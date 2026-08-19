@@ -1,0 +1,23 @@
+[workspace]
+members = [
+    "crates/ego-core",
+    "crates/ego-ai",
+    "crates/ego-tools",
+    "crates/ego-acp",
+]
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+publish = false
+
+[workspace.dependencies]
+ego-core = { path = "crates/ego-core" }
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }

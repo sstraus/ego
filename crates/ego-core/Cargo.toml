@@ -1,0 +1,15 @@
+[package]
+name = "ego-core"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# ARCHITECTURE.md §2: ego-core opens no sockets and no files.
+# reqwest / rusqlite / rmcp are forbidden here — enforced by this manifest,
+# not by discipline.
+[dependencies]
+
+[lints]
+workspace = true
