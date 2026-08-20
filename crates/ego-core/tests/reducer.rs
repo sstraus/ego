@@ -306,88 +306,193 @@ mod reducer {
         );
     }
 
+    /// Table-driven totality proof: every one of the 17 `EventKind`
+    /// variants, applied with every degenerate axis stacked at once —
+    /// empty strings, `u64::MAX` payloads, no item, an unresolvable parent,
+    /// a duplicate event id shared across all 17 events, and a `seq` that
+    /// regresses a previously-applied higher one. `apply` must not panic on
+    /// any of it. If a variant is missing from the table, this test does
+    /// not cover it — the `EventKind::name()` cross-check below keeps the
+    /// table honest against the enum.
     #[test]
-    fn apply_is_total_for_every_variant_with_degenerate_data() {
+    fn apply_is_total_for_every_variant_under_maximally_degenerate_conditions() {
         let turn = TurnId::new();
-        let mut seq = Seq::default();
-        let unknown_parent = EventId::new();
+        let mut state = SessionState::default();
 
-        let kinds = vec![
+        // Prime last_seq above zero so every event below regresses it.
+        let mut counter = Seq::default();
+        let primer = ev(
+            counter.next(),
+            turn,
+            None,
+            None,
             EventKind::UserPrompt {
-                text: String::new(),
+                text: "primer".to_string(),
             },
-            EventKind::AssistantDelta {
-                text: String::new(),
-            },
-            EventKind::AssistantMessage {
-                text: String::new(),
-            },
-            EventKind::ReasoningDelta {
-                text: String::new(),
-            },
-            EventKind::ToolCallStarted {
-                name: String::new(),
-                args: String::new(),
-            },
-            EventKind::ToolCallDelta {
-                text: String::new(),
-            },
-            EventKind::ToolCallCompleted {
-                ok: false,
-                output: String::new(),
-            },
-            EventKind::PermissionRequested {
-                description: String::new(),
-            },
-            EventKind::PermissionDecided { allowed: false },
-            EventKind::UsageUpdated {
-                input_tokens: u64::MAX,
-                output_tokens: u64::MAX,
-            },
-            EventKind::TurnCompleted {
-                ok: false,
-                exit_reason: ExitReason::Error,
-            },
-            EventKind::Compacted {
-                summary: String::new(),
-            },
-            EventKind::Forked {
-                source: SessionId::new(),
-                at_seq: Seq::default(),
-            },
-            EventKind::HookFired {
-                name: String::new(),
-                blocked: false,
-            },
-            EventKind::SubagentSpawned {
-                subagent_id: String::new(),
-            },
-            EventKind::SubagentReturned {
-                subagent_id: String::new(),
-                result: String::new(),
-            },
-            EventKind::Error {
-                message: String::new(),
-            },
+        );
+        let primer_id = primer.env.id;
+        state.apply(&primer);
+        let primed_seq = state.last_seq;
+
+        let duplicate_id = EventId::new(); // reused as `id` on every event below
+        let unknown_parent = EventId::new(); // never applied to this state
+        let regressed_seq = Seq::default(); // ZERO — below `primed_seq`
+        assert!(regressed_seq < primed_seq);
+
+        let table: Vec<(&str, EventKind)> = vec![
+            (
+                "user_prompt",
+                EventKind::UserPrompt {
+                    text: String::new(),
+                },
+            ),
+            (
+                "assistant_delta",
+                EventKind::AssistantDelta {
+                    text: String::new(),
+                },
+            ),
+            (
+                "assistant_message",
+                EventKind::AssistantMessage {
+                    text: String::new(),
+                },
+            ),
+            (
+                "reasoning_delta",
+                EventKind::ReasoningDelta {
+                    text: String::new(),
+                },
+            ),
+            (
+                "tool_call_started",
+                EventKind::ToolCallStarted {
+                    name: String::new(),
+                    args: String::new(),
+                },
+            ),
+            (
+                "tool_call_delta",
+                EventKind::ToolCallDelta {
+                    text: String::new(),
+                },
+            ),
+            (
+                "tool_call_completed",
+                EventKind::ToolCallCompleted {
+                    ok: false,
+                    output: String::new(),
+                },
+            ),
+            (
+                "permission_requested",
+                EventKind::PermissionRequested {
+                    description: String::new(),
+                },
+            ),
+            (
+                "permission_decided",
+                EventKind::PermissionDecided { allowed: false },
+            ),
+            (
+                "usage_updated",
+                EventKind::UsageUpdated {
+                    input_tokens: u64::MAX,
+                    output_tokens: u64::MAX,
+                },
+            ),
+            (
+                "turn_completed",
+                EventKind::TurnCompleted {
+                    ok: false,
+                    exit_reason: ExitReason::Error,
+                },
+            ),
+            (
+                "compacted",
+                EventKind::Compacted {
+                    summary: String::new(),
+                },
+            ),
+            (
+                "forked",
+                EventKind::Forked {
+                    source: SessionId::new(),
+                    at_seq: Seq::default(),
+                },
+            ),
+            (
+                "hook_fired",
+                EventKind::HookFired {
+                    name: String::new(),
+                    blocked: false,
+                },
+            ),
+            (
+                "subagent_spawned",
+                EventKind::SubagentSpawned {
+                    subagent_id: String::new(),
+                },
+            ),
+            (
+                "subagent_returned",
+                EventKind::SubagentReturned {
+                    subagent_id: String::new(),
+                    result: String::new(),
+                },
+            ),
+            (
+                "error",
+                EventKind::Error {
+                    message: String::new(),
+                },
+            ),
         ];
         assert_eq!(
-            kinds.len(),
+            table.len(),
             17,
-            "keep this list in sync with EventKind's variant count (ARCH §1)"
+            "keep this table in sync with EventKind's variant count (ARCH §1)"
         );
 
-        let mut state = SessionState::default();
-        for kind in kinds {
-            // No item id and the *same* unresolvable parent id repeated
-            // across every event (both a degenerate causal reference and a
-            // repeated-id case): the most degenerate envelope apply can be
-            // handed, short of payload-specific extremes (covered by the
-            // u64::MAX usage entry above and the dedicated overflow and
-            // repeated/self-referential-id tests below).
-            let e = ev(seq.next(), turn, None, Some(unknown_parent), kind);
-            state.apply(&e); // must not panic
+        for (name, kind) in table {
+            assert_eq!(
+                kind.name(),
+                name,
+                "table entry out of sync with EventKind::name()"
+            );
+            let e = DomainEvent {
+                env: Envelope {
+                    seq: regressed_seq,
+                    id: duplicate_id,
+                    turn,
+                    item: None,
+                    parent: Some(unknown_parent),
+                    ts: Timestamp::from_millis(1_000),
+                    producer: Producer::Main,
+                },
+                kind,
+            };
+            state.apply(&e); // must not panic, for every variant, under every degenerate axis at once
         }
-        assert_eq!(state.unresolved_parents.len(), 17);
+
+        assert_eq!(
+            state.unresolved_parents.len(),
+            17,
+            "every event's parent was unresolvable"
+        );
+        assert_eq!(
+            state.last_seq, regressed_seq,
+            "apply must not clamp/reject the regressed seq"
+        );
+        assert!(
+            state.items.is_empty(),
+            "item: None on every event must touch no item"
+        );
+        assert_eq!(
+            state.known_events,
+            std::collections::HashSet::from([primer_id, duplicate_id]),
+            "the primer's id and the (repeated) duplicate id — deduped by the HashSet"
+        );
         assert_eq!(state.usage.input_tokens, u64::MAX);
         assert_eq!(state.usage.output_tokens, u64::MAX);
     }
