@@ -32,6 +32,7 @@ name = "ego-ai"
 version = "0.1.0"
 dependencies = [
  "ego-core",
+ "futures",
 ]
 
 [[package]]
