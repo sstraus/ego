@@ -2,4 +2,6 @@
 //!
 //! See `ARCHITECTURE.md` §1.
 
+pub mod domain;
 pub mod id;
+pub mod time;
