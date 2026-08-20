@@ -15,8 +15,9 @@ schemars = "1.2.2"
 serde = { version = "1.0.229", features = ["derive"] }
 # The store codec builds the durable JSONL line bytes itself, in library code,
 # so serde_json is a normal dependency rather than a dev-dependency. It is a
-# pure data format: no sockets, no files.
-serde_json = "1.0.151"
+# pure data format: no sockets, no files. raw_value is what lets the codec
+# checksum a payload's literal on-line bytes instead of a re-serialisation.
+serde_json = { version = "1.0.151", features = ["raw_value"] }
 toml = "1.1.4"
 tracing = "0.1.44"
 uuid = { version = "1.24.1", features = ["v7", "serde"] }
