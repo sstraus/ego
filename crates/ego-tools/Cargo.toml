@@ -8,6 +8,7 @@ publish.workspace = true
 
 [dependencies]
 ego-core.workspace = true
+fd-lock = "4.0.4"
 futures = "0.3.34"
 serde_json = "1.0.151"
 tracing = "0.1.44"

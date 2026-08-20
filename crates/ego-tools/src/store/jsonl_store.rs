@@ -114,7 +114,7 @@ impl JsonlStore {
 impl SessionStore for JsonlStore {
     fn append(&self, id: &SessionId, ev: &DomainEvent) -> Result<(), StoreError> {
         let log_path = self.log_path(id);
-        let is_new_session = self.io.read(&log_path)?.is_none();
+        let is_new_session = !self.io.exists(&log_path)?;
         if is_new_session {
             let header = HeaderV1::new(*id, ev.env.ts);
             self.io.append_line(&log_path, &encode_header(&header))?;
@@ -197,28 +197,39 @@ impl SessionStore for JsonlStore {
         let mut metas = Vec::new();
         for dir in dirs {
             let manifest_path = dir.join("manifest.json");
-            match self.io.read(&manifest_path)? {
-                None => continue, // session directory exists, but no append has landed yet
-                Some(bytes) => match serde_json::from_slice::<SessionMeta>(&bytes) {
-                    Ok(meta) => metas.push(meta),
-                    Err(error) => {
-                        // A catalogue that dies on one bad directory is a
-                        // worse failure mode than one that quietly hides a
-                        // session: the event log's own integrity is
-                        // independently protected by `StoreRecord`
-                        // checksums (Step 3), and a corrupt manifest is a
-                        // defect a later story can rebuild from the log
-                        // (`ARCHITECTURE.md` §5) rather than something that
-                        // should take down `list()` for every session. Still
-                        // warn, so a session missing from the catalogue is
-                        // diagnosable rather than silently absent.
-                        tracing::warn!(
-                            dir = %dir.display(),
-                            error = %error,
-                            "skipping session with an unreadable manifest"
-                        );
-                    }
-                },
+            // A catalogue that dies on one bad directory is a worse failure
+            // mode than one that quietly hides a session: the event log's
+            // own integrity is independently protected by `StoreRecord`
+            // checksums (Step 3), and a corrupt or unreadable manifest is a
+            // defect a later story can rebuild from the log
+            // (`ARCHITECTURE.md` §5) rather than something that should take
+            // down `list()` for every session. That reasoning applies
+            // equally to an I/O error reading the manifest (e.g. a
+            // permissions problem on one session directory) and to a parse
+            // error on its contents — both are per-session failures, so
+            // both are skipped and warned about the same way, rather than
+            // one killing the whole call and the other not.
+            let bytes = match self.io.read(&manifest_path) {
+                Ok(Some(bytes)) => bytes,
+                Ok(None) => continue, // session directory exists, but no append has landed yet
+                Err(error) => {
+                    tracing::warn!(
+                        dir = %dir.display(),
+                        error = %error,
+                        "skipping session with an unreadable manifest"
+                    );
+                    continue;
+                }
+            };
+            match serde_json::from_slice::<SessionMeta>(&bytes) {
+                Ok(meta) => metas.push(meta),
+                Err(error) => {
+                    tracing::warn!(
+                        dir = %dir.display(),
+                        error = %error,
+                        "skipping session with an unreadable manifest"
+                    );
+                }
             }
         }
         Ok(metas)

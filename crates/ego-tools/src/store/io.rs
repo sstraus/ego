@@ -31,6 +31,14 @@ pub trait StoreIo: Send + Sync {
     /// Read the whole file at `path`, or `None` if it does not exist.
     fn read(&self, path: &Path) -> io::Result<Option<Vec<u8>>>;
 
+    /// Whether `path` exists. A distinct operation from [`StoreIo::read`] so
+    /// a caller that only needs to know "does this log exist yet" is not
+    /// forced to pull the whole file into memory to answer a boolean —
+    /// `JsonlStore::append` is exactly that caller, and a session's log can
+    /// grow to the hundreds of megabytes `ARCHITECTURE.md` §5 expects
+    /// snapshots to bound.
+    fn exists(&self, path: &Path) -> io::Result<bool>;
+
     /// Atomically replace `path`'s contents with `bytes`: a reader must
     /// never observe a partially written file. Implemented as write-to-tmp
     /// then rename, both behind this one call.
@@ -73,6 +81,14 @@ impl StoreIo for OsIo {
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e),
         }
+    }
+
+    fn exists(&self, path: &Path) -> io::Result<bool> {
+        // `Path::exists()` swallows a permissions error into `false`, which
+        // would make an unreadable log look like a brand-new session and
+        // re-write a header into a log that already has one. `try_exists()`
+        // surfaces that error instead of hiding it.
+        path.try_exists()
     }
 
     fn replace_atomic(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {

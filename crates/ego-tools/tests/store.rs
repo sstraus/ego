@@ -3,9 +3,10 @@
 //!
 //! See `plans/m0a-contracts.md` Step 4 and `ARCHITECTURE.md` §3.3 / §5.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use ego_core::event::domain::{DomainEvent, Envelope, EventKind, ExitReason};
 use ego_core::event::id::{EventId, Producer, Seq, SessionId, TurnId};
@@ -87,6 +88,91 @@ mod store {
             self.inner.read(path)
         }
 
+        fn exists(&self, path: &std::path::Path) -> std::io::Result<bool> {
+            self.inner.exists(path)
+        }
+
+        fn replace_atomic(&self, path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+            self.inner.replace_atomic(path, bytes)
+        }
+
+        fn list_dirs(&self, path: &std::path::Path) -> std::io::Result<Vec<PathBuf>> {
+            self.inner.list_dirs(path)
+        }
+    }
+
+    /// A [`StoreIo`] that counts `read` calls per path, wrapping the real
+    /// filesystem for everything else — used to prove `JsonlStore::append`
+    /// does not re-read the whole log on every call.
+    struct ReadCountingIo {
+        inner: OsIo,
+        reads: Arc<Mutex<HashMap<PathBuf, usize>>>,
+    }
+
+    impl StoreIo for ReadCountingIo {
+        fn append_line(&self, path: &std::path::Path, line: &[u8]) -> std::io::Result<()> {
+            self.inner.append_line(path, line)
+        }
+
+        fn fsync(&self, path: &std::path::Path) -> std::io::Result<()> {
+            self.inner.fsync(path)
+        }
+
+        fn read(&self, path: &std::path::Path) -> std::io::Result<Option<Vec<u8>>> {
+            *self
+                .reads
+                .lock()
+                .unwrap()
+                .entry(path.to_path_buf())
+                .or_insert(0) += 1;
+            self.inner.read(path)
+        }
+
+        fn exists(&self, path: &std::path::Path) -> std::io::Result<bool> {
+            self.inner.exists(path)
+        }
+
+        fn replace_atomic(&self, path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+            self.inner.replace_atomic(path, bytes)
+        }
+
+        fn list_dirs(&self, path: &std::path::Path) -> std::io::Result<Vec<PathBuf>> {
+            self.inner.list_dirs(path)
+        }
+    }
+
+    /// A [`StoreIo`] that fails `read` for one specific path (simulating,
+    /// e.g., a permissions error), wrapping the real filesystem for
+    /// everything else.
+    struct FailingReadIo {
+        inner: OsIo,
+        fail_path: PathBuf,
+    }
+
+    impl StoreIo for FailingReadIo {
+        fn append_line(&self, path: &std::path::Path, line: &[u8]) -> std::io::Result<()> {
+            self.inner.append_line(path, line)
+        }
+
+        fn fsync(&self, path: &std::path::Path) -> std::io::Result<()> {
+            self.inner.fsync(path)
+        }
+
+        fn read(&self, path: &std::path::Path) -> std::io::Result<Option<Vec<u8>>> {
+            if path == self.fail_path {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "simulated permission error",
+                ))
+            } else {
+                self.inner.read(path)
+            }
+        }
+
+        fn exists(&self, path: &std::path::Path) -> std::io::Result<bool> {
+            self.inner.exists(path)
+        }
+
         fn replace_atomic(&self, path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
             self.inner.replace_atomic(path, bytes)
         }
@@ -159,6 +245,16 @@ mod store {
         let dir = tempdir().unwrap();
         let io = OsIo;
         assert_eq!(io.read(&dir.path().join("nope.json")).unwrap(), None);
+    }
+
+    #[test]
+    fn store_os_io_exists_reflects_presence_without_reading_content() {
+        let dir = tempdir().unwrap();
+        let io = OsIo;
+        let path = dir.path().join("events.jsonl");
+        assert!(!io.exists(&path).unwrap());
+        io.append_line(&path, b"{}").unwrap();
+        assert!(io.exists(&path).unwrap());
     }
 
     // -- append / read roundtrip ------------------------------------------
@@ -424,6 +520,56 @@ mod store {
         );
     }
 
+    // -- append cost ---------------------------------------------------------
+
+    /// `append` must not re-read the whole log on every call just to decide
+    /// whether a header is needed — that makes a single append O(n) in log
+    /// size and a session O(n²) overall. Verified while developing this
+    /// fix: against the pre-fix implementation (`self.io.read(&log_path)?
+    /// .is_none()`), this test failed with `log_reads = 20` (one whole-log
+    /// read per appended event); against the `StoreIo::exists`-based fix it
+    /// asserts zero.
+    #[test]
+    fn store_append_does_not_read_the_whole_log_per_event() {
+        let dir = tempdir().unwrap();
+        let reads = Arc::new(Mutex::new(HashMap::new()));
+        let io = ReadCountingIo {
+            inner: OsIo,
+            reads: reads.clone(),
+        };
+        let store = JsonlStore::new(dir.path(), Box::new(io));
+        let id = SessionId::new();
+        let turn = TurnId::new();
+        let mut seq = Seq::default();
+
+        let event_count = 20;
+        for i in 0..event_count {
+            store
+                .append(
+                    &id,
+                    &ev(
+                        seq.next(),
+                        turn,
+                        EventKind::AssistantDelta {
+                            text: format!("chunk-{i}"),
+                        },
+                    ),
+                )
+                .unwrap();
+        }
+
+        let log_path = log_path(dir.path(), &id);
+        let log_reads = *reads.lock().unwrap().get(&log_path).unwrap_or(&0);
+        assert_eq!(
+            log_reads, 0,
+            "a nonzero count here means something in JsonlStore::append is calling \
+             StoreIo::read on the log path again (e.g. to check whether the session \
+             already exists) instead of StoreIo::exists — that re-introduces the O(n) \
+             whole-log read per event this test exists to catch; saw {log_reads} reads \
+             across {event_count} appends"
+        );
+    }
+
     // -- manifest / list -----------------------------------------------------
 
     #[test]
@@ -538,6 +684,52 @@ mod store {
             metas.len(),
             1,
             "the whole catalogue must not fail on one bad manifest"
+        );
+        assert_eq!(metas[0].id, good_id);
+    }
+
+    /// The parse-error case above and this I/O-error case must be handled
+    /// the same way: both are per-session failures reading one manifest,
+    /// so both are skipped-and-warned rather than one failing the whole
+    /// `list()` call and the other not.
+    #[test]
+    fn store_list_skips_a_session_whose_manifest_read_fails_rather_than_failing_the_whole_call() {
+        let dir = tempdir().unwrap();
+        let good_id = SessionId::new();
+        let turn = TurnId::new();
+        let mut seq = Seq::default();
+        {
+            let store = JsonlStore::new(dir.path(), Box::new(OsIo));
+            store
+                .append(
+                    &good_id,
+                    &ev(
+                        seq.next(),
+                        turn,
+                        EventKind::UserPrompt {
+                            text: "hi".to_string(),
+                        },
+                    ),
+                )
+                .unwrap();
+        }
+
+        let bad_id = SessionId::new();
+        let bad_manifest = manifest_path(dir.path(), &bad_id);
+        std::fs::create_dir_all(bad_manifest.parent().unwrap()).unwrap();
+        std::fs::write(&bad_manifest, b"{}").unwrap(); // content is irrelevant; read() itself fails
+
+        let io = FailingReadIo {
+            inner: OsIo,
+            fail_path: bad_manifest,
+        };
+        let store = JsonlStore::new(dir.path(), Box::new(io));
+
+        let metas = store.list().unwrap();
+        assert_eq!(
+            metas.len(),
+            1,
+            "an I/O error reading one manifest must not fail the whole catalogue"
         );
         assert_eq!(metas[0].id, good_id);
     }
