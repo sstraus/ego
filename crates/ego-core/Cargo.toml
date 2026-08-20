@@ -10,6 +10,12 @@ publish.workspace = true
 # reqwest / rusqlite / rmcp are forbidden here — enforced by this manifest,
 # not by discipline.
 [dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+toml = "1.1.4"
+uuid = { version = "1.24.1", features = ["v7", "serde"] }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+serde_json = "1.0.151"
