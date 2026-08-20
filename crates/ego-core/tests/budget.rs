@@ -104,12 +104,13 @@ mod budget {
         }
     }
 
-    /// The bound for the standard fixture: a full 200k context of uncached
-    /// input at $3/MTok is $0.60, plus 1024 output tokens at $15/MTok,
+    /// The bound for the standard fixture: a full 200k context at the
+    /// dearest input rate the quote prices — cache write, $3.75/MTok, not
+    /// uncached input's $3 — is $0.75, plus 1024 output tokens at $15/MTok,
     /// $0.01536. Written out because every limit below is chosen relative
     /// to it.
     fn standard_bound() -> Money {
-        usd("0.61536")
+        usd("0.76536")
     }
 
     // --- pricing ----------------------------------------------------------
@@ -187,32 +188,62 @@ mod budget {
     // --- the upper bound --------------------------------------------------
 
     #[test]
-    fn the_upper_bound_is_a_full_context_of_uncached_input_plus_max_output() {
+    fn the_upper_bound_is_a_full_context_at_the_dearest_input_rate_plus_max_output() {
         let bound = quote()
             .upper_bound(&request(Some(1_024)), &caps(Some(200_000), Some(64_000)))
             .unwrap();
         assert_eq!(bound, standard_bound());
     }
 
+    /// An input category this quote cannot price is one whose cost cannot be
+    /// bounded, so the bound is unknown rather than quietly computed from
+    /// the categories that happen to be priced. `None` means unpriced, never
+    /// free — a provider that genuinely does not charge says `Some(zero)`.
+    #[test]
+    fn an_unpriced_input_category_leaves_the_bound_unknown() {
+        let mut quote = quote();
+        quote.cache_write = None;
+        assert_eq!(
+            quote.upper_bound(&request(Some(1_024)), &caps(Some(200_000), Some(64_000))),
+            Err(UnknownCost::UnpricedCategory {
+                category: TokenCategory::CacheWrite
+            })
+        );
+    }
+
     /// The bound must exceed anything the generation can actually cost, or
-    /// it is not a bound. A generation that filled the window and produced
-    /// the full requested output is the worst case by construction.
+    /// it is not a bound.
+    ///
+    /// Filling the window with *uncached input* is only the worst case if
+    /// uncached input is the dearest input category, and it is not: in the
+    /// fixture — which follows a real published table — cache writes cost
+    /// $3.75/MTok against uncached input's $3. So the window is filled with
+    /// each input category in turn and every one of them has to fit under
+    /// the same bound. Checking only the uncached row is what let a bound
+    /// that undershoots by 25% look correct.
     #[test]
     fn the_upper_bound_is_never_below_what_the_generation_actually_costs() {
         let quote = quote();
         let bound = quote
             .upper_bound(&request(Some(1_024)), &caps(Some(200_000), Some(64_000)))
             .unwrap();
-        let worst_case = quote.price(&tokens(200_000, 0, 0, 1_024));
-        let CostDelta::Known { amount: actual, .. } = worst_case else {
-            panic!("the worst case must be priceable");
-        };
-        assert!(
-            bound.amount >= actual.amount,
-            "bound {} must not be below the worst case {}",
-            bound.amount,
-            actual.amount
-        );
+        let full_window = [
+            ("uncached input", tokens(200_000, 0, 0, 1_024)),
+            ("cache read", tokens(0, 200_000, 0, 1_024)),
+            ("cache write", tokens(0, 0, 200_000, 1_024)),
+            ("a mix", tokens(50_000, 50_000, 100_000, 1_024)),
+        ];
+        for (label, usage) in full_window {
+            let CostDelta::Known { amount: actual, .. } = quote.price(&usage) else {
+                panic!("the {label} worst case must be priceable");
+            };
+            assert!(
+                bound.amount >= actual.amount,
+                "a window of {label} costs {}, which the {} bound does not cover",
+                actual.amount,
+                bound.amount
+            );
+        }
     }
 
     /// The request may cap output below the model's ceiling; the bound takes
@@ -227,8 +258,8 @@ mod budget {
             .upper_bound(&request(Some(64_000)), &caps(Some(200_000), Some(100)))
             .unwrap();
         assert_eq!(low_request, low_model);
-        // 0.6 input + 100 x 0.000015 = 0.6015
-        assert_eq!(low_request, usd("0.6015"));
+        // 0.75 input + 100 x 0.000015 = 0.7515
+        assert_eq!(low_request, usd("0.7515"));
     }
 
     /// An unbounded spend is exactly what a budget exists to prevent, so a
@@ -284,14 +315,15 @@ mod budget {
     /// billed for all of them.
     #[test]
     fn concurrent_reservations_accumulate_and_eventually_deny() {
-        // Room for exactly two standard bounds ($1.23072), not three.
-        let mut gate = BudgetGate::new(usd("1.5"));
+        // Room for exactly two standard bounds ($1.53072), not three
+        // ($2.29608).
+        let mut gate = BudgetGate::new(usd("1.6"));
         let quote = quote();
         let caps = caps(Some(200_000), Some(64_000));
 
         let first = gate.reserve(&quote, &request(Some(1_024)), &caps).unwrap();
         let _second = gate.reserve(&quote, &request(Some(1_024)), &caps).unwrap();
-        assert_eq!(*gate.outstanding(), usd("1.23072"));
+        assert_eq!(*gate.outstanding(), usd("1.53072"));
 
         let denied = gate
             .reserve(&quote, &request(Some(1_024)), &caps)

@@ -129,16 +129,40 @@ impl PricingQuote {
         }
     }
 
+    /// The dearest an input token can be under this quote.
+    ///
+    /// A prompt is some unknown mix of uncached, cache-read and cache-write
+    /// tokens, and *which* mix is not known before the request. Pricing the
+    /// whole window at the highest of the three covers every mix.
+    ///
+    /// It is tempting to assume uncached input is the dearest — it is the
+    /// one you pay "full price" for — but that is false on real tables:
+    /// Anthropic charges 1.25x the base rate to *write* the cache. An
+    /// unpriced input category makes the bound unknown rather than skipped:
+    /// a category this quote cannot price is one whose cost we cannot
+    /// bound, and `None` means unpriced, never free (see the type's doc).
+    fn dearest_input_rate(&self) -> Result<Amount, UnknownCost> {
+        [
+            TokenCategory::UncachedInput,
+            TokenCategory::CacheRead,
+            TokenCategory::CacheWrite,
+        ]
+        .into_iter()
+        .try_fold(Amount::ZERO, |dearest, category| {
+            Ok(dearest.max(self.rate(category)?))
+        })
+    }
+
     /// The most `req` could possibly cost against a model with `caps`.
     ///
     /// Deliberately crude, and crude in the safe direction: it assumes the
-    /// request fills the entire context window with uncached input — the
-    /// most expensive input category — and that the model emits its maximum
-    /// permitted output. Both are true upper bounds for any request that the
-    /// model will accept at all, and neither needs a tokenizer, which
-    /// `ego-core` does not have and must not grow (it would have to match
-    /// the provider's tokenizer exactly to be worth anything, and a bound
-    /// that is *nearly* right is not a bound).
+    /// request fills the entire context window with the dearest input the
+    /// quote prices, and that the model emits its maximum permitted output.
+    /// Both are true upper bounds for any request that the model will accept
+    /// at all, and neither needs a tokenizer, which `ego-core` does not have
+    /// and must not grow (it would have to match the provider's tokenizer
+    /// exactly to be worth anything, and a bound that is *nearly* right is
+    /// not a bound).
     ///
     /// A model whose context or output ceiling is unknown has no upper
     /// bound, so the gate fails closed. That is the whole point: an
@@ -148,7 +172,7 @@ impl PricingQuote {
         req: &GenRequest,
         caps: &ModelCapabilities,
     ) -> Result<Money, UnknownCost> {
-        let input = caps.max_context_tokens.ok_or(UnknownCost::NoPricingQuote)?;
+        let context = caps.max_context_tokens.ok_or(UnknownCost::NoPricingQuote)?;
         // The request may cap output below the model's ceiling; the bound is
         // whichever is lower, and unknown if neither is stated.
         let output = match (req.max_output_tokens, caps.max_output_tokens) {
@@ -157,7 +181,11 @@ impl PricingQuote {
             (None, Some(max)) => max,
             (None, None) => return Err(UnknownCost::NoPricingQuote),
         };
-        let input = self.line(TokenCategory::UncachedInput, input)?;
+        let context = Amount::new(u128::from(context), 0).map_err(|_| UnknownCost::Overflow)?;
+        let input = self
+            .dearest_input_rate()?
+            .checked_mul(&context)
+            .ok_or(UnknownCost::Overflow)?;
         let output = self.line(TokenCategory::Output, output)?;
         let total = input.checked_add(&output).ok_or(UnknownCost::Overflow)?;
         Ok(Money::new(total, self.currency))
@@ -396,10 +424,22 @@ pub struct Reconciled {
 /// `a - b`, floored at zero.
 ///
 /// Saturating rather than erroring because the only caller is releasing a
-/// hold it previously added: an underflow would mean the gate's own
-/// bookkeeping had already diverged, and the useful response to that is a
-/// zero outstanding balance (which admits nothing extra) rather than a
-/// wrapped enormous one (which would deny everything forever).
+/// hold it previously added, so within one gate an underflow is unreachable:
+/// `reserve` adds exactly the bound `reconcile` later releases, and it
+/// refuses any quote whose currency differs from the limit's.
+///
+/// Be clear about what the floor does when it *is* reached, because the
+/// obvious reading is backwards: zeroing `outstanding` frees headroom, so it
+/// admits **more**, not less. It fails open. The wrapped alternative would
+/// deny everything forever, which is at least loud — the floor is chosen
+/// anyway because the divergence it papers over should not be representable
+/// in the first place.
+///
+/// It currently is: a `Reservation` carries no gate identity, so one minted
+/// by gate A can be reconciled against gate B, which underflows B and
+/// silently widens its budget. That is a hole in the reservation contract,
+/// not in this arithmetic, and closing it belongs with the generation-attempt
+/// lifecycle — see `POTENTIALS.md` P9.
 fn subtract_or_zero(a: &Money, b: &Money) -> Money {
     if a.currency != b.currency || a.amount < b.amount {
         return Money::zero(a.currency);

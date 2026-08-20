@@ -575,7 +575,14 @@ impl CumulativeCost {
     pub fn add_delta(&mut self, delta: &CostDelta) {
         let (amount, fx) = match delta {
             CostDelta::Unknown(reason) => {
-                *self = CumulativeCost::Unknown(reason.clone());
+                // Keep the reason that *broke* the total. A total already
+                // unknown cannot become more unknown, and the first cause is
+                // the one an operator can act on; later ones are the next
+                // symptoms, and overwriting would bury the diagnosis under
+                // them.
+                if !matches!(self, CumulativeCost::Unknown(_)) {
+                    *self = CumulativeCost::Unknown(reason.clone());
+                }
                 return;
             }
             CostDelta::Known { amount, fx, .. } => (amount, fx),

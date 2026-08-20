@@ -330,6 +330,24 @@ mod cost {
         assert_eq!(total.known(), None);
     }
 
+    /// The reason kept is the one that broke the total, not the most recent
+    /// one to arrive. An operator asking "why is this session's cost
+    /// unknown?" needs the root cause: "we have no pricing table for this
+    /// model" is actionable, while a later "the provider reported no usage"
+    /// is just the next symptom, and overwriting hides the first behind it.
+    #[test]
+    fn the_reason_a_total_went_unknown_is_the_first_one_not_the_last() {
+        let mut total = CumulativeCost::default();
+        total.add_delta(&known("1.50", "USD"));
+        total.add_delta(&CostDelta::Unknown(UnknownCost::NoPricingQuote));
+        total.add_delta(&CostDelta::Unknown(UnknownCost::ProviderReportedNoUsage));
+        assert_eq!(
+            total,
+            CumulativeCost::Unknown(UnknownCost::NoPricingQuote),
+            "the root cause must survive later symptoms"
+        );
+    }
+
     /// And it stays unknown: adding a later *known* delta cannot repair a
     /// sum with a hole in it, because nobody knows how big the hole was.
     #[test]
