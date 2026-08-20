@@ -202,6 +202,7 @@ mod acp_golden {
                 EventKind::UsageUpdated {
                     usage: tokens(120, 45),
                     cost_delta: priced("0.001035"),
+                    attempt: None,
                 },
             ),
             ev(
@@ -324,6 +325,7 @@ mod acp_golden {
             EventKind::UsageUpdated {
                 usage: tokens(1, 1),
                 cost_delta: priced("0.000018"),
+                attempt: None,
             },
             EventKind::ContextWindowUpdated {
                 used_tokens: 2,
@@ -460,6 +462,7 @@ mod acp_golden {
             EventKind::UsageUpdated {
                 usage: tokens(120, 45),
                 cost_delta: priced("0.001035"),
+                attempt: None,
             },
             EventKind::ContextWindowUpdated {
                 used_tokens: 165,
@@ -833,6 +836,7 @@ mod acp_golden {
                 EventKind::UsageUpdated {
                     usage: tokens(120, 45),
                     cost_delta: priced("0.001035"),
+                    attempt: None,
                 },
             ),
             ev(
@@ -923,6 +927,7 @@ mod acp_golden {
                 EventKind::UsageUpdated {
                     usage: tokens(120, 45),
                     cost_delta: CostDelta::Unknown(UnknownCost::NoPricingQuote),
+                    attempt: None,
                 },
             ),
             ev(

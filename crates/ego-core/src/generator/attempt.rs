@@ -165,34 +165,21 @@ pub enum UsageReport {
     Missing,
 }
 
-/// `StopReason::Pending` is the absence of a terminal state, so it cannot be
-/// the outcome of one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct NotTerminal(StopReason);
-
-impl std::fmt::Display for NotTerminal {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?} is not a terminal stop reason", self.0)
-    }
-}
-
-impl std::error::Error for NotTerminal {}
-
 /// How one attempt ended: why it stopped, whether the request may have
 /// reached the provider, and what it reported spending.
 ///
 /// A struct wrapping [`StopReason`] rather than an enum beside it. The three
 /// facts are orthogonal — an aborted attempt still has a delivery certainty
 /// and may still have reported usage — and a parallel enum would duplicate
-/// `StopReason`'s seven variants only to answer a different question.
+/// `StopReason`'s variants only to answer a different question.
 ///
-/// Fields are private so the invariant holds: `stop` is never
-/// [`StopReason::Pending`]. Deliberately *not* `Deserialize` yet — that
-/// would let a decoded value walk straight past [`Outcome::new`], and the
-/// right answer (a validating impl, or removing `Pending` from `StopReason`
-/// altogether — see `POTENTIALS.md`) belongs with the step that makes this
-/// durable.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Durable, and safe to decode without a guard: every [`StopReason`] is
+/// terminal since `Pending` was removed
+/// (`docs/decisions/2026-08-21-attempt-accounting-ledger.md`), so there is no
+/// non-terminal value for a decoded outcome to hold. This type used to reject
+/// one in its constructor and refuse to derive `Deserialize` because of it;
+/// deleting the variant deleted both guards rather than adding a third.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Outcome {
     stop: StopReason,
     delivery: DeliveryCertainty,
@@ -200,23 +187,16 @@ pub struct Outcome {
 }
 
 impl Outcome {
-    /// Build a terminal outcome, refusing [`StopReason::Pending`].
-    pub fn new(
-        stop: StopReason,
-        delivery: DeliveryCertainty,
-        usage: UsageReport,
-    ) -> Result<Self, NotTerminal> {
-        if stop == StopReason::Pending {
-            return Err(NotTerminal(stop));
-        }
-        Ok(Self {
+    /// Build a terminal outcome.
+    pub fn new(stop: StopReason, delivery: DeliveryCertainty, usage: UsageReport) -> Self {
+        Self {
             stop,
             delivery,
             usage,
-        })
+        }
     }
 
-    /// Why the attempt stopped. Never [`StopReason::Pending`].
+    /// Why the attempt stopped.
     pub fn stop(&self) -> StopReason {
         self.stop
     }
@@ -392,13 +372,11 @@ impl AttemptStream {
                 self.usage = UsageReport::Reported(total);
             }
 
-            // `Pending` is the absence of a terminal state, so a provider
-            // that sends it has said nothing terminal. First real terminal
-            // wins.
-            AiEvent::Stop(stop) if *stop != StopReason::Pending => {
+            // First terminal wins: a provider that sends two is not believed
+            // twice.
+            AiEvent::Stop(stop) => {
                 self.terminal.get_or_insert(*stop);
             }
-            AiEvent::Stop(_) => {}
 
             AiEvent::TextDelta { .. }
             | AiEvent::ReasoningDelta { .. }
@@ -427,9 +405,7 @@ impl AttemptStream {
         }
     }
 
-    /// What this attempt is known to have done. Private because it is only
-    /// ever built from fields this type controls, so the `Pending` invariant
-    /// [`Outcome::new`] enforces for outside callers holds by construction.
+    /// What this attempt is known to have done.
     fn outcome(&self) -> Outcome {
         Outcome {
             // No terminal event means nobody told us it finished — the

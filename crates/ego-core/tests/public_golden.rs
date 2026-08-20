@@ -199,6 +199,7 @@ mod public_golden {
                 EventKind::UsageUpdated {
                     usage: tokens(120, 900, 60, 45),
                     cost_delta: priced("0.0027"),
+                    attempt: None,
                 },
             ),
             ev(
@@ -420,6 +421,7 @@ mod public_golden {
             EventKind::UsageUpdated {
                 usage: tokens(10, 0, 0, 5),
                 cost_delta: priced("0.001"),
+                attempt: None,
             },
         );
         assert_eq!(
@@ -449,6 +451,7 @@ mod public_golden {
             EventKind::UsageUpdated {
                 usage: tokens(10, 0, 0, 5),
                 cost_delta: CostDelta::Unknown(UnknownCost::NoPricingQuote),
+                attempt: None,
             },
         );
         assert_eq!(

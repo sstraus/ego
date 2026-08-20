@@ -39,7 +39,12 @@ use serde::{Deserialize, Serialize};
 /// The snapshot format version. Bumped when [`Snapshot`]'s shape changes;
 /// an unrecognised version is ignored rather than parsed optimistically,
 /// because a snapshot is a cache and replaying the log is always correct.
-pub const SNAPSHOT_VERSION: u32 = 1;
+///
+/// v2: `SessionState` gained the attempt ledger and lifecycle
+/// (`docs/decisions/2026-08-21-attempt-accounting-ledger.md`). A v1 snapshot
+/// has no fields for them, so it is discarded and the log is replayed — a
+/// cache miss, not data loss, which is precisely what this constant buys.
+pub const SNAPSHOT_VERSION: u32 = 2;
 
 /// A reduced [`SessionState`] plus the point in the log it reduces.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

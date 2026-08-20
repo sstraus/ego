@@ -210,6 +210,7 @@ mod generator {
                         kind: EventKind::UsageUpdated {
                             usage: *usage,
                             cost_delta: quote().price(usage),
+                            attempt: None,
                         },
                     }]
                 }
@@ -219,8 +220,10 @@ mod generator {
                         StopReason::Length => (false, ExitReason::Budget),
                         StopReason::Error => (false, ExitReason::Error),
                         StopReason::Aborted => (false, ExitReason::Cancelled),
-                        // Not a terminal state: nothing to assemble yet.
-                        StopReason::Pending | StopReason::Deferred => return vec![],
+                        // Terminal for the attempt, but nothing was
+                        // delivered: the provider will hand the result over
+                        // elsewhere, so there is no turn to complete yet.
+                        StopReason::Deferred => return vec![],
                     };
                     let env = self.envelope(None);
                     vec![DomainEvent {
@@ -318,6 +321,7 @@ mod generator {
                     pricing_revision: PricingRevision("test-2026-08".to_string()),
                     fx: None,
                 },
+                attempt: None,
             }
         );
         assert_eq!(
@@ -370,9 +374,19 @@ mod generator {
         );
     }
 
+    /// A deferred generation is terminal for the attempt and assembles no
+    /// turn: the provider finished with this request and will hand the result
+    /// over elsewhere, so there is nothing yet to record as completed.
+    ///
+    /// This replaces `generator_fake_pending_stop_is_not_terminal`, whose
+    /// subject (`StopReason::Pending`) was removed in
+    /// `docs/decisions/2026-08-21-attempt-accounting-ledger.md`. `Deferred`
+    /// is the remaining stop reason that assembles nothing, and it is the
+    /// more interesting one, because it is genuinely terminal while still
+    /// producing no `DomainEvent`.
     #[test]
-    fn generator_fake_pending_stop_is_not_terminal() {
-        let fake = FakeGenerator::new(vec![vec![AiEvent::Stop(StopReason::Pending)]]);
+    fn generator_fake_deferred_stop_assembles_no_turn() {
+        let fake = FakeGenerator::new(vec![vec![AiEvent::Stop(StopReason::Deferred)]]);
         let events: Vec<AiEvent> = drain_events(&fake);
         let mut assembler = Assembler::new(TurnId::new());
         let domain_events: Vec<DomainEvent> =

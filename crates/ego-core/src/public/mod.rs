@@ -237,7 +237,12 @@ pub fn project_public(ev: &DomainEvent) -> Option<PublicEvent> {
             ok: *allowed,
             text: None,
         }),
-        EventKind::UsageUpdated { usage, cost_delta } => Some(PublicEvent::UsageUpdated {
+        // `attempt` is deliberately not projected: the public schema is
+        // compatibility-governed and v1 has no field for it, so surfacing an
+        // internal identity here would be a schema change for no consumer.
+        EventKind::UsageUpdated {
+            usage, cost_delta, ..
+        } => Some(PublicEvent::UsageUpdated {
             turn,
             item,
             usage_delta: *usage,
@@ -278,5 +283,17 @@ pub fn project_public(ev: &DomainEvent) -> Option<PublicEvent> {
             item,
             message: message.clone(),
         }),
+
+        // The attempt lifecycle is internal, and stays internal. A client
+        // consumes the *effect* — usage, cost, occupancy — not the harness's
+        // bookkeeping about which journey to the wire produced it, and
+        // `AttemptRef` is an identity core mints for its own accounting.
+        // A correction is not a public event either: it does not add a
+        // figure, it revises one, and what a client should see afterwards is
+        // the corrected cumulative total, which the next `UsageUpdated` or
+        // `ContextWindowUpdated` already carries.
+        EventKind::GenerationStarted { .. }
+        | EventKind::AttemptSettled { .. }
+        | EventKind::UsageCorrected { .. } => None,
     }
 }

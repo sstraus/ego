@@ -371,7 +371,13 @@ pub fn project_v1(ev: &DomainEvent) -> Option<v1::SessionUpdate> {
         | EventKind::HookFired { .. }
         | EventKind::SubagentSpawned { .. }
         | EventKind::SubagentReturned { .. }
-        | EventKind::Error { .. } => None,
+        | EventKind::Error { .. }
+        // Internal bookkeeping. ACP describes what the agent did, and which
+        // journey to the wire produced a figure is not that; the corrected
+        // cumulative total reaches a client through `UsageUpdate` anyway.
+        | EventKind::GenerationStarted { .. }
+        | EventKind::AttemptSettled { .. }
+        | EventKind::UsageCorrected { .. } => None,
     }
 }
 
@@ -469,6 +475,12 @@ pub fn project_v2(ev: &DomainEvent) -> Option<v2::SessionUpdate> {
         | EventKind::HookFired { .. }
         | EventKind::SubagentSpawned { .. }
         | EventKind::SubagentReturned { .. }
-        | EventKind::Error { .. } => None,
+        | EventKind::Error { .. }
+        // Internal bookkeeping. ACP describes what the agent did, and which
+        // journey to the wire produced a figure is not that; the corrected
+        // cumulative total reaches a client through `UsageUpdate` anyway.
+        | EventKind::GenerationStarted { .. }
+        | EventKind::AttemptSettled { .. }
+        | EventKind::UsageCorrected { .. } => None,
     }
 }

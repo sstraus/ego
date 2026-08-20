@@ -7,6 +7,8 @@ use ego_core::cost::{Amount, CostDelta, CurrencyCode, Money, PricingRevision};
 use ego_core::event::domain::{DomainEvent, Envelope, EventKind};
 use ego_core::event::id::{Producer, Seq, SessionId};
 use ego_core::event::time::Timestamp;
+use ego_core::generator::attempt::{AttemptRef, DeliveryCertainty, Outcome, UsageReport};
+use ego_core::generator::types::StopReason;
 use ego_core::state::Usage;
 use ego_core::store::codec::{
     CODEC_VERSION, CodecError, HeaderV1, IndexedCodecError, StoreLine, decode_line, decode_log,
@@ -402,6 +404,25 @@ mod codec {
     const GOLDEN_ITEM: &str = "00000000-0000-0000-0000-000000000003";
     const GOLDEN_EVENT_1: &str = "00000000-0000-0000-0000-00000000000a";
     const GOLDEN_EVENT_2: &str = "00000000-0000-0000-0000-00000000000b";
+    const GOLDEN_EVENT_3: &str = "00000000-0000-0000-0000-00000000000c";
+    const GOLDEN_EVENT_4: &str = "00000000-0000-0000-0000-00000000000d";
+    const GOLDEN_EVENT_5: &str = "00000000-0000-0000-0000-00000000000e";
+    const GOLDEN_GENERATION: &str = "00000000-0000-0000-0000-000000000010";
+    const GOLDEN_ATTEMPT: &str = "00000000-0000-0000-0000-000000000011";
+
+    /// An `AttemptRef` over fixed ids.
+    ///
+    /// Built through serde because there is deliberately no constructor that
+    /// takes both ids — `AttemptRef::first` mints a fresh `AttemptId`, which
+    /// a byte-for-byte golden cannot use. Decoding one here is also the
+    /// durable shape being exercised in the direction that matters.
+    fn golden_attempt() -> AttemptRef {
+        serde_json::from_value(serde_json::json!({
+            "generation": GOLDEN_GENERATION,
+            "attempt": GOLDEN_ATTEMPT,
+        }))
+        .expect("an AttemptRef is two ids")
+    }
 
     fn golden_events() -> Vec<DomainEvent> {
         let envelope = |id: &str, parent: Option<&str>| Envelope {
@@ -441,6 +462,59 @@ mod codec {
                         pricing_revision: PricingRevision("test-2026-08".to_string()),
                         fx: None,
                     },
+                    // Deliberately absent, and the record above is committed
+                    // without it. This is the backward-read evidence: a
+                    // `UsageUpdated` written before attempts were attributed
+                    // still decodes, which is the whole reason the field is
+                    // optional rather than required
+                    // (`docs/decisions/2026-08-21-attempt-accounting-ledger.md`).
+                    attempt: None,
+                },
+            },
+            // The attempt lifecycle, appended rather than woven in, so every
+            // record above keeps the exact bytes an earlier build wrote.
+            DomainEvent {
+                env: envelope(GOLDEN_EVENT_3, Some(GOLDEN_EVENT_2)),
+                kind: EventKind::GenerationStarted {
+                    attempt: golden_attempt(),
+                },
+            },
+            // The attributed twin of the record above: same money shape, now
+            // carrying the attempt a correction can key to.
+            DomainEvent {
+                env: envelope(GOLDEN_EVENT_4, Some(GOLDEN_EVENT_3)),
+                kind: EventKind::UsageUpdated {
+                    usage: Usage {
+                        uncached_input_tokens: 120,
+                        cache_read_tokens: 900,
+                        cache_write_tokens: 60,
+                        output_tokens: 45,
+                    },
+                    cost_delta: CostDelta::Known {
+                        amount: Money::new(
+                            "0.0027".parse::<Amount>().expect("a valid test amount"),
+                            CurrencyCode::new("USD").expect("USD is a valid code"),
+                        ),
+                        pricing_revision: PricingRevision("test-2026-08".to_string()),
+                        fx: None,
+                    },
+                    attempt: Some(golden_attempt()),
+                },
+            },
+            DomainEvent {
+                env: envelope(GOLDEN_EVENT_5, Some(GOLDEN_EVENT_4)),
+                kind: EventKind::AttemptSettled {
+                    attempt: golden_attempt(),
+                    outcome: Outcome::new(
+                        StopReason::Stop,
+                        DeliveryCertainty::PossiblySent,
+                        UsageReport::Reported(Usage {
+                            uncached_input_tokens: 120,
+                            cache_read_tokens: 900,
+                            cache_write_tokens: 60,
+                            output_tokens: 45,
+                        }),
+                    ),
                 },
             },
         ]

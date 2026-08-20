@@ -446,25 +446,38 @@ mod lifecycle {
         }
     }
 
-    /// `Pending` means "no terminal state yet", so a provider that sends it
-    /// has said nothing terminal — and an attempt that ends without one was
-    /// cancelled, whoever cancelled it.
+    /// An attempt that ends without a terminal frame was cancelled, whoever
+    /// cancelled it.
+    ///
+    /// This replaces `pending_is_not_a_terminal_state`. That test proved
+    /// `Outcome::new` rejected `StopReason::Pending` and that a `Stop(Pending)`
+    /// frame folded to `Aborted`; the variant was removed in
+    /// `docs/decisions/2026-08-21-attempt-accounting-ledger.md`, so the guard
+    /// it exercised no longer exists — "not finished yet" is now the absence
+    /// of a `StopReason`, which is what this asserts. The round-trip below
+    /// is the other half: every variant that *can* be decoded is terminal, so
+    /// a durable `Outcome` needs no validation on the way in.
     #[test]
-    fn pending_is_not_a_terminal_state() {
-        assert_eq!(
-            outcome_of(vec![AiEvent::Stop(StopReason::Pending)]).stop(),
-            StopReason::Aborted
-        );
+    fn an_attempt_with_no_terminal_frame_is_an_abort() {
         assert_eq!(outcome_of(Vec::new()).stop(), StopReason::Aborted);
-        assert!(
-            Outcome::new(
-                StopReason::Pending,
-                DeliveryCertainty::DefinitelyUnsent,
-                UsageReport::Missing
-            )
-            .is_err(),
-            "and it cannot be built directly either"
-        );
+
+        for stop in [
+            StopReason::Stop,
+            StopReason::Length,
+            StopReason::ToolUse,
+            StopReason::Error,
+            StopReason::Aborted,
+            StopReason::Deferred,
+        ] {
+            let outcome = Outcome::new(
+                stop,
+                DeliveryCertainty::PossiblySent,
+                UsageReport::Reported(Usage::default()),
+            );
+            let json = serde_json::to_string(&outcome).expect("an outcome serialises");
+            let back: Outcome = serde_json::from_str(&json).expect("and decodes back");
+            assert_eq!(back, outcome, "{stop:?} survives the durable round trip");
+        }
     }
 
     /// Settling before the stream terminates *is* cancellation — it consumes

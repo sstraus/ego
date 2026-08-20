@@ -179,6 +179,7 @@ mod snapshot {
             EventKind::UsageUpdated {
                 usage: tokens(120, 45),
                 cost_delta: priced("0.001035"),
+                attempt: None,
             },
             None,
             EventId::new(),
@@ -282,6 +283,7 @@ mod snapshot {
             EventKind::UsageUpdated {
                 usage: tokens(10, 5),
                 cost_delta: priced("0.000105"),
+                attempt: None,
             },
             None,
             EventId::new(),

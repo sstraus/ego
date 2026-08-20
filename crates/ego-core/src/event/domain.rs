@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use super::id::{EventId, ItemId, Producer, Seq, SessionId, TurnId};
 use super::time::Timestamp;
 use crate::cost::CostDelta;
+use crate::generator::attempt::{AttemptRef, Outcome};
 use crate::state::Usage;
 
 /// The full envelope every `DomainEvent` carries, per ARCH §1: a monotonic
@@ -84,15 +85,28 @@ pub enum OccupancyProvenance {
 /// Compacted | Forked | HookFired | SubagentSpawned | SubagentReturned | Error
 /// ```
 ///
+/// plus the attempt lifecycle and accounting variants added in
+/// `docs/decisions/2026-08-21-attempt-accounting-ledger.md`:
+///
+/// ```text
+/// GenerationStarted | AttemptSettled | UsageCorrected
+/// ```
+///
 /// This is the internal representation: it evolves freely with core, and
 /// `PublicEvent` is the privacy-filtered, compatibility-governed projection
 /// of it. "Freely" has one hard limit, though — `SessionStore::append`
 /// serialises this type verbatim as the `StoreRecord` payload, so its serde
 /// shape *is* the durable format and a later build has to read what an
 /// earlier one wrote. `tests/codec.rs`'s committed `golden/store_log.jsonl`
-/// pins those bytes: adding a variant or a field is fine, but renaming or
-/// re-tagging an existing one is a `CODEC_VERSION` bump plus a migration,
-/// not a fixture update.
+/// pins those bytes.
+///
+/// What is additive, precisely: a new variant, or a new field **that has a
+/// default**. A required field is not — a record written before it existed
+/// has no value for it and fails to decode, which is the same break as a
+/// rename. Renaming or re-tagging an existing variant or field is a
+/// `CODEC_VERSION` bump plus a migration, not a fixture update. (This note
+/// used to say "adding a variant or a field is fine", which was overbroad;
+/// corrected in `docs/decisions/2026-08-21-attempt-accounting-ledger.md`.)
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum EventKind {
@@ -114,6 +128,24 @@ pub enum EventKind {
     PermissionRequested { description: String },
     /// A permission decision was made.
     PermissionDecided { allowed: bool },
+    /// One generation was admitted and is on its way to the provider.
+    ///
+    /// Opens the attempt's lifecycle in the log, which is what makes a
+    /// resumed session able to say that a request was in flight — and, once
+    /// `AttemptSettled` arrives, whether it may safely be sent again.
+    GenerationStarted { attempt: AttemptRef },
+    /// One attempt reached a terminal state.
+    ///
+    /// Carries no money. `UsageUpdated` is the single accounting fact
+    /// (`docs/decisions/2026-08-21-attempt-accounting-ledger.md`); two events
+    /// carrying the same figure are two events that can disagree once they
+    /// are bytes on disk. The `UsageReport` inside `outcome` is the
+    /// provider's own report, kept as *evidence* about the bookings rather
+    /// than as a booking: the reducer checks the two against each other.
+    AttemptSettled {
+        attempt: AttemptRef,
+        outcome: Outcome,
+    },
     /// One generation's usage was reported (added to the running totals),
     /// together with what it cost.
     ///
@@ -122,7 +154,34 @@ pub enum EventKind {
     /// was resolved before the request. Splitting them into two events would
     /// let a log contain tokens with no price or a price with no tokens, and
     /// nothing could tell which generation a stray price belonged to.
-    UsageUpdated { usage: Usage, cost_delta: CostDelta },
+    UsageUpdated {
+        usage: Usage,
+        cost_delta: CostDelta,
+        /// Which attempt spent this, when it is known.
+        ///
+        /// `Option` with a default because a *required* field would break
+        /// every record written before attempts were attributed — see this
+        /// type's own doc comment. `None` means exactly that: written before
+        /// attribution. Once any `GenerationStarted` has been observed the
+        /// reducer refuses a `None`, so a producer cannot opt out of
+        /// attribution by omitting the field.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attempt: Option<AttemptRef>,
+    },
+    /// A provider revised what one attempt actually used, after the fact.
+    ///
+    /// Replaces that attempt's contribution rather than adding to it, and the
+    /// session totals are refolded from the ledger. Addition would
+    /// double-count, and replacing the whole session total (what
+    /// `CumulativeCost::reconcile` does) would discard every other
+    /// generation. A correction is also the only thing that can clear a
+    /// poisoned total, which is why it must not be modelled as subtraction:
+    /// nobody knows how big an `Unknown` was.
+    UsageCorrected {
+        attempt: AttemptRef,
+        usage: Usage,
+        cost_delta: CostDelta,
+    },
     /// How much of the context window is currently occupied.
     ///
     /// A separate event from `UsageUpdated`, and reduced with *replace*
@@ -167,7 +226,10 @@ impl EventKind {
             EventKind::ToolCallCompleted { .. } => "tool_call_completed",
             EventKind::PermissionRequested { .. } => "permission_requested",
             EventKind::PermissionDecided { .. } => "permission_decided",
+            EventKind::GenerationStarted { .. } => "generation_started",
+            EventKind::AttemptSettled { .. } => "attempt_settled",
             EventKind::UsageUpdated { .. } => "usage_updated",
+            EventKind::UsageCorrected { .. } => "usage_corrected",
             EventKind::ContextWindowUpdated { .. } => "context_window_updated",
             EventKind::TurnCompleted { .. } => "turn_completed",
             EventKind::Compacted { .. } => "compacted",

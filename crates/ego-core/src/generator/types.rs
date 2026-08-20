@@ -24,12 +24,21 @@ pub enum ThinkingLevel {
     Max,
 }
 
-/// Why a generation stopped, pi's scale verbatim (`docs/02-pi.md` §2).
+/// Why a generation stopped, pi's scale (`docs/02-pi.md` §2) minus `Pending`.
+///
+/// The one deliberate deviation from pi, decided in
+/// `docs/decisions/2026-08-21-attempt-accounting-ledger.md`: pi's `Pending`
+/// means "no terminal state yet", which is the *absence* of the answer this
+/// type exists to give. Every variant here is terminal, so an
+/// [`Outcome`](super::attempt::Outcome) cannot be built around a value that
+/// says nothing ended — and it can be durable without a guard, because a
+/// decoded `StopReason` has no non-terminal spelling to decode into.
+///
+/// "Not finished yet" is expressed by not having a `StopReason`: the stream
+/// is still running, or `AttemptStream::terminal` is `None`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum StopReason {
-    /// The stream hasn't produced a terminal state yet.
-    Pending,
     /// The model completed its turn normally.
     Stop,
     /// The output was truncated at a length limit.

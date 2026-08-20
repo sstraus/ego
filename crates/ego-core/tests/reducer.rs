@@ -3,11 +3,16 @@
 //!
 //! See `ARCHITECTURE.md` §1 and `plans/m0a-contracts.md` Step 2.
 
-use ego_core::cost::{Amount, CostDelta, CumulativeCost, CurrencyCode, Money, PricingRevision};
+use ego_core::cost::{
+    Amount, CostDelta, CumulativeCost, CurrencyCode, FxQuote, Money, PricingRevision,
+};
 use ego_core::event::domain::{DomainEvent, Envelope, EventKind, ExitReason, OccupancyProvenance};
+use ego_core::event::id::{AttemptId, GenerationId};
 use ego_core::event::id::{EventId, ItemId, Producer, Seq, SessionId, TurnId};
 use ego_core::event::time::Timestamp;
-use ego_core::state::{PermissionEvent, SessionState, SubagentEvent, Usage};
+use ego_core::generator::attempt::{AttemptRef, DeliveryCertainty, Outcome, UsageReport};
+use ego_core::generator::types::StopReason;
+use ego_core::state::{PermissionEvent, RefusalReason, SessionState, SubagentEvent, Usage};
 
 // Wrapped in a module named `reducer` so `cargo test -p ego-core reducer`
 // (the story's VERIFY command) matches these tests by substring: cargo's
@@ -149,6 +154,7 @@ mod reducer {
             EventKind::UsageUpdated {
                 usage: tokens(42, 7),
                 cost_delta: priced("0.000441"),
+                attempt: None,
             }
         );
         push!(
@@ -451,6 +457,7 @@ mod reducer {
                     cost_delta: CostDelta::Unknown(
                         ego_core::cost::UnknownCost::ProviderReportedNoUsage,
                     ),
+                    attempt: None,
                 },
             ),
             (
@@ -506,10 +513,41 @@ mod reducer {
                     message: String::new(),
                 },
             ),
+            // The attempt lifecycle, last on purpose: `generation_started`
+            // flips attribution on, and every entry above it is written the
+            // way a pre-attribution log is. The settlement and the correction
+            // below name attempts nobody started, so both are refused —
+            // exactly the degenerate case this test is about. A refusal is
+            // recorded; it is never a panic.
+            (
+                "generation_started",
+                EventKind::GenerationStarted {
+                    attempt: AttemptRef::first(GenerationId::new()),
+                },
+            ),
+            (
+                "attempt_settled",
+                EventKind::AttemptSettled {
+                    attempt: AttemptRef::first(GenerationId::new()),
+                    outcome: Outcome::new(
+                        StopReason::Error,
+                        DeliveryCertainty::PossiblySent,
+                        UsageReport::Missing,
+                    ),
+                },
+            ),
+            (
+                "usage_corrected",
+                EventKind::UsageCorrected {
+                    attempt: AttemptRef::first(GenerationId::new()),
+                    usage: Usage::default(),
+                    cost_delta: CostDelta::Unknown(ego_core::cost::UnknownCost::Overflow),
+                },
+            ),
         ];
         assert_eq!(
             table.len(),
-            18,
+            21,
             "keep this table in sync with EventKind's variant count (ARCH §1)"
         );
 
@@ -536,12 +574,27 @@ mod reducer {
 
         assert_eq!(
             state.unresolved_parents.len(),
-            18,
+            21,
             "every event's parent was unresolvable"
         );
         assert_eq!(
             state.last_seq, regressed_seq,
             "apply must not clamp/reject the regressed seq"
+        );
+        assert_eq!(
+            state
+                .refusals
+                .iter()
+                .map(|r| r.reason)
+                .collect::<Vec<RefusalReason>>(),
+            vec![RefusalReason::UnknownAttempt, RefusalReason::UnknownAttempt],
+            "the settlement and the correction name attempts nobody started, \
+             and a refusal is recorded rather than raised"
+        );
+        assert_eq!(
+            state.live_attempts.len(),
+            1,
+            "only the started attempt is live; the other two never opened one"
         );
         assert!(
             state.items.is_empty(),
@@ -575,6 +628,7 @@ mod reducer {
             EventKind::UsageUpdated {
                 usage: tokens(u64::MAX - 1, u64::MAX - 1),
                 cost_delta: priced("0"),
+                attempt: None,
             },
         ));
         // Summing past u64::MAX must not panic (dev profile has
@@ -587,6 +641,7 @@ mod reducer {
             EventKind::UsageUpdated {
                 usage: tokens(10, 10),
                 cost_delta: priced("0"),
+                attempt: None,
             },
         ));
 
@@ -814,6 +869,7 @@ mod reducer {
                 EventKind::UsageUpdated {
                     usage: tokens(100, 20),
                     cost_delta: priced("0.001"),
+                    attempt: None,
                 },
             ));
             state.apply(&ev(
@@ -863,6 +919,7 @@ mod reducer {
             EventKind::UsageUpdated {
                 usage: tokens(10, 2),
                 cost_delta: priced("0.25"),
+                attempt: None,
             },
         ));
         state.apply(&ev(
@@ -873,6 +930,7 @@ mod reducer {
             EventKind::UsageUpdated {
                 usage: tokens(5, 1),
                 cost_delta: priced("0.125"),
+                attempt: None,
             },
         ));
         assert_eq!(state.usage.uncached_input_tokens, 15);
@@ -990,5 +1048,520 @@ mod reducer {
         assert_eq!(state.forks.len(), 1);
         assert_eq!(state.forks[0].source, source);
         assert_eq!(state.errors, vec!["oops".to_string()]);
+    }
+
+    // --- the attempt ledger ------------------------------------------------
+    //
+    // See `docs/decisions/2026-08-21-attempt-accounting-ledger.md`. The
+    // reducer is total, so "refused" means the variant's effect is not
+    // applied and a typed `Refusal` is recorded — the envelope bookkeeping
+    // still happens either way.
+
+    /// A driver for one session's log: it hands out sequence numbers and
+    /// applies as it goes, which is what the harness loop does.
+    struct Session {
+        turn: TurnId,
+        seq: Seq,
+        state: SessionState,
+    }
+
+    impl Session {
+        fn new() -> Self {
+            Self {
+                turn: TurnId::new(),
+                seq: Seq::default(),
+                state: SessionState::default(),
+            }
+        }
+
+        fn apply(&mut self, kind: EventKind) -> EventId {
+            let e = ev(self.seq.next(), self.turn, None, None, kind);
+            let id = e.env.id;
+            self.state.apply(&e);
+            id
+        }
+
+        fn start(&mut self, attempt: AttemptRef) {
+            self.apply(EventKind::GenerationStarted { attempt });
+        }
+
+        fn book(&mut self, attempt: Option<AttemptRef>, usage: Usage, cost: CostDelta) {
+            self.apply(EventKind::UsageUpdated {
+                usage,
+                cost_delta: cost,
+                attempt,
+            });
+        }
+
+        fn settle(&mut self, attempt: AttemptRef, usage: UsageReport) {
+            self.apply(EventKind::AttemptSettled {
+                attempt,
+                outcome: Outcome::new(StopReason::Stop, DeliveryCertainty::PossiblySent, usage),
+            });
+        }
+
+        fn correct(&mut self, attempt: AttemptRef, usage: Usage, cost: CostDelta) {
+            self.apply(EventKind::UsageCorrected {
+                attempt,
+                usage,
+                cost_delta: cost,
+            });
+        }
+
+        fn reasons(&self) -> Vec<RefusalReason> {
+            self.state.refusals.iter().map(|r| r.reason).collect()
+        }
+    }
+
+    /// Start, book and settle one attempt with `usage` priced at `cost`.
+    fn one_generation(s: &mut Session, usage: Usage, cost: CostDelta) -> AttemptRef {
+        let attempt = AttemptRef::first(GenerationId::new());
+        s.start(attempt);
+        s.book(Some(attempt), usage, cost);
+        s.settle(attempt, UsageReport::Reported(usage));
+        attempt
+    }
+
+    #[test]
+    fn an_attempt_is_live_from_start_to_settlement_and_no_longer() {
+        let mut s = Session::new();
+        let attempt = AttemptRef::first(GenerationId::new());
+
+        s.start(attempt);
+        assert_eq!(s.state.live_attempts.len(), 1);
+        assert!(s.state.settled_attempts.is_empty());
+
+        s.settle(attempt, UsageReport::Missing);
+        assert!(
+            s.state.live_attempts.is_empty(),
+            "settlement closes the lifecycle; nothing about it is kept live"
+        );
+        assert_eq!(
+            s.state.settled_attempts.len(),
+            1,
+            "but it is remembered, because refusing an unknown attempt means \
+             knowing which ones are known"
+        );
+        assert!(s.reasons().is_empty());
+    }
+
+    /// The bound the acceptance criterion asks for, stated as an experiment:
+    /// a long log with many generations, only one of which is ever in flight.
+    #[test]
+    fn live_attempt_state_is_bounded_by_concurrent_generations_not_by_log_length() {
+        let mut s = Session::new();
+        for _ in 0..50 {
+            let attempt = one_generation(&mut s, tokens(10, 5), priced("0.01"));
+            assert_eq!(
+                s.state.live_attempts.len(),
+                0,
+                "no generation stays live past its settlement: {attempt:?}"
+            );
+            // Events per generation, not events per log: three here, and the
+            // live map does not grow with either.
+            assert!(s.state.live_attempts.len() <= 1);
+        }
+        assert_eq!(s.state.charges.len(), 50, "the ledger does grow, by design");
+        assert_eq!(s.state.cost, CumulativeCost::Known { total: usd("0.5") });
+    }
+
+    #[test]
+    fn two_generations_can_be_in_flight_at_once() {
+        let mut s = Session::new();
+        let a = AttemptRef::first(GenerationId::new());
+        let b = AttemptRef::first(GenerationId::new());
+        s.start(a);
+        s.start(b);
+        assert_eq!(s.state.live_attempts.len(), 2);
+
+        s.book(Some(a), tokens(10, 1), priced("0.01"));
+        s.book(Some(b), tokens(20, 2), priced("0.02"));
+        s.settle(b, UsageReport::Reported(tokens(20, 2)));
+
+        assert_eq!(s.state.live_attempts.len(), 1, "a is still in flight");
+        assert_eq!(s.state.cost, CumulativeCost::Known { total: usd("0.03") });
+        assert!(s.reasons().is_empty());
+    }
+
+    #[test]
+    fn a_settlement_for_an_attempt_nobody_started_is_refused() {
+        let mut s = Session::new();
+        s.settle(AttemptRef::first(GenerationId::new()), UsageReport::Missing);
+
+        assert_eq!(s.reasons(), vec![RefusalReason::UnknownAttempt]);
+        assert!(s.state.settled_attempts.is_empty());
+    }
+
+    /// The reason `AttemptRef` travels whole rather than a bare `AttemptId`.
+    #[test]
+    fn a_settlement_naming_a_different_generation_is_refused_and_leaves_the_attempt_in_flight() {
+        let mut s = Session::new();
+        let real = AttemptRef::first(GenerationId::new());
+        s.start(real);
+
+        let mut imposter = AttemptRef::first(GenerationId::new());
+        // Same attempt id, different generation — the swap a bare `AttemptId`
+        // could not have noticed.
+        imposter = rebind(imposter, real.attempt());
+        s.settle(imposter, UsageReport::Missing);
+
+        assert_eq!(s.reasons(), vec![RefusalReason::GenerationMismatch]);
+        assert_eq!(
+            s.state.live_attempts.len(),
+            1,
+            "the real attempt is still in flight: a settlement naming the \
+             wrong generation says nothing about it, so closing it on that \
+             evidence would strand it"
+        );
+    }
+
+    #[test]
+    fn settling_or_starting_the_same_attempt_twice_is_refused() {
+        let mut s = Session::new();
+        let attempt = AttemptRef::first(GenerationId::new());
+        s.start(attempt);
+        s.start(attempt);
+        s.settle(attempt, UsageReport::Missing);
+        s.settle(attempt, UsageReport::Missing);
+        s.start(attempt);
+
+        assert_eq!(
+            s.reasons(),
+            vec![
+                RefusalReason::AlreadyStarted,
+                RefusalReason::AlreadySettled,
+                RefusalReason::AlreadySettled,
+            ]
+        );
+        assert_eq!(s.state.settled_attempts.len(), 1);
+    }
+
+    #[test]
+    fn usage_attributed_to_an_unknown_attempt_is_refused_and_costs_nothing() {
+        let mut s = Session::new();
+        s.start(AttemptRef::first(GenerationId::new()));
+        s.book(
+            Some(AttemptRef::first(GenerationId::new())),
+            tokens(999, 999),
+            priced("99"),
+        );
+
+        assert_eq!(s.reasons(), vec![RefusalReason::UnknownAttempt]);
+        assert!(s.state.charges.is_empty(), "nothing was booked");
+        assert_eq!(s.state.cost, CumulativeCost::Unstarted);
+    }
+
+    /// Unattributed usage is accepted only while nothing has shown it knows
+    /// how to attribute. Otherwise a producer opts out by omitting a field.
+    #[test]
+    fn unattributed_usage_is_legacy_only_and_refused_once_attribution_has_begun() {
+        let mut s = Session::new();
+        s.book(None, tokens(10, 1), priced("0.01"));
+        assert_eq!(s.state.cost, CumulativeCost::Known { total: usd("0.01") });
+        assert!(
+            s.reasons().is_empty(),
+            "a pre-attribution log still reduces"
+        );
+
+        s.start(AttemptRef::first(GenerationId::new()));
+        s.book(None, tokens(10, 1), priced("0.01"));
+
+        assert_eq!(s.reasons(), vec![RefusalReason::UnattributedUsage]);
+        assert_eq!(
+            s.state.cost,
+            CumulativeCost::Known { total: usd("0.01") },
+            "the refused figure did not move the total"
+        );
+    }
+
+    #[test]
+    fn usage_booked_after_settlement_is_refused_because_a_correction_is_the_only_way_back() {
+        let mut s = Session::new();
+        let attempt = one_generation(&mut s, tokens(10, 1), priced("0.01"));
+        s.book(Some(attempt), tokens(10, 1), priced("0.01"));
+
+        assert_eq!(s.reasons(), vec![RefusalReason::AlreadySettled]);
+        assert_eq!(
+            s.state.cost,
+            CumulativeCost::Known { total: usd("0.01") },
+            "the double count this contract exists to prevent"
+        );
+    }
+
+    /// The settlement's own `UsageReport` is evidence about the bookings, not
+    /// a booking. A disagreement is recorded and the money does not move.
+    #[test]
+    fn a_settlement_disagreeing_with_what_was_booked_is_recorded_and_still_settles() {
+        let mut s = Session::new();
+        let attempt = AttemptRef::first(GenerationId::new());
+        s.start(attempt);
+        s.book(Some(attempt), tokens(10, 1), priced("0.01"));
+        s.settle(attempt, UsageReport::Reported(tokens(999, 999)));
+
+        assert_eq!(
+            s.reasons(),
+            vec![RefusalReason::UsageDisagreesWithSettlement]
+        );
+        assert!(
+            s.state.live_attempts.is_empty() && s.state.settled_attempts.len() == 1,
+            "it settles anyway: the bookings are what a real gate was charged"
+        );
+        assert_eq!(s.state.usage, tokens(10, 1));
+        assert_eq!(s.state.cost, CumulativeCost::Known { total: usd("0.01") });
+    }
+
+    #[test]
+    fn a_correction_replaces_one_contribution_and_leaves_the_others_alone() {
+        let mut s = Session::new();
+        let first = one_generation(&mut s, tokens(10, 1), priced("0.01"));
+        one_generation(&mut s, tokens(20, 2), priced("0.02"));
+        assert_eq!(s.state.cost, CumulativeCost::Known { total: usd("0.03") });
+
+        s.correct(first, tokens(100, 10), priced("0.10"));
+
+        assert!(s.reasons().is_empty());
+        assert_eq!(
+            s.state.cost,
+            CumulativeCost::Known { total: usd("0.12") },
+            "0.10 replaced 0.01; the other generation's 0.02 is untouched"
+        );
+        assert_eq!(s.state.usage, tokens(120, 12));
+        assert_eq!(s.state.charges.len(), 2, "replaced, not appended");
+    }
+
+    /// The correction that matters most in practice, and the reason this is
+    /// a refold rather than a subtraction: nobody knows how big an `Unknown`
+    /// was, so there is nothing to subtract.
+    #[test]
+    fn a_correction_clears_a_total_that_a_missing_usage_report_poisoned() {
+        let mut s = Session::new();
+        let silent = AttemptRef::first(GenerationId::new());
+        s.start(silent);
+        s.book(
+            Some(silent),
+            Usage::default(),
+            CostDelta::Unknown(ego_core::cost::UnknownCost::ProviderReportedNoUsage),
+        );
+        s.settle(silent, UsageReport::Reported(Usage::default()));
+        one_generation(&mut s, tokens(20, 2), priced("0.02"));
+
+        assert_eq!(
+            s.state.cost,
+            CumulativeCost::Unknown(ego_core::cost::UnknownCost::ProviderReportedNoUsage),
+            "one unpriced generation poisons the total, and a later priced \
+             one cannot repair a sum with a hole in it"
+        );
+
+        s.correct(silent, tokens(10, 1), priced("0.01"));
+
+        assert_eq!(
+            s.state.cost,
+            CumulativeCost::Known { total: usd("0.03") },
+            "the billing figure arrived, so the hole closed and the total is \
+             a number again"
+        );
+        assert_eq!(s.state.usage, tokens(30, 3));
+    }
+
+    /// The ledger is a `Vec` and not a map because `add_delta` is
+    /// order-dependent: the first `Known` delta fixes the settlement
+    /// currency. Folded EUR-then-USD this totals in EUR; folded the other way
+    /// round the EUR contribution has no quote and poisons the total.
+    #[test]
+    fn a_refold_preserves_ledger_order_so_the_settlement_currency_cannot_move() {
+        let mut s = Session::new();
+        let eur = one_generation(&mut s, tokens(10, 1), eur_priced("1"));
+        one_generation(&mut s, tokens(20, 2), usd_priced_with_eur_quote("1", "0.9"));
+
+        assert_eq!(
+            s.state.cost,
+            CumulativeCost::Known {
+                total: money("1.9", "EUR")
+            },
+            "EUR came first, so EUR settles"
+        );
+
+        s.correct(eur, tokens(10, 1), eur_priced("2"));
+
+        assert_eq!(
+            s.state.cost,
+            CumulativeCost::Known {
+                total: money("2.9", "EUR")
+            },
+            "the corrected entry keeps its position, so EUR still settles. \
+             Refolded in any other order the USD entry would establish the \
+             currency and the EUR one would poison the total"
+        );
+    }
+
+    #[test]
+    fn a_correction_for_an_unknown_or_still_live_attempt_is_refused() {
+        let mut s = Session::new();
+        let live = AttemptRef::first(GenerationId::new());
+        s.start(live);
+        s.book(Some(live), tokens(10, 1), priced("0.01"));
+
+        s.correct(live, tokens(99, 9), priced("9"));
+        s.correct(
+            AttemptRef::first(GenerationId::new()),
+            tokens(99, 9),
+            priced("9"),
+        );
+
+        assert_eq!(
+            s.reasons(),
+            vec![RefusalReason::NotSettled, RefusalReason::UnknownAttempt]
+        );
+        assert_eq!(s.state.cost, CumulativeCost::Known { total: usd("0.01") });
+    }
+
+    /// An attempt that settled without booking anything has no contribution
+    /// to replace, and a correction must not conjure one.
+    #[test]
+    fn a_correction_for_an_attempt_that_booked_nothing_is_refused() {
+        let mut s = Session::new();
+        let attempt = AttemptRef::first(GenerationId::new());
+        s.start(attempt);
+        s.settle(attempt, UsageReport::Missing);
+
+        s.correct(attempt, tokens(10, 1), priced("0.01"));
+
+        assert_eq!(s.reasons(), vec![RefusalReason::UnknownAttempt]);
+        assert_eq!(s.state.cost, CumulativeCost::Unstarted);
+        assert!(s.state.charges.is_empty());
+    }
+
+    /// Several increments for one attempt collapse into the revised figure —
+    /// a correction states what the attempt used, not what to add to it.
+    #[test]
+    fn a_correction_collapses_every_increment_that_attempt_booked() {
+        let mut s = Session::new();
+        let attempt = AttemptRef::first(GenerationId::new());
+        s.start(attempt);
+        s.book(Some(attempt), tokens(10, 1), priced("0.01"));
+        s.book(Some(attempt), tokens(5, 1), priced("0.005"));
+        s.settle(attempt, UsageReport::Reported(tokens(15, 2)));
+        assert_eq!(s.state.charges.len(), 2);
+        assert_eq!(
+            s.state.cost,
+            CumulativeCost::Known {
+                total: usd("0.015")
+            }
+        );
+
+        s.correct(attempt, tokens(20, 3), priced("0.02"));
+
+        assert!(s.reasons().is_empty());
+        assert_eq!(s.state.charges.len(), 1, "two increments, one revision");
+        assert_eq!(s.state.usage, tokens(20, 3));
+        assert_eq!(s.state.cost, CumulativeCost::Known { total: usd("0.02") });
+    }
+
+    /// The property the whole ledger rests on: the totals are the fold of it.
+    #[test]
+    fn the_totals_are_always_the_fold_of_the_ledger() {
+        let mut s = Session::new();
+        let a = one_generation(&mut s, tokens(10, 1), priced("0.01"));
+        one_generation(&mut s, tokens(20, 2), priced("0.02"));
+        s.correct(a, tokens(7, 7), priced("0.07"));
+
+        let mut usage = Usage::default();
+        let mut cost = CumulativeCost::default();
+        for charge in &s.state.charges {
+            usage.add(&charge.usage);
+            cost.add_delta(&charge.cost);
+        }
+        assert_eq!(s.state.usage, usage);
+        assert_eq!(s.state.cost, cost);
+    }
+
+    #[test]
+    fn replaying_a_corrected_log_is_deterministic() {
+        let turn = TurnId::new();
+        let mut seq = Seq::default();
+        let attempt = AttemptRef::first(GenerationId::new());
+        let other = AttemptRef::first(GenerationId::new());
+        let log: Vec<DomainEvent> = vec![
+            EventKind::GenerationStarted { attempt },
+            EventKind::UsageUpdated {
+                usage: tokens(10, 1),
+                cost_delta: priced("0.01"),
+                attempt: Some(attempt),
+            },
+            EventKind::AttemptSettled {
+                attempt,
+                outcome: Outcome::new(
+                    StopReason::Stop,
+                    DeliveryCertainty::PossiblySent,
+                    UsageReport::Reported(tokens(10, 1)),
+                ),
+            },
+            EventKind::GenerationStarted { attempt: other },
+            EventKind::UsageUpdated {
+                usage: tokens(20, 2),
+                cost_delta: priced("0.02"),
+                attempt: Some(other),
+            },
+            EventKind::UsageCorrected {
+                attempt,
+                usage: tokens(5, 5),
+                cost_delta: priced("0.05"),
+            },
+        ]
+        .into_iter()
+        .map(|kind| ev(seq.next(), turn, None, None, kind))
+        .collect();
+
+        let reduce = || {
+            let mut state = SessionState::default();
+            for e in &log {
+                state.apply(e);
+            }
+            state
+        };
+        assert_eq!(reduce(), reduce());
+        assert_eq!(reduce().cost, CumulativeCost::Known { total: usd("0.07") });
+    }
+
+    /// Same attempt id, different generation — the swap a bare `AttemptId`
+    /// could not have noticed. There is deliberately no public constructor
+    /// for this, so the test builds it through serde, which is also how a
+    /// forged record would arrive.
+    fn rebind(reference: AttemptRef, attempt: AttemptId) -> AttemptRef {
+        let json = serde_json::json!({
+            "generation": reference.generation(),
+            "attempt": attempt,
+        });
+        serde_json::from_value(json).expect("an AttemptRef is two ids")
+    }
+
+    fn money(decimal: &str, currency: &str) -> Money {
+        Money::new(
+            decimal.parse::<Amount>().expect("a valid test amount"),
+            CurrencyCode::new(currency).expect("a valid test currency"),
+        )
+    }
+
+    fn eur_priced(decimal: &str) -> CostDelta {
+        CostDelta::Known {
+            amount: money(decimal, "EUR"),
+            pricing_revision: PricingRevision("test-2026-08".to_string()),
+            fx: None,
+        }
+    }
+
+    /// A USD cost carrying its own persisted USD→EUR quote, so it can settle
+    /// into a EUR session.
+    fn usd_priced_with_eur_quote(decimal: &str, rate: &str) -> CostDelta {
+        CostDelta::Known {
+            amount: money(decimal, "USD"),
+            pricing_revision: PricingRevision("test-2026-08".to_string()),
+            fx: Some(FxQuote {
+                from: CurrencyCode::new("USD").expect("USD is a valid code"),
+                to: CurrencyCode::new("EUR").expect("EUR is a valid code"),
+                rate: rate.parse::<Amount>().expect("a valid test rate"),
+                quoted_at: Timestamp::from_millis(1_000),
+            }),
+        }
     }
 }
