@@ -21,7 +21,7 @@
 //!    wrong currency, overflow — every one denies rather than proceeding
 //!    and hoping.
 
-use ego_core::budget::{BudgetDenied, BudgetGate, PricingQuote};
+use ego_core::budget::{BudgetBinding, BudgetDenied, BudgetGate, PricingQuote};
 use ego_core::cost::{
     Amount, CostDelta, CurrencyCode, Money, PricingRevision, TokenCategory, UnknownCost,
 };
@@ -299,7 +299,9 @@ mod budget {
         assert_eq!(*gate.outstanding(), standard_bound());
         assert!(gate.committed().amount.is_zero());
 
-        let settled = gate.reconcile(reservation, &quote().price(&tokens(1_000, 0, 0, 200)));
+        let settled = gate
+            .reconcile(reservation, &quote().price(&tokens(1_000, 0, 0, 200)))
+            .expect("the minting gate settles its own reservation");
         assert!(settled.exact);
         assert_eq!(settled.charged, usd("0.006"));
         assert!(
@@ -334,7 +336,8 @@ mod budget {
         );
 
         // Settling one cheaply frees its hold, and the third now fits.
-        gate.reconcile(first, &quote.price(&tokens(10, 0, 0, 10)));
+        gate.reconcile(first, &quote.price(&tokens(10, 0, 0, 10)))
+            .expect("the minting gate settles its own reservation");
         assert!(gate.reserve(&quote, &request(Some(1_024)), &caps).is_ok());
     }
 
@@ -435,7 +438,9 @@ mod budget {
                 &caps(Some(200_000), Some(64_000)),
             )
             .unwrap();
-        let settled = gate.reconcile(reservation, &quote().price(&tokens(1_000, 0, 0, 200)));
+        let settled = gate
+            .reconcile(reservation, &quote().price(&tokens(1_000, 0, 0, 200)))
+            .expect("the minting gate settles its own reservation");
         assert_eq!(settled.charged, usd("0.006"));
         assert!(settled.exact);
         assert!(gate.committed().amount < standard_bound().amount);
@@ -455,10 +460,12 @@ mod budget {
                 &caps(Some(200_000), Some(64_000)),
             )
             .unwrap();
-        let settled = gate.reconcile(
-            reservation,
-            &CostDelta::Unknown(UnknownCost::ProviderReportedNoUsage),
-        );
+        let settled = gate
+            .reconcile(
+                reservation,
+                &CostDelta::Unknown(UnknownCost::ProviderReportedNoUsage),
+            )
+            .expect("the minting gate settles its own reservation");
         assert_eq!(settled.charged, standard_bound());
         assert!(
             !settled.exact,
@@ -482,14 +489,16 @@ mod budget {
                 &caps(Some(200_000), Some(64_000)),
             )
             .unwrap();
-        let settled = gate.reconcile(
-            reservation,
-            &CostDelta::Known {
-                amount: usd("0.006"),
-                pricing_revision: PricingRevision("a-different-table".to_string()),
-                fx: None,
-            },
-        );
+        let settled = gate
+            .reconcile(
+                reservation,
+                &CostDelta::Known {
+                    amount: usd("0.006"),
+                    pricing_revision: PricingRevision("a-different-table".to_string()),
+                    fx: None,
+                },
+            )
+            .expect("the minting gate settles its own reservation");
         assert!(!settled.exact);
         assert_eq!(settled.charged, standard_bound());
     }
@@ -509,7 +518,8 @@ mod budget {
                 &caps(Some(200_000), Some(64_000)),
             )
             .unwrap();
-        gate.reconcile(reservation, &quote().price(&tokens(1_000, 0, 0, 200)));
+        gate.reconcile(reservation, &quote().price(&tokens(1_000, 0, 0, 200)))
+            .expect("the minting gate settles its own reservation");
         // gate.reconcile(reservation, ...);  // error[E0382]: use of moved value
         assert_eq!(*gate.committed(), usd("0.006"));
         assert!(gate.outstanding().amount.is_zero());
@@ -546,5 +556,320 @@ mod budget {
     fn the_limit_is_readable_for_reporting() {
         let gate = BudgetGate::new(usd("42.50"));
         assert_eq!(*gate.limit(), usd("42.50"));
+    }
+
+    // --- whose budget, and for what -----------------------------------------
+    //
+    // A `Reservation` used to prove only that *some* `reserve` ran. Since
+    // `BudgetGate::new` is public, anyone could stand up a gate with a limit
+    // of their choosing and obtain a genuine token from it. These tests pin
+    // the two things that turn "genuine" into "authorised": which gate is
+    // holding the bound, and which generation it was priced for.
+
+    fn standard_caps() -> ModelCapabilities {
+        caps(Some(200_000), Some(64_000))
+    }
+
+    /// The standard fixture request against a named model.
+    fn request_for(model: &str, max_output_tokens: Option<u64>) -> GenRequest {
+        GenRequest {
+            model: model.to_string(),
+            ..request(max_output_tokens)
+        }
+    }
+
+    fn reserve_standard(gate: &mut BudgetGate) -> ego_core::budget::Reservation {
+        gate.reserve(&quote(), &request(Some(1_024)), &standard_caps())
+            .expect("well within the test limits")
+    }
+
+    #[test]
+    fn every_gate_has_its_own_identity_and_stamps_it_on_what_it_mints() {
+        let (mut a, mut b) = (BudgetGate::new(usd("10")), BudgetGate::new(usd("10")));
+        assert_ne!(a.id(), b.id(), "two gates must not share an identity");
+        assert_eq!(reserve_standard(&mut a).gate(), a.id());
+        assert_eq!(reserve_standard(&mut b).gate(), b.id());
+    }
+
+    /// The hole this closes, and the reason the test makes gate B hold
+    /// something first: `subtract_or_zero` floors at zero, so releasing a
+    /// foreign bound against an *empty* gate is invisible. Against a gate
+    /// with a real hold it is a silent gift of headroom — B would drop from
+    /// $0.76536 outstanding to nothing and cheerfully admit another
+    /// generation it never had room for.
+    #[test]
+    fn a_reservation_is_refused_by_a_gate_that_did_not_mint_it() {
+        let mut a = BudgetGate::new(usd("10"));
+        let mut b = BudgetGate::new(usd("10"));
+        let from_a = reserve_standard(&mut a);
+        let _b_own = reserve_standard(&mut b);
+        assert_eq!(*b.outstanding(), standard_bound());
+
+        let denied = b
+            .reconcile(from_a, &quote().price(&tokens(1_000, 0, 0, 200)))
+            .expect_err("gate B never minted this");
+        assert_eq!(
+            denied.reason,
+            BudgetDenied::WrongGate {
+                minted_by: a.id(),
+                presented_to: b.id(),
+            }
+        );
+        assert_eq!(
+            *b.outstanding(),
+            standard_bound(),
+            "a refused reconciliation must not release a hold B never took"
+        );
+        assert!(b.committed().amount.is_zero(), "and must not charge B");
+
+        // The authorisation is handed back intact, because B never released
+        // it — dropping it here would strand A's hold for the rest of A's
+        // life. It still settles, at the one gate that can settle it.
+        let settled = a
+            .reconcile(
+                denied.reservation,
+                &quote().price(&tokens(1_000, 0, 0, 200)),
+            )
+            .expect("A minted it, so A can settle it");
+        assert!(settled.exact);
+        assert!(a.outstanding().amount.is_zero());
+    }
+
+    #[test]
+    fn a_reservation_authorises_the_generation_it_was_priced_for() {
+        let mut gate = BudgetGate::new(usd("10"));
+        let reservation = reserve_standard(&mut gate);
+        assert_eq!(
+            reservation.authorises(&quote(), &request(Some(1_024)), &standard_caps()),
+            Ok(())
+        );
+        assert_eq!(reservation.binding().model(), "claude-opus-5");
+        assert_eq!(reservation.binding().context_ceiling(), 200_000);
+        assert_eq!(
+            reservation.binding().output_ceiling(),
+            1_024,
+            "the request caps output below the model's 64k ceiling"
+        );
+    }
+
+    #[test]
+    fn a_reservation_priced_for_one_model_is_refused_for_another() {
+        let mut gate = BudgetGate::new(usd("10"));
+        let reservation = reserve_standard(&mut gate);
+        let denied = reservation
+            .authorises(
+                &quote(),
+                &request_for("some-other-model", Some(1_024)),
+                &standard_caps(),
+            )
+            .expect_err("this authorised a generation against claude-opus-5");
+        let BudgetDenied::WrongBinding(mismatch) = &denied else {
+            panic!("expected WrongBinding, got {denied:?}");
+        };
+        assert_eq!(mismatch.authorised.model(), "claude-opus-5");
+        assert_eq!(mismatch.presented.model(), "some-other-model");
+        // ARCH §3.2: a denial names what was denied.
+        let said = denied.to_string();
+        assert!(
+            said.contains("claude-opus-5") && said.contains("some-other-model"),
+            "the denial must name the substitution: {said}"
+        );
+    }
+
+    /// Moving a ceiling moves the bound, so the authorisation no longer
+    /// covers what is being asked for.
+    #[test]
+    fn a_reservation_is_refused_when_a_ceiling_moved() {
+        let mut gate = BudgetGate::new(usd("10"));
+        let reservation = reserve_standard(&mut gate);
+
+        let wider_window = reservation
+            .authorises(
+                &quote(),
+                &request(Some(1_024)),
+                &caps(Some(400_000), Some(64_000)),
+            )
+            .expect_err("a 400k window is not the 200k that was priced");
+        assert!(matches!(wider_window, BudgetDenied::WrongBinding(_)));
+
+        let more_output = reservation
+            .authorises(&quote(), &request(Some(8_192)), &standard_caps())
+            .expect_err("8192 output tokens is not the 1024 that was priced");
+        assert!(matches!(more_output, BudgetDenied::WrongBinding(_)));
+    }
+
+    /// `PricingRevision` is an opaque public string, so a fabricated cheap
+    /// table can wear a genuine label and the binding alone cannot tell.
+    /// Recomputing the bound from the presented quote can — this is the
+    /// check that stops a caller from having its generation authorised at
+    /// real prices and then billed against pretend ones.
+    #[test]
+    fn a_cheaper_quote_wearing_the_authorised_revision_is_still_refused() {
+        let mut gate = BudgetGate::new(usd("10"));
+        let reservation = reserve_standard(&mut gate);
+
+        let mut pretend = quote();
+        pretend.cache_write = Some(amount("0.0000001"));
+        assert_eq!(
+            pretend.revision,
+            revision(),
+            "the fixture's whole point is a genuine label on a false table"
+        );
+
+        let denied = reservation
+            .authorises(&pretend, &request(Some(1_024)), &standard_caps())
+            .expect_err("the same revision does not make it the same table");
+        assert_eq!(
+            denied,
+            BudgetDenied::QuoteChanged {
+                authorised: standard_bound(),
+                // 200_000 x 0.000003 (uncached input is now the dearest)
+                //   + 1_024 x 0.000015
+                presented: usd("0.61536"),
+            }
+        );
+    }
+
+    /// A deliberate *non*-property, recorded so it is not mistaken for an
+    /// oversight. The bound already assumes a full context window at the
+    /// dearest input rate, so no rewording of a prompt can cost more than
+    /// what was authorised — and refusing one would be this type claiming an
+    /// authority over content that it does not have and cannot enforce.
+    #[test]
+    fn rewording_the_prompt_does_not_change_what_was_authorised() {
+        let mut gate = BudgetGate::new(usd("10"));
+        let reservation = reserve_standard(&mut gate);
+
+        let mut reworded = request(Some(1_024));
+        reworded.messages = vec![Message {
+            role: Role::User,
+            content: "something else entirely, and much longer".repeat(100),
+            tool_call_id: None,
+        }];
+        assert_eq!(
+            reservation.authorises(&quote(), &reworded, &standard_caps()),
+            Ok(()),
+            "a reservation is budget authority, not content authority"
+        );
+    }
+
+    #[test]
+    fn a_binding_cannot_be_built_for_a_request_with_no_stated_ceilings() {
+        assert_eq!(
+            BudgetBinding::of(&request(None), &caps(Some(200_000), None), &revision()),
+            Err(UnknownCost::NoPricingQuote)
+        );
+        assert_eq!(
+            BudgetBinding::of(
+                &request(Some(1_024)),
+                &caps(None, Some(64_000)),
+                &revision()
+            ),
+            Err(UnknownCost::NoPricingQuote)
+        );
+    }
+
+    // --- a bound that was not a bound ---------------------------------------
+
+    /// 200k cache-write tokens ($0.75) plus 2048 output tokens ($0.03072) —
+    /// twice the output the request asked for, which is the provider
+    /// breaking its side of the contract. $0.78072 against a $0.76536 bound.
+    fn over_bound_usage() -> Usage {
+        tokens(0, 0, 200_000, 2_048)
+    }
+
+    /// The money is already spent, so the honest charge is the real one.
+    /// `exact` stays true: the figure is perfectly well known — what is
+    /// broken is the bound, and saying "inexact" would report the opposite
+    /// of what happened.
+    #[test]
+    fn a_cost_above_the_bound_is_charged_in_full_and_reported() {
+        let mut gate = BudgetGate::new(usd("10"));
+        let reservation = reserve_standard(&mut gate);
+        let settled = gate
+            .reconcile(reservation, &quote().price(&over_bound_usage()))
+            .expect("its own gate");
+
+        assert_eq!(settled.charged, usd("0.78072"));
+        assert!(
+            settled.exact,
+            "the actual cost is known, it is just too big"
+        );
+        let breach = settled
+            .over_bound
+            .expect("a charge above the bound must be reported, not absorbed");
+        assert_eq!(breach.charged, usd("0.78072"));
+        assert_eq!(breach.bound, standard_bound());
+        assert_eq!(breach.excess(), usd("0.01536"));
+        assert_eq!(*gate.committed(), usd("0.78072"));
+    }
+
+    /// Reporting alone would be "silently charged" one level up: the caller
+    /// may ignore a field, and the gate would keep admitting generations on
+    /// a premise it has just watched fail. `upper_bound` claims to be an
+    /// absolute ceiling; once one is exceeded, none of them are trustworthy.
+    #[test]
+    fn a_breached_bound_closes_the_gate_for_good() {
+        let mut gate = BudgetGate::new(usd("10"));
+        let reservation = reserve_standard(&mut gate);
+        gate.reconcile(reservation, &quote().price(&over_bound_usage()))
+            .expect("its own gate");
+
+        let breach = *gate.breached().expect("the gate records why it closed");
+        assert_eq!(breach.excess(), usd("0.01536"));
+
+        let denied = gate
+            .reserve(&quote(), &request(Some(1_024)), &standard_caps())
+            .expect_err("a gate whose bounds are not bounds admits nothing");
+        assert_eq!(denied, BudgetDenied::BoundBreached(breach));
+        assert!(
+            denied.to_string().contains("0.01536"),
+            "the denial names the breach that caused it: {denied}"
+        );
+        // Plenty of budget left — the refusal is about trust, not headroom.
+        assert!(gate.committed().amount < gate.limit().amount);
+    }
+
+    /// A charge exactly equal to the bound is not a breach. The bound is a
+    /// ceiling, and an off-by-one here would close a gate every time a
+    /// generation ran to precisely its authorised worst case.
+    #[test]
+    fn a_cost_exactly_at_the_bound_is_not_a_breach() {
+        let mut gate = BudgetGate::new(usd("10"));
+        let reservation = reserve_standard(&mut gate);
+        let settled = gate
+            .reconcile(
+                reservation,
+                &CostDelta::Known {
+                    amount: standard_bound(),
+                    pricing_revision: revision(),
+                    fx: None,
+                },
+            )
+            .expect("its own gate");
+        assert!(settled.over_bound.is_none());
+        assert!(gate.breached().is_none());
+        assert!(
+            gate.reserve(&quote(), &request(Some(1_024)), &standard_caps())
+                .is_ok()
+        );
+    }
+
+    /// The inexact path charges the reserved bound itself, which by
+    /// definition cannot exceed it. Without this, every provider that failed
+    /// to report usage would look like a breached bound and close the gate.
+    #[test]
+    fn falling_back_to_the_bound_is_not_a_breach() {
+        let mut gate = BudgetGate::new(usd("10"));
+        let reservation = reserve_standard(&mut gate);
+        let settled = gate
+            .reconcile(
+                reservation,
+                &CostDelta::Unknown(UnknownCost::ProviderReportedNoUsage),
+            )
+            .expect("its own gate");
+        assert!(!settled.exact);
+        assert!(settled.over_bound.is_none());
+        assert!(gate.breached().is_none());
     }
 }

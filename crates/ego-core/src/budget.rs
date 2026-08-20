@@ -36,12 +36,29 @@
 //! same quote prices the reservation and the actual usage, so a pricing
 //! table that changes mid-session cannot make a generation cost one thing
 //! going in and another coming out.
+//!
+//! ## A reservation names the gate that minted it and what it authorised
+//!
+//! Unforgeability is not the same as authorisation. [`BudgetGate::new`] is
+//! public, so anyone can stand up a gate with a limit of their choosing and
+//! obtain a perfectly genuine [`Reservation`] from it. What that reservation
+//! must not be able to do is spend *someone else's* budget, and until it
+//! carried a [`GateId`] it could: settling it against another gate released
+//! a hold that gate never took, and [`subtract_or_zero`] floors at zero, so
+//! the release did not even underflow visibly — it just handed the second
+//! gate headroom out of thin air.
+//!
+//! It also carries a [`BudgetBinding`]: the model, the two token ceilings
+//! the bound was computed from, and the pricing revision. Deliberately not
+//! the prompt — see the type's own doc for why binding request bytes would
+//! refuse substitutions that cannot overspend.
 
 use std::fmt;
 
 use crate::cost::{
     Amount, CostDelta, CurrencyCode, Money, MoneyError, PricingRevision, TokenCategory, UnknownCost,
 };
+use crate::event::id::GateId;
 use crate::generator::capabilities::ModelCapabilities;
 use crate::generator::types::GenRequest;
 use crate::state::Usage;
@@ -172,15 +189,7 @@ impl PricingQuote {
         req: &GenRequest,
         caps: &ModelCapabilities,
     ) -> Result<Money, UnknownCost> {
-        let context = caps.max_context_tokens.ok_or(UnknownCost::NoPricingQuote)?;
-        // The request may cap output below the model's ceiling; the bound is
-        // whichever is lower, and unknown if neither is stated.
-        let output = match (req.max_output_tokens, caps.max_output_tokens) {
-            (Some(requested), Some(max)) => requested.min(max),
-            (Some(requested), None) => requested,
-            (None, Some(max)) => max,
-            (None, None) => return Err(UnknownCost::NoPricingQuote),
-        };
+        let (context, output) = ceilings(req, caps)?;
         let context = Amount::new(u128::from(context), 0).map_err(|_| UnknownCost::Overflow)?;
         let input = self
             .dearest_input_rate()?
@@ -189,6 +198,167 @@ impl PricingQuote {
         let output = self.line(TokenCategory::Output, output)?;
         let total = input.checked_add(&output).ok_or(UnknownCost::Overflow)?;
         Ok(Money::new(total, self.currency))
+    }
+}
+
+/// The two token ceilings a bound is computed from: the model's context
+/// window, and the most output this particular request may produce.
+///
+/// Shared by [`PricingQuote::upper_bound`] and [`BudgetBinding::of`] rather
+/// than written twice. If the two ever disagreed about how a ceiling is
+/// resolved, a reservation would bind a shape its own bound was not computed
+/// from — which is exactly the confusion the binding exists to prevent.
+///
+/// The request may cap output below the model's ceiling; the bound uses
+/// whichever is lower, and is unknown if neither is stated.
+fn ceilings(req: &GenRequest, caps: &ModelCapabilities) -> Result<(u64, u64), UnknownCost> {
+    let context = caps.max_context_tokens.ok_or(UnknownCost::NoPricingQuote)?;
+    let output = match (req.max_output_tokens, caps.max_output_tokens) {
+        (Some(requested), Some(max)) => requested.min(max),
+        (Some(requested), None) => requested,
+        (None, Some(max)) => max,
+        (None, None) => return Err(UnknownCost::NoPricingQuote),
+    };
+    Ok((context, output))
+}
+
+/// What a reservation authorised, in the only terms a budget understands.
+///
+/// Held by value rather than digested. A digest could report only
+/// "mismatch"; this names the fact that moved, which `ARCHITECTURE.md` §3.2
+/// requires of a denial — and, unlike a hash, it cannot collide, so it needs
+/// no canonical-encoding argument and no golden to pin one.
+///
+/// Deliberately **not** the request. Prompt bytes, tools and thinking level
+/// are absent because [`PricingQuote::upper_bound`] already assumes a full
+/// context window at the dearest input rate: no rewording of a prompt can
+/// cost more than what was already authorised. Binding them would refuse
+/// substitutions that cannot overspend, and a reservation is budget
+/// authority, not content authority — whatever polices *what* is sent is a
+/// different mechanism, and pretending this one does it would be worse than
+/// not doing it at all.
+///
+/// `model` is bound even though the bound's arithmetic never reads it:
+/// authorising a generation against one model and running another with
+/// coincidentally identical ceilings is a substitution the operator would
+/// call a bug, and the binding is the only place that can notice.
+///
+/// What this cannot prove on its own is that the quote presented later is
+/// the one that priced it: [`PricingRevision`] is an opaque public string,
+/// so a fabricated cheap quote can wear a genuine revision label.
+/// [`Reservation::authorises`] closes that separately, by recomputing the
+/// bound from the presented quote.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BudgetBinding {
+    model: String,
+    context_ceiling: u64,
+    output_ceiling: u64,
+    revision: PricingRevision,
+}
+
+impl BudgetBinding {
+    /// The budget-relevant shape of `req` against `caps` under `revision`,
+    /// or the reason it has none — the same reason
+    /// [`PricingQuote::upper_bound`] would refuse, because it is the same
+    /// resolution.
+    pub fn of(
+        req: &GenRequest,
+        caps: &ModelCapabilities,
+        revision: &PricingRevision,
+    ) -> Result<Self, UnknownCost> {
+        let (context_ceiling, output_ceiling) = ceilings(req, caps)?;
+        Ok(Self {
+            model: req.model.clone(),
+            context_ceiling,
+            output_ceiling,
+            revision: revision.clone(),
+        })
+    }
+
+    /// The model this authorises a generation against.
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+
+    /// The context window the bound assumed was filled.
+    pub fn context_ceiling(&self) -> u64 {
+        self.context_ceiling
+    }
+
+    /// The most output tokens the bound allowed for.
+    pub fn output_ceiling(&self) -> u64 {
+        self.output_ceiling
+    }
+
+    /// The pricing table this was authorised under.
+    pub fn revision(&self) -> &PricingRevision {
+        &self.revision
+    }
+}
+
+/// A reservation presented for a generation it did not authorise, with both
+/// shapes kept so the denial can name which fact moved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BindingMismatch {
+    pub authorised: BudgetBinding,
+    pub presented: BudgetBinding,
+}
+
+impl BindingMismatch {
+    /// Every fact that differs, as `(what, authorised, presented)`. Empty is
+    /// unreachable from a real denial: the mismatch is constructed only when
+    /// the two bindings compare unequal.
+    fn differences(&self) -> Vec<(&'static str, String, String)> {
+        let (a, p) = (&self.authorised, &self.presented);
+        let mut out = Vec::new();
+        if a.model != p.model {
+            out.push(("model", a.model.clone(), p.model.clone()));
+        }
+        if a.context_ceiling != p.context_ceiling {
+            out.push((
+                "context ceiling",
+                a.context_ceiling.to_string(),
+                p.context_ceiling.to_string(),
+            ));
+        }
+        if a.output_ceiling != p.output_ceiling {
+            out.push((
+                "output ceiling",
+                a.output_ceiling.to_string(),
+                p.output_ceiling.to_string(),
+            ));
+        }
+        if a.revision != p.revision {
+            out.push((
+                "pricing revision",
+                a.revision.0.clone(),
+                p.revision.0.clone(),
+            ));
+        }
+        out
+    }
+}
+
+/// A settled generation that cost more than the bound which admitted it.
+///
+/// [`PricingQuote::upper_bound`] claims to be an *absolute* ceiling, so this
+/// is not an overspend to note and move past: it is proof that the quote,
+/// the capability record or the provider's reported usage is wrong, and
+/// therefore that every bound this gate has computed is unreliable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BoundBreach {
+    /// What the generation actually cost.
+    pub charged: Money,
+    /// The bound that was supposed to cover it.
+    pub bound: Money,
+}
+
+impl BoundBreach {
+    /// How far past the bound the real cost went. Derived rather than
+    /// stored: a third field would be a fact that could disagree with the
+    /// two it is computed from.
+    pub fn excess(&self) -> Money {
+        subtract_or_zero(&self.charged, &self.bound)
     }
 }
 
@@ -226,6 +396,25 @@ pub enum BudgetDenied {
         limit: CurrencyCode,
         quote: CurrencyCode,
     },
+    /// The reservation was minted by a different gate. Settling it here
+    /// would release a hold this gate never took, handing it headroom it
+    /// never reserved.
+    WrongGate {
+        minted_by: GateId,
+        presented_to: GateId,
+    },
+    /// The reservation authorised a different generation than the one
+    /// presented.
+    WrongBinding(Box<BindingMismatch>),
+    /// The presented quote does not bound this generation at the figure that
+    /// was authorised. Caught separately from the binding because
+    /// [`PricingRevision`] is an opaque public string: a quote with cheaper
+    /// rates can carry a genuine revision label, and only recomputing the
+    /// bound notices.
+    QuoteChanged { authorised: Money, presented: Money },
+    /// A generation this gate settled cost more than the bound that admitted
+    /// it, so the gate's bounds are not bounds. It admits nothing further.
+    BoundBreached(BoundBreach),
 }
 
 impl fmt::Display for BudgetDenied {
@@ -247,6 +436,38 @@ impl fmt::Display for BudgetDenied {
                 f,
                 "budget denied: the budget is in {limit} but the quote prices in {quote}"
             ),
+            BudgetDenied::WrongGate {
+                minted_by,
+                presented_to,
+            } => write!(
+                f,
+                "budget denied: this reservation was minted by gate {minted_by:?} \
+                 and presented to gate {presented_to:?}"
+            ),
+            BudgetDenied::WrongBinding(mismatch) => {
+                write!(f, "budget denied: this reservation authorised")?;
+                for (what, authorised, presented) in mismatch.differences() {
+                    write!(f, " {what} {authorised}, not {presented};")?;
+                }
+                Ok(())
+            }
+            BudgetDenied::QuoteChanged {
+                authorised,
+                presented,
+            } => write!(
+                f,
+                "budget denied: the presented quote bounds this generation at {} {}, \
+                 not the {} that was authorised",
+                presented.amount, presented.currency, authorised.amount
+            ),
+            BudgetDenied::BoundBreached(breach) => write!(
+                f,
+                "budget denied: a settled generation cost {} against a {} bound \
+                 (over by {}), so this gate's bounds are not bounds",
+                breach.charged.amount,
+                breach.bound.amount,
+                breach.excess().amount
+            ),
         }
     }
 }
@@ -262,8 +483,9 @@ impl std::error::Error for BudgetDenied {}
 /// be run repeatedly on one reservation.
 #[derive(Debug)]
 pub struct Reservation {
+    gate: GateId,
     upper_bound: Money,
-    revision: PricingRevision,
+    binding: BudgetBinding,
     _sealed: Sealed,
 }
 
@@ -273,13 +495,89 @@ impl Reservation {
         &self.upper_bound
     }
 
+    /// Which gate is holding this bound, and therefore the only gate that
+    /// may release it.
+    pub fn gate(&self) -> GateId {
+        self.gate
+    }
+
+    /// What this authorised.
+    pub fn binding(&self) -> &BudgetBinding {
+        &self.binding
+    }
+
     /// The pricing revision this was authorised under. The same revision
     /// must price the actual usage, so a mid-session pricing change cannot
     /// make one generation cost two different things.
     pub fn revision(&self) -> &PricingRevision {
-        &self.revision
+        self.binding.revision()
+    }
+
+    /// Refuse unless this reservation is the one that authorised exactly
+    /// this generation.
+    ///
+    /// Two checks, because neither implies the other. The [`BudgetBinding`]
+    /// catches a substituted model or moved ceilings and names which; the
+    /// recomputed bound catches a substituted *quote*, which the binding
+    /// cannot see because [`PricingRevision`] is an opaque public string and
+    /// a fabricated cheap table can wear a genuine label.
+    ///
+    /// Not called by [`BudgetGate::reconcile`], which has no request to
+    /// check against: this is the check at the moment of *use*, and it takes
+    /// the same `(quote, req, caps)` as [`BudgetGate::reserve`] so a caller
+    /// that has one has the other.
+    pub fn authorises(
+        &self,
+        quote: &PricingQuote,
+        req: &GenRequest,
+        caps: &ModelCapabilities,
+    ) -> Result<(), BudgetDenied> {
+        let presented =
+            BudgetBinding::of(req, caps, &quote.revision).map_err(BudgetDenied::CostUnknown)?;
+        if presented != self.binding {
+            return Err(BudgetDenied::WrongBinding(Box::new(BindingMismatch {
+                authorised: self.binding.clone(),
+                presented,
+            })));
+        }
+        let recomputed = quote
+            .upper_bound(req, caps)
+            .map_err(BudgetDenied::CostUnknown)?;
+        if recomputed != self.upper_bound {
+            return Err(BudgetDenied::QuoteChanged {
+                authorised: self.upper_bound,
+                presented: recomputed,
+            });
+        }
+        Ok(())
     }
 }
+
+/// A reconciliation the gate refused, with the authorisation handed back.
+///
+/// The reservation is returned rather than dropped because the refusing gate
+/// never released it: consuming it here would strand the hold on whichever
+/// gate did mint it, for the rest of that gate's life, which is the same
+/// budget leak the refusal exists to prevent.
+///
+/// Handing it back grants nothing. The caller held exactly one linear token
+/// before the call and holds the same one after — [`Reservation`] is not
+/// `Clone`, so no second copy can appear — and presenting it to every gate
+/// in reach still only settles at the one whose [`GateId`] it names.
+#[derive(Debug)]
+pub struct ReconcileDenied {
+    /// The unspent authorisation, returned intact.
+    pub reservation: Reservation,
+    pub reason: BudgetDenied,
+}
+
+impl fmt::Display for ReconcileDenied {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.reason.fmt(f)
+    }
+}
+
+impl std::error::Error for ReconcileDenied {}
 
 /// A session's spend ceiling, and the authority that admits generations
 /// against it.
@@ -291,9 +589,13 @@ impl Reservation {
 /// each fit the remaining budget alone.
 #[derive(Debug)]
 pub struct BudgetGate {
+    id: GateId,
     limit: Money,
     committed: Money,
     outstanding: Money,
+    /// Set once a settled generation has cost more than its bound. From that
+    /// moment the gate admits nothing: see [`BudgetGate::reserve`].
+    breached: Option<BoundBreach>,
 }
 
 impl BudgetGate {
@@ -301,10 +603,22 @@ impl BudgetGate {
     pub fn new(limit: Money) -> Self {
         let currency = limit.currency;
         Self {
+            id: GateId::new(),
             limit,
             committed: Money::zero(currency),
             outstanding: Money::zero(currency),
+            breached: None,
         }
+    }
+
+    /// This gate's identity, stamped on every reservation it mints.
+    pub fn id(&self) -> GateId {
+        self.id
+    }
+
+    /// The breach that closed this gate, if one has happened.
+    pub fn breached(&self) -> Option<&BoundBreach> {
+        self.breached.as_ref()
     }
 
     /// Spent and reconciled.
@@ -328,12 +642,23 @@ impl BudgetGate {
     /// overflow, a currency the budget is not in. In every one of those
     /// cases the honest answer is "we do not know what this will cost", and
     /// `ARCHITECTURE.md` §3.1 says an unknown cost does not proceed.
+    ///
+    /// A gate that has already seen a generation cost more than its bound
+    /// refuses everything, permanently. That looks severe for one mispriced
+    /// generation, and it is the same rule: a breach proves the bound is not
+    /// a bound, so every admission after it would be computed from a premise
+    /// this gate has watched fail. Continuing to admit would be exactly the
+    /// "we do not know what this will cost, but proceed anyway" the gate
+    /// exists to refuse — only worse, because the evidence is in hand.
     pub fn reserve(
         &mut self,
         quote: &PricingQuote,
         req: &GenRequest,
         caps: &ModelCapabilities,
     ) -> Result<Reservation, BudgetDenied> {
+        if let Some(breach) = self.breached {
+            return Err(BudgetDenied::BoundBreached(breach));
+        }
         if quote.currency != self.limit.currency {
             return Err(BudgetDenied::CurrencyMismatch {
                 limit: self.limit.currency,
@@ -358,13 +683,16 @@ impl BudgetGate {
             })));
         }
 
+        let binding =
+            BudgetBinding::of(req, caps, &quote.revision).map_err(BudgetDenied::CostUnknown)?;
         self.outstanding = self
             .outstanding
             .checked_add(&upper_bound)
             .map_err(|_: MoneyError| BudgetDenied::CostUnknown(UnknownCost::Overflow))?;
         Ok(Reservation {
+            gate: self.id,
             upper_bound,
-            revision: quote.revision.clone(),
+            binding,
             _sealed: Sealed(()),
         })
     }
@@ -383,7 +711,32 @@ impl BudgetGate {
     /// committed total as no longer trustworthy by charging the full
     /// reserved bound. Charging the pessimistic bound is the conservative
     /// reading: it can only make the gate stricter, never laxer.
-    pub fn reconcile(&mut self, reservation: Reservation, actual: &CostDelta) -> Reconciled {
+    ///
+    /// Refuses, without touching a single figure, a reservation another gate
+    /// minted — and hands it back, because this gate is not the one holding
+    /// it (see [`ReconcileDenied`]). The identity check comes first for that
+    /// reason: releasing and then discovering the mismatch would already
+    /// have widened this gate's budget.
+    ///
+    /// An actual *above* the reserved bound is charged in full and reported
+    /// in [`Reconciled::over_bound`] — the money is spent, and the bound was
+    /// the larger of the two only in the cases where it is charged instead.
+    /// It also closes the gate permanently; see [`BudgetGate::reserve`].
+    pub fn reconcile(
+        &mut self,
+        reservation: Reservation,
+        actual: &CostDelta,
+    ) -> Result<Reconciled, Box<ReconcileDenied>> {
+        if reservation.gate != self.id {
+            return Err(Box::new(ReconcileDenied {
+                reason: BudgetDenied::WrongGate {
+                    minted_by: reservation.gate,
+                    presented_to: self.id,
+                },
+                reservation,
+            }));
+        }
+
         let released = reservation.upper_bound;
         self.outstanding = subtract_or_zero(&self.outstanding, &released);
 
@@ -392,7 +745,7 @@ impl BudgetGate {
                 amount,
                 pricing_revision,
                 ..
-            } if *pricing_revision == reservation.revision
+            } if pricing_revision == reservation.revision()
                 && amount.currency == self.limit.currency =>
             {
                 (*amount, true)
@@ -403,8 +756,24 @@ impl BudgetGate {
         // On overflow, pin the committed total at the limit. Every later
         // `reserve` then fails, which is the only safe reading of "we can no
         // longer represent what this session has spent".
+        // `exact` stays true here: the charge *is* the real cost. What the
+        // excess reports is a broken bound, not an unknown figure, and
+        // conflating the two would tell the operator the opposite of what
+        // happened.
+        let over_bound = (charged.amount > released.amount).then_some(BoundBreach {
+            charged,
+            bound: released,
+        });
+        if let Some(breach) = over_bound {
+            self.breached.get_or_insert(breach);
+        }
+
         self.committed = self.committed.checked_add(&charged).unwrap_or(self.limit);
-        Reconciled { charged, exact }
+        Ok(Reconciled {
+            charged,
+            exact,
+            over_bound,
+        })
     }
 }
 
@@ -418,15 +787,25 @@ pub struct Reconciled {
     /// was unknown, in the wrong currency, or priced under a different
     /// revision — the committed total is then an overestimate, which is the
     /// safe direction but is no longer the truth.
+    ///
+    /// Independent of [`over_bound`](Self::over_bound): a breach is charged
+    /// from a figure that is perfectly well known, so `exact` stays `true`
+    /// there.
     pub exact: bool,
+    /// Set when the real cost exceeded the bound that admitted it — proof
+    /// that the bound was not one. The gate is closed from here on; this
+    /// field exists so the caller can say why rather than discovering it at
+    /// the next refused `reserve`.
+    pub over_bound: Option<BoundBreach>,
 }
 
 /// `a - b`, floored at zero.
 ///
-/// Saturating rather than erroring because the only caller is releasing a
-/// hold it previously added, so within one gate an underflow is unreachable:
-/// `reserve` adds exactly the bound `reconcile` later releases, and it
-/// refuses any quote whose currency differs from the limit's.
+/// Saturating rather than erroring because both callers subtract a quantity
+/// the same gate already knows about: `reserve` adds exactly the bound
+/// `reconcile` later releases, and it refuses any quote whose currency
+/// differs from the limit's. The excess computed for a [`BoundBreach`] is
+/// guarded by the comparison that decides there is one.
 ///
 /// Be clear about what the floor does when it *is* reached, because the
 /// obvious reading is backwards: zeroing `outstanding` frees headroom, so it
@@ -435,11 +814,11 @@ pub struct Reconciled {
 /// anyway because the divergence it papers over should not be representable
 /// in the first place.
 ///
-/// It currently is: a `Reservation` carries no gate identity, so one minted
-/// by gate A can be reconciled against gate B, which underflows B and
-/// silently widens its budget. That is a hole in the reservation contract,
-/// not in this arithmetic, and closing it belongs with the generation-attempt
-/// lifecycle — see `POTENTIALS.md` P9.
+/// It no longer is. A reservation carries the [`GateId`] that minted it and
+/// `reconcile` refuses one it did not mint *before* releasing anything, so
+/// the cross-gate release that used to reach this floor — underflowing the
+/// second gate and silently widening its budget — cannot be expressed. That
+/// was `POTENTIALS.md` P9.
 fn subtract_or_zero(a: &Money, b: &Money) -> Money {
     if a.currency != b.currency || a.amount < b.amount {
         return Money::zero(a.currency);
