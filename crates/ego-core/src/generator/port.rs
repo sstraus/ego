@@ -7,6 +7,7 @@ use futures::stream::BoxStream;
 use serde::{Deserialize, Serialize};
 
 use super::types::{GenRequest, StopReason};
+use crate::budget::Reservation;
 use crate::state::Usage;
 
 /// One increment of a generation's output stream.
@@ -49,5 +50,19 @@ pub enum AiEvent {
 /// `Http`, credentials and the provider table. The dependency arrow is
 /// `ego-ai -> ego-core`, never the reverse.
 pub trait Generator: Send + Sync {
-    fn generate(&self, req: GenRequest) -> BoxStream<'static, AiEvent>;
+    /// Generate the next assistant turn.
+    ///
+    /// The `&Reservation` is the budget gate, enforced in the signature
+    /// rather than by convention: its constructor is sealed inside
+    /// [`crate::budget`], so the only way to obtain one is
+    /// `BudgetGate::reserve`, which refuses when the cost cannot be bounded.
+    /// `ARCHITECTURE.md` §3.1 requires an unknown cost to fail *closed*, and
+    /// a check on the response cannot do that — the money is already spent
+    /// by then. Taking the proof as an argument means a generation that
+    /// skipped the gate does not compile.
+    ///
+    /// Borrowed rather than consumed: the reservation outlives the call and
+    /// is settled afterwards by `BudgetGate::reconcile`, which needs the
+    /// same pricing revision that authorised it.
+    fn generate(&self, req: GenRequest, reservation: &Reservation) -> BoxStream<'static, AiEvent>;
 }

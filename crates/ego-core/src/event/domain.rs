@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 
 use super::id::{EventId, ItemId, Producer, Seq, SessionId, TurnId};
 use super::time::Timestamp;
+use crate::cost::CostDelta;
+use crate::state::Usage;
 
 /// The full envelope every `DomainEvent` carries, per ARCH §1: a monotonic
 /// sequence number, stable session/turn/item identity, a causal parent, an
@@ -45,13 +47,41 @@ pub enum ExitReason {
     Budget,
 }
 
+/// Where a context-occupancy figure came from, and therefore how much it can
+/// be trusted.
+///
+/// Occupancy is not derivable from cumulative token totals — prior history is
+/// counted again as input on every call, so the totals diverge from
+/// occupancy from the second generation onward. It has to be *reported*, and
+/// the reports differ in quality, so the source travels with the number
+/// instead of being lost.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OccupancyProvenance {
+    /// Summed from what the provider reported for the generation that just
+    /// finished. The industry-standard proxy (it is what the reference
+    /// `claude-agent-acp` adapter uses, and its own source calls it a proxy):
+    /// accurate at the instant it is observed, and stale the moment anything
+    /// changes the history.
+    GenerationBoundary,
+    /// The provider was asked outright what the context currently holds.
+    /// The only figure that is correct straight after a compaction, because
+    /// per-message usage cannot describe a history that was rewritten
+    /// between generations.
+    AuthoritativeQuery,
+    /// Counted locally from the prompt the harness assembled. Available when
+    /// no provider figure is — after a context edit, say — and no better
+    /// than the local tokenizer's agreement with the provider's.
+    LocalEstimate,
+}
+
 /// The exhaustive set of internal reducer inputs, per ARCH §1:
 ///
 /// ```text
 /// UserPrompt | AssistantDelta | AssistantMessage | ReasoningDelta |
 /// ToolCallStarted | ToolCallDelta | ToolCallCompleted | PermissionRequested |
-/// PermissionDecided | UsageUpdated | TurnCompleted | Compacted | Forked |
-/// HookFired | SubagentSpawned | SubagentReturned | Error
+/// PermissionDecided | UsageUpdated | ContextWindowUpdated | TurnCompleted |
+/// Compacted | Forked | HookFired | SubagentSpawned | SubagentReturned | Error
 /// ```
 ///
 /// This is the internal representation: it evolves freely with core and is
@@ -78,10 +108,27 @@ pub enum EventKind {
     PermissionRequested { description: String },
     /// A permission decision was made.
     PermissionDecided { allowed: bool },
-    /// Incremental usage was reported (added to the running totals).
-    UsageUpdated {
-        input_tokens: u64,
-        output_tokens: u64,
+    /// One generation's usage was reported (added to the running totals),
+    /// together with what it cost.
+    ///
+    /// Token counts and cost travel together because they are the same
+    /// observation: the cost *is* the token counts priced by the quote that
+    /// was resolved before the request. Splitting them into two events would
+    /// let a log contain tokens with no price or a price with no tokens, and
+    /// nothing could tell which generation a stray price belonged to.
+    UsageUpdated { usage: Usage, cost_delta: CostDelta },
+    /// How much of the context window is currently occupied.
+    ///
+    /// A separate event from `UsageUpdated`, and reduced with *replace*
+    /// rather than *add* semantics, because occupancy is a level and usage
+    /// is a flow. They are not two views of one number: cumulative tokens
+    /// only ever grow, while occupancy drops the moment a compaction throws
+    /// history away. Deriving one from the other is impossible once history
+    /// has been recounted as input, which happens on the second generation
+    /// of every session.
+    ContextWindowUpdated {
+        used_tokens: u64,
+        provenance: OccupancyProvenance,
     },
     /// A turn finished.
     TurnCompleted { ok: bool, exit_reason: ExitReason },
@@ -115,6 +162,7 @@ impl EventKind {
             EventKind::PermissionRequested { .. } => "permission_requested",
             EventKind::PermissionDecided { .. } => "permission_decided",
             EventKind::UsageUpdated { .. } => "usage_updated",
+            EventKind::ContextWindowUpdated { .. } => "context_window_updated",
             EventKind::TurnCompleted { .. } => "turn_completed",
             EventKind::Compacted { .. } => "compacted",
             EventKind::Forked { .. } => "forked",

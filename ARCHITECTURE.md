@@ -21,8 +21,8 @@ State is a **reduction over an append-only event log** (pi's reducer,
 ```
 UserPrompt | AssistantDelta | AssistantMessage | ReasoningDelta |
 ToolCallStarted | ToolCallDelta | ToolCallCompleted | PermissionRequested |
-PermissionDecided | UsageUpdated | TurnCompleted | Compacted | Forked |
-HookFired | SubagentSpawned | SubagentReturned | Error
+PermissionDecided | UsageUpdated | ContextWindowUpdated | TurnCompleted |
+Compacted | Forked | HookFired | SubagentSpawned | SubagentReturned | Error
 ```
 
 - `SessionState::apply(&mut self, &Event)` is a **pure, sync** function.

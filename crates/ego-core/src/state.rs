@@ -8,18 +8,51 @@ use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
-use crate::event::domain::{DomainEvent, EventKind, ExitReason};
+use crate::cost::CumulativeCost;
+use crate::event::domain::{DomainEvent, EventKind, ExitReason, OccupancyProvenance};
 use crate::event::id::{EventId, ItemId, Seq, SessionId, TurnId};
 
-/// Running usage totals, accumulated from `UsageUpdated` events.
+/// Token counts, split by the categories providers price separately.
+///
+/// Four categories rather than the input/output pair this type used to
+/// carry. Cache reads and cache writes are billed at materially different
+/// rates from uncached input — typically a fraction and a premium
+/// respectively — so an `input_tokens` field that silently mixed all three
+/// made the cost of a cached conversation unknowable, and made even the
+/// standard context-occupancy proxy impossible to compute. See the mdkb
+/// decision `ego-acp-usage-verdict`.
+///
+/// Used both as one generation's increment (`AiEvent::Usage`,
+/// `EventKind::UsageUpdated`) and as the session's running totals
+/// (`SessionState::usage`): the same shape, folded by `add`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Usage {
-    pub input_tokens: u64,
+    /// Input tokens billed at the full rate — not served from cache.
+    pub uncached_input_tokens: u64,
+    /// Input tokens served from the provider's prompt cache.
+    pub cache_read_tokens: u64,
+    /// Input tokens written into the provider's prompt cache.
+    pub cache_write_tokens: u64,
+    /// Generated tokens, including reasoning tokens billed as output.
     pub output_tokens: u64,
 }
 
 impl Usage {
-    /// Add incremental usage to the running totals.
+    /// Every token in every category.
+    ///
+    /// Saturating for the same reason `add` is. At a generation boundary
+    /// this sum is also the industry-standard *proxy* for context
+    /// occupancy — but only there, and only until the history changes, so
+    /// occupancy has its own event and its own field rather than being read
+    /// off the running totals. See `EventKind::ContextWindowUpdated`.
+    pub fn total_tokens(&self) -> u64 {
+        self.uncached_input_tokens
+            .saturating_add(self.cache_read_tokens)
+            .saturating_add(self.cache_write_tokens)
+            .saturating_add(self.output_tokens)
+    }
+
+    /// Add one generation's usage to the running totals.
     ///
     /// Saturates rather than panicking or wrapping: `apply` must be total,
     /// and this totals field is later read by budget gates, so a silent
@@ -27,10 +60,33 @@ impl Usage {
     /// worse than reporting a pinned-at-max total from a degenerate or
     /// hostile log (this is data read back from disk, not just a
     /// theoretical edge).
-    fn add(&mut self, input_tokens: u64, output_tokens: u64) {
-        self.input_tokens = self.input_tokens.saturating_add(input_tokens);
-        self.output_tokens = self.output_tokens.saturating_add(output_tokens);
+    fn add(&mut self, delta: &Usage) {
+        self.uncached_input_tokens = self
+            .uncached_input_tokens
+            .saturating_add(delta.uncached_input_tokens);
+        self.cache_read_tokens = self
+            .cache_read_tokens
+            .saturating_add(delta.cache_read_tokens);
+        self.cache_write_tokens = self
+            .cache_write_tokens
+            .saturating_add(delta.cache_write_tokens);
+        self.output_tokens = self.output_tokens.saturating_add(delta.output_tokens);
     }
+}
+
+/// What the context window currently holds, as last reported.
+///
+/// `Option`, not a bare `u64` defaulting to zero: "nobody has told us yet"
+/// and "the context is empty" are different facts, and the ACP contract
+/// turns on exactly that difference — an agent must not send `UsageUpdate`
+/// when occupancy is unknown, and a zero would be indistinguishable from a
+/// fresh session.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextWindow {
+    pub used_tokens: Option<u64>,
+    /// Where `used_tokens` came from. Kept beside the number so a consumer
+    /// can tell a provider's authoritative answer from a local estimate.
+    pub provenance: Option<OccupancyProvenance>,
 }
 
 /// Per-turn state: whether, and how, it completed.
@@ -117,6 +173,10 @@ pub struct SessionState {
     pub unresolved_parents: Vec<EventId>,
     /// Running usage totals across the session.
     pub usage: Usage,
+    /// The running cost of the session, or why it is not known.
+    pub cost: CumulativeCost,
+    /// The last reported context-window occupancy.
+    pub context: ContextWindow,
     /// Permission requests and decisions, in application order.
     pub permissions: Vec<PermissionEvent>,
     /// Hooks that fired, in application order.
@@ -210,11 +270,20 @@ impl SessionState {
                     allowed: *allowed,
                 });
             }
-            EventKind::UsageUpdated {
-                input_tokens,
-                output_tokens,
+            EventKind::UsageUpdated { usage, cost_delta } => {
+                self.usage.add(usage);
+                self.cost.add_delta(cost_delta);
+            }
+            EventKind::ContextWindowUpdated {
+                used_tokens,
+                provenance,
             } => {
-                self.usage.add(*input_tokens, *output_tokens);
+                // Replace, never add: occupancy is a level, and a compaction
+                // makes it go down.
+                self.context = ContextWindow {
+                    used_tokens: Some(*used_tokens),
+                    provenance: Some(*provenance),
+                };
             }
             EventKind::TurnCompleted { ok, exit_reason } => {
                 let turn = self.turns.entry(ev.env.turn).or_default();

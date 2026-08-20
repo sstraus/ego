@@ -3,10 +3,11 @@
 //!
 //! See `ARCHITECTURE.md` §1 and `plans/m0a-contracts.md` Step 2.
 
-use ego_core::event::domain::{DomainEvent, Envelope, EventKind, ExitReason};
+use ego_core::cost::{Amount, CostDelta, CumulativeCost, CurrencyCode, Money, PricingRevision};
+use ego_core::event::domain::{DomainEvent, Envelope, EventKind, ExitReason, OccupancyProvenance};
 use ego_core::event::id::{EventId, ItemId, Producer, Seq, SessionId, TurnId};
 use ego_core::event::time::Timestamp;
-use ego_core::state::{PermissionEvent, SessionState, SubagentEvent};
+use ego_core::state::{PermissionEvent, SessionState, SubagentEvent, Usage};
 
 // Wrapped in a module named `reducer` so `cargo test -p ego-core reducer`
 // (the story's VERIFY command) matches these tests by substring: cargo's
@@ -33,6 +34,32 @@ mod reducer {
                 producer: Producer::Main,
             },
             kind,
+        }
+    }
+
+    /// Tokens in the two categories most events exercise; the cache
+    /// categories default to zero and are set explicitly where they matter.
+    fn tokens(uncached_input: u64, output: u64) -> Usage {
+        Usage {
+            uncached_input_tokens: uncached_input,
+            output_tokens: output,
+            ..Usage::default()
+        }
+    }
+
+    fn usd(decimal: &str) -> Money {
+        Money::new(
+            decimal.parse::<Amount>().expect("a valid test amount"),
+            CurrencyCode::new("USD").expect("USD is a valid code"),
+        )
+    }
+
+    /// A priced cost delta under the default test pricing revision.
+    fn priced(decimal: &str) -> CostDelta {
+        CostDelta::Known {
+            amount: usd(decimal),
+            pricing_revision: PricingRevision("test-2026-08".to_string()),
+            fx: None,
         }
     }
 
@@ -120,8 +147,15 @@ mod reducer {
         push!(
             None,
             EventKind::UsageUpdated {
-                input_tokens: 42,
-                output_tokens: 7
+                usage: tokens(42, 7),
+                cost_delta: priced("0.000441"),
+            }
+        );
+        push!(
+            None,
+            EventKind::ContextWindowUpdated {
+                used_tokens: 49,
+                provenance: OccupancyProvenance::GenerationBoundary,
             }
         );
         push!(
@@ -189,8 +223,19 @@ mod reducer {
 
         assert_eq!(a, b);
         // The fixture does real work; pin a few facts so this isn't vacuous.
-        assert_eq!(a.usage.input_tokens, 42);
+        assert_eq!(a.usage.uncached_input_tokens, 42);
         assert_eq!(a.usage.output_tokens, 7);
+        assert_eq!(
+            a.cost,
+            CumulativeCost::Known {
+                total: usd("0.000441")
+            }
+        );
+        assert_eq!(a.context.used_tokens, Some(49));
+        assert_eq!(
+            a.context.provenance,
+            Some(OccupancyProvenance::GenerationBoundary)
+        );
         assert_eq!(a.errors, vec!["a recoverable hiccup".to_string()]);
         assert_eq!(a.unresolved_parents, Vec::<EventId>::new());
         assert_eq!(a.last_seq, log.last().unwrap().env.seq);
@@ -397,8 +442,22 @@ mod reducer {
             (
                 "usage_updated",
                 EventKind::UsageUpdated {
-                    input_tokens: u64::MAX,
-                    output_tokens: u64::MAX,
+                    usage: Usage {
+                        uncached_input_tokens: u64::MAX,
+                        cache_read_tokens: u64::MAX,
+                        cache_write_tokens: u64::MAX,
+                        output_tokens: u64::MAX,
+                    },
+                    cost_delta: CostDelta::Unknown(
+                        ego_core::cost::UnknownCost::ProviderReportedNoUsage,
+                    ),
+                },
+            ),
+            (
+                "context_window_updated",
+                EventKind::ContextWindowUpdated {
+                    used_tokens: u64::MAX,
+                    provenance: OccupancyProvenance::LocalEstimate,
                 },
             ),
             (
@@ -450,7 +509,7 @@ mod reducer {
         ];
         assert_eq!(
             table.len(),
-            17,
+            18,
             "keep this table in sync with EventKind's variant count (ARCH §1)"
         );
 
@@ -477,7 +536,7 @@ mod reducer {
 
         assert_eq!(
             state.unresolved_parents.len(),
-            17,
+            18,
             "every event's parent was unresolvable"
         );
         assert_eq!(
@@ -493,8 +552,13 @@ mod reducer {
             std::collections::HashSet::from([primer_id, duplicate_id]),
             "the primer's id and the (repeated) duplicate id — deduped by the HashSet"
         );
-        assert_eq!(state.usage.input_tokens, u64::MAX);
+        assert_eq!(state.usage.uncached_input_tokens, u64::MAX);
         assert_eq!(state.usage.output_tokens, u64::MAX);
+        assert_eq!(
+            state.cost,
+            CumulativeCost::Unknown(ego_core::cost::UnknownCost::ProviderReportedNoUsage),
+            "an unpriced generation must poison the cumulative total, not read as free"
+        );
     }
 
     #[test]
@@ -509,8 +573,8 @@ mod reducer {
             None,
             None,
             EventKind::UsageUpdated {
-                input_tokens: u64::MAX - 1,
-                output_tokens: u64::MAX - 1,
+                usage: tokens(u64::MAX - 1, u64::MAX - 1),
+                cost_delta: priced("0"),
             },
         ));
         // Summing past u64::MAX must not panic (dev profile has
@@ -521,12 +585,12 @@ mod reducer {
             None,
             None,
             EventKind::UsageUpdated {
-                input_tokens: 10,
-                output_tokens: 10,
+                usage: tokens(10, 10),
+                cost_delta: priced("0"),
             },
         ));
 
-        assert_eq!(state.usage.input_tokens, u64::MAX);
+        assert_eq!(state.usage.uncached_input_tokens, u64::MAX);
         assert_eq!(state.usage.output_tokens, u64::MAX);
     }
 
@@ -722,6 +786,70 @@ mod reducer {
         );
     }
 
+    /// Occupancy is a *level*, so the reducer replaces it; usage is a
+    /// *flow*, so the reducer adds it. The two live in one test because the
+    /// contrast is the point — and because a log with only one occupancy
+    /// report cannot tell replace from add at all (`0 + x == x`), which is
+    /// exactly how this rule can be broken without any test noticing.
+    ///
+    /// The second report here is *lower* than the first, which is the real
+    /// post-compaction shape: the history was thrown away, so the context
+    /// genuinely holds less than it did. An adding reducer would report
+    /// 4700 tokens in a window that holds 400.
+    #[test]
+    fn context_occupancy_replaces_while_usage_accumulates() {
+        let turn = TurnId::new();
+        let mut seq = Seq::default();
+        let mut state = SessionState::default();
+
+        for (used, provenance) in [
+            (4_300, OccupancyProvenance::GenerationBoundary),
+            (400, OccupancyProvenance::AuthoritativeQuery),
+        ] {
+            state.apply(&ev(
+                seq.next(),
+                turn,
+                None,
+                None,
+                EventKind::UsageUpdated {
+                    usage: tokens(100, 20),
+                    cost_delta: priced("0.001"),
+                },
+            ));
+            state.apply(&ev(
+                seq.next(),
+                turn,
+                None,
+                None,
+                EventKind::ContextWindowUpdated {
+                    used_tokens: used,
+                    provenance,
+                },
+            ));
+        }
+
+        assert_eq!(
+            state.context.used_tokens,
+            Some(400),
+            "the latest occupancy replaces the previous one; 4700 would mean it accumulated"
+        );
+        assert_eq!(
+            state.context.provenance,
+            Some(OccupancyProvenance::AuthoritativeQuery),
+            "provenance travels with the number it describes"
+        );
+        // The same two events' token counts *did* accumulate, so this is a
+        // contrast within one log rather than two unrelated behaviours.
+        assert_eq!(state.usage.uncached_input_tokens, 200);
+        assert_eq!(state.usage.output_tokens, 40);
+        assert_eq!(
+            state.cost,
+            CumulativeCost::Known {
+                total: usd("0.002")
+            }
+        );
+    }
+
     #[test]
     fn usage_updates_accumulate() {
         let turn = TurnId::new();
@@ -733,8 +861,8 @@ mod reducer {
             None,
             None,
             EventKind::UsageUpdated {
-                input_tokens: 10,
-                output_tokens: 2,
+                usage: tokens(10, 2),
+                cost_delta: priced("0.25"),
             },
         ));
         state.apply(&ev(
@@ -743,12 +871,19 @@ mod reducer {
             None,
             None,
             EventKind::UsageUpdated {
-                input_tokens: 5,
-                output_tokens: 1,
+                usage: tokens(5, 1),
+                cost_delta: priced("0.125"),
             },
         ));
-        assert_eq!(state.usage.input_tokens, 15);
+        assert_eq!(state.usage.uncached_input_tokens, 15);
         assert_eq!(state.usage.output_tokens, 3);
+        assert_eq!(
+            state.cost,
+            CumulativeCost::Known {
+                total: usd("0.375")
+            },
+            "cost deltas accumulate exactly alongside the token totals"
+        );
     }
 
     #[test]

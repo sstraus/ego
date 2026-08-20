@@ -10,6 +10,7 @@ use futures::stream::{self, BoxStream};
 
 use super::port::{AiEvent, Generator};
 use super::types::GenRequest;
+use crate::budget::Reservation;
 
 /// A `Generator` driven entirely by pre-scripted output.
 ///
@@ -50,7 +51,13 @@ impl FakeGenerator {
 }
 
 impl Generator for FakeGenerator {
-    fn generate(&self, req: GenRequest) -> BoxStream<'static, AiEvent> {
+    /// Records the request and plays the next script.
+    ///
+    /// Ignores the `Reservation` on purpose: a fake generator spends no
+    /// money, so it has nothing to charge. The reservation still has to be
+    /// *obtained* to reach this call, which is the whole point — the gate is
+    /// enforced by the type, so even the replay seam cannot route around it.
+    fn generate(&self, req: GenRequest, _reservation: &Reservation) -> BoxStream<'static, AiEvent> {
         self.calls
             .lock()
             .expect("FakeGenerator::calls poisoned")

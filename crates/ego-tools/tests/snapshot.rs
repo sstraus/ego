@@ -15,10 +15,11 @@
 
 use std::num::NonZeroUsize;
 
-use ego_core::event::domain::{DomainEvent, Envelope, EventKind, ExitReason};
+use ego_core::cost::{Amount, CostDelta, CumulativeCost, CurrencyCode, Money, PricingRevision};
+use ego_core::event::domain::{DomainEvent, Envelope, EventKind, ExitReason, OccupancyProvenance};
 use ego_core::event::id::{EventId, ItemId, Producer, Seq, SessionId, TurnId};
 use ego_core::event::time::Timestamp;
-use ego_core::state::SessionState;
+use ego_core::state::{SessionState, Usage};
 use ego_core::store::session_store::SessionStore;
 use ego_tools::store::{
     JsonlStore, OsIo, SNAPSHOT_VERSION, Snapshot, SnapshotPolicy, SnapshotRejection, validate,
@@ -65,6 +66,29 @@ mod snapshot {
                 state.apply(ev);
             }
             (self.events[n - 1].env.seq, state)
+        }
+    }
+
+    fn tokens(uncached_input: u64, output: u64) -> Usage {
+        Usage {
+            uncached_input_tokens: uncached_input,
+            output_tokens: output,
+            ..Usage::default()
+        }
+    }
+
+    fn usd(decimal: &str) -> Money {
+        Money::new(
+            decimal.parse::<Amount>().expect("a valid test amount"),
+            CurrencyCode::new("USD").expect("USD is a valid code"),
+        )
+    }
+
+    fn priced(decimal: &str) -> CostDelta {
+        CostDelta::Known {
+            amount: usd(decimal),
+            pricing_revision: PricingRevision("test-2026-08".to_string()),
+            fx: None,
         }
     }
 
@@ -153,8 +177,19 @@ mod snapshot {
             turn1,
             None,
             EventKind::UsageUpdated {
-                input_tokens: 120,
-                output_tokens: 45,
+                usage: tokens(120, 45),
+                cost_delta: priced("0.001035"),
+            },
+            None,
+            EventId::new(),
+        );
+        push(
+            seq.next(),
+            turn1,
+            None,
+            EventKind::ContextWindowUpdated {
+                used_tokens: 165,
+                provenance: OccupancyProvenance::GenerationBoundary,
             },
             None,
             EventId::new(),
@@ -245,8 +280,8 @@ mod snapshot {
             turn2,
             None,
             EventKind::UsageUpdated {
-                input_tokens: 10,
-                output_tokens: 5,
+                usage: tokens(10, 5),
+                cost_delta: priced("0.000105"),
             },
             None,
             EventId::new(),
@@ -295,7 +330,15 @@ mod snapshot {
         // nothing.
         assert!(!expected.turns.is_empty());
         assert!(!expected.items.is_empty());
-        assert_ne!(expected.usage.input_tokens, 0);
+        assert_ne!(expected.usage.uncached_input_tokens, 0);
+        assert_eq!(
+            expected.cost,
+            CumulativeCost::Known {
+                total: usd("0.00114")
+            },
+            "the two priced generations must have summed exactly"
+        );
+        assert_eq!(expected.context.used_tokens, Some(165));
         assert!(!expected.permissions.is_empty());
         assert!(!expected.subagents.is_empty());
         assert!(!expected.hooks.is_empty());

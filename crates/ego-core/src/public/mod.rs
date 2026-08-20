@@ -6,7 +6,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::event::domain::{DomainEvent, EventKind, ExitReason};
+use crate::cost::CostDelta;
+use crate::event::domain::{DomainEvent, EventKind, ExitReason, OccupancyProvenance};
 use crate::event::id::{ItemId, SessionId, TurnId};
 use crate::state::Usage;
 
@@ -123,11 +124,33 @@ pub enum PublicEvent {
     /// total to anyone who hasn't read this comment, and that misreading
     /// is expensive once it reaches budget or billing logic — so the name
     /// carries the semantics instead of relying on documentation alone.
+    ///
+    /// `cost_delta` is the price of *this* generation, and it rides the same
+    /// event as the tokens rather than a separate one: the cost is the
+    /// tokens priced, and separating them would let a consumer see a price
+    /// it cannot attribute to any usage. It is an explicit
+    /// `known`/`unknown` value, never an absent field, so a consumer cannot
+    /// read "we could not price this" as "this was free".
     UsageUpdated {
         turn: TurnId,
         #[serde(skip_serializing_if = "Option::is_none")]
         item: Option<ItemId>,
         usage_delta: Usage,
+        cost_delta: CostDelta,
+    },
+    /// The context window's occupancy changed.
+    ///
+    /// Public because it is the only honest source for "how full is the
+    /// context" — it cannot be derived from the cumulative token totals,
+    /// which recount prior history as input on every call and therefore
+    /// diverge from occupancy from the second generation onward. Carries its
+    /// `provenance` so a consumer can tell a provider's authoritative answer
+    /// from a local estimate instead of treating every figure as equally
+    /// solid.
+    ContextWindowUpdated {
+        turn: TurnId,
+        used_tokens: u64,
+        provenance: OccupancyProvenance,
     },
     /// An error occurred, possibly outside any single item.
     Error {
@@ -214,16 +237,19 @@ pub fn project_public(ev: &DomainEvent) -> Option<PublicEvent> {
             ok: *allowed,
             text: None,
         }),
-        EventKind::UsageUpdated {
-            input_tokens,
-            output_tokens,
-        } => Some(PublicEvent::UsageUpdated {
+        EventKind::UsageUpdated { usage, cost_delta } => Some(PublicEvent::UsageUpdated {
             turn,
             item,
-            usage_delta: Usage {
-                input_tokens: *input_tokens,
-                output_tokens: *output_tokens,
-            },
+            usage_delta: *usage,
+            cost_delta: cost_delta.clone(),
+        }),
+        EventKind::ContextWindowUpdated {
+            used_tokens,
+            provenance,
+        } => Some(PublicEvent::ContextWindowUpdated {
+            turn,
+            used_tokens: *used_tokens,
+            provenance: *provenance,
         }),
         EventKind::TurnCompleted { ok, exit_reason } => Some(PublicEvent::TurnCompleted {
             turn,

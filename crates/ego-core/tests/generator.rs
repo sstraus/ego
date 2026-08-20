@@ -3,6 +3,8 @@
 //!
 //! See `ARCHITECTURE.md` §2/§3.1 and `plans/m0a-contracts.md` Step 10.
 
+use ego_core::budget::{BudgetGate, PricingQuote, Reservation};
+use ego_core::cost::{Amount, CostDelta, CurrencyCode, Money, PricingRevision};
 use ego_core::event::domain::{DomainEvent, Envelope, EventKind, ExitReason};
 use ego_core::event::id::{EventId, ItemId, Producer, Seq, TurnId};
 use ego_core::event::time::Timestamp;
@@ -58,6 +60,45 @@ mod generator {
             cache: CacheRetention::Short,
             transport: Transport::Sse,
         }
+    }
+
+    fn usd(decimal: &str) -> Money {
+        Money::new(
+            decimal.parse::<Amount>().expect("a valid test amount"),
+            CurrencyCode::new("USD").expect("USD is a valid code"),
+        )
+    }
+
+    /// Per-token prices in the shape of a real published table, converted
+    /// once from the usual `$/MTok` quoting.
+    fn quote() -> PricingQuote {
+        let rate = |d: &str| Some(d.parse::<Amount>().expect("a valid test rate"));
+        PricingQuote {
+            revision: PricingRevision("test-2026-08".to_string()),
+            currency: CurrencyCode::new("USD").expect("USD is a valid code"),
+            uncached_input: rate("0.000003"),
+            cache_read: rate("0.0000003"),
+            cache_write: rate("0.00000375"),
+            output: rate("0.000015"),
+        }
+    }
+
+    /// A reservation minted by a real [`BudgetGate`] against a generous
+    /// limit.
+    ///
+    /// There is deliberately no shortcut: `Reservation`'s constructor is
+    /// sealed inside `ego_core::budget`, so even a test cannot fabricate
+    /// one, and going through `reserve` is the only way to call `generate`
+    /// at all. That is the budget gate's whole enforcement mechanism, and
+    /// the fact that this helper has to exist is the proof it works.
+    fn reservation() -> Reservation {
+        let mut gate = BudgetGate::new(usd("1000"));
+        gate.reserve(
+            &quote(),
+            &gen_request(),
+            &capabilities(ReasoningCarryover::Portable),
+        )
+        .expect("a generous budget admits an ordinary request")
     }
 
     /// A minimal, test-local turn assembler: it maps one `AiEvent` at a time
@@ -131,9 +172,14 @@ mod generator {
                     let env = self.envelope(None);
                     vec![DomainEvent {
                         env,
+                        // The assembler prices the generation with the same
+                        // quote the budget gate reserved against, which is
+                        // what makes the reservation reconcilable: a cost
+                        // computed under a different revision cannot be
+                        // matched to the authorisation that admitted it.
                         kind: EventKind::UsageUpdated {
-                            input_tokens: usage.input_tokens,
-                            output_tokens: usage.output_tokens,
+                            usage: *usage,
+                            cost_delta: quote().price(usage),
                         },
                     }]
                 }
@@ -182,14 +228,16 @@ mod generator {
                 args: r#"{"cmd":"ls"}"#.to_string(),
             },
             AiEvent::Usage(Usage {
-                input_tokens: 12,
+                uncached_input_tokens: 12,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
                 output_tokens: 34,
             }),
             AiEvent::Stop(StopReason::ToolUse),
         ];
         let fake = FakeGenerator::new(vec![script]);
         let events: Vec<AiEvent> =
-            futures::executor::block_on(fake.generate(gen_request()).collect());
+            futures::executor::block_on(fake.generate(gen_request(), &reservation()).collect());
         assert_eq!(events.len(), 5);
 
         let turn = TurnId::new();
@@ -224,8 +272,18 @@ mod generator {
         assert_eq!(
             domain_events[3].kind,
             EventKind::UsageUpdated {
-                input_tokens: 12,
-                output_tokens: 34,
+                usage: Usage {
+                    uncached_input_tokens: 12,
+                    cache_read_tokens: 0,
+                    cache_write_tokens: 0,
+                    output_tokens: 34,
+                },
+                // 12 x 0.000003 + 34 x 0.000015 = 0.000546, exactly.
+                cost_delta: CostDelta::Known {
+                    amount: usd("0.000546"),
+                    pricing_revision: PricingRevision("test-2026-08".to_string()),
+                    fx: None,
+                },
             }
         );
         assert_eq!(
@@ -245,8 +303,15 @@ mod generator {
         for ev in &domain_events {
             state.apply(ev);
         }
-        assert_eq!(state.usage.input_tokens, 12);
+        assert_eq!(state.usage.uncached_input_tokens, 12);
         assert_eq!(state.usage.output_tokens, 34);
+        assert_eq!(
+            state.cost,
+            ego_core::cost::CumulativeCost::Known {
+                total: usd("0.000546")
+            },
+            "the priced generation reduces into an exact cumulative total"
+        );
         assert!(state.turns.get(&turn).unwrap().completed);
         assert!(state.turns.get(&turn).unwrap().ok);
 
@@ -259,7 +324,7 @@ mod generator {
     fn generator_fake_stop_length_completes_not_ok_with_budget_exit() {
         let fake = FakeGenerator::new(vec![vec![AiEvent::Stop(StopReason::Length)]]);
         let events: Vec<AiEvent> =
-            futures::executor::block_on(fake.generate(gen_request()).collect());
+            futures::executor::block_on(fake.generate(gen_request(), &reservation()).collect());
         let mut assembler = Assembler::new(TurnId::new());
         let domain_events: Vec<DomainEvent> =
             events.iter().flat_map(|e| assembler.assemble(e)).collect();
@@ -276,7 +341,7 @@ mod generator {
     fn generator_fake_pending_stop_is_not_terminal() {
         let fake = FakeGenerator::new(vec![vec![AiEvent::Stop(StopReason::Pending)]]);
         let events: Vec<AiEvent> =
-            futures::executor::block_on(fake.generate(gen_request()).collect());
+            futures::executor::block_on(fake.generate(gen_request(), &reservation()).collect());
         let mut assembler = Assembler::new(TurnId::new());
         let domain_events: Vec<DomainEvent> =
             events.iter().flat_map(|e| assembler.assemble(e)).collect();
@@ -297,9 +362,9 @@ mod generator {
         ]);
 
         let first: Vec<AiEvent> =
-            futures::executor::block_on(fake.generate(gen_request()).collect());
+            futures::executor::block_on(fake.generate(gen_request(), &reservation()).collect());
         let second: Vec<AiEvent> =
-            futures::executor::block_on(fake.generate(gen_request()).collect());
+            futures::executor::block_on(fake.generate(gen_request(), &reservation()).collect());
 
         assert_eq!(
             first,
@@ -320,7 +385,7 @@ mod generator {
     fn generator_fake_call_past_scripted_count_is_empty_not_a_panic() {
         let fake = FakeGenerator::new(Vec::new());
         let events: Vec<AiEvent> =
-            futures::executor::block_on(fake.generate(gen_request()).collect());
+            futures::executor::block_on(fake.generate(gen_request(), &reservation()).collect());
         assert!(events.is_empty());
         assert_eq!(fake.calls().len(), 1);
     }

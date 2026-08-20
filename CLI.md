@@ -142,10 +142,23 @@ ceilings come only from an administrator's `/etc/ego`.
   "result": "…final assistant text or --schema-validated object…",
   "exit_reason": "done|budget|max_turns|timeout|permission|error",
   "turns": 4,
-  "usage": { "input": 48210, "output": 3120, "cache_read": 40100,
-             "cost": { "amount": 0.083, "currency": "USD" } }
+  "usage": { "uncached_input_tokens": 8110, "cache_read_tokens": 40100,
+             "cache_write_tokens": 1200, "output_tokens": 3120 },
+  "context": { "used_tokens": 51410, "provenance": "generation_boundary" },
+  "cost": { "state": "known",
+            "total": { "amount": "0.083", "currency": "USD" } }
 }
 ```
+
+`usage` is the sum of the per-generation deltas, split by the categories that
+are *priced differently*; it is a flow and only grows. `context` is the
+occupancy *level* of the live context window and goes **down** after a
+compaction, so it is reported separately and never derived from `usage`.
+`cost.amount` is an exact decimal **string**, not a JSON number — binary floats
+cannot represent a price. `cost.state` is `unstarted` before the first priced
+generation, and `{"state":"unknown","reason":…}` once any generation could not
+be priced: an unpriceable generation makes the session total unknown rather
+than silently under-reported.
 
 ### 4.2 `--output jsonl` (one event per line, live)
 

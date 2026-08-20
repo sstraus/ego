@@ -4,6 +4,7 @@
 //! See `ARCHITECTURE.md` §3.1. Implements `ego-core`'s `Generator` port and
 //! owns `Http`, credentials and the provider tables.
 
+use ego_core::budget::Reservation;
 use ego_core::generator::port::{AiEvent, Generator};
 use ego_core::generator::types::GenRequest;
 use futures::stream::{self, BoxStream};
@@ -16,7 +17,11 @@ use futures::stream::{self, BoxStream};
 pub struct SkeletonGenerator;
 
 impl Generator for SkeletonGenerator {
-    fn generate(&self, _req: GenRequest) -> BoxStream<'static, AiEvent> {
+    fn generate(
+        &self,
+        _req: GenRequest,
+        _reservation: &Reservation,
+    ) -> BoxStream<'static, AiEvent> {
         Box::pin(stream::empty())
     }
 }

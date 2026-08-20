@@ -113,14 +113,36 @@
 //! would misreport why the turn actually stopped, exactly the mistake
 //! `UsageUpdated` (below) already establishes we must not make.
 //!
+//! ## The third entry point: `project_acp_v1` / `project_acp_v2`
+//!
+//! `SessionUpdate::UsageUpdate` cannot be produced by a stateless function,
+//! for two independent reasons, and it is the only variant that cannot:
+//!
+//! - its `used` is tokens *currently in context*, which is a level that a
+//!   compaction lowers — not something derivable from any event's payload,
+//!   and emphatically not from cumulative token totals, which recount prior
+//!   history as input on every call and so diverge from occupancy from the
+//!   second generation onward;
+//! - its `cost` is the *cumulative session* cost, so even a per-generation
+//!   cost delta on the event has to be summed over everything before it;
+//! - its `size` is the model's context window, which lives in
+//!   `ModelCapabilities`, not in the event at all.
+//!
+//! So [`project_acp_v1`] and [`project_acp_v2`] take the reduced state
+//! *after* the event and the resolved capabilities, and are the complete
+//! entry points: each returns whatever its stateless counterpart returns,
+//! plus the usage updates only state can produce. [`project_v1`] and
+//! [`project_v2`] remain as the pure core, so the great majority of the
+//! mapping stays testable without constructing a `SessionState`.
+//!
+//! The RFD is explicit that an agent must *not* send `UsageUpdate` when the
+//! context size is unknown, and that clients must tolerate its absence.
+//! Both `used` and `size` are therefore required to be known before anything
+//! is emitted; `cost` is genuinely optional and is attached only when the
+//! cumulative total is known in a single currency.
+//!
 //! ## Events with no `SessionUpdate` counterpart in either version
 //!
-//! - **`UsageUpdated`** — ratified: `SessionUpdate::UsageUpdate.used` is
-//!   tokens *currently in context*; ego's `input_tokens`/`output_tokens` are
-//!   *cumulative provider-request* accounting. These are different
-//!   quantities that diverge from the second generation on, and there is no
-//!   correct formula from one to the other. Never derive `used` from
-//!   `input_tokens + output_tokens`.
 //! - **`PermissionRequested`/`PermissionDecided`** — permissions travel over
 //!   `session/request_permission`, a request/response RPC pair the agent
 //!   sends to the client, not a `session/update` notification. Handling it
@@ -143,8 +165,11 @@
 //!   (v2 *does* have a mapping — see [`project_v2`]'s `TurnCompleted` arm.)
 
 use agent_client_protocol_schema::{v1, v2};
+use ego_core::cost::Money;
 use ego_core::event::domain::{DomainEvent, EventKind, ExitReason};
 use ego_core::event::id::ItemId;
+use ego_core::generator::capabilities::ModelCapabilities;
+use ego_core::state::SessionState;
 
 /// The bare-string wire form ACP ids use (`MessageId`, `ToolCallId`, …).
 ///
@@ -189,6 +214,83 @@ fn stop_reason_v2(exit_reason: ExitReason) -> v2::StopReason {
         ExitReason::Cancelled => v2::StopReason::Cancelled,
         ExitReason::Error => v2::StopReason::Other("_error".to_string()),
         ExitReason::Budget => v2::StopReason::Other("_budget".to_string()),
+    }
+}
+
+/// The `used` and `size` an ACP `UsageUpdate` needs, when both are known.
+///
+/// `None` whenever either is missing. The ACP RFD says an agent must not
+/// send `UsageUpdate` without a context size, and there is no defensible
+/// substitute for the other half either: a `used` of zero would claim an
+/// empty context, and a `size` guessed from anything but the model's own
+/// record would put a real numerator over an invented denominator, which is
+/// worse than silence because it looks like information.
+fn usage_figures(state_after: &SessionState, caps: &ModelCapabilities) -> Option<(u64, u64)> {
+    Some((state_after.context.used_tokens?, caps.max_context_tokens?))
+}
+
+/// The cumulative session cost as ACP wants it, when it is known.
+///
+/// This is the single place where exact money becomes `f64`
+/// (`ego_core::cost` keeps everything else exact): ACP's `Cost.amount` is a
+/// float, so the conversion has to happen, and confining it to the wire edge
+/// means no rounding error can ever be added back into a running total.
+fn acp_cost(total: &Money) -> (f64, String) {
+    (
+        total.amount.to_f64_lossy(),
+        total.currency.as_str().to_string(),
+    )
+}
+
+/// Project one `DomainEvent` onto ACP v1, using the state it produced.
+///
+/// The complete v1 entry point: everything [`project_v1`] maps, plus the
+/// `UsageUpdate` that only reduced state and resolved capabilities can
+/// produce. `state_after` must be the reduction *including* `ev` — a caller
+/// that passes the state from before the event will report the previous
+/// generation's numbers under this one.
+///
+/// See the module doc comment's "third entry point" section.
+pub fn project_acp_v1(
+    ev: &DomainEvent,
+    state_after: &SessionState,
+    caps: &ModelCapabilities,
+) -> Option<v1::SessionUpdate> {
+    match &ev.kind {
+        EventKind::UsageUpdated { .. } | EventKind::ContextWindowUpdated { .. } => {
+            let (used, size) = usage_figures(state_after, caps)?;
+            let mut update = v1::UsageUpdate::new(used, size);
+            if let Some(total) = state_after.cost.known() {
+                let (amount, currency) = acp_cost(total);
+                update = update.cost(Some(v1::Cost::new(amount, currency)));
+            }
+            Some(v1::SessionUpdate::UsageUpdate(update))
+        }
+        _ => project_v1(ev),
+    }
+}
+
+/// Project one `DomainEvent` onto ACP v2, using the state it produced.
+///
+/// The v2 twin of [`project_acp_v1`]; `UsageUpdate` is the one variant whose
+/// shape is identical in both protocol versions, so the rule is the same and
+/// only the types differ.
+pub fn project_acp_v2(
+    ev: &DomainEvent,
+    state_after: &SessionState,
+    caps: &ModelCapabilities,
+) -> Option<v2::SessionUpdate> {
+    match &ev.kind {
+        EventKind::UsageUpdated { .. } | EventKind::ContextWindowUpdated { .. } => {
+            let (used, size) = usage_figures(state_after, caps)?;
+            let mut update = v2::UsageUpdate::new(used, size);
+            if let Some(total) = state_after.cost.known() {
+                let (amount, currency) = acp_cost(total);
+                update = update.cost(Some(v2::Cost::new(amount, currency)));
+            }
+            Some(v2::SessionUpdate::UsageUpdate(update))
+        }
+        _ => project_v2(ev),
     }
 }
 
@@ -255,9 +357,14 @@ pub fn project_v1(ev: &DomainEvent) -> Option<v1::SessionUpdate> {
 
         // See the module doc comment's "no counterpart in either version"
         // list, plus v1's own "no counterpart" note for `TurnCompleted`.
+        // `UsageUpdated` and `ContextWindowUpdated` are the two events that
+        // need reduced state and resolved capabilities to project — see the
+        // module doc comment's "third entry point" section and
+        // `project_acp_v1`.
         EventKind::PermissionRequested { .. }
         | EventKind::PermissionDecided { .. }
         | EventKind::UsageUpdated { .. }
+        | EventKind::ContextWindowUpdated { .. }
         | EventKind::TurnCompleted { .. }
         | EventKind::Compacted { .. }
         | EventKind::Forked { .. }
@@ -351,10 +458,12 @@ pub fn project_v2(ev: &DomainEvent) -> Option<v2::SessionUpdate> {
         }
 
         // See the module doc comment's "no counterpart in either version"
-        // list.
+        // list, and its "third entry point" section for the two usage
+        // events, which need state that is not in the event.
         EventKind::PermissionRequested { .. }
         | EventKind::PermissionDecided { .. }
         | EventKind::UsageUpdated { .. }
+        | EventKind::ContextWindowUpdated { .. }
         | EventKind::Compacted { .. }
         | EventKind::Forked { .. }
         | EventKind::HookFired { .. }

@@ -26,17 +26,22 @@
 //! projection.
 //!
 //! The fixture is a representative session, **not** an exhaustive tour of
-//! the domain's 17 event kinds: its 20 events cover 16 distinct kinds
+//! the domain's 18 event kinds: its 21 events cover 17 distinct kinds
 //! (`UserPrompt`, `AssistantDelta`, `AssistantMessage` and `TurnCompleted`
 //! each appear more than once) and omit `ReasoningDelta` entirely.
 //! Exhaustiveness is the job of the per-kind tests below —
 //! `reasoning_delta_projects_to_a_thought_chunk_in_both_versions` covers
 //! the kind the fixture omits — not of this log.
 use agent_client_protocol_schema::{v1, v2};
-use ego_acp::project::{project_v1, project_v2};
-use ego_core::event::domain::{DomainEvent, Envelope, EventKind, ExitReason};
+use ego_acp::project::{project_acp_v1, project_acp_v2, project_v1, project_v2};
+use ego_core::cost::{Amount, CostDelta, CurrencyCode, Money, PricingRevision, UnknownCost};
+use ego_core::event::domain::{DomainEvent, Envelope, EventKind, ExitReason, OccupancyProvenance};
 use ego_core::event::id::{EventId, ItemId, Producer, Seq, SessionId, TurnId};
 use ego_core::event::time::Timestamp;
+use ego_core::generator::capabilities::{
+    CacheRetention, CancelSemantics, ModelCapabilities, ReasoningCarryover, Transport,
+};
+use ego_core::state::{SessionState, Usage};
 
 // Wrapped in a module named `acp_golden` so `cargo test -p ego-acp
 // acp_golden` (the story's VERIFY command) matches these tests by
@@ -195,8 +200,17 @@ mod acp_golden {
                 turn1,
                 None,
                 EventKind::UsageUpdated {
-                    input_tokens: 120,
-                    output_tokens: 45,
+                    usage: tokens(120, 45),
+                    cost_delta: priced("0.001035"),
+                },
+            ),
+            ev(
+                seq.next(),
+                turn1,
+                None,
+                EventKind::ContextWindowUpdated {
+                    used_tokens: 165,
+                    provenance: OccupancyProvenance::GenerationBoundary,
                 },
             ),
             ev(
@@ -308,8 +322,12 @@ mod acp_golden {
             },
             EventKind::PermissionDecided { allowed: true },
             EventKind::UsageUpdated {
-                input_tokens: 1,
-                output_tokens: 1,
+                usage: tokens(1, 1),
+                cost_delta: priced("0.000018"),
+            },
+            EventKind::ContextWindowUpdated {
+                used_tokens: 2,
+                provenance: OccupancyProvenance::GenerationBoundary,
             },
             EventKind::TurnCompleted {
                 ok: true,
@@ -341,6 +359,56 @@ mod acp_golden {
 
     fn with_item(kind: EventKind) -> DomainEvent {
         ev(Seq::default(), TurnId::new(), Some(ItemId::new()), kind)
+    }
+
+    fn tokens(uncached_input: u64, output: u64) -> Usage {
+        Usage {
+            uncached_input_tokens: uncached_input,
+            output_tokens: output,
+            ..Usage::default()
+        }
+    }
+
+    fn usd(decimal: &str) -> Money {
+        Money::new(
+            decimal.parse::<Amount>().expect("a valid test amount"),
+            CurrencyCode::new("USD").expect("USD is a valid code"),
+        )
+    }
+
+    fn priced(decimal: &str) -> CostDelta {
+        CostDelta::Known {
+            amount: usd(decimal),
+            pricing_revision: PricingRevision("test-2026-08".to_string()),
+            fx: None,
+        }
+    }
+
+    /// Capabilities with a stated context window, so `UsageUpdate.size` is
+    /// known. `max_context_tokens: None` is the case that must suppress the
+    /// update entirely.
+    fn caps(max_context_tokens: Option<u64>) -> ModelCapabilities {
+        ModelCapabilities {
+            schema_version: 1,
+            max_context_tokens,
+            max_output_tokens: Some(64_000),
+            max_tools: Some(128),
+            supports_parallel_tool_calls: true,
+            reasoning_carryover: ReasoningCarryover::Portable,
+            cancel: CancelSemantics::Cooperative,
+            cache: CacheRetention::Short,
+            transport: Transport::Sse,
+        }
+    }
+
+    /// The reduction of `events`, which is what the state-aware projection
+    /// must be handed: the state *after* the event it is projecting.
+    fn state_after(events: &[DomainEvent]) -> SessionState {
+        let mut state = SessionState::default();
+        for ev in events {
+            state.apply(ev);
+        }
+        state
     }
 
     /// The core v1 projection golden: `project_v1` over the whole fixture
@@ -379,20 +447,31 @@ mod acp_golden {
         assert_eq!(actual, expected.trim_end());
     }
 
-    /// Explicit, kind-named proof that `UsageUpdated` never projects to
-    /// ACP's `UsageUpdate` (or anything else) in either protocol version —
-    /// the ratified decision in `project.rs`'s module doc comment. Not just
-    /// "the golden happens to omit it": every `UsageUpdated` event, in
-    /// isolation, with an item attached (the most favourable case for a
-    /// wrong mapping), projects to `None`.
+    /// Explicit, kind-named proof that the *stateless* projections cannot
+    /// produce ACP's `UsageUpdate` — not just that the golden happens to
+    /// omit it. `UsageUpdate.used` is context occupancy, `size` is the
+    /// model's window and `cost` is a cumulative session total; none of the
+    /// three is in the event, so a function that sees only the event has
+    /// nothing to build one from. The state-aware entry points do produce
+    /// it — see `project_acp_emits_usage_update_when_used_and_size_are_known`.
     #[test]
-    fn usage_updated_never_projects_to_acp_usage_update() {
-        let event = with_item(EventKind::UsageUpdated {
-            input_tokens: 120,
-            output_tokens: 45,
-        });
-        assert_eq!(project_v1(&event), None);
-        assert_eq!(project_v2(&event), None);
+    fn usage_updated_never_projects_through_the_stateless_functions() {
+        for kind in [
+            EventKind::UsageUpdated {
+                usage: tokens(120, 45),
+                cost_delta: priced("0.001035"),
+            },
+            EventKind::ContextWindowUpdated {
+                used_tokens: 165,
+                provenance: OccupancyProvenance::GenerationBoundary,
+            },
+        ] {
+            // With an item attached: the most favourable case for a wrong
+            // mapping, since every other arm that needs an id has one here.
+            let event = with_item(kind);
+            assert_eq!(project_v1(&event), None);
+            assert_eq!(project_v2(&event), None);
+        }
     }
 
     /// `Forked` projects to `None` in both versions: `session/fork` is a
@@ -735,6 +814,166 @@ mod acp_golden {
             let event = ev(Seq::default(), TurnId::new(), None, kind);
             assert_eq!(project_v1(&event), None, "v1 {name}");
             assert_eq!(project_v2(&event), None, "v2 {name}");
+        }
+    }
+
+    // --- the state-aware entry points ------------------------------------
+
+    /// A three-event lead-in: one priced generation, then the occupancy it
+    /// implies. Returned whole so a test can project the last event with
+    /// the state that includes it.
+    fn usage_log() -> Vec<DomainEvent> {
+        let turn = TurnId::new();
+        let mut seq = Seq::default();
+        vec![
+            ev(
+                seq.next(),
+                turn,
+                None,
+                EventKind::UsageUpdated {
+                    usage: tokens(120, 45),
+                    cost_delta: priced("0.001035"),
+                },
+            ),
+            ev(
+                seq.next(),
+                turn,
+                None,
+                EventKind::ContextWindowUpdated {
+                    used_tokens: 165,
+                    provenance: OccupancyProvenance::GenerationBoundary,
+                },
+            ),
+        ]
+    }
+
+    /// The happy path: occupancy known, window known, cost known in one
+    /// currency — so `UsageUpdate` carries all three fields, identically in
+    /// both protocol versions.
+    #[test]
+    fn project_acp_emits_usage_update_when_used_and_size_are_known() {
+        let log = usage_log();
+        let state = state_after(&log);
+        let caps = caps(Some(200_000));
+        let last = log.last().unwrap();
+
+        let v1_update = project_acp_v1(last, &state, &caps).expect("used and size are both known");
+        let v1::SessionUpdate::UsageUpdate(v1_usage) = v1_update else {
+            panic!("expected a v1 UsageUpdate, got {v1_update:?}");
+        };
+        assert_eq!(v1_usage.used, 165);
+        assert_eq!(v1_usage.size, 200_000);
+        let cost = v1_usage.cost.expect("the cumulative cost is known");
+        assert_eq!(cost.currency, "USD");
+        // 0.001035 is not exactly representable in binary floating point,
+        // which is the entire reason the domain keeps it as an exact
+        // decimal and converts only here.
+        assert!((cost.amount - 0.001035).abs() < 1e-12);
+
+        let v2_update = project_acp_v2(last, &state, &caps).expect("used and size are both known");
+        let v2::SessionUpdate::UsageUpdate(v2_usage) = v2_update else {
+            panic!("expected a v2 UsageUpdate, got {v2_update:?}");
+        };
+        assert_eq!((v2_usage.used, v2_usage.size), (165, 200_000));
+    }
+
+    /// The RFD is explicit that an agent must not send `UsageUpdate` when
+    /// the context size is unknown, and clients must tolerate its absence.
+    /// A model with no stated context window is exactly that case.
+    #[test]
+    fn project_acp_emits_nothing_when_the_context_window_size_is_unknown() {
+        let log = usage_log();
+        let state = state_after(&log);
+        let caps = caps(None);
+        let last = log.last().unwrap();
+        assert_eq!(project_acp_v1(last, &state, &caps), None);
+        assert_eq!(project_acp_v2(last, &state, &caps), None);
+    }
+
+    /// Occupancy has to be *reported*; it cannot be inferred from token
+    /// totals. A session that has recorded usage but no
+    /// `ContextWindowUpdated` therefore has no `used` to send — and the
+    /// wrong answer here would be to sum the token counts, which is the
+    /// specific mistake `ego-acp-usage-verdict` ruled out.
+    #[test]
+    fn project_acp_emits_nothing_when_occupancy_was_never_reported() {
+        let log = vec![usage_log().remove(0)];
+        let state = state_after(&log);
+        assert_eq!(state.context.used_tokens, None);
+        assert_ne!(state.usage.total_tokens(), 0, "tokens were recorded");
+
+        let caps = caps(Some(200_000));
+        assert_eq!(project_acp_v1(&log[0], &state, &caps), None);
+        assert_eq!(project_acp_v2(&log[0], &state, &caps), None);
+    }
+
+    /// `cost` is optional in the ACP schema, and an unknown cumulative cost
+    /// must simply be omitted — never sent as zero. Occupancy and window are
+    /// still known here, so the update itself is emitted: an unpriceable
+    /// generation must not cost the client its context readout.
+    #[test]
+    fn project_acp_omits_cost_when_the_cumulative_total_is_unknown() {
+        let turn = TurnId::new();
+        let mut seq = Seq::default();
+        let log = vec![
+            ev(
+                seq.next(),
+                turn,
+                None,
+                EventKind::UsageUpdated {
+                    usage: tokens(120, 45),
+                    cost_delta: CostDelta::Unknown(UnknownCost::NoPricingQuote),
+                },
+            ),
+            ev(
+                seq.next(),
+                turn,
+                None,
+                EventKind::ContextWindowUpdated {
+                    used_tokens: 165,
+                    provenance: OccupancyProvenance::GenerationBoundary,
+                },
+            ),
+        ];
+        let state = state_after(&log);
+        let caps = caps(Some(200_000));
+
+        let update = project_acp_v1(log.last().unwrap(), &state, &caps)
+            .expect("used and size are known even when cost is not");
+        let v1::SessionUpdate::UsageUpdate(usage) = update else {
+            panic!("expected a UsageUpdate");
+        };
+        assert_eq!((usage.used, usage.size), (165, 200_000));
+        assert_eq!(usage.cost, None, "an unknown cost must be absent, not zero");
+    }
+
+    /// The state-aware functions are supersets, not replacements: for every
+    /// event that does not need state they must agree with the stateless
+    /// ones exactly. Otherwise a caller would have to keep calling both,
+    /// and the two paths could drift.
+    #[test]
+    fn project_acp_agrees_with_the_stateless_projection_on_every_other_kind() {
+        let log = fixture_log();
+        let state = state_after(&log);
+        let caps = caps(Some(200_000));
+        for event in &log {
+            if matches!(
+                event.kind,
+                EventKind::UsageUpdated { .. } | EventKind::ContextWindowUpdated { .. }
+            ) {
+                continue;
+            }
+            let name = event.kind.name();
+            assert_eq!(
+                project_acp_v1(event, &state, &caps),
+                project_v1(event),
+                "v1 {name}"
+            );
+            assert_eq!(
+                project_acp_v2(event, &state, &caps),
+                project_v2(event),
+                "v2 {name}"
+            );
         }
     }
 }

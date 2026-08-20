@@ -6,7 +6,8 @@
 //! inline string literals, so a change to the projection shows up as a
 //! reviewable diff in a data file rather than a diff in test code.
 
-use ego_core::event::domain::{DomainEvent, Envelope, EventKind, ExitReason};
+use ego_core::cost::{Amount, CostDelta, CurrencyCode, Money, PricingRevision, UnknownCost};
+use ego_core::event::domain::{DomainEvent, Envelope, EventKind, ExitReason, OccupancyProvenance};
 use ego_core::event::id::{EventId, ItemId, Producer, Seq, SessionId, TurnId};
 use ego_core::event::time::Timestamp;
 use ego_core::public::{ItemKind, PUBLIC_EVENT_VERSION, PublicEvent, project_public};
@@ -28,6 +29,32 @@ mod public_golden {
     }
 
     const SESSION: &str = "00000000-0000-0000-0000-000000000001";
+
+    /// Tokens across all four priced categories, so the golden pins every
+    /// one of them rather than only the two the old input/output pair had.
+    fn tokens(uncached_input: u64, cache_read: u64, cache_write: u64, output: u64) -> Usage {
+        Usage {
+            uncached_input_tokens: uncached_input,
+            cache_read_tokens: cache_read,
+            cache_write_tokens: cache_write,
+            output_tokens: output,
+        }
+    }
+
+    fn usd(decimal: &str) -> Money {
+        Money::new(
+            decimal.parse::<Amount>().expect("a valid test amount"),
+            CurrencyCode::new("USD").expect("USD is a valid code"),
+        )
+    }
+
+    fn priced(decimal: &str) -> CostDelta {
+        CostDelta::Known {
+            amount: usd(decimal),
+            pricing_revision: PricingRevision("test-2026-08".to_string()),
+            fx: None,
+        }
+    }
     const TURN_1: &str = "00000000-0000-0000-0000-000000000002";
     const TURN_2: &str = "00000000-0000-0000-0000-000000000003";
     const ITEM_USER_1: &str = "00000000-0000-0000-0000-000000000004";
@@ -53,7 +80,7 @@ mod public_golden {
         }
     }
 
-    /// A realistic two-turn log of 20 events covering 16 of the 17
+    /// A realistic two-turn log of 21 events covering 17 of the 18
     /// `EventKind` variants: `UserPrompt`, `AssistantDelta`,
     /// `AssistantMessage` and `TurnCompleted` each appear more than once,
     /// and `ReasoningDelta` is absent — it is the one kind this log does
@@ -174,8 +201,17 @@ mod public_golden {
                 turn1,
                 None,
                 EventKind::UsageUpdated {
-                    input_tokens: 120,
-                    output_tokens: 45,
+                    usage: tokens(120, 900, 60, 45),
+                    cost_delta: priced("0.0027"),
+                },
+            ),
+            ev(
+                seq.next(),
+                turn1,
+                None,
+                EventKind::ContextWindowUpdated {
+                    used_tokens: 1_125,
+                    provenance: OccupancyProvenance::GenerationBoundary,
                 },
             ),
             ev(
@@ -386,8 +422,8 @@ mod public_golden {
             turn,
             Some(item),
             EventKind::UsageUpdated {
-                input_tokens: 10,
-                output_tokens: 5,
+                usage: tokens(10, 0, 0, 5),
+                cost_delta: priced("0.001"),
             },
         );
         assert_eq!(
@@ -395,12 +431,70 @@ mod public_golden {
             Some(PublicEvent::UsageUpdated {
                 turn,
                 item: Some(item),
-                usage_delta: Usage {
-                    input_tokens: 10,
-                    output_tokens: 5,
-                },
+                usage_delta: tokens(10, 0, 0, 5),
+                cost_delta: priced("0.001"),
             })
         );
+    }
+
+    /// An unpriced generation must reach the public stream *as* unpriced.
+    /// The failure this guards against is not a crash but a silent
+    /// downgrade: if `cost_delta` were `Option<Money>`, the natural
+    /// projection would be `None`, which every consumer would read as
+    /// "free". The golden log only carries priced generations, so without
+    /// this the `Unknown` path has no coverage at all.
+    #[test]
+    fn an_unpriced_generation_projects_as_unknown_never_as_free() {
+        let turn: TurnId = id(TURN_1);
+        let event = ev(
+            Seq::default(),
+            turn,
+            None,
+            EventKind::UsageUpdated {
+                usage: tokens(10, 0, 0, 5),
+                cost_delta: CostDelta::Unknown(UnknownCost::NoPricingQuote),
+            },
+        );
+        assert_eq!(
+            project_public(&event),
+            Some(PublicEvent::UsageUpdated {
+                turn,
+                item: None,
+                usage_delta: tokens(10, 0, 0, 5),
+                cost_delta: CostDelta::Unknown(UnknownCost::NoPricingQuote),
+            })
+        );
+    }
+
+    /// Context occupancy is public, and carries its provenance. Without
+    /// this, the arm could be deleted — the event would simply vanish from
+    /// the stream — and every other test would stay green.
+    #[test]
+    fn context_window_updates_project_with_their_provenance() {
+        let turn: TurnId = id(TURN_1);
+        for provenance in [
+            OccupancyProvenance::GenerationBoundary,
+            OccupancyProvenance::AuthoritativeQuery,
+            OccupancyProvenance::LocalEstimate,
+        ] {
+            let event = ev(
+                Seq::default(),
+                turn,
+                None,
+                EventKind::ContextWindowUpdated {
+                    used_tokens: 4_096,
+                    provenance,
+                },
+            );
+            assert_eq!(
+                project_public(&event),
+                Some(PublicEvent::ContextWindowUpdated {
+                    turn,
+                    used_tokens: 4_096,
+                    provenance,
+                })
+            );
+        }
     }
 
     /// `ReasoningDelta` is the one `EventKind` the fixture log never
