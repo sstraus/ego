@@ -265,6 +265,7 @@ dependencies = [
  "ego-core",
  "fd-lock",
  "futures",
+ "serde",
  "serde_json",
  "tempfile",
  "tracing",

@@ -6,12 +6,8 @@
 
 mod io;
 mod jsonl_store;
-// Public as a module rather than re-exported flat like its siblings, only
-// until Step 5 lands: a `pub use lease::{Lease, LeaseError}` against an
-// empty module fails the whole crate's build, which blocks every other
-// agent working in `ego-tools`. Flattened to match `io`/`jsonl_store` once
-// the types exist.
-pub mod lease;
+mod lease;
 
 pub use io::{OsIo, StoreIo};
 pub use jsonl_store::JsonlStore;
+pub use lease::{Lease, LeaseError};
