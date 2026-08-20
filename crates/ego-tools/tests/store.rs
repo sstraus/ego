@@ -96,6 +96,14 @@ mod store {
             self.inner.replace_atomic(path, bytes)
         }
 
+        fn truncate(&self, path: &std::path::Path, len: u64) -> std::io::Result<()> {
+            self.inner.truncate(path, len)
+        }
+
+        fn remove_file(&self, path: &std::path::Path) -> std::io::Result<()> {
+            self.inner.remove_file(path)
+        }
+
         fn list_dirs(&self, path: &std::path::Path) -> std::io::Result<Vec<PathBuf>> {
             self.inner.list_dirs(path)
         }
@@ -134,6 +142,14 @@ mod store {
 
         fn replace_atomic(&self, path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
             self.inner.replace_atomic(path, bytes)
+        }
+
+        fn truncate(&self, path: &std::path::Path, len: u64) -> std::io::Result<()> {
+            self.inner.truncate(path, len)
+        }
+
+        fn remove_file(&self, path: &std::path::Path) -> std::io::Result<()> {
+            self.inner.remove_file(path)
         }
 
         fn list_dirs(&self, path: &std::path::Path) -> std::io::Result<Vec<PathBuf>> {
@@ -175,6 +191,14 @@ mod store {
 
         fn replace_atomic(&self, path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
             self.inner.replace_atomic(path, bytes)
+        }
+
+        fn truncate(&self, path: &std::path::Path, len: u64) -> std::io::Result<()> {
+            self.inner.truncate(path, len)
+        }
+
+        fn remove_file(&self, path: &std::path::Path) -> std::io::Result<()> {
+            self.inner.remove_file(path)
         }
 
         fn list_dirs(&self, path: &std::path::Path) -> std::io::Result<Vec<PathBuf>> {

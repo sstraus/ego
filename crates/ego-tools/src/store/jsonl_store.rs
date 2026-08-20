@@ -11,13 +11,91 @@ use std::path::PathBuf;
 
 use ego_core::event::domain::{DomainEvent, EventKind};
 use ego_core::event::id::SessionId;
+use ego_core::event::time::Timestamp;
 use ego_core::store::codec::{
     CodecError, HeaderV1, StoreLine, decode_line, encode_header, encode_record,
 };
 use ego_core::store::session_store::{SessionMeta, SessionStore, StoreError};
 use futures::stream::{self, BoxStream};
 
-use super::io::StoreIo;
+use super::io::{StoreIo, tmp_path_for};
+
+/// What [`JsonlStore::recover`] actually had to repair.
+///
+/// Returned rather than swallowed because "we silently rewrote your session
+/// log" is not something a store should do invisibly: a caller decides
+/// whether dropping N events is routine (the last append was interrupted)
+/// or alarming (half the session vanished). Every field is zero/false on
+/// the overwhelmingly common path where nothing was wrong.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Repair {
+    /// Bytes cut from a torn tail.
+    pub truncated_bytes: u64,
+    /// Lines those bytes contained — a torn final line counts as one.
+    pub dropped_lines: usize,
+    /// Whether the manifest was rewritten from the log.
+    pub manifest_rebuilt: bool,
+    /// Whether a scratch file orphaned mid-`replace_atomic` was removed.
+    pub removed_tmp: bool,
+}
+
+impl Repair {
+    /// Whether anything at all was repaired.
+    pub fn is_clean(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// The end of the last *complete, valid* line in `bytes`, plus how many
+/// lines were rejected from there on.
+///
+/// A line counts as durable only if it is terminated by a newline: a final
+/// line without one is by definition a half-finished append, which is the
+/// single most likely crash artefact for an append-only log. Beyond that,
+/// every line must decode — checksum included — and must be the shape its
+/// position demands (a header first, records after).
+///
+/// The scan stops at the *first* rejected line rather than skipping it and
+/// resuming, and everything after it is dropped too. That is deliberate: a
+/// gap in an append-only log means the byte stream desynchronised, so
+/// "valid" lines after the gap are not trustworthy neighbours — they are
+/// bytes that happened to parse.
+fn valid_prefix(bytes: &[u8]) -> (usize, usize) {
+    let mut end = 0usize;
+    let mut index = 0usize;
+
+    while end < bytes.len() {
+        let Some(offset) = bytes[end..].iter().position(|&b| b == b'\n') else {
+            break; // torn final line: no terminating newline
+        };
+        let line = &bytes[end..end + offset];
+        let decoded = match decode_line(line) {
+            Ok(decoded) => decoded,
+            Err(_) => break,
+        };
+        let shape_ok = match (index, &decoded) {
+            (0, StoreLine::Header(_)) => true,
+            (0, _) => false,
+            (_, StoreLine::Record(_)) => true,
+            (_, _) => false,
+        };
+        if !shape_ok {
+            break;
+        }
+        end += offset + 1;
+        index += 1;
+    }
+
+    // Count what is being discarded, in lines rather than just bytes, so a
+    // caller can tell "the last append was cut short" (1) from "the log
+    // desynchronised early" (many).
+    let dropped = if end < bytes.len() {
+        bytes[end..].split(|&b| b == b'\n').count() - usize::from(bytes.ends_with(b"\n"))
+    } else {
+        0
+    };
+    (end, dropped)
+}
 
 /// A `SessionId`'s value, as a plain hyphenated UUID string.
 ///
@@ -47,6 +125,31 @@ fn split_lines(bytes: &[u8]) -> Vec<&[u8]> {
         lines.pop();
     }
     lines
+}
+
+/// A valid log's `created` (from its header) and the timestamp of its last
+/// record, or `None` if it has no header or no records.
+///
+/// Only ever called on a prefix [`valid_prefix`] has already accepted, so
+/// every line here is known to decode; a line that somehow does not is
+/// skipped rather than failing recovery, since refusing to rebuild a
+/// manifest is a worse outcome than rebuilding it from one event less.
+fn log_bounds(log: &[u8]) -> Option<(Timestamp, Timestamp)> {
+    let mut lines = split_lines(log).into_iter();
+    let created = match decode_line(lines.next()?) {
+        Ok(StoreLine::Header(header)) => header.created,
+        _ => return None,
+    };
+    let last_ts = lines
+        .filter_map(|line| match decode_line(line) {
+            Ok(StoreLine::Record(record)) => {
+                serde_json::from_str::<DomainEvent>(record.payload.get()).ok()
+            }
+            _ => None,
+        })
+        .map(|ev| ev.env.ts)
+        .next_back()?;
+    Some((created, last_ts))
 }
 
 /// The filesystem `SessionStore`. Real I/O goes through the injected
@@ -88,6 +191,123 @@ impl JsonlStore {
                 Ok(Some(meta))
             }
         }
+    }
+
+    /// Bring `id`'s on-disk state back to something every later read can
+    /// trust, and report what had to change.
+    ///
+    /// This is the recovery half of `ARCHITECTURE.md` §5 and
+    /// `plans/m0a-contracts.md` Step 6, and it must be run before a session
+    /// is read or appended to after a crash. It is idempotent: running it on
+    /// an already-clean session returns a clean [`Repair`] and touches
+    /// nothing, so a caller can run it unconditionally on open rather than
+    /// having to first work out whether a crash happened — which is not
+    /// knowable from the outside anyway.
+    ///
+    /// The three kill points, in the order they are repaired:
+    ///
+    /// 1. **Orphan scratch file** — a crash between `replace_atomic`'s write
+    ///    and its rename leaves `manifest.json.tmp` behind. Removed first,
+    ///    so a later manifest rebuild cannot trip over a stale one.
+    /// 2. **Torn tail** — the log is truncated to its last complete, valid,
+    ///    checksummed line (see [`valid_prefix`]).
+    /// 3. **Stale or unreadable manifest** — rebuilt from the log when the
+    ///    log is ahead of it, which is exactly the "missing fsync window"
+    ///    case: `append` only rewrites the manifest on a turn boundary, so
+    ///    every event since the last one is in the log but not the manifest.
+    ///    The log is the authority; the manifest is a derived cache.
+    ///
+    /// Note the deliberate absence of a fourth: an orphaned *lease* needs no
+    /// repair here. The advisory lock behind `Lease` is owned by the open
+    /// file description, so the kernel drops it when the holder's descriptor
+    /// closes — including on `SIGKILL` — and a stale PID/heartbeat record is
+    /// handled by `Lease::acquire`'s takeover path, not by rewriting files.
+    /// Deleting a lease file here would be actively wrong: it would evict a
+    /// *live* writer.
+    pub fn recover(&self, id: &SessionId) -> Result<Repair, StoreError> {
+        let mut repair = Repair::default();
+
+        let manifest_path = self.manifest_path(id);
+        let tmp_path = tmp_path_for(&manifest_path);
+        if self.io.exists(&tmp_path)? {
+            self.io.remove_file(&tmp_path)?;
+            repair.removed_tmp = true;
+        }
+
+        let log_path = self.log_path(id);
+        let Some(bytes) = self.io.read(&log_path)? else {
+            // No log at all: nothing to repair, and nothing to rebuild a
+            // manifest from. Not an error — `recover` is safe to call on a
+            // session id that was never written.
+            return Ok(repair);
+        };
+
+        let (valid_len, dropped_lines) = valid_prefix(&bytes);
+        if valid_len < bytes.len() {
+            repair.truncated_bytes = (bytes.len() - valid_len) as u64;
+            repair.dropped_lines = dropped_lines;
+            tracing::warn!(
+                session = %session_dir_name(id),
+                truncated_bytes = repair.truncated_bytes,
+                dropped_lines = repair.dropped_lines,
+                "repairing a torn session log tail"
+            );
+            self.io.truncate(&log_path, valid_len as u64)?;
+        }
+
+        if self.rebuild_manifest_if_stale(id, &bytes[..valid_len])? {
+            repair.manifest_rebuilt = true;
+        }
+
+        Ok(repair)
+    }
+
+    /// Rewrite `id`'s manifest from `log` when the manifest is missing,
+    /// unreadable, or older than the log's last event. Returns whether it
+    /// wrote anything.
+    fn rebuild_manifest_if_stale(&self, id: &SessionId, log: &[u8]) -> Result<bool, StoreError> {
+        let Some((created, last_ts)) = log_bounds(log) else {
+            // A log with a header but no surviving records has no `updated`
+            // to offer, so it cannot make an existing manifest more
+            // accurate than it already is.
+            return Ok(false);
+        };
+
+        // A manifest that fails to parse is treated exactly like a missing
+        // one — it is a derived cache, and the log can regenerate it — but
+        // an I/O error is propagated, because "cannot read this path" is
+        // not evidence about the manifest's contents.
+        let previous = match self.read_manifest(id) {
+            Ok(previous) => previous,
+            Err(StoreError::Manifest(_)) => None,
+            Err(e) => return Err(e),
+        };
+
+        if let Some(meta) = &previous
+            && meta.updated >= last_ts
+        {
+            return Ok(false);
+        }
+
+        tracing::warn!(
+            session = %session_dir_name(id),
+            "rebuilding a session manifest that is missing, unreadable or behind its log"
+        );
+        let meta = SessionMeta {
+            id: *id,
+            workspace_root: previous.as_ref().and_then(|m| m.workspace_root.clone()),
+            model: previous.as_ref().and_then(|m| m.model.clone()),
+            // `created` comes from the log header rather than the old
+            // manifest: the header is written once, at session creation, and
+            // is checksum-protected, so it is the better authority for a
+            // value that must never drift.
+            created,
+            updated: last_ts,
+            title: previous.as_ref().and_then(|m| m.title.clone()),
+        };
+        let bytes = serde_json::to_vec(&meta).expect("SessionMeta always serialises");
+        self.io.replace_atomic(&self.manifest_path(id), &bytes)?;
+        Ok(true)
     }
 
     /// Replace `id`'s manifest, carrying its `created`/`workspace_root`/

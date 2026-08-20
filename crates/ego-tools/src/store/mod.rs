@@ -8,6 +8,6 @@ mod io;
 mod jsonl_store;
 mod lease;
 
-pub use io::{OsIo, StoreIo};
-pub use jsonl_store::JsonlStore;
+pub use io::{OsIo, StoreIo, tmp_path_for};
+pub use jsonl_store::{JsonlStore, Repair};
 pub use lease::{Lease, LeaseError};
