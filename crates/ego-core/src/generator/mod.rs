@@ -7,6 +7,7 @@
 //! Named `generator` rather than the plan's `gen`: `gen` is a reserved keyword
 //! in edition 2024.
 
+pub mod attempt;
 pub mod capabilities;
 pub mod fake;
 pub mod port;

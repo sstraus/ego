@@ -71,6 +71,68 @@ impl Default for EventId {
     }
 }
 
+/// One logical generation, stable across every retry of it (UUIDv7).
+///
+/// The budget settles once per `GenerationId`: a retry is the same intent
+/// reaching the wire again, not a second thing to pay for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct GenerationId(Uuid);
+
+impl GenerationId {
+    /// Generate a new identity from the current time.
+    pub fn new() -> Self {
+        Self(Uuid::now_v7())
+    }
+}
+
+impl Default for GenerationId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// One wire attempt within a generation (UUIDv7).
+///
+/// Usage observations and corrections key to *this*, not to the generation,
+/// because a provider can report a figure per attempt and summing two
+/// attempts of one generation would double-count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct AttemptId(Uuid);
+
+impl AttemptId {
+    /// Generate a new identity from the current time.
+    pub fn new() -> Self {
+        Self(Uuid::now_v7())
+    }
+}
+
+impl Default for AttemptId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The identity of a budget gate (UUIDv7).
+///
+/// Carried by every reservation so a token minted by one gate cannot be
+/// settled against another — which would underflow the second gate's
+/// outstanding balance and silently widen its budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct GateId(Uuid);
+
+impl GateId {
+    /// Generate a new identity from the current time.
+    pub fn new() -> Self {
+        Self(Uuid::now_v7())
+    }
+}
+
+impl Default for GateId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// A monotonic sequence number.
 ///
 /// `Seq` only exposes forward movement: the public API has no way to
