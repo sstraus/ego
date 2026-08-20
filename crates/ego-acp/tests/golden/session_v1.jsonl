@@ -1,0 +1,6 @@
+{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"list the files"},"messageId":"00000000-0000-0000-0000-000000000004"}
+{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Sure"},"messageId":"00000000-0000-0000-0000-000000000005"}
+{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":", one sec"},"messageId":"00000000-0000-0000-0000-000000000005"}
+{"sessionUpdate":"tool_call","toolCallId":"00000000-0000-0000-0000-000000000006","title":"bash","rawInput":"ls"}
+{"sessionUpdate":"tool_call_update","toolCallId":"00000000-0000-0000-0000-000000000006","status":"completed","content":[{"type":"content","content":{"type":"text","text":"file1\nfile2\n"}}]}
+{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"thanks"},"messageId":"00000000-0000-0000-0000-000000000009"}

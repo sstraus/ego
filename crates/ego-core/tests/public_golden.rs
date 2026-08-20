@@ -53,8 +53,13 @@ mod public_golden {
         }
     }
 
-    /// A realistic two-turn log exercising every one of the 17 `EventKind`
-    /// variants exactly once. The first turn covers every public item kind
+    /// A realistic two-turn log of 20 events covering 16 of the 17
+    /// `EventKind` variants: `UserPrompt`, `AssistantDelta`,
+    /// `AssistantMessage` and `TurnCompleted` each appear more than once,
+    /// and `ReasoningDelta` is absent — it is the one kind this log does
+    /// not reach, so it is covered by
+    /// `reasoning_delta_projects_to_an_item_delta_of_kind_reasoning` below
+    /// instead. The first turn covers every public item kind
     /// (message, tool, permission, subagent), a `UsageUpdated` (public, as
     /// `usage_delta` — never a running total), a bare `Error`, and the
     /// three internal-only kinds (`Compacted`, `Forked`, `HookFired`) that
@@ -394,6 +399,37 @@ mod public_golden {
                     input_tokens: 10,
                     output_tokens: 5,
                 },
+            })
+        );
+    }
+
+    /// `ReasoningDelta` is the one `EventKind` the fixture log never
+    /// contains, so without this test its projection has no runtime
+    /// coverage: the golden would be equally green with the arm deleted or
+    /// mapped to the wrong `ItemKind`.
+    ///
+    /// It is deliberately *not* `ItemKind::Message`: reasoning is a
+    /// separate public item kind, so a client can render or suppress
+    /// thinking independently of the answer.
+    #[test]
+    fn reasoning_delta_projects_to_an_item_delta_of_kind_reasoning() {
+        let turn: TurnId = id(TURN_1);
+        let item: ItemId = id(ITEM_ASSISTANT_1);
+        let event = ev(
+            Seq::default(),
+            turn,
+            Some(item),
+            EventKind::ReasoningDelta {
+                text: "weighing the options".to_string(),
+            },
+        );
+        assert_eq!(
+            project_public(&event),
+            Some(PublicEvent::ItemDelta {
+                turn,
+                item,
+                kind: ItemKind::Reasoning,
+                text: "weighing the options".to_string(),
             })
         );
     }
