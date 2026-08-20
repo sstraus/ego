@@ -84,9 +84,15 @@ pub enum OccupancyProvenance {
 /// Compacted | Forked | HookFired | SubagentSpawned | SubagentReturned | Error
 /// ```
 ///
-/// This is the internal representation: it evolves freely with core and is
-/// never assumed stable across a process boundary. `PublicEvent` (a later
-/// step) is the privacy-filtered, compatibility-governed projection of this.
+/// This is the internal representation: it evolves freely with core, and
+/// `PublicEvent` is the privacy-filtered, compatibility-governed projection
+/// of it. "Freely" has one hard limit, though — `SessionStore::append`
+/// serialises this type verbatim as the `StoreRecord` payload, so its serde
+/// shape *is* the durable format and a later build has to read what an
+/// earlier one wrote. `tests/codec.rs`'s committed `golden/store_log.jsonl`
+/// pins those bytes: adding a variant or a field is fine, but renaming or
+/// re-tagging an existing one is a `CODEC_VERSION` bump plus a migration,
+/// not a fixture update.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum EventKind {

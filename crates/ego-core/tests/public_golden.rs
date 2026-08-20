@@ -13,6 +13,8 @@ use ego_core::event::time::Timestamp;
 use ego_core::public::{ItemKind, PUBLIC_EVENT_VERSION, PublicEvent, project_public};
 use ego_core::state::Usage;
 
+mod common;
+
 // Wrapped in a module named `public_golden` so `cargo test -p ego-core
 // public_golden` (the story's VERIFY command) matches these tests by
 // substring, the same trick `tests/reducer.rs` uses for `reducer`: cargo's
@@ -20,13 +22,7 @@ use ego_core::state::Usage;
 mod public_golden {
     use super::*;
 
-    /// Deserialise a fixed UUID literal into any of the id newtypes, via
-    /// their already-derived (and already-public) `Deserialize` impl. This
-    /// gets deterministic, golden-comparable ids without adding a
-    /// constructor to `event::id` (out of scope: owned by another story).
-    fn id<T: serde::de::DeserializeOwned>(uuid: &str) -> T {
-        serde_json::from_str(&format!("{uuid:?}")).unwrap()
-    }
+    use super::common::id;
 
     const SESSION: &str = "00000000-0000-0000-0000-000000000001";
 

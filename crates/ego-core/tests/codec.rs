@@ -3,13 +3,18 @@
 //!
 //! See `ARCHITECTURE.md` §1/§5 and `plans/m0a-contracts.md` Step 3.
 
-use ego_core::event::id::{Seq, SessionId};
+use ego_core::cost::{Amount, CostDelta, CurrencyCode, Money, PricingRevision};
+use ego_core::event::domain::{DomainEvent, Envelope, EventKind};
+use ego_core::event::id::{Producer, Seq, SessionId};
 use ego_core::event::time::Timestamp;
+use ego_core::state::Usage;
 use ego_core::store::codec::{
     CODEC_VERSION, CodecError, HeaderV1, IndexedCodecError, StoreLine, decode_line, decode_log,
     encode_header, encode_record,
 };
 use serde::{Deserialize, Serialize};
+
+mod common;
 
 // Wrapped in a module named `codec` so `cargo test -p ego-core codec` (the
 // story's VERIFY command) matches these tests by substring: cargo's test
@@ -361,5 +366,122 @@ mod codec {
 
         let lines = decode_log(&log).unwrap();
         assert_eq!(lines.len(), 2);
+    }
+
+    // --- golden: the durable wire format --------------------------------
+    //
+    // Every test above this line round-trips through *this* build, so all of
+    // them still pass if a field is renamed, the checksum framing changes or
+    // a `DomainEvent` variant's serde shape moves — encoder and decoder move
+    // together and agree with each other. That is precisely the failure a
+    // durable format cannot afford: `events.jsonl` is read back by future
+    // builds, so the bytes are the contract, not the round-trip.
+    //
+    // The fixture is committed data. It pins the record envelope *and* the
+    // `DomainEvent` payload shape, which no other golden covers — the public
+    // goldens pin the `PublicEvent` projection, which is deliberately a
+    // different schema with its own compatibility policy (ARCH §1).
+
+    /// A log with a fixed session, fixed ids and fixed timestamps, so its
+    /// encoding is byte-for-byte reproducible.
+    fn golden_log() -> Vec<u8> {
+        let header = HeaderV1::new(
+            common::id(GOLDEN_SESSION),
+            Timestamp::from_millis(1_787_206_085_352),
+        );
+        let mut log = encode_header(&header);
+        for (n, event) in golden_events().iter().enumerate() {
+            log.push(b'\n');
+            log.extend(encode_record(seq_of(n as u64 + 1), event).unwrap());
+        }
+        log
+    }
+
+    const GOLDEN_SESSION: &str = "00000000-0000-0000-0000-000000000001";
+    const GOLDEN_TURN: &str = "00000000-0000-0000-0000-000000000002";
+    const GOLDEN_ITEM: &str = "00000000-0000-0000-0000-000000000003";
+    const GOLDEN_EVENT_1: &str = "00000000-0000-0000-0000-00000000000a";
+    const GOLDEN_EVENT_2: &str = "00000000-0000-0000-0000-00000000000b";
+
+    fn golden_events() -> Vec<DomainEvent> {
+        let envelope = |id: &str, parent: Option<&str>| Envelope {
+            seq: Seq::default(),
+            id: common::id(id),
+            turn: common::id(GOLDEN_TURN),
+            item: Some(common::id(GOLDEN_ITEM)),
+            parent: parent.map(common::id),
+            ts: Timestamp::from_millis(1_787_206_085_400),
+            producer: Producer::Main,
+        };
+        vec![
+            DomainEvent {
+                env: envelope(GOLDEN_EVENT_1, None),
+                kind: EventKind::UserPrompt {
+                    text: "list the files".to_string(),
+                },
+            },
+            // Chosen deliberately: this is the money event. Its durable shape
+            // carries the four priced token categories and an exact decimal
+            // amount as a *string*, and a silent change to either would
+            // misprice every session already on disk.
+            DomainEvent {
+                env: envelope(GOLDEN_EVENT_2, Some(GOLDEN_EVENT_1)),
+                kind: EventKind::UsageUpdated {
+                    usage: Usage {
+                        uncached_input_tokens: 120,
+                        cache_read_tokens: 900,
+                        cache_write_tokens: 60,
+                        output_tokens: 45,
+                    },
+                    cost_delta: CostDelta::Known {
+                        amount: Money::new(
+                            "0.0027".parse::<Amount>().expect("a valid test amount"),
+                            CurrencyCode::new("USD").expect("USD is a valid code"),
+                        ),
+                        pricing_revision: PricingRevision("test-2026-08".to_string()),
+                        fx: None,
+                    },
+                },
+            },
+        ]
+    }
+
+    #[test]
+    fn codec_golden_log_encodes_to_the_committed_bytes() {
+        let actual = String::from_utf8(golden_log()).expect("the codec emits UTF-8");
+        assert_eq!(
+            actual,
+            include_str!("golden/store_log.jsonl").trim_end(),
+            "the durable wire format changed. Every log already written to \
+             disk is in the old shape, so this is a codec version bump and a \
+             migration, not a fixture update."
+        );
+    }
+
+    #[test]
+    fn codec_golden_log_written_by_a_past_build_still_decodes_and_verifies() {
+        let lines = decode_log(include_str!("golden/store_log.jsonl").as_bytes())
+            .expect("the committed log decodes with checksums intact");
+
+        let expected = golden_events();
+        assert_eq!(lines.len(), expected.len() + 1, "header plus one per event");
+        match &lines[0] {
+            StoreLine::Header(h) => assert_eq!(h.v, CODEC_VERSION),
+            other => panic!("first line is not a header: {other:?}"),
+        }
+        for (line, event) in lines[1..].iter().zip(&expected) {
+            match line {
+                // `decode_line` verifies the checksum before it yields a
+                // `Record` at all, so reaching this arm is the integrity
+                // assertion; deserialising the payload then proves the
+                // committed bytes still parse as today's `DomainEvent`.
+                StoreLine::Record(record) => {
+                    let decoded: DomainEvent = serde_json::from_str(record.payload.get())
+                        .expect("the committed payload still parses as a DomainEvent");
+                    assert_eq!(&decoded, event);
+                }
+                other => panic!("expected a record, got {other:?}"),
+            }
+        }
     }
 }
