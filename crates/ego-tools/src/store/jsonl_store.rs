@@ -10,8 +10,9 @@
 use std::path::PathBuf;
 
 use ego_core::event::domain::{DomainEvent, EventKind};
-use ego_core::event::id::SessionId;
+use ego_core::event::id::{Seq, SessionId};
 use ego_core::event::time::Timestamp;
+use ego_core::state::SessionState;
 use ego_core::store::codec::{
     CodecError, HeaderV1, StoreLine, decode_line, encode_header, encode_record,
 };
@@ -19,6 +20,7 @@ use ego_core::store::session_store::{SessionMeta, SessionStore, StoreError};
 use futures::stream::{self, BoxStream};
 
 use super::io::{StoreIo, tmp_path_for};
+use super::snapshot::{SNAPSHOT_VERSION, Snapshot, SnapshotRejection, validate};
 
 /// What [`JsonlStore::recover`] actually had to repair.
 ///
@@ -191,6 +193,115 @@ impl JsonlStore {
                 Ok(Some(meta))
             }
         }
+    }
+
+    fn snapshot_path(&self, id: &SessionId) -> PathBuf {
+        self.session_dir(id).join("snapshot.json")
+    }
+
+    /// Write `state` as `id`'s snapshot, as of `source_seq`.
+    ///
+    /// Replaced atomically and durably, like the manifest: a half-written
+    /// snapshot must never be readable, and one that survives a crash must
+    /// be complete. Unlike the manifest, a torn snapshot would be *safe*
+    /// anyway — [`JsonlStore::resume`] discards anything it cannot parse —
+    /// but leaving a corrupt file on disk to be silently ignored on every
+    /// later resume would turn a bounded replay into a full one forever,
+    /// with nothing to show why.
+    pub fn write_snapshot(
+        &self,
+        id: &SessionId,
+        source_seq: Seq,
+        state: &SessionState,
+    ) -> Result<(), StoreError> {
+        let snapshot = Snapshot::new(*id, source_seq, state.clone());
+        let bytes = serde_json::to_vec(&snapshot).expect("Snapshot always serialises");
+        self.io.replace_atomic(&self.snapshot_path(id), &bytes)?;
+        Ok(())
+    }
+
+    /// Reduce `id`'s log to a [`SessionState`], using its snapshot when one
+    /// can be trusted and replaying the whole log when it cannot.
+    ///
+    /// Returns the state and, when a snapshot was *not* used, the reason —
+    /// so a caller can tell a bounded resume from a full replay, and log or
+    /// act on a snapshot that keeps being rejected. A rejected snapshot is
+    /// never an error: see this module's `snapshot` sibling for why the
+    /// snapshot is a cache and the log is the authority.
+    pub fn resume(
+        &self,
+        id: &SessionId,
+    ) -> Result<(SessionState, Option<SnapshotRejection>), StoreError> {
+        let events = self.read_events(id)?;
+
+        let rejection = match self.read_snapshot(id) {
+            Err(rejection) => Some(rejection),
+            Ok(snapshot) => {
+                match (events.first(), events.last()) {
+                    // An empty log cannot corroborate any snapshot, and has
+                    // nothing to replay either.
+                    (None, _) | (_, None) => Some(SnapshotRejection::Absent),
+                    (Some(first), Some(last)) => {
+                        match validate(&snapshot, id, first.env.seq, last.env.seq) {
+                            Err(rejection) => Some(rejection),
+                            Ok(()) => {
+                                let mut state = snapshot.state;
+                                for ev in events.iter().filter(|e| e.env.seq > snapshot.source_seq)
+                                {
+                                    state.apply(ev);
+                                }
+                                return Ok((state, None));
+                            }
+                        }
+                    }
+                }
+            }
+        };
+
+        let mut state = SessionState::default();
+        for ev in &events {
+            state.apply(ev);
+        }
+        Ok((state, rejection))
+    }
+
+    /// `id`'s snapshot, or why it cannot be used. Errors are rejections,
+    /// not failures — every one of them means "replay the log instead".
+    fn read_snapshot(&self, id: &SessionId) -> Result<Snapshot, SnapshotRejection> {
+        let bytes = match self.io.read(&self.snapshot_path(id)) {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => return Err(SnapshotRejection::Absent),
+            Err(e) => return Err(SnapshotRejection::Unreadable(e.to_string())),
+        };
+        serde_json::from_slice(&bytes)
+            .map_err(|e| SnapshotRejection::Unreadable(e.to_string()))
+            .and_then(|snapshot: Snapshot| {
+                // Checked before anything else looks at the payload: a
+                // future version's `state` may not even deserialise into
+                // today's `SessionState`, so a parse failure above is
+                // already the common outcome — this catches the case where
+                // it happens to parse but must still not be trusted.
+                if snapshot.v == SNAPSHOT_VERSION {
+                    Ok(snapshot)
+                } else {
+                    Err(SnapshotRejection::Version { found: snapshot.v })
+                }
+            })
+    }
+
+    /// Every event in `id`'s log, in order, skipping any line that does not
+    /// decode.
+    ///
+    /// Skipping rather than failing mirrors `SessionStore::read`'s contract
+    /// (a per-line failure must not abort the whole session) and is safe
+    /// here because `recover` is what removes bad lines; a caller that has
+    /// not run it should still get the events that are intact.
+    fn read_events(&self, id: &SessionId) -> Result<Vec<DomainEvent>, StoreError> {
+        let stream = SessionStore::read(self, id)?;
+        Ok(futures::executor::block_on(async {
+            use futures::StreamExt;
+            stream.filter_map(|r| async move { r.ok() }).collect().await
+        }))
     }
 
     /// Bring `id`'s on-disk state back to something every later read can
