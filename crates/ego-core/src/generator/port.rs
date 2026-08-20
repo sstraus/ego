@@ -3,11 +3,10 @@
 //! See `ARCHITECTURE.md` §2 ("ports belong to the consumer") and §3.1.
 //! `ego-ai` implements this trait; `ego-core` never opens a socket itself.
 
-use futures::stream::BoxStream;
 use serde::{Deserialize, Serialize};
 
+use super::attempt::{AttemptStream, DeliveryCertainty, GenerationAttempt};
 use super::types::{GenRequest, StopReason};
-use crate::budget::Reservation;
 use crate::state::Usage;
 
 /// One increment of a generation's output stream.
@@ -37,6 +36,15 @@ pub enum AiEvent {
     },
     /// Incremental usage for this generation.
     Usage(Usage),
+    /// The transport's reading of whether the request bytes reached the
+    /// provider.
+    ///
+    /// Reported as it changes rather than only at the end, because the case
+    /// that matters most is a stream dropped *after* the bytes may have left
+    /// and *before* any terminal frame — precisely when a terminal-only
+    /// report would never arrive and a retry would double-bill.
+    /// `AttemptStream` folds these monotonically.
+    DeliveryObserved(DeliveryCertainty),
     /// The generation reached a terminal state.
     Stop(StopReason),
     /// The provider reported an error mid-stream.
@@ -52,17 +60,25 @@ pub enum AiEvent {
 pub trait Generator: Send + Sync {
     /// Generate the next assistant turn.
     ///
-    /// The `&Reservation` is the budget gate, enforced in the signature
-    /// rather than by convention: its constructor is sealed inside
-    /// [`crate::budget`], so the only way to obtain one is
-    /// `BudgetGate::reserve`, which refuses when the cost cannot be bounded.
-    /// `ARCHITECTURE.md` §3.1 requires an unknown cost to fail *closed*, and
-    /// a check on the response cannot do that — the money is already spent
-    /// by then. Taking the proof as an argument means a generation that
-    /// skipped the gate does not compile.
+    /// The [`GenerationAttempt`] is the budget gate, enforced in the
+    /// signature rather than by convention: it can only be built from a
+    /// [`Reservation`](crate::budget::Reservation), whose constructor is
+    /// sealed inside [`crate::budget`], so the only source is
+    /// `BudgetGate::reserve` — which refuses when the cost cannot be
+    /// bounded. `ARCHITECTURE.md` §3.1 requires an unknown cost to fail
+    /// *closed*, and a check on the response cannot do that, because the
+    /// money is already spent by then. A generation that skipped the gate
+    /// does not compile.
     ///
-    /// Borrowed rather than consumed: the reservation outlives the call and
-    /// is settled afterwards by `BudgetGate::reconcile`, which needs the
-    /// same pricing revision that authorised it.
-    fn generate(&self, req: GenRequest, reservation: &Reservation) -> BoxStream<'static, AiEvent>;
+    /// Taken **by value**, and handed back inside the returned
+    /// [`AttemptStream`]. Not borrowed: a borrowed token stays usable for a
+    /// second generation. Not consumed and discarded either — settling needs
+    /// `&mut BudgetGate`, which no implementor of this trait has, so an
+    /// attempt that did not come back out could never be settled by anyone.
+    /// Riding inside the stream is what makes "the hold survives until the
+    /// stream ends" a fact about ownership rather than a rule to remember.
+    ///
+    /// Implementors build the return value with [`AttemptStream::new`]; they
+    /// do not need to touch the attempt otherwise.
+    fn generate(&self, req: GenRequest, attempt: GenerationAttempt) -> AttemptStream;
 }

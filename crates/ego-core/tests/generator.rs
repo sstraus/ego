@@ -3,11 +3,12 @@
 //!
 //! See `ARCHITECTURE.md` §2/§3.1 and `plans/m0a-contracts.md` Step 10.
 
-use ego_core::budget::{BudgetGate, PricingQuote, Reservation};
+use ego_core::budget::{BudgetGate, PricingQuote};
 use ego_core::cost::{Amount, CostDelta, CurrencyCode, Money, PricingRevision};
 use ego_core::event::domain::{DomainEvent, Envelope, EventKind, ExitReason};
-use ego_core::event::id::{EventId, ItemId, Producer, Seq, TurnId};
+use ego_core::event::id::{EventId, GenerationId, ItemId, Producer, Seq, TurnId};
 use ego_core::event::time::Timestamp;
+use ego_core::generator::attempt::{AttemptStream, GenerationAttempt, Settlement};
 use ego_core::generator::capabilities::{
     CacheRetention, CancelSemantics, CapabilityGap, ModelCapabilities, ReasoningCarryover,
     Transport,
@@ -91,14 +92,43 @@ mod generator {
     /// one, and going through `reserve` is the only way to call `generate`
     /// at all. That is the budget gate's whole enforcement mechanism, and
     /// the fact that this helper has to exist is the proof it works.
-    fn reservation() -> Reservation {
+    fn gate_and_attempt() -> (BudgetGate, GenerationAttempt) {
         let mut gate = BudgetGate::new(usd("1000"));
-        gate.reserve(
+        let caps = capabilities(ReasoningCarryover::Portable);
+        let reservation = gate
+            .reserve(&quote(), &gen_request(), &caps)
+            .expect("a generous budget admits an ordinary request");
+        let attempt = GenerationAttempt::new(
+            GenerationId::new(),
+            reservation,
             &quote(),
             &gen_request(),
-            &capabilities(ReasoningCarryover::Portable),
+            &caps,
         )
-        .expect("a generous budget admits an ordinary request")
+        .expect("the attempt is built from the request that was priced");
+        (gate, attempt)
+    }
+
+    /// Drive a stream to exhaustion and settle it — what the turn loop does.
+    ///
+    /// `by_ref` rather than `collect` on the stream itself, because settling
+    /// needs the stream back: the attempt rides inside it, and that is the
+    /// point. Dropping it instead would leak the hold and log loudly.
+    fn drain(mut stream: AttemptStream, gate: &mut BudgetGate) -> (Vec<AiEvent>, Settlement) {
+        let events: Vec<AiEvent> = futures::executor::block_on(stream.by_ref().collect());
+        let settlement = stream
+            .settle(gate)
+            .expect("the gate that minted the reservation settles it");
+        (events, settlement)
+    }
+
+    /// One whole generation — reserve, generate, drain, settle — for the
+    /// tests that care only about what the stream produced. They still go
+    /// through the full lifecycle rather than leaking an attempt, because a
+    /// test that leaks is a test that would not notice if everything did.
+    fn drain_events(fake: &FakeGenerator) -> Vec<AiEvent> {
+        let (mut gate, attempt) = gate_and_attempt();
+        drain(fake.generate(gen_request(), attempt), &mut gate).0
     }
 
     /// A minimal, test-local turn assembler: it maps one `AiEvent` at a time
@@ -198,6 +228,11 @@ mod generator {
                         kind: EventKind::TurnCompleted { ok, exit_reason },
                     }]
                 }
+                // The transport's delivery reading is not conversation:
+                // `AttemptStream` folds it into the attempt's `Outcome`, and
+                // it reaches the log through `AttemptSettled` (Step 6), not
+                // through turn assembly.
+                AiEvent::DeliveryObserved(_) => Vec::new(),
                 AiEvent::Error { message } => {
                     let env = self.envelope(None);
                     vec![DomainEvent {
@@ -236,8 +271,7 @@ mod generator {
             AiEvent::Stop(StopReason::ToolUse),
         ];
         let fake = FakeGenerator::new(vec![script]);
-        let events: Vec<AiEvent> =
-            futures::executor::block_on(fake.generate(gen_request(), &reservation()).collect());
+        let events: Vec<AiEvent> = drain_events(&fake);
         assert_eq!(events.len(), 5);
 
         let turn = TurnId::new();
@@ -323,8 +357,7 @@ mod generator {
     #[test]
     fn generator_fake_stop_length_completes_not_ok_with_budget_exit() {
         let fake = FakeGenerator::new(vec![vec![AiEvent::Stop(StopReason::Length)]]);
-        let events: Vec<AiEvent> =
-            futures::executor::block_on(fake.generate(gen_request(), &reservation()).collect());
+        let events: Vec<AiEvent> = drain_events(&fake);
         let mut assembler = Assembler::new(TurnId::new());
         let domain_events: Vec<DomainEvent> =
             events.iter().flat_map(|e| assembler.assemble(e)).collect();
@@ -340,8 +373,7 @@ mod generator {
     #[test]
     fn generator_fake_pending_stop_is_not_terminal() {
         let fake = FakeGenerator::new(vec![vec![AiEvent::Stop(StopReason::Pending)]]);
-        let events: Vec<AiEvent> =
-            futures::executor::block_on(fake.generate(gen_request(), &reservation()).collect());
+        let events: Vec<AiEvent> = drain_events(&fake);
         let mut assembler = Assembler::new(TurnId::new());
         let domain_events: Vec<DomainEvent> =
             events.iter().flat_map(|e| assembler.assemble(e)).collect();
@@ -361,10 +393,8 @@ mod generator {
             }],
         ]);
 
-        let first: Vec<AiEvent> =
-            futures::executor::block_on(fake.generate(gen_request(), &reservation()).collect());
-        let second: Vec<AiEvent> =
-            futures::executor::block_on(fake.generate(gen_request(), &reservation()).collect());
+        let first: Vec<AiEvent> = drain_events(&fake);
+        let second: Vec<AiEvent> = drain_events(&fake);
 
         assert_eq!(
             first,
@@ -384,8 +414,7 @@ mod generator {
     #[test]
     fn generator_fake_call_past_scripted_count_is_empty_not_a_panic() {
         let fake = FakeGenerator::new(Vec::new());
-        let events: Vec<AiEvent> =
-            futures::executor::block_on(fake.generate(gen_request(), &reservation()).collect());
+        let events: Vec<AiEvent> = drain_events(&fake);
         assert!(events.is_empty());
         assert_eq!(fake.calls().len(), 1);
     }

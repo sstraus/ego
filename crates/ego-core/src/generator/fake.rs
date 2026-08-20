@@ -6,11 +6,11 @@
 use std::collections::VecDeque;
 use std::sync::Mutex;
 
-use futures::stream::{self, BoxStream};
+use futures::stream;
 
+use super::attempt::{AttemptStream, GenerationAttempt};
 use super::port::{AiEvent, Generator};
 use super::types::GenRequest;
-use crate::budget::Reservation;
 
 /// A `Generator` driven entirely by pre-scripted output.
 ///
@@ -53,11 +53,13 @@ impl FakeGenerator {
 impl Generator for FakeGenerator {
     /// Records the request and plays the next script.
     ///
-    /// Ignores the `Reservation` on purpose: a fake generator spends no
-    /// money, so it has nothing to charge. The reservation still has to be
-    /// *obtained* to reach this call, which is the whole point — the gate is
-    /// enforced by the type, so even the replay seam cannot route around it.
-    fn generate(&self, req: GenRequest, _reservation: &Reservation) -> BoxStream<'static, AiEvent> {
+    /// Passes the attempt straight through into the returned stream. A
+    /// fake generator spends no money, so it has nothing to charge — but the
+    /// attempt still has to be *obtained* to reach this call, and it still
+    /// comes back out for the caller to settle, which is the whole point:
+    /// the gate is enforced by the type, so even the replay seam cannot
+    /// route around it.
+    fn generate(&self, req: GenRequest, attempt: GenerationAttempt) -> AttemptStream {
         self.calls
             .lock()
             .expect("FakeGenerator::calls poisoned")
@@ -68,6 +70,6 @@ impl Generator for FakeGenerator {
             .expect("FakeGenerator::scripts poisoned")
             .pop_front()
             .unwrap_or_default();
-        Box::pin(stream::iter(script))
+        AttemptStream::new(attempt, Box::pin(stream::iter(script)))
     }
 }

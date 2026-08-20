@@ -4,10 +4,10 @@
 //! See `ARCHITECTURE.md` §3.1. Implements `ego-core`'s `Generator` port and
 //! owns `Http`, credentials and the provider tables.
 
-use ego_core::budget::Reservation;
-use ego_core::generator::port::{AiEvent, Generator};
+use ego_core::generator::attempt::{AttemptStream, GenerationAttempt};
+use ego_core::generator::port::Generator;
 use ego_core::generator::types::GenRequest;
-use futures::stream::{self, BoxStream};
+use futures::stream;
 
 /// Proves the crate DAG direction (`ego-ai -> ego-core`) compiles: a bare
 /// `Generator` impl with no wire format behind it. Real providers —
@@ -17,11 +17,7 @@ use futures::stream::{self, BoxStream};
 pub struct SkeletonGenerator;
 
 impl Generator for SkeletonGenerator {
-    fn generate(
-        &self,
-        _req: GenRequest,
-        _reservation: &Reservation,
-    ) -> BoxStream<'static, AiEvent> {
-        Box::pin(stream::empty())
+    fn generate(&self, _req: GenRequest, attempt: GenerationAttempt) -> AttemptStream {
+        AttemptStream::new(attempt, Box::pin(stream::empty()))
     }
 }

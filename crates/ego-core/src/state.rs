@@ -60,7 +60,7 @@ impl Usage {
     /// worse than reporting a pinned-at-max total from a degenerate or
     /// hostile log (this is data read back from disk, not just a
     /// theoretical edge).
-    fn add(&mut self, delta: &Usage) {
+    pub(crate) fn add(&mut self, delta: &Usage) {
         self.uncached_input_tokens = self
             .uncached_input_tokens
             .saturating_add(delta.uncached_input_tokens);

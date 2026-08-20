@@ -14,10 +14,50 @@
 //! carried by a `DomainEvent`, and `ego-core` cannot depend on `ego-ai`
 //! without inverting the crate DAG. The same split already applies to
 //! `Usage` — core owns the type, the provider layer produces the values.
+//!
+//! ## Who owns the authorisation, and why it is not the provider
+//!
+//! [`GenerationAttempt`] owns the [`Reservation`] from admission to
+//! settlement. That is the piece `&Reservation` could not express:
+//! consuming it at `generate` left nobody to reconcile, and borrowing it
+//! left the token reusable for a second generation.
+//!
+//! `plans/m0b-vertical-slice.md` originally sketched
+//! `generate(req, attempt) -> BoxStream<AiEvent>`, with the attempt moved in
+//! and never returned. That does not work, and the reason is worth stating
+//! so it is not re-proposed: [`BudgetGate::reconcile`] needs
+//! `&mut BudgetGate`, a `Generator` has none and cannot obtain one, and
+//! `Drop` cannot acquire one either. An attempt that goes in and never comes
+//! out can never be settled by anybody — the same ownership hole, relocated.
+//!
+//! So the attempt rides *inside* the stream. [`AttemptStream`] owns both the
+//! attempt and the provider's stream and is itself a `Stream<Item =
+//! AiEvent>`, so "the hold survives until the stream ends" is structural
+//! rather than caller discipline: the attempt cannot be dropped without
+//! dropping the stream, and [`AttemptStream::settle`] is the only exit.
+//!
+//! For the same reason there is no `AiEvent::Settled`. A provider cannot
+//! settle a gate, so an event named for it would be a claim the type system
+//! cannot back. The provider reports that it *finished*
+//! ([`AiEvent::Stop`](crate::generator::port::AiEvent::Stop)); only a
+//! successful `reconcile` settles.
 
+use std::pin::Pin;
+use std::task::{Context, Poll};
+
+use futures::Stream;
+use futures::stream::BoxStream;
 use serde::{Deserialize, Serialize};
 
+use super::capabilities::ModelCapabilities;
+use super::port::AiEvent;
+use super::types::{GenRequest, StopReason};
+use crate::budget::{
+    BudgetDenied, BudgetGate, PricingQuote, ReconcileDenied, Reconciled, Reservation,
+};
+use crate::cost::{CostDelta, UnknownCost};
 use crate::event::id::{AttemptId, GenerationId};
+use crate::state::Usage;
 
 /// Which generation an attempt belongs to, and which attempt it is.
 ///
@@ -107,5 +147,343 @@ impl DeliveryCertainty {
     /// transport can take on their behalf.
     pub fn retry_is_safe(&self) -> bool {
         matches!(self, DeliveryCertainty::DefinitelyUnsent)
+    }
+}
+
+/// What the provider said about token usage for one attempt.
+///
+/// `Missing` rather than `Option<Usage>` so that "the provider reported
+/// zero" and "the provider reported nothing" are distinguishable in the code
+/// and in any durable form, without a convention that a reader has to know.
+/// The two settle differently: a reported zero is an exact cost, while a
+/// missing figure is [`UnknownCost::ProviderReportedNoUsage`] and charges the
+/// pessimistic bound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageReport {
+    Reported(Usage),
+    Missing,
+}
+
+/// `StopReason::Pending` is the absence of a terminal state, so it cannot be
+/// the outcome of one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NotTerminal(StopReason);
+
+impl std::fmt::Display for NotTerminal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?} is not a terminal stop reason", self.0)
+    }
+}
+
+impl std::error::Error for NotTerminal {}
+
+/// How one attempt ended: why it stopped, whether the request may have
+/// reached the provider, and what it reported spending.
+///
+/// A struct wrapping [`StopReason`] rather than an enum beside it. The three
+/// facts are orthogonal — an aborted attempt still has a delivery certainty
+/// and may still have reported usage — and a parallel enum would duplicate
+/// `StopReason`'s seven variants only to answer a different question.
+///
+/// Fields are private so the invariant holds: `stop` is never
+/// [`StopReason::Pending`]. Deliberately *not* `Deserialize` yet — that
+/// would let a decoded value walk straight past [`Outcome::new`], and the
+/// right answer (a validating impl, or removing `Pending` from `StopReason`
+/// altogether — see `POTENTIALS.md`) belongs with the step that makes this
+/// durable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Outcome {
+    stop: StopReason,
+    delivery: DeliveryCertainty,
+    usage: UsageReport,
+}
+
+impl Outcome {
+    /// Build a terminal outcome, refusing [`StopReason::Pending`].
+    pub fn new(
+        stop: StopReason,
+        delivery: DeliveryCertainty,
+        usage: UsageReport,
+    ) -> Result<Self, NotTerminal> {
+        if stop == StopReason::Pending {
+            return Err(NotTerminal(stop));
+        }
+        Ok(Self {
+            stop,
+            delivery,
+            usage,
+        })
+    }
+
+    /// Why the attempt stopped. Never [`StopReason::Pending`].
+    pub fn stop(&self) -> StopReason {
+        self.stop
+    }
+
+    /// Whether the request may have reached the provider.
+    pub fn delivery(&self) -> DeliveryCertainty {
+        self.delivery
+    }
+
+    /// What the provider reported spending.
+    pub fn usage(&self) -> UsageReport {
+        self.usage
+    }
+
+    /// Whether this attempt may be re-sent without risking a double bill.
+    pub fn retry_is_safe(&self) -> bool {
+        self.delivery.retry_is_safe()
+    }
+}
+
+/// One generation's authorisation, owned until it settles.
+///
+/// Holds the [`Reservation`] and the [`PricingQuote`] that priced it, so the
+/// same quote that authorised the generation also prices what it actually
+/// cost — the invariant `crate::budget`'s module doc states, now enforced by
+/// the type rather than by the caller passing the right `CostDelta`.
+///
+/// Not `Clone`, for the reason `Reservation` is not: one authorisation must
+/// not become two.
+#[must_use = "an unsettled attempt holds budget that nothing else will release"]
+pub struct GenerationAttempt {
+    attempt: AttemptRef,
+    quote: PricingQuote,
+    /// Taken by [`AttemptStream::settle`]. While it is `Some`, this attempt
+    /// still holds budget, which is exactly what [`Drop`] reports on.
+    reservation: Option<Reservation>,
+}
+
+impl GenerationAttempt {
+    /// Take ownership of a reservation for one generation, refusing it if it
+    /// does not authorise this request.
+    ///
+    /// This is where [`Reservation::authorises`] finally has a caller, and
+    /// it is the right place: `req`, `caps` and the quote are all still in
+    /// hand here, and they are not once the stream is running.
+    pub fn new(
+        generation: GenerationId,
+        reservation: Reservation,
+        quote: &PricingQuote,
+        req: &GenRequest,
+        caps: &ModelCapabilities,
+    ) -> Result<Self, BudgetDenied> {
+        reservation.authorises(quote, req, caps)?;
+        Ok(Self {
+            attempt: AttemptRef::first(generation),
+            quote: quote.clone(),
+            reservation: Some(reservation),
+        })
+    }
+
+    /// Which generation this is, and which attempt at it.
+    pub fn attempt(&self) -> AttemptRef {
+        self.attempt
+    }
+
+    /// The bound this attempt is holding against its gate.
+    pub fn bound(&self) -> Option<&crate::cost::Money> {
+        self.reservation.as_ref().map(Reservation::upper_bound)
+    }
+}
+
+impl std::fmt::Debug for GenerationAttempt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GenerationAttempt")
+            .field("attempt", &self.attempt)
+            .field("settled", &self.reservation.is_none())
+            .finish()
+    }
+}
+
+impl Drop for GenerationAttempt {
+    /// Loud, but not fatal.
+    ///
+    /// `Drop` cannot release the hold: [`BudgetGate::reconcile`] needs
+    /// `&mut BudgetGate` and there is no way to reach one from here. So the
+    /// honest options were to log or to panic, and panicking is wrong on
+    /// every count — it cannot reconcile either, it turns ordinary async
+    /// cancellation into a process failure, and a panic while unwinding
+    /// aborts. What is left behind is a hold that is never released, which
+    /// narrows the budget until the process ends: it fails *closed*, so
+    /// loudly reporting it is the proportionate response.
+    fn drop(&mut self) {
+        if let Some(reservation) = &self.reservation {
+            tracing::error!(
+                generation = ?self.attempt.generation(),
+                attempt = ?self.attempt.attempt(),
+                gate = ?reservation.gate(),
+                bound = %reservation.upper_bound().amount,
+                "generation attempt dropped without settling; its hold is \
+                 never released and the gate's budget stays narrowed"
+            );
+        }
+    }
+}
+
+/// An attempt settled against its gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Settlement {
+    pub attempt: AttemptRef,
+    pub outcome: Outcome,
+    pub reconciled: Reconciled,
+}
+
+/// A provider's stream with the authorisation riding inside it.
+///
+/// The reason for the wrapper rather than two independently owned values:
+/// an attempt that can be dropped while its stream is still running makes
+/// "the hold survives until the stream ends" a rule the caller must
+/// remember. Here it is a consequence of ownership — the only way to reach
+/// the attempt is [`settle`](Self::settle), which consumes both.
+///
+/// It also folds what the stream says as it passes: delivery certainty
+/// (monotonically), incremental usage (by addition), and the first terminal
+/// stop reason. That is why `settle` needs no arguments beyond the gate.
+#[must_use = "dropping the stream drops an unsettled attempt, leaking its hold"]
+pub struct AttemptStream {
+    attempt: GenerationAttempt,
+    inner: BoxStream<'static, AiEvent>,
+    delivery: DeliveryCertainty,
+    usage: UsageReport,
+    /// The *first* terminal stop reason seen. Exactly one outcome per
+    /// attempt: a provider that emits two is not believed twice.
+    terminal: Option<StopReason>,
+}
+
+impl AttemptStream {
+    /// Wrap a provider's stream around the attempt that authorised it.
+    ///
+    /// The only constructor a `Generator` implementation needs, and the
+    /// reason `generate` can take the attempt by value at all.
+    pub fn new(attempt: GenerationAttempt, inner: BoxStream<'static, AiEvent>) -> Self {
+        Self {
+            attempt,
+            inner,
+            delivery: DeliveryCertainty::default(),
+            usage: UsageReport::Missing,
+            terminal: None,
+        }
+    }
+
+    /// Which generation is streaming, and which attempt at it.
+    ///
+    /// Stamped by `ego-core` when the attempt was built, never taken from
+    /// anything the provider says: an id supplied by the provider layer
+    /// would be attribution the core cannot check.
+    pub fn attempt(&self) -> AttemptRef {
+        self.attempt.attempt()
+    }
+
+    /// Fold one event into what this attempt is known to have done.
+    fn observe(&mut self, event: &AiEvent) {
+        match event {
+            // The transport's own reading, folded monotonically.
+            AiEvent::DeliveryObserved(certainty) => self.delivery.observe(*certainty),
+
+            // Usage arrives as increments, so it accumulates.
+            AiEvent::Usage(delta) => {
+                let mut total = match self.usage {
+                    UsageReport::Reported(usage) => usage,
+                    UsageReport::Missing => Usage::default(),
+                };
+                total.add(delta);
+                self.usage = UsageReport::Reported(total);
+            }
+
+            // `Pending` is the absence of a terminal state, so a provider
+            // that sends it has said nothing terminal. First real terminal
+            // wins.
+            AiEvent::Stop(stop) if *stop != StopReason::Pending => {
+                self.terminal.get_or_insert(*stop);
+            }
+            AiEvent::Stop(_) => {}
+
+            AiEvent::TextDelta { .. }
+            | AiEvent::ReasoningDelta { .. }
+            | AiEvent::ToolCall { .. } => {}
+
+            // Deliberately not treated as proof of arrival: an `Error` can
+            // be the provider answering *or* the transport failing locally,
+            // and the two are opposite readings of retry safety. The
+            // transport says which, with `DeliveryObserved`.
+            AiEvent::Error { .. } => {}
+        }
+
+        // Anything that is provider *content* proves the request arrived,
+        // whatever the transport did or did not report. This is the backstop
+        // that keeps retry safety correct for a provider that forgets to
+        // emit `DeliveryObserved` at all.
+        if matches!(
+            event,
+            AiEvent::TextDelta { .. }
+                | AiEvent::ReasoningDelta { .. }
+                | AiEvent::ToolCall { .. }
+                | AiEvent::Usage(_)
+                | AiEvent::Stop(_)
+        ) {
+            self.delivery.observe(DeliveryCertainty::PossiblySent);
+        }
+    }
+
+    /// What this attempt is known to have done. Private because it is only
+    /// ever built from fields this type controls, so the `Pending` invariant
+    /// [`Outcome::new`] enforces for outside callers holds by construction.
+    fn outcome(&self) -> Outcome {
+        Outcome {
+            // No terminal event means nobody told us it finished — the
+            // caller stopped polling, or the stream ended mid-flight. Both
+            // are `Aborted` as far as the budget is concerned.
+            stop: self.terminal.unwrap_or(StopReason::Aborted),
+            delivery: self.delivery,
+            usage: self.usage,
+        }
+    }
+
+    /// Release the hold and charge what the attempt actually cost.
+    ///
+    /// One method rather than a `settle`/`cancel` pair. Settling *is* the
+    /// end of the generation — it consumes the stream — so calling it before
+    /// a terminal event is not an error to report, it is a cancellation, and
+    /// the outcome says so with [`StopReason::Aborted`]. A second method
+    /// would only add a way to get the same thing wrong.
+    ///
+    /// A refusal (the gate did not mint this reservation) propagates with
+    /// the reservation inside it, so the authorisation is not lost — this
+    /// attempt's `Drop` stays quiet precisely because the token now lives in
+    /// the error, not because it was dropped on the floor.
+    pub fn settle(mut self, gate: &mut BudgetGate) -> Result<Settlement, Box<ReconcileDenied>> {
+        let outcome = self.outcome();
+        let actual = match self.usage {
+            UsageReport::Reported(usage) => self.attempt.quote.price(&usage),
+            UsageReport::Missing => CostDelta::Unknown(UnknownCost::ProviderReportedNoUsage),
+        };
+        let reservation = self
+            .attempt
+            .reservation
+            .take()
+            .expect("an AttemptStream is consumed by settle, so this runs at most once");
+        let reconciled = gate.reconcile(reservation, &actual)?;
+        Ok(Settlement {
+            attempt: self.attempt.attempt(),
+            outcome,
+            reconciled,
+        })
+    }
+}
+
+impl Stream for AttemptStream {
+    type Item = AiEvent;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<AiEvent>> {
+        let this = self.get_mut();
+        match this.inner.as_mut().poll_next(cx) {
+            Poll::Ready(Some(event)) => {
+                this.observe(&event);
+                Poll::Ready(Some(event))
+            }
+            other => other,
+        }
     }
 }
