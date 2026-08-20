@@ -10,5 +10,8 @@
 
 pub mod config;
 pub mod event;
+pub mod generator;
+pub mod permit;
+pub mod public;
 pub mod state;
 pub mod store;

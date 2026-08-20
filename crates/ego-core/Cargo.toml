@@ -10,6 +10,8 @@ publish.workspace = true
 # reqwest / rusqlite / rmcp are forbidden here — enforced by this manifest,
 # not by discipline.
 [dependencies]
+futures = "0.3.34"
+schemars = "1.2.2"
 serde = { version = "1.0.229", features = ["derive"] }
 # The store codec builds the durable JSONL line bytes itself, in library code,
 # so serde_json is a normal dependency rather than a dev-dependency. It is a
