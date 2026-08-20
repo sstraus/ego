@@ -7,7 +7,9 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+agent-client-protocol-schema = { version = "1.6.0", features = ["unstable_protocol_v2", "unstable_session_fork"] }
 ego-core.workspace = true
+serde_json = "1.0.151"
 
 [lints]
 workspace = true

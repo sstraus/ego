@@ -4,3 +4,4 @@
 //! lives in `ego-tools`.
 
 pub mod codec;
+pub mod session_store;

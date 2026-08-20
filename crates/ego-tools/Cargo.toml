@@ -8,6 +8,12 @@ publish.workspace = true
 
 [dependencies]
 ego-core.workspace = true
+futures = "0.3.34"
+serde_json = "1.0.151"
+tracing = "0.1.44"
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+tempfile = "3.27.0"
