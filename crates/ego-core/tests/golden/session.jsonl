@@ -1,0 +1,17 @@
+{"type":"item_completed","turn":"00000000-0000-0000-0000-000000000002","item":"00000000-0000-0000-0000-000000000004","kind":"message","ok":true,"text":"list the files"}
+{"type":"item_delta","turn":"00000000-0000-0000-0000-000000000002","item":"00000000-0000-0000-0000-000000000005","kind":"message","text":"Sure"}
+{"type":"item_delta","turn":"00000000-0000-0000-0000-000000000002","item":"00000000-0000-0000-0000-000000000005","kind":"message","text":", one sec"}
+{"type":"item_completed","turn":"00000000-0000-0000-0000-000000000002","item":"00000000-0000-0000-0000-000000000005","kind":"message","ok":true,"text":"Sure, one sec"}
+{"type":"item_started","turn":"00000000-0000-0000-0000-000000000002","item":"00000000-0000-0000-0000-000000000006","kind":"tool","name":"bash","text":"ls"}
+{"type":"item_delta","turn":"00000000-0000-0000-0000-000000000002","item":"00000000-0000-0000-0000-000000000006","kind":"tool","text":"file1\n"}
+{"type":"item_completed","turn":"00000000-0000-0000-0000-000000000002","item":"00000000-0000-0000-0000-000000000006","kind":"tool","ok":true,"text":"file1\nfile2\n"}
+{"type":"item_started","turn":"00000000-0000-0000-0000-000000000002","item":"00000000-0000-0000-0000-000000000007","kind":"permission","text":"write to /etc"}
+{"type":"item_completed","turn":"00000000-0000-0000-0000-000000000002","item":"00000000-0000-0000-0000-000000000007","kind":"permission","ok":false}
+{"type":"item_started","turn":"00000000-0000-0000-0000-000000000002","item":"00000000-0000-0000-0000-000000000008","kind":"subagent","text":"explorer-1"}
+{"type":"item_completed","turn":"00000000-0000-0000-0000-000000000002","item":"00000000-0000-0000-0000-000000000008","kind":"subagent","ok":true,"text":"done"}
+{"type":"usage_updated","turn":"00000000-0000-0000-0000-000000000002","usage_delta":{"input_tokens":120,"output_tokens":45}}
+{"type":"error","turn":"00000000-0000-0000-0000-000000000002","message":"rate limited, retrying"}
+{"type":"turn_completed","turn":"00000000-0000-0000-0000-000000000002","ok":true,"exit_reason":"Completed"}
+{"type":"item_completed","turn":"00000000-0000-0000-0000-000000000003","item":"00000000-0000-0000-0000-000000000009","kind":"message","ok":true,"text":"thanks"}
+{"type":"item_completed","turn":"00000000-0000-0000-0000-000000000003","item":"00000000-0000-0000-0000-00000000000a","kind":"message","ok":true,"text":"You're welcome"}
+{"type":"turn_completed","turn":"00000000-0000-0000-0000-000000000003","ok":true,"exit_reason":"Completed"}

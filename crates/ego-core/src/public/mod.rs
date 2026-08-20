@@ -3,3 +3,254 @@
 //!
 //! See `ARCHITECTURE.md` §1 (four serialisations, one semantic model) and
 //! `CLI.md` §4.2. A new internal event never becomes public automatically.
+
+use serde::{Deserialize, Serialize};
+
+use crate::event::domain::{DomainEvent, EventKind, ExitReason};
+use crate::event::id::{ItemId, SessionId, TurnId};
+use crate::state::Usage;
+
+/// The current `PublicEvent` schema version, carried in `SessionStarted`'s
+/// `v` field. `CLI.md` §4.2: "the schema is versioned in the header and
+/// published".
+pub const PUBLIC_EVENT_VERSION: u32 = 1;
+
+/// The item kinds carried by `item.*` events, per `CLI.md` §4.2.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ItemKind {
+    /// A user or assistant message.
+    Message,
+    /// A block of the model's reasoning/thinking.
+    Reasoning,
+    /// A tool call.
+    Tool,
+    /// A permission request/decision.
+    Permission,
+    /// A subagent invocation.
+    Subagent,
+}
+
+/// The privacy-filtered, versioned JSONL wire event — `CLI.md` §4.2's
+/// three-level envelope: `session.started` / `turn.started|completed` /
+/// `item.started|delta|completed`.
+///
+/// `SessionStarted` and `TurnStarted` have no `DomainEvent` counterpart:
+/// nothing in `EventKind` (ARCH §1's exhaustive internal set) marks the
+/// start of a session or a turn, because that's not a fact the *reducer*
+/// establishes — it's a fact the harness that drives a session already
+/// knows the instant it opens one, before any domain event exists. So the
+/// harness constructs these two variants directly; `project_public` below
+/// only ever returns the other variants, which do each originate from a
+/// `DomainEvent`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum PublicEvent {
+    /// The header event: schema version and session-wide facts known once,
+    /// at session start.
+    SessionStarted {
+        /// Schema version. Always `PUBLIC_EVENT_VERSION`.
+        v: u32,
+        session: SessionId,
+        /// Feature detection by name, never version parsing (`CLI.md`
+        /// §4.2).
+        capabilities: Vec<String>,
+        /// MCP server load errors. Present only when non-empty — a CI gate
+        /// is a presence check, not a length check.
+        #[serde(skip_serializing_if = "Vec::is_empty", default)]
+        mcp_errors: Vec<String>,
+        /// Hook load errors. Present only when non-empty, same rule.
+        #[serde(skip_serializing_if = "Vec::is_empty", default)]
+        hook_errors: Vec<String>,
+    },
+    /// A turn began.
+    TurnStarted { turn: TurnId },
+    /// An item (message, reasoning block, tool call, permission request or
+    /// subagent invocation) began.
+    ItemStarted {
+        turn: TurnId,
+        item: ItemId,
+        kind: ItemKind,
+        /// The tool name, for `kind: tool`; absent for every other kind.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        /// The tool call's arguments, the permission's description, or the
+        /// subagent id — this item kind's one piece of starting detail.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        text: Option<String>,
+    },
+    /// A streamed increment of an item's content.
+    ItemDelta {
+        turn: TurnId,
+        item: ItemId,
+        kind: ItemKind,
+        text: String,
+    },
+    /// An item finished.
+    ItemCompleted {
+        turn: TurnId,
+        item: ItemId,
+        kind: ItemKind,
+        /// One outcome field, never a second status field beside it
+        /// (`ARCHITECTURE.md` §1: "single `ok` field for outcomes").
+        ok: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        text: Option<String>,
+    },
+    /// A turn finished. Every `TurnCompleted` carries its own outcome; the
+    /// *last* one in the stream is, by construction, the terminal event —
+    /// no separate "final result" mechanism is needed (`CLI.md` §4.2: "no
+    /// `--output-last-message` temp-file dance").
+    ///
+    /// Deliberately no usage field: turn completion is a turn *outcome*,
+    /// while usage is observed at a *generation* boundary — a fallback
+    /// chain can switch providers mid-turn and report several separately
+    /// attributable usage events inside one turn. Usage rides its own
+    /// `UsageUpdated` variant instead, so this event has exactly one
+    /// concern (`ok` + `exit_reason`) and never a running total that could
+    /// drift from `SessionState.usage`, the actual cumulative source of
+    /// truth.
+    TurnCompleted {
+        turn: TurnId,
+        ok: bool,
+        exit_reason: ExitReason,
+    },
+    /// Incremental usage was reported.
+    ///
+    /// `usage_delta`, not `usage`: this is the increment observed at *this*
+    /// generation boundary, never a cumulative total. A field named
+    /// `usage` on a stable, compatibility-governed DTO reads as a running
+    /// total to anyone who hasn't read this comment, and that misreading
+    /// is expensive once it reaches budget or billing logic — so the name
+    /// carries the semantics instead of relying on documentation alone.
+    UsageUpdated {
+        turn: TurnId,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        item: Option<ItemId>,
+        usage_delta: Usage,
+    },
+    /// An error occurred, possibly outside any single item.
+    Error {
+        turn: TurnId,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        item: Option<ItemId>,
+        message: String,
+    },
+}
+
+/// Project one internal `DomainEvent` onto the public wire contract.
+///
+/// Returns `None` for:
+/// - internal-only event kinds that never leak into the public stream
+///   (`Compacted`, `Forked`, `HookFired` — none of them is one of the five
+///   public item kinds, and none belongs on the three-level envelope);
+/// - an item-shaped event (message/tool/permission/subagent content) whose
+///   envelope carries no item id. `state.rs`'s reducer already tolerates
+///   this degenerate case without panicking (`SessionState::item_mut`
+///   returns `None`); `project_public` is equally total, dropping the event
+///   rather than fabricating an item id or panicking.
+pub fn project_public(ev: &DomainEvent) -> Option<PublicEvent> {
+    let turn = ev.env.turn;
+    let item = ev.env.item;
+
+    match &ev.kind {
+        EventKind::UserPrompt { text } => Some(PublicEvent::ItemCompleted {
+            turn,
+            item: item?,
+            kind: ItemKind::Message,
+            ok: true,
+            text: Some(text.clone()),
+        }),
+        EventKind::AssistantDelta { text } => Some(PublicEvent::ItemDelta {
+            turn,
+            item: item?,
+            kind: ItemKind::Message,
+            text: text.clone(),
+        }),
+        EventKind::AssistantMessage { text } => Some(PublicEvent::ItemCompleted {
+            turn,
+            item: item?,
+            kind: ItemKind::Message,
+            ok: true,
+            text: Some(text.clone()),
+        }),
+        EventKind::ReasoningDelta { text } => Some(PublicEvent::ItemDelta {
+            turn,
+            item: item?,
+            kind: ItemKind::Reasoning,
+            text: text.clone(),
+        }),
+        EventKind::ToolCallStarted { name, args } => Some(PublicEvent::ItemStarted {
+            turn,
+            item: item?,
+            kind: ItemKind::Tool,
+            name: Some(name.clone()),
+            text: Some(args.clone()),
+        }),
+        EventKind::ToolCallDelta { text } => Some(PublicEvent::ItemDelta {
+            turn,
+            item: item?,
+            kind: ItemKind::Tool,
+            text: text.clone(),
+        }),
+        EventKind::ToolCallCompleted { ok, output } => Some(PublicEvent::ItemCompleted {
+            turn,
+            item: item?,
+            kind: ItemKind::Tool,
+            ok: *ok,
+            text: Some(output.clone()),
+        }),
+        EventKind::PermissionRequested { description } => Some(PublicEvent::ItemStarted {
+            turn,
+            item: item?,
+            kind: ItemKind::Permission,
+            name: None,
+            text: Some(description.clone()),
+        }),
+        EventKind::PermissionDecided { allowed } => Some(PublicEvent::ItemCompleted {
+            turn,
+            item: item?,
+            kind: ItemKind::Permission,
+            ok: *allowed,
+            text: None,
+        }),
+        EventKind::UsageUpdated {
+            input_tokens,
+            output_tokens,
+        } => Some(PublicEvent::UsageUpdated {
+            turn,
+            item,
+            usage_delta: Usage {
+                input_tokens: *input_tokens,
+                output_tokens: *output_tokens,
+            },
+        }),
+        EventKind::TurnCompleted { ok, exit_reason } => Some(PublicEvent::TurnCompleted {
+            turn,
+            ok: *ok,
+            exit_reason: *exit_reason,
+        }),
+        EventKind::Compacted { .. } => None,
+        EventKind::Forked { .. } => None,
+        EventKind::HookFired { .. } => None,
+        EventKind::SubagentSpawned { subagent_id } => Some(PublicEvent::ItemStarted {
+            turn,
+            item: item?,
+            kind: ItemKind::Subagent,
+            name: None,
+            text: Some(subagent_id.clone()),
+        }),
+        EventKind::SubagentReturned { result, .. } => Some(PublicEvent::ItemCompleted {
+            turn,
+            item: item?,
+            kind: ItemKind::Subagent,
+            ok: true,
+            text: Some(result.clone()),
+        }),
+        EventKind::Error { message } => Some(PublicEvent::Error {
+            turn,
+            item,
+            message: message.clone(),
+        }),
+    }
+}
