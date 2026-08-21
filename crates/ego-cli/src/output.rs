@@ -138,7 +138,7 @@ impl<'a> JsonlSink<'a> {
 }
 
 impl EventSink for JsonlSink<'_> {
-    fn publish(&self, event: &PublicEvent) {
+    fn publish(&self, event: &PublicEvent, _state: &SessionState) {
         match serde_json::to_string(event) {
             Ok(line) => self.out.line(&line),
             // An event that cannot be serialised is a defect in the schema,
@@ -252,7 +252,7 @@ impl<'a> TextSink<'a> {
 }
 
 impl EventSink for TextSink<'_> {
-    fn publish(&self, event: &PublicEvent) {
+    fn publish(&self, event: &PublicEvent, _state: &SessionState) {
         match event {
             // `AgentMessage` and not "either message kind": stdout is the
             // answer, and a user prompt is what the caller already typed. It

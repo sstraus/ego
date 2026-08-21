@@ -25,6 +25,12 @@ use crate::store::session_store::{SessionStore, StoreError};
 /// sink comes last for the same reason one layer out: a host told about an
 /// event that was never written would be reporting a turn nobody can resume
 /// into.
+///
+/// That ordering is also why the sink is handed [`SessionState`]: at the
+/// moment of publication this journal holds the reduction *including* the
+/// event it is publishing, which is precisely what a consumer projecting
+/// cumulative figures needs and cannot obtain for itself in the right order.
+/// See `docs/decisions/2026-08-21-what-a-sink-is-handed.md`.
 pub struct Journal<'a> {
     session: SessionId,
     store: &'a dyn SessionStore,
@@ -89,7 +95,7 @@ impl<'a> Journal<'a> {
         self.store.append(&self.session, &event)?;
         self.state.apply(&event);
         if let Some(public) = project_public(&event) {
-            self.sink.publish(&public);
+            self.sink.publish(&public, &self.state);
         }
         Ok(id)
     }
@@ -103,7 +109,7 @@ impl<'a> Journal<'a> {
     /// because there is nothing to write: an unwritten event cannot be
     /// published out of order with one that was.
     pub fn publish(&self, event: &PublicEvent) {
-        self.sink.publish(event);
+        self.sink.publish(event, &self.state);
     }
 
     /// The reduction of everything appended so far.

@@ -17,6 +17,7 @@ use ego_core::config::{
 use ego_core::cost::CurrencyCode;
 use ego_core::event::domain::CancelCause;
 use ego_core::event::id::SessionId;
+use ego_core::generator::capabilities::ModelCapabilities;
 use ego_core::permit::{CanonPath, PolicyEngine, Tool};
 use ego_core::public::{PUBLIC_EVENT_VERSION, PublicEvent};
 use ego_core::run::{RunTermination, Signal};
@@ -75,9 +76,55 @@ impl Ended {
     }
 }
 
-/// Run `args` to completion and say how it ended.
+/// Run `args` to completion, publishing where `--output` says, and say how it
+/// ended.
 pub async fn run(args: Args, out: &Stdout, cancel: CancelToken) -> Ended {
-    match execute(args, out, cancel).await {
+    let output = args.output;
+    let quiet = args.quiet;
+    let text_sink = TextSink::new(out, quiet);
+    let jsonl_sink = JsonlSink::new(out);
+    let sink: &dyn EventSink = match output {
+        Output::Text => &text_sink,
+        Output::Jsonl => &jsonl_sink,
+        // §4.1 is a single object at completion, so nothing is published as it
+        // happens — but the run still needs a sink, and one that writes
+        // nothing is the honest one rather than a collector nobody reads.
+        Output::Json => &ego_core::sink::NullSink,
+    };
+
+    let ended = run_with(args, |_| sink, cancel).await;
+
+    // A no-op unless text mode left a streamed line open, which is why it can
+    // run on the refusal path too: a run that refused before the first token
+    // has nothing outstanding to close.
+    if output == Output::Text {
+        text_sink.finish();
+    }
+    ended
+}
+
+/// Run `args` to completion, publishing through the sink `destination` builds.
+///
+/// The destination of the event stream is a *parameter* of a run, not a
+/// consequence of `--output`. [`run`] derives one from the flag because that is
+/// what the flag is for; `ego acp` supplies one that turns each event into a
+/// `session/update` notification, and it is the same run underneath — one
+/// implementation of a turn, two places its events go.
+///
+/// **A function of the resolved model, not a value.** ACP's `UsageUpdate`
+/// reports occupancy as a fraction of the context window, and the window is a
+/// fact about the model — which is resolved *inside* this run, after the store
+/// is chosen and before the first event. A caller that had to supply a ready
+/// sink would have to resolve the model itself first, which is the same
+/// resolution done twice with two chances to disagree. `destination` is
+/// therefore called once, at the point the answer exists. A caller that does
+/// not care ignores the argument: `|_| sink`.
+pub async fn run_with<S: EventSink>(
+    args: Args,
+    destination: impl FnOnce(&ModelCapabilities) -> S,
+    cancel: CancelToken,
+) -> Ended {
+    match execute(args, destination, cancel).await {
         Ok(ended) => ended,
         Err(refusal) => Ended::refused(refusal),
     }
@@ -114,7 +161,7 @@ fn deadline(spec: &str) -> Result<Duration, UsageError> {
 /// `-C DIR` is applied to the process before anything else reads a path, so
 /// there is exactly one notion of "here" and every relative path in every
 /// later step agrees with it.
-fn workspace(directory: Option<&PathBuf>) -> Result<PathBuf, UsageError> {
+pub(crate) fn workspace(directory: Option<&PathBuf>) -> Result<PathBuf, UsageError> {
     if let Some(dir) = directory {
         std::env::set_current_dir(dir)
             .map_err(|err| UsageError(format!("-C {}: {err}", dir.display())))?;
@@ -271,7 +318,7 @@ fn tools(selected: Option<&Vec<String>>) -> Result<Vec<Arc<dyn Tool>>, UsageErro
 /// is generating into. It over-reserves — the prompt already occupies part of
 /// that window — and over-reserving is the safe direction for a gate whose only
 /// failure that matters is authorising too much.
-fn output_ceiling(caps: &ego_core::generator::capabilities::ModelCapabilities) -> Option<u64> {
+fn output_ceiling(caps: &ModelCapabilities) -> Option<u64> {
     caps.max_output_tokens.or(caps.max_context_tokens)
 }
 
@@ -297,7 +344,11 @@ fn capabilities(tools: &[Arc<dyn Tool>], instructions: bool, schema: bool) -> Ve
 }
 
 /// Everything before the first turn.
-async fn execute(args: Args, out: &Stdout, cancel: CancelToken) -> Result<Ended, RunTermination> {
+async fn execute<S: EventSink>(
+    args: Args,
+    destination: impl FnOnce(&ModelCapabilities) -> S,
+    cancel: CancelToken,
+) -> Result<Ended, RunTermination> {
     let usage = |err: UsageError| RunTermination::UsageError {
         message: err.to_string(),
     };
@@ -421,28 +472,28 @@ async fn execute(args: Args, out: &Stdout, cancel: CancelToken) -> Result<Ended,
 
     // Everything that can refuse has refused. From here the run has a session,
     // and every ending is a `RunTermination` with a log behind it.
-    let text_sink = TextSink::new(out, args.quiet);
-    let jsonl_sink = JsonlSink::new(out);
-    let sink: &dyn EventSink = match args.output {
-        Output::Text => &text_sink,
-        Output::Jsonl => &jsonl_sink,
-        // §4.1 is a single object at completion, so nothing is published as it
-        // happens — but the run still needs a sink, and one that writes
-        // nothing is the honest one rather than a collector nobody reads.
-        Output::Json => &ego_core::sink::NullSink,
-    };
-
-    sink.publish(&PublicEvent::SessionStarted {
-        v: PUBLIC_EVENT_VERSION,
-        session: session_id,
-        capabilities: capabilities(&registry, system.is_some(), compiled.is_some()),
-        mcp_errors: Vec::new(),
-        hook_errors: Vec::new(),
-        instructions: system
-            .as_ref()
-            .map(|prompt| prompt.sources.clone())
-            .unwrap_or_default(),
-    });
+    let sink = destination(&resolved.capabilities);
+    let sink = &sink;
+    //
+    // The opening reduction, taken once: it is what `session.started` is
+    // published against and what the loop then folds into, so reading it twice
+    // would let the announcement and the turn disagree about where the session
+    // began.
+    let opening = opened.state();
+    sink.publish(
+        &PublicEvent::SessionStarted {
+            v: PUBLIC_EVENT_VERSION,
+            session: session_id,
+            capabilities: capabilities(&registry, system.is_some(), compiled.is_some()),
+            mcp_errors: Vec::new(),
+            hook_errors: Vec::new(),
+            instructions: system
+                .as_ref()
+                .map(|prompt| prompt.sources.clone())
+                .unwrap_or_default(),
+        },
+        &opening,
+    );
 
     let generator = ego_ai::generator::WireGenerator::new(resolved.row.clone(), Arc::clone(&http));
     let policy = PolicyEngine::new(CanonPath::new(&root));
@@ -460,7 +511,7 @@ async fn execute(args: Args, out: &Stdout, cancel: CancelToken) -> Result<Ended,
     let mut loop_ = TurnLoop::new(
         Session {
             id: session_id,
-            state: opened.state(),
+            state: opening,
             store: opened.store(),
             clock: &clock,
             sink,
@@ -486,10 +537,6 @@ async fn execute(args: Args, out: &Stdout, cancel: CancelToken) -> Result<Ended,
         started,
     };
     let (termination, result) = turns.drive(&mut loop_, &text, &cancel).await;
-
-    if args.output == Output::Text {
-        text_sink.finish();
-    }
 
     Ok(Ended {
         termination,

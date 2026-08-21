@@ -30,6 +30,7 @@
 use std::sync::Mutex;
 
 use crate::public::PublicEvent;
+use crate::state::SessionState;
 
 /// A consumer of the public projection, in the order the events happened.
 ///
@@ -37,9 +38,40 @@ use crate::public::PublicEvent;
 /// while the loop, and eventually a host, all publish through it — and the
 /// alternative is threading a unique borrow through every layer that can
 /// produce an event.
-pub trait EventSink {
-    /// Take one event. Called once per event, after it is durable.
-    fn publish(&self, event: &PublicEvent);
+///
+/// `Send + Sync` follows from that sharing rather than being added to it. A
+/// turn is an `async fn`, and an `ego acp` connection drives one on a
+/// multi-threaded runtime: a future holding `&dyn EventSink` across an await is
+/// `Send` only if the sink is `Sync`. Every implementation here already
+/// satisfies it — the ones with interior state use a `Mutex` because a shared
+/// `&self` left them no other choice — so this states a property the port had
+/// all along and could not be relied on.
+pub trait EventSink: Send + Sync {
+    /// Take one event, with the reduction it produced.
+    ///
+    /// Called once per event, after it is durable and after it has been folded
+    /// — so `state` always *includes* `event`, never precedes it. See
+    /// `docs/decisions/2026-08-21-what-a-sink-is-handed.md`.
+    ///
+    /// Most sinks ignore `state`: a line of JSONL is the event and nothing
+    /// else. It is here for the consumer that cannot work without it — ACP's
+    /// `UsageUpdate` reports context *occupancy* and *cumulative* cost, neither
+    /// of which any single event carries, and `ego-acp`'s `project_acp_v1`
+    /// requires exactly this reduction. Handing it over at the moment of
+    /// publication is what makes that requirement true by construction instead
+    /// of by a caller remembering a doc comment.
+    fn publish(&self, event: &PublicEvent, state: &SessionState);
+}
+
+/// A borrowed sink is a sink.
+///
+/// So that a caller who owns one destination and a caller who is handed
+/// `&dyn EventSink` can go through the same generic entry point without one of
+/// them wrapping the other in a newtype whose only job is to forward.
+impl<T: EventSink + ?Sized> EventSink for &T {
+    fn publish(&self, event: &PublicEvent, state: &SessionState) {
+        (**self).publish(event, state);
+    }
 }
 
 /// A sink that keeps everything, for a caller that wants the batch after all.
@@ -81,7 +113,7 @@ impl CollectingSink {
 }
 
 impl EventSink for CollectingSink {
-    fn publish(&self, event: &PublicEvent) {
+    fn publish(&self, event: &PublicEvent, _state: &SessionState) {
         self.events
             .lock()
             .expect("a poisoned lock means a publisher panicked mid-event")
@@ -99,5 +131,5 @@ impl EventSink for CollectingSink {
 pub struct NullSink;
 
 impl EventSink for NullSink {
-    fn publish(&self, _event: &PublicEvent) {}
+    fn publish(&self, _event: &PublicEvent, _state: &SessionState) {}
 }
