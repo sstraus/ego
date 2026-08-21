@@ -93,7 +93,89 @@ pub trait StoreIo: Send + Sync {
     fn list_dirs(&self, path: &Path) -> io::Result<Vec<PathBuf>>;
 }
 
-/// The real, `std::fs`-backed [`StoreIo`].
+/// Whether a durability barrier actually reaches the device.
+///
+/// The *only* thing that differs between [`OsIo`] and [`NonDurableOsIo`].
+/// Every filesystem operation below is written once and takes this as a
+/// parameter, so the two types cannot drift into two different sets of
+/// rename/truncate semantics — which is the one way a barrier-free variant
+/// could quietly stop testing what the real one does.
+/// Without `test-support` this enum has exactly one variant, so eliding a
+/// barrier is not merely discouraged in a production build — it cannot be
+/// spelled.
+#[derive(Debug, Clone, Copy)]
+enum Barrier {
+    /// `fsync(2)` — on macOS, `F_FULLFSYNC`: a full device barrier.
+    Fsync,
+    /// Not issued. The write still reaches the OS page cache, so every
+    /// reader in this process sees exactly what it would have seen; only
+    /// survival across a power loss is given up.
+    #[cfg(feature = "test-support")]
+    Elided,
+}
+
+impl Barrier {
+    fn apply(self, file: &fs::File) -> io::Result<()> {
+        match self {
+            Self::Fsync => file.sync_all(),
+            #[cfg(feature = "test-support")]
+            Self::Elided => Ok(()),
+        }
+    }
+}
+
+/// [`StoreIo::replace_atomic`], with `barrier` deciding whether the two
+/// fsyncs it describes are issued. The tmp+rename half is unconditional.
+fn replace_atomic_with(path: &Path, bytes: &[u8], barrier: Barrier) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let tmp_path = tmp_path_for(path);
+
+    // Write *and fsync* the scratch file before renaming it into place.
+    // `fs::write` only guarantees the bytes reached the OS page cache;
+    // renaming an unflushed file is what produces the classic
+    // "atomically replaced the manifest with zeroes" crash outcome,
+    // because the rename can reach stable storage before the contents
+    // do.
+    {
+        use std::io::Write;
+        let mut file = fs::File::create(&tmp_path)?;
+        file.write_all(bytes)?;
+        barrier.apply(&file)?;
+    }
+
+    fs::rename(&tmp_path, path)?;
+
+    // Then fsync the *directory*, which is what actually makes the
+    // rename durable: the file's own contents are already on stable
+    // storage, but the directory entry pointing at them is a separate
+    // write that a crash can still lose.
+    if let Some(parent) = path.parent() {
+        barrier.apply(&fs::File::open(parent)?)?;
+    }
+    Ok(())
+}
+
+/// [`StoreIo::truncate`], with `barrier` deciding whether the shortened
+/// length is forced out before returning.
+fn truncate_with(path: &Path, len: u64, barrier: Barrier) -> io::Result<()> {
+    let file = fs::OpenOptions::new()
+        .write(true)
+        // Declared explicitly: `set_len` below is the only shortening
+        // this performs, and opening with `truncate(true)` would
+        // discard the whole log before we could keep its valid prefix.
+        .truncate(false)
+        .open(path)?;
+    file.set_len(len)?;
+    // A repair that a crash can undo is not a repair: the next open
+    // would find the same torn tail. Force the shortened length out
+    // before reporting success.
+    barrier.apply(&file)
+}
+
+/// The real, `std::fs`-backed [`StoreIo`]. The only one anything outside a
+/// test should ever construct.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct OsIo;
 
@@ -136,49 +218,11 @@ impl StoreIo for OsIo {
     }
 
     fn replace_atomic(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let tmp_path = tmp_path_for(path);
-
-        // Write *and fsync* the scratch file before renaming it into place.
-        // `fs::write` only guarantees the bytes reached the OS page cache;
-        // renaming an unflushed file is what produces the classic
-        // "atomically replaced the manifest with zeroes" crash outcome,
-        // because the rename can reach stable storage before the contents
-        // do.
-        {
-            use std::io::Write;
-            let mut file = fs::File::create(&tmp_path)?;
-            file.write_all(bytes)?;
-            file.sync_all()?;
-        }
-
-        fs::rename(&tmp_path, path)?;
-
-        // Then fsync the *directory*, which is what actually makes the
-        // rename durable: the file's own contents are already on stable
-        // storage, but the directory entry pointing at them is a separate
-        // write that a crash can still lose.
-        if let Some(parent) = path.parent() {
-            fs::File::open(parent)?.sync_all()?;
-        }
-        Ok(())
+        replace_atomic_with(path, bytes, Barrier::Fsync)
     }
 
     fn truncate(&self, path: &Path, len: u64) -> io::Result<()> {
-        let file = fs::OpenOptions::new()
-            .write(true)
-            // Declared explicitly: `set_len` below is the only shortening
-            // this performs, and opening with `truncate(true)` would
-            // discard the whole log before we could keep its valid prefix.
-            .truncate(false)
-            .open(path)?;
-        file.set_len(len)?;
-        // A repair that a crash can undo is not a repair: the next open
-        // would find the same torn tail. Force the shortened length out
-        // before reporting success.
-        file.sync_all()
+        truncate_with(path, len, Barrier::Fsync)
     }
 
     fn remove_file(&self, path: &Path) -> io::Result<()> {
@@ -203,5 +247,71 @@ impl StoreIo for OsIo {
             }
         }
         Ok(dirs)
+    }
+}
+
+/// [`OsIo`] with the durability barriers elided, and **nothing else
+/// changed**. For tests that sweep a large number of filesystem states and
+/// assert nothing about surviving a power loss.
+///
+/// Every operation is the real one: the same `create_dir_all`, the same
+/// tmp-write-then-`rename`, the same `set_len`, the same `read_dir` — see
+/// `replace_atomic_with` and `truncate_with`, which both types share so
+/// there is exactly one implementation of these semantics. Only
+/// `Barrier::Fsync` becomes `Barrier::Elided`. A test running on this still
+/// meets real rename and truncate behaviour, and so still catches the class
+/// of bug a hand-written in-memory fake would stop catching.
+///
+/// **What is given up, precisely:** a crash after one of these calls returns
+/// may leave the old contents, or a lost directory entry, or a torn tail
+/// this type reported as repaired. Within a single live process nothing
+/// changes at all — the writes reach the OS page cache either way, so every
+/// read-back sees identical bytes. That is the whole reason it is safe for a
+/// test that reads back in-process, and the whole reason it is wrong
+/// anywhere else.
+///
+/// `JsonlStore`'s crash-recovery contract (`ARCHITECTURE.md` §5) is a
+/// durability claim, and this type does not honour it — which is why it sits
+/// behind the `test-support` feature rather than merely carrying this
+/// warning. A doc comment is advice; a feature gate is a guarantee. No
+/// non-test build enables it, so outside a test this type does not exist to
+/// be misused. See the feature's own comment in `crates/ego-tools/Cargo.toml`.
+#[cfg(feature = "test-support")]
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NonDurableOsIo;
+
+#[cfg(feature = "test-support")]
+impl StoreIo for NonDurableOsIo {
+    fn append_line(&self, path: &Path, line: &[u8]) -> io::Result<()> {
+        OsIo.append_line(path, line)
+    }
+
+    /// The barrier itself, so eliding it is the entire point of this type.
+    fn fsync(&self, _path: &Path) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn read(&self, path: &Path) -> io::Result<Option<Vec<u8>>> {
+        OsIo.read(path)
+    }
+
+    fn exists(&self, path: &Path) -> io::Result<bool> {
+        OsIo.exists(path)
+    }
+
+    fn replace_atomic(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+        replace_atomic_with(path, bytes, Barrier::Elided)
+    }
+
+    fn truncate(&self, path: &Path, len: u64) -> io::Result<()> {
+        truncate_with(path, len, Barrier::Elided)
+    }
+
+    fn remove_file(&self, path: &Path) -> io::Result<()> {
+        OsIo.remove_file(path)
+    }
+
+    fn list_dirs(&self, path: &Path) -> io::Result<Vec<PathBuf>> {
+        OsIo.list_dirs(path)
     }
 }

@@ -21,8 +21,24 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 tracing = "0.1.44"
 
+[features]
+# `NonDurableOsIo`: `OsIo` with the fsync barriers elided, for tests that
+# sweep thousands of filesystem states and assert nothing about surviving a
+# power loss. Behind a feature, and not merely behind a doc comment, because
+# a durability-free `StoreIo` exported from the crate that *is* the
+# durability contract is a hazard advice cannot close — the same reason
+# `ego_core::permit::Permit` seals its constructor rather than asking
+# callers not to forge one. With this off, the type does not exist to be
+# misused.
+#
+# Enabled for this crate's own tests by the self dev-dependency below, which
+# is the only supported way an integration test (a separate crate) can see a
+# gated item. No non-test build turns it on.
+test-support = []
+
 [lints]
 workspace = true
 
 [dev-dependencies]
+ego-tools = { path = ".", features = ["test-support"] }
 tempfile = "3.27.0"
