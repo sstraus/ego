@@ -853,22 +853,55 @@ fn a_refusal_is_the_answer_and_not_a_missing_one() {
 
 /// The schema has `content`, `refusal`, `tool_calls`, `role` and the
 /// deprecated `function_call` in a streaming delta — and no reasoning text at
-/// all. Reasoning appears only as a count in `completion_tokens_details`. A
-/// `reasoning_content` field is a vendor extension, and this format guessing
-/// at one would be inventing a contract.
+/// all. Reasoning appears only as a count in `completion_tokens_details`.
+///
+/// This test asserted the opposite until the shared-shape ADR §4 settled the
+/// question the other way, and the sentence it used to carry — "this format
+/// guessing at one would be inventing a contract" — was right about *guessing*
+/// and wrong about *reading*. Both spellings the family uses are read, for
+/// every member, with nothing consulted about who sent them; a member that
+/// sends neither is unaffected, which is what makes this uniform rather than a
+/// branch. The measured cost of not reading them is in
+/// `tests/ollama_reasoning.rs`: 117 of 118 output tokens billed and dropped.
 #[test]
-fn this_wire_format_never_invents_reasoning_it_was_not_sent() {
+fn both_of_the_familys_reasoning_spellings_are_read_and_neither_is_invented() {
     const VENDOR: &str = "data: {\"choices\":[{\"index\":0,\"delta\":\
          {\"reasoning_content\":\"hmm\",\"content\":\"42\"},\"finish_reason\":\"stop\"}]}\n\n\
          data: [DONE]\n\n";
     assert_eq!(
         decode_whole(VENDOR.as_bytes()),
         vec![
+            AiEvent::ReasoningDelta {
+                text: "hmm".to_string()
+            },
             AiEvent::TextDelta {
                 text: "42".to_string()
             },
             AiEvent::Stop(StopReason::Stop),
         ]
+    );
+
+    const OTHER: &str = "data: {\"choices\":[{\"index\":0,\"delta\":\
+         {\"reasoning\":\"hmm\",\"content\":\"42\"},\"finish_reason\":\"stop\"}]}\n\n\
+         data: [DONE]\n\n";
+    assert_eq!(
+        decode_whole(OTHER.as_bytes()),
+        decode_whole(VENDOR.as_bytes()),
+        "one concept, two member names, and a reader that treats them \
+         differently makes the vendor the contract again"
+    );
+
+    // And nothing is invented: a delta with neither member produces no
+    // reasoning event at all, which is the half of the old test that was
+    // always true.
+    const PLAIN: &str = "data: {\"choices\":[{\"index\":0,\"delta\":\
+         {\"content\":\"42\"},\"finish_reason\":\"stop\"}]}\n\n\
+         data: [DONE]\n\n";
+    assert!(
+        !decode_whole(PLAIN.as_bytes())
+            .iter()
+            .any(|e| matches!(e, AiEvent::ReasoningDelta { .. })),
+        "a delta with no reasoning member produced one anyway"
     );
 }
 

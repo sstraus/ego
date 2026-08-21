@@ -33,11 +33,13 @@
 //!   it simply leaves the field absent, so there is nothing to branch on and
 //!   no provider identity to consult.
 //!
-//!   `Delta` does not decode either name yet, so this format still emits no
-//!   [`AiEvent::ReasoningDelta`] and silently drops text a provider sent. That
-//!   is a **recorded gap** (`POTENTIALS.md` P24), not a policy — an earlier
-//!   version of this comment argued the drop was correct, which `b00822e`
-//!   reversed.
+//!   `Delta` decodes both names, so this is where
+//!   [`AiEvent::ReasoningDelta`] gets its first producer in the workspace.
+//!   The measured cost of not decoding them is in
+//!   `tests/ollama_reasoning.rs`: 117 of 118 output tokens billed and
+//!   dropped. **The tokens are still not separable** — this family's usage
+//!   chunk has no `completion_tokens_details` on the rows that send reasoning
+//!   — and that half stays open as `POTENTIALS.md` P24.
 //! - **`finish_reason` has five spellings**, and one of them —
 //!   `content_filter` — has no [`StopReason`] to land on. It is reported as
 //!   [`StopReason::Error`] with a named [`AiEvent::Error`] beside it rather
@@ -492,6 +494,28 @@ struct Delta {
     content: Option<String>,
     #[serde(default)]
     refusal: Option<String>,
+    /// Reasoning text, spelling one. Ollama sends this
+    /// (`tests/goldens/ollama_reasoning_high.sse`, measured), and so does
+    /// OpenRouter.
+    ///
+    /// Not in `openai/openai-openapi`, and read anyway: the shared-shape ADR
+    /// §4 rules that an extension field is decoded opportunistically and
+    /// uniformly for every member of the family, because the *field name* is
+    /// the contract and the vendor is not. A member that never sends it
+    /// leaves it absent, which decodes to `None` and changes nothing — so
+    /// there is no branch here, and nothing to consult a provider id about.
+    #[serde(default)]
+    reasoning: Option<String>,
+    /// Reasoning text, spelling two. xAI sends this one
+    /// (`POTENTIALS.md` P24, from xAI's own schema).
+    ///
+    /// Two fields and not one aliased field: `#[serde(alias)]` would decode
+    /// either name into one slot and silently keep the last one written if a
+    /// provider ever sent both. These are two members of an object, and the
+    /// object is allowed to carry both; reading them as two and concatenating
+    /// in order is the reading that cannot lose text.
+    #[serde(default)]
+    reasoning_content: Option<String>,
     #[serde(default)]
     tool_calls: Vec<ToolCallChunk>,
 }
@@ -906,6 +930,19 @@ impl StreamDecoder {
     }
 
     fn consume_delta(&mut self, delta: &Delta, out: &mut Vec<AiEvent>) {
+        // Before the visible text, because that is the order a chunk carrying
+        // both means: the model reasoned and then answered. Both spellings,
+        // in a fixed order, because a provider sending both is a provider
+        // whose text would otherwise be interleaved by whichever `if` came
+        // first — and neither of the two that send one has ever sent the
+        // other.
+        for text in [&delta.reasoning, &delta.reasoning_content]
+            .into_iter()
+            .flatten()
+            .filter(|text| !text.is_empty())
+        {
+            out.push(AiEvent::ReasoningDelta { text: text.clone() });
+        }
         if let Some(text) = &delta.content
             && !text.is_empty()
         {

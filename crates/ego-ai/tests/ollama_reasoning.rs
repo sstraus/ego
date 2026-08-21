@@ -27,25 +27,33 @@
 //! | `"high"` | 351 chars | `9` | **118** |
 //! | `"none"` | absent | `9` | **1** |
 //!
-//! 117 of those 118 output tokens are reasoning. Every one of them is
+//! 117 of those 118 output tokens were reasoning, and every one of them was
 //! invisible to this repository: replaying the transcript through its own
-//! decoder yields the single character `9`, and
-//! [`AiEvent::ReasoningDelta`] — which exists — never fires.
+//! decoder yielded the single character `9`, and
+//! [`AiEvent::ReasoningDelta`] — which exists — never fired.
 //!
-//! The usage chunk carries no `completion_tokens_details`, so the reasoning
-//! tokens cannot be separated from the answer's afterwards either. They are
-//! counted, they settle at the output rate, and nothing downstream can tell
-//! that 99% of the turn was thinking.
+//! # The remedy, and where this file was wrong about it
 //!
-//! # Where the remedy is not
+//! This file used to carry a section headed "Where the remedy is not", ruling
+//! out `Delta` on two grounds: that adding `reasoning` would put one
+//! provider's extension into the format every provider uses, and that it would
+//! still miss xAI's spelling. The second is a reason to read **both** names,
+//! not neither. The first is answered by
+//! `docs/decisions/2026-08-21-a-shared-shape-is-not-a-shared-contract.md` §4,
+//! which rules that an extension field is decoded opportunistically and
+//! uniformly for every member of the family, and §8, which applies it here by
+//! name: the deciding question is whether there is any member for which
+//! reading both fields is wrong, and there is not.
 //!
-//! Not in `Delta`. `openai_completions.rs`'s module doc already rules that
-//! providers extending the shape "are a different row's problem, not a field
-//! this one may guess at", and adding `reasoning` to the shared decoder would
-//! put one provider's extension into the format every provider uses — and
-//! would still miss xAI, which spells it differently. The event vocabulary
-//! itself is under review in its own ADR. **This file measures and records;
-//! it does not propose the shape of the fix.**
+//! So `Delta` reads `reasoning` and `reasoning_content`, no branch and no
+//! provider id, and this row's reasoning text now reaches
+//! [`AiEvent::ReasoningDelta`] — its first producer in the workspace.
+//!
+//! **What the fix does not recover.** The usage chunk carries no
+//! `completion_tokens_details`, so the reasoning tokens still cannot be
+//! separated from the answer's after the fact. They are counted, they settle
+//! at the output rate, and nothing downstream can tell that 99% of the turn
+//! was thinking. The text is no longer lost; the accounting still is.
 
 use ego_ai::wire::openai_completions::StreamDecoder;
 use ego_core::generator::port::AiEvent;
@@ -75,6 +83,17 @@ fn text_of(events: &[AiEvent]) -> String {
         .iter()
         .filter_map(|e| match e {
             AiEvent::TextDelta { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Everything the decoder surfaced as reasoning text.
+fn reasoning_of(events: &[AiEvent]) -> String {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            AiEvent::ReasoningDelta { text } => Some(text.as_str()),
             _ => None,
         })
         .collect()
@@ -132,7 +151,7 @@ fn the_two_recordings_differ_only_in_reasoning_effort() {
 
 /// Ollama spells it `reasoning`. xAI, per `POTENTIALS.md` P24, spells it
 /// `reasoning_content`. Two rows, two names, one concept — which is the
-/// reason this cannot be fixed by adding a field to the shared decoder.
+/// reason the decoder reads both names rather than either one.
 #[test]
 fn ollama_streams_reasoning_under_its_own_member_name() {
     let reasoning = reasoning_on_the_wire(HIGH_TRANSCRIPT);
@@ -154,10 +173,16 @@ fn ollama_streams_reasoning_under_its_own_member_name() {
     );
 }
 
-/// The finding. Every character of reasoning is dropped, and
-/// `AiEvent::ReasoningDelta` never fires for this row.
+/// The finding, now inverted: every character of reasoning on the wire
+/// reaches `AiEvent::ReasoningDelta`, and none of it is confused with the
+/// answer.
+///
+/// The assertion is equality against what the recording actually carries, not
+/// "at least one event fired". A decoder that surfaced the first chunk and
+/// dropped the rest would pass the weaker claim while losing most of the text,
+/// which is the failure this file was written about.
 #[test]
-fn every_reasoning_token_is_dropped_on_the_way_through() {
+fn every_reasoning_token_reaches_an_event_of_its_own() {
     let on_the_wire = reasoning_on_the_wire(HIGH_TRANSCRIPT);
     let events = replay(HIGH_TRANSCRIPT);
 
@@ -166,30 +191,39 @@ fn every_reasoning_token_is_dropped_on_the_way_through() {
         ANSWER,
         "the decoder surfaced something other than the visible answer"
     );
-    assert!(
-        !events
-            .iter()
-            .any(|e| matches!(e, AiEvent::ReasoningDelta { .. })),
-        "ReasoningDelta fired for an Ollama row; if this now holds, the \
-         mapping changed and P24 should be revisited: {events:?}"
+    assert_eq!(
+        reasoning_of(&events),
+        on_the_wire,
+        "the reasoning that reached events is not the reasoning the daemon \
+         sent"
     );
 
     // Stated as an inequality rather than a count, so the test survives a
-    // re-recording: what matters is that the reasoning text never reaches
-    // any event, not that it was exactly this long.
+    // re-recording: what matters is that this recording is still mostly
+    // reasoning, or it demonstrates nothing either way.
     assert!(
         on_the_wire.len() > text_of(&events).len() * 100,
         "this recording no longer has enough reasoning in it to demonstrate \
-         the loss: {} chars of reasoning against {} of answer",
+         anything: {} chars of reasoning against {} of answer",
         on_the_wire.len(),
         text_of(&events).len()
     );
+
+    // The control: no reasoning asked for, no reasoning event invented.
+    assert!(
+        reasoning_of(&replay(NONE_TRANSCRIPT)).is_empty(),
+        "the control recording carries no delta.reasoning, so any \
+         ReasoningDelta from it was invented"
+    );
 }
 
-/// And they were counted. Same model, same prompt, same one-character answer:
-/// 118 output tokens with reasoning on, 1 with it off. The usage chunk offers
-/// no `completion_tokens_details`, so the 117 cannot be told apart from the
-/// answer afterwards — they settle at the output rate like any other.
+/// And they are counted, which reading them does not change. Same model, same
+/// prompt, same one-character answer: 118 output tokens with reasoning on, 1
+/// with it off. The usage chunk offers no `completion_tokens_details`, so the
+/// 117 cannot be told apart from the answer afterwards — they settle at the
+/// output rate like any other. This is the half of the finding the fix does
+/// not close, and it stays pinned so nobody reads the recovered text as
+/// recovered accounting.
 #[test]
 fn the_dropped_reasoning_is_still_counted_as_output() {
     let with = output_tokens(&replay(HIGH_TRANSCRIPT));
