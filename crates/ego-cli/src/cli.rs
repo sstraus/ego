@@ -121,11 +121,15 @@ pub const UNBUILT: &[(&str, &str)] = &[
     (
         "resume",
         "a session the catalogue can attribute to a workspace. \
-         `SessionMeta.workspace_root` is `None` for every entry, because no \
-         `EventKind` carries it, so `no ID = latest in this workspace` has \
-         nothing to select on. The machinery underneath is already here: \
-         `--session NAME` attaches to a named session and the store repairs a \
-         torn tail on the way in",
+         `SessionMeta.workspace_root` is `None` for every entry, so \
+         `no ID = latest in this workspace` has nothing to select on. Where \
+         the root will live is decided — the log header, at a new codec \
+         version — and the bump is what is waiting: under the version check \
+         the header now carries, a v5 log makes every session already on disk \
+         unopenable, and accepting them anyway is a backward-compatibility \
+         decision this build will not take on its own. The machinery \
+         underneath is already here: `--session NAME` attaches to a named \
+         session and the store repairs a torn tail on the way in",
     ),
     (
         "ls",
