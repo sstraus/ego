@@ -665,7 +665,7 @@ mod end_to_end {
     fn a_turn_drives_a_real_read_from_the_model_s_call_to_the_file_s_contents() {
         let ws = populated();
         let store_dir = TempDir::new().expect("a temp directory");
-        let store = JsonlStore::new(store_dir.path(), Box::new(OsIo));
+        let store = JsonlStore::new(store_dir.path(), "/ws", Box::new(OsIo));
         let clock = SystemClock;
         let generator = FakeGenerator::new([
             vec![
@@ -751,7 +751,7 @@ mod end_to_end {
         let outside = Workspace::new();
         let secret = outside.file("secret.txt", "not yours");
         let store_dir = TempDir::new().expect("a temp directory");
-        let store = JsonlStore::new(store_dir.path(), Box::new(OsIo));
+        let store = JsonlStore::new(store_dir.path(), "/ws", Box::new(OsIo));
         let clock = SystemClock;
         let generator = FakeGenerator::new([
             vec![

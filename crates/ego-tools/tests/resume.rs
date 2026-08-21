@@ -45,7 +45,7 @@ impl Fixture {
     fn healthy() -> Self {
         let dir = tempdir().unwrap();
         let root = dir.path().to_path_buf();
-        let store = JsonlStore::new(&root, Box::new(OsIo));
+        let store = JsonlStore::new(&root, "/ws", Box::new(OsIo));
         let mut fx = Self {
             _dir: dir,
             root,
@@ -131,7 +131,7 @@ impl Fixture {
     /// A second `JsonlStore` over the same root — what another process
     /// attaching to the same session directory holds.
     fn other_store(&self) -> JsonlStore {
-        JsonlStore::new(&self.root, Box::new(OsIo))
+        JsonlStore::new(&self.root, "/ws", Box::new(OsIo))
     }
 
     fn texts(&self) -> Vec<String> {

@@ -60,7 +60,7 @@ pub enum StoreError {
     /// `manifest.json` exists but is not valid `SessionMeta` JSON.
     Manifest(serde_json::Error),
     /// The log's first line is not a header record. A defect the store
-    /// must report, not paper over — see `HeaderV1` in `crate::store::codec`.
+    /// must report, not paper over — see `Header` in `crate::store::codec`.
     MissingHeader,
     /// The log's first line is a header and will not decode as one.
     ///
