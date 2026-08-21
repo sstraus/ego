@@ -184,8 +184,27 @@ fn config_precedence_is_independent_of_slice_order() {
     );
 }
 
+/// The ceiling **survives the merge**. It does not decide anything.
+///
+/// This test was called `config_system_deny_ceiling_cannot_be_relaxed_by_flags`
+/// and that name is now a claim it does not check. "Cannot be relaxed" was
+/// true of `resolve` while `resolve` ended with
+/// `allow.retain(|e| !deny.contains(e))`, and that line is gone
+/// (`docs/decisions/2026-08-21-a-permit-nobody-can-widen.md` §6): whether a
+/// deny beats an allow is now decided per call, by the engine, against a
+/// canonical `PreparedCall`.
+///
+/// So the property did not lose its test — it changed owner, and until the
+/// engine-side test exists nothing checks it. A green test whose *name* claims
+/// a security property nothing checks is how the next person concludes the
+/// property is covered, which is why the name moved with the property rather
+/// than staying here to look reassuring.
+///
+/// What is checked here is real and still worth checking: a `Flags` layer that
+/// sets `deny = []` would otherwise overwrite the system layer's deny outright,
+/// and the ceiling at `resolve.rs:121-147` puts it back.
 #[test]
-fn config_system_deny_ceiling_cannot_be_relaxed_by_flags() {
+fn config_system_deny_survives_a_higher_precedence_layer_that_clears_it() {
     let layers = [
         layer(
             Source::System,
@@ -337,7 +356,7 @@ fn config_profile_defined_by_only_one_eligible_layer_still_applies() {
 }
 
 #[test]
-fn config_system_deny_ceiling_survives_profile_override_that_clears_deny() {
+fn config_system_deny_survives_a_profile_override_that_clears_it() {
     let toml = "[permissions]\ndeny = [\"bash(rm -rf *)\"]\n\n[profile.ci.permissions]\nallow = [\"bash(rm -rf *)\"]\ndeny = []\n";
     let system = ConfigLayer::parse(Source::System, toml).unwrap();
     let effective = resolve(&[system], Trust::Trusted, Some("ci")).unwrap();
@@ -348,7 +367,7 @@ fn config_system_deny_ceiling_survives_profile_override_that_clears_deny() {
             .contains(&"bash(rm -rf *)".to_string())
     );
     // Carried, not subtracted — see
-    // `config_system_deny_ceiling_cannot_be_relaxed_by_flags`.
+    // `config_system_deny_survives_a_higher_precedence_layer_that_clears_it`.
     assert!(
         effective
             .permissions
@@ -358,7 +377,7 @@ fn config_system_deny_ceiling_survives_profile_override_that_clears_deny() {
 }
 
 #[test]
-fn config_system_deny_ceiling_unions_across_multiple_system_layers() {
+fn config_system_deny_unions_across_multiple_system_layers() {
     let system_a = layer(
         Source::System,
         ConfigLayer {
@@ -393,7 +412,7 @@ fn config_system_deny_ceiling_unions_across_multiple_system_layers() {
             .contains(&"bash(curl *)".to_string())
     );
     // Carried, not subtracted — see
-    // `config_system_deny_ceiling_cannot_be_relaxed_by_flags`.
+    // `config_system_deny_survives_a_higher_precedence_layer_that_clears_it`.
     assert!(
         effective
             .permissions
