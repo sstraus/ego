@@ -163,6 +163,12 @@ fn rule_two_spellings_of_one_predicate_are_one_rule_with_one_id() {
         ("read(src/)", "read(src)"),
         ("read(a/../b)", "read(b)"),
         ("exec(git   *)", "exec(git *)"),
+        // Adjacent wildcards collapse. Without this, `exec(git **)` would be
+        // a second spelling that means something *different* — one token
+        // matching anything, rather than any number of them — which is worse
+        // than a second spelling that means the same thing.
+        ("exec(git **)", "exec(git *)"),
+        ("exec(cargo-**-x)", "exec(cargo-*-x)"),
         ("net(0177.0.0.1)", "net(127.0.0.1)"),
         ("net(2130706433)", "net(127.0.0.1)"),
         ("net(0x7f.0.0.1)", "net(127.0.0.1)"),
