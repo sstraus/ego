@@ -769,6 +769,69 @@ fn the_same_read_without_the_deny_rule_completes() {
     assert_eq!(finished.code, Some(0), "stderr: {}", finished.stderr);
 }
 
+/// A run that names no rule must not *erase* the rules a config file names.
+///
+/// **This test exists because a mutation survived without it, and the thing it
+/// survived is silent permission loss.** `resolve` replaces a layer's whole
+/// `permissions` block, so a flags layer that unconditionally wrote
+/// `permissions.allow = []` and `permissions.deny = []` would drop a project
+/// or user deny on *every single run* — and the system-deny ceiling would not
+/// notice, because it only restores denies from `/etc/ego`.
+///
+/// Written end-to-end rather than against `flags_layer`, because what the
+/// operator cares about is that the deny they wrote still bites. The emptiness
+/// guard in `config.rs` is the mechanism; this is the promise.
+///
+/// The deny is written into the **user** layer, not the project one. A headless
+/// run is untrusted, an untrusted workspace runs bare, and bare means
+/// `.ego/config.toml` is never even opened — a project deny here would not bite
+/// for a reason that has nothing to do with the guard, and the test would pass
+/// while proving nothing. `$EGO_HOME/config.toml` is not ambient discovery, so
+/// it survives the bare posture.
+///
+/// The second completion is scripted deliberately. Without it, a run where the
+/// deny *was* erased reaches the loop's second generation, the stub has none
+/// left, and the process dies on the harness's own duplicate-id check — a
+/// failure that names the stub instead of the permission loss.
+#[test]
+fn a_run_with_no_rule_flags_leaves_the_config_files_rules_alone() {
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(tool_call("call_a", "read", "{\"path\":\"notes.md\"}")),
+            Reply::Sse(text("I read it.")),
+        ],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub);
+    ego.file("notes.md", "the contents");
+    ego.home_file("config.toml", "permissions.deny = [\"read(**)\"]\n");
+    let finished = ego
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--ephemeral",
+            "--output",
+            "json",
+            "Read notes.md",
+        ])
+        .run();
+
+    assert_eq!(
+        finished.code,
+        Some(3),
+        "the user layer's deny stopped biting: {}",
+        finished.stderr
+    );
+    let denied = finished.report()["denied"]
+        .as_str()
+        .expect("§4.4 requires the action")
+        .to_string();
+    assert!(
+        denied.contains("notes.md") && denied.contains("denied by r"),
+        "{denied}"
+    );
+}
+
 /// A rule that is not a rule is a usage error, before any turn runs.
 ///
 /// This is what proves the flag's argument reaches `Rule::load` rather than

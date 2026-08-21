@@ -18,6 +18,7 @@ use ego_cli::cli::{self, Invocation, Output, SessionChoice, Stdin};
 use ego_cli::prompt::{self, StdinSource};
 use ego_core::budget::Ledger;
 use ego_core::ceiling::Ceilings;
+use ego_core::config::Mode;
 use ego_core::cost::{Amount, CurrencyCode, Money};
 
 fn argv<const N: usize>(args: [&str; N]) -> Vec<String> {
@@ -130,6 +131,70 @@ fn the_session_flags_collapse_into_one_choice() {
         parsed(["run", "--ephemeral", "Ask"]).session,
         SessionChoice::Ephemeral
     );
+}
+
+/// The mode group, one axis over, and for the same reason: `--plan` and
+/// `--yolo` are spellings of `--mode`, so "which mode" has one answer.
+///
+/// **This test exists because a mutation survived without it.** `run.rs`
+/// drives the whole binary, and the builtins are read-only — so every mode
+/// admits a workspace read, refuses a workspace escape and never asks about
+/// either, and *no* end-to-end assertion can tell them apart. Mapping both
+/// `--plan` and `--yolo` to `Mode::Default` left all 787 tests green.
+///
+/// The engine's own tests already prove the five modes behave differently
+/// (`permit_step4_the_ceiling_answers_a_write_differently_in_every_mode`).
+/// What nothing checked was the wire between the flag and the engine, which
+/// is exactly the seam a process-level test cannot see and a function-level
+/// one can. That split is this file's whole premise.
+#[test]
+fn the_mode_flags_collapse_into_one_value() {
+    assert_eq!(parsed(["run", "Ask"]).mode, None);
+    assert_eq!(parsed(["run", "--plan", "Ask"]).mode, Some(Mode::Plan));
+    assert_eq!(parsed(["run", "--yolo", "Ask"]).mode, Some(Mode::Yolo));
+    for (spelling, mode) in [
+        ("plan", Mode::Plan),
+        ("default", Mode::Default),
+        ("auto", Mode::Auto),
+        ("edits", Mode::Edits),
+        ("yolo", Mode::Yolo),
+    ] {
+        assert_eq!(
+            parsed(["run", "--mode", spelling, "Ask"]).mode,
+            Some(mode),
+            "--mode {spelling}"
+        );
+    }
+    let refusal = refused(["run", "--plan", "--yolo", "Ask"]);
+    assert!(
+        refusal.contains("--plan") && refusal.contains("--yolo"),
+        "{refusal}"
+    );
+}
+
+/// The rules arrive in the order they were written, and both lists are kept.
+///
+/// Order matters: §7 of the rule ADR is first-match-wins within a list, so a
+/// parser that sorted or deduplicated would change which rule an operator's
+/// denial is attributed to. They stay text here — `Rule::load` runs in the
+/// config layer, so a flag and a file go through one parser and not two.
+#[test]
+fn the_rule_flags_are_repeatable_and_keep_their_order() {
+    let args = parsed([
+        "run",
+        "--allow",
+        "read(a/**)",
+        "--deny",
+        "write(**)",
+        "--allow",
+        "read(b/**)",
+        "Ask",
+    ]);
+    assert_eq!(args.allow, ["read(a/**)", "read(b/**)"]);
+    assert_eq!(args.deny, ["write(**)"]);
+
+    let none = parsed(["run", "Ask"]);
+    assert!(none.allow.is_empty() && none.deny.is_empty());
 }
 
 /// `-` is not a prompt that happens to be a hyphen; it says where the prompt
