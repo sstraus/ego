@@ -981,6 +981,80 @@ mod turn {
         assert!(fx.store.kinds().contains(&"attempt_settled".to_string()));
     }
 
+    /// Two calls in one generation claiming the same provider id.
+    ///
+    /// See the tool-use-history ADR §6. Nothing rejected this before: the
+    /// openai decoder's `settle_identity` compares an incoming id only with
+    /// the id held at the *same* index, and the loop mints a fresh `ItemId`
+    /// per call while `SessionState` keys on `ItemId`, so two items carried
+    /// one `call_id` without complaint. It surfaced two generations later as
+    /// a **panic** — `Conversation::new` returning `DuplicateCallId` into an
+    /// `expect` whose stated reason was about unanswered calls — by which
+    /// point both tools had already run.
+    ///
+    /// So the assertion that matters is not the exit code, it is
+    /// **`executions == 0`**. A check that merely stopped the panic would
+    /// leave the double effect, which is survivable only while every tool is
+    /// read-only.
+    #[test]
+    fn duplicate_provider_call_ids_end_the_turn_before_any_tool_runs() {
+        let fx = Fixture::new(vec![
+            vec![
+                AiEvent::ToolCall {
+                    call_id: "call_1".to_string(),
+                    name: "read".to_string(),
+                    args: r#"{"path":"/ws/a"}"#.to_string(),
+                },
+                AiEvent::ToolCall {
+                    // The same id, a different call. Neither may be dispatched:
+                    // once two calls share an id, a result cannot be attributed
+                    // back to the call that earned it.
+                    call_id: "call_1".to_string(),
+                    name: "read".to_string(),
+                    args: r#"{"path":"/ws/b"}"#.to_string(),
+                },
+                AiEvent::Stop(StopReason::ToolUse),
+            ],
+            // Present and must go unused: reaching it would mean the loop
+            // carried on past corruption.
+            vec![AiEvent::Stop(StopReason::Stop)],
+        ])
+        .with_read_tool();
+
+        let (reason, ok, state) = run(&fx, SessionState::default(), "read both");
+
+        assert_eq!(
+            reason,
+            ExitReason::Provider,
+            "a malformed response is the provider's fault, not ours: CLI.md §4.3 exit 4"
+        );
+        assert!(!ok);
+        assert_eq!(
+            fx.generator.calls().len(),
+            1,
+            "the turn must not generate again on a corrupt response"
+        );
+        let executions = state
+            .items
+            .values()
+            .filter(|item| item.kind == ItemKind::ToolCall && item.ok.is_some())
+            .count();
+        assert_eq!(
+            executions, 0,
+            "neither call may run: the panic this replaces fired only after both had"
+        );
+        assert!(
+            state.errors.iter().any(|error| error.contains("call_1")),
+            "the duplicated id has to be named, or nobody can diagnose it: {:?}",
+            state.errors
+        );
+        assert!(
+            fx.store.kinds().contains(&"attempt_settled".to_string()),
+            "the attempt is already paid for and still has to settle: {:?}",
+            fx.store.kinds()
+        );
+    }
+
     #[test]
     fn a_turn_whose_log_cannot_be_written_is_abandoned_with_the_state_intact() {
         let fx = Fixture::new(vec![vec![
