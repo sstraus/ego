@@ -840,13 +840,7 @@ pub fn decode(response: Result<HttpResponse, HttpError>) -> BoxStream<'static, A
     stream::unfold(State::Head(response), |state| async move {
         match state {
             State::Head(Err(error)) => Some((
-                vec![
-                    AiEvent::DeliveryObserved(error.delivery()),
-                    AiEvent::Error {
-                        message: error.to_string(),
-                    },
-                    AiEvent::Stop(StopReason::Error),
-                ],
+                super::failed(error.to_string(), error.delivery()).to_vec(),
                 State::Done,
             )),
             State::Head(Ok(response)) => {
@@ -865,12 +859,11 @@ pub fn decode(response: Result<HttpResponse, HttpError>) -> BoxStream<'static, A
                     ));
                 }
                 let message = read_error_body(response.status, response.body).await;
+                // The same three events, with the certainty already read off
+                // the status above rather than off a failure: a response at
+                // all proves the request arrived.
                 Some((
-                    vec![
-                        arrived,
-                        AiEvent::Error { message },
-                        AiEvent::Stop(StopReason::Error),
-                    ],
+                    super::failed(message, DeliveryCertainty::PossiblySent).to_vec(),
                     State::Done,
                 ))
             }

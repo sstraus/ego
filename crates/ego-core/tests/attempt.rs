@@ -629,6 +629,48 @@ mod lifecycle {
         );
     }
 
+    /// The same claim against the events a real decoder actually emits —
+    /// which is where it used to be false.
+    ///
+    /// The test above omits the terminal frame, and a wire format never
+    /// does: an egress refusal reaches the caller as exactly these three
+    /// events. `Stop` was in the arrival backstop, so the third one
+    /// overwrote the first, and a request the policy refused before a socket
+    /// existed settled as `PossiblySent` — unretryable, for the one case
+    /// where retrying is provably free. Found from `ego-ai` in Step 13.5,
+    /// because nothing in this crate had ever settled a stream that both
+    /// stopped and never left.
+    #[test]
+    fn a_request_refused_before_it_left_stays_retryable_through_its_terminal_frame() {
+        let outcome = outcome_of(vec![
+            AiEvent::DeliveryObserved(DeliveryCertainty::DefinitelyUnsent),
+            AiEvent::Error {
+                message: "loopback-only policy refused api.example".to_string(),
+            },
+            AiEvent::Stop(StopReason::Error),
+        ]);
+        assert_eq!(outcome.delivery(), DeliveryCertainty::DefinitelyUnsent);
+        assert!(
+            outcome.retry_is_safe(),
+            "the bytes never left, so a retry cannot double-bill"
+        );
+    }
+
+    /// The backstop still holds where it was meant to: a provider that
+    /// streams content and forgets to report delivery cannot licence a
+    /// double-billing retry by also stopping.
+    #[test]
+    fn content_before_a_terminal_frame_still_proves_the_request_arrived() {
+        let outcome = outcome_of(vec![
+            AiEvent::TextDelta {
+                text: "hello".to_string(),
+            },
+            AiEvent::Stop(StopReason::Stop),
+        ]);
+        assert_eq!(outcome.delivery(), DeliveryCertainty::PossiblySent);
+        assert!(!outcome.retry_is_safe());
+    }
+
     // --- test-local tracing capture ----------------------------------------
 
     /// Collect the `tracing` events emitted while `body` runs, as

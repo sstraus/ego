@@ -393,13 +393,29 @@ impl AttemptStream {
         // whatever the transport did or did not report. This is the backstop
         // that keeps retry safety correct for a provider that forgets to
         // emit `DeliveryObserved` at all.
+        //
+        // `Stop` is deliberately **not** in this list, and leaving it in was
+        // a bug that inverted the guarantee this type exists to give. A
+        // terminal frame is not provider content: a decoder synthesises
+        // `Stop(StopReason::Error)` locally for a request that never left —
+        // an egress refusal, a DNS refusal, a connector that never opened —
+        // and every one of those arrives as
+        // `DeliveryObserved(DefinitelyUnsent)`, `Error`, `Stop(Error)`. With
+        // `Stop` here the backstop overwrote the transport's own reading on
+        // the last of the three, so a request that provably never went out
+        // settled as `PossiblySent` and `retry_is_safe` said no.
+        //
+        // It never helped, either: a `Stop` with no `DeliveryObserved` and no
+        // content before it is a provider that sent a terminal frame and
+        // nothing else, which is not a stream any wire format produces. The
+        // events that do prove arrival are below, and they are the ones a
+        // forgetful adapter would actually emit.
         if matches!(
             event,
             AiEvent::TextDelta { .. }
                 | AiEvent::ReasoningDelta { .. }
                 | AiEvent::ToolCall { .. }
                 | AiEvent::Usage(_)
-                | AiEvent::Stop(_)
         ) {
             self.delivery.observe(DeliveryCertainty::PossiblySent);
         }
