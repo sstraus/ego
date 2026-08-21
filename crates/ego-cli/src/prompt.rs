@@ -1,6 +1,12 @@
 //! The input-precedence algorithm of `CLI.md` §4.5, and the `@file`
 //! convention `--system` and `--schema` share.
 //!
+//! Ratified in `docs/decisions/2026-08-21-where-a-prompt-comes-from.md`, whose
+//! §3.4 is the table [`assemble`] must grow into when `-f` lands: an agent
+//! file's body is the argv prompt's peer and the two together are *refused*
+//! rather than concatenated, while `--attach` never enters this algorithm at
+//! all because an attachment is a content block and not prompt text.
+//!
 //! §2's stdin contract, which the document takes from Codex as "the cleanest
 //! surveyed": the prompt is an argument; `-` reads it from stdin; and with
 //! *both* an argv prompt and piped stdin, stdin is appended as a delimited
