@@ -175,8 +175,8 @@ pub const UNBUILT: &[(&str, &str)] = &[
     ),
     (
         "auth",
-        "a credential store. Every provider reads one environment variable \
-         (`Auth::bearer_from_env`), so there is nowhere for a login to put \
+        "a credential store. Every provider names one environment variable \
+         (`Auth::BearerFromEnv`), so there is nowhere for a login to put \
          anything and nothing for a logout to remove",
     ),
     (

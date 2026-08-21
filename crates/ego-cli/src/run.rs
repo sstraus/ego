@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use ego_ai::provider::{Credentials, EnvCredentials};
 use ego_core::config::{
     Effective, Limits, Posture, Selection, SystemPrompt, Trust, resolve, system_prompt,
 };
@@ -446,17 +447,23 @@ async fn execute<S: EventSink>(
         message: err.to_string(),
     })?;
     let hosted = facts::supplied(&effective.ceilings).map_err(usage)?;
-    let resolved = model::resolve(&slug, hosted, &http).await.map_err(|err| {
-        if model::is_provider_failure(&err) {
-            RunTermination::Provider {
-                message: err.to_string(),
+    // One credential source for the whole run: the check `resolve` makes and
+    // the header the generator builds read the same place, so they cannot
+    // disagree about whether a key exists.
+    let creds: Arc<dyn Credentials> = Arc::new(EnvCredentials);
+    let resolved = model::resolve(&slug, hosted, &http, creds.as_ref())
+        .await
+        .map_err(|err| {
+            if model::is_provider_failure(&err) {
+                RunTermination::Provider {
+                    message: err.to_string(),
+                }
+            } else {
+                RunTermination::UsageError {
+                    message: err.to_string(),
+                }
             }
-        } else {
-            RunTermination::UsageError {
-                message: err.to_string(),
-            }
-        }
-    })?;
+        })?;
 
     let opened = match &jsonl_store {
         Some(store) => Opened::Durable(Box::new(
@@ -495,7 +502,8 @@ async fn execute<S: EventSink>(
         &opening,
     );
 
-    let generator = ego_ai::generator::WireGenerator::new(resolved.row.clone(), Arc::clone(&http));
+    let generator =
+        ego_ai::generator::WireGenerator::new(resolved.row.clone(), Arc::clone(&http), creds);
     let policy = PolicyEngine::new(CanonPath::new(&root));
     let fs = OsFs;
     let mut gate = budget::gate(&effective.ceilings, effective.clamped.money, currency);

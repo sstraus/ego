@@ -38,7 +38,16 @@ use futures::StreamExt;
 use futures::future::BoxFuture;
 use url::Url;
 
+mod support;
+use support::FakeCredentials;
+
 const TEXT_TRANSCRIPT: &str = include_str!("goldens/stream_text.sse");
+
+/// The variable the fixture row names, and the value a configured machine
+/// would have put in it. Two constants rather than two literals: the tests
+/// below assert that the first appears where the second must not.
+const KEY_VAR: &str = "EGO_TEST_API_KEY";
+const KEY: &str = "sk-not-a-real-key";
 
 // --- fixtures ---
 
@@ -99,9 +108,20 @@ fn row() -> ProviderRow {
     ProviderRow {
         id: "stub".to_string(),
         endpoint: Url::parse("https://api.example/v1/chat/completions").expect("a valid url"),
-        auth: Auth::Bearer("sk-not-a-real-key".into()),
+        auth: Auth::BearerFromEnv {
+            var: KEY_VAR.to_string(),
+        },
         cost: None,
     }
+}
+
+/// The fixture row, over `http`, on a machine where the key is configured.
+///
+/// Every test below the credential section wants that machine — the
+/// credential is not what they are about — so the three-argument constructor
+/// is spelled once here rather than at each call site.
+fn generator(http: Arc<dyn Http>) -> WireGenerator {
+    WireGenerator::new(row(), http, Arc::new(FakeCredentials::holding(KEY)))
 }
 
 /// Mints a real attempt through the only door there is.
@@ -185,7 +205,7 @@ impl Http for StubHttp {
 async fn the_transport_is_handed_exactly_what_the_wire_format_would_send() {
     let http = StubHttp::responding(200, TEXT_TRANSCRIPT);
     let mut gate = BudgetGate::new(usd("10"));
-    let generator = WireGenerator::new(row(), Arc::clone(&http) as Arc<dyn Http>);
+    let generator = generator(Arc::clone(&http) as Arc<dyn Http>);
 
     let attempt = attempt_for(&mut gate, &request());
     let _: Vec<AiEvent> = generator.generate(request(), attempt).collect().await;
@@ -206,7 +226,7 @@ async fn the_transport_is_handed_exactly_what_the_wire_format_would_send() {
     assert!(
         sent.headers
             .iter()
-            .any(|(name, value)| name == "authorization" && value == "Bearer sk-not-a-real-key"),
+            .any(|(name, value)| name == "authorization" && value == &format!("Bearer {KEY}")),
         "the provider row's credential reaches the request: {:?}",
         sent.headers.iter().map(|(n, _)| n).collect::<Vec<_>>()
     );
@@ -219,7 +239,7 @@ async fn the_transport_is_handed_exactly_what_the_wire_format_would_send() {
 async fn the_generation_carries_the_attempt_ego_core_stamped() {
     let http = StubHttp::responding(200, TEXT_TRANSCRIPT);
     let mut gate = BudgetGate::new(usd("10"));
-    let generator = WireGenerator::new(row(), http as Arc<dyn Http>);
+    let generator = generator(http as Arc<dyn Http>);
 
     let attempt = attempt_for(&mut gate, &request());
     let expected = attempt.attempt();
@@ -242,7 +262,7 @@ async fn the_generation_carries_the_attempt_ego_core_stamped() {
 async fn a_request_this_format_cannot_express_stops_the_generation() {
     let http = StubHttp::responding(200, TEXT_TRANSCRIPT);
     let mut gate = BudgetGate::new(usd("10"));
-    let generator = WireGenerator::new(row(), Arc::clone(&http) as Arc<dyn Http>);
+    let generator = generator(Arc::clone(&http) as Arc<dyn Http>);
 
     let mut req = request();
     req.reasoning_state = Some(ReasoningState("opaque".to_string()));
@@ -281,7 +301,7 @@ async fn a_request_this_format_cannot_express_stops_the_generation() {
 fn a_locally_refused_generation_still_settles_and_releases_the_hold() {
     let http = StubHttp::responding(200, TEXT_TRANSCRIPT);
     let mut gate = BudgetGate::new(usd("10"));
-    let generator = WireGenerator::new(row(), http as Arc<dyn Http>);
+    let generator = generator(http as Arc<dyn Http>);
 
     let mut req = request();
     req.reasoning_state = Some(ReasoningState("opaque".to_string()));
@@ -321,7 +341,7 @@ async fn a_transport_failure_keeps_the_certainty_the_transport_reported() {
         delivery: DeliveryCertainty::PossiblySent,
     }));
     let mut gate = BudgetGate::new(usd("10"));
-    let generator = WireGenerator::new(row(), http as Arc<dyn Http>);
+    let generator = generator(http as Arc<dyn Http>);
 
     let attempt = attempt_for(&mut gate, &request());
     let events: Vec<AiEvent> = generator.generate(request(), attempt).collect().await;
@@ -345,7 +365,7 @@ async fn a_transport_failure_keeps_the_certainty_the_transport_reported() {
 async fn a_streamed_response_decodes_to_what_the_wire_format_decodes() {
     let http = StubHttp::responding(200, TEXT_TRANSCRIPT);
     let mut gate = BudgetGate::new(usd("10"));
-    let generator = WireGenerator::new(row(), http as Arc<dyn Http>);
+    let generator = generator(http as Arc<dyn Http>);
 
     let attempt = attempt_for(&mut gate, &request());
     let through_binding: Vec<AiEvent> = generator.generate(request(), attempt).collect().await;
@@ -383,16 +403,36 @@ async fn a_streamed_response_decodes_to_what_the_wire_format_decodes() {
 
 // --- the credential ---
 
-/// A credential must not be printable. `ProviderRow` is `Debug` — a row is
-/// configuration and worth logging — so the redaction has to live on the
-/// secret itself, where it holds everywhere the value goes rather than only
-/// on the one type someone remembered.
+/// Story `regression_case`'s fifth criterion, stated as a property of the type
+/// rather than of who may call an accessor: a row names the variable its
+/// credential lives in and never holds the value.
+///
+/// The row is asked for its headers *first*, and inspected after. That
+/// ordering is the test. It used to be true only that a held [`Secret`]
+/// declined to print itself — a redaction one `derive` away from being wrong
+/// (`docs/decisions/2026-08-21-a-profile-is-not-a-protocol.md` §3). Resolving
+/// a credential now leaves the row exactly as it was, so there is nothing for
+/// a future `Serialize` to leak.
 #[test]
-fn a_credential_does_not_print_itself() {
-    let printed = format!("{:?}", row());
+fn resolving_a_credential_leaves_nothing_behind_in_the_row() {
+    let row = row();
+    let headers = row
+        .headers(&FakeCredentials::holding(KEY))
+        .expect("the fake holds every variable");
+
+    assert_eq!(
+        headers,
+        vec![("authorization".to_string(), format!("Bearer {KEY}"))],
+        "only the credential: content type and accept belong to the wire format"
+    );
+    let printed = format!("{row:?}");
     assert!(
-        !printed.contains("sk-not-a-real-key"),
-        "the credential is in a Debug string: {printed}"
+        !printed.contains(KEY),
+        "the row kept the credential it was handed: {printed}"
+    );
+    assert!(
+        printed.contains(KEY_VAR),
+        "a row still says which variable to set: {printed}"
     );
     assert!(
         printed.contains("stub"),
@@ -400,16 +440,87 @@ fn a_credential_does_not_print_itself() {
     );
 }
 
-/// A missing credential is refused where it can be diagnosed, rather than
-/// sent as an empty header and returned as a 401 from the provider.
+/// A provider that authenticates with nothing asks for nothing — and that is
+/// not the same answer as a failure.
+///
+/// [`Auth::None`] is a distinct variant rather than an empty variable name for
+/// exactly this reason: collapsing the two would make every local run refuse,
+/// or would send `Bearer ` to a daemon that never wanted one.
+#[test]
+fn a_row_that_authenticates_with_nothing_neither_asks_nor_fails() {
+    let local = ProviderRow::ollama_default();
+    let creds = FakeCredentials::empty();
+
+    assert_eq!(
+        local.headers(&creds).expect("no credential is needed"),
+        Vec::new()
+    );
+    local
+        .auth
+        .ensure_available(&creds)
+        .expect("a strategy that needs nothing is available on a machine with nothing");
+}
+
+/// A missing credential is refused by name at *both* doors, rather than
+/// leaving one of them to send an empty header and return a 401 from the
+/// provider.
 #[test]
 fn a_credential_that_is_not_configured_is_refused_by_name() {
-    let missing = Auth::bearer_from_env("EGO_TEST_CREDENTIAL_THAT_IS_NOT_SET")
+    let row = row();
+    let creds = FakeCredentials::empty();
+
+    let early = row
+        .auth
+        .ensure_available(&creds)
         .expect_err("this variable is not set");
+    let late = row.headers(&creds).expect_err("nor is it set here");
+
+    assert_eq!(early, late, "one refusal, whichever door found it");
     assert!(
-        missing
-            .to_string()
-            .contains("EGO_TEST_CREDENTIAL_THAT_IS_NOT_SET"),
-        "the refusal must name the variable to set: {missing}"
+        early.to_string().contains(KEY_VAR),
+        "the refusal must name the variable to set: {early}"
     );
+}
+
+/// And the generator refuses the same way, without a socket.
+///
+/// `model::resolve` calls `ensure_available` before a generation exists, so
+/// this should not happen — but should-not-happen is not cannot, and the
+/// honest answer to "the variable was unset mid-run" is a failed generation
+/// that was never sent, never a `Bearer ` header for the provider to reject.
+#[tokio::test]
+async fn a_generation_whose_credential_is_gone_fails_without_sending() {
+    let http = StubHttp::responding(200, TEXT_TRANSCRIPT);
+    let mut gate = BudgetGate::new(usd("10"));
+    let generator = WireGenerator::new(
+        row(),
+        Arc::clone(&http) as Arc<dyn Http>,
+        Arc::new(FakeCredentials::empty()),
+    );
+
+    let attempt = attempt_for(&mut gate, &request());
+    let events: Vec<AiEvent> = generator.generate(request(), attempt).collect().await;
+
+    assert_eq!(
+        http.calls(),
+        0,
+        "an unauthenticated request must not be sent"
+    );
+    assert!(
+        matches!(
+            events.first(),
+            Some(AiEvent::DeliveryObserved(
+                DeliveryCertainty::DefinitelyUnsent
+            ))
+        ),
+        "{events:?}"
+    );
+    assert!(
+        matches!(events.last(), Some(AiEvent::Stop(StopReason::Error))),
+        "{events:?}"
+    );
+    let named = events
+        .iter()
+        .any(|event| matches!(event, AiEvent::Error { message } if message.contains(KEY_VAR)));
+    assert!(named, "the error must name the variable: {events:?}");
 }

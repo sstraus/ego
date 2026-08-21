@@ -19,7 +19,7 @@ use ego_core::generator::types::GenRequest;
 use futures::{StreamExt, stream};
 
 use crate::http::Http;
-use crate::provider::ProviderRow;
+use crate::provider::{Credentials, ProviderRow};
 use crate::wire::{self, openai_completions};
 
 /// A [`Generator`] that sends `openai-completions` over an [`Http`].
@@ -36,11 +36,17 @@ pub struct WireGenerator {
     /// [`AttemptStream::new`] takes a `BoxStream<'static, _>`, so the future
     /// that calls [`Http::execute`] outlives any borrow of `self`.
     http: Arc<dyn Http>,
+    /// Where the row's credential strategy is resolved, once per request.
+    ///
+    /// Held here rather than resolved into the row, because the row must not
+    /// hold a secret — `docs/decisions/2026-08-21-a-profile-is-not-a-protocol.md`
+    /// §3. This holds no secret either: it holds the *means* of getting one.
+    creds: Arc<dyn Credentials>,
 }
 
 impl WireGenerator {
-    pub fn new(row: ProviderRow, http: Arc<dyn Http>) -> Self {
-        WireGenerator { row, http }
+    pub fn new(row: ProviderRow, http: Arc<dyn Http>, creds: Arc<dyn Credentials>) -> Self {
+        WireGenerator { row, http, creds }
     }
 
     /// Which provider this generates against.
@@ -51,25 +57,37 @@ impl WireGenerator {
 
 impl Generator for WireGenerator {
     fn generate(&self, req: GenRequest, attempt: GenerationAttempt) -> AttemptStream {
-        let request = match openai_completions::build_request(
-            self.row.endpoint.clone(),
-            self.row.headers(),
-            &req,
-        ) {
-            Ok(request) => request,
-            // Refused before a socket exists. `DefinitelyUnsent` is honest
-            // here for the same reason `HttpError::refused_before_sending` is
-            // allowed to assert it: the decision is a pure function of the
-            // request — no DNS, no connection, no bytes.
-            //
-            // Returning an empty stream instead would settle as an abort with
-            // a missing usage report, which says "the provider was called and
-            // went silent" about a provider that was never called.
-            Err(refused) => {
-                let events = wire::failed(refused.to_string(), DeliveryCertainty::DefinitelyUnsent);
+        // Resolved before the body is built, and refused the same way a
+        // request the format cannot express is refused. It should not happen:
+        // `model::resolve` already called `Auth::ensure_available`, so by the
+        // time a generation exists the variable was there. Should-not-happen
+        // is not the same as cannot, and the honest answer to "the credential
+        // vanished mid-run" is the one below — never a `Bearer ` header sent
+        // to be blamed on the provider.
+        let headers = match self.row.headers(self.creds.as_ref()) {
+            Ok(headers) => headers,
+            Err(missing) => {
+                let events = wire::failed(missing.to_string(), DeliveryCertainty::DefinitelyUnsent);
                 return AttemptStream::new(attempt, stream::iter(events).boxed());
             }
         };
+        let request =
+            match openai_completions::build_request(self.row.endpoint.clone(), headers, &req) {
+                Ok(request) => request,
+                // Refused before a socket exists. `DefinitelyUnsent` is honest
+                // here for the same reason `HttpError::refused_before_sending` is
+                // allowed to assert it: the decision is a pure function of the
+                // request — no DNS, no connection, no bytes.
+                //
+                // Returning an empty stream instead would settle as an abort with
+                // a missing usage report, which says "the provider was called and
+                // went silent" about a provider that was never called.
+                Err(refused) => {
+                    let events =
+                        wire::failed(refused.to_string(), DeliveryCertainty::DefinitelyUnsent);
+                    return AttemptStream::new(attempt, stream::iter(events).boxed());
+                }
+            };
 
         let http = Arc::clone(&self.http);
         // The row's own declaration of where it states a charge, carried to

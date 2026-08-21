@@ -93,7 +93,7 @@ omitted when empty: two states, identical bytes.
 | `ego export` | no | replay and export with `--sanitize` (**M3**). The projection exists; the redaction contract that makes an exported session safe to hand over does not |
 | `ego mcp` | no | the MCP client (**M2**). There is no server to add, remove or log in to |
 | `ego mcp-server` | no | ego's own MCP server surface (**M2**): the scoped run/continue/cancel/status tools it would expose |
-| `ego auth` | no | a credential store. Every provider reads one environment variable (`Auth::bearer_from_env`), so there is nowhere for a login to put anything and nothing for a logout to remove |
+| `ego auth` | no | a credential store. Every provider names one environment variable (`Auth::BearerFromEnv`), so there is nowhere for a login to put anything and nothing for a logout to remove |
 | `ego models` | no | a catalogue to enumerate. Hosted facts are supplied and local ones are discovered per resolution (`docs/decisions/2026-08-21-what-a-model-resolves-to.md`), so this build resolves one model at a time and holds no list to print or refresh; generated catalogues are **M5** |
 | `ego config` | no | a config writer. The loader is strict and read-only, and nothing in this build writes a config file — `-c/--set` overrides one run |
 | `ego rules` | no | the permission rule grammar (**M1**), the same subsystem `--allow` and `--deny` wait on: stable rule IDs are what `rules ls` would list and `rules revoke` would name |

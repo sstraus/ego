@@ -59,27 +59,72 @@ impl From<&str> for Secret {
     }
 }
 
-/// How a provider authenticates a request.
+/// How a provider authenticates a request — the *strategy*, never the value.
+///
+/// `docs/decisions/2026-08-21-a-profile-is-not-a-protocol.md` §3. A row used
+/// to carry a resolved [`Secret`], which was not readable outside this module
+/// but was one `derive` away from being — and which made a row *impossible to
+/// build* without a credential, so a missing key made a provider vanish and
+/// `model.rs` had to name one provider by hand to report the true error.
+/// Naming the variable instead means every provider has a row whether or not
+/// anyone has configured it, and the refusal happens where it can be acted on.
 #[derive(Debug, Clone)]
 pub enum Auth {
     /// None at all — a local daemon that does not authenticate. A distinct
-    /// variant rather than an empty [`Secret`], so "this provider needs no
+    /// variant rather than an empty variable name, so "this provider needs no
     /// key" and "the key is missing" cannot be confused.
     None,
-    /// `Authorization: Bearer <token>`.
-    Bearer(Secret),
+    /// `Authorization: Bearer <the value of this variable>`.
+    BearerFromEnv { var: String },
 }
 
 impl Auth {
-    /// Read a bearer token from the environment.
+    /// The credential this strategy needs, resolved now and returned to a
+    /// caller that is about to put it in a header and drop it.
     ///
-    /// Fallible, and separate from building the row, so that "no key
-    /// configured" is a refusal naming the variable to set rather than a 401
-    /// from the provider several layers later — by which point the request
-    /// has been built, sent, and billed to somebody's rate limit.
-    pub fn bearer_from_env(var: &str) -> Result<Self, MissingCredential> {
+    /// `None` means the strategy needs no credential, which is not the same
+    /// answer as an error and must never collapse into one.
+    fn secret(&self, creds: &dyn Credentials) -> Result<Option<Secret>, MissingCredential> {
+        match self {
+            Auth::None => Ok(None),
+            Auth::BearerFromEnv { var } => creds.bearer(var).map(Some),
+        }
+    }
+
+    /// Refuse now if the credential this strategy names is not there.
+    ///
+    /// Called at resolution, so "no key configured" is a refusal naming the
+    /// variable to set rather than a 401 from the provider several layers
+    /// later — by which point the request has been built, sent, and billed to
+    /// somebody's rate limit. It returns nothing on purpose: the value is
+    /// read again when a request is assembled and is never stored in between.
+    pub fn ensure_available(&self, creds: &dyn Credentials) -> Result<(), MissingCredential> {
+        self.secret(creds).map(|_| ())
+    }
+}
+
+/// Where a credential named by an [`Auth`] actually comes from.
+///
+/// A seam rather than a direct `std::env::var`, for two reasons that point the
+/// same way. `AGENTS.md` puts the process environment in `ego-cli`'s ownership,
+/// and a library reaching for it behind the caller's back is the ambient
+/// dependency that makes a resolution impossible to reason about. And it is
+/// the only way this is testable at all: `std::env::set_var` is `unsafe` in
+/// edition 2024 and this workspace denies `unsafe_code`, so a test that had to
+/// set a variable to exercise the success path could not be written.
+pub trait Credentials: Send + Sync {
+    /// The bearer token in `var`, or a refusal naming it.
+    fn bearer(&self, var: &str) -> Result<Secret, MissingCredential>;
+}
+
+/// The process environment: the only [`Credentials`] a real run uses.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct EnvCredentials;
+
+impl Credentials for EnvCredentials {
+    fn bearer(&self, var: &str) -> Result<Secret, MissingCredential> {
         match std::env::var(var) {
-            Ok(value) if !value.trim().is_empty() => Ok(Auth::Bearer(value.into())),
+            Ok(value) if !value.trim().is_empty() => Ok(value.into()),
             // A variable that is set to whitespace is not a credential, and
             // treating it as one would send `Bearer ` and blame the provider.
             _ => Err(MissingCredential {
@@ -148,11 +193,12 @@ pub const OLLAMA_ENDPOINT: &str = "http://localhost:11434/v1/chat/completions";
 impl ProviderRow {
     /// The hosted row.
     ///
-    /// The credential is read here rather than per request, so "no key
-    /// configured" is a refusal naming the variable to set instead of a 401
-    /// several layers later — by which point the request has been built,
-    /// sent, and charged to somebody's rate limit.
-    pub fn openai() -> Result<Self, MissingCredential> {
+    /// Infallible, and that is the change the profile ADR's §3 argues for: a
+    /// row names the variable its credential lives in and never reads it, so
+    /// the row exists whether or not anyone has configured a key. When it was
+    /// fallible a missing key made the provider *disappear*, and the resolver
+    /// had to special-case one provider by name to report the true error.
+    pub fn openai() -> Self {
         Self::openai_at(Url::parse(OPENAI_ENDPOINT).expect("a constant this file controls"))
     }
 
@@ -160,19 +206,21 @@ impl ProviderRow {
     ///
     /// The same pairing [`ollama`](Self::ollama) and
     /// [`ollama_default`](Self::ollama_default) already have, and for the same
-    /// reason: the endpoint is the caller's knowledge, the credential and the
-    /// id are the row's. Azure and the compatible gateways serve this wire
-    /// format at their own hostnames, and a test serves it on loopback.
-    pub fn openai_at(endpoint: Url) -> Result<Self, MissingCredential> {
-        Ok(ProviderRow {
+    /// reason: the endpoint is the caller's knowledge, the credential strategy
+    /// and the id are the row's. Azure and the compatible gateways serve this
+    /// wire format at their own hostnames, and a test serves it on loopback.
+    pub fn openai_at(endpoint: Url) -> Self {
+        ProviderRow {
             id: "openai".to_string(),
             endpoint,
-            auth: Auth::bearer_from_env(OPENAI_KEY_VAR)?,
+            auth: Auth::BearerFromEnv {
+                var: OPENAI_KEY_VAR.to_string(),
+            },
             // OpenAI reports token usage and no monetary total
             // (`docs/decisions/2026-08-21-how-a-model-is-metered.md` §6), so
             // this row is priced from a supplied table or not at all.
             cost: None,
-        })
+        }
     }
 
     /// The local row, on the same wire format as the hosted one.
@@ -219,13 +267,22 @@ impl ProviderRow {
     /// Only the credential. Content type and accept belong to the wire
     /// format, which adds them itself (`openai_completions::build_request`),
     /// because they are facts about the body — not about the provider.
-    pub fn headers(&self) -> Vec<(String, String)> {
-        match &self.auth {
-            Auth::None => Vec::new(),
-            Auth::Bearer(secret) => vec![(
+    ///
+    /// The credential is resolved *here*, per request, and the [`Secret`] it
+    /// comes back in lives exactly as long as the `format!` below. Nothing
+    /// holds it: that is what "no secret is reachable from `ProviderRow`"
+    /// means now that it is a claim about what the type holds rather than
+    /// about who can call an accessor.
+    pub fn headers(
+        &self,
+        creds: &dyn Credentials,
+    ) -> Result<Vec<(String, String)>, MissingCredential> {
+        Ok(match self.auth.secret(creds)? {
+            None => Vec::new(),
+            Some(secret) => vec![(
                 "authorization".to_string(),
                 format!("Bearer {}", secret.expose()),
             )],
-        }
+        })
     }
 }

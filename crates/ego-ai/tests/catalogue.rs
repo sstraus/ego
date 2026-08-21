@@ -20,7 +20,7 @@ use ego_ai::catalogue::{
 };
 use ego_ai::http::{Http, HttpError, HttpRequest, HttpResponse, Method};
 use ego_ai::ollama;
-use ego_ai::provider::{Auth, ProviderRow};
+use ego_ai::provider::ProviderRow;
 use ego_ai::wire::provider_cost::{ProviderCost, XaiUsdTicks};
 use ego_core::budget::{Metering, PricingQuote, ResolvedRates, SettlementSource};
 use ego_core::cost::{CurrencyCode, MeteringRevision, PricingRevision, RateSource, UnknownCost};
@@ -137,12 +137,7 @@ fn local_row() -> ProviderRow {
 }
 
 fn hosted_row() -> ProviderRow {
-    ProviderRow {
-        id: "openai".to_string(),
-        endpoint: Url::parse("https://api.openai.com/v1/chat/completions").unwrap(),
-        auth: Auth::Bearer("sk-not-a-real-key".into()),
-        cost: None,
-    }
+    ProviderRow::openai()
 }
 
 /// A deliberately NON-zero hosted quote. The point of the test that uses it:

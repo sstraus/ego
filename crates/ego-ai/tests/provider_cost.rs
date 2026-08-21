@@ -51,6 +51,9 @@ use futures::future::BoxFuture;
 use serde_json::value::RawValue;
 use url::Url;
 
+mod support;
+use support::FakeCredentials;
+
 // --- the two wire conventions ---
 
 /// One `usage` object as each provider sends it, and nothing else. The
@@ -240,9 +243,20 @@ fn row(id: &str, cost: Arc<dyn ProviderCost>) -> ProviderRow {
     ProviderRow {
         id: id.to_string(),
         endpoint: Url::parse("https://api.example/v1/chat/completions").expect("a valid url"),
-        auth: Auth::Bearer("sk-not-a-real-key".into()),
+        auth: Auth::BearerFromEnv {
+            var: "EGO_TEST_API_KEY".to_string(),
+        },
         cost: Some(cost),
     }
+}
+
+/// A machine where every provider's key is configured.
+///
+/// Authentication is not what this file is about, but the rows above are the
+/// real thing rather than a keyless simplification — a fixture that could not
+/// authenticate would not exercise the same path a priced run takes.
+fn creds() -> Arc<FakeCredentials> {
+    Arc::new(FakeCredentials::holding("sk-not-a-real-key"))
 }
 
 /// Everything from the socket to the committed total, for one provider.
@@ -275,6 +289,7 @@ async fn settle_through_core(
     let generator = WireGenerator::new(
         row(id, decoder),
         StubHttp::new(transcript(usage)) as Arc<dyn Http>,
+        creds(),
     );
     let mut stream = generator.generate(request(), attempt);
     let events: Vec<AiEvent> = stream.by_ref().collect().await;
@@ -512,11 +527,16 @@ async fn a_row_with_no_cost_decoder_settles_from_its_table_as_it_always_did() {
     let plain = ProviderRow {
         id: "openai".to_string(),
         endpoint: Url::parse("https://api.example/v1/chat/completions").expect("a valid url"),
-        auth: Auth::Bearer("sk-not-a-real-key".into()),
+        auth: Auth::BearerFromEnv {
+            var: "EGO_TEST_API_KEY".to_string(),
+        },
         cost: None,
     };
-    let generator =
-        WireGenerator::new(plain, StubHttp::new(transcript(XAI_USAGE)) as Arc<dyn Http>);
+    let generator = WireGenerator::new(
+        plain,
+        StubHttp::new(transcript(XAI_USAGE)) as Arc<dyn Http>,
+        creds(),
+    );
     let mut stream = generator.generate(request(), attempt);
     let events: Vec<AiEvent> = stream.by_ref().collect().await;
     assert!(

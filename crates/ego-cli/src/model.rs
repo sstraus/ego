@@ -11,7 +11,7 @@ use std::sync::Arc;
 use ego_ai::catalogue::{self, Catalogue, ModelSlug, ResolveError, ResolvedModel};
 use ego_ai::http::{EgressPolicy, Http, ReqwestHttp};
 use ego_ai::ollama;
-use ego_ai::provider::{OLLAMA_ENDPOINT, OPENAI_ENDPOINT, ProviderRow};
+use ego_ai::provider::{Credentials, OLLAMA_ENDPOINT, OPENAI_ENDPOINT, ProviderRow};
 use url::Url;
 
 use crate::facts;
@@ -79,16 +79,21 @@ pub fn transport(offline: bool) -> Result<Arc<dyn Http>, ResolveError> {
 
 /// The rows this build knows how to reach.
 ///
-/// The hosted row is only added when its credential is present. That is not
-/// leniency: `Auth::bearer_from_env` refuses without one, and a catalogue
-/// built eagerly would make *every* invocation fail for want of a key, even
-/// `--model ollama/qwen3`.
+/// Every row, unconditionally. A row names the variable its credential lives
+/// in and never reads it
+/// (`docs/decisions/2026-08-21-a-profile-is-not-a-protocol.md` §3), so a
+/// machine with no `OPENAI_API_KEY` still *has* an OpenAI row — it simply
+/// cannot authenticate against it yet, which is a different sentence and a
+/// different error.
+///
+/// It used to be conditional, because a row could not be built without a key.
+/// That made a missing credential indistinguishable from an unknown provider
+/// and forced [`resolve`] to name one provider by hand to say the true thing.
 fn rows() -> Result<Vec<ProviderRow>, ResolveError> {
-    let mut rows = vec![ProviderRow::ollama(endpoint(OLLAMA_HOST, OLLAMA_ENDPOINT)?)];
-    if let Ok(openai) = ProviderRow::openai_at(endpoint(OPENAI_BASE_URL, OPENAI_ENDPOINT)?) {
-        rows.push(openai);
-    }
-    Ok(rows)
+    Ok(vec![
+        ProviderRow::ollama(endpoint(OLLAMA_HOST, OLLAMA_ENDPOINT)?),
+        ProviderRow::openai_at(endpoint(OPENAI_BASE_URL, OPENAI_ENDPOINT)?),
+    ])
 }
 
 /// Resolve `slug` against the daemon or against what was supplied.
@@ -97,27 +102,30 @@ fn rows() -> Result<Vec<ProviderRow>, ResolveError> {
 /// here, so that a `models.toml` which cannot be parsed is reported as the file
 /// error it is. Folding it into [`ResolveError`] would make "your TOML has a
 /// stray bracket" arrive as a statement about a model.
+///
+/// `creds` is passed in for the same reason and one more: it is the *same*
+/// source the generator will read from when it assembles a request, so the
+/// check below and the header built later cannot disagree about whether a key
+/// exists.
 pub async fn resolve(
     slug: &str,
     hosted: Vec<(String, facts::Hosted)>,
     http: &Arc<dyn Http>,
+    creds: &dyn Credentials,
 ) -> Result<ResolvedModel, ResolveError> {
     let slug = ModelSlug::parse(slug)?;
     let mut catalogue = Catalogue::new(rows()?);
     for (supplied, model) in hosted {
         catalogue = catalogue.with_hosted(&supplied, model);
     }
+    let row = catalogue.row(&slug.provider)?.clone();
+    // Refused here, where the operator can act on it, rather than as a 401
+    // several layers later. No per-provider branch: the row names its own
+    // variable, so this one line covers every provider that has one and says
+    // nothing about the ones that do not.
+    row.auth.ensure_available(creds)?;
     if slug.provider == catalogue::OLLAMA {
-        let row = catalogue.row(&slug.provider)?.clone();
         return ollama::resolve(&row, &slug.model, http).await;
-    }
-    // The hosted path. `row` is consulted first so that a missing credential
-    // is reported as a missing credential — the thing an operator can fix —
-    // rather than as "no facts are configured for that model".
-    if slug.provider == catalogue::OPENAI && catalogue.row(&slug.provider).is_err() {
-        return Err(ResolveError::MissingCredential(
-            ProviderRow::openai().expect_err("the row is absent, so the credential is"),
-        ));
     }
     catalogue.resolve_hosted(&slug)
 }
