@@ -47,7 +47,7 @@ mod common;
 
 mod turn {
     use super::*;
-    use crate::common::FakeFs;
+    use ego_core::permit::fake::FakeFs;
 
     /// A `SessionStore` that keeps the log in memory, and can be told to fail
     /// on the nth append — which is the only way to test what the loop does

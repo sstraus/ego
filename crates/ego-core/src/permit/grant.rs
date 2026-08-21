@@ -6,7 +6,9 @@
 //! constructor lives behind [`Sealed`], whose own constructor is private to
 //! this module too. No code outside `grant.rs` — not `tool.rs`, not
 //! `fs.rs`, not a consumer crate — can name `Sealed(())`, so the only way
-//! to produce a `Permit` anywhere in the program is [`PolicyEngine::mint`].
+//! to produce a `Permit` anywhere in the program is this module's private
+//! `mint`, and the only way to reach *that* is
+//! [`PolicyEngine::authorize`], which derives the scope from the call.
 
 use std::fmt;
 
@@ -318,14 +320,320 @@ impl PolicyEngine {
 
     /// Mint a permit for an explicit scope.
     ///
-    /// The sealed primitive [`authorize`](Self::authorize) is built from, and
-    /// what a later bypass mode (`--yolo`, `ARCHITECTURE.md` §3.4) mints a
-    /// deliberately wide grant with. The turn loop does not call it: a loop
-    /// that chooses its own `Scope` is a loop that is its own policy.
-    pub fn mint(&self, scope: Scope) -> Permit {
+    /// **Private to `grant.rs`, and that is the load-bearing half of
+    /// Invariant W.** It used to be `pub`, reserved for "a later bypass mode
+    /// (`--yolo`) minting a deliberately wide grant". §1 of
+    /// `docs/decisions/2026-08-21-a-permit-nobody-can-widen.md` removed that
+    /// use: bypass is a decision *whether to ask*, and a bypassed call is
+    /// still scoped from the call, so nothing anywhere needs a wide grant.
+    /// What was left was a public widening primitive kept for its own sake —
+    /// any holder of a `&PolicyEngine` could compose a `Scope` covering the
+    /// whole disk and get a `Permit` for it.
+    ///
+    /// With it private, [`authorize`](Self::authorize) is the only path to a
+    /// `Permit` in the entire program, and `authorize` derives the scope from
+    /// the call. A loop that chooses its own `Scope` is a loop that is its own
+    /// policy, and now it cannot.
+    fn mint(&self, scope: Scope) -> Permit {
         Permit {
             scope,
             _sealed: Sealed(()),
         }
+    }
+}
+
+/// Scope mechanics, and the one place `mint` can still be called.
+///
+/// These tests live inside `grant.rs` rather than under `tests/` because
+/// they need [`PolicyEngine::mint`], and `mint` is private to this module —
+/// that privacy is half of §2 of
+/// `docs/decisions/2026-08-21-a-permit-nobody-can-widen.md`, and a test
+/// binary that could reach it would be proof it is not private at all. What
+/// they check is what a `Scope` *means* once minted: the four path lists do
+/// not imply one another, `is_or_under` is component-wise and not a string
+/// prefix, and the guarded seam rechecks at use time.
+#[cfg(test)]
+mod tests {
+    use futures::executor::block_on;
+    use serde_json::json;
+
+    use super::*;
+    use crate::permit::fake::{FakeFs, FakeWriteTool};
+    use crate::permit::{
+        Fs, GuardedFs, GuardedIo, IoDenied, Op, PrepareCtx, Tool, ToolError, Typed,
+    };
+
+    fn prepare_ctx<'a>(fs: &'a FakeFs) -> PrepareCtx<'a> {
+        PrepareCtx {
+            cwd: CanonPath::new("/ws"),
+            resolver: fs,
+        }
+    }
+
+    #[test]
+    fn permit_typed_tool_writes_inside_permit_ok() {
+        let fs = FakeFs::default();
+        let tool = Typed(FakeWriteTool);
+        let ctx = prepare_ctx(&fs);
+        let call = tool
+            .prepare(
+                json!({ "path": "/ws/allowed/note.txt", "contents": "hello" }),
+                &ctx,
+            )
+            .unwrap();
+
+        let engine = PolicyEngine::new(CanonPath::new("/ws"));
+        let permit = engine.mint(Scope {
+            write_paths: vec![CanonPath::new("/ws/allowed")],
+            ..Scope::default()
+        });
+        let guarded = GuardedFs::new(&permit, &fs);
+
+        let result = block_on(tool.execute(call, &permit, &guarded)).unwrap();
+        assert_eq!(result.content, "wrote 5 bytes to /ws/allowed/note.txt");
+        assert_eq!(
+            fs.read(&CanonPath::new("/ws/allowed/note.txt")).unwrap(),
+            b"hello"
+        );
+    }
+
+    #[test]
+    fn permit_typed_tool_write_outside_permit_denied_names_op() {
+        let fs = FakeFs::default();
+        let tool = Typed(FakeWriteTool);
+        let ctx = prepare_ctx(&fs);
+        let call = tool
+            .prepare(json!({ "path": "/etc/passwd", "contents": "pwned" }), &ctx)
+            .unwrap();
+
+        let engine = PolicyEngine::new(CanonPath::new("/ws"));
+        let permit = engine.mint(Scope {
+            write_paths: vec![CanonPath::new("/ws/allowed")],
+            ..Scope::default()
+        });
+        let guarded = GuardedFs::new(&permit, &fs);
+
+        let err = block_on(tool.execute(call, &permit, &guarded)).unwrap_err();
+        assert_eq!(
+            err,
+            ToolError::Denied(PermitDenied::Write {
+                path: CanonPath::new("/etc/passwd")
+            })
+        );
+        let message = err.to_string();
+        assert!(
+            message.contains("write"),
+            "denial should name the op: {message}"
+        );
+        assert!(
+            message.contains("/etc/passwd"),
+            "denial should name the path: {message}"
+        );
+        assert!(
+            fs.read(&CanonPath::new("/etc/passwd")).is_err(),
+            "denied write must not happen"
+        );
+    }
+
+    #[test]
+    fn permit_symlink_resolved_at_prepare_is_rechecked_at_execute() {
+        let fs = FakeFs::default();
+        fs.symlink("/ws/link", "/ws/allowed/file.txt");
+
+        let tool = Typed(FakeWriteTool);
+        let ctx = prepare_ctx(&fs);
+        let call = tool
+            .prepare(json!({ "path": "/ws/link", "contents": "hi" }), &ctx)
+            .expect("prepare chases the symlink");
+        assert_eq!(
+            call.ops,
+            vec![Op::Write {
+                path: CanonPath::new("/ws/allowed/file.txt"),
+                contents: b"hi".to_vec(),
+            }]
+        );
+
+        let engine = PolicyEngine::new(CanonPath::new("/ws"));
+        let permit = engine.mint(Scope {
+            write_paths: vec![CanonPath::new("/ws/allowed")],
+            ..Scope::default()
+        });
+
+        // Race: between prepare (which classified /ws/allowed/file.txt as
+        // the target) and execute, the resolved target itself is swapped
+        // for a symlink pointing outside the permitted scope.
+        fs.symlink("/ws/allowed/file.txt", "/ws/secret/passwords.txt");
+
+        let guarded = GuardedFs::new(&permit, &fs);
+        let err = block_on(tool.execute(call, &permit, &guarded)).unwrap_err();
+        assert_eq!(
+            err,
+            ToolError::Denied(PermitDenied::Write {
+                path: CanonPath::new("/ws/secret/passwords.txt"),
+            })
+        );
+        assert!(
+            fs.read(&CanonPath::new("/ws/secret/passwords.txt"))
+                .is_err(),
+            "the raced-to target must never be written"
+        );
+    }
+
+    #[test]
+    fn permit_guarded_fs_read_respects_scope() {
+        let fs = FakeFs::default();
+        fs.file("/ws/readable/notes.md", "public notes");
+        fs.file("/ws/private/notes.md", "private notes");
+
+        let engine = PolicyEngine::new(CanonPath::new("/ws"));
+        let permit = engine.mint(Scope {
+            read_paths: vec![CanonPath::new("/ws/readable")],
+            ..Scope::default()
+        });
+        let guarded = GuardedFs::new(&permit, &fs);
+
+        assert_eq!(
+            guarded
+                .read(&CanonPath::new("/ws/readable/notes.md"))
+                .unwrap(),
+            b"public notes".to_vec()
+        );
+        assert!(matches!(
+            guarded.read(&CanonPath::new("/ws/private/notes.md")),
+            Err(IoDenied::Permit(PermitDenied::Read { .. }))
+        ));
+    }
+
+    #[test]
+    fn permit_guarded_fs_write_denies_sibling_prefix_directory() {
+        let fs = FakeFs::default();
+        let engine = PolicyEngine::new(CanonPath::new("/ws"));
+        let permit = engine.mint(Scope {
+            write_paths: vec![CanonPath::new("/ws/allowed")],
+            ..Scope::default()
+        });
+        let guarded = GuardedFs::new(&permit, &fs);
+
+        // "/ws/allowed-evil" shares a textual prefix with the scoped
+        // "/ws/allowed" but is a sibling, not a descendant of it —
+        // `Path::starts_with` is component-wise, so this must stay denied.
+        // A string-prefix "simplification" of `CanonPath::is_or_under`
+        // would silently let this through.
+        let err = guarded
+            .write(&CanonPath::new("/ws/allowed-evil/file.txt"), b"pwned")
+            .unwrap_err();
+        assert!(matches!(err, IoDenied::Permit(PermitDenied::Write { .. })));
+        assert!(
+            fs.read(&CanonPath::new("/ws/allowed-evil/file.txt"))
+                .is_err(),
+            "denied write must not happen"
+        );
+    }
+
+    #[test]
+    fn permit_guarded_fs_write_allows_scope_root_and_nested_descendant() {
+        let fs = FakeFs::default();
+        let engine = PolicyEngine::new(CanonPath::new("/ws"));
+        let permit = engine.mint(Scope {
+            write_paths: vec![CanonPath::new("/ws/allowed")],
+            ..Scope::default()
+        });
+        let guarded = GuardedFs::new(&permit, &fs);
+
+        // The scope boundary itself is in scope ("is or under", not
+        // strictly-under-only)...
+        guarded
+            .write(&CanonPath::new("/ws/allowed"), b"root")
+            .unwrap();
+        // ...and so is a nested descendant, arbitrarily deep.
+        guarded
+            .write(&CanonPath::new("/ws/allowed/nested/deep/file.txt"), b"deep")
+            .unwrap();
+
+        assert_eq!(fs.read(&CanonPath::new("/ws/allowed")).unwrap(), b"root");
+        assert_eq!(
+            fs.read(&CanonPath::new("/ws/allowed/nested/deep/file.txt"))
+                .unwrap(),
+            b"deep"
+        );
+    }
+
+    #[test]
+    fn permit_guarded_fs_read_denies_sibling_prefix_directory() {
+        let fs = FakeFs::default();
+        fs.file("/ws/allowed-evil/secret.txt", "leaked");
+
+        let engine = PolicyEngine::new(CanonPath::new("/ws"));
+        let permit = engine.mint(Scope {
+            read_paths: vec![CanonPath::new("/ws/allowed")],
+            ..Scope::default()
+        });
+        let guarded = GuardedFs::new(&permit, &fs);
+
+        // Same sibling-prefix hazard as the write case, checked against
+        // `Scope::read_paths` — read and write scope independently, each
+        // with its own `.iter().any()`, so this needs its own pin.
+        let err = guarded
+            .read(&CanonPath::new("/ws/allowed-evil/secret.txt"))
+            .unwrap_err();
+        assert!(matches!(err, IoDenied::Permit(PermitDenied::Read { .. })));
+    }
+
+    #[test]
+    fn permit_scope_covers_paths_endpoints_and_argv() {
+        let engine = PolicyEngine::new(CanonPath::new("/ws"));
+        let permit = engine.mint(Scope {
+            write_paths: vec![CanonPath::new("/ws/allowed")],
+            read_paths: vec![CanonPath::new("/ws/readable")],
+            list_paths: vec![CanonPath::new("/ws/listable")],
+            search_paths: vec![CanonPath::new("/ws/searchable")],
+            endpoints: vec!["api.example.com:443".to_string()],
+            argv: vec![vec!["git".to_string(), "status".to_string()]],
+        });
+
+        assert!(
+            permit
+                .allows_write(&CanonPath::new("/ws/allowed/file.txt"))
+                .is_ok()
+        );
+        assert!(matches!(
+            permit.allows_write(&CanonPath::new("/etc/passwd")),
+            Err(PermitDenied::Write { .. })
+        ));
+        // Write scope does not imply read scope, or vice versa.
+        assert!(matches!(
+            permit.allows_read(&CanonPath::new("/ws/allowed/file.txt")),
+            Err(PermitDenied::Read { .. })
+        ));
+
+        assert!(
+            permit
+                .allows_read(&CanonPath::new("/ws/readable/notes.md"))
+                .is_ok()
+        );
+        assert!(matches!(
+            permit.allows_read(&CanonPath::new("/ws/private/notes.md")),
+            Err(PermitDenied::Read { .. })
+        ));
+
+        assert!(permit.allows_connect("api.example.com:443").is_ok());
+        assert!(matches!(
+            permit.allows_connect("evil.example.com:443"),
+            Err(PermitDenied::Connect { .. })
+        ));
+
+        assert!(
+            permit
+                .allows_argv(&[
+                    "git".to_string(),
+                    "status".to_string(),
+                    "--short".to_string()
+                ])
+                .is_ok()
+        );
+        assert!(matches!(
+            permit.allows_argv(&["rm".to_string(), "-rf".to_string()]),
+            Err(PermitDenied::Argv { .. })
+        ));
     }
 }
