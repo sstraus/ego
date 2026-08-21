@@ -21,6 +21,7 @@ use std::sync::{Arc, Mutex};
 use ego_ai::generator::WireGenerator;
 use ego_ai::http::{Http, HttpError, HttpRequest, HttpResponse, Method};
 use ego_ai::provider::{CredentialStrategy, ProviderRow, ResolvedCredential};
+use ego_ai::resolver::Supplied;
 use ego_ai::wire::openai_completions::{OpenAiCompletions, request_body};
 use ego_core::budget::{BudgetGate, Metering, PricingQuote, SettlementSource};
 use ego_core::cost::{Amount, CurrencyCode, Money, PricingRevision};
@@ -129,6 +130,7 @@ fn request_carrying_reasoning() -> GenRequest {
 
 fn row() -> ProviderRow {
     ProviderRow {
+        resolver: &Supplied,
         id: "stub".to_string(),
         base: Url::parse("https://api.example/v1/").expect("a valid url"),
         wire: &OpenAiCompletions,

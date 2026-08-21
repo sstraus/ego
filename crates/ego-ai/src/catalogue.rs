@@ -18,13 +18,16 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::Arc;
 
 use ego_core::budget::{Metering, PricingQuote, ResolvedRates, SettlementSource};
 use ego_core::cost::{MeteringRevision, RateSource};
 use ego_core::generator::capabilities::ModelCapabilities;
 use url::Url;
 
+use crate::http::Http;
 use crate::provider::{MissingCredential, ProviderRow};
+use crate::resolver::Resolution;
 use crate::wire::provider_cost::ProviderCost;
 
 /// The provider id of the hosted row this milestone ships.
@@ -354,10 +357,43 @@ impl Catalogue {
             })
     }
 
+    /// Resolve any slug, by asking whatever its row says resolves it.
+    ///
+    /// The one entry point, and the reason there is one:
+    /// `crates/ego-cli/src/model.rs` used to ask
+    /// `if slug.provider == catalogue::OLLAMA` and call one of two functions,
+    /// which is a caller that must know which providers are daemons in order
+    /// to resolve any of them. The row knows
+    /// (`docs/decisions/2026-08-21-a-shared-shape-is-not-a-shared-contract.md`
+    /// §4), so the branch is gone and the second daemon costs a constructor
+    /// rather than an arm in another crate.
+    ///
+    /// The transport is taken by every call, including the ones that never
+    /// open a socket. Making it optional would put the branch back — the
+    /// caller would decide whether this resolution is the kind that needs a
+    /// network, which is the thing it must not know.
+    pub async fn resolve(
+        &self,
+        slug: &ModelSlug,
+        http: &Arc<dyn Http>,
+    ) -> Result<ResolvedModel, ResolveError> {
+        let row = self.row(&slug.provider)?;
+        let at = Resolution {
+            catalogue: self,
+            row,
+            slug,
+            http,
+        };
+        row.resolver.resolve(&at).await
+    }
+
     /// Resolve a hosted slug from what was supplied.
     ///
     /// Local slugs are not resolvable here: their facts come from the daemon,
-    /// which needs a transport this type deliberately does not hold.
+    /// which needs a transport this type deliberately does not hold. Public
+    /// because [`Supplied`](crate::resolver::Supplied) is what calls it and
+    /// because a test that wants the supplied half alone should not have to
+    /// build a transport to reach it.
     pub fn resolve_hosted(&self, slug: &ModelSlug) -> Result<ResolvedModel, ResolveError> {
         let row = self.row(&slug.provider)?;
         let key = slug.to_string();

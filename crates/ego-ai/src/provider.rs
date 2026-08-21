@@ -20,6 +20,7 @@ use std::sync::Arc;
 
 use url::Url;
 
+use crate::resolver::{ModelResolver, OllamaDaemon, Supplied};
 use crate::wire::WireFormat;
 use crate::wire::ollama::Ollama;
 use crate::wire::openai_completions::OpenAiCompletions;
@@ -241,6 +242,21 @@ pub struct ProviderRow {
     /// disguise. It can select one now — that is precisely what the ADR
     /// unblocked — so the field is the trait in the open.
     pub wire: &'static dyn WireFormat,
+    /// What turns one of this provider's model ids into the facts a turn
+    /// needs.
+    ///
+    /// A `&'static dyn` for exactly the reasons [`wire`](Self::wire) is one,
+    /// and it removes the same kind of thing: `crates/ego-cli/src/model.rs`
+    /// used to ask `if slug.provider == catalogue::OLLAMA` and call one of two
+    /// functions, which is a caller that has to know which providers are
+    /// daemons in order to resolve any of them. The row knows; nobody else
+    /// needs to.
+    ///
+    /// The distinction it carries is real and not a tidy-up:
+    /// `2026-08-21-what-a-model-resolves-to.md` argues that a hosted model's
+    /// ceilings and prices are facts nobody can discover, and a local model's
+    /// are facts nobody can write down.
+    pub resolver: &'static dyn ModelResolver,
     /// How this provider states the money it will charge, when it states it
     /// at all.
     ///
@@ -307,6 +323,7 @@ impl ProviderRow {
             id: "openai".to_string(),
             base: as_base(base),
             wire: &OpenAiCompletions,
+            resolver: &Supplied,
             credential: CredentialStrategy::BearerFromEnv {
                 var: OPENAI_KEY_VAR.to_string(),
             },
@@ -336,8 +353,10 @@ impl ProviderRow {
     /// server took the request, never that it did what the request said.**
     /// Every remaining claim in this comment is an acceptance claim, so none
     /// of them may be read as a claim about honouring either — which is why
-    /// this row still owes a recorded transcript and a local smoke rather
-    /// than a sentence.
+    /// this row owed a recorded transcript and a local smoke rather than a
+    /// sentence. Both exist now: `tests/goldens/profile/ollama/` holds a
+    /// request, two transcripts, an error and two usage frames taken from a
+    /// live daemon, and `EGO_SMOKE=ollama` re-takes them.
     ///
     /// It is not the hosted row with a different address. The same
     /// measurement discipline found the one place the daemon's answers differ
@@ -353,6 +372,7 @@ impl ProviderRow {
             id: "ollama".to_string(),
             base: as_base(base),
             wire: &Ollama,
+            resolver: &OllamaDaemon,
             credential: CredentialStrategy::None,
             // A daemon serving its own weights charges nothing and states
             // nothing; the metering says so, not a cost field.

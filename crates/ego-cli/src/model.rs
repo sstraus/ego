@@ -2,15 +2,15 @@
 //!
 //! The split is `ego-ai`'s and this module does not reopen it: a hosted
 //! model's price and ceilings are *supplied*, a local daemon's are
-//! *discovered*. What lives here is the part that needs the process — reading
-//! the environment for a credential and for a daemon address, and choosing
-//! which of the two resolvers to ask.
+//! *discovered*, and which of the two a provider gets is a fact its row
+//! carries (`ego_ai::resolver`). What lives here is only the part that needs
+//! the process — reading the environment for a credential and for a daemon
+//! address.
 
 use std::sync::Arc;
 
-use ego_ai::catalogue::{self, Catalogue, ModelSlug, ResolveError, ResolvedModel};
+use ego_ai::catalogue::{Catalogue, ModelSlug, ResolveError, ResolvedModel};
 use ego_ai::http::{EgressPolicy, Http, ReqwestHttp};
-use ego_ai::ollama;
 use ego_ai::provider::{Credentials, OLLAMA_BASE, OPENAI_BASE, ProviderRow, ResolvedCredential};
 use url::Url;
 
@@ -131,17 +131,16 @@ pub async fn resolve(
     for (supplied, model) in hosted {
         catalogue = catalogue.with_hosted(&supplied, model);
     }
-    let row = catalogue.row(&slug.provider)?.clone();
+    let row = catalogue.row(&slug.provider)?;
     // Read here, where a refusal can name the variable to set, rather than as
     // a 401 several layers later. No per-provider branch: the row names its
     // own variable, so this one line covers every provider that has one and
     // says nothing about the ones that do not.
     let credential = row.credential.resolve(creds)?;
-    let model = if slug.provider == catalogue::OLLAMA {
-        ollama::resolve(&row, &slug.model, http).await?
-    } else {
-        catalogue.resolve_hosted(&slug)?
-    };
+    // No branch on the provider id. The row names what resolves it
+    // (`ego_ai::resolver`), so this crate does not have to know which
+    // providers are daemons in order to resolve any of them.
+    let model = catalogue.resolve(&slug, http).await?;
     Ok((model, credential))
 }
 

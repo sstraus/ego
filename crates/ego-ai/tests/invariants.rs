@@ -38,6 +38,7 @@ use ego_ai::catalogue::{self, Catalogue, HostedModel, ModelSlug};
 use ego_ai::generator::WireGenerator;
 use ego_ai::http::{Http, HttpError, HttpRequest, HttpResponse};
 use ego_ai::provider::{CredentialStrategy, ProviderRow};
+use ego_ai::resolver::Supplied;
 use ego_ai::wire::openai_completions::OpenAiCompletions;
 use ego_ai::wire::provider_cost::ProviderCost;
 use ego_ai::wire::{RequestRefused, RequestTarget, WireFormat};
@@ -307,6 +308,7 @@ fn settled(exit: ExitReason, state: &SessionState, usage: Usage, total: &str) {
 #[tokio::test]
 async fn a_provider_on_a_supported_dialect_is_configuration_and_nothing_else() {
     let acme = ProviderRow {
+        resolver: &Supplied,
         id: "acme".to_string(),
         base: Url::parse("https://api.acme.example/v1/").expect("a valid url"),
         credential: CredentialStrategy::BearerFromEnv {
@@ -543,6 +545,7 @@ fn beacon_transcript() -> String {
 /// The stranger's row. A value like any other row, which is the claim.
 fn beacon_row() -> ProviderRow {
     ProviderRow {
+        resolver: &Supplied,
         id: "beacon".to_string(),
         base: Url::parse("https://beacon.example/").expect("a valid url"),
         credential: CredentialStrategy::None,

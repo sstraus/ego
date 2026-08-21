@@ -27,6 +27,7 @@ use std::sync::{Arc, Mutex};
 
 use ego_ai::http::{Http, HttpError, HttpRequest, HttpResponse};
 use ego_ai::provider::{CredentialStrategy, ProviderRow, ResolvedCredential};
+use ego_ai::resolver::Supplied;
 use ego_ai::wire::openai_completions::OpenAiCompletions;
 use ego_ai::wire::provider_cost::{
     OPENROUTER_COST_FIELD, OpenRouterUsd, ProviderCost, XAI_COST_FIELD, XaiUsdTicks,
@@ -243,6 +244,7 @@ impl Http for StubHttp {
 
 fn row(id: &str, cost: Arc<dyn ProviderCost>) -> ProviderRow {
     ProviderRow {
+        resolver: &Supplied,
         id: id.to_string(),
         base: Url::parse("https://api.example/v1/").expect("a valid url"),
         wire: &OpenAiCompletions,
@@ -536,6 +538,7 @@ async fn a_row_with_no_cost_decoder_settles_from_its_table_as_it_always_did() {
     // The transcript still carries xAI's cost field; the row simply does not
     // declare that it reads one, so nothing may read it.
     let plain = ProviderRow {
+        resolver: &Supplied,
         id: "openai".to_string(),
         base: Url::parse("https://api.example/v1/").expect("a valid url"),
         wire: &OpenAiCompletions,

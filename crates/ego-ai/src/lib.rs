@@ -9,6 +9,7 @@ pub mod generator;
 pub mod http;
 pub mod ollama;
 pub mod provider;
+pub mod resolver;
 pub mod wire;
 
 use ego_core::generator::attempt::{AttemptStream, GenerationAttempt};

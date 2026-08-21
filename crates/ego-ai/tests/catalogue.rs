@@ -21,6 +21,7 @@ use ego_ai::catalogue::{
 use ego_ai::http::{Http, HttpError, HttpRequest, HttpResponse, Method};
 use ego_ai::ollama;
 use ego_ai::provider::ProviderRow;
+use ego_ai::resolver::{OllamaDaemon, Supplied};
 use ego_ai::wire::provider_cost::{ProviderCost, XaiUsdTicks};
 use ego_core::budget::{Metering, PricingQuote, ResolvedRates, SettlementSource};
 use ego_core::cost::{CurrencyCode, MeteringRevision, PricingRevision, RateSource, UnknownCost};
@@ -849,4 +850,145 @@ fn a_provider_reported_row_with_no_rates_has_no_bound_and_is_not_an_error() {
         Ok(None),
         "no rates is no bound, not a refusal"
     );
+}
+
+// --- the row decides what resolves it ---
+//
+// `docs/decisions/2026-08-21-a-shared-shape-is-not-a-shared-contract.md` §4.
+// `crates/ego-cli/src/model.rs` used to ask `if slug.provider == OLLAMA` and
+// call one of two functions, so a second daemon meant a second arm in a crate
+// that should not have needed touching. These four are what make that branch
+// unnecessary rather than merely absent.
+
+/// A hosted slug resolves without opening a socket.
+///
+/// The transport is scripted with **nothing**, so the stub errors on the first
+/// request. That is the assertion: `Supplied` reads a table, and a resolution
+/// that reached for the network would fail here instead of passing.
+#[test]
+fn a_hosted_slug_resolves_from_the_table_and_asks_nothing() {
+    let (http, stub) = daemon([]);
+    let catalogue = Catalogue::new([hosted_row()]).with_hosted(
+        "openai/gpt-5.6",
+        HostedModel {
+            capabilities: hosted_caps(),
+            metering: tabulated(),
+            rates: Some(hosted_rates()),
+        },
+    );
+
+    let resolved = block_on(catalogue.resolve(&ModelSlug::parse("openai/gpt-5.6").unwrap(), &http))
+        .expect("it was supplied");
+
+    assert_eq!(resolved.model, "gpt-5.6");
+    assert_eq!(resolved.capabilities, hosted_caps());
+    assert!(
+        stub.paths().is_empty(),
+        "a supplied model was resolved by asking a server: {:?}",
+        stub.paths()
+    );
+}
+
+/// A local slug resolves by asking the daemon, through the same call.
+///
+/// Same method, same arguments, opposite behaviour — which is the whole claim:
+/// the caller passes a slug and a transport and does not choose.
+#[test]
+fn a_local_slug_resolves_by_asking_the_daemon_through_the_same_call() {
+    let (http, stub) = daemon([(200, TAGS), (200, PS_LOADED)]);
+    let catalogue = Catalogue::new([local_row()]);
+
+    let resolved =
+        block_on(catalogue.resolve(&ModelSlug::parse("ollama/gemma4:e4b-mlx").unwrap(), &http))
+            .expect("the daemon serves it");
+
+    assert_eq!(resolved.model, "gemma4:e4b-mlx");
+    assert_eq!(
+        resolved.capabilities.max_context_tokens,
+        Some(32_768),
+        "the served context is the measured one"
+    );
+    assert_eq!(stub.paths(), vec!["/api/tags", "/api/ps"]);
+}
+
+/// The *row* decides, not the provider id.
+///
+/// This is the test the old branch could not have passed. The row is called
+/// `acme` — a name no arm of `if slug.provider == OLLAMA` would ever match —
+/// and it carries the daemon resolver, so resolution asks the control plane.
+/// Nothing in `ego-ai` or `ego-cli` had to learn the name.
+#[test]
+fn a_row_that_is_not_called_ollama_can_still_be_a_daemon() {
+    let (http, stub) = daemon([(200, TAGS), (200, PS_LOADED)]);
+    let acme = ProviderRow {
+        id: "acme".to_string(),
+        resolver: &OllamaDaemon,
+        ..local_row()
+    };
+    let catalogue = Catalogue::new([acme]);
+
+    let resolved =
+        block_on(catalogue.resolve(&ModelSlug::parse("acme/gemma4:e4b-mlx").unwrap(), &http))
+            .expect("the daemon serves it");
+
+    assert_eq!(resolved.row.id, "acme");
+    assert_eq!(resolved.capabilities.max_context_tokens, Some(32_768));
+    assert_eq!(stub.paths(), vec!["/api/tags", "/api/ps"]);
+}
+
+/// And the converse: a row *called* ollama that says its models are supplied
+/// is resolved from the table.
+///
+/// Without this the test above is satisfied by a dispatch that reads the row
+/// for daemons and falls back to the id for everything else. Together they pin
+/// that the id is consulted for nothing at all.
+#[test]
+fn a_row_called_ollama_that_names_the_supplied_resolver_asks_nothing() {
+    let (http, stub) = daemon([]);
+    let supplied_locally = ProviderRow {
+        resolver: &Supplied,
+        ..local_row()
+    };
+    let catalogue = Catalogue::new([supplied_locally]).with_hosted(
+        "ollama/gemma4:e4b-mlx",
+        HostedModel {
+            capabilities: hosted_caps(),
+            metering: unmetered(),
+            rates: None,
+        },
+    );
+
+    let resolved =
+        block_on(catalogue.resolve(&ModelSlug::parse("ollama/gemma4:e4b-mlx").unwrap(), &http))
+            .expect("it was supplied");
+
+    assert_eq!(resolved.capabilities, hosted_caps());
+    assert!(
+        stub.paths().is_empty(),
+        "the id was consulted instead of the row: {:?}",
+        stub.paths()
+    );
+}
+
+/// An unknown provider is refused before any resolver runs, listing what does
+/// exist.
+///
+/// The refusal belongs to the lookup and not to a resolver, which is why it
+/// keeps the shape it had: a slug naming no row has no resolver to ask.
+#[test]
+fn an_unknown_provider_is_refused_before_a_resolver_is_chosen() {
+    let (http, stub) = daemon([]);
+    let catalogue = Catalogue::new([hosted_row(), local_row()]);
+
+    let refused = block_on(catalogue.resolve(&ModelSlug::parse("acme/whatever").unwrap(), &http))
+        .expect_err("there is no acme row");
+
+    assert_eq!(
+        refused,
+        ResolveError::UnknownProvider {
+            provider: "acme".to_string(),
+            known: vec!["ollama".to_string(), "openai".to_string()],
+        }
+    );
+    assert!(stub.paths().is_empty());
 }
