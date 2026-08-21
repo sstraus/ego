@@ -62,6 +62,11 @@ fn the_separator_stops_a_subcommand_name_from_being_one() {
         parsed(["run", "--", "--model"]).prompt.as_deref(),
         Some("--model")
     );
+    // `run` alone cannot prove the rule any more: it is the one command that
+    // *is* built, so a separator check that had stopped working would still
+    // reach the interactive refusal by the ordinary route. A name from
+    // `UNBUILT` has a competing meaning and so can tell the two apart.
+    assert!(refused(["--", "resume"]).contains("interactive"));
 }
 
 /// Without a subcommand the invocation is the interactive one, and this build
@@ -96,6 +101,76 @@ fn a_retired_flag_would_be_refused_with_its_replacement() {
         let refusal = refused(["run", retired, "Ask"]);
         assert!(refusal.contains(retired), "{refusal}");
         assert!(refusal.contains(replacement), "{refusal}");
+    }
+}
+
+/// §2 documents fourteen commands and this build implements one. The other
+/// thirteen were reaching the *interactive* refusal, which told a caller who
+/// typed `ego resume` that the permission dialog was missing — a true sentence
+/// about a surface they did not ask for.
+///
+/// The standard is already written down for the other half of the grammar
+/// (`CLI.md` §3.1: "refused **by name**, with the subsystem it waits on — not
+/// swallowed, and not reported as an unknown argument"). This is that rule
+/// applied to §2, and the failure it prevents is the one §3.1 exists to
+/// prevent: a documented surface whose absence is invisible to anyone who has
+/// not read the source.
+#[test]
+fn a_documented_subcommand_this_build_lacks_is_refused_by_its_own_name() {
+    for (name, waiting_on) in cli::UNBUILT {
+        let refusal = refused([name]);
+        assert!(
+            refusal.contains(name),
+            "`ego {name}` must be refused by name: {refusal}"
+        );
+        assert!(
+            refusal.contains(waiting_on),
+            "`ego {name}` must say what it waits on: {refusal}"
+        );
+        assert!(
+            !refusal.contains("interactive"),
+            "`ego {name}` named a command, so the interactive surface is not \
+             the thing it is missing: {refusal}"
+        );
+    }
+}
+
+/// The complement, and the reason the check above is a table rather than "any
+/// unrecognised word". §2's first line is `ego [PROMPT]`, so a word that is
+/// *not* a documented command is a prompt and the interactive refusal is the
+/// correct answer for it. Widening the new rule to every unknown token would
+/// turn `ego "explain this"` into a spelling complaint.
+#[test]
+fn a_word_that_is_not_a_documented_command_is_still_a_prompt() {
+    for word in ["hello", "resumee", "explain this failing test"] {
+        let refusal = refused([word]);
+        assert!(refusal.contains("interactive"), "{refusal}");
+        assert!(refusal.contains("no subcommand"), "{refusal}");
+    }
+}
+
+/// Every name the code refuses is one the document actually offers. Without
+/// this the table could drift into refusing a command `CLI.md` never promised,
+/// which is a worse answer than the interactive fallback it replaced: it would
+/// advertise a roadmap item that does not exist.
+///
+/// Binding a test to the document rather than to a copy of it follows
+/// `ego-ai/tests/http.rs:552`, which reads `Cargo.toml` for the same reason.
+#[test]
+fn every_unbuilt_subcommand_is_one_the_document_offers() {
+    let doc = include_str!("../../../CLI.md");
+    let commands = doc
+        .split("## 2. Command set")
+        .nth(1)
+        .expect("CLI.md has a command set section")
+        .split("## 3.")
+        .next()
+        .expect("the command set section ends");
+    for (name, _) in cli::UNBUILT {
+        assert!(
+            commands.contains(&format!("ego {name}")),
+            "`{name}` is refused as documented but CLI.md §2 does not list it"
+        );
     }
 }
 
