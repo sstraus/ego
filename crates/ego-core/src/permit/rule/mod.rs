@@ -30,10 +30,19 @@
 //! published as one thing — `ARCHITECTURE.md:252` makes that a gate. Only
 //! four of them can currently *match*: `read`, `write`, `list` and `search`
 //! name operations that exist. `exec`, `net` and `tool` name operations no
-//! tool in this workspace produces yet, so a rule with one of those heads is
-//! well-formed, has a stable ID, renders in `rules ls` — and matches nothing,
-//! because there is nothing of that shape to match. When the operations
-//! arrive, [`Rule::matches`] gains an arm; no rule changes and no ID changes.
+//! tool in this workspace produces yet.
+//!
+//! A rule with one of those three heads is well-formed, has a stable ID and
+//! renders in `rules ls` — and [`Rule::load`] **refuses it**, by name, saying
+//! that no tool in this build produces operations of that shape. Not a parse
+//! error, which would lie about the grammar and churn the ID later; and not a
+//! silent non-match, which is the worse failure: an operator who writes
+//! `exec(rm -rf /)` in a deny list cannot tell a rule that matches nothing
+//! apart from a boundary that works. §6a.
+//!
+//! It self-heals. When the operations arrive, [`Rule::matches`] gains an arm
+//! and one entry in `parse.rs`'s `OPERATIONS` table changes; no rule is
+//! rewritten and no ID is recomputed.
 
 mod argv;
 mod endpoint;
@@ -49,7 +58,7 @@ pub use argv::{ArgvPattern, ArgvToken};
 pub use endpoint::{Endpoint, Host};
 pub use glob::Glob;
 pub use id::{BadRuleId, GRAMMAR_VERSION, RuleId};
-pub use parse::{Head, HeadHint, RuleParseError};
+pub use parse::{Head, HeadHint, RuleParseError, Unenforceable};
 pub use pattern::{PathPattern, Segment};
 
 use super::prepared_call::Op;
@@ -104,6 +113,31 @@ impl Rule {
                 Rule::Tool { server, name }
             }
         })
+    }
+
+    /// Parse a rule **and refuse it if this build cannot enforce it** (§6a).
+    ///
+    /// This is what every surface that *stores* a rule calls — config layers
+    /// today, frontmatter and `--allow` when they arrive. [`parse`](Self::parse)
+    /// is the grammar alone and is what `rules explain` wants: rendering a rule
+    /// nobody can enforce is fine, believing in it is not.
+    ///
+    /// The refusal is not a parse error, and the distinction is the whole
+    /// point. A rule with an unenforceable head is a valid sentence with a
+    /// stable ID that renders correctly in `rules ls`; what it lacks is
+    /// anything to match. Calling that a grammar error would churn the ID on
+    /// the day the head became usable, and would be a temporary message about
+    /// a permanent grammar.
+    pub fn load(raw: &str) -> Result<Self, RuleLoadError> {
+        let rule = Self::parse(raw)?;
+        if let Some(awaiting) = rule.head().awaiting() {
+            return Err(RuleLoadError::Unenforceable(Unenforceable::new(
+                rule.to_string(),
+                rule.head(),
+                awaiting,
+            )));
+        }
+        Ok(rule)
     }
 
     pub fn head(&self) -> Head {
@@ -182,6 +216,34 @@ impl fmt::Display for Rule {
             Rule::Tool { server, name } => write!(f, "{server}/{name}")?,
         }
         f.write_str(")")
+    }
+}
+
+/// Why a string in a permission list did not become a usable rule.
+///
+/// Two arms because they are two different facts about the world, and an
+/// operator acts on them differently: one is a sentence the grammar does not
+/// contain, the other is a sentence this build has nothing to match.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuleLoadError {
+    Parse(RuleParseError),
+    Unenforceable(Unenforceable),
+}
+
+impl fmt::Display for RuleLoadError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RuleLoadError::Parse(err) => err.fmt(f),
+            RuleLoadError::Unenforceable(err) => err.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for RuleLoadError {}
+
+impl From<RuleParseError> for RuleLoadError {
+    fn from(err: RuleParseError) -> Self {
+        RuleLoadError::Parse(err)
     }
 }
 

@@ -5,6 +5,7 @@ use super::error::ConfigError;
 use super::layer::{ConfigLayer, Mode, ModelRef, PermCfg};
 use super::source::{Source, Sourced, Trust};
 use crate::ceiling::{Ceilings, Clamped};
+use crate::permit::rule::Rule;
 
 /// Ambient-loading posture (`CLI.md` §4.5): whether project-local config,
 /// hooks, skills and MCP servers may load.
@@ -106,8 +107,8 @@ pub fn resolve(
 
     let mut model = None;
     let mut mode = None;
-    let mut allow: Vec<String> = Vec::new();
-    let mut deny: Vec<String> = Vec::new();
+    let mut allow: Vec<Rule> = Vec::new();
+    let mut deny: Vec<Rule> = Vec::new();
     let mut ceilings = Ceilings::default();
 
     for sourced in &eligible {
@@ -145,7 +146,7 @@ pub fn resolve(
     // The ceiling is gathered independently of the ordinary merge above, so
     // a `[profile.NAME]` override that clears `deny` — or a later layer
     // that overwrites it — can never make a system-layer deny disappear.
-    let mut system_deny: Vec<String> = Vec::new();
+    let mut system_deny: Vec<Rule> = Vec::new();
     for sourced in eligible.iter().filter(|l| l.source == Source::System) {
         if let Some(perm) = &sourced.value.permissions {
             for entry in &perm.deny {

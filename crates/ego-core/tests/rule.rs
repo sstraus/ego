@@ -7,7 +7,8 @@
 use std::path::{Path, PathBuf};
 
 use ego_core::permit::rule::{
-    ArgvToken, GRAMMAR_VERSION, Head, HeadHint, Host, Rule, RuleId, RuleParseError, Segment,
+    ArgvToken, GRAMMAR_VERSION, Head, HeadHint, Host, Rule, RuleId, RuleLoadError, RuleParseError,
+    Segment,
 };
 use ego_core::permit::{CanonPath, Op};
 
@@ -633,4 +634,102 @@ fn rule_different_predicates_have_different_ids() {
         ids.len(),
         "two predicates share an id: {ids:?}"
     );
+}
+
+// --- §6a: a head with no operations refuses at load ---------------------
+
+/// The distinction the whole section rests on. `exec(...)` is a **valid
+/// sentence** — it parses, canonicalises and takes an ID, because
+/// `ARCHITECTURE.md:252` gates on the grammar being published whole. What it
+/// lacks is an operation of that shape to match.
+#[test]
+fn rule_an_unenforceable_head_still_parses_and_still_has_an_id() {
+    for raw in [
+        "exec(git *)",
+        "net(github.com)",
+        "tool(github/create_issue)",
+    ] {
+        let rule = parse(raw);
+        assert!(
+            rule.head().awaiting().is_some(),
+            "`{raw}` should have no operations in this build"
+        );
+        let id = rule.id().to_string();
+        assert!(id.starts_with(&format!("r{GRAMMAR_VERSION}:")), "{id}");
+        assert_eq!(
+            id,
+            parse(raw).id().to_string(),
+            "an id nobody can enforce is still stable"
+        );
+    }
+}
+
+/// The other half: `load` refuses it, so nobody stores a boundary that is not
+/// there. An operator who writes `exec(rm -rf /)` in a deny list would
+/// otherwise get a rule that matches nothing and **cannot tell that apart from
+/// a boundary that works** — "vacuous rather than fail-open" is a distinction
+/// visible only to us.
+#[test]
+fn rule_load_refuses_a_head_with_no_operations_and_parse_does_not() {
+    for raw in [
+        "exec(git *)",
+        "net(github.com)",
+        "tool(github/create_issue)",
+    ] {
+        assert!(Rule::parse(raw).is_ok(), "`{raw}` is a valid sentence");
+        let err = Rule::load(raw).expect_err("nothing can enforce it");
+        assert!(
+            matches!(err, RuleLoadError::Unenforceable(_)),
+            "`{raw}` is not a grammar error: {err:?}"
+        );
+    }
+}
+
+/// **Not a parse error**, and the type says so rather than the message. A
+/// grammar error here would be a temporary lie about a permanent grammar, and
+/// it would churn the rule's ID on the day the head became usable.
+#[test]
+fn rule_unenforceable_is_a_different_error_from_a_head_that_does_not_exist() {
+    assert!(matches!(
+        Rule::load("exec(git *)"),
+        Err(RuleLoadError::Unenforceable(_))
+    ));
+    assert!(matches!(
+        Rule::load("bash(git *)"),
+        Err(RuleLoadError::Parse(RuleParseError::UnknownHead { .. }))
+    ));
+}
+
+/// The refusal names the rule, the effect, and what is missing — because an
+/// operator who is told only "refused" removes the wrong line, or removes the
+/// rule and believes the boundary went with it.
+#[test]
+fn rule_the_refusal_says_which_rule_which_effect_and_what_is_missing() {
+    let said = Rule::load("exec(git *)").unwrap_err().to_string();
+    assert!(said.contains("exec(git *)"), "{said}");
+    assert!(
+        said.contains("no tool in this build produces exec"),
+        "{said}"
+    );
+    assert!(said.contains("a shell tool"), "{said}");
+}
+
+/// The four heads that name operations this build produces are not refused.
+/// The control that stops the test above from passing because `load` refuses
+/// everything.
+#[test]
+fn rule_load_admits_every_head_that_names_an_operation_that_exists() {
+    for raw in [
+        "read(src/**)",
+        "write(src/**)",
+        "list(src)",
+        "search(src/**)",
+    ] {
+        assert_eq!(
+            parse(raw).head().awaiting(),
+            None,
+            "`{raw}` names an operation this build produces"
+        );
+        Rule::load(raw).unwrap_or_else(|err| panic!("`{raw}` should load: {err}"));
+    }
 }

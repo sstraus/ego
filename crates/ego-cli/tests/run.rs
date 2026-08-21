@@ -529,7 +529,7 @@ fn a_documented_flag_without_its_subsystem_is_refused_by_name() {
     for (flag, value) in [
         ("--mode", Some("plan")),
         ("--sandbox", Some("workspace")),
-        ("--allow", Some("bash(git *)")),
+        ("--allow", Some("read(src/**)")),
         ("--deny", Some("net(*)")),
         ("--yolo", None),
         ("--attach", Some("diagram.png")),

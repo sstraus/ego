@@ -49,7 +49,85 @@ impl Head {
             _ => return None,
         })
     }
+
+    /// What this build is missing before a rule with this head can match
+    /// anything — `None` when nothing is missing.
+    ///
+    /// Reads [`OPERATIONS`], so a head that gains an operation stops being
+    /// unenforceable by editing one table entry.
+    pub fn awaiting(self) -> Option<&'static str> {
+        OPERATIONS
+            .iter()
+            .find(|(head, _)| *head == self)
+            .and_then(|(_, awaiting)| *awaiting)
+    }
 }
+
+/// Whether this build produces operations of each head's shape, and what
+/// would supply the ones it does not (§6a).
+///
+/// **Data, not a `match`**, so the refusal in [`Unenforceable`] is derived and
+/// a head costs one entry. `None` means an operation of that shape exists
+/// today; `Some(awaiting)` names the thing whose arrival changes that.
+///
+/// The grammar publishes seven heads and this workspace produces four kinds of
+/// operation. That gap has an unacceptable default: an operator who writes
+/// `exec(rm -rf /)` in a deny list gets a rule that matches nothing, and
+/// **cannot tell that apart from a boundary that works**. "Vacuous rather than
+/// fail-open" is a distinction visible only to us. So the rule parses, gets a
+/// stable ID, and is refused at load with a true statement about
+/// enforceability rather than a false one about grammar.
+const OPERATIONS: &[(Head, Option<&str>)] = &[
+    (Head::Read, None),
+    (Head::Write, None),
+    (Head::List, None),
+    (Head::Search, None),
+    (Head::Exec, Some("a shell tool")),
+    (Head::Net, Some("a tool that reaches the network")),
+    (Head::Tool, Some("an MCP client")),
+];
+
+/// A well-formed rule this build cannot enforce (§6a).
+///
+/// Deliberately **not** a [`RuleParseError`]. The grammar is complete and this
+/// rule is a valid sentence in it; what is missing is an operation to match.
+/// Saying "parse error" would be a temporary lie about a permanent grammar,
+/// and it would churn the rule's ID on the day the head became usable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unenforceable {
+    /// The rule as it canonically renders, so the message names what the
+    /// operator can go and remove.
+    pub rule: String,
+    pub head: Head,
+    awaiting: &'static str,
+}
+
+impl Unenforceable {
+    pub(super) fn new(rule: String, head: Head, awaiting: &'static str) -> Self {
+        Self {
+            rule,
+            head,
+            awaiting,
+        }
+    }
+}
+
+impl fmt::Display for Unenforceable {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self {
+            rule,
+            head,
+            awaiting,
+        } = self;
+        write!(
+            f,
+            "{rule} cannot be enforced: no tool in this build produces {head} \
+             operations. Remove the rule or omit it until {awaiting} exists."
+        )
+    }
+}
+
+impl std::error::Error for Unenforceable {}
 
 impl fmt::Display for Head {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
