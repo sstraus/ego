@@ -270,12 +270,12 @@ async fn fetch(http: &Arc<dyn Http>, req: HttpRequest) -> Result<Vec<u8>, String
 /// since `max_tokens` is deprecated at OpenAI and a shared wire format is not
 /// where a provider's name belongs.
 ///
-/// **It is true again, and by a different route.** The row declares
-/// `Adaptation::OutputCeilingInMaxTokens`, so the mapping is told which field
-/// this member reads without being told who it is
-/// (`docs/decisions/2026-08-21-a-declared-adaptation-not-a-silent-branch.md`).
-/// The request caps itself; `ollama_ceiling.rs`'s third recording is `ego`'s
-/// own body against a live 0.32.14 daemon, stopping at the ceiling.
+/// **It is true again, and by a different route.** The row names
+/// [`wire::ollama`](crate::wire::ollama), a mapping of its own, which sends
+/// the ceiling in the field this daemon reads
+/// (`docs/decisions/2026-08-21-a-shared-shape-is-not-a-shared-contract.md`
+/// §8). The request caps itself; `ollama_ceiling.rs`'s third recording is
+/// `ego`'s own body against a live 0.32.14 daemon, stopping at the ceiling.
 ///
 /// `max_output_tokens` stays `None` regardless, and the distinction is worth
 /// keeping: this field is what the *daemon states*, and it states nothing. The

@@ -72,7 +72,7 @@ fn golden_request() -> GenRequest {
 }
 
 fn body_of(req: &GenRequest) -> serde_json::Value {
-    let bytes = request_body(&[], req).expect("this request is expressible");
+    let bytes = request_body(req).expect("this request is expressible");
     serde_json::from_slice(&bytes).expect("the body is valid JSON")
 }
 
@@ -272,7 +272,7 @@ fn reasoning_state_is_refused_rather_than_dropped() {
         ..golden_request()
     };
     assert_eq!(
-        request_body(&[], &req),
+        request_body(&req),
         Err(RequestRefused::ReasoningStateNotCarriable)
     );
 }
@@ -283,7 +283,6 @@ fn the_request_declares_what_it_sends_and_what_it_expects_back() {
     let req = build_request(
         endpoint.clone(),
         vec![("authorization".to_string(), "Bearer sk-test".to_string())],
-        &[],
         &golden_request(),
     )
     .expect("this request is expressible");

@@ -83,8 +83,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use url::Url;
 
-use crate::http::{HttpError, HttpRequest, HttpResponse, Method};
-use crate::provider::Adaptation;
+use crate::http::{HttpError, HttpRequest, HttpResponse};
 
 use super::provider_cost::ProviderCost;
 use super::sse::SseDecoder;
@@ -106,10 +105,9 @@ impl WireFormat for OpenAiCompletions {
         &self,
         endpoint: Url,
         headers: Vec<(String, String)>,
-        adaptations: &[Adaptation],
         req: &GenRequest,
     ) -> Result<HttpRequest, Unexpressible> {
-        build_request(endpoint, headers, adaptations, req).map_err(Unexpressible::from)
+        build_request(endpoint, headers, req).map_err(Unexpressible::from)
     }
 
     fn decode(
@@ -173,8 +171,18 @@ impl From<RequestRefused> for Unexpressible {
     }
 }
 
+/// Everything in this family's request body that does not depend on which
+/// member is being addressed.
+///
+/// Split out because exactly one member's body differs, in exactly one field:
+/// Ollama reads `max_tokens` and discards `max_completion_tokens`
+/// (`docs/decisions/2026-08-21-a-shared-shape-is-not-a-shared-contract.md` §8).
+/// §4 place 3 makes that an adapter difference and offers no third option, so
+/// the difference is carried by *which mapping serialises this*, and never by
+/// a flag one shared mapping reads. `pub(crate)` for that reason and no other:
+/// [`super::ollama`] is the second serialiser, not a second copy.
 #[derive(Debug, Serialize)]
-struct WireRequest<'a> {
+pub(crate) struct CommonRequest<'a> {
     model: &'a str,
     messages: Vec<WireMessage<'a>>,
     stream: bool,
@@ -188,28 +196,28 @@ struct WireRequest<'a> {
     /// provider row that needs a different mapping, not a reason for this one
     /// to send a value nobody asked for.
     reasoning_effort: &'static str,
-    /// The output ceiling, in the field the schema defines for it.
-    ///
-    /// Exactly one of this and [`max_tokens`](Self::max_tokens) is ever
-    /// `Some`: they are the same number, and a request carrying both would be
-    /// asking two ways and giving a provider that reads them differently a
-    /// choice nobody made.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    max_completion_tokens: Option<u64>,
-    /// The same ceiling, in the field OpenAI deprecated.
-    ///
-    /// Sent only for a profile declaring
-    /// [`Adaptation::OutputCeilingInMaxTokens`], never by default. The
-    /// deprecated field is not the safer choice for the family — it is the
-    /// only field one measured member reads.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    max_tokens: Option<u64>,
     /// Omitted when empty, together with `parallel_tool_calls`, which OpenAI
     /// rejects when there are no tools to parallelise.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<WireTool<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     parallel_tool_calls: Option<bool>,
+}
+
+/// The body this mapping sends: the common part, plus the ceiling in the
+/// field `openai/openai-openapi` defines for it.
+///
+/// A wrapper and not a field on [`CommonRequest`], so that the ceiling's
+/// *name* is a property of the type doing the serialising. `max_tokens` is
+/// then not a field this mapping declines to set — it is a field this mapping
+/// does not have, which is a difference a `serde` derive enforces and a
+/// convention does not.
+#[derive(Debug, Serialize)]
+struct WireRequest<'a> {
+    #[serde(flatten)]
+    common: CommonRequest<'a>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_completion_tokens: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -386,15 +394,21 @@ fn flush<'a>(
 /// Separate from [`build_request`] so the golden can pin the body without a
 /// URL or a credential in it — the body is the contract with the provider;
 /// the endpoint and the auth header are the provider row's business.
-pub fn request_body(
-    adaptations: &[Adaptation],
-    req: &GenRequest,
-) -> Result<Vec<u8>, RequestRefused> {
-    // The one place this mapping reads a declaration, and it reads only
-    // *what* differs. There is no provider id in scope here and there is not
-    // meant to be: a second member that ignores `max_completion_tokens`
-    // declares the same variant and this line does not change.
-    let ceiling_in_max_tokens = adaptations.contains(&Adaptation::OutputCeilingInMaxTokens);
+pub fn request_body(req: &GenRequest) -> Result<Vec<u8>, RequestRefused> {
+    let wire = WireRequest {
+        common: common_request(req)?,
+        max_completion_tokens: req.max_output_tokens,
+    };
+    Ok(serde_json::to_vec(&wire).expect("WireRequest has no non-string map keys and no NaN"))
+}
+
+/// The part of the body every member of this family shares.
+///
+/// The refusal lives here rather than in either caller: a request carrying
+/// reasoning state is unexpressible on this *shape*, and both members send the
+/// shape. `pub(crate)` for [`super::ollama`], which supplies the other
+/// ceiling field and nothing else.
+pub(crate) fn common_request(req: &GenRequest) -> Result<CommonRequest<'_>, RequestRefused> {
     let carries_reasoning = req
         .messages
         .messages()
@@ -418,7 +432,7 @@ pub fn request_body(
         })
         .collect();
     let parallel_tool_calls = (!tools.is_empty()).then_some(req.parallel_tool_calls);
-    let wire = WireRequest {
+    Ok(CommonRequest {
         model: &req.model,
         messages,
         stream: true,
@@ -426,16 +440,9 @@ pub fn request_body(
             include_usage: true,
         },
         reasoning_effort: reasoning_effort(req.thinking),
-        max_completion_tokens: (!ceiling_in_max_tokens)
-            .then_some(req.max_output_tokens)
-            .flatten(),
-        max_tokens: ceiling_in_max_tokens
-            .then_some(req.max_output_tokens)
-            .flatten(),
         tools,
         parallel_tool_calls,
-    };
-    Ok(serde_json::to_vec(&wire).expect("WireRequest has no non-string map keys and no NaN"))
+    })
 }
 
 /// A complete HTTP request for `req` against `endpoint`.
@@ -445,20 +452,10 @@ pub fn request_body(
 pub fn build_request(
     endpoint: Url,
     headers: Vec<(String, String)>,
-    adaptations: &[Adaptation],
     req: &GenRequest,
 ) -> Result<HttpRequest, RequestRefused> {
-    let body = request_body(adaptations, req)?;
-    let mut all = Vec::with_capacity(headers.len() + 2);
-    all.push(("content-type".to_string(), "application/json".to_string()));
-    all.push(("accept".to_string(), "text/event-stream".to_string()));
-    all.extend(headers);
-    Ok(HttpRequest {
-        url: endpoint,
-        method: Method::Post,
-        headers: all,
-        body: Some(body),
-    })
+    let body = request_body(req)?;
+    Ok(super::json_sse_post(endpoint, headers, body))
 }
 
 // --- response ---

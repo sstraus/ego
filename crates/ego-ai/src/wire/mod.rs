@@ -15,6 +15,7 @@
 //! `GenRequest` and `AiEvent`, the types the signature is made of. Both have
 //! landed, so the signature is written against types that have stopped moving.
 
+pub mod ollama;
 pub mod openai_completions;
 pub mod provider_cost;
 pub mod sse;
@@ -28,8 +29,7 @@ use ego_core::generator::types::{ErrorKind, GenRequest, StopReason};
 use futures::stream::BoxStream;
 use url::Url;
 
-use crate::http::{HttpError, HttpRequest, HttpResponse};
-use crate::provider::Adaptation;
+use crate::http::{HttpError, HttpRequest, HttpResponse, Method};
 use provider_cost::ProviderCost;
 
 /// One API shape: how a [`GenRequest`] becomes bytes, and how the bytes become
@@ -52,17 +52,17 @@ pub trait WireFormat: fmt::Debug + Send + Sync {
     /// because a wire format is not allowed to know one
     /// (`ARCHITECTURE.md` §3.1). A mapping adds the headers that are facts
     /// about *the body it is about to write*, and no others.
-    /// `adaptations` are the profile's declared departures from this
-    /// format's family contract
-    /// (`docs/decisions/2026-08-21-a-declared-adaptation-not-a-silent-branch.md`).
-    /// A mapping may branch on one — that is what declaring is for — and may
-    /// never branch on who declared it: the slice says *what differs*, and
-    /// carries no provider identity to consult.
+    /// Nothing else arrives, and that is the point: a mapping is handed an
+    /// address, a credential and a request, and is told nothing about who it
+    /// is speaking to. A provider that needs a different body is a different
+    /// value of this trait —
+    /// `docs/decisions/2026-08-21-a-shared-shape-is-not-a-shared-contract.md`
+    /// §4 allows a model fact, a transport fact or another mapping, and no
+    /// fourth option and no flag.
     fn build_request(
         &self,
         endpoint: Url,
         headers: Vec<(String, String)>,
-        adaptations: &[Adaptation],
         req: &GenRequest,
     ) -> Result<HttpRequest, Unexpressible>;
 
@@ -138,4 +138,29 @@ pub fn failed(message: String, delivery: DeliveryCertainty, kind: ErrorKind) -> 
         AiEvent::Error { message, kind },
         AiEvent::Stop(StopReason::Error),
     ]
+}
+
+/// A JSON body posted to `url`, asking for an event stream back.
+///
+/// The two headers are facts about *what is being sent and what is wanted
+/// back*, which is the only kind of header a mapping is allowed to add
+/// (`ARCHITECTURE.md` §3.1) — everything else in `headers` is the profile's,
+/// the credential above all. It lives at the seam because it is the same two
+/// headers for every streaming JSON API, and a mapping that had to remember
+/// them is a mapping that can forget one.
+pub(crate) fn json_sse_post(
+    url: Url,
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
+) -> HttpRequest {
+    let mut all = Vec::with_capacity(headers.len() + 2);
+    all.push(("content-type".to_string(), "application/json".to_string()));
+    all.push(("accept".to_string(), "text/event-stream".to_string()));
+    all.extend(headers);
+    HttpRequest {
+        url,
+        method: Method::Post,
+        headers: all,
+        body: Some(body),
+    }
 }

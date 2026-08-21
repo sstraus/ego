@@ -39,17 +39,19 @@
 //! For a while the consequence was only recorded: `GenRequest::max_output_tokens`
 //! did not bind on this row, and the remedy was named as a mapping decision
 //! above this layer. `docs/decisions/`
-//! `2026-08-21-a-declared-adaptation-not-a-silent-branch.md` made it. The
-//! Ollama profile declares `Adaptation::OutputCeilingInMaxTokens`, the mapping
-//! is handed the declaration and never the provider, and the ceiling binds.
+//! `2026-08-21-a-shared-shape-is-not-a-shared-contract.md` §8 makes it, and
+//! makes it the blunt way: a member that fails a conformance check is not a
+//! member. So the Ollama row names `wire::ollama`, which shares the family's
+//! request projection and its whole decoder and sends the ceiling in the field
+//! measured above. Nothing is handed a flag; the profile picks a mapping.
 //!
 //! A **third** recording establishes that, and it is the one that matters:
 //! `ollama_ceiling_adapted.*` is the exact body
 //! `ProviderRow::ollama_default()` builds, posted unmodified. The first two
 //! prove a field works; only this one proves *our request* does.
 
-use ego_ai::provider::{Adaptation, ProviderRow};
-use ego_ai::wire::openai_completions::{StreamDecoder, request_body};
+use ego_ai::provider::ProviderRow;
+use ego_ai::wire::openai_completions::{self, StreamDecoder};
 use ego_core::generator::port::AiEvent;
 use ego_core::generator::types::{
     Conversation, GenRequest, Message, Role, StopReason, ThinkingLevel,
@@ -139,38 +141,40 @@ fn ollama_honours_max_tokens_and_ignores_max_completion_tokens() {
 /// comment: the field the **Ollama profile** sends is the field the daemon
 /// reads.
 ///
-/// This test used to assert the opposite, and it was right to: until the
-/// profile could declare a departure, `ego` sent `max_completion_tokens` and
-/// the daemon threw it away. `docs/decisions/`
-/// `2026-08-21-a-declared-adaptation-not-a-silent-branch.md` closed that, and
+/// This test used to assert the opposite, and it was right to: until the row
+/// could name a mapping, `ego` sent `max_completion_tokens` and the daemon
+/// threw it away. `docs/decisions/`
+/// `2026-08-21-a-shared-shape-is-not-a-shared-contract.md` §8 closed that, and
 /// this is the same guard pointed at the same seam from the other side.
 ///
-/// It reads `ProviderRow::ollama_default().adaptations` and not a literal
-/// `&[Adaptation::OutputCeilingInMaxTokens]`, so removing the declaration from
-/// the profile fails here rather than passing against a copy of it.
+/// It goes through `ProviderRow::ollama_default().wire` rather than calling
+/// `wire::ollama::request_body` directly, because the claim under test is
+/// about the *profile*: pointing the row back at the family would then fail
+/// here rather than pass against a mapping nothing selects.
 ///
-/// The `&[]` half is not decoration. It is the other direction of the same
-/// claim — the default is unchanged, so no other member of the family started
-/// receiving a deprecated field because one member needed it.
+/// The family half is not decoration. It is the other direction of the same
+/// claim — `openai_completions` is unchanged, so no member of the family
+/// started receiving a deprecated field because one non-member needed it.
 #[test]
 fn the_ceiling_the_ollama_profile_sends_is_the_one_this_daemon_reads() {
-    let body = |adaptations: &[Adaptation]| -> serde_json::Value {
-        let req = GenRequest {
-            model: "gemma4:e4b-mlx".to_string(),
-            messages: Conversation::new(vec![Message::text(Role::User, "Count from 1 to 40.")])
-                .expect("a one-message history is valid"),
-            tools: Vec::new(),
-            thinking: ThinkingLevel::Low,
-            max_output_tokens: Some(CEILING),
-            parallel_tool_calls: false,
-        };
-        serde_json::from_slice(
-            &request_body(adaptations, &req).expect("this request is expressible"),
-        )
-        .expect("the body is valid JSON")
+    let req = GenRequest {
+        model: "gemma4:e4b-mlx".to_string(),
+        messages: Conversation::new(vec![Message::text(Role::User, "Count from 1 to 40.")])
+            .expect("a one-message history is valid"),
+        tools: Vec::new(),
+        thinking: ThinkingLevel::Low,
+        max_output_tokens: Some(CEILING),
+        parallel_tool_calls: false,
     };
 
-    let adapted = body(ProviderRow::ollama_default().adaptations);
+    let row = ProviderRow::ollama_default();
+    let request = row
+        .wire
+        .build_request(row.endpoint.clone(), Vec::new(), &req)
+        .expect("this request is expressible");
+    let adapted: serde_json::Value =
+        serde_json::from_slice(&request.body.expect("a generation posts a body"))
+            .expect("the body is valid JSON");
     assert_eq!(
         adapted["max_tokens"],
         serde_json::json!(CEILING),
@@ -182,12 +186,15 @@ fn the_ceiling_the_ollama_profile_sends_is_the_one_this_daemon_reads() {
          that reads them differently a choice nobody made: {adapted}"
     );
 
-    let plain = body(&[]);
+    let plain: serde_json::Value = serde_json::from_slice(
+        &openai_completions::request_body(&req).expect("this request is expressible"),
+    )
+    .expect("the body is valid JSON");
     assert_eq!(
         plain["max_completion_tokens"],
         serde_json::json!(CEILING),
-        "a profile that declares nothing must still get the schema's field, \
-         or the adaptation has leaked into the family: {plain}"
+        "the family must still get the schema's field, or one non-member's \
+         departure has leaked into it: {plain}"
     );
     assert!(plain.get("max_tokens").is_none(), "{plain}");
 
