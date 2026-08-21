@@ -1,4 +1,5 @@
-//! Wall-clock observation time for the event envelope.
+//! Wall-clock observation time for the event envelope, and the port that
+//! reads it.
 
 use serde::{Deserialize, Serialize};
 
@@ -39,6 +40,25 @@ impl Timestamp {
     pub const fn as_millis(self) -> u64 {
         self.0
     }
+}
+
+/// Where an [`Envelope`](super::domain::Envelope)'s observation time comes
+/// from (`docs/decisions/2026-08-21-the-turn-loop.md` §2).
+///
+/// A port rather than a `Timestamp::now()`, for the reason this whole type
+/// exists: a timestamp that reads the system clock from inside the domain
+/// makes every envelope non-deterministic and leaves a test nothing to
+/// inject. `ego-core` does not read the system clock, the same way it does
+/// not open files — `ego-tools` owns the implementation that does.
+///
+/// Returns a wall-clock `Timestamp`, not a `std::time::Instant`.
+/// `ARCHITECTURE.md` §3.3 sketched `Env::clock() -> Instant`, which cannot
+/// produce this value at all: an `Instant` is an opaque monotonic
+/// measurement with no epoch, and this is UTC milliseconds since one.
+/// `Instant` stays right for what it is good at — elapsed time and deadlines
+/// — and that is a different method for a different caller.
+pub trait Clock: Send + Sync {
+    fn now(&self) -> Timestamp;
 }
 
 #[cfg(test)]

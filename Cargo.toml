@@ -9,7 +9,12 @@ resolver = "3"
 
 [workspace.package]
 edition = "2024"
-rust-version = "1.85"
+# 1.86 and not 1.85 (edition 2024's floor) for trait upcasting: the turn loop
+# holds a `&dyn Fs` and has to hand `Tool::prepare` the narrower
+# `&dyn PathResolver` it is a supertrait of. The alternatives were a
+# `as_resolver()` method on `Fs` that exists only to launder a coercion, or
+# storing both halves and letting them disagree.
+rust-version = "1.86"
 license = "MIT"
 publish = false
 

@@ -1,0 +1,106 @@
+//! The tool half of the loop's dependencies: a registry, the policy that
+//! authorises a call, and the raw filesystem a grant is exercised against.
+//!
+//! Kept as three stages rather than one `run(name, args)` future, for the
+//! reason `docs/decisions/2026-08-21-the-turn-loop.md` gives for rejecting a
+//! `ToolRunner` port: M1 has to append a permission request *between*
+//! authorising and executing, and a single future has no such between.
+
+use std::sync::Arc;
+
+use crate::generator::types::ToolDescriptor as GenToolDescriptor;
+use crate::permit::{
+    CanonPath, Fs, GuardedFs, Permit, PolicyEngine, PrepareCtx, PreparedCall, Tool, ToolError,
+};
+
+/// Everything the loop needs to turn a model's tool call into an effect.
+pub struct Tools<'a> {
+    registry: &'a [Arc<dyn Tool>],
+    policy: &'a PolicyEngine,
+    /// The *raw* filesystem. [`GuardedFs`] binds one permit to one `Fs` at
+    /// construction (`permit/fs.rs:51`), so a fresh facade is built per
+    /// authorised call; there is no permit to swap into a shared one.
+    fs: &'a dyn Fs,
+    cwd: CanonPath,
+}
+
+impl<'a> Tools<'a> {
+    pub fn new(
+        registry: &'a [Arc<dyn Tool>],
+        policy: &'a PolicyEngine,
+        fs: &'a dyn Fs,
+        cwd: CanonPath,
+    ) -> Self {
+        Self {
+            registry,
+            policy,
+            fs,
+            cwd,
+        }
+    }
+
+    /// What the model is told it can call.
+    ///
+    /// [`crate::permit::ToolDescriptor`] carries a `schemars::Schema` and
+    /// [`GenToolDescriptor`] carries a `serde_json::Value`; the conversion is
+    /// here rather than in either type because this is the only seam that
+    /// needs both — a tool describes itself once, and a request quotes it.
+    pub fn descriptors(&self) -> Vec<GenToolDescriptor> {
+        self.registry
+            .iter()
+            .map(|tool| {
+                let descriptor = tool.descriptor();
+                GenToolDescriptor {
+                    name: descriptor.name,
+                    description: descriptor.description,
+                    parameters: descriptor.schema.to_value(),
+                }
+            })
+            .collect()
+    }
+
+    /// Stage one: find the tool and reduce raw arguments to canonical
+    /// operations.
+    ///
+    /// Both failures return prose rather than a typed error on purpose: they
+    /// are answers *to the model*, which is going to read them as the tool
+    /// result and try again. A caller that could distinguish them would still
+    /// do the same thing with both.
+    pub fn prepare(&self, name: &str, args: &str) -> Result<(&'a dyn Tool, PreparedCall), String> {
+        let tool = self
+            .registry
+            .iter()
+            .find(|tool| tool.descriptor().name == name)
+            .ok_or_else(|| format!("there is no tool named {name}"))?;
+        let params = serde_json::from_str(args)
+            .map_err(|err| format!("{name} was called with arguments that are not JSON: {err}"))?;
+        let ctx = PrepareCtx {
+            cwd: self.cwd.clone(),
+            resolver: self.fs,
+        };
+        let call = tool
+            .prepare(params, &ctx)
+            .map_err(|err: ToolError| err.to_string())?;
+        Ok((tool.as_ref(), call))
+    }
+
+    /// Stage two: ask policy what this call may do.
+    pub fn authorize(&self, call: &PreparedCall) -> Result<Permit, String> {
+        self.policy.authorize(call).map_err(|err| err.to_string())
+    }
+
+    /// Stage three: run it, under the grant policy issued and through the
+    /// facade that checks it.
+    pub async fn execute(
+        &self,
+        tool: &'a dyn Tool,
+        call: PreparedCall,
+        permit: &Permit,
+    ) -> Result<String, String> {
+        let guarded = GuardedFs::new(permit, self.fs);
+        tool.execute(call, permit, &guarded)
+            .await
+            .map(|result| result.content)
+            .map_err(|err| err.to_string())
+    }
+}

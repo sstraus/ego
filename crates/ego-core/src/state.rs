@@ -674,10 +674,10 @@ impl SessionState {
         self.cost = cost;
     }
 
-    /// The item this event's envelope points at, creating it on first
-    /// reference. `None` when the envelope carries no item id — a degenerate
-    /// but valid input that `apply` must not panic on.
     /// The item this event names, creating it as `kind` if it is new.
+    ///
+    /// `None` when the envelope carries no item id — a degenerate but valid
+    /// input that `apply` must not panic on.
     ///
     /// `kind` applies only on creation. A later event of a different kind
     /// against the same id does not re-author the item: `apply` is total and

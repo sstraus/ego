@@ -180,10 +180,19 @@ trait Tool: Send + Sync {
 trait Env: Send + Sync {          // pi's harness/env, docs/02-pi.md §3
     fn fs(&self) -> &dyn Fs;      // read, write, glob, stat
     fn spawn(&self, cmd: Command, confinement: &Confinement) -> BoxFuture<Spawned>;
-    fn clock(&self) -> Instant;   // injectable for replay determinism
 }
 // Tools do NOT receive Env; they receive GuardedIo, a permit-checking facade
 // over it (§3.2). Env is held by the loop and by GuardedIo's implementation.
+
+trait Clock: Send + Sync {        // event/time.rs — the only reader of wall time
+    fn now(&self) -> Timestamp;   // injectable for replay determinism
+}
+// A port of its own, and not `Env::clock() -> Instant` as this section said
+// until M0b. An `Instant` is monotonic and opaque: it cannot produce the UTC
+// millisecond an `Envelope.ts` is. The turn loop needs a clock and nothing
+// else from the environment, and a port it can satisfy with one type is
+// cheaper than an `Env` it would have to stub.
+// Corrected by docs/decisions/2026-08-21-the-turn-loop.md §2.
 
 trait SessionStore: Send + Sync {
     fn append(&self, id: &SessionId, ev: &Event) -> Result<()>;

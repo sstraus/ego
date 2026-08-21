@@ -2,12 +2,10 @@
 //!
 //! See `ARCHITECTURE.md` §3.2 and §3.4, and `plans/m0a-contracts.md` Step 11.
 
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::path::Path;
 
 use ego_core::permit::{
-    CanonPath, Fs, GuardedFs, GuardedIo, Op, PathResolver, Permit, PermitDenied, PolicyEngine,
+    CanonPath, Fs, GuardedFs, GuardedIo, Op, Permit, PermitDenied, PolicyDenied, PolicyEngine,
     PrepareCtx, PreparedCall, Scope, Tool, ToolError, ToolResult, Typed, TypedTool,
 };
 use futures::executor::block_on;
@@ -20,66 +18,11 @@ use serde_json::json;
 // story's VERIFY command) matches these tests by substring: cargo's test
 // filter matches the full test path, not the source file name, and
 // tests/permit.rs's bare functions wouldn't otherwise contain "permit".
+mod common;
+
 mod permit {
     use super::*;
-
-    /// An in-memory, test-only `Fs`: a flat table from path to either file
-    /// bytes or a symlink target, resolved by whole-path substitution (not
-    /// POSIX component-by-component — this fake only needs to model "what
-    /// does this path resolve to right now", including changing its answer
-    /// between two calls, which is exactly the TOCTOU this story guards
-    /// against).
-    #[derive(Default)]
-    struct FakeFs {
-        table: Mutex<HashMap<PathBuf, Node>>,
-    }
-
-    enum Node {
-        File(Vec<u8>),
-        Symlink(PathBuf),
-    }
-
-    impl FakeFs {
-        /// Points `from` at `to`, overwriting any previous entry. Callable
-        /// at any time — including between a tool's `prepare` and
-        /// `execute` — which is how tests express the symlink race.
-        fn symlink(&self, from: &str, to: &str) {
-            self.table
-                .lock()
-                .unwrap()
-                .insert(PathBuf::from(from), Node::Symlink(PathBuf::from(to)));
-        }
-    }
-
-    impl PathResolver for FakeFs {
-        fn canonicalize(&self, path: &Path) -> CanonPath {
-            let table = self.table.lock().unwrap();
-            let mut current = path.to_path_buf();
-            for _ in 0..32 {
-                match table.get(&current) {
-                    Some(Node::Symlink(target)) => current = target.clone(),
-                    _ => return CanonPath::new(current),
-                }
-            }
-            panic!("FakeFs::canonicalize: symlink loop at {}", path.display());
-        }
-    }
-
-    impl Fs for FakeFs {
-        fn read(&self, path: &CanonPath) -> Option<Vec<u8>> {
-            match self.table.lock().unwrap().get(path.as_path()) {
-                Some(Node::File(bytes)) => Some(bytes.clone()),
-                _ => None,
-            }
-        }
-
-        fn write(&self, path: &CanonPath, bytes: &[u8]) {
-            self.table
-                .lock()
-                .unwrap()
-                .insert(path.as_path().to_path_buf(), Node::File(bytes.to_vec()));
-        }
-    }
+    use crate::common::FakeFs;
 
     #[derive(Debug, Deserialize, JsonSchema)]
     struct WriteParams {
@@ -154,7 +97,7 @@ mod permit {
             )
             .unwrap();
 
-        let engine = PolicyEngine;
+        let engine = PolicyEngine::new(CanonPath::new("/ws"));
         let permit = engine.mint(Scope {
             write_paths: vec![CanonPath::new("/ws/allowed")],
             ..Scope::default()
@@ -178,7 +121,7 @@ mod permit {
             .prepare(json!({ "path": "/etc/passwd", "contents": "pwned" }), &ctx)
             .unwrap();
 
-        let engine = PolicyEngine;
+        let engine = PolicyEngine::new(CanonPath::new("/ws"));
         let permit = engine.mint(Scope {
             write_paths: vec![CanonPath::new("/ws/allowed")],
             ..Scope::default()
@@ -225,7 +168,7 @@ mod permit {
             }]
         );
 
-        let engine = PolicyEngine;
+        let engine = PolicyEngine::new(CanonPath::new("/ws"));
         let permit = engine.mint(Scope {
             write_paths: vec![CanonPath::new("/ws/allowed")],
             ..Scope::default()
@@ -257,7 +200,7 @@ mod permit {
         fs.write(&CanonPath::new("/ws/readable/notes.md"), b"public notes");
         fs.write(&CanonPath::new("/ws/private/notes.md"), b"private notes");
 
-        let engine = PolicyEngine;
+        let engine = PolicyEngine::new(CanonPath::new("/ws"));
         let permit = engine.mint(Scope {
             read_paths: vec![CanonPath::new("/ws/readable")],
             ..Scope::default()
@@ -279,7 +222,7 @@ mod permit {
     #[test]
     fn permit_guarded_fs_write_denies_sibling_prefix_directory() {
         let fs = FakeFs::default();
-        let engine = PolicyEngine;
+        let engine = PolicyEngine::new(CanonPath::new("/ws"));
         let permit = engine.mint(Scope {
             write_paths: vec![CanonPath::new("/ws/allowed")],
             ..Scope::default()
@@ -305,7 +248,7 @@ mod permit {
     #[test]
     fn permit_guarded_fs_write_allows_scope_root_and_nested_descendant() {
         let fs = FakeFs::default();
-        let engine = PolicyEngine;
+        let engine = PolicyEngine::new(CanonPath::new("/ws"));
         let permit = engine.mint(Scope {
             write_paths: vec![CanonPath::new("/ws/allowed")],
             ..Scope::default()
@@ -335,7 +278,7 @@ mod permit {
         let fs = FakeFs::default();
         fs.write(&CanonPath::new("/ws/allowed-evil/secret.txt"), b"leaked");
 
-        let engine = PolicyEngine;
+        let engine = PolicyEngine::new(CanonPath::new("/ws"));
         let permit = engine.mint(Scope {
             read_paths: vec![CanonPath::new("/ws/allowed")],
             ..Scope::default()
@@ -353,7 +296,7 @@ mod permit {
 
     #[test]
     fn permit_scope_covers_paths_endpoints_and_argv() {
-        let engine = PolicyEngine;
+        let engine = PolicyEngine::new(CanonPath::new("/ws"));
         let permit = engine.mint(Scope {
             write_paths: vec![CanonPath::new("/ws/allowed")],
             read_paths: vec![CanonPath::new("/ws/readable")],
@@ -426,5 +369,106 @@ mod permit {
             .unwrap();
         assert!(properties.contains_key("path"));
         assert!(properties.contains_key("contents"));
+    }
+
+    // --- policy: what a `PreparedCall` is actually authorised to do ---
+    // `docs/decisions/2026-08-21-the-turn-loop.md` §1.
+
+    fn read_call(path: &str) -> PreparedCall {
+        PreparedCall {
+            tool: "read".to_string(),
+            ops: vec![Op::Read {
+                path: CanonPath::new(path),
+            }],
+        }
+    }
+
+    #[test]
+    fn permit_policy_admits_a_read_inside_the_workspace() {
+        let engine = PolicyEngine::new(CanonPath::new("/ws"));
+        let permit = engine
+            .authorize(&read_call("/ws/src/main.rs"))
+            .expect("a workspace read is what this policy exists to allow");
+        assert!(
+            permit
+                .allows_read(&CanonPath::new("/ws/src/main.rs"))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn permit_policy_grants_only_the_paths_the_call_named() {
+        // The whole reason `authorize` exists rather than the loop calling
+        // `mint`: a permit must not be wider than the call it authorises.
+        let engine = PolicyEngine::new(CanonPath::new("/ws"));
+        let permit = engine
+            .authorize(&read_call("/ws/src/main.rs"))
+            .expect("a workspace read is allowed");
+        assert_eq!(
+            permit.allows_read(&CanonPath::new("/ws/secrets.env")),
+            Err(PermitDenied::Read {
+                path: CanonPath::new("/ws/secrets.env")
+            }),
+            "reading one file must not authorise reading the workspace"
+        );
+    }
+
+    #[test]
+    fn permit_policy_refuses_a_write_and_names_it() {
+        let engine = PolicyEngine::new(CanonPath::new("/ws"));
+        let call = PreparedCall {
+            tool: "edit".to_string(),
+            ops: vec![Op::Write {
+                path: CanonPath::new("/ws/src/main.rs"),
+                contents: b"pwned".to_vec(),
+            }],
+        };
+        let denied = engine
+            .authorize(&call)
+            .expect_err("this session cannot write");
+        assert_eq!(
+            denied,
+            PolicyDenied::WriteRefused {
+                tool: "edit".to_string(),
+                path: CanonPath::new("/ws/src/main.rs"),
+            }
+        );
+        assert!(denied.to_string().contains("/ws/src/main.rs"));
+    }
+
+    #[test]
+    fn permit_policy_refuses_a_read_outside_the_workspace_and_names_it() {
+        let engine = PolicyEngine::new(CanonPath::new("/ws"));
+        let denied = engine
+            .authorize(&read_call("/etc/passwd"))
+            .expect_err("the workspace is the boundary");
+        assert_eq!(
+            denied,
+            PolicyDenied::ReadOutsideWorkspace {
+                tool: "read".to_string(),
+                path: CanonPath::new("/etc/passwd"),
+            }
+        );
+        assert!(denied.to_string().contains("/etc/passwd"));
+    }
+
+    #[test]
+    fn permit_policy_refuses_a_whole_call_for_one_bad_op() {
+        // A call is authorised or it is not. Minting a permit for the
+        // acceptable half would let a tool do part of something nobody
+        // approved.
+        let engine = PolicyEngine::new(CanonPath::new("/ws"));
+        let call = PreparedCall {
+            tool: "read".to_string(),
+            ops: vec![
+                Op::Read {
+                    path: CanonPath::new("/ws/fine.txt"),
+                },
+                Op::Read {
+                    path: CanonPath::new("/etc/shadow"),
+                },
+            ],
+        };
+        assert!(engine.authorize(&call).is_err());
     }
 }

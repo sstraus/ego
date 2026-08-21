@@ -12,7 +12,7 @@ mod scope;
 mod tool;
 
 pub use fs::{Fs, GuardedFs, GuardedIo, PathResolver};
-pub use grant::{Permit, PermitDenied, PolicyEngine};
+pub use grant::{Permit, PermitDenied, PolicyDenied, PolicyEngine};
 pub use path::CanonPath;
 pub use prepared_call::{Op, PreparedCall};
 pub use scope::Scope;

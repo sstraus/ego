@@ -11,6 +11,7 @@
 use std::fmt;
 
 use super::path::CanonPath;
+use super::prepared_call::{Op, PreparedCall};
 use super::scope::Scope;
 
 /// A capability token whose constructor only this module can reach. Its
@@ -133,17 +134,102 @@ impl Permit {
     }
 }
 
+/// Why policy refused to authorise a call. Names the operation, never just
+/// the fact of a refusal — `ARCHITECTURE.md` §3.2.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PolicyDenied {
+    /// The call wants to write, and this milestone's tools are read-only.
+    WriteRefused { tool: String, path: CanonPath },
+    /// The call wants to read outside the workspace.
+    ReadOutsideWorkspace { tool: String, path: CanonPath },
+}
+
+impl fmt::Display for PolicyDenied {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            PolicyDenied::WriteRefused { tool, path } => write!(
+                f,
+                "{tool} may not write {path}: this session's tools are read-only"
+            ),
+            PolicyDenied::ReadOutsideWorkspace { tool, path } => {
+                write!(f, "{tool} may not read {path}: it is outside the workspace")
+            }
+        }
+    }
+}
+
+impl std::error::Error for PolicyDenied {}
+
 /// The sole minter of [`Permit`]s (`ARCHITECTURE.md` §3.2, §3.4).
 ///
 /// Stands in for the full rule-grammar-plus-judge engine of §3.4 axes 2–3,
-/// which is a later milestone; for M0a its entire job is to be the one
-/// place that can name `Sealed(())`. There is deliberately no `widen`
-/// method, here or anywhere: a call that needs a broader grant is a new
-/// decision, made by minting a new `Permit`, not by mutating an old one.
-#[derive(Debug, Default)]
-pub struct PolicyEngine;
+/// which is a later milestone; for M0b it answers one question — see
+/// [`authorize`](Self::authorize). There is deliberately no `widen` method,
+/// here or anywhere: a call that needs a broader grant is a new decision,
+/// made by minting a new `Permit`, not by mutating an old one.
+#[derive(Debug)]
+pub struct PolicyEngine {
+    /// Everything at or under this path may be read. Nothing else may.
+    workspace: CanonPath,
+}
 
 impl PolicyEngine {
+    /// A policy that admits reads inside `workspace`.
+    pub fn new(workspace: CanonPath) -> Self {
+        Self { workspace }
+    }
+
+    /// Decide what a prepared call may do, and hand back the grant that says
+    /// so (`docs/decisions/2026-08-21-the-turn-loop.md` §1).
+    ///
+    /// This is the method that makes this an engine rather than a stamp. The
+    /// scope is derived *from the call*, so a permit can never allow more
+    /// than the call asked for — with [`mint`](Self::mint) alone, whoever
+    /// chose the `Scope` was the real policy, and the caller is the turn
+    /// loop, which has no business holding that authority.
+    ///
+    /// M0b's rule is one line long: a read inside the workspace is admitted,
+    /// and nothing else is. `ARCHITECTURE.md` §3.4's grammar, modes and judge
+    /// are M1's; the shape here is what lets them arrive without moving
+    /// anything — a mode that asks a human still returns a `Permit` or a
+    /// `PolicyDenied` from this method.
+    pub fn authorize(&self, call: &PreparedCall) -> Result<Permit, PolicyDenied> {
+        let mut read_paths = Vec::with_capacity(call.ops.len());
+        for op in &call.ops {
+            match op {
+                Op::Write { path, .. } => {
+                    return Err(PolicyDenied::WriteRefused {
+                        tool: call.tool.clone(),
+                        path: path.clone(),
+                    });
+                }
+                Op::Read { path } => {
+                    if !path.is_or_under(&self.workspace) {
+                        return Err(PolicyDenied::ReadOutsideWorkspace {
+                            tool: call.tool.clone(),
+                            path: path.clone(),
+                        });
+                    }
+                    read_paths.push(path.clone());
+                }
+            }
+        }
+        // Scoped to the paths this call named, not to the workspace: a tool
+        // that asked to read one file is not thereby allowed to read the
+        // repository. `GuardedIo` re-resolves at use time, so a symlink
+        // swapped in afterwards is judged against this same narrow list.
+        Ok(self.mint(Scope {
+            read_paths,
+            ..Scope::default()
+        }))
+    }
+
+    /// Mint a permit for an explicit scope.
+    ///
+    /// The sealed primitive [`authorize`](Self::authorize) is built from, and
+    /// what a later bypass mode (`--yolo`, `ARCHITECTURE.md` §3.4) mints a
+    /// deliberately wide grant with. The turn loop does not call it: a loop
+    /// that chooses its own `Scope` is a loop that is its own policy.
     pub fn mint(&self, scope: Scope) -> Permit {
         Permit {
             scope,
