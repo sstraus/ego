@@ -77,7 +77,7 @@ Grouped; all long flags, short forms only for the hot five
                         confine spawned commands, hooks or MCP transports, and
                         it cannot stop an admitted local daemon from relaying
                         upstream itself (see `crates/ego-ai/src/http.rs`)
-    --thinking L        off|min|low|medium|high|xhigh|max   (pi's scale)
+    --thinking L        off|minimal|low|medium|high|xhigh|max   (pi's scale)
     --system TEXT|@file          replace system prompt
     --append-system TEXT|@file   append to it
 ```
@@ -139,6 +139,52 @@ ceilings come only from an administrator's `/etc/ego`.
     --tools LIST        restrict builtin tools;  --no-tools for pure generation
     --mcp NAME|@cfg.json  attach MCP server for this invocation (repeatable)
 ```
+
+### 3.1 Availability — what ships today
+
+§4.5 requires this table: *no flag documented before its contract is
+implemented*. The grammar above is the **whole** design; this says which of it
+you can actually run. Checked against the clap definitions in
+`crates/ego-cli/src/cli.rs`, not against intent, on 2026-08-21.
+
+A flag marked **no** is **refused by name**, with the subsystem it waits on —
+not swallowed, and not reported as an unknown argument. That mechanism already
+exists: `UNAVAILABLE` in `crates/ego-cli/src/cli.rs:66-101`, checked before
+clap sees the tokens, and it covers every "no" below. This table is the
+document half of it; the code is the source of truth, and the two were compared
+flag by flag against the built binary to write this.
+
+| Flag | M0b | Note |
+|---|---|---|
+| `-m, --model` | **yes** | |
+| `--offline` | **yes** | |
+| `--thinking` | **yes** | §3 above spelled the second value `min` until 2026-08-21; the parser has only ever accepted `minimal`, so `--thinking min` was a documented value that errored. Corrected above |
+| `--system`, `--append-system` | **yes** | |
+| `--instructions` | **yes** | ships, and is **missing from §3's grammar** — documented only in §4.5's prose |
+| `--bare` | **yes** | |
+| `--session`, `--session-id`, `--ephemeral` | **yes** | one mutually exclusive group, as §4.5 requires |
+| `--session-dir` | **yes** | |
+| `--output` | **yes** | `text\|json\|jsonl` |
+| `--schema`, `--schema-retries` | **yes** | `--schema-retries` ships as its own flag; §3 mentions it only inside `--schema`'s description |
+| `--budget` | **yes** | binds only on a currency-metered row — the run says so on `metering.selected` |
+| `--max-turns`, `--timeout` | **yes** | |
+| `--tools`, `--no-tools` | **yes** | |
+| `-C`, `-c/--set`, `--profile` | **yes** | |
+| `-q`, `-v`, `--no-color` | **yes** | |
+| `--mode`, `--plan`, `--yolo`, `--allow`, `--deny` | no | waiting on the permission rule grammar (**M1**). `PolicyEngine` today admits a read inside the workspace and nothing else, so a rule would parse and enforce nothing — which is why refusing beats accepting: an ignored `--allow` looks like a permission boundary. §4.4's "scripts opt in with `--allow`" therefore describes no shipping flag |
+| `--sandbox` | no | waiting on a sandbox backend (**M1**). No process is spawned anywhere in this build, so there is nothing yet to confine |
+| `-f`, `--file`, `--var` | no | waiting on executable agent files (**M4**). §5 is a design, not a feature: the shebang form runs nothing today |
+| `--attach` | no | waiting on a non-text content block — the conversation model carries text, tool calls and tool results, so an image has nothing to be sent in |
+| `--mcp` | no | waiting on the MCP client (**M2**). `mcp_errors` exists on `session.started`, but no flag attaches a server |
+| `--retry`, `--fallback` | no | waiting on a retry seam. Delivery certainty is implemented and enforced; a generation owns its reservation for its whole life, so re-issuing one changes the attempt contract rather than adding a loop |
+
+**Thirteen documented flag spellings do not ship.** That is the gap this table
+exists to stop being invisible, and it is not a defect list — every one of them
+refuses by name and says what it is waiting on. The defect would be §3 reading,
+to someone who has not run the binary, as though all of it worked.
+
+Milestones in bold above are from `ARCHITECTURE.md` §8's table, which owns
+them; the flags with none are waiting on a subsystem that table does not place.
 
 ## 4. Output contracts
 
