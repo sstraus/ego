@@ -30,7 +30,7 @@ use crate::generator::capabilities::ModelCapabilities;
 use crate::generator::history::conversation_from;
 use crate::generator::port::{AiEvent, Generator};
 use crate::generator::types::{Conversation, GenRequest, Message, Role, StopReason, ThinkingLevel};
-use crate::permit::{Classification, Pending, PolicyDenied};
+use crate::permit::{Classification, Pending, PolicyDenied, Resolution};
 use crate::public::PublicEvent;
 use crate::sink::EventSink;
 use crate::state::{SessionState, Usage};
@@ -858,13 +858,19 @@ impl<'a> TurnLoop<'a> {
         let authorized = match self.tools.authorize(prepared) {
             Classification::Settled(Ok(authorized)) => authorized,
             Classification::Settled(Err(denial)) => return ToolOutcome::Refused { denial },
-            // Nobody in this run can answer it. §6's steps 6 and 7 — the judge
-            // and the human — have no producer in this build, so the honest
-            // terminal state is the one `CLI.md` §4.4 already specifies for a
-            // headless run: end it, with the action named. Not a stub standing
-            // in for a feature; the feature adds a fourth answer source to a
-            // loop that already runs.
-            Classification::Ask(pending) => return ToolOutcome::Unanswerable { pending },
+            // The rules did not settle it, so ask the next party in §6's
+            // order. That is the mode at step 5 today; the judge and the human
+            // are steps 6 and 7 and have no producer yet, so a question the
+            // mode hands back has reached the end of the order. The honest
+            // terminal state is then the one `CLI.md` §4.4 already specifies
+            // for a headless run: end it, with the action named. Not a stub
+            // standing in for a feature — the feature adds parties to a
+            // consultation that already happens.
+            Classification::Ask(pending) => match self.tools.settle(pending).await {
+                Resolution::Settled(Ok(authorized)) => authorized,
+                Resolution::Settled(Err(denial)) => return ToolOutcome::Refused { denial },
+                Resolution::Ask(pending) => return ToolOutcome::Unanswerable { pending },
+            },
         };
         match self.tools.execute(tool, authorized).await {
             Ok(output) => answered(true, output),

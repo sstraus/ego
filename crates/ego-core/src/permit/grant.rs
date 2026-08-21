@@ -12,6 +12,7 @@
 
 use std::fmt;
 
+use super::approver::{Approver, ModeApprover, Verdict};
 use super::path::CanonPath;
 use super::prepared_call::{Op, PreparedCall};
 use super::rule::{Rule, RuleId};
@@ -111,14 +112,20 @@ struct Sealed(());
 ///
 /// ```compile_fail
 /// use ego_core::config::{Mode, PermCfg};
+/// use ego_core::permit::rule::Rule;
 /// use ego_core::permit::{CanonPath, Classification, Op, PolicyEngine, PreparedCall};
-/// let engine = PolicyEngine::new(CanonPath::new("/ws"), Mode::Default, PermCfg::default());
+/// let allow = vec![Rule::load("read(**)").expect("a rule this build enforces")];
+/// let engine = PolicyEngine::new(
+///     CanonPath::new("/ws"),
+///     Mode::Default,
+///     PermCfg { allow, deny: Vec::new() },
+/// );
 /// let call = PreparedCall {
 ///     tool: "read".to_string(),
 ///     ops: vec![Op::Read { path: CanonPath::new("/ws/a.rs") }],
 /// };
 /// let Classification::Settled(Ok(granted)) = engine.classify(call)
-///     else { panic!("a workspace read is allowed") };
+///     else { panic!("an allow rule covers this read") };
 /// let _scope = &granted.permit().scope;
 /// ```
 ///
@@ -127,14 +134,20 @@ struct Sealed(());
 ///
 /// ```
 /// use ego_core::config::{Mode, PermCfg};
+/// use ego_core::permit::rule::Rule;
 /// use ego_core::permit::{CanonPath, Classification, Op, PolicyEngine, PreparedCall};
-/// let engine = PolicyEngine::new(CanonPath::new("/ws"), Mode::Default, PermCfg::default());
+/// let allow = vec![Rule::load("read(**)").expect("a rule this build enforces")];
+/// let engine = PolicyEngine::new(
+///     CanonPath::new("/ws"),
+///     Mode::Default,
+///     PermCfg { allow, deny: Vec::new() },
+/// );
 /// let call = PreparedCall {
 ///     tool: "read".to_string(),
 ///     ops: vec![Op::Read { path: CanonPath::new("/ws/a.rs") }],
 /// };
 /// let Classification::Settled(Ok(granted)) = engine.classify(call)
-///     else { panic!("a workspace read is allowed") };
+///     else { panic!("an allow rule covers this read") };
 /// let _permit = granted.permit();
 /// ```
 ///
@@ -302,14 +315,20 @@ impl Permit {
 ///
 /// ```compile_fail
 /// use ego_core::config::{Mode, PermCfg};
+/// use ego_core::permit::rule::Rule;
 /// use ego_core::permit::{CanonPath, Classification, Op, PolicyEngine, PreparedCall};
-/// let engine = PolicyEngine::new(CanonPath::new("/ws"), Mode::Default, PermCfg::default());
+/// let allow = vec![Rule::load("read(**)").expect("a rule this build enforces")];
+/// let engine = PolicyEngine::new(
+///     CanonPath::new("/ws"),
+///     Mode::Default,
+///     PermCfg { allow, deny: Vec::new() },
+/// );
 /// let call = PreparedCall {
 ///     tool: "read".to_string(),
 ///     ops: vec![Op::Read { path: CanonPath::new("/ws/a.rs") }],
 /// };
 /// let Classification::Settled(Ok(granted)) = engine.classify(call)
-///     else { panic!("a workspace read is allowed") };
+///     else { panic!("an allow rule covers this read") };
 /// let _stolen = &granted.permit;
 /// ```
 ///
@@ -318,14 +337,20 @@ impl Permit {
 ///
 /// ```
 /// use ego_core::config::{Mode, PermCfg};
+/// use ego_core::permit::rule::Rule;
 /// use ego_core::permit::{CanonPath, Classification, Op, PolicyEngine, PreparedCall};
-/// let engine = PolicyEngine::new(CanonPath::new("/ws"), Mode::Default, PermCfg::default());
+/// let allow = vec![Rule::load("read(**)").expect("a rule this build enforces")];
+/// let engine = PolicyEngine::new(
+///     CanonPath::new("/ws"),
+///     Mode::Default,
+///     PermCfg { allow, deny: Vec::new() },
+/// );
 /// let call = PreparedCall {
 ///     tool: "read".to_string(),
 ///     ops: vec![Op::Read { path: CanonPath::new("/ws/a.rs") }],
 /// };
 /// let Classification::Settled(Ok(granted)) = engine.classify(call)
-///     else { panic!("a workspace read is allowed") };
+///     else { panic!("an allow rule covers this read") };
 /// let _borrowed = granted.permit();
 /// ```
 ///
@@ -340,15 +365,21 @@ impl Permit {
 ///
 /// ```compile_fail
 /// use ego_core::config::{Mode, PermCfg};
+/// use ego_core::permit::rule::Rule;
 /// use ego_core::permit::{Authorized, CanonPath, Classification, Op, PolicyEngine, PreparedCall};
-/// let engine = PolicyEngine::new(CanonPath::new("/ws"), Mode::Default, PermCfg::default());
+/// let allow = vec![Rule::load("read(**)").expect("a rule this build enforces")];
+/// let engine = PolicyEngine::new(
+///     CanonPath::new("/ws"),
+///     Mode::Default,
+///     PermCfg { allow, deny: Vec::new() },
+/// );
 /// let split = |path: &str| {
 ///     let call = PreparedCall {
 ///         tool: "read".to_string(),
 ///         ops: vec![Op::Read { path: CanonPath::new(path) }],
 ///     };
 ///     let Classification::Settled(Ok(granted)) = engine.classify(call)
-///         else { panic!("a workspace read is allowed") };
+///         else { panic!("an allow rule covers this read") };
 ///     granted.into_parts()
 /// };
 /// let (_, permit) = split("/ws/a.rs");
@@ -362,15 +393,21 @@ impl Permit {
 ///
 /// ```
 /// use ego_core::config::{Mode, PermCfg};
+/// use ego_core::permit::rule::Rule;
 /// use ego_core::permit::{CanonPath, Classification, Op, PolicyEngine, PreparedCall};
-/// let engine = PolicyEngine::new(CanonPath::new("/ws"), Mode::Default, PermCfg::default());
+/// let allow = vec![Rule::load("read(**)").expect("a rule this build enforces")];
+/// let engine = PolicyEngine::new(
+///     CanonPath::new("/ws"),
+///     Mode::Default,
+///     PermCfg { allow, deny: Vec::new() },
+/// );
 /// let split = |path: &str| {
 ///     let call = PreparedCall {
 ///         tool: "read".to_string(),
 ///         ops: vec![Op::Read { path: CanonPath::new(path) }],
 ///     };
 ///     let Classification::Settled(Ok(granted)) = engine.classify(call)
-///         else { panic!("a workspace read is allowed") };
+///         else { panic!("an allow rule covers this read") };
 ///     granted.into_parts()
 /// };
 /// let (_, _permit) = split("/ws/a.rs");
@@ -469,6 +506,19 @@ pub enum PolicyDenied {
         op: &'static str,
         path: CanonPath,
     },
+    /// A party that was asked said no. Distinct from `Denied` because nobody
+    /// wrote a rule: there is nothing to grep for and nothing to revoke, and
+    /// telling an operator to look for a rule that does not exist is worse
+    /// than saying less.
+    ///
+    /// It does not name *who* refused. That is §4's `by: Authority`, which
+    /// arrives with the audit event that needs it — see the ADR's §5
+    /// amendment.
+    Refused {
+        tool: String,
+        op: &'static str,
+        path: CanonPath,
+    },
 }
 
 impl fmt::Display for PolicyDenied {
@@ -490,6 +540,9 @@ impl fmt::Display for PolicyDenied {
             PolicyDenied::OutsideWorkspace { tool, op, path } => {
                 write!(f, "{tool} may not {op} {path}: it is outside the workspace")
             }
+            PolicyDenied::Refused { tool, op, path } => {
+                write!(f, "{tool} may not {op} {path}: permission was refused")
+            }
         }
     }
 }
@@ -506,10 +559,42 @@ impl std::error::Error for PolicyDenied {}
 /// names "the judge was unavailable" and "the judge was uncertain". There is
 /// no judge in this build, so those have no producer and are not declared —
 /// the same rule that keeps `Op::Spawn` out of the `Op` enum.
+///
+/// The two that *are* declared are the two steps that can decline: the rules,
+/// and then the mode. They are chained rather than alternative — a question
+/// the rules did not cover reaches the mode carrying `NoRuleCovers`, and the
+/// mode replaces it with its own reason if it declines too. Both are true; the
+/// second is the one that stopped the run, and it is the one an operator can
+/// act on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Escalation {
-    /// No rule covered it and the mode does not auto-approve it.
+    /// No allow rule covered it. `PolicyEngine::classify` is the producer:
+    /// steps 0 to 3 ran and none of them settled it.
     NoRuleCovers { op: &'static str, path: CanonPath },
+    /// The mode does not auto-approve this operation. `ModeApprover` is the
+    /// producer, at §6 step 5.
+    ModeAsks {
+        mode: Mode,
+        op: &'static str,
+        path: CanonPath,
+    },
+}
+
+impl Escalation {
+    /// The operation the escalation is about. Every arm names one, because a
+    /// question that cannot say what it is about is not a question anybody
+    /// can answer.
+    pub fn op(&self) -> &'static str {
+        match self {
+            Escalation::NoRuleCovers { op, .. } | Escalation::ModeAsks { op, .. } => op,
+        }
+    }
+
+    pub fn path(&self) -> &CanonPath {
+        match self {
+            Escalation::NoRuleCovers { path, .. } | Escalation::ModeAsks { path, .. } => path,
+        }
+    }
 }
 
 impl fmt::Display for Escalation {
@@ -517,6 +602,9 @@ impl fmt::Display for Escalation {
         match self {
             Escalation::NoRuleCovers { op, path } => {
                 write!(f, "no rule covers {op} {path}")
+            }
+            Escalation::ModeAsks { mode, op, path } => {
+                write!(f, "{mode} mode does not approve {op} {path} on its own")
             }
         }
     }
@@ -609,6 +697,25 @@ pub enum Classification {
     Ask(Pending),
 }
 
+/// What [`PolicyEngine::settle`] concluded after consulting a party.
+///
+/// `Ask` again rather than a third "unanswerable" arm: the question is not
+/// finished, it is only finished *with this party*. §6 orders three of them
+/// and the engine — never the loop — decides who is next, because the engine
+/// is the only thing that may construct a [`Pending`] at all. With one party
+/// in this build, "next" is nobody, and a loop that gets `Ask` back from
+/// `settle` has exhausted the order: `CLI.md` §4.4, exit 3.
+///
+/// §5's `Reclassify` arm is not declared. It is the human's `Amend`, there is
+/// no human, and an arm nothing produces reads as a working feature.
+#[derive(Debug)]
+pub enum Resolution {
+    /// Decided. The party allowed it, or refused it.
+    Settled(Result<Authorized, PolicyDenied>),
+    /// Still open, with the reason this party gave for not answering.
+    Ask(Pending),
+}
+
 /// The sole minter of [`Permit`]s (`ARCHITECTURE.md` §3.2, §3.4).
 ///
 /// # Invariant W
@@ -668,6 +775,63 @@ pub enum Classification {
 /// judge, has nothing to build it out of yet, so a call the first two cannot
 /// settle leaves as a question — see [`classify`](Self::classify).
 ///
+/// # Leg 1, continued: nobody can supply the mode
+///
+/// Since §6 step 5 became the [`Approver`] port, "the mode decides" is only
+/// true if the caller cannot decide which mode-shaped thing is consulted.
+/// A port moves the choice of implementation somewhere, and wherever that
+/// somewhere is, *it* becomes the mode. The same three blocks as above,
+/// pointed at that:
+///
+/// **The mode's approver cannot be named.** `E0603`: `approver` is a private
+/// module and `ModeApprover` is not re-exported, so there is no path to the
+/// type a caller would have to mention in order to build a different one.
+///
+/// ```compile_fail
+/// use ego_core::permit::approver::ModeApprover;
+/// ```
+///
+/// Control — `Approver` and `Verdict` *are* exported, from the module a
+/// caller really does reach, so the failure above is the type's absence and
+/// not a mistyped path:
+///
+/// ```
+/// use ego_core::permit::{Approver, Verdict};
+/// fn takes(_: &dyn Approver) {}
+/// let _answers = [Verdict::Allow, Verdict::Deny];
+/// ```
+///
+/// **And there is no way to hand one in.** `E0599`: `with_approver` exists
+/// only under `#[cfg(test)]`, inside this crate, so no release build contains
+/// it and no other crate can reach it in any build. `new` takes a `Mode` and
+/// builds the approver itself; a caller supplies the *configuration*, never
+/// the party.
+///
+/// ```compile_fail
+/// use ego_core::config::{Mode, PermCfg};
+/// use ego_core::permit::{CanonPath, PolicyEngine};
+/// let engine = PolicyEngine::new(CanonPath::new("/ws"), Mode::Default, PermCfg::default());
+/// let _yolo = engine.with_approver(todo!());
+/// ```
+///
+/// Control — the engine really is constructible from outside, and the mode
+/// really is the argument it takes, so the block above fails on the method
+/// and not on the setup:
+///
+/// ```
+/// use ego_core::config::{Mode, PermCfg};
+/// use ego_core::permit::{CanonPath, PolicyEngine};
+/// let _engine = PolicyEngine::new(CanonPath::new("/ws"), Mode::Yolo, PermCfg::default());
+/// ```
+///
+/// **What this does not prove, and it is the same limit as everywhere else in
+/// Leg 1.** Nothing here stops a caller passing `Mode::Yolo` to `new`. It is
+/// not supposed to: choosing the mode is exactly what the config layers are
+/// for, and `run.rs` passes `effective.mode`. The property is narrower and it
+/// is the one that was at risk — *given* a resolved mode, no code downstream
+/// of `new` can obtain a different mode's behaviour. Where the mode comes
+/// from is `config::resolve`'s claim and `tests/config.rs` holds it.
+///
 /// There is deliberately no `widen` method, here or anywhere: a call that
 /// needs a broader grant is a new decision, made by minting a new `Permit`,
 /// not by mutating an old one.
@@ -682,6 +846,11 @@ pub struct PolicyEngine {
     /// and `deny = ["exec(git *)"]` left `allow = ["exec(git push)"]` standing.
     allow: Vec<Rule>,
     deny: Vec<Rule>,
+    /// §6 step 5, built from `mode` by [`new`](Self::new) and reachable no
+    /// other way. See [`ModeApprover`]'s doc for why there is no constructor
+    /// that takes one: a port that let its holder pick the implementation
+    /// would have moved the mode out of the config and into the caller.
+    approver: Box<dyn Approver>,
 }
 
 impl PolicyEngine {
@@ -693,7 +862,26 @@ impl PolicyEngine {
             mode,
             allow: permissions.allow,
             deny: permissions.deny,
+            approver: Box::new(ModeApprover::new(mode)),
         }
+    }
+
+    /// The same engine with a different party at §6 step 5, for tests that
+    /// need a verdict the mode cannot produce.
+    ///
+    /// **`#[cfg(test)]`, and only `ego-core`'s own test profile compiles it.**
+    /// It exists because `Verdict::Deny` has no production producer — the
+    /// mode never denies at step 5, since `plan`'s refusal is the floor at
+    /// step 2 — and an arm of `settle` that nothing could reach would be
+    /// untested code that reads as a decided behaviour. This is the seam that
+    /// makes it a decided behaviour.
+    ///
+    /// It is not a relaxation of the rule above it. No release build contains
+    /// this function, no other crate can call it, and the one caller is a
+    /// test in this file asserting what a refusal turns into.
+    #[cfg(test)]
+    fn with_approver(self, approver: Box<dyn Approver>) -> Self {
+        Self { approver, ..self }
     }
 
     /// Decide what a prepared call may do, and hand back the grant that says
@@ -724,7 +912,6 @@ impl PolicyEngine {
     /// 1. deny                     (system denies are unioned in by resolve)
     /// 2. mode floor               (plan refuses every mutating op)
     /// 3. allow
-    /// 4. mode ceiling             (edits approves workspace writes; yolo all)
     /// →  ask
     /// ```
     ///
@@ -734,30 +921,86 @@ impl PolicyEngine {
     /// either way. What a separate step would buy is *attribution* in the
     /// audit event, and that arrives with the event.
     ///
-    /// Steps 6 and 7 — the judge and the human — have no producer in this
-    /// build, so the order ends by returning the question rather than
-    /// answering it.
+    /// **Step 5 — the mode ceiling — is not here, and it used to be.** It is
+    /// the first implementation of the [`Approver`] port, consulted by
+    /// [`settle`](Self::settle). The reason is in the ADR's §5 amendment and
+    /// it is not tidiness: with the ceiling inside this method, a `Pending`
+    /// could only ever be constructed *after* the mode had declined, so an
+    /// approver derived from the mode had exactly one reachable answer. The
+    /// port existed and the seat had no occupant.
+    ///
+    /// Steps 6 and 7 — the judge and the human — still have no producer, so
+    /// the order ends by returning the question rather than answering it.
+    /// **Two passes, and the order between them is the point.** Every
+    /// operation is put through steps 0 to 2 before any of them is allowed to
+    /// raise a question, because "first match wins, top down" is a claim about
+    /// the *steps*, not about the order the ops happen to be in. A single pass
+    /// returns a question about op one and never reaches op two — so a call
+    /// that reads a workspace file and `/etc/shadow` would arrive at an
+    /// approver as an ordinary question, and a mode that answers yes would
+    /// authorise the whole call, boundary included. A refusal anywhere refuses
+    /// the call.
     pub fn classify(&self, call: PreparedCall) -> Classification {
         for op in &call.ops {
             if let Err(denied) = self.judge(&call, op) {
                 return Classification::Settled(Err(denied));
             }
-            if !self.approves(op) {
-                return Classification::Ask(Pending {
-                    ask: PermissionRequest {
-                        tool: call.tool.clone(),
-                        ops: call.ops.clone(),
-                        why: Escalation::NoRuleCovers {
-                            op: op.name(),
-                            path: op.path().clone(),
-                        },
-                    },
-                    call,
-                });
+        }
+        for op in &call.ops {
+            if self.matching(&self.allow, op).is_none() {
+                let why = Escalation::NoRuleCovers {
+                    op: op.name(),
+                    path: op.path().clone(),
+                };
+                return Classification::Ask(self.pending(call, why));
             }
         }
         let permit = self.mint(scope_of(&call));
         Classification::Settled(Ok(Authorized { call, permit }))
+    }
+
+    /// Put the question to the next party in §6's order and act on the answer.
+    ///
+    /// The one `await` in `permit`. What this module still owns, and does not
+    /// delegate, is *which* party is consulted and what their answer means: a
+    /// verdict is a party's opinion, and only this method turns one into a
+    /// [`Permit`] — from a scope derived, as always, from the call.
+    ///
+    /// `Escalate` hands the question back rather than ending it, carrying the
+    /// reason this party gave. In this build there is nobody after the mode,
+    /// so a caller that receives [`Resolution::Ask`] has exhausted the order
+    /// and `CLI.md` §4.4 applies. When the judge and the human arrive they are
+    /// consulted here, and no caller changes.
+    pub async fn settle(&self, pending: Pending) -> Resolution {
+        match self.approver.approve(&pending).await {
+            Verdict::Allow => {
+                let call = pending.call;
+                let permit = self.mint(scope_of(&call));
+                Resolution::Settled(Ok(Authorized { call, permit }))
+            }
+            Verdict::Deny => Resolution::Settled(Err(PolicyDenied::Refused {
+                tool: pending.call.tool,
+                op: pending.ask.why.op(),
+                path: pending.ask.why.path().clone(),
+            })),
+            Verdict::Escalate { why } => Resolution::Ask(self.pending(pending.call, why)),
+        }
+    }
+
+    /// The question, addressed to whoever is next.
+    ///
+    /// Private, and the only constructor of a [`Pending`] anywhere: §5's
+    /// property is that the engine decides who is asked, and a `Pending` a
+    /// caller could build is a caller nominating its own approver.
+    fn pending(&self, call: PreparedCall, why: Escalation) -> Pending {
+        Pending {
+            ask: PermissionRequest {
+                tool: call.tool.clone(),
+                ops: call.ops.clone(),
+                why,
+            },
+            call,
+        }
     }
 
     /// Steps 0 to 2: everything that can refuse an operation outright.
@@ -800,33 +1043,6 @@ impl PolicyEngine {
         }
 
         Ok(())
-    }
-
-    /// Steps 3 and 4: everything that can approve one without asking.
-    fn approves(&self, op: &Op) -> bool {
-        // 3. An allow rule the operator wrote.
-        if self.matching(&self.allow, op).is_some() {
-            return true;
-        }
-
-        // 4. The mode ceiling.
-        match self.mode {
-            // Bypass. Not "wider authority" — the scope is still derived from
-            // the call — but "do not ask about it".
-            Mode::Yolo => true,
-            // Auto-approves workspace writes; step 0 already established that
-            // every path here is inside the workspace.
-            Mode::Edits => true,
-            // `ARCHITECTURE.md:242` — these review unresolved **sensitive**
-            // actions, not every action. A read inside the workspace that
-            // stopped the run to ask would be the prompt fatigue that
-            // `ARCHITECTURE.md:238` counts as a security bug.
-            //
-            // `Auto` behaves as `Default` because step 6's judge does not
-            // exist. When it does, `Auto` consults it here instead of falling
-            // through, and `Default` is unchanged.
-            Mode::Plan | Mode::Default | Mode::Auto => !op.mutates(),
-        }
     }
 
     /// The first rule in `rules` that covers `op`, if any.
@@ -929,6 +1145,90 @@ mod tests {
     /// not a choice here; there is nothing for them to affect.
     fn minter() -> PolicyEngine {
         PolicyEngine::new(CanonPath::new("/ws"), Mode::Default, PermCfg::default())
+    }
+
+    /// The second implementation of [`Approver`], and the only producer of
+    /// [`Verdict::Deny`] anywhere.
+    ///
+    /// The mode never denies at §6 step 5 — `plan`'s refusal is the floor at
+    /// step 2, inside `classify` — so without a party that can say no, the
+    /// `Deny` arm of [`PolicyEngine::settle`] would be code nothing could
+    /// reach. `2026-08-21-a-permit-nobody-can-widen.md` §5's amendment records
+    /// why the arm ships anyway: `Approver` is a public port, and one whose
+    /// vocabulary cannot express a refusal is a port the human seat at step 7
+    /// would have to break in order to use it.
+    ///
+    /// It answers without asking anybody, which is the property the trait had
+    /// to keep: an approver is a *party*, not a prompt, and a party that could
+    /// only ever relay a question to somewhere else would make "the mode
+    /// approves" unexpressible.
+    #[derive(Debug)]
+    struct AlwaysDenies;
+
+    impl Approver for AlwaysDenies {
+        fn approve<'a>(&'a self, _pending: &'a Pending) -> futures::future::BoxFuture<'a, Verdict> {
+            Box::pin(futures::future::ready(Verdict::Deny))
+        }
+    }
+
+    fn write_call(path: &str) -> PreparedCall {
+        PreparedCall {
+            tool: "edit".to_string(),
+            ops: vec![Op::Write {
+                path: CanonPath::new(path),
+                contents: b"whatever".to_vec(),
+            }],
+        }
+    }
+
+    #[test]
+    fn a_party_that_refuses_settles_the_call_without_naming_a_rule() {
+        let engine = PolicyEngine::new(CanonPath::new("/ws"), Mode::Default, PermCfg::default())
+            .with_approver(Box::new(AlwaysDenies));
+        let Classification::Ask(pending) = engine.classify(write_call("/ws/src/main.rs")) else {
+            panic!("no rule covers it, so steps 0 to 3 cannot settle it");
+        };
+
+        let Resolution::Settled(Err(denied)) = block_on(engine.settle(pending)) else {
+            panic!("the party said no, and no is an answer");
+        };
+        // `Refused` and not `Denied`: nobody wrote a rule, so there is no ID
+        // to grep for and nothing for `ego rules revoke` to take. Sending an
+        // operator looking for a rule that does not exist is worse than
+        // saying less.
+        assert_eq!(
+            denied,
+            PolicyDenied::Refused {
+                tool: "edit".to_string(),
+                op: "write",
+                path: CanonPath::new("/ws/src/main.rs"),
+            }
+        );
+    }
+
+    /// A refusal ends the call. It does not fall through to the next party,
+    /// and it does not mint anything.
+    ///
+    /// Worth its own assertion because the `Deny` arm and the `Escalate` arm
+    /// both stop the run in a headless build, so a `settle` that treated a
+    /// refusal as an escalation would look identical from the outside — same
+    /// exit code, same absence of an effect — while meaning the opposite. One
+    /// says nobody could answer; the other says somebody did.
+    #[test]
+    fn a_refusal_is_an_answer_and_not_another_question() {
+        let engine = PolicyEngine::new(CanonPath::new("/ws"), Mode::Default, PermCfg::default())
+            .with_approver(Box::new(AlwaysDenies));
+        let Classification::Ask(pending) = engine.classify(write_call("/ws/src/main.rs")) else {
+            panic!("no rule covers it");
+        };
+
+        assert!(
+            matches!(
+                block_on(engine.settle(pending)),
+                Resolution::Settled(Err(_))
+            ),
+            "a party that answered must not leave the question open"
+        );
     }
 
     #[test]

@@ -10,8 +10,8 @@ use std::sync::Arc;
 
 use crate::generator::types::ToolDescriptor as GenToolDescriptor;
 use crate::permit::{
-    Authorized, CanonPath, Classification, Fs, GuardedFs, PolicyEngine, PrepareCtx, PreparedCall,
-    Tool, ToolError,
+    Authorized, CanonPath, Classification, Fs, GuardedFs, Pending, PolicyEngine, PrepareCtx,
+    PreparedCall, Resolution, Tool, ToolError,
 };
 
 /// Everything the loop needs to turn a model's tool call into an effect.
@@ -99,6 +99,22 @@ impl<'a> Tools<'a> {
     /// was refused.
     pub fn authorize(&self, call: PreparedCall) -> Classification {
         self.policy.classify(call)
+    }
+
+    /// Stage two and a half: put a question the rules did not settle to the
+    /// next party in the order.
+    ///
+    /// A separate stage rather than folded into `authorize`, because the two
+    /// differ in the thing this module exists to keep straight: `authorize` is
+    /// pure and sync and answers from the run's own configuration; this one
+    /// awaits somebody. Collapsing them would put an `await` on the path every
+    /// authorised read already takes.
+    ///
+    /// The loop consults; it does not choose who answers. The approver is
+    /// built inside [`PolicyEngine::new`] from the resolved mode, so there is
+    /// nothing here to pass and nothing to substitute.
+    pub async fn settle(&self, pending: Pending) -> Resolution {
+        self.policy.settle(pending).await
     }
 
     /// Stage three: run it, under the grant policy issued and through the

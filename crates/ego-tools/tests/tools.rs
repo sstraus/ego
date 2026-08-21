@@ -30,9 +30,9 @@ use ego_core::generator::fake::FakeGenerator;
 use ego_core::generator::port::AiEvent;
 use ego_core::generator::types::{StopReason, ThinkingLevel};
 use ego_core::permit::{
-    Authorized, CanonPath, Classification, GuardedFs, GuardedIo, Op, PermitDenied, PolicyDenied,
-    PolicyEngine, PrepareCtx, PreparedCall, ScanRequest, Tool, ToolError, ToolResult, Typed,
-    TypedTool,
+    Authorized, CanonPath, Classification, GuardedFs, GuardedIo, Op, Pending, PermitDenied,
+    PolicyDenied, PolicyEngine, PrepareCtx, PreparedCall, Resolution, ScanRequest, Tool, ToolError,
+    ToolResult, Typed, TypedTool,
 };
 use ego_core::sink::CollectingSink;
 use ego_core::state::SessionState;
@@ -119,20 +119,32 @@ impl Workspace {
         block_on(tool.execute(call, &guarded)).map(|result: ToolResult| result.content)
     }
 
-    /// What policy concludes about a call, for a call it settles on its own.
+    /// What policy concludes about a call, for a call the run settles without
+    /// a human.
     ///
     /// Every call in this file reads, lists or searches inside a workspace,
-    /// which the default mode answers without asking anybody. A test that
-    /// reached [`Classification::Ask`] here would mean a read-only builtin had
+    /// which the default mode answers without asking anybody — at §6 step 5,
+    /// which is the `Approver` port rather than part of `classify`. So the
+    /// whole order runs here: a helper that stopped at `classify` would find
+    /// every read unsettled and say the builtins had lost their authority.
+    ///
+    /// A call still open after `settle` would mean a read-only builtin had
     /// started asking for authority it never used to need — worth a loud
     /// failure naming the tool, not a quiet `is_err()`.
     fn authorize(&self, call: PreparedCall) -> Result<Authorized, PolicyDenied> {
-        match self.policy.classify(call) {
-            Classification::Settled(answer) => answer,
-            Classification::Ask(pending) => panic!(
+        let unanswered = |pending: &Pending| {
+            panic!(
                 "a read-only builtin needed permission it never used to need: {}",
                 pending.request()
-            ),
+            )
+        };
+        let pending = match self.policy.classify(call) {
+            Classification::Settled(answer) => return answer,
+            Classification::Ask(pending) => pending,
+        };
+        match block_on(self.policy.settle(pending)) {
+            Resolution::Settled(answer) => answer,
+            Resolution::Ask(pending) => unanswered(&pending),
         }
     }
 

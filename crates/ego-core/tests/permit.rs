@@ -8,9 +8,10 @@ use ego_core::config::{Mode, PermCfg};
 use ego_core::permit::rule::Rule;
 use ego_core::permit::{
     Authorized, CanonPath, Classification, EntryKind, Escalation, FsError, GuardedFs, GuardedIo,
-    IoDenied, Op, PermitDenied, PolicyDenied, PolicyEngine, PrepareCtx, PreparedCall, ScanLimits,
-    ScanRequest, Tool, ToolError, Typed,
+    IoDenied, Op, Pending, PermitDenied, PolicyDenied, PolicyEngine, PrepareCtx, PreparedCall,
+    Resolution, ScanLimits, ScanRequest, Tool, ToolError, Typed,
 };
+use futures::executor::block_on;
 use serde_json::json;
 
 // Wrapped in a module named `permit` so `cargo test -p ego-core permit` (the
@@ -66,24 +67,40 @@ mod permit {
         PolicyEngine::new(CanonPath::new(root), Mode::Default, PermCfg::default())
     }
 
-    /// The answer, for a call the engine settles on its own.
+    /// The answer, for a call the run settles without a human.
+    ///
+    /// Runs the whole order: `classify` for steps 0 to 3, then `settle` for
+    /// step 5's mode ceiling. Both, because since the ceiling became the
+    /// `Approver` port neither half is the answer on its own — `classify`
+    /// leaves an ordinary read open, and the mode is what closes it.
     ///
     /// Lives in the test rather than on `PolicyEngine` because a caller that
-    /// cannot handle [`Classification::Ask`] is a test and never the loop —
-    /// the third outcome is the loop's whole job, and a library method that
+    /// cannot handle a question still being open is a test and never the loop
+    /// — that outcome is the loop's whole job, and a library method that
     /// flattened it away would be there for something to accidentally call.
+    ///
+    /// `block_on` rather than an async test: nothing in the order awaits I/O,
+    /// and a runtime dependency in `ego-core`'s tests to drive a future that
+    /// is ready on construction would be a dependency on nothing.
     trait Settles {
         fn classify_settled(&self, call: PreparedCall) -> Result<Authorized, PolicyDenied>;
     }
 
     impl Settles for PolicyEngine {
         fn classify_settled(&self, call: PreparedCall) -> Result<Authorized, PolicyDenied> {
-            match self.classify(call) {
-                Classification::Settled(answer) => answer,
-                Classification::Ask(pending) => panic!(
+            let unanswered = |pending: &Pending| {
+                panic!(
                     "expected an answer, got a question for the operator: {}",
                     pending.request()
-                ),
+                )
+            };
+            let pending = match self.classify(call) {
+                Classification::Settled(answer) => return answer,
+                Classification::Ask(pending) => pending,
+            };
+            match block_on(self.settle(pending)) {
+                Resolution::Settled(answer) => answer,
+                Resolution::Ask(pending) => unanswered(&pending),
             }
         }
     }
@@ -367,11 +384,17 @@ mod permit {
         );
     }
 
+    /// The mode axis, as one table. Read down the right-hand column: this is
+    /// the whole of what choosing a mode buys, for the one operation the
+    /// modes disagree about.
+    ///
+    /// Runs the **whole order**, `classify` then `settle`, and it has to.
+    /// Step 5 is the `Approver` port now, so `classify` alone answers `Asked`
+    /// for all five rows and this table would read as though the modes agreed
+    /// — a green test asserting the opposite of what it is named for. The
+    /// subject did not change; where the subject lives did.
     #[test]
-    fn permit_step4_the_ceiling_answers_a_write_differently_in_every_mode() {
-        // The mode axis, as one table. Read down the right-hand column: this
-        // is the whole of what choosing a mode buys, for the one operation
-        // the modes disagree about.
+    fn permit_step5_the_ceiling_answers_a_write_differently_in_every_mode() {
         #[derive(Debug, PartialEq)]
         enum Answer {
             Authorized,
@@ -395,10 +418,91 @@ mod permit {
             let answer = match engine.classify(write_call("/ws/src/main.rs")) {
                 Classification::Settled(Ok(_)) => Answer::Authorized,
                 Classification::Settled(Err(_)) => Answer::Refused,
-                Classification::Ask(_) => Answer::Asked,
+                Classification::Ask(pending) => match block_on(engine.settle(pending)) {
+                    Resolution::Settled(Ok(_)) => Answer::Authorized,
+                    Resolution::Settled(Err(_)) => Answer::Refused,
+                    Resolution::Ask(_) => Answer::Asked,
+                },
             };
             assert_eq!(answer, expected, "{mode} mode, writing inside /ws");
         }
+    }
+
+    /// The mode that declined says so in its own words, and they are not the
+    /// words `classify` used.
+    ///
+    /// Without this, `settle`'s escalation could hand back the `Pending` it
+    /// was given and every assertion above would still pass — the run stops
+    /// either way. What would be lost is the only thing the operator gets:
+    /// "no rule covers write /ws/src/main.rs" tells them to write a rule,
+    /// which is one of the two available remedies. "default mode does not
+    /// approve it on its own" tells them the other one exists.
+    #[test]
+    fn permit_step5_a_mode_that_declines_replaces_the_reason_with_its_own() {
+        let engine = engine(Mode::Default, &[], &[]);
+        let Classification::Ask(pending) = engine.classify(write_call("/ws/src/main.rs")) else {
+            panic!("no rule covers it, so step 3 cannot settle it");
+        };
+        assert_eq!(
+            pending.request().why(),
+            &Escalation::NoRuleCovers {
+                op: "write",
+                path: CanonPath::new("/ws/src/main.rs"),
+            },
+            "steps 0-3 ran and none of them covered it"
+        );
+
+        let Resolution::Ask(pending) = block_on(engine.settle(pending)) else {
+            panic!("default mode does not auto-approve a write");
+        };
+        assert_eq!(
+            pending.request().why(),
+            &Escalation::ModeAsks {
+                mode: Mode::Default,
+                op: "write",
+                path: CanonPath::new("/ws/src/main.rs"),
+            },
+            "and the mode declined too, which is the reason that stopped the run"
+        );
+    }
+
+    /// A refusal anywhere in a call refuses the call, and it must not be
+    /// pre-empted by a *question* about an earlier operation.
+    ///
+    /// **This is the hazard the two-pass `classify` exists for, and it is
+    /// worth stating as an attack rather than as a property.** One pass
+    /// returns `Ask` at op one and never judges op two. The question then
+    /// reaches an approver looking like an ordinary workspace write — and a
+    /// mode that answers yes mints a permit over `scope_of(&call)`, which is
+    /// the *whole* call. `--yolo` would read `/etc/shadow`, through the one
+    /// boundary the ADR's §4a says no mode lifts.
+    #[test]
+    fn permit_step0_a_question_about_one_op_cannot_pre_empt_a_refusal_of_another() {
+        let engine = engine(Mode::Yolo, &[], &[]);
+        let call = PreparedCall {
+            tool: "write".to_string(),
+            ops: vec![
+                Op::Write {
+                    path: CanonPath::new("/ws/src/main.rs"),
+                    contents: b"harmless".to_vec(),
+                },
+                Op::Read {
+                    path: CanonPath::new("/etc/shadow"),
+                },
+            ],
+        };
+
+        let Classification::Settled(Err(denied)) = engine.classify(call) else {
+            panic!("the second op is outside the workspace, and yolo does not lift that");
+        };
+        assert_eq!(
+            denied,
+            PolicyDenied::OutsideWorkspace {
+                tool: "write".to_string(),
+                op: "read",
+                path: CanonPath::new("/etc/shadow"),
+            }
+        );
     }
 
     #[test]

@@ -611,8 +611,14 @@ mod turn {
             .find(|item| item.kind == ItemKind::ToolCall)
             .expect("the tool call became an item");
         assert_eq!(call.ok, Some(false));
+        // "does not approve ... on its own" and not "no rule covers": both are
+        // true, and the second is the reason the run stopped. The rules did
+        // not cover it, so it went to the mode at §6 step 5, and the mode
+        // declined too. The last party to decline is the one whose reason an
+        // operator can act on — it is what tells them `--yolo` and `--allow`
+        // are both available, where "no rule covers" names only the second.
         assert!(
-            call.text.contains("needs permission") && call.text.contains("no rule covers"),
+            call.text.contains("needs permission") && call.text.contains("does not approve"),
             "an unanswerable call must read as a question: {}",
             call.text
         );
