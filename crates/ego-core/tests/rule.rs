@@ -733,3 +733,44 @@ fn rule_load_admits_every_head_that_names_an_operation_that_exists() {
         Rule::load(raw).unwrap_or_else(|err| panic!("`{raw}` should load: {err}"));
     }
 }
+
+/// A host whose last label is a number is an **address**, and a broken address
+/// is refused rather than demoted to a name.
+///
+/// Falling through to `Host::Name("256.1.1.1")` would store a rule that can
+/// never match any destination, held by an operator who believes they named an
+/// address — §2's worst failure mode reached by a typo. The transport agrees:
+/// WHATWG makes `http://256.1.1.1/` an invalid URL, and
+/// `ego-ai/tests/endpoint_agreement.rs` pins the two together.
+#[test]
+fn rule_a_host_that_looks_like_a_broken_address_is_not_quietly_a_name() {
+    for spelling in [
+        "256.1.1.1",
+        "999.1.1.1",
+        "127.0.0.256",
+        "1.2.3.4.5",
+        "0x1g.1.1.1",
+        "a.1.1.1",
+    ] {
+        let RuleParseError::BadEndpoint { why, .. } = err(&format!("net({spelling})")) else {
+            panic!("`{spelling}` should be refused as an endpoint, not parsed");
+        };
+        assert!(why.contains("not a valid one"), "{why}");
+    }
+}
+
+/// The control: a numeric-looking host that *is* an address still parses, in
+/// every base. Without this, refusing all of them would satisfy the test above
+/// and break every address rule in the grammar.
+#[test]
+fn rule_a_host_that_looks_like_an_address_and_is_one_still_parses() {
+    for spelling in ["127.0.0.1", "8.8.8.8", "12.34", "0x7f000001", "2130706433"] {
+        let Rule::Net(endpoint) = parse(&format!("net({spelling})")) else {
+            panic!("`{spelling}` should parse as an endpoint");
+        };
+        assert!(
+            matches!(endpoint.host(), Host::Ip(_)),
+            "`{spelling}` is an address"
+        );
+    }
+}

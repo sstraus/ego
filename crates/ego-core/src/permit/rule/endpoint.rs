@@ -204,6 +204,23 @@ fn parse_host(host: &str, bad: &dyn Fn(&str) -> RuleParseError) -> Result<Host, 
     if let Some(ip) = legacy_ipv4(host) {
         return Ok(Host::Ip(IpAddr::V4(ip)));
     }
+    // A host that *looks* like an address and is not one is refused, never
+    // demoted to a name. `256.1.1.1` has an octet out of range: falling
+    // through would store it as `Host::Name("256.1.1.1")`, a rule that can
+    // never match anything, while the operator believes they named an
+    // address. That is §2's worst failure mode — a boundary that reads
+    // correctly and is not there — reached by a typo rather than by design.
+    //
+    // It is also what the transport does. WHATWG requires that a host whose
+    // last label is numeric parse as IPv4 or the URL be invalid, so `url`
+    // refuses `http://256.1.1.1/` outright. Agreeing here is the whole of
+    // P19: two subsystems that classify one string differently is the hole.
+    if ends_in_a_number(host) {
+        return Err(bad(
+            "the last label is a number, so this is an address — and it is \
+             not a valid one",
+        ));
+    }
 
     let (name, subdomains) = match host.strip_prefix("*.") {
         Some(suffix) => (suffix, true),
@@ -228,6 +245,31 @@ fn parse_host(host: &str, bad: &dyn Fn(&str) -> RuleParseError) -> Result<Host, 
     } else {
         Host::Name(ascii)
     })
+}
+
+/// Would the WHATWG URL parser insist this host be an IPv4 address?
+///
+/// True when the last label is a number in any of the bases `legacy_ipv4`
+/// reads. A trailing dot is the DNS root and is skipped, so `127.0.0.1.` is
+/// judged on `1` exactly as `127.0.0.1` is.
+///
+/// This is the *shape* test only — whether the string is then a valid address
+/// is [`legacy_ipv4`]'s answer, and the two are asked in that order so a host
+/// can be refused for being a broken address rather than accepted as a name.
+fn ends_in_a_number(host: &str) -> bool {
+    let mut labels = host.split('.').collect::<Vec<_>>();
+    if labels.last() == Some(&"") {
+        labels.pop();
+    }
+    let Some(last) = labels.last() else {
+        return false;
+    };
+
+    match last.strip_prefix("0x").or_else(|| last.strip_prefix("0X")) {
+        // `0x` alone is zero, and hex digits after it are a number.
+        Some(hex) => hex.chars().all(|c| c.is_ascii_hexdigit()),
+        None => !last.is_empty() && last.chars().all(|c| c.is_ascii_digit()),
+    }
 }
 
 /// The legacy IPv4 spellings `inet_aton` accepts and Rust's parser does not:
