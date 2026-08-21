@@ -864,6 +864,7 @@ mod end_to_end {
             supports_parallel_tool_calls: true,
             reasoning_carryover: ReasoningCarryover::Unsupported,
             reasoning_efforts: ReasoningEffortSupport::Any,
+            reasoning_state_dialect: None,
             cancel: CancelSemantics::Cooperative,
             cache: CacheRetention::Short,
             transport: Transport::Sse,

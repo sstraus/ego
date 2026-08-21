@@ -171,6 +171,7 @@ fn caps() -> ModelCapabilities {
         supports_parallel_tool_calls: true,
         reasoning_carryover: ReasoningCarryover::SameProviderOnly,
         reasoning_efforts: ReasoningEffortSupport::Any,
+        reasoning_state_dialect: None,
         cancel: CancelSemantics::Cooperative,
         cache: CacheRetention::Long,
         transport: Transport::Sse,

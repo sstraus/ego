@@ -205,6 +205,7 @@ mod lifecycle {
             supports_parallel_tool_calls: true,
             reasoning_carryover: ReasoningCarryover::Portable,
             reasoning_efforts: ReasoningEffortSupport::Any,
+            reasoning_state_dialect: None,
             cancel: CancelSemantics::Cooperative,
             cache: CacheRetention::Short,
             transport: Transport::Sse,

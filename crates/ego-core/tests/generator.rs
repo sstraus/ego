@@ -85,6 +85,7 @@ mod generator {
             supports_parallel_tool_calls: true,
             reasoning_carryover,
             reasoning_efforts: ReasoningEffortSupport::Any,
+            reasoning_state_dialect: None,
             cancel: CancelSemantics::Cooperative,
             cache: CacheRetention::Short,
             transport: Transport::Sse,
@@ -504,6 +505,128 @@ mod generator {
         let json = serde_json::to_string(&caps).expect("serialize");
         let back: ModelCapabilities = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(caps, back);
+    }
+
+    // --- Whose reasoning state a model accepts -----------------------------
+
+    /// `SameProviderOnly` is a property of the *target* and says nothing
+    /// about who minted the state in hand. Without comparing the two tags the
+    /// check is vacuous, and Anthropic state sails into a Gemini target — the
+    /// failure `ReasoningState::dialect`'s own doc was added to prevent.
+    #[test]
+    fn a_same_provider_model_refuses_reasoning_state_minted_by_another_dialect() {
+        let mut caps = capabilities(ReasoningCarryover::SameProviderOnly);
+        caps.reasoning_state_dialect = Some("gemini-interactions".to_string());
+
+        let gaps = caps.request_gaps(&request_carrying_reasoning());
+
+        assert!(
+            gaps.contains(&CapabilityGap::ReasoningStateDialectMismatch {
+                carried: "anthropic-messages".to_string(),
+                accepted: "gemini-interactions".to_string(),
+            }),
+            "expected a dialect mismatch, got {gaps:?}"
+        );
+    }
+
+    /// The same model, its own state: nothing to report. Without this the
+    /// test above would also pass against a check that refuses everything.
+    #[test]
+    fn a_same_provider_model_accepts_reasoning_state_it_minted_itself() {
+        let mut caps = capabilities(ReasoningCarryover::SameProviderOnly);
+        caps.reasoning_state_dialect = Some("anthropic-messages".to_string());
+
+        assert_eq!(caps.request_gaps(&request_carrying_reasoning()), Vec::new());
+    }
+
+    /// Silence about the dialect is not a match, on the same grounds that
+    /// silence about reasoning efforts is not permission. The remedy differs
+    /// from a mismatch's — resolve the model again, rather than carry other
+    /// state — so it is a gap of its own and says so.
+    #[test]
+    fn silence_about_the_dialect_refuses_rather_than_assuming_a_match() {
+        let caps = capabilities(ReasoningCarryover::SameProviderOnly);
+        assert_eq!(caps.reasoning_state_dialect, None, "the fixture is silent");
+
+        let gaps = caps.request_gaps(&request_carrying_reasoning());
+
+        assert!(
+            gaps.contains(&CapabilityGap::ReasoningStateDialectUnstated {
+                carried: "anthropic-messages".to_string(),
+            }),
+            "expected an unstated-dialect gap, got {gaps:?}"
+        );
+    }
+
+    /// A dialect check on a model that accepts every dialect would be a
+    /// refusal invented out of nothing, and one on a model that accepts none
+    /// would report the same problem twice with two different remedies.
+    #[test]
+    fn the_dialect_is_only_consulted_when_the_model_constrains_whose_state_it_takes() {
+        let portable = capabilities(ReasoningCarryover::Portable);
+        assert_eq!(
+            portable.request_gaps(&request_carrying_reasoning()),
+            Vec::new(),
+            "a portable model accepts any dialect by definition"
+        );
+
+        let unsupported = capabilities(ReasoningCarryover::Unsupported);
+        assert_eq!(
+            unsupported.request_gaps(&request_carrying_reasoning()),
+            vec![CapabilityGap::ReasoningStateCarryoverUnsupported],
+            "carries no state at all is one problem, not two"
+        );
+    }
+
+    /// A history with many blocks from one other provider is one problem with
+    /// one remedy. Reporting it per block would bury the other gaps under
+    /// forty copies of the same sentence.
+    #[test]
+    fn one_foreign_dialect_is_reported_once_however_many_blocks_carry_it() {
+        let mut caps = capabilities(ReasoningCarryover::SameProviderOnly);
+        caps.reasoning_state_dialect = Some("ollama".to_string());
+
+        let foreign = |dialect: &str| ContentBlock::Reasoning {
+            state: ReasoningState {
+                blob: "opaque".to_string(),
+                dialect: dialect.to_string(),
+            },
+        };
+        let req = GenRequest {
+            messages: Conversation::new(vec![
+                Message::text(Role::User, "list the files".to_string()),
+                Message {
+                    role: Role::Assistant,
+                    content: vec![
+                        foreign("anthropic-messages"),
+                        foreign("anthropic-messages"),
+                        foreign("gemini-interactions"),
+                    ],
+                },
+            ])
+            .expect("reasoning blocks take no part in the call invariants"),
+            ..gen_request()
+        };
+
+        let mismatches: Vec<_> = caps
+            .request_gaps(&req)
+            .into_iter()
+            .filter(|gap| matches!(gap, CapabilityGap::ReasoningStateDialectMismatch { .. }))
+            .collect();
+        assert_eq!(
+            mismatches,
+            vec![
+                CapabilityGap::ReasoningStateDialectMismatch {
+                    carried: "anthropic-messages".to_string(),
+                    accepted: "ollama".to_string(),
+                },
+                CapabilityGap::ReasoningStateDialectMismatch {
+                    carried: "gemini-interactions".to_string(),
+                    accepted: "ollama".to_string(),
+                },
+            ],
+            "one gap per offending dialect, in the order the history carries them"
+        );
     }
 
     // --- What the model accepts, asked of one model ------------------------
