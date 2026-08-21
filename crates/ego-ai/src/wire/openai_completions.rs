@@ -1,0 +1,836 @@
+//! The `openai-completions` wire format: `POST /chat/completions`, streamed.
+//!
+//! The shape behind OpenAI, OpenRouter, Groq, Together, Fireworks, DeepSeek,
+//! xAI and every local daemon that advertises an "OpenAI-compatible" endpoint
+//! (`ARCHITECTURE.md` §3.1). Every field name, enum spelling and nullability
+//! below was read from `openai/openai-openapi` rather than recalled — the
+//! constraint `plans/m0b-vertical-slice.md` Step 9 puts on this step, because
+//! a golden pinned from memory pins the memory, not the contract.
+//!
+//! # What the schema settled, and what it ruled out
+//!
+//! - **The usage breakdown is a partition, not overlapping subsets.** OpenAI's
+//!   own aggregate schema says `input_tokens` is "including cached and
+//!   cache-write tokens" while `input_uncached_tokens` is "excluding
+//!   cache-write tokens", and both published examples add up exactly
+//!   (400+100+500=1000; 1800+200+3000=5000). So `uncached = prompt_tokens −
+//!   cached_tokens − cache_write_tokens`, and
+//!   [`Usage::total_tokens`](ego_core::state::Usage::total_tokens) comes back
+//!   to `prompt + completion` with nothing counted twice. Subtracting only
+//!   `cached_tokens` — the obvious reading, and the one the per-request schema
+//!   alone would leave you with — would double-count every cache-write token.
+//! - **There is no reasoning text on this wire.** The streaming delta schema
+//!   has `content`, `refusal`, `tool_calls`, `role` and `function_call`, and
+//!   nothing else; reasoning appears only as a *count*
+//!   (`completion_tokens_details.reasoning_tokens`). So this format never
+//!   emits [`AiEvent::ReasoningDelta`]. Providers that extend the shape with
+//!   `reasoning_content` are a different row's problem, not a field this one
+//!   may guess at.
+//! - **`finish_reason` has five spellings**, and one of them —
+//!   `content_filter` — has no [`StopReason`] to land on. It is reported as
+//!   [`StopReason::Error`] with a named [`AiEvent::Error`] beside it rather
+//!   than mapped onto `Stop`, which would claim a filtered answer finished
+//!   normally.
+//!
+//! # The one event ordering rule
+//!
+//! **`Stop` is last, always, exactly once.** Not at the `finish_reason` chunk,
+//! where it would arrive before the usage chunk that follows it — OpenAI sends
+//! usage *after* the choice that ends the turn and before `data: [DONE]`. So
+//! the finish reason is remembered when it arrives and emitted when the byte
+//! stream ends, whatever ended it.
+//!
+//! Which gives the truncation table a single line: **the `finish_reason` is
+//! the answer.** If it arrived, the generation ended the way it says, and a
+//! stream cut afterwards costs only the usage report — which
+//! [`UsageReport::Missing`](ego_core::generator::attempt::UsageReport) already
+//! charges pessimistically, and which OpenAI's own schema warns about ("If the
+//! stream is interrupted, you may not receive the final usage chunk"). If it
+//! never arrived, the generation ended in `Error`, and the error says which of
+//! the ways it was: cut mid-frame, ended between frames, or `[DONE]` with
+//! nothing before it.
+
+use std::collections::BTreeMap;
+
+use ego_core::generator::attempt::DeliveryCertainty;
+use ego_core::generator::port::AiEvent;
+use ego_core::generator::types::{GenRequest, Role, StopReason, ThinkingLevel};
+use ego_core::state::Usage;
+use futures::stream::{self, BoxStream, StreamExt};
+use serde::{Deserialize, Serialize};
+use url::Url;
+
+use crate::http::{HttpError, HttpRequest, HttpResponse, Method};
+
+use super::sse::SseDecoder;
+
+/// The path a provider row appends to its base URL to reach this format.
+///
+/// Held here rather than in the provider table because it is a fact about the
+/// API shape, not about any one vendor: every provider that speaks this format
+/// serves it at this path.
+pub const PATH: &str = "chat/completions";
+
+// --- request ---
+
+/// A `GenRequest` this format cannot express without lying about it.
+///
+/// Every variant is a case where the alternative would be to drop something
+/// the caller asked for and send the request anyway. `docs/08-codex-critique.md`
+/// I5 is about exactly that: a shared HTTP shape is not equivalent semantics,
+/// and a silent mistranslation is worse than a refusal because nothing
+/// downstream can tell it happened.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RequestRefused {
+    /// The history contains a tool result, and
+    /// [`Message`](ego_core::generator::types::Message) cannot carry the
+    /// assistant turn that requested it.
+    ///
+    /// OpenAI requires a `tool` message to follow an assistant message whose
+    /// `tool_calls[].id` matches — the assistant request schema says its
+    /// `content` is "Required unless `tool_calls` or `function_call` is
+    /// specified" — and `Message` has `role`, `content` and `tool_call_id`
+    /// and no way to state that an assistant turn *made* a call. So the
+    /// request cannot be built, and building one without the assistant turn
+    /// would earn a 400 from the provider rather than a diagnosis from us.
+    ///
+    /// This is a gap in the `GenRequest` contract, not in this module.
+    ToolResultHasNoAssistantTurn { position: usize },
+    /// The request carries reasoning state, and this format has nowhere to put
+    /// it: the chat-completions request schema has no field for a reasoning
+    /// signature. Dropping it silently would be
+    /// [`ReasoningCarryover::Unsupported`](ego_core::generator::capabilities::ReasoningCarryover::Unsupported)
+    /// pretending to be support.
+    ReasoningStateNotCarriable,
+}
+
+impl std::fmt::Display for RequestRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RequestRefused::ToolResultHasNoAssistantTurn { position } => write!(
+                f,
+                "message {position} is a tool result, and openai-completions \
+                 requires the assistant turn that called the tool to precede \
+                 it; GenRequest::messages cannot express one"
+            ),
+            RequestRefused::ReasoningStateNotCarriable => write!(
+                f,
+                "openai-completions has no field for reasoning state, so \
+                 carrying it over would mean dropping it"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for RequestRefused {}
+
+#[derive(Debug, Serialize)]
+struct WireRequest<'a> {
+    model: &'a str,
+    messages: Vec<WireMessage<'a>>,
+    stream: bool,
+    stream_options: StreamOptions,
+    /// Always sent, including `"none"`.
+    ///
+    /// Omitting it when the caller said [`ThinkingLevel::Off`] would silently
+    /// select the schema's documented default of `medium`: the model would
+    /// reason after being told not to, and the caller would be billed for
+    /// reasoning tokens they refused. A provider that rejects the field is a
+    /// provider row that needs a different mapping, not a reason for this one
+    /// to send a value nobody asked for.
+    reasoning_effort: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_completion_tokens: Option<u64>,
+    /// Omitted when empty, together with `parallel_tool_calls`, which OpenAI
+    /// rejects when there are no tools to parallelise.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tools: Vec<WireTool<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parallel_tool_calls: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+struct StreamOptions {
+    /// Buys one extra chunk before `data: [DONE]` carrying the whole request's
+    /// usage. Without it the settlement has no figures at all and every
+    /// generation reconciles at its pessimistic bound.
+    include_usage: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct WireMessage<'a> {
+    role: &'static str,
+    content: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+struct WireTool<'a> {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    function: WireFunction<'a>,
+}
+
+#[derive(Debug, Serialize)]
+struct WireFunction<'a> {
+    name: &'a str,
+    description: &'a str,
+    parameters: &'a serde_json::Value,
+}
+
+/// `ThinkingLevel` to `reasoning_effort`.
+///
+/// One-to-one, because the schema's enum is `none | minimal | low | medium |
+/// high | xhigh | max` and `ThinkingLevel` is that list with `Off` spelled
+/// differently. Nothing is approximated here, so nothing has to be documented
+/// as approximate.
+fn reasoning_effort(level: ThinkingLevel) -> &'static str {
+    match level {
+        ThinkingLevel::Off => "none",
+        ThinkingLevel::Minimal => "minimal",
+        ThinkingLevel::Low => "low",
+        ThinkingLevel::Medium => "medium",
+        ThinkingLevel::High => "high",
+        ThinkingLevel::XHigh => "xhigh",
+        ThinkingLevel::Max => "max",
+    }
+}
+
+/// The exact JSON bytes this format would send for `req`.
+///
+/// Separate from [`build_request`] so the golden can pin the body without a
+/// URL or a credential in it — the body is the contract with the provider;
+/// the endpoint and the auth header are the provider row's business.
+pub fn request_body(req: &GenRequest) -> Result<Vec<u8>, RequestRefused> {
+    if req.reasoning_state.is_some() {
+        return Err(RequestRefused::ReasoningStateNotCarriable);
+    }
+    let mut messages = Vec::with_capacity(req.messages.len());
+    for (position, message) in req.messages.iter().enumerate() {
+        let role = match message.role {
+            Role::System => "system",
+            Role::User => "user",
+            Role::Assistant => "assistant",
+            Role::Tool => {
+                return Err(RequestRefused::ToolResultHasNoAssistantTurn { position });
+            }
+        };
+        messages.push(WireMessage {
+            role,
+            content: &message.content,
+        });
+    }
+    let tools: Vec<WireTool<'_>> = req
+        .tools
+        .iter()
+        .map(|tool| WireTool {
+            kind: "function",
+            function: WireFunction {
+                name: &tool.name,
+                description: &tool.description,
+                parameters: &tool.parameters,
+            },
+        })
+        .collect();
+    let parallel_tool_calls = (!tools.is_empty()).then_some(req.parallel_tool_calls);
+    let wire = WireRequest {
+        model: &req.model,
+        messages,
+        stream: true,
+        stream_options: StreamOptions {
+            include_usage: true,
+        },
+        reasoning_effort: reasoning_effort(req.thinking),
+        max_completion_tokens: req.max_output_tokens,
+        tools,
+        parallel_tool_calls,
+    };
+    Ok(serde_json::to_vec(&wire).expect("WireRequest has no non-string map keys and no NaN"))
+}
+
+/// A complete HTTP request for `req` against `endpoint`.
+///
+/// `headers` comes from the provider row — the auth header above all — because
+/// credentials are not this module's to know (`ARCHITECTURE.md` §3.1).
+pub fn build_request(
+    endpoint: Url,
+    headers: Vec<(String, String)>,
+    req: &GenRequest,
+) -> Result<HttpRequest, RequestRefused> {
+    let body = request_body(req)?;
+    let mut all = Vec::with_capacity(headers.len() + 2);
+    all.push(("content-type".to_string(), "application/json".to_string()));
+    all.push(("accept".to_string(), "text/event-stream".to_string()));
+    all.extend(headers);
+    Ok(HttpRequest {
+        url: endpoint,
+        method: Method::Post,
+        headers: all,
+        body: Some(body),
+    })
+}
+
+// --- response ---
+
+#[derive(Debug, Deserialize)]
+struct Chunk {
+    #[serde(default)]
+    choices: Vec<Choice>,
+    #[serde(default)]
+    usage: Option<WireUsage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct Choice {
+    #[serde(default)]
+    index: u32,
+    #[serde(default)]
+    delta: Delta,
+    #[serde(default)]
+    finish_reason: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct Delta {
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default)]
+    refusal: Option<String>,
+    #[serde(default)]
+    tool_calls: Vec<ToolCallChunk>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ToolCallChunk {
+    /// The only field the schema marks required, and the only one that
+    /// identifies which call a fragment belongs to.
+    #[serde(default)]
+    index: u32,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    function: Option<FunctionChunk>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FunctionChunk {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    arguments: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct WireUsage {
+    #[serde(default)]
+    prompt_tokens: u64,
+    #[serde(default)]
+    completion_tokens: u64,
+    #[serde(default)]
+    prompt_tokens_details: Option<PromptTokensDetails>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct PromptTokensDetails {
+    #[serde(default)]
+    cached_tokens: u64,
+    #[serde(default)]
+    cache_write_tokens: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct ErrorEnvelope {
+    error: ErrorBody,
+}
+
+#[derive(Debug, Deserialize)]
+struct ErrorBody {
+    message: String,
+}
+
+/// The four-way split, or nothing.
+///
+/// A daemon that reports no `prompt_tokens_details` at all is not hiding a
+/// cache: it is saying every prompt token was billed at the full rate, which
+/// is `uncached_input_tokens = prompt_tokens` and two zeros. Discarding a
+/// perfectly good `prompt_tokens`/`completion_tokens` pair over a missing
+/// optional object would send every generation against every local daemon —
+/// the majority of what speaks this shape — to settle at its pessimistic
+/// bound, narrowing the budget on every turn for no reason.
+///
+/// A breakdown that does not *fit*, though, is a different thing: the schema
+/// makes the three a partition of `prompt_tokens`, so `cached + written >
+/// prompt` is a payload no conforming provider produces, and there is no way
+/// to tell which of the three numbers is the wrong one. Returning `None`
+/// leaves the attempt with
+/// [`UsageReport::Missing`](ego_core::generator::attempt::UsageReport::Missing)
+/// and settles it at the pessimistic bound — the failure direction that costs
+/// budget rather than the one that leaks it. Clamping instead would under-
+/// report the uncached tokens, which are the dearest ones, and the repaired
+/// number would be indistinguishable from a real one.
+fn map_usage(usage: &WireUsage) -> Option<Usage> {
+    let details = usage.prompt_tokens_details.as_ref();
+    let cache_read_tokens = details.map_or(0, |d| d.cached_tokens);
+    let cache_write_tokens = details.map_or(0, |d| d.cache_write_tokens);
+    let breakdown = cache_read_tokens.saturating_add(cache_write_tokens);
+    let uncached_input_tokens = usage.prompt_tokens.checked_sub(breakdown)?;
+    Some(Usage {
+        uncached_input_tokens,
+        cache_read_tokens,
+        cache_write_tokens,
+        output_tokens: usage.completion_tokens,
+    })
+}
+
+/// Records `incoming` as an identity, or notes that it disagrees with the one
+/// already held.
+fn settle_identity(
+    held: &mut Option<String>,
+    incoming: Option<&str>,
+    what: &str,
+    index: u32,
+    conflict: &mut Option<String>,
+) {
+    let Some(incoming) = incoming else { return };
+    match held.as_deref() {
+        Some(existing) if existing != incoming => {
+            *conflict = Some(format!(
+                "two {what} ({existing} and {incoming}) at tool call index {index}"
+            ));
+        }
+        _ => *held = Some(incoming.to_string()),
+    }
+}
+
+/// One tool call, being assembled from the fragments it arrives in.
+#[derive(Debug, Default)]
+struct PartialToolCall {
+    id: Option<String>,
+    name: Option<String>,
+    args: String,
+    /// Set when two fragments at this index disagree about which call they
+    /// belong to. A poisoned slot is reported and dropped rather than
+    /// dispatched: whether the provider meant to correct an id or to start a
+    /// second call cannot be told from the wire, and a tool call is not
+    /// something to run on a guess.
+    conflict: Option<String>,
+}
+
+/// Why a stream ended without the model saying why.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Incomplete {
+    /// Bytes stopped in the middle of an event.
+    CutMidFrame,
+    /// Bytes stopped cleanly between events.
+    EndedBetweenFrames,
+    /// The provider said `[DONE]` having never sent a `finish_reason`.
+    DoneWithoutFinishReason,
+}
+
+/// Turns chunks of `text/event-stream` bytes into [`AiEvent`]s.
+///
+/// Separate from the byte stream that feeds it, and pure, so a transcript can
+/// be replayed at any chunk boundary — which is how the goldens prove that a
+/// cut mid-frame is handled rather than merely survived.
+#[derive(Debug, Default)]
+pub struct StreamDecoder {
+    sse: SseDecoder,
+    /// Ordered by index so a flush is deterministic regardless of the order
+    /// the provider interleaved the fragments in.
+    calls: BTreeMap<u32, PartialToolCall>,
+    finish_reason: Option<StopReason>,
+    saw_done: bool,
+    /// The last usage object the provider sent, held rather than forwarded.
+    ///
+    /// [`AiEvent::Usage`] is an *increment*: `AttemptStream` adds every one it
+    /// sees into a running total. This wire's usage chunk is a *total for the
+    /// whole request*. One of those is safe to emit as it arrives and the
+    /// other is not — a gateway that restates the cumulative figure would be
+    /// billed for the sum of its restatements. So exactly one is emitted, at
+    /// the end, and a second report replaces the first instead of adding to
+    /// it.
+    usage: Option<Usage>,
+    /// A usage object whose parts did not fit its total. Held so it can be
+    /// reported once, at the end, beside everything else that went wrong.
+    usage_incoherent: bool,
+}
+
+impl StreamDecoder {
+    /// Feed bytes; get the events that completed within them.
+    pub fn push(&mut self, chunk: &[u8]) -> Vec<AiEvent> {
+        let mut out = Vec::new();
+        for frame in self.sse.push(chunk) {
+            self.consume(&frame, &mut out);
+        }
+        out
+    }
+
+    /// End the stream, and emit the one terminal event.
+    ///
+    /// `transport` is whatever killed the byte stream, if anything, so that
+    /// its [`DeliveryCertainty`] reaches the attempt — the reading only
+    /// [`HttpError`] is in a position to take.
+    pub fn finish(mut self, transport: Option<HttpError>) -> Vec<AiEvent> {
+        let mut out = Vec::new();
+        if let Some(error) = &transport {
+            out.push(AiEvent::DeliveryObserved(error.delivery()));
+        }
+        if self.usage_incoherent {
+            out.push(AiEvent::Error {
+                message: "the provider's prompt cache breakdown was larger than \
+                          the prompt it broke down, so no usage figure could be \
+                          trusted; this generation settles at its bound"
+                    .to_string(),
+            });
+        }
+        if let Some(usage) = self.usage.take() {
+            out.push(AiEvent::Usage(usage));
+        }
+        match self.finish_reason {
+            // The model said why it stopped, so it stopped that way. Anything
+            // that happened to the framing afterwards costs at most the usage
+            // chunk, which settles pessimistically on its own.
+            Some(stop) => {
+                if let Some(error) = &transport {
+                    tracing::warn!(
+                        %error,
+                        "the response stream failed after the model had already \
+                         reported why it stopped; the turn is complete and the \
+                         usage report may be missing"
+                    );
+                }
+                out.push(AiEvent::Stop(stop));
+            }
+            None => {
+                // Fragments of a call the model never finished asking for are
+                // not a call. Dropping them is named in the error rather than
+                // done quietly.
+                let abandoned = self.calls.len();
+                self.calls.clear();
+                out.push(AiEvent::Error {
+                    message: self.incomplete_message(transport.as_ref(), abandoned),
+                });
+                out.push(AiEvent::Stop(StopReason::Error));
+            }
+        }
+        out
+    }
+
+    fn incomplete_message(&self, transport: Option<&HttpError>, abandoned: usize) -> String {
+        let cause = match transport {
+            Some(error) => format!("the response stream failed: {error}"),
+            None => match self.incomplete() {
+                Incomplete::CutMidFrame => {
+                    "the response stream was cut in the middle of an event".to_string()
+                }
+                Incomplete::EndedBetweenFrames => {
+                    "the response stream ended between events".to_string()
+                }
+                Incomplete::DoneWithoutFinishReason => {
+                    "the provider ended the stream with [DONE] and never sent a \
+                     finish_reason"
+                        .to_string()
+                }
+            },
+        };
+        let mut message =
+            format!("{cause}, so the model never reported why the generation stopped");
+        if abandoned > 0 {
+            message.push_str(&format!(
+                "; {abandoned} half-assembled tool call(s) were discarded rather \
+                 than dispatched with truncated arguments"
+            ));
+        }
+        message
+    }
+
+    fn incomplete(&self) -> Incomplete {
+        if self.saw_done {
+            Incomplete::DoneWithoutFinishReason
+        } else if self.sse.has_partial_frame() {
+            Incomplete::CutMidFrame
+        } else {
+            Incomplete::EndedBetweenFrames
+        }
+    }
+
+    fn consume(&mut self, frame: &str, out: &mut Vec<AiEvent>) {
+        if frame == "[DONE]" {
+            self.saw_done = true;
+            return;
+        }
+        let chunk: Chunk = match serde_json::from_str(frame) {
+            Ok(chunk) => chunk,
+            Err(error) => {
+                // Not fatal on its own: a proxy that injects a frame this
+                // format does not know has not necessarily broken the answer,
+                // and a missing `finish_reason` is caught at the end anyway.
+                tracing::warn!(%error, "skipping an event this wire format cannot decode");
+                return;
+            }
+        };
+        for choice in &chunk.choices {
+            if choice.index != 0 {
+                // `n` is never sent, so a second choice is a completion nobody
+                // asked for. Folding it into the first would interleave two
+                // answers into one.
+                tracing::warn!(
+                    index = choice.index,
+                    "ignoring a completion choice beyond the one requested"
+                );
+                continue;
+            }
+            self.consume_delta(&choice.delta, out);
+            if let Some(reason) = &choice.finish_reason {
+                self.consume_finish_reason(reason, out);
+            }
+        }
+        if let Some(usage) = &chunk.usage {
+            match map_usage(usage) {
+                Some(mapped) => self.usage = Some(mapped),
+                None => {
+                    tracing::warn!(
+                        prompt_tokens = usage.prompt_tokens,
+                        "the reported prompt cache breakdown exceeds the prompt; \
+                         discarding the whole usage report rather than repairing it"
+                    );
+                    self.usage = None;
+                    self.usage_incoherent = true;
+                }
+            }
+        }
+    }
+
+    fn consume_delta(&mut self, delta: &Delta, out: &mut Vec<AiEvent>) {
+        if let Some(text) = &delta.content {
+            if !text.is_empty() {
+                out.push(AiEvent::TextDelta { text: text.clone() });
+            }
+        }
+        // A refusal is the assistant's visible answer, arriving on a second
+        // channel: `finish_reason` is still `stop`, and the turn succeeded.
+        // Reported as text because that is what it is — dropping it would
+        // leave the user with an empty, successful turn.
+        if let Some(text) = &delta.refusal {
+            if !text.is_empty() {
+                out.push(AiEvent::TextDelta { text: text.clone() });
+            }
+        }
+        for fragment in &delta.tool_calls {
+            self.consume_tool_fragment(fragment);
+        }
+    }
+
+    fn consume_tool_fragment(&mut self, fragment: &ToolCallChunk) {
+        let index = fragment.index;
+        let call = self.calls.entry(index).or_default();
+        // `id` and `name` identify the call; `arguments` is its payload. Only
+        // the payload accumulates. Repeating an identity is how a provider
+        // that restates its metadata looks, and appending it would produce
+        // `call_acall_a`; *changing* one is a disagreement about which call
+        // the arguments so far belong to, and neither reading may be run.
+        settle_identity(
+            &mut call.id,
+            fragment.id.as_deref(),
+            "ids",
+            index,
+            &mut call.conflict,
+        );
+        if let Some(function) = &fragment.function {
+            settle_identity(
+                &mut call.name,
+                function.name.as_deref(),
+                "names",
+                index,
+                &mut call.conflict,
+            );
+            if let Some(args) = &function.arguments {
+                call.args.push_str(args);
+            }
+        }
+    }
+
+    fn consume_finish_reason(&mut self, reason: &str, out: &mut Vec<AiEvent>) {
+        // Flushed here rather than at the end so tool calls precede the usage
+        // chunk that follows this one — and because this is the point at which
+        // the arguments are known to be whole.
+        for (index, call) in std::mem::take(&mut self.calls) {
+            Self::emit_call(index, call, out);
+        }
+        if self.finish_reason.is_some() {
+            tracing::warn!(reason, "ignoring a second finish_reason");
+            return;
+        }
+        let stop = match reason {
+            "stop" => StopReason::Stop,
+            "length" => StopReason::Length,
+            "tool_calls" => StopReason::ToolUse,
+            // Deprecated in the schema, still emitted by older gateways, and
+            // the same event: the model stopped in order to call something.
+            "function_call" => StopReason::ToolUse,
+            "content_filter" => {
+                out.push(AiEvent::Error {
+                    message: "the provider's content filter stopped the generation".to_string(),
+                });
+                StopReason::Error
+            }
+            other => {
+                out.push(AiEvent::Error {
+                    message: format!(
+                        "the provider reported a finish_reason this wire format \
+                         does not know: {other}"
+                    ),
+                });
+                StopReason::Error
+            }
+        };
+        self.finish_reason = Some(stop);
+    }
+
+    fn emit_call(index: u32, call: PartialToolCall, out: &mut Vec<AiEvent>) {
+        if let Some(conflict) = call.conflict {
+            out.push(AiEvent::Error {
+                message: format!(
+                    "the provider streamed {conflict}, so which call the \
+                     arguments belong to cannot be told; it was not dispatched"
+                ),
+            });
+            return;
+        }
+        // Both of these are unanswerable rather than merely incomplete. A
+        // result message needs the `tool_call_id` to send back, and a dispatch
+        // needs a name; inventing either produces a request the provider
+        // rejects, or a call to the wrong tool.
+        let Some(call_id) = call.id else {
+            out.push(AiEvent::Error {
+                message: format!(
+                    "the provider streamed a tool call at index {index} with no id, \
+                     so its result could never be attributed back to it"
+                ),
+            });
+            return;
+        };
+        let Some(name) = call.name.filter(|name| !name.is_empty()) else {
+            out.push(AiEvent::Error {
+                message: format!("tool call {call_id} arrived with no function name"),
+            });
+            return;
+        };
+        // `args` is passed through exactly as assembled, including when it is
+        // not valid JSON. The schema warns that "the model does not always
+        // generate valid JSON", the tool owns the schema that would judge it,
+        // and a truncated argument string is already explained by the
+        // `Length` stop reason that accompanies it.
+        out.push(AiEvent::ToolCall {
+            call_id,
+            name,
+            args: call.args,
+        });
+    }
+}
+
+/// How much of a non-200 body is read before giving up on it.
+///
+/// An error body is a small JSON object. A cap is here because the far side
+/// having gone wrong is exactly when "it will be small" stops being a
+/// guarantee.
+const MAX_ERROR_BODY: usize = 64 * 1024;
+
+enum State {
+    Head(Result<HttpResponse, HttpError>),
+    Body {
+        body: crate::http::ByteStream,
+        decoder: StreamDecoder,
+    },
+    Done,
+}
+
+/// Decode one provider response into the generation's events.
+///
+/// Takes the `Result` rather than the response so that a request that never
+/// got a response is the same kind of thing as one that failed halfway: both
+/// end in exactly one `Stop`, and both report their
+/// [`DeliveryCertainty`] from the transport that watched them.
+pub fn decode(response: Result<HttpResponse, HttpError>) -> BoxStream<'static, AiEvent> {
+    stream::unfold(State::Head(response), |state| async move {
+        match state {
+            State::Head(Err(error)) => Some((
+                vec![
+                    AiEvent::DeliveryObserved(error.delivery()),
+                    AiEvent::Error {
+                        message: error.to_string(),
+                    },
+                    AiEvent::Stop(StopReason::Error),
+                ],
+                State::Done,
+            )),
+            State::Head(Ok(response)) => {
+                // A status at all proves the request arrived, whatever the
+                // status says. This is the earliest honest reading, and it is
+                // the one that matters: it is taken before anything can cut
+                // the body and leave nobody to report it.
+                let arrived = AiEvent::DeliveryObserved(DeliveryCertainty::PossiblySent);
+                if response.status == 200 {
+                    return Some((
+                        vec![arrived],
+                        State::Body {
+                            body: response.body,
+                            decoder: StreamDecoder::default(),
+                        },
+                    ));
+                }
+                let message = read_error_body(response.status, response.body).await;
+                Some((
+                    vec![
+                        arrived,
+                        AiEvent::Error { message },
+                        AiEvent::Stop(StopReason::Error),
+                    ],
+                    State::Done,
+                ))
+            }
+            State::Body {
+                mut body,
+                mut decoder,
+            } => match body.next().await {
+                Some(Ok(bytes)) => {
+                    let events = decoder.push(&bytes);
+                    Some((events, State::Body { body, decoder }))
+                }
+                Some(Err(error)) => Some((decoder.finish(Some(error)), State::Done)),
+                None => Some((decoder.finish(None), State::Done)),
+            },
+            State::Done => None,
+        }
+    })
+    .flat_map(stream::iter)
+    .boxed()
+}
+
+async fn read_error_body(status: u16, mut body: crate::http::ByteStream) -> String {
+    let mut raw = Vec::new();
+    while let Some(chunk) = body.next().await {
+        match chunk {
+            Ok(bytes) => {
+                raw.extend_from_slice(&bytes);
+                if raw.len() >= MAX_ERROR_BODY {
+                    raw.truncate(MAX_ERROR_BODY);
+                    break;
+                }
+            }
+            // The status is the news; a body that also failed to arrive does
+            // not change it.
+            Err(_) => break,
+        }
+    }
+    let text = String::from_utf8_lossy(&raw);
+    match serde_json::from_str::<ErrorEnvelope>(&text) {
+        Ok(envelope) => format!(
+            "the provider returned HTTP {status}: {}",
+            envelope.error.message
+        ),
+        Err(_) if text.trim().is_empty() => {
+            format!("the provider returned HTTP {status} with an empty body")
+        }
+        Err(_) => format!("the provider returned HTTP {status}: {}", text.trim()),
+    }
+}

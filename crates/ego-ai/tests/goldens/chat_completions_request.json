@@ -1,0 +1,26 @@
+{
+  "model": "gpt-5.1",
+  "messages": [
+    { "role": "system", "content": "You are terse." },
+    { "role": "user", "content": "What is in ./src?" }
+  ],
+  "stream": true,
+  "stream_options": { "include_usage": true },
+  "reasoning_effort": "high",
+  "max_completion_tokens": 4096,
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "read_file",
+        "description": "Read a file from the workspace.",
+        "parameters": {
+          "type": "object",
+          "properties": { "path": { "type": "string" } },
+          "required": ["path"]
+        }
+      }
+    }
+  ],
+  "parallel_tool_calls": true
+}

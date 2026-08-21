@@ -359,7 +359,10 @@ dependencies = [
  "ego-core",
  "futures",
  "reqwest",
+ "serde",
+ "serde_json",
  "tokio",
+ "tracing",
  "url",
 ]
 

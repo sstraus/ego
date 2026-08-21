@@ -5,6 +5,7 @@
 //! owns `Http`, credentials and the provider tables.
 
 pub mod http;
+pub mod wire;
 
 use ego_core::generator::attempt::{AttemptStream, GenerationAttempt};
 use ego_core::generator::port::Generator;

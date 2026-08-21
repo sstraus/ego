@@ -23,6 +23,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use ego_ai::http::{
     EgressPolicy, EgressRefused, Http, HttpError, HttpRequest, Method, ReqwestHttp,
 };
+use ego_core::generator::attempt::DeliveryCertainty;
 use futures::StreamExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -302,12 +303,13 @@ async fn the_transport_refuses_a_remote_url_its_caller_never_checked() {
         .await
         .expect_err("an offline transport must refuse a remote host");
 
-    match err {
-        HttpError::Refused(EgressRefused::NameNeedsResolution { host }) => {
-            assert_eq!(host, "api.openai.com");
-        }
-        other => panic!("expected a named egress refusal, got {other:?}"),
-    }
+    assert_eq!(
+        err.refusal(),
+        Some(&EgressRefused::NameNeedsResolution {
+            host: "api.openai.com".to_string()
+        }),
+        "expected a named egress refusal, got {err:?}"
+    );
 }
 
 /// The test above cannot tell *which* layer refused: `api.openai.com` is a
@@ -328,16 +330,22 @@ async fn the_transport_refuses_before_it_connects_even_when_the_address_would_wo
         .await
         .expect_err("0.0.0.0 does not name the loopback interface");
 
-    match err {
-        HttpError::Refused(EgressRefused::NotLoopbackAddress { host }) => {
-            assert_eq!(host, "0.0.0.0");
-        }
-        other => panic!("expected a refusal decided before connecting, got {other:?}"),
-    }
+    assert_eq!(
+        err.refusal(),
+        Some(&EgressRefused::NotLoopbackAddress {
+            host: "0.0.0.0".to_string()
+        }),
+        "expected a refusal decided before connecting, got {err:?}"
+    );
     assert_eq!(
         server.accepted(),
         0,
         "a refused destination must cost no connection at all"
+    );
+    assert_eq!(
+        err.delivery(),
+        DeliveryCertainty::DefinitelyUnsent,
+        "nothing was connected to, so nothing could have been billed"
     );
 }
 
@@ -413,19 +421,26 @@ async fn an_admitted_server_cannot_redirect_the_connection_off_the_machine() {
     .await
     .expect_err("following a redirect off the loopback interface must fail");
 
-    match err {
-        HttpError::Refused(EgressRefused::NotLoopbackAddress { host }) => {
-            assert_eq!(
-                host, "192.0.2.1",
-                "the refusal must name the hop it refused"
-            );
-        }
-        other => panic!("expected a named egress refusal, got {other:?}"),
-    }
+    assert_eq!(
+        err.refusal(),
+        Some(&EgressRefused::NotLoopbackAddress {
+            host: "192.0.2.1".to_string()
+        }),
+        "the refusal must name the hop it refused, got {err:?}"
+    );
     assert_eq!(
         server.accepted(),
         1,
         "only the admitted first hop should ever have been connected to"
+    );
+    // The trap in reading "refused" as "nothing was sent". This refusal
+    // happened *after* the first request was written and answered — the
+    // accept count above is the proof — so the provider has it and may have
+    // billed it. A retry here is the caller's decision to take knowingly.
+    assert_eq!(
+        err.delivery(),
+        DeliveryCertainty::PossiblySent,
+        "a redirect is refused after the original request was already sent"
     );
 }
 
@@ -455,6 +470,68 @@ async fn an_unrestricted_transport_is_free_to_follow_the_same_redirect() {
         target.accepted(),
         1,
         "the redirect should have been followed"
+    );
+}
+
+// --- and what it says about whether the request bytes left ---
+
+/// The three readings a wire format cannot take for itself, because by the
+/// time a failure reaches it the evidence is prose.
+///
+/// A pre-flight refusal and a failed connect are `DefinitelyUnsent`: the
+/// first decided before a socket existed, the second is the connector
+/// reporting no handshake completed. (A *redirect* refusal is neither — see
+/// `an_admitted_server_cannot_redirect_the_connection_off_the_machine`, where
+/// the request had already been sent.) A body that stops arriving is
+/// `PossiblySent` — the
+/// provider has the request and may already have billed it, so a retry is the
+/// caller's decision to take knowingly, not the transport's to take for them.
+#[tokio::test]
+async fn the_transport_says_whether_the_request_bytes_could_have_left() {
+    let offline = ReqwestHttp::new(EgressPolicy::LoopbackOnly).expect("client builds");
+    let refused = get(&offline, "https://api.openai.com/v1/chat/completions")
+        .await
+        .expect_err("a remote host is refused offline");
+    assert_eq!(
+        refused.delivery(),
+        DeliveryCertainty::DefinitelyUnsent,
+        "a refusal costs no packets, so a retry elsewhere cannot double-bill"
+    );
+
+    // A port that was free a moment ago and has nothing on it now. Binding
+    // first is what makes it free rather than hopefully-free.
+    let dead = TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("binding a loopback port should succeed");
+    let dead_port = dead.local_addr().expect("bound socket").port();
+    drop(dead);
+    let unreachable = get(&offline, &format!("http://127.0.0.1:{dead_port}/v1/models"))
+        .await
+        .expect_err("nothing is listening on that port");
+    assert_eq!(
+        unreachable.delivery(),
+        DeliveryCertainty::DefinitelyUnsent,
+        "the connector never completed a handshake, so no request line was written: {unreachable}"
+    );
+
+    // A response that promises a hundred bytes and delivers five, then hangs
+    // up: exactly the shape of a provider that started answering and died.
+    const TRUNCATED: &str = "HTTP/1.1 200 OK\r\n\
+         content-type: text/event-stream\r\n\
+         content-length: 100\r\n\
+         \r\n\
+         hello";
+    let server = Listener::serving(TRUNCATED).await;
+    let cut = get(
+        &offline,
+        &format!("http://127.0.0.1:{}/v1/models", server.port),
+    )
+    .await
+    .expect_err("a body that ends early is an error, not a short read");
+    assert_eq!(
+        cut.delivery(),
+        DeliveryCertainty::PossiblySent,
+        "the provider answered, so it may already have billed the request: {cut}"
     );
 }
 

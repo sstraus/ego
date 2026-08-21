@@ -49,11 +49,22 @@
 //!   `localhost:11434` to `ollama.com`, and the caller cannot tell from the
 //!   API shape. "No non-loopback socket *from ego*" is the true claim;
 //!   "nothing reaches the network" is not, and this module does not make it.
+//!
+//! # Why delivery certainty is reported here too
+//!
+//! For the same reason, one level down. Whether the request bytes left is a
+//! fact about the socket, and it survives only as long as the error keeps its
+//! type: a failure flattened to a `String` cannot say whether the connector
+//! never opened or the response died halfway, and those are opposite answers
+//! to whether a retry double-bills. So [`HttpError`] carries a
+//! [`DeliveryCertainty`] rather than making every wire format guess from
+//! prose — see [`HttpError::delivery`].
 
 use std::fmt;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
+use ego_core::generator::attempt::DeliveryCertainty;
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 use url::{Host, Url};
@@ -223,16 +234,70 @@ pub struct HttpResponse {
 pub enum HttpError {
     /// The policy refused a destination — either the request's own, or a
     /// redirect hop's.
-    Refused(EgressRefused),
-    /// Everything else the transport can fail at.
-    Transport(String),
+    ///
+    /// Carries a [`DeliveryCertainty`] because those two are not the same
+    /// event. The request's own destination is refused by a pure predicate
+    /// before a socket exists; a *redirect* hop is refused after the original
+    /// request was written, answered, and possibly billed. Reading "refused"
+    /// as "nothing was sent" would authorise a retry of a request the provider
+    /// already has.
+    Refused {
+        refused: EgressRefused,
+        delivery: DeliveryCertainty,
+    },
+    /// Everything else the transport can fail at, carrying the only reading of
+    /// [`DeliveryCertainty`] anyone is in a position to take.
+    Transport {
+        message: String,
+        delivery: DeliveryCertainty,
+    },
+}
+
+impl HttpError {
+    /// A refusal decided before anything was sent.
+    ///
+    /// The only constructor that may assert [`DeliveryCertainty::DefinitelyUnsent`]
+    /// by hand, and it is correct exactly because [`EgressPolicy::admit`] is
+    /// pure: no DNS, no socket, no bytes. Every other refusal reads its
+    /// certainty off the failure that produced it.
+    pub fn refused_before_sending(refused: EgressRefused) -> Self {
+        HttpError::Refused {
+            refused,
+            delivery: DeliveryCertainty::DefinitelyUnsent,
+        }
+    }
+
+    /// Whether the request bytes may have reached the far side.
+    ///
+    /// This lives on the transport error and not on the wire format because
+    /// the wire format cannot answer it. By the time a failure is prose, "the
+    /// connector never opened a socket" and "the connection died halfway
+    /// through the response" read identically — and they are opposite answers
+    /// to whether a retry can be billed twice
+    /// (`ego_core::generator::attempt::DeliveryCertainty`). The distinction
+    /// exists exactly once, here, at the layer that watched it happen.
+    pub fn delivery(&self) -> DeliveryCertainty {
+        match self {
+            HttpError::Refused { delivery, .. } | HttpError::Transport { delivery, .. } => {
+                *delivery
+            }
+        }
+    }
+
+    /// The egress refusal inside this error, if that is what it is.
+    pub fn refusal(&self) -> Option<&EgressRefused> {
+        match self {
+            HttpError::Refused { refused, .. } => Some(refused),
+            HttpError::Transport { .. } => None,
+        }
+    }
 }
 
 impl fmt::Display for HttpError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            HttpError::Refused(why) => write!(f, "{why}"),
-            HttpError::Transport(msg) => write!(f, "transport error: {msg}"),
+            HttpError::Refused { refused, .. } => write!(f, "{refused}"),
+            HttpError::Transport { message, .. } => write!(f, "transport error: {message}"),
         }
     }
 }
@@ -336,7 +401,10 @@ impl ReqwestHttp {
                 },
             ))
             .build()
-            .map_err(|e| HttpError::Transport(e.to_string()))?;
+            .map_err(|e| HttpError::Transport {
+                delivery: delivery_of(&e),
+                message: e.to_string(),
+            })?;
         Ok(Self { policy, client })
     }
 }
@@ -357,10 +425,46 @@ fn refusal_in(err: &reqwest::Error) -> Option<EgressRefused> {
     None
 }
 
+/// Reads whether `err` happened before the request bytes went out.
+///
+/// Two kinds are unsent with certainty. `is_builder` never touched the
+/// network at all. `is_connect` is `reqwest` walking the source chain for
+/// `hyper_util`'s `Kind::Connect`, which is raised by the *connector* — no
+/// TCP handshake completed, so no request line was written. Everything else
+/// — a timeout, a reset, a body that stopped arriving, a redirect loop — is
+/// [`DeliveryCertainty::PossiblySent`], because the local side genuinely
+/// cannot tell an error before the bytes left from one after.
+///
+/// One known way `is_connect` understates: `hyper_util`'s pooled client
+/// retries a request whose connection was closed before any response
+/// arrived, and if that *second* attempt fails to connect the error is
+/// `Kind::Connect` even though the first attempt's bytes may have been
+/// processed. Removing it means disabling connection reuse
+/// (`pool_max_idle_per_host(0)`), which costs a TLS handshake on every
+/// generation of an agent loop — too much for a race this narrow. Recorded
+/// rather than papered over; see `POTENTIALS.md`.
+fn delivery_of(err: &reqwest::Error) -> DeliveryCertainty {
+    if err.is_builder() || err.is_connect() {
+        DeliveryCertainty::DefinitelyUnsent
+    } else {
+        DeliveryCertainty::PossiblySent
+    }
+}
+
 fn to_http_error(err: reqwest::Error) -> HttpError {
+    // `delivery_of` is asked in both arms, and that is the point. A refusal
+    // that surfaces here is not the pre-flight one: it came either from the
+    // resolver, which fails the *connector* and so reads as `is_connect`, or
+    // from the redirect policy, which fires only after the original request
+    // was written and answered. One of those is unsent and the other is not,
+    // and the word "refused" does not distinguish them.
+    let delivery = delivery_of(&err);
     match refusal_in(&err) {
-        Some(refused) => HttpError::Refused(refused),
-        None => HttpError::Transport(err.to_string()),
+        Some(refused) => HttpError::Refused { refused, delivery },
+        None => HttpError::Transport {
+            delivery,
+            message: err.to_string(),
+        },
     }
 }
 
@@ -369,7 +473,7 @@ impl Http for ReqwestHttp {
         // The first of the three enforcement points. It runs before anything
         // is built, so a refusal here costs no DNS query and no socket.
         if let Err(refused) = self.policy.admit(&req.url) {
-            return Box::pin(async move { Err(HttpError::Refused(refused)) });
+            return Box::pin(async move { Err(HttpError::refused_before_sending(refused)) });
         }
         let method = match req.method {
             Method::Get => reqwest::Method::GET,
