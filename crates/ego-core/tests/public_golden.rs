@@ -6,8 +6,10 @@
 //! inline string literals, so a change to the projection shows up as a
 //! reviewable diff in a data file rather than a diff in test code.
 
+use ego_core::budget::{Metering, PricingQuote, SettlementSource};
 use ego_core::cost::{
-    Amount, CostAttribution, CostDelta, CurrencyCode, Money, PricingRevision, UnknownCost,
+    Amount, CostAttribution, CostDelta, CurrencyCode, MeteringRevision, Money, PricingRevision,
+    ProviderCostRevision, UnknownCost,
 };
 use ego_core::event::domain::{DomainEvent, Envelope, EventKind, ExitReason, OccupancyProvenance};
 use ego_core::event::id::{EventId, ItemId, Producer, Seq, SessionId, TurnId};
@@ -424,6 +426,70 @@ mod public_golden {
             actual,
             include_str!("golden/session_started_with_instructions.json").trim_end()
         );
+    }
+
+    /// `MeteringSelected`, the third event with no `DomainEvent` counterpart.
+    ///
+    /// The serialised shape is pinned per variant rather than once, because
+    /// its whole job is to let a host tell the four arrangements apart:
+    /// `metering` says whether a monetary budget can bind at all, and
+    /// `provider_reported` says whether the figures that follow are the
+    /// provider's own or this side's arithmetic. A host reading only one of
+    /// the two fields would get a currency row settled from an invoice wrong.
+    #[test]
+    fn metering_selected_distinguishes_all_four_arrangements() {
+        let turn: TurnId = id(TURN_1);
+        let quote = PricingQuote {
+            revision: PricingRevision("openai-2026-08".to_string()),
+            currency: CurrencyCode::new("USD").expect("USD is a valid code"),
+            uncached_input: Some("0.000003".parse().expect("a valid rate")),
+            cache_read: None,
+            cache_write: None,
+            output: Some("0.000015".parse().expect("a valid rate")),
+        };
+        let cases = [
+            (
+                Metering::Currency {
+                    reservation: quote.clone(),
+                    settlement: SettlementSource::Quote,
+                },
+                r#"{"type":"metering_selected","turn":"00000000-0000-0000-0000-000000000002","metering":"currency","revision":"openai-2026-08","provider_reported":false}"#,
+            ),
+            (
+                Metering::Currency {
+                    reservation: quote,
+                    settlement: SettlementSource::ProviderReported {
+                        revision: ProviderCostRevision {
+                            provider: "xai".to_string(),
+                            field: "usage.cost_in_usd_ticks".to_string(),
+                            schema_revision: "2026-08-21".to_string(),
+                        },
+                    },
+                },
+                r#"{"type":"metering_selected","turn":"00000000-0000-0000-0000-000000000002","metering":"currency","revision":"openai-2026-08","provider_reported":true}"#,
+            ),
+            (
+                Metering::Subscription {
+                    revision: MeteringRevision("acme/pro-plan/2026-08".to_string()),
+                },
+                r#"{"type":"metering_selected","turn":"00000000-0000-0000-0000-000000000002","metering":"subscription","revision":"acme/pro-plan/2026-08","provider_reported":false}"#,
+            ),
+            (
+                Metering::Unmetered {
+                    revision: MeteringRevision("ego/builtin/local/v1".to_string()),
+                },
+                r#"{"type":"metering_selected","turn":"00000000-0000-0000-0000-000000000002","metering":"unmetered","revision":"ego/builtin/local/v1","provider_reported":false}"#,
+            ),
+        ];
+
+        for (metering, expected) in cases {
+            let event = PublicEvent::metering_selected(turn, &metering);
+            assert_eq!(
+                serde_json::to_string(&event).expect("it serialises"),
+                expected,
+                "for {metering:?}"
+            );
+        }
     }
 
     /// `TurnStarted`, like `SessionStarted`, has no `DomainEvent`

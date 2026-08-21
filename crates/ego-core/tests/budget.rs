@@ -26,8 +26,8 @@ use ego_core::budget::{
     SettlementSource,
 };
 use ego_core::cost::{
-    Amount, Ceiling, CostAttribution, CostDelta, CurrencyCode, Money, PricingRevision,
-    TokenCategory, UnknownCost,
+    Amount, Ceiling, CostAttribution, CostDelta, CurrencyCode, MeteringRevision, Money,
+    PricingRevision, ProviderCostRevision, TokenCategory, UnknownCost,
 };
 use ego_core::generator::capabilities::{
     CacheRetention, CancelSemantics, ModelCapabilities, ReasoningCarryover, ReasoningEffortSupport,
@@ -924,5 +924,297 @@ mod budget {
         assert!(!settled.exact);
         assert!(settled.over_bound.is_none());
         assert!(gate.breached().is_none());
+    }
+
+    // --- the other three meterings -----------------------------------------
+    //
+    // `docs/decisions/2026-08-21-how-a-model-is-metered.md` §2. Everything
+    // above this line is the currency-table arrangement the gate was born
+    // with. These are the three the sum-product added, and each is here
+    // because it makes the gate *behave* differently — not because a variant
+    // exists.
+
+    fn policy() -> MeteringRevision {
+        MeteringRevision("acme/pro-plan/2026-08".to_string())
+    }
+
+    fn provider() -> ProviderCostRevision {
+        ProviderCostRevision {
+            provider: "xai".to_string(),
+            field: "usage.cost_in_usd_ticks".to_string(),
+            schema_revision: "2026-08-21".to_string(),
+        }
+    }
+
+    fn provider_reported() -> Metering {
+        Metering::Currency {
+            reservation: quote(),
+            settlement: SettlementSource::ProviderReported {
+                revision: provider(),
+            },
+        }
+    }
+
+    /// A flat fee is not spent per request, so there is nothing to hold —
+    /// and a limit that could not admit one currency-metered generation
+    /// admits any number of these.
+    #[test]
+    fn a_row_that_is_not_metered_in_currency_reserves_nothing() {
+        for metering in [
+            Metering::Subscription { revision: policy() },
+            Metering::Unmetered { revision: policy() },
+        ] {
+            // A tenth of a cent: three orders of magnitude below the
+            // $0.76536 bound the same request takes under the quote.
+            let mut gate = BudgetGate::new(usd("0.001"));
+            for _ in 0..100 {
+                let reservation = gate
+                    .reserve(&metering, &request(Some(1_024)), &standard_caps())
+                    .expect("nothing is being charged, so nothing is being reserved");
+                assert!(reservation.upper_bound().amount.is_zero());
+                gate.reconcile(
+                    reservation,
+                    &CostDelta::free(usd("0").currency, {
+                        let Some(attribution) = metering.policy_attribution() else {
+                            panic!("a policy row attributes its own zero");
+                        };
+                        attribution
+                    }),
+                )
+                .expect("its own gate");
+            }
+            assert!(gate.outstanding().amount.is_zero());
+            assert!(gate.committed().amount.is_zero(), "{metering:?}");
+        }
+    }
+
+    /// The zero is minted in the *gate's* currency, because neither variant
+    /// states one. A zero in some other currency would be refused by
+    /// `reconcile`'s currency check and quietly charge the bound instead.
+    #[test]
+    fn a_policy_zero_is_minted_in_the_currency_it_will_be_compared_against() {
+        let mut gate = BudgetGate::new(Money::new(
+            amount("10"),
+            CurrencyCode::new("JPY").expect("JPY is valid"),
+        ));
+        let metering = Metering::Subscription { revision: policy() };
+        let reservation = gate
+            .reserve(&metering, &request(Some(1_024)), &standard_caps())
+            .expect("a policy row states no currency of its own to clash");
+        assert_eq!(
+            reservation.upper_bound().currency,
+            CurrencyCode::new("JPY").expect("JPY is valid")
+        );
+
+        let settled = gate
+            .reconcile(
+                reservation,
+                &CostDelta::free(
+                    CurrencyCode::new("JPY").expect("JPY is valid"),
+                    CostAttribution::MeteringPolicy { revision: policy() },
+                ),
+            )
+            .expect("its own gate");
+        assert!(settled.exact, "a policy zero is not a fallback");
+        assert!(gate.committed().amount.is_zero());
+    }
+
+    /// A row nobody charges per token is not a row whose shape may go
+    /// unstated. The binding says what was authorised, and "against a model
+    /// with an unknown context window" is not something anyone can check
+    /// afterwards — so the ceiling refusal survives the metering change.
+    #[test]
+    fn a_policy_row_is_still_refused_when_a_ceiling_is_unstated() {
+        let mut gate = BudgetGate::new(usd("10"));
+        let denied = gate
+            .reserve(
+                &Metering::Unmetered { revision: policy() },
+                &request(Some(1_024)),
+                &caps(None, Some(64_000)),
+            )
+            .expect_err("a model that states no window cannot be bound to");
+        assert_eq!(
+            denied,
+            BudgetDenied::CostUnknown(UnknownCost::UnstatedCeiling {
+                ceiling: Ceiling::Context
+            })
+        );
+    }
+
+    /// A zero attributed to the wrong policy does not settle. The check is
+    /// the same one that stops a mid-session table change from pricing one
+    /// generation two ways; without it, "free" would be a universal solvent
+    /// that settled any reservation exactly.
+    #[test]
+    fn a_zero_attributed_to_another_policy_falls_back_to_the_bound() {
+        let mut gate = BudgetGate::new(usd("10"));
+        let reservation = gate
+            .reserve(
+                &Metering::Subscription { revision: policy() },
+                &request(Some(1_024)),
+                &standard_caps(),
+            )
+            .unwrap();
+        let settled = gate
+            .reconcile(
+                reservation,
+                &CostDelta::free(
+                    usd("0").currency,
+                    CostAttribution::MeteringPolicy {
+                        revision: MeteringRevision("someone/elses-plan".to_string()),
+                    },
+                ),
+            )
+            .expect("its own gate");
+        assert!(
+            !settled.exact,
+            "a figure from another policy is not this generation's cost"
+        );
+    }
+
+    /// A provider-reported row still reserves from its table, because the
+    /// stated figure does not exist until after the tokens are spent. This is
+    /// the ADR's §1 invariant at the one place it can be observed.
+    #[test]
+    fn a_provider_reported_row_reserves_from_its_table_exactly_as_a_quoted_one_does() {
+        let mut gate = BudgetGate::new(usd("10"));
+        let reservation = gate
+            .reserve(
+                &provider_reported(),
+                &request(Some(1_024)),
+                &standard_caps(),
+            )
+            .expect("the reservation quote bounds it");
+        assert_eq!(*reservation.upper_bound(), standard_bound());
+        assert_eq!(*gate.outstanding(), standard_bound());
+    }
+
+    /// And it settles from the provider's figure whatever table minted the
+    /// reservation. A provider-stated total carries no table revision at all,
+    /// so applying the revision check to it would discard the best figure the
+    /// gate will ever get, on every single generation.
+    #[test]
+    fn a_provider_stated_figure_settles_without_matching_any_table_revision() {
+        let mut gate = BudgetGate::new(usd("10"));
+        let reservation = gate
+            .reserve(
+                &provider_reported(),
+                &request(Some(1_024)),
+                &standard_caps(),
+            )
+            .unwrap();
+        let settled = gate
+            .reconcile(
+                reservation,
+                &CostDelta::Known {
+                    amount: usd("0.0012345678"),
+                    attribution: CostAttribution::ProviderReported(provider()),
+                    fx: None,
+                },
+            )
+            .expect("its own gate");
+        assert!(settled.exact, "an invoice figure is not a guess");
+        assert_eq!(settled.charged, usd("0.0012345678"));
+    }
+
+    /// The exception is narrow: it is provider-*reported* figures that skip
+    /// the revision check, not every figure presented to a provider-reported
+    /// reservation. A table figure computed under another revision is refused
+    /// here exactly as it is anywhere else.
+    #[test]
+    fn a_provider_reported_reservation_still_checks_a_table_figures_revision() {
+        let mut gate = BudgetGate::new(usd("10"));
+        let reservation = gate
+            .reserve(
+                &provider_reported(),
+                &request(Some(1_024)),
+                &standard_caps(),
+            )
+            .unwrap();
+        let settled = gate
+            .reconcile(
+                reservation,
+                &CostDelta::Known {
+                    amount: usd("0.006"),
+                    attribution: CostAttribution::Table {
+                        revision: PricingRevision("a-different-table".to_string()),
+                    },
+                    fx: None,
+                },
+            )
+            .expect("its own gate");
+        assert!(!settled.exact);
+        assert_eq!(settled.charged, standard_bound());
+    }
+
+    /// A stated cost that never arrived charges the bound and is reported
+    /// inexact — the same treatment every unknown cost gets, reached through
+    /// a distinct name so the log says which silence it was.
+    #[test]
+    fn a_missing_stated_cost_charges_the_bound_like_any_other_unknown() {
+        let mut gate = BudgetGate::new(usd("10"));
+        let reservation = gate
+            .reserve(
+                &provider_reported(),
+                &request(Some(1_024)),
+                &standard_caps(),
+            )
+            .unwrap();
+        let settled = gate
+            .reconcile(
+                reservation,
+                &CostDelta::Unknown(UnknownCost::ProviderReportedCostMissing),
+            )
+            .expect("its own gate");
+        assert!(!settled.exact);
+        assert_eq!(settled.charged, standard_bound());
+        assert!(
+            settled.over_bound.is_none(),
+            "the bound charged is not a breach"
+        );
+        assert!(gate.outstanding().amount.is_zero());
+    }
+
+    /// A reservation binds the settlement source, not only the table. Two
+    /// rows on the same price list that settle differently are two different
+    /// authorisations, and swapping one for the other after admission would
+    /// change which figure the gate accepts as exact.
+    #[test]
+    fn changing_where_the_settlement_comes_from_moves_the_binding() {
+        let mut gate = BudgetGate::new(usd("10"));
+        let reservation = reserve_standard(&mut gate);
+        let denied = reservation
+            .authorises(
+                &provider_reported(),
+                &request(Some(1_024)),
+                &standard_caps(),
+            )
+            .expect_err("this authorised a quote-settled generation");
+        let BudgetDenied::WrongBinding(mismatch) = &denied else {
+            panic!("expected WrongBinding, got {denied:?}");
+        };
+        assert_eq!(*mismatch.authorised.metering(), metered_identity());
+        // ARCH §3.2: a denial names what was denied.
+        let said = denied.to_string();
+        assert!(
+            said.contains("the quote") && said.contains("usage.cost_in_usd_ticks"),
+            "the denial must name both settlement sources: {said}"
+        );
+    }
+
+    /// And the metering variant itself is part of the binding: a currency
+    /// authorisation is not a subscription one, however the ceilings line up.
+    #[test]
+    fn a_currency_authorisation_does_not_cover_a_policy_metered_generation() {
+        let mut gate = BudgetGate::new(usd("10"));
+        let reservation = reserve_standard(&mut gate);
+        assert!(matches!(
+            reservation.authorises(
+                &Metering::Subscription { revision: policy() },
+                &request(Some(1_024)),
+                &standard_caps()
+            ),
+            Err(BudgetDenied::WrongBinding(_) | BudgetDenied::QuoteChanged { .. })
+        ));
     }
 }
