@@ -264,19 +264,24 @@ async fn fetch(http: &Arc<dyn Http>, req: HttpRequest) -> Result<Vec<u8>, String
 /// `UnstatedCeiling { Output }` if the request does not state one either.
 ///
 /// The second half of that sentence used to read "so the request must cap
-/// itself", and that was measured and found false. **The request cannot cap
-/// itself on this row.** Ollama's OpenAI-compatible endpoint honours
-/// `max_tokens` and ignores `max_completion_tokens`, which is the field
-/// `wire::openai_completions` sends — correctly, since `max_tokens` is
-/// deprecated at OpenAI and a shared wire format is not where a provider's
-/// name belongs. Recorded from a live 0.32.14 daemon in
-/// `crates/ego-ai/tests/ollama_ceiling.rs`, request and response both.
+/// itself", and that was measured and found false: Ollama's
+/// OpenAI-compatible endpoint honours `max_tokens` and ignores
+/// `max_completion_tokens`, which is the field the family sends — correctly,
+/// since `max_tokens` is deprecated at OpenAI and a shared wire format is not
+/// where a provider's name belongs.
 ///
-/// So the gate's refusal is currently doing the only real work: it forces a
-/// ceiling to be named, and the daemon then discards it. Closing that is a
-/// mapping decision one layer up — this row is further from the
-/// openai-completions family than a shared endpoint path suggests — and it is
-/// deliberately not made here.
+/// **It is true again, and by a different route.** The row declares
+/// `Adaptation::OutputCeilingInMaxTokens`, so the mapping is told which field
+/// this member reads without being told who it is
+/// (`docs/decisions/2026-08-21-a-declared-adaptation-not-a-silent-branch.md`).
+/// The request caps itself; `ollama_ceiling.rs`'s third recording is `ego`'s
+/// own body against a live 0.32.14 daemon, stopping at the ceiling.
+///
+/// `max_output_tokens` stays `None` regardless, and the distinction is worth
+/// keeping: this field is what the *daemon states*, and it states nothing. The
+/// gate's `UnstatedCeiling { Output }` therefore still forces a request to
+/// name one — which is now the thing that binds rather than the only thing
+/// that happens.
 fn capabilities_from(tag: &Tag, served_context: u64) -> ModelCapabilities {
     let thinks = tag.capabilities.iter().any(|cap| cap == "thinking");
     ModelCapabilities {

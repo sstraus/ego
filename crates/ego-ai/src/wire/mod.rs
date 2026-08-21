@@ -29,6 +29,7 @@ use futures::stream::BoxStream;
 use url::Url;
 
 use crate::http::{HttpError, HttpRequest, HttpResponse};
+use crate::provider::Adaptation;
 use provider_cost::ProviderCost;
 
 /// One API shape: how a [`GenRequest`] becomes bytes, and how the bytes become
@@ -51,10 +52,17 @@ pub trait WireFormat: fmt::Debug + Send + Sync {
     /// because a wire format is not allowed to know one
     /// (`ARCHITECTURE.md` §3.1). A mapping adds the headers that are facts
     /// about *the body it is about to write*, and no others.
+    /// `adaptations` are the profile's declared departures from this
+    /// format's family contract
+    /// (`docs/decisions/2026-08-21-a-declared-adaptation-not-a-silent-branch.md`).
+    /// A mapping may branch on one — that is what declaring is for — and may
+    /// never branch on who declared it: the slice says *what differs*, and
+    /// carries no provider identity to consult.
     fn build_request(
         &self,
         endpoint: Url,
         headers: Vec<(String, String)>,
+        adaptations: &[Adaptation],
         req: &GenRequest,
     ) -> Result<HttpRequest, Unexpressible>;
 

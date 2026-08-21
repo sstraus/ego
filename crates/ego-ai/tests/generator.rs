@@ -132,6 +132,7 @@ fn row() -> ProviderRow {
         id: "stub".to_string(),
         endpoint: Url::parse("https://api.example/v1/chat/completions").expect("a valid url"),
         wire: &OpenAiCompletions,
+        adaptations: &[],
         auth: Auth::BearerFromEnv {
             var: KEY_VAR.to_string(),
         },
@@ -241,7 +242,7 @@ async fn the_transport_is_handed_exactly_what_the_wire_format_would_send() {
     assert_eq!(
         sent.body.as_deref(),
         Some(
-            request_body(&request())
+            request_body(&[], &request())
                 .expect("this request is expressible")
                 .as_slice()
         ),
@@ -579,6 +580,7 @@ impl ego_ai::wire::WireFormat for MarkerFormat {
         &self,
         _endpoint: Url,
         headers: Vec<(String, String)>,
+        _adaptations: &[ego_ai::provider::Adaptation],
         _req: &GenRequest,
     ) -> Result<HttpRequest, ego_ai::wire::Unexpressible> {
         Ok(HttpRequest {

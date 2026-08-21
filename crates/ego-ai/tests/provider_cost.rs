@@ -246,6 +246,7 @@ fn row(id: &str, cost: Arc<dyn ProviderCost>) -> ProviderRow {
         id: id.to_string(),
         endpoint: Url::parse("https://api.example/v1/chat/completions").expect("a valid url"),
         wire: &OpenAiCompletions,
+        adaptations: &[],
         auth: Auth::BearerFromEnv {
             var: "EGO_TEST_API_KEY".to_string(),
         },
@@ -535,6 +536,7 @@ async fn a_row_with_no_cost_decoder_settles_from_its_table_as_it_always_did() {
         id: "openai".to_string(),
         endpoint: Url::parse("https://api.example/v1/chat/completions").expect("a valid url"),
         wire: &OpenAiCompletions,
+        adaptations: &[],
         auth: Auth::BearerFromEnv {
             var: "EGO_TEST_API_KEY".to_string(),
         },

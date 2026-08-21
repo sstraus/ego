@@ -154,6 +154,33 @@ impl fmt::Display for MissingCredential {
 
 impl std::error::Error for MissingCredential {}
 
+/// One named way a profile departs from its wire format's family contract.
+///
+/// `docs/decisions/2026-08-21-a-declared-adaptation-not-a-silent-branch.md`.
+/// A mapping is handed this slice and may branch on it; what it may never do
+/// is ask *who* declared it. A second provider that departs the same way
+/// declares the same variant and needs no new code, which is the difference
+/// between this and the `match` on a provider id that the metering ADR §8 and
+/// the profile ADR §4 both forbid.
+///
+/// A closed enum and not a string, because a departure a test cannot
+/// enumerate is a departure nothing can audit — and the conformance suite has
+/// to hold the set as a value to check it both ways: a failed check with no
+/// declaration, and a declaration for a check that now passes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Adaptation {
+    /// The output ceiling must be sent as `max_tokens`, because this provider
+    /// ignores `max_completion_tokens`.
+    ///
+    /// Measured against a live Ollama 0.32.14, request and response both
+    /// (`crates/ego-ai/tests/ollama_ceiling.rs`): the run that sent
+    /// `max_completion_tokens: 24` overran it, and the run that sent
+    /// `max_tokens: 24` produced exactly 24. `max_tokens` is deprecated at
+    /// OpenAI, which is why the mapping does not send it by default and why
+    /// this had to be a declaration rather than a change of field.
+    OutputCeilingInMaxTokens,
+}
+
 /// One provider profile: who it is, where it lives, how it authenticates,
 /// which shape its bytes take, and whether it states a charge.
 ///
@@ -179,6 +206,14 @@ pub struct ProviderRow {
     /// disguise. It can select one now — that is precisely what the ADR
     /// unblocked — so the field is the trait in the open.
     pub wire: &'static dyn WireFormat,
+    /// Where this profile departs from its mapping's family contract.
+    ///
+    /// Empty is an assertion and not an omission: it says every check the
+    /// conformance suite runs against this member passes. A member that fails
+    /// one and declares nothing fails the suite, and a member that declares
+    /// one it now passes fails it too — a declaration is a measurement, and a
+    /// measurement that has gone stale is worse than none.
+    pub adaptations: &'static [Adaptation],
     /// How this provider states the money it will charge, when it states it
     /// at all.
     ///
@@ -230,6 +265,7 @@ impl ProviderRow {
             id: "openai".to_string(),
             endpoint,
             wire: &OpenAiCompletions,
+            adaptations: &[],
             auth: Auth::BearerFromEnv {
                 var: OPENAI_KEY_VAR.to_string(),
             },
@@ -268,6 +304,10 @@ impl ProviderRow {
             id: "ollama".to_string(),
             endpoint,
             wire: &OpenAiCompletions,
+            // Measured, not supposed: this daemon reads `max_tokens` and
+            // discards the field the family sends. See the adaptation's own
+            // doc for the two recordings that establish it.
+            adaptations: &[Adaptation::OutputCeilingInMaxTokens],
             auth: Auth::None,
             // A daemon serving its own weights charges nothing and states
             // nothing; the metering says so, not a cost field.

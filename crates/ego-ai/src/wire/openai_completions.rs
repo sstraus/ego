@@ -84,6 +84,7 @@ use serde_json::value::RawValue;
 use url::Url;
 
 use crate::http::{HttpError, HttpRequest, HttpResponse, Method};
+use crate::provider::Adaptation;
 
 use super::provider_cost::ProviderCost;
 use super::sse::SseDecoder;
@@ -105,9 +106,10 @@ impl WireFormat for OpenAiCompletions {
         &self,
         endpoint: Url,
         headers: Vec<(String, String)>,
+        adaptations: &[Adaptation],
         req: &GenRequest,
     ) -> Result<HttpRequest, Unexpressible> {
-        build_request(endpoint, headers, req).map_err(Unexpressible::from)
+        build_request(endpoint, headers, adaptations, req).map_err(Unexpressible::from)
     }
 
     fn decode(
@@ -186,8 +188,22 @@ struct WireRequest<'a> {
     /// provider row that needs a different mapping, not a reason for this one
     /// to send a value nobody asked for.
     reasoning_effort: &'static str,
+    /// The output ceiling, in the field the schema defines for it.
+    ///
+    /// Exactly one of this and [`max_tokens`](Self::max_tokens) is ever
+    /// `Some`: they are the same number, and a request carrying both would be
+    /// asking two ways and giving a provider that reads them differently a
+    /// choice nobody made.
     #[serde(skip_serializing_if = "Option::is_none")]
     max_completion_tokens: Option<u64>,
+    /// The same ceiling, in the field OpenAI deprecated.
+    ///
+    /// Sent only for a profile declaring
+    /// [`Adaptation::OutputCeilingInMaxTokens`], never by default. The
+    /// deprecated field is not the safer choice for the family — it is the
+    /// only field one measured member reads.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_tokens: Option<u64>,
     /// Omitted when empty, together with `parallel_tool_calls`, which OpenAI
     /// rejects when there are no tools to parallelise.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -370,7 +386,15 @@ fn flush<'a>(
 /// Separate from [`build_request`] so the golden can pin the body without a
 /// URL or a credential in it — the body is the contract with the provider;
 /// the endpoint and the auth header are the provider row's business.
-pub fn request_body(req: &GenRequest) -> Result<Vec<u8>, RequestRefused> {
+pub fn request_body(
+    adaptations: &[Adaptation],
+    req: &GenRequest,
+) -> Result<Vec<u8>, RequestRefused> {
+    // The one place this mapping reads a declaration, and it reads only
+    // *what* differs. There is no provider id in scope here and there is not
+    // meant to be: a second member that ignores `max_completion_tokens`
+    // declares the same variant and this line does not change.
+    let ceiling_in_max_tokens = adaptations.contains(&Adaptation::OutputCeilingInMaxTokens);
     let carries_reasoning = req
         .messages
         .messages()
@@ -402,7 +426,12 @@ pub fn request_body(req: &GenRequest) -> Result<Vec<u8>, RequestRefused> {
             include_usage: true,
         },
         reasoning_effort: reasoning_effort(req.thinking),
-        max_completion_tokens: req.max_output_tokens,
+        max_completion_tokens: (!ceiling_in_max_tokens)
+            .then_some(req.max_output_tokens)
+            .flatten(),
+        max_tokens: ceiling_in_max_tokens
+            .then_some(req.max_output_tokens)
+            .flatten(),
         tools,
         parallel_tool_calls,
     };
@@ -416,9 +445,10 @@ pub fn request_body(req: &GenRequest) -> Result<Vec<u8>, RequestRefused> {
 pub fn build_request(
     endpoint: Url,
     headers: Vec<(String, String)>,
+    adaptations: &[Adaptation],
     req: &GenRequest,
 ) -> Result<HttpRequest, RequestRefused> {
-    let body = request_body(req)?;
+    let body = request_body(adaptations, req)?;
     let mut all = Vec::with_capacity(headers.len() + 2);
     all.push(("content-type".to_string(), "application/json".to_string()));
     all.push(("accept".to_string(), "text/event-stream".to_string()));
