@@ -967,9 +967,10 @@ mod permit {
         Read,
         List,
         Search,
+        Write,
     }
 
-    const KINDS: &[Kind] = &[Kind::Read, Kind::List, Kind::Search];
+    const KINDS: &[Kind] = &[Kind::Read, Kind::List, Kind::Search, Kind::Write];
 
     fn op_of(kind: Kind, path: &str) -> Op {
         match kind {
@@ -983,6 +984,10 @@ mod permit {
             Kind::Search => Op::Search {
                 root: CanonPath::new(path),
                 query: "q".to_string(),
+            },
+            Kind::Write => Op::Write {
+                path: CanonPath::new(path),
+                contents: b"x".to_vec(),
             },
         }
     }
@@ -1010,7 +1015,7 @@ mod permit {
         };
         let granted = engine
             .classify_settled(call)
-            .expect("every generated call reads, lists or searches inside /ws");
+            .expect("every generated call operates inside /ws, in a mode that admits it");
         let permit = granted.permit();
 
         for probe in PROBES {
@@ -1019,6 +1024,7 @@ mod permit {
                 (Kind::Read, permit.allows_read(&path).is_ok()),
                 (Kind::List, permit.allows_list(&path).is_ok()),
                 (Kind::Search, permit.allows_search(&path).is_ok()),
+                (Kind::Write, permit.allows_write(&path).is_ok()),
             ];
             for (kind, allowed) in checks {
                 assert_eq!(
@@ -1027,18 +1033,30 @@ mod permit {
                     "{kind:?} of {probe} under a permit for {ops:?}"
                 );
             }
-            // No op in this alphabet contributes write authority, so no
-            // generated call may write anywhere at all.
-            assert!(
-                permit.allows_write(&path).is_err(),
-                "a call of reads, lists and searches granted a write to {probe}"
-            );
         }
+    }
+
+    /// The engine this leg generates against: `edits`, so that a write is
+    /// *authorised* rather than asked about and the alphabet can include one.
+    ///
+    /// Write joined the alphabet late, and the reason is worth keeping. While
+    /// this ran in `default` mode a write was never authorised, so `check`
+    /// carried a blanket "no generated call may write anywhere" instead of the
+    /// biconditional the other three kinds get. That hole survived a mutation:
+    /// making `Op::Write` contribute to `read_paths` *as well as*
+    /// `write_paths` — a tool handed authority to read back the file it was
+    /// only allowed to overwrite — left all 774 tests green.
+    ///
+    /// The mode is not what is being tested here; it is what makes the
+    /// alphabet complete. Which modes authorise a write is `permit_step4_*`'s
+    /// question, and it is asked there.
+    fn leg2_engine() -> PolicyEngine {
+        PolicyEngine::new(CanonPath::new("/ws"), Mode::Edits, PermCfg::default())
     }
 
     #[test]
     fn permit_leg2_a_one_op_call_grants_exactly_what_that_op_named() {
-        let engine = in_default_mode("/ws");
+        let engine = leg2_engine();
         for (kind, path) in alphabet() {
             check(&engine, &[(kind, path)]);
         }
@@ -1049,7 +1067,7 @@ mod permit {
         // The case a one-op sweep cannot see: two ops of *different* kinds
         // over the same path must not lend each other authority, and two ops
         // of the same kind must union rather than overwrite.
-        let engine = in_default_mode("/ws");
+        let engine = leg2_engine();
         let alphabet = alphabet();
         for first in &alphabet {
             for second in &alphabet {
