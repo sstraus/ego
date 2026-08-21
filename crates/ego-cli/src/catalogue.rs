@@ -77,9 +77,13 @@ pub fn resolve(
     // Named explicitly, so the catalogue is asked whether it exists rather
     // than asked to choose. A `run` would have created it; `resume` must not
     // (ADR §3), so an id nobody has used is a refusal and not a fresh session.
+    //
+    // `{wanted}` and not `{wanted:?}` in both refusals below: these reach an
+    // operator, and `SessionId(0192…)` names a Rust type they cannot act on.
+    // The bare id is the thing they can pass back to `ego resume`.
     let Some(meta) = metas.into_iter().find(|meta| meta.id == wanted) else {
         return Err(UsageError(format!(
-            "no session {wanted:?} in this store: `ego ls --all` lists the ones \
+            "no session {wanted} in this store: `ego ls --all` lists the ones \
              there are"
         )));
     };
@@ -89,7 +93,7 @@ pub fn resolve(
     // are named, which is all `-C` needs to fix it.
     if meta.workspace_root != root {
         return Err(UsageError(format!(
-            "session {wanted:?} belongs to {}, and this is {}: resuming it here \
+            "session {wanted} belongs to {}, and this is {}: resuming it here \
              would run its history against a different tree. Use `-C {}`",
             meta.workspace_root.display(),
             root.display(),

@@ -116,7 +116,11 @@ impl std::fmt::Display for StoreError {
             ),
             StoreError::NotFound => write!(f, "session not found"),
             StoreError::WrongSession { expected, asked } => {
-                write!(f, "this store serves session {expected:?}, not {asked:?}")
+                // `Display` and not `Debug`: this reaches an operator through
+                // `StoreError`, and `SessionId(0192…)` tells them the name of
+                // a Rust type they cannot act on. The id alone is the thing
+                // they can pass back to `ego resume`.
+                write!(f, "this store serves session {expected}, not {asked}")
             }
         }
     }
