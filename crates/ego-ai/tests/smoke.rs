@@ -70,11 +70,20 @@ const RECORD: &str = "EGO_SMOKE_RECORD";
 
 /// Whether the operator asked for this provider by name.
 fn asked_for(provider: &str) -> bool {
-    std::env::var(OPT_IN)
-        .unwrap_or_default()
-        .split(',')
-        .map(str::trim)
-        .any(|named| named == provider)
+    named(&std::env::var(OPT_IN).unwrap_or_default(), provider)
+}
+
+/// The gate itself, with the environment lifted out.
+///
+/// Split from [`asked_for`] so the test below can call *this* rather than
+/// re-spell it: a test that asserts its own copy of a predicate passes
+/// whatever the real one does, which for a gate that guards paid requests is
+/// precisely the wrong thing to be sure of. Setting the variable instead is
+/// not open to us — `std::env::set_var` is unsafe in this edition and the
+/// workspace denies unsafe — so the pure half is what gets tested and the one
+/// remaining unobservable defect is a typo in [`OPT_IN`] itself.
+fn named(list: &str, provider: &str) -> bool {
+    list.split(',').map(str::trim).any(|item| item == provider)
 }
 
 fn recording() -> bool {
@@ -417,14 +426,12 @@ async fn openai_accepts_the_body_this_build_sends() {
 
 /// The gate itself, which is the one thing here that must run offline.
 ///
-/// Without it, a typo in [`OPT_IN`] or an inverted condition would make every
-/// smoke silently inert — and an inert paid test looks exactly like a passing
-/// one. This asserts the predicate and never sends anything.
+/// Without it, an inverted condition would make every smoke silently inert —
+/// and an inert paid test looks exactly like a passing one. This asserts
+/// [`named`], the predicate [`asked_for`] actually consults, and never sends
+/// anything.
 #[test]
 fn a_provider_that_was_not_named_is_not_smoked() {
-    // Whatever the ambient environment says, the predicate is about the list.
-    let named =
-        |list: &str, provider: &str| list.split(',').map(str::trim).any(|item| item == provider);
     assert!(named("ollama", "ollama"));
     assert!(named("openai, ollama", "ollama"));
     assert!(!named("", "ollama"));
