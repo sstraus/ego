@@ -256,9 +256,24 @@ async fn fetch(http: &Arc<dyn Http>, req: HttpRequest) -> Result<Vec<u8>, String
 /// `/api/tags` reports `["completion","tools","thinking"]` and says nothing
 /// about parallel tool calls, so `supports_parallel_tool_calls` is `false`:
 /// the value that only forecloses a fallback, never the one that breaks a
-/// request. `max_output_tokens` is `None` for the same reason — the daemon
-/// states no output ceiling, so the request must cap itself, and the gate
-/// refuses with `UnstatedCeiling { Output }` if neither does.
+/// request. `max_output_tokens` is `None` for the same reason: the daemon
+/// states no output ceiling, and the gate refuses with
+/// `UnstatedCeiling { Output }` if the request does not state one either.
+///
+/// The second half of that sentence used to read "so the request must cap
+/// itself", and that was measured and found false. **The request cannot cap
+/// itself on this row.** Ollama's OpenAI-compatible endpoint honours
+/// `max_tokens` and ignores `max_completion_tokens`, which is the field
+/// `wire::openai_completions` sends — correctly, since `max_tokens` is
+/// deprecated at OpenAI and a shared wire format is not where a provider's
+/// name belongs. Recorded from a live 0.32.14 daemon in
+/// `crates/ego-ai/tests/ollama_ceiling.rs`, request and response both.
+///
+/// So the gate's refusal is currently doing the only real work: it forces a
+/// ceiling to be named, and the daemon then discards it. Closing that is a
+/// mapping decision one layer up — this row is further from the
+/// openai-completions family than a shared endpoint path suggests — and it is
+/// deliberately not made here.
 fn capabilities_from(tag: &Tag, served_context: u64) -> ModelCapabilities {
     let thinks = tag.capabilities.iter().any(|cap| cap == "thinking");
     ModelCapabilities {
