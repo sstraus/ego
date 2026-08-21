@@ -476,6 +476,21 @@ mod permit {
     /// mode that answers yes mints a permit over `scope_of(&call)`, which is
     /// the *whole* call. `--yolo` would read `/etc/shadow`, through the one
     /// boundary the ADR's §4a says no mode lifts.
+    ///
+    /// **The general shape, because it will happen again:** the single-pass
+    /// loop was in the tree for weeks and was harmless the entire time — not
+    /// because it was correct, but because step 5 lived *inside* `classify`
+    /// and nothing downstream could answer yes. The bug needed an approving
+    /// party to become exploitable, and the commit that introduced the port
+    /// was the commit that supplied one. A guard that is never exercised is
+    /// not a guard; it is an assumption with a guard's syntax, and the change
+    /// that first exercises it is the most dangerous change in the file. When
+    /// a decision moves from inline to a seam, re-read every early return on
+    /// the path to it — they were all written under the assumption that the
+    /// answer could not vary.
+    ///
+    /// What caught this was an *existing* test, not a new one. That is the
+    /// argument for asserting the boundary per-call rather than per-op.
     #[test]
     fn permit_step0_a_question_about_one_op_cannot_pre_empt_a_refusal_of_another() {
         let engine = engine(Mode::Yolo, &[], &[]);
