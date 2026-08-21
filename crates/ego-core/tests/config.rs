@@ -504,8 +504,10 @@ mod instructions {
     use std::path::{Path, PathBuf};
 
     use ego_core::config::{
-        Found, Instruction, InstructionIo, Limits, Posture, Refusal, Selection, load, plan,
+        Found, Instruction, InstructionIo, InstructionSet, Limits, Posture, Refusal, Selection,
+        SystemPrompt, load, plan, system_prompt,
     };
+    use ego_core::public::InstructionSource;
 
     /// An `InstructionIo` that answers from a table and counts every call.
     ///
@@ -857,5 +859,131 @@ mod instructions {
         );
         assert_eq!(set.loaded[0].bytes, 3);
         assert_eq!(set.bytes(), 3);
+    }
+
+    // -- The system prompt ---------------------------------------------
+
+    fn loaded(files: Vec<(&str, &str)>, cwd: &str) -> InstructionSet {
+        let io = Fake::new(
+            files
+                .into_iter()
+                .map(|(path, text)| (path, read(text)))
+                .collect(),
+        );
+        load(
+            &io,
+            Path::new("/ws"),
+            Path::new(cwd),
+            &Selection::Ambient,
+            Limits::default(),
+        )
+        .unwrap()
+    }
+
+    /// The whole reason `SystemPrompt` carries both halves: what the model is
+    /// sent and what the session header publishes are produced in one pass, so
+    /// a descriptor cannot describe a file whose words never went anywhere.
+    #[test]
+    fn a_system_prompt_describes_exactly_the_files_it_quotes() {
+        let set = loaded(
+            vec![
+                ("/ws/AGENTS.md", "run the tests"),
+                ("/ws/crates/AGENTS.md", "and the clippy gate"),
+            ],
+            "/ws/crates",
+        );
+
+        let prompt = system_prompt(&set, Path::new("/ws"), &Selection::Ambient)
+            .expect("two files contributed");
+
+        let quoted: Vec<&str> = prompt.sources.iter().map(|d| d.path.as_str()).collect();
+        assert_eq!(quoted, ["/ws/AGENTS.md", "/ws/crates/AGENTS.md"]);
+        for (source, instruction) in prompt.sources.iter().zip(&set.loaded) {
+            assert!(
+                prompt.text.contains(&instruction.text),
+                "{} is described but not quoted",
+                source.path
+            );
+            assert_eq!(source.sha256, instruction.digest);
+        }
+    }
+
+    /// Root first, so the file nearest the working directory is the last word
+    /// — and the preamble says that is what being last means. Without the
+    /// framing, "the nearest file wins" is a rule nobody told the model.
+    #[test]
+    fn a_system_prompt_frames_its_files_nearest_last() {
+        let set = loaded(
+            vec![
+                ("/ws/AGENTS.md", "the outer rule"),
+                ("/ws/crates/AGENTS.md", "the inner rule"),
+            ],
+            "/ws/crates",
+        );
+
+        let prompt =
+            system_prompt(&set, Path::new("/ws"), &Selection::Ambient).expect("two files loaded");
+
+        let outer = prompt.text.find("the outer rule").expect("the outer file");
+        let inner = prompt.text.find("the inner rule").expect("the inner file");
+        assert!(outer < inner, "the nearer file must come last");
+        assert!(
+            prompt.text.starts_with("The following instructions"),
+            "the text must say what it is before saying it: {}",
+            prompt.text
+        );
+        assert_eq!(prompt.sources[0].scope, ".");
+        assert_eq!(prompt.sources[1].scope, "crates");
+    }
+
+    /// A workspace that offered nothing is not a workspace that offered the
+    /// empty string. `None` is the difference, and `TurnConfig` carries the
+    /// `Option` so the request has no system message at all.
+    #[test]
+    fn a_workspace_that_loaded_nothing_has_no_system_prompt() {
+        let set = loaded(Vec::new(), "/ws");
+
+        assert!(set.loaded.is_empty());
+        assert_eq!(
+            system_prompt(&set, Path::new("/ws"), &Selection::Ambient),
+            None
+        );
+    }
+
+    /// `--system TEXT` is the user's own words, so it is attributable to no
+    /// file — and says so with an empty `sources` rather than by inventing a
+    /// path. A header built from this publishes no instructions, which is
+    /// exactly right: none were used.
+    #[test]
+    fn a_verbatim_system_prompt_claims_no_file() {
+        let prompt = SystemPrompt::verbatim("answer in French");
+
+        assert_eq!(prompt.text, "answer in French");
+        assert!(prompt.sources.is_empty());
+    }
+
+    /// An explicitly named file is marked `explicit`, because two files at the
+    /// same path mean different things depending on whether the user asked for
+    /// one — one is a claim the workspace made, the other is an instruction
+    /// the operator gave.
+    #[test]
+    fn an_explicitly_named_file_is_published_as_explicit() {
+        let io = Fake::new(vec![("/elsewhere/house-style.md", read("no semicolons"))]);
+        let selection = Selection::Explicit(PathBuf::from("/elsewhere/house-style.md"));
+        let set = load(
+            &io,
+            Path::new("/ws"),
+            Path::new("/ws"),
+            &selection,
+            Limits::default(),
+        )
+        .unwrap();
+
+        let prompt = system_prompt(&set, Path::new("/ws"), &selection).expect("one file loaded");
+
+        assert_eq!(prompt.sources[0].source, InstructionSource::Explicit);
+        // Outside the workspace, so it has no workspace-relative scope and
+        // reports the directory it actually lives in.
+        assert_eq!(prompt.sources[0].scope, "/elsewhere");
     }
 }

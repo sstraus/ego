@@ -11,7 +11,7 @@ mod source;
 
 pub use discovery::{
     CwdOutsideRoot, Found, INSTRUCTIONS_FILE, Instruction, InstructionIo, InstructionSet, Limits,
-    Refusal, Selection, Skipped, descriptors, load, plan,
+    Refusal, Selection, Skipped, SystemPrompt, load, plan, system_prompt,
 };
 pub use error::ConfigError;
 pub use layer::{ConfigLayer, Mode, ModelRef, PermCfg, ProfileLayer};

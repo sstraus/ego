@@ -11,6 +11,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ego_core::budget::{BudgetGate, PricingQuote};
+use ego_core::config::SystemPrompt;
 use ego_core::cost::{Amount, CurrencyCode, Money, PricingRevision};
 use ego_core::event::domain::{CancelCause, DomainEvent, EventKind, ExitReason};
 use ego_core::event::id::{Seq, SessionId};
@@ -313,23 +314,41 @@ mod turn {
     }
 
     fn model<'a>(generator: &'a dyn Generator, gate: &'a mut BudgetGate) -> Model<'a> {
+        model_with(generator, gate, config())
+    }
+
+    fn model_with<'a>(
+        generator: &'a dyn Generator,
+        gate: &'a mut BudgetGate,
+        config: TurnConfig,
+    ) -> Model<'a> {
         Model {
             generator,
             gate,
             quote: quote(),
             caps: caps(),
-            config: config(),
+            config,
         }
     }
 
     /// Run one turn against `fx`, starting from `state`, and hand back where
     /// the session got to.
     fn run(fx: &Fixture, state: SessionState, prompt: &str) -> (ExitReason, bool, SessionState) {
+        run_with(fx, state, prompt, config())
+    }
+
+    /// The same, under a config a test chose.
+    fn run_with(
+        fx: &Fixture,
+        state: SessionState,
+        prompt: &str,
+        config: TurnConfig,
+    ) -> (ExitReason, bool, SessionState) {
         let mut gate = fx.gate.borrow_mut();
         let tools = Tools::new(&fx.registry, &fx.policy, &fx.fs, CanonPath::new("/ws"));
         let mut turn = TurnLoop::new(
             session(state, &fx.store, &fx.clock, &fx.sink, CancelToken::new()),
-            model(&fx.generator, &mut gate),
+            model_with(&fx.generator, &mut gate, config),
             tools,
         );
         let outcome = block_on(turn.run(prompt)).expect("the store accepted every append");
@@ -495,6 +514,76 @@ mod turn {
             ContentBlock::ToolResult { call_id, output, is_error }
                 if call_id == "call_abc" && output == "hello from the file" && !is_error
         )));
+    }
+
+    /// A system prompt is a setting the whole turn runs under, so it leads
+    /// *every* generation — not just the first — and it is never written to
+    /// the log. Writing it there would make a resumed session rebuild it as a
+    /// message someone sent, and then send it twice.
+    #[test]
+    fn a_system_prompt_leads_every_generation_and_is_never_logged() {
+        const HOUSE_STYLE: &str = "the house style: no semicolons";
+
+        let fx = Fixture::new(vec![
+            vec![
+                AiEvent::ToolCall {
+                    call_id: "call_abc".to_string(),
+                    name: "read".to_string(),
+                    args: r#"{"path":"/ws/note.txt"}"#.to_string(),
+                },
+                AiEvent::Stop(StopReason::ToolUse),
+            ],
+            vec![AiEvent::Stop(StopReason::Stop)],
+        ])
+        .with_read_tool();
+        fx.fs.file("/ws/note.txt", "hello from the file");
+
+        let mut config = config();
+        config.system = Some(SystemPrompt::verbatim(HOUSE_STYLE));
+        run_with(&fx, SessionState::default(), "what is in note.txt?", config);
+
+        let calls = fx.generator.calls();
+        assert_eq!(calls.len(), 2, "the tool call should force a second pass");
+        for (nth, call) in calls.iter().enumerate() {
+            let lead = &call.messages.messages()[0];
+            assert_eq!(
+                lead.role,
+                Role::System,
+                "generation {nth} led with a {lead:?}"
+            );
+            assert!(
+                matches!(&lead.content[0], ContentBlock::Text { text } if text == HOUSE_STYLE),
+                "generation {nth} did not carry the system prompt: {lead:?}"
+            );
+        }
+
+        // Debug over the whole event rather than a field: the claim is that
+        // *no* kind carries it, and naming the kinds that must not would go
+        // stale the moment `EventKind` grows one.
+        for event in fx.store.events() {
+            assert!(
+                !format!("{:?}", event.kind).contains(HOUSE_STYLE),
+                "the system prompt was written to the log as {:?}",
+                event.kind
+            );
+        }
+    }
+
+    /// No system prompt means no system message — not an empty one. A
+    /// provider that receives `""` in the system role has been told something.
+    #[test]
+    fn without_a_system_prompt_a_request_carries_no_system_message() {
+        let fx = Fixture::new(vec![vec![AiEvent::Stop(StopReason::Stop)]]);
+
+        run(&fx, SessionState::default(), "hello");
+
+        let roles: Vec<Role> = fx.generator.calls()[0]
+            .messages
+            .messages()
+            .iter()
+            .map(|message| message.role)
+            .collect();
+        assert_eq!(roles, vec![Role::User]);
     }
 
     #[test]

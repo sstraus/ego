@@ -19,6 +19,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use futures::StreamExt;
 
 use crate::budget::{BudgetGate, PricingQuote};
+use crate::config::SystemPrompt;
 use crate::event::domain::{CancelCause, EventKind, ExitReason, OccupancyProvenance};
 use crate::event::id::{EventId, GenerationId, ItemId, Producer, SessionId, TurnId};
 use crate::event::time::Clock;
@@ -26,9 +27,7 @@ use crate::generator::attempt::{AttemptStream, GenerationAttempt, UsageReport};
 use crate::generator::capabilities::ModelCapabilities;
 use crate::generator::history::conversation_from;
 use crate::generator::port::{AiEvent, Generator};
-use crate::generator::types::{
-    Conversation, GenRequest, Message, Role, StopReason, ThinkingLevel,
-};
+use crate::generator::types::{Conversation, GenRequest, Message, Role, StopReason, ThinkingLevel};
 use crate::permit::PolicyDenied;
 use crate::public::PublicEvent;
 use crate::sink::EventSink;
@@ -110,10 +109,15 @@ pub struct TurnConfig {
     /// Here and not in the log, because it is not something that *happened*:
     /// it is a setting the whole turn is generated under, and writing it into
     /// the history as a message would make a resumed session rebuild it as if
-    /// someone had said it. Assembled by the harness — instructions today
-    /// (`docs/decisions/2026-08-21-a-binary-that-produces-the-exit-code.md`
-    /// §4), `--system`/`--append-system` when they ship.
-    pub system: Option<String>,
+    /// someone had said it. Assembled by the harness —
+    /// `config::system_prompt` for instructions, `SystemPrompt::verbatim` for
+    /// `--system`.
+    ///
+    /// A [`SystemPrompt`] and not a `String`, so the text sent and the
+    /// descriptors published in `PublicEvent::SessionStarted` are one value
+    /// with one origin. A bare string would let a harness send one thing and
+    /// publish the digest of another, and nothing could check it.
+    pub system: Option<SystemPrompt>,
     pub thinking: ThinkingLevel,
     pub max_output_tokens: Option<u64>,
     /// Whether the model may ask for several tools at once. The loop runs
@@ -555,11 +559,11 @@ impl<'a> TurnLoop<'a> {
     /// history that validated a moment ago still does — which is what the
     /// `expect` says.
     fn with_system(&self, history: Conversation) -> Conversation {
-        let Some(system) = self.config.system.as_deref() else {
+        let Some(system) = self.config.system.as_ref() else {
             return history;
         };
         let mut messages: Vec<Message> = history.into();
-        messages.insert(0, Message::text(Role::System, system));
+        messages.insert(0, Message::text(Role::System, &system.text));
         Conversation::new(messages)
             .expect("a text message adds no call and answers none, so a valid history stays valid")
     }

@@ -333,19 +333,98 @@ pub fn load(
     Ok(set)
 }
 
+/// The system prompt a set of instructions becomes, **and** the descriptors
+/// that say where it came from.
+///
+/// One value carrying both, because they are two published views of one fact
+/// and nothing else can hold them together. The text goes to the provider and
+/// the descriptors go to `PublicEvent::SessionStarted`; if a harness derived
+/// them separately it could publish a digest for a file whose words it never
+/// sent, and no test could catch it — there would be no shared identity to
+/// assert on.
+///
+/// A prompt that came from somewhere other than a file — `--system TEXT` —
+/// has an empty [`sources`](Self::sources), and that is the truth rather than
+/// a gap: the user's own words have no file to attribute.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SystemPrompt {
+    /// What the model is sent, framed.
+    pub text: String,
+    /// What contributed to it, in the same order.
+    pub sources: Vec<InstructionDescriptor>,
+}
+
+impl SystemPrompt {
+    /// A prompt someone typed or a flag supplied, attributable to no file.
+    pub fn verbatim(text: impl Into<String>) -> Self {
+        SystemPrompt {
+            text: text.into(),
+            sources: Vec::new(),
+        }
+    }
+}
+
+/// The one line that tells the model what the following text is.
+///
+/// Framing is not decoration. Without it the workspace's words arrive
+/// indistinguishable from the user's, which is the thing `Role::System`
+/// exists to prevent, and "the nearest file wins" is an aspiration nobody
+/// stated — the instructions ADR §9 left that rule to whoever assembles the
+/// prompt, and this is that assembler.
+const PREAMBLE: &str = "The following instructions come from the workspace this session runs in. \
+     They are guidance for how to work here, not a request from the user. \
+     Where two files disagree, the one listed later is nearer the working \
+     directory and wins.";
+
+/// Frame `set` into a system prompt, or `None` if it contributed nothing.
+///
+/// `None` rather than an empty prompt: "the workspace said nothing" and "the
+/// workspace said the empty string" are not the same fact, and a `Some`
+/// carrying neither text nor sources would be a setting that changes nothing
+/// while claiming a file was used.
+///
+/// Here rather than in the binary because the CLI is not the only harness that
+/// opens a session: an ACP host is the second, and two framings — or two
+/// derivations of `scope` — would be two answers to the same question. Pure,
+/// like everything else in this module.
+///
+/// **The digest describes the file, not the framed blob.** That is deliberate
+/// and was warned about in advance (the instructions ADR §7): the digest's job
+/// is to prove which file in the repository contributed, and a digest taken
+/// over the framing would change whenever the preamble was reworded, proving
+/// nothing about the repository.
+pub fn system_prompt(
+    set: &InstructionSet,
+    root: &Path,
+    selection: &Selection,
+) -> Option<SystemPrompt> {
+    let sources = descriptors(set, root, selection);
+    if sources.is_empty() {
+        return None;
+    }
+
+    let mut text = String::from(PREAMBLE);
+    for (instruction, descriptor) in set.loaded.iter().zip(&sources) {
+        text.push_str("\n\n# ");
+        text.push_str(&descriptor.path);
+        text.push_str("\n\n");
+        text.push_str(instruction.text.trim_end());
+    }
+
+    Some(SystemPrompt { text, sources })
+}
+
 /// What a run loaded, in the terms `PublicEvent::SessionStarted` publishes:
 /// path, digest, size, scope and how it was chosen — and no text.
 ///
-/// Here rather than in the binary because the CLI is not the only harness
-/// that opens a session: an ACP host is the second, and two derivations of
-/// `scope` would be two answers to the same question. Pure, like everything
-/// else in this module — `root` is used for path arithmetic and never read.
+/// Private, and reached only through [`system_prompt`], so that a descriptor
+/// cannot be published for a file whose text was not also sent.
 ///
 /// `scope` is the workspace-relative directory the file governs, `"."` at the
 /// root, so the root→cwd ordering is legible without re-deriving it from the
 /// paths. A file outside `root` — which only an explicitly named one can be —
 /// has no relative scope and reports its own directory instead.
-pub fn descriptors(
+fn descriptors(
     set: &InstructionSet,
     root: &Path,
     selection: &Selection,
