@@ -21,9 +21,17 @@ State is a **reduction over an append-only event log** (pi's reducer,
 ```
 UserPrompt | AssistantDelta | AssistantMessage | ReasoningDelta |
 ToolCallStarted | ToolCallDelta | ToolCallCompleted | PermissionRequested |
-PermissionDecided | UsageUpdated | ContextWindowUpdated | TurnCompleted |
-Compacted | Forked | HookFired | SubagentSpawned | SubagentReturned | Error
+PermissionDecided | GenerationStarted | AttemptSettled | UsageUpdated |
+UsageCorrected | ContextWindowUpdated | TurnCompleted | Compacted | Forked |
+HookFired | SubagentSpawned | SubagentReturned | Error
 ```
+
+Twenty-one, and this list is exhaustive by contract — `EventKind`
+(`crates/ego-core/src/event/domain.rs`) is the source and the two are compared
+by hand at each milestone close. `GenerationStarted`, `AttemptSettled` and
+`UsageCorrected` were added by the attempt-lifecycle and metering work and were
+missing here until 2026-08-21; the list had said eighteen while the enum had
+twenty-one.
 
 - `SessionState::apply(&mut self, &Event)` is a **pure, sync** function.
 - Compaction and forking are events *in* the log, not operations *on* it.
@@ -386,7 +394,7 @@ section) are M0a's exit criteria.
 | M | Content | Demo / exit criteria |
 | --- | --- | --- |
 | **M0a — contracts** | The four event representations with golden fixtures (§1); stable ID/ordering scheme; single-writer durable store passing fault-injection; crate DAG with `Generator` port and fakes for `Generator`/`GuardedIo`/`Host` (also the eval seam, U3); `ModelCapabilities` record; strict trusted-config loading; `tracing` spans throughout. | The seven docs/08 gates pass; `cargo test` proves replay, projection and crash-recovery on synthetic logs. |
-| **M0b — vertical slice** | `ego-ai`: anthropic-messages + openai-completions, streaming, usage, delivery certainty. Loop + reducer + resume. **Read-only tools** (read, grep, glob) via `GuardedIo`. AGENTS.md discovery (trust-gated, I2). Line UI + headless `--output json/jsonl` + exit codes. **ACP spike**: one prompt + updates driven from a host. | `ego "explain this failing test"` interactively; `ego run --output json … \| jq` in a script; kill → `ego resume`; the same session driven over ACP. |
+| **M0b — vertical slice** | `ego-ai`: openai-completions (**anthropic-messages deferred** — plan Open Question 4, answered 2026-08-21: one wire format proves the seam, and no Anthropic credential exists to verify a second end to end), streaming, usage, delivery certainty. Loop + reducer + resume. **Read-only tools** (read, grep, glob) via `GuardedIo`. AGENTS.md discovery (trust-gated, I2). Line UI + headless `--output json/jsonl` + exit codes. **ACP spike**: one prompt + updates driven from a host. | `ego "explain this failing test"` interactively; `ego run --output json … \| jq` in a script; kill → `ego resume`; the same session driven over ACP. |
 | **M1 — safety, writes, judge** | prepare/permit/execute in anger: write/edit/bash tools; permission grammar + canonical AST + stable-ID rules + `rules explain`; modes incl. `auto` (judge model) and plan; landlock + Seatbelt backends with per-operation capability accounting; egress policy at all four exits; truncation; **minimum viable compaction**; narrow taint (ask-only). | Fix-the-failing-test end to end: near-zero prompts under workspace sandbox with the judge on; same task on the null backend shows escalation; `--offline` verified at every exit. |
 | **M2 — MCP, both directions** | rmcp client: stdio + streamable HTTP, OAuth, tools/resources/prompts, elicitation; access policy, startup admission, health; foreign tools enter the same permit model as remote trust domains. **`ego mcp-server`** (I1): run/continue/cancel/status tools, sanitized resources. `ego mcp add/ls/rm/login`. | A real MCP server's tools run under the permission engine; Claude Code delegates a scoped run to ego over MCP. |
 | **M3 — sessions in full** | Full compaction (intent, latest results, blockers, verification state survive), fork, replay/export (`--sanitize`), catalogue polish, budgets incl. judge budget line, run-manifest completeness, `[profile.ci]` contract (U1). | `--budget`, `ego fork`, compaction across a context-overflow task; a CI job consumes the sanitized run bundle. |
