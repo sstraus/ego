@@ -23,7 +23,7 @@
 
 use ego_core::budget::{BudgetBinding, BudgetDenied, BudgetGate, PricingQuote};
 use ego_core::cost::{
-    Amount, CostDelta, CurrencyCode, Money, PricingRevision, TokenCategory, UnknownCost,
+    Amount, Ceiling, CostDelta, CurrencyCode, Money, PricingRevision, TokenCategory, UnknownCost,
 };
 use ego_core::generator::capabilities::{
     CacheRetention, CancelSemantics, ModelCapabilities, ReasoningCarryover, Transport,
@@ -268,7 +268,11 @@ mod budget {
     fn a_model_with_no_stated_context_window_cannot_be_bounded() {
         assert_eq!(
             quote().upper_bound(&request(Some(1_024)), &caps(None, Some(64_000))),
-            Err(UnknownCost::NoPricingQuote)
+            Err(UnknownCost::UnstatedCeiling {
+                ceiling: Ceiling::Context
+            }),
+            "the quote prices everything it was asked to; it is the model that \
+             says nothing, and the denial has to name that and not the price"
         );
     }
 
@@ -276,7 +280,9 @@ mod budget {
     fn a_request_with_no_output_ceiling_anywhere_cannot_be_bounded() {
         assert_eq!(
             quote().upper_bound(&request(None), &caps(Some(200_000), None)),
-            Err(UnknownCost::NoPricingQuote)
+            Err(UnknownCost::UnstatedCeiling {
+                ceiling: Ceiling::Output
+            })
         );
     }
 
@@ -757,7 +763,9 @@ mod budget {
     fn a_binding_cannot_be_built_for_a_request_with_no_stated_ceilings() {
         assert_eq!(
             BudgetBinding::of(&request(None), &caps(Some(200_000), None), &revision()),
-            Err(UnknownCost::NoPricingQuote)
+            Err(UnknownCost::UnstatedCeiling {
+                ceiling: Ceiling::Output
+            })
         );
         assert_eq!(
             BudgetBinding::of(
@@ -765,7 +773,9 @@ mod budget {
                 &caps(None, Some(64_000)),
                 &revision()
             ),
-            Err(UnknownCost::NoPricingQuote)
+            Err(UnknownCost::UnstatedCeiling {
+                ceiling: Ceiling::Context
+            })
         );
     }
 

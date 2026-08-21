@@ -56,7 +56,8 @@
 use std::fmt;
 
 use crate::cost::{
-    Amount, CostDelta, CurrencyCode, Money, MoneyError, PricingRevision, TokenCategory, UnknownCost,
+    Amount, Ceiling, CostDelta, CurrencyCode, Money, MoneyError, PricingRevision, TokenCategory,
+    UnknownCost,
 };
 use crate::event::id::GateId;
 use crate::generator::capabilities::ModelCapabilities;
@@ -212,12 +213,20 @@ impl PricingQuote {
 /// The request may cap output below the model's ceiling; the bound uses
 /// whichever is lower, and is unknown if neither is stated.
 fn ceilings(req: &GenRequest, caps: &ModelCapabilities) -> Result<(u64, u64), UnknownCost> {
-    let context = caps.max_context_tokens.ok_or(UnknownCost::NoPricingQuote)?;
+    let context = caps
+        .max_context_tokens
+        .ok_or(UnknownCost::UnstatedCeiling {
+            ceiling: Ceiling::Context,
+        })?;
     let output = match (req.max_output_tokens, caps.max_output_tokens) {
         (Some(requested), Some(max)) => requested.min(max),
         (Some(requested), None) => requested,
         (None, Some(max)) => max,
-        (None, None) => return Err(UnknownCost::NoPricingQuote),
+        (None, None) => {
+            return Err(UnknownCost::UnstatedCeiling {
+                ceiling: Ceiling::Output,
+            });
+        }
     };
     Ok((context, output))
 }

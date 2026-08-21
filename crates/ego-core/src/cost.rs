@@ -467,6 +467,18 @@ pub enum UnknownCost {
     /// categories the provider reported, so any total would be an undercount
     /// presented as a fact.
     UnpricedCategory { category: TokenCategory },
+    /// The quote prices everything it was asked to, but the model does not
+    /// say how many tokens there could be, so there is no quantity to price.
+    ///
+    /// Distinct from [`NoPricingQuote`](Self::NoPricingQuote), which this
+    /// case used to be reported as, because they send an operator to two
+    /// different places: a missing quote means "configure pricing", a missing
+    /// ceiling means "this model's capabilities were never resolved". The
+    /// confusion is worst exactly where it matters most — a free local model
+    /// has a complete, honest, all-zero quote, so being told its *price* is
+    /// unknown sends the reader hunting for a table that is already there.
+    /// `ARCHITECTURE.md` §3.2 requires a denial to name the fact that moved.
+    UnstatedCeiling { ceiling: Ceiling },
     /// The provider returned no usage for this generation, so the quantity
     /// to price is itself missing.
     ProviderReportedNoUsage,
@@ -477,6 +489,23 @@ pub enum UnknownCost {
     /// unlikely with a `u128` coefficient, but the alternative to naming it
     /// is a saturating total that lies to the budget gate.
     Overflow,
+}
+
+/// Which token ceiling a bound could not be computed without.
+///
+/// Two variants rather than one flag because they are fixed in different
+/// places: a context window comes from the model's capabilities and nothing
+/// the caller writes can supply it, while an output ceiling can come from
+/// either the capabilities *or* the request's own `max_output_tokens`. An
+/// operator told only "a ceiling is missing" cannot tell which of those two
+/// they are able to act on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Ceiling {
+    /// The model states no context window.
+    Context,
+    /// Neither the request nor the model states an output ceiling.
+    Output,
 }
 
 /// The token categories that are priced separately.

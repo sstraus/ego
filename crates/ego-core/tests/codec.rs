@@ -75,14 +75,14 @@ mod codec {
     }
 
     #[test]
-    fn codec_header_carries_codec_version_2() {
+    fn codec_header_carries_codec_version_3() {
         let h = header();
-        assert_eq!(h.v, 2);
-        assert_eq!(CODEC_VERSION, 2);
+        assert_eq!(h.v, 3);
+        assert_eq!(CODEC_VERSION, 3);
 
         let bytes = encode_header(&h);
         match decode_line(&bytes).unwrap() {
-            StoreLine::Header(decoded) => assert_eq!(decoded.v, 2),
+            StoreLine::Header(decoded) => assert_eq!(decoded.v, 3),
             other => panic!("expected Header, got {other:?}"),
         }
     }
