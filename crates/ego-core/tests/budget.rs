@@ -66,6 +66,7 @@ mod budget {
             uncached_input: Some(amount("0.000003")),
             cache_read: Some(amount("0.0000003")),
             cache_write: Some(amount("0.00000375")),
+            cache_write_extended: None,
             output: Some(amount("0.000015")),
         }
     }
@@ -214,6 +215,50 @@ mod budget {
         );
     }
 
+    /// An extended cache write is its own rate, not a multiplier on the
+    /// standard one. Anthropic prices a 1-hour write at 2x base against a
+    /// 5-minute write's 1.25x, so deriving one from the other would be a
+    /// guess presented as a measurement.
+    #[test]
+    fn an_extended_cache_write_is_priced_at_its_own_rate() {
+        let mut quote = quote();
+        quote.cache_write_extended = Some(amount("0.000006"));
+        let usage = Usage {
+            cache_write_extended_tokens: 100_000,
+            ..tokens(0, 0, 0, 0)
+        };
+        assert_eq!(
+            quote.price(&usage),
+            CostDelta::Known {
+                amount: usd("0.6"),
+                attribution: CostAttribution::Table {
+                    revision: revision()
+                },
+                fx: None,
+            },
+            "100k extended writes at $6/MTok is $0.60, not the $0.375 the \
+             standard cache-write rate would give"
+        );
+    }
+
+    /// The category obeys the same rule as every other: a count that was
+    /// actually reported and cannot be priced makes the figure unknown. No
+    /// quote prices this category today, so a provider that started
+    /// reporting extended writes would make ego say so rather than undercount.
+    #[test]
+    fn a_reported_extended_write_with_no_rate_makes_the_cost_unknown() {
+        let usage = Usage {
+            cache_write_extended_tokens: 500,
+            ..tokens(1_000, 0, 0, 200)
+        };
+        assert_eq!(
+            quote().price(&usage),
+            CostDelta::Unknown(UnknownCost::UnpricedCategory {
+                category: TokenCategory::CacheWriteExtended
+            })
+        );
+    }
+
     // --- the upper bound --------------------------------------------------
 
     #[test]
@@ -237,6 +282,35 @@ mod budget {
             Err(UnknownCost::UnpricedCategory {
                 category: TokenCategory::CacheWrite
             })
+        );
+    }
+
+    /// The one input category that does *not* make the bound unknown when
+    /// unpriced, and the test exists because the rule above would otherwise
+    /// say it should.
+    ///
+    /// An extended write happens only because a request asked for one, and
+    /// no request ego can build is able to ask. So it is not in the mix the
+    /// bound covers. Were it included, no quote prices it and every model in
+    /// the tree would become unboundable — the gate would refuse fully
+    /// priced requests it exists to admit, which is a worse failure than the
+    /// one the rule guards against.
+    ///
+    /// This fails the day a request can select a retention, which is exactly
+    /// when the bound must start covering it.
+    #[test]
+    fn an_unpriced_extended_write_does_not_make_every_model_unboundable() {
+        assert_eq!(
+            quote().cache_write_extended,
+            None,
+            "the fixture is unpriced"
+        );
+        assert_eq!(
+            quote()
+                .upper_bound(&request(Some(1_024)), &caps(Some(200_000), Some(64_000)))
+                .unwrap(),
+            standard_bound(),
+            "the bound must still be the dearest of the three reachable rates"
         );
     }
 

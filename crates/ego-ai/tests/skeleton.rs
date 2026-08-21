@@ -40,6 +40,7 @@ fn quote() -> PricingQuote {
         uncached_input: Some("0.000003".parse().unwrap()),
         cache_read: Some("0.0000003".parse().unwrap()),
         cache_write: Some("0.00000375".parse().unwrap()),
+        cache_write_extended: None,
         output: Some("0.000015".parse().unwrap()),
     }
 }

@@ -114,6 +114,14 @@ pub struct PricingQuote {
     pub uncached_input: Option<Amount>,
     pub cache_read: Option<Amount>,
     pub cache_write: Option<Amount>,
+    /// The rate for a write at an extended retention.
+    ///
+    /// Absent on every quote today: no provider ego speaks to publishes one,
+    /// and `None` here means unpriced rather than free, exactly as it does
+    /// for the categories above. A generation that wrote nothing at extended
+    /// retention has a zero count and never consults this, so an absent rate
+    /// costs nothing until a request actually asks for one.
+    pub cache_write_extended: Option<Amount>,
     pub output: Option<Amount>,
 }
 
@@ -124,6 +132,7 @@ impl PricingQuote {
             TokenCategory::UncachedInput => self.uncached_input,
             TokenCategory::CacheRead => self.cache_read,
             TokenCategory::CacheWrite => self.cache_write,
+            TokenCategory::CacheWriteExtended => self.cache_write_extended,
             TokenCategory::Output => self.output,
         };
         rate.ok_or(UnknownCost::UnpricedCategory { category })
@@ -148,6 +157,10 @@ impl PricingQuote {
             (TokenCategory::UncachedInput, usage.uncached_input_tokens),
             (TokenCategory::CacheRead, usage.cache_read_tokens),
             (TokenCategory::CacheWrite, usage.cache_write_tokens),
+            (
+                TokenCategory::CacheWriteExtended,
+                usage.cache_write_extended_tokens,
+            ),
             (TokenCategory::Output, usage.output_tokens),
         ];
         let mut total = Amount::ZERO;
@@ -184,6 +197,22 @@ impl PricingQuote {
     /// unpriced input category makes the bound unknown rather than skipped:
     /// a category this quote cannot price is one whose cost we cannot
     /// bound, and `None` means unpriced, never free (see the type's doc).
+    ///
+    /// **[`TokenCategory::CacheWriteExtended`] is deliberately not in the
+    /// list**, and this is the one place the rule above is not applied. An
+    /// extended write happens only because a request *asked* for one, and no
+    /// request ego can currently build is able to ask — so it is not a member
+    /// of the "unknown mix" this bounds, and pricing the window at a rate no
+    /// request can incur would not be conservative, merely wrong. Including
+    /// it is worse than wrong: no quote prices the category, so every model
+    /// would become unboundable and the gate would refuse fully priced
+    /// requests it is meant to admit. [`Self::price`] does consult it, since
+    /// a count that was actually reported must be priced or the figure is
+    /// unknown.
+    ///
+    /// The trigger to revisit is a request that can select a retention. On
+    /// that day this bound must cover it, conditionally on what the request
+    /// asked for rather than unconditionally.
     fn dearest_input_rate(&self) -> Result<Amount, UnknownCost> {
         [
             TokenCategory::UncachedInput,

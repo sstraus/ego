@@ -842,6 +842,7 @@ mod end_to_end {
             uncached_input: rate("0.000003"),
             cache_read: rate("0.0000003"),
             cache_write: rate("0.00000375"),
+            cache_write_extended: None,
             output: rate("0.000015"),
         }
     }
