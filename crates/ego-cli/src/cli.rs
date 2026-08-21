@@ -168,9 +168,11 @@ pub const UNBUILT: &[(&str, &str)] = &[
     ),
     (
         "rules",
-        "the permission rule grammar (**M1**), the same subsystem `--allow` and \
-         `--deny` wait on: stable rule IDs are what `rules ls` would list and \
-         `rules revoke` would name",
+        "somewhere to keep a rule. The grammar and its stable IDs are built and \
+         `--allow`/`--deny` already reach the engine through them, so `ls` and \
+         `explain` have their material; what `allow`, `deny`, `revoke` and \
+         `remember` have nowhere to write to is a rule store — the same \
+         read-only loader `config` waits on",
     ),
     (
         "usage",
@@ -191,6 +193,23 @@ pub const UNBUILT: &[(&str, &str)] = &[
          report on three absent subsystems is not a diagnosis",
     ),
 ];
+
+/// What `ego` with no subcommand is waiting on.
+///
+/// A named constant rather than a phrase inside the refusal, so the message and
+/// `CLI.md` §2.1's `ego [PROMPT]` row are held to one another by a test — the
+/// same binding [`UNBUILT`] gets, and for a reason this entry has already
+/// demonstrated. It used to say the surface was waiting on "the permission
+/// dialog, which needs an approver that can mint a `Permit`". The `Approver`
+/// port and its mode implementation landed, that sentence stopped being true,
+/// and the test on this refusal asserted only the word "interactive" — so
+/// nothing went red. A reason nothing checks is a reason that decays into a
+/// confident falsehood.
+pub const INTERACTIVE_WAITING_ON: &str = "the terminal surface itself — a \
+     line editor for the prompt, and the dialog that renders a \
+     `PermissionRequest` and reads a person's answer. The `Approver` port that dialog would \
+     occupy is built and the mode already answers through it (**M1**); what \
+     is missing is the human seat and the screen it draws on";
 
 /// A flag that was removed, and what replaced it.
 ///
@@ -534,8 +553,8 @@ pub fn parse(argv: Vec<String>) -> Result<Invocation, UsageError> {
         return Err(UsageError(format!(
             "`{program}` with no subcommand starts an interactive session, and \
              the interactive surface is not in this build: it is waiting on \
-             the permission dialog, which needs an approver that can mint a \
-             Permit. Use `{program} run` for a headless one-shot"
+             {INTERACTIVE_WAITING_ON}. Use `{program} run` for a headless \
+             one-shot"
         )));
     }
 

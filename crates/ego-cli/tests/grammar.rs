@@ -71,11 +71,51 @@ fn the_separator_stops_a_subcommand_name_from_being_one() {
 
 /// Without a subcommand the invocation is the interactive one, and this build
 /// says which surface is missing rather than printing a usage block.
+///
+/// **The reason is asserted, not just the word "interactive", and that is a
+/// repair rather than thoroughness.** The refusal used to say the surface
+/// waited on "the permission dialog, which needs an approver that can mint a
+/// `Permit`". The `Approver` port landed; the sentence became false; this test
+/// stayed green, because it checked that a refusal *happened* and never what it
+/// claimed. A refusal is a factual assertion about the state of the build, and
+/// one nothing checks is one that decays into a confident falsehood — the same
+/// shape as an availability table nobody bound to its document.
 #[test]
 fn an_invocation_with_no_subcommand_names_the_surface_it_would_need() {
     let refusal = refused(["hello"]);
     assert!(refusal.contains("interactive"), "{refusal}");
     assert!(refusal.contains("ego run"), "{refusal}");
+    assert!(
+        refusal.contains(cli::INTERACTIVE_WAITING_ON),
+        "the refusal must say what the surface waits on: {refusal}"
+    );
+}
+
+/// And the reason it gives is the one `CLI.md` §2.1 publishes.
+///
+/// The companion to `every_unbuilt_subcommand_is_one_the_document_offers`, for
+/// the one row of that table `UNBUILT` does not cover: `ego [PROMPT]` is not a
+/// subcommand, so it has no entry there and had nothing holding it to the
+/// document. Which is exactly the row that went stale.
+#[test]
+fn the_interactive_refusal_says_what_the_document_says() {
+    let doc = include_str!("../../../CLI.md");
+    let availability = doc
+        .split("### 2.1 Availability")
+        .nth(1)
+        .expect("CLI.md has an availability section")
+        .split("## 3.")
+        .next()
+        .expect("the availability section ends");
+    // Whitespace-insensitive: the constant is a wrapped Rust string literal and
+    // the table row is one long line, so a literal `contains` would fail on the
+    // line breaks rather than on a disagreement about the reason.
+    let flatten = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        flatten(availability).contains(&flatten(cli::INTERACTIVE_WAITING_ON)),
+        "CLI.md §2.1's `ego [PROMPT]` row and the refusal disagree about what \
+         the interactive surface waits on"
+    );
 }
 
 /// A flag whose subsystem does not exist is refused by name *before* clap sees
