@@ -33,6 +33,7 @@ fn parsed<const N: usize>(args: [&str; N]) -> ego_cli::cli::Args {
     match cli::parse(argv(args)).expect("the command line parses") {
         Invocation::Run(args) | Invocation::Resume(args) => *args,
         Invocation::Ls(_) => panic!("`ls` takes no Args: use `listed` for it"),
+        Invocation::Acp(_) => panic!("`acp` takes no Args: use `served` for it"),
     }
 }
 
@@ -40,6 +41,13 @@ fn listed<const N: usize>(args: [&str; N]) -> ego_cli::cli::LsArgs {
     match cli::parse(argv(args)).expect("the command line parses") {
         Invocation::Ls(args) => *args,
         _ => panic!("that is not `ego ls`"),
+    }
+}
+
+fn served<const N: usize>(args: [&str; N]) -> ego_cli::cli::AcpArgs {
+    match cli::parse(argv(args)).expect("the command line parses") {
+        Invocation::Acp(args) => *args,
+        _ => panic!("that is not `ego acp`"),
     }
 }
 
@@ -581,11 +589,66 @@ fn ls_takes_no_positional() {
     assert!(refusal.contains("something"), "{refusal}");
 }
 
+// --- `ego acp` ---
+
+/// `ego acp` with nothing else: serve on stdio, from here, against the default
+/// store.
+#[test]
+fn acp_needs_nothing_to_serve() {
+    let args = served(["acp"]);
+    assert_eq!(args.session_dir, None);
+    assert_eq!(args.directory, None);
+}
+
+/// It shares `--session-dir` and `-C` with every other command, from the same
+/// declaration — a host launched against a particular store must write to the
+/// store `ego ls` then lists, because the sessions it opens are ordinary ones.
+#[test]
+fn acp_honours_the_two_flags_it_shares() {
+    let args = served(["acp", "--session-dir", "/tmp/store", "-C", "/tmp/ws"]);
+    assert_eq!(
+        args.session_dir.as_deref(),
+        Some(std::path::Path::new("/tmp/store"))
+    );
+    assert_eq!(
+        args.directory.as_deref(),
+        Some(std::path::Path::new("/tmp/ws"))
+    );
+}
+
+/// **`--output` is the flag `ego acp` must not have**, and this is the test
+/// that says so.
+///
+/// Its stdout *is* the JSON-RPC stream. A second writer on that descriptor does
+/// not produce a run with noisy output — it produces a protocol the host cannot
+/// parse, from the first line onward. So the flag is refused rather than
+/// accepted and ignored: accepting it would let a caller believe they had
+/// chosen a rendering, and the connection would then fail for a reason nothing
+/// stated.
+#[test]
+fn acp_refuses_the_flag_that_would_corrupt_its_own_transport() {
+    for spelling in [["acp", "--output", "json"], ["acp", "--output", "text"]] {
+        let refusal = refused(spelling);
+        assert!(
+            refusal.contains("--output"),
+            "`ego acp --output` must be refused by name: {refusal}"
+        );
+    }
+}
+
+/// `acp` takes no prompt: a host sends one over the wire, and a word here is a
+/// mistake rather than something to run.
+#[test]
+fn acp_takes_no_positional() {
+    let refusal = refused(["acp", "something"]);
+    assert!(refusal.contains("something"), "{refusal}");
+}
+
 /// §4.5's separator rule reaches the new commands too: after `--` the word is
 /// a prompt, so `ego -- ls` is the interactive form and not the catalogue.
 #[test]
 fn the_separator_still_stops_the_new_subcommand_names() {
-    for name in ["resume", "ls"] {
+    for name in ["resume", "ls", "acp"] {
         let refusal = refused(["--", name]);
         assert!(
             refusal.contains("interactive"),

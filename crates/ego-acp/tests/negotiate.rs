@@ -1,90 +1,100 @@
-//! The version this agent answers `initialize` with.
+//! The version this agent answers `initialize` with, as a table.
 //!
-//! `docs/decisions/2026-08-21-the-version-an-agent-answers-with.md` §3 is a
-//! four-row table, and this file is that table. It is tested here rather than
-//! through a live connection for the reason §4 gives: a transport test can
-//! reach `1` and `2`, and the inputs that matter most are the ones an
-//! arbitrary peer can send and no enum can express.
+//! `docs/decisions/2026-08-21-the-version-an-agent-answers-with.md` §6.3 is a
+//! two-row table, and this file is that table read as a pure function. The same
+//! rows are driven through the real SDK router in `tests/initialize.rs`, and
+//! §6.4 says why one of the two is not enough: the SDK owns the negotiation, so
+//! a table only this crate believes is a binding whose two ends are both our
+//! code.
+//!
+//! What this file has that the transport test cannot is *reach*. An
+//! `initialize` over a socket can carry `1` and `2`; the inputs that matter
+//! most are the ones an arbitrary peer can send and no enum can express.
 
 use agent_client_protocol_schema::ProtocolVersion;
-use ego_acp::negotiate::negotiate;
+use ego_acp::negotiate::{SERVED, negotiate};
 
-/// The two we implement, answered with themselves.
-///
-/// The v2 row is the only one where echoing and deciding agree, which is
-/// exactly why the SDK's echoing example looks correct until it isn't.
+/// The one we serve, answered with itself.
 #[test]
-fn a_version_we_implement_is_the_version_we_answer_with() {
-    assert_eq!(negotiate(ProtocolVersion::V1), ProtocolVersion::V1);
-    assert_eq!(negotiate(ProtocolVersion::V2), ProtocolVersion::V2);
+fn the_version_we_serve_is_the_version_we_answer_with() {
+    assert_eq!(negotiate(SERVED), Some(SERVED));
+    assert_eq!(SERVED, ProtocolVersion::V1);
 }
 
 /// **The row the obvious rule gets wrong.**
 ///
 /// `min(wanted, our_max)` answers `2` here. We answer `1`, because v2 is an
-/// unstable draft and a client asking for `3` has not opted into it — see
-/// `negotiate`'s doc comment and ADR §3.1.
-///
-/// `65535` is in the same row and is not padding: `ProtocolVersion` is a `u16`
-/// newtype whose own tests confirm the maximum deserialises, so it is a value
-/// a real peer can put on the wire.
+/// unstable draft and a client asking for `3` has not opted into it — see ADR
+/// §3.1, and §6.2 for the mechanism, which is that the v2 arm of the router is
+/// deliberately not configured.
 #[test]
 fn a_version_newer_than_ours_gets_the_stable_one_and_never_the_draft() {
-    for newer in [3u16, 4, 100, 65535] {
+    for newer in [2u16, 3, 4, 100, 65535] {
         let answer = negotiate(ProtocolVersion::from(newer));
         assert_eq!(
             answer,
-            ProtocolVersion::V1,
-            "a client asking for {newer} was handed {answer}: it never opted \
-             into the v2 draft, and only asking for 2 by name is that opt-in"
+            Some(ProtocolVersion::V1),
+            "a client asking for {newer} was handed {answer:?}: it never opted \
+             into the v2 draft, and this build configures no arm to hand it"
         );
         assert_ne!(
             answer,
-            ProtocolVersion::V2,
+            Some(ProtocolVersion::V2),
             "the draft was selected on a client's behalf"
         );
     }
 }
 
-/// The pre-release, answered with the lowest thing we actually implement.
+/// The pre-release, refused.
 ///
-/// Not an error: ACP gives the client the decision about whether our answer is
-/// usable, and an agent that fails `initialize` takes that decision away
-/// (ADR §3.2).
+/// **This row was the opposite way round until the SDK was read rather than
+/// assumed.** ADR §3.2 argued that ACP gives the client the decision about
+/// whether our answer is usable, so an agent should answer `1` rather than fail
+/// `initialize`. The reasoning still holds and the code cannot act on it:
+/// `SupportedAgentProtocols::highest_compatible` requires `requested >= V1`, so
+/// a `0` matches no configured arm and the router replies with an error before
+/// any handler of ours runs. ADR §6.3 records the correction.
+///
+/// The test is kept, inverted, rather than deleted: what it now pins is that we
+/// know we refuse here, which is the fact a future reader of §3.2 would
+/// otherwise be misled about.
 #[test]
-fn the_pre_release_version_is_answered_with_one_rather_than_refused() {
-    assert_eq!(negotiate(ProtocolVersion::V0), ProtocolVersion::V1);
+fn the_pre_release_version_is_refused_because_the_router_has_no_arm_below_one() {
+    assert_eq!(negotiate(ProtocolVersion::V0), None);
 }
 
-/// Whatever arrives, what leaves is a version this build can actually speak.
+/// Whatever arrives, what leaves is a version this build actually serves.
 ///
-/// The property behind the table: `negotiate` is total, and its range is the
-/// two versions `project.rs` has a projection for. A future row added to §3
-/// that answered with anything else would fail here without needing its own
-/// test — which is the point, since the failure mode being guarded is an agent
-/// naming a protocol it does not implement.
+/// The property behind the table: `negotiate` is total, and its range is
+/// [`SERVED`] and refusal — nothing else. A future row that answered with some
+/// other integer would fail here without needing its own test, which is the
+/// point, since the failure mode being guarded is an agent naming a protocol it
+/// does not speak.
 #[test]
-fn every_answer_is_a_version_this_build_projects_onto() {
+fn every_answer_is_the_version_this_build_serves() {
     for wanted in [0u16, 1, 2, 3, 7, 255, 256, 65535] {
         let answer = negotiate(ProtocolVersion::from(wanted));
         assert!(
-            answer == ProtocolVersion::V1 || answer == ProtocolVersion::V2,
-            "asked for {wanted}, answered {answer}, which no projection covers"
+            answer.is_none() || answer == Some(SERVED),
+            "asked for {wanted}, answered {answer:?}, which this build does not speak"
         );
     }
 }
 
 /// Answering is not echoing, stated as a difference rather than implied.
 ///
-/// This is the assertion that fails if someone "simplifies" `negotiate` to the
-/// SDK example's `InitializeResponse::new(initialize.protocol_version)`. Every
-/// other test here would still pass for the two rows where the two rules agree.
+/// This is the assertion that fails if someone "simplifies" the `initialize`
+/// handler to the SDK example's `InitializeResponse::new(request.protocol_
+/// version)`. Every other test here would still pass: the router narrows the
+/// request to the selected arm before a handler sees it, so today an echo would
+/// return the right number for the wrong reason — and would return the wrong
+/// number the moment a second arm is configured.
 #[test]
 fn the_answer_is_not_merely_the_question_repeated() {
     let asked = ProtocolVersion::from(9u16);
     assert_ne!(
         negotiate(asked),
-        asked,
-        "the agent echoed the client's version back, claiming to implement 9"
+        Some(asked),
+        "the agent echoed the client's version back, claiming to speak 9"
     );
 }

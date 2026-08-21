@@ -62,7 +62,7 @@ Notes:
 ### 2.1 Availability — what ships today
 
 The same discipline as §3.1, and it was missing here until 2026-08-21. §2 lists
-fourteen commands; this build implements **three**. The other eleven used to
+fourteen commands; this build implements **four**. The other ten used to
 reach the *interactive* refusal, so `ego resume` was answered with a sentence
 about the permission dialog — true, and about a surface the caller had not
 asked for. They are now refused **by name**, each naming what it waits on, from
@@ -98,15 +98,16 @@ omitted when empty: two states, identical bytes.
 | `ego config` | no | a config writer. The loader is strict and read-only, and nothing in this build writes a config file — `-c/--set` overrides one run |
 | `ego rules` | no | the permission rule grammar (**M1**), the same subsystem `--allow` and `--deny` wait on: stable rule IDs are what `rules ls` would list and `rules revoke` would name |
 | `ego usage` | no | a report across sessions, which needs both the workspace attribution `ls` waits on and the per-session cost line budgets add in **M3** |
-| `ego acp` | no | an agent that serves the protocol on stdio. `ego-acp` already projects events onto v1 and v2 (`project_acp_v1`/`project_acp_v2`), so what is missing is the connection and its version negotiation, not the mapping |
+| `ego acp` | **yes** | the Agent Client Protocol on stdio, v1. A host's `session/new` mints an ordinary ego session and its `session/prompt` runs an ordinary turn, so what it opens is listed by `ego ls` and continued by `ego resume`. v1 and not the v2 draft: see `docs/decisions/2026-08-21-the-version-an-agent-answers-with.md` §6.2 |
 | `ego doctor` | no | most of what it would diagnose: the credential store, the MCP client and the sandbox backend are each waiting on their own milestone, and a report on three absent subsystems is not a diagnosis |
 
-**Two of M0b's four exit criteria are commands that do not exist yet**
+**One of M0b's four exit criteria is a command that does not exist yet**
 (`ARCHITECTURE.md` §8: interactive, `ego run … | jq`, `kill → ego resume`, and
-the same session over ACP). The second and third ship; the interactive surface
-and the ACP agent do not. That is the fact this table exists to stop being
-invisible, and the count is part of it — it read "three of four" until
-`ego resume` landed.
+the same session over ACP). Three of the four ship; the interactive surface does
+not, because it waits on an approver that can mint a `Permit`. That is the fact
+this table exists to stop being invisible, and the count is part of it — it read
+"three of four" until `ego resume` landed and "two of four" until `ego acp`
+did.
 
 ## 3. Flags (the argument grammar)
 

@@ -11,6 +11,13 @@ agent-client-protocol = { version = "2.0.0", features = ["unstable_protocol_v2"]
 agent-client-protocol-schema = { version = "=1.5.0", features = ["unstable_protocol_v2", "unstable_session_fork"] }
 ego-core.workspace = true
 serde_json = "1.0.151"
+tracing = "0.1.44"
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+# The `initialize` test drives the real SDK router over a pair of in-memory
+# line channels, which is the only way to ask what the router actually answers.
+futures = "0.3.34"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

@@ -179,6 +179,7 @@ use ego_core::event::domain::ExitReason;
 use ego_core::event::id::ItemId;
 use ego_core::generator::capabilities::ModelCapabilities;
 use ego_core::public::{ItemKind, PublicEvent};
+use ego_core::run::RunTermination;
 use ego_core::state::SessionState;
 
 /// The bare-string wire form ACP ids use (`MessageId`, `ToolCallId`, …).
@@ -232,6 +233,49 @@ fn stop_reason_v2(exit_reason: ExitReason) -> v2::StopReason {
         ExitReason::PermissionRequired => v2::StopReason::Other("_permission".to_string()),
         ExitReason::Budget => v2::StopReason::Other("_budget".to_string()),
         ExitReason::Usage => v2::StopReason::Other("_usage".to_string()),
+    }
+}
+
+/// Why the `session/prompt` call stops, in v1's vocabulary — or the sentence to
+/// fail it with when v1 has no word for it.
+///
+/// v1's `StopReason` has five values and no extension point (v2 added
+/// `Other`, which is why [`stop_reason_v2`] can be total). Three of ego's
+/// endings have no honest v1 spelling, and the two candidates are both worse
+/// than an error:
+///
+/// - `MaxTokens` means the *model's* token ceiling. A budget ceiling is a
+///   figure an operator set, and reporting it as `MaxTokens` would tell a host
+///   the model ran out of room. [`stop_reason_v2`] rejects the same conflation.
+/// - `Refusal` is documented as discarding history: "the user prompt and
+///   everything that comes after it won't be included in the next prompt". A
+///   budget stop, a permission stop and a failed schema all leave the session
+///   intact and resumable, so `Refusal` would instruct the client to throw away
+///   a transcript that is still good.
+///
+/// So they become a JSON-RPC error on the `session/prompt` response, which is
+/// where `project.rs`'s module doc already puts a mid-turn error, and the
+/// sentence travels with it. `UsageError`, `Provider` and `Failed` are errors
+/// on their own terms — the run produced no turn, or broke.
+pub fn stop_reason_v1(termination: &RunTermination) -> Result<v1::StopReason, String> {
+    match termination {
+        RunTermination::Done => Ok(v1::StopReason::EndTurn),
+        RunTermination::MaxTurns => Ok(v1::StopReason::MaxTurnRequests),
+        // Every cancellation is `Cancelled` to a host, for the reason
+        // `stop_reason_v2` gives: ACP asks why the turn stopped, and "a human,
+        // a deadline or your own `session/cancel`" is a distinction the
+        // protocol has no field for.
+        RunTermination::TimedOut | RunTermination::Signalled(_) => Ok(v1::StopReason::Cancelled),
+        RunTermination::BudgetExceeded => {
+            Err("the turn stopped because a budget ceiling was reached".to_string())
+        }
+        RunTermination::PermissionRequired { action } => Err(format!(
+            "the turn stopped because {action} needed a permission nobody could grant"
+        )),
+        RunTermination::TaskFailed => Err("the turn ran and the task did not succeed".to_string()),
+        RunTermination::UsageError { message }
+        | RunTermination::Provider { message }
+        | RunTermination::Failed { message } => Err(message.clone()),
     }
 }
 

@@ -37,6 +37,9 @@ pub enum Invocation {
     Resume(Box<Args>),
     /// `ego ls` — the catalogue, this workspace's by default.
     Ls(Box<LsArgs>),
+    /// `ego acp` — serve the Agent Client Protocol on stdio, until the host
+    /// closes it.
+    Acp(Box<AcpArgs>),
 }
 
 /// A refusal decided before any turn exists.
@@ -120,7 +123,7 @@ const UNAVAILABLE: &[Unavailable] = &[
 /// exist. That is `every_waiting_on_reason_is_the_one_the_document_prints`'s
 /// defect moved one link along the chain — two surfaces agreeing perfectly
 /// about something that has stopped being true.
-pub const BUILT: &[&str] = &["run", "resume", "ls"];
+pub const BUILT: &[&str] = &["run", "resume", "ls", "acp"];
 
 /// A command `CLI.md` §2 documents that this build does not implement, and the
 /// subsystem it is waiting on.
@@ -189,13 +192,6 @@ pub const UNBUILT: &[(&str, &str)] = &[
         "usage",
         "a report across sessions, which needs both the workspace attribution \
          `ls` waits on and the per-session cost line budgets add in **M3**",
-    ),
-    (
-        "acp",
-        "an agent that serves the protocol on stdio. `ego-acp` already projects \
-         events onto v1 and v2 (`project_acp_v1`/`project_acp_v2`), so what is \
-         missing is the connection and its version negotiation, not the \
-         mapping",
     ),
     (
         "doctor",
@@ -312,6 +308,16 @@ pub struct LsArgs {
     pub output: Output,
 }
 
+/// The parsed command line of `ego acp`.
+///
+/// Two fields, and the absent third is the point: `ego acp`'s stdout **is** the
+/// JSON-RPC stream, so there is no `--output` to choose. See [`Places`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcpArgs {
+    pub session_dir: Option<PathBuf>,
+    pub directory: Option<PathBuf>,
+}
+
 /// The parsed command line of `ego run`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Args {
@@ -393,6 +399,18 @@ struct LsCommand {
     common: Common,
 }
 
+/// `ego acp` — the protocol, on stdio.
+#[derive(Debug, Parser)]
+#[command(
+    name = "ego acp",
+    about = "Serve the Agent Client Protocol on stdio.",
+    disable_help_subcommand = true
+)]
+struct AcpCommand {
+    #[command(flatten)]
+    places: Places,
+}
+
 /// The three flags every subcommand takes, declared once.
 ///
 /// `ls` starts no turn, so it shares almost nothing with `run` — but these
@@ -403,6 +421,24 @@ struct LsCommand {
 /// true by construction rather than by two authors agreeing.
 #[derive(Debug, ClapArgs)]
 struct Common {
+    #[command(flatten)]
+    places: Places,
+
+    /// text|json|jsonl
+    #[arg(long, value_enum, default_value_t = Output::Text)]
+    output: Output,
+}
+
+/// Which store and which workspace — the two `acp` shares with the rest.
+///
+/// Split out of [`Common`] rather than flattened wholesale, because `--output`
+/// is the one flag `ego acp` must not have: its stdout *is* the JSON-RPC
+/// stream, and a second writer on that descriptor does not produce a run with
+/// noisy output, it produces a protocol the host cannot parse. A flag that
+/// would corrupt the transport is not a flag with a bad default — it is one
+/// the command does not take.
+#[derive(Debug, ClapArgs)]
+struct Places {
     /// Override the store location.
     #[arg(long)]
     session_dir: Option<PathBuf>,
@@ -410,10 +446,6 @@ struct Common {
     /// Run as if started in DIR.
     #[arg(short = 'C', value_name = "DIR")]
     directory: Option<PathBuf>,
-
-    /// text|json|jsonl
-    #[arg(long, value_enum, default_value_t = Output::Text)]
-    output: Output,
 }
 
 #[derive(Debug, ClapArgs)]
@@ -598,12 +630,19 @@ pub fn parse(argv: Vec<String>) -> Result<Invocation, UsageError> {
             let parsed = ResumeCommand::try_parse_from(&tokens).map_err(clap_said)?;
             Ok(Invocation::Resume(Box::new(into_resume_args(parsed)?)))
         }
+        "acp" => {
+            let parsed = AcpCommand::try_parse_from(&tokens).map_err(clap_said)?;
+            Ok(Invocation::Acp(Box::new(AcpArgs {
+                session_dir: parsed.places.session_dir,
+                directory: parsed.places.directory,
+            })))
+        }
         "ls" => {
             let parsed = LsCommand::try_parse_from(&tokens).map_err(clap_said)?;
             Ok(Invocation::Ls(Box::new(LsArgs {
                 all: parsed.all,
-                session_dir: parsed.common.session_dir,
-                directory: parsed.common.directory,
+                session_dir: parsed.common.places.session_dir,
+                directory: parsed.common.places.directory,
                 output: parsed.common.output,
             })))
         }
@@ -716,7 +755,7 @@ fn into_args(command: RunCommand) -> Result<Args, UsageError> {
         instructions: flags.instructions,
         bare: flags.bare,
         session,
-        session_dir: flags.common.session_dir,
+        session_dir: flags.common.places.session_dir,
         output: flags.common.output,
         schema: flags.schema,
         schema_retries: flags.schema_retries,
@@ -731,7 +770,7 @@ fn into_args(command: RunCommand) -> Result<Args, UsageError> {
         } else {
             flags.tools
         },
-        directory: flags.common.directory,
+        directory: flags.common.places.directory,
         set: flags.set,
         profile: flags.profile,
         quiet: flags.quiet,

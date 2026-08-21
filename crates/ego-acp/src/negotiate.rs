@@ -1,62 +1,83 @@
 //! Which protocol version this agent agrees to speak.
 //!
-//! See `docs/decisions/2026-08-21-the-version-an-agent-answers-with.md` §3.
+//! See `docs/decisions/2026-08-21-the-version-an-agent-answers-with.md`, §3 as
+//! corrected by §6.
 //!
-//! One function, because the whole decision is one: a client states the
-//! version it wants in `initialize`, and the agent's response states the
-//! version it will actually use. Those are different questions, and the SDK's
-//! own `examples/simple_agent.rs` answers the second with the first —
-//! `InitializeResponse::new(initialize.protocol_version)` — which is shorthand
+//! ## The SDK owns the negotiation; we own the configuration
+//!
+//! `agent-client-protocol`'s transport layer answers `initialize` before any
+//! handler runs (`jsonrpc/protocol_compat.rs`), and
+//! [`Agent::protocol_router`](agent_client_protocol::Agent::protocol_router)
+//! picks the highest *configured* implementation at or below the requested
+//! version. So the decision this module records is not "which integer does the
+//! handler return" — it is **which arms [`connect`](crate::connect) configures**,
+//! and this function is the statement of what that configuration answers.
+//!
+//! [`SERVED`] is the one arm. Everything below follows from there.
+//!
+//! ## It is still not an echo
+//!
+//! The SDK's `examples/simple_agent.rs` answers with
+//! `InitializeResponse::new(initialize.protocol_version)`. That is shorthand
 //! that only works for an agent whose behaviour does not depend on the answer.
-//!
-//! Ours does. The negotiated version picks the projection
+//! Ours does: the version picks the projection
 //! ([`project_acp_v1`](crate::project::project_acp_v1) or
 //! [`project_acp_v2`](crate::project::project_acp_v2)), and those have
 //! genuinely different variant sets — v1 returns `None` for events v2 can
-//! carry. Echoing would let the agent answer "2" and then speak v1 at a client
-//! that believes it agreed to v2.
+//! carry.
+//!
+//! The router does rewrite the request's version to its selection before the
+//! handler sees it, so echoing would *happen* to be right today. It would stop
+//! being right the moment a second arm is configured, and it would be right by
+//! accident even now. The handler states [`SERVED`] instead.
 
 use agent_client_protocol_schema::ProtocolVersion;
 
-/// The version this agent speaks when the client asks for `wanted`.
+/// The one protocol version this build serves.
+///
+/// Not `LATEST` — the schema crate withholds that constant under
+/// `unstable_protocol_v2` precisely so a build cannot drift onto the draft by
+/// writing "latest", and this crate enables that feature.
+///
+/// v1 and not v2, although [`project_acp_v2`](crate::project::project_acp_v2)
+/// is complete: with both arms configured the router answers `2` to a client
+/// asking for `3`, performing an opt-in into an unstable draft on the client's
+/// behalf. That substitution is undetectable by the client and unrecoverable by
+/// us; answering `1` to a client that wanted `2` is stated in the response and
+/// recoverable by re-initializing. See ADR §6.2.
+///
+/// **This constant is the expiry switch.** When v2 stabilises, configuring the
+/// second arm is what changes — not this module's shape.
+pub const SERVED: ProtocolVersion = ProtocolVersion::V1;
+
+/// The version this agent answers `initialize` with, or `None` when the
+/// connection is refused before it begins.
 ///
 /// Total by construction: `ProtocolVersion` is a `u16` newtype and *every*
-/// value of it deserialises (the schema crate's own tests cover `0`, `100000`
-/// rejected only for exceeding `u16`, and `65535` accepted), so this is not a
-/// match over a closed enum and cannot be written as one. An arbitrary integer
-/// arrives and an implemented version leaves.
+/// value of it deserialises (the schema crate's own tests accept `0` and
+/// `65535`, and reject `100000` only for exceeding `u16`), so this is not a
+/// match over a closed enum and cannot be written as one.
 ///
 /// # The rule
 ///
-/// `V2` exactly when asked for by name; `V1` otherwise — including for
-/// versions *newer* than either. That last clause is the whole point and is
-/// the opposite of `min(wanted, our_max)`:
+/// | asked | answered |
+/// |---|---|
+/// | `1` and above | `1` |
+/// | `0` | refused |
 ///
-/// v2 is an unstable draft. The schema crate withholds
-/// `ProtocolVersion::LATEST` under `unstable_protocol_v2` precisely so that
-/// opting into the draft has to be written out, and answering `V2` to a client
-/// that asked for `3` would perform that opt-in on its behalf. It asked for a
-/// stable future version and would be handed a draft whose shape can change
-/// under it — a substitution it cannot detect.
+/// **The upper row is the whole point, and is the opposite of
+/// `min(wanted, our_max)`** — a client asking for `3` is not handed the v2
+/// draft. See [`SERVED`].
 ///
-/// The cost is real and bounded the other way: a v2-capable client that asked
-/// for `3` gets v1's documented losses (see `project.rs`) until it asks for
-/// `2` by name. A wrong answer here is recoverable; the other wrong answer is
-/// not.
-///
-/// **This function expires when v2 stabilises.** Delete it rather than
-/// generalising it — it encodes one fact about one draft, not a theory of
-/// negotiation.
-pub fn negotiate(wanted: ProtocolVersion) -> ProtocolVersion {
-    match wanted {
-        ProtocolVersion::V2 => ProtocolVersion::V2,
-        // Everything else, and deliberately not a range check. `V0` is
-        // documented by the schema crate as a pre-release that "should likely
-        // be treated as unsupported", and a version above ours has not opted
-        // into the draft. Both get the one version we implement that is not a
-        // draft, and the client decides whether it can live with it — ACP
-        // gives that decision to the client, so refusing here would take it
-        // away (ADR §3.2).
-        _ => ProtocolVersion::V1,
-    }
+/// **The lower row is not our choice.** `SupportedAgentProtocols::
+/// highest_compatible` requires `requested >= V1`, so a `0` matches no arm and
+/// the router replies with `invalid_request`. Making it anything else would
+/// mean a transport shim ahead of the router rewriting the request — a parallel
+/// implementation of the SDK's negotiation, to rescue a version the schema crate
+/// calls a pre-release that "should likely be treated as unsupported". ADR §3.2
+/// claimed we never refuse; ADR §6.3 corrects it.
+pub fn negotiate(wanted: ProtocolVersion) -> Option<ProtocolVersion> {
+    // `>=` and not equality: the router selects the highest configured arm at
+    // or below the ask, so every version from `SERVED` upward reaches this one.
+    (wanted >= SERVED).then_some(SERVED)
 }
