@@ -76,7 +76,7 @@ fn a_json_run_writes_one_object_whose_success_and_reason_cannot_disagree() {
 
     assert_eq!(finished.code, Some(0), "stderr: {}", finished.stderr);
     let report = finished.report();
-    assert_eq!(report["v"], 4);
+    assert_eq!(report["v"], 5);
     assert_eq!(report["result"], "The answer.");
     assert_eq!(report["ok"], true);
     assert_eq!(report["exit_reason"], "done");
@@ -185,7 +185,7 @@ fn a_jsonl_run_writes_one_public_event_per_line() {
     // The version rides `session_started` and nothing else: a consumer learns
     // the schema once, from the event that opens the stream, and repeating it
     // on every line would be a number that could disagree with itself.
-    assert_eq!(finished.events()[0]["v"], 4);
+    assert_eq!(finished.events()[0]["v"], 5);
     assert!(
         finished.events()[1..]
             .iter()

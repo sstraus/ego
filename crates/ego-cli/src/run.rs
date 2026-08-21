@@ -312,19 +312,17 @@ async fn execute(args: Args, out: &Stdout, cancel: CancelToken) -> Result<Ended,
         message: err.to_string(),
     })?;
     let hosted = facts::supplied().map_err(usage)?;
-    let resolved = model::resolve(&slug, hosted, currency, &http)
-        .await
-        .map_err(|err| {
-            if model::is_provider_failure(&err) {
-                RunTermination::Provider {
-                    message: err.to_string(),
-                }
-            } else {
-                RunTermination::UsageError {
-                    message: err.to_string(),
-                }
+    let resolved = model::resolve(&slug, hosted, &http).await.map_err(|err| {
+        if model::is_provider_failure(&err) {
+            RunTermination::Provider {
+                message: err.to_string(),
             }
-        })?;
+        } else {
+            RunTermination::UsageError {
+                message: err.to_string(),
+            }
+        }
+    })?;
 
     let session_id = session::id_for(&args.session, &root).map_err(usage)?;
     let store_root = match args.session {
@@ -395,7 +393,7 @@ async fn execute(args: Args, out: &Stdout, cancel: CancelToken) -> Result<Ended,
         Model {
             generator: &generator,
             gate: &mut gate,
-            quote: resolved.pricing.clone(),
+            metering: resolved.metering.clone(),
             caps: resolved.capabilities.clone(),
             config,
         },

@@ -28,7 +28,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use ego_ai::catalogue::HostedModel;
+use ego_ai::catalogue::{self, HostedModel};
 use ego_core::budget::PricingQuote;
 use ego_core::cost::{Amount, CurrencyCode, PricingRevision};
 use ego_core::generator::capabilities::ModelCapabilities;
@@ -137,7 +137,7 @@ pub fn supplied() -> Result<Vec<(String, HostedModel)>, UsageError> {
                 slug,
                 HostedModel {
                     capabilities: supplied.capabilities,
-                    pricing: supplied.pricing.into(),
+                    metering: catalogue::tabulated(supplied.pricing.into()),
                 },
             )
         })
