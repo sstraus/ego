@@ -325,6 +325,15 @@ exit 5); **stdout is protocol-clean** in json/jsonl/acp modes, all diagnostics
 on stderr; agent files are a versioned format. CLI reference and completions
 are generated from the same clap definitions and snapshot-tested.
 
+**`--help` and `--version` are answers, not errors**: stdout, exit 0, and a
+usage line naming the command that was asked about — `ego ls --help` says
+`Usage: ego ls`, because `Usage: ego` describes an invocation that does not
+work. Spelled out because it was wrong in all three respects at once until
+2026-08-21: clap reports both through its error type alongside the genuine
+failures, and one conversion sent help to stderr at exit 2, which §4.3
+defines as a usage error. Asking what a command does is not misusing it, and
+a script that pipes `--help` must not get an empty stdout and a failure.
+
 
 
 `--instructions FILE` is the headless opt-in and is **not** ambient: it names
