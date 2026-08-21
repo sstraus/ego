@@ -91,6 +91,15 @@ pub trait WireFormat: fmt::Debug + Send + Sync {
 /// holding the base directly would be a mapping that could `set_path` it, and
 /// the difference between `join` and `set_path` on a base with a prefix is a
 /// request sent somewhere unintended.
+///
+/// **A guardrail, not an enforcement**, and the distinction is worth stating
+/// because the stronger claim is inviting and false. `join` itself accepts an
+/// absolute path, a `../` that climbs out of the prefix, and a whole other
+/// URL; and a mapping builds an [`HttpRequest`] itself, so it can put any URL
+/// in one whatever this type offers. What privacy buys is that the *accident*
+/// cannot happen — a mapping cannot reach for `set_path` on a base it never
+/// holds. A mapping determined to send its request elsewhere is not what this
+/// prevents, and nothing at this seam could.
 pub struct RequestTarget<'a> {
     base: &'a Url,
     headers: &'a [(String, String)],
