@@ -476,6 +476,7 @@ impl AttemptStream {
 
             AiEvent::TextDelta { .. }
             | AiEvent::ReasoningDelta { .. }
+            | AiEvent::ReasoningState(_)
             | AiEvent::ToolCall { .. } => {}
 
             // Deliberately not treated as proof of arrival: an `Error` can
@@ -510,6 +511,7 @@ impl AttemptStream {
             event,
             AiEvent::TextDelta { .. }
                 | AiEvent::ReasoningDelta { .. }
+                | AiEvent::ReasoningState(_)
                 | AiEvent::ToolCall { .. }
                 | AiEvent::Usage(_)
                 | AiEvent::ProviderCost { .. }

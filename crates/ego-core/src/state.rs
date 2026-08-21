@@ -12,6 +12,7 @@ use crate::cost::{CostDelta, CumulativeCost};
 use crate::event::domain::{DomainEvent, EventKind, ExitReason, OccupancyProvenance};
 use crate::event::id::{AttemptId, EventId, GenerationId, ItemId, Seq, SessionId, TurnId};
 use crate::generator::attempt::{AttemptRef, Outcome, UsageReport};
+use crate::generator::types::ReasoningState;
 
 /// Token counts, split by the categories providers price separately.
 ///
@@ -26,16 +27,100 @@ use crate::generator::attempt::{AttemptRef, Outcome, UsageReport};
 /// Used both as one generation's increment (`AiEvent::Usage`,
 /// `EventKind::UsageUpdated`) and as the session's running totals
 /// (`SessionState::usage`): the same shape, folded by `add`.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Usage {
     /// Input tokens billed at the full rate — not served from cache.
+    ///
+    /// **The partition direction is this type's, not a wire's**, and the
+    /// wires disagree: OpenAI's `prompt_tokens` *includes* its cache figures
+    /// while Anthropic's `input_tokens` *excludes* them, so the same
+    /// arithmetic applied to both is a silent factor-of-two in one direction
+    /// or the other. Here the four fields are disjoint and this one is what
+    /// is left after the two cache categories are taken out; a mapping that
+    /// receives an already-exclusive figure passes it through, and one that
+    /// receives an inclusive figure subtracts. Asserted per profile by check
+    /// 4 of `docs/decisions/2026-08-21-a-shared-shape-is-not-a-shared-contract.md`
+    /// §9, which is where it can actually fail.
     pub uncached_input_tokens: u64,
     /// Input tokens served from the provider's prompt cache.
     pub cache_read_tokens: u64,
-    /// Input tokens written into the provider's prompt cache.
+    /// Input tokens written into the provider's prompt cache at its standard
+    /// retention.
     pub cache_write_tokens: u64,
+    /// Input tokens written at an extended retention the request asked for.
+    ///
+    /// Its own category because every provider that offers one charges more
+    /// for it: Anthropic prices its 5-minute and 1-hour writes at 1.25× and
+    /// 2× the base input rate. Named standard/extended and not "5m"/"1h",
+    /// which are one vendor's numbers and would put a vendor's TTL in a
+    /// provider-neutral type; standard against extended is the distinction
+    /// every provider offering a choice actually makes. The whole
+    /// openai-completions family publishes one cache-write figure, which is
+    /// the standard one, so nothing there moves.
+    ///
+    /// A plain `u64` where [`Self::reasoning_tokens`] below is an `Option`,
+    /// and the asymmetry is the point: only a provider that *offers* an
+    /// extended retention can write at one, ego speaks to none that does, so
+    /// a record without this field was written by a run that provably wrote
+    /// nothing at extended retention. Zero is that run's measurement. The
+    /// reasoning split is the opposite case — a figure some rows publish and
+    /// this one used to discard.
+    #[serde(default)]
+    pub cache_write_extended_tokens: u64,
     /// Generated tokens, including reasoning tokens billed as output.
     pub output_tokens: u64,
+    /// How many of [`Self::output_tokens`] the provider attributed to
+    /// reasoning — **when it said**.
+    ///
+    /// `None` is not zero, and that is the whole reason this is an `Option`.
+    /// OpenRouter and xAI publish `completion_tokens_details.reasoning_tokens`
+    /// and Gemini publishes `total_thought_tokens`; **Ollama publishes
+    /// nothing**, so on that row the split is not merely undeclared but
+    /// unrecoverable after the fact. A `0` there would state a measurement
+    /// nobody made. The cost of getting this wrong is recorded live in
+    /// `crates/ego-ai/tests/ollama_reasoning.rs`: a turn whose visible answer
+    /// was the single character `9` reported 118 output tokens, 117 of them
+    /// reasoning, and the daemon reported none of that.
+    ///
+    /// This is the same deliberate reading `map_usage` already makes when it
+    /// treats an absent `prompt_tokens_details` as "all uncached" and says so
+    /// — an assumption written down is falsifiable by the next reader; one
+    /// left as a default is invisible to them.
+    ///
+    /// **Not a fifth category — a breakdown of the fourth.** All six wires
+    /// bill reasoning as output, so these tokens are already inside
+    /// `output_tokens`, and [`Self::total_tokens`] deliberately does not add
+    /// them. Gemini states thoughts as a separate summand; its mapping folds
+    /// them into `output_tokens` *and* reports them here.
+    ///
+    /// Skipped when unknown rather than written as `null`, on the rule
+    /// `EventKind::ToolCallStarted::call_id` already set and its codec test
+    /// pins: "nobody told us" gets one spelling on disk, and it is the same
+    /// spelling a log written before this field existed already has.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_tokens: Option<u64>,
+}
+
+/// A usage of nothing: every category counted, all of them zero.
+///
+/// Written out rather than derived because of the last field. `Default` is
+/// the identity of [`Usage::add`] — `SessionState` folds from it in three
+/// places — and the identity of a sum that treats "unknown" as absorbing is
+/// a known zero, not an unknown. A record *decoded* without the field is the
+/// other case and does get `None`: nothing predating the field ever stated
+/// one. The two differ on purpose, and the difference is exactly what the
+/// field exists to keep.
+impl Default for Usage {
+    fn default() -> Self {
+        Self {
+            uncached_input_tokens: 0,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+            cache_write_extended_tokens: 0,
+            output_tokens: 0,
+            reasoning_tokens: Some(0),
+        }
+    }
 }
 
 impl Usage {
@@ -46,10 +131,15 @@ impl Usage {
     /// occupancy — but only there, and only until the history changes, so
     /// occupancy has its own event and its own field rather than being read
     /// off the running totals. See `EventKind::ContextWindowUpdated`.
+    ///
+    /// [`Self::reasoning_tokens`] is absent from this sum on purpose: it is a
+    /// breakdown of `output_tokens` rather than a category beside it, and
+    /// adding it would count those tokens twice.
     pub fn total_tokens(&self) -> u64 {
         self.uncached_input_tokens
             .saturating_add(self.cache_read_tokens)
             .saturating_add(self.cache_write_tokens)
+            .saturating_add(self.cache_write_extended_tokens)
             .saturating_add(self.output_tokens)
     }
 
@@ -71,7 +161,20 @@ impl Usage {
         self.cache_write_tokens = self
             .cache_write_tokens
             .saturating_add(delta.cache_write_tokens);
+        self.cache_write_extended_tokens = self
+            .cache_write_extended_tokens
+            .saturating_add(delta.cache_write_extended_tokens);
         self.output_tokens = self.output_tokens.saturating_add(delta.output_tokens);
+        // Unknown is absorbing. A total that summed one generation's 117
+        // stated reasoning tokens with another generation that stated none is
+        // not 117 — it is at least 117 and unknown, and reporting the lower
+        // bound as the total is the same falsehood as defaulting the field to
+        // zero. Nothing is lost by this: each generation's own figure stays in
+        // the log, where it was written.
+        self.reasoning_tokens = match (self.reasoning_tokens, delta.reasoning_tokens) {
+            (Some(total), Some(delta)) => Some(total.saturating_add(delta)),
+            _ => None,
+        };
     }
 }
 
@@ -144,6 +247,16 @@ pub struct ItemState {
     pub args: String,
     /// Message and reasoning text, and a tool call's output.
     pub text: String,
+    /// A reasoning item's opaque continuation state, once its block closed.
+    ///
+    /// Its own field and not [`Self::text`]: the two are different values on
+    /// every wire that mints state, and a block can carry one without the
+    /// other in both directions — `redacted_thinking` has state and no
+    /// readable text, and three of the six wires publish readable reasoning
+    /// and mint nothing replayable. `None` means the block minted none, which
+    /// is why a reasoning item with text alone is not replayed.
+    #[serde(default)]
+    pub reasoning_state: Option<ReasoningState>,
     pub completed: bool,
     pub ok: Option<bool>,
 }
@@ -158,6 +271,7 @@ impl ItemState {
             tool_name: None,
             args: String::new(),
             text: String::new(),
+            reasoning_state: None,
             completed: false,
             ok: None,
         }

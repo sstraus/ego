@@ -17,7 +17,7 @@ pub mod sse;
 
 use ego_core::generator::attempt::DeliveryCertainty;
 use ego_core::generator::port::AiEvent;
-use ego_core::generator::types::StopReason;
+use ego_core::generator::types::{ErrorKind, StopReason};
 
 /// The events a generation that produced no terminal frame still owes.
 ///
@@ -35,7 +35,17 @@ use ego_core::generator::types::StopReason;
 pub fn failed(message: String, delivery: DeliveryCertainty) -> [AiEvent; 3] {
     [
         AiEvent::DeliveryObserved(delivery),
-        AiEvent::Error { message },
+        // INCOMPLETE: each of the three call sites knows more than this — a
+        // transport failure is `Transient`, a request this format cannot
+        // express is `Invalid`, and a non-200 carries a body that says which.
+        // Classifying them is this function taking the kind as an argument,
+        // and it happens with the rest of the mapping's error classification.
+        // `Unclassified` until then is the truth and not a placeholder: no
+        // provider code has been read.
+        AiEvent::Error {
+            message,
+            kind: ErrorKind::Unclassified,
+        },
         AiEvent::Stop(StopReason::Error),
     ]
 }

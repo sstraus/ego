@@ -457,7 +457,9 @@ mod reducer {
                         uncached_input_tokens: u64::MAX,
                         cache_read_tokens: u64::MAX,
                         cache_write_tokens: u64::MAX,
+                        cache_write_extended_tokens: u64::MAX,
                         output_tokens: u64::MAX,
+                        reasoning_tokens: Some(u64::MAX),
                     },
                     cost_delta: CostDelta::Unknown(
                         ego_core::cost::UnknownCost::ProviderReportedNoUsage,

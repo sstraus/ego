@@ -158,7 +158,7 @@ mod lifecycle {
     use ego_core::generator::fake::FakeGenerator;
     use ego_core::generator::port::{AiEvent, Generator};
     use ego_core::generator::types::{
-        Conversation, GenRequest, Message, Role, StopReason, ThinkingLevel,
+        Conversation, ErrorKind, GenRequest, Message, Role, StopReason, ThinkingLevel,
     };
     use ego_core::state::Usage;
     use futures::StreamExt;
@@ -222,7 +222,6 @@ mod lifecycle {
             thinking: ThinkingLevel::Off,
             max_output_tokens: Some(1_024),
             parallel_tool_calls: false,
-            reasoning_state: None,
         }
     }
 
@@ -241,7 +240,9 @@ mod lifecycle {
             uncached_input_tokens: uncached_input,
             cache_read_tokens: 0,
             cache_write_tokens: 0,
+            cache_write_extended_tokens: 0,
             output_tokens: output,
+            reasoning_tokens: None,
         }
     }
 
@@ -678,6 +679,7 @@ mod lifecycle {
     fn an_error_alone_is_not_read_as_proof_the_request_arrived() {
         let outcome = outcome_of(vec![AiEvent::Error {
             message: "connection refused".to_string(),
+            kind: ErrorKind::Transient,
         }]);
         assert_eq!(outcome.delivery(), DeliveryCertainty::DefinitelyUnsent);
         assert!(
@@ -703,6 +705,7 @@ mod lifecycle {
             AiEvent::DeliveryObserved(DeliveryCertainty::DefinitelyUnsent),
             AiEvent::Error {
                 message: "loopback-only policy refused api.example".to_string(),
+                kind: ErrorKind::Transient,
             },
             AiEvent::Stop(StopReason::Error),
         ]);

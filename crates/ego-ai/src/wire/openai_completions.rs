@@ -57,7 +57,7 @@ use ego_core::cost::Money;
 use ego_core::generator::attempt::DeliveryCertainty;
 use ego_core::generator::port::AiEvent;
 use ego_core::generator::types::{
-    ContentBlock, GenRequest, Message, Role, StopReason, ThinkingLevel,
+    ContentBlock, ErrorKind, GenRequest, Message, Role, StopReason, ThinkingLevel,
 };
 use ego_core::state::Usage;
 use futures::stream::{self, BoxStream, StreamExt};
@@ -238,6 +238,11 @@ fn wire_messages(messages: &[Message]) -> Vec<WireMessage<'_>> {
         let mut tool_calls = Vec::new();
         for block in &message.content {
             match block {
+                // Unreachable in practice: `request_body` refuses a history
+                // carrying one before this runs, because this schema has
+                // nowhere to put it. Dropped rather than refused a second
+                // time so that the refusal stays in one place.
+                ContentBlock::Reasoning { .. } => {}
                 ContentBlock::Text { text: chunk } => {
                     if !text.is_empty() {
                         text.push('\n');
@@ -305,7 +310,13 @@ fn flush<'a>(
 /// URL or a credential in it — the body is the contract with the provider;
 /// the endpoint and the auth header are the provider row's business.
 pub fn request_body(req: &GenRequest) -> Result<Vec<u8>, RequestRefused> {
-    if req.reasoning_state.is_some() {
+    let carries_reasoning = req
+        .messages
+        .messages()
+        .iter()
+        .flat_map(|message| &message.content)
+        .any(|block| matches!(block, ContentBlock::Reasoning { .. }));
+    if carries_reasoning {
         return Err(RequestRefused::ReasoningStateNotCarriable);
     }
     let messages = wire_messages(req.messages.messages());
@@ -425,6 +436,12 @@ struct WireUsage {
     completion_tokens: u64,
     #[serde(default)]
     prompt_tokens_details: Option<PromptTokensDetails>,
+    /// Absent on rows that publish no reasoning breakdown, which is why the
+    /// `Option` survives all the way to
+    /// [`Usage::reasoning_tokens`](ego_core::state::Usage::reasoning_tokens)
+    /// rather than being flattened to a zero here.
+    #[serde(default)]
+    completion_tokens_details: Option<CompletionTokensDetails>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -433,6 +450,12 @@ struct PromptTokensDetails {
     cached_tokens: u64,
     #[serde(default)]
     cache_write_tokens: u64,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct CompletionTokensDetails {
+    #[serde(default)]
+    reasoning_tokens: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -475,7 +498,22 @@ fn map_usage(usage: &WireUsage) -> Option<Usage> {
         uncached_input_tokens,
         cache_read_tokens,
         cache_write_tokens,
+        // A measured zero, not an absent figure. This wire's schema
+        // partitions `prompt_tokens` into cached and cache-write and has no
+        // extended-retention category at all, so every provider speaking it
+        // wrote nothing at an extended retention.
+        cache_write_extended_tokens: 0,
         output_tokens: usage.completion_tokens,
+        // Read where it is published and left unknown where it is not — the
+        // same opportunistic, uniform decode the sibling ADR §4 rules for
+        // every extension field, with no provider id anywhere near it.
+        // OpenRouter and xAI fill this in; Ollama sends no
+        // `completion_tokens_details` at all, and `None` says so rather than
+        // claiming it reasoned for nothing.
+        reasoning_tokens: usage
+            .completion_tokens_details
+            .as_ref()
+            .map(|details| details.reasoning_tokens),
     })
 }
 
@@ -603,6 +641,7 @@ impl StreamDecoder {
                           the prompt it broke down, so no usage figure could be \
                           trusted; this generation settles at its bound"
                     .to_string(),
+                kind: ErrorKind::Unclassified,
             });
         }
         // Before the usage frame, deliberately. The two are one observation
@@ -640,6 +679,7 @@ impl StreamDecoder {
                 self.calls.clear();
                 out.push(AiEvent::Error {
                     message: self.incomplete_message(transport.as_ref(), abandoned),
+                    kind: ErrorKind::Unclassified,
                 });
                 out.push(AiEvent::Stop(StopReason::Error));
             }
@@ -824,6 +864,11 @@ impl StreamDecoder {
             "content_filter" => {
                 out.push(AiEvent::Error {
                     message: "the provider's content filter stopped the generation".to_string(),
+                    // Refused and not `Invalid`: the request was well formed
+                    // and the provider declined to answer it. No retry of the
+                    // same request changes that either way, but the two are
+                    // different facts and only one of them blames the schema.
+                    kind: ErrorKind::Refused,
                 });
                 StopReason::Error
             }
@@ -833,6 +878,7 @@ impl StreamDecoder {
                         "the provider reported a finish_reason this wire format \
                          does not know: {other}"
                     ),
+                    kind: ErrorKind::Unclassified,
                 });
                 StopReason::Error
             }
@@ -847,6 +893,7 @@ impl StreamDecoder {
                     "the provider streamed {conflict}, so which call the \
                      arguments belong to cannot be told; it was not dispatched"
                 ),
+                kind: ErrorKind::Unclassified,
             });
             return;
         }
@@ -860,12 +907,14 @@ impl StreamDecoder {
                     "the provider streamed a tool call at index {index} with no id, \
                      so its result could never be attributed back to it"
                 ),
+                kind: ErrorKind::Unclassified,
             });
             return;
         };
         let Some(name) = call.name.filter(|name| !name.is_empty()) else {
             out.push(AiEvent::Error {
                 message: format!("tool call {call_id} arrived with no function name"),
+                kind: ErrorKind::Unclassified,
             });
             return;
         };

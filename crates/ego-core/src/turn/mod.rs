@@ -451,9 +451,6 @@ impl<'a> TurnLoop<'a> {
             thinking: self.config.thinking,
             max_output_tokens: self.config.max_output_tokens,
             parallel_tool_calls: self.config.parallel_tool_calls,
-            // Nothing carries reasoning across generations yet: `ego-core`
-            // never fabricates one, and no wire format produces one to carry.
-            reasoning_state: None,
         };
 
         // Before the gate, deliberately: a reservation taken for a request
@@ -678,6 +675,13 @@ impl<'a> TurnLoop<'a> {
                         .append(turn, Some(item), None, EventKind::ReasoningDelta { text })
                         .map(|_| ())
                 }
+                // INCOMPLETE: this must journal the state against the open
+                // reasoning item and then close it, so the next
+                // `ReasoningDelta` opens a new one. Both halves need
+                // `EventKind::ReasoningState`, which does not exist yet;
+                // closing the item without recording why would lose the state
+                // rather than defer it.
+                AiEvent::ReasoningState(_) => Ok(()),
                 AiEvent::ToolCall {
                     call_id,
                     name,
@@ -745,7 +749,11 @@ impl<'a> TurnLoop<'a> {
                     stated_cost = Some(cost);
                     Ok(())
                 }
-                AiEvent::Error { message } => self
+                // INCOMPLETE: `kind` is dropped here because `EventKind::Error`
+                // has no field to hold it yet. It gains one, and this carries
+                // it through to `ExitReason`, in the same change — nothing
+                // downstream may branch on an error until then.
+                AiEvent::Error { message, kind: _ } => self
                     .journal
                     .append(turn, None, None, EventKind::Error { message })
                     .map(|_| ()),

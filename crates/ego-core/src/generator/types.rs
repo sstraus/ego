@@ -1,5 +1,5 @@
 //! The provider-neutral conversation model: `GenRequest`, `Conversation`,
-//! `Message`, `ContentBlock`, `ToolDescriptor`, `StopReason`,
+//! `Message`, `ContentBlock`, `ToolDescriptor`, `StopReason`, `ErrorKind`,
 //! `ThinkingLevel`, `ReasoningState`.
 //!
 //! See `ARCHITECTURE.md` §3.1 and `docs/02-pi.md` §2 (the pi taxonomy this
@@ -61,6 +61,45 @@ pub enum StopReason {
     Deferred,
 }
 
+/// Why a provider error happened, in the only terms a caller can act on.
+///
+/// Four values, each with a distinct action. Not the twenty-four of
+/// OpenRouter's `error_type`: that is a fine vocabulary and it is
+/// OpenRouter's, and six of its values describe image generation this
+/// repository does not do. The adapter maps its provider's spelling onto
+/// these; the mapping is data, and the branch stays in core.
+///
+/// Carrying the provider's own code as a string beside the message was
+/// rejected for the reason that a string only helps if something matches on
+/// it, and the only thing that would is `turn/` — matching on a provider's
+/// spelling in `turn/` being exactly what
+/// `docs/decisions/2026-08-21-a-shared-shape-is-not-a-shared-contract.md` §5's
+/// name-absence test exists to forbid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ErrorKind {
+    /// Momentarily unable: overload, rate limit, timeout, upstream
+    /// unavailability. A retry may succeed.
+    Transient,
+    /// The request is wrong and will be wrong again: schema, context length,
+    /// an unsupported parameter. No retry changes it.
+    Invalid,
+    /// The account or the credential is refused: unauthenticated, forbidden,
+    /// out of credit. No retry changes it, and the request was not the
+    /// problem.
+    Refused,
+    /// The provider said something this mapping does not classify. Treated as
+    /// non-retryable.
+    ///
+    /// The default, and it fails closed on the precedent
+    /// [`ReasoningEffortSupport::Unknown`](super::capabilities::ReasoningEffortSupport::Unknown)
+    /// set: a provider that stated nothing is not a provider that stated
+    /// "retryable". Failing closed costs one attempt; failing open costs
+    /// `--retry N` attempts and a wrong exit code.
+    #[default]
+    Unclassified,
+}
+
 /// Who authored a `Message`.
 ///
 /// Three roles, not four: a tool *result* is a [`ContentBlock`] inside the
@@ -88,19 +127,52 @@ pub enum Role {
 pub enum ContentBlock {
     /// Visible text.
     Text { text: String },
+    /// Reasoning the model produced, kept only so it can be handed back.
+    ///
+    /// Carries no text: what a human reads rides `AiEvent::ReasoningDelta`
+    /// and the journal, and the two are not the same value — a block sent
+    /// with `display: "omitted"`, and every `redacted_thinking` block, has
+    /// state and no readable text at all.
+    ///
+    /// A block rather than a field beside the content for the reason this
+    /// type's own doc gives one line up: reasoning state is *positional*.
+    /// Anthropic requires a turn's thinking to precede its `tool_use`, and
+    /// documents a hard `400` when the blocks are not replayed exactly,
+    /// "including blocks whose `thinking` field is empty". A second carrier
+    /// beside the ordered list would be two places for one fact.
+    Reasoning { state: ReasoningState },
     /// The assistant asked for a tool to be run.
     ToolUse {
-        /// The provider's own id for this call. Opaque and unguessable: the
-        /// provider validates the id it issued, so a locally minted
-        /// substitute (an `ItemId`, say) is a rejected request.
+        /// The correlation token **of the protocol that produced this call**.
+        ///
+        /// Opaque and unguessable where the provider issues one, because the
+        /// provider validates the id it issued — so a locally minted
+        /// substitute is a rejected request. Where the provider issues none
+        /// (Ollama's `api.ToolCall.ID` is `json:"id,omitempty"` and is
+        /// populated by per-model parsers; Gemini's legacy `FunctionCall.id`
+        /// is optional), the mapping mints one, and may do so **only because
+        /// it is also the code that will send it back**.
+        ///
+        /// Both of those are properties of a protocol, not of this field, and
+        /// stating one of them here as though it were the port's was the
+        /// original error. What the port requires is only that the token
+        /// exists: it is the key
+        /// [`Conversation`]'s three relational invariants are defined over.
         call_id: String,
         name: String,
-        /// The arguments exactly as the provider sent them, JSON or not.
+        /// The arguments, JSON or not.
         ///
         /// A `String` and not a `serde_json::Value` on purpose: a tool call
         /// truncated mid-stream arrives as invalid JSON, and that is
         /// *evidence about the stream*. Parsing here would discard it at the
         /// one seam that can still see it.
+        ///
+        /// "The verbatim bytes the model produced" is a property of protocols
+        /// that transmit **string fragments**, not of this field — Gemini
+        /// sends `functionCall.args` as a JSON object, and its mapping
+        /// serialises it, which loses the original textual representation and
+        /// not the value. Same correction as `call_id` above, same original
+        /// mistake: one protocol's guarantee documented as the port's.
         args: String,
     },
     /// A tool's answer to one call.
@@ -219,7 +291,10 @@ impl Conversation {
         });
         for (role, block) in blocks {
             match block {
-                ContentBlock::Text { .. } => {}
+                // Neither takes part in the call/result relation these
+                // invariants are about. Reasoning is ordered, and the block
+                // list is what carries that; nothing here needs to know it.
+                ContentBlock::Text { .. } | ContentBlock::Reasoning { .. } => {}
                 ContentBlock::ToolUse { call_id, .. } => {
                     if role != Role::Assistant {
                         return Err(HistoryError::CallFromNonAssistant {
@@ -293,11 +368,24 @@ pub struct ToolDescriptor {
 }
 
 /// Opaque, provider-private reasoning-continuation state (e.g. an encrypted
-/// reasoning signature or a deferred-response handle). `ego-core` never
-/// interprets the contents — only whether a target `ModelCapabilities`
-/// declares it can carry this over (`capabilities::ReasoningCarryover`).
+/// reasoning signature). `ego-core` never interprets the contents — only
+/// whether a target `ModelCapabilities` declares it can carry this over
+/// (`capabilities::ReasoningCarryover`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ReasoningState(pub String);
+pub struct ReasoningState {
+    /// Opaque, provider-private. Never parsed, never modified, never
+    /// reordered — three separate documented `400`s.
+    pub blob: String,
+    /// Which dialect minted it, filled by the mapping that decoded it.
+    ///
+    /// Data, not a branch: compared for equality against the target model's
+    /// own tag, never matched on. It exists because
+    /// [`ReasoningCarryover::SameProviderOnly`](super::capabilities::ReasoningCarryover::SameProviderOnly)
+    /// is a property of the *target* and says nothing about who minted the
+    /// state — so without a tag, Anthropic state passes the check for a
+    /// Gemini target and gets sent.
+    pub dialect: String,
+}
 
 /// A request to generate the next assistant turn.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -309,14 +397,14 @@ pub struct GenRequest {
     /// The history, already checked. A `Conversation` and not a
     /// `Vec<Message>` so that an unvalidated history cannot reach a
     /// [`Generator`](super::port::Generator) at all.
+    ///
+    /// Reasoning state carried over from a prior generation rides here too,
+    /// as [`ContentBlock::Reasoning`]. It used to be a second field beside
+    /// this one — the same fact in two places, and an input nothing in the
+    /// tree could produce.
     pub messages: Conversation,
     pub tools: Vec<ToolDescriptor>,
     pub thinking: ThinkingLevel,
     pub max_output_tokens: Option<u64>,
     pub parallel_tool_calls: bool,
-    /// Reasoning state carried over from a prior generation, if any. Present
-    /// only when continuing a chain of thought across generations (e.g. a
-    /// fallback or a follow-up call) — see
-    /// `capabilities::ModelCapabilities::fallback_gaps`.
-    pub reasoning_state: Option<ReasoningState>,
 }

@@ -32,7 +32,8 @@ use ego_core::generator::capabilities::{
 };
 use ego_core::generator::port::{AiEvent, Generator};
 use ego_core::generator::types::{
-    Conversation, GenRequest, Message, ReasoningState, Role, StopReason, ThinkingLevel,
+    ContentBlock, Conversation, GenRequest, Message, ReasoningState, Role, StopReason,
+    ThinkingLevel,
 };
 use futures::StreamExt;
 use futures::future::BoxFuture;
@@ -91,7 +92,27 @@ fn request() -> GenRequest {
         thinking: ThinkingLevel::Off,
         max_output_tokens: Some(1_024),
         parallel_tool_calls: false,
-        reasoning_state: None,
+    }
+}
+
+/// [`request`] with one reasoning block in its history — the thing this wire
+/// format has nowhere to put, and refuses rather than drops.
+fn request_carrying_reasoning() -> GenRequest {
+    GenRequest {
+        messages: Conversation::new(vec![
+            Message::text(Role::User, "list the files"),
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::Reasoning {
+                    state: ReasoningState {
+                        blob: "opaque".to_string(),
+                        dialect: "anthropic-messages".to_string(),
+                    },
+                }],
+            },
+        ])
+        .expect("a reasoning block takes no part in the call invariants"),
+        ..request()
     }
 }
 
@@ -244,8 +265,7 @@ async fn a_request_this_format_cannot_express_stops_the_generation() {
     let mut gate = BudgetGate::new(usd("10"));
     let generator = WireGenerator::new(row(), Arc::clone(&http) as Arc<dyn Http>);
 
-    let mut req = request();
-    req.reasoning_state = Some(ReasoningState("opaque".to_string()));
+    let req = request_carrying_reasoning();
     let attempt = attempt_for(&mut gate, &req);
 
     let events: Vec<AiEvent> = generator.generate(req, attempt).collect().await;
@@ -269,7 +289,7 @@ async fn a_request_this_format_cannot_express_stops_the_generation() {
         "{events:?}"
     );
     let named = events.iter().any(
-        |event| matches!(event, AiEvent::Error { message } if message.contains("reasoning state")),
+        |event| matches!(event, AiEvent::Error { message, .. } if message.contains("reasoning state")),
     );
     assert!(named, "the error must say what it refused: {events:?}");
 }
@@ -283,8 +303,7 @@ fn a_locally_refused_generation_still_settles_and_releases_the_hold() {
     let mut gate = BudgetGate::new(usd("10"));
     let generator = WireGenerator::new(row(), http as Arc<dyn Http>);
 
-    let mut req = request();
-    req.reasoning_state = Some(ReasoningState("opaque".to_string()));
+    let req = request_carrying_reasoning();
     let attempt = attempt_for(&mut gate, &req);
 
     let mut stream = generator.generate(req, attempt);

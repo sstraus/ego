@@ -27,7 +27,7 @@ use ego_core::generator::capabilities::{
 use ego_core::generator::fake::FakeGenerator;
 use ego_core::generator::port::{AiEvent, Generator};
 use ego_core::generator::types::{
-    ContentBlock, GenRequest, Role, StopReason, ThinkingLevel, ToolDescriptor,
+    ContentBlock, ErrorKind, GenRequest, Role, StopReason, ThinkingLevel, ToolDescriptor,
 };
 use ego_core::permit::{
     CanonPath, GuardedIo, Op, Permit, PolicyEngine, PrepareCtx, PreparedCall, ToolError,
@@ -425,7 +425,9 @@ mod turn {
             uncached_input_tokens: uncached_input,
             cache_read_tokens: cache_read,
             cache_write_tokens: cache_write,
+            cache_write_extended_tokens: 0,
             output_tokens: output,
+            reasoning_tokens: None,
         }
     }
 
@@ -969,6 +971,7 @@ mod turn {
         let fx = Fixture::new(vec![vec![
             AiEvent::Error {
                 message: "the provider fell over".to_string(),
+                kind: ErrorKind::Unclassified,
             },
             AiEvent::Stop(StopReason::Error),
         ]]);

@@ -11,7 +11,21 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
-use super::types::{GenRequest, ThinkingLevel};
+use super::types::{ContentBlock, GenRequest, ReasoningState, ThinkingLevel};
+
+/// Every reasoning state `req`'s history carries, in the order it carries
+/// them.
+fn carried_reasoning(req: &GenRequest) -> Vec<&ReasoningState> {
+    req.messages
+        .messages()
+        .iter()
+        .flat_map(|message| &message.content)
+        .filter_map(|block| match block {
+            ContentBlock::Reasoning { state } => Some(state),
+            _ => None,
+        })
+        .collect()
+}
 
 /// Whether a model can accept reasoning state carried over from another
 /// generation (its own prior turn, or — for a fallback — a different model).
@@ -218,9 +232,11 @@ impl ModelCapabilities {
     pub fn request_gaps(&self, req: &GenRequest) -> Vec<CapabilityGap> {
         let mut gaps = Vec::new();
 
-        if req.reasoning_state.is_some()
-            && self.reasoning_carryover == ReasoningCarryover::Unsupported
-        {
+        // Read off the conversation rather than a field beside it: the state
+        // is positional, so the block list is the only place it can live, and
+        // a second copy on the request would be the same fact twice.
+        let carried = carried_reasoning(req);
+        if !carried.is_empty() && self.reasoning_carryover == ReasoningCarryover::Unsupported {
             gaps.push(CapabilityGap::ReasoningStateCarryoverUnsupported);
         }
         if req.parallel_tool_calls && !self.supports_parallel_tool_calls {

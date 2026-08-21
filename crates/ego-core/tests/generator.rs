@@ -18,8 +18,8 @@ use ego_core::generator::capabilities::{
 use ego_core::generator::fake::FakeGenerator;
 use ego_core::generator::port::{AiEvent, Generator};
 use ego_core::generator::types::{
-    Conversation, GenRequest, Message, ReasoningState, Role, StopReason, ThinkingLevel,
-    ToolDescriptor,
+    ContentBlock, Conversation, GenRequest, Message, ReasoningState, Role, StopReason,
+    ThinkingLevel, ToolDescriptor,
 };
 use ego_core::state::{SessionState, Usage};
 use futures::StreamExt;
@@ -48,7 +48,31 @@ mod generator {
             thinking: ThinkingLevel::Off,
             max_output_tokens: Some(1024),
             parallel_tool_calls: false,
-            reasoning_state: None,
+        }
+    }
+
+    /// [`gen_request`] with one reasoning block in its history.
+    ///
+    /// The state used to be a field beside the conversation; it is a
+    /// [`ContentBlock`] inside it now, because it is positional — so
+    /// "carries reasoning state" is a question about the history and the
+    /// checks that answer it read the history.
+    fn request_carrying_reasoning() -> GenRequest {
+        GenRequest {
+            messages: Conversation::new(vec![
+                Message::text(Role::User, "list the files".to_string()),
+                Message {
+                    role: Role::Assistant,
+                    content: vec![ContentBlock::Reasoning {
+                        state: ReasoningState {
+                            blob: "provider-opaque-token".to_string(),
+                            dialect: "anthropic-messages".to_string(),
+                        },
+                    }],
+                },
+            ])
+            .expect("a reasoning block takes no part in the call invariants"),
+            ..gen_request()
         }
     }
 
@@ -184,6 +208,9 @@ mod generator {
 
         fn assemble(&mut self, event: &AiEvent) -> Vec<DomainEvent> {
             match event {
+                // Not journalled by this stub assembler: it exists to test
+                // turn assembly, and the reasoning carrier is `turn/drain`'s.
+                AiEvent::ReasoningState(_) => Vec::new(),
                 AiEvent::TextDelta { text } => {
                     let item = *self.message_item.get_or_insert_with(ItemId::new);
                     let env = self.envelope(Some(item));
@@ -264,7 +291,7 @@ mod generator {
                 // loop, which does know its own metering, is where a stated
                 // cost becomes a `UsageUpdated`.
                 AiEvent::ProviderCost { .. } => Vec::new(),
-                AiEvent::Error { message } => {
+                AiEvent::Error { message, .. } => {
                     let env = self.envelope(None);
                     vec![DomainEvent {
                         env,
@@ -297,7 +324,9 @@ mod generator {
                 uncached_input_tokens: 12,
                 cache_read_tokens: 0,
                 cache_write_tokens: 0,
+                cache_write_extended_tokens: 0,
                 output_tokens: 34,
+                reasoning_tokens: None,
             }),
             AiEvent::Stop(StopReason::ToolUse),
         ];
@@ -342,7 +371,9 @@ mod generator {
                     uncached_input_tokens: 12,
                     cache_read_tokens: 0,
                     cache_write_tokens: 0,
+                    cache_write_extended_tokens: 0,
                     output_tokens: 34,
+                    reasoning_tokens: None,
                 },
                 // 12 x 0.000003 + 34 x 0.000015 = 0.000546, exactly.
                 cost_delta: CostDelta::Known {
@@ -626,10 +657,7 @@ mod generator {
     fn generator_fallback_reasoning_carryover_gap_is_detected() {
         let current = capabilities(ReasoningCarryover::Portable);
         let target = capabilities(ReasoningCarryover::Unsupported);
-        let req = GenRequest {
-            reasoning_state: Some(ReasoningState("provider-opaque-token".to_string())),
-            ..gen_request()
-        };
+        let req = request_carrying_reasoning();
 
         let gaps = current.fallback_gaps(&target, &req);
 
@@ -640,7 +668,7 @@ mod generator {
     fn generator_fallback_without_reasoning_state_has_no_carryover_gap() {
         let current = capabilities(ReasoningCarryover::Portable);
         let target = capabilities(ReasoningCarryover::Unsupported);
-        let req = gen_request(); // reasoning_state: None
+        let req = gen_request(); // no reasoning block in its history
 
         let gaps = current.fallback_gaps(&target, &req);
 

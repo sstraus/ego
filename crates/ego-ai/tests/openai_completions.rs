@@ -32,7 +32,7 @@ use ego_ai::wire::openai_completions::{
 use ego_core::generator::attempt::DeliveryCertainty;
 use ego_core::generator::port::AiEvent;
 use ego_core::generator::types::{
-    ContentBlock, Conversation, GenRequest, Message, ReasoningState, Role, StopReason,
+    ContentBlock, Conversation, ErrorKind, GenRequest, Message, ReasoningState, Role, StopReason,
     ThinkingLevel, ToolDescriptor,
 };
 use ego_core::state::Usage;
@@ -68,7 +68,6 @@ fn golden_request() -> GenRequest {
         thinking: ThinkingLevel::High,
         max_output_tokens: Some(4096),
         parallel_tool_calls: true,
-        reasoning_state: None,
     }
 }
 
@@ -257,8 +256,21 @@ fn an_assistant_turn_of_pure_tool_calls_sends_no_content_key() {
 /// exactly the kind `ModelCapabilities::fallback_gaps` exists to catch.
 #[test]
 fn reasoning_state_is_refused_rather_than_dropped() {
-    let mut req = golden_request();
-    req.reasoning_state = Some(ReasoningState("opaque".to_string()));
+    let req = GenRequest {
+        messages: conversation(vec![
+            Message::text(Role::User, "What is in ./src?"),
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::Reasoning {
+                    state: ReasoningState {
+                        blob: "opaque".to_string(),
+                        dialect: "anthropic-messages".to_string(),
+                    },
+                }],
+            },
+        ]),
+        ..golden_request()
+    };
     assert_eq!(
         request_body(&req),
         Err(RequestRefused::ReasoningStateNotCarriable)
@@ -330,11 +342,16 @@ fn a_golden_transcript_decodes_to_an_exact_event_sequence() {
                 text: "file — perché no? 😀".to_string()
             },
             // 1000 prompt tokens = 400 cached + 100 written + 500 uncached.
+            // The 180 reasoning tokens are *inside* the 250 output tokens,
+            // not beside them: this golden's own `total_tokens` is 1250, and
+            // the breakdown is read because the transcript publishes one.
             AiEvent::Usage(Usage {
                 uncached_input_tokens: 500,
                 cache_read_tokens: 400,
                 cache_write_tokens: 100,
+                cache_write_extended_tokens: 0,
                 output_tokens: 250,
+                reasoning_tokens: Some(180),
             }),
             AiEvent::Stop(StopReason::Stop),
         ],
@@ -384,7 +401,9 @@ fn a_usage_report_without_a_cache_breakdown_is_all_uncached() {
                 uncached_input_tokens: 30,
                 cache_read_tokens: 0,
                 cache_write_tokens: 0,
+                cache_write_extended_tokens: 0,
                 output_tokens: 7,
+                reasoning_tokens: None,
             }),
             AiEvent::Stop(StopReason::Stop),
         ]
@@ -413,7 +432,7 @@ fn a_usage_report_whose_parts_exceed_its_total_is_discarded_not_repaired() {
     );
     assert!(
         events.iter().any(|event| match event {
-            AiEvent::Error { message } => message.contains("breakdown"),
+            AiEvent::Error { message, .. } => message.contains("breakdown"),
             _ => false,
         }),
         "and the caller has to be told why the turn settles at its bound: {events:?}"
@@ -447,7 +466,9 @@ fn a_restated_usage_total_is_not_added_to_itself() {
                 uncached_input_tokens: 100,
                 cache_read_tokens: 0,
                 cache_write_tokens: 0,
+                cache_write_extended_tokens: 0,
                 output_tokens: 40,
+                reasoning_tokens: None,
             }),
             AiEvent::Stop(StopReason::Stop),
         ],
@@ -477,7 +498,9 @@ fn tool_call_arguments_are_assembled_by_index_across_interleaved_fragments() {
                 uncached_input_tokens: 800,
                 cache_read_tokens: 0,
                 cache_write_tokens: 0,
+                cache_write_extended_tokens: 0,
                 output_tokens: 64,
+                reasoning_tokens: None,
             }),
             AiEvent::Stop(StopReason::ToolUse),
         ],
@@ -590,7 +613,7 @@ fn a_finish_reason_maps_to_the_stop_it_names() {
         );
         if expected == StopReason::Error {
             let named = events.iter().any(|event| match event {
-                AiEvent::Error { message } => {
+                AiEvent::Error { message, .. } => {
                     message.contains(reason) || reason == "content_filter"
                 }
                 _ => false,
@@ -623,7 +646,7 @@ fn a_stream_cut_mid_frame_is_an_error_and_not_a_short_answer() {
     );
     assert_eq!(events.last(), Some(&AiEvent::Stop(StopReason::Error)));
     let explained = events.iter().any(|event| match event {
-        AiEvent::Error { message } => message.contains("connection reset by peer"),
+        AiEvent::Error { message, .. } => message.contains("connection reset by peer"),
         _ => false,
     });
     assert!(
@@ -682,7 +705,7 @@ fn a_tool_call_cut_before_its_finish_reason_is_not_dispatched() {
     );
     assert_eq!(events.last(), Some(&AiEvent::Stop(StopReason::Error)));
     let counted = events.iter().any(|event| match event {
-        AiEvent::Error { message } => message.contains("discarded"),
+        AiEvent::Error { message, .. } => message.contains("discarded"),
         _ => false,
     });
     assert!(counted, "dropping them must be said out loud: {events:?}");
@@ -705,7 +728,7 @@ fn a_tool_call_the_provider_never_named_is_reported_rather_than_invented() {
     );
     assert!(
         events.iter().any(|event| match event {
-            AiEvent::Error { message } => message.contains("no id"),
+            AiEvent::Error { message, .. } => message.contains("no id"),
             _ => false,
         }),
         "{events:?}"
@@ -760,7 +783,8 @@ fn two_ids_at_one_tool_call_index_are_reported_rather_than_spliced() {
     );
     assert!(
         events.iter().any(|event| match event {
-            AiEvent::Error { message } => message.contains("call_a") && message.contains("call_b"),
+            AiEvent::Error { message, .. } =>
+                message.contains("call_a") && message.contains("call_b"),
             _ => false,
         }),
         "the error must name both ids it could not choose between: {events:?}"
@@ -851,7 +875,8 @@ async fn an_error_status_is_reported_with_what_the_provider_said() {
             AiEvent::DeliveryObserved(DeliveryCertainty::PossiblySent),
             AiEvent::Error {
                 message: "the provider returned HTTP 429: Rate limit reached for gpt-5.1"
-                    .to_string()
+                    .to_string(),
+                kind: ErrorKind::Unclassified,
             },
             AiEvent::Stop(StopReason::Error),
         ]
@@ -884,7 +909,7 @@ async fn a_request_that_never_left_says_so() {
     assert_eq!(events.last(), Some(&AiEvent::Stop(StopReason::Error)));
     assert!(
         events.iter().any(|event| match event {
-            AiEvent::Error { message } => message.contains("api.openai.com"),
+            AiEvent::Error { message, .. } => message.contains("api.openai.com"),
             _ => false,
         }),
         "the refusal must still name what it refused: {events:?}"

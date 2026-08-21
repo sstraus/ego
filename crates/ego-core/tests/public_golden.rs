@@ -33,14 +33,21 @@ mod public_golden {
 
     const SESSION: &str = "00000000-0000-0000-0000-000000000001";
 
-    /// Tokens across all four priced categories, so the golden pins every
-    /// one of them rather than only the two the old input/output pair had.
+    /// Tokens across every priced category, so the golden pins each of them
+    /// rather than only the two the old input/output pair had.
+    ///
+    /// The reasoning split is deliberately left unknown: this fixture stands
+    /// for a row that publishes no breakdown, and the golden is therefore
+    /// also the pin on how *unknown* crosses the public boundary — which a
+    /// zero would have quietly replaced with a claim.
     fn tokens(uncached_input: u64, cache_read: u64, cache_write: u64, output: u64) -> Usage {
         Usage {
             uncached_input_tokens: uncached_input,
             cache_read_tokens: cache_read,
             cache_write_tokens: cache_write,
+            cache_write_extended_tokens: 0,
             output_tokens: output,
+            reasoning_tokens: None,
         }
     }
 

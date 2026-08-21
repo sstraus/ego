@@ -115,7 +115,6 @@ mod budget {
             thinking: ThinkingLevel::Off,
             max_output_tokens,
             parallel_tool_calls: false,
-            reasoning_state: None,
         }
     }
 
@@ -124,7 +123,9 @@ mod budget {
             uncached_input_tokens: uncached_input,
             cache_read_tokens: cache_read,
             cache_write_tokens: cache_write,
+            cache_write_extended_tokens: 0,
             output_tokens: output,
+            reasoning_tokens: None,
         }
     }
 
