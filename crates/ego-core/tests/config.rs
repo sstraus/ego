@@ -417,11 +417,16 @@ fn config_no_layer_writing_a_budget_leaves_no_ceiling_at_all() {
 /// deny beats an allow is now decided per call, by the engine, against a
 /// canonical `PreparedCall`.
 ///
-/// So the property did not lose its test — it changed owner, and until the
-/// engine-side test exists nothing checks it. A green test whose *name* claims
-/// a security property nothing checks is how the next person concludes the
-/// property is covered, which is why the name moved with the property rather
-/// than staying here to look reassuring.
+/// So the property did not lose its test — it changed owner. The owner is
+/// `tests/permit.rs`'s
+/// `permit_step1_a_deny_beats_an_allow_the_old_string_match_would_have_kept`,
+/// which uses an allow *narrower* than the deny: that is the case the retain
+/// let through, and the case a test with equal strings cannot see.
+///
+/// The two together are the whole property, and neither half is it alone.
+/// A green test whose *name* claims a security property nothing checks is how
+/// the next person concludes the property is covered, which is why the name
+/// moved with the property rather than staying here to look reassuring.
 ///
 /// What is checked here is real and still worth checking: a `Flags` layer that
 /// sets `deny = []` would otherwise overwrite the system layer's deny outright,

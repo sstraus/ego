@@ -30,8 +30,8 @@ use ego_core::generator::types::{
     ContentBlock, GenRequest, Role, StopReason, ThinkingLevel, ToolDescriptor,
 };
 use ego_core::permit::{
-    CanonPath, GuardedIo, Op, PolicyEngine, PrepareCtx, PreparedCall, ToolError, ToolResult, Typed,
-    TypedTool,
+    CanonPath, Fs, GuardedIo, Op, PolicyEngine, PrepareCtx, PreparedCall, ToolError, ToolResult,
+    Typed, TypedTool,
 };
 use ego_core::public::PublicEvent;
 use ego_core::run::RunTermination;
@@ -50,7 +50,7 @@ mod common;
 
 mod turn {
     use super::*;
-    use ego_core::permit::fake::FakeFs;
+    use ego_core::permit::fake::{FakeFs, FakeWriteTool};
 
     /// A `SessionStore` that keeps the log in memory, and can be told to fail
     /// on the nth append — which is the only way to test what the loop does
@@ -303,6 +303,14 @@ mod turn {
 
         fn with_read_tool(mut self) -> Self {
             self.registry = vec![std::sync::Arc::new(Typed(FakeReadTool))];
+            self
+        }
+
+        /// A tool that mutates, which is what it takes to reach the third
+        /// classification: under the default mode a read inside the workspace
+        /// is settled and only a write has nobody to answer for it.
+        fn with_write_tool(mut self) -> Self {
+            self.registry = vec![std::sync::Arc::new(Typed(FakeWriteTool))];
             self
         }
     }
@@ -565,6 +573,65 @@ mod turn {
             ContentBlock::ToolResult { call_id, output, is_error }
                 if call_id == "call_abc" && output == "hello from the file" && !is_error
         )));
+    }
+
+    /// A call nobody in this run can answer ends the run, and says so in the
+    /// words of a question rather than a refusal.
+    ///
+    /// `CLI.md` §4.4 gives both endings exit 3, which is exactly why the text
+    /// has to differ. "Denied by r1:…" tells an operator which line of their
+    /// config to go and look at; "no rule covers write /ws/note.txt" tells
+    /// them there is no line to look at and they have to write one. A loop
+    /// that collapsed the two would leave the commonest case reading like a
+    /// refusal somebody configured on purpose.
+    #[test]
+    fn a_call_nobody_can_answer_stops_the_run_and_reads_as_a_question() {
+        let fx = Fixture::new(vec![
+            vec![
+                AiEvent::ToolCall {
+                    call_id: "call_abc".to_string(),
+                    name: "fake_write".to_string(),
+                    args: r#"{"path":"/ws/note.txt","contents":"pwned"}"#.to_string(),
+                },
+                AiEvent::Stop(StopReason::ToolUse),
+            ],
+            vec![AiEvent::Stop(StopReason::Stop)],
+        ])
+        .with_write_tool();
+        fx.fs.file("/ws/note.txt", "the original");
+
+        let (reason, ok, state) = run(&fx, SessionState::default(), "overwrite note.txt");
+
+        assert_eq!(reason, ExitReason::PermissionRequired);
+        assert!(!ok);
+
+        let call = state
+            .items
+            .values()
+            .find(|item| item.kind == ItemKind::ToolCall)
+            .expect("the tool call became an item");
+        assert_eq!(call.ok, Some(false));
+        assert!(
+            call.text.contains("needs permission") && call.text.contains("no rule covers"),
+            "an unanswerable call must read as a question: {}",
+            call.text
+        );
+        assert!(
+            call.text.contains("/ws/note.txt"),
+            "and must name what it is a question about: {}",
+            call.text
+        );
+
+        assert_eq!(
+            fx.generator.calls().len(),
+            1,
+            "the run stopped, so there is no second generation"
+        );
+        assert_eq!(
+            fx.fs.read(&CanonPath::new("/ws/note.txt")).unwrap(),
+            b"the original",
+            "a call that was never authorised must not have run"
+        );
     }
 
     /// A system prompt is a setting the whole turn runs under, so it leads

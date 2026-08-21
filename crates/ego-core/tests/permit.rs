@@ -5,6 +5,7 @@
 use std::path::Path;
 
 use ego_core::config::{Mode, PermCfg};
+use ego_core::permit::rule::Rule;
 use ego_core::permit::{
     Authorized, CanonPath, Classification, EntryKind, Escalation, FsError, GuardedFs, GuardedIo,
     IoDenied, Op, PermitDenied, PolicyDenied, PolicyEngine, PrepareCtx, PreparedCall, ScanLimits,
@@ -201,6 +202,261 @@ mod permit {
             }
         );
         assert!(denied.to_string().contains("/etc/passwd"));
+    }
+
+    // --- the evaluation order ---------------------------------------------
+    //
+    // `docs/decisions/2026-08-21-a-permit-nobody-can-widen.md` §6. The order
+    // is the whole security property: what each step decides matters less
+    // than which step gets asked first, so every test below pins a *pair* of
+    // steps against each other rather than one step on its own.
+
+    /// An engine in `mode`, with those rules, over `/ws`.
+    fn engine(mode: Mode, allow: &[&str], deny: &[&str]) -> PolicyEngine {
+        let load = |raws: &[&str]| raws.iter().map(|raw| rule(raw)).collect();
+        PolicyEngine::new(
+            CanonPath::new("/ws"),
+            mode,
+            PermCfg {
+                allow: load(allow),
+                deny: load(deny),
+            },
+        )
+    }
+
+    fn rule(raw: &str) -> Rule {
+        Rule::load(raw).unwrap_or_else(|err| panic!("{raw} is a rule this build enforces: {err}"))
+    }
+
+    #[test]
+    fn permit_step0_the_workspace_boundary_is_not_lifted_by_yolo() {
+        // The bypass mode bypasses *asking*. Where ego may reach is
+        // `ARCHITECTURE.md` §3.4 axis 4 — the sandbox — and it is a separate
+        // control, so a mode that turned the boundary off would be one axis
+        // silently doing another's job.
+        let engine = engine(Mode::Yolo, &["read(**)"], &[]);
+        let denied = engine
+            .classify_settled(read_call("/etc/passwd"))
+            .expect_err("yolo does not move the workspace");
+        assert!(matches!(denied, PolicyDenied::OutsideWorkspace { .. }));
+    }
+
+    #[test]
+    fn permit_step1_a_deny_beats_an_allow_the_old_string_match_would_have_kept() {
+        // The engine half of the property `tests/config.rs`'s
+        // `config_system_deny_survives_a_higher_precedence_layer_that_clears_it`
+        // used to own under the name `config_system_deny_ceiling_cannot_be_
+        // relaxed_by_flags`. Resolution guarantees the system deny survives
+        // the merge; *this* is where it beats the allow sitting beside it.
+        //
+        // The allow is deliberately narrower than the deny rather than equal
+        // to it. `resolve` once ended with `allow.retain(|e|
+        // !deny.contains(e))`, which is string equality: `write(src/**)`
+        // survived `deny = ["write(**)"]` untouched and the call went through.
+        let engine = engine(Mode::Edits, &["write(src/**)"], &["write(**)"]);
+        let denied = engine
+            .classify_settled(write_call("/ws/src/main.rs"))
+            .expect_err("the deny covers it and no allow may relax one");
+        assert_eq!(
+            denied,
+            PolicyDenied::Denied {
+                tool: "edit".to_string(),
+                op: "write",
+                path: CanonPath::new("/ws/src/main.rs"),
+                by: rule("write(**)").id(),
+            }
+        );
+        assert!(
+            denied
+                .to_string()
+                .contains(&rule("write(**)").id().to_string()),
+            "a denial must name the rule, or an operator greps forty lines of \
+             config to find which one did it: {denied}"
+        );
+    }
+
+    #[test]
+    fn permit_step1_a_deny_beats_the_bypass_mode() {
+        // `yolo` is step 4 and deny is step 1, so this is settled by the
+        // order alone. Worth pinning because the reading that puts bypass
+        // first is the intuitive one, and it would make every deny an
+        // operator wrote conditional on nobody passing a flag.
+        let engine = engine(Mode::Yolo, &[], &["read(secrets/**)"]);
+        let denied = engine
+            .classify_settled(read_call("/ws/secrets/prod.env"))
+            .expect_err("a deny is not a suggestion");
+        assert!(matches!(denied, PolicyDenied::Denied { .. }));
+    }
+
+    #[test]
+    fn permit_step2_the_plan_floor_is_above_the_allow_list() {
+        // The floor at step 2 and the allow at step 3. A `plan` run that an
+        // allow rule could talk into writing would not mean what `plan`
+        // means, and the operator who set the mode is not always the one who
+        // wrote the rules.
+        let engine = engine(Mode::Plan, &["write(**)"], &[]);
+        let denied = engine
+            .classify_settled(write_call("/ws/src/main.rs"))
+            .expect_err("plan changes nothing, whatever the rules say");
+        assert!(matches!(
+            denied,
+            PolicyDenied::ModeForbids {
+                mode: Mode::Plan,
+                op: "write",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn permit_step2_the_plan_floor_lets_a_read_through() {
+        // The floor refuses what *changes* something, not everything. A plan
+        // run that could not read would be a plan run that cannot plan.
+        let engine = engine(Mode::Plan, &[], &[]);
+        engine
+            .classify_settled(read_call("/ws/src/main.rs"))
+            .expect("planning is reading");
+    }
+
+    #[test]
+    fn permit_step3_an_allow_rule_settles_what_the_mode_would_have_asked_about() {
+        let engine = engine(Mode::Default, &["write(src/**)"], &[]);
+        let granted = engine
+            .classify_settled(write_call("/ws/src/main.rs"))
+            .expect("the operator allowed exactly this");
+        assert!(
+            granted
+                .permit()
+                .allows_write(&CanonPath::new("/ws/src/main.rs"))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn permit_step3_an_allow_that_matches_grants_only_the_call_and_not_the_rule() {
+        // The rule says `write(src/**)`; the call named one file. The permit
+        // must cover the file. A rule that widened the grant to its own
+        // pattern would make every allow a standing authority rather than an
+        // answer to one call — §1's whole subject.
+        let engine = engine(Mode::Default, &["write(src/**)"], &[]);
+        let granted = engine
+            .classify_settled(write_call("/ws/src/main.rs"))
+            .expect("the operator allowed exactly this");
+        assert_eq!(
+            granted
+                .permit()
+                .allows_write(&CanonPath::new("/ws/src/other.rs")),
+            Err(PermitDenied::Write {
+                path: CanonPath::new("/ws/src/other.rs")
+            })
+        );
+    }
+
+    #[test]
+    fn permit_step3_an_allow_that_does_not_cover_the_path_still_asks() {
+        let engine = engine(Mode::Default, &["write(src/**)"], &[]);
+        let Classification::Ask(pending) = engine.classify(write_call("/ws/docs/README.md")) else {
+            panic!("no rule covers docs/, so nobody here has answered");
+        };
+        assert_eq!(
+            pending.request().why(),
+            &Escalation::NoRuleCovers {
+                op: "write",
+                path: CanonPath::new("/ws/docs/README.md"),
+            }
+        );
+    }
+
+    #[test]
+    fn permit_step4_the_ceiling_answers_a_write_differently_in_every_mode() {
+        // The mode axis, as one table. Read down the right-hand column: this
+        // is the whole of what choosing a mode buys, for the one operation
+        // the modes disagree about.
+        #[derive(Debug, PartialEq)]
+        enum Answer {
+            Authorized,
+            Refused,
+            Asked,
+        }
+
+        let cases = [
+            (Mode::Plan, Answer::Refused),
+            (Mode::Default, Answer::Asked),
+            // No judge in this build, so `auto` has nothing to consult and
+            // falls through to the same question `default` asks. When step
+            // 6 exists this row changes and no other one does.
+            (Mode::Auto, Answer::Asked),
+            (Mode::Edits, Answer::Authorized),
+            (Mode::Yolo, Answer::Authorized),
+        ];
+
+        for (mode, expected) in cases {
+            let engine = engine(mode, &[], &[]);
+            let answer = match engine.classify(write_call("/ws/src/main.rs")) {
+                Classification::Settled(Ok(_)) => Answer::Authorized,
+                Classification::Settled(Err(_)) => Answer::Refused,
+                Classification::Ask(_) => Answer::Asked,
+            };
+            assert_eq!(answer, expected, "{mode} mode, writing inside /ws");
+        }
+    }
+
+    #[test]
+    fn permit_step4_no_mode_asks_about_a_read_inside_the_workspace() {
+        // `ARCHITECTURE.md:238` counts prompt fatigue as a security bug, and
+        // :242 says `default` and `auto` review unresolved **sensitive**
+        // actions rather than every action. A mode that stopped the run to
+        // ask about reading a file in the workspace it was pointed at is how
+        // an operator learns to approve without looking.
+        for mode in [
+            Mode::Plan,
+            Mode::Default,
+            Mode::Auto,
+            Mode::Edits,
+            Mode::Yolo,
+        ] {
+            let engine = engine(mode, &[], &[]);
+            engine
+                .classify_settled(read_call("/ws/src/main.rs"))
+                .unwrap_or_else(|err| panic!("{mode} mode refused a workspace read: {err}"));
+        }
+    }
+
+    #[test]
+    fn permit_the_order_is_per_operation_and_the_first_unanswered_one_stops_it() {
+        // A call with three ops is three questions, and the answer to the
+        // call is the first one that is not "yes". Here op two is denied and
+        // op three would have been asked about: a loop that answered the
+        // *last* question, or that collected them, would let the tool run
+        // under a denial it had already been given.
+        let engine = engine(Mode::Default, &["read(**)"], &["read(secrets/**)"]);
+        let call = PreparedCall {
+            tool: "read".to_string(),
+            ops: vec![
+                Op::Read {
+                    path: CanonPath::new("/ws/src/main.rs"),
+                },
+                Op::Read {
+                    path: CanonPath::new("/ws/secrets/prod.env"),
+                },
+                Op::Write {
+                    path: CanonPath::new("/ws/src/main.rs"),
+                    contents: b"pwned".to_vec(),
+                },
+            ],
+        };
+        let denied = engine
+            .classify_settled(call)
+            .expect_err("op two is denied, and that ends the call");
+        assert_eq!(
+            denied,
+            PolicyDenied::Denied {
+                tool: "read".to_string(),
+                op: "read",
+                path: CanonPath::new("/ws/secrets/prod.env"),
+                by: rule("read(secrets/**)").id(),
+            }
+        );
     }
 
     #[test]
