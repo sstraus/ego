@@ -14,12 +14,12 @@ mod journal;
 mod tools;
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use futures::StreamExt;
 
 use crate::budget::{BudgetGate, PricingQuote};
-use crate::event::domain::{EventKind, ExitReason};
+use crate::event::domain::{CancelCause, EventKind, ExitReason};
 use crate::event::id::{EventId, GenerationId, ItemId, Producer, SessionId, TurnId};
 use crate::event::time::Clock;
 use crate::generator::attempt::{AttemptStream, GenerationAttempt};
@@ -27,6 +27,7 @@ use crate::generator::capabilities::ModelCapabilities;
 use crate::generator::history::conversation_from;
 use crate::generator::port::{AiEvent, Generator};
 use crate::generator::types::{GenRequest, StopReason, ThinkingLevel};
+use crate::permit::PolicyDenied;
 use crate::public::PublicEvent;
 use crate::state::SessionState;
 use crate::store::session_store::{SessionStore, StoreError};
@@ -47,21 +48,53 @@ pub use tools::Tools;
 /// delays cancellation until its transport gives up. Racing the await instead
 /// would mean dropping a stream that owns an unsettled reservation, which is
 /// precisely the leak [`AttemptStream`] exists to prevent.
+///
+/// Carries *who* asked, not just that someone did: a timeout and a `SIGINT`
+/// are different process exits (124 and 130), and a token that only said
+/// "cancelled" would make them the same value. An `AtomicU8` rather than a
+/// second field, so the promise above — an atomic and a `clone`, no runtime —
+/// still holds.
 #[derive(Debug, Clone, Default)]
-pub struct CancelToken(Arc<AtomicBool>);
+pub struct CancelToken(Arc<AtomicU8>);
+
+const NOT_CANCELLED: u8 = 0;
+const BY_USER: u8 = 1;
+const BY_TIMEOUT: u8 = 2;
+const BY_HOST: u8 = 3;
 
 impl CancelToken {
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Ask the turn to stop at its next check.
-    pub fn cancel(&self) {
-        self.0.store(true, Ordering::SeqCst);
+    /// Ask the turn to stop at its next check, saying who is asking.
+    ///
+    /// **The first cause wins.** A `SIGINT` followed a moment later by a
+    /// deadline is a run the user stopped, and reporting the timeout because
+    /// it stored last would be the wrong account of what happened.
+    pub fn cancel(&self, cause: CancelCause) {
+        let code = match cause {
+            CancelCause::User => BY_USER,
+            CancelCause::Timeout => BY_TIMEOUT,
+            CancelCause::Host => BY_HOST,
+        };
+        let _ = self
+            .0
+            .compare_exchange(NOT_CANCELLED, code, Ordering::SeqCst, Ordering::SeqCst);
     }
 
     pub fn is_cancelled(&self) -> bool {
-        self.0.load(Ordering::SeqCst)
+        self.0.load(Ordering::SeqCst) != NOT_CANCELLED
+    }
+
+    /// Why the turn was asked to stop, if it was.
+    pub fn cause(&self) -> Option<CancelCause> {
+        match self.0.load(Ordering::SeqCst) {
+            BY_USER => Some(CancelCause::User),
+            BY_TIMEOUT => Some(CancelCause::Timeout),
+            BY_HOST => Some(CancelCause::Host),
+            _ => None,
+        }
     }
 }
 
@@ -83,6 +116,11 @@ pub struct TurnOutcome {
     pub turn: TurnId,
     pub ok: bool,
     pub exit_reason: ExitReason,
+    /// What was refused, when `exit_reason` is
+    /// [`ExitReason::PermissionRequired`]. `CLI.md` §4.1 requires the denied
+    /// action in the result: a script handed exit 3 and no subject has been
+    /// told nothing it can act on.
+    pub denied: Option<String>,
     /// The privacy-filtered projection, in order. The internal log stays
     /// inside this crate; this is what a host is given.
     pub published: Vec<PublicEvent>,
@@ -196,10 +234,11 @@ impl<'a> TurnLoop<'a> {
         let turn = TurnId::new();
         let published_before = self.journal.published().len();
 
-        let (ok, exit_reason) = match self.drive(turn, prompt).await {
-            Ok(reason) => (matches!(reason, ExitReason::Completed), reason),
+        let (exit_reason, denied) = match self.drive(turn, prompt).await {
+            Ok(ended) => ended,
             Err(cause) => return Err(self.abandon(turn, cause)),
         };
+        let ok = matches!(exit_reason, ExitReason::Completed);
 
         if let Err(cause) = self.journal.append(
             turn,
@@ -214,6 +253,7 @@ impl<'a> TurnLoop<'a> {
             turn,
             ok,
             exit_reason,
+            denied,
             published: self.journal.published()[published_before..].to_vec(),
         })
     }
@@ -232,7 +272,14 @@ impl<'a> TurnLoop<'a> {
     }
 
     /// Everything between the prompt and `TurnCompleted`.
-    async fn drive(&mut self, turn: TurnId, prompt: &str) -> Result<ExitReason, StoreError> {
+    ///
+    /// Returns the reason and, when that reason is
+    /// [`ExitReason::PermissionRequired`], the action that was refused.
+    async fn drive(
+        &mut self,
+        turn: TurnId,
+        prompt: &str,
+    ) -> Result<(ExitReason, Option<String>), StoreError> {
         self.journal.append(
             turn,
             Some(ItemId::new()),
@@ -243,12 +290,12 @@ impl<'a> TurnLoop<'a> {
         )?;
 
         loop {
-            if self.cancel.is_cancelled() {
-                return Ok(ExitReason::Cancelled);
+            if let Some(cause) = self.cancel.cause() {
+                return Ok((ExitReason::Cancelled(cause), None));
             }
 
             let (reason, pending) = match self.generate(turn).await? {
-                Generated::Ended(reason) => return Ok(reason),
+                Generated::Ended(reason) => return Ok((reason, None)),
                 Generated::Stopped { reason, pending } => (reason, pending),
             };
 
@@ -256,16 +303,47 @@ impl<'a> TurnLoop<'a> {
             // has nothing to answer. Generating again on that evidence loops
             // forever against a provider that keeps saying it.
             if reason != StopReason::ToolUse || pending.is_empty() {
-                return Ok(match reason {
-                    StopReason::Stop | StopReason::ToolUse => ExitReason::Completed,
-                    StopReason::Length => ExitReason::Budget,
-                    StopReason::Aborted => ExitReason::Cancelled,
-                    StopReason::Error | StopReason::Deferred => ExitReason::Error,
-                });
+                return Ok((
+                    match reason {
+                        StopReason::Stop | StopReason::ToolUse => ExitReason::Completed,
+                        StopReason::Length => ExitReason::Budget,
+                        // Not `Cancelled`: our own cancellation was already
+                        // answered above and at `drained.cancelled`, so an
+                        // `Aborted` reaching here is a stream that ended with no
+                        // terminal frame — a provider that went silent.
+                        StopReason::Aborted => ExitReason::Provider,
+                        // `Deferred` is upstream choosing a delivery mode this
+                        // wire format does not consume. Not our defect, so not
+                        // `Internal`; the provider decided it, so it reads as an
+                        // upstream condition like any other.
+                        StopReason::Error | StopReason::Deferred => ExitReason::Provider,
+                    },
+                    None,
+                ));
             }
 
             for call in pending {
-                let (ok, output) = self.run_tool(&call).await;
+                let (ok, output) = match self.run_tool(&call).await {
+                    ToolOutcome::Answered { ok, output } => (ok, output),
+                    // `CLI.md` §4.4: a run with nobody to ask does not answer
+                    // a permission question on the model's behalf. The denial
+                    // is still logged against the call — the model's audience
+                    // argument holds for the *record*, it just no longer
+                    // decides whether the run continues.
+                    ToolOutcome::Refused { denial } => {
+                        let action = denial.to_string();
+                        self.journal.append(
+                            turn,
+                            Some(call.item),
+                            Some(call.started),
+                            EventKind::ToolCallCompleted {
+                                ok: false,
+                                output: action.clone(),
+                            },
+                        )?;
+                        return Ok((ExitReason::PermissionRequired, Some(action)));
+                    }
+                };
                 self.journal.append(
                     turn,
                     Some(call.item),
@@ -339,7 +417,7 @@ impl<'a> TurnLoop<'a> {
                         message: denied.to_string(),
                     },
                 )?;
-                return Ok(Generated::Ended(ExitReason::Error));
+                return Ok(Generated::Ended(ExitReason::Internal));
             }
         };
 
@@ -369,7 +447,7 @@ impl<'a> TurnLoop<'a> {
                         message: denied.to_string(),
                     },
                 )?;
-                return Ok(Generated::Ended(ExitReason::Error));
+                return Ok(Generated::Ended(ExitReason::Internal));
             }
         };
         drained.failure.map_or(Ok(()), Err)?;
@@ -385,7 +463,9 @@ impl<'a> TurnLoop<'a> {
         )?;
 
         if drained.cancelled {
-            return Ok(Generated::Ended(ExitReason::Cancelled));
+            return Ok(Generated::Ended(ExitReason::Cancelled(
+                self.cancel.cause().unwrap_or(CancelCause::User),
+            )));
         }
         Ok(Generated::Stopped {
             reason: settlement.outcome.stop(),
@@ -515,24 +595,39 @@ impl<'a> TurnLoop<'a> {
 
     /// Look up, authorise and run one call the model asked for.
     ///
-    /// Every failure comes back as `(false, prose)` and is logged as a failed
-    /// tool result rather than raised. The model is the audience: it asked for
-    /// something that did not happen, and the only useful thing to do with
-    /// that is tell it why.
-    async fn run_tool(&self, call: &PendingCall) -> (bool, String) {
+    /// A *failure* comes back as `Answered { ok: false, .. }` and is logged as
+    /// a failed tool result rather than raised. The model is the audience: it
+    /// asked for something that did not happen, and the only useful thing to
+    /// do is tell it why.
+    ///
+    /// A *refusal by policy* is not that, and this is where the two parted
+    /// company. A denial is a question — "may this happen?" — and answering it
+    /// on the model's behalf is the thing `CLI.md` §4.4 forbids in a run with
+    /// nobody to ask. It comes back typed, and the caller decides.
+    async fn run_tool(&self, call: &PendingCall) -> ToolOutcome {
+        let answered = |ok, output| ToolOutcome::Answered { ok, output };
         let (tool, prepared) = match self.tools.prepare(&call.name, &call.args) {
             Ok(prepared) => prepared,
-            Err(refusal) => return (false, refusal),
+            Err(refusal) => return answered(false, refusal),
         };
         let permit = match self.tools.authorize(&prepared) {
             Ok(permit) => permit,
-            Err(denial) => return (false, denial),
+            Err(denial) => return ToolOutcome::Refused { denial },
         };
         match self.tools.execute(tool, prepared, &permit).await {
-            Ok(output) => (true, output),
-            Err(failure) => (false, failure),
+            Ok(output) => answered(true, output),
+            Err(failure) => answered(false, failure),
         }
     }
+}
+
+/// What running one tool call produced.
+enum ToolOutcome {
+    /// It ran, or it failed in a way the model should read and adapt to.
+    Answered { ok: bool, output: String },
+    /// Policy refused it. Not an answer — a question nobody in this run can
+    /// be asked, so it is the caller's to decide, not this method's.
+    Refused { denial: PolicyDenied },
 }
 
 /// What one generation did.

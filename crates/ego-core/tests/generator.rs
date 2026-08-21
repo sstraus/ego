@@ -5,7 +5,7 @@
 
 use ego_core::budget::{BudgetGate, PricingQuote};
 use ego_core::cost::{Amount, CostDelta, CurrencyCode, Money, PricingRevision};
-use ego_core::event::domain::{DomainEvent, Envelope, EventKind, ExitReason};
+use ego_core::event::domain::{CancelCause, DomainEvent, Envelope, EventKind, ExitReason};
 use ego_core::event::id::{EventId, GenerationId, ItemId, Producer, Seq, TurnId};
 use ego_core::event::time::Timestamp;
 use ego_core::generator::attempt::{AttemptStream, GenerationAttempt, Settlement};
@@ -228,8 +228,8 @@ mod generator {
                     let (ok, exit_reason) = match reason {
                         StopReason::Stop | StopReason::ToolUse => (true, ExitReason::Completed),
                         StopReason::Length => (false, ExitReason::Budget),
-                        StopReason::Error => (false, ExitReason::Error),
-                        StopReason::Aborted => (false, ExitReason::Cancelled),
+                        StopReason::Error => (false, ExitReason::Provider),
+                        StopReason::Aborted => (false, ExitReason::Cancelled(CancelCause::User)),
                         // Terminal for the attempt, but nothing was
                         // delivered: the provider will hand the result over
                         // elsewhere, so there is no turn to complete yet.

@@ -14,7 +14,7 @@ use crate::state::Usage;
 /// The current `PublicEvent` schema version, carried in `SessionStarted`'s
 /// `v` field. `CLI.md` §4.2: "the schema is versioned in the header and
 /// published".
-pub const PUBLIC_EVENT_VERSION: u32 = 1;
+pub const PUBLIC_EVENT_VERSION: u32 = 2;
 
 /// The item kinds carried by `item.*` events, per `CLI.md` §4.2.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

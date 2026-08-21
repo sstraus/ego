@@ -718,10 +718,17 @@ mod end_to_end {
     }
 
     #[test]
-    fn a_turn_tells_the_model_why_a_tool_call_was_refused_instead_of_failing() {
-        // A denied tool call is a fact about the call, not about the turn:
-        // it is logged as a failed result, the model reads it, and the turn
-        // completes.
+    fn a_turn_stops_when_a_tool_call_is_refused_and_names_what_was_refused() {
+        // This test used to assert the opposite ending: the denial was logged
+        // as a failed result, the model read it in the next generation, and
+        // the turn completed. `CLI.md` §4.4 is ratified and says otherwise —
+        // a run with nobody to ask does not answer a permission question on
+        // the model's behalf; it stops with the denied action in the result.
+        //
+        // What it protected is protected harder here: the denial still names
+        // what it refused, the refused *contents* still never reach the
+        // model, and now there is no second generation for them to reach.
+        // See `docs/decisions/2026-08-21-two-levels-of-ending.md` §4.
         let ws = populated();
         let outside = Workspace::new();
         let secret = outside.file("secret.txt", "not yours");
@@ -767,12 +774,28 @@ mod end_to_end {
             block_on(loop_.run("read that file")).expect("the log is writable")
         };
 
-        assert_eq!(outcome.exit_reason, ExitReason::Completed);
-        let history = format!("{:?}", generator.calls()[1].messages);
+        assert_eq!(outcome.exit_reason, ExitReason::PermissionRequired);
+        assert!(!outcome.ok);
+
+        let denied = outcome
+            .denied
+            .as_deref()
+            .expect("a permission-required turn names the action it was refused");
         assert!(
-            history.contains("outside the workspace"),
-            "the model has to be told why: {history}"
+            denied.contains("outside the workspace") && denied.contains("secret.txt"),
+            "the denial must name what it denied: {denied}"
         );
+        assert!(
+            !denied.contains("not yours"),
+            "and must not quote what it refused to read: {denied}"
+        );
+
+        assert_eq!(
+            generator.calls().len(),
+            1,
+            "the run stopped, so there is no second generation"
+        );
+        let history = format!("{:?}", generator.calls()[0].messages);
         assert!(
             !history.contains("not yours"),
             "the refused contents must not reach the model: {history}"

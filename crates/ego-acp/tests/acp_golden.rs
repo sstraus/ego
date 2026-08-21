@@ -35,7 +35,9 @@
 use agent_client_protocol_schema::{v1, v2};
 use ego_acp::project::{project_acp_v1, project_acp_v2, project_v1, project_v2};
 use ego_core::cost::{Amount, CostDelta, CurrencyCode, Money, PricingRevision, UnknownCost};
-use ego_core::event::domain::{DomainEvent, Envelope, EventKind, ExitReason, OccupancyProvenance};
+use ego_core::event::domain::{
+    CancelCause, DomainEvent, Envelope, EventKind, ExitReason, OccupancyProvenance,
+};
 use ego_core::event::id::{EventId, ItemId, Producer, Seq, SessionId, TurnId};
 use ego_core::event::time::Timestamp;
 use ego_core::generator::capabilities::{
@@ -670,9 +672,12 @@ mod acp_golden {
     /// `TurnCompleted` has no v1 `SessionUpdate` counterpart (turn
     /// completion rides the `session/prompt` RPC response's `stop_reason`
     /// there) but maps to v2's `StateUpdate` — added specifically to report
-    /// foreground-work state independently of the RPC response. All four
-    /// `ExitReason` values are exercised here since the two-turn fixture
-    /// only ever uses `Completed`.
+    /// foreground-work state independently of the RPC response. **Every**
+    /// `ExitReason` value is exercised here — including all three
+    /// `CancelCause`s, which must project alike — since the two-turn fixture
+    /// only ever uses `Completed`. The list is exhaustive on purpose: a new
+    /// variant that nobody maps would otherwise reach a host as whatever the
+    /// projection's catch-all happened to be.
     ///
     /// Each `exit_reason` is run with **both** `ok` values, which is what
     /// actually proves `project.rs`'s claim that `ok` "carries no further
@@ -685,10 +690,32 @@ mod acp_golden {
     fn turn_completed_maps_to_v2_idle_state_by_exit_reason_alone() {
         for (exit_reason, expected_stop_reason) in [
             (ExitReason::Completed, v2::StopReason::EndTurn),
-            (ExitReason::Cancelled, v2::StopReason::Cancelled),
+            // All three causes flatten to one ACP stop reason: the protocol
+            // has no field for who cancelled, and the cause survives in the
+            // durable log and the exit code instead.
             (
-                ExitReason::Error,
-                v2::StopReason::Other("_error".to_string()),
+                ExitReason::Cancelled(CancelCause::User),
+                v2::StopReason::Cancelled,
+            ),
+            (
+                ExitReason::Cancelled(CancelCause::Timeout),
+                v2::StopReason::Cancelled,
+            ),
+            (
+                ExitReason::Cancelled(CancelCause::Host),
+                v2::StopReason::Cancelled,
+            ),
+            (
+                ExitReason::Provider,
+                v2::StopReason::Other("_provider".to_string()),
+            ),
+            (
+                ExitReason::Internal,
+                v2::StopReason::Other("_internal".to_string()),
+            ),
+            (
+                ExitReason::PermissionRequired,
+                v2::StopReason::Other("_permission".to_string()),
             ),
             (
                 ExitReason::Budget,

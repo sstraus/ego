@@ -473,7 +473,7 @@ mod reducer {
                 "turn_completed",
                 EventKind::TurnCompleted {
                     ok: false,
-                    exit_reason: ExitReason::Error,
+                    exit_reason: ExitReason::Provider,
                 },
             ),
             (

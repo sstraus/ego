@@ -75,14 +75,14 @@ mod codec {
     }
 
     #[test]
-    fn codec_header_carries_codec_version_1() {
+    fn codec_header_carries_codec_version_2() {
         let h = header();
-        assert_eq!(h.v, 1);
-        assert_eq!(CODEC_VERSION, 1);
+        assert_eq!(h.v, 2);
+        assert_eq!(CODEC_VERSION, 2);
 
         let bytes = encode_header(&h);
         match decode_line(&bytes).unwrap() {
-            StoreLine::Header(decoded) => assert_eq!(decoded.v, 1),
+            StoreLine::Header(decoded) => assert_eq!(decoded.v, 2),
             other => panic!("expected Header, got {other:?}"),
         }
     }
@@ -532,8 +532,19 @@ mod codec {
         );
     }
 
+    /// The committed log decodes under today's codec, with every checksum
+    /// intact and every payload still parsing as a `DomainEvent`.
+    ///
+    /// This used to be called "written by a past build", and that name
+    /// overclaimed: the fixture is regenerated whenever the durable format
+    /// moves, so it has only ever proved that *this* build reads *this*
+    /// fixture. `docs/decisions/2026-08-21-two-levels-of-ending.md` §3 makes
+    /// the gap explicit rather than leaving it in a test name — v1 logs are
+    /// not readable by a v2 build, deliberately, because none exist outside
+    /// this repository. If that ever stops being true, this is the test that
+    /// has to grow a real v1 fixture and a migration beside it.
     #[test]
-    fn codec_golden_log_written_by_a_past_build_still_decodes_and_verifies() {
+    fn codec_golden_log_decodes_and_verifies_under_todays_codec() {
         let lines = decode_log(include_str!("golden/store_log.jsonl").as_bytes())
             .expect("the committed log decodes with checksums intact");
 

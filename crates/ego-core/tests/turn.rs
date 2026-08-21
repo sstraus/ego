@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ego_core::budget::{BudgetGate, PricingQuote};
 use ego_core::cost::{Amount, CurrencyCode, Money, PricingRevision};
-use ego_core::event::domain::{DomainEvent, EventKind, ExitReason};
+use ego_core::event::domain::{CancelCause, DomainEvent, EventKind, ExitReason};
 use ego_core::event::id::{Seq, SessionId};
 use ego_core::event::time::{Clock, Timestamp};
 use ego_core::generator::attempt::{AttemptStream, GenerationAttempt};
@@ -128,7 +128,7 @@ mod turn {
             let stream =
                 futures::stream::iter(events.into_iter().enumerate()).map(move |(at, event)| {
                     if at + 1 == after {
-                        token.cancel();
+                        token.cancel(CancelCause::User);
                     }
                     event
                 });
@@ -614,7 +614,10 @@ mod turn {
 
         let outcome = block_on(turn.run("start something long")).expect("the store accepted");
 
-        assert_eq!(outcome.exit_reason, ExitReason::Cancelled);
+        assert_eq!(
+            outcome.exit_reason,
+            ExitReason::Cancelled(CancelCause::User)
+        );
         assert!(!outcome.ok);
         let kinds = fx.store.kinds();
         assert!(
@@ -641,6 +644,35 @@ mod turn {
             &usd("0"),
             "the reservation was released, not leaked"
         );
+    }
+
+    #[test]
+    fn the_first_reason_a_turn_was_asked_to_stop_is_the_one_it_reports() {
+        // A `SIGINT` and a deadline can both land, in either order, on a run
+        // that is already shutting down — the second is often *caused* by the
+        // first, since a cancelled turn still has to unwind. Reporting
+        // whichever stored last would exit 124 for a run the user stopped,
+        // and a scheduler that retries on timeout would then retry it.
+        let token = CancelToken::new();
+        assert_eq!(token.cause(), None, "nothing has asked to stop yet");
+
+        token.cancel(CancelCause::User);
+        token.cancel(CancelCause::Timeout);
+        token.cancel(CancelCause::Host);
+
+        assert!(token.is_cancelled());
+        assert_eq!(
+            token.cause(),
+            Some(CancelCause::User),
+            "the user asked first, so the run stopped because the user asked"
+        );
+
+        // And the same property from the other end: a deadline that arrives
+        // first is not overwritten by the signal the shutdown then raises.
+        let token = CancelToken::new();
+        token.cancel(CancelCause::Timeout);
+        token.cancel(CancelCause::User);
+        assert_eq!(token.cause(), Some(CancelCause::Timeout));
     }
 
     #[test]
@@ -678,7 +710,10 @@ mod turn {
 
         let outcome = block_on(turn.run("read note.txt")).expect("the store accepted");
 
-        assert_eq!(outcome.exit_reason, ExitReason::Cancelled);
+        assert_eq!(
+            outcome.exit_reason,
+            ExitReason::Cancelled(CancelCause::User)
+        );
         let kinds = fx.store.kinds();
         assert!(
             !kinds.contains(&"tool_call_completed".to_string()),
@@ -741,7 +776,7 @@ mod turn {
 
         let (reason, ok, state) = run(&fx, SessionState::default(), "hello");
 
-        assert_eq!(reason, ExitReason::Error);
+        assert_eq!(reason, ExitReason::Provider);
         assert!(!ok);
         assert_eq!(state.errors, vec!["the provider fell over".to_string()]);
         assert!(fx.store.kinds().contains(&"attempt_settled".to_string()));

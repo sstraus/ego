@@ -211,8 +211,15 @@ fn tool_raw_input(raw: &str) -> serde_json::Value {
 fn stop_reason_v2(exit_reason: ExitReason) -> v2::StopReason {
     match exit_reason {
         ExitReason::Completed => v2::StopReason::EndTurn,
-        ExitReason::Cancelled => v2::StopReason::Cancelled,
-        ExitReason::Error => v2::StopReason::Other("_error".to_string()),
+        // Every cancellation is `Cancelled` to a host: ACP asks why the turn
+        // stopped, and "a human, a deadline or you" is a distinction the
+        // protocol has no field for. The cause is not lost — it is in the
+        // durable log and in the CLI's exit code; flattening it here is a
+        // projection, which is what this module is.
+        ExitReason::Cancelled(_) => v2::StopReason::Cancelled,
+        ExitReason::Provider => v2::StopReason::Other("_provider".to_string()),
+        ExitReason::Internal => v2::StopReason::Other("_internal".to_string()),
+        ExitReason::PermissionRequired => v2::StopReason::Other("_permission".to_string()),
         ExitReason::Budget => v2::StopReason::Other("_budget".to_string()),
     }
 }

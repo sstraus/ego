@@ -10,7 +10,8 @@ use std::sync::Arc;
 
 use crate::generator::types::ToolDescriptor as GenToolDescriptor;
 use crate::permit::{
-    CanonPath, Fs, GuardedFs, Permit, PolicyEngine, PrepareCtx, PreparedCall, Tool, ToolError,
+    CanonPath, Fs, GuardedFs, Permit, PolicyDenied, PolicyEngine, PrepareCtx, PreparedCall, Tool,
+    ToolError,
 };
 
 /// Everything the loop needs to turn a model's tool call into an effect.
@@ -85,8 +86,16 @@ impl<'a> Tools<'a> {
     }
 
     /// Stage two: ask policy what this call may do.
-    pub fn authorize(&self, call: &PreparedCall) -> Result<Permit, String> {
-        self.policy.authorize(call).map_err(|err| err.to_string())
+    /// Returns the typed [`PolicyDenied`], not prose.
+    ///
+    /// It used to flatten to a `String`, which is the same defect as an
+    /// `HttpError` flattened one layer down: the value already names what it
+    /// refused, and discarding the type at the seam left the loop unable to
+    /// tell "policy said no" from "the tool broke". Those are different
+    /// outcomes now — see `CLI.md` §4.4 and
+    /// `docs/decisions/2026-08-21-two-levels-of-ending.md`.
+    pub fn authorize(&self, call: &PreparedCall) -> Result<Permit, PolicyDenied> {
+        self.policy.authorize(call)
     }
 
     /// Stage three: run it, under the grant policy issued and through the

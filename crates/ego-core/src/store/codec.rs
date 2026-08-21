@@ -26,7 +26,7 @@ use crate::event::id::{Seq, SessionId};
 use crate::event::time::Timestamp;
 
 /// The codec version written into every session's header line.
-pub const CODEC_VERSION: u32 = 1;
+pub const CODEC_VERSION: u32 = 2;
 
 /// The fixed xxhash64 seed for record checksums. Part of the codec v1
 /// contract: changing it would silently invalidate every checksum already

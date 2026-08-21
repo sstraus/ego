@@ -33,19 +33,55 @@ pub struct Envelope {
     pub producer: Producer,
 }
 
+/// Who stopped a turn that did not finish on its own.
+///
+/// Carried by [`ExitReason::Cancelled`] rather than left to the run level,
+/// because a timeout that interrupts a turn has to be durable: without this,
+/// the log and `PublicEvent::TurnCompleted` would say `Cancelled` while the
+/// CLI printed `timeout`, and replay, JSONL and ACP would give three accounts
+/// of one fact. A limit applied *between* turns is not here — that is the run
+/// level's, where it is true. See
+/// `docs/decisions/2026-08-21-two-levels-of-ending.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CancelCause {
+    /// A human asked for it — `SIGINT`, or an interactive interrupt.
+    User,
+    /// A deadline expired while the turn was running.
+    Timeout,
+    /// The embedding host withdrew the turn (an ACP client cancelling a
+    /// prompt, a supervisor shutting down).
+    Host,
+}
+
 /// How a turn ended. Deliberately one field (paired with `ok` on
 /// `TurnCompleted`), never a separate error field alongside it (ARCH §1
 /// review note: "one error field, never two").
+///
+/// The variants are the *turn's* vocabulary. Why an invocation ended is
+/// [`RunTermination`](crate::run::RunTermination), which is a different
+/// question with a different lifetime: `max_turns` fires between two
+/// completed turns, and is not honestly a cause of the one before it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ExitReason {
     /// The turn ran to completion.
     Completed,
-    /// The turn was cancelled (by the user or a timeout).
-    Cancelled,
-    /// The turn ended in an error.
-    Error,
+    /// The turn was stopped before it finished, by whom it says.
+    Cancelled(CancelCause),
     /// The turn was stopped by a budget limit.
     Budget,
+    /// A call needed a grant that nobody in this run could give. `CLI.md`
+    /// §4.4: a headless run never hangs on a prompt, so an unresolvable
+    /// permission ends it rather than being answered on the model's behalf.
+    PermissionRequired,
+    /// The provider or the network failed. Distinct from [`Internal`] because
+    /// `CLI.md` §4.3 makes them different exits — a script retries 4 and does
+    /// not retry 1.
+    ///
+    /// [`Internal`]: ExitReason::Internal
+    Provider,
+    /// **We** failed. Never reported as a provider error: telling a script to
+    /// retry our own defect is worse than telling it nothing.
+    Internal,
 }
 
 /// Where a context-occupancy figure came from, and therefore how much it can
