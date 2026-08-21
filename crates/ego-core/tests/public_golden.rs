@@ -657,7 +657,7 @@ mod public_golden {
     /// coverage: the golden would be equally green with the arm deleted or
     /// mapped to the wrong `ItemKind`.
     ///
-    /// It is deliberately *not* `ItemKind::Message`: reasoning is a
+    /// It is deliberately *not* `ItemKind::AgentMessage`: reasoning is a
     /// separate public item kind, so a client can render or suppress
     /// thinking independently of the answer.
     #[test]
@@ -689,9 +689,17 @@ mod public_golden {
     /// bare serialisation).
     #[test]
     fn item_kind_serialises_snake_case() {
+        // The two halves of what used to be one `message`. Pinned separately
+        // because the whole point of the split is that a consumer can tell
+        // them apart, and a single spelling test would not notice if both
+        // arms serialised to the same string.
         assert_eq!(
-            serde_json::to_string(&ItemKind::Message).unwrap(),
-            "\"message\""
+            serde_json::to_string(&ItemKind::UserMessage).unwrap(),
+            "\"user_message\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ItemKind::AgentMessage).unwrap(),
+            "\"agent_message\""
         );
         assert_eq!(
             serde_json::to_string(&ItemKind::Reasoning).unwrap(),

@@ -254,8 +254,13 @@ impl<'a> TextSink<'a> {
 impl EventSink for TextSink<'_> {
     fn publish(&self, event: &PublicEvent) {
         match event {
+            // `AgentMessage` and not "either message kind": stdout is the
+            // answer, and a user prompt is what the caller already typed. It
+            // never arrives as a delta anyway — `UserPrompt` projects to one
+            // `ItemCompleted` — so this narrowing describes the stream rather
+            // than filtering it.
             PublicEvent::ItemDelta {
-                kind: ItemKind::Message,
+                kind: ItemKind::AgentMessage,
                 text,
                 ..
             } => self.stream(text),

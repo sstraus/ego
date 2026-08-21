@@ -67,8 +67,17 @@ pub struct InstructionDescriptor {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ItemKind {
-    /// A user or assistant message.
-    Message,
+    /// A message the person running the command sent.
+    ///
+    /// Split from [`AgentMessage`](Self::AgentMessage), which used to share a
+    /// single `Message` value with it. "A user *or* assistant message" is two
+    /// facts wearing one name: a consumer holding an `ItemCompleted` could not
+    /// say who wrote it, and the ACP projection needs to — v2 has `UserMessage`
+    /// and `AgentMessage` as separate updates, so a projection reading this
+    /// stream had no way to choose between them.
+    UserMessage,
+    /// A message the model produced.
+    AgentMessage,
     /// A block of the model's reasoning/thinking.
     Reasoning,
     /// A tool call.
@@ -364,20 +373,20 @@ pub fn project_public(ev: &DomainEvent) -> Option<PublicEvent> {
         EventKind::UserPrompt { text } => Some(PublicEvent::ItemCompleted {
             turn,
             item: item?,
-            kind: ItemKind::Message,
+            kind: ItemKind::UserMessage,
             ok: true,
             text: Some(text.clone()),
         }),
         EventKind::AssistantDelta { text } => Some(PublicEvent::ItemDelta {
             turn,
             item: item?,
-            kind: ItemKind::Message,
+            kind: ItemKind::AgentMessage,
             text: text.clone(),
         }),
         EventKind::AssistantMessage { text } => Some(PublicEvent::ItemCompleted {
             turn,
             item: item?,
-            kind: ItemKind::Message,
+            kind: ItemKind::AgentMessage,
             ok: true,
             text: Some(text.clone()),
         }),
