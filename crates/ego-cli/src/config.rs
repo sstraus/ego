@@ -124,6 +124,13 @@ fn flags_layer(args: &Args) -> Result<Sourced<ConfigLayer>, UsageError> {
     if args.bare {
         toml.push_str("bare = true\n");
     }
+    // `--budget` is the flags layer of the ceiling, not a value parsed on the
+    // side. `2026-08-21-a-run-with-no-ceiling.md` §4: an administrator's
+    // system layer is the only source of non-relaxable ceilings, and it can
+    // only clamp a figure that went through the same resolution it did.
+    if let Some(budget) = &args.budget {
+        toml.push_str(&format!("budget = {}\n", quote(budget)));
+    }
     for entry in &args.set {
         let (key, value) = entry.split_once('=').ok_or_else(|| {
             UsageError(format!(

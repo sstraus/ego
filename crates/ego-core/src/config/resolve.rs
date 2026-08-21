@@ -4,6 +4,7 @@
 use super::error::ConfigError;
 use super::layer::{ConfigLayer, Mode, ModelRef, PermCfg};
 use super::source::{Source, Sourced, Trust};
+use crate::ceiling::{Ceilings, Clamped};
 
 /// Ambient-loading posture (`CLI.md` §4.5): whether project-local config,
 /// hooks, skills and MCP servers may load.
@@ -21,6 +22,17 @@ pub struct Effective {
     pub mode: Option<Mode>,
     pub permissions: PermCfg,
     pub posture: Posture,
+    /// What this run may spend, after precedence and the system clamp.
+    ///
+    /// `2026-08-21-a-run-with-no-ceiling.md` §4: both fields are `None`
+    /// unless somebody wrote a ceiling, because ego imposes none of its own.
+    pub ceilings: Ceilings,
+    /// What the system clamp reduced, per field, so the run can say so.
+    ///
+    /// Separate from `ceilings` rather than folded into it: what is in force
+    /// and what was asked for are two numbers, and a single field would have
+    /// to be one of them.
+    pub clamped: Clamped,
 }
 
 /// Resolves layered config into one [`Effective`] value.
@@ -96,6 +108,7 @@ pub fn resolve(
     let mut mode = None;
     let mut allow: Vec<String> = Vec::new();
     let mut deny: Vec<String> = Vec::new();
+    let mut ceilings = Ceilings::default();
 
     for sourced in &eligible {
         let profile = active_profile.and_then(|name| sourced.value.profile.get(name));
@@ -115,6 +128,17 @@ pub fn resolve(
         {
             allow = perm.allow;
             deny = perm.deny;
+        }
+        if let Some(budget) = profile
+            .and_then(|p| p.budget.as_ref())
+            .or(sourced.value.budget.as_ref())
+        {
+            // Per field, so a layer naming a token ceiling does not erase a
+            // money ceiling a lower one set. They are independent
+            // instruments — §9's token ceiling needs no rates and binds on
+            // every metering class — and merging them into one slot would
+            // make naming either a way to drop the other.
+            ceilings.apply(budget);
         }
     }
 
@@ -147,10 +171,32 @@ pub fn resolve(
     }
     allow.retain(|entry| !deny.contains(entry));
 
+    // The same construction one field over: a `system` ceiling is gathered
+    // outside the ordinary merge and re-applied after it, so no
+    // higher-precedence layer and no profile override can raise it. `min`
+    // rather than "system wins", because `CLI.md:311` binds everyone to the
+    // administrator's cap and not to the administrator's *figure* — an
+    // operator asking for less keeps their own.
+    let mut system_ceiling = Ceilings::default();
+    for sourced in eligible.iter().filter(|l| l.source == Source::System) {
+        if let Some(budget) = &sourced.value.budget {
+            system_ceiling.apply(budget);
+        }
+        if let Some(budget) = active_profile
+            .and_then(|name| sourced.value.profile.get(name))
+            .and_then(|profile| profile.budget.as_ref())
+        {
+            system_ceiling.apply(budget);
+        }
+    }
+    let clamped = ceilings.clamp(&system_ceiling);
+
     Ok(Effective {
         model,
         mode,
         permissions: PermCfg { allow, deny },
         posture,
+        ceilings,
+        clamped,
     })
 }

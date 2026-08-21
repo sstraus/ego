@@ -19,6 +19,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use futures::StreamExt;
 
 use crate::budget::{BudgetGate, Metering, PricingQuote, ResolvedRates, SettlementSource};
+use crate::ceiling::tokens_reached;
 use crate::config::SystemPrompt;
 use crate::cost::{Money, RateSource};
 use crate::event::domain::{CancelCause, EventKind, ExitReason, OccupancyProvenance};
@@ -202,6 +203,15 @@ pub struct Model<'a> {
     /// run with no `--budget`: `2026-08-21-a-run-with-no-ceiling.md` §1
     /// consults no rate source at all unless a ceiling was configured.
     pub rates: Option<ResolvedRates>,
+    /// A ceiling on this session's cumulative billed tokens, when one was
+    /// configured.
+    ///
+    /// Beside the gate rather than inside it, because it is not money:
+    /// `2026-08-21-a-run-with-no-ceiling.md` §9 — it needs no rates, no fetch
+    /// and no network, and it binds on every metering class including the two
+    /// a monetary ceiling cannot touch. It is what an air-gapped operator, or
+    /// one who does not care to trust a third-party price table, reaches for.
+    pub token_ceiling: Option<u64>,
     pub caps: ModelCapabilities,
     pub config: TurnConfig,
 }
@@ -217,6 +227,7 @@ pub struct TurnLoop<'a> {
     gate: &'a mut BudgetGate,
     metering: Metering,
     rates: Option<ResolvedRates>,
+    token_ceiling: Option<u64>,
     caps: ModelCapabilities,
     config: TurnConfig,
     tools: Tools<'a>,
@@ -243,6 +254,7 @@ impl<'a> TurnLoop<'a> {
             gate: model.gate,
             metering: model.metering,
             rates: model.rates,
+            token_ceiling: model.token_ceiling,
             caps: model.caps,
             config: model.config,
             tools,
@@ -342,6 +354,20 @@ impl<'a> TurnLoop<'a> {
         loop {
             if let Some(cause) = self.cancel.cause() {
                 return Ok((ExitReason::Cancelled(cause), None));
+            }
+            // Beside the cancel check and for the same reason: this is the
+            // boundary between generations, the only place a turn can be
+            // stopped without abandoning an attempt that is already paid for.
+            //
+            // Post-generation where money is pre-generation, and the
+            // asymmetry is principled (§9). Money must be held before the
+            // request because once a provider reports what a generation cost
+            // the money is spent; tokens differ in exactly that property —
+            // on an unmetered or subscription row no charge is raised at all.
+            // `CLI.md:128` spells it the same way: "exit 5 when hit", not
+            // "when it would be hit".
+            if tokens_reached(self.token_ceiling, &self.journal.state().usage) {
+                return Ok((ExitReason::Budget, None));
             }
 
             let (reason, pending) = match self.generate(turn).await? {

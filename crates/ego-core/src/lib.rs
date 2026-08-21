@@ -9,6 +9,7 @@
 //! satellite crates implement them.
 
 pub mod budget;
+pub mod ceiling;
 pub mod config;
 pub mod cost;
 pub mod event;

@@ -336,7 +336,7 @@ mod turn {
     }
 
     fn model<'a>(generator: &'a dyn Generator, gate: &'a mut BudgetGate) -> Model<'a> {
-        model_with(generator, gate, metering(), Some(rates()), config())
+        model_with(generator, gate, metering(), Some(rates()), None, config())
     }
 
     fn model_with<'a>(
@@ -344,6 +344,7 @@ mod turn {
         gate: &'a mut BudgetGate,
         metering: Metering,
         rates: Option<ResolvedRates>,
+        token_ceiling: Option<u64>,
         config: TurnConfig,
     ) -> Model<'a> {
         Model {
@@ -351,6 +352,7 @@ mod turn {
             gate,
             metering,
             rates,
+            token_ceiling,
             caps: caps(),
             config,
         }
@@ -359,7 +361,7 @@ mod turn {
     /// Run one turn against `fx`, starting from `state`, and hand back where
     /// the session got to.
     fn run(fx: &Fixture, state: SessionState, prompt: &str) -> (ExitReason, bool, SessionState) {
-        run_with(fx, state, prompt, metering(), Some(rates()), config())
+        run_with(fx, state, prompt, metering(), Some(rates()), None, config())
     }
 
     /// The same, under a metering of the caller's choosing.
@@ -369,23 +371,32 @@ mod turn {
         prompt: &str,
         metering: Metering,
     ) -> (ExitReason, bool, SessionState) {
-        run_with(fx, state, prompt, metering, Some(rates()), config())
+        run_with(fx, state, prompt, metering, Some(rates()), None, config())
     }
 
-    /// The same, under a metering, rates and a config the caller chose.
+    /// The same, under a metering, rates, token ceiling and config the
+    /// caller chose.
     fn run_with(
         fx: &Fixture,
         state: SessionState,
         prompt: &str,
         metering: Metering,
         rates: Option<ResolvedRates>,
+        token_ceiling: Option<u64>,
         config: TurnConfig,
     ) -> (ExitReason, bool, SessionState) {
         let mut gate = fx.gate.borrow_mut();
         let tools = Tools::new(&fx.registry, &fx.policy, &fx.fs, CanonPath::new("/ws"));
         let mut turn = TurnLoop::new(
             session(state, &fx.store, &fx.clock, &fx.sink, CancelToken::new()),
-            model_with(&fx.generator, &mut gate, metering, rates, config),
+            model_with(
+                &fx.generator,
+                &mut gate,
+                metering,
+                rates,
+                token_ceiling,
+                config,
+            ),
             tools,
         );
         let outcome = block_on(turn.run(prompt)).expect("the store accepted every append");
@@ -587,6 +598,7 @@ mod turn {
             "what is in note.txt?",
             metering(),
             Some(rates()),
+            None,
             config,
         );
 
@@ -1384,6 +1396,115 @@ mod turn {
         );
     }
 
+    /// The token ceiling, at the boundary §9 puts it on: between two
+    /// generations of the *same* turn, not between turns.
+    ///
+    /// The tool call is what makes the distinction observable. A turn that
+    /// calls a tool generates twice; a ceiling checked only between turns
+    /// would let the second generation run and stop the run afterwards,
+    /// having spent the tokens it was there to stop. Here the first
+    /// generation's usage crosses the ceiling and the second never happens.
+    #[test]
+    fn a_token_ceiling_stops_the_next_generation_of_the_turn_it_is_in() {
+        let script = || {
+            vec![
+                vec![
+                    AiEvent::ToolCall {
+                        call_id: "call-1".to_string(),
+                        name: "read".to_string(),
+                        args: r#"{"path":"/ws/note.txt"}"#.to_string(),
+                    },
+                    AiEvent::Usage(tokens(900, 0, 0, 200)),
+                    AiEvent::Stop(StopReason::ToolUse),
+                ],
+                vec![AiEvent::Stop(StopReason::Stop)],
+            ]
+        };
+
+        // 1_100 billed tokens against a 1_000 ceiling: reached after the
+        // first generation, so the second is refused.
+        let capped = Fixture::new(script()).with_read_tool();
+        capped.fs.file("/ws/note.txt", "hello from the file");
+        let (exit, ok, _) = run_with(
+            &capped,
+            SessionState::default(),
+            "what is in note.txt?",
+            metering(),
+            Some(rates()),
+            Some(1_000),
+            config(),
+        );
+
+        assert_eq!(exit, ExitReason::Budget);
+        assert!(!ok);
+        assert_eq!(
+            capped.generator.calls().len(),
+            1,
+            "the second generation ran despite the ceiling"
+        );
+
+        // The same script with no ceiling generates twice, so the assertion
+        // above is about the ceiling and not about the script.
+        let uncapped = Fixture::new(script()).with_read_tool();
+        uncapped.fs.file("/ws/note.txt", "hello from the file");
+        let (exit, ok, _) = run(&uncapped, SessionState::default(), "what is in note.txt?");
+        assert_eq!(exit, ExitReason::Completed);
+        assert!(ok);
+        assert_eq!(uncapped.generator.calls().len(), 2);
+    }
+
+    /// It binds a subscription row exactly as it binds a metered one. That is
+    /// §9's second property: the token ceiling needs no rates, no fetch and
+    /// no network, so it is the one instrument that works on the two
+    /// arrangements a monetary ceiling cannot touch.
+    #[test]
+    fn a_token_ceiling_binds_a_row_no_money_ceiling_could() {
+        let fx = Fixture::new(vec![vec![
+            AiEvent::Usage(tokens(900, 0, 0, 200)),
+            AiEvent::Stop(StopReason::Stop),
+        ]]);
+        *fx.gate.borrow_mut() =
+            BudgetGate::unlimited(CurrencyCode::new("USD").expect("USD is valid"));
+
+        // The first turn spends 1_100 tokens against a 1_000 ceiling, and
+        // completes: the ceiling is checked before a generation, not after.
+        let (exit, ok, state) = run_with(
+            &fx,
+            SessionState::default(),
+            "hi",
+            subscription(),
+            None,
+            Some(1_000),
+            config(),
+        );
+        assert_eq!(exit, ExitReason::Completed);
+        assert!(ok);
+
+        // The next one is refused before it reaches the provider, on a row
+        // that reserves zero and could never be stopped by `--budget 5$`.
+        let (exit, ok, _) = run_with(
+            &fx,
+            state,
+            "and again",
+            subscription(),
+            None,
+            Some(1_000),
+            config(),
+        );
+        assert_eq!(exit, ExitReason::Budget);
+        assert!(!ok);
+        assert_eq!(
+            fx.generator.calls().len(),
+            1,
+            "a flat-fee row was generated past its token ceiling"
+        );
+        assert_eq!(
+            RunTermination::after_turn(exit, None),
+            Some(RunTermination::BudgetExceeded),
+            "and it is exit 5, the same code the money ceiling ends on"
+        );
+    }
+
     /// The ordinary case, end to end: nobody configured a ceiling, so the
     /// run says so and runs anyway.
     ///
@@ -1405,6 +1526,7 @@ mod turn {
             SessionState::default(),
             "hi",
             metering(),
+            None,
             None,
             config(),
         );
