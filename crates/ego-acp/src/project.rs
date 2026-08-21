@@ -221,6 +221,7 @@ fn stop_reason_v2(exit_reason: ExitReason) -> v2::StopReason {
         ExitReason::Internal => v2::StopReason::Other("_internal".to_string()),
         ExitReason::PermissionRequired => v2::StopReason::Other("_permission".to_string()),
         ExitReason::Budget => v2::StopReason::Other("_budget".to_string()),
+        ExitReason::Usage => v2::StopReason::Other("_usage".to_string()),
     }
 }
 

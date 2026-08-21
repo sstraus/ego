@@ -152,7 +152,8 @@ mod lifecycle {
         DeliveryCertainty, GenerationAttempt, Outcome, Settlement, UsageReport,
     };
     use ego_core::generator::capabilities::{
-        CacheRetention, CancelSemantics, ModelCapabilities, ReasoningCarryover, Transport,
+        CacheRetention, CancelSemantics, ModelCapabilities, ReasoningCarryover,
+        ReasoningEffortSupport, Transport,
     };
     use ego_core::generator::fake::FakeGenerator;
     use ego_core::generator::port::{AiEvent, Generator};
@@ -194,6 +195,7 @@ mod lifecycle {
             max_tools: Some(128),
             supports_parallel_tool_calls: true,
             reasoning_carryover: ReasoningCarryover::Portable,
+            reasoning_efforts: ReasoningEffortSupport::Any,
             cancel: CancelSemantics::Cooperative,
             cache: CacheRetention::Short,
             transport: Transport::Sse,

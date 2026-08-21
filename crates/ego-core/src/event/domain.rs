@@ -69,6 +69,16 @@ pub enum ExitReason {
     Cancelled(CancelCause),
     /// The turn was stopped by a budget limit.
     Budget,
+    /// The run was asked for something it cannot do, and no retry will change
+    /// that: `CLI.md` §4.3's exit 2. Distinct from [`Provider`] because
+    /// nothing was sent, and from [`Internal`] because nothing of ours
+    /// failed — the invocation and the resolved model disagree, and the
+    /// caller is the only party who can settle it. See
+    /// `docs/decisions/2026-08-21-a-request-the-model-will-not-take.md`.
+    ///
+    /// [`Provider`]: ExitReason::Provider
+    /// [`Internal`]: ExitReason::Internal
+    Usage,
     /// A call needed a grant that nobody in this run could give. `CLI.md`
     /// §4.4: a headless run never hangs on a prompt, so an unresolvable
     /// permission ends it rather than being answered on the model's behalf.

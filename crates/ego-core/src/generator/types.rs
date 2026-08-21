@@ -16,7 +16,10 @@ use serde::{Deserialize, Serialize};
 /// needs to be able to say "no thinking" as well as an effort level, and the
 /// plan asks for one `ThinkingLevel` type, so this merges the two rather than
 /// introducing a second type the acceptance criteria doesn't ask for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// The ordering is the effort ordering, not an accident of declaration: it is
+/// derived, and the variants are written from least to most so that deriving
+/// it says something true.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ThinkingLevel {
     Off,

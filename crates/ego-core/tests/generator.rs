@@ -3,6 +3,8 @@
 //!
 //! See `ARCHITECTURE.md` §2/§3.1 and `plans/m0a-contracts.md` Step 10.
 
+use std::collections::BTreeSet;
+
 use ego_core::budget::{BudgetGate, PricingQuote};
 use ego_core::cost::{Amount, CostDelta, CurrencyCode, Money, PricingRevision};
 use ego_core::event::domain::{CancelCause, DomainEvent, Envelope, EventKind, ExitReason};
@@ -11,7 +13,7 @@ use ego_core::event::time::Timestamp;
 use ego_core::generator::attempt::{AttemptStream, GenerationAttempt, Settlement};
 use ego_core::generator::capabilities::{
     CacheRetention, CancelSemantics, CapabilityGap, ModelCapabilities, ReasoningCarryover,
-    Transport,
+    ReasoningEffortSupport, Transport,
 };
 use ego_core::generator::fake::FakeGenerator;
 use ego_core::generator::port::{AiEvent, Generator};
@@ -58,6 +60,7 @@ mod generator {
             max_tools: Some(128),
             supports_parallel_tool_calls: true,
             reasoning_carryover,
+            reasoning_efforts: ReasoningEffortSupport::Any,
             cancel: CancelSemantics::Cooperative,
             cache: CacheRetention::Short,
             transport: Transport::Sse,
@@ -452,6 +455,152 @@ mod generator {
         let json = serde_json::to_string(&caps).expect("serialize");
         let back: ModelCapabilities = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(caps, back);
+    }
+
+    // --- What the model accepts, asked of one model ------------------------
+
+    #[test]
+    fn a_model_that_never_stated_its_reasoning_efforts_refuses_rather_than_guessing() {
+        let mut caps = capabilities(ReasoningCarryover::Portable);
+        caps.reasoning_efforts = ReasoningEffortSupport::Unknown;
+        let req = GenRequest {
+            thinking: ThinkingLevel::Medium,
+            ..gen_request()
+        };
+
+        let gaps = caps.request_gaps(&req);
+
+        assert!(gaps.contains(&CapabilityGap::ReasoningEffortUnstated {
+            requested: ThinkingLevel::Medium,
+        }));
+    }
+
+    /// The whole point of three states rather than an `Option`: silence is not
+    /// permission. If this ever passes with an empty `gaps`, the field has
+    /// been read as "nothing stated, so send anything" — the exact mistake
+    /// `2026-08-21-grok-as-a-provider.md` §4 records Codex overruling.
+    #[test]
+    fn silence_about_reasoning_efforts_is_not_permission_to_send_any_of_them() {
+        let mut caps = capabilities(ReasoningCarryover::Portable);
+        caps.reasoning_efforts = ReasoningEffortSupport::Unknown;
+
+        for level in [
+            ThinkingLevel::Off,
+            ThinkingLevel::Minimal,
+            ThinkingLevel::Low,
+            ThinkingLevel::Medium,
+            ThinkingLevel::High,
+            ThinkingLevel::XHigh,
+            ThinkingLevel::Max,
+        ] {
+            let req = GenRequest {
+                thinking: level,
+                ..gen_request()
+            };
+            assert!(
+                caps.request_gaps(&req)
+                    .contains(&CapabilityGap::ReasoningEffortUnstated { requested: level }),
+                "{level:?} was allowed through a model that stated nothing"
+            );
+        }
+    }
+
+    #[test]
+    fn a_level_outside_the_stated_set_is_refused_naming_the_ones_that_would_work() {
+        let accepted = BTreeSet::from([
+            ThinkingLevel::Low,
+            ThinkingLevel::Medium,
+            ThinkingLevel::High,
+        ]);
+        let mut caps = capabilities(ReasoningCarryover::Portable);
+        caps.reasoning_efforts = ReasoningEffortSupport::Only(accepted.clone());
+        let req = GenRequest {
+            thinking: ThinkingLevel::Max,
+            ..gen_request()
+        };
+
+        let gaps = caps.request_gaps(&req);
+
+        assert!(gaps.contains(&CapabilityGap::ReasoningEffortUnsupported {
+            requested: ThinkingLevel::Max,
+            accepted,
+        }));
+        // Both sides reach the caller, or the refusal is one they must guess
+        // their way out of.
+        let told = gaps[0].to_string();
+        assert!(told.contains("Max"), "{told}");
+        assert!(told.contains("Low"), "{told}");
+    }
+
+    #[test]
+    fn a_level_inside_the_stated_set_is_sent() {
+        let mut caps = capabilities(ReasoningCarryover::Portable);
+        caps.reasoning_efforts = ReasoningEffortSupport::Only(BTreeSet::from([
+            ThinkingLevel::Low,
+            ThinkingLevel::Medium,
+        ]));
+        let req = GenRequest {
+            thinking: ThinkingLevel::Low,
+            ..gen_request()
+        };
+
+        assert_eq!(caps.request_gaps(&req), Vec::new());
+    }
+
+    #[test]
+    fn a_model_that_accepts_every_level_is_not_asked_twice() {
+        let mut caps = capabilities(ReasoningCarryover::Portable);
+        caps.reasoning_efforts = ReasoningEffortSupport::Any;
+        let req = GenRequest {
+            thinking: ThinkingLevel::Max,
+            ..gen_request()
+        };
+
+        assert_eq!(caps.request_gaps(&req), Vec::new());
+    }
+
+    /// A record written before the field existed proves nothing about the
+    /// model, and decodes as the state that says so.
+    #[test]
+    fn a_capability_record_from_before_the_field_existed_decodes_as_unknown() {
+        let v1 = serde_json::json!({
+            "schema_version": 1,
+            "max_context_tokens": 200_000,
+            "max_output_tokens": 64_000,
+            "max_tools": 128,
+            "supports_parallel_tool_calls": true,
+            "reasoning_carryover": "portable",
+            "cancel": "cooperative",
+            "cache": "short",
+            "transport": "sse"
+        });
+
+        let caps: ModelCapabilities =
+            serde_json::from_value(v1).expect("a v1 record still decodes");
+
+        assert_eq!(caps.reasoning_efforts, ReasoningEffortSupport::Unknown);
+    }
+
+    /// `fallback_gaps` is `request_gaps` asked of the target, so a target that
+    /// rejects the level refuses the fallback too — without a second copy of
+    /// the check that could drift from the first.
+    #[test]
+    fn a_fallback_target_that_rejects_the_level_is_refused_like_any_other_gap() {
+        let current = capabilities(ReasoningCarryover::Portable);
+        let mut target = capabilities(ReasoningCarryover::Portable);
+        target.reasoning_efforts =
+            ReasoningEffortSupport::Only(BTreeSet::from([ThinkingLevel::Low]));
+        let req = GenRequest {
+            thinking: ThinkingLevel::Max,
+            ..gen_request()
+        };
+
+        assert!(current.fallback_gaps(&target, &req).contains(
+            &CapabilityGap::ReasoningEffortUnsupported {
+                requested: ThinkingLevel::Max,
+                accepted: BTreeSet::from([ThinkingLevel::Low]),
+            }
+        ));
     }
 
     // --- Incompatible fallback is detected and reported ---------------------

@@ -19,7 +19,8 @@ use ego_core::cost::{Amount, CurrencyCode, Money, PricingRevision};
 use ego_core::event::domain::ExitReason;
 use ego_core::event::id::SessionId;
 use ego_core::generator::capabilities::{
-    CacheRetention, CancelSemantics, ModelCapabilities, ReasoningCarryover, Transport,
+    CacheRetention, CancelSemantics, ModelCapabilities, ReasoningCarryover, ReasoningEffortSupport,
+    Transport,
 };
 use ego_core::generator::fake::FakeGenerator;
 use ego_core::generator::port::AiEvent;
@@ -834,6 +835,7 @@ mod end_to_end {
             max_tools: Some(128),
             supports_parallel_tool_calls: true,
             reasoning_carryover: ReasoningCarryover::Unsupported,
+            reasoning_efforts: ReasoningEffortSupport::Any,
             cancel: CancelSemantics::Cooperative,
             cache: CacheRetention::Short,
             transport: Transport::Sse,

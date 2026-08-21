@@ -27,7 +27,8 @@ use ego_core::cost::{Amount, CurrencyCode, Money, PricingRevision};
 use ego_core::event::id::GenerationId;
 use ego_core::generator::attempt::{DeliveryCertainty, GenerationAttempt};
 use ego_core::generator::capabilities::{
-    CacheRetention, CancelSemantics, ModelCapabilities, ReasoningCarryover, Transport,
+    CacheRetention, CancelSemantics, ModelCapabilities, ReasoningCarryover, ReasoningEffortSupport,
+    Transport,
 };
 use ego_core::generator::port::{AiEvent, Generator};
 use ego_core::generator::types::{
@@ -67,6 +68,7 @@ fn caps() -> ModelCapabilities {
         max_tools: Some(128),
         supports_parallel_tool_calls: true,
         reasoning_carryover: ReasoningCarryover::Portable,
+        reasoning_efforts: ReasoningEffortSupport::Any,
         cancel: CancelSemantics::Cooperative,
         cache: CacheRetention::Short,
         transport: Transport::Sse,

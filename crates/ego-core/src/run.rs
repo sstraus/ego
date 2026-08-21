@@ -112,9 +112,17 @@ impl RunTermination {
     /// never re-derives it. `Completed` returns `None`: a completed turn does
     /// not end a run — the controller decides whether another turn follows,
     /// and only it knows. That is also why no turn can produce
-    /// [`MaxTurns`](Self::MaxTurns) or [`UsageError`](Self::UsageError): both
-    /// are facts about the invocation that no single turn is in a position to
-    /// report.
+    /// [`MaxTurns`](Self::MaxTurns): it is a fact about the invocation that no
+    /// single turn is in a position to report.
+    ///
+    /// **[`UsageError`](Self::UsageError) was in that sentence and should not
+    /// have been.** A turn is in fact the only thing positioned to notice one
+    /// class of it: the invocation and the *resolved* model disagree — a
+    /// `--thinking` level the model does not accept — and nothing above the
+    /// turn holds the resolved [`ModelCapabilities`] to compare against. See
+    /// `docs/decisions/2026-08-21-a-request-the-model-will-not-take.md`.
+    ///
+    /// [`ModelCapabilities`]: crate::generator::capabilities::ModelCapabilities
     ///
     /// `denied` is the action a [`ExitReason::PermissionRequired`] turn was
     /// refused, which `CLI.md` §4.1 requires in the result. A
@@ -143,6 +151,13 @@ impl RunTermination {
             }
             ExitReason::Provider => Some(RunTermination::Provider {
                 message: "the provider or the network failed".to_string(),
+            }),
+            // A summary line, like `Provider` above and for the same reason:
+            // the gaps themselves are already in the log as an
+            // `EventKind::Error`, which is what `--output json` streams. This
+            // is what a caller reads when it reads nothing else.
+            ExitReason::Usage => Some(RunTermination::UsageError {
+                message: "the model does not accept the request this run asks for".to_string(),
             }),
             ExitReason::Internal => Some(RunTermination::Failed {
                 message: "the turn failed for an internal reason".to_string(),

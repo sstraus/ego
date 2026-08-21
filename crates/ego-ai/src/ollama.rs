@@ -36,7 +36,8 @@ use std::sync::Arc;
 
 use ego_core::cost::CurrencyCode;
 use ego_core::generator::capabilities::{
-    CacheRetention, CancelSemantics, ModelCapabilities, ReasoningCarryover, Transport,
+    CacheRetention, CancelSemantics, ModelCapabilities, ReasoningCarryover, ReasoningEffortSupport,
+    Transport,
 };
 use futures::StreamExt;
 use serde::Deserialize;
@@ -44,9 +45,6 @@ use serde::Deserialize;
 use crate::catalogue::{ResolveError, ResolvedModel, control_plane, is_locally_served, unmetered};
 use crate::http::{Http, HttpRequest, HttpResponse, Method};
 use crate::provider::ProviderRow;
-
-/// The capability schema version a resolved local model is stamped with.
-const SCHEMA_VERSION: u32 = 1;
 
 /// One entry of `GET /api/tags`.
 #[derive(Debug, Deserialize)]
@@ -262,7 +260,7 @@ async fn fetch(http: &Arc<dyn Http>, req: HttpRequest) -> Result<Vec<u8>, String
 fn capabilities_from(tag: &Tag, served_context: u64) -> ModelCapabilities {
     let thinks = tag.capabilities.iter().any(|cap| cap == "thinking");
     ModelCapabilities {
-        schema_version: SCHEMA_VERSION,
+        schema_version: ModelCapabilities::SCHEMA_VERSION,
         max_context_tokens: Some(served_context),
         max_output_tokens: None,
         max_tools: None,
@@ -276,6 +274,12 @@ fn capabilities_from(tag: &Tag, served_context: u64) -> ModelCapabilities {
         } else {
             ReasoningCarryover::Unsupported
         },
+        // Earned, not assumed. `provider.rs:143` records that a live
+        // Ollama 0.32.14 validates `reasoning_effort` against a strict
+        // superset of what `ThinkingLevel` can produce — which is the same
+        // measurement that lets the local row reuse the hosted wire format
+        // with no mapping of its own. `Any` is the honest reading of it.
+        reasoning_efforts: ReasoningEffortSupport::Any,
         // Dropping the connection stops the runner at a token boundary.
         cancel: CancelSemantics::Cooperative,
         // Ollama's prompt cache does not survive the model being unloaded,

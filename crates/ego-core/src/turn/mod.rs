@@ -392,6 +392,31 @@ impl<'a> TurnLoop<'a> {
             reasoning_state: None,
         };
 
+        // Before the gate, deliberately: a reservation taken for a request
+        // the model will reject has authorised spending on something that was
+        // never going to be sent
+        // (`docs/decisions/2026-08-21-a-request-the-model-will-not-take.md`).
+        let gaps = self.caps.request_gaps(&request);
+        if !gaps.is_empty() {
+            tracing::warn!(
+                ?gaps,
+                "the model does not accept the request this run asks for"
+            );
+            self.journal.append(
+                turn,
+                None,
+                None,
+                EventKind::Error {
+                    message: gaps
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join("; "),
+                },
+            )?;
+            return Ok(Generated::Ended(ExitReason::Usage));
+        }
+
         let reservation = match self.gate.reserve(&self.quote, &request, &self.caps) {
             Ok(reservation) => reservation,
             Err(denied) => {

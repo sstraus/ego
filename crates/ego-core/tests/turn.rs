@@ -5,6 +5,7 @@
 //! `plans/m0b-vertical-slice.md` Step 10.
 
 use std::cell::RefCell;
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -16,7 +17,8 @@ use ego_core::event::id::{Seq, SessionId};
 use ego_core::event::time::{Clock, Timestamp};
 use ego_core::generator::attempt::{AttemptStream, GenerationAttempt};
 use ego_core::generator::capabilities::{
-    CacheRetention, CancelSemantics, ModelCapabilities, ReasoningCarryover, Transport,
+    CacheRetention, CancelSemantics, ModelCapabilities, ReasoningCarryover, ReasoningEffortSupport,
+    Transport,
 };
 use ego_core::generator::fake::FakeGenerator;
 use ego_core::generator::port::{AiEvent, Generator};
@@ -28,6 +30,7 @@ use ego_core::permit::{
     ToolResult, Typed, TypedTool,
 };
 use ego_core::public::PublicEvent;
+use ego_core::run::RunTermination;
 use ego_core::sink::{CollectingSink, EventSink};
 use ego_core::state::{ItemKind, SessionState, Usage};
 use ego_core::store::session_store::{SessionMeta, SessionStore, StoreError};
@@ -235,6 +238,7 @@ mod turn {
             max_tools: Some(128),
             supports_parallel_tool_calls: true,
             reasoning_carryover: ReasoningCarryover::Unsupported,
+            reasoning_efforts: ReasoningEffortSupport::Any,
             cancel: CancelSemantics::Cooperative,
             cache: CacheRetention::Short,
             transport: Transport::Sse,
@@ -863,6 +867,128 @@ mod turn {
             &usd("0"),
             "an abandoned turn still settles the attempt it had in flight"
         );
+    }
+
+    /// The decisive property of the preflight, and the reason it sits where it
+    /// sits: a reservation taken for a request the model will reject has
+    /// authorised spending on something that was never going to be sent. So
+    /// the gate must be untouched — `outstanding` and `committed` both zero —
+    /// and the generator must never have been called.
+    #[test]
+    fn a_request_the_model_will_not_take_never_reaches_the_budget_gate() {
+        let fx = Fixture::new(vec![vec![
+            AiEvent::TextDelta {
+                text: "never sent".to_string(),
+            },
+            AiEvent::Stop(StopReason::Stop),
+        ]]);
+
+        let mut gate = fx.gate.borrow_mut();
+        let tools = Tools::new(&fx.registry, &fx.policy, &fx.fs, CanonPath::new("/ws"));
+        let mut refusing = model(&fx.generator, &mut gate);
+        // The model accepts three levels; `config()` asks for `Off`.
+        refusing.caps.reasoning_efforts = ReasoningEffortSupport::Only(BTreeSet::from([
+            ThinkingLevel::Low,
+            ThinkingLevel::Medium,
+            ThinkingLevel::High,
+        ]));
+        let mut turn = TurnLoop::new(
+            session(
+                SessionState::default(),
+                &fx.store,
+                &fx.clock,
+                &fx.sink,
+                CancelToken::new(),
+            ),
+            refusing,
+            tools,
+        );
+
+        let outcome = block_on(turn.run("hi")).expect("the store accepted every append");
+
+        assert_eq!(outcome.exit_reason, ExitReason::Usage);
+        assert!(!outcome.ok);
+        drop(turn);
+        assert_eq!(gate.outstanding(), &usd("0"), "the gate reserved anyway");
+        assert_eq!(gate.committed(), &usd("0"), "the gate settled anyway");
+        assert!(
+            fx.generator.calls().is_empty(),
+            "the request was sent to the provider anyway"
+        );
+    }
+
+    /// A usage error is exit 2, and the log says which levels would have
+    /// worked — the summary line in `RunTermination` deliberately does not.
+    #[test]
+    fn a_refused_level_is_named_in_the_log_with_the_levels_that_would_have_worked() {
+        let fx = Fixture::new(vec![vec![AiEvent::Stop(StopReason::Stop)]]);
+
+        let mut gate = fx.gate.borrow_mut();
+        let tools = Tools::new(&fx.registry, &fx.policy, &fx.fs, CanonPath::new("/ws"));
+        let mut refusing = model(&fx.generator, &mut gate);
+        refusing.caps.reasoning_efforts =
+            ReasoningEffortSupport::Only(BTreeSet::from([ThinkingLevel::High]));
+        let mut turn = TurnLoop::new(
+            session(
+                SessionState::default(),
+                &fx.store,
+                &fx.clock,
+                &fx.sink,
+                CancelToken::new(),
+            ),
+            refusing,
+            tools,
+        );
+
+        let outcome = block_on(turn.run("hi")).expect("the store accepted every append");
+
+        assert_eq!(
+            RunTermination::after_turn(outcome.exit_reason, outcome.denied.as_deref())
+                .expect("a usage error ends the run")
+                .exit_code(),
+            2
+        );
+        drop(turn);
+        let message = fx
+            .store
+            .events()
+            .iter()
+            .find_map(|ev| match &ev.kind {
+                EventKind::Error { message } => Some(message.clone()),
+                _ => None,
+            })
+            .expect("the refusal is durable, or nobody can diagnose the run from the log");
+        assert!(message.contains("Off"), "{message}");
+        assert!(message.contains("High"), "{message}");
+    }
+
+    /// A model that states nothing is refused for a different reason, and the
+    /// message says so: re-resolve the model, do not pick another level.
+    #[test]
+    fn a_model_that_stated_nothing_is_refused_before_it_is_sent_anything() {
+        let fx = Fixture::new(vec![vec![AiEvent::Stop(StopReason::Stop)]]);
+
+        let mut gate = fx.gate.borrow_mut();
+        let tools = Tools::new(&fx.registry, &fx.policy, &fx.fs, CanonPath::new("/ws"));
+        let mut silent = model(&fx.generator, &mut gate);
+        silent.caps.reasoning_efforts = ReasoningEffortSupport::Unknown;
+        let mut turn = TurnLoop::new(
+            session(
+                SessionState::default(),
+                &fx.store,
+                &fx.clock,
+                &fx.sink,
+                CancelToken::new(),
+            ),
+            silent,
+            tools,
+        );
+
+        let outcome = block_on(turn.run("hi")).expect("the store accepted every append");
+
+        assert_eq!(outcome.exit_reason, ExitReason::Usage);
+        drop(turn);
+        assert!(fx.generator.calls().is_empty());
     }
 
     #[test]

@@ -23,7 +23,8 @@ use ego_ai::provider::{Auth, ProviderRow};
 use ego_core::budget::PricingQuote;
 use ego_core::cost::{Amount, CurrencyCode, PricingRevision, TokenCategory, UnknownCost};
 use ego_core::generator::capabilities::{
-    CacheRetention, CancelSemantics, ModelCapabilities, ReasoningCarryover, Transport,
+    CacheRetention, CancelSemantics, ModelCapabilities, ReasoningCarryover, ReasoningEffortSupport,
+    Transport,
 };
 use ego_core::generator::types::{Conversation, GenRequest, ThinkingLevel};
 use futures::executor::block_on;
@@ -163,6 +164,7 @@ fn hosted_caps() -> ModelCapabilities {
         max_tools: None,
         supports_parallel_tool_calls: true,
         reasoning_carryover: ReasoningCarryover::SameProviderOnly,
+        reasoning_efforts: ReasoningEffortSupport::Any,
         cancel: CancelSemantics::Cooperative,
         cache: CacheRetention::Long,
         transport: Transport::Sse,

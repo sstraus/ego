@@ -26,7 +26,8 @@ use ego_core::cost::{
     Amount, Ceiling, CostDelta, CurrencyCode, Money, PricingRevision, TokenCategory, UnknownCost,
 };
 use ego_core::generator::capabilities::{
-    CacheRetention, CancelSemantics, ModelCapabilities, ReasoningCarryover, Transport,
+    CacheRetention, CancelSemantics, ModelCapabilities, ReasoningCarryover, ReasoningEffortSupport,
+    Transport,
 };
 use ego_core::generator::types::{Conversation, GenRequest, Message, Role, ThinkingLevel};
 use ego_core::state::Usage;
@@ -73,6 +74,7 @@ mod budget {
             max_tools: Some(128),
             supports_parallel_tool_calls: true,
             reasoning_carryover: ReasoningCarryover::Portable,
+            reasoning_efforts: ReasoningEffortSupport::Any,
             cancel: CancelSemantics::Cooperative,
             cache: CacheRetention::Short,
             transport: Transport::Sse,
