@@ -148,6 +148,40 @@ fn a_word_that_is_not_a_documented_command_is_still_a_prompt() {
     }
 }
 
+/// Collapse every run of whitespace to one space, so a Rust string broken
+/// across lines with `\` continuations and a markdown table cell on one long
+/// line can be compared as the same sentence. Nothing else is normalised:
+/// backticks, em dashes and `**M3**` must match exactly, because they are what
+/// the operator reads.
+fn normalised(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The reason is bound to the document, not just the name.
+///
+/// The first version of this file bound only the command *name* to §2 and left
+/// `waiting_on` free on both sides. `ego rules` then went stale in the code and
+/// in §2.1 independently, within an hour, when the permission rule grammar
+/// shipped and both surfaces went on blaming it — caught by a person, which is
+/// the mechanism this test replaces.
+///
+/// Two prose surfaces that agree today, with nothing that can say when they
+/// stop, are the same defect as a field that is omitted when empty: two
+/// different states, identical bytes. The code string is the source and the
+/// table quotes it.
+#[test]
+fn every_waiting_on_reason_is_the_one_the_document_prints() {
+    let doc = normalised(include_str!("../../../CLI.md"));
+    for (name, waiting_on) in cli::UNBUILT {
+        assert!(
+            doc.contains(&normalised(waiting_on)),
+            "`{name}`'s reason is not in CLI.md §2.1 verbatim. The code says:\n\
+             {waiting_on}\n\
+             Change the table to quote it, or change both."
+        );
+    }
+}
+
 /// Every name the code refuses is one the document actually offers. Without
 /// this the table could drift into refusing a command `CLI.md` never promised,
 /// which is a worse answer than the interactive fallback it replaced: it would
