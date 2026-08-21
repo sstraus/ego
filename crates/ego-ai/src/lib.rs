@@ -4,6 +4,8 @@
 //! See `ARCHITECTURE.md` §3.1. Implements `ego-core`'s `Generator` port and
 //! owns `Http`, credentials and the provider tables.
 
+pub mod http;
+
 use ego_core::generator::attempt::{AttemptStream, GenerationAttempt};
 use ego_core::generator::port::Generator;
 use ego_core::generator::types::GenRequest;

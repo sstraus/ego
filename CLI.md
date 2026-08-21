@@ -67,7 +67,12 @@ Grouped; all long flags, short forms only for the hot five
                         openrouter/z-ai/glm-4.7, ollama/qwen3 …
                         local daemons (ollama, lmstudio, vllm, llamacpp) are
                         first-class providers, catalogued live from the daemon
-    --offline           assert no non-loopback egress (enforced at transport)
+    --offline           no non-loopback egress from ego's own HTTP transport:
+                        loopback addresses and `localhost` only, no DNS, no
+                        proxy, and every redirect hop re-checked. It does not
+                        confine spawned commands, hooks or MCP transports, and
+                        it cannot stop an admitted local daemon from relaying
+                        upstream itself (see `crates/ego-ai/src/http.rs`)
     --thinking L        off|min|low|medium|high|xhigh|max   (pi's scale)
     --system TEXT|@file          replace system prompt
     --append-system TEXT|@file   append to it
