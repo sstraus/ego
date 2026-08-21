@@ -1,5 +1,9 @@
 # ego — Command language
 
+Date: 2026-08-19. Status: **§4 (output contracts) ratified by maintainer
+2026-08-21 — §4.1 through §4.5 in full, not a subset.** The rest of this
+document remains proposed.
+
 
 
 ## 1. Design principles
