@@ -15,9 +15,9 @@ use std::fmt;
 use super::approver::{Approver, ModeApprover, Verdict};
 use super::path::CanonPath;
 use super::prepared_call::{Op, PreparedCall};
-use super::rule::{Rule, RuleId};
+use super::rule::RuleId;
 use super::scope::Scope;
-use crate::config::{Mode, PermCfg};
+use crate::config::{Mode, Ruleset, SourcedRule};
 
 /// A capability token whose constructor only this module can reach. Its
 /// only job is to make [`Permit`]'s constructor equally unreachable from
@@ -111,14 +111,14 @@ struct Sealed(());
 /// is private. There is no accessor either, and none returning `&mut`.
 ///
 /// ```compile_fail
-/// use ego_core::config::{Mode, PermCfg};
+/// use ego_core::config::{Mode, PermCfg, Ruleset, Source};
 /// use ego_core::permit::rule::Rule;
 /// use ego_core::permit::{CanonPath, Classification, Op, PolicyEngine, PreparedCall};
 /// let allow = vec![Rule::load("read(**)").expect("a rule this build enforces")];
 /// let engine = PolicyEngine::new(
 ///     CanonPath::new("/ws"),
 ///     Mode::Default,
-///     PermCfg { allow, deny: Vec::new() },
+///     Ruleset::from_layer(PermCfg { allow, deny: Vec::new() }, Source::Project),
 /// );
 /// let call = PreparedCall {
 ///     tool: "read".to_string(),
@@ -133,14 +133,14 @@ struct Sealed(());
 /// does not:
 ///
 /// ```
-/// use ego_core::config::{Mode, PermCfg};
+/// use ego_core::config::{Mode, PermCfg, Ruleset, Source};
 /// use ego_core::permit::rule::Rule;
 /// use ego_core::permit::{CanonPath, Classification, Op, PolicyEngine, PreparedCall};
 /// let allow = vec![Rule::load("read(**)").expect("a rule this build enforces")];
 /// let engine = PolicyEngine::new(
 ///     CanonPath::new("/ws"),
 ///     Mode::Default,
-///     PermCfg { allow, deny: Vec::new() },
+///     Ruleset::from_layer(PermCfg { allow, deny: Vec::new() }, Source::Project),
 /// );
 /// let call = PreparedCall {
 ///     tool: "read".to_string(),
@@ -314,14 +314,14 @@ impl Permit {
 /// moved out and re-paired with another call — §3's whole subject.
 ///
 /// ```compile_fail
-/// use ego_core::config::{Mode, PermCfg};
+/// use ego_core::config::{Mode, PermCfg, Ruleset, Source};
 /// use ego_core::permit::rule::Rule;
 /// use ego_core::permit::{CanonPath, Classification, Op, PolicyEngine, PreparedCall};
 /// let allow = vec![Rule::load("read(**)").expect("a rule this build enforces")];
 /// let engine = PolicyEngine::new(
 ///     CanonPath::new("/ws"),
 ///     Mode::Default,
-///     PermCfg { allow, deny: Vec::new() },
+///     Ruleset::from_layer(PermCfg { allow, deny: Vec::new() }, Source::Project),
 /// );
 /// let call = PreparedCall {
 ///     tool: "read".to_string(),
@@ -336,14 +336,14 @@ impl Permit {
 /// moved out:
 ///
 /// ```
-/// use ego_core::config::{Mode, PermCfg};
+/// use ego_core::config::{Mode, PermCfg, Ruleset, Source};
 /// use ego_core::permit::rule::Rule;
 /// use ego_core::permit::{CanonPath, Classification, Op, PolicyEngine, PreparedCall};
 /// let allow = vec![Rule::load("read(**)").expect("a rule this build enforces")];
 /// let engine = PolicyEngine::new(
 ///     CanonPath::new("/ws"),
 ///     Mode::Default,
-///     PermCfg { allow, deny: Vec::new() },
+///     Ruleset::from_layer(PermCfg { allow, deny: Vec::new() }, Source::Project),
 /// );
 /// let call = PreparedCall {
 ///     tool: "read".to_string(),
@@ -364,14 +364,14 @@ impl Permit {
 /// privacy it names.
 ///
 /// ```compile_fail
-/// use ego_core::config::{Mode, PermCfg};
+/// use ego_core::config::{Mode, PermCfg, Ruleset, Source};
 /// use ego_core::permit::rule::Rule;
 /// use ego_core::permit::{Authorized, CanonPath, Classification, Op, PolicyEngine, PreparedCall};
 /// let allow = vec![Rule::load("read(**)").expect("a rule this build enforces")];
 /// let engine = PolicyEngine::new(
 ///     CanonPath::new("/ws"),
 ///     Mode::Default,
-///     PermCfg { allow, deny: Vec::new() },
+///     Ruleset::from_layer(PermCfg { allow, deny: Vec::new() }, Source::Project),
 /// );
 /// let split = |path: &str| {
 ///     let call = PreparedCall {
@@ -392,14 +392,14 @@ impl Permit {
 /// above fails on the constructor rather than on a missing value.
 ///
 /// ```
-/// use ego_core::config::{Mode, PermCfg};
+/// use ego_core::config::{Mode, PermCfg, Ruleset, Source};
 /// use ego_core::permit::rule::Rule;
 /// use ego_core::permit::{CanonPath, Classification, Op, PolicyEngine, PreparedCall};
 /// let allow = vec![Rule::load("read(**)").expect("a rule this build enforces")];
 /// let engine = PolicyEngine::new(
 ///     CanonPath::new("/ws"),
 ///     Mode::Default,
-///     PermCfg { allow, deny: Vec::new() },
+///     Ruleset::from_layer(PermCfg { allow, deny: Vec::new() }, Source::Project),
 /// );
 /// let split = |path: &str| {
 ///     let call = PreparedCall {
@@ -735,9 +735,9 @@ pub enum Resolution {
 /// [`classify`](Self::classify) the only source of a permit.
 ///
 /// ```compile_fail
-/// use ego_core::config::{Mode, PermCfg};
+/// use ego_core::config::{Mode, PermCfg, Ruleset, Source};
 /// use ego_core::permit::{CanonPath, PolicyEngine, Scope};
-/// let engine = PolicyEngine::new(CanonPath::new("/ws"), Mode::Default, PermCfg::default());
+/// let engine = PolicyEngine::new(CanonPath::new("/ws"), Mode::Default, Ruleset::default());
 /// let _wide = engine.mint(Scope::default());
 /// ```
 ///
@@ -745,9 +745,9 @@ pub enum Resolution {
 /// method is the only missing piece:
 ///
 /// ```
-/// use ego_core::config::{Mode, PermCfg};
+/// use ego_core::config::{Mode, PermCfg, Ruleset, Source};
 /// use ego_core::permit::{CanonPath, PolicyEngine, Scope};
-/// let _engine = PolicyEngine::new(CanonPath::new("/ws"), Mode::Default, PermCfg::default());
+/// let _engine = PolicyEngine::new(CanonPath::new("/ws"), Mode::Default, Ruleset::default());
 /// let _empty = Scope::default();
 /// ```
 ///
@@ -808,9 +808,9 @@ pub enum Resolution {
 /// the party.
 ///
 /// ```compile_fail
-/// use ego_core::config::{Mode, PermCfg};
+/// use ego_core::config::{Mode, PermCfg, Ruleset, Source};
 /// use ego_core::permit::{CanonPath, PolicyEngine};
-/// let engine = PolicyEngine::new(CanonPath::new("/ws"), Mode::Default, PermCfg::default());
+/// let engine = PolicyEngine::new(CanonPath::new("/ws"), Mode::Default, Ruleset::default());
 /// let _yolo = engine.with_approver(todo!());
 /// ```
 ///
@@ -819,9 +819,9 @@ pub enum Resolution {
 /// and not on the setup:
 ///
 /// ```
-/// use ego_core::config::{Mode, PermCfg};
+/// use ego_core::config::{Mode, PermCfg, Ruleset, Source};
 /// use ego_core::permit::{CanonPath, PolicyEngine};
-/// let _engine = PolicyEngine::new(CanonPath::new("/ws"), Mode::Yolo, PermCfg::default());
+/// let _engine = PolicyEngine::new(CanonPath::new("/ws"), Mode::Yolo, Ruleset::default());
 /// ```
 ///
 /// **What this does not prove, and it is the same limit as everywhere else in
@@ -844,8 +844,8 @@ pub struct PolicyEngine {
     /// Both lists intact, matched per call. `resolve` no longer subtracts one
     /// from the other — that comparison was string equality between two lists
     /// and `deny = ["exec(git *)"]` left `allow = ["exec(git push)"]` standing.
-    allow: Vec<Rule>,
-    deny: Vec<Rule>,
+    allow: Vec<SourcedRule>,
+    deny: Vec<SourcedRule>,
     /// §6 step 5, built from `mode` by [`new`](Self::new) and reachable no
     /// other way. See [`ModeApprover`]'s doc for why there is no constructor
     /// that takes one: a port that let its holder pick the implementation
@@ -856,7 +856,7 @@ pub struct PolicyEngine {
 impl PolicyEngine {
     /// A policy that decides `mode`'s way, under `permissions`, inside
     /// `workspace`.
-    pub fn new(workspace: CanonPath, mode: Mode, permissions: PermCfg) -> Self {
+    pub fn new(workspace: CanonPath, mode: Mode, permissions: Ruleset) -> Self {
         Self {
             workspace,
             mode,
@@ -1021,12 +1021,12 @@ impl PolicyEngine {
         }
 
         // 1. Deny, before any allow at any scope.
-        if let Some(rule) = self.matching(&self.deny, op) {
+        if let Some(entry) = self.matching(&self.deny, op) {
             return Err(PolicyDenied::Denied {
                 tool: call.tool.clone(),
                 op: op.name(),
                 path: path.clone(),
-                by: rule.id(),
+                by: entry.rule().id(),
             });
         }
 
@@ -1049,10 +1049,10 @@ impl PolicyEngine {
     ///
     /// First match wins, in the order the lists were resolved. Matching is
     /// against the canonical operation and never against rendered text.
-    fn matching<'r>(&self, rules: &'r [Rule], op: &Op) -> Option<&'r Rule> {
+    fn matching<'r>(&self, rules: &'r [SourcedRule], op: &Op) -> Option<&'r SourcedRule> {
         rules
             .iter()
-            .find(|rule| rule.matches(op, self.workspace.as_path()))
+            .find(|entry| entry.rule().matches(op, self.workspace.as_path()))
     }
 
     /// Mint a permit for an explicit scope.
@@ -1144,7 +1144,7 @@ mod tests {
     /// directly and ask what the resulting permit means. So the defaults are
     /// not a choice here; there is nothing for them to affect.
     fn minter() -> PolicyEngine {
-        PolicyEngine::new(CanonPath::new("/ws"), Mode::Default, PermCfg::default())
+        PolicyEngine::new(CanonPath::new("/ws"), Mode::Default, Ruleset::default())
     }
 
     /// The second implementation of [`Approver`], and the only producer of
@@ -1183,7 +1183,7 @@ mod tests {
 
     #[test]
     fn a_party_that_refuses_settles_the_call_without_naming_a_rule() {
-        let engine = PolicyEngine::new(CanonPath::new("/ws"), Mode::Default, PermCfg::default())
+        let engine = PolicyEngine::new(CanonPath::new("/ws"), Mode::Default, Ruleset::default())
             .with_approver(Box::new(AlwaysDenies));
         let Classification::Ask(pending) = engine.classify(write_call("/ws/src/main.rs")) else {
             panic!("no rule covers it, so steps 0 to 3 cannot settle it");
@@ -1216,7 +1216,7 @@ mod tests {
     /// says nobody could answer; the other says somebody did.
     #[test]
     fn a_refusal_is_an_answer_and_not_another_question() {
-        let engine = PolicyEngine::new(CanonPath::new("/ws"), Mode::Default, PermCfg::default())
+        let engine = PolicyEngine::new(CanonPath::new("/ws"), Mode::Default, Ruleset::default())
             .with_approver(Box::new(AlwaysDenies));
         let Classification::Ask(pending) = engine.classify(write_call("/ws/src/main.rs")) else {
             panic!("no rule covers it");

@@ -6,7 +6,7 @@
 use ego_core::ceiling::{Budget, Ceilings};
 use ego_core::config::{
     ConfigError, ConfigLayer, Mode, ModelRef, PermCfg, Posture, ProfileLayer, Source, Sourced,
-    Trust, resolve,
+    SourcedRule, Trust, resolve,
 };
 use ego_core::cost::{Amount, CurrencyCode, Money};
 use ego_core::permit::rule::Rule;
@@ -20,6 +20,23 @@ fn layer(source: Source, value: ConfigLayer) -> Sourced<ConfigLayer> {
 /// config file could not have contained.
 fn rule(raw: &str) -> Rule {
     Rule::load(raw).expect("a rule this build can enforce")
+}
+
+/// Whether `list` carries `raw` at all, ignoring which layers it came from.
+///
+/// Replaces `list.contains(&rule(raw))`, which stopped compiling when the
+/// resolved lists started carrying origins. The tests that only care *whether*
+/// a rule survived resolution say so with this; the ones that care *where it
+/// came from* use `origins` below and say that instead.
+fn carries(list: &[SourcedRule], raw: &str) -> bool {
+    origins(list, raw).is_some()
+}
+
+/// Every layer `list` records as carrying `raw`, or `None` if no entry does.
+fn origins(list: &[SourcedRule], raw: &str) -> Option<Vec<Source>> {
+    list.iter()
+        .find(|entry| entry.rule() == &rule(raw))
+        .map(|entry| entry.origins().to_vec())
 }
 
 fn amount(decimal: &str, currency: &str) -> Option<Money> {
@@ -456,7 +473,7 @@ fn config_system_deny_survives_a_higher_precedence_layer_that_clears_it() {
         ),
     ];
     let effective = resolve(&layers, Trust::Trusted, None).unwrap();
-    assert!(effective.permissions.deny.contains(&rule("write(**)")));
+    assert!(carries(&effective.permissions.deny, "write(**)"));
     // And the flags layer's allow is still *there*. Resolution's job is to
     // guarantee the system deny survives the merge, not to decide which of the
     // two wins: that is decided per call, against a canonical `PreparedCall`,
@@ -468,7 +485,7 @@ fn config_system_deny_survives_a_higher_precedence_layer_that_clears_it() {
     // equal. Change the allow to `write(src/**)` and the retain kept it,
     // while the deny it violates sat right beside it in the same `Effective`.
     // See `docs/decisions/2026-08-21-a-permit-nobody-can-widen.md` §6.
-    assert!(effective.permissions.allow.contains(&rule("write(**)")));
+    assert!(carries(&effective.permissions.allow, "write(**)"));
 }
 
 #[test]
@@ -496,18 +513,8 @@ fn config_non_system_deny_can_be_relaxed_by_higher_precedence() {
         ),
     ];
     let effective = resolve(&layers, Trust::Trusted, None).unwrap();
-    assert!(
-        effective
-            .permissions
-            .allow
-            .contains(&rule("read(secrets/**)"))
-    );
-    assert!(
-        !effective
-            .permissions
-            .deny
-            .contains(&rule("read(secrets/**)"))
-    );
+    assert!(carries(&effective.permissions.allow, "read(secrets/**)"));
+    assert!(!carries(&effective.permissions.deny, "read(secrets/**)"));
 }
 
 #[test]
@@ -578,10 +585,10 @@ fn config_system_deny_survives_a_profile_override_that_clears_it() {
     let toml = "[permissions]\ndeny = [\"write(**)\"]\n\n[profile.ci.permissions]\nallow = [\"write(**)\"]\ndeny = []\n";
     let system = ConfigLayer::parse(Source::System, toml).unwrap();
     let effective = resolve(&[system], Trust::Trusted, Some("ci")).unwrap();
-    assert!(effective.permissions.deny.contains(&rule("write(**)")));
+    assert!(carries(&effective.permissions.deny, "write(**)"));
     // Carried, not subtracted — see
     // `config_system_deny_survives_a_higher_precedence_layer_that_clears_it`.
-    assert!(effective.permissions.allow.contains(&rule("write(**)")));
+    assert!(carries(&effective.permissions.allow, "write(**)"));
 }
 
 #[test]
@@ -607,16 +614,11 @@ fn config_system_deny_unions_across_multiple_system_layers() {
         },
     );
     let effective = resolve(&[system_a, system_b], Trust::Trusted, None).unwrap();
-    assert!(effective.permissions.deny.contains(&rule("write(**)")));
-    assert!(
-        effective
-            .permissions
-            .deny
-            .contains(&rule("read(secrets/**)"))
-    );
+    assert!(carries(&effective.permissions.deny, "write(**)"));
+    assert!(carries(&effective.permissions.deny, "read(secrets/**)"));
     // Carried, not subtracted — see
     // `config_system_deny_survives_a_higher_precedence_layer_that_clears_it`.
-    assert!(effective.permissions.allow.contains(&rule("write(**)")));
+    assert!(carries(&effective.permissions.allow, "write(**)"));
 }
 
 #[test]
@@ -1304,16 +1306,17 @@ fn config_profile_rules_are_parsed_by_the_same_parser() {
 }
 
 #[test]
-fn config_a_deny_written_in_two_layers_resolves_to_one_entry() {
+fn config_a_deny_written_in_two_layers_reports_the_layer_that_can_lift_it() {
     // The system layer and the user layer deny the same predicate. The merge
     // loop leaves `deny` holding the *user* copy; the ceiling pass then finds
-    // the system copy already present and skips it. One rule, one entry — and
-    // nothing in the result records that two layers wanted it.
+    // the system copy already present.
     //
-    // That is correct for enforcement and it is the whole difficulty for
-    // attribution: an origin derived from "which layer put this entry in the
-    // list" would name the user, the layer whose line can be deleted without
-    // lifting the denial. See
+    // One rule, one entry — that part is correct for enforcement and has not
+    // changed. What changed is that the entry now records *both* layers, so
+    // the attribution can name the one whose deletion actually lifts the
+    // denial. The old skip kept whichever origin arrived first, which is the
+    // user's: the one line an operator can delete without effect.
+    //
     // `docs/decisions/2026-08-21-a-deny-that-names-who-can-lift-it.md`.
     let overlapping = || PermCfg {
         allow: vec![],
@@ -1336,5 +1339,71 @@ fn config_a_deny_written_in_two_layers_resolves_to_one_entry() {
         ),
     ];
     let effective = resolve(&layers, Trust::Untrusted, None).unwrap();
-    assert_eq!(effective.permissions.deny, vec![rule("read(/etc/**)")]);
+
+    assert_eq!(effective.permissions.deny.len(), 1, "one rule, one entry");
+    let entry = &effective.permissions.deny[0];
+    assert_eq!(entry.rule(), &rule("read(/etc/**)"));
+
+    // Both layers are recorded, in merge order: the user copy is what the
+    // merge loop left, the system copy is what the ceiling pass unioned in.
+    assert_eq!(entry.origins(), [Source::User, Source::System]);
+
+    // And the answer to "can I change this" is the system layer — the *least*
+    // recently added and the *most* authoritative. An attribution that took
+    // the first origin, or the highest merge rank, would say `user` here and
+    // send the operator to delete a line that changes nothing.
+    assert_eq!(entry.authority(), Source::System);
+}
+
+/// The complement, and the reason `authority` is not just "the first origin".
+///
+/// Nothing system-level is involved, so the operator's own layer is both the
+/// only origin and the answer. Without this, a bug that hardcoded
+/// `Source::System` as the authority would pass the test above.
+#[test]
+fn config_a_deny_only_the_operator_wrote_is_attributed_to_them() {
+    let layers = [layer(
+        Source::User,
+        ConfigLayer {
+            permissions: Some(PermCfg {
+                allow: vec![],
+                deny: vec![rule("read(/etc/**)")],
+            }),
+            ..Default::default()
+        },
+    )];
+    let effective = resolve(&layers, Trust::Untrusted, None).unwrap();
+    let entry = &effective.permissions.deny[0];
+    assert_eq!(entry.origins(), [Source::User]);
+    assert_eq!(entry.authority(), Source::User);
+}
+
+/// A rule the operator restated does not become theirs to lift, and the order
+/// they arrive in does not decide it.
+///
+/// The test above has the user copy arriving first because that is what the
+/// merge loop produces. This one pins the *rule* rather than that accident:
+/// authority is a property of the layer, and no amount of restating moves it
+/// (decision 1). Two layers above system, so the winner is not simply "the
+/// last one added" either.
+#[test]
+fn config_authority_is_the_layer_not_the_arrival_order() {
+    let mut entry = SourcedRule::new(rule("read(/etc/**)"), Source::Flags);
+    assert_eq!(entry.authority(), Source::Flags);
+    entry.also_carried_by(Source::User);
+    assert_eq!(entry.authority(), Source::User, "user outranks flags");
+    entry.also_carried_by(Source::Project);
+    assert_eq!(
+        entry.authority(),
+        Source::User,
+        "project is above user in merge precedence and below it in authority"
+    );
+    entry.also_carried_by(Source::System);
+    assert_eq!(entry.authority(), Source::System);
+    // Idempotent: restating does not duplicate.
+    entry.also_carried_by(Source::System);
+    assert_eq!(
+        entry.origins(),
+        [Source::Flags, Source::User, Source::Project, Source::System]
+    );
 }

@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use ego_core::budget::{BudgetGate, Metering, PricingQuote, ResolvedRates, SettlementSource};
-use ego_core::config::{Mode, PermCfg};
+use ego_core::config::{Mode, Ruleset};
 use ego_core::cost::{Amount, CurrencyCode, Money, PricingRevision, RateSource};
 use ego_core::event::domain::ExitReason;
 use ego_core::event::id::SessionId;
@@ -70,7 +70,7 @@ impl Workspace {
         // itself a symlink, and a policy whose workspace is not canonical
         // refuses every path the resolver returns.
         let root = fs::canonicalize(dir.path()).expect("the temp directory resolves");
-        let policy = PolicyEngine::new(CanonPath::new(&root), Mode::Default, PermCfg::default());
+        let policy = PolicyEngine::new(CanonPath::new(&root), Mode::Default, Ruleset::default());
         Self {
             _dir: dir,
             root,

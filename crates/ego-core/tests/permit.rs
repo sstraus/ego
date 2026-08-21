@@ -4,7 +4,7 @@
 
 use std::path::Path;
 
-use ego_core::config::{Mode, PermCfg};
+use ego_core::config::{Mode, PermCfg, Ruleset, Source};
 use ego_core::permit::rule::Rule;
 use ego_core::permit::{
     Authorized, CanonPath, Classification, EntryKind, Escalation, FsError, GuardedFs, GuardedIo,
@@ -64,7 +64,7 @@ mod permit {
     /// changed to spell out something else, and the claim "this is what you
     /// get out of the box" would quietly stop being tested.
     fn in_default_mode(root: &str) -> PolicyEngine {
-        PolicyEngine::new(CanonPath::new(root), Mode::Default, PermCfg::default())
+        PolicyEngine::new(CanonPath::new(root), Mode::Default, Ruleset::default())
     }
 
     /// The answer, for a call the run settles without a human.
@@ -163,7 +163,7 @@ mod permit {
         // the mode floor, so the same call gets a different answer under
         // `edits` — and *that* is the property worth pinning: `plan` is the
         // mode where a write cannot happen, not the build.
-        let engine = PolicyEngine::new(CanonPath::new("/ws"), Mode::Plan, PermCfg::default());
+        let engine = PolicyEngine::new(CanonPath::new("/ws"), Mode::Plan, Ruleset::default());
         let denied = engine
             .classify_settled(write_call("/ws/src/main.rs"))
             .expect_err("plan mode changes nothing");
@@ -234,10 +234,17 @@ mod permit {
         PolicyEngine::new(
             CanonPath::new("/ws"),
             mode,
-            PermCfg {
-                allow: load(allow),
-                deny: load(deny),
-            },
+            // `Project` because these tests are about the evaluation order,
+            // not about attribution: an operator wrote these rules and can
+            // edit them. The system layer's authority is tested where it
+            // belongs, against `resolve`, in `tests/config.rs`.
+            Ruleset::from_layer(
+                PermCfg {
+                    allow: load(allow),
+                    deny: load(deny),
+                },
+                Source::Project,
+            ),
         )
     }
 
@@ -1170,7 +1177,7 @@ mod permit {
     /// alphabet complete. Which modes authorise a write is `permit_step4_*`'s
     /// question, and it is asked there.
     fn leg2_engine() -> PolicyEngine {
-        PolicyEngine::new(CanonPath::new("/ws"), Mode::Edits, PermCfg::default())
+        PolicyEngine::new(CanonPath::new("/ws"), Mode::Edits, Ruleset::default())
     }
 
     #[test]

@@ -2,7 +2,8 @@
 //! sources — no file I/O (`plans/m0a-contracts.md` Step 12).
 
 use super::error::ConfigError;
-use super::layer::{ConfigLayer, Mode, ModelRef, PermCfg};
+use super::layer::{ConfigLayer, Mode, ModelRef};
+use super::ruleset::Ruleset;
 use super::source::{Source, Sourced, Trust};
 use crate::ceiling::{Ceilings, Clamped};
 use crate::permit::rule::Rule;
@@ -21,7 +22,7 @@ pub enum Posture {
 pub struct Effective {
     pub model: Option<ModelRef>,
     pub mode: Option<Mode>,
-    pub permissions: PermCfg,
+    pub permissions: Ruleset,
     pub posture: Posture,
     /// What this run may spend, after precedence and the system clamp.
     ///
@@ -107,8 +108,7 @@ pub fn resolve(
 
     let mut model = None;
     let mut mode = None;
-    let mut allow: Vec<Rule> = Vec::new();
-    let mut deny: Vec<Rule> = Vec::new();
+    let mut permissions = Ruleset::default();
     let mut ceilings = Ceilings::default();
 
     for sourced in &eligible {
@@ -127,8 +127,13 @@ pub fn resolve(
             .and_then(|p| p.permissions.clone())
             .or_else(|| sourced.value.permissions.clone())
         {
-            allow = perm.allow;
-            deny = perm.deny;
+            // Still a replacement, not a merge: a layer that writes
+            // `permissions` states the whole block. What changed is that the
+            // rules now carry which layer stated them, so a later attribution
+            // is reading a recorded fact instead of guessing from list
+            // membership. A profile's permissions come from this same layer,
+            // so the origin is the same either way.
+            permissions = Ruleset::from_layer(perm, sourced.source);
         }
         if let Some(budget) = profile
             .and_then(|p| p.budget.as_ref())
@@ -165,10 +170,21 @@ pub fn resolve(
             }
         }
     }
+    // A **union of origins, not a skip**. This loop used to read
+    //
+    // ```rust
+    // if !deny.contains(&entry) { deny.push(entry); }
+    // ```
+    //
+    // which is correct about enforcement — one deny is one entry — and threw
+    // away the only fact an attribution needs. A predicate denied in both
+    // `/etc/ego/config.toml` and the operator's own config arrived here
+    // already present, was skipped, and kept whichever origin the merge loop
+    // happened to leave: the *user* copy, the one whose deletion changes
+    // nothing. See
+    // `docs/decisions/2026-08-21-a-deny-that-names-who-can-lift-it.md`.
     for entry in system_deny {
-        if !deny.contains(&entry) {
-            deny.push(entry);
-        }
+        Ruleset::merge(&mut permissions.deny, entry, Source::System);
     }
     // Both lists are carried to the engine intact. Precedence between an
     // allow and a deny is decided **per call**, by matching each against the
@@ -216,7 +232,7 @@ pub fn resolve(
     Ok(Effective {
         model,
         mode,
-        permissions: PermCfg { allow, deny },
+        permissions,
         posture,
         ceilings,
         clamped,
