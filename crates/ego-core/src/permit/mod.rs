@@ -5,6 +5,7 @@
 //! only by the policy engine, never by a tool's own declaration.
 
 mod approver;
+mod authority;
 pub mod fake;
 mod fs;
 mod grant;
@@ -19,6 +20,7 @@ mod tool;
 /// is chosen by `PolicyEngine::new` from the resolved mode, and a type a
 /// caller could name is one step from a caller that supplies one.
 pub use approver::{Approver, Verdict};
+pub use authority::{Authority, RuleAuthority};
 pub use fs::{Fs, FsError, GuardedFs, GuardedIo, IoDenied, PathResolver};
 pub use grant::{
     Authorized, Classification, Escalation, Pending, PermissionRequest, Permit, PermitDenied,

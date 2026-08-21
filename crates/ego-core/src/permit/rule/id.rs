@@ -36,7 +36,14 @@ const ALPHABET: &[u8; 32] = b"0123456789abcdefghjkmnpqrstvwxyz";
 /// "revocable without the original context" has to mean. The same predicate
 /// at project and user scope is one rule in two places; where it came from is
 /// metadata that `rules ls` shows.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+/// Serialised as the string [`Display`](fmt::Display) writes and
+/// [`FromStr`] reads — `r1:yhntjjh06f3x` — rather than as its two fields.
+/// One representation, and it is the one an operator already sees in a
+/// refusal and hands to `ego rules revoke`.
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(try_from = "String", into = "String")]
 pub struct RuleId {
     generation: u32,
     digest: String,
@@ -145,4 +152,18 @@ fn base32(digest: &[u8]) -> String {
     }
 
     out
+}
+
+impl From<RuleId> for String {
+    fn from(id: RuleId) -> Self {
+        id.to_string()
+    }
+}
+
+impl TryFrom<String> for RuleId {
+    type Error = BadRuleId;
+
+    fn try_from(raw: String) -> Result<Self, Self::Error> {
+        raw.parse()
+    }
 }

@@ -15,6 +15,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use super::approver::{Approver, ModeApprover, Verdict};
+use super::authority::{Authority, RuleAuthority};
 use super::path::CanonPath;
 use super::prepared_call::{Op, OpName, PreparedCall};
 use super::rule::RuleId;
@@ -436,12 +437,18 @@ impl Permit {
 pub struct Authorized {
     call: PreparedCall,
     permit: Permit,
+    by: Authority,
 }
 
 impl Authorized {
     /// The call this grant answers.
     pub fn call(&self) -> &PreparedCall {
         &self.call
+    }
+
+    /// What let this call through, for the audit event.
+    pub fn by(&self) -> &Authority {
+        &self.by
     }
 
     /// The grant, borrowed.
@@ -528,14 +535,37 @@ pub enum PolicyDenied {
     /// telling an operator to look for a rule that does not exist is worse
     /// than saying less.
     ///
-    /// It does not name *who* refused. That is §4's `by: Authority`, which
-    /// arrives with the audit event that needs it — see the ADR's §5
-    /// amendment.
+    /// `by` names *who* refused. §5 deferred this field to "the audit event
+    /// that needs it"; that event has arrived, so the field has.
     Refused {
         tool: String,
         op: OpName,
         path: CanonPath,
+        by: Authority,
     },
+}
+
+impl PolicyDenied {
+    /// Who refused, for `EventKind::PermissionDecided`.
+    ///
+    /// One authority in every arm, and that is the shape of a refusal rather
+    /// than a simplification: `judge` stops at the first step that says no, so
+    /// exactly one thing did. The list in [`Authority::Rules`] is a list for
+    /// the *allow* case, where nothing stops early.
+    pub fn authority(&self) -> Authority {
+        match self {
+            PolicyDenied::Denied { by, from, also, .. } => Authority::Rules {
+                rules: vec![RuleAuthority {
+                    id: by.clone(),
+                    from: *from,
+                    also: *also,
+                }],
+            },
+            PolicyDenied::ModeForbids { mode, .. } => Authority::Mode { mode: *mode },
+            PolicyDenied::OutsideWorkspace { .. } => Authority::Boundary,
+            PolicyDenied::Refused { by, .. } => by.clone(),
+        }
+    }
 }
 
 impl fmt::Display for PolicyDenied {
@@ -601,7 +631,7 @@ impl fmt::Display for PolicyDenied {
             PolicyDenied::OutsideWorkspace { tool, op, path } => {
                 write!(f, "{tool} may not {op} {path}: it is outside the workspace")
             }
-            PolicyDenied::Refused { tool, op, path } => {
+            PolicyDenied::Refused { tool, op, path, .. } => {
                 write!(f, "{tool} may not {op} {path}: permission was refused")
             }
         }
@@ -861,9 +891,9 @@ pub enum Resolution {
 /// not a mistyped path:
 ///
 /// ```
-/// use ego_core::permit::{Approver, Verdict};
+/// use ego_core::permit::{Approver, Authority, Verdict};
 /// fn takes(_: &dyn Approver) {}
-/// let _answers = [Verdict::Allow, Verdict::Deny];
+/// let _answers = [Verdict::Allow { by: Authority::Party }, Verdict::Deny { by: Authority::Party }];
 /// ```
 ///
 /// **And there is no way to hand one in.** `E0599`: `with_approver` exists
@@ -1011,17 +1041,31 @@ impl PolicyEngine {
                 return Classification::Settled(Err(denied));
             }
         }
+        // Every rule that covered an op, not the first one to match. An
+        // allow is a conjunction — the call proceeds because *all* of its ops
+        // were covered — so naming one of them would record a rule that did
+        // not, on its own, authorise anything. A denial is the other shape and
+        // gets one authority, because `judge` stops at the first deny.
+        let mut rules: Vec<RuleAuthority> = Vec::new();
         for op in &call.ops {
-            if self.matching(&self.allow, op).is_none() {
+            let Some(entry) = self.matching(&self.allow, op) else {
                 let why = Escalation::NoRuleCovers {
                     op: op.name(),
                     path: op.path().clone(),
                 };
                 return Classification::Ask(self.pending(call, why));
+            };
+            let authority = RuleAuthority::of(entry);
+            if !rules.contains(&authority) {
+                rules.push(authority);
             }
         }
         let permit = self.mint(scope_of(&call));
-        Classification::Settled(Ok(Authorized { call, permit }))
+        Classification::Settled(Ok(Authorized {
+            call,
+            permit,
+            by: Authority::Rules { rules },
+        }))
     }
 
     /// Put the question to the next party in §6's order and act on the answer.
@@ -1038,15 +1082,16 @@ impl PolicyEngine {
     /// consulted here, and no caller changes.
     pub async fn settle(&self, pending: Pending) -> Resolution {
         match self.approver.approve(&pending).await {
-            Verdict::Allow => {
+            Verdict::Allow { by } => {
                 let call = pending.call;
                 let permit = self.mint(scope_of(&call));
-                Resolution::Settled(Ok(Authorized { call, permit }))
+                Resolution::Settled(Ok(Authorized { call, permit, by }))
             }
-            Verdict::Deny => Resolution::Settled(Err(PolicyDenied::Refused {
+            Verdict::Deny { by } => Resolution::Settled(Err(PolicyDenied::Refused {
                 tool: pending.call.tool,
                 op: pending.ask.why.op(),
                 path: pending.ask.why.path().clone(),
+                by,
             })),
             Verdict::Escalate { why } => Resolution::Ask(self.pending(pending.call, why)),
         }
@@ -1235,7 +1280,9 @@ mod tests {
 
     impl Approver for AlwaysDenies {
         fn approve<'a>(&'a self, _pending: &'a Pending) -> futures::future::BoxFuture<'a, Verdict> {
-            Box::pin(futures::future::ready(Verdict::Deny))
+            Box::pin(futures::future::ready(Verdict::Deny {
+                by: Authority::Party,
+            }))
         }
     }
 
@@ -1270,6 +1317,7 @@ mod tests {
                 tool: "edit".to_string(),
                 op: OpName::Write,
                 path: CanonPath::new("/ws/src/main.rs"),
+                by: Authority::Party,
             }
         );
     }

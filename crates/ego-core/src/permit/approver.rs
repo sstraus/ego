@@ -14,6 +14,7 @@
 use futures::future::{self, BoxFuture};
 use std::fmt;
 
+use super::authority::Authority;
 use super::grant::{Escalation, Pending};
 use crate::config::Mode;
 
@@ -30,8 +31,16 @@ pub enum Verdict {
     ///
     /// **Not "wider authority".** The scope is still derived from the call by
     /// `scope_of`, so an approval decides *whether to ask*, never *what for*.
-    Allow,
+    ///
+    /// `by` names the party. §4 deferred it with "it arrives with its
+    /// reader"; the reader is `EventKind::PermissionDecided`, and it has
+    /// arrived. The engine does **not** reconstruct this after the fact from
+    /// `self.mode` — a party that answers says who it was, because an engine
+    /// inferring an authority behind a `dyn Approver` would be recording a
+    /// guess in an audit log.
+    Allow { by: Authority },
     /// Refused. The call does not run and no later party is consulted.
+    /// `by` names the party, for the same reason `Allow`'s does.
     ///
     /// **No production approver returns this yet, and that is not a gap.**
     /// The human seat at §6 step 7 is what produces it in anger, and that
@@ -48,7 +57,7 @@ pub enum Verdict {
     /// `PolicyDenied::Refused` that names no rule — is asserted. Dead code is
     /// a variant nothing produces and nothing pins. So do not "simplify" this
     /// away, and do not read its absence from the production path as a bug.
-    Deny,
+    Deny { by: Authority },
     /// Not this party's to answer. The question moves on with the reason
     /// attached, which is what `ARCHITECTURE.md` §3.4 requires to reach both
     /// the next party and the audit event.
@@ -132,7 +141,9 @@ impl ModeApprover {
                 };
             }
         }
-        Verdict::Allow
+        Verdict::Allow {
+            by: Authority::Mode { mode: self.mode },
+        }
     }
 }
 

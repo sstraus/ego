@@ -21,8 +21,14 @@ use crate::permit::rule::Rule;
 /// Iteration is most-authoritative-first, so the first element is the
 /// [`authority`](SourcedRule::authority) and no caller has to sort.
 ///
+/// Serialised as the list of layers it holds, not as its bitset. The bits are
+/// how it is stored, not what it means, and a `4` in an audit log is a number
+/// somebody has to decode by hand against an enum's declaration order — which
+/// is the kind of coupling that breaks silently when a layer is inserted.
+///
 /// [`PolicyDenied`]: crate::permit::PolicyDenied
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(from = "Vec<Source>", into = "Vec<Source>")]
 pub struct OriginSet(u8);
 
 impl OriginSet {
@@ -56,6 +62,22 @@ impl OriginSet {
     /// Everything in `self` that is not in `other`.
     pub fn without(self, other: Source) -> Self {
         Self(self.0 & !(1 << other.rank()))
+    }
+}
+
+impl From<Vec<Source>> for OriginSet {
+    fn from(sources: Vec<Source>) -> Self {
+        let mut set = Self::default();
+        for source in sources {
+            set.insert(source);
+        }
+        set
+    }
+}
+
+impl From<OriginSet> for Vec<Source> {
+    fn from(set: OriginSet) -> Self {
+        set.iter().collect()
     }
 }
 
