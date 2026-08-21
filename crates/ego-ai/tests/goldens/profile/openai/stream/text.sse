@@ -1,3 +1,5 @@
+: schema-derived from the OpenAI Chat Completions streaming specification
+: provider openai, ego 0.1.0
 : ping
 
 data: {"id":"chatcmpl-golden-text","object":"chat.completion.chunk","created":1787000000,"model":"gpt-5.1","choices":[{"index":0,"delta":{"role":"assistant","content":""},"logprobs":null,"finish_reason":null}],"usage":null}

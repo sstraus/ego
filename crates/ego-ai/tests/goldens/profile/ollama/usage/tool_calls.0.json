@@ -1,0 +1,13 @@
+{
+  "choices": [],
+  "created": 1009843208,
+  "id": "chatcmpl-example-6",
+  "model": "gemma4:12b-mlx",
+  "object": "chat.completion.chunk",
+  "system_fingerprint": "fp_ollama",
+  "usage": {
+    "completion_tokens": 19,
+    "prompt_tokens": 88,
+    "total_tokens": 107
+  }
+}

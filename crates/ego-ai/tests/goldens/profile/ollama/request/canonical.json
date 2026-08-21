@@ -1,0 +1,23 @@
+{
+  "body": {
+    "max_tokens": 16,
+    "messages": [
+      {
+        "content": "Reply with the single word: ok",
+        "role": "user"
+      }
+    ],
+    "model": "gemma4:12b-mlx",
+    "reasoning_effort": "none",
+    "stream": true,
+    "stream_options": {
+      "include_usage": true
+    }
+  },
+  "header_names": [
+    "content-type",
+    "accept"
+  ],
+  "method": "Post",
+  "url": "http://localhost:11434/v1/chat/completions"
+}
