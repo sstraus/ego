@@ -1501,7 +1501,7 @@ mod turn {
         let outcome = block_on(turn.run("hi")).expect("the store accepted every append");
 
         assert_eq!(
-            RunTermination::after_turn(outcome.exit_reason, outcome.denied.as_deref())
+            RunTermination::after_turn(outcome.exit_reason, outcome.denied)
                 .expect("a usage error ends the run")
                 .exit_code(),
             2

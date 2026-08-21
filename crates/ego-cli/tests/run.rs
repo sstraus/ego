@@ -127,6 +127,17 @@ fn a_json_run_that_was_refused_says_not_ok_and_names_what_was_refused() {
         denied.contains("read") && denied.contains("/etc/hosts"),
         "a script handed exit 3 and no subject has been told nothing: {denied}"
     );
+    // And *who* refused, which is what picks the remedy. §4.4 offers three
+    // and is explicit that this one is not a permission at all: "the workspace
+    // boundary belongs to ARCHITECTURE.md §3.4 axis 4 — the execution
+    // backend — and no mode moves it", so `--yolo` cannot help and
+    // `--sandbox` is the only thing that can. A caller reading prose has to
+    // regex ego's sentences to learn that; `denied_by` is the key that says it.
+    assert_eq!(
+        report["denied_by"],
+        serde_json::json!({ "by": "boundary" }),
+        "the boundary names no rule and no mode, because nobody wrote it"
+    );
 }
 
 /// `denied` is absent rather than null when nothing was denied: an optional key
@@ -147,11 +158,11 @@ fn a_json_run_that_was_not_refused_carries_no_denied_key() {
         .run();
 
     let report = finished.report();
+    let object = report.as_object().expect("an object");
+    assert!(!object.contains_key("denied"));
     assert!(
-        !report
-            .as_object()
-            .expect("an object")
-            .contains_key("denied")
+        !object.contains_key("denied_by"),
+        "and neither half of a denial appears on a run that had none"
     );
 }
 
@@ -743,6 +754,29 @@ fn a_deny_rule_on_the_command_line_stops_a_tool_and_names_the_rule() {
     assert!(
         !denied.contains("the contents"),
         "and must not quote what it refused to read: {denied}"
+    );
+
+    // The same fact as a key rather than as prose, and one thing more: the
+    // *layer*. `2026-08-21-a-deny-that-names-who-can-lift-it.md` exists
+    // because the only operational question an attribution answers is "can I
+    // change this", and a run that ends at exit 3 has no second invocation in
+    // which to show it. The rule came from `--deny`, so the layer is `flags`.
+    let by = &report["denied_by"];
+    assert_eq!(by["by"], "rules");
+    let rules = by["rules"]
+        .as_array()
+        .expect("an allow-or-deny names rules");
+    assert_eq!(rules.len(), 1, "one deny matched, so one rule is named");
+    assert_eq!(rules[0]["from"], "flags");
+    assert_eq!(
+        rules[0]["also"],
+        serde_json::json!([]),
+        "no other layer carries it, so there is nothing to subordinate"
+    );
+    let id = rules[0]["id"].as_str().expect("a rule id is a string");
+    assert!(
+        denied.contains(id),
+        "the key and the sentence must name the same rule: {id} is not in {denied}"
     );
 }
 

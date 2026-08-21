@@ -314,6 +314,17 @@ Headless runs never hang on a prompt: an unresolvable permission ⇒ exit 3, wit
 the denied action in the JSON result. Scripts opt in with `--allow` rules, a
 stronger `--sandbox`, or `--yolo` — never by answering prompts.
 
+Exit 3 has more than one cause, and the three opt-ins above are not
+interchangeable, so §4.1's object carries **who refused** beside what was
+refused: `denied` is the action, and `denied_by` names the authority — a rule
+(with the layer that owns it, which is what says whether it can be edited at
+all), the mode, or the workspace boundary. `denied_by` is **absent when nobody
+decided**: every party in the evaluation order was consulted and the question
+is still open, which is the case `--allow` answers and the only one where the
+absence of an authority is itself the fact. Present-or-absent, per §4.2's rule
+for this format. See
+`docs/decisions/2026-08-21-an-exit-code-that-names-who-refused.md`.
+
 The three remedies are alternatives because they act on different axes, and
 one of them is not a permission at all: **the workspace boundary belongs to
 `ARCHITECTURE.md` §3.4 axis 4 — the execution backend — and no mode moves it.**

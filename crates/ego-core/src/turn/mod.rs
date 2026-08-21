@@ -33,6 +33,7 @@ use crate::generator::port::{AiEvent, Generator};
 use crate::generator::types::{Conversation, GenRequest, Message, Role, StopReason, ThinkingLevel};
 use crate::permit::{Authority, Classification, Pending, PolicyDenied, Resolution};
 use crate::public::PublicEvent;
+use crate::run::{Denial, DeniedBy};
 use crate::sink::EventSink;
 use crate::state::{SessionState, Usage};
 use crate::store::session_store::{SessionStore, StoreError};
@@ -141,11 +142,12 @@ pub struct TurnOutcome {
     pub turn: TurnId,
     pub ok: bool,
     pub exit_reason: ExitReason,
-    /// What was refused, when `exit_reason` is
+    /// What was refused and by whom, when `exit_reason` is
     /// [`ExitReason::PermissionRequired`]. `CLI.md` §4.1 requires the denied
     /// action in the result: a script handed exit 3 and no subject has been
-    /// told nothing it can act on.
-    pub denied: Option<String>,
+    /// told nothing it can act on. §4.4's four remedies need the authority
+    /// too, which is why this is one [`Denial`] and not a string.
+    pub denied: Option<Denial>,
 }
 
 /// A turn that could not be written down.
@@ -337,12 +339,12 @@ impl<'a> TurnLoop<'a> {
     /// Everything between the prompt and `TurnCompleted`.
     ///
     /// Returns the reason and, when that reason is
-    /// [`ExitReason::PermissionRequired`], the action that was refused.
+    /// [`ExitReason::PermissionRequired`], what was refused and by whom.
     async fn drive(
         &mut self,
         turn: TurnId,
         prompt: &str,
-    ) -> Result<(ExitReason, Option<String>), StoreError> {
+    ) -> Result<(ExitReason, Option<Denial>), StoreError> {
         self.journal.append(
             turn,
             Some(ItemId::new()),
@@ -400,53 +402,53 @@ impl<'a> TurnLoop<'a> {
             }
 
             for call in pending {
-                let (ok, output) = match self.run_tool(turn, &call).await? {
-                    ToolOutcome::Answered { ok, output } => (ok, output),
-                    // `CLI.md` §4.4: a run with nobody to ask does not answer
-                    // a permission question on the model's behalf. The denial
-                    // is still logged against the call — the model's audience
-                    // argument holds for the *record*, it just no longer
-                    // decides whether the run continues.
-                    // Both end the run at exit 3 and they are not the same
-                    // event. "Denied by r1:…" tells an operator which line of
-                    // their config to go and look at; "no rule covers write
-                    // /ws/x" tells them there is no line to look at and they
-                    // have to write one. Collapsing them would leave the
-                    // commonest case — a run that needed an answer — reading
-                    // like a refusal somebody configured on purpose.
-                    ToolOutcome::Refused { denial } => {
-                        let action = denial.to_string();
+                // `CLI.md` §4.4: a run with nobody to ask does not answer a
+                // permission question on the model's behalf. The denial is
+                // still logged against the call — the model's audience
+                // argument holds for the *record*, it just no longer decides
+                // whether the run continues.
+                //
+                // Both endings below are exit 3 and they are not the same
+                // fact. "Denied by r1:…" tells an operator which line of their
+                // config to go and look at; "no rule covers write /ws/x" tells
+                // them there is no line to look at and they have to write one.
+                // Collapsing them would leave the commonest case — a run that
+                // needed an answer — reading like a refusal somebody
+                // configured on purpose. `DeniedBy` is what carries that
+                // difference past the prose and into §4.1's object.
+                let denial = match self.run_tool(turn, &call).await? {
+                    ToolOutcome::Answered { ok, output } => {
                         self.journal.append(
                             turn,
                             Some(call.item),
                             Some(call.started),
-                            EventKind::ToolCallCompleted {
-                                ok: false,
-                                output: action.clone(),
-                            },
+                            EventKind::ToolCallCompleted { ok, output },
                         )?;
-                        return Ok((ExitReason::PermissionRequired, Some(action)));
+                        continue;
                     }
-                    ToolOutcome::Unanswerable { pending } => {
-                        let action = pending.request().to_string();
-                        self.journal.append(
-                            turn,
-                            Some(call.item),
-                            Some(call.started),
-                            EventKind::ToolCallCompleted {
-                                ok: false,
-                                output: action.clone(),
-                            },
-                        )?;
-                        return Ok((ExitReason::PermissionRequired, Some(action)));
-                    }
+                    ToolOutcome::Refused { denial } => Denial {
+                        action: denial.to_string(),
+                        // Never assembled here: `PolicyDenied::authority` is
+                        // the single definition of who said so, and a second
+                        // caller deciding it from the arms would be a second
+                        // chance to attribute a denial to the wrong party.
+                        by: DeniedBy::Decided(denial.authority()),
+                    },
+                    ToolOutcome::Unanswerable { pending } => Denial {
+                        action: pending.request().to_string(),
+                        by: DeniedBy::Nobody,
+                    },
                 };
                 self.journal.append(
                     turn,
                     Some(call.item),
                     Some(call.started),
-                    EventKind::ToolCallCompleted { ok, output },
+                    EventKind::ToolCallCompleted {
+                        ok: false,
+                        output: denial.action.clone(),
+                    },
                 )?;
+                return Ok((ExitReason::PermissionRequired, Some(denial)));
             }
         }
     }

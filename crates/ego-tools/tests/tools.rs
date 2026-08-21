@@ -30,10 +30,11 @@ use ego_core::generator::fake::FakeGenerator;
 use ego_core::generator::port::AiEvent;
 use ego_core::generator::types::{StopReason, ThinkingLevel};
 use ego_core::permit::{
-    Authorized, CanonPath, Classification, GuardedFs, GuardedIo, Op, OpName, Pending, PermitDenied,
-    PolicyDenied, PolicyEngine, PrepareCtx, PreparedCall, Resolution, ScanRequest, Tool, ToolError,
-    ToolResult, Typed, TypedTool,
+    Authority, Authorized, CanonPath, Classification, GuardedFs, GuardedIo, Op, OpName, Pending,
+    PermitDenied, PolicyDenied, PolicyEngine, PrepareCtx, PreparedCall, Resolution, ScanRequest,
+    Tool, ToolError, ToolResult, Typed, TypedTool,
 };
+use ego_core::run::DeniedBy;
 use ego_core::sink::CollectingSink;
 use ego_core::state::SessionState;
 use ego_core::turn::{CancelToken, Model, Session, Tools, TurnConfig, TurnLoop};
@@ -946,17 +947,26 @@ mod end_to_end {
         assert_eq!(outcome.exit_reason, ExitReason::PermissionRequired);
         assert!(!outcome.ok);
 
-        let denied = outcome
+        let denial = outcome
             .denied
-            .as_deref()
             .expect("a permission-required turn names the action it was refused");
+        let action = &denial.action;
         assert!(
-            denied.contains("outside the workspace") && denied.contains("secret.txt"),
-            "the denial must name what it denied: {denied}"
+            action.contains("outside the workspace") && action.contains("secret.txt"),
+            "the denial must name what it denied: {action}"
         );
         assert!(
-            !denied.contains("not yours"),
-            "and must not quote what it refused to read: {denied}"
+            !action.contains("not yours"),
+            "and must not quote what it refused to read: {action}"
+        );
+        // And *who* denied it, which is the fact that picks the remedy.
+        // `CLI.md` §4.4 is explicit that the boundary is not a permission at
+        // all: `--sandbox` moves it and `--yolo` does not, so a caller that
+        // reads `Boundary` must not be sent to the flag that cannot help.
+        assert_eq!(
+            denial.by,
+            DeniedBy::Decided(Authority::Boundary),
+            "an operation refused at the workspace boundary names no rule and no mode"
         );
 
         assert_eq!(

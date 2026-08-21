@@ -19,7 +19,7 @@ use ego_core::event::domain::CancelCause;
 use ego_core::event::id::SessionId;
 use ego_core::permit::{CanonPath, PolicyEngine, Tool};
 use ego_core::public::{PUBLIC_EVENT_VERSION, PublicEvent};
-use ego_core::run::{RunTermination, Signal};
+use ego_core::run::{DeniedBy, RunTermination, Signal};
 use ego_core::sink::EventSink;
 use ego_core::state::{ItemKind, SessionState};
 use ego_core::store::session_store::SessionStore;
@@ -541,7 +541,7 @@ impl Turns<'_> {
             taken += 1;
 
             if let Some(termination) =
-                RunTermination::after_turn(outcome.exit_reason, outcome.denied.as_deref())
+                RunTermination::after_turn(outcome.exit_reason, outcome.denied)
             {
                 return (termination, self.answer(loop_.state()));
             }
@@ -776,9 +776,21 @@ pub fn diagnose(termination: &RunTermination, broken: Option<String>) {
             message.clone()
         }
         RunTermination::Failed { message } => message.clone(),
-        RunTermination::PermissionRequired { action } => {
-            format!("stopped: {action} needed a permission nobody could grant")
-        }
+        // Two sentences, because one of them was about to be false. "Nobody
+        // could grant it" describes a question the evaluation order exhausted;
+        // said of a refusal somebody made, it denies that anybody decided,
+        // which is the one thing that did happen. Both still lead with the
+        // class — a person who reads only this line has to see that exit 3 is
+        // about permission — and both name the action, whose own `Display`
+        // carries the rule, the mode or the boundary that produced it.
+        RunTermination::PermissionRequired {
+            action,
+            by: DeniedBy::Decided(_),
+        } => format!("stopped: permission refused — {action}"),
+        RunTermination::PermissionRequired {
+            action,
+            by: DeniedBy::Nobody,
+        } => format!("stopped: permission unresolved and nobody could be asked — {action}"),
         RunTermination::BudgetExceeded => "stopped: the budget was reached".to_string(),
         RunTermination::MaxTurns => "stopped: --max-turns was reached".to_string(),
         RunTermination::TimedOut => "stopped: --timeout expired".to_string(),

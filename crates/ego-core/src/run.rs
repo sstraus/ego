@@ -19,6 +19,57 @@
 //! the same table.
 
 use crate::event::domain::{CancelCause, ExitReason};
+use crate::permit::Authority;
+
+/// Who refused the call that ended the run — or that nobody did.
+///
+/// The fifth case exit 3 could not express. `CLI.md` §4.4 offers three opt-ins
+/// — `--allow`, a stronger `--sandbox`, `--yolo` — and says they "act on
+/// different axes". Which of them applies is this value, and for one arm the
+/// answer is *none of them*: a deny rule sends an operator to the config layer
+/// `RuleAuthority::from` names, the mode floor sends them to `--mode`, the
+/// boundary sends them to `--sandbox` and explicitly not to `--yolo`, and a
+/// question nobody answered sends them to `--allow`.
+///
+/// [`Nobody`](Self::Nobody) rather than `Option<Authority>`, even though a
+/// `None` here could only ever mean the one thing — `RunTermination` is not
+/// durable, so nothing else can put one there. Every Rust reader's prior for
+/// `Option` is "absent or unknown", and this is neither: it is a stated fact
+/// about a run in which §6's order was exhausted. Same size, nothing to
+/// re-derive. See
+/// `docs/decisions/2026-08-21-an-exit-code-that-names-who-refused.md` §2.
+///
+/// There is deliberately no `Authority::Nobody` arm. That type is persisted
+/// through `EventKind::PermissionDecided`, and a *decision* event whose
+/// authority is "nobody decided" is a contradiction on disk that outlives
+/// anyone who could explain it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeniedBy {
+    /// A rule, the mode, the workspace boundary or a party at the
+    /// [`Approver`](crate::permit::Approver) port. Built only from
+    /// [`PolicyDenied::authority`](crate::permit::PolicyDenied::authority),
+    /// which is the single definition of "who said so".
+    Decided(Authority),
+    /// Every party in the evaluation order was consulted and the question is
+    /// still open. Nothing was decided, so there is nothing to name.
+    Nobody,
+}
+
+/// What a permission-refused turn was refused, and by whom.
+///
+/// One value rather than two `Option` fields on [`TurnOutcome`], because they
+/// cannot be true separately: there is no action without an
+/// authority-or-nobody, and no authority without an action. Two Options would
+/// be two things that must agree with nothing in the types saying so.
+///
+/// [`TurnOutcome`]: crate::turn::TurnOutcome
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Denial {
+    /// What was refused, rendered for a person. `CLI.md` §4.4's "denied
+    /// action".
+    pub action: String,
+    pub by: DeniedBy,
+}
 
 /// Why an invocation ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,10 +82,21 @@ pub enum RunTermination {
     TaskFailed,
     /// The command line itself was wrong. No turn ever ran.
     UsageError { message: String },
-    /// A call needed a grant nobody could give, in a run with nobody to ask.
-    /// Carries the action so §4.1's result can name it — a script that gets
-    /// exit 3 and no subject cannot act on it.
-    PermissionRequired { action: String },
+    /// A call needed a grant this run could not produce. Carries the action so
+    /// §4.1's result can name it — a script that gets exit 3 and no subject
+    /// cannot act on it — and [`DeniedBy`] so it can tell a refusal somebody
+    /// made from a question nobody answered, which want different remedies.
+    ///
+    /// Two fields and not two variants. The precedent that looks like it
+    /// argues for a `PermissionUnanswered` beside this one is [`MaxTurns`]'s
+    /// doc below, and it argues the other way: that split exists because §4.1
+    /// spells the two limits as two different words, and §4.1 has exactly
+    /// **one** word for permission. A second variant would return
+    /// `"permission"` from [`exit_reason`](Self::exit_reason) like this one,
+    /// exit 3 like this one, and still need a field to say anything.
+    ///
+    /// [`MaxTurns`]: Self::MaxTurns
+    PermissionRequired { action: String, by: DeniedBy },
     /// The provider or the network failed.
     Provider { message: String },
     /// Our own defect.
@@ -124,20 +186,20 @@ impl RunTermination {
     ///
     /// [`ModelCapabilities`]: crate::generator::capabilities::ModelCapabilities
     ///
-    /// `denied` is the action a [`ExitReason::PermissionRequired`] turn was
-    /// refused, which `CLI.md` §4.1 requires in the result. A
-    /// `PermissionRequired` turn that recorded no action is reported as our
+    /// `denied` is what a [`ExitReason::PermissionRequired`] turn was refused
+    /// and who refused it, which `CLI.md` §4.1 and §4.4 require in the result.
+    /// A `PermissionRequired` turn that recorded no denial is reported as our
     /// own defect rather than as exit 3 with an empty subject: a script that
     /// gets 3 and cannot see what was denied has been told nothing, and
-    /// inventing a placeholder would hide the bug that produced it.
-    pub fn after_turn(reason: ExitReason, denied: Option<&str>) -> Option<Self> {
+    /// inventing a placeholder would hide the bug that produced it. The
+    /// missing thing is the whole [`Denial`], so an action can no longer
+    /// arrive without an authority beside it.
+    pub fn after_turn(reason: ExitReason, denied: Option<Denial>) -> Option<Self> {
         match reason {
             ExitReason::Completed => None,
             ExitReason::Budget => Some(RunTermination::BudgetExceeded),
             ExitReason::PermissionRequired => Some(match denied {
-                Some(action) => RunTermination::PermissionRequired {
-                    action: action.to_string(),
-                },
+                Some(Denial { action, by }) => RunTermination::PermissionRequired { action, by },
                 None => RunTermination::Failed {
                     message: "a turn ended needing a permission but recorded no action".to_string(),
                 },
