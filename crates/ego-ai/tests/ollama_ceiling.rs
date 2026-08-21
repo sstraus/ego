@@ -50,12 +50,14 @@
 //! `ProviderRow::ollama_default()` builds, posted unmodified. The first two
 //! prove a field works; only this one proves *our request* does.
 
+use ego_ai::http::{HttpError, HttpResponse};
 use ego_ai::provider::ProviderRow;
-use ego_ai::wire::openai_completions::{self, StreamDecoder};
+use ego_ai::wire::openai_completions;
 use ego_core::generator::port::AiEvent;
 use ego_core::generator::types::{
     Conversation, GenRequest, Message, Role, StopReason, ThinkingLevel,
 };
+use futures::StreamExt;
 
 const IGNORED_REQUEST: &str = include_str!("goldens/ollama_ceiling_ignored.request.json");
 const IGNORED_TRANSCRIPT: &str = include_str!("goldens/ollama_ceiling_ignored.sse");
@@ -73,11 +75,35 @@ fn recorded(request: &str) -> serde_json::Value {
     serde_json::from_str(request).expect("the recorded request is valid JSON")
 }
 
-fn replay(transcript: &str) -> Vec<AiEvent> {
-    let mut decoder = StreamDecoder::default();
-    let mut events = decoder.push(transcript.as_bytes());
-    events.extend(decoder.finish(None));
-    events
+/// A recorded response, decoded by **the mapping the Ollama profile names**.
+///
+/// It would be shorter to drive `openai_completions::StreamDecoder` directly,
+/// and it would assert less: the claim `wire::ollama` makes is that Ollama's
+/// responses need no decoder of their own, and a test that reaches past the
+/// row to the family's decoder is a test that assumes that claim instead of
+/// checking it. Going through `row.wire` means replacing the delegation with
+/// anything else — an empty stream, a second decoder that drifts — fails here.
+///
+/// Chunked at seven bytes so the SSE framing is exercised across boundaries
+/// rather than handed one whole buffer no real socket would deliver.
+async fn replay(transcript: &'static str) -> Vec<AiEvent> {
+    let chunks: Vec<Result<bytes::Bytes, HttpError>> = transcript
+        .as_bytes()
+        .chunks(7)
+        .map(|chunk| Ok(bytes::Bytes::copy_from_slice(chunk)))
+        .collect();
+    let row = ProviderRow::ollama_default();
+    row.wire
+        .decode(
+            Ok(HttpResponse {
+                status: 200,
+                headers: vec![("content-type".to_string(), "text/event-stream".to_string())],
+                body: Box::pin(futures::stream::iter(chunks)),
+            }),
+            row.cost.clone(),
+        )
+        .collect()
+        .await
 }
 
 fn output_tokens(events: &[AiEvent]) -> u64 {
@@ -102,8 +128,8 @@ fn stop(events: &[AiEvent]) -> StopReason {
 
 /// The measurement itself: the same prompt and the same ceiling, asked for
 /// under two different names, answered differently.
-#[test]
-fn ollama_honours_max_tokens_and_ignores_max_completion_tokens() {
+#[tokio::test]
+async fn ollama_honours_max_tokens_and_ignores_max_completion_tokens() {
     let ignored = recorded(IGNORED_REQUEST);
     assert_eq!(ignored["max_completion_tokens"], serde_json::json!(CEILING));
     assert!(
@@ -120,7 +146,7 @@ fn ollama_honours_max_tokens_and_ignores_max_completion_tokens() {
          field that made it bind: {honoured}"
     );
 
-    let overrun = output_tokens(&replay(IGNORED_TRANSCRIPT));
+    let overrun = output_tokens(&replay(IGNORED_TRANSCRIPT).await);
     assert!(
         overrun > CEILING,
         "the daemon was asked for at most {CEILING} output tokens via \
@@ -129,7 +155,7 @@ fn ollama_honours_max_tokens_and_ignores_max_completion_tokens() {
          revisited"
     );
 
-    let bounded = output_tokens(&replay(HONOURED_TRANSCRIPT));
+    let bounded = output_tokens(&replay(HONOURED_TRANSCRIPT).await);
     assert_eq!(
         bounded, CEILING,
         "the daemon was asked for at most {CEILING} output tokens via \
@@ -219,9 +245,9 @@ fn the_ceiling_the_ollama_profile_sends_is_the_one_this_daemon_reads() {
 /// and this file exists because the second does not follow from the first —
 /// the `reasoning_effort` claim it opens with was true of the field and false
 /// of the behaviour.
-#[test]
-fn the_body_the_ollama_profile_builds_is_bounded_by_the_daemon() {
-    let events = replay(ADAPTED_TRANSCRIPT);
+#[tokio::test]
+async fn the_body_the_ollama_profile_builds_is_bounded_by_the_daemon() {
+    let events = replay(ADAPTED_TRANSCRIPT).await;
     assert_eq!(
         output_tokens(&events),
         CEILING,
@@ -244,9 +270,9 @@ fn the_body_the_ollama_profile_builds_is_bounded_by_the_daemon() {
 /// to [`StopReason::Length`] and emits no [`AiEvent::Error`] — so an ordinary
 /// bounded generation is *not* logged as a failure. Had Ollama spelled it
 /// anything else, it would have been.
-#[test]
-fn a_bounded_ollama_generation_is_length_and_not_an_error() {
-    let events = replay(HONOURED_TRANSCRIPT);
+#[tokio::test]
+async fn a_bounded_ollama_generation_is_length_and_not_an_error() {
+    let events = replay(HONOURED_TRANSCRIPT).await;
     assert_eq!(stop(&events), StopReason::Length);
     assert!(
         !events.iter().any(|e| matches!(e, AiEvent::Error { .. })),
@@ -257,8 +283,8 @@ fn a_bounded_ollama_generation_is_length_and_not_an_error() {
 /// The unbounded control, from the same daemon and the same prompt: it ends
 /// at `stop`, so the `length` above is the ceiling talking and not something
 /// this model does on every turn.
-#[test]
-fn the_generation_that_was_not_bounded_ends_at_stop() {
-    let events = replay(IGNORED_TRANSCRIPT);
+#[tokio::test]
+async fn the_generation_that_was_not_bounded_ends_at_stop() {
+    let events = replay(IGNORED_TRANSCRIPT).await;
     assert_eq!(stop(&events), StopReason::Stop);
 }
