@@ -49,7 +49,7 @@ mod reducer {
         Usage {
             uncached_input_tokens: uncached_input,
             output_tokens: output,
-            ..Usage::default()
+            ..Usage::IDENTITY
         }
     }
 
@@ -547,7 +547,7 @@ mod reducer {
                 "usage_corrected",
                 EventKind::UsageCorrected {
                     attempt: AttemptRef::first(GenerationId::new()),
-                    usage: Usage::default(),
+                    usage: Usage::IDENTITY,
                     cost_delta: CostDelta::Unknown(ego_core::cost::UnknownCost::Overflow),
                 },
             ),
@@ -1347,10 +1347,10 @@ mod reducer {
         s.start(silent);
         s.book(
             Some(silent),
-            Usage::default(),
+            Usage::IDENTITY,
             CostDelta::Unknown(ego_core::cost::UnknownCost::ProviderReportedNoUsage),
         );
-        s.settle(silent, UsageReport::Reported(Usage::default()));
+        s.settle(silent, UsageReport::Reported(Usage::IDENTITY));
         one_generation(&mut s, tokens(20, 2), priced("0.02"));
 
         assert_eq!(
@@ -1473,7 +1473,7 @@ mod reducer {
         one_generation(&mut s, tokens(20, 2), priced("0.02"));
         s.correct(a, tokens(7, 7), priced("0.07"));
 
-        let mut usage = Usage::default();
+        let mut usage = Usage::IDENTITY;
         let mut cost = CumulativeCost::default();
         for charge in &s.state.charges {
             usage.add(&charge.usage);
@@ -1481,6 +1481,66 @@ mod reducer {
         }
         assert_eq!(s.state.usage, usage);
         assert_eq!(s.state.cost, cost);
+    }
+
+    /// `IDENTITY` is the identity of `add`, in both directions and on every
+    /// field — the property that lets any fold start there.
+    #[test]
+    fn the_identity_adds_nothing_to_a_usage_and_a_usage_adds_nothing_to_it() {
+        let measured = Usage {
+            uncached_input_tokens: 120,
+            cache_read_tokens: 900,
+            cache_write_tokens: 60,
+            cache_write_extended_tokens: 30,
+            output_tokens: 45,
+            reasoning_tokens: Some(40),
+        };
+
+        let mut left = measured;
+        left.add(&Usage::IDENTITY);
+        assert_eq!(left, measured, "adding the identity changed the total");
+
+        let mut right = Usage::IDENTITY;
+        right.add(&measured);
+        assert_eq!(right, measured, "the identity was not a clean seed");
+    }
+
+    /// Why `IDENTITY`'s `reasoning_tokens` is `Some(0)` and not `None`.
+    ///
+    /// `add` treats unknown as absorbing, so a `None` seed would make every
+    /// total in the process unknown regardless of what providers reported.
+    /// This is the test that fails if somebody "simplifies" the const back to
+    /// a `None`, or restores a `#[derive(Default)]` that computes one.
+    #[test]
+    fn a_none_seed_would_poison_every_total_which_is_why_the_identity_is_a_zero() {
+        assert_eq!(
+            Usage::IDENTITY.reasoning_tokens,
+            Some(0),
+            "the fold identity must be a measured zero, not an unknown"
+        );
+
+        let reported = Usage {
+            reasoning_tokens: Some(40),
+            ..Usage::IDENTITY
+        };
+        let mut from_identity = Usage::IDENTITY;
+        from_identity.add(&reported);
+        assert_eq!(
+            from_identity.reasoning_tokens,
+            Some(40),
+            "a fold seeded at the identity must keep what the provider said"
+        );
+
+        let mut from_unknown = Usage {
+            reasoning_tokens: None,
+            ..Usage::IDENTITY
+        };
+        from_unknown.add(&reported);
+        assert_eq!(
+            from_unknown.reasoning_tokens, None,
+            "unknown must absorb: a total that summed an unreported \
+             generation is not a known figure"
+        );
     }
 
     #[test]

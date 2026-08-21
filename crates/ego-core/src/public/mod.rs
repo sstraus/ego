@@ -15,7 +15,20 @@ use crate::state::Usage;
 /// The current `PublicEvent` schema version, carried in `SessionStarted`'s
 /// `v` field. `CLI.md` §4.2: "the schema is versioned in the header and
 /// published".
-pub const PUBLIC_EVENT_VERSION: u32 = 5;
+///
+/// **Incremented when the shape moves, not when the branch merges.** This
+/// went 5 → 6 for `UsageUpdated`'s `usage_delta`, which embeds [`Usage`] and
+/// so gained `cache_write_extended_tokens` and `reasoning_tokens`. A version
+/// left behind is a claim a consumer acts on; a version raised early is only
+/// an integer pending confirmation, and the two are not equally wrong.
+///
+/// **The integer is re-derived at merge, never carried from here.** Three
+/// branches move this constant — metering, permissions and this one — so the
+/// number above is arithmetic on the base this branch forked from, not a
+/// measurement of the merged tree. At merge: read the constant on the merge
+/// base and add one. A value that is not what you expect means another branch
+/// moved it too, and is a reason to stop and look rather than to overwrite.
+pub const PUBLIC_EVENT_VERSION: u32 = 6;
 
 /// How a run came to load one instruction file.
 ///

@@ -509,7 +509,7 @@ mod lifecycle {
             let outcome = Outcome::new(
                 stop,
                 DeliveryCertainty::PossiblySent,
-                UsageReport::Reported(Usage::default()),
+                UsageReport::Reported(Usage::IDENTITY),
             );
             let json = serde_json::to_string(&outcome).expect("an outcome serialises");
             let back: Outcome = serde_json::from_str(&json).expect("and decodes back");
@@ -591,13 +591,10 @@ mod lifecycle {
         assert!(!missing.reconciled.exact);
 
         let (_, zero) = run(vec![
-            AiEvent::Usage(Usage::default()),
+            AiEvent::Usage(Usage::IDENTITY),
             AiEvent::Stop(StopReason::Stop),
         ]);
-        assert_eq!(
-            zero.outcome.usage(),
-            UsageReport::Reported(Usage::default())
-        );
+        assert_eq!(zero.outcome.usage(), UsageReport::Reported(Usage::IDENTITY));
         assert_eq!(zero.reconciled.charged, Some(usd("0")));
         assert!(zero.reconciled.exact);
     }

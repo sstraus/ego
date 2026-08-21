@@ -374,7 +374,7 @@ mod acp_golden {
         Usage {
             uncached_input_tokens: uncached_input,
             output_tokens: output,
-            ..Usage::default()
+            ..Usage::IDENTITY
         }
     }
 

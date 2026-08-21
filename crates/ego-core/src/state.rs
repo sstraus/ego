@@ -101,29 +101,44 @@ pub struct Usage {
     pub reasoning_tokens: Option<u64>,
 }
 
-/// A usage of nothing: every category counted, all of them zero.
-///
-/// Written out rather than derived because of the last field. `Default` is
-/// the identity of [`Usage::add`] — `SessionState` folds from it in three
-/// places — and the identity of a sum that treats "unknown" as absorbing is
-/// a known zero, not an unknown. A record *decoded* without the field is the
-/// other case and does get `None`: nothing predating the field ever stated
-/// one. The two differ on purpose, and the difference is exactly what the
-/// field exists to keep.
-impl Default for Usage {
-    fn default() -> Self {
-        Self {
-            uncached_input_tokens: 0,
-            cache_read_tokens: 0,
-            cache_write_tokens: 0,
-            cache_write_extended_tokens: 0,
-            output_tokens: 0,
-            reasoning_tokens: Some(0),
-        }
-    }
-}
-
 impl Usage {
+    /// A usage of nothing: every category counted, all of them zero.
+    ///
+    /// This is the identity of [`add`](Usage::add), and the only correct seed
+    /// for a fold. Every accumulation in the process starts here — the two
+    /// `SessionState` folds, `attempt.rs`'s `UsageReport::Missing`, and
+    /// `turn`'s held total.
+    ///
+    /// **`reasoning_tokens` is `Some(0)` and not `None`**, because the sum
+    /// treats unknown as *absorbing*: seeding a fold with `None` would make
+    /// every total in the process unknown no matter what the providers went
+    /// on to report. A run that has measured nothing yet has measured zero.
+    ///
+    /// **A const rather than a `Default` impl**, and that is the load-bearing
+    /// half. `Default` is reachable without being named —
+    /// `unwrap_or_default`, `or_default`, `..Default::default()`, a `derive`
+    /// on any struct that later gains a `Usage` field — and each of those
+    /// paths would mint a *measured zero* for a reasoning split nobody
+    /// reported. That is precisely the falsehood
+    /// [`reasoning_tokens`](Usage::reasoning_tokens) exists to prevent, and
+    /// it would arrive silently. `cost.rs`'s module doc ("Unknown is a value,
+    /// not a missing value") rejected the same hazard one field over, for the
+    /// same reason: `Option` invites `unwrap_or_default()`, which prices an
+    /// unpriced generation at zero. Naming the identity makes the seed a
+    /// decision at every site instead of a default nobody chose.
+    ///
+    /// A record *decoded* without the field is the opposite case and does get
+    /// `None`: nothing predating the field ever stated one. The two differ on
+    /// purpose, and the difference is what the field is for.
+    pub const IDENTITY: Self = Self {
+        uncached_input_tokens: 0,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+        cache_write_extended_tokens: 0,
+        output_tokens: 0,
+        reasoning_tokens: Some(0),
+    };
+
     /// Every token in every category.
     ///
     /// Saturating for the same reason `add` is. At a generation boundary
@@ -388,7 +403,7 @@ pub struct Refusal {
 
 /// The reduction of a `DomainEvent` log: the harness's entire semantic
 /// state. Built exclusively by `apply`, which is pure and sync (ARCH §1, §4).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionState {
     /// The `seq` carried by the most recently applied event. `apply` trusts
     /// the caller's replay order and never reorders, clamps or rejects on
@@ -453,6 +468,41 @@ pub struct SessionState {
     pub compactions: Vec<String>,
     /// Fork records, in application order.
     pub forks: Vec<ForkRecord>,
+}
+
+/// A session that has observed nothing.
+///
+/// Written out rather than derived for one field: `usage` seeds the fold and
+/// must be [`Usage::IDENTITY`], which is a *measured* zero in every category
+/// including the reasoning split. `Usage` deliberately has no `Default` impl
+/// so that this choice cannot be made silently — see the const's doc — and
+/// the price of that is this block. It is the intended price: a field added
+/// here later will not compile until somebody says what an empty session's
+/// value for it is.
+impl Default for SessionState {
+    fn default() -> Self {
+        Self {
+            usage: Usage::IDENTITY,
+            last_seq: Seq::default(),
+            turns: HashMap::default(),
+            items: HashMap::default(),
+            known_events: HashSet::default(),
+            unresolved_parents: Vec::default(),
+            cost: CumulativeCost::default(),
+            charges: Vec::default(),
+            settled_attempts: HashMap::default(),
+            live_attempts: HashMap::default(),
+            attribution_began: false,
+            refusals: Vec::default(),
+            context: ContextWindow::default(),
+            permissions: Vec::default(),
+            hooks: Vec::default(),
+            subagents: Vec::default(),
+            errors: Vec::default(),
+            compactions: Vec::default(),
+            forks: Vec::default(),
+        }
+    }
 }
 
 impl SessionState {
@@ -745,7 +795,9 @@ impl SessionState {
     fn booked_usage(&self, id: AttemptId) -> Option<Usage> {
         let mut total: Option<Usage> = None;
         for at in self.charge_positions(id) {
-            total.get_or_insert_default().add(&self.charges[at].usage);
+            total
+                .get_or_insert(Usage::IDENTITY)
+                .add(&self.charges[at].usage);
         }
         total
     }
@@ -778,7 +830,7 @@ impl SessionState {
     /// O(n) per correction, and a log crafted to be all corrections replays
     /// in O(n²). See `POTENTIALS.md`.
     fn refold(&mut self) {
-        let mut usage = Usage::default();
+        let mut usage = Usage::IDENTITY;
         let mut cost = CumulativeCost::default();
         for charge in &self.charges {
             usage.add(&charge.usage);

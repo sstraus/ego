@@ -713,7 +713,7 @@ impl<'a> TurnLoop<'a> {
                         })
                 }
                 AiEvent::Usage(usage) if held => {
-                    let mut total = held_usage.unwrap_or_default();
+                    let mut total = held_usage.unwrap_or(Usage::IDENTITY);
                     total.add(&usage);
                     held_usage = Some(total);
                     Ok(())
@@ -780,7 +780,7 @@ impl<'a> TurnLoop<'a> {
         // exactly as it did before; the gate still charges it the full
         // reserved bound at settlement, which is where that belongs.
         if failure.is_none() && held && (held_usage.is_some() || stated_cost.is_some()) {
-            let usage = held_usage.unwrap_or_default();
+            let usage = held_usage.unwrap_or(Usage::IDENTITY);
             let cost_delta = settled_cost(
                 &self.metering,
                 self.quote(),

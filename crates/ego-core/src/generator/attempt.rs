@@ -459,7 +459,7 @@ impl AttemptStream {
             AiEvent::Usage(delta) => {
                 let mut total = match self.usage {
                     UsageReport::Reported(usage) => usage,
-                    UsageReport::Missing => Usage::default(),
+                    UsageReport::Missing => Usage::IDENTITY,
                 };
                 total.add(delta);
                 self.usage = UsageReport::Reported(total);
