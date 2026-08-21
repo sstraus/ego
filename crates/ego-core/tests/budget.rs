@@ -21,9 +21,13 @@
 //!    wrong currency, overflow — every one denies rather than proceeding
 //!    and hoping.
 
-use ego_core::budget::{BudgetBinding, BudgetDenied, BudgetGate, PricingQuote};
+use ego_core::budget::{
+    BudgetBinding, BudgetDenied, BudgetGate, Ledger, Metering, MeteringIdentity, PricingQuote,
+    Reserved, SettlementSource,
+};
 use ego_core::cost::{
-    Amount, Ceiling, CostDelta, CurrencyCode, Money, PricingRevision, TokenCategory, UnknownCost,
+    Amount, Ceiling, CostAttribution, CostDelta, CurrencyCode, MeteringRevision, Money,
+    PricingRevision, ProviderCostRevision, TokenCategory, UnknownCost,
 };
 use ego_core::generator::capabilities::{
     CacheRetention, CancelSemantics, ModelCapabilities, ReasoningCarryover, ReasoningEffortSupport,
@@ -63,6 +67,24 @@ mod budget {
             cache_read: Some(amount("0.0000003")),
             cache_write: Some(amount("0.00000375")),
             output: Some(amount("0.000015")),
+        }
+    }
+
+    /// The fixture quote as a metering: priced from a table, settled from
+    /// the same table. Every existing test in this file was written against
+    /// that arrangement, and it stays the default here.
+    fn metered() -> Metering {
+        Metering::Currency {
+            settlement: SettlementSource::Quote,
+        }
+    }
+
+    /// The identity `metered()` binds itself to. It no longer names a
+    /// revision: which table priced a bound is recorded beside the metering
+    /// on the binding, not inside it.
+    fn metered_identity() -> MeteringIdentity {
+        MeteringIdentity::Currency {
+            settlement: SettlementSource::Quote,
         }
     }
 
@@ -126,7 +148,9 @@ mod budget {
             priced,
             CostDelta::Known {
                 amount: usd("0.010875"),
-                pricing_revision: revision(),
+                attribution: CostAttribution::Table {
+                    revision: revision()
+                },
                 fx: None,
             }
         );
@@ -181,7 +205,9 @@ mod budget {
             quote.price(&tokens(1_000, 0, 0, 200)),
             CostDelta::Known {
                 amount: usd("0.006"),
-                pricing_revision: revision(),
+                attribution: CostAttribution::Table {
+                    revision: revision()
+                },
                 fx: None,
             }
         );
@@ -293,30 +319,58 @@ mod budget {
     #[test]
     fn a_reservation_holds_its_bound_against_the_limit_until_reconciled() {
         let mut gate = BudgetGate::new(usd("10"));
-        assert!(gate.outstanding().amount.is_zero());
-        assert!(gate.committed().amount.is_zero());
+        assert!(
+            gate.outstanding()
+                .expect("a limited gate keeps totals")
+                .amount
+                .is_zero()
+        );
+        assert!(
+            gate.committed()
+                .expect("a limited gate keeps totals")
+                .amount
+                .is_zero()
+        );
 
         let reservation = gate
             .reserve(
-                &quote(),
+                &metered(),
+                Some(&quote()),
                 &request(Some(1_024)),
                 &caps(Some(200_000), Some(64_000)),
             )
             .expect("well within a $10 limit");
-        assert_eq!(*reservation.upper_bound(), standard_bound());
-        assert_eq!(*gate.outstanding(), standard_bound());
-        assert!(gate.committed().amount.is_zero());
+        assert_eq!(
+            *reservation.upper_bound().expect("a bounded reservation"),
+            standard_bound()
+        );
+        assert_eq!(
+            *gate.outstanding().expect("a limited gate keeps totals"),
+            standard_bound()
+        );
+        assert!(
+            gate.committed()
+                .expect("a limited gate keeps totals")
+                .amount
+                .is_zero()
+        );
 
         let settled = gate
             .reconcile(reservation, &quote().price(&tokens(1_000, 0, 0, 200)))
             .expect("the minting gate settles its own reservation");
         assert!(settled.exact);
-        assert_eq!(settled.charged, usd("0.006"));
+        assert_eq!(settled.charged, Some(usd("0.006")));
         assert!(
-            gate.outstanding().amount.is_zero(),
+            gate.outstanding()
+                .expect("a limited gate keeps totals")
+                .amount
+                .is_zero(),
             "the hold must be released"
         );
-        assert_eq!(*gate.committed(), usd("0.006"));
+        assert_eq!(
+            *gate.committed().expect("a limited gate keeps totals"),
+            usd("0.006")
+        );
     }
 
     /// The property that makes `outstanding` necessary at all. A gate that
@@ -331,12 +385,34 @@ mod budget {
         let quote = quote();
         let caps = caps(Some(200_000), Some(64_000));
 
-        let first = gate.reserve(&quote, &request(Some(1_024)), &caps).unwrap();
-        let _second = gate.reserve(&quote, &request(Some(1_024)), &caps).unwrap();
-        assert_eq!(*gate.outstanding(), usd("1.53072"));
+        let first = gate
+            .reserve(
+                &metered(),
+                Some(&quote.clone()),
+                &request(Some(1_024)),
+                &caps,
+            )
+            .unwrap();
+        let _second = gate
+            .reserve(
+                &metered(),
+                Some(&quote.clone()),
+                &request(Some(1_024)),
+                &caps,
+            )
+            .unwrap();
+        assert_eq!(
+            *gate.outstanding().expect("a limited gate keeps totals"),
+            usd("1.53072")
+        );
 
         let denied = gate
-            .reserve(&quote, &request(Some(1_024)), &caps)
+            .reserve(
+                &metered(),
+                Some(&quote.clone()),
+                &request(Some(1_024)),
+                &caps,
+            )
             .expect_err("a third concurrent generation must not fit");
         assert!(
             matches!(denied, BudgetDenied::WouldExceed { .. }),
@@ -346,7 +422,15 @@ mod budget {
         // Settling one cheaply frees its hold, and the third now fits.
         gate.reconcile(first, &quote.price(&tokens(10, 0, 0, 10)))
             .expect("the minting gate settles its own reservation");
-        assert!(gate.reserve(&quote, &request(Some(1_024)), &caps).is_ok());
+        assert!(
+            gate.reserve(
+                &metered(),
+                Some(&quote.clone()),
+                &request(Some(1_024)),
+                &caps
+            )
+            .is_ok()
+        );
     }
 
     /// `ARCHITECTURE.md` §3.1's rule, at the point where it actually bites:
@@ -359,7 +443,8 @@ mod budget {
         quote.output = None;
         let denied = gate
             .reserve(
-                &quote,
+                &metered(),
+                Some(&quote.clone()),
                 &request(Some(1_024)),
                 &caps(Some(200_000), Some(64_000)),
             )
@@ -371,7 +456,10 @@ mod budget {
             })
         );
         assert!(
-            gate.outstanding().amount.is_zero(),
+            gate.outstanding()
+                .expect("a limited gate keeps totals")
+                .amount
+                .is_zero(),
             "a denied reservation must not hold anything"
         );
     }
@@ -385,7 +473,8 @@ mod budget {
         quote.currency = CurrencyCode::new("EUR").unwrap();
         let denied = gate
             .reserve(
-                &quote,
+                &metered(),
+                Some(&quote.clone()),
                 &request(Some(1_024)),
                 &caps(Some(200_000), Some(64_000)),
             )
@@ -401,7 +490,8 @@ mod budget {
         let mut gate = BudgetGate::new(usd("0.5"));
         let denied = gate
             .reserve(
-                &quote(),
+                &metered(),
+                Some(&quote()),
                 &request(Some(1_024)),
                 &caps(Some(200_000), Some(64_000)),
             )
@@ -424,7 +514,8 @@ mod budget {
         let mut gate = BudgetGate::new(standard_bound());
         assert!(
             gate.reserve(
-                &quote(),
+                &metered(),
+                Some(&quote()),
                 &request(Some(1_024)),
                 &caps(Some(200_000), Some(64_000))
             )
@@ -441,7 +532,8 @@ mod budget {
         let mut gate = BudgetGate::new(usd("10"));
         let reservation = gate
             .reserve(
-                &quote(),
+                &metered(),
+                Some(&quote()),
                 &request(Some(1_024)),
                 &caps(Some(200_000), Some(64_000)),
             )
@@ -449,9 +541,14 @@ mod budget {
         let settled = gate
             .reconcile(reservation, &quote().price(&tokens(1_000, 0, 0, 200)))
             .expect("the minting gate settles its own reservation");
-        assert_eq!(settled.charged, usd("0.006"));
+        assert_eq!(settled.charged, Some(usd("0.006")));
         assert!(settled.exact);
-        assert!(gate.committed().amount < standard_bound().amount);
+        assert!(
+            gate.committed()
+                .expect("a limited gate keeps totals")
+                .amount
+                < standard_bound().amount
+        );
     }
 
     /// An unknown actual cost still releases the hold — the generation *is*
@@ -463,7 +560,8 @@ mod budget {
         let mut gate = BudgetGate::new(usd("10"));
         let reservation = gate
             .reserve(
-                &quote(),
+                &metered(),
+                Some(&quote()),
                 &request(Some(1_024)),
                 &caps(Some(200_000), Some(64_000)),
             )
@@ -474,13 +572,21 @@ mod budget {
                 &CostDelta::Unknown(UnknownCost::ProviderReportedNoUsage),
             )
             .expect("the minting gate settles its own reservation");
-        assert_eq!(settled.charged, standard_bound());
+        assert_eq!(settled.charged, Some(standard_bound()));
         assert!(
             !settled.exact,
             "the committed total is now an overestimate and must not claim to be the truth"
         );
-        assert!(gate.outstanding().amount.is_zero());
-        assert_eq!(*gate.committed(), standard_bound());
+        assert!(
+            gate.outstanding()
+                .expect("a limited gate keeps totals")
+                .amount
+                .is_zero()
+        );
+        assert_eq!(
+            *gate.committed().expect("a limited gate keeps totals"),
+            standard_bound()
+        );
     }
 
     /// A cost computed under a different pricing revision cannot be matched
@@ -492,7 +598,8 @@ mod budget {
         let mut gate = BudgetGate::new(usd("10"));
         let reservation = gate
             .reserve(
-                &quote(),
+                &metered(),
+                Some(&quote()),
                 &request(Some(1_024)),
                 &caps(Some(200_000), Some(64_000)),
             )
@@ -502,13 +609,15 @@ mod budget {
                 reservation,
                 &CostDelta::Known {
                     amount: usd("0.006"),
-                    pricing_revision: PricingRevision("a-different-table".to_string()),
+                    attribution: CostAttribution::Table {
+                        revision: PricingRevision("a-different-table".to_string()),
+                    },
                     fx: None,
                 },
             )
             .expect("the minting gate settles its own reservation");
         assert!(!settled.exact);
-        assert_eq!(settled.charged, standard_bound());
+        assert_eq!(settled.charged, Some(standard_bound()));
     }
 
     /// Reconciliation consumes the `Reservation` by value, so one
@@ -521,7 +630,8 @@ mod budget {
         let mut gate = BudgetGate::new(usd("10"));
         let reservation = gate
             .reserve(
-                &quote(),
+                &metered(),
+                Some(&quote()),
                 &request(Some(1_024)),
                 &caps(Some(200_000), Some(64_000)),
             )
@@ -529,8 +639,16 @@ mod budget {
         gate.reconcile(reservation, &quote().price(&tokens(1_000, 0, 0, 200)))
             .expect("the minting gate settles its own reservation");
         // gate.reconcile(reservation, ...);  // error[E0382]: use of moved value
-        assert_eq!(*gate.committed(), usd("0.006"));
-        assert!(gate.outstanding().amount.is_zero());
+        assert_eq!(
+            *gate.committed().expect("a limited gate keeps totals"),
+            usd("0.006")
+        );
+        assert!(
+            gate.outstanding()
+                .expect("a limited gate keeps totals")
+                .amount
+                .is_zero()
+        );
     }
 
     /// The enforcement mechanism itself, stated where a reader will look for
@@ -545,25 +663,35 @@ mod budget {
     /// pins is the runtime half, that the gate really is the source.
     #[test]
     fn budget_reservations_cannot_be_forged_outside_the_gate() {
-        // Reservation { upper_bound: usd("0"), revision: revision() }
+        // Reservation { upper_bound: usd("0"), metering: metered_identity() }
         //   error: cannot construct `Reservation` with struct literal
         //   syntax due to private fields
         let mut gate = BudgetGate::new(usd("10"));
         let reservation = gate
             .reserve(
-                &quote(),
+                &metered(),
+                Some(&quote()),
                 &request(Some(1_024)),
                 &caps(Some(200_000), Some(64_000)),
             )
             .expect("the gate is the only source of a Reservation");
-        assert_eq!(*reservation.revision(), revision());
-        assert_eq!(*reservation.upper_bound(), standard_bound());
+        assert_eq!(
+            *reservation.metering().expect("a bounded reservation"),
+            metered_identity()
+        );
+        assert_eq!(
+            *reservation.upper_bound().expect("a bounded reservation"),
+            standard_bound()
+        );
     }
 
     #[test]
     fn the_limit_is_readable_for_reporting() {
         let gate = BudgetGate::new(usd("42.50"));
-        assert_eq!(*gate.limit(), usd("42.50"));
+        assert_eq!(
+            *gate.limit().expect("a limited gate has a limit"),
+            usd("42.50")
+        );
     }
 
     // --- whose budget, and for what -----------------------------------------
@@ -587,8 +715,13 @@ mod budget {
     }
 
     fn reserve_standard(gate: &mut BudgetGate) -> ego_core::budget::Reservation {
-        gate.reserve(&quote(), &request(Some(1_024)), &standard_caps())
-            .expect("well within the test limits")
+        gate.reserve(
+            &metered(),
+            Some(&quote()),
+            &request(Some(1_024)),
+            &standard_caps(),
+        )
+        .expect("well within the test limits")
     }
 
     #[test]
@@ -611,7 +744,10 @@ mod budget {
         let mut b = BudgetGate::new(usd("10"));
         let from_a = reserve_standard(&mut a);
         let _b_own = reserve_standard(&mut b);
-        assert_eq!(*b.outstanding(), standard_bound());
+        assert_eq!(
+            *b.outstanding().expect("a limited gate keeps totals"),
+            standard_bound()
+        );
 
         let denied = b
             .reconcile(from_a, &quote().price(&tokens(1_000, 0, 0, 200)))
@@ -624,11 +760,17 @@ mod budget {
             }
         );
         assert_eq!(
-            *b.outstanding(),
+            *b.outstanding().expect("a limited gate keeps totals"),
             standard_bound(),
             "a refused reconciliation must not release a hold B never took"
         );
-        assert!(b.committed().amount.is_zero(), "and must not charge B");
+        assert!(
+            b.committed()
+                .expect("a limited gate keeps totals")
+                .amount
+                .is_zero(),
+            "and must not charge B"
+        );
 
         // The authorisation is handed back intact, because B never released
         // it — dropping it here would strand A's hold for the rest of A's
@@ -640,7 +782,12 @@ mod budget {
             )
             .expect("A minted it, so A can settle it");
         assert!(settled.exact);
-        assert!(a.outstanding().amount.is_zero());
+        assert!(
+            a.outstanding()
+                .expect("a limited gate keeps totals")
+                .amount
+                .is_zero()
+        );
     }
 
     #[test]
@@ -648,13 +795,33 @@ mod budget {
         let mut gate = BudgetGate::new(usd("10"));
         let reservation = reserve_standard(&mut gate);
         assert_eq!(
-            reservation.authorises(&quote(), &request(Some(1_024)), &standard_caps()),
+            reservation.authorises(
+                &metered(),
+                Some(&quote()),
+                &request(Some(1_024)),
+                &standard_caps()
+            ),
             Ok(())
         );
-        assert_eq!(reservation.binding().model(), "claude-opus-5");
-        assert_eq!(reservation.binding().context_ceiling(), 200_000);
         assert_eq!(
-            reservation.binding().output_ceiling(),
+            reservation
+                .binding()
+                .expect("a bounded reservation")
+                .model(),
+            "claude-opus-5"
+        );
+        assert_eq!(
+            reservation
+                .binding()
+                .expect("a bounded reservation")
+                .context_ceiling(),
+            200_000
+        );
+        assert_eq!(
+            reservation
+                .binding()
+                .expect("a bounded reservation")
+                .output_ceiling(),
             1_024,
             "the request caps output below the model's 64k ceiling"
         );
@@ -666,7 +833,8 @@ mod budget {
         let reservation = reserve_standard(&mut gate);
         let denied = reservation
             .authorises(
-                &quote(),
+                &metered(),
+                Some(&quote()),
                 &request_for("some-other-model", Some(1_024)),
                 &standard_caps(),
             )
@@ -693,7 +861,8 @@ mod budget {
 
         let wider_window = reservation
             .authorises(
-                &quote(),
+                &metered(),
+                Some(&quote()),
                 &request(Some(1_024)),
                 &caps(Some(400_000), Some(64_000)),
             )
@@ -701,7 +870,12 @@ mod budget {
         assert!(matches!(wider_window, BudgetDenied::WrongBinding(_)));
 
         let more_output = reservation
-            .authorises(&quote(), &request(Some(8_192)), &standard_caps())
+            .authorises(
+                &metered(),
+                Some(&quote()),
+                &request(Some(8_192)),
+                &standard_caps(),
+            )
             .expect_err("8192 output tokens is not the 1024 that was priced");
         assert!(matches!(more_output, BudgetDenied::WrongBinding(_)));
     }
@@ -725,7 +899,12 @@ mod budget {
         );
 
         let denied = reservation
-            .authorises(&pretend, &request(Some(1_024)), &standard_caps())
+            .authorises(
+                &metered(),
+                Some(&pretend),
+                &request(Some(1_024)),
+                &standard_caps(),
+            )
             .expect_err("the same revision does not make it the same table");
         assert_eq!(
             denied,
@@ -755,7 +934,7 @@ mod budget {
         )])
         .expect("one user message is a conversation");
         assert_eq!(
-            reservation.authorises(&quote(), &reworded, &standard_caps()),
+            reservation.authorises(&metered(), Some(&quote()), &reworded, &standard_caps()),
             Ok(()),
             "a reservation is budget authority, not content authority"
         );
@@ -764,7 +943,12 @@ mod budget {
     #[test]
     fn a_binding_cannot_be_built_for_a_request_with_no_stated_ceilings() {
         assert_eq!(
-            BudgetBinding::of(&request(None), &caps(Some(200_000), None), &revision()),
+            BudgetBinding::of(
+                &request(None),
+                &caps(Some(200_000), None),
+                &metered(),
+                Some(&quote())
+            ),
             Err(UnknownCost::UnstatedCeiling {
                 ceiling: Ceiling::Output
             })
@@ -773,7 +957,8 @@ mod budget {
             BudgetBinding::of(
                 &request(Some(1_024)),
                 &caps(None, Some(64_000)),
-                &revision()
+                &metered(),
+                Some(&quote())
             ),
             Err(UnknownCost::UnstatedCeiling {
                 ceiling: Ceiling::Context
@@ -802,7 +987,7 @@ mod budget {
             .reconcile(reservation, &quote().price(&over_bound_usage()))
             .expect("its own gate");
 
-        assert_eq!(settled.charged, usd("0.78072"));
+        assert_eq!(settled.charged, Some(usd("0.78072")));
         assert!(
             settled.exact,
             "the actual cost is known, it is just too big"
@@ -813,7 +998,10 @@ mod budget {
         assert_eq!(breach.charged, usd("0.78072"));
         assert_eq!(breach.bound, standard_bound());
         assert_eq!(breach.excess(), usd("0.01536"));
-        assert_eq!(*gate.committed(), usd("0.78072"));
+        assert_eq!(
+            *gate.committed().expect("a limited gate keeps totals"),
+            usd("0.78072")
+        );
     }
 
     /// Reporting alone would be "silently charged" one level up: the caller
@@ -831,7 +1019,12 @@ mod budget {
         assert_eq!(breach.excess(), usd("0.01536"));
 
         let denied = gate
-            .reserve(&quote(), &request(Some(1_024)), &standard_caps())
+            .reserve(
+                &metered(),
+                Some(&quote()),
+                &request(Some(1_024)),
+                &standard_caps(),
+            )
             .expect_err("a gate whose bounds are not bounds admits nothing");
         assert_eq!(denied, BudgetDenied::BoundBreached(breach));
         assert!(
@@ -839,7 +1032,12 @@ mod budget {
             "the denial names the breach that caused it: {denied}"
         );
         // Plenty of budget left — the refusal is about trust, not headroom.
-        assert!(gate.committed().amount < gate.limit().amount);
+        assert!(
+            gate.committed()
+                .expect("a limited gate keeps totals")
+                .amount
+                < gate.limit().expect("a limited gate has a limit").amount
+        );
     }
 
     /// A charge exactly equal to the bound is not a breach. The bound is a
@@ -854,7 +1052,9 @@ mod budget {
                 reservation,
                 &CostDelta::Known {
                     amount: standard_bound(),
-                    pricing_revision: revision(),
+                    attribution: CostAttribution::Table {
+                        revision: revision(),
+                    },
                     fx: None,
                 },
             )
@@ -862,8 +1062,13 @@ mod budget {
         assert!(settled.over_bound.is_none());
         assert!(gate.breached().is_none());
         assert!(
-            gate.reserve(&quote(), &request(Some(1_024)), &standard_caps())
-                .is_ok()
+            gate.reserve(
+                &metered(),
+                Some(&quote()),
+                &request(Some(1_024)),
+                &standard_caps()
+            )
+            .is_ok()
         );
     }
 
@@ -883,5 +1088,670 @@ mod budget {
         assert!(!settled.exact);
         assert!(settled.over_bound.is_none());
         assert!(gate.breached().is_none());
+    }
+
+    // --- the other three meterings -----------------------------------------
+    //
+    // `docs/decisions/2026-08-21-how-a-model-is-metered.md` §2. Everything
+    // above this line is the currency-table arrangement the gate was born
+    // with. These are the three the sum-product added, and each is here
+    // because it makes the gate *behave* differently — not because a variant
+    // exists.
+
+    fn policy() -> MeteringRevision {
+        MeteringRevision("acme/pro-plan/2026-08".to_string())
+    }
+
+    fn provider() -> ProviderCostRevision {
+        ProviderCostRevision {
+            provider: "xai".to_string(),
+            field: "usage.cost_in_usd_ticks".to_string(),
+            schema_revision: "2026-08-21".to_string(),
+        }
+    }
+
+    fn provider_reported() -> Metering {
+        Metering::Currency {
+            settlement: SettlementSource::ProviderReported {
+                revision: provider(),
+            },
+        }
+    }
+
+    /// A flat fee is not spent per request, so there is nothing to hold —
+    /// and a limit that could not admit one currency-metered generation
+    /// admits any number of these.
+    #[test]
+    fn a_row_that_is_not_metered_in_currency_reserves_nothing() {
+        for metering in [
+            Metering::Subscription { revision: policy() },
+            Metering::Unmetered { revision: policy() },
+        ] {
+            // A tenth of a cent: three orders of magnitude below the
+            // $0.76536 bound the same request takes under the quote.
+            let mut gate = BudgetGate::new(usd("0.001"));
+            for _ in 0..100 {
+                let reservation = gate
+                    .reserve(&metering, None, &request(Some(1_024)), &standard_caps())
+                    .expect("nothing is being charged, so nothing is being reserved");
+                assert!(
+                    reservation
+                        .upper_bound()
+                        .expect("a bounded reservation")
+                        .amount
+                        .is_zero()
+                );
+                gate.reconcile(
+                    reservation,
+                    &CostDelta::free(usd("0").currency, {
+                        let Some(attribution) = metering.policy_attribution() else {
+                            panic!("a policy row attributes its own zero");
+                        };
+                        attribution
+                    }),
+                )
+                .expect("its own gate");
+            }
+            assert!(
+                gate.outstanding()
+                    .expect("a limited gate keeps totals")
+                    .amount
+                    .is_zero()
+            );
+            assert!(
+                gate.committed()
+                    .expect("a limited gate keeps totals")
+                    .amount
+                    .is_zero(),
+                "{metering:?}"
+            );
+        }
+    }
+
+    /// The zero is minted in the *gate's* currency, because neither variant
+    /// states one. A zero in some other currency would be refused by
+    /// `reconcile`'s currency check and quietly charge the bound instead.
+    #[test]
+    fn a_policy_zero_is_minted_in_the_currency_it_will_be_compared_against() {
+        let mut gate = BudgetGate::new(Money::new(
+            amount("10"),
+            CurrencyCode::new("JPY").expect("JPY is valid"),
+        ));
+        let metering = Metering::Subscription { revision: policy() };
+        let reservation = gate
+            .reserve(&metering, None, &request(Some(1_024)), &standard_caps())
+            .expect("a policy row states no currency of its own to clash");
+        assert_eq!(
+            reservation
+                .upper_bound()
+                .expect("a bounded reservation")
+                .currency,
+            CurrencyCode::new("JPY").expect("JPY is valid")
+        );
+
+        let settled = gate
+            .reconcile(
+                reservation,
+                &CostDelta::free(
+                    CurrencyCode::new("JPY").expect("JPY is valid"),
+                    CostAttribution::MeteringPolicy { revision: policy() },
+                ),
+            )
+            .expect("its own gate");
+        assert!(settled.exact, "a policy zero is not a fallback");
+        assert!(
+            gate.committed()
+                .expect("a limited gate keeps totals")
+                .amount
+                .is_zero()
+        );
+    }
+
+    /// A row nobody charges per token is not a row whose shape may go
+    /// unstated. The binding says what was authorised, and "against a model
+    /// with an unknown context window" is not something anyone can check
+    /// afterwards — so the ceiling refusal survives the metering change.
+    #[test]
+    fn a_policy_row_is_still_refused_when_a_ceiling_is_unstated() {
+        let mut gate = BudgetGate::new(usd("10"));
+        let denied = gate
+            .reserve(
+                &Metering::Unmetered { revision: policy() },
+                None,
+                &request(Some(1_024)),
+                &caps(None, Some(64_000)),
+            )
+            .expect_err("a model that states no window cannot be bound to");
+        assert_eq!(
+            denied,
+            BudgetDenied::CostUnknown(UnknownCost::UnstatedCeiling {
+                ceiling: Ceiling::Context
+            })
+        );
+    }
+
+    /// A zero attributed to the wrong policy does not settle. The check is
+    /// the same one that stops a mid-session table change from pricing one
+    /// generation two ways; without it, "free" would be a universal solvent
+    /// that settled any reservation exactly.
+    #[test]
+    fn a_zero_attributed_to_another_policy_falls_back_to_the_bound() {
+        let mut gate = BudgetGate::new(usd("10"));
+        let reservation = gate
+            .reserve(
+                &Metering::Subscription { revision: policy() },
+                None,
+                &request(Some(1_024)),
+                &standard_caps(),
+            )
+            .unwrap();
+        let settled = gate
+            .reconcile(
+                reservation,
+                &CostDelta::free(
+                    usd("0").currency,
+                    CostAttribution::MeteringPolicy {
+                        revision: MeteringRevision("someone/elses-plan".to_string()),
+                    },
+                ),
+            )
+            .expect("its own gate");
+        assert!(
+            !settled.exact,
+            "a figure from another policy is not this generation's cost"
+        );
+    }
+
+    /// A provider-reported row still reserves from its table, because the
+    /// stated figure does not exist until after the tokens are spent. This is
+    /// the ADR's §1 invariant at the one place it can be observed.
+    #[test]
+    fn a_provider_reported_row_reserves_from_its_table_exactly_as_a_quoted_one_does() {
+        let mut gate = BudgetGate::new(usd("10"));
+        let reservation = gate
+            .reserve(
+                &provider_reported(),
+                Some(&quote()),
+                &request(Some(1_024)),
+                &standard_caps(),
+            )
+            .expect("the reservation quote bounds it");
+        assert_eq!(
+            *reservation.upper_bound().expect("a bounded reservation"),
+            standard_bound()
+        );
+        assert_eq!(
+            *gate.outstanding().expect("a limited gate keeps totals"),
+            standard_bound()
+        );
+    }
+
+    /// And it settles from the provider's figure whatever table minted the
+    /// reservation. A provider-stated total carries no table revision at all,
+    /// so applying the revision check to it would discard the best figure the
+    /// gate will ever get, on every single generation.
+    #[test]
+    fn a_provider_stated_figure_settles_without_matching_any_table_revision() {
+        let mut gate = BudgetGate::new(usd("10"));
+        let reservation = gate
+            .reserve(
+                &provider_reported(),
+                Some(&quote()),
+                &request(Some(1_024)),
+                &standard_caps(),
+            )
+            .unwrap();
+        let settled = gate
+            .reconcile(
+                reservation,
+                &CostDelta::Known {
+                    amount: usd("0.0012345678"),
+                    attribution: CostAttribution::ProviderReported(provider()),
+                    fx: None,
+                },
+            )
+            .expect("its own gate");
+        assert!(settled.exact, "an invoice figure is not a guess");
+        assert_eq!(settled.charged, Some(usd("0.0012345678")));
+    }
+
+    /// The exception is narrow: it is provider-*reported* figures that skip
+    /// the revision check, not every figure presented to a provider-reported
+    /// reservation. A table figure computed under another revision is refused
+    /// here exactly as it is anywhere else.
+    #[test]
+    fn a_provider_reported_reservation_still_checks_a_table_figures_revision() {
+        let mut gate = BudgetGate::new(usd("10"));
+        let reservation = gate
+            .reserve(
+                &provider_reported(),
+                Some(&quote()),
+                &request(Some(1_024)),
+                &standard_caps(),
+            )
+            .unwrap();
+        let settled = gate
+            .reconcile(
+                reservation,
+                &CostDelta::Known {
+                    amount: usd("0.006"),
+                    attribution: CostAttribution::Table {
+                        revision: PricingRevision("a-different-table".to_string()),
+                    },
+                    fx: None,
+                },
+            )
+            .expect("its own gate");
+        assert!(!settled.exact);
+        assert_eq!(settled.charged, Some(standard_bound()));
+    }
+
+    /// A stated cost that never arrived charges the bound and is reported
+    /// inexact — the same treatment every unknown cost gets, reached through
+    /// a distinct name so the log says which silence it was.
+    #[test]
+    fn a_missing_stated_cost_charges_the_bound_like_any_other_unknown() {
+        let mut gate = BudgetGate::new(usd("10"));
+        let reservation = gate
+            .reserve(
+                &provider_reported(),
+                Some(&quote()),
+                &request(Some(1_024)),
+                &standard_caps(),
+            )
+            .unwrap();
+        let settled = gate
+            .reconcile(
+                reservation,
+                &CostDelta::Unknown(UnknownCost::ProviderReportedCostMissing),
+            )
+            .expect("its own gate");
+        assert!(!settled.exact);
+        assert_eq!(settled.charged, Some(standard_bound()));
+        assert!(
+            settled.over_bound.is_none(),
+            "the bound charged is not a breach"
+        );
+        assert!(
+            gate.outstanding()
+                .expect("a limited gate keeps totals")
+                .amount
+                .is_zero()
+        );
+    }
+
+    /// A reservation binds the settlement source, not only the table. Two
+    /// rows on the same price list that settle differently are two different
+    /// authorisations, and swapping one for the other after admission would
+    /// change which figure the gate accepts as exact.
+    #[test]
+    fn changing_where_the_settlement_comes_from_moves_the_binding() {
+        let mut gate = BudgetGate::new(usd("10"));
+        let reservation = reserve_standard(&mut gate);
+        let denied = reservation
+            .authorises(
+                &provider_reported(),
+                Some(&quote()),
+                &request(Some(1_024)),
+                &standard_caps(),
+            )
+            .expect_err("this authorised a quote-settled generation");
+        let BudgetDenied::WrongBinding(mismatch) = &denied else {
+            panic!("expected WrongBinding, got {denied:?}");
+        };
+        assert_eq!(*mismatch.authorised.metering(), metered_identity());
+        // ARCH §3.2: a denial names what was denied.
+        let said = denied.to_string();
+        assert!(
+            said.contains("the quote") && said.contains("usage.cost_in_usd_ticks"),
+            "the denial must name both settlement sources: {said}"
+        );
+    }
+
+    // --- a run with no ceiling -------------------------------------------
+    //
+    // `docs/decisions/2026-08-21-a-run-with-no-ceiling.md` §§1-2. Nobody has
+    // to configure a ceiling, and a run without one still reserves, settles
+    // and reconciles — it simply has nothing to enforce. The four cases of
+    // §2's table are exercised below, plus what the shape it mints costs the
+    // caller.
+
+    /// An unlimited ledger holds no totals, and says so by having none
+    /// rather than by reporting zeroes. A zero `outstanding` on a gate with
+    /// no limit is a number nothing consults and nothing checks; reporting
+    /// it would invite a consumer to compare it against a limit that is not
+    /// there.
+    #[test]
+    fn a_gate_with_no_ceiling_reports_no_limit_and_no_totals() {
+        let gate = BudgetGate::unlimited(CurrencyCode::new("USD").expect("USD is valid"));
+
+        assert_eq!(gate.ledger(), &Ledger::Unlimited);
+        assert_eq!(gate.limit(), None);
+        assert_eq!(gate.committed(), None);
+        assert_eq!(gate.outstanding(), None);
+        assert_eq!(
+            gate.currency(),
+            CurrencyCode::new("USD").expect("USD is valid"),
+            "the settlement currency survives the ceiling's absence: a flat-fee \
+             row still costs an attributable zero, and a zero is denominated"
+        );
+    }
+
+    /// §2, row three: `Unlimited` and a computable bound still bounds. The
+    /// bound is not wasted work with nothing to compare against — it is what
+    /// `reconcile` charges when the real figure is unusable, and it is a
+    /// falsifiable claim about the quote and the capability record.
+    #[test]
+    fn a_run_with_no_ceiling_still_bounds_what_it_can_bound() {
+        let mut gate = BudgetGate::unlimited(CurrencyCode::new("USD").expect("USD is valid"));
+
+        let reservation = gate
+            .reserve(
+                &metered(),
+                Some(&quote()),
+                &request(Some(1_024)),
+                &caps(Some(200_000), Some(64_000)),
+            )
+            .expect("no ceiling refuses nothing");
+
+        assert_eq!(reservation.upper_bound(), Some(&standard_bound()));
+        assert_eq!(
+            gate.ledger(),
+            &Ledger::Unlimited,
+            "and the bound is held against nothing, because there is nothing to hold it against"
+        );
+    }
+
+    /// The invariant §2 turns on, in one test: the *same* generation, with
+    /// the same metering and the same missing rates, is admitted unbounded
+    /// where no ceiling was configured and refused by name where one was.
+    ///
+    /// Neither half means anything alone. Admitting without the refusal would
+    /// be a gate that never bounds; refusing without the admission is exactly
+    /// the "no price, no run" rule §1 deleted. The pair is what says the
+    /// operator's intent — not the state of our price tables — is what
+    /// decides.
+    #[test]
+    fn an_unbounded_reservation_is_admitted_where_a_limited_ledger_with_no_rates_refuses() {
+        let no_rates: Option<&PricingQuote> = None;
+
+        let mut unlimited = BudgetGate::unlimited(CurrencyCode::new("USD").expect("USD is valid"));
+        let admitted = unlimited
+            .reserve(
+                &metered(),
+                no_rates,
+                &request(Some(1_024)),
+                &caps(Some(200_000), Some(64_000)),
+            )
+            .expect("a run nobody asked to bound is not refused for a price nobody asked for");
+        assert_eq!(
+            admitted.reserved(),
+            &Reserved::Unbounded {
+                model: "claude-opus-5".to_string()
+            },
+            "and what it gets is a named absence, not a zero standing in for one"
+        );
+
+        let mut limited = BudgetGate::new(usd("10"));
+        let refused = limited
+            .reserve(
+                &metered(),
+                no_rates,
+                &request(Some(1_024)),
+                &caps(Some(200_000), Some(64_000)),
+            )
+            .expect_err("a ceiling was asked for and cannot be honoured");
+        assert_eq!(
+            refused,
+            BudgetDenied::CostUnknown(UnknownCost::NoPricingQuote),
+            "the refusal names the missing fact"
+        );
+    }
+
+    /// The same asymmetry for the other reason a bound fails: a model whose
+    /// context window nobody stated. §1 says this degrades under `Unlimited`
+    /// and stays fatal under `Limited`, and the two must not be allowed to
+    /// converge on either answer.
+    #[test]
+    fn an_unstated_ceiling_is_fatal_only_where_a_ceiling_was_asked_for() {
+        let no_window = caps(None, Some(64_000));
+
+        let mut unlimited = BudgetGate::unlimited(CurrencyCode::new("USD").expect("USD is valid"));
+        assert!(matches!(
+            unlimited
+                .reserve(
+                    &metered(),
+                    Some(&quote()),
+                    &request(Some(1_024)),
+                    &no_window
+                )
+                .expect("nothing to enforce, so nothing to refuse")
+                .reserved(),
+            Reserved::Unbounded { .. }
+        ));
+
+        let mut limited = BudgetGate::new(usd("10"));
+        assert_eq!(
+            limited
+                .reserve(
+                    &metered(),
+                    Some(&quote()),
+                    &request(Some(1_024)),
+                    &no_window
+                )
+                .expect_err("a ceiling cannot be honoured against an unknown context window"),
+            BudgetDenied::CostUnknown(UnknownCost::UnstatedCeiling {
+                ceiling: Ceiling::Context
+            })
+        );
+    }
+
+    /// An unbounded reservation is checked on the model, which is every fact
+    /// it holds. Nothing weaker than the bounded check in what it protects:
+    /// it authorised no figure, so no substitution can overspend one — but a
+    /// reservation for one model must still not run another.
+    #[test]
+    fn an_unbounded_reservation_still_refuses_a_different_model() {
+        let mut gate = BudgetGate::unlimited(CurrencyCode::new("USD").expect("USD is valid"));
+        let reservation = gate
+            .reserve(
+                &metered(),
+                None,
+                &request(Some(1_024)),
+                &caps(Some(200_000), Some(64_000)),
+            )
+            .expect("no ceiling refuses nothing");
+
+        assert_eq!(reservation.model(), "claude-opus-5");
+        assert_eq!(reservation.binding(), None, "there is no bound to bind");
+        assert_eq!(reservation.metering(), None);
+        assert!(
+            reservation
+                .authorises(
+                    &metered(),
+                    None,
+                    &request(Some(1_024)),
+                    &caps(Some(200_000), Some(64_000))
+                )
+                .is_ok(),
+            "the generation it was minted for is the one it authorises"
+        );
+
+        let elsewhere = GenRequest {
+            model: "claude-haiku-5".to_string(),
+            ..request(Some(1_024))
+        };
+        let denied = reservation
+            .authorises(
+                &metered(),
+                None,
+                &elsewhere,
+                &caps(Some(200_000), Some(64_000)),
+            )
+            .expect_err("a different model is a different generation");
+        assert_eq!(
+            denied,
+            BudgetDenied::WrongModel {
+                authorised: "claude-opus-5".to_string(),
+                presented: "claude-haiku-5".to_string()
+            }
+        );
+        let said = denied.to_string();
+        assert!(
+            said.contains("claude-opus-5") && said.contains("claude-haiku-5"),
+            "the denial names both models: {said}"
+        );
+    }
+
+    /// Reconciling an unbounded reservation releases nothing — there was no
+    /// hold — and charges the figure that actually arrived.
+    #[test]
+    fn an_unbounded_reservation_charges_what_was_stated_and_releases_nothing() {
+        let mut gate = BudgetGate::unlimited(CurrencyCode::new("USD").expect("USD is valid"));
+        let reservation = gate
+            .reserve(
+                &metered(),
+                None,
+                &request(Some(1_024)),
+                &caps(Some(200_000), Some(64_000)),
+            )
+            .expect("no ceiling refuses nothing");
+
+        let settled = gate
+            .reconcile(
+                reservation,
+                &CostDelta::Known {
+                    amount: usd("0.004"),
+                    attribution: CostAttribution::Table {
+                        revision: revision(),
+                    },
+                    fx: None,
+                },
+            )
+            .expect("its own gate settles it");
+
+        assert_eq!(settled.charged, Some(usd("0.004")));
+        assert!(settled.exact, "a stated figure is not a guess");
+        assert!(settled.over_bound.is_none(), "there was no bound to breach");
+        assert_eq!(
+            gate.ledger(),
+            &Ledger::Unlimited,
+            "and no total moved, because there is no total"
+        );
+    }
+
+    /// And when the figure does not arrive, nothing is charged. There is no
+    /// bound to fall back to, and a `Some(zero)` here would read as *free* —
+    /// which is the one thing an unpriced hosted generation certainly was
+    /// not. The unknown propagates instead, and poisons the run's cumulative
+    /// total where a fabricated zero would have quietly completed it.
+    #[test]
+    fn an_unbounded_reservation_with_no_usable_cost_charges_nothing_rather_than_zero() {
+        let mut gate = BudgetGate::unlimited(CurrencyCode::new("USD").expect("USD is valid"));
+        let reservation = gate
+            .reserve(
+                &metered(),
+                None,
+                &request(Some(1_024)),
+                &caps(Some(200_000), Some(64_000)),
+            )
+            .expect("no ceiling refuses nothing");
+
+        let settled = gate
+            .reconcile(
+                reservation,
+                &CostDelta::Unknown(UnknownCost::NoPricingQuote),
+            )
+            .expect("its own gate settles it");
+
+        assert_eq!(settled.charged, None);
+        assert!(!settled.exact);
+        assert!(settled.over_bound.is_none());
+    }
+
+    /// The one check that survives on an unbounded reservation: the currency.
+    /// It has no binding, so there is no authorised revision for an
+    /// attribution to contradict — but a figure denominated in something the
+    /// session does not settle in is still not this session's cost, and
+    /// adding it to a run total would be adding euros to dollars.
+    #[test]
+    fn an_unbounded_reservation_still_refuses_a_cost_in_another_currency() {
+        let mut gate = BudgetGate::unlimited(CurrencyCode::new("USD").expect("USD is valid"));
+        let reservation = gate
+            .reserve(
+                &metered(),
+                None,
+                &request(Some(1_024)),
+                &caps(Some(200_000), Some(64_000)),
+            )
+            .expect("no ceiling refuses nothing");
+
+        let settled = gate
+            .reconcile(
+                reservation,
+                &CostDelta::Known {
+                    amount: Money::new(
+                        amount("0.004"),
+                        CurrencyCode::new("EUR").expect("EUR is valid"),
+                    ),
+                    attribution: CostAttribution::Table {
+                        revision: revision(),
+                    },
+                    fx: None,
+                },
+            )
+            .expect("its own gate settles it");
+
+        assert_eq!(
+            settled.charged, None,
+            "euros are not this session's dollars, and there is no bound to fall back to"
+        );
+        assert!(!settled.exact);
+    }
+
+    /// A gate whose limit an administrator reduced remembers both figures.
+    /// §4 requires the clamp be *stated, not silent*: a `--budget $20` that
+    /// silently became $5 reads as binding at a figure it does not, and the
+    /// only thing that knows both numbers is the ledger they live in.
+    #[test]
+    fn a_clamped_ceiling_remembers_the_figure_that_was_asked_for() {
+        let gate = BudgetGate::clamped(usd("5"), usd("20"));
+
+        assert_eq!(
+            gate.ledger(),
+            &Ledger::Limited {
+                limit: usd("5"),
+                clamped_from: Some(usd("20")),
+                committed: usd("0"),
+                outstanding: usd("0"),
+            }
+        );
+        assert_eq!(
+            BudgetGate::new(usd("5")).ledger(),
+            &Ledger::Limited {
+                limit: usd("5"),
+                clamped_from: None,
+                committed: usd("0"),
+                outstanding: usd("0"),
+            },
+            "and an unclamped ceiling does not accidentally claim a clamp"
+        );
+    }
+
+    /// And the metering variant itself is part of the binding: a currency
+    /// authorisation is not a subscription one, however the ceilings line up.
+    #[test]
+    fn a_currency_authorisation_does_not_cover_a_policy_metered_generation() {
+        let mut gate = BudgetGate::new(usd("10"));
+        let reservation = reserve_standard(&mut gate);
+        assert!(matches!(
+            reservation.authorises(
+                &Metering::Subscription { revision: policy() },
+                None,
+                &request(Some(1_024)),
+                &standard_caps()
+            ),
+            Err(BudgetDenied::WrongBinding(_) | BudgetDenied::QuoteChanged { .. })
+        ));
     }
 }

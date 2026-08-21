@@ -12,6 +12,7 @@
 //! requirements from imagination.
 
 pub mod openai_completions;
+pub mod provider_cost;
 pub mod sse;
 
 use ego_core::generator::attempt::DeliveryCertainty;

@@ -19,35 +19,40 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use ego_core::budget::PricingQuote;
-use ego_core::cost::{Amount, CurrencyCode, PricingRevision};
+use ego_core::budget::{Metering, PricingQuote, ResolvedRates, SettlementSource};
+use ego_core::cost::{MeteringRevision, RateSource};
 use ego_core::generator::capabilities::ModelCapabilities;
 use url::Url;
 
 use crate::provider::{MissingCredential, ProviderRow};
+use crate::wire::provider_cost::ProviderCost;
 
 /// The provider id of the hosted row this milestone ships.
 pub const OPENAI: &str = "openai";
 /// The provider id of the local daemon this milestone ships.
 pub const OLLAMA: &str = "ollama";
 
-/// The revision stamped on a local model's zero quote.
+/// The policy under which a locally served model is not metered at all.
 ///
-/// It names the *policy* that produced the figure, not a date it was copied
-/// on. `PricingRevision` exists to make a past cost attributable — "this
-/// number came from that table" — and a date attributes a built-in policy to
-/// nothing anyone can go and check. This string says exactly what was
+/// It names the *policy*, not a date it was copied on. A revision exists to
+/// make a past figure attributable — and a date attributes a built-in policy
+/// to nothing anyone can go and check. This string says exactly what was
 /// asserted and under what condition, which is checkable.
+///
+/// A [`MeteringRevision`] and deliberately not a `PricingRevision`: there is
+/// no price list here to attribute anything to, and the all-zero quote this
+/// used to be spelled through claimed there was
+/// (`docs/decisions/2026-08-21-how-a-model-is-metered.md` §4).
 pub const LOCAL_UNMETERED: &str = "ego/builtin/ollama-local-unmetered/v1";
 
 /// Everything a generation needs to know about the model it is about to run.
 ///
 /// One value rather than three lookups, because the three are only correct
-/// *together*: capabilities bound the reservation that the pricing prices,
-/// and both are resolved against the row the request is then sent to. A
-/// caller that could fetch them separately could mix a quote with another
-/// model's ceilings, which is the confusion `BudgetBinding` exists to catch
-/// one layer down.
+/// *together*: capabilities bound the reservation that the rates price, and
+/// both are resolved against the row the request is then sent to. A caller
+/// that could fetch them separately could mix a quote with another model's
+/// ceilings, which is the confusion `BudgetBinding` exists to catch one layer
+/// down.
 #[derive(Debug, Clone)]
 pub struct ResolvedModel {
     /// The model id as the wire format must spell it — the part after the
@@ -55,20 +60,43 @@ pub struct ResolvedModel {
     pub model: String,
     pub row: ProviderRow,
     pub capabilities: ModelCapabilities,
-    pub pricing: PricingQuote,
+    pub metering: Metering,
+    /// What this build knows the row costs, which may be nothing.
+    ///
+    /// Split from `metering` along the line
+    /// `docs/decisions/2026-08-21-a-run-with-no-ceiling.md` §3 draws: the
+    /// metering is a fact about the billing arrangement, the rates are a fact
+    /// about our knowledge, and a run that configured no ceiling looks no
+    /// rates up at all.
+    pub rates: Option<ResolvedRates>,
 }
 
 /// A hosted model's facts, which nobody in this repository is in a position
 /// to know.
 ///
-/// Both halves are supplied for the same reason. A price written from memory
-/// is a number the budget gate will trust and nothing can check; a context
-/// window written from memory is the identical claim one field over, since
-/// no hosted provider publishes a capability endpoint either.
+/// **Capabilities stay required and rates do not**, and the asymmetry is the
+/// ruling's, not an oversight. maintainer ruled about prices: a run that asks for
+/// no ceiling needs none, so demanding one refuses a working run to buy
+/// nothing. The argument for supplied *capabilities* was always a separate
+/// one and survives intact — a context window written from memory is the same
+/// unverifiable claim a price is, and it feeds far more than the budget:
+/// `CLI.md` §4.1 publishes context occupancy from it, compaction triggers on
+/// it, and `fallback_gaps` compares it.
 #[derive(Debug, Clone)]
 pub struct HostedModel {
     pub capabilities: ModelCapabilities,
-    pub pricing: PricingQuote,
+    /// How the row is metered — currency, or a flat fee with no per-token
+    /// price at all. This is the slot every operator-supplied metering enters
+    /// through, and the reason `Metering::Subscription` has a producer.
+    pub metering: Metering,
+    /// What the operator says the row costs, if they said.
+    ///
+    /// Optional, and **not** a reason to reach for `Metering::Unmetered`. An
+    /// OpenAI row is metered in currency whether or not this build holds
+    /// rates for it — the provider will charge — and spelling ignorance as
+    /// "nobody is charging" would under-reserve every metered row the moment
+    /// somebody did ask for a ceiling.
+    pub rates: Option<ResolvedRates>,
 }
 
 /// A model reference that has been split but not yet resolved.
@@ -118,9 +146,12 @@ pub enum ResolveError {
         provider: String,
         known: Vec<String>,
     },
-    /// A hosted model with no supplied quote or capabilities. The final
-    /// behaviour, not a placeholder: M5's generated catalogue becomes another
-    /// producer of the same value and does not change this refusal.
+    /// A hosted model with no supplied **capabilities**.
+    ///
+    /// Narrowed from "no pricing or capabilities" by
+    /// `docs/decisions/2026-08-21-a-run-with-no-ceiling.md` §3: pricing is no
+    /// longer required, and "cannot be bounded" is no longer the reason,
+    /// because a run that asked for no ceiling does not need bounding.
     HostedModelNotConfigured { slug: String },
     /// The provider needs a credential that is not set.
     MissingCredential(MissingCredential),
@@ -154,8 +185,9 @@ impl fmt::Display for ResolveError {
             ),
             ResolveError::HostedModelNotConfigured { slug } => write!(
                 f,
-                "no pricing or capabilities are configured for `{slug}`: a hosted \
-                 model cannot be bounded from figures this build does not have"
+                "no capabilities are configured for `{slug}`: a hosted provider \
+                 publishes no capability endpoint, so its context window and \
+                 output ceiling have to be supplied"
             ),
             ResolveError::MissingCredential(missing) => write!(f, "{missing}"),
             ResolveError::NotInstalled { model, installed } => write!(
@@ -191,23 +223,96 @@ impl From<MissingCredential> for ResolveError {
     }
 }
 
-/// A quote asserting the provider charges nothing, in `currency`.
+/// Nobody is charging for this model, under [`LOCAL_UNMETERED`].
 ///
-/// Every category is `Some(zero)` and never `None`: `None` means *unpriced*,
-/// and `upper_bound` consults all three input categories plus output, so one
-/// `None` would fail the gate closed before the network and run nothing.
+/// Takes no currency, and losing that parameter is the point. The old
+/// all-zero [`PricingQuote`] had to be denominated in something because a
+/// price list is denominated in something; this states that there is no price
+/// list, so the only currency in sight is the one the budget gate mints its
+/// zero reservation in — which is the gate's own limit currency, the only
+/// currency the zero could be compared against.
 ///
-/// This is a price claim, not the absence of one (`cost.rs`: "zero is a
-/// price"), so it is only ever built for a model the daemon reports as served
-/// locally — never for a provider id.
-pub fn unmetered(currency: CurrencyCode) -> PricingQuote {
-    PricingQuote {
-        revision: PricingRevision(LOCAL_UNMETERED.to_string()),
-        currency,
-        uncached_input: Some(Amount::ZERO),
-        cache_read: Some(Amount::ZERO),
-        cache_write: Some(Amount::ZERO),
-        output: Some(Amount::ZERO),
+/// It is still a claim, and still only ever built for a model the daemon
+/// reports as served locally — never for a provider id. What changed is that
+/// the claim is now "not metered", which the daemon's own answer establishes,
+/// instead of "the provider charges zero per token", which nothing did.
+pub fn unmetered() -> Metering {
+    Metering::Unmetered {
+        revision: MeteringRevision(LOCAL_UNMETERED.to_string()),
+    }
+}
+
+/// A row whose access is paid for by a flat fee, under the policy `revision`
+/// names.
+///
+/// The revision is supplied because the policy is: this repository knows of
+/// no subscription it could name, and inventing a label for someone else's
+/// billing arrangement would be the same fabrication the all-zero quote was.
+/// An operator who pays a flat fee for a row supplies this the way they
+/// supply a [`HostedModel`] — the "explicitly operator-supplied, pinned
+/// source" slot of `docs/decisions/2026-08-21-how-a-model-is-metered.md` §7.
+///
+/// What it buys them: the gate reserves zero, so a *monetary* `--budget`
+/// admits every generation and says so through
+/// [`PublicEvent::MeteringSelected`](ego_core::public::PublicEvent::MeteringSelected)
+/// rather than appearing to cap something. The *token* form of `--budget`
+/// binds such a row exactly as it binds any other.
+pub fn subscription(revision: &str) -> Metering {
+    Metering::Subscription {
+        revision: MeteringRevision(revision.to_string()),
+    }
+}
+
+/// A row metered in currency and settled from whatever table priced it.
+///
+/// The ordinary hosted case. It takes no quote: under
+/// `docs/decisions/2026-08-21-a-run-with-no-ceiling.md` §3 the rates travel
+/// beside the metering rather than inside it, so "this row is billed in
+/// money" and "we hold rates for it" stay two separate assertions. A row with
+/// no rates is still this — the provider still charges — and settles as
+/// `UnknownCost::NoPricingQuote` rather than as a fabricated zero.
+pub fn tabulated() -> Metering {
+    Metering::Currency {
+        settlement: SettlementSource::Quote,
+    }
+}
+
+/// Rates an operator wrote down, the first of §5's three sources.
+///
+/// Named rather than constructed inline so the provenance and the quote are
+/// minted together: a `ResolvedRates` whose `source` disagreed with where its
+/// quote actually came from would make `MeteringSelected` publish a false
+/// statement about the strength of a guarantee.
+pub fn operator_rates(quote: PricingQuote) -> ResolvedRates {
+    ResolvedRates {
+        quote,
+        source: RateSource::Operator,
+    }
+}
+
+/// A row priced from a supplied table, and settled from the provider's own
+/// statement of what it will charge.
+///
+/// The best accounting available: the provider's own figure settles what the
+/// generation cost, replacing anything a table would have computed.
+///
+/// Takes no quote, for the reason [`tabulated`] does not — and the change is
+/// a real one rather than a rename. A provider-reported row **with no rates**
+/// is now legal and useful: with no ceiling configured it runs unbounded and
+/// still settles exactly, from the figure that will appear on the invoice.
+/// What it cannot do is bound a ceiling, and that requirement now lives at
+/// `BudgetGate::reserve`, which refuses a `Limited` ledger with no rates
+/// whatever the settlement source is.
+///
+/// The [`ProviderCostRevision`](ego_core::cost::ProviderCostRevision) is
+/// taken from `cost` rather than written out here, so the declaration
+/// recorded at resolution and the attribution stamped on the settled figure
+/// are one value and cannot drift apart.
+pub fn provider_reported(cost: &dyn ProviderCost) -> Metering {
+    Metering::Currency {
+        settlement: SettlementSource::ProviderReported {
+            revision: cost.revision().clone(),
+        },
     }
 }
 
@@ -264,7 +369,8 @@ impl Catalogue {
             model: slug.model.clone(),
             row: row.clone(),
             capabilities: hosted.capabilities.clone(),
-            pricing: hosted.pricing.clone(),
+            metering: hosted.metering.clone(),
+            rates: hosted.rates.clone(),
         })
     }
 }

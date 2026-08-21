@@ -3,7 +3,7 @@
 //!
 //! See `ARCHITECTURE.md` §1/§5 and `plans/m0a-contracts.md` Step 3.
 
-use ego_core::cost::{Amount, CostDelta, CurrencyCode, Money, PricingRevision};
+use ego_core::cost::{Amount, CostAttribution, CostDelta, CurrencyCode, Money, PricingRevision};
 use ego_core::event::domain::{DomainEvent, Envelope, EventKind};
 use ego_core::event::id::{Producer, Seq, SessionId};
 use ego_core::event::time::Timestamp;
@@ -75,14 +75,14 @@ mod codec {
     }
 
     #[test]
-    fn codec_header_carries_codec_version_3() {
+    fn codec_header_carries_codec_version_4() {
         let h = header();
-        assert_eq!(h.v, 3);
-        assert_eq!(CODEC_VERSION, 3);
+        assert_eq!(h.v, 4);
+        assert_eq!(CODEC_VERSION, 4);
 
         let bytes = encode_header(&h);
         match decode_line(&bytes).unwrap() {
-            StoreLine::Header(decoded) => assert_eq!(decoded.v, 3),
+            StoreLine::Header(decoded) => assert_eq!(decoded.v, 4),
             other => panic!("expected Header, got {other:?}"),
         }
     }
@@ -459,7 +459,9 @@ mod codec {
                             "0.0027".parse::<Amount>().expect("a valid test amount"),
                             CurrencyCode::new("USD").expect("USD is a valid code"),
                         ),
-                        pricing_revision: PricingRevision("test-2026-08".to_string()),
+                        attribution: CostAttribution::Table {
+                            revision: PricingRevision("test-2026-08".to_string()),
+                        },
                         fx: None,
                     },
                     // Deliberately absent, and the record above is committed
@@ -495,7 +497,9 @@ mod codec {
                             "0.0027".parse::<Amount>().expect("a valid test amount"),
                             CurrencyCode::new("USD").expect("USD is a valid code"),
                         ),
-                        pricing_revision: PricingRevision("test-2026-08".to_string()),
+                        attribution: CostAttribution::Table {
+                            revision: PricingRevision("test-2026-08".to_string()),
+                        },
                         fx: None,
                     },
                     attempt: Some(golden_attempt()),

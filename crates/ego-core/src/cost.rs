@@ -451,6 +451,101 @@ impl FxQuote {
 #[serde(transparent)]
 pub struct PricingRevision(pub String);
 
+/// Where the rates that priced a reservation came from.
+///
+/// Not decoration: a ceiling enforced against rates an operator wrote down
+/// and one enforced against nothing at all are materially different
+/// guarantees, and a consumer that cannot tell them apart cannot report
+/// honestly on either. See `2026-08-21-a-run-with-no-ceiling.md` §5 and
+/// §Consequences.
+///
+/// **Exactly the sources that exist.** §5 names three, in resolution order:
+/// an operator's quote, the provider's own pricing endpoint, and the cached
+/// third-party table. Only the first has a producer today — the other two
+/// arrive with the table and the endpoint, in story `regression_case`. They are not
+/// declared here in advance: a variant nothing can produce is a claim the
+/// code cannot back, and `AGENTS.md:22-37` forbids exactly that. Adding an
+/// arm when its source lands is ordinary additive growth, not a temporary
+/// contract being replaced.
+///
+/// The order of the variants is §5's resolution order, first hit wins.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "source", rename_all = "snake_case")]
+pub enum RateSource {
+    /// Nobody looked any up. The ordinary case for a run with no ceiling, and
+    /// a *property* rather than an omission: no third party was contacted.
+    None,
+    /// Explicit operator configuration, which may hold a negotiated rate no
+    /// public table knows about. First in §5's order for that reason.
+    Operator,
+}
+
+/// Which metering policy established that a row has no per-token price at
+/// all.
+///
+/// Beside [`PricingRevision`], opaque for the same reason, and deliberately
+/// *not* the same type. A `PricingRevision` names a price list; a
+/// subscription and a locally served model have none, and labelling their
+/// figures as though a table produced them is the confusion
+/// `docs/decisions/2026-08-21-how-a-model-is-metered.md` §4 refused. This
+/// names the policy that says "not metered in currency" — which is
+/// checkable, where a fabricated all-zero price list is not.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct MeteringRevision(pub String);
+
+/// A provider's declaration that it states the charge for a request itself.
+///
+/// Three facts rather than one string, because a figure is only re-derivable
+/// from a captured response if you know *where on the wire* it was read.
+/// `field` is data — the name of a place — never something anything
+/// dispatches on: `ego-core` cannot name a wire format
+/// (`docs/decisions/2026-08-21-how-a-model-is-metered.md` §8), and every
+/// decoder that can read a cost feeds the same
+/// [`AiEvent::ProviderCost`](crate::generator::port::AiEvent::ProviderCost).
+///
+/// The same value is carried by the resolution-time
+/// [`SettlementSource::ProviderReported`](crate::budget::SettlementSource)
+/// and by the settlement-time [`CostAttribution::ProviderReported`], and the
+/// settlement record is minted *from* the declaration rather than assembled
+/// beside it. Two values describing one provider contract, built in two
+/// places, are two values that can disagree once they are bytes on disk.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct ProviderCostRevision {
+    /// Whose API stated the figure.
+    pub provider: String,
+    /// Where in the response body it was read — `usage.cost`,
+    /// `usage.cost_in_usd_ticks`.
+    pub field: String,
+    /// Which revision of that provider's response schema was decoded, so a
+    /// change in what the field means is visible in the log.
+    pub schema_revision: String,
+}
+
+/// Where a settled figure came from, recorded on every [`CostDelta::Known`]
+/// so a past cost stays attributable.
+///
+/// Three arms because there are three answers to "who produced this number",
+/// and they are checkable in three different ways. A table revision points at
+/// an artefact; a provider statement points at a field in a response body; a
+/// metering policy points at neither, because a row with no per-token price
+/// has no figure to check — the policy *is* the whole source, and saying so
+/// is more honest than dressing it as a price list.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "source", rename_all = "snake_case")]
+pub enum CostAttribution {
+    /// Computed from a price list, under this revision.
+    Table { revision: PricingRevision },
+    /// Stated outright by the provider. Deliberately **not** a
+    /// [`PricingRevision`] wearing a provider's name: a provider-stated total
+    /// came from no table, and labelling it as though it did would make the
+    /// log claim a pricing source exists to be checked when none does.
+    ProviderReported(ProviderCostRevision),
+    /// Neither: the row is not metered in currency, and this policy is what
+    /// established that.
+    MeteringPolicy { revision: MeteringRevision },
+}
+
 /// Why a generation's cost is not known.
 ///
 /// Distinguishable causes rather than a free-text string, because these are
@@ -482,6 +577,17 @@ pub enum UnknownCost {
     /// The provider returned no usage for this generation, so the quantity
     /// to price is itself missing.
     ProviderReportedNoUsage,
+    /// The provider declared that it states the charge for a request and
+    /// then stated none.
+    ///
+    /// Distinct from [`ProviderReportedNoUsage`](Self::ProviderReportedNoUsage)
+    /// for the reason [`UnstatedCeiling`](Self::UnstatedCeiling) was split out
+    /// of [`NoPricingQuote`](Self::NoPricingQuote): "this provider said it
+    /// would state a cost and did not" and "the provider reported no usage"
+    /// send an operator to two different places. Under a provider-reported
+    /// settlement the tokens are beside the point — the figure that was
+    /// promised is the one that is missing.
+    ProviderReportedCostMissing,
     /// A cost was reported in a currency the session cannot settle, with no
     /// quote to convert it.
     UnconvertibleCurrency { found: CurrencyCode },
@@ -540,10 +646,11 @@ pub enum TokenCategory {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "cost", rename_all = "snake_case")]
 pub enum CostDelta {
-    /// Priced, under a named revision.
+    /// Priced, and attributable to whatever produced the figure.
     Known {
         amount: Money,
-        pricing_revision: PricingRevision,
+        /// Who produced this number, and how it can be checked.
+        attribution: CostAttribution,
         /// Present only when `amount`'s currency differs from the session's
         /// settlement currency. Persisted with the event so the conversion
         /// replays identically forever.
@@ -555,13 +662,18 @@ pub enum CostDelta {
 }
 
 impl CostDelta {
-    /// A free generation — a local model, say. Local providers emit
-    /// `Known(0)`, never `Unknown`: zero is a price, and reporting it as
-    /// unknown would poison the session total for no reason.
-    pub fn free(currency: CurrencyCode, pricing_revision: PricingRevision) -> Self {
+    /// A generation that cost nothing — a locally served model, a row paid
+    /// for by a flat fee. Emitted as `Known(0)`, never `Unknown`: the figure
+    /// is known, and reporting it as unknown would poison the session total
+    /// for no reason.
+    ///
+    /// `currency` comes from whatever the zero will be compared against —
+    /// the budget gate's own limit currency — because a metering with no
+    /// per-token price states none of its own.
+    pub fn free(currency: CurrencyCode, attribution: CostAttribution) -> Self {
         CostDelta::Known {
             amount: Money::zero(currency),
-            pricing_revision,
+            attribution,
             fx: None,
         }
     }

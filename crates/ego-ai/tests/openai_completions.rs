@@ -828,7 +828,9 @@ fn responding(status: u16, body: &'static str) -> Result<HttpResponse, HttpError
 /// taken before anything can cut the body and leave nobody to report it.
 #[tokio::test]
 async fn a_streamed_response_reports_that_it_arrived_before_it_decodes_anything() {
-    let events: Vec<AiEvent> = decode(responding(200, TEXT_TRANSCRIPT)).collect().await;
+    let events: Vec<AiEvent> = decode(responding(200, TEXT_TRANSCRIPT), None)
+        .collect()
+        .await;
     assert_eq!(
         events.first(),
         Some(&AiEvent::DeliveryObserved(DeliveryCertainty::PossiblySent))
@@ -842,7 +844,7 @@ async fn a_streamed_response_reports_that_it_arrived_before_it_decodes_anything(
 async fn an_error_status_is_reported_with_what_the_provider_said() {
     const BODY: &str = "{\"error\":{\"message\":\"Rate limit reached for gpt-5.1\",\
          \"type\":\"rate_limit_error\",\"code\":null}}";
-    let events: Vec<AiEvent> = decode(responding(429, BODY)).collect().await;
+    let events: Vec<AiEvent> = decode(responding(429, BODY), None).collect().await;
     assert_eq!(
         events,
         vec![
@@ -862,11 +864,14 @@ async fn an_error_status_is_reported_with_what_the_provider_said() {
 #[tokio::test]
 async fn a_request_that_never_left_says_so() {
     use ego_ai::http::EgressRefused;
-    let events: Vec<AiEvent> = decode(Err(HttpError::refused_before_sending(
-        EgressRefused::NameNeedsResolution {
-            host: "api.openai.com".to_string(),
-        },
-    )))
+    let events: Vec<AiEvent> = decode(
+        Err(HttpError::refused_before_sending(
+            EgressRefused::NameNeedsResolution {
+                host: "api.openai.com".to_string(),
+            },
+        )),
+        None,
+    )
     .collect()
     .await;
 
@@ -903,7 +908,7 @@ async fn a_body_that_fails_halfway_carries_its_certainty_out_through_the_stream(
             }),
         ])),
     });
-    let events: Vec<AiEvent> = decode(response).collect().await;
+    let events: Vec<AiEvent> = decode(response, None).collect().await;
 
     assert_eq!(events.last(), Some(&AiEvent::Stop(StopReason::Error)));
     assert_eq!(

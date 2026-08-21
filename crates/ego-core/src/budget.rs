@@ -30,12 +30,35 @@
 //! [`BudgetGate::reconcile`]. Reserving the expected cost instead would let
 //! a run of unusually long generations walk straight through the limit.
 //!
+//! ## A ceiling is optional; the lifecycle is not
+//!
+//! `docs/decisions/2026-08-21-a-run-with-no-ceiling.md` §1: nobody has to
+//! configure a ceiling, and a run without one needs no prices at all. So the
+//! gate holds a [`Ledger`], which is [`Unlimited`](Ledger::Unlimited) when no
+//! ceiling was configured and [`Limited`](Ledger::Limited) when one was, and
+//! [`reserve`](BudgetGate::reserve) takes the rates as an `Option`. What a
+//! run without a ceiling does **not** lose is the lifecycle: it still
+//! reserves, streams, settles and reconciles, because that is where usage,
+//! cost attribution and the durable ledger come from. It simply has nothing
+//! to enforce.
+//!
+//! The reservation it gets is [`Reserved::Unbounded`] — a named absence and
+//! not a zero. A zero is a *claim* about a quantity, indistinguishable from
+//! the genuine zero a subscription row mints; a variant is the absence of a
+//! claim. The distinction is the one that ADR's §2 turns on, and it is the
+//! same distinction [`PricingQuote`]'s `None` rates make one type over.
+//!
 //! ## The quote is resolved before the request and never recomputed
 //!
 //! [`PricingQuote`] is immutable and carries its [`PricingRevision`]. The
 //! same quote prices the reservation and the actual usage, so a pricing
 //! table that changes mid-session cannot make a generation cost one thing
 //! going in and another coming out.
+//!
+//! It is deliberately **not** part of [`Metering`]. A metering records the
+//! **billing arrangement** — a fact about the world — while the presence of
+//! rates records **our knowledge**, and a design that conflates the two has
+//! to invent a variant for ignorance. See that ADR's §3.
 //!
 //! ## A reservation names the gate that minted it and what it authorised
 //!
@@ -56,8 +79,8 @@
 use std::fmt;
 
 use crate::cost::{
-    Amount, Ceiling, CostDelta, CurrencyCode, Money, MoneyError, PricingRevision, TokenCategory,
-    UnknownCost,
+    Amount, Ceiling, CostAttribution, CostDelta, CurrencyCode, MeteringRevision, Money, MoneyError,
+    PricingRevision, ProviderCostRevision, RateSource, TokenCategory, UnknownCost,
 };
 use crate::event::id::GateId;
 use crate::generator::capabilities::ModelCapabilities;
@@ -142,7 +165,9 @@ impl PricingQuote {
         }
         CostDelta::Known {
             amount: Money::new(total, self.currency),
-            pricing_revision: self.revision.clone(),
+            attribution: CostAttribution::Table {
+                revision: self.revision.clone(),
+            },
             fx: None,
         }
     }
@@ -202,6 +227,200 @@ impl PricingQuote {
     }
 }
 
+/// A quote with the fact of where it was found.
+///
+/// One value and not two parameters, because the two must not drift: a run
+/// that reports enforcing a ceiling against the provider's own published
+/// rates while actually holding a third-party table's is making the exact
+/// false statement `2026-08-21-a-run-with-no-ceiling.md` §10 adds
+/// [`RateSource`] to prevent. Resolution (§5) mints them together.
+///
+/// The provenance never reaches the arithmetic: [`BudgetGate::reserve`] takes
+/// the [`PricingQuote`] alone, because where a rate came from must not change
+/// what it computes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedRates {
+    pub quote: PricingQuote,
+    pub source: RateSource,
+}
+
+/// Where the settled figure for a currency-metered generation comes from.
+///
+/// A property of the **billing arrangement**, which is why it survives inside
+/// [`Metering::Currency`] while the quote does not: whether a provider states
+/// its own charge is a fact about that provider, true whether or not this
+/// build holds a rate table for it. A stated cost arrives after the tokens
+/// are spent, so it can improve the record and can never gate the spend —
+/// which is why the reservation reads the rates and the settlement reads
+/// this.
+///
+/// See `docs/decisions/2026-08-21-how-a-model-is-metered.md` §1 and §2, as
+/// narrowed by `2026-08-21-a-run-with-no-ceiling.md` §3.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SettlementSource {
+    /// The same quote that minted the reservation prices the observed usage.
+    Quote,
+    /// The provider states the charge for the request outright, and that
+    /// figure settles it — strictly better than any table, because it is
+    /// what will appear on the invoice.
+    ProviderReported { revision: ProviderCostRevision },
+}
+
+impl fmt::Display for SettlementSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SettlementSource::Quote => f.write_str("the quote"),
+            SettlementSource::ProviderReported { revision } => {
+                write!(f, "{}'s {}", revision.provider, revision.field)
+            }
+        }
+    }
+}
+
+/// How a model is metered, and therefore what may settle a generation
+/// against it.
+///
+/// **A fact about the billing arrangement, and nothing about what this build
+/// knows.** The rates that price a reservation are a separate, optional value
+/// resolved beside a `Metering` and handed to [`BudgetGate::reserve`]. An
+/// OpenAI row is metered in currency whether or not anybody has configured a
+/// table for it — the provider will charge — and folding "we have rates" into
+/// this vocabulary would force a fourth variant meaning *ignorance*, inside a
+/// type whose other three variants are claims about the world. See
+/// `docs/decisions/2026-08-21-a-run-with-no-ceiling.md` §3.
+///
+/// The `Currency` variant keeps `settlement` for the same reason it lost the
+/// quote: whether a provider states its own charge is a property of that
+/// provider. See `2026-08-21-how-a-model-is-metered.md` §1 for why the
+/// settlement axis is a discriminant at all.
+///
+/// `ego-core` gains no constant and opens no file for any of this.
+/// `Metering` is a shape; every number that fills it enters through the
+/// resolver in `ego-ai`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Metering {
+    /// Metered in money, per token. What that money *is* comes from the
+    /// rates, which may be absent — see the type's own doc.
+    Currency { settlement: SettlementSource },
+    /// Access is paid for by a flat fee, so no per-token currency charge
+    /// exists to quote. **Not** an all-zero [`PricingQuote`]: a price list
+    /// saying "zero per token" and a row that has no per-token price at all
+    /// are different facts, and once they share a spelling nothing downstream
+    /// can tell them apart.
+    ///
+    /// Also **not** the answer to "we do not know this row's rates". That is
+    /// `Currency` with no rates: this variant asserts *the provider charges
+    /// nothing per token*, a claim about the world that has to be earned.
+    Subscription { revision: MeteringRevision },
+    /// Nobody is charging: a daemon serving its own weights. Same reasoning
+    /// as [`Subscription`](Self::Subscription), one row over.
+    Unmetered { revision: MeteringRevision },
+}
+
+impl Metering {
+    /// The labels this metering is authorised under, without its figures.
+    pub fn identity(&self) -> MeteringIdentity {
+        match self {
+            Metering::Currency { settlement } => MeteringIdentity::Currency {
+                settlement: settlement.clone(),
+            },
+            Metering::Subscription { revision } => MeteringIdentity::Subscription {
+                revision: revision.clone(),
+            },
+            Metering::Unmetered { revision } => MeteringIdentity::Unmetered {
+                revision: revision.clone(),
+            },
+        }
+    }
+
+    /// The most `req` could cost against a model with `caps`, under this
+    /// metering and whatever rates were resolved for it.
+    ///
+    /// For a currency row this is [`PricingQuote::upper_bound`] — and
+    /// `Ok(None)` when no rates were resolved, which is *not* an error: a run
+    /// with no ceiling never looks any up, and §1 of the no-ceiling ADR
+    /// forbids refusing for want of a price nobody asked for. Whether an
+    /// absent bound is fatal is the *gate's* decision, taken against its
+    /// [`Ledger`], and it is taken in exactly one place.
+    ///
+    /// For the other two it is **a zero monetary reservation minted from the
+    /// policy**, in `settlement` — the currency it will be compared against,
+    /// because neither variant states one of its own. The rates are ignored
+    /// there even when present: a flat-fee row costs nothing per token
+    /// whatever some table says about it.
+    ///
+    /// The ceilings are still resolved, and still refuse when they are
+    /// missing. A row that is not metered in currency is not thereby a row
+    /// whose shape nobody has to know: the binding says what was authorised,
+    /// and "against a model with an unstated context window" is not an
+    /// authorisation anyone can check later.
+    pub fn upper_bound(
+        &self,
+        rates: Option<&PricingQuote>,
+        req: &GenRequest,
+        caps: &ModelCapabilities,
+        settlement: CurrencyCode,
+    ) -> Result<Option<Money>, UnknownCost> {
+        match self {
+            Metering::Currency { .. } => match rates {
+                Some(quote) => quote.upper_bound(req, caps).map(Some),
+                None => Ok(None),
+            },
+            Metering::Subscription { .. } | Metering::Unmetered { .. } => {
+                ceilings(req, caps)?;
+                Ok(Some(Money::zero(settlement)))
+            }
+        }
+    }
+
+    /// What a settled figure under this metering is attributable to, when it
+    /// is the metering itself that produced it.
+    ///
+    /// `None` for a currency row: there the figure comes from the quote or
+    /// from the provider, and both mint their own attribution.
+    pub fn policy_attribution(&self) -> Option<CostAttribution> {
+        match self {
+            Metering::Currency { .. } => None,
+            Metering::Subscription { revision } | Metering::Unmetered { revision } => {
+                Some(CostAttribution::MeteringPolicy {
+                    revision: revision.clone(),
+                })
+            }
+        }
+    }
+}
+
+/// A [`Metering`] with its figures removed: the labels a reservation binds
+/// itself to, and nothing that could be substituted cheaply behind one.
+///
+/// Deliberately not the `Metering` itself, for exactly the reason
+/// [`BudgetBinding`] has always held a [`PricingRevision`] rather than a
+/// quote. A fabricated cheap table wearing a genuine label is caught by
+/// *recomputing the bound* in [`Reservation::authorises`], not by comparing
+/// labels; folding the rates into the binding would collapse two checks that
+/// catch different things into one, and leave the cheaper-quote substitution
+/// reported as a moved binding rather than as the changed quote it is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MeteringIdentity {
+    Currency { settlement: SettlementSource },
+    Subscription { revision: MeteringRevision },
+    Unmetered { revision: MeteringRevision },
+}
+
+impl fmt::Display for MeteringIdentity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            MeteringIdentity::Currency { settlement } => {
+                write!(f, "currency settled from {settlement}")
+            }
+            MeteringIdentity::Subscription { revision } => {
+                write!(f, "a subscription under {}", revision.0)
+            }
+            MeteringIdentity::Unmetered { revision } => write!(f, "unmetered under {}", revision.0),
+        }
+    }
+}
+
 /// The two token ceilings a bound is computed from: the model's context
 /// window, and the most output this particular request may produce.
 ///
@@ -257,31 +476,84 @@ fn ceilings(req: &GenRequest, caps: &ModelCapabilities) -> Result<(u64, u64), Un
 /// so a fabricated cheap quote can wear a genuine revision label.
 /// [`Reservation::authorises`] closes that separately, by recomputing the
 /// bound from the presented quote.
+///
+/// `metering` and `rates` are two fields and not one for the reason the ADR
+/// gives one type up: the arrangement and our knowledge of its prices are
+/// different facts, and a reservation has to bind both — the arrangement so a
+/// switched metering is caught, the revision so a mid-session table change
+/// cannot price one generation two ways.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BudgetBinding {
     model: String,
     context_ceiling: u64,
     output_ceiling: u64,
-    revision: PricingRevision,
+    metering: MeteringIdentity,
+    /// Which table priced the bound, when a table did. `None` on a row with
+    /// no rates and on every row that is not metered in currency.
+    rates: Option<PricingRevision>,
 }
 
 impl BudgetBinding {
-    /// The budget-relevant shape of `req` against `caps` under `revision`,
-    /// or the reason it has none — the same reason
-    /// [`PricingQuote::upper_bound`] would refuse, because it is the same
+    /// The budget-relevant shape of `req` against `caps` under `metering`
+    /// priced by `rates`, or the reason it has none — the same reason
+    /// [`Metering::upper_bound`] would refuse, because it is the same
     /// resolution.
     pub fn of(
         req: &GenRequest,
         caps: &ModelCapabilities,
-        revision: &PricingRevision,
+        metering: &Metering,
+        rates: Option<&PricingQuote>,
     ) -> Result<Self, UnknownCost> {
         let (context_ceiling, output_ceiling) = ceilings(req, caps)?;
         Ok(Self {
             model: req.model.clone(),
             context_ceiling,
             output_ceiling,
-            revision: revision.clone(),
+            metering: metering.identity(),
+            // A table revision is only meaningful where a table is what
+            // settles: on a flat-fee row the policy revision is the binding
+            // fact and the rates are ignored (see `Metering::upper_bound`),
+            // so recording one here would bind a figure nothing consults.
+            rates: match metering {
+                Metering::Currency { .. } => rates.map(|quote| quote.revision.clone()),
+                Metering::Subscription { .. } | Metering::Unmetered { .. } => None,
+            },
         })
+    }
+
+    /// Whether a figure attributed this way may be charged as the real cost
+    /// of the generation this authorised.
+    ///
+    /// A **table** figure must have been computed under the very revision the
+    /// reservation was authorised with: that check exists to stop a
+    /// mid-session table change from pricing one generation two ways. A row
+    /// authorised with *no* rates has no revision to match, so no table
+    /// figure settles it — which is right, since no table produced the bound.
+    ///
+    /// A **provider-reported** figure is accepted whatever table the
+    /// reservation used, and that is a deliberate exception rather than an
+    /// oversight. It carries no table revision at all, so the revision check
+    /// would reject it on every single generation and the gate would silently
+    /// discard the best figure it will ever receive in favour of a
+    /// pessimistic bound. A provider's own invoice figure is not a table
+    /// change — the reason for the check does not reach it. See
+    /// `docs/decisions/2026-08-21-how-a-model-is-metered.md` §5.
+    ///
+    /// A **policy** figure must name the policy that was authorised, for the
+    /// same reason as a table.
+    fn settles(&self, attribution: &CostAttribution) -> bool {
+        match (&self.metering, attribution) {
+            (_, CostAttribution::ProviderReported(_)) => true,
+            (MeteringIdentity::Currency { .. }, CostAttribution::Table { revision: settled }) => {
+                self.rates.as_ref() == Some(settled)
+            }
+            (
+                MeteringIdentity::Subscription { revision }
+                | MeteringIdentity::Unmetered { revision },
+                CostAttribution::MeteringPolicy { revision: settled },
+            ) => revision == settled,
+            _ => false,
+        }
     }
 
     /// The model this authorises a generation against.
@@ -299,9 +571,14 @@ impl BudgetBinding {
         self.output_ceiling
     }
 
-    /// The pricing table this was authorised under.
-    pub fn revision(&self) -> &PricingRevision {
-        &self.revision
+    /// The metering this was authorised under.
+    pub fn metering(&self) -> &MeteringIdentity {
+        &self.metering
+    }
+
+    /// The table revision that priced the bound, when a table did.
+    pub fn rates(&self) -> Option<&PricingRevision> {
+        self.rates.as_ref()
     }
 }
 
@@ -337,12 +614,14 @@ impl BindingMismatch {
                 p.output_ceiling.to_string(),
             ));
         }
-        if a.revision != p.revision {
-            out.push((
-                "pricing revision",
-                a.revision.0.clone(),
-                p.revision.0.clone(),
-            ));
+        if a.metering != p.metering {
+            out.push(("metering", a.metering.to_string(), p.metering.to_string()));
+        }
+        if a.rates != p.rates {
+            let name = |r: &Option<PricingRevision>| {
+                r.as_ref().map_or("no rates".to_string(), |r| r.0.clone())
+            };
+            out.push(("rates", name(&a.rates), name(&p.rates)));
         }
         out
     }
@@ -415,6 +694,14 @@ pub enum BudgetDenied {
     /// The reservation authorised a different generation than the one
     /// presented.
     WrongBinding(Box<BindingMismatch>),
+    /// An unbounded reservation was presented for a different model. The
+    /// thin counterpart of [`WrongBinding`](Self::WrongBinding): a model is
+    /// the only fact an unbounded reservation holds, so it is the only one
+    /// that can be checked.
+    WrongModel {
+        authorised: String,
+        presented: String,
+    },
     /// The presented quote does not bound this generation at the figure that
     /// was authorised. Caught separately from the binding because
     /// [`PricingRevision`] is an opaque public string: a quote with cheaper
@@ -460,6 +747,13 @@ impl fmt::Display for BudgetDenied {
                 }
                 Ok(())
             }
+            BudgetDenied::WrongModel {
+                authorised,
+                presented,
+            } => write!(
+                f,
+                "budget denied: this reservation authorised {authorised}, not {presented}"
+            ),
             BudgetDenied::QuoteChanged {
                 authorised,
                 presented,
@@ -483,6 +777,40 @@ impl fmt::Display for BudgetDenied {
 
 impl std::error::Error for BudgetDenied {}
 
+/// What a reservation actually holds.
+///
+/// Two shapes rather than a `Money` that might be zero, because the two
+/// available zeros are both wrong. A **zero bound** is a claim about a
+/// quantity, and one indistinguishable from the genuine zero a subscription
+/// row mints; **the computed bound** requires rates that a run with no
+/// ceiling was never obliged to have. There is no third `Money`, so there is
+/// a third shape. See `2026-08-21-a-run-with-no-ceiling.md` §2.
+///
+/// [`Unbounded`](Self::Unbounded) cannot leak into a real ceiling's
+/// accounting, and that needs no new mechanism: a [`Reservation`] carries the
+/// [`GateId`] that minted it and [`BudgetGate::reconcile`] refuses one it did
+/// not mint before releasing anything, so an unbounded reservation can only
+/// ever be settled at the unlimited gate that issued it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Reserved {
+    /// A hold against a ceiling: what was bounded, and what it was computed
+    /// from.
+    Bounded {
+        upper_bound: Money,
+        binding: BudgetBinding,
+    },
+    /// No ceiling was configured and no rates were in hand, so nothing was
+    /// bounded and nothing is held.
+    ///
+    /// What this loses, stated rather than glossed: no conservative fallback
+    /// at reconcile, and no [`BoundBreach`] detection. Both losses are
+    /// confined to runs where no claim was made — there is no ceiling to
+    /// protect and no quote to falsify — and an unpriceable settlement there
+    /// produces [`CumulativeCost::Unknown`](crate::cost::CumulativeCost),
+    /// which is the honest answer rather than a fabricated total.
+    Unbounded { model: String },
+}
+
 /// Proof that a generation was authorised against a budget before it began.
 ///
 /// Unforgeable: both fields are private and the only public constructor is
@@ -493,15 +821,23 @@ impl std::error::Error for BudgetDenied {}
 #[derive(Debug)]
 pub struct Reservation {
     gate: GateId,
-    upper_bound: Money,
-    binding: BudgetBinding,
+    reserved: Reserved,
     _sealed: Sealed,
 }
 
 impl Reservation {
-    /// The bound held against the budget while this generation runs.
-    pub fn upper_bound(&self) -> &Money {
-        &self.upper_bound
+    /// What this holds — a bound, or the absence of one.
+    pub fn reserved(&self) -> &Reserved {
+        &self.reserved
+    }
+
+    /// The bound held against the budget while this generation runs, or
+    /// `None` when nothing was bounded.
+    pub fn upper_bound(&self) -> Option<&Money> {
+        match &self.reserved {
+            Reserved::Bounded { upper_bound, .. } => Some(upper_bound),
+            Reserved::Unbounded { .. } => None,
+        }
     }
 
     /// Which gate is holding this bound, and therefore the only gate that
@@ -510,51 +846,97 @@ impl Reservation {
         self.gate
     }
 
-    /// What this authorised.
-    pub fn binding(&self) -> &BudgetBinding {
-        &self.binding
+    /// What this authorised, when there was a bound to authorise it at.
+    pub fn binding(&self) -> Option<&BudgetBinding> {
+        match &self.reserved {
+            Reserved::Bounded { binding, .. } => Some(binding),
+            Reserved::Unbounded { .. } => None,
+        }
     }
 
-    /// The pricing revision this was authorised under. The same revision
-    /// must price the actual usage, so a mid-session pricing change cannot
-    /// make one generation cost two different things.
-    pub fn revision(&self) -> &PricingRevision {
-        self.binding.revision()
+    /// The model this authorises a generation against — the one fact both
+    /// shapes carry, and the only one an unbounded reservation can be
+    /// checked on.
+    pub fn model(&self) -> &str {
+        match &self.reserved {
+            Reserved::Bounded { binding, .. } => binding.model(),
+            Reserved::Unbounded { model } => model,
+        }
+    }
+
+    /// The metering this was authorised under, when a bound recorded one.
+    /// The same metering must settle the actual usage, so a mid-session
+    /// pricing change cannot make one generation cost two different things.
+    pub fn metering(&self) -> Option<&MeteringIdentity> {
+        self.binding().map(BudgetBinding::metering)
     }
 
     /// Refuse unless this reservation is the one that authorised exactly
     /// this generation.
     ///
     /// Two checks, because neither implies the other. The [`BudgetBinding`]
-    /// catches a substituted model or moved ceilings and names which; the
-    /// recomputed bound catches a substituted *quote*, which the binding
-    /// cannot see because [`PricingRevision`] is an opaque public string and
-    /// a fabricated cheap table can wear a genuine label.
+    /// catches a substituted model, moved ceilings or a switched metering and
+    /// names which; the recomputed bound catches a substituted *quote*, which
+    /// the binding cannot see because [`PricingRevision`] is an opaque public
+    /// string and a fabricated cheap table can wear a genuine label.
+    ///
+    /// An [`Unbounded`](Reserved::Unbounded) reservation is checked on the
+    /// model alone, which is every fact it holds. There is nothing weaker
+    /// about that than about the value itself: it authorised no figure, so no
+    /// substitution can overspend one.
     ///
     /// Not called by [`BudgetGate::reconcile`], which has no request to
     /// check against: this is the check at the moment of *use*, and it takes
-    /// the same `(quote, req, caps)` as [`BudgetGate::reserve`] so a caller
-    /// that has one has the other.
+    /// the same `(metering, rates, req, caps)` as [`BudgetGate::reserve`] so
+    /// a caller that has one has the other.
     pub fn authorises(
         &self,
-        quote: &PricingQuote,
+        metering: &Metering,
+        rates: Option<&PricingQuote>,
         req: &GenRequest,
         caps: &ModelCapabilities,
     ) -> Result<(), BudgetDenied> {
+        let (upper_bound, binding) = match &self.reserved {
+            Reserved::Bounded {
+                upper_bound,
+                binding,
+            } => (upper_bound, binding),
+            Reserved::Unbounded { model } => {
+                return if model == &req.model {
+                    Ok(())
+                } else {
+                    Err(BudgetDenied::WrongModel {
+                        authorised: model.clone(),
+                        presented: req.model.clone(),
+                    })
+                };
+            }
+        };
+
         let presented =
-            BudgetBinding::of(req, caps, &quote.revision).map_err(BudgetDenied::CostUnknown)?;
-        if presented != self.binding {
+            BudgetBinding::of(req, caps, metering, rates).map_err(BudgetDenied::CostUnknown)?;
+        if &presented != binding {
             return Err(BudgetDenied::WrongBinding(Box::new(BindingMismatch {
-                authorised: self.binding.clone(),
+                authorised: binding.clone(),
                 presented,
             })));
         }
-        let recomputed = quote
-            .upper_bound(req, caps)
-            .map_err(BudgetDenied::CostUnknown)?;
-        if recomputed != self.upper_bound {
+        // Recomputed in the currency the authorised bound is already stated
+        // in: a metering that is not in currency mints its zero against
+        // whatever it will be compared to, and that is the only currency this
+        // reservation was ever measured in.
+        let recomputed = metering
+            .upper_bound(rates, req, caps, upper_bound.currency)
+            .map_err(BudgetDenied::CostUnknown)?
+            // Unreachable from a matching binding: the binding records
+            // whether rates priced it, so equal bindings had equal rates and
+            // the recomputation took the same arm. Refused rather than
+            // unwrapped, because "the bound vanished" must never read as
+            // "the bound agreed".
+            .ok_or(BudgetDenied::CostUnknown(UnknownCost::NoPricingQuote))?;
+        if recomputed != *upper_bound {
             return Err(BudgetDenied::QuoteChanged {
-                authorised: self.upper_bound,
+                authorised: *upper_bound,
                 presented: recomputed,
             });
         }
@@ -588,20 +970,61 @@ impl fmt::Display for ReconcileDenied {
 
 impl std::error::Error for ReconcileDenied {}
 
-/// A session's spend ceiling, and the authority that admits generations
-/// against it.
+/// What a gate holds generations against, when it holds them against
+/// anything.
 ///
-/// Holds three quantities that must not be confused: what has been spent and
-/// reconciled (`committed`), what is bound up in generations still running
-/// (`outstanding`), and the ceiling (`limit`). A gate that tracked only
-/// `committed` would happily authorise a hundred concurrent generations that
-/// each fit the remaining budget alone.
+/// `2026-08-21-a-run-with-no-ceiling.md` §4: ego imposes no ceiling of its
+/// own, so a run without one is the ordinary case rather than the exception.
+/// The running totals live inside [`Limited`](Self::Limited) rather than
+/// beside the ledger because they are meaningless without it: `outstanding`
+/// exists to be compared against a limit, and a gate with no limit that kept
+/// counting would publish a number nothing consults and nothing checks.
+///
+/// The size difference between the two variants is deliberate and not worth
+/// boxing away: there is exactly one `Ledger` per session, it lives inside
+/// the gate for the whole run, and it is never collected. Boxing the totals
+/// would buy a smaller enum nobody allocates in bulk, at the cost of a heap
+/// indirection on the hot path every reservation takes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)]
+pub enum Ledger {
+    /// No ceiling was configured. Nothing is enforced and nothing is held.
+    Unlimited,
+    /// A ceiling, with the two quantities held against it.
+    ///
+    /// They must not be confused: `committed` is what has been spent and
+    /// reconciled, `outstanding` is what is bound up in generations still
+    /// running. A gate that tracked only `committed` would happily authorise
+    /// a hundred concurrent generations that each fit the remaining budget
+    /// alone.
+    Limited {
+        limit: Money,
+        /// The higher figure that was asked for, when an administrator's
+        /// non-relaxable ceiling reduced it.
+        ///
+        /// Held here rather than passed around beside the gate so that "what
+        /// is in force" and "what was asked for" cannot be reported by two
+        /// values that disagree. §4 requires the clamp be *stated*, and this
+        /// is the only thing that knows both figures.
+        clamped_from: Option<Money>,
+        committed: Money,
+        outstanding: Money,
+    },
+}
+
+/// A session's spend ceiling, if it has one, and the authority that admits
+/// generations against it.
 #[derive(Debug)]
 pub struct BudgetGate {
     id: GateId,
-    limit: Money,
-    committed: Money,
-    outstanding: Money,
+    /// What this session settles in, ceiling or no ceiling.
+    ///
+    /// Deliberately outside the [`Ledger`]: a subscription row costs a real,
+    /// attributable zero whether or not anybody set a budget, and a zero has
+    /// to be denominated in something. The settlement currency is a fact
+    /// about the *session*, which is why it survives `Unlimited`.
+    currency: CurrencyCode,
+    ledger: Ledger,
     /// Set once a settled generation has cost more than its bound. From that
     /// moment the gate admits nothing: see [`BudgetGate::reserve`].
     breached: Option<BoundBreach>,
@@ -610,12 +1033,47 @@ pub struct BudgetGate {
 impl BudgetGate {
     /// A gate that admits generations until `limit` is reached.
     pub fn new(limit: Money) -> Self {
+        Self::bounded(limit, None)
+    }
+
+    /// The same, where `requested` was reduced to `limit` by an
+    /// administrator's non-relaxable ceiling.
+    ///
+    /// A separate constructor rather than an `Option` on `new`, so that the
+    /// ordinary case cannot accidentally claim a clamp and the clamped case
+    /// cannot silently forget one.
+    pub fn clamped(limit: Money, requested: Money) -> Self {
+        Self::bounded(limit, Some(requested))
+    }
+
+    fn bounded(limit: Money, clamped_from: Option<Money>) -> Self {
         let currency = limit.currency;
         Self {
             id: GateId::new(),
-            limit,
-            committed: Money::zero(currency),
-            outstanding: Money::zero(currency),
+            currency,
+            ledger: Ledger::Limited {
+                limit,
+                clamped_from,
+                committed: Money::zero(currency),
+                outstanding: Money::zero(currency),
+            },
+            breached: None,
+        }
+    }
+
+    /// A gate with no ceiling, settling in `currency`.
+    ///
+    /// Not `new` with an enormous limit. That spelling was in the tree —
+    /// `Amount::new(u128::MAX, 0)` — and it is the surrogate this variant
+    /// exists to delete: a ceiling nobody set, wearing the largest number the
+    /// representation can hold, is still a ceiling as far as every arithmetic
+    /// path is concerned, and it makes "no budget was configured"
+    /// indistinguishable from "a budget of ten undecillion was".
+    pub fn unlimited(currency: CurrencyCode) -> Self {
+        Self {
+            id: GateId::new(),
+            currency,
+            ledger: Ledger::Unlimited,
             breached: None,
         }
     }
@@ -625,23 +1083,44 @@ impl BudgetGate {
         self.id
     }
 
+    /// What this session settles in.
+    pub fn currency(&self) -> CurrencyCode {
+        self.currency
+    }
+
+    /// What this gate enforces, if anything.
+    pub fn ledger(&self) -> &Ledger {
+        &self.ledger
+    }
+
     /// The breach that closed this gate, if one has happened.
     pub fn breached(&self) -> Option<&BoundBreach> {
         self.breached.as_ref()
     }
 
-    /// Spent and reconciled.
-    pub fn committed(&self) -> &Money {
-        &self.committed
+    /// Spent and reconciled, when there is a ceiling to spend against.
+    pub fn committed(&self) -> Option<&Money> {
+        match &self.ledger {
+            Ledger::Limited { committed, .. } => Some(committed),
+            Ledger::Unlimited => None,
+        }
     }
 
-    /// Held by reservations still in flight.
-    pub fn outstanding(&self) -> &Money {
-        &self.outstanding
+    /// Held by reservations still in flight, when there is a ceiling to hold
+    /// against.
+    pub fn outstanding(&self) -> Option<&Money> {
+        match &self.ledger {
+            Ledger::Limited { outstanding, .. } => Some(outstanding),
+            Ledger::Unlimited => None,
+        }
     }
 
-    pub fn limit(&self) -> &Money {
-        &self.limit
+    /// The ceiling, when one was configured.
+    pub fn limit(&self) -> Option<&Money> {
+        match &self.ledger {
+            Ledger::Limited { limit, .. } => Some(limit),
+            Ledger::Unlimited => None,
+        }
     }
 
     /// Authorise one generation, or refuse.
@@ -659,51 +1138,139 @@ impl BudgetGate {
     /// this gate has watched fail. Continuing to admit would be exactly the
     /// "we do not know what this will cost, but proceed anyway" the gate
     /// exists to refuse — only worse, because the evidence is in hand.
+    /// A row that is not metered in currency is admitted with a **zero**
+    /// reservation, minted from its policy in this gate's own settlement
+    /// currency. A monetary limit then bounds nothing: every reservation is
+    /// zero, so the gate admits until the provider refuses. That is the
+    /// honest arithmetic, and it is why the run announces
+    /// [`PublicEvent::MeteringSelected`](crate::public::PublicEvent::MeteringSelected)
+    /// per generation rather than leaving `--budget` silently vacuous.
+    ///
+    /// ## What the ledger and the rates decide between them
+    ///
+    /// `2026-08-21-a-run-with-no-ceiling.md` §2, exhaustively:
+    ///
+    /// | [`Ledger`] | A bound is computable | Result |
+    /// |---|---|---|
+    /// | `Limited` | yes | [`Bounded`](Reserved::Bounded), compared against the ceiling |
+    /// | `Limited` | no | refused |
+    /// | `Unlimited` | yes | `Bounded`; nothing compared, but the bound still does two jobs |
+    /// | `Unlimited` | no | [`Unbounded`](Reserved::Unbounded) |
+    ///
+    /// **Bounding whenever a bound is computable, not only when a ceiling
+    /// exists**, because the bound earns its cost twice with nothing to
+    /// compare against: it is the figure [`reconcile`](Self::reconcile)
+    /// charges when the actual cost is unusable, and it is a *falsifiable
+    /// claim* — a settled cost above it proves the quote, the capability
+    /// record or the provider's usage report is wrong.
+    ///
+    /// **On an `Unlimited` ledger nothing here refuses for want of a bound**,
+    /// including an unstated context window or an unpriced category. §1 is
+    /// explicit that a run nobody asked to bound is not refused for a price
+    /// nobody asked for, so every such failure degrades to `Unbounded`
+    /// instead. On a `Limited` ledger the identical failure is fatal, because
+    /// there the operator did ask for a guarantee.
     pub fn reserve(
         &mut self,
-        quote: &PricingQuote,
+        metering: &Metering,
+        rates: Option<&PricingQuote>,
         req: &GenRequest,
         caps: &ModelCapabilities,
     ) -> Result<Reservation, BudgetDenied> {
         if let Some(breach) = self.breached {
             return Err(BudgetDenied::BoundBreached(breach));
         }
-        if quote.currency != self.limit.currency {
+
+        let Ledger::Limited {
+            limit,
+            clamped_from,
+            committed,
+            outstanding,
+        } = self.ledger
+        else {
+            return Ok(self.mint(self.unenforced(metering, rates, req, caps)));
+        };
+
+        if let Some(quote) = rates
+            && matches!(metering, Metering::Currency { .. })
+            && quote.currency != limit.currency
+        {
             return Err(BudgetDenied::CurrencyMismatch {
-                limit: self.limit.currency,
+                limit: limit.currency,
                 quote: quote.currency,
             });
         }
-        let upper_bound = quote
-            .upper_bound(req, caps)
-            .map_err(BudgetDenied::CostUnknown)?;
+        let upper_bound = metering
+            .upper_bound(rates, req, caps, self.currency)
+            .map_err(BudgetDenied::CostUnknown)?
+            // The narrowed meaning of this variant: not "this build has no
+            // table anywhere", but "you asked for a ceiling on a model I
+            // cannot price". Nothing about a missing price is evidence about
+            // the operator's intent, and nothing about intent is evidence
+            // about a price — so the refusal only happens where both are in.
+            .ok_or(BudgetDenied::CostUnknown(UnknownCost::NoPricingQuote))?;
 
-        let held = self
-            .committed
-            .checked_add(&self.outstanding)
+        let held = committed
+            .checked_add(&outstanding)
             .and_then(|held| held.checked_add(&upper_bound))
             .map_err(|_: MoneyError| BudgetDenied::CostUnknown(UnknownCost::Overflow))?;
-        if held.amount > self.limit.amount {
+        if held.amount > limit.amount {
             return Err(BudgetDenied::WouldExceed(Box::new(Overrun {
-                committed: self.committed,
-                outstanding: self.outstanding,
+                committed,
+                outstanding,
                 requested: upper_bound,
-                limit: self.limit,
+                limit,
             })));
         }
 
         let binding =
-            BudgetBinding::of(req, caps, &quote.revision).map_err(BudgetDenied::CostUnknown)?;
-        self.outstanding = self
-            .outstanding
-            .checked_add(&upper_bound)
-            .map_err(|_: MoneyError| BudgetDenied::CostUnknown(UnknownCost::Overflow))?;
-        Ok(Reservation {
-            gate: self.id,
+            BudgetBinding::of(req, caps, metering, rates).map_err(BudgetDenied::CostUnknown)?;
+        self.ledger = Ledger::Limited {
+            limit,
+            clamped_from,
+            committed,
+            outstanding: outstanding
+                .checked_add(&upper_bound)
+                .map_err(|_: MoneyError| BudgetDenied::CostUnknown(UnknownCost::Overflow))?,
+        };
+        Ok(self.mint(Reserved::Bounded {
             upper_bound,
             binding,
+        }))
+    }
+
+    /// What an `Unlimited` gate reserves: a bound if one falls out, and the
+    /// absence of one otherwise. Never a refusal — see [`reserve`](Self::reserve).
+    fn unenforced(
+        &self,
+        metering: &Metering,
+        rates: Option<&PricingQuote>,
+        req: &GenRequest,
+        caps: &ModelCapabilities,
+    ) -> Reserved {
+        let unbounded = || Reserved::Unbounded {
+            model: req.model.clone(),
+        };
+        let Ok(Some(upper_bound)) = metering.upper_bound(rates, req, caps, self.currency) else {
+            return unbounded();
+        };
+        match BudgetBinding::of(req, caps, metering, rates) {
+            Ok(binding) => Reserved::Bounded {
+                upper_bound,
+                binding,
+            },
+            Err(_) => unbounded(),
+        }
+    }
+
+    /// Stamp this gate's identity on an authorisation. The one place a
+    /// [`Reservation`] is constructed, so [`Sealed`] is named exactly once.
+    fn mint(&self, reserved: Reserved) -> Reservation {
+        Reservation {
+            gate: self.id,
+            reserved,
             _sealed: Sealed(()),
-        })
+        }
     }
 
     /// Release a reservation and commit what the generation actually cost.
@@ -731,6 +1298,11 @@ impl BudgetGate {
     /// in [`Reconciled::over_bound`] — the money is spent, and the bound was
     /// the larger of the two only in the cases where it is charged instead.
     /// It also closes the gate permanently; see [`BudgetGate::reserve`].
+    /// An [`Unbounded`](Reserved::Unbounded) reservation released nothing, so
+    /// there is nothing to release and no bound to fall back to. It charges
+    /// the actual figure when there is one and reports
+    /// [`charged: None`](Reconciled::charged) when there is not — an unknown
+    /// cost stays unknown rather than becoming a zero that reads as free.
     pub fn reconcile(
         &mut self,
         reservation: Reservation,
@@ -746,27 +1318,52 @@ impl BudgetGate {
             }));
         }
 
-        let released = reservation.upper_bound;
-        self.outstanding = subtract_or_zero(&self.outstanding, &released);
-
-        let (charged, exact) = match actual {
+        // A figure settles this reservation if it is in the currency this
+        // session settles in, and was produced by the arrangement the
+        // reservation authorised.
+        //
+        // An `Unbounded` reservation authorised no arrangement — there is no
+        // binding, because there was no bound to bind. The attribution check
+        // is therefore not *skipped* here so much as vacuous: there is no
+        // authorised revision for a figure to contradict, so any known cost
+        // in the settlement currency is the cost. Requiring a binding
+        // instead would make `charged` unconditionally `None` on every
+        // unbounded generation, turning an exact figure into an unknown one
+        // and poisoning a run's total that has a perfectly good answer.
+        let settles = |attribution: &CostAttribution, amount: &Money| {
+            amount.currency == self.currency
+                && match reservation.binding() {
+                    Some(binding) => binding.settles(attribution),
+                    None => true,
+                }
+        };
+        let stated = match actual {
             CostDelta::Known {
                 amount,
-                pricing_revision,
+                attribution,
                 ..
-            } if pricing_revision == reservation.revision()
-                && amount.currency == self.limit.currency =>
-            {
-                (*amount, true)
-            }
-            _ => (released, false),
+            } if settles(attribution, amount) => Some(*amount),
+            _ => None,
         };
 
-        // On overflow, pin the committed total at the limit. Every later
-        // `reserve` then fails, which is the only safe reading of "we can no
-        // longer represent what this session has spent".
-        // `exact` stays true here: the charge *is* the real cost. What the
-        // excess reports is a broken bound, not an unknown figure, and
+        let Some(released) = reservation.upper_bound().copied() else {
+            // Nothing was held, so nothing is released and the ledger — which
+            // is `Unlimited`, the only ledger that mints this shape — has no
+            // total to move.
+            return Ok(Reconciled {
+                charged: stated,
+                exact: stated.is_some(),
+                over_bound: None,
+            });
+        };
+
+        let (charged, exact) = match stated {
+            Some(amount) => (amount, true),
+            None => (released, false),
+        };
+
+        // `exact` stays true on a breach: the charge *is* the real cost. What
+        // the excess reports is a broken bound, not an unknown figure, and
         // conflating the two would tell the operator the opposite of what
         // happened.
         let over_bound = (charged.amount > released.amount).then_some(BoundBreach {
@@ -777,9 +1374,26 @@ impl BudgetGate {
             self.breached.get_or_insert(breach);
         }
 
-        self.committed = self.committed.checked_add(&charged).unwrap_or(self.limit);
+        if let Ledger::Limited {
+            limit,
+            clamped_from,
+            committed,
+            outstanding,
+        } = self.ledger
+        {
+            self.ledger = Ledger::Limited {
+                limit,
+                clamped_from,
+                // On overflow, pin the committed total at the limit. Every
+                // later `reserve` then fails, which is the only safe reading
+                // of "we can no longer represent what this session has spent".
+                committed: committed.checked_add(&charged).unwrap_or(limit),
+                outstanding: subtract_or_zero(&outstanding, &released),
+            };
+        }
+
         Ok(Reconciled {
-            charged,
+            charged: Some(charged),
             exact,
             over_bound,
         })
@@ -789,8 +1403,14 @@ impl BudgetGate {
 /// What a [`BudgetGate::reconcile`] actually charged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Reconciled {
-    /// The amount added to the committed total.
-    pub charged: Money,
+    /// The amount charged for this generation, and the amount added to a
+    /// `Limited` ledger's committed total.
+    ///
+    /// `None` only on an [`Unbounded`](Reserved::Unbounded) reservation whose
+    /// cost could not be established: there is no bound to fall back to and
+    /// no ceiling that a zero would be safe against, so the honest answer is
+    /// that nothing is known. A `Some(zero)` here would read as *free*.
+    pub charged: Option<Money>,
     /// Whether `charged` is the generation's real cost. `false` means the
     /// gate fell back to the reserved upper bound because the actual figure
     /// was unknown, in the wrong currency, or priced under a different

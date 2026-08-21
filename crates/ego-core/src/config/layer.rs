@@ -7,6 +7,7 @@ use serde::Deserialize;
 
 use super::error::ConfigError;
 use super::source::{Source, Sourced};
+use crate::ceiling::Budget;
 
 /// A model reference in `provider/name` form, e.g. `anthropic/claude-sonnet-5`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -45,6 +46,9 @@ pub struct ProfileLayer {
     pub model: Option<ModelRef>,
     pub mode: Option<Mode>,
     pub permissions: Option<PermCfg>,
+    /// A spend ceiling, in the same grammar `--budget` takes
+    /// (`crate::ceiling::Budget`).
+    pub budget: Option<Budget>,
 }
 
 /// One config layer: a file, an env-derived table, or the flags table.
@@ -56,6 +60,15 @@ pub struct ConfigLayer {
     pub model: Option<ModelRef>,
     pub mode: Option<Mode>,
     pub permissions: Option<PermCfg>,
+    /// A spend ceiling, in the same grammar `--budget` takes
+    /// (`crate::ceiling::Budget`).
+    ///
+    /// `CLI.md:296-299` promises an administrator this key on
+    /// `/etc/ego/config.toml` and calls the system layer "the only source of
+    /// ceilings". This layer is `deny_unknown_fields`, so until the key
+    /// existed the promise could not be kept by anybody: writing it produced
+    /// `ConfigError::UnknownKey`.
+    pub budget: Option<Budget>,
     /// Mirrors `--bare`: forces `Posture::Bare` even in a trusted workspace.
     pub bare: Option<bool>,
     /// `[profile.NAME]` sections, selected with `--profile NAME` /

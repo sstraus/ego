@@ -10,9 +10,12 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use ego_core::budget::{BudgetGate, PricingQuote};
+use ego_core::budget::{BudgetGate, Metering, PricingQuote, ResolvedRates, SettlementSource};
 use ego_core::config::SystemPrompt;
-use ego_core::cost::{Amount, CurrencyCode, Money, PricingRevision};
+use ego_core::cost::{
+    Amount, CostAttribution, CostDelta, CurrencyCode, MeteringRevision, Money, PricingRevision,
+    ProviderCostRevision, RateSource, UnknownCost,
+};
 use ego_core::event::domain::{CancelCause, DomainEvent, EventKind, ExitReason};
 use ego_core::event::id::{Seq, SessionId};
 use ego_core::event::time::{Clock, Timestamp};
@@ -231,6 +234,15 @@ mod turn {
         }
     }
 
+    /// The fixture quote as a metering: a table that both bounds and
+    /// settles. Every turn test here was written against that arrangement;
+    /// the other three arrangements are exercised in `tests/metering.rs`.
+    fn metering() -> Metering {
+        Metering::Currency {
+            settlement: SettlementSource::Quote,
+        }
+    }
+
     fn caps() -> ModelCapabilities {
         ModelCapabilities {
             schema_version: 1,
@@ -313,19 +325,34 @@ mod turn {
         }
     }
 
+    /// The fixture quote as the run resolved it: operator-supplied, which is
+    /// the only source `models.toml` has and the first of the three §5
+    /// consults.
+    fn rates() -> ResolvedRates {
+        ResolvedRates {
+            quote: quote(),
+            source: RateSource::Operator,
+        }
+    }
+
     fn model<'a>(generator: &'a dyn Generator, gate: &'a mut BudgetGate) -> Model<'a> {
-        model_with(generator, gate, config())
+        model_with(generator, gate, metering(), Some(rates()), None, config())
     }
 
     fn model_with<'a>(
         generator: &'a dyn Generator,
         gate: &'a mut BudgetGate,
+        metering: Metering,
+        rates: Option<ResolvedRates>,
+        token_ceiling: Option<u64>,
         config: TurnConfig,
     ) -> Model<'a> {
         Model {
             generator,
             gate,
-            quote: quote(),
+            metering,
+            rates,
+            token_ceiling,
             caps: caps(),
             config,
         }
@@ -334,21 +361,42 @@ mod turn {
     /// Run one turn against `fx`, starting from `state`, and hand back where
     /// the session got to.
     fn run(fx: &Fixture, state: SessionState, prompt: &str) -> (ExitReason, bool, SessionState) {
-        run_with(fx, state, prompt, config())
+        run_with(fx, state, prompt, metering(), Some(rates()), None, config())
     }
 
-    /// The same, under a config a test chose.
+    /// The same, under a metering of the caller's choosing.
+    fn run_metered(
+        fx: &Fixture,
+        state: SessionState,
+        prompt: &str,
+        metering: Metering,
+    ) -> (ExitReason, bool, SessionState) {
+        run_with(fx, state, prompt, metering, Some(rates()), None, config())
+    }
+
+    /// The same, under a metering, rates, token ceiling and config the
+    /// caller chose.
     fn run_with(
         fx: &Fixture,
         state: SessionState,
         prompt: &str,
+        metering: Metering,
+        rates: Option<ResolvedRates>,
+        token_ceiling: Option<u64>,
         config: TurnConfig,
     ) -> (ExitReason, bool, SessionState) {
         let mut gate = fx.gate.borrow_mut();
         let tools = Tools::new(&fx.registry, &fx.policy, &fx.fs, CanonPath::new("/ws"));
         let mut turn = TurnLoop::new(
             session(state, &fx.store, &fx.clock, &fx.sink, CancelToken::new()),
-            model_with(&fx.generator, &mut gate, config),
+            model_with(
+                &fx.generator,
+                &mut gate,
+                metering,
+                rates,
+                token_ceiling,
+                config,
+            ),
             tools,
         );
         let outcome = block_on(turn.run(prompt)).expect("the store accepted every append");
@@ -369,11 +417,15 @@ mod turn {
     }
 
     fn usage() -> Usage {
+        tokens(100, 0, 0, 20)
+    }
+
+    fn tokens(uncached_input: u64, cache_read: u64, cache_write: u64, output: u64) -> Usage {
         Usage {
-            uncached_input_tokens: 100,
-            cache_read_tokens: 0,
-            cache_write_tokens: 0,
-            output_tokens: 20,
+            uncached_input_tokens: uncached_input,
+            cache_read_tokens: cache_read,
+            cache_write_tokens: cache_write,
+            output_tokens: output,
         }
     }
 
@@ -540,7 +592,15 @@ mod turn {
 
         let mut config = config();
         config.system = Some(SystemPrompt::verbatim(HOUSE_STYLE));
-        run_with(&fx, SessionState::default(), "what is in note.txt?", config);
+        run_with(
+            &fx,
+            SessionState::default(),
+            "what is in note.txt?",
+            metering(),
+            Some(rates()),
+            None,
+            config,
+        );
 
         let calls = fx.generator.calls();
         assert_eq!(calls.len(), 2, "the tool call should force a second pass");
@@ -773,7 +833,7 @@ mod turn {
         drop(turn);
         assert_eq!(
             gate.outstanding(),
-            &usd("0"),
+            Some(&usd("0")),
             "the reservation was released, not leaked"
         );
     }
@@ -958,7 +1018,7 @@ mod turn {
         drop(turn);
         assert_eq!(
             gate.outstanding(),
-            &usd("0"),
+            Some(&usd("0")),
             "an abandoned turn still settles the attempt it had in flight"
         );
     }
@@ -1003,8 +1063,12 @@ mod turn {
         assert_eq!(outcome.exit_reason, ExitReason::Usage);
         assert!(!outcome.ok);
         drop(turn);
-        assert_eq!(gate.outstanding(), &usd("0"), "the gate reserved anyway");
-        assert_eq!(gate.committed(), &usd("0"), "the gate settled anyway");
+        assert_eq!(
+            gate.outstanding(),
+            Some(&usd("0")),
+            "the gate reserved anyway"
+        );
+        assert_eq!(gate.committed(), Some(&usd("0")), "the gate settled anyway");
         assert!(
             fx.generator.calls().is_empty(),
             "the request was sent to the provider anyway"
@@ -1117,13 +1181,15 @@ mod turn {
         );
         // `GenerationStarted` and `AttemptSettled` have no public spelling:
         // the attempt lifecycle is internal accounting, not a host's business.
-        // `TurnStarted` is published and never appended, so the sink carries
-        // one more event than the log does public ones.
+        // `TurnStarted` and `MeteringSelected` go the other way — both are
+        // published and neither is appended, so the sink carries two more
+        // events than the log does public ones.
         assert_eq!(
             published.len(),
-            fx.store.events().len() - 2 + 1,
+            fx.store.events().len() - 2 + 2,
             "exactly the two attempt-lifecycle events stay internal, and \
-             turn.started is published without being logged"
+             turn.started and metering.selected are published without being \
+             logged"
         );
     }
 
@@ -1252,6 +1318,490 @@ mod turn {
                 .all(|event| matches!(event, PublicEvent::TurnStarted { .. })),
             "nothing the store refused was published: {:?}",
             fx.sink.events()
+        );
+    }
+
+    // --- how this generation is metered, said out loud ---
+    //
+    // `docs/decisions/2026-08-21-how-a-model-is-metered.md` §6. Three of the
+    // four arrangements make a monetary `--budget` inert, and an operator who
+    // set one has to be told that before the run rather than inferring it
+    // from a limit that never fired.
+
+    fn metering_events(fx: &Fixture) -> Vec<PublicEvent> {
+        fx.sink
+            .events()
+            .into_iter()
+            .filter(|event| matches!(event, PublicEvent::MeteringSelected { .. }))
+            .collect()
+    }
+
+    fn subscription() -> Metering {
+        Metering::Subscription {
+            revision: MeteringRevision("acme/pro-plan/2026-08".to_string()),
+        }
+    }
+
+    fn provider_reported() -> Metering {
+        Metering::Currency {
+            settlement: SettlementSource::ProviderReported {
+                revision: ProviderCostRevision {
+                    provider: "xai".to_string(),
+                    field: "usage.cost_in_usd_ticks".to_string(),
+                    schema_revision: "2026-08-21".to_string(),
+                },
+            },
+        }
+    }
+
+    #[test]
+    fn every_generation_says_how_it_is_metered_before_the_gate_is_asked() {
+        let fx = Fixture::new(vec![vec![AiEvent::Stop(StopReason::Stop)]]);
+        run(&fx, SessionState::default(), "hi");
+
+        assert_eq!(
+            metering_events(&fx),
+            vec![PublicEvent::MeteringSelected {
+                turn: match fx.sink.events().first() {
+                    Some(PublicEvent::TurnStarted { turn }) => *turn,
+                    other => panic!("a turn starts before it is metered: {other:?}"),
+                },
+                metering: ego_core::public::MeteringKind::Currency,
+                ceiling: ego_core::public::CeilingEffect::Binds {
+                    limit: usd("1000"),
+                    clamped_from: None,
+                },
+                rates: RateSource::Operator,
+            }]
+        );
+
+        // Before the gate is asked, and the falsifiable form of that is a
+        // gate that refuses: an operator whose `--budget` denies the very
+        // first generation still has to be told which metering was about to
+        // be charged, or the denial is unreadable.
+        let denied = Fixture::new(vec![vec![AiEvent::Stop(StopReason::Stop)]]);
+        *denied.gate.borrow_mut() = BudgetGate::new(usd("0.01"));
+        let (exit, ok, _) = run(&denied, SessionState::default(), "hi");
+        assert_eq!(exit, ExitReason::Budget);
+        assert!(!ok, "a cent cannot admit this generation");
+        assert_eq!(
+            metering_events(&denied).len(),
+            1,
+            "a refused generation was still metered: {:?}",
+            denied.sink.events()
+        );
+        assert!(
+            denied.generator.calls().is_empty(),
+            "and the provider was never reached, so this is genuinely pre-gate"
+        );
+    }
+
+    /// The token ceiling, at the boundary §9 puts it on: between two
+    /// generations of the *same* turn, not between turns.
+    ///
+    /// The tool call is what makes the distinction observable. A turn that
+    /// calls a tool generates twice; a ceiling checked only between turns
+    /// would let the second generation run and stop the run afterwards,
+    /// having spent the tokens it was there to stop. Here the first
+    /// generation's usage crosses the ceiling and the second never happens.
+    #[test]
+    fn a_token_ceiling_stops_the_next_generation_of_the_turn_it_is_in() {
+        let script = || {
+            vec![
+                vec![
+                    AiEvent::ToolCall {
+                        call_id: "call-1".to_string(),
+                        name: "read".to_string(),
+                        args: r#"{"path":"/ws/note.txt"}"#.to_string(),
+                    },
+                    AiEvent::Usage(tokens(900, 0, 0, 200)),
+                    AiEvent::Stop(StopReason::ToolUse),
+                ],
+                vec![AiEvent::Stop(StopReason::Stop)],
+            ]
+        };
+
+        // 1_100 billed tokens against a 1_000 ceiling: reached after the
+        // first generation, so the second is refused.
+        let capped = Fixture::new(script()).with_read_tool();
+        capped.fs.file("/ws/note.txt", "hello from the file");
+        let (exit, ok, _) = run_with(
+            &capped,
+            SessionState::default(),
+            "what is in note.txt?",
+            metering(),
+            Some(rates()),
+            Some(1_000),
+            config(),
+        );
+
+        assert_eq!(exit, ExitReason::Budget);
+        assert!(!ok);
+        assert_eq!(
+            capped.generator.calls().len(),
+            1,
+            "the second generation ran despite the ceiling"
+        );
+
+        // The same script with no ceiling generates twice, so the assertion
+        // above is about the ceiling and not about the script.
+        let uncapped = Fixture::new(script()).with_read_tool();
+        uncapped.fs.file("/ws/note.txt", "hello from the file");
+        let (exit, ok, _) = run(&uncapped, SessionState::default(), "what is in note.txt?");
+        assert_eq!(exit, ExitReason::Completed);
+        assert!(ok);
+        assert_eq!(uncapped.generator.calls().len(), 2);
+    }
+
+    /// It binds a subscription row exactly as it binds a metered one. That is
+    /// §9's second property: the token ceiling needs no rates, no fetch and
+    /// no network, so it is the one instrument that works on the two
+    /// arrangements a monetary ceiling cannot touch.
+    #[test]
+    fn a_token_ceiling_binds_a_row_no_money_ceiling_could() {
+        let fx = Fixture::new(vec![vec![
+            AiEvent::Usage(tokens(900, 0, 0, 200)),
+            AiEvent::Stop(StopReason::Stop),
+        ]]);
+        *fx.gate.borrow_mut() =
+            BudgetGate::unlimited(CurrencyCode::new("USD").expect("USD is valid"));
+
+        // The first turn spends 1_100 tokens against a 1_000 ceiling, and
+        // completes: the ceiling is checked before a generation, not after.
+        let (exit, ok, state) = run_with(
+            &fx,
+            SessionState::default(),
+            "hi",
+            subscription(),
+            None,
+            Some(1_000),
+            config(),
+        );
+        assert_eq!(exit, ExitReason::Completed);
+        assert!(ok);
+
+        // The next one is refused before it reaches the provider, on a row
+        // that reserves zero and could never be stopped by `--budget 5$`.
+        let (exit, ok, _) = run_with(
+            &fx,
+            state,
+            "and again",
+            subscription(),
+            None,
+            Some(1_000),
+            config(),
+        );
+        assert_eq!(exit, ExitReason::Budget);
+        assert!(!ok);
+        assert_eq!(
+            fx.generator.calls().len(),
+            1,
+            "a flat-fee row was generated past its token ceiling"
+        );
+        assert_eq!(
+            RunTermination::after_turn(exit, None),
+            Some(RunTermination::BudgetExceeded),
+            "and it is exit 5, the same code the money ceiling ends on"
+        );
+    }
+
+    /// The ordinary case, end to end: nobody configured a ceiling, so the
+    /// run says so and runs anyway.
+    ///
+    /// This is §1's whole claim reduced to something falsifiable. The turn
+    /// has no rates at all — the state that used to be a refusal — and it
+    /// completes, publishing `ceiling: none` and `rates: none` rather than a
+    /// limit that is not there or a provenance for figures nobody has.
+    #[test]
+    fn a_run_with_no_ceiling_and_no_rates_completes_and_says_so() {
+        let fx = Fixture::new(vec![vec![
+            AiEvent::Usage(tokens(1_000, 0, 0, 200)),
+            AiEvent::Stop(StopReason::Stop),
+        ]]);
+        *fx.gate.borrow_mut() =
+            BudgetGate::unlimited(CurrencyCode::new("USD").expect("USD is valid"));
+
+        let (exit, ok, _) = run_with(
+            &fx,
+            SessionState::default(),
+            "hi",
+            metering(),
+            None,
+            None,
+            config(),
+        );
+
+        assert_eq!(exit, ExitReason::Completed);
+        assert!(ok, "a run nobody asked to bound is not refused for a price");
+        assert_eq!(
+            metering_events(&fx),
+            vec![PublicEvent::MeteringSelected {
+                turn: match fx.sink.events().first() {
+                    Some(PublicEvent::TurnStarted { turn }) => *turn,
+                    other => panic!("a turn starts before it is metered: {other:?}"),
+                },
+                metering: ego_core::public::MeteringKind::Currency,
+                ceiling: ego_core::public::CeilingEffect::None,
+                rates: RateSource::None,
+            }],
+            "no ceiling and no rates are each announced as the absences they are"
+        );
+        assert_eq!(
+            fx.generator.calls().len(),
+            1,
+            "and the provider was actually reached"
+        );
+    }
+
+    /// The three arrangements a monetary budget cannot bind, each said in its
+    /// own words. Without this the variants would be constructible and
+    /// invisible — an operator running a subscription model under `--budget
+    /// $5` would see a limit that silently never applies. §10 says that
+    /// outright: the ceiling on a flat-fee row is announced `inapplicable`,
+    /// naming the limit that will never fire and the metering that defeats
+    /// it.
+    #[test]
+    fn each_metering_is_announced_as_the_thing_it_actually_is() {
+        use ego_core::public::{CeilingEffect, MeteringKind};
+
+        for (metering, expected_kind, expected_ceiling) in [
+            (
+                subscription(),
+                MeteringKind::Subscription,
+                CeilingEffect::Inapplicable {
+                    limit: usd("1000"),
+                    metering: MeteringKind::Subscription,
+                },
+            ),
+            (
+                Metering::Unmetered {
+                    revision: MeteringRevision("ego/builtin/local/v1".to_string()),
+                },
+                MeteringKind::Unmetered,
+                CeilingEffect::Inapplicable {
+                    limit: usd("1000"),
+                    metering: MeteringKind::Unmetered,
+                },
+            ),
+            (
+                provider_reported(),
+                MeteringKind::Currency,
+                CeilingEffect::Binds {
+                    limit: usd("1000"),
+                    clamped_from: None,
+                },
+            ),
+        ] {
+            let fx = Fixture::new(vec![vec![AiEvent::Stop(StopReason::Stop)]]);
+            run_metered(&fx, SessionState::default(), "hi", metering.clone());
+
+            let announced = metering_events(&fx);
+            let [
+                PublicEvent::MeteringSelected {
+                    metering: kind,
+                    ceiling,
+                    rates,
+                    ..
+                },
+            ] = announced.as_slice()
+            else {
+                panic!("exactly one metering announcement per generation: {announced:?}");
+            };
+            assert_eq!(*kind, expected_kind, "for {metering:?}");
+            assert_eq!(*ceiling, expected_ceiling, "for {metering:?}");
+            assert_eq!(
+                *rates,
+                RateSource::Operator,
+                "every fixture run resolves its rates from the operator's file, \
+                 whatever the arrangement: for {metering:?}"
+            );
+        }
+    }
+
+    /// A subscription reserves nothing, so a monetary limit smaller than any
+    /// currency bound still admits the generation. This is the gate actually
+    /// behaving differently, not just a label on a log line.
+    #[test]
+    fn a_subscription_generation_is_admitted_by_a_budget_no_currency_row_could_pass() {
+        let script = || {
+            vec![vec![
+                AiEvent::Usage(tokens(1_000, 0, 0, 200)),
+                AiEvent::Stop(StopReason::Stop),
+            ]]
+        };
+
+        // A cent could not cover the $0.76536 worst case of the currency row.
+        let currency = Fixture::new(script());
+        *currency.gate.borrow_mut() = BudgetGate::new(usd("0.01"));
+        let (exit, ok, _) = run(&currency, SessionState::default(), "hi");
+        assert_eq!(exit, ExitReason::Budget);
+        assert!(!ok, "a cent cannot admit a currency-metered generation");
+
+        let flat = Fixture::new(script());
+        *flat.gate.borrow_mut() = BudgetGate::new(usd("0.01"));
+        let (exit, ok, _) = run_metered(&flat, SessionState::default(), "hi", subscription());
+        assert_eq!(exit, ExitReason::Completed);
+        assert!(ok, "a flat fee is not spent per request");
+        assert!(
+            flat.gate
+                .borrow()
+                .committed()
+                .expect("a limited gate keeps totals")
+                .amount
+                .is_zero()
+        );
+    }
+
+    /// And the zero it settles at is `Known`, attributed to the policy.
+    /// `Unknown` would poison the session's cumulative total for a figure
+    /// nobody doubts, and a `PricingRevision` here would be a price list that
+    /// does not exist.
+    #[test]
+    fn a_subscription_settles_at_a_known_zero_attributed_to_its_policy() {
+        let fx = Fixture::new(vec![vec![
+            AiEvent::Usage(tokens(1_000, 0, 0, 200)),
+            AiEvent::Stop(StopReason::Stop),
+        ]]);
+        run_metered(&fx, SessionState::default(), "hi", subscription());
+
+        let booked: Vec<_> = fx
+            .store
+            .events()
+            .into_iter()
+            .filter_map(|ev| match ev.kind {
+                EventKind::UsageUpdated { cost_delta, .. } => Some(cost_delta),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            booked,
+            vec![CostDelta::Known {
+                amount: usd("0"),
+                attribution: CostAttribution::MeteringPolicy {
+                    revision: MeteringRevision("acme/pro-plan/2026-08".to_string()),
+                },
+                fx: None,
+            }]
+        );
+    }
+
+    /// Under provider-reported settlement the log books the provider's own
+    /// figure, and the usage frame no longer decides the money.
+    #[test]
+    fn a_stated_cost_settles_the_generation_and_the_table_does_not() {
+        let fx = Fixture::new(vec![vec![
+            AiEvent::Usage(tokens(1_000, 0, 0, 200)),
+            AiEvent::ProviderCost {
+                cost: usd("0.0012345678"),
+            },
+            AiEvent::Stop(StopReason::Stop),
+        ]]);
+        run_metered(&fx, SessionState::default(), "hi", provider_reported());
+
+        let booked: Vec<_> = fx
+            .store
+            .events()
+            .into_iter()
+            .filter_map(|ev| match ev.kind {
+                EventKind::UsageUpdated {
+                    usage, cost_delta, ..
+                } => Some((usage, cost_delta)),
+                _ => None,
+            })
+            .collect();
+        let [(usage, cost_delta)] = booked.as_slice() else {
+            panic!("one usage update, holding both halves: {booked:?}");
+        };
+        assert_eq!(
+            *usage,
+            tokens(1_000, 0, 0, 200),
+            "the tokens are still recorded; it is the money that changed hands"
+        );
+        assert_eq!(
+            *cost_delta,
+            CostDelta::Known {
+                amount: usd("0.0012345678"),
+                attribution: CostAttribution::ProviderReported(ProviderCostRevision {
+                    provider: "xai".to_string(),
+                    field: "usage.cost_in_usd_ticks".to_string(),
+                    schema_revision: "2026-08-21".to_string(),
+                }),
+                fx: None,
+            }
+        );
+        // 1000 x 0.000003 + 200 x 0.000015 = 0.006, which is what the table
+        // would have said. It is three times the stated figure, so a silent
+        // fallback to the quote could not hide here.
+        assert_ne!(
+            *cost_delta,
+            quote().price(&tokens(1_000, 0, 0, 200)),
+            "a stated cost is not the table's answer"
+        );
+        assert_eq!(fx.gate.borrow().committed(), Some(&usd("0.0012345678")));
+    }
+
+    /// The cost may arrive before the usage or after it — SSE gives no
+    /// guarantee — and one `UsageUpdated` has to come out either way. Booking
+    /// per event would produce two, double-counting the tokens.
+    #[test]
+    fn a_stated_cost_and_a_usage_frame_are_booked_once_in_either_order() {
+        let cost = AiEvent::ProviderCost {
+            cost: usd("0.0012345678"),
+        };
+        let usage = AiEvent::Usage(tokens(1_000, 0, 0, 200));
+        let mut booked = Vec::new();
+        for script in [
+            vec![usage.clone(), cost.clone(), AiEvent::Stop(StopReason::Stop)],
+            vec![cost.clone(), usage.clone(), AiEvent::Stop(StopReason::Stop)],
+        ] {
+            let fx = Fixture::new(vec![script]);
+            run_metered(&fx, SessionState::default(), "hi", provider_reported());
+            booked.push(
+                fx.store
+                    .events()
+                    .into_iter()
+                    .filter_map(|ev| match ev.kind {
+                        EventKind::UsageUpdated {
+                            usage, cost_delta, ..
+                        } => Some((usage, cost_delta)),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>(),
+            );
+        }
+        assert_eq!(booked[0].len(), 1, "one booking, not one per event");
+        assert_eq!(booked[0], booked[1], "the wire order is not the record");
+    }
+
+    /// A provider that declared it states a cost and then did not: the money
+    /// is unknown, named as *that* silence rather than the usage one, and the
+    /// gate charges the full reserved bound.
+    #[test]
+    fn a_missing_stated_cost_settles_at_the_bound_and_not_at_zero() {
+        let fx = Fixture::new(vec![vec![
+            AiEvent::Usage(tokens(1_000, 0, 0, 200)),
+            AiEvent::Stop(StopReason::Stop),
+        ]]);
+        run_metered(&fx, SessionState::default(), "hi", provider_reported());
+
+        let booked: Vec<_> = fx
+            .store
+            .events()
+            .into_iter()
+            .filter_map(|ev| match ev.kind {
+                EventKind::UsageUpdated { cost_delta, .. } => Some(cost_delta),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            booked,
+            vec![CostDelta::Unknown(UnknownCost::ProviderReportedCostMissing)],
+            "the tokens arrived, so `ProviderReportedNoUsage` would name the wrong silence"
+        );
+        assert_eq!(
+            fx.gate.borrow().committed(),
+            Some(&usd("0.76536")),
+            "an unknown cost charges the bound, never zero"
         );
     }
 }
