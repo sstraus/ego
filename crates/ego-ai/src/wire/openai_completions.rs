@@ -755,19 +755,19 @@ impl StreamDecoder {
     }
 
     fn consume_delta(&mut self, delta: &Delta, out: &mut Vec<AiEvent>) {
-        if let Some(text) = &delta.content {
-            if !text.is_empty() {
-                out.push(AiEvent::TextDelta { text: text.clone() });
-            }
+        if let Some(text) = &delta.content
+            && !text.is_empty()
+        {
+            out.push(AiEvent::TextDelta { text: text.clone() });
         }
         // A refusal is the assistant's visible answer, arriving on a second
         // channel: `finish_reason` is still `stop`, and the turn succeeded.
         // Reported as text because that is what it is — dropping it would
         // leave the user with an empty, successful turn.
-        if let Some(text) = &delta.refusal {
-            if !text.is_empty() {
-                out.push(AiEvent::TextDelta { text: text.clone() });
-            }
+        if let Some(text) = &delta.refusal
+            && !text.is_empty()
+        {
+            out.push(AiEvent::TextDelta { text: text.clone() });
         }
         for fragment in &delta.tool_calls {
             self.consume_tool_fragment(fragment);

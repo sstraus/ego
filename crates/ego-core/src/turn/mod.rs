@@ -868,15 +868,14 @@ impl<'a> TurnLoop<'a> {
         // it is what tells a host the item finished.
         if failure.is_none()
             && let Some(item) = message
-        {
-            if let Err(cause) = self.journal.append(
+            && let Err(cause) = self.journal.append(
                 turn,
                 Some(item),
                 None,
                 EventKind::AssistantMessage { text: assembled },
-            ) {
-                failure = Some(cause);
-            }
+            )
+        {
+            failure = Some(cause);
         }
 
         Drained {
