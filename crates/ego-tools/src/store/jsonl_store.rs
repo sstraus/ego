@@ -172,7 +172,7 @@ impl JsonlStore {
         }
     }
 
-    fn session_dir(&self, id: &SessionId) -> PathBuf {
+    pub(super) fn session_dir(&self, id: &SessionId) -> PathBuf {
         self.root.join(session_dir_name(id))
     }
 
@@ -292,10 +292,18 @@ impl JsonlStore {
     /// Every event in `id`'s log, in order, skipping any line that does not
     /// decode.
     ///
-    /// Skipping rather than failing mirrors `SessionStore::read`'s contract
-    /// (a per-line failure must not abort the whole session) and is safe
-    /// here because `recover` is what removes bad lines; a caller that has
-    /// not run it should still get the events that are intact.
+    /// Skipping is the **opposite** of `SessionStore::read`'s contract, which
+    /// is explicit that "a corrupt or truncated line must never be silently
+    /// skipped" (`session_store.rs`) — and this doc comment used to claim it
+    /// mirrored that contract, which was backwards.
+    ///
+    /// What makes the skip safe is not the port, it is the caller: `recover`
+    /// is what removes bad lines, and `JsonlStore::open_writer` runs it before
+    /// `resume` for exactly this reason. A caller that reaches `resume` on an
+    /// unrepaired log gets a state quietly missing its tail. That is the price
+    /// of totality here, and it is stated rather than dressed up: replay must
+    /// not abort on one bad byte, but the honest report of *which* lines
+    /// failed lives on `read`, where the contract puts it.
     fn read_events(&self, id: &SessionId) -> Result<Vec<DomainEvent>, StoreError> {
         let stream = SessionStore::read(self, id)?;
         Ok(futures::executor::block_on(async {

@@ -308,6 +308,8 @@ same registries" — no redesign, so deferring costs nothing.
 ~/.ego/sessions/<id>/
     manifest.json      # id, workspace_root, model, created, updated, title
     events.jsonl       # the log; first line is a versioned header record
+    snapshot.json      # a replay checkpoint carrying its source sequence
+    lease              # the writer lease: PID + heartbeat, advisory-locked
 ```
 
 Rationale: the state is *already* an event log (§1) — an append-only JSONL file

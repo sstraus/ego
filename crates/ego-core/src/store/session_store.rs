@@ -45,7 +45,11 @@ pub struct SessionMeta {
 ///
 /// Deliberately small: this is the Step 4 contract (append/read/list on a
 /// healthy store), not the tail-repair or writer-lease vocabulary later
-/// steps add — see `plans/m0a-contracts.md` Steps 5-7.
+/// steps add — see `plans/m0a-contracts.md` Steps 5-7. `WrongSession` is the
+/// one addition and is neither of those: it is a store saying it does not
+/// serve that session at all, which any implementation scoped to a subset of
+/// sessions can say (see
+/// `docs/decisions/2026-08-21-opening-a-session-for-writing.md` §3).
 #[derive(Debug)]
 pub enum StoreError {
     /// The underlying I/O failed: open, read, write, fsync or rename.
@@ -60,6 +64,16 @@ pub enum StoreError {
     MissingHeader,
     /// `read` was asked for a session with no durable log.
     NotFound,
+    /// This store serves one session and was asked about another.
+    ///
+    /// Returning it rather than delegating anyway is what keeps a
+    /// session-scoped store honest: a writer holding a lease for one session
+    /// that quietly appended to a second would be writing unleased, which is
+    /// the exact thing the lease exists to prevent.
+    WrongSession {
+        expected: SessionId,
+        asked: SessionId,
+    },
 }
 
 impl std::fmt::Display for StoreError {
@@ -70,6 +84,9 @@ impl std::fmt::Display for StoreError {
             StoreError::Manifest(e) => write!(f, "session manifest error: {e}"),
             StoreError::MissingHeader => write!(f, "session log is missing its header record"),
             StoreError::NotFound => write!(f, "session not found"),
+            StoreError::WrongSession { expected, asked } => {
+                write!(f, "this store serves session {expected:?}, not {asked:?}")
+            }
         }
     }
 }
