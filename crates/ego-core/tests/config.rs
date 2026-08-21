@@ -492,3 +492,370 @@ fn config_bare_flag_forces_bare_even_when_trusted() {
     let effective = resolve(&layers, Trust::Trusted, None).unwrap();
     assert_eq!(effective.posture, Posture::Bare);
 }
+
+// -- Instruction discovery (AGENTS.md) ----------------------------------
+//
+// The pure half: which files, in what order, and — the part that matters —
+// that an untrusted workspace's files are never *touched*. See
+// `docs/decisions/2026-08-21-instructions-a-workspace-may-hand-a-model.md`.
+
+mod instructions {
+    use std::cell::RefCell;
+    use std::path::{Path, PathBuf};
+
+    use ego_core::config::{
+        Found, Instruction, InstructionIo, Limits, Posture, Refusal, Selection, load, plan,
+    };
+
+    /// An `InstructionIo` that answers from a table and counts every call.
+    ///
+    /// The count is the point: "an untrusted workspace loads nothing" is a
+    /// weaker claim than "an untrusted workspace is never looked at", and only
+    /// the second one keeps a permission dialog off the screen.
+    struct Fake {
+        files: Vec<(PathBuf, Found)>,
+        calls: RefCell<Vec<PathBuf>>,
+    }
+
+    impl Fake {
+        fn new(files: Vec<(&str, Found)>) -> Self {
+            Fake {
+                files: files
+                    .into_iter()
+                    .map(|(p, f)| (PathBuf::from(p), f))
+                    .collect(),
+                calls: RefCell::new(Vec::new()),
+            }
+        }
+
+        fn calls(&self) -> Vec<PathBuf> {
+            self.calls.borrow().clone()
+        }
+    }
+
+    impl InstructionIo for Fake {
+        fn load(&self, path: &Path, _max_bytes: u64) -> Found {
+            self.calls.borrow_mut().push(path.to_path_buf());
+            self.files
+                .iter()
+                .find(|(p, _)| p == path)
+                .map(|(_, f)| f.clone())
+                .unwrap_or(Found::Absent)
+        }
+    }
+
+    fn read(text: &str) -> Found {
+        Found::Read {
+            bytes: text.as_bytes().to_vec(),
+        }
+    }
+
+    fn texts(loaded: &[Instruction]) -> Vec<&str> {
+        loaded.iter().map(|i| i.text.as_str()).collect()
+    }
+
+    // -- The gate ------------------------------------------------------
+
+    /// The Step 13 mechanism: an untrusted workspace does not merely load
+    /// nothing, it never asks the filesystem anything. No stat, no open — so
+    /// there is nothing for a dialog to be raised about, which is what a
+    /// headless untrusted run depends on.
+    #[test]
+    fn instructions_a_bare_posture_never_touches_the_filesystem() {
+        let io = Fake::new(vec![("/ws/AGENTS.md", read("do the thing"))]);
+        let selection = Selection::of(Posture::Bare, None);
+        assert_eq!(selection, Selection::Disabled);
+
+        let set = load(
+            &io,
+            Path::new("/ws"),
+            Path::new("/ws/src"),
+            &selection,
+            Limits::default(),
+        )
+        .unwrap();
+
+        assert!(set.loaded.is_empty());
+        assert!(set.skipped.is_empty());
+        assert_eq!(io.calls(), Vec::<PathBuf>::new(), "the port was called");
+    }
+
+    /// An explicitly named file is *chosen*, not discovered, so the ambient
+    /// gate does not apply to it — which is the whole point of the flag in a
+    /// headless untrusted run.
+    #[test]
+    fn instructions_an_explicit_file_survives_a_bare_posture() {
+        let io = Fake::new(vec![("/elsewhere/rules.md", read("the rules"))]);
+        let selection = Selection::of(Posture::Bare, Some(PathBuf::from("/elsewhere/rules.md")));
+        assert_eq!(
+            selection,
+            Selection::Explicit(PathBuf::from("/elsewhere/rules.md"))
+        );
+
+        let set = load(
+            &io,
+            Path::new("/ws"),
+            Path::new("/ws/src"),
+            &selection,
+            Limits::default(),
+        )
+        .unwrap();
+
+        assert_eq!(texts(&set.loaded), ["the rules"]);
+    }
+
+    /// An explicit file *replaces* the ambient set rather than adding to it
+    /// (ADR §9): no `AGENTS.md` is even looked for.
+    #[test]
+    fn instructions_an_explicit_file_replaces_the_ambient_set() {
+        let io = Fake::new(vec![
+            ("/ws/AGENTS.md", read("ambient")),
+            ("/elsewhere/rules.md", read("explicit")),
+        ]);
+        let selection = Selection::of(Posture::Ambient, Some(PathBuf::from("/elsewhere/rules.md")));
+
+        let set = load(
+            &io,
+            Path::new("/ws"),
+            Path::new("/ws/src"),
+            &selection,
+            Limits::default(),
+        )
+        .unwrap();
+
+        assert_eq!(texts(&set.loaded), ["explicit"]);
+        assert_eq!(io.calls(), [PathBuf::from("/elsewhere/rules.md")]);
+    }
+
+    // -- Ordering ------------------------------------------------------
+
+    /// Root first, cwd last, one candidate per directory in between — so a
+    /// later entry is always the nearer one.
+    #[test]
+    fn instructions_are_planned_from_the_root_down_to_the_working_directory() {
+        let paths = plan(
+            Path::new("/ws"),
+            Path::new("/ws/crates/core"),
+            &Selection::Ambient,
+        )
+        .unwrap();
+
+        assert_eq!(
+            paths,
+            [
+                PathBuf::from("/ws/AGENTS.md"),
+                PathBuf::from("/ws/crates/AGENTS.md"),
+                PathBuf::from("/ws/crates/core/AGENTS.md"),
+            ]
+        );
+    }
+
+    #[test]
+    fn instructions_at_the_root_itself_plan_exactly_one_candidate() {
+        let paths = plan(Path::new("/ws"), Path::new("/ws"), &Selection::Ambient).unwrap();
+        assert_eq!(paths, [PathBuf::from("/ws/AGENTS.md")]);
+    }
+
+    #[test]
+    fn instructions_load_in_planned_order_skipping_directories_without_one() {
+        let io = Fake::new(vec![
+            ("/ws/AGENTS.md", read("workspace rules")),
+            ("/ws/crates/core/AGENTS.md", read("crate rules")),
+        ]);
+
+        let set = load(
+            &io,
+            Path::new("/ws"),
+            Path::new("/ws/crates/core"),
+            &Selection::Ambient,
+            Limits::default(),
+        )
+        .unwrap();
+
+        assert_eq!(texts(&set.loaded), ["workspace rules", "crate rules"]);
+        assert!(set.skipped.is_empty(), "an absent file is not a refusal");
+    }
+
+    #[test]
+    fn instructions_refuse_a_working_directory_outside_the_root() {
+        let err = plan(
+            Path::new("/ws"),
+            Path::new("/somewhere/else"),
+            &Selection::Ambient,
+        )
+        .unwrap_err();
+
+        assert_eq!(err.root, PathBuf::from("/ws"));
+        assert_eq!(err.cwd, PathBuf::from("/somewhere/else"));
+    }
+
+    // -- Refusals are reported, never silent ---------------------------
+
+    /// A file that was there and did not contribute has to be nameable, with
+    /// its reason: "your AGENTS.md was ignored" is not something a run may
+    /// keep to itself.
+    #[test]
+    fn instructions_a_refused_file_is_reported_with_its_reason() {
+        let io = Fake::new(vec![
+            ("/ws/AGENTS.md", read("workspace rules")),
+            ("/ws/src/AGENTS.md", Found::Refused(Refusal::Symlink)),
+        ]);
+
+        let set = load(
+            &io,
+            Path::new("/ws"),
+            Path::new("/ws/src"),
+            &Selection::Ambient,
+            Limits::default(),
+        )
+        .unwrap();
+
+        assert_eq!(texts(&set.loaded), ["workspace rules"]);
+        assert_eq!(set.skipped.len(), 1);
+        assert_eq!(set.skipped[0].path, PathBuf::from("/ws/src/AGENTS.md"));
+        assert_eq!(set.skipped[0].reason, Refusal::Symlink);
+        assert!(
+            set.skipped[0].reason.to_string().contains("symlink"),
+            "the reason must say what it was: {}",
+            set.skipped[0].reason
+        );
+    }
+
+    #[test]
+    fn instructions_that_are_not_utf8_are_refused_rather_than_mangled() {
+        let io = Fake::new(vec![(
+            "/ws/AGENTS.md",
+            Found::Read {
+                bytes: vec![0xff, 0xfe, 0x00],
+            },
+        )]);
+
+        let set = load(
+            &io,
+            Path::new("/ws"),
+            Path::new("/ws"),
+            &Selection::Ambient,
+            Limits::default(),
+        )
+        .unwrap();
+
+        assert!(set.loaded.is_empty());
+        assert_eq!(set.skipped[0].reason, Refusal::NotText);
+    }
+
+    // -- Limits --------------------------------------------------------
+
+    #[test]
+    fn instructions_stop_at_the_total_byte_limit_and_say_so() {
+        let io = Fake::new(vec![
+            ("/ws/AGENTS.md", read("aaaaaaaa")),
+            ("/ws/src/AGENTS.md", read("bbbbbbbb")),
+        ]);
+        let limits = Limits {
+            max_total_bytes: 12,
+            ..Limits::default()
+        };
+
+        let set = load(
+            &io,
+            Path::new("/ws"),
+            Path::new("/ws/src"),
+            &Selection::Ambient,
+            limits,
+        )
+        .unwrap();
+
+        assert_eq!(texts(&set.loaded), ["aaaaaaaa"]);
+        assert_eq!(
+            set.skipped[0].reason,
+            Refusal::TotalTooLarge { limit: 12 },
+            "the second file must be refused, not truncated"
+        );
+    }
+
+    #[test]
+    fn instructions_stop_at_the_file_count_limit_and_say_so() {
+        let io = Fake::new(vec![
+            ("/ws/AGENTS.md", read("one")),
+            ("/ws/a/AGENTS.md", read("two")),
+            ("/ws/a/b/AGENTS.md", read("three")),
+        ]);
+        let limits = Limits {
+            max_files: 2,
+            ..Limits::default()
+        };
+
+        let set = load(
+            &io,
+            Path::new("/ws"),
+            Path::new("/ws/a/b"),
+            &Selection::Ambient,
+            limits,
+        )
+        .unwrap();
+
+        assert_eq!(texts(&set.loaded), ["one", "two"]);
+        assert_eq!(set.skipped[0].reason, Refusal::TooManyFiles { limit: 2 });
+        assert!(
+            !io.calls().contains(&PathBuf::from("/ws/a/b/AGENTS.md")),
+            "a file past the count limit must not even be opened"
+        );
+    }
+
+    /// The per-file limit belongs to the port — core must not ask for a file
+    /// and then decide it was too big — so core's job is to pass it through
+    /// unchanged and report what comes back.
+    #[test]
+    fn instructions_pass_the_per_file_limit_to_the_port() {
+        struct Recorder(RefCell<Vec<u64>>);
+        impl InstructionIo for Recorder {
+            fn load(&self, _path: &Path, max_bytes: u64) -> Found {
+                self.0.borrow_mut().push(max_bytes);
+                Found::Refused(Refusal::TooLarge { limit: max_bytes })
+            }
+        }
+
+        let io = Recorder(RefCell::new(Vec::new()));
+        let limits = Limits {
+            max_file_bytes: 4096,
+            ..Limits::default()
+        };
+        let set = load(
+            &io,
+            Path::new("/ws"),
+            Path::new("/ws"),
+            &Selection::Ambient,
+            limits,
+        )
+        .unwrap();
+
+        assert_eq!(io.0.borrow().as_slice(), [4096]);
+        assert_eq!(set.skipped[0].reason, Refusal::TooLarge { limit: 4096 });
+    }
+
+    // -- Digests -------------------------------------------------------
+
+    /// SHA-256 of the bytes as read. The known vector is checked rather than
+    /// merely "some hex", because a digest that is stable but wrong proves
+    /// nothing about an export.
+    #[test]
+    fn instructions_carry_a_sha256_digest_of_their_bytes() {
+        let io = Fake::new(vec![("/ws/AGENTS.md", read("abc"))]);
+
+        let set = load(
+            &io,
+            Path::new("/ws"),
+            Path::new("/ws"),
+            &Selection::Ambient,
+            Limits::default(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            set.loaded[0].digest,
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(set.loaded[0].bytes, 3);
+        assert_eq!(set.bytes(), 3);
+    }
+}

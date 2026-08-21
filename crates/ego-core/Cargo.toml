@@ -13,6 +13,11 @@ publish.workspace = true
 futures = "0.3.34"
 schemars = "1.2.2"
 serde = { version = "1.0.229", features = ["derive"] }
+# Instruction-file digests (docs/decisions/2026-08-21-instructions-a-workspace-
+# may-hand-a-model.md §7). Deliberately not the store's xxhash64: that detects
+# corruption, this has to hold up against substituted content in an export.
+# Pure computation — no sockets, no files — so it fits this manifest's rule.
+sha2 = "0.10.9"
 # The store codec builds the durable JSONL line bytes itself, in library code,
 # so serde_json is a normal dependency rather than a dev-dependency. It is a
 # pure data format: no sockets, no files. raw_value is what lets the codec

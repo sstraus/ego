@@ -219,6 +219,14 @@ are generated from the same clap definitions and snapshot-tested.
 
 
 
+`--instructions FILE` is the headless opt-in and is **not** ambient: it names
+a file rather than discovering one, so it survives `Posture::Bare` and
+*replaces* the discovered set rather than adding to it. `--bare` together with
+`--instructions` is a conflict for the applicability matrix above, not for the
+loader — from a resolved posture alone, "the user demanded bare" and "the
+workspace is untrusted" are the same value and want opposite answers. See
+`docs/decisions/2026-08-21-instructions-a-workspace-may-hand-a-model.md`.
+
 ## 5. Agent files — the scripting language
 
 An **executable agent file** is YAML frontmatter + prompt body. Same format
