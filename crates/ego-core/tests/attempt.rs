@@ -156,7 +156,9 @@ mod lifecycle {
     };
     use ego_core::generator::fake::FakeGenerator;
     use ego_core::generator::port::{AiEvent, Generator};
-    use ego_core::generator::types::{GenRequest, Message, Role, StopReason, ThinkingLevel};
+    use ego_core::generator::types::{
+        Conversation, GenRequest, Message, Role, StopReason, ThinkingLevel,
+    };
     use ego_core::state::Usage;
     use futures::StreamExt;
 
@@ -201,11 +203,11 @@ mod lifecycle {
     fn request_for(model: &str) -> GenRequest {
         GenRequest {
             model: model.to_string(),
-            messages: vec![Message {
-                role: Role::User,
-                content: "list the files".to_string(),
-                tool_call_id: None,
-            }],
+            messages: Conversation::new(vec![Message::text(
+                Role::User,
+                "list the files".to_string(),
+            )])
+            .expect("one user message is a conversation"),
             tools: Vec::new(),
             thinking: ThinkingLevel::Off,
             max_output_tokens: Some(1_024),

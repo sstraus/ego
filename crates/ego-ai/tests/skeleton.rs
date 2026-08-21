@@ -20,7 +20,9 @@ use ego_core::generator::capabilities::{
     CacheRetention, CancelSemantics, ModelCapabilities, ReasoningCarryover, Transport,
 };
 use ego_core::generator::port::{AiEvent, Generator};
-use ego_core::generator::types::{GenRequest, Message, Role, StopReason, ThinkingLevel};
+use ego_core::generator::types::{
+    Conversation, GenRequest, Message, Role, StopReason, ThinkingLevel,
+};
 use futures::StreamExt;
 
 fn usd(decimal: &str) -> Money {
@@ -58,11 +60,11 @@ fn caps() -> ModelCapabilities {
 fn request() -> GenRequest {
     GenRequest {
         model: "claude-opus-5".to_string(),
-        messages: vec![Message {
-            role: Role::User,
-            content: "list the files".to_string(),
-            tool_call_id: None,
-        }],
+        messages: Conversation::new(vec![Message::text(
+            Role::User,
+            "list the files".to_string(),
+        )])
+        .expect("one user message is a conversation"),
         tools: Vec::new(),
         thinking: ThinkingLevel::Off,
         max_output_tokens: Some(1_024),

@@ -98,21 +98,65 @@ pub struct TurnState {
     pub exit_reason: Option<ExitReason>,
 }
 
+/// What an item is, and therefore who authored it.
+///
+/// Not [`crate::public::ItemKind`], which answers a different question for a
+/// different audience: that one collapses user and assistant into a single
+/// `Message` (`CLI.md` §4.2) and adds kinds that never become items here.
+/// Rebuilding a conversation needs exactly the distinction the public one
+/// throws away.
+///
+/// Decided by the first event that touches the item and never revised: an
+/// item's author is settled when it is created. Without it a rebuilt history
+/// cannot tell a user's prompt from the assistant's reply — all three of
+/// `UserPrompt`, `AssistantMessage` and `ReasoningDelta` write the same
+/// text field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ItemKind {
+    UserPrompt,
+    Assistant,
+    Reasoning,
+    ToolCall,
+}
+
 /// Per-item state: accumulated text for messages, reasoning and tool calls.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ItemState {
     pub turn: TurnId,
+    /// The `seq` of the event that created this item.
+    ///
+    /// [`SessionState::items`] is a `HashMap`, so the order items happened in
+    /// has to be carried rather than iterated. Sorting by `ItemId` would
+    /// *usually* agree — they are UUIDv7 — which is what makes it the wrong
+    /// thing to rely on.
+    pub seq: Seq,
+    pub kind: ItemKind,
+    /// The provider's id for a tool call, when the record carried one.
+    pub call_id: Option<String>,
     pub tool_name: Option<String>,
+    /// A tool call's arguments.
+    ///
+    /// Its own field, and not shared with [`Self::text`]: `ToolCallCompleted`
+    /// writes the output, and while the two lived in one field a *completed*
+    /// call could no longer say what it had been called with — which is
+    /// exactly what a rebuilt history needs from it.
+    pub args: String,
+    /// Message and reasoning text, and a tool call's output.
     pub text: String,
     pub completed: bool,
     pub ok: Option<bool>,
 }
 
 impl ItemState {
-    fn new(turn: TurnId) -> Self {
+    fn new(turn: TurnId, seq: Seq, kind: ItemKind) -> Self {
         Self {
             turn,
+            seq,
+            kind,
+            call_id: None,
             tool_name: None,
+            args: String::new(),
             text: String::new(),
             completed: false,
             ok: None,
@@ -327,38 +371,43 @@ impl SessionState {
 
         match &ev.kind {
             EventKind::UserPrompt { text } => {
-                if let Some(item) = self.item_mut(ev) {
+                if let Some(item) = self.item_mut(ev, ItemKind::UserPrompt) {
                     item.text = text.clone();
                 }
             }
             EventKind::AssistantDelta { text } => {
-                if let Some(item) = self.item_mut(ev) {
+                if let Some(item) = self.item_mut(ev, ItemKind::Assistant) {
                     item.text.push_str(text);
                 }
             }
             EventKind::AssistantMessage { text } => {
-                if let Some(item) = self.item_mut(ev) {
+                if let Some(item) = self.item_mut(ev, ItemKind::Assistant) {
                     item.text = text.clone();
                 }
             }
             EventKind::ReasoningDelta { text } => {
-                if let Some(item) = self.item_mut(ev) {
+                if let Some(item) = self.item_mut(ev, ItemKind::Reasoning) {
                     item.text.push_str(text);
                 }
             }
-            EventKind::ToolCallStarted { name, args } => {
-                if let Some(item) = self.item_mut(ev) {
+            EventKind::ToolCallStarted {
+                name,
+                args,
+                call_id,
+            } => {
+                if let Some(item) = self.item_mut(ev, ItemKind::ToolCall) {
                     item.tool_name = Some(name.clone());
-                    item.text = args.clone();
+                    item.args = args.clone();
+                    item.call_id = call_id.clone();
                 }
             }
             EventKind::ToolCallDelta { text } => {
-                if let Some(item) = self.item_mut(ev) {
+                if let Some(item) = self.item_mut(ev, ItemKind::ToolCall) {
                     item.text.push_str(text);
                 }
             }
             EventKind::ToolCallCompleted { ok, output } => {
-                if let Some(item) = self.item_mut(ev) {
+                if let Some(item) = self.item_mut(ev, ItemKind::ToolCall) {
                     item.text = output.clone();
                     item.completed = true;
                     item.ok = Some(*ok);
@@ -628,12 +677,18 @@ impl SessionState {
     /// The item this event's envelope points at, creating it on first
     /// reference. `None` when the envelope carries no item id — a degenerate
     /// but valid input that `apply` must not panic on.
-    fn item_mut(&mut self, ev: &DomainEvent) -> Option<&mut ItemState> {
+    /// The item this event names, creating it as `kind` if it is new.
+    ///
+    /// `kind` applies only on creation. A later event of a different kind
+    /// against the same id does not re-author the item: `apply` is total and
+    /// has to survive a hostile or torn log, and silently changing an item's
+    /// author mid-stream is worse than keeping the first claim.
+    fn item_mut(&mut self, ev: &DomainEvent, kind: ItemKind) -> Option<&mut ItemState> {
         let item_id = ev.env.item?;
         Some(
             self.items
                 .entry(item_id)
-                .or_insert_with(|| ItemState::new(ev.env.turn)),
+                .or_insert_with(|| ItemState::new(ev.env.turn, ev.env.seq, kind)),
         )
     }
 }

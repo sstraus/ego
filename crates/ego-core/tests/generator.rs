@@ -16,7 +16,8 @@ use ego_core::generator::capabilities::{
 use ego_core::generator::fake::FakeGenerator;
 use ego_core::generator::port::{AiEvent, Generator};
 use ego_core::generator::types::{
-    GenRequest, Message, ReasoningState, Role, StopReason, ThinkingLevel, ToolDescriptor,
+    Conversation, GenRequest, Message, ReasoningState, Role, StopReason, ThinkingLevel,
+    ToolDescriptor,
 };
 use ego_core::state::{SessionState, Usage};
 use futures::StreamExt;
@@ -32,11 +33,11 @@ mod generator {
     fn gen_request() -> GenRequest {
         GenRequest {
             model: "claude-opus-5".to_string(),
-            messages: vec![Message {
-                role: Role::User,
-                content: "list the files".to_string(),
-                tool_call_id: None,
-            }],
+            messages: Conversation::new(vec![Message::text(
+                Role::User,
+                "list the files".to_string(),
+            )])
+            .expect("one user message is a conversation"),
             tools: vec![ToolDescriptor {
                 name: "bash".to_string(),
                 description: "run a shell command".to_string(),
@@ -187,7 +188,11 @@ mod generator {
                         kind: EventKind::ReasoningDelta { text: text.clone() },
                     }]
                 }
-                AiEvent::ToolCall { name, args, .. } => {
+                AiEvent::ToolCall {
+                    call_id,
+                    name,
+                    args,
+                } => {
                     let item = ItemId::new();
                     let env = self.envelope(Some(item));
                     vec![DomainEvent {
@@ -195,6 +200,11 @@ mod generator {
                         kind: EventKind::ToolCallStarted {
                             name: name.clone(),
                             args: args.clone(),
+                            // Carried, not dropped: the provider's id is the
+                            // only thing that can match a result back to this
+                            // call on the next request, and nothing local can
+                            // stand in for it.
+                            call_id: Some(call_id.clone()),
                         },
                     }]
                 }
@@ -302,6 +312,7 @@ mod generator {
             EventKind::ToolCallStarted {
                 name: "bash".to_string(),
                 args: r#"{"cmd":"ls"}"#.to_string(),
+                call_id: Some("call-1".to_string()),
             }
         );
         // The tool call gets its own item, distinct from the message item.

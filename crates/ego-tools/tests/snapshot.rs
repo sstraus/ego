@@ -157,6 +157,7 @@ mod snapshot {
             EventKind::ToolCallStarted {
                 name: "bash".to_string(),
                 args: "ls".to_string(),
+                call_id: Some("call_a".to_string()),
             },
             None,
             EventId::new(),
@@ -475,6 +476,63 @@ mod snapshot {
             Some(SnapshotRejection::Version {
                 found: SNAPSHOT_VERSION + 1
             })
+        );
+        assert_eq!(resumed, fx.full_replay());
+    }
+
+    /// A snapshot a *previous build of this binary* wrote, byte for byte, not
+    /// a synthetic one with its version field poked. `ItemState` gained four
+    /// required fields in
+    /// `docs/decisions/2026-08-21-tool-use-history.md`, so a v2 snapshot no
+    /// longer even parses — and the point of this test is that it does not
+    /// have to. Whichever rejection fires, resume produces the same state a
+    /// full replay does, which is what makes "a snapshot is a cache" true
+    /// rather than aspirational.
+    #[test]
+    fn a_snapshot_from_before_the_item_fields_falls_back_to_a_full_replay() {
+        let fx = session_with_events();
+        let (source_seq, _) = fx.replay_prefix(4);
+        let v2 = serde_json::json!({
+            "v": 2,
+            "session": fx.id,
+            "source_seq": source_seq,
+            "state": {
+                "last_seq": source_seq,
+                "turns": {},
+                // The shape v2 wrote: no seq, no kind, no call_id, no args,
+                // and a `text` field carrying whichever of the two a tool
+                // call happened to have last.
+                "items": {},
+                "known_events": [],
+                "unresolved_parents": [],
+                "usage": {
+                    "uncached_input_tokens": 0,
+                    "cache_read_tokens": 0,
+                    "cache_write_tokens": 0,
+                    "output_tokens": 0
+                },
+                "cost": { "Known": [] },
+                "charges": [],
+                "settled_attempts": {},
+                "live_attempts": {},
+                "attribution_began": false,
+                "refusals": [],
+                "context": { "used_tokens": null, "provenance": null },
+                "permissions": [],
+                "hooks": [],
+                "subagents": [],
+                "errors": [],
+                "compactions": [],
+                "forks": []
+            }
+        });
+        std::fs::write(fx.snapshot_path(), serde_json::to_vec(&v2).unwrap()).unwrap();
+
+        let (resumed, rejection) = fx.store.resume(&fx.id).unwrap();
+
+        assert!(
+            rejection.is_some(),
+            "a v2 snapshot is never silently accepted"
         );
         assert_eq!(resumed, fx.full_replay());
     }

@@ -44,7 +44,13 @@ use serde::{Deserialize, Serialize};
 /// (`docs/decisions/2026-08-21-attempt-accounting-ledger.md`). A v1 snapshot
 /// has no fields for them, so it is discarded and the log is replayed — a
 /// cache miss, not data loss, which is precisely what this constant buys.
-pub const SNAPSHOT_VERSION: u32 = 2;
+///
+/// v3: `ItemState` gained `seq`, `kind`, `call_id` and `args`, so that a
+/// tool-use history can be rebuilt from the reduced state at all
+/// (`docs/decisions/2026-08-21-tool-use-history.md`). They are required
+/// fields — an item with no author or no position is not a fact anything can
+/// default — so a v2 snapshot cannot be read, and does not need to be.
+pub const SNAPSHOT_VERSION: u32 = 3;
 
 /// A reduced [`SessionState`] plus the point in the log it reduces.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

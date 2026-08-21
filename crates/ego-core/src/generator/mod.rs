@@ -10,5 +10,6 @@
 pub mod attempt;
 pub mod capabilities;
 pub mod fake;
+pub mod history;
 pub mod port;
 pub mod types;

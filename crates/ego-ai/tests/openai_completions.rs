@@ -32,7 +32,8 @@ use ego_ai::wire::openai_completions::{
 use ego_core::generator::attempt::DeliveryCertainty;
 use ego_core::generator::port::AiEvent;
 use ego_core::generator::types::{
-    GenRequest, Message, ReasoningState, Role, StopReason, ThinkingLevel, ToolDescriptor,
+    ContentBlock, Conversation, GenRequest, Message, ReasoningState, Role, StopReason,
+    ThinkingLevel, ToolDescriptor,
 };
 use ego_core::state::Usage;
 use futures::StreamExt;
@@ -41,12 +42,8 @@ use url::Url;
 const TEXT_TRANSCRIPT: &str = include_str!("goldens/stream_text.sse");
 const TOOL_TRANSCRIPT: &str = include_str!("goldens/stream_tool_calls.sse");
 
-fn message(role: Role, content: &str) -> Message {
-    Message {
-        role,
-        content: content.to_string(),
-        tool_call_id: None,
-    }
+fn conversation(messages: Vec<Message>) -> Conversation {
+    Conversation::new(messages).expect("the test histories here are valid")
 }
 
 /// The request the golden pins: a system turn, a user turn, one tool, an
@@ -55,10 +52,10 @@ fn message(role: Role, content: &str) -> Message {
 fn golden_request() -> GenRequest {
     GenRequest {
         model: "gpt-5.1".to_string(),
-        messages: vec![
-            message(Role::System, "You are terse."),
-            message(Role::User, "What is in ./src?"),
-        ],
+        messages: conversation(vec![
+            Message::text(Role::System, "You are terse."),
+            Message::text(Role::User, "What is in ./src?"),
+        ]),
         tools: vec![ToolDescriptor {
             name: "read_file".to_string(),
             description: "Read a file from the workspace.".to_string(),
@@ -151,23 +148,108 @@ fn fields_that_have_nothing_to_say_are_omitted() {
     );
 }
 
-/// The gap this format cannot paper over. OpenAI requires a `tool` message to
-/// answer an assistant message carrying the matching `tool_calls[].id`, and
-/// `Message` has no way to say that an assistant turn made a call — so a
-/// request built from this history would be rejected by the provider. Refusing
-/// with a diagnosis beats sending it and reading the 400.
+/// The round trip that used to be unbuildable: an assistant turn that called
+/// two tools, and the results answering them. OpenAI wants the calls attached
+/// to the assistant message and each result in its own `tool` message naming
+/// the id — a shape `Message` could not express at all before
+/// `docs/decisions/2026-08-21-tool-use-history.md`.
 #[test]
-fn a_tool_result_is_refused_because_the_contract_cannot_express_its_call() {
+fn a_tool_round_trip_reaches_the_wire_in_the_shape_the_schema_asks_for() {
     let mut req = golden_request();
-    req.messages.push(Message {
-        role: Role::Tool,
-        content: "fn main() {}".to_string(),
-        tool_call_id: Some("call_a".to_string()),
-    });
+    req.messages = conversation(vec![
+        Message::text(Role::User, "What is in ./src?"),
+        Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::Text {
+                    text: "Reading both.".to_string(),
+                },
+                ContentBlock::ToolUse {
+                    call_id: "call_a".to_string(),
+                    name: "read_file".to_string(),
+                    args: r#"{"path":"src/main.rs"}"#.to_string(),
+                },
+                ContentBlock::ToolUse {
+                    call_id: "call_b".to_string(),
+                    name: "read_file".to_string(),
+                    args: r#"{"path":"src/lib.rs"}"#.to_string(),
+                },
+            ],
+        },
+        Message {
+            role: Role::User,
+            content: vec![
+                ContentBlock::ToolResult {
+                    call_id: "call_a".to_string(),
+                    output: "fn main() {}".to_string(),
+                    is_error: false,
+                },
+                ContentBlock::ToolResult {
+                    call_id: "call_b".to_string(),
+                    output: "no such file".to_string(),
+                    is_error: true,
+                },
+            ],
+        },
+    ]);
     assert_eq!(
-        request_body(&req),
-        Err(RequestRefused::ToolResultHasNoAssistantTurn { position: 2 })
+        body_of(&req)["messages"],
+        serde_json::json!([
+            { "role": "user", "content": "What is in ./src?" },
+            {
+                "role": "assistant",
+                "content": "Reading both.",
+                "tool_calls": [
+                    {
+                        "id": "call_a",
+                        "type": "function",
+                        "function": { "name": "read_file", "arguments": "{\"path\":\"src/main.rs\"}" }
+                    },
+                    {
+                        "id": "call_b",
+                        "type": "function",
+                        "function": { "name": "read_file", "arguments": "{\"path\":\"src/lib.rs\"}" }
+                    }
+                ]
+            },
+            { "role": "tool", "tool_call_id": "call_a", "content": "fn main() {}" },
+            { "role": "tool", "tool_call_id": "call_b", "content": "no such file" }
+        ])
     );
+}
+
+/// An assistant turn that is nothing but calls sends no `content` at all —
+/// the schema makes it "Required unless `tool_calls` … is specified", and an
+/// empty string is a message that says nothing rather than one that is absent.
+#[test]
+fn an_assistant_turn_of_pure_tool_calls_sends_no_content_key() {
+    let mut req = golden_request();
+    req.messages = conversation(vec![
+        Message::text(Role::User, "read it"),
+        Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                call_id: "call_a".to_string(),
+                name: "read_file".to_string(),
+                args: "{}".to_string(),
+            }],
+        },
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                call_id: "call_a".to_string(),
+                output: "ok".to_string(),
+                is_error: false,
+            }],
+        },
+    ]);
+    let body = body_of(&req);
+    let assistant = body["messages"][1].as_object().expect("an object");
+    assert!(
+        !assistant.contains_key("content"),
+        "content is omitted, not empty: {assistant:?}"
+    );
+    assert!(assistant.contains_key("tool_calls"));
 }
 
 /// The chat-completions request schema has no field for a reasoning

@@ -331,7 +331,7 @@ pub fn project_v1(ev: &DomainEvent) -> Option<v1::SessionUpdate> {
 
         // Tool calls: `tool_call_id` is required, so no item id means no
         // update (mirrors `project_public`'s degenerate-envelope handling).
-        EventKind::ToolCallStarted { name, args } => item.map(|item| {
+        EventKind::ToolCallStarted { name, args, .. } => item.map(|item| {
             v1::SessionUpdate::ToolCall(
                 v1::ToolCall::new(item_id_string(item), name.clone())
                     .raw_input(tool_raw_input(args)),
@@ -421,7 +421,7 @@ pub fn project_v2(ev: &DomainEvent) -> Option<v2::SessionUpdate> {
             ))
         }),
 
-        EventKind::ToolCallStarted { name, args } => item.map(|item| {
+        EventKind::ToolCallStarted { name, args, .. } => item.map(|item| {
             v2::SessionUpdate::ToolCallUpdate(
                 v2::ToolCallUpdate::new(item_id_string(item))
                     .title(name.clone())

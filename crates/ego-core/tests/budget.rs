@@ -28,7 +28,7 @@ use ego_core::cost::{
 use ego_core::generator::capabilities::{
     CacheRetention, CancelSemantics, ModelCapabilities, ReasoningCarryover, Transport,
 };
-use ego_core::generator::types::{GenRequest, Message, Role, ThinkingLevel};
+use ego_core::generator::types::{Conversation, GenRequest, Message, Role, ThinkingLevel};
 use ego_core::state::Usage;
 
 // Wrapped in a module named `budget` so `cargo test -p ego-core budget`
@@ -82,11 +82,11 @@ mod budget {
     fn request(max_output_tokens: Option<u64>) -> GenRequest {
         GenRequest {
             model: "claude-opus-5".to_string(),
-            messages: vec![Message {
-                role: Role::User,
-                content: "list the files".to_string(),
-                tool_call_id: None,
-            }],
+            messages: Conversation::new(vec![Message::text(
+                Role::User,
+                "list the files".to_string(),
+            )])
+            .expect("one user message is a conversation"),
             tools: Vec::new(),
             thinking: ThinkingLevel::Off,
             max_output_tokens,
@@ -741,11 +741,11 @@ mod budget {
         let reservation = reserve_standard(&mut gate);
 
         let mut reworded = request(Some(1_024));
-        reworded.messages = vec![Message {
-            role: Role::User,
-            content: "something else entirely, and much longer".repeat(100),
-            tool_call_id: None,
-        }];
+        reworded.messages = Conversation::new(vec![Message::text(
+            Role::User,
+            "something else entirely, and much longer".repeat(100),
+        )])
+        .expect("one user message is a conversation");
         assert_eq!(
             reservation.authorises(&quote(), &reworded, &standard_caps()),
             Ok(()),

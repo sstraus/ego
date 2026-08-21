@@ -142,6 +142,7 @@ mod public_golden {
                 EventKind::ToolCallStarted {
                     name: "bash".to_string(),
                     args: "ls".to_string(),
+                    call_id: Some("call_provider_side".to_string()),
                 },
             ),
             ev(

@@ -558,4 +558,36 @@ mod codec {
             }
         }
     }
+
+    /// `ToolCallStarted` gained `call_id` in
+    /// `docs/decisions/2026-08-21-tool-use-history.md`, as an `Option` with a
+    /// serde default rather than a required field plus a `CODEC_VERSION`
+    /// bump. This is the claim that decision rests on: a payload written
+    /// before the field existed still decodes, and decodes to the only honest
+    /// value — not to a fabricated id, and not to an error.
+    ///
+    /// The other half of the same claim is that a `None` does not re-appear
+    /// in the bytes, so a log round-tripped by this build is byte-identical
+    /// to the one an older build wrote.
+    #[test]
+    fn codec_a_tool_call_written_before_call_id_existed_decodes_as_unknown() {
+        let old = r#"{"env":{"seq":7,"id":"00000000-0000-0000-0000-00000000000a","turn":"00000000-0000-0000-0000-000000000002","item":"00000000-0000-0000-0000-000000000003","parent":null,"ts":1787206085400,"producer":"Main"},"kind":{"kind":"ToolCallStarted","name":"glob","args":"{\"pattern\":\"*\"}"}}"#;
+
+        let decoded: DomainEvent =
+            serde_json::from_str(old).expect("a payload without call_id still decodes");
+        assert_eq!(
+            decoded.kind,
+            EventKind::ToolCallStarted {
+                name: "glob".to_string(),
+                args: "{\"pattern\":\"*\"}".to_string(),
+                call_id: None,
+            }
+        );
+
+        let round_tripped = serde_json::to_string(&decoded).expect("a DomainEvent serialises");
+        assert_eq!(
+            round_tripped, old,
+            "an unknown call_id must not be written back as a null"
+        );
+    }
 }

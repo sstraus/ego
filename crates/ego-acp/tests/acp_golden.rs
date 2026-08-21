@@ -145,6 +145,7 @@ mod acp_golden {
                 EventKind::ToolCallStarted {
                     name: "bash".to_string(),
                     args: "ls".to_string(),
+                    call_id: Some("call_provider_side".to_string()),
                 },
             ),
             ev(
@@ -310,6 +311,7 @@ mod acp_golden {
             EventKind::ToolCallStarted {
                 name: String::new(),
                 args: String::new(),
+                call_id: None,
             },
             EventKind::ToolCallDelta {
                 text: String::new(),
@@ -778,6 +780,7 @@ mod acp_golden {
             EventKind::ToolCallStarted {
                 name: "bash".to_string(),
                 args: "ls".to_string(),
+                call_id: Some("call_provider_side".to_string()),
             },
             EventKind::ToolCallDelta {
                 text: "orphaned".to_string(),
@@ -803,6 +806,7 @@ mod acp_golden {
             EventKind::ToolCallStarted {
                 name: "bash".to_string(),
                 args: "ls".to_string(),
+                call_id: Some("call_provider_side".to_string()),
             },
             EventKind::ToolCallDelta {
                 text: "orphaned".to_string(),

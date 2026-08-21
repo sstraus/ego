@@ -100,8 +100,9 @@ pub enum OccupancyProvenance {
 /// earlier one wrote. `tests/codec.rs`'s committed `golden/store_log.jsonl`
 /// pins those bytes.
 ///
-/// What is additive, precisely: a new variant, or a new field **that has a
-/// default**. A required field is not — a record written before it existed
+/// What is additive, precisely: a new variant, or a new field **that decodes
+/// when it is absent** (an `Option`, or `#[serde(default)]` on a type that
+/// has one). A required field is not — a record written before it existed
 /// has no value for it and fails to decode, which is the same break as a
 /// rename. Renaming or re-tagging an existing variant or field is a
 /// `CODEC_VERSION` bump plus a migration, not a fixture update. (This note
@@ -119,7 +120,28 @@ pub enum EventKind {
     /// A streamed increment of the model's reasoning/thinking.
     ReasoningDelta { text: String },
     /// A tool call began, with its name and raw (unvalidated) arguments.
-    ToolCallStarted { name: String, args: String },
+    ToolCallStarted {
+        name: String,
+        args: String,
+        /// The provider's own id for the call, which
+        /// [`AiEvent::ToolCall`](crate::generator::port::AiEvent::ToolCall)
+        /// carries in. Without it a resumed session cannot build a history
+        /// the provider will accept: the id is opaque and provider-issued,
+        /// so nothing local can stand in for it.
+        ///
+        /// `Option` because a *required* field would break every record
+        /// written before ids were kept — see this type's own doc comment.
+        /// `None` means exactly that, and is not repairable: there is no rule
+        /// that reconstructs an opaque id, so the rebuild truncates the
+        /// history there rather than inventing one.
+        ///
+        /// The optionality is `Option`'s doing, not the attribute's: serde
+        /// decodes a missing `Option` field as `None` on its own. `default`
+        /// is written out anyway so the intent survives a future change of
+        /// this field's type, when it would start carrying weight.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        call_id: Option<String>,
+    },
     /// A streamed increment of a tool call's output.
     ToolCallDelta { text: String },
     /// A tool call finished, with its outcome and final output.
@@ -159,9 +181,10 @@ pub enum EventKind {
         cost_delta: CostDelta,
         /// Which attempt spent this, when it is known.
         ///
-        /// `Option` with a default because a *required* field would break
-        /// every record written before attempts were attributed — see this
-        /// type's own doc comment. `None` means exactly that: written before
+        /// `Option` because a *required* field would break every record
+        /// written before attempts were attributed — see this type's own doc
+        /// comment, and `ToolCallStarted::call_id` for why the `default`
+        /// attribute is not what makes it optional. `None` means written before
         /// attribution. Once any `GenerationStarted` has been observed the
         /// reducer refuses a `None`, so a producer cannot opt out of
         /// attribution by omitting the field.

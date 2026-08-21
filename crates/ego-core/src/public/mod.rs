@@ -203,7 +203,12 @@ pub fn project_public(ev: &DomainEvent) -> Option<PublicEvent> {
             kind: ItemKind::Reasoning,
             text: text.clone(),
         }),
-        EventKind::ToolCallStarted { name, args } => Some(PublicEvent::ItemStarted {
+        // `call_id` is deliberately not projected. It is the *provider's*
+        // correlation token, private to conversation replay; the public
+        // surface identifies a tool call by the harness's own `ItemId`, and
+        // adding a second identity to a versioned schema would be a
+        // compatibility-governed change with no consumer asking for it.
+        EventKind::ToolCallStarted { name, args, .. } => Some(PublicEvent::ItemStarted {
             turn,
             item: item?,
             kind: ItemKind::Tool,

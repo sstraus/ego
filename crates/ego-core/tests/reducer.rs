@@ -123,7 +123,8 @@ mod reducer {
             Some(tool_item),
             EventKind::ToolCallStarted {
                 name: "glob".to_string(),
-                args: "{\"pattern\":\"*\"}".to_string()
+                args: "{\"pattern\":\"*\"}".to_string(),
+                call_id: Some("call_a".to_string()),
             }
         );
         push!(
@@ -420,6 +421,7 @@ mod reducer {
                 EventKind::ToolCallStarted {
                     name: String::new(),
                     args: String::new(),
+                    call_id: None,
                 },
             ),
             (
@@ -757,6 +759,7 @@ mod reducer {
             EventKind::ToolCallStarted {
                 name: "grep".to_string(),
                 args: "{\"q\":\"foo\"}".to_string(),
+                call_id: Some("call_b".to_string()),
             },
         ));
         state.apply(&ev(

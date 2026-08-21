@@ -54,7 +54,9 @@ use std::collections::BTreeMap;
 
 use ego_core::generator::attempt::DeliveryCertainty;
 use ego_core::generator::port::AiEvent;
-use ego_core::generator::types::{GenRequest, Role, StopReason, ThinkingLevel};
+use ego_core::generator::types::{
+    ContentBlock, GenRequest, Message, Role, StopReason, ThinkingLevel,
+};
 use ego_core::state::Usage;
 use futures::stream::{self, BoxStream, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -82,20 +84,6 @@ pub const PATH: &str = "chat/completions";
 /// downstream can tell it happened.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RequestRefused {
-    /// The history contains a tool result, and
-    /// [`Message`](ego_core::generator::types::Message) cannot carry the
-    /// assistant turn that requested it.
-    ///
-    /// OpenAI requires a `tool` message to follow an assistant message whose
-    /// `tool_calls[].id` matches — the assistant request schema says its
-    /// `content` is "Required unless `tool_calls` or `function_call` is
-    /// specified" — and `Message` has `role`, `content` and `tool_call_id`
-    /// and no way to state that an assistant turn *made* a call. So the
-    /// request cannot be built, and building one without the assistant turn
-    /// would earn a 400 from the provider rather than a diagnosis from us.
-    ///
-    /// This is a gap in the `GenRequest` contract, not in this module.
-    ToolResultHasNoAssistantTurn { position: usize },
     /// The request carries reasoning state, and this format has nowhere to put
     /// it: the chat-completions request schema has no field for a reasoning
     /// signature. Dropping it silently would be
@@ -107,12 +95,6 @@ pub enum RequestRefused {
 impl std::fmt::Display for RequestRefused {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            RequestRefused::ToolResultHasNoAssistantTurn { position } => write!(
-                f,
-                "message {position} is a tool result, and openai-completions \
-                 requires the assistant turn that called the tool to precede \
-                 it; GenRequest::messages cannot express one"
-            ),
             RequestRefused::ReasoningStateNotCarriable => write!(
                 f,
                 "openai-completions has no field for reasoning state, so \
@@ -157,10 +139,39 @@ struct StreamOptions {
     include_usage: bool,
 }
 
+/// One message as this format spells it.
+///
+/// The fields are optional because chat-completions uses one object shape for
+/// three different messages: a plain turn has `content`; an assistant turn
+/// that called tools may have `tool_calls` and no `content` ("Required unless
+/// `tool_calls` or `function_call` is specified"); and a tool result is its
+/// own message with `tool_call_id` and `content`.
 #[derive(Debug, Serialize)]
 struct WireMessage<'a> {
     role: &'static str,
-    content: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    tool_calls: Vec<WireToolCall<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_call_id: Option<&'a str>,
+}
+
+#[derive(Debug, Serialize)]
+struct WireToolCall<'a> {
+    id: &'a str,
+    #[serde(rename = "type")]
+    kind: &'static str,
+    function: WireCallFunction<'a>,
+}
+
+#[derive(Debug, Serialize)]
+struct WireCallFunction<'a> {
+    name: &'a str,
+    /// The arguments verbatim, as a JSON *string* — which is what the schema
+    /// asks for, and what a streamed call arrives as. Not re-serialised, so a
+    /// call that arrived malformed leaves exactly as it arrived.
+    arguments: &'a str,
 }
 
 #[derive(Debug, Serialize)]
@@ -195,6 +206,95 @@ fn reasoning_effort(level: ThinkingLevel) -> &'static str {
     }
 }
 
+/// A [`Conversation`] as this format's `messages` array.
+///
+/// Total, and it has to be: [`Conversation`] already holds every invariant
+/// this projection needs (a call is the assistant's, a result is not, every
+/// result answers an earlier call exactly once), so there is nothing left
+/// here to refuse.
+///
+/// Two block kinds change shape on the way out. A tool result becomes its own
+/// `role: "tool"` message rather than staying inside the turn that carried it
+/// — this format has a role for it where anthropic-messages has a block —
+/// which is why the walk is per *block* and flushes in block order rather
+/// than per message. And `is_error` has nowhere to go: chat-completions gives
+/// a tool message a `content` and nothing else, so a failure reaches the
+/// model as whatever the tool said about it. That is this format's own
+/// convention, not a loss invented here.
+fn wire_messages(messages: &[Message]) -> Vec<WireMessage<'_>> {
+    let mut wire = Vec::with_capacity(messages.len());
+    for message in messages {
+        let role = match message.role {
+            Role::System => "system",
+            Role::User => "user",
+            Role::Assistant => "assistant",
+        };
+        // The turn's own message, built up until a tool result interrupts it.
+        let mut text = String::new();
+        let mut tool_calls = Vec::new();
+        for block in &message.content {
+            match block {
+                ContentBlock::Text { text: chunk } => {
+                    if !text.is_empty() {
+                        text.push('\n');
+                    }
+                    text.push_str(chunk);
+                }
+                ContentBlock::ToolUse {
+                    call_id,
+                    name,
+                    args,
+                } => tool_calls.push(WireToolCall {
+                    id: call_id,
+                    kind: "function",
+                    function: WireCallFunction {
+                        name,
+                        arguments: args,
+                    },
+                }),
+                ContentBlock::ToolResult {
+                    call_id, output, ..
+                } => {
+                    flush(&mut wire, role, &mut text, &mut tool_calls);
+                    wire.push(WireMessage {
+                        role: "tool",
+                        content: Some(output.clone()),
+                        tool_calls: Vec::new(),
+                        tool_call_id: Some(call_id),
+                    });
+                }
+            }
+        }
+        flush(&mut wire, role, &mut text, &mut tool_calls);
+    }
+    wire
+}
+
+/// Emit whatever has accumulated for the current turn, if anything has.
+///
+/// `content` is omitted only when the turn is nothing but tool calls: the
+/// schema permits that for an assistant turn and requires content otherwise,
+/// and an empty string is a message that says nothing rather than one that is
+/// not there.
+fn flush<'a>(
+    wire: &mut Vec<WireMessage<'a>>,
+    role: &'static str,
+    text: &mut String,
+    tool_calls: &mut Vec<WireToolCall<'a>>,
+) {
+    if text.is_empty() && tool_calls.is_empty() {
+        return;
+    }
+    let content = (!text.is_empty() || tool_calls.is_empty()).then(|| std::mem::take(text));
+    text.clear();
+    wire.push(WireMessage {
+        role,
+        content,
+        tool_calls: std::mem::take(tool_calls),
+        tool_call_id: None,
+    });
+}
+
 /// The exact JSON bytes this format would send for `req`.
 ///
 /// Separate from [`build_request`] so the golden can pin the body without a
@@ -204,21 +304,7 @@ pub fn request_body(req: &GenRequest) -> Result<Vec<u8>, RequestRefused> {
     if req.reasoning_state.is_some() {
         return Err(RequestRefused::ReasoningStateNotCarriable);
     }
-    let mut messages = Vec::with_capacity(req.messages.len());
-    for (position, message) in req.messages.iter().enumerate() {
-        let role = match message.role {
-            Role::System => "system",
-            Role::User => "user",
-            Role::Assistant => "assistant",
-            Role::Tool => {
-                return Err(RequestRefused::ToolResultHasNoAssistantTurn { position });
-            }
-        };
-        messages.push(WireMessage {
-            role,
-            content: &message.content,
-        });
-    }
+    let messages = wire_messages(req.messages.messages());
     let tools: Vec<WireTool<'_>> = req
         .tools
         .iter()

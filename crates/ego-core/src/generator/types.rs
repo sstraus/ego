@@ -1,8 +1,12 @@
-//! The provider-neutral conversation model: `GenRequest`, `Message`,
-//! `ToolDescriptor`, `StopReason`, `ThinkingLevel`, `ReasoningState`.
+//! The provider-neutral conversation model: `GenRequest`, `Conversation`,
+//! `Message`, `ContentBlock`, `ToolDescriptor`, `StopReason`,
+//! `ThinkingLevel`, `ReasoningState`.
 //!
 //! See `ARCHITECTURE.md` §3.1 and `docs/02-pi.md` §2 (the pi taxonomy this
-//! borrows from).
+//! borrows from), and `docs/decisions/2026-08-21-tool-use-history.md` for why
+//! a message is a list of blocks rather than a string plus an optional id.
+
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
@@ -55,24 +59,224 @@ pub enum StopReason {
 }
 
 /// Who authored a `Message`.
+///
+/// Three roles, not four: a tool *result* is a [`ContentBlock`] inside the
+/// turn that carries it, not an author. The providers disagree about which
+/// role that is — chat-completions gives a result its own `role: "tool"`
+/// message, anthropic-messages puts it in a `user` message — so a `Tool` role
+/// here would be one of them borrowed and imposed on the other.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
     System,
     User,
     Assistant,
-    Tool,
+}
+
+/// One piece of a message's content.
+///
+/// Ordered, because order is part of what makes a request valid: Anthropic
+/// requires every `tool_result` of a turn to be grouped ahead of any text in
+/// it, and requires a turn's thinking to precede its `tool_use`. A shape that
+/// kept calls in a field beside the text would throw that ordering away and
+/// leave each adapter to invent it back.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ContentBlock {
+    /// Visible text.
+    Text { text: String },
+    /// The assistant asked for a tool to be run.
+    ToolUse {
+        /// The provider's own id for this call. Opaque and unguessable: the
+        /// provider validates the id it issued, so a locally minted
+        /// substitute (an `ItemId`, say) is a rejected request.
+        call_id: String,
+        name: String,
+        /// The arguments exactly as the provider sent them, JSON or not.
+        ///
+        /// A `String` and not a `serde_json::Value` on purpose: a tool call
+        /// truncated mid-stream arrives as invalid JSON, and that is
+        /// *evidence about the stream*. Parsing here would discard it at the
+        /// one seam that can still see it.
+        args: String,
+    },
+    /// A tool's answer to one call.
+    ToolResult {
+        /// The `ToolUse::call_id` this answers.
+        call_id: String,
+        output: String,
+        /// Whether the tool failed. Not the same as "no answer": a failure
+        /// still answers the call, and a call that was never executed at all
+        /// must still be answered this way — Anthropic requires a
+        /// `tool_result` "marked with `is_error` set to true" for it.
+        is_error: bool,
+    },
 }
 
 /// One turn of conversation history sent to the model.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Message {
     pub role: Role,
-    pub content: String,
-    /// The tool call this message answers. Only meaningful for `Role::Tool`
-    /// messages — without it a tool result can't be matched back to the call
-    /// that produced it.
-    pub tool_call_id: Option<String>,
+    pub content: Vec<ContentBlock>,
+}
+
+impl Message {
+    /// A message whose whole content is one block of text — every system
+    /// prompt, every user turn that is not answering a tool.
+    pub fn text(role: Role, text: impl Into<String>) -> Self {
+        Message {
+            role,
+            content: vec![ContentBlock::Text { text: text.into() }],
+        }
+    }
+}
+
+/// Why a list of messages is not a conversation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HistoryError {
+    /// A result names a call that no earlier message made.
+    ResultWithoutCall { call_id: String },
+    /// Two results name one call.
+    CallAnsweredTwice { call_id: String },
+    /// Two calls share one id, so no result can say which it answers.
+    DuplicateCallId { call_id: String },
+    /// A call was made and never answered. Every provider rejects this.
+    CallUnanswered { call_id: String },
+    /// A call appears in a turn the assistant did not author. Only the model
+    /// asks for a tool to run, on every wire there is.
+    CallFromNonAssistant { call_id: String },
+    /// A result appears in an assistant turn. The assistant asks; something
+    /// else answers — chat-completions gives the answer its own `tool` role
+    /// and anthropic-messages puts it in a `user` turn, and neither lets the
+    /// assistant answer itself.
+    ResultFromAssistant { call_id: String },
+}
+
+impl std::fmt::Display for HistoryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HistoryError::ResultWithoutCall { call_id } => {
+                write!(f, "a result answers {call_id}, which nothing called")
+            }
+            HistoryError::CallAnsweredTwice { call_id } => {
+                write!(f, "{call_id} was answered twice")
+            }
+            HistoryError::DuplicateCallId { call_id } => {
+                write!(f, "two calls share the id {call_id}")
+            }
+            HistoryError::CallUnanswered { call_id } => {
+                write!(f, "{call_id} was called and never answered")
+            }
+            HistoryError::CallFromNonAssistant { call_id } => {
+                write!(
+                    f,
+                    "{call_id} was called by a turn the assistant did not author"
+                )
+            }
+            HistoryError::ResultFromAssistant { call_id } => {
+                write!(f, "the assistant cannot answer its own call {call_id}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for HistoryError {}
+
+/// A message history that every wire format can express.
+///
+/// Holds the three relational invariants the providers agree on — a result
+/// answers a call that came earlier, exactly once, and no call is left
+/// hanging — and nothing else. Rules only one provider has (Anthropic's
+/// grouping and block ordering, chat-completions' encodability) stay in the
+/// wire formats, which keep refusing defensively: the two disagree about what
+/// is valid, so a check here would have to pick one and be wrong for the
+/// other.
+///
+/// It exists as a type rather than a convention because the invalid history
+/// is not hypothetical. A session killed mid-turn resumes holding a call with
+/// no result; with a bare `Vec` the loop can build that and learn about it
+/// from a provider's 400, and with this it has to decide first — which is
+/// what [`crate::generator::history`] does.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "Vec<Message>", into = "Vec<Message>")]
+pub struct Conversation(Vec<Message>);
+
+impl Conversation {
+    /// Check `messages` and take ownership of them, or say what is wrong.
+    pub fn new(messages: Vec<Message>) -> Result<Self, HistoryError> {
+        // `false` until the call has been answered. A `BTreeMap` and not a
+        // `HashMap`: the unanswered-call error names *a* call, and which one
+        // it names should not depend on hash order.
+        let mut calls: BTreeMap<&str, bool> = BTreeMap::new();
+        let blocks = messages.iter().flat_map(|message| {
+            message
+                .content
+                .iter()
+                .map(move |block| (message.role, block))
+        });
+        for (role, block) in blocks {
+            match block {
+                ContentBlock::Text { .. } => {}
+                ContentBlock::ToolUse { call_id, .. } => {
+                    if role != Role::Assistant {
+                        return Err(HistoryError::CallFromNonAssistant {
+                            call_id: call_id.clone(),
+                        });
+                    }
+                    if calls.insert(call_id, false).is_some() {
+                        return Err(HistoryError::DuplicateCallId {
+                            call_id: call_id.clone(),
+                        });
+                    }
+                }
+                ContentBlock::ToolResult { call_id, .. } if role == Role::Assistant => {
+                    return Err(HistoryError::ResultFromAssistant {
+                        call_id: call_id.clone(),
+                    });
+                }
+                ContentBlock::ToolResult { call_id, .. } => match calls.get_mut(call_id.as_str()) {
+                    // Walking in order is what makes this also catch a result
+                    // that precedes its call: the call is not in the map yet.
+                    None => {
+                        return Err(HistoryError::ResultWithoutCall {
+                            call_id: call_id.clone(),
+                        });
+                    }
+                    Some(true) => {
+                        return Err(HistoryError::CallAnsweredTwice {
+                            call_id: call_id.clone(),
+                        });
+                    }
+                    Some(answered) => *answered = true,
+                },
+            }
+        }
+        if let Some((call_id, _)) = calls.iter().find(|(_, answered)| !**answered) {
+            return Err(HistoryError::CallUnanswered {
+                call_id: (*call_id).to_string(),
+            });
+        }
+        Ok(Conversation(messages))
+    }
+
+    /// The messages, in order.
+    pub fn messages(&self) -> &[Message] {
+        &self.0
+    }
+}
+
+impl TryFrom<Vec<Message>> for Conversation {
+    type Error = HistoryError;
+
+    fn try_from(messages: Vec<Message>) -> Result<Self, Self::Error> {
+        Conversation::new(messages)
+    }
+}
+
+impl From<Conversation> for Vec<Message> {
+    fn from(conversation: Conversation) -> Self {
+        conversation.0
+    }
 }
 
 /// A tool the model may call: name, description and JSON Schema for its
@@ -99,7 +303,10 @@ pub struct GenRequest {
     /// `"claude-opus-5"`). `ego-core` treats this as an opaque string; the
     /// catalogue and provider table live in `ego-ai` (ARCH §3.1).
     pub model: String,
-    pub messages: Vec<Message>,
+    /// The history, already checked. A `Conversation` and not a
+    /// `Vec<Message>` so that an unvalidated history cannot reach a
+    /// [`Generator`](super::port::Generator) at all.
+    pub messages: Conversation,
     pub tools: Vec<ToolDescriptor>,
     pub thinking: ThinkingLevel,
     pub max_output_tokens: Option<u64>,
