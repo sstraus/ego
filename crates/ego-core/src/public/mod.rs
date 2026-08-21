@@ -427,10 +427,29 @@ pub fn project_public(ev: &DomainEvent) -> Option<PublicEvent> {
             name: Some(tool.clone()),
             text: Some(escalation.to_string()),
         }),
-        // `by` is likewise not projected. Which rule or which layer let a
-        // call through is exactly the internal detail `PublicEvent` filters:
-        // it names config layers and rule IDs, and the public schema
-        // describes what the agent did, not how this build is configured.
+        // `by` is likewise not projected, and this module's own governing
+        // line is the whole reason: *a new internal event never becomes
+        // public automatically*. Nothing reads an authority out of
+        // `PublicEvent`, and `Verdict`'s rule applies unchanged — a field
+        // whose only reader is unbuilt is a field nothing can be wrong about,
+        // so it arrives with its reader.
+        //
+        // `2026-08-21-a-permit-nobody-can-widen.md` §7 expected the opposite
+        // and priced a `PUBLIC_EVENT_VERSION` bump for it. What was wrong was
+        // the assumed consumer, not the projection rule: 5→6 is paid by every
+        // ACP host and every `--output jsonl` reader, for a field none of them
+        // asks for.
+        //
+        // **Not withheld for privacy, and the difference matters to whoever
+        // reads this next.** `Source` is a six-value layer name
+        // (`config/source.rs`) and `RuleId` is a truncated hash over the
+        // canonical AST (`rule/id.rs`, "over the AST and never the input
+        // text"), which discloses no pattern and is already the handle an
+        // operator sees in a refusal. This projection publishes
+        // `InstructionDescriptor::path`, an absolute path, so it plainly does
+        // not withhold configuration. Reasoning from privacy here would send
+        // the next reader to strip a `RuleId` out of a refusal, where it is
+        // the one thing that tells them what to revoke.
         EventKind::PermissionDecided { allowed, .. } => Some(PublicEvent::ItemCompleted {
             turn,
             item: item?,
