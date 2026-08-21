@@ -14,7 +14,7 @@ use ego_core::event::id::{Seq, SessionId};
 use ego_core::event::time::Timestamp;
 use ego_core::state::SessionState;
 use ego_core::store::codec::{
-    CodecError, HeaderV1, StoreLine, decode_line, encode_header, encode_record,
+    CODEC_VERSION, CodecError, HeaderV1, StoreLine, decode_line, encode_header, encode_record,
 };
 use ego_core::store::session_store::{SessionMeta, SessionStore, StoreError};
 use futures::stream::{self, BoxStream};
@@ -48,44 +48,69 @@ impl Repair {
     }
 }
 
-/// The end of the last *complete, valid* line in `bytes`, plus how many
-/// lines were rejected from there on.
+/// Check the log's header line and return the offset just past it.
+///
+/// **Separate from the tail scan below, and the separation is the point.**
+/// The header is not a candidate for repair. A prefix scan that rejects the
+/// line at index 0 has established a valid prefix of zero bytes, and a
+/// caller that then truncates to that length deletes the entire session —
+/// which is what this store did, reporting it as an ordinary `Repair`. See
+/// `docs/decisions/2026-08-21-a-header-the-repair-must-not-delete.md` §1.
+///
+/// So the header is answered here, before anything is allowed to remove a
+/// byte. `read` and `recover` both come through this function so the two
+/// cannot drift on what a readable header is.
+///
+/// `Ok(None)` is the one case where damaged-header bytes may still be thrown
+/// away: no newline anywhere means the file is a single unterminated line, so
+/// by this store's own durability rule there is no complete header **and no
+/// record can exist under it** — nothing to lose. That is an interrupted
+/// first append, the ordinary way a session dies before it begins, and
+/// refusing it would leave a brand-new session permanently unopenable over
+/// bytes that never held an event. Every other damaged header has a
+/// terminated line, and therefore may have records beneath it.
+fn header_end(bytes: &[u8]) -> Result<Option<usize>, StoreError> {
+    let Some(offset) = bytes.iter().position(|&b| b == b'\n') else {
+        return Ok(None);
+    };
+    match decode_line(&bytes[..offset]) {
+        Ok(StoreLine::Header(header)) if header.v == CODEC_VERSION => Ok(Some(offset + 1)),
+        // ADR §3. Nothing compared `v` before, so a log written by a later
+        // build was read as though it were this version's.
+        Ok(StoreLine::Header(header)) => Err(StoreError::UnsupportedLog { found: header.v }),
+        Ok(StoreLine::Record(_) | StoreLine::Unknown(_)) => Err(StoreError::MissingHeader),
+        Err(e) => Err(StoreError::UnreadableHeader {
+            reason: e.to_string(),
+        }),
+    }
+}
+
+/// The end of the last *complete, valid* record line in `bytes`, plus how
+/// many lines were rejected from there on. `start` is [`header_end`]'s
+/// offset: the header is already validated and is never a repair candidate.
 ///
 /// A line counts as durable only if it is terminated by a newline: a final
 /// line without one is by definition a half-finished append, which is the
 /// single most likely crash artefact for an append-only log. Beyond that,
-/// every line must decode — checksum included — and must be the shape its
-/// position demands (a header first, records after).
+/// every line must decode — checksum included — and must be a record.
 ///
 /// The scan stops at the *first* rejected line rather than skipping it and
 /// resuming, and everything after it is dropped too. That is deliberate: a
 /// gap in an append-only log means the byte stream desynchronised, so
 /// "valid" lines after the gap are not trustworthy neighbours — they are
 /// bytes that happened to parse.
-fn valid_prefix(bytes: &[u8]) -> (usize, usize) {
-    let mut end = 0usize;
-    let mut index = 0usize;
+fn valid_prefix(bytes: &[u8], start: usize) -> (usize, usize) {
+    let mut end = start;
 
     while end < bytes.len() {
         let Some(offset) = bytes[end..].iter().position(|&b| b == b'\n') else {
             break; // torn final line: no terminating newline
         };
-        let line = &bytes[end..end + offset];
-        let decoded = match decode_line(line) {
-            Ok(decoded) => decoded,
-            Err(_) => break,
-        };
-        let shape_ok = match (index, &decoded) {
-            (0, StoreLine::Header(_)) => true,
-            (0, _) => false,
-            (_, StoreLine::Record(_)) => true,
-            (_, _) => false,
-        };
-        if !shape_ok {
-            break;
+        match decode_line(&bytes[end..end + offset]) {
+            Ok(StoreLine::Record(_)) => {}
+            _ => break,
         }
         end += offset + 1;
-        index += 1;
     }
 
     // Count what is being discarded, in lines rather than just bytes, so a
@@ -361,7 +386,14 @@ impl JsonlStore {
             return Ok(repair);
         };
 
-        let (valid_len, dropped_lines) = valid_prefix(&bytes);
+        // Before any truncation, and it must stay before: this is the one
+        // question whose wrong answer costs the whole log rather than a torn
+        // tail. An error here leaves the bytes exactly as they were found.
+        // `None` is the interrupted first append — see `header_end` — where
+        // truncating to nothing is right because there is nothing under it.
+        let start = header_end(&bytes)?.unwrap_or(0);
+
+        let (valid_len, dropped_lines) = valid_prefix(&bytes, start);
         if valid_len < bytes.len() {
             repair.truncated_bytes = (bytes.len() - valid_len) as u64;
             repair.dropped_lines = dropped_lines;
@@ -418,8 +450,17 @@ impl JsonlStore {
             model: previous.as_ref().and_then(|m| m.model.clone()),
             // `created` comes from the log header rather than the old
             // manifest: the header is written once, at session creation, and
-            // is checksum-protected, so it is the better authority for a
-            // value that must never drift.
+            // never rewritten, whereas this manifest is a derived cache that
+            // a rebuild can lose — so the header is the better authority for
+            // a value that must never drift.
+            //
+            // This comment used to add "and is checksum-protected". It is
+            // not: `encode_header` is a plain `serde_json::to_vec`
+            // (`codec.rs:186-190`) and the checksum covers `StoreRecord`
+            // only, which makes the header the *least* protected line in the
+            // file. The conclusion survives on the write-once clause alone;
+            // the deleted clause was never checked. ADR §2 of
+            // `docs/decisions/2026-08-21-a-header-the-repair-must-not-delete.md`.
             created,
             updated: last_ts,
             title: previous.as_ref().and_then(|m| m.title.clone()),
@@ -493,17 +534,16 @@ impl SessionStore for JsonlStore {
             .io
             .read(&self.log_path(id))?
             .ok_or(StoreError::NotFound)?;
-        let mut lines = split_lines(&bytes).into_iter();
-
-        match lines.next() {
-            None => return Err(StoreError::MissingHeader),
-            Some(header_line) => match decode_line(header_line)? {
-                StoreLine::Header(_) => {}
-                StoreLine::Record(_) | StoreLine::Unknown(_) => {
-                    return Err(StoreError::MissingHeader);
-                }
-            },
+        // The same check `recover` makes, through the same function, so a
+        // header one of them accepts cannot be one the other rejects. An
+        // unterminated first line is `None` there because it costs nothing to
+        // discard; here it is simply not a header, which is what it always
+        // was to a reader.
+        if header_end(&bytes)?.is_none() {
+            return Err(StoreError::MissingHeader);
         }
+        let mut lines = split_lines(&bytes).into_iter();
+        lines.next();
 
         // Read eagerly into an owned `Vec` rather than streaming
         // incrementally off disk: this store already reads the whole log

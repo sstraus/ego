@@ -62,6 +62,22 @@ pub enum StoreError {
     /// The log's first line is not a header record. A defect the store
     /// must report, not paper over — see `HeaderV1` in `crate::store::codec`.
     MissingHeader,
+    /// The log's first line is a header and will not decode as one.
+    ///
+    /// Distinct from [`MissingHeader`](StoreError::MissingHeader) because the
+    /// remedy is different — the header is *there* and damaged, so the
+    /// records under it are probably fine — and because tail repair must
+    /// treat the two identically only in one respect: neither may cost a
+    /// byte. See `docs/decisions/2026-08-21-a-header-the-repair-must-not-delete.md`
+    /// §1.
+    UnreadableHeader { reason: String },
+    /// The log's header names a codec version this build does not implement.
+    ///
+    /// Refused rather than read as though it were ours: nothing compared `v`
+    /// before, so a log from a future build decoded as the current version
+    /// and its records were interpreted under rules that were never used to
+    /// write them (ADR §3).
+    UnsupportedLog { found: u32 },
     /// `read` was asked for a session with no durable log.
     NotFound,
     /// This store serves one session and was asked about another.
@@ -83,6 +99,13 @@ impl std::fmt::Display for StoreError {
             StoreError::Codec(e) => write!(f, "session store codec error: {e}"),
             StoreError::Manifest(e) => write!(f, "session manifest error: {e}"),
             StoreError::MissingHeader => write!(f, "session log is missing its header record"),
+            StoreError::UnreadableHeader { reason } => {
+                write!(f, "session log's header record cannot be read: {reason}")
+            }
+            StoreError::UnsupportedLog { found } => write!(
+                f,
+                "session log was written at codec version {found}, which this build does not read"
+            ),
             StoreError::NotFound => write!(f, "session not found"),
             StoreError::WrongSession { expected, asked } => {
                 write!(f, "this store serves session {expected:?}, not {asked:?}")

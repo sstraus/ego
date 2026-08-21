@@ -291,6 +291,97 @@ mod faults {
         assert_eq!(fx.read_all().unwrap().len(), healthy_events);
     }
 
+    /// **Kill point: the header line itself is damaged.** Every test above
+    /// damages the *tail*, which is what a crash mid-append leaves. This one
+    /// damages the first line, and the difference is total: `valid_prefix`
+    /// requires a decodable header at index 0, so a header that will not
+    /// decode makes the valid prefix **zero bytes**, and `recover` truncates
+    /// the file to nothing — every record in the session, however healthy,
+    /// however long ago it was fsynced.
+    ///
+    /// Tail repair exists to salvage a log. It must not be the thing that
+    /// destroys one. A first line that is not a header this build understands
+    /// is not a torn append: it is a log this build cannot speak for, and the
+    /// answer is to refuse it and leave the bytes alone so a later build, or
+    /// a human, still has something to read.
+    ///
+    /// This is also the gate on ever adding a field to `HeaderV1`. Without
+    /// it, the commit that does so deletes every session written before it,
+    /// on first open — `open_writer` calls `recover` before `resume`.
+    #[test]
+    fn faults_a_header_this_build_cannot_read_is_refused_not_truncated() {
+        let fx = healthy_session();
+        let before = fx.log_bytes();
+        let healthy_events = fx.read_all().unwrap().len();
+        assert!(
+            healthy_events > 0,
+            "precondition: there must be records to lose"
+        );
+
+        // Still recognisable as a header — it carries `v` — and still
+        // undecodable, because `session` is not an id. A flipped byte in the
+        // first line produces exactly this, and so does any future build
+        // whose header requires a field this one does not write.
+        let tail = before
+            .iter()
+            .position(|&b| b == b'\n')
+            .map(|at| before[at..].to_vec())
+            .unwrap();
+        let mut damaged = br#"{"v":4,"session":"not-an-id","created":1}"#.to_vec();
+        damaged.extend_from_slice(&tail);
+        std::fs::write(fx.log_path(), &damaged).unwrap();
+
+        let outcome = fx.store.recover(&fx.id);
+
+        assert!(
+            outcome.is_err(),
+            "an unreadable header must be reported, not repaired: {outcome:?}"
+        );
+        assert_eq!(
+            fx.log_bytes(),
+            damaged,
+            "not one byte may be removed: the records after a bad header are \
+             the whole session, and this build cannot say they are wrong"
+        );
+    }
+
+    /// **Kill point: a log from a build that is not this one.** `v` was
+    /// written into every header and compared nowhere, so a log written by a
+    /// later codec was read as though it were this version's — its records
+    /// interpreted under rules that were never used to write them.
+    ///
+    /// Refused, and refused without a write, for the same reason as above:
+    /// this build cannot say those bytes are wrong, only that it cannot read
+    /// them. Note that serde ignores unknown fields, so a *future* header is
+    /// undetectable by decoding alone — only `v` distinguishes it, which is
+    /// exactly why it has to be looked at.
+    #[test]
+    fn faults_a_log_from_a_later_codec_version_is_refused_not_truncated() {
+        let fx = healthy_session();
+        let before = fx.log_bytes();
+
+        let tail = before
+            .iter()
+            .position(|&b| b == b'\n')
+            .map(|at| before[at..].to_vec())
+            .unwrap();
+        // A perfectly well-formed header, one version ahead, carrying a field
+        // this build has never heard of — which decodes fine and must still
+        // be refused.
+        let session = serde_json::to_string(&fx.id).unwrap();
+        let mut future =
+            format!(r#"{{"v":5,"session":{session},"created":1,"workspace_root":"/ws"}}"#)
+                .into_bytes();
+        future.extend_from_slice(&tail);
+        std::fs::write(fx.log_path(), &future).unwrap();
+
+        match fx.store.recover(&fx.id) {
+            Err(StoreError::UnsupportedLog { found }) => assert_eq!(found, 5),
+            other => panic!("a later codec version must be named, not repaired: {other:?}"),
+        }
+        assert_eq!(fx.log_bytes(), future, "not one byte may be removed");
+    }
+
     /// **Kill point: torn manifest tmp.** A crash between
     /// `replace_atomic`'s write and its rename leaves a scratch file.
     /// Recovery must remove it — and must not mistake it for the manifest.
