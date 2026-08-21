@@ -19,13 +19,25 @@
 //!   to `prompt + completion` with nothing counted twice. Subtracting only
 //!   `cached_tokens` — the obvious reading, and the one the per-request schema
 //!   alone would leave you with — would double-count every cache-write token.
-//! - **There is no reasoning text on this wire.** The streaming delta schema
+//! - **There is no reasoning text in *OpenAI's* schema.** The streaming delta
 //!   has `content`, `refusal`, `tool_calls`, `role` and `function_call`, and
 //!   nothing else; reasoning appears only as a *count*
-//!   (`completion_tokens_details.reasoning_tokens`). So this format never
-//!   emits [`AiEvent::ReasoningDelta`]. Providers that extend the shape with
-//!   `reasoning_content` are a different row's problem, not a field this one
-//!   may guess at.
+//!   (`completion_tokens_details.reasoning_tokens`).
+//!
+//!   But this format serves a family, and other members of it do stream the
+//!   text — as `reasoning` or as `reasoning_content`, in the same `delta`
+//!   object. Those are not a different row's problem: `ARCHITECTURE.md`'s
+//!   wire decision §4 rules that an extension field is decoded
+//!   **opportunistically and uniformly for every member**, because the field
+//!   *name* is the contract and the vendor is not. A member that never sends
+//!   it simply leaves the field absent, so there is nothing to branch on and
+//!   no provider identity to consult.
+//!
+//!   `Delta` does not decode either name yet, so this format still emits no
+//!   [`AiEvent::ReasoningDelta`] and silently drops text a provider sent. That
+//!   is a **recorded gap** (`POTENTIALS.md` P24), not a policy — an earlier
+//!   version of this comment argued the drop was correct, which `b00822e`
+//!   reversed.
 //! - **`finish_reason` has five spellings**, and one of them —
 //!   `content_filter` — has no [`StopReason`] to land on. It is reported as
 //!   [`StopReason::Error`] with a named [`AiEvent::Error`] beside it rather
