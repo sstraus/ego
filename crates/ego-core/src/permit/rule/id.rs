@@ -3,6 +3,7 @@
 //!
 //! `docs/decisions/2026-08-21-a-rule-that-means-exactly-one-thing.md` §8.
 
+use sha2::{Digest, Sha256};
 use std::fmt;
 use std::str::FromStr;
 
@@ -46,11 +47,15 @@ impl RuleId {
     ///
     /// Over the AST and never the input text: that is what makes
     /// `read( src/** )` and `read(src/**)` one ID.
+    /// `sha256` and not a second hash crate: nothing is authorised *by* an ID
+    /// (see [`DIGEST_CHARS`]), so the properties that would justify one buy
+    /// nothing here, and `sha2` is already a dependency for instruction
+    /// digests.
     pub fn of(canonical: &[u8]) -> Self {
-        let hash = blake3::hash(canonical);
+        let digest = Sha256::digest(canonical);
         Self {
             generation: GRAMMAR_VERSION,
-            digest: base32(hash.as_bytes()),
+            digest: base32(&digest),
         }
     }
 
@@ -130,7 +135,7 @@ fn base32(digest: &[u8]) -> String {
 
     while out.len() < DIGEST_CHARS {
         if held < 5 {
-            let next = *bytes.next().expect("blake3 supplies 32 bytes for 60 bits");
+            let next = *bytes.next().expect("sha256 supplies 32 bytes for 60 bits");
             bits = (bits << 8) | u32::from(next);
             held += 8;
         }

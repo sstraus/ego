@@ -10,11 +10,6 @@ publish.workspace = true
 # reqwest / rusqlite / rmcp are forbidden here — enforced by this manifest,
 # not by discipline.
 [dependencies]
-# Rule IDs (docs/decisions/2026-08-21-a-rule-that-means-exactly-one-thing.md
-# §8). Separate from the sha2 above because an ID is a durable identifier an
-# operator stores, not a digest of content: what it needs is speed and a fixed
-# definition, and the ADR names this one. Pure computation.
-blake3 = "1"
 futures = "0.3.34"
 # `net(...)` host normalisation to A-labels (same ADR, §5): an ID that differed
 # by how an editor encoded a character would not be revocable from a config
@@ -26,6 +21,10 @@ serde = { version = "1.0.229", features = ["derive"] }
 # may-hand-a-model.md §7). Deliberately not the store's xxhash64: that detects
 # corruption, this has to hold up against substituted content in an export.
 # Pure computation — no sockets, no files — so it fits this manifest's rule.
+#
+# Also rule IDs (2026-08-21-a-rule-that-means-exactly-one-thing.md §8), which
+# is one crate and not two on purpose: nothing is authorised *by* an ID, so a
+# second hash is surface with no payer.
 sha2 = "0.10.9"
 # The store codec builds the durable JSONL line bytes itself, in library code,
 # so serde_json is a normal dependency rather than a dev-dependency. It is a
