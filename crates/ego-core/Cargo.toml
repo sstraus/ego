@@ -10,7 +10,16 @@ publish.workspace = true
 # reqwest / rusqlite / rmcp are forbidden here — enforced by this manifest,
 # not by discipline.
 [dependencies]
+# Rule IDs (docs/decisions/2026-08-21-a-rule-that-means-exactly-one-thing.md
+# §8). Separate from the sha2 above because an ID is a durable identifier an
+# operator stores, not a digest of content: what it needs is speed and a fixed
+# definition, and the ADR names this one. Pure computation.
+blake3 = "1"
 futures = "0.3.34"
+# `net(...)` host normalisation to A-labels (same ADR, §5): an ID that differed
+# by how an editor encoded a character would not be revocable from a config
+# file written on another machine. Pure computation.
+idna = "1"
 schemars = "1.2.2"
 serde = { version = "1.0.229", features = ["derive"] }
 # Instruction-file digests (docs/decisions/2026-08-21-instructions-a-workspace-

@@ -9,6 +9,7 @@ mod fs;
 mod grant;
 mod path;
 mod prepared_call;
+pub mod rule;
 mod scan;
 mod scope;
 mod tool;
