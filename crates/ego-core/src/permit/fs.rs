@@ -29,6 +29,15 @@ pub enum FsError {
     NotAFile {
         path: CanonPath,
     },
+    /// A traversal was rooted at something that is not a directory.
+    ///
+    /// The mirror of [`FsError::NotAFile`], and the two are not
+    /// interchangeable: one says "you asked to read a directory", the other
+    /// "you asked to walk a file". A model told the wrong one goes looking in
+    /// the wrong place.
+    NotADirectory {
+        path: CanonPath,
+    },
     /// Too many symlinks were chased. A loop, or a chain deep enough to be
     /// indistinguishable from one.
     Loop {
@@ -48,6 +57,7 @@ impl FsError {
         match self {
             FsError::NotFound { path }
             | FsError::NotAFile { path }
+            | FsError::NotADirectory { path }
             | FsError::Loop { path }
             | FsError::Io { path, .. } => path,
         }
@@ -59,6 +69,7 @@ impl fmt::Display for FsError {
         match self {
             FsError::NotFound { path } => write!(f, "{path}: no such file or directory"),
             FsError::NotAFile { path } => write!(f, "{path}: not a file"),
+            FsError::NotADirectory { path } => write!(f, "{path}: not a directory"),
             FsError::Loop { path } => write!(f, "{path}: too many levels of symbolic links"),
             FsError::Io { path, message } => write!(f, "{path}: {message}"),
         }

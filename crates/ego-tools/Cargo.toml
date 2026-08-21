@@ -10,6 +10,13 @@ publish.workspace = true
 ego-core.workspace = true
 fd-lock = "4.0.4"
 futures = "0.3.34"
+# Not the `0.4.20` of `docs/04-crates.md`: that release raised its own floor
+# to Rust 1.88 and this workspace declares 1.86. Left as `0.4` so the
+# MSRV-aware resolver picks the newest release the declared floor allows,
+# rather than pinning us past our own gate.
+globset = "0.4"
+regex = "1.12"
+schemars = "1.2.2"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 tracing = "0.1.44"
