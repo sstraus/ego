@@ -24,6 +24,7 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 
 use super::resolve::Posture;
+use crate::public::{InstructionDescriptor, InstructionSource};
 
 /// The default file every ancestor directory is checked for.
 pub const INSTRUCTIONS_FILE: &str = "AGENTS.md";
@@ -330,6 +331,51 @@ pub fn load(
     }
 
     Ok(set)
+}
+
+/// What a run loaded, in the terms `PublicEvent::SessionStarted` publishes:
+/// path, digest, size, scope and how it was chosen — and no text.
+///
+/// Here rather than in the binary because the CLI is not the only harness
+/// that opens a session: an ACP host is the second, and two derivations of
+/// `scope` would be two answers to the same question. Pure, like everything
+/// else in this module — `root` is used for path arithmetic and never read.
+///
+/// `scope` is the workspace-relative directory the file governs, `"."` at the
+/// root, so the root→cwd ordering is legible without re-deriving it from the
+/// paths. A file outside `root` — which only an explicitly named one can be —
+/// has no relative scope and reports its own directory instead.
+pub fn descriptors(
+    set: &InstructionSet,
+    root: &Path,
+    selection: &Selection,
+) -> Vec<InstructionDescriptor> {
+    let source = match selection {
+        Selection::Explicit(_) => InstructionSource::Explicit,
+        Selection::Ambient | Selection::Disabled => InstructionSource::Ambient,
+    };
+    set.loaded
+        .iter()
+        .map(|instruction| InstructionDescriptor {
+            path: instruction.path.display().to_string(),
+            sha256: instruction.digest.clone(),
+            bytes: instruction.bytes,
+            scope: scope_of(&instruction.path, root),
+            source,
+        })
+        .collect()
+}
+
+/// The directory `path`'s file governs, relative to `root`.
+fn scope_of(path: &Path, root: &Path) -> String {
+    let dir = path.parent().unwrap_or(path);
+    match dir.strip_prefix(root) {
+        // The root's own file governs the whole workspace, and `strip_prefix`
+        // leaves an empty path for it. `"."` is that directory's name.
+        Ok(relative) if relative.as_os_str().is_empty() => ".".to_string(),
+        Ok(relative) => relative.display().to_string(),
+        Err(_) => dir.display().to_string(),
+    }
 }
 
 /// Lowercase hex SHA-256.

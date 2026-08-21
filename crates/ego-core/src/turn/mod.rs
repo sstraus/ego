@@ -19,14 +19,16 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use futures::StreamExt;
 
 use crate::budget::{BudgetGate, PricingQuote};
-use crate::event::domain::{CancelCause, EventKind, ExitReason};
+use crate::event::domain::{CancelCause, EventKind, ExitReason, OccupancyProvenance};
 use crate::event::id::{EventId, GenerationId, ItemId, Producer, SessionId, TurnId};
 use crate::event::time::Clock;
-use crate::generator::attempt::{AttemptStream, GenerationAttempt};
+use crate::generator::attempt::{AttemptStream, GenerationAttempt, UsageReport};
 use crate::generator::capabilities::ModelCapabilities;
 use crate::generator::history::conversation_from;
 use crate::generator::port::{AiEvent, Generator};
-use crate::generator::types::{GenRequest, StopReason, ThinkingLevel};
+use crate::generator::types::{
+    Conversation, GenRequest, Message, Role, StopReason, ThinkingLevel,
+};
 use crate::permit::PolicyDenied;
 use crate::public::PublicEvent;
 use crate::sink::EventSink;
@@ -103,6 +105,15 @@ impl CancelToken {
 #[derive(Debug, Clone)]
 pub struct TurnConfig {
     pub model: String,
+    /// The system prompt, prepended to every generation's conversation.
+    ///
+    /// Here and not in the log, because it is not something that *happened*:
+    /// it is a setting the whole turn is generated under, and writing it into
+    /// the history as a message would make a resumed session rebuild it as if
+    /// someone had said it. Assembled by the harness — instructions today
+    /// (`docs/decisions/2026-08-21-a-binary-that-produces-the-exit-code.md`
+    /// §4), `--system`/`--append-system` when they ship.
+    pub system: Option<String>,
     pub thinking: ThinkingLevel,
     pub max_output_tokens: Option<u64>,
     /// Whether the model may ask for several tools at once. The loop runs
@@ -369,7 +380,8 @@ impl<'a> TurnLoop<'a> {
 
     /// One generation: reserve, stream it into the log, settle.
     async fn generate(&mut self, turn: TurnId) -> Result<Generated, StoreError> {
-        let (conversation, repairs) = conversation_from(self.journal.state());
+        let (history, repairs) = conversation_from(self.journal.state());
+        let conversation = self.with_system(history);
         if !repairs.is_empty() {
             // Not a durable event: whether a repair becomes one is
             // `POTENTIALS.md` P2, and it is waiting on a decision rather than
@@ -500,6 +512,29 @@ impl<'a> TurnLoop<'a> {
             },
         )?;
 
+        // `CLI.md` §4.1's `context`, and the only place it can come from: a
+        // generation boundary is where occupancy is observable, and the loop
+        // is the only thing that sees one. The figure is the provider's own
+        // report for the generation that just finished — the prompt it
+        // counted plus what it produced — which is what
+        // `OccupancyProvenance::GenerationBoundary` names, proxy and all.
+        //
+        // An attempt that reported nothing appends nothing. `ContextWindow`
+        // holds an `Option` precisely so that "nobody has told us" is not
+        // spelled `0`, and a fabricated zero would be indistinguishable from
+        // an empty context.
+        if let UsageReport::Reported(usage) = settlement.outcome.usage() {
+            self.journal.append(
+                turn,
+                None,
+                None,
+                EventKind::ContextWindowUpdated {
+                    used_tokens: usage.total_tokens(),
+                    provenance: OccupancyProvenance::GenerationBoundary,
+                },
+            )?;
+        }
+
         if drained.cancelled {
             return Ok(Generated::Ended(ExitReason::Cancelled(
                 self.cancel.cause().unwrap_or(CancelCause::User),
@@ -509,6 +544,24 @@ impl<'a> TurnLoop<'a> {
             reason: settlement.outcome.stop(),
             pending: drained.pending,
         })
+    }
+
+    /// The rebuilt history with this turn's system prompt in front of it.
+    ///
+    /// Rebuilt through [`Conversation::new`] rather than pushed into: a
+    /// `Conversation` is a *checked* history, and there is deliberately no way
+    /// to add a message to one without checking it again. The check cannot
+    /// fail here — a block of text makes no tool call and answers none, so a
+    /// history that validated a moment ago still does — which is what the
+    /// `expect` says.
+    fn with_system(&self, history: Conversation) -> Conversation {
+        let Some(system) = self.config.system.as_deref() else {
+            return history;
+        };
+        let mut messages: Vec<Message> = history.into();
+        messages.insert(0, Message::text(Role::System, system));
+        Conversation::new(messages)
+            .expect("a text message adds no call and answers none, so a valid history stays valid")
     }
 
     /// Turn one generation's stream into log entries.

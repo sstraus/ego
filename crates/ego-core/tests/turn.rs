@@ -251,6 +251,7 @@ mod turn {
             thinking: ThinkingLevel::Off,
             max_output_tokens: Some(1_024),
             parallel_tool_calls: false,
+            system: None,
         }
     }
 
@@ -380,6 +381,10 @@ mod turn {
                 "usage_updated",
                 "assistant_message",
                 "attempt_settled",
+                // The loop is the only place that sees a generation boundary,
+                // so it is the only place that can say how full the context
+                // was at one.
+                "context_window_updated",
                 "turn_completed",
             ]
         );

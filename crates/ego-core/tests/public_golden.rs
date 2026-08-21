@@ -10,7 +10,10 @@ use ego_core::cost::{Amount, CostDelta, CurrencyCode, Money, PricingRevision, Un
 use ego_core::event::domain::{DomainEvent, Envelope, EventKind, ExitReason, OccupancyProvenance};
 use ego_core::event::id::{EventId, ItemId, Producer, Seq, SessionId, TurnId};
 use ego_core::event::time::Timestamp;
-use ego_core::public::{ItemKind, PUBLIC_EVENT_VERSION, PublicEvent, project_public};
+use ego_core::public::{
+    InstructionDescriptor, InstructionSource, ItemKind, PUBLIC_EVENT_VERSION, PublicEvent,
+    project_public,
+};
 use ego_core::state::Usage;
 
 mod common;
@@ -329,12 +332,13 @@ mod public_golden {
         }
     }
 
-    /// `SessionStarted` is the header event: `v:1`, a `capabilities` array,
-    /// and `mcp_errors`/`hook_errors` omitted entirely (not emitted as
-    /// `[]`) when there's nothing to report. It has no `DomainEvent`
-    /// counterpart — `project_public` never returns it, the harness that
-    /// drives a session constructs it directly — so this golden proves the
-    /// DTO's own shape and serialisation rather than a projection.
+    /// `SessionStarted` is the header event: the schema version, a
+    /// `capabilities` array, and `mcp_errors`/`hook_errors`/`instructions`
+    /// omitted entirely (not emitted as `[]`) when there's nothing to report.
+    /// It has no `DomainEvent` counterpart — `project_public` never returns
+    /// it, the harness that drives a session constructs it directly — so this
+    /// golden proves the DTO's own shape and serialisation rather than a
+    /// projection.
     #[test]
     fn session_started_header_is_versioned_and_omits_empty_error_arrays() {
         let session: SessionId = id(SESSION);
@@ -348,6 +352,7 @@ mod public_golden {
             ],
             mcp_errors: Vec::new(),
             hook_errors: Vec::new(),
+            instructions: Vec::new(),
         };
         let actual = serde_json::to_string(&event).unwrap();
         assert_eq!(
@@ -369,11 +374,51 @@ mod public_golden {
             capabilities: vec!["mcp".to_string()],
             mcp_errors: vec!["server 'foo' failed to start".to_string()],
             hook_errors: vec!["hook 'pre-commit' malformed".to_string()],
+            instructions: Vec::new(),
         };
         let actual = serde_json::to_string(&event).unwrap();
         assert_eq!(
             actual,
             include_str!("golden/session_started_with_errors.json").trim_end()
+        );
+    }
+
+    /// The header carries what the workspace handed the model — path, digest,
+    /// size, scope and how it was chosen — and **no text**. The golden is the
+    /// enforcement: a field carrying instruction bodies would change these
+    /// bytes, and this is the stream a CI job archives.
+    #[test]
+    fn session_started_describes_its_instructions_and_never_quotes_them() {
+        let session: SessionId = id(SESSION);
+        let event = PublicEvent::SessionStarted {
+            v: PUBLIC_EVENT_VERSION,
+            session,
+            capabilities: vec!["instructions".to_string()],
+            mcp_errors: Vec::new(),
+            hook_errors: Vec::new(),
+            instructions: vec![
+                InstructionDescriptor {
+                    path: "/ws/AGENTS.md".to_string(),
+                    sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                        .to_string(),
+                    bytes: 0,
+                    scope: ".".to_string(),
+                    source: InstructionSource::Ambient,
+                },
+                InstructionDescriptor {
+                    path: "/ws/crates/AGENTS.md".to_string(),
+                    sha256: "8ff9a4b2c1e0d3f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9"
+                        .to_string(),
+                    bytes: 42,
+                    scope: "crates".to_string(),
+                    source: InstructionSource::Ambient,
+                },
+            ],
+        };
+        let actual = serde_json::to_string(&event).unwrap();
+        assert_eq!(
+            actual,
+            include_str!("golden/session_started_with_instructions.json").trim_end()
         );
     }
 

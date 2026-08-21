@@ -848,6 +848,7 @@ mod end_to_end {
             thinking: ThinkingLevel::Off,
             max_output_tokens: Some(1_024),
             parallel_tool_calls: false,
+            system: None,
         }
     }
 }

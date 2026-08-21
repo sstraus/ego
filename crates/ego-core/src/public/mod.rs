@@ -14,7 +14,53 @@ use crate::state::Usage;
 /// The current `PublicEvent` schema version, carried in `SessionStarted`'s
 /// `v` field. `CLI.md` §4.2: "the schema is versioned in the header and
 /// published".
-pub const PUBLIC_EVENT_VERSION: u32 = 3;
+pub const PUBLIC_EVENT_VERSION: u32 = 4;
+
+/// How a run came to load one instruction file.
+///
+/// Two values and not a boolean, because the difference decides what the file
+/// is allowed to be: an ambient `AGENTS.md` is discovered under the trust gate
+/// and refused if it is a symlink, while an explicit one was named by the
+/// person running the command. A consumer reading a descriptor without this
+/// cannot tell the workspace's claim from the user's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InstructionSource {
+    /// Discovered as [`INSTRUCTIONS_FILE`](crate::config::INSTRUCTIONS_FILE)
+    /// somewhere between the workspace root and the working directory.
+    Ambient,
+    /// Named outright, with `--instructions FILE`.
+    Explicit,
+}
+
+/// One instruction file a run loaded, described but **never quoted**.
+///
+/// `docs/08-codex-critique.md` I2 asks for each path, digest and scope to be
+/// recorded in the public start event, and asks for the *text* to stay out of
+/// it. Those are one requirement, not two: the stream this rides is what a CI
+/// job archives, and an `AGENTS.md` is one symlink away from being something
+/// else — which is why `config::Refusal::Symlink` exists at all. A descriptor
+/// proves which file contributed; it does not republish it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstructionDescriptor {
+    /// Where the file was found.
+    pub path: String,
+    /// Lowercase hex SHA-256 of the bytes as read — the digest
+    /// `config::load` already computed, carried rather than recomputed.
+    ///
+    /// It describes the file, not the prompt: the assembler frames what it
+    /// sends, so a digest over the framed text would change with the framing
+    /// and prove nothing about the repository. See
+    /// `docs/decisions/2026-08-21-a-binary-that-produces-the-exit-code.md` §4.
+    pub sha256: String,
+    /// How many bytes that digest covers.
+    pub bytes: u64,
+    /// The workspace-relative directory this file governs, `"."` at the root.
+    /// A file named outside the workspace has no relative scope and reports
+    /// the directory it lives in.
+    pub scope: String,
+    pub source: InstructionSource,
+}
 
 /// The item kinds carried by `item.*` events, per `CLI.md` §4.2.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -63,6 +109,12 @@ pub enum PublicEvent {
         /// Hook load errors. Present only when non-empty, same rule.
         #[serde(skip_serializing_if = "Vec::is_empty", default)]
         hook_errors: Vec<String>,
+        /// What instructions this session was started with, described and
+        /// never quoted. Present only when non-empty, same rule again: a run
+        /// in a bare posture loaded nothing, and an absent key says so
+        /// without a consumer having to compare a length.
+        #[serde(skip_serializing_if = "Vec::is_empty", default)]
+        instructions: Vec<InstructionDescriptor>,
     },
     /// A turn began.
     TurnStarted { turn: TurnId },
