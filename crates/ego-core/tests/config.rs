@@ -215,8 +215,19 @@ fn config_system_deny_ceiling_cannot_be_relaxed_by_flags() {
             .deny
             .contains(&"bash(rm -rf *)".to_string())
     );
+    // And the flags layer's allow is still *there*. Resolution's job is to
+    // guarantee the system deny survives the merge, not to decide which of the
+    // two wins: that is decided per call, against a canonical `PreparedCall`,
+    // by the engine.
+    //
+    // This assertion used to read `!allow.contains(...)`, satisfied by an
+    // `allow.retain(|e| !deny.contains(e))` at the end of `resolve`. It passed
+    // for a reason that does not generalise — the two strings happened to be
+    // equal. Change the allow to `bash(rm -rf /tmp/x)` and the retain kept it,
+    // while the deny it violates sat right beside it in the same `Effective`.
+    // See `docs/decisions/2026-08-21-a-permit-nobody-can-widen.md` §6.
     assert!(
-        !effective
+        effective
             .permissions
             .allow
             .contains(&"bash(rm -rf *)".to_string())
@@ -336,8 +347,10 @@ fn config_system_deny_ceiling_survives_profile_override_that_clears_deny() {
             .deny
             .contains(&"bash(rm -rf *)".to_string())
     );
+    // Carried, not subtracted — see
+    // `config_system_deny_ceiling_cannot_be_relaxed_by_flags`.
     assert!(
-        !effective
+        effective
             .permissions
             .allow
             .contains(&"bash(rm -rf *)".to_string())
@@ -379,8 +392,10 @@ fn config_system_deny_ceiling_unions_across_multiple_system_layers() {
             .deny
             .contains(&"bash(curl *)".to_string())
     );
+    // Carried, not subtracted — see
+    // `config_system_deny_ceiling_cannot_be_relaxed_by_flags`.
     assert!(
-        !effective
+        effective
             .permissions
             .allow
             .contains(&"bash(rm -rf *)".to_string())

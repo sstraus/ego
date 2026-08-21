@@ -145,7 +145,28 @@ pub fn resolve(
             deny.push(entry);
         }
     }
-    allow.retain(|entry| !deny.contains(entry));
+    // Both lists are carried to the engine intact. Precedence between an
+    // allow and a deny is decided **per call**, by matching each against the
+    // canonical `PreparedCall` — never here, by comparing two lists.
+    //
+    // This function used to end with
+    //
+    // ```rust
+    // allow.retain(|entry| !deny.contains(entry));
+    // ```
+    //
+    // which spelled "deny beats allow" as *string equality between two
+    // lists*: `deny = ["exec(git *)"]` left `allow = ["exec(git push)"]`
+    // standing, because the strings differ, and the resolved config then said
+    // the push was allowed. No better comparison rescues it — those two rules
+    // are neither equal nor unrelated, and the only place their relationship
+    // is decidable is against an actual call. See
+    // `docs/decisions/2026-08-21-a-permit-nobody-can-widen.md` §6 and
+    // `docs/decisions/2026-08-21-a-rule-that-means-exactly-one-thing.md` §7.
+    //
+    // The system-deny ceiling above is a *different* job and stays: it
+    // guarantees a `/etc/ego` entry is present in the list at all, which no
+    // per-call evaluation can supply if the merge dropped it.
 
     Ok(Effective {
         model,
