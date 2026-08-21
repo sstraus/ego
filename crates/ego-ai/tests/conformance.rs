@@ -275,7 +275,7 @@ async fn check_3_a_refusal_is_three_events_and_repeats_the_provider() {
             // What the provider said, not a sentence this build invented. The
             // fixture's own prose is the only thing that can prove it was
             // carried rather than replaced.
-            let said = provider_message(&body);
+            let said = provider_message(profile, &body);
             assert!(
                 message.contains(&said),
                 "{} dropped what the provider said for {name}: {message:?} does not contain {said:?}",
@@ -291,18 +291,34 @@ async fn check_3_a_refusal_is_three_events_and_repeats_the_provider() {
     }
 }
 
-/// The sentence inside a provider's error envelope.
+/// The sentence inside a provider's error envelope, wherever that provider
+/// keeps it.
 ///
-/// Every profile this build ships wraps it the same way — `{"error":
-/// {"message": …}}` — which is a fact about these providers and not a
-/// requirement on the next one. A profile that spelled it differently would
-/// fail here, and failing is right: check 3 would then be asserting nothing
-/// about it.
-fn provider_message(body: &str) -> String {
+/// **They do not all keep it in the same place**, and an earlier version of
+/// this helper assumed they did. OpenAI, Ollama and OpenRouter wrap it as
+/// `{"error": {"message": …}}`; xAI publishes no error-body schema at all and
+/// answers with a flatter `{"code": …, "error": "…"}`. Hard-coding the nested
+/// path would have made this check silently unfalsifiable for xAI — it would
+/// panic on the fixture, or worse, be quietly relaxed until it passed.
+///
+/// That the mapping needs no such knowledge is the actual finding. It parses
+/// the family's envelope and **relays a body it could not parse verbatim**, so
+/// xAI's sentence reaches the `AiEvent::Error` inside the raw JSON and check 3
+/// passes. A decode *difference* that the fallback already covers is not a
+/// decode *failure*, and only a failure would cost xAI its membership.
+fn provider_message(profile: &Profile, body: &str) -> String {
     let document: serde_json::Value = serde_json::from_str(body).expect("an error fixture is JSON");
-    document["error"]["message"]
-        .as_str()
-        .expect("an error envelope carries a message")
+    let mut at = &document;
+    for key in profile.error_message_at {
+        at = &at[key];
+    }
+    at.as_str()
+        .unwrap_or_else(|| {
+            panic!(
+                "{}'s error fixture carries no message at {:?}: {body}",
+                profile.id, profile.error_message_at
+            )
+        })
         .to_string()
 }
 
@@ -367,6 +383,52 @@ async fn check_4_usage_is_reported_once_and_partitions_the_total() {
 /// is indexed because more than one report per stream is legal.
 fn usage_fixture_name(transcript: &str) -> String {
     format!("{}.0.json", transcript.trim_end_matches(".sse"))
+}
+
+/// A row that says the provider states a charge is a row whose transcripts
+/// state one — and a row that says it does not is a row whose transcripts do
+/// not.
+///
+/// Both halves, because `cost: None` is not "we have not got round to it": it
+/// is the row asserting that no cost will arrive, which is the assertion that
+/// makes `UnknownCost::ProviderReportedCostMissing` mean anything on the rows
+/// that carry a decoder. An unchecked `None` would let a provider quietly
+/// start reporting a figure that nothing read.
+///
+/// This is the fifth thing a fixture can be evidence about, and it belongs
+/// beside check 4 rather than in `provider_cost.rs`: that file proves the
+/// decoders against handcrafted `usage` objects, and this proves the *row's
+/// own claim* against the same bytes every other check reads.
+#[tokio::test]
+async fn a_rows_cost_claim_is_what_its_transcripts_do() {
+    for profile in ALL {
+        let row = (profile.row)();
+        for name in ["text.sse", "tool_calls.sse"] {
+            let events = stream_events(profile, name).await;
+            let reported: Vec<_> = events
+                .iter()
+                .filter_map(|event| match event {
+                    AiEvent::ProviderCost { cost } => Some(cost),
+                    _ => None,
+                })
+                .collect();
+            match &row.cost {
+                Some(decoder) => assert_eq!(
+                    reported.len(),
+                    1,
+                    "{} carries a decoder for {} and its {name} reported {} costs",
+                    profile.id,
+                    decoder.revision().field,
+                    reported.len()
+                ),
+                None => assert!(
+                    reported.is_empty(),
+                    "{} says it states no charge and its {name} states {reported:?}",
+                    profile.id
+                ),
+            }
+        }
+    }
 }
 
 // --- the suite's own guard ---

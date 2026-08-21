@@ -1,0 +1,27 @@
+{
+  "choices": [],
+  "created": 1787000000,
+  "id": "3f8a1e0c-golden-tools",
+  "model": "grok-4",
+  "object": "chat.completion.chunk",
+  "system_fingerprint": "fp_xai_golden",
+  "usage": {
+    "completion_tokens": 64,
+    "completion_tokens_details": {
+      "accepted_prediction_tokens": 0,
+      "audio_tokens": 0,
+      "reasoning_tokens": 0,
+      "rejected_prediction_tokens": 0
+    },
+    "cost_in_usd_ticks": 33600000,
+    "num_sources_used": 0,
+    "prompt_tokens": 800,
+    "prompt_tokens_details": {
+      "audio_tokens": 0,
+      "cached_tokens": 0,
+      "image_tokens": 0,
+      "text_tokens": 800
+    },
+    "total_tokens": 864
+  }
+}

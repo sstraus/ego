@@ -1,0 +1,15 @@
+: schema-derived from the xAI chat-completions streaming reference at docs.x.ai
+: provider xai, ego 0.1.0
+: 800 uncached input at 3e-6 and 64 output at 1.5e-5 is 0.00336 USD, in ticks.
+data: {"id":"3f8a1e0c-golden-tools","object":"chat.completion.chunk","created":1787000000,"model":"grok-4","choices":[{"index":0,"delta":{"role":"assistant","content":null,"tool_calls":[{"index":0,"id":"call_01JXAI","type":"function","function":{"name":"read_file","arguments":""}}]},"finish_reason":null}],"usage":null,"system_fingerprint":"fp_xai_golden"}
+
+data: {"id":"3f8a1e0c-golden-tools","object":"chat.completion.chunk","created":1787000000,"model":"grok-4","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"path\":"}}]},"finish_reason":null}],"usage":null,"system_fingerprint":"fp_xai_golden"}
+
+data: {"id":"3f8a1e0c-golden-tools","object":"chat.completion.chunk","created":1787000000,"model":"grok-4","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"./src/main.rs\"}"}}]},"finish_reason":null}],"usage":null,"system_fingerprint":"fp_xai_golden"}
+
+data: {"id":"3f8a1e0c-golden-tools","object":"chat.completion.chunk","created":1787000000,"model":"grok-4","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":null,"system_fingerprint":"fp_xai_golden"}
+
+data: {"id":"3f8a1e0c-golden-tools","object":"chat.completion.chunk","created":1787000000,"model":"grok-4","choices":[],"usage":{"prompt_tokens":800,"completion_tokens":64,"total_tokens":864,"prompt_tokens_details":{"text_tokens":800,"audio_tokens":0,"image_tokens":0,"cached_tokens":0},"completion_tokens_details":{"reasoning_tokens":0,"audio_tokens":0,"accepted_prediction_tokens":0,"rejected_prediction_tokens":0},"num_sources_used":0,"cost_in_usd_ticks":33600000},"system_fingerprint":"fp_xai_golden"}
+
+data: [DONE]
+

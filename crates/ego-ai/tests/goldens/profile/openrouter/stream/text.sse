@@ -1,0 +1,21 @@
+: schema-derived from the OpenRouter usage-accounting reference at openrouter.ai
+: provider openrouter, ego 0.1.0
+: usage.cost arrives unasked. OpenRouter documents that `usage: {include: true}`
+: and `stream_options: {include_usage: true}` are deprecated and have no effect,
+: and that full usage is now always included — which is why the family's request
+: projection, which sends the second and not the first, is compatible with it.
+: The `: OPENROUTER PROCESSING` comment is the keep-alive it emits while a
+: provider is being selected; it is here because a decoder that choked on a
+: bare SSE comment would fail against every real OpenRouter stream.
+: OPENROUTER PROCESSING
+
+data: {"id":"gen-golden-text","object":"chat.completion.chunk","created":1787000000,"model":"z-ai/glm-4.7","provider":"Z.AI","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null,"native_finish_reason":null}],"usage":null}
+
+data: {"id":"gen-golden-text","object":"chat.completion.chunk","created":1787000000,"model":"z-ai/glm-4.7","provider":"Z.AI","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":null,"native_finish_reason":null}],"usage":null}
+
+data: {"id":"gen-golden-text","object":"chat.completion.chunk","created":1787000000,"model":"z-ai/glm-4.7","provider":"Z.AI","choices":[{"index":0,"delta":{},"finish_reason":"stop","native_finish_reason":"stop"}],"usage":null}
+
+data: {"id":"gen-golden-text","object":"chat.completion.chunk","created":1787000000,"model":"z-ai/glm-4.7","provider":"Z.AI","choices":[],"usage":{"prompt_tokens":1000,"completion_tokens":250,"total_tokens":1250,"prompt_tokens_details":{"cached_tokens":400,"cache_write_tokens":100,"audio_tokens":0},"completion_tokens_details":{"reasoning_tokens":180},"cost":0.00585,"cost_details":{"upstream_inference_cost":0}}}
+
+data: [DONE]
+

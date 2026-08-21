@@ -56,7 +56,7 @@ fn base(var: &str, fallback: &str) -> Result<Url, ResolveError> {
     } else {
         format!("http://{given}")
     };
-    let mut url = Url::parse(&base).map_err(|err| ResolveError::DaemonUnreachable {
+    let mut url = Url::parse(&base).map_err(|err| ResolveError::EndpointUnreachable {
         endpoint: given.to_string(),
         message: format!("{var} is not an address: {err}"),
     })?;
@@ -77,7 +77,7 @@ pub fn transport(offline: bool) -> Result<Arc<dyn Http>, ResolveError> {
     };
     ReqwestHttp::new(policy)
         .map(|http| Arc::new(http) as Arc<dyn Http>)
-        .map_err(|err| ResolveError::DaemonUnreachable {
+        .map_err(|err| ResolveError::EndpointUnreachable {
             endpoint: "the local transport".to_string(),
             message: err.to_string(),
         })
@@ -95,6 +95,20 @@ pub fn transport(offline: bool) -> Result<Arc<dyn Http>, ResolveError> {
 /// It used to be conditional, because a row could not be built without a key.
 /// That made a missing credential indistinguishable from an unknown provider
 /// and forced [`resolve`] to name one provider by hand to say the true thing.
+///
+/// # What is deliberately missing
+///
+/// `ego_ai::provider` also builds an `xai` row and an `openrouter` row, and
+/// neither is here. They are **candidates**:
+/// `docs/decisions/2026-08-21-a-shared-shape-is-not-a-shared-contract.md` §9
+/// puts both on the family's mapping from a published document rather than
+/// from a live recording, and rules that a provider whose conformance is read
+/// rather than measured is not runnable — *no row, so `--model` cannot select
+/// it*. The rows exist so the offline evidence has a subject
+/// (`crates/ego-ai/tests/goldens/profile/`); this list is what makes them
+/// unreachable until a recording exists.
+///
+/// The test below is what keeps that true, because nothing else would notice.
 fn rows() -> Result<Vec<ProviderRow>, ResolveError> {
     Ok(vec![
         ProviderRow::ollama(base(OLLAMA_HOST, OLLAMA_BASE)?),
@@ -140,7 +154,7 @@ pub async fn resolve(
     // No branch on the provider id. The row names what resolves it
     // (`ego_ai::resolver`), so this crate does not have to know which
     // providers are daemons in order to resolve any of them.
-    let model = catalogue.resolve(&slug, http).await?;
+    let model = catalogue.resolve(&slug, http, &credential).await?;
     Ok((model, credential))
 }
 
@@ -151,5 +165,53 @@ pub async fn resolve(
 /// drawn. A model that is not installed is a 2 however long the daemon took to
 /// say so.
 pub fn is_provider_failure(err: &ResolveError) -> bool {
-    matches!(err, ResolveError::DaemonUnreachable { .. })
+    matches!(err, ResolveError::EndpointUnreachable { .. })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A candidate is not runnable, and this is what enforces it.
+    ///
+    /// `docs/decisions/2026-08-21-a-shared-shape-is-not-a-shared-contract.md`
+    /// §9 draws the line at selectability: a provider assembled from a
+    /// published document has offline evidence and no acceptance evidence, and
+    /// until a live recording exists `--model` must refuse it the way it
+    /// refuses a name nobody has heard of. Adding a candidate to [`rows`] is
+    /// one line and looks like progress, so the rule needs a test rather than
+    /// a comment.
+    ///
+    /// It fails in the right direction. When xAI's smoke has run and the row is
+    /// promoted deliberately, this test fails and names the provider — which is
+    /// the moment to check that the recording is committed, not a nuisance.
+    #[test]
+    fn a_candidate_provider_cannot_be_selected() {
+        let ids: Vec<String> = rows()
+            .expect("the built-in bases parse")
+            .into_iter()
+            .map(|row| row.id)
+            .collect();
+
+        for candidate in ["xai", "openrouter"] {
+            assert!(
+                !ids.contains(&candidate.to_string()),
+                "{candidate} has a row and no live recording, so it must not be \
+                 selectable: {ids:?}"
+            );
+        }
+    }
+
+    /// And the converse, so the test above is not satisfied by an empty table.
+    #[test]
+    fn the_measured_providers_are_selectable() {
+        let ids: Vec<String> = rows()
+            .expect("the built-in bases parse")
+            .into_iter()
+            .map(|row| row.id)
+            .collect();
+
+        assert!(ids.contains(&"ollama".to_string()), "{ids:?}");
+        assert!(ids.contains(&"openai".to_string()), "{ids:?}");
+    }
 }

@@ -16,7 +16,7 @@
 use std::path::PathBuf;
 
 use ego_ai::http::HttpRequest;
-use ego_ai::provider::{OLLAMA_BASE, OPENAI_BASE, ProviderRow};
+use ego_ai::provider::{OLLAMA_BASE, OPENAI_BASE, OPENROUTER_BASE, ProviderRow, XAI_BASE};
 use ego_core::budget::{Metering, SettlementSource};
 use ego_core::generator::types::{
     Conversation, GenRequest, Message, Role, ThinkingLevel, ToolDescriptor,
@@ -51,7 +51,25 @@ pub struct Profile {
     pub row: fn() -> ProviderRow,
     /// Where this profile's fixtures came from.
     pub provenance: Provenance,
+    /// Where in this provider's error body the sentence it wants read lives.
+    ///
+    /// A path and not a shared parser, because the envelope is **not** shared:
+    /// OpenAI and OpenRouter wrap it as `{"error": {"message": …}}` and xAI
+    /// publishes the flatter `{"code": …, "error": "…"}`. Check 3 asks whether
+    /// what the provider said survives into the `AiEvent::Error`, and it can
+    /// only ask that if it knows which bytes the provider said.
+    ///
+    /// This is deliberately in the *test* table and not on the row. A feature
+    /// bit on a row that a decoder consults is the per-provider branch under a
+    /// new name, and §9 forbids it — the mapping keeps one behaviour for both
+    /// shapes, relaying a body it could not parse verbatim, and that is exactly
+    /// why xAI passes a check written around OpenAI's envelope.
+    pub error_message_at: &'static [&'static str],
 }
+
+/// `{"error": {"message": …}}` — the envelope OpenAI defined and most of the
+/// family copied.
+const NESTED: &[&str] = &["error", "message"];
 
 impl Profile {
     /// How this profile is metered, which is what bounds a smoke's spend.
@@ -80,6 +98,7 @@ pub const OLLAMA: Profile = Profile {
     model: "gemma4:12b-mlx",
     row: ProviderRow::ollama_default,
     provenance: Provenance::Recorded,
+    error_message_at: NESTED,
 };
 
 /// The hosted row: schema-derived, and said so.
@@ -95,10 +114,67 @@ pub const OPENAI: Profile = Profile {
     model: "gpt-5.1",
     row: ProviderRow::openai,
     provenance: Provenance::SchemaDerived,
+    error_message_at: NESTED,
+};
+
+/// xAI: schema-derived, and a **candidate** rather than a member.
+///
+/// `2026-08-21-grok-as-a-provider.md`. It is on the family's mapping from its
+/// published schema and its row is not in the table
+/// `crates/ego-cli/src/model.rs` builds, so `--model xai/…` does not resolve
+/// (§9: a candidate is not runnable). These fixtures are what it has instead
+/// of a live recording.
+///
+/// **Its error fixture is the weakest evidence in this directory, and that is
+/// stated rather than hidden.** xAI publishes no error-body schema at all — a
+/// fact checked against `docs.x.ai`, not assumed — so `error/404.json` is the
+/// flat `{"code", "error"}` shape its error-code documentation and its users
+/// describe, and not something derived from a specification. It is the first
+/// thing a live smoke should overwrite.
+pub const XAI: Profile = Profile {
+    id: "xai",
+    base: XAI_BASE,
+    model: "grok-4",
+    row: ProviderRow::xai_default,
+    provenance: Provenance::SchemaDerived,
+    // Flat, and demonstrably not the family's. The mapping relays a body it
+    // could not parse verbatim, so the sentence survives anyway — which is the
+    // difference between a decode *difference* and a decode *failure*.
+    error_message_at: &["error"],
+};
+
+/// OpenRouter: schema-derived, and a candidate for a sharper reason.
+///
+/// The ADR's §7 left an open question about conformance check 1 here that xAI
+/// does not raise: whether `usage.cost` needs `usage: {include: true}` in the
+/// request body, which the family's projection does not send. OpenRouter's own
+/// documentation now answers it — "the `usage: { include: true }` and
+/// `stream_options: { include_usage: true }` parameters are deprecated and
+/// have no effect. Full usage details are now always included automatically" —
+/// so the projection is compatible and, incidentally, so is the
+/// `stream_options` it *does* send. That is a reading of a document, which is
+/// what `SchemaDerived` means; it is not a recording, so the row stays out of
+/// the table.
+///
+/// The model carries a slash on purpose. `CLI.md` spells `--model` as `P/M`
+/// and OpenRouter's ids are themselves `vendor/model`, so this profile is the
+/// one that would notice a split on the last separator rather than the first.
+pub const OPENROUTER: Profile = Profile {
+    id: "openrouter",
+    base: OPENROUTER_BASE,
+    model: "z-ai/glm-4.7",
+    row: ProviderRow::openrouter_default,
+    provenance: Provenance::SchemaDerived,
+    error_message_at: NESTED,
 };
 
 /// Every profile this build ships a row for.
-pub const ALL: &[&Profile] = &[&OLLAMA, &OPENAI];
+///
+/// Two of the four are candidates: a row exists, so there is something to
+/// build a request from and decode an answer with, and it is not in the
+/// catalogue a run assembles. That is the shape §9 asks for — the evidence is
+/// gathered before the provider is selectable, not after.
+pub const ALL: &[&Profile] = &[&OLLAMA, &OPENAI, &XAI, &OPENROUTER];
 
 // --- fixtures ---
 
