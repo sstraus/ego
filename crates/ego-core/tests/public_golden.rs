@@ -14,7 +14,7 @@ use ego_core::cost::{
 use ego_core::event::domain::{DomainEvent, Envelope, EventKind, ExitReason, OccupancyProvenance};
 use ego_core::event::id::{EventId, ItemId, Producer, Seq, SessionId, TurnId};
 use ego_core::event::time::Timestamp;
-use ego_core::generator::types::ErrorKind;
+use ego_core::generator::types::{ErrorKind, ReasoningState};
 use ego_core::public::{
     InstructionDescriptor, InstructionSource, ItemKind, PUBLIC_EVENT_VERSION, PublicEvent,
     project_public,
@@ -77,6 +77,7 @@ mod public_golden {
     const ITEM_SUB_1: &str = "00000000-0000-0000-0000-000000000008";
     const ITEM_USER_2: &str = "00000000-0000-0000-0000-000000000009";
     const ITEM_ASSISTANT_2: &str = "00000000-0000-0000-0000-00000000000a";
+    const ITEM_REASONING_1: &str = "00000000-0000-0000-0000-00000000000b";
 
     fn ev(seq: Seq, turn: TurnId, item: Option<ItemId>, kind: EventKind) -> DomainEvent {
         DomainEvent {
@@ -93,20 +94,22 @@ mod public_golden {
         }
     }
 
-    /// A realistic two-turn log of 21 events covering 17 of the 18
+    /// A realistic two-turn log of 22 events covering 18 of the 22
     /// `EventKind` variants: `UserPrompt`, `AssistantDelta`,
-    /// `AssistantMessage` and `TurnCompleted` each appear more than once,
-    /// and `ReasoningDelta` is absent — it is the one kind this log does
-    /// not reach, so it is covered by
-    /// `reasoning_delta_projects_to_an_item_delta_of_kind_reasoning` below
-    /// instead. The first turn covers every public item kind
-    /// (message, tool, permission, subagent), a `UsageUpdated` (public, as
-    /// `usage_delta` — never a running total), a bare `Error`, and the
-    /// three internal-only kinds (`Compacted`, `Forked`, `HookFired`) that
-    /// must not appear in the projection. The second, final turn is
-    /// deliberately minimal so the golden's last line is a plain
-    /// `turn_completed` — proving "the final result rides the terminal
+    /// `AssistantMessage` and `TurnCompleted` each appear more than once.
+    /// The first turn covers every public item kind (message, tool,
+    /// permission, subagent), a `UsageUpdated` (public, as `usage_delta` —
+    /// never a running total), a classified `Error`, and the four
+    /// internal-only kinds (`Compacted`, `Forked`, `HookFired`,
+    /// `ReasoningState`) that must not appear in the projection. The second,
+    /// final turn is deliberately minimal so the golden's last line is a
+    /// plain `turn_completed` — proving "the final result rides the terminal
     /// event" needs no separate mechanism.
+    ///
+    /// The four kinds this log does not reach: `ReasoningDelta`, covered by
+    /// `reasoning_delta_projects_to_an_item_delta_of_kind_reasoning` below,
+    /// and `GenerationStarted`, `AttemptSettled` and `UsageCorrected`, which
+    /// are the attempt-lifecycle kinds the projection drops wholesale.
     fn fixture_log() -> Vec<DomainEvent> {
         let turn1: TurnId = id(TURN_1);
         let turn2: TurnId = id(TURN_2);
@@ -117,6 +120,7 @@ mod public_golden {
         let item_sub_1: ItemId = id(ITEM_SUB_1);
         let item_user_2: ItemId = id(ITEM_USER_2);
         let item_assistant_2: ItemId = id(ITEM_ASSISTANT_2);
+        let item_reasoning_1: ItemId = id(ITEM_REASONING_1);
 
         let mut seq = Seq::default();
         vec![
@@ -255,13 +259,26 @@ mod public_golden {
                     blocked: false,
                 },
             ),
+            // The blob is provider-private, and the golden is the pin that
+            // says so: no line of the committed `.jsonl` contains it.
+            ev(
+                seq.next(),
+                turn1,
+                Some(item_reasoning_1),
+                EventKind::ReasoningState {
+                    state: ReasoningState {
+                        blob: "provider-private-continuation-token".to_string(),
+                        dialect: "anthropic".to_string(),
+                    },
+                },
+            ),
             ev(
                 seq.next(),
                 turn1,
                 None,
                 EventKind::Error {
                     message: "rate limited, retrying".to_string(),
-                    kind: ErrorKind::Unclassified,
+                    kind: ErrorKind::Transient,
                 },
             ),
             ev(
@@ -329,13 +346,14 @@ mod public_golden {
                     EventKind::Compacted { .. }
                         | EventKind::Forked { .. }
                         | EventKind::HookFired { .. }
+                        | EventKind::ReasoningState { .. }
                 )
             })
             .collect::<Vec<_>>();
         assert_eq!(
             internal_kinds.len(),
-            3,
-            "fixture should exercise all three internal-only kinds"
+            4,
+            "fixture should exercise all four internal-only kinds"
         );
         for event in &internal_kinds {
             assert_eq!(
@@ -345,6 +363,27 @@ mod public_golden {
                 event.kind
             );
         }
+    }
+
+    /// The continuation blob is provider-private, and the check is on the
+    /// bytes rather than on the variant. `ReasoningState` projecting to
+    /// `None` is how the blob stays out *today*; a future projection that
+    /// published the reasoning item and folded the state into it would keep
+    /// that `None` and still leak. Searching the committed stream for the
+    /// blob catches the leak whatever route it takes to get there.
+    #[test]
+    fn the_continuation_blob_appears_nowhere_in_the_public_stream() {
+        let blob = fixture_log()
+            .into_iter()
+            .find_map(|e| match e.kind {
+                EventKind::ReasoningState { state } => Some(state.blob),
+                _ => None,
+            })
+            .expect("the fixture carries reasoning state");
+        assert!(
+            !include_str!("golden/session.jsonl").contains(&blob),
+            "the provider-private blob reached the public stream"
+        );
     }
 
     /// `SessionStarted` is the header event: the schema version, a
@@ -597,6 +636,61 @@ mod public_golden {
                 usage_delta: tokens(10, 0, 0, 5),
                 cost_delta: priced("0.001"),
             })
+        );
+    }
+
+    /// The classification the adapter made is the one the consumer gets. A
+    /// projection that re-derived it — sniffing "rate limited" out of the
+    /// message, say — would be publishing a claim the wire never made, and
+    /// the golden's `Transient` line cannot tell the two apart on its own
+    /// because a sniffer would agree with it. So this asserts the disagreeing
+    /// case: a message that reads transient, classified `Refused`, arrives
+    /// `Refused`.
+    #[test]
+    fn an_error_is_published_with_the_class_the_adapter_gave_it() {
+        let turn: TurnId = id(TURN_1);
+        let event = ev(
+            Seq::default(),
+            turn,
+            None,
+            EventKind::Error {
+                message: "rate limited, retrying".to_string(),
+                kind: ErrorKind::Refused,
+            },
+        );
+        assert_eq!(
+            project_public(&event),
+            Some(PublicEvent::Error {
+                turn,
+                item: None,
+                message: "rate limited, retrying".to_string(),
+                kind: ErrorKind::Refused,
+            })
+        );
+    }
+
+    /// `Unclassified` is published, not omitted. It is a statement — nobody
+    /// classified this error — and a consumer that saw no `kind` at all could
+    /// not tell it from a stream too old to carry one. The serialised form is
+    /// asserted rather than the enum, because "always emitted" is a
+    /// serialisation property and `skip_serializing_if` is one attribute away.
+    #[test]
+    fn an_unclassified_error_still_carries_its_class_on_the_wire() {
+        let turn: TurnId = id(TURN_1);
+        let event = ev(
+            Seq::default(),
+            turn,
+            None,
+            EventKind::Error {
+                message: "something went wrong".to_string(),
+                kind: ErrorKind::Unclassified,
+            },
+        );
+        let json = serde_json::to_string(&project_public(&event).expect("errors are public"))
+            .expect("a public event serialises");
+        assert_eq!(
+            json,
+            r#"{"type":"error","turn":"00000000-0000-0000-0000-000000000002","message":"something went wrong","kind":"unclassified"}"#
         );
     }
 

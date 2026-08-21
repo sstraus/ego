@@ -10,6 +10,7 @@ use crate::budget::{Ledger, Metering};
 use crate::cost::{CostDelta, Money, RateSource};
 use crate::event::domain::{DomainEvent, EventKind, ExitReason, OccupancyProvenance};
 use crate::event::id::{ItemId, SessionId, TurnId};
+use crate::generator::types::ErrorKind;
 use crate::state::Usage;
 
 /// The current `PublicEvent` schema version, carried in `SessionStarted`'s
@@ -17,10 +18,14 @@ use crate::state::Usage;
 /// published".
 ///
 /// **Incremented when the shape moves, not when the branch merges.** This
-/// went 5 → 6 for `UsageUpdated`'s `usage_delta`, which embeds [`Usage`] and
-/// so gained `cache_write_extended_tokens` and `reasoning_tokens`. A version
-/// left behind is a claim a consumer acts on; a version raised early is only
-/// an integer pending confirmation, and the two are not equally wrong.
+/// went 5 → 6 for two changes that ship together: `UsageUpdated`'s
+/// `usage_delta`, which embeds [`Usage`] and so gained
+/// `cache_write_extended_tokens` and `reasoning_tokens`, and
+/// [`PublicEvent::Error`]'s new `kind`. One increment covers both because 6
+/// describes a shape, not a changeset, and no consumer ever saw a 6 without
+/// the second half. A version left behind is a claim a consumer acts on; a
+/// version raised early is only an integer pending confirmation, and the two
+/// are not equally wrong.
 ///
 /// **The integer is re-derived at merge, never carried from here.** Three
 /// branches move this constant — metering, permissions and this one — so the
@@ -297,11 +302,21 @@ pub enum PublicEvent {
         provenance: OccupancyProvenance,
     },
     /// An error occurred, possibly outside any single item.
+    ///
+    /// `kind` is what a consumer can act on; `message` is what it can show.
+    /// Published unconditionally, including when it is
+    /// [`ErrorKind::Unclassified`]: that value says "nobody classified this",
+    /// which is a fact about the error and not an absence of one. Omitting it
+    /// would leave a consumer unable to tell an unclassified error from an
+    /// older stream that never carried the field, and reading a missing field
+    /// as `Unclassified` is exactly the guess that
+    /// [`ErrorKind`]'s fail-closed default exists to make unnecessary.
     Error {
         turn: TurnId,
         #[serde(skip_serializing_if = "Option::is_none")]
         item: Option<ItemId>,
         message: String,
+        kind: ErrorKind,
     },
 }
 
@@ -488,14 +503,16 @@ pub fn project_public(ev: &DomainEvent) -> Option<PublicEvent> {
             ok: true,
             text: Some(result.clone()),
         }),
-        // INCOMPLETE: `kind` is dropped here because `PublicEvent::Error`
-        // has no field to hold it. Move 10 of the AiEvent ADR adds one; until
-        // then a consumer cannot tell a transient failure from a refusal, and
-        // the projection says so by omission rather than by guessing.
-        EventKind::Error { message, .. } => Some(PublicEvent::Error {
+        // Passed through as classified, never re-derived. The adapter that
+        // saw the provider's own answer is the only thing that could classify
+        // it; this projection has the message and nothing else, and a
+        // projection that sniffed the message for "rate limit" would be
+        // inventing a classification the wire never made.
+        EventKind::Error { message, kind } => Some(PublicEvent::Error {
             turn,
             item,
             message: message.clone(),
+            kind: *kind,
         }),
 
         // The attempt lifecycle is internal, and stays internal. A client
