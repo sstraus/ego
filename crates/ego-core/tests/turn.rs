@@ -1127,6 +1127,61 @@ mod turn {
         );
     }
 
+    /// The case that decides *where* the guard lives. A decoder sees one
+    /// response and can never catch this; only a check seeded from the
+    /// reduction can. Emptying that seed leaves the test above passing, which
+    /// is how this one came to be written.
+    #[test]
+    fn a_call_id_reused_by_a_later_generation_is_refused_too() {
+        let fx = Fixture::new(vec![
+            vec![
+                AiEvent::ToolCall {
+                    call_id: "call_1".to_string(),
+                    name: "read".to_string(),
+                    args: r#"{"path":"/ws/a"}"#.to_string(),
+                },
+                AiEvent::Stop(StopReason::ToolUse),
+            ],
+            vec![
+                AiEvent::ToolCall {
+                    // Answered in the generation before this one, so a result
+                    // naming it now would answer that call as readily as this
+                    // one.
+                    call_id: "call_1".to_string(),
+                    name: "read".to_string(),
+                    args: r#"{"path":"/ws/b"}"#.to_string(),
+                },
+                AiEvent::Stop(StopReason::ToolUse),
+            ],
+            vec![AiEvent::Stop(StopReason::Stop)],
+        ])
+        .with_read_tool();
+
+        let (reason, ok, state) = run(&fx, SessionState::default(), "read a, then b");
+
+        assert_eq!(reason, ExitReason::Provider);
+        assert!(!ok);
+        assert_eq!(
+            fx.generator.calls().len(),
+            2,
+            "the third generation is never reached"
+        );
+        let executions = state
+            .items
+            .values()
+            .filter(|item| item.kind == ItemKind::ToolCall && item.ok.is_some())
+            .count();
+        assert_eq!(
+            executions, 1,
+            "the first generation's call had a valid id and stands; only the reuse is refused"
+        );
+        assert!(
+            state.errors.iter().any(|error| error.contains("call_1")),
+            "{:?}",
+            state.errors
+        );
+    }
+
     #[test]
     fn a_turn_whose_log_cannot_be_written_is_abandoned_with_the_state_intact() {
         let fx = Fixture::new(vec![vec![
