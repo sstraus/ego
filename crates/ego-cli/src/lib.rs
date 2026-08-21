@@ -13,6 +13,7 @@
 //! inside the process that produces it.
 
 pub mod budget;
+pub mod catalogue;
 pub mod cli;
 pub mod config;
 pub mod facts;

@@ -62,7 +62,7 @@ Notes:
 ### 2.1 Availability — what ships today
 
 The same discipline as §3.1, and it was missing here until 2026-08-21. §2 lists
-fourteen commands; this build implements **one**. The other thirteen used to
+fourteen commands; this build implements **three**. The other eleven used to
 reach the *interactive* refusal, so `ego resume` was answered with a sentence
 about the permission dialog — true, and about a surface the caller had not
 asked for. They are now refused **by name**, each naming what it waits on, from
@@ -87,8 +87,8 @@ omitted when empty: two states, identical bytes.
 |---|---|---|
 | `ego run` | **yes** | the scripting workhorse; the whole of §4 is about it |
 | `ego [PROMPT]` | no | the interactive surface — the permission dialog, which needs an approver that can mint a `Permit` (**M1**) |
-| `ego resume` | no | a session the catalogue can attribute to a workspace. `SessionMeta.workspace_root` is `None` for every entry, so `no ID = latest in this workspace` has nothing to select on. Where the root will live is decided — the log header, at a new codec version — and the bump is what is waiting: under the version check the header now carries, a v5 log makes every session already on disk unopenable, and accepting them anyway is a backward-compatibility decision this build will not take on its own. The machinery underneath is already here: `--session NAME` attaches to a named session and the store repairs a torn tail on the way in |
-| `ego ls` | no | the same workspace attribution `resume` waits on. `SessionStore::list` exists and returns every session, which is what `--all` would show; the default — this workspace only — is the half that cannot be computed yet |
+| `ego resume` | **yes** | continues a session that already exists, never creating one. `[ID]` is optional: without it the most recently updated session of this workspace is taken |
+| `ego ls` | **yes** | this workspace by default, `--all` for the whole store; `--output json\|jsonl` per §4.6 |
 | `ego fork` | no | session forking (**M3**), which needs the branch point to be nameable in the log rather than just a file copy |
 | `ego export` | no | replay and export with `--sanitize` (**M3**). The projection exists; the redaction contract that makes an exported session safe to hand over does not |
 | `ego mcp` | no | the MCP client (**M2**). There is no server to add, remove or log in to |
@@ -101,10 +101,12 @@ omitted when empty: two states, identical bytes.
 | `ego acp` | no | an agent that serves the protocol on stdio. `ego-acp` already projects events onto v1 and v2 (`project_acp_v1`/`project_acp_v2`), so what is missing is the connection and its version negotiation, not the mapping |
 | `ego doctor` | no | most of what it would diagnose: the credential store, the MCP client and the sandbox backend are each waiting on their own milestone, and a report on three absent subsystems is not a diagnosis |
 
-**Three of M0b's four exit criteria are commands that do not exist yet**
+**Two of M0b's four exit criteria are commands that do not exist yet**
 (`ARCHITECTURE.md` §8: interactive, `ego run … | jq`, `kill → ego resume`, and
-the same session over ACP). Only the second ships. That is the fact this table
-exists to stop being invisible.
+the same session over ACP). The second and third ship; the interactive surface
+and the ACP agent do not. That is the fact this table exists to stop being
+invisible, and the count is part of it — it read "three of four" until
+`ego resume` landed.
 
 ## 3. Flags (the argument grammar)
 
@@ -211,7 +213,8 @@ flag by flag against the built binary to write this.
 | `--bare` | **yes** | |
 | `--session`, `--session-id`, `--ephemeral` | **yes** | one mutually exclusive group, as §4.5 requires |
 | `--session-dir` | **yes** | |
-| `--output` | **yes** | `text\|json\|jsonl` |
+| `--output` | **yes** | `text\|json\|jsonl`. On `ego ls` the two machine forms are §4.6's, not §4.1/§4.2's — a listing is not a run |
+| `--all` | **yes** | `ego ls` only, and documented in §2 rather than here: §3 is the argument grammar of a *run*, and this widens a catalogue query |
 | `--schema`, `--schema-retries` | **yes** | `--schema-retries` ships as its own flag; §3 mentions it only inside `--schema`'s description |
 | `--budget` | **yes** | binds only on a currency-metered row — the run says so on `metering.selected` |
 | `--max-turns`, `--timeout` | **yes** | |
@@ -323,6 +326,53 @@ a file rather than discovering one, so it survives `Posture::Bare` and
 loader — from a resolved posture alone, "the user demanded bare" and "the
 workspace is untrusted" are the same value and want opposite answers. See
 `docs/decisions/2026-08-21-instructions-a-workspace-may-hand-a-model.md`.
+
+### 4.6 `ego ls --output json|jsonl` (the catalogue)
+
+§4.1 and §4.2 are shapes *of a run*: they carry a `session`, a `result` and a
+`usage`. A listing has none of those, so it is its own contract rather than
+those two bent to fit. Same `--output` flag and the same three values.
+
+`--output json` writes one object:
+
+```json
+{
+  "v": 1,
+  "sessions": [
+    {
+      "id": "0192f3a1-…-8c41",
+      "workspace_root": "/Users/…/ego",
+      "model": null,
+      "created": 1787206085352,
+      "updated": 1787292481007,
+      "title": null
+    }
+  ]
+}
+```
+
+`--output jsonl` writes one of those session objects per line, with no
+envelope — the unit of a catalogue is a session, as the unit of a run is an
+event.
+
+- **`v` is this listing's own version**, not `PUBLIC_EVENT_VERSION`. A new
+  field on a run's event stream must not bump a contract that did not move.
+- **An object with a `sessions` key, not a bare array.** A top-level array has
+  nowhere to put a version, and a consumer that cannot see the version is one
+  that cannot be told the shape changed.
+- **`sessions` is ordered: most recently updated first**, and the id breaks a
+  tie. It is the order `ego resume` selects "latest" by, so the first row is
+  always the session `ego resume` with no ID would continue.
+- **`model` and `title` are `null` today** and are present anyway. An omitted
+  key and a key nobody has set are two states with identical bytes.
+- `created` and `updated` are UTC milliseconds since the epoch, the same
+  `Timestamp` the session log carries.
+- The empty store writes `{"v":1,"sessions":[]}` and exits 0. A script that
+  gets no output cannot tell an empty store from a command that failed.
+
+Default `--output text` is a table for the person who typed it: id, updated,
+model, title, and a `WORKSPACE` column only under `--all` — without `--all`
+every row would carry the same path.
 
 ## 5. Agent files — the scripting language
 

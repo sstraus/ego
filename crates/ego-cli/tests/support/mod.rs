@@ -335,6 +335,9 @@ pub struct Ego {
     /// Kept alive for as long as the invocation is described, so a builder
     /// that owns its directories does not delete them before it runs.
     keep: Vec<tempfile::TempDir>,
+    /// Which of `CLI.md` §2's commands this invocation runs. `run` unless a
+    /// test says otherwise, because almost every test here is about a turn.
+    subcommand: String,
     args: Vec<String>,
     env: HashMap<String, String>,
     stdin: Option<String>,
@@ -422,10 +425,17 @@ impl Ego {
             home: home.to_path_buf(),
             workspace: workspace.to_path_buf(),
             keep: Vec::new(),
+            subcommand: "run".to_string(),
             args: Vec::new(),
             env,
             stdin: None,
         }
+    }
+
+    /// Run `ego <name>` rather than `ego run`.
+    pub fn subcommand(mut self, name: &str) -> Self {
+        self.subcommand = name.to_string();
+        self
     }
 
     pub fn arg(mut self, arg: &str) -> Self {
@@ -478,7 +488,7 @@ impl Ego {
             command.env(key, value);
         }
         command.current_dir(&self.workspace);
-        command.arg("run");
+        command.arg(&self.subcommand);
         command.args(&self.args);
         command
     }

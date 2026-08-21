@@ -19,8 +19,10 @@
 //!    one definition.
 
 use std::path::PathBuf;
+use std::str::FromStr;
 
 use clap::{ArgAction, Args as ClapArgs, Parser};
+use ego_core::event::id::SessionId;
 use ego_core::generator::types::ThinkingLevel;
 
 /// What the process was asked to do.
@@ -28,6 +30,13 @@ use ego_core::generator::types::ThinkingLevel;
 pub enum Invocation {
     /// `ego run [PROMPT]` — the headless one-shot of `CLI.md` §2.
     Run(Box<Args>),
+    /// `ego resume [ID] [PROMPT]` — the same run against a session that
+    /// already exists. One [`Args`] and not a second shape: everything after
+    /// "which session" is identical, and a `ResumeArgs` would be the parallel
+    /// implementation `AGENTS.md`'s reuse rule forbids.
+    Resume(Box<Args>),
+    /// `ego ls` — the catalogue, this workspace's by default.
+    Ls(Box<LsArgs>),
 }
 
 /// A refusal decided before any turn exists.
@@ -100,6 +109,19 @@ const UNAVAILABLE: &[Unavailable] = &[
     },
 ];
 
+/// The commands of `CLI.md` §2 this build implements.
+///
+/// The dispatch below reads this rather than matching three literals, so the
+/// list is a value a test can hold — and the test it exists for is the one
+/// that says [`BUILT`] and [`UNBUILT`] are disjoint. Without it the two tables
+/// were only bound to the *document*: a command could be implemented and still
+/// listed as waiting on a subsystem, and since the `UNBUILT` check runs first
+/// the refusal would win, so a working command would answer that it does not
+/// exist. That is `every_waiting_on_reason_is_the_one_the_document_prints`'s
+/// defect moved one link along the chain — two surfaces agreeing perfectly
+/// about something that has stopped being true.
+pub const BUILT: &[&str] = &["run", "resume", "ls"];
+
 /// A command `CLI.md` §2 documents that this build does not implement, and the
 /// subsystem it is waiting on.
 ///
@@ -118,26 +140,6 @@ const UNAVAILABLE: &[Unavailable] = &[
 /// places the work, and from the code where it does not — a subsystem that
 /// table does not place still gets a reason, never a milestone invented for it.
 pub const UNBUILT: &[(&str, &str)] = &[
-    (
-        "resume",
-        "a session the catalogue can attribute to a workspace. \
-         `SessionMeta.workspace_root` is `None` for every entry, so \
-         `no ID = latest in this workspace` has nothing to select on. Where \
-         the root will live is decided — the log header, at a new codec \
-         version — and the bump is what is waiting: under the version check \
-         the header now carries, a v5 log makes every session already on disk \
-         unopenable, and accepting them anyway is a backward-compatibility \
-         decision this build will not take on its own. The machinery \
-         underneath is already here: `--session NAME` attaches to a named \
-         session and the store repairs a torn tail on the way in",
-    ),
-    (
-        "ls",
-        "the same workspace attribution `resume` waits on. `SessionStore::list` \
-         exists and returns every session, which is what `--all` would show; \
-         the default — this workspace only — is the half that cannot be \
-         computed yet",
-    ),
     (
         "fork",
         "session forking (**M3**), which needs the branch point to be nameable \
@@ -281,6 +283,33 @@ pub enum SessionChoice {
     Id(String),
     /// Nothing is written.
     Ephemeral,
+    /// `ego resume [ID]`: a session that **already exists** — the one named,
+    /// or the most recently updated one belonging to this workspace.
+    ///
+    /// Not [`Id`](SessionChoice::Id), and the difference is the whole point.
+    /// `--session-id` is documented as a caller-supplied id and creates the
+    /// session when it is not there; routing `resume` through it would make a
+    /// mistyped id succeed by silently starting an empty session, so the
+    /// caller who asked to continue something would get a new thing wearing
+    /// its name. See
+    /// `docs/decisions/2026-08-21-the-two-commands-the-header-unblocked.md` §3.
+    Resume(Option<String>),
+}
+
+/// The parsed command line of `ego ls`.
+///
+/// Four fields and not [`Args`]: `ls` starts no turn, so a model, a budget and
+/// a schema have nothing to act on. Three of the four come from the same
+/// [`Common`] block `run` and `resume` use, so the spelling of `--session-dir`,
+/// `-C` and `--output` cannot drift between the command that writes a session
+/// and the command that lists them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LsArgs {
+    /// Every session in the store, not just this workspace's (`CLI.md` §2).
+    pub all: bool,
+    pub session_dir: Option<PathBuf>,
+    pub directory: Option<PathBuf>,
+    pub output: Output,
 }
 
 /// The parsed command line of `ego run`.
@@ -329,6 +358,64 @@ struct RunCommand {
     flags: Flags,
 }
 
+/// `ego resume [ID] [PROMPT]` — the same [`Flags`], against a session that
+/// already exists.
+#[derive(Debug, Parser)]
+#[command(
+    name = "ego resume",
+    about = "Continue a session; no ID = latest in this workspace.",
+    disable_help_subcommand = true
+)]
+struct ResumeCommand {
+    /// The session to continue. Omit it for the latest in this workspace.
+    id: Option<String>,
+
+    /// The prompt. `-` reads it from stdin.
+    prompt: Option<String>,
+
+    #[command(flatten)]
+    flags: Flags,
+}
+
+/// `ego ls` — the catalogue.
+#[derive(Debug, Parser)]
+#[command(
+    name = "ego ls",
+    about = "List sessions (this workspace; --all for every one).",
+    disable_help_subcommand = true
+)]
+struct LsCommand {
+    /// Every session in the store, not just this workspace's.
+    #[arg(long)]
+    all: bool,
+
+    #[command(flatten)]
+    common: Common,
+}
+
+/// The three flags every subcommand takes, declared once.
+///
+/// `ls` starts no turn, so it shares almost nothing with `run` — but these
+/// three it does share, and they are the three where a divergence would be
+/// invisible: a `--session-dir` that `run` honoured and `ls` did not would
+/// list the wrong store, and a `-C` that only one of them applied would list
+/// the wrong workspace. Declaring them once is what makes "the same flag"
+/// true by construction rather than by two authors agreeing.
+#[derive(Debug, ClapArgs)]
+struct Common {
+    /// Override the store location.
+    #[arg(long)]
+    session_dir: Option<PathBuf>,
+
+    /// Run as if started in DIR.
+    #[arg(short = 'C', value_name = "DIR")]
+    directory: Option<PathBuf>,
+
+    /// text|json|jsonl
+    #[arg(long, value_enum, default_value_t = Output::Text)]
+    output: Output,
+}
+
 #[derive(Debug, ClapArgs)]
 struct Flags {
     /// provider/model slug, e.g. ollama/qwen3
@@ -371,13 +458,8 @@ struct Flags {
     #[arg(long, group = "session-choice")]
     ephemeral: bool,
 
-    /// Override the store location.
-    #[arg(long)]
-    session_dir: Option<PathBuf>,
-
-    /// text|json|jsonl
-    #[arg(long, value_enum, default_value_t = Output::Text)]
-    output: Output,
+    #[command(flatten)]
+    common: Common,
 
     /// JSON Schema the final answer must validate against; `@file` or inline.
     #[arg(long)]
@@ -406,10 +488,6 @@ struct Flags {
     /// Offer no tools at all.
     #[arg(long, conflicts_with = "tools")]
     no_tools: bool,
-
-    /// Run as if started in DIR.
-    #[arg(short = 'C', value_name = "DIR")]
-    directory: Option<PathBuf>,
 
     /// Dotted-path config override, value parsed as TOML.
     #[arg(short = 'c', long = "set", value_name = "K=V", action = ArgAction::Append)]
@@ -488,15 +566,18 @@ pub fn parse(argv: Vec<String>) -> Result<Invocation, UsageError> {
         )));
     }
 
-    let is_run = head.first().map(|token| token == "run").unwrap_or(false);
-    if !is_run {
-        return Err(UsageError(format!(
-            "`{program}` with no subcommand starts an interactive session, and \
-             the interactive surface is not in this build: it is waiting on \
-             the permission dialog, which needs an approver that can mint a \
-             Permit. Use `{program} run` for a headless one-shot"
-        )));
-    }
+    let subcommand = match head.first().map(String::as_str) {
+        Some(name) if BUILT.contains(&name) => name.to_string(),
+        _ => {
+            return Err(UsageError(format!(
+                "`{program}` with no subcommand starts an interactive session, \
+                 and the interactive surface is not in this build: it is \
+                 waiting on the permission dialog, which needs an approver \
+                 that can mint a Permit. Use `{program} run` for a headless \
+                 one-shot"
+            )));
+        }
+    };
 
     let mut tokens: Vec<String> = head;
     tokens[0] = program;
@@ -507,14 +588,90 @@ pub fn parse(argv: Vec<String>) -> Result<Invocation, UsageError> {
         tokens.extend(tail);
     }
 
-    let parsed = RunCommand::try_parse_from(&tokens).map_err(|err| {
-        // clap's own rendering, which already names the offending argument and
-        // the group it violated. Re-writing it here would be a second voice
-        // saying the same thing, worse.
-        UsageError(err.to_string().trim_end().to_string())
-    })?;
+    // clap's own rendering, which already names the offending argument and the
+    // group it violated. Re-writing it here would be a second voice saying the
+    // same thing, worse.
+    let clap_said = |err: clap::Error| UsageError(err.to_string().trim_end().to_string());
 
-    Ok(Invocation::Run(Box::new(into_args(parsed)?)))
+    match subcommand.as_str() {
+        "resume" => {
+            let parsed = ResumeCommand::try_parse_from(&tokens).map_err(clap_said)?;
+            Ok(Invocation::Resume(Box::new(into_resume_args(parsed)?)))
+        }
+        "ls" => {
+            let parsed = LsCommand::try_parse_from(&tokens).map_err(clap_said)?;
+            Ok(Invocation::Ls(Box::new(LsArgs {
+                all: parsed.all,
+                session_dir: parsed.common.session_dir,
+                directory: parsed.common.directory,
+                output: parsed.common.output,
+            })))
+        }
+        _ => {
+            let parsed = RunCommand::try_parse_from(&tokens).map_err(clap_said)?;
+            Ok(Invocation::Run(Box::new(into_args(parsed)?)))
+        }
+    }
+}
+
+/// `ego resume [ID] [PROMPT]` becomes the same [`Args`] a run produces, with
+/// [`SessionChoice::Resume`] in place of the session group.
+///
+/// **The first positional is an id only if it is one.** `CLI.md` §2 spells
+/// both positionals optional, so `ego resume "next step"` has to mean the
+/// latest session and that prompt — deciding by position alone would make it a
+/// malformed-id complaint. When a *second* positional is present the first was
+/// unambiguously meant as an id, so a word that is not one is refused rather
+/// than silently demoted to a prompt that would then have a stray argument
+/// after it.
+fn into_resume_args(command: ResumeCommand) -> Result<Args, UsageError> {
+    let ResumeCommand { id, prompt, flags } = command;
+
+    for (given, flag) in [
+        (flags.session.is_some(), "--session"),
+        (flags.session_id.is_some(), "--session-id"),
+        (flags.ephemeral, "--ephemeral"),
+    ] {
+        if given {
+            return Err(UsageError(format!(
+                "{flag} and `resume` both name a session, and they disagree: \
+                 drop {flag}, or use `run` if you meant to start one"
+            )));
+        }
+    }
+
+    let (id, prompt) = match (id, prompt) {
+        (Some(first), None) if SessionId::from_str(&first).is_err() => (None, Some(first)),
+        (Some(first), None) => (Some(first), None),
+        (first, second) => (first, second),
+    };
+    if let Some(text) = &id
+        && let Err(err) = SessionId::from_str(text)
+    {
+        return Err(UsageError(format!(
+            "`{text}` is not a session id: {err}. Pass the id of a session, or \
+             omit it for the latest in this workspace"
+        )));
+    }
+
+    // §2's second positional is what a resumed session is *for*. Without it
+    // there is nothing to say to the session, and this build has no
+    // interactive surface to hand it to — so opening one and stopping would be
+    // work with no product.
+    let Some(prompt) = prompt else {
+        return Err(UsageError(
+            "`resume` needs something to say to the session: pass a prompt, or \
+             `-` to read one from stdin"
+                .to_string(),
+        ));
+    };
+
+    let mut args = into_args(RunCommand {
+        prompt: Some(prompt),
+        flags,
+    })?;
+    args.session = SessionChoice::Resume(id);
+    Ok(args)
 }
 
 fn into_args(command: RunCommand) -> Result<Args, UsageError> {
@@ -559,8 +716,8 @@ fn into_args(command: RunCommand) -> Result<Args, UsageError> {
         instructions: flags.instructions,
         bare: flags.bare,
         session,
-        session_dir: flags.session_dir,
-        output: flags.output,
+        session_dir: flags.common.session_dir,
+        output: flags.common.output,
         schema: flags.schema,
         schema_retries: flags.schema_retries,
         budget: flags.budget,
@@ -574,7 +731,7 @@ fn into_args(command: RunCommand) -> Result<Args, UsageError> {
         } else {
             flags.tools
         },
-        directory: flags.directory,
+        directory: flags.common.directory,
         set: flags.set,
         profile: flags.profile,
         quiet: flags.quiet,

@@ -1548,3 +1548,221 @@ fn a_session_id_that_is_not_an_id_is_refused() {
         finished.stderr
     );
 }
+
+// --- `ego ls` and `ego resume`, as processes ---
+
+/// `ego run` writes a session; `ego ls` finds it, attributed to the workspace
+/// the run happened in.
+///
+/// The whole point of `CODEC_VERSION` 5. Before the header carried a workspace
+/// root, `SessionMeta.workspace_root` was `None` for every session and this
+/// listing could not have had a default at all.
+///
+/// The path comparison is what makes it a real test on macOS: a tempdir is
+/// under `/var`, which canonicalises to `/private/var`. The header stores the
+/// canonical root and `ls` canonicalises the directory it is standing in, so
+/// the two agree — a build that stored either one raw would list nothing here.
+#[test]
+fn ls_finds_the_session_a_run_just_wrote() {
+    let places = Places::new();
+    let stub = Stub::start(Plan::default());
+    let run = places
+        .ego(&stub)
+        .args(["--model", "ollama/qwen3", "Begin"])
+        .run();
+    assert_eq!(run.code, Some(0), "stderr: {}", run.stderr);
+
+    let listed = places
+        .ego(&stub)
+        .subcommand("ls")
+        .args(["--output", "json"])
+        .run();
+    assert_eq!(listed.code, Some(0), "stderr: {}", listed.stderr);
+
+    let value = listed.report();
+    assert_eq!(value["v"], 1);
+    let sessions = value["sessions"].as_array().expect("an array");
+    assert_eq!(sessions.len(), 1, "{value}");
+    assert!(
+        sessions[0]["workspace_root"].is_string(),
+        "a listed session knows where it belongs: {value}"
+    );
+    assert!(sessions[0]["created"].is_number(), "{value}");
+}
+
+/// An empty store is `{"v":1,"sessions":[]}` and exit 0, not silence. A script
+/// that gets no output cannot tell an empty store from a command that failed
+/// to run.
+#[test]
+fn ls_on_an_empty_store_is_an_empty_list_and_not_a_failure() {
+    let listed = Ego::nowhere()
+        .subcommand("ls")
+        .args(["--output", "json"])
+        .run();
+    assert_eq!(listed.code, Some(0), "stderr: {}", listed.stderr);
+    assert_eq!(
+        listed.report(),
+        serde_json::json!({"v": 1, "sessions": []}),
+        "stdout: {}",
+        listed.stdout
+    );
+}
+
+/// Text mode prints the header even with nothing to list, so the person who
+/// typed it sees the command ran — and says on *stderr* why the table is
+/// empty, because stdout is the listing.
+#[test]
+fn ls_with_nothing_to_list_still_prints_a_header_and_explains_on_stderr() {
+    let listed = Ego::nowhere().subcommand("ls").run();
+    assert_eq!(listed.code, Some(0), "stderr: {}", listed.stderr);
+    assert!(listed.stdout.starts_with("ID"), "{:?}", listed.stdout);
+    assert!(
+        listed.stderr.contains("no session belongs"),
+        "{:?}",
+        listed.stderr
+    );
+    assert!(
+        listed.stderr.contains("--all"),
+        "the note should say how to widen it: {:?}",
+        listed.stderr
+    );
+}
+
+/// `--output jsonl` is one session per line with no envelope: the unit of a
+/// catalogue is a session, as the unit of a run is an event.
+#[test]
+fn ls_jsonl_writes_one_session_per_line() {
+    let places = Places::new();
+    let stub = Stub::start(Plan::default());
+    for prompt in ["one", "two"] {
+        let run = places
+            .ego(&stub)
+            .args(["--model", "ollama/qwen3", prompt])
+            .run();
+        assert_eq!(run.code, Some(0), "stderr: {}", run.stderr);
+    }
+
+    let listed = places
+        .ego(&stub)
+        .subcommand("ls")
+        .args(["--output", "jsonl"])
+        .run();
+    assert_eq!(listed.code, Some(0), "stderr: {}", listed.stderr);
+    let lines: Vec<&str> = listed.stdout.lines().filter(|l| !l.is_empty()).collect();
+    assert_eq!(lines.len(), 2, "stdout: {}", listed.stdout);
+    for line in lines {
+        let row: serde_json::Value = serde_json::from_str(line).expect("a session per line");
+        assert!(row["id"].is_string(), "{row}");
+        assert!(
+            row.get("sessions").is_none(),
+            "no envelope on a line: {row}"
+        );
+    }
+}
+
+/// `kill → ego resume` — `ARCHITECTURE.md` §8's third M0b exit criterion.
+/// A second turn continues the session the first one wrote, chosen with no id
+/// at all, and the session id in the report is the proof it is the same one.
+#[test]
+fn resume_with_no_id_continues_this_workspaces_latest_session() {
+    let places = Places::new();
+    let stub = Stub::start(Plan {
+        completions: vec![Reply::Sse(text("First."))],
+        ..Plan::default()
+    });
+    let first = places
+        .ego(&stub)
+        .args(["--model", "ollama/qwen3", "--output", "json", "Begin"])
+        .run();
+    assert_eq!(first.code, Some(0), "stderr: {}", first.stderr);
+    let started = first.report()["session"].clone();
+
+    let stub = Stub::start(Plan {
+        completions: vec![Reply::Sse(text("Second."))],
+        ..Plan::default()
+    });
+    let second = places
+        .ego(&stub)
+        .subcommand("resume")
+        .args(["--model", "ollama/qwen3", "--output", "json", "Go on"])
+        .run();
+    assert_eq!(second.code, Some(0), "stderr: {}", second.stderr);
+    assert_eq!(
+        second.report()["session"],
+        started,
+        "resume continued a different session"
+    );
+
+    // And the history came with it: the second generation was sent the first
+    // turn's exchange, which is what makes this a resume rather than a second
+    // run that happens to share a file.
+    let sent = stub.generations();
+    let body = serde_json::to_string(&sent[0]).expect("a request body");
+    assert!(
+        body.contains("Begin"),
+        "the first turn's prompt was not sent: {body}"
+    );
+    assert!(
+        body.contains("First."),
+        "the first answer was not sent: {body}"
+    );
+}
+
+/// `resume` never creates. `--session-id` is the flag that does, and routing
+/// `resume` through it would make a mistyped id succeed by starting an empty
+/// session — the caller who asked to continue something would get a new thing
+/// wearing its name.
+#[test]
+fn resume_with_an_unknown_id_is_a_usage_error_and_writes_no_session() {
+    let places = Places::new();
+    let stub = Stub::start(Plan::default());
+    let absent = "0192f3a1-1c2b-7d3e-9a4f-5b6c7d8e8c41";
+    let refused = places
+        .ego(&stub)
+        .subcommand("resume")
+        .args(["--model", "ollama/qwen3", absent, "Go on"])
+        .run();
+    assert_eq!(refused.code, Some(2), "stdout: {}", refused.stdout);
+    assert!(refused.stderr.contains("no session"), "{}", refused.stderr);
+
+    let listed = places
+        .ego(&stub)
+        .subcommand("ls")
+        .args(["--all", "--output", "json"])
+        .run();
+    assert_eq!(
+        listed.report()["sessions"],
+        serde_json::json!([]),
+        "the refusal must not have left a session behind: {}",
+        listed.stdout
+    );
+}
+
+/// A store full of other workspaces' sessions is not "no sessions", and the
+/// refusal says which of the two it is rather than starting one.
+#[test]
+fn resume_in_a_workspace_with_no_session_refuses_by_naming_it() {
+    let refused = Ego::nowhere()
+        .subcommand("resume")
+        .args(["--model", "ollama/qwen3", "Go on"])
+        .run();
+    assert_eq!(refused.code, Some(2), "stdout: {}", refused.stdout);
+    assert!(
+        refused.stderr.contains("no session belongs"),
+        "{}",
+        refused.stderr
+    );
+}
+
+/// `resume` with nothing to say would open a session and do nothing to it, and
+/// this build has no interactive surface to hand it to.
+#[test]
+fn resume_with_no_prompt_exits_two() {
+    let refused = Ego::nowhere().subcommand("resume").run();
+    assert_eq!(refused.code, Some(2), "stdout: {}", refused.stdout);
+    assert!(
+        refused.stderr.contains("needs something to say"),
+        "{}",
+        refused.stderr
+    );
+}

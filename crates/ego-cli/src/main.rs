@@ -20,7 +20,16 @@ async fn main() -> std::process::ExitCode {
     let out = Stdout::new(cancel.clone());
 
     let ended = match cli::parse(std::env::args().collect()) {
-        Ok(Invocation::Run(args)) => {
+        // `ls` starts no session and takes no turn, so it has no `Ended` to
+        // report — only a termination. The two absent fields are stated as
+        // what they are rather than filled with a session id nothing wrote.
+        Ok(Invocation::Ls(args)) => Ended {
+            termination: run::ls(&args, &out),
+            session: ego_core::event::id::SessionId::new(),
+            state: ego_core::state::SessionState::default(),
+            result: serde_json::Value::String(String::new()),
+        },
+        Ok(Invocation::Run(args) | Invocation::Resume(args)) => {
             let json = args.output == cli::Output::Json;
             let ended = run::run(*args, &out, cancel).await;
             if json {

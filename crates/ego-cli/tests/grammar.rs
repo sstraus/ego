@@ -26,9 +26,20 @@ fn argv<const N: usize>(args: [&str; N]) -> Vec<String> {
         .collect()
 }
 
+/// `run` and `resume` both produce an [`Args`](ego_cli::cli::Args) — that is
+/// the point of them sharing one — so one helper unwraps either, and every
+/// table below can be pointed at whichever subcommand it is about.
 fn parsed<const N: usize>(args: [&str; N]) -> ego_cli::cli::Args {
     match cli::parse(argv(args)).expect("the command line parses") {
-        Invocation::Run(args) => *args,
+        Invocation::Run(args) | Invocation::Resume(args) => *args,
+        Invocation::Ls(_) => panic!("`ls` takes no Args: use `listed` for it"),
+    }
+}
+
+fn listed<const N: usize>(args: [&str; N]) -> ego_cli::cli::LsArgs {
+    match cli::parse(argv(args)).expect("the command line parses") {
+        Invocation::Ls(args) => *args,
+        _ => panic!("that is not `ego ls`"),
     }
 }
 
@@ -61,11 +72,15 @@ fn the_separator_stops_a_subcommand_name_from_being_one() {
         parsed(["run", "--", "--model"]).prompt.as_deref(),
         Some("--model")
     );
-    // `run` alone cannot prove the rule any more: it is the one command that
-    // *is* built, so a separator check that had stopped working would still
-    // reach the interactive refusal by the ordinary route. A name from
-    // `UNBUILT` has a competing meaning and so can tell the two apart.
-    assert!(refused(["--", "resume"]).contains("interactive"));
+    // `run` alone cannot prove the rule: a separator check that had stopped
+    // working would still reach the interactive refusal for it by the ordinary
+    // route. A name with a *competing* meaning tells the two apart, and every
+    // name in either table has one — `fork` is refused by name and `resume` is
+    // a command that would have run, so the separator is the only thing that
+    // can be turning both into prompts.
+    for name in ["resume", "fork"] {
+        assert!(refused(["--", name]).contains("interactive"), "{name}");
+    }
 }
 
 /// Without a subcommand the invocation is the interactive one, and this build
@@ -103,9 +118,9 @@ fn a_retired_flag_would_be_refused_with_its_replacement() {
     }
 }
 
-/// §2 documents fourteen commands and this build implements one. The other
-/// thirteen were reaching the *interactive* refusal, which told a caller who
-/// typed `ego resume` that the permission dialog was missing — a true sentence
+/// §2 documents fourteen commands and this build implements three. The other
+/// eleven were reaching the *interactive* refusal, which told a caller who
+/// typed `ego fork` that the permission dialog was missing — a true sentence
 /// about a surface they did not ask for.
 ///
 /// The standard is already written down for the other half of the grammar
@@ -419,4 +434,238 @@ fn an_at_file_that_is_not_there_is_refused_rather_than_taken_literally() {
         .expect_err("it is not there")
         .to_string();
     assert!(refusal.contains("definitely/not/here.md"), "{refusal}");
+}
+
+// --- `ego resume` and `ego ls` ---
+
+const SOME_ID: &str = "0192f3a1-1c2b-7d3e-9a4f-5b6c7d8e8c41";
+
+/// §2's `ego resume [ID] [PROMPT]`, both positionals given.
+#[test]
+fn resume_takes_an_id_and_a_prompt() {
+    let args = parsed(["resume", SOME_ID, "next step"]);
+    assert_eq!(
+        args.session,
+        SessionChoice::Resume(Some(SOME_ID.to_string()))
+    );
+    assert_eq!(args.prompt.as_deref(), Some("next step"));
+}
+
+/// **The first positional is an id only if it is one.** §2 spells both
+/// optional, so `ego resume "next step"` has to mean the latest session and
+/// that prompt — deciding by position alone would turn it into a
+/// malformed-id complaint about the prompt.
+#[test]
+fn a_lone_positional_that_is_not_an_id_is_the_prompt() {
+    let args = parsed(["resume", "next step"]);
+    assert_eq!(args.session, SessionChoice::Resume(None));
+    assert_eq!(args.prompt.as_deref(), Some("next step"));
+}
+
+/// A lone positional that *is* an id is an id, not a prompt that happens to
+/// look like one — and then there is no prompt, which is the refusal below.
+#[test]
+fn a_lone_positional_that_is_an_id_is_not_read_as_a_prompt() {
+    let refusal = refused(["resume", SOME_ID]);
+    assert!(refusal.contains("needs something to say"), "{refusal}");
+}
+
+/// With a second positional the first was unambiguously meant as an id, so a
+/// word that is not one is refused by name rather than silently demoted to a
+/// prompt with a stray argument after it.
+#[test]
+fn a_first_of_two_positionals_must_be_an_id() {
+    let refusal = refused(["resume", "notanid", "next step"]);
+    assert!(refusal.contains("notanid"), "{refusal}");
+    assert!(refusal.contains("not a session id"), "{refusal}");
+}
+
+/// `resume` with nothing to say would open a session and do nothing to it.
+/// §2 spells the prompt optional because the interactive surface takes over
+/// when it is absent, and this build has no interactive surface.
+#[test]
+fn resume_with_no_prompt_is_refused() {
+    let refusal = refused(["resume"]);
+    assert!(refusal.contains("needs something to say"), "{refusal}");
+    assert!(
+        !refusal.contains("interactive session"),
+        "a named command must not be answered with the interactive refusal: {refusal}"
+    );
+}
+
+/// `-` is the prompt from stdin here exactly as it is for `run`: one contract,
+/// because `resume` is a run against a session that already exists.
+#[test]
+fn resume_reads_a_prompt_from_stdin_like_run_does() {
+    let args = parsed(["resume", SOME_ID, "-"]);
+    assert_eq!(args.stdin, Stdin::IsThePrompt);
+    assert_eq!(args.prompt, None);
+}
+
+/// Each of the session flags names a session, and so does `resume`. Refused by
+/// name rather than silently losing to the positional — an ignored `--session`
+/// would write a run into a session nobody asked for.
+#[test]
+fn the_session_flags_and_resume_cannot_both_name_a_session() {
+    for flag in ["--session", "--session-id"] {
+        let refusal = refused(["resume", "hi", flag, SOME_ID]);
+        assert!(refusal.contains(flag), "{refusal}");
+        assert!(refusal.contains("both name a session"), "{refusal}");
+    }
+    let refusal = refused(["resume", "hi", "--ephemeral"]);
+    assert!(refusal.contains("--ephemeral"), "{refusal}");
+}
+
+/// `resume` shares `run`'s whole flag block, which is the reason it produces
+/// the same `Args`. A second grammar for a second subcommand is the parallel
+/// implementation the reuse rule forbids, and this is what says the reuse is
+/// real rather than intended.
+#[test]
+fn resume_takes_every_flag_run_takes() {
+    let args = parsed([
+        "resume",
+        SOME_ID,
+        "go on",
+        "--model",
+        "ollama/qwen3",
+        "--max-turns",
+        "3",
+        "--output",
+        "json",
+        "--no-tools",
+    ]);
+    assert_eq!(args.model.as_deref(), Some("ollama/qwen3"));
+    assert_eq!(args.max_turns, Some(3));
+    assert_eq!(args.output, Output::Json);
+    assert_eq!(args.tools, Some(Vec::new()));
+}
+
+/// `ego ls` with nothing else: this workspace, as a table.
+#[test]
+fn ls_defaults_to_this_workspace_as_text() {
+    let args = listed(["ls"]);
+    assert!(!args.all);
+    assert_eq!(args.output, Output::Text);
+    assert_eq!(args.session_dir, None);
+}
+
+/// The two flags §2 line 39 and §4.6 give it.
+#[test]
+fn ls_widens_with_all_and_renders_with_output() {
+    let args = listed(["ls", "--all", "--output", "json"]);
+    assert!(args.all);
+    assert_eq!(args.output, Output::Json);
+}
+
+/// The three flags `run`, `resume` and `ls` share come from one declaration,
+/// so `--session-dir` cannot mean one store to the command that writes a
+/// session and another to the command that lists them.
+#[test]
+fn ls_honours_the_flags_it_shares_with_run() {
+    let args = listed(["ls", "--session-dir", "/tmp/store", "-C", "/tmp/ws"]);
+    assert_eq!(
+        args.session_dir.as_deref(),
+        Some(std::path::Path::new("/tmp/store"))
+    );
+    assert_eq!(
+        args.directory.as_deref(),
+        Some(std::path::Path::new("/tmp/ws"))
+    );
+}
+
+/// `ls` takes no prompt, so a positional is a mistake and clap says so rather
+/// than the word being quietly ignored.
+#[test]
+fn ls_takes_no_positional() {
+    let refusal = refused(["ls", "something"]);
+    assert!(refusal.contains("something"), "{refusal}");
+}
+
+/// §4.5's separator rule reaches the new commands too: after `--` the word is
+/// a prompt, so `ego -- ls` is the interactive form and not the catalogue.
+#[test]
+fn the_separator_still_stops_the_new_subcommand_names() {
+    for name in ["resume", "ls"] {
+        let refusal = refused(["--", name]);
+        assert!(
+            refusal.contains("interactive"),
+            "`ego -- {name}` prompts the word: {refusal}"
+        );
+    }
+}
+
+/// **The two tables must not both claim a command.**
+///
+/// `UNBUILT` is checked before the subcommand is dispatched, so a name in both
+/// places would be refused as unavailable *even though it runs* — a working
+/// command answering that it does not exist. Nothing could have caught that
+/// before: the existing bindings tie each table to `CLI.md`, and a command in
+/// both tables is consistent with the document, which offers it either way.
+///
+/// This is the check one link further along than
+/// `every_waiting_on_reason_is_the_one_the_document_prints`. That one stops the
+/// prose from drifting from `cli.rs`; this one stops `cli.rs` from drifting
+/// from the binary.
+#[test]
+fn no_command_is_both_built_and_waiting_on_something() {
+    for name in cli::BUILT {
+        assert!(
+            !cli::UNBUILT.iter().any(|(unbuilt, _)| unbuilt == name),
+            "`ego {name}` is dispatched and also refused as unavailable; the \
+             refusal runs first, so it would never reach the code that \
+             implements it"
+        );
+    }
+}
+
+/// Every command `CLI.md` §2 offers is accounted for by exactly one of the two
+/// tables — implemented, or refused by name with what it waits on.
+///
+/// The gap this closes is a command §2 promises that neither table mentions.
+/// It would fall through to the *interactive* refusal, which is the failure
+/// §2.1 was written to end: a caller who typed a documented command told about
+/// a surface they had not asked for.
+#[test]
+fn every_command_the_document_offers_is_in_exactly_one_table() {
+    let doc = include_str!("../../../CLI.md");
+    let block = doc
+        .split("## 2. Command set")
+        .nth(1)
+        .expect("CLI.md has a command set section")
+        .split("```")
+        .nth(1)
+        .expect("the command set is a fenced block");
+
+    let mut seen = 0;
+    for line in block.lines() {
+        // `ego [PROMPT]` is the interactive form, which is not a command name;
+        // continuation lines of a wrapped description are not either.
+        let Some(rest) = line.strip_prefix("ego ") else {
+            continue;
+        };
+        let Some(name) = rest.split_whitespace().next() else {
+            continue;
+        };
+        if name.starts_with('[') {
+            continue;
+        }
+        seen += 1;
+        let built = cli::BUILT.contains(&name);
+        let unbuilt = cli::UNBUILT.iter().any(|(listed, _)| *listed == name);
+        assert!(
+            built ^ unbuilt,
+            "`ego {name}` is offered by CLI.md §2 but is {}",
+            match (built, unbuilt) {
+                (false, false) =>
+                    "in neither table, so it falls through to the \
+                                   interactive refusal",
+                _ => "in both tables",
+            }
+        );
+    }
+    assert_eq!(
+        seen,
+        cli::BUILT.len() + cli::UNBUILT.len(),
+        "every table entry must be a command §2 actually offers"
+    );
 }

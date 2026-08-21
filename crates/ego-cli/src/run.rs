@@ -22,6 +22,7 @@ use ego_core::public::{PUBLIC_EVENT_VERSION, PublicEvent};
 use ego_core::run::{RunTermination, Signal};
 use ego_core::sink::EventSink;
 use ego_core::state::{ItemKind, SessionState};
+use ego_core::store::session_store::SessionStore;
 use ego_core::turn::{CancelToken, Model, Session, Tools, TurnConfig, TurnLoop, TurnOutcome};
 use ego_tools::clock::SystemClock;
 use ego_tools::fs::OsFs;
@@ -364,6 +365,32 @@ async fn execute(args: Args, out: &Stdout, cancel: CancelToken) -> Result<Ended,
             ))
         })?;
 
+    let store_root = match args.session {
+        SessionChoice::Ephemeral => None,
+        _ => Some(session::store_root(args.session_dir.as_ref()).map_err(usage)?),
+    };
+    let clock = SystemClock;
+    // The same `root` that derives a named session's id (`session::id_for`
+    // below), so "the session called build in this workspace" and "the
+    // sessions belonging to this workspace" cannot disagree about which
+    // workspace that is.
+    let jsonl_store = store_root.map(|dir| session::jsonl(dir, root.clone()));
+    // *Which* session, before the model — and *opening* it, further down,
+    // after. The two halves are separated on purpose. Choosing is a read-only
+    // catalogue query and can refuse: `ego resume` in a directory that owns no
+    // session is a usage error about the command as typed, and it would be
+    // true whatever the provider said. Answering it after the model resolves
+    // told an operator standing in the wrong directory that the network was
+    // down. Opening stays below, because that takes a lease and can create,
+    // and a session must not be created for a run whose model does not
+    // resolve.
+    let session_id = session::id_for(
+        &args.session,
+        &root,
+        jsonl_store.as_ref().map(|store| store as &dyn SessionStore),
+    )
+    .map_err(usage)?;
+
     let http = model::transport(args.offline).map_err(|err| RunTermination::Provider {
         message: err.to_string(),
     })?;
@@ -380,17 +407,6 @@ async fn execute(args: Args, out: &Stdout, cancel: CancelToken) -> Result<Ended,
         }
     })?;
 
-    let session_id = session::id_for(&args.session, &root).map_err(usage)?;
-    let store_root = match args.session {
-        SessionChoice::Ephemeral => None,
-        _ => Some(session::store_root(args.session_dir.as_ref()).map_err(usage)?),
-    };
-    let clock = SystemClock;
-    // The same `root` that derives a named session's id (`session::id_for`
-    // above), so "the session called build in this workspace" and "the
-    // sessions belonging to this workspace" cannot disagree about which
-    // workspace that is.
-    let jsonl_store = store_root.map(|dir| session::jsonl(dir, root.clone()));
     let opened = match &jsonl_store {
         Some(store) => Opened::Durable(Box::new(
             session::open(store, &session_id, &clock).map_err(|err| RunTermination::Failed {
@@ -640,6 +656,89 @@ fn last_assistant_message(state: &SessionState) -> String {
         .max_by_key(|item| item.seq)
         .map(|item| item.text.clone())
         .unwrap_or_default()
+}
+
+/// `ego ls`: the catalogue, printed (`CLI.md` §4.6).
+///
+/// A `RunTermination` like everything else, so one exit-code table answers for
+/// the whole binary: a store that cannot be listed is `Failed` (exit 1) and a
+/// store root that cannot be located is a `UsageError` (exit 2), exactly as
+/// they are for a run. There is no session and no turn, so nothing here can
+/// produce the endings that are about one.
+pub fn ls(args: &crate::cli::LsArgs, out: &Stdout) -> RunTermination {
+    let usage = |err: UsageError| RunTermination::UsageError {
+        message: err.to_string(),
+    };
+
+    let root = match workspace(args.directory.as_ref()) {
+        Ok(root) => root,
+        Err(err) => return usage(err),
+    };
+    let store_root = match session::store_root(args.session_dir.as_ref()) {
+        Ok(dir) => dir,
+        Err(err) => return usage(err),
+    };
+    // The workspace is handed over for the same reason `run` hands it over —
+    // a store writes it into the header of any session it creates — even
+    // though listing creates none. One constructor, one meaning.
+    let store = session::jsonl(store_root, root.clone());
+
+    let metas = match crate::catalogue::listing(&store, &root, args.all) {
+        Ok(metas) => metas,
+        Err(err) => {
+            return RunTermination::Failed {
+                message: format!("the session store could not be listed: {err}"),
+            };
+        }
+    };
+
+    match args.output {
+        // §4.6's single object. Rendered even when there is nothing to list:
+        // a script that gets no output cannot tell an empty store from a
+        // command that failed to run.
+        Output::Json => match serde_json::to_string(&crate::catalogue::Listing::of(&metas)) {
+            Ok(line) => out.line(&line),
+            Err(err) => {
+                return RunTermination::Failed {
+                    message: format!("the listing could not be rendered: {err}"),
+                };
+            }
+        },
+        // One session per line, which is what §4.2's spelling means for a
+        // list: the unit of a catalogue is a session, as the unit of a run is
+        // an event.
+        Output::Jsonl => {
+            for meta in &metas {
+                match serde_json::to_string(&crate::catalogue::Row::of(meta)) {
+                    Ok(line) => out.line(&line),
+                    Err(err) => {
+                        return RunTermination::Failed {
+                            message: format!("a session could not be rendered: {err}"),
+                        };
+                    }
+                }
+            }
+        }
+        // The header row is printed even for an empty store, so the person who
+        // typed `ego ls` sees that the command ran. The empty case says so on
+        // stderr rather than on stdout, which stays the listing.
+        Output::Text => {
+            for line in crate::catalogue::table(&metas, args.all) {
+                out.line(&line);
+            }
+            if metas.is_empty() {
+                note(&if args.all {
+                    "no sessions in this store".to_string()
+                } else {
+                    format!(
+                        "no session belongs to {}; `ego ls --all` lists every one",
+                        root.display()
+                    )
+                });
+            }
+        }
+    }
+    RunTermination::Done
 }
 
 /// The result of a run, rendered for `--output json` (`CLI.md` §4.1).

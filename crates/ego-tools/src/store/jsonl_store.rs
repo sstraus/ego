@@ -473,11 +473,11 @@ impl JsonlStore {
             // From the log header, for exactly the reason `created` is —
             // and this is the whole point of the field being there. Carrying
             // it forward from the previous manifest, as this line used to,
-            // meant a session whose manifest was lost came back with
-            // `workspace_root: None` and silently left its workspace. The
+            // meant a session whose manifest was lost came back without a
+            // workspace and silently left the one it belonged to. The
             // recovery path that loses the manifest is the one directly
             // above.
-            workspace_root: Some(workspace_root),
+            workspace_root,
             model: previous.as_ref().and_then(|m| m.model.clone()),
             // `created` comes from the log header rather than the old
             // manifest: the header is written once, at session creation, and
@@ -501,11 +501,11 @@ impl JsonlStore {
         Ok(true)
     }
 
-    /// Replace `id`'s manifest, carrying its `created`/`workspace_root`/
-    /// `model`/`title` forward from whatever was there before (see
-    /// `SessionMeta`'s doc comment for why this store cannot populate the
-    /// latter three from an `append` call alone) and updating `updated` to
-    /// `ev`'s envelope timestamp.
+    /// Replace `id`'s manifest, carrying its `created`/`model`/`title`
+    /// forward from whatever was there before (see `SessionMeta`'s doc
+    /// comment for why this store cannot populate the latter two from an
+    /// `append` call alone) and updating `updated` to `ev`'s envelope
+    /// timestamp.
     fn write_manifest(&self, id: &SessionId, ev: &DomainEvent) -> Result<(), StoreError> {
         let previous = self.read_manifest(id)?;
         let meta = SessionMeta {
@@ -513,7 +513,7 @@ impl JsonlStore {
             // This store created the session, so its own workspace is the
             // one the header carries. Reading the header back to confirm
             // would be an I/O round trip to learn a value already in hand.
-            workspace_root: Some(self.workspace.clone()),
+            workspace_root: self.workspace.clone(),
             model: previous.as_ref().and_then(|m| m.model.clone()),
             created: previous.as_ref().map_or(ev.env.ts, |m| m.created),
             updated: ev.env.ts,
