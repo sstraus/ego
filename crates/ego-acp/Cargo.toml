@@ -20,4 +20,9 @@ workspace = true
 # The `initialize` test drives the real SDK router over a pair of in-memory
 # line channels, which is the only way to ask what the router actually answers.
 futures = "0.3.34"
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+# `sync` for `Notify`: the admission tests in `prompt.rs` need a turn that is
+# still running when the next request arrives, which means the test host must
+# park until the test releases it. `time` so that a request which is *never*
+# answered fails the test with what its silence meant, rather than hanging the
+# suite — which is precisely how the admission defect presents.
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }

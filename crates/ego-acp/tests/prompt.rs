@@ -159,6 +159,55 @@ impl Turns for Recorder {
     }
 }
 
+/// A host whose turn does not finish until the test lets it, and which reports
+/// whether its own token was cancelled.
+///
+/// [`Recorder`] cannot express either question: its turn is over before the
+/// next line is read, so there is never a moment at which a second request
+/// arrives *during* a turn — which is the only moment the admission rule and
+/// the cancel token are about.
+#[derive(Clone, Default)]
+struct Blocking {
+    /// Notified as each turn begins.
+    started: Arc<tokio::sync::Notify>,
+    /// Awaited by each turn before it returns.
+    release: Arc<tokio::sync::Notify>,
+    /// One entry per turn admitted: its text, and whether its own token was
+    /// cancelled by the time it was allowed to end.
+    ran: Arc<Mutex<Vec<(String, bool)>>>,
+}
+
+impl Blocking {
+    async fn turn_began(&self) {
+        self.started.notified().await;
+    }
+
+    fn let_a_turn_end(&self) {
+        self.release.notify_one();
+    }
+
+    fn ran(&self) -> Vec<(String, bool)> {
+        self.ran.lock().expect("no handler panicked").clone()
+    }
+}
+
+impl Turns for Blocking {
+    async fn run(&self, turn: Turn) -> Result<v1::StopReason, String> {
+        self.started.notify_one();
+        self.release.notified().await;
+        let cancelled = turn.cancel.is_cancelled();
+        self.ran
+            .lock()
+            .expect("no handler panicked")
+            .push((turn.text.clone(), cancelled));
+        if cancelled {
+            Ok(v1::StopReason::Cancelled)
+        } else {
+            Ok(v1::StopReason::EndTurn)
+        }
+    }
+}
+
 /// One connection, driven request by request.
 ///
 /// A struct rather than a function per request because these tests are about a
@@ -172,7 +221,7 @@ struct Connected {
 }
 
 impl Connected {
-    fn to(turns: Recorder) -> Self {
+    fn to<T: Turns>(turns: T) -> Self {
         let (to_agent, to_agent_rx) = mpsc::unbounded::<String>();
         let (from_agent, from_agent_rx) = mpsc::unbounded::<String>();
         let transport = Lines::new(
@@ -187,17 +236,12 @@ impl Connected {
         }
     }
 
-    /// Send one request and return the response to *it*, collecting every
-    /// notification that arrived first.
+    /// Write one request and return its id **without waiting for the answer**.
     ///
-    /// Matching on the id rather than taking the next line is the point: a
-    /// prompt's response arrives after its updates, so a helper that read one
-    /// line would read a notification and call it the answer.
-    async fn request(
-        &mut self,
-        method: &str,
-        params: serde_json::Value,
-    ) -> (serde_json::Value, Vec<serde_json::Value>) {
+    /// The half of [`request`](Self::request) that these tests need on its own:
+    /// a second prompt can only arrive while the first turn is running if the
+    /// first prompt's response has not been waited for.
+    async fn send(&mut self, method: &str, params: serde_json::Value) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
         self.to_agent
@@ -212,7 +256,31 @@ impl Connected {
             )
             .await
             .expect("the agent is listening");
+        id
+    }
 
+    /// Write one notification. No id, and so no response to wait for — which
+    /// is what `session/cancel` is.
+    async fn notify(&mut self, method: &str, params: serde_json::Value) {
+        self.to_agent
+            .send(
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "method": method,
+                    "params": params,
+                })
+                .to_string(),
+            )
+            .await
+            .expect("the agent is listening");
+    }
+
+    /// Read until the answer to `id` arrives, collecting what came first.
+    ///
+    /// Matching on the id rather than taking the next line is the point: a
+    /// prompt's response arrives after its updates, so a helper that read one
+    /// line would read a notification and call it the answer.
+    async fn response_to(&mut self, id: u64) -> (serde_json::Value, Vec<serde_json::Value>) {
         let mut notifications = Vec::new();
         loop {
             let line = self
@@ -227,6 +295,17 @@ impl Connected {
             }
             notifications.push(message);
         }
+    }
+
+    /// Send one request and return the response to *it*, collecting every
+    /// notification that arrived first.
+    async fn request(
+        &mut self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> (serde_json::Value, Vec<serde_json::Value>) {
+        let id = self.send(method, params).await;
+        self.response_to(id).await
     }
 
     /// `initialize` then `session/new`, returning the session id minted.
@@ -262,6 +341,24 @@ impl Connected {
     async fn finish(self) {
         self.to_agent.close_channel();
         let _ = self.agent.await;
+    }
+}
+
+/// Await something that must happen, and say what its not happening meant.
+///
+/// Without this a request the agent never answers hangs the whole test binary,
+/// and a hang is not a report: `cargo test` prints nothing and the reader is
+/// left to guess which assertion never ran. The admission defect presents
+/// exactly that way — a second prompt is accepted, parks behind the first, and
+/// its response never comes.
+///
+/// Ten seconds because it is only ever reached on failure. Nothing here waits
+/// for a model; every step is an in-memory channel, so a passing run consumes
+/// none of it.
+async fn awaited<T>(what: &str, work: impl Future<Output = T>) -> T {
+    match tokio::time::timeout(std::time::Duration::from_secs(10), work).await {
+        Ok(value) => value,
+        Err(_) => panic!("{what}"),
     }
 }
 
@@ -436,6 +533,26 @@ async fn an_image_is_refused_by_name_and_no_turn_is_started() {
         "a refused prompt still published updates: {notifications:?}"
     );
 
+    // And the session is still usable. The admission rule marks a session busy
+    // before the blocks are read, so a build that refused here without
+    // releasing it would cost the client its session over one bad block —
+    // permanently, since nothing else ever clears the mark.
+    let (recovered, _) = awaited(
+        "the session was left marked busy by a prompt it refused",
+        connection.request(
+            "session/prompt",
+            serde_json::json!({
+                "sessionId": session,
+                "prompt": [{ "type": "text", "text": "then just tell me" }],
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(
+        recovered["result"]["stopReason"], "end_turn",
+        "the next prompt on that session was refused too: {recovered}"
+    );
+
     connection.finish().await;
 }
 
@@ -464,6 +581,184 @@ async fn a_prompt_for_an_unopened_session_is_refused() {
         "the refusal does not say how to open a session: {data}"
     );
     assert!(turns.turns().is_empty(), "a turn ran without a session");
+
+    connection.finish().await;
+}
+
+/// A second prompt for a session whose turn is still running is refused, and
+/// no second turn starts.
+///
+/// `docs/decisions/2026-08-21-one-turn-per-session-and-what-cancel-means.md`
+/// §3. The refusal is not politeness: the registry holds one `CancelToken` per
+/// session, so admitting a second turn would replace the running turn's token
+/// with the queued turn's and leave the running one unreachable by
+/// `session/cancel` — the defect §1 describes.
+///
+/// Both halves are asserted. A build that answered the second prompt with an
+/// error *and* ran the turn anyway would satisfy the first assertion alone.
+#[tokio::test]
+async fn a_second_prompt_while_a_turn_is_running_is_refused_and_starts_nothing() {
+    let host = Blocking::default();
+    let mut connection = Connected::to(host.clone());
+    let session = connection.open("/tmp/ws").await;
+
+    let first = connection
+        .send(
+            "session/prompt",
+            serde_json::json!({
+                "sessionId": session,
+                "prompt": [{ "type": "text", "text": "the running turn" }],
+            }),
+        )
+        .await;
+    awaited("the first turn never started", host.turn_began()).await;
+
+    let (refused, _) = awaited(
+        "a second concurrent prompt was neither refused nor answered: it was \
+         accepted and queued behind the running turn",
+        connection.request(
+            "session/prompt",
+            serde_json::json!({
+                "sessionId": session,
+                "prompt": [{ "type": "text", "text": "the second turn" }],
+            }),
+        ),
+    )
+    .await;
+    let data = refused["error"]["data"]
+        .as_str()
+        .unwrap_or_else(|| panic!("a second concurrent prompt was accepted: {refused}"));
+    assert!(
+        data.contains("already has a turn running"),
+        "the refusal does not say why it refused: {data}"
+    );
+
+    host.let_a_turn_end();
+    let (answered, _) = awaited(
+        "the running turn never answered once it was released",
+        connection.response_to(first),
+    )
+    .await;
+    assert_eq!(
+        answered["result"]["stopReason"], "end_turn",
+        "the running turn did not answer normally: {answered}"
+    );
+    assert_eq!(
+        host.ran()
+            .iter()
+            .map(|(text, _)| text.as_str())
+            .collect::<Vec<_>>(),
+        vec!["the running turn"],
+        "a second turn ran for a session that already had one"
+    );
+
+    connection.finish().await;
+}
+
+/// `session/cancel` reaches the turn that is running.
+///
+/// The other half of §3, and the one the admission rule exists to keep true: a
+/// host's cancel names a session, and the session's answer must be the turn
+/// that is actually spending money — not a token left over from a prompt that
+/// arrived later.
+#[tokio::test]
+async fn cancel_reaches_the_turn_that_is_running() {
+    let host = Blocking::default();
+    let mut connection = Connected::to(host.clone());
+    let session = connection.open("/tmp/ws").await;
+
+    let running = connection
+        .send(
+            "session/prompt",
+            serde_json::json!({
+                "sessionId": session,
+                "prompt": [{ "type": "text", "text": "stop me" }],
+            }),
+        )
+        .await;
+    awaited("the turn never started", host.turn_began()).await;
+
+    connection
+        .notify(
+            "session/cancel",
+            serde_json::json!({ "sessionId": session }),
+        )
+        .await;
+    // The notification and the release race unless the release is what unblocks
+    // the turn *after* the cancel has been dispatched. `session/cancel` stays
+    // on the dispatch loop (`serve.rs`'s module doc), and the turn is parked on
+    // `release` — so the loop is free and the flip has happened by the time
+    // this next request is answered.
+    let (_, _) = awaited(
+        "the dispatch loop was blocked, so the cancel never reached the registry",
+        connection.request(
+            "session/new",
+            serde_json::json!({ "cwd": "/tmp/other", "mcpServers": [] }),
+        ),
+    )
+    .await;
+    host.let_a_turn_end();
+
+    let (answered, _) = awaited(
+        "the cancelled turn never answered",
+        connection.response_to(running),
+    )
+    .await;
+    assert_eq!(
+        answered["result"]["stopReason"], "cancelled",
+        "the running turn was not cancelled: {answered}"
+    );
+    assert_eq!(
+        host.ran(),
+        vec![("stop me".to_string(), true)],
+        "the turn did not see its own token flip"
+    );
+
+    connection.finish().await;
+}
+
+/// A session that finished a turn accepts the next one.
+///
+/// The admission rule is per *turn in flight*, not per session for the life of
+/// the connection. A build that marked a session busy and never cleared it
+/// would pass both tests above and make every session single-use.
+#[tokio::test]
+async fn a_session_accepts_another_prompt_once_its_turn_has_ended() {
+    let host = Blocking::default();
+    let mut connection = Connected::to(host.clone());
+    let session = connection.open("/tmp/ws").await;
+
+    for text in ["first", "second"] {
+        let sent = connection
+            .send(
+                "session/prompt",
+                serde_json::json!({
+                    "sessionId": session,
+                    "prompt": [{ "type": "text", "text": text }],
+                }),
+            )
+            .await;
+        awaited(&format!("the {text} turn never started"), host.turn_began()).await;
+        host.let_a_turn_end();
+        let (answered, _) = awaited(
+            &format!("the {text} turn never answered"),
+            connection.response_to(sent),
+        )
+        .await;
+        assert_eq!(
+            answered["result"]["stopReason"], "end_turn",
+            "the {text} turn was refused or failed: {answered}"
+        );
+    }
+
+    assert_eq!(
+        host.ran()
+            .iter()
+            .map(|(text, _)| text.as_str())
+            .collect::<Vec<_>>(),
+        vec!["first", "second"],
+        "the session did not run both of its turns"
+    );
 
     connection.finish().await;
 }

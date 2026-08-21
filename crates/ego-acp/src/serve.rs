@@ -29,6 +29,21 @@
 //! `session/cancel` stays on the loop because all it does is flip an atomic:
 //! spawning it would add a scheduling hop to the one message whose whole value
 //! is arriving promptly.
+//!
+//! ## One turn per session
+//!
+//! A `session/prompt` for a session whose turn has not answered is refused
+//! rather than queued —
+//! `docs/decisions/2026-08-21-one-turn-per-session-and-what-cancel-means.md`.
+//! The registry holds one [`CancelToken`] per session because the protocol's
+//! cancel names a session and not a turn, so a session with two live turns has
+//! no unambiguous answer to give a `session/cancel`. Admitting one turn at a
+//! time is what makes the one token correct.
+//!
+//! This is per session and not per connection: two *different* sessions prompt
+//! concurrently, and nothing here serialises them. (`ego-cli`'s `Host` does,
+//! for its own reason — `run_with` roots a run with `set_current_dir`, which is
+//! process-global — and that is a separate limit recorded in `ego-cli/src/acp.rs`.)
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -119,11 +134,37 @@ fn capabilities() -> v1::AgentCapabilities {
 struct Registered {
     session: SessionId,
     cwd: PathBuf,
-    /// Replaced at the start of every turn, because a [`CancelToken`] is
-    /// one-shot: a session whose first turn was cancelled must still be able to
-    /// run a second. A `session/cancel` that arrives between turns therefore
-    /// stops a turn that is not running, which is the correct nothing.
-    cancel: CancelToken,
+    /// The running turn's token, and `None` between turns.
+    ///
+    /// A fresh one per turn, because a [`CancelToken`] is one-shot: a session
+    /// whose first turn was cancelled must still be able to run a second. An
+    /// `Option` rather than a token that is always present, because the two
+    /// states this field has to distinguish are *a turn is running* and *none
+    /// is* — and a token standing in for both is what let
+    /// `docs/decisions/2026-08-21-one-turn-per-session-and-what-cancel-means.md`
+    /// §1's defect exist: a second prompt replaced the running turn's token and
+    /// left the turn that was actually generating unreachable by
+    /// `session/cancel`.
+    ///
+    /// `None` also gives `session/cancel` between turns the right answer for
+    /// the right reason: there is nothing to stop, so it stops nothing.
+    running: Option<CancelToken>,
+}
+
+/// What `session/prompt` found when it asked to start a turn.
+///
+/// Three answers and not an `Option`, because the two ways to be refused are
+/// different sentences to a host: one is *you never opened this*, which is a
+/// mistake, and the other is *you already have one running*, which is a race a
+/// correct client can lose.
+enum Admitted {
+    /// The turn may run: the session it continues, its workspace, and the
+    /// token `session/cancel` will flip.
+    Turn(SessionId, PathBuf, CancelToken),
+    /// This session's previous turn has not answered yet.
+    Busy,
+    /// No `session/new` opened this id on this connection.
+    Unknown,
 }
 
 /// The sessions this connection has open.
@@ -140,26 +181,46 @@ impl Sessions {
             Registered {
                 session,
                 cwd,
-                cancel: CancelToken::new(),
+                running: None,
             },
         );
     }
 
-    /// Begin a turn: hand back what it needs and arm a fresh cancel token.
-    fn begin(&self, id: &v1::SessionId) -> Option<(SessionId, PathBuf, CancelToken)> {
+    /// Admit a turn, if this session has none running: hand back what it needs
+    /// and arm the token `session/cancel` will find.
+    ///
+    /// The check and the arming are one critical section on purpose. Two
+    /// prompts arriving together must not both read "nothing is running" before
+    /// either writes.
+    fn begin(&self, id: &v1::SessionId) -> Admitted {
         let mut open = self.lock();
-        let registered = open.get_mut(id)?;
-        registered.cancel = CancelToken::new();
-        Some((
-            registered.session,
-            registered.cwd.clone(),
-            registered.cancel.clone(),
-        ))
+        let Some(registered) = open.get_mut(id) else {
+            return Admitted::Unknown;
+        };
+        if registered.running.is_some() {
+            return Admitted::Busy;
+        }
+        let cancel = CancelToken::new();
+        registered.running = Some(cancel.clone());
+        Admitted::Turn(registered.session, registered.cwd.clone(), cancel)
+    }
+
+    /// The turn is over: this session may take another.
+    ///
+    /// Called on every path out of an admitted turn, including the ones that
+    /// end badly — a turn that fails releases its session, or a single refused
+    /// prompt would wedge the session for the life of the connection.
+    fn end(&self, id: &v1::SessionId) {
+        if let Some(registered) = self.lock().get_mut(id) {
+            registered.running = None;
+        }
     }
 
     fn cancel(&self, id: &v1::SessionId) {
-        if let Some(registered) = self.lock().get(id) {
-            registered.cancel.cancel(CancelCause::User);
+        if let Some(registered) = self.lock().get(id)
+            && let Some(running) = &registered.running
+        {
+            running.cancel(CancelCause::User);
         }
     }
 
@@ -296,26 +357,46 @@ fn v1_agent<T: Turns>(turns: T) -> impl agent_client_protocol::ConnectTo<Client>
                 let sessions = sessions.clone();
                 async move |request: v1::PromptRequest, responder, cx: ConnectionTo<Client>| {
                     let id = request.session_id.clone();
-                    let Some((session, cwd, cancel)) = sessions.begin(&id) else {
-                        return responder.respond_with_error(Error::invalid_params().data(
-                            format!(
-                                "there is no open session {id}: create one with \
-                             `session/new` first"
-                            ),
-                        ));
+                    let (session, cwd, cancel) = match sessions.begin(&id) {
+                        Admitted::Turn(session, cwd, cancel) => (session, cwd, cancel),
+                        // `invalid_request` and not `invalid_params`: the
+                        // params are fine and the same prompt would be accepted
+                        // a moment later. What is wrong is the moment.
+                        Admitted::Busy => {
+                            return responder.respond_with_error(Error::invalid_request().data(
+                                format!(
+                                    "session {id} already has a turn running, and this \
+                                     agent runs one turn per session: wait for the \
+                                     prompt in flight to answer before sending the next"
+                                ),
+                            ));
+                        }
+                        Admitted::Unknown => {
+                            return responder.respond_with_error(Error::invalid_params().data(
+                                format!(
+                                    "there is no open session {id}: create one with \
+                                     `session/new` first"
+                                ),
+                            ));
+                        }
                     };
                     let text = match prompt_text(&request.prompt) {
                         Ok(text) => text,
                         Err(refusal) => {
+                            // Admitted a moment ago, so it has to be released:
+                            // a prompt this build cannot read must cost the
+                            // client its answer, not its session.
+                            sessions.end(&id);
                             return responder
                                 .respond_with_error(Error::invalid_params().data(refusal));
                         }
                     };
 
                     let turns = turns.clone();
+                    let sessions = sessions.clone();
                     let updates = Updates {
                         connection: cx.clone(),
-                        session: id,
+                        session: id.clone(),
                     };
                     // Off the dispatch loop — see the module doc. The responder
                     // travels with the work, so the response is sent when the
@@ -330,6 +411,10 @@ fn v1_agent<T: Turns>(turns: T) -> impl agent_client_protocol::ConnectTo<Client>
                                 cancel,
                             })
                             .await;
+                        // Before the response, and on both arms: the client is
+                        // free to prompt again the instant it has its answer,
+                        // and a session still marked busy would refuse it.
+                        sessions.end(&id);
                         match outcome {
                             Ok(stop_reason) => {
                                 responder.respond(v1::PromptResponse::new(stop_reason))
