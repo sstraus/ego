@@ -46,12 +46,53 @@ use ego_core::generator::capabilities::{
     CacheRetention, CancelSemantics, ModelCapabilities, ReasoningCarryover, ReasoningEffortSupport,
     Transport,
 };
+use ego_core::public::project_public;
 use ego_core::state::{SessionState, Usage};
 
 // Wrapped in a module named `acp_golden` so `cargo test -p ego-acp
 // acp_golden` (the story's VERIFY command) matches these tests by
 // substring on the full test path — top-level functions in this file would
 // not match, per `ego-core/tests/public_golden.rs`'s own note on the trap.
+
+/// The real chain a connection walks: domain → public → ACP.
+///
+/// `project_v1`/`project_v2` take a `PublicEvent` now, because `EventSink` is
+/// the only live seam a run publishes through and it carries the public
+/// projection (`project.rs`'s module doc). Composing here rather than
+/// rewriting every fixture keeps these assertions about the ACP mapping while
+/// making them run over the events a host would actually be handed.
+///
+/// An event `project_public` drops never reaches ACP at all — that is the
+/// narrowing `project.rs` documents, and it is visible here as a `None`.
+fn acp_v1(event: &DomainEvent) -> Option<v1::SessionUpdate> {
+    project_public(event).as_ref().and_then(project_v1)
+}
+
+fn acp_v2(event: &DomainEvent) -> Option<v2::SessionUpdate> {
+    project_public(event).as_ref().and_then(project_v2)
+}
+
+/// The same composition for the two entry points that also need reduced state.
+fn acp_state_v1(
+    event: &DomainEvent,
+    state: &SessionState,
+    caps: &ModelCapabilities,
+) -> Option<v1::SessionUpdate> {
+    project_public(event)
+        .as_ref()
+        .and_then(|public| project_acp_v1(public, state, caps))
+}
+
+fn acp_state_v2(
+    event: &DomainEvent,
+    state: &SessionState,
+    caps: &ModelCapabilities,
+) -> Option<v2::SessionUpdate> {
+    project_public(event)
+        .as_ref()
+        .and_then(|public| project_acp_v2(public, state, caps))
+}
+
 mod acp_golden {
     use super::*;
 
@@ -439,7 +480,7 @@ mod acp_golden {
         let expected = include_str!("golden/session_v1.jsonl");
         let actual: String = fixture_log()
             .iter()
-            .filter_map(project_v1)
+            .filter_map(acp_v1)
             .map(|update| serde_json::to_string(&update).unwrap())
             .collect::<Vec<_>>()
             .join("\n");
@@ -452,7 +493,7 @@ mod acp_golden {
         let expected = include_str!("golden/session_v2.jsonl");
         let actual: String = fixture_log()
             .iter()
-            .filter_map(project_v2)
+            .filter_map(acp_v2)
             .map(|update| serde_json::to_string(&update).unwrap())
             .collect::<Vec<_>>()
             .join("\n");
@@ -482,8 +523,8 @@ mod acp_golden {
             // With an item attached: the most favourable case for a wrong
             // mapping, since every other arm that needs an id has one here.
             let event = with_item(kind);
-            assert_eq!(project_v1(&event), None);
-            assert_eq!(project_v2(&event), None);
+            assert_eq!(acp_v1(&event), None);
+            assert_eq!(acp_v2(&event), None);
         }
     }
 
@@ -497,8 +538,8 @@ mod acp_golden {
             source: SessionId::new(),
             at_seq: Seq::default(),
         });
-        assert_eq!(project_v1(&event), None);
-        assert_eq!(project_v2(&event), None);
+        assert_eq!(acp_v1(&event), None);
+        assert_eq!(acp_v2(&event), None);
     }
 
     /// Every domain event kind that has no `SessionUpdate` counterpart in
@@ -529,13 +570,13 @@ mod acp_golden {
         for kind in kinds {
             let event = with_item(kind);
             assert_eq!(
-                project_v1(&event),
+                acp_v1(&event),
                 None,
                 "{:?} must not project to a v1 SessionUpdate",
                 event.kind
             );
             assert_eq!(
-                project_v2(&event),
+                acp_v2(&event),
                 None,
                 "{:?} must not project to a v2 SessionUpdate",
                 event.kind
@@ -555,9 +596,9 @@ mod acp_golden {
         let event = with_item(EventKind::AssistantMessage {
             text: "final text".to_string(),
         });
-        assert_eq!(project_v1(&event), None);
+        assert_eq!(acp_v1(&event), None);
         assert!(matches!(
-            project_v2(&event),
+            acp_v2(&event),
             Some(v2::SessionUpdate::AgentMessage(_))
         ));
     }
@@ -590,7 +631,7 @@ mod acp_golden {
 
         // The loss, stated outright.
         assert_eq!(
-            project_v1(&event),
+            acp_v1(&event),
             None,
             "v1 currently drops a non-streamed final message; if this now \
              emits an update, re-read project.rs's Known limitation section"
@@ -600,7 +641,7 @@ mod acp_golden {
         // intrinsically unrepresentable — only unrepresentable statelessly
         // in v1.
         assert_eq!(
-            project_v2(&event),
+            acp_v2(&event),
             Some(v2::SessionUpdate::AgentMessage(
                 v2::AgentMessage::new(ITEM_ASSISTANT_2).content(vec!["You're welcome".into()])
             ))
@@ -610,7 +651,7 @@ mod acp_golden {
         // the whole fixture log emits nothing carrying this text in v1.
         let v1_lines: Vec<String> = fixture_log()
             .iter()
-            .filter_map(project_v1)
+            .filter_map(acp_v1)
             .map(|u| serde_json::to_string(&u).unwrap())
             .collect();
         assert!(
@@ -630,9 +671,9 @@ mod acp_golden {
         let event = with_item(EventKind::ToolCallDelta {
             text: "partial output".to_string(),
         });
-        assert_eq!(project_v1(&event), None);
+        assert_eq!(acp_v1(&event), None);
         assert!(matches!(
-            project_v2(&event),
+            acp_v2(&event),
             Some(v2::SessionUpdate::ToolCallContentChunk(_))
         ));
     }
@@ -660,14 +701,14 @@ mod acp_golden {
         let id = id.as_str().unwrap();
 
         assert_eq!(
-            project_v1(&event),
+            acp_v1(&event),
             Some(v1::SessionUpdate::AgentThoughtChunk(
                 v1::ContentChunk::new("weighing the options".into())
                     .message_id(Some(v1::MessageId::new(id)))
             ))
         );
         assert_eq!(
-            project_v2(&event),
+            acp_v2(&event),
             Some(v2::SessionUpdate::AgentThoughtChunk(v2::ContentChunk::new(
                 "weighing the options".into(),
                 id
@@ -735,9 +776,9 @@ mod acp_golden {
                     None,
                     EventKind::TurnCompleted { ok, exit_reason },
                 );
-                assert_eq!(project_v1(&event), None, "{exit_reason:?} ok={ok}");
+                assert_eq!(acp_v1(&event), None, "{exit_reason:?} ok={ok}");
                 assert_eq!(
-                    project_v2(&event),
+                    acp_v2(&event),
                     Some(v2::SessionUpdate::StateUpdate(v2::StateUpdate::Idle(
                         v2::IdleStateUpdate::new().stop_reason(expected_stop_reason.clone())
                     ))),
@@ -747,42 +788,46 @@ mod acp_golden {
         }
     }
 
-    /// v1's `ContentChunk.message_id` is optional, so **every** chunk-shaped
-    /// event still projects without an item id — just without chunk
-    /// continuity. Table-driven over all three rather than asserting it for
-    /// `AssistantDelta` alone and generalising: the three arms are written
-    /// separately in `project.rs`, so one of them regressing to `item.map`
-    /// would go unnoticed by a single-variant test.
+    /// **This test used to assert the opposite, and the seam change is why.**
     ///
-    /// `AssistantMessage` is deliberately absent: it projects to `None` in
-    /// v1 with *or* without an item id (see
-    /// `v1_loses_a_final_message_that_never_streamed`).
+    /// v1's `ContentChunk.message_id` is optional, so the old
+    /// `DomainEvent`-based mapping emitted a chunk for an item-less event —
+    /// content without continuity, on the grounds that it beat dropping the
+    /// text. That mapping no longer sees the event: `project_public` maps an
+    /// item-less event to `None`, so it never reaches ACP at all.
+    ///
+    /// Kept and inverted rather than deleted, because the fact it pins is the
+    /// one that replaced it, and it is a *loss* somebody could otherwise
+    /// reintroduce by accident: a future `project_public` that started
+    /// tolerating a missing item id would silently change what a host sees,
+    /// and nothing else in this file would notice.
+    ///
+    /// Table-driven over the same three arms for the same reason as before —
+    /// they are written separately in `project.rs`, so one regressing alone
+    /// would go unnoticed by a single-variant test.
     #[test]
-    fn every_v1_chunk_shaped_event_without_item_id_still_projects() {
-        let cases = [
-            (
-                EventKind::UserPrompt {
-                    text: "orphaned".to_string(),
-                },
-                v1::SessionUpdate::UserMessageChunk(v1::ContentChunk::new("orphaned".into())),
-            ),
-            (
-                EventKind::AssistantDelta {
-                    text: "orphaned".to_string(),
-                },
-                v1::SessionUpdate::AgentMessageChunk(v1::ContentChunk::new("orphaned".into())),
-            ),
-            (
-                EventKind::ReasoningDelta {
-                    text: "orphaned".to_string(),
-                },
-                v1::SessionUpdate::AgentThoughtChunk(v1::ContentChunk::new("orphaned".into())),
-            ),
+    fn an_item_less_event_reaches_neither_protocol_because_the_public_stream_drops_it() {
+        let kinds = [
+            EventKind::UserPrompt {
+                text: "orphaned".to_string(),
+            },
+            EventKind::AssistantDelta {
+                text: "orphaned".to_string(),
+            },
+            EventKind::ReasoningDelta {
+                text: "orphaned".to_string(),
+            },
         ];
-        for (kind, expected) in cases {
+        for kind in kinds {
             let name = kind.name();
             let event = ev(Seq::default(), TurnId::new(), None, kind);
-            assert_eq!(project_v1(&event), Some(expected), "{name}");
+            assert_eq!(
+                project_public(&event),
+                None,
+                "{name} reached the public stream without an item id"
+            );
+            assert_eq!(acp_v1(&event), None, "v1 {name}");
+            assert_eq!(acp_v2(&event), None, "v2 {name}");
         }
     }
 
@@ -826,7 +871,7 @@ mod acp_golden {
         for kind in kinds {
             let name = kind.name();
             let event = ev(Seq::default(), TurnId::new(), None, kind);
-            assert_eq!(project_v2(&event), None, "{name}");
+            assert_eq!(acp_v2(&event), None, "{name}");
         }
     }
 
@@ -852,8 +897,8 @@ mod acp_golden {
         for kind in kinds {
             let name = kind.name();
             let event = ev(Seq::default(), TurnId::new(), None, kind);
-            assert_eq!(project_v1(&event), None, "v1 {name}");
-            assert_eq!(project_v2(&event), None, "v2 {name}");
+            assert_eq!(acp_v1(&event), None, "v1 {name}");
+            assert_eq!(acp_v2(&event), None, "v2 {name}");
         }
     }
 
@@ -898,7 +943,7 @@ mod acp_golden {
         let caps = caps(Some(200_000));
         let last = log.last().unwrap();
 
-        let v1_update = project_acp_v1(last, &state, &caps).expect("used and size are both known");
+        let v1_update = acp_state_v1(last, &state, &caps).expect("used and size are both known");
         let v1::SessionUpdate::UsageUpdate(v1_usage) = v1_update else {
             panic!("expected a v1 UsageUpdate, got {v1_update:?}");
         };
@@ -911,7 +956,7 @@ mod acp_golden {
         // decimal and converts only here.
         assert!((cost.amount - 0.001035).abs() < 1e-12);
 
-        let v2_update = project_acp_v2(last, &state, &caps).expect("used and size are both known");
+        let v2_update = acp_state_v2(last, &state, &caps).expect("used and size are both known");
         let v2::SessionUpdate::UsageUpdate(v2_usage) = v2_update else {
             panic!("expected a v2 UsageUpdate, got {v2_update:?}");
         };
@@ -927,8 +972,8 @@ mod acp_golden {
         let state = state_after(&log);
         let caps = caps(None);
         let last = log.last().unwrap();
-        assert_eq!(project_acp_v1(last, &state, &caps), None);
-        assert_eq!(project_acp_v2(last, &state, &caps), None);
+        assert_eq!(acp_state_v1(last, &state, &caps), None);
+        assert_eq!(acp_state_v2(last, &state, &caps), None);
     }
 
     /// Occupancy has to be *reported*; it cannot be inferred from token
@@ -944,8 +989,8 @@ mod acp_golden {
         assert_ne!(state.usage.total_tokens(), 0, "tokens were recorded");
 
         let caps = caps(Some(200_000));
-        assert_eq!(project_acp_v1(&log[0], &state, &caps), None);
-        assert_eq!(project_acp_v2(&log[0], &state, &caps), None);
+        assert_eq!(acp_state_v1(&log[0], &state, &caps), None);
+        assert_eq!(acp_state_v2(&log[0], &state, &caps), None);
     }
 
     /// `cost` is optional in the ACP schema, and an unknown cumulative cost
@@ -980,7 +1025,7 @@ mod acp_golden {
         let state = state_after(&log);
         let caps = caps(Some(200_000));
 
-        let update = project_acp_v1(log.last().unwrap(), &state, &caps)
+        let update = acp_state_v1(log.last().unwrap(), &state, &caps)
             .expect("used and size are known even when cost is not");
         let v1::SessionUpdate::UsageUpdate(usage) = update else {
             panic!("expected a UsageUpdate");
@@ -1007,13 +1052,13 @@ mod acp_golden {
             }
             let name = event.kind.name();
             assert_eq!(
-                project_acp_v1(event, &state, &caps),
-                project_v1(event),
+                acp_state_v1(event, &state, &caps),
+                acp_v1(event),
                 "v1 {name}"
             );
             assert_eq!(
-                project_acp_v2(event, &state, &caps),
-                project_v2(event),
+                acp_state_v2(event, &state, &caps),
+                acp_v2(event),
                 "v2 {name}"
             );
         }
