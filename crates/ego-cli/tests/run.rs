@@ -9,7 +9,38 @@ mod support;
 use std::io::BufRead;
 use std::time::Duration;
 
+use ego_core::public::PUBLIC_EVENT_VERSION;
 use support::{Ego, Places, Plan, Reply, Stub, costing, paced, text, tool_call};
+
+/// The number `CLI.md` §4.1's own example object carries.
+///
+/// The document showed `"v": 1` from the bootstrap commit until the day this
+/// was written, while the binary emitted `PUBLIC_EVENT_VERSION` — 5 by then.
+/// Nothing noticed, because the assertions above compared the report against a
+/// literal `5` rather than against the document, so the two ends of the binding
+/// were both the code. A reader following §4.1 to learn the shape was told a
+/// version no build has ever written.
+///
+/// This is the missing link, not a second copy: the example is read out of
+/// `CLI.md` and compared to the constant the binary uses. Changing one without
+/// the other fails here.
+#[test]
+fn the_version_in_the_document_is_the_version_the_binary_writes() {
+    let doc = include_str!("../../../CLI.md");
+    let example = doc
+        .split("### 4.1 ")
+        .nth(1)
+        .expect("CLI.md has a §4.1")
+        .split("### 4.2")
+        .next()
+        .expect("§4.1 ends");
+    assert!(
+        example.contains(&format!("\"v\": {PUBLIC_EVENT_VERSION}")),
+        "CLI.md §4.1's example does not show `\"v\": {PUBLIC_EVENT_VERSION}`, \
+         which is what the binary writes. Update the document, or the constant, \
+         but not one alone.\n{example}"
+    );
+}
 
 /// The pricing an operator writes for a hosted model, in `models.toml` form.
 ///
@@ -76,7 +107,7 @@ fn a_json_run_writes_one_object_whose_success_and_reason_cannot_disagree() {
 
     assert_eq!(finished.code, Some(0), "stderr: {}", finished.stderr);
     let report = finished.report();
-    assert_eq!(report["v"], 5);
+    assert_eq!(report["v"], PUBLIC_EVENT_VERSION);
     assert_eq!(report["result"], "The answer.");
     assert_eq!(report["ok"], true);
     assert_eq!(report["exit_reason"], "done");
@@ -185,7 +216,7 @@ fn a_jsonl_run_writes_one_public_event_per_line() {
     // The version rides `session_started` and nothing else: a consumer learns
     // the schema once, from the event that opens the stream, and repeating it
     // on every line would be a number that could disagree with itself.
-    assert_eq!(finished.events()[0]["v"], 5);
+    assert_eq!(finished.events()[0]["v"], PUBLIC_EVENT_VERSION);
     assert!(
         finished.events()[1..]
             .iter()
