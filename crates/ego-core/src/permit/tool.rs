@@ -8,7 +8,7 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use super::fs::{FsError, GuardedIo, IoDenied, PathResolver};
-use super::grant::{Permit, PermitDenied};
+use super::grant::PermitDenied;
 use super::path::CanonPath;
 use super::prepared_call::PreparedCall;
 
@@ -94,9 +94,16 @@ pub struct ToolResult {
 
 /// One tool, dynamically dispatched (`ARCHITECTURE.md` §3.2): MCP tools are
 /// dynamic by nature, and boxing one trait beats a static registry macro
-/// plus a second registration mechanism for builtins. `execute` receives a
-/// `Permit` and a `GuardedIo` — never the raw `Fs` — so an effect can only
-/// happen through a checked seam.
+/// plus a second registration mechanism for builtins.
+///
+/// `execute` receives the call and a [`GuardedIo`] — never the raw `Fs`, and
+/// no longer a `Permit` either. Every tool that ever existed took the permit
+/// and ignored it, because the authority reaches a tool only as the seam's
+/// willingness to act: `io.read(p)` succeeds exactly when the permit covers
+/// `p`. Handing the permit over as well gave a tool a second, unchecked
+/// handle on its own grant, and gave a caller two values to pair — which is
+/// what `docs/decisions/2026-08-21-a-permit-nobody-can-widen.md` §3 exists to
+/// prevent. The permit now lives inside the `GuardedFs` and dies with it.
 pub trait Tool: Send + Sync {
     fn descriptor(&self) -> ToolDescriptor;
 
@@ -105,7 +112,6 @@ pub trait Tool: Send + Sync {
     fn execute<'a>(
         &'a self,
         call: PreparedCall,
-        permit: &'a Permit,
         io: &'a dyn GuardedIo,
     ) -> BoxFuture<'a, Result<ToolResult, ToolError>>;
 }
@@ -127,7 +133,6 @@ pub trait TypedTool: Send + Sync {
     fn execute<'a>(
         &'a self,
         call: PreparedCall,
-        permit: &'a Permit,
         io: &'a dyn GuardedIo,
     ) -> BoxFuture<'a, Result<ToolResult, ToolError>>;
 }
@@ -155,9 +160,8 @@ impl<T: TypedTool> Tool for Typed<T> {
     fn execute<'a>(
         &'a self,
         call: PreparedCall,
-        permit: &'a Permit,
         io: &'a dyn GuardedIo,
     ) -> BoxFuture<'a, Result<ToolResult, ToolError>> {
-        self.0.execute(call, permit, io)
+        self.0.execute(call, io)
     }
 }

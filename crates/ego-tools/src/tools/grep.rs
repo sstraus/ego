@@ -1,9 +1,7 @@
 //! `grep`: the lines under a root that match, without the files they came
 //! from ever reaching the tool.
 
-use ego_core::permit::{
-    GuardedIo, Op, Permit, PrepareCtx, PreparedCall, ToolError, ToolResult, TypedTool,
-};
+use ego_core::permit::{GuardedIo, Op, PrepareCtx, PreparedCall, ToolError, ToolResult, TypedTool};
 use futures::future::BoxFuture;
 use regex::Regex;
 use schemars::JsonSchema;
@@ -58,7 +56,6 @@ impl TypedTool for GrepTool {
     fn execute<'a>(
         &'a self,
         call: PreparedCall,
-        _permit: &'a Permit,
         io: &'a dyn GuardedIo,
     ) -> BoxFuture<'a, Result<ToolResult, ToolError>> {
         Box::pin(async move {

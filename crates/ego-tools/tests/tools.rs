@@ -97,11 +97,8 @@ impl Workspace {
     fn call(&self, name: &str, params: serde_json::Value) -> Result<String, ToolError> {
         let call = self.prepare(name, params)?;
         let granted = self.policy.authorize(call).expect("policy admits this");
-        // `Authorized` cannot be split outside `ego-core` — `into_parts` is
-        // crate-private — so a test that needs the call by value clones it.
-        // The clone grants nothing: the permit is still the one the engine
-        // minted, for this call.
-        self.execute(name, granted.call().clone(), granted.permit())
+        let (call, permit) = granted.into_parts();
+        self.execute(name, call, permit)
     }
 
     fn prepare(&self, name: &str, params: serde_json::Value) -> Result<PreparedCall, ToolError> {
@@ -112,15 +109,9 @@ impl Workspace {
         self.tool(name).prepare(params, &ctx)
     }
 
-    fn execute(
-        &self,
-        name: &str,
-        call: PreparedCall,
-        permit: &Permit,
-    ) -> Result<String, ToolError> {
+    fn execute(&self, name: &str, call: PreparedCall, permit: Permit) -> Result<String, ToolError> {
         let guarded = GuardedFs::new(permit, &self.fs);
-        block_on(self.tool(name).execute(call, permit, &guarded))
-            .map(|result: ToolResult| result.content)
+        block_on(self.tool(name).execute(call, &guarded)).map(|result: ToolResult| result.content)
     }
 }
 
@@ -276,7 +267,7 @@ mod read {
             .prepare("read", json!({ "path": "src/main.rs" }))
             .unwrap();
         let granted = ws.policy.authorize(allowed).unwrap();
-        let permit = granted.permit();
+        let (_, permit) = granted.into_parts();
         let other = ws.prepare("read", json!({ "path": ".env" })).unwrap();
 
         let err = ws
@@ -441,7 +432,7 @@ mod glob {
             .prepare("glob", json!({ "pattern": "**", "path": "src/deep" }))
             .unwrap();
         let granted = ws.policy.authorize(allowed).unwrap();
-        let permit = granted.permit();
+        let (_, permit) = granted.into_parts();
         let wider = ws
             .prepare("glob", json!({ "pattern": "**", "path": "src" }))
             .unwrap();
@@ -616,7 +607,7 @@ mod grep {
             .prepare("grep", json!({ "query": "TODO", "path": "src/deep" }))
             .unwrap();
         let granted = ws.policy.authorize(allowed).unwrap();
-        let permit = granted.permit();
+        let (_, permit) = granted.into_parts();
         let wider = ws
             .prepare("grep", json!({ "query": "TODO", "path": "src" }))
             .unwrap();

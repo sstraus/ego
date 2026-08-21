@@ -111,8 +111,8 @@ impl<'a> Tools<'a> {
         authorized: Authorized,
     ) -> Result<String, String> {
         let (call, permit) = authorized.into_parts();
-        let guarded = GuardedFs::new(&permit, self.fs);
-        tool.execute(call, &permit, &guarded)
+        let guarded = GuardedFs::new(permit, self.fs);
+        tool.execute(call, &guarded)
             .await
             .map(|result| result.content)
             .map_err(|err| err.to_string())

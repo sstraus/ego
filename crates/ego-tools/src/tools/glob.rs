@@ -1,7 +1,7 @@
 //! `glob`: names under a root, and nothing else about them.
 
 use ego_core::permit::{
-    EntryKind, GuardedIo, Op, Permit, PrepareCtx, PreparedCall, ToolError, ToolResult, TypedTool,
+    EntryKind, GuardedIo, Op, PrepareCtx, PreparedCall, ToolError, ToolResult, TypedTool,
 };
 use futures::future::BoxFuture;
 use globset::{Glob, GlobBuilder};
@@ -57,7 +57,6 @@ impl TypedTool for GlobTool {
     fn execute<'a>(
         &'a self,
         call: PreparedCall,
-        _permit: &'a Permit,
         io: &'a dyn GuardedIo,
     ) -> BoxFuture<'a, Result<ToolResult, ToolError>> {
         Box::pin(async move {

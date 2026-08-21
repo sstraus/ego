@@ -27,8 +27,8 @@ use ego_core::generator::types::{
     ContentBlock, GenRequest, Role, StopReason, ThinkingLevel, ToolDescriptor,
 };
 use ego_core::permit::{
-    CanonPath, GuardedIo, Op, Permit, PolicyEngine, PrepareCtx, PreparedCall, ToolError,
-    ToolResult, Typed, TypedTool,
+    CanonPath, GuardedIo, Op, PolicyEngine, PrepareCtx, PreparedCall, ToolError, ToolResult, Typed,
+    TypedTool,
 };
 use ego_core::public::PublicEvent;
 use ego_core::run::RunTermination;
@@ -197,7 +197,6 @@ mod turn {
         fn execute<'a>(
             &'a self,
             call: PreparedCall,
-            _permit: &'a Permit,
             io: &'a dyn GuardedIo,
         ) -> BoxFuture<'a, Result<ToolResult, ToolError>> {
             Box::pin(async move {

@@ -300,7 +300,7 @@ mod permit {
         let fs = workspace();
         let engine = PolicyEngine::new(CanonPath::new("/ws"));
         let granted = engine.authorize(list_call("/ws/src", "**")).unwrap();
-        let guarded = GuardedFs::new(granted.permit(), &fs);
+        let guarded = GuardedFs::new(granted.into_parts().1, &fs);
 
         let scan = guarded
             .list(&ScanRequest::new(CanonPath::new("/ws/src")))
@@ -333,7 +333,7 @@ mod permit {
         let fs = workspace();
         let engine = PolicyEngine::new(CanonPath::new("/ws"));
         let granted = engine.authorize(list_call("/ws/src", "**")).unwrap();
-        let guarded = GuardedFs::new(granted.permit(), &fs);
+        let guarded = GuardedFs::new(granted.into_parts().1, &fs);
 
         let denied = guarded
             .list(&ScanRequest::new(CanonPath::new("/ws")))
@@ -356,7 +356,7 @@ mod permit {
         fs.symlink("/ws/src/innocent.rs", "/etc/passwd");
         let engine = PolicyEngine::new(CanonPath::new("/ws"));
         let granted = engine.authorize(list_call("/ws/src", "**")).unwrap();
-        let guarded = GuardedFs::new(granted.permit(), &fs);
+        let guarded = GuardedFs::new(granted.into_parts().1, &fs);
 
         let denied = guarded
             .list(&ScanRequest::new(CanonPath::new("/ws/src")))
@@ -377,7 +377,7 @@ mod permit {
         fs.symlink("/ws/src/out", "/elsewhere");
         let engine = PolicyEngine::new(CanonPath::new("/ws"));
         let granted = engine.authorize(list_call("/ws/src", "**")).unwrap();
-        let guarded = GuardedFs::new(granted.permit(), &fs);
+        let guarded = GuardedFs::new(granted.into_parts().1, &fs);
 
         let scan = guarded
             .list(&ScanRequest::new(CanonPath::new("/ws/src")))
@@ -400,7 +400,7 @@ mod permit {
         let fs = workspace();
         let engine = PolicyEngine::new(CanonPath::new("/ws"));
         let granted = engine.authorize(list_call("/ws/src", "**")).unwrap();
-        let guarded = GuardedFs::new(granted.permit(), &fs);
+        let guarded = GuardedFs::new(granted.into_parts().1, &fs);
 
         let capped = ScanRequest {
             root: CanonPath::new("/ws/src"),
@@ -421,7 +421,7 @@ mod permit {
         let fs = workspace();
         let engine = PolicyEngine::new(CanonPath::new("/ws"));
         let granted = engine.authorize(list_call("/ws/src", "**")).unwrap();
-        let guarded = GuardedFs::new(granted.permit(), &fs);
+        let guarded = GuardedFs::new(granted.into_parts().1, &fs);
 
         let shallow = ScanRequest {
             root: CanonPath::new("/ws/src"),
@@ -453,7 +453,7 @@ mod permit {
         fs.file("/ws/src/target/build.rs", "generated");
         let engine = PolicyEngine::new(CanonPath::new("/ws"));
         let granted = engine.authorize(list_call("/ws/src", "**")).unwrap();
-        let guarded = GuardedFs::new(granted.permit(), &fs);
+        let guarded = GuardedFs::new(granted.into_parts().1, &fs);
 
         let skipping = ScanRequest {
             root: CanonPath::new("/ws/src"),
@@ -487,7 +487,7 @@ mod permit {
         let fs = workspace();
         let engine = PolicyEngine::new(CanonPath::new("/ws"));
         let granted = engine.authorize(search_call("/ws/src", "TODO")).unwrap();
-        let guarded = GuardedFs::new(granted.permit(), &fs);
+        let guarded = GuardedFs::new(granted.into_parts().1, &fs);
 
         let found = guarded
             .search(
@@ -511,7 +511,7 @@ mod permit {
         let fs = workspace();
         let engine = PolicyEngine::new(CanonPath::new("/ws"));
         let granted = engine.authorize(read_call("/ws/src")).unwrap();
-        let guarded = GuardedFs::new(granted.permit(), &fs);
+        let guarded = GuardedFs::new(granted.into_parts().1, &fs);
 
         // Authorised, but there is nothing there.
         assert!(matches!(
@@ -534,7 +534,7 @@ mod permit {
         let fs = workspace();
         let engine = PolicyEngine::new(CanonPath::new("/ws"));
         let granted = engine.authorize(search_call("/ws/src", "fn")).unwrap();
-        let guarded = GuardedFs::new(granted.permit(), &fs);
+        let guarded = GuardedFs::new(granted.into_parts().1, &fs);
 
         let starved = ScanRequest {
             root: CanonPath::new("/ws/src"),
@@ -560,7 +560,7 @@ mod permit {
         let fs = workspace();
         let engine = PolicyEngine::new(CanonPath::new("/ws"));
         let granted = engine.authorize(search_call("/ws/src", "SECRET")).unwrap();
-        let guarded = GuardedFs::new(granted.permit(), &fs);
+        let guarded = GuardedFs::new(granted.into_parts().1, &fs);
 
         let denied = guarded
             .search(&ScanRequest::new(CanonPath::new("/ws")), &|line: &str| {

@@ -323,50 +323,58 @@ impl Permit {
 /// let _borrowed = granted.permit();
 /// ```
 ///
-/// **Assembling one is refused twice over, and the second reason is the
-/// stronger.** An `Authorized` literal needs an owned `Permit`, and outside
-/// `ego-core` no owned `Permit` can be obtained at all: `authorize` returns
-/// them already paired, `mint` is private, `permit()` lends. The pairing
-/// mutation is not merely rejected by field privacy — it has no ingredients.
-///
-/// **That second reason was found by running the mutation, not by reading the
-/// code.** An earlier version of this block wrote the literal
-/// `Authorized { call: b, permit: a.permit() }` and passed. It passed on a
-/// *type* error — `permit()` lends, the field wants an owned value — so
-/// making both fields `pub` did not disturb it, and the block asserted
-/// nothing whatever about privacy. The `compile_fail`-plus-control pairing
-/// does not catch that; only mutating the modifier does. Recorded here
-/// because the same trap is waiting for anyone who writes the next one.
-///
-/// **And it cannot be split into its halves.** `E0624`: `into_parts` is
-/// crate-private. Splitting is what would make a pair available to mismatch
-/// in the first place, and `turn/tools.rs` is the only caller.
+/// **Assembling one is refused by field privacy, and by nothing else.**
+/// `E0451`. This is worth stating precisely, because an earlier draft of this
+/// comment claimed two independent reasons — field privacy, *and* that no
+/// owned `Permit` could be obtained outside `ego-core` at all. The second is
+/// no longer true. `into_parts` is public, so the ingredients for the forgery
+/// are freely available; only the constructor refuses. The block below mints
+/// them on purpose rather than reaching for a borrow, so that it fails on the
+/// privacy it names.
 ///
 /// ```compile_fail
-/// use ego_core::permit::{CanonPath, Op, PolicyEngine, PreparedCall};
+/// use ego_core::permit::{Authorized, CanonPath, Op, PolicyEngine, PreparedCall};
 /// let engine = PolicyEngine::new(CanonPath::new("/ws"));
-/// let granted = engine
-///     .authorize(PreparedCall {
-///         tool: "read".to_string(),
-///         ops: vec![Op::Read { path: CanonPath::new("/ws/a.rs") }],
-///     })
-///     .unwrap();
-/// let (_call, _permit) = granted.into_parts();
+/// let read = |path: &str| PreparedCall {
+///     tool: "read".to_string(),
+///     ops: vec![Op::Read { path: CanonPath::new(path) }],
+/// };
+/// let (_, permit) = engine.authorize(read("/ws/a.rs")).unwrap().into_parts();
+/// let (call, _) = engine.authorize(read("/ws/b.rs")).unwrap().into_parts();
+/// let _forged = Authorized { call, permit };
 /// ```
 ///
-/// Control — the same `granted`, interrogated through what *is* public:
+/// Control — the same two splits, without the literal. It compiles, which is
+/// the half that matters: the ingredients really are in hand, and the forgery
+/// above fails on the constructor rather than on a missing value.
 ///
 /// ```
 /// use ego_core::permit::{CanonPath, Op, PolicyEngine, PreparedCall};
 /// let engine = PolicyEngine::new(CanonPath::new("/ws"));
-/// let granted = engine
-///     .authorize(PreparedCall {
-///         tool: "read".to_string(),
-///         ops: vec![Op::Read { path: CanonPath::new("/ws/a.rs") }],
-///     })
-///     .unwrap();
-/// let (_call, _permit) = (granted.call(), granted.permit());
+/// let read = |path: &str| PreparedCall {
+///     tool: "read".to_string(),
+///     ops: vec![Op::Read { path: CanonPath::new(path) }],
+/// };
+/// let (_, _permit) = engine.authorize(read("/ws/a.rs")).unwrap().into_parts();
+/// let (_call, _) = engine.authorize(read("/ws/b.rs")).unwrap().into_parts();
 /// ```
+///
+/// **The forgery buys nothing even where it is available.** Inside
+/// `ego-core`, where the literal *does* compile, pairing call `b` with permit
+/// `a` hands the tool `b`'s operations under `a`'s authority — and `a`'s
+/// authority is the ceiling. Every path `b` names that `a` did not is refused
+/// by [`GuardedFs`](super::GuardedFs) at use time. Mispairing can lose
+/// authority; it cannot gain any. Invariant W is about what `mint` was told,
+/// and `into_parts` does not mint.
+///
+/// **The earlier draft of the first block was found wrong by running the
+/// mutation, not by reading it.** It wrote the literal
+/// `Authorized { call: b, permit: a.permit() }` and passed — on a *type*
+/// error, because `permit()` lends and the field wants an owned value. Making
+/// both fields `pub` did not disturb it, so it asserted nothing whatever
+/// about privacy. The `compile_fail`-plus-control pairing does not catch
+/// that; only mutating the modifier does. Recorded here because the same trap
+/// is waiting for anyone who writes the next one.
 #[derive(Debug)]
 pub struct Authorized {
     call: PreparedCall,
@@ -391,12 +399,17 @@ impl Authorized {
 
     /// Split the pair, immediately before execution.
     ///
-    /// `pub(crate)` and not `pub`: `turn/tools.rs` is the one place that
-    /// needs the call by value and the permit by reference at the same
-    /// instant, and it re-pairs them in the same expression. Outside this
-    /// crate there is no way to obtain a free-standing `Permit` at all, so
-    /// there is nothing to pair with the wrong call.
-    pub(crate) fn into_parts(self) -> (PreparedCall, Permit) {
+    /// Public, and that gives nothing away. This **consumes** a validly built
+    /// pair; it does not construct one. Outside `ego-core` the halves cannot
+    /// be put back together at all — the fields are private and there is no
+    /// constructor — and inside it, re-pairing them wrongly loses authority
+    /// rather than gaining it, because the permit is the ceiling. See the type
+    /// comment.
+    ///
+    /// The one production caller is `turn/tools.rs`, which splits and
+    /// immediately re-pairs: the permit goes into the seam, the call goes to
+    /// the tool, and the tool is handed no permit at all.
+    pub fn into_parts(self) -> (PreparedCall, Permit) {
         (self.call, self.permit)
     }
 }
@@ -626,9 +639,9 @@ mod tests {
             write_paths: vec![CanonPath::new("/ws/allowed")],
             ..Scope::default()
         });
-        let guarded = GuardedFs::new(&permit, &fs);
+        let guarded = GuardedFs::new(permit, &fs);
 
-        let result = block_on(tool.execute(call, &permit, &guarded)).unwrap();
+        let result = block_on(tool.execute(call, &guarded)).unwrap();
         assert_eq!(result.content, "wrote 5 bytes to /ws/allowed/note.txt");
         assert_eq!(
             fs.read(&CanonPath::new("/ws/allowed/note.txt")).unwrap(),
@@ -650,9 +663,9 @@ mod tests {
             write_paths: vec![CanonPath::new("/ws/allowed")],
             ..Scope::default()
         });
-        let guarded = GuardedFs::new(&permit, &fs);
+        let guarded = GuardedFs::new(permit, &fs);
 
-        let err = block_on(tool.execute(call, &permit, &guarded)).unwrap_err();
+        let err = block_on(tool.execute(call, &guarded)).unwrap_err();
         assert_eq!(
             err,
             ToolError::Denied(PermitDenied::Write {
@@ -703,8 +716,8 @@ mod tests {
         // for a symlink pointing outside the permitted scope.
         fs.symlink("/ws/allowed/file.txt", "/ws/secret/passwords.txt");
 
-        let guarded = GuardedFs::new(&permit, &fs);
-        let err = block_on(tool.execute(call, &permit, &guarded)).unwrap_err();
+        let guarded = GuardedFs::new(permit, &fs);
+        let err = block_on(tool.execute(call, &guarded)).unwrap_err();
         assert_eq!(
             err,
             ToolError::Denied(PermitDenied::Write {
@@ -729,7 +742,7 @@ mod tests {
             read_paths: vec![CanonPath::new("/ws/readable")],
             ..Scope::default()
         });
-        let guarded = GuardedFs::new(&permit, &fs);
+        let guarded = GuardedFs::new(permit, &fs);
 
         assert_eq!(
             guarded
@@ -751,7 +764,7 @@ mod tests {
             write_paths: vec![CanonPath::new("/ws/allowed")],
             ..Scope::default()
         });
-        let guarded = GuardedFs::new(&permit, &fs);
+        let guarded = GuardedFs::new(permit, &fs);
 
         // "/ws/allowed-evil" shares a textual prefix with the scoped
         // "/ws/allowed" but is a sibling, not a descendant of it —
@@ -777,7 +790,7 @@ mod tests {
             write_paths: vec![CanonPath::new("/ws/allowed")],
             ..Scope::default()
         });
-        let guarded = GuardedFs::new(&permit, &fs);
+        let guarded = GuardedFs::new(permit, &fs);
 
         // The scope boundary itself is in scope ("is or under", not
         // strictly-under-only)...
@@ -807,7 +820,7 @@ mod tests {
             read_paths: vec![CanonPath::new("/ws/allowed")],
             ..Scope::default()
         });
-        let guarded = GuardedFs::new(&permit, &fs);
+        let guarded = GuardedFs::new(permit, &fs);
 
         // Same sibling-prefix hazard as the write case, checked against
         // `Scope::read_paths` — read and write scope independently, each

@@ -16,7 +16,6 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 use super::fs::{Fs, FsError, GuardedIo, PathResolver};
-use super::grant::Permit;
 use super::path::CanonPath;
 use super::prepared_call::{Op, PreparedCall};
 use super::scan::{Entry, EntryKind, Scan, ScanRequest};
@@ -256,7 +255,6 @@ impl TypedTool for FakeWriteTool {
     fn execute<'a>(
         &'a self,
         call: PreparedCall,
-        _permit: &'a Permit,
         io: &'a dyn GuardedIo,
     ) -> BoxFuture<'a, Result<ToolResult, ToolError>> {
         Box::pin(async move {
