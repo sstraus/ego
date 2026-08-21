@@ -1,0 +1,14 @@
+{
+    "model": "gemma4:12b-mlx",
+    "messages": [
+        {
+            "role": "user",
+            "content": "A farmer has 17 sheep. All but 9 run away. How many are left? Reply with only the number."
+        }
+    ],
+    "stream": true,
+    "stream_options": {
+        "include_usage": true
+    },
+    "reasoning_effort": "none"
+}
