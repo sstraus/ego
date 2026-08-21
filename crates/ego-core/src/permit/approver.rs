@@ -32,6 +32,22 @@ pub enum Verdict {
     /// `scope_of`, so an approval decides *whether to ask*, never *what for*.
     Allow,
     /// Refused. The call does not run and no later party is consulted.
+    ///
+    /// **No production approver returns this yet, and that is not a gap.**
+    /// The human seat at §6 step 7 is what produces it in anger, and that
+    /// seat belongs to regression case. `Deny` is here because it defines the
+    /// port rather than anticipating a feature: [`Approver`] models the
+    /// parties who may *answer* a question, and a party that cannot say no is
+    /// an escalator, not an approver. Trimming the vocabulary to today's one
+    /// implementation would make this trait describe [`ModeApprover`] instead
+    /// of the role.
+    ///
+    /// Nor is it an unreachable variant in the sense `AGENTS.md:22-37`
+    /// forbids: a second real implementation produces it in this crate's
+    /// tests and `PolicyEngine::settle`'s handling of it — a
+    /// `PolicyDenied::Refused` that names no rule — is asserted. Dead code is
+    /// a variant nothing produces and nothing pins. So do not "simplify" this
+    /// away, and do not read its absence from the production path as a bug.
     Deny,
     /// Not this party's to answer. The question moves on with the reason
     /// attached, which is what `ARCHITECTURE.md` §3.4 requires to reach both
