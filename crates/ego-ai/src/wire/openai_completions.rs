@@ -1131,7 +1131,15 @@ pub fn decode(
 /// it, and they are opposite answers — the first clears on its own, the
 /// second never does. Only the body distinguishes them, and only on the rows
 /// that publish a discriminator. `Transient` is the right reading of the
-/// status alone, and the wrong reading of an empty wallet.
+/// status alone, and the wrong reading of an empty wallet. `POTENTIALS.md`
+/// P26, whose trigger is an OpenAI credential existing.
+///
+/// **What this does not do.** It classifies the non-200 path and only that.
+/// A row can answer `200` to a request that was wrong — Ollama accepts
+/// `role: "wizard"`, a negative `max_tokens` and a tool with no function
+/// body, and generates a normal completion for each — and none of those
+/// reaches this function, because nothing about them is a failure as far as
+/// the transport is concerned. No status table closes that gap.
 fn classify_status(status: u16) -> ErrorKind {
     match status {
         // The provider is momentarily unable. Nothing about the request is

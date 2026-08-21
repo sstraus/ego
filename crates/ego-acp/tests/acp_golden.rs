@@ -293,14 +293,18 @@ mod acp_golden {
         ]
     }
 
-    /// Every event kind in the domain's exhaustive 18-variant set, once.
+    /// Nineteen of the domain's twenty-two event kinds, once each. The three
+    /// absent are the attempt-lifecycle kinds — `GenerationStarted`,
+    /// `AttemptSettled`, `UsageCorrected` — which ACP has no counterpart for.
     ///
     /// This is the *source* the `None`-set test selects from by name, so
     /// that a kind renamed or removed upstream breaks a test instead of
-    /// silently shrinking the set being checked. It does not by itself
-    /// prove every kind is covered — the test below filters it to the nine
-    /// kinds it names, and the remaining eight are covered by the dedicated
-    /// tests further down.
+    /// silently shrinking the set being checked.
+    ///
+    /// **It catches removal and not addition**, which is a real hole and not
+    /// a nuance: a `Vec` literal has no relationship to the enum, so a new
+    /// variant falls out of coverage in silence rather than failing. It did,
+    /// when `ReasoningState` was added. `POTENTIALS.md` P27.
     fn one_of_each_kind() -> Vec<EventKind> {
         vec![
             EventKind::UserPrompt {
