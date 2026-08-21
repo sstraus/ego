@@ -320,7 +320,7 @@ async fn execute(args: Args, out: &Stdout, cancel: CancelToken) -> Result<Ended,
     let http = model::transport(args.offline).map_err(|err| RunTermination::Provider {
         message: err.to_string(),
     })?;
-    let hosted = facts::supplied().map_err(usage)?;
+    let hosted = facts::supplied(&effective.ceilings).map_err(usage)?;
     let resolved = model::resolve(&slug, hosted, &http).await.map_err(|err| {
         if model::is_provider_failure(&err) {
             RunTermination::Provider {

@@ -480,23 +480,18 @@ mod public_golden {
                 RateSource::Operator,
                 r#"{"type":"metering_selected","turn":"00000000-0000-0000-0000-000000000002","metering":"currency","ceiling":{"effect":"binds","limit":{"amount":"5","currency":"USD"}},"rates":{"source":"operator"}}"#,
             ),
-            // The same ceiling resting on a third-party table, whose revision
-            // is the only thing that identifies which figures were used.
-            (
-                currency(),
-                limited.ledger(),
-                RateSource::Table {
-                    revision: PricingRevision("litellm/2026-08-21".to_string()),
-                },
-                r#"{"type":"metering_selected","turn":"00000000-0000-0000-0000-000000000002","metering":"currency","ceiling":{"effect":"binds","limit":{"amount":"5","currency":"USD"}},"rates":{"source":"table","revision":"litellm/2026-08-21"}}"#,
-            ),
-            // A currency row settled from the provider's own invoice, whose
-            // ceiling still had to be estimated from published rates.
+            // A currency row settled from the provider's own invoice. Its
+            // ceiling still rests on rates, because a stated cost arrives
+            // after the tokens are spent and can never bound them — and the
+            // rates it rests on are the operator's, because that is the only
+            // source this build has. §5's other two arrive with the pricing
+            // table in story `regression_case`, and the enum grows an arm each when
+            // they do.
             (
                 invoiced(),
                 limited.ledger(),
-                RateSource::ProviderPublished,
-                r#"{"type":"metering_selected","turn":"00000000-0000-0000-0000-000000000002","metering":"currency","ceiling":{"effect":"binds","limit":{"amount":"5","currency":"USD"}},"rates":{"source":"provider_published"}}"#,
+                RateSource::Operator,
+                r#"{"type":"metering_selected","turn":"00000000-0000-0000-0000-000000000002","metering":"currency","ceiling":{"effect":"binds","limit":{"amount":"5","currency":"USD"}},"rates":{"source":"operator"}}"#,
             ),
             // An administrator's non-relaxable ceiling reduced what was asked
             // for. §4 requires the clamp be stated, not silent.

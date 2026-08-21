@@ -182,6 +182,23 @@ pub struct Ceilings {
 }
 
 impl Ceilings {
+    /// Whether anything here needs rates to enforce, and therefore whether
+    /// §5's rate sources are consulted at all.
+    ///
+    /// Only the money ceiling does. §9's token ceiling is checked against
+    /// token counts the session already has, so a run bounded only in tokens
+    /// looks up no price — which is exactly why §9 calls it the ceiling an
+    /// air-gapped operator should reach for.
+    ///
+    /// §5 is emphatic that this is a *gate* and not an optimisation: with no
+    /// money ceiling, no rate source is consulted, so an ordinary run
+    /// contacts nobody but the model provider. That is a privacy property,
+    /// and it has to be true before there is a third-party fetch to leak
+    /// through rather than after.
+    pub fn needs_rates(&self) -> bool {
+        self.money.is_some()
+    }
+
     /// Fold one layer's written ceiling in, overwriting the field it names
     /// and leaving the other alone.
     ///

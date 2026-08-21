@@ -24,12 +24,32 @@
 //! `config.toml` because `ConfigLayer` is `deny_unknown_fields` over a schema
 //! that mirrors the flags, and a price mirrors no flag: it is a fact about the
 //! world, not an instruction to this run.
+//!
+//! ## Why a run with no money ceiling ignores the prices in it
+//!
+//! `docs/decisions/2026-08-21-a-run-with-no-ceiling.md` §5 gates every rate
+//! source on a ceiling existing: "none of them is consulted at all unless a
+//! ceiling is configured". This file is the first of the three, so the gate
+//! starts here.
+//!
+//! It looks like a no-op today, because reading an operator's own file leaks
+//! nothing. It is not one. §5's other two sources are a provider pricing
+//! endpoint and a fetched third-party table, and §7's first row — "no fetch is
+//! attempted, offline or not" — is a *property* of the ceiling gate rather
+//! than of the fetch code: an ordinary run contacts nobody but the model
+//! provider. A gate that is only added once there is something to leak
+//! through has already been wrong once.
+//!
+//! It is also honest in its own right. A `MeteringSelected` announcing
+//! `rates: operator` on a run with no ceiling would claim figures were
+//! consulted that nothing consulted.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use ego_ai::catalogue::{self, HostedModel};
 use ego_core::budget::PricingQuote;
+use ego_core::ceiling::Ceilings;
 use ego_core::cost::{Amount, CurrencyCode, PricingRevision};
 use ego_core::generator::capabilities::ModelCapabilities;
 use serde::Deserialize;
@@ -125,7 +145,14 @@ fn read(path: &Path) -> Result<Facts, UsageError> {
 pub type Hosted = HostedModel;
 
 /// Every supplied hosted model, keyed by slug, user's winning over system's.
-pub fn supplied() -> Result<Vec<(String, HostedModel)>, UsageError> {
+///
+/// `ceilings` decides whether the *prices* come with them. Capabilities always
+/// do — a request needs the model's shape whatever it costs — but the rates
+/// are §5's first source and are consulted only when a ceiling needs them.
+/// The file is read either way, because a malformed `models.toml` is a hard
+/// error at any ceiling: an operator who typed a rate wrong should be told so
+/// rather than have the typo become invisible on runs that do not read it.
+pub fn supplied(ceilings: &Ceilings) -> Result<Vec<(String, HostedModel)>, UsageError> {
     let mut paths = vec![PathBuf::from(SYSTEM_DIR).join(MODELS_FILE)];
     if let Some(home) = config::ego_home() {
         paths.push(home.join(MODELS_FILE));
@@ -148,8 +175,14 @@ pub fn supplied() -> Result<Vec<(String, HostedModel)>, UsageError> {
                     // charge either way, and this file is not where that
                     // fact is decided.
                     metering: catalogue::tabulated(),
-                    rates: supplied
-                        .pricing
+                    // §5: the first of the three rate sources, and consulted
+                    // only when a ceiling needs one. A run with no money
+                    // ceiling resolves this row with no rates and runs
+                    // unbounded, which is §1's ordinary case.
+                    rates: ceilings
+                        .needs_rates()
+                        .then_some(supplied.pricing)
+                        .flatten()
                         .map(|quote| catalogue::operator_rates(quote.into())),
                 },
             )

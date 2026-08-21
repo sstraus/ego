@@ -297,6 +297,41 @@ mod ceiling {
         );
     }
 
+    /// §5's gate, and §9's claim that the token ceiling is the one instrument
+    /// that needs no rates, no fetch and no network.
+    ///
+    /// The middle case is the whole test. A token ceiling is still a ceiling,
+    /// so a gate written as "any ceiling at all" would pass every other
+    /// assertion here and quietly drag a price lookup in behind it — which is
+    /// exactly what an air-gapped operator reached for the token ceiling to
+    /// avoid, and what §7's first row promises does not happen.
+    #[test]
+    fn only_a_money_ceiling_needs_rates() {
+        assert!(
+            !Ceilings::default().needs_rates(),
+            "no ceiling consults nothing, which is §5's ordinary case"
+        );
+
+        let mut tokens_only = Ceilings::default();
+        tokens_only.apply(&Budget::Tokens(400_000));
+        assert!(
+            !tokens_only.needs_rates(),
+            "a token ceiling is checked against token counts the session \
+             already has, so it needs no price and must not ask for one"
+        );
+
+        let mut with_money = Ceilings::default();
+        with_money.apply(&money("5", "USD"));
+        assert!(with_money.needs_rates());
+
+        with_money.apply(&Budget::Tokens(400_000));
+        assert!(
+            with_money.needs_rates(),
+            "and adding a token ceiling beside a money one does not excuse the \
+             money one from needing rates"
+        );
+    }
+
     // --- the token check --------------------------------------------------
 
     fn used(total: u64) -> Usage {

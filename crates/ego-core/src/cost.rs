@@ -453,12 +453,20 @@ pub struct PricingRevision(pub String);
 
 /// Where the rates that priced a reservation came from.
 ///
-/// Not decoration: a ceiling enforced against the provider's own published
-/// rates and one enforced against a third-party table are materially
-/// different guarantees — the first is what the party that will charge says,
-/// the second is a summary of someone else's prices with no detector behind
-/// it — and a consumer that cannot tell them apart cannot report honestly on
-/// either. See `2026-08-21-a-run-with-no-ceiling.md` §5 and §Consequences.
+/// Not decoration: a ceiling enforced against rates an operator wrote down
+/// and one enforced against nothing at all are materially different
+/// guarantees, and a consumer that cannot tell them apart cannot report
+/// honestly on either. See `2026-08-21-a-run-with-no-ceiling.md` §5 and
+/// §Consequences.
+///
+/// **Exactly the sources that exist.** §5 names three, in resolution order:
+/// an operator's quote, the provider's own pricing endpoint, and the cached
+/// third-party table. Only the first has a producer today — the other two
+/// arrive with the table and the endpoint, in story `regression_case`. They are not
+/// declared here in advance: a variant nothing can produce is a claim the
+/// code cannot back, and `AGENTS.md:22-37` forbids exactly that. Adding an
+/// arm when its source lands is ordinary additive growth, not a temporary
+/// contract being replaced.
 ///
 /// The order of the variants is §5's resolution order, first hit wins.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -470,15 +478,6 @@ pub enum RateSource {
     /// Explicit operator configuration, which may hold a negotiated rate no
     /// public table knows about. First in §5's order for that reason.
     Operator,
-    /// The provider's own pricing endpoint, per key — the strongest evidence
-    /// available short of the invoice.
-    ProviderPublished,
-    /// The cached third-party table. The only source that names its revision
-    /// here, because it is the only one whose identity a consumer cannot
-    /// otherwise establish: an operator's quote is in the operator's own file
-    /// and a provider's is the provider's, while this is a hash-pinned
-    /// artefact fetched from somewhere else entirely.
-    Table { revision: PricingRevision },
 }
 
 /// Which metering policy established that a row has no per-token price at
