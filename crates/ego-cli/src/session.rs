@@ -80,9 +80,15 @@ pub fn store_root(explicit: Option<&PathBuf>) -> Result<PathBuf, UsageError> {
 }
 
 /// The id this run writes under.
+///
+/// `store` is consulted for exactly one choice — [`SessionChoice::Resume`],
+/// which selects a session that already exists rather than deriving or
+/// inventing an id. It is an `Option` because `--ephemeral` has no store, and
+/// those two choices cannot co-occur: they are the same field.
 pub fn id_for(
     choice: &SessionChoice,
     workspace: &std::path::Path,
+    store: Option<&dyn SessionStore>,
 ) -> Result<SessionId, UsageError> {
     match choice {
         SessionChoice::New | SessionChoice::Ephemeral => Ok(SessionId::new()),
@@ -93,6 +99,24 @@ pub fn id_for(
             let derived = uuid::Uuid::new_v5(&NAMESPACE, key.as_bytes());
             SessionId::from_str(&derived.to_string())
                 .map_err(|err| UsageError(format!("a derived session id was not one: {err}")))
+        }
+        SessionChoice::Resume(named) => {
+            let wanted =
+                match named {
+                    // Already checked by `into_resume_args`, which refuses a
+                    // first positional that is not an id when a prompt follows it.
+                    // Re-parsed rather than carried as a `SessionId`, so
+                    // `SessionChoice` stays the shape the argument grammar
+                    // produced and no second party has to keep them in step.
+                    Some(text) => Some(SessionId::from_str(text).map_err(|err| {
+                        UsageError(format!("`{text}` is not a session id: {err}"))
+                    })?),
+                    None => None,
+                };
+            let store = store.ok_or_else(|| {
+                UsageError("`resume` needs the session store, and this run has none".to_string())
+            })?;
+            crate::catalogue::resolve(store, workspace, wanted)
         }
     }
 }

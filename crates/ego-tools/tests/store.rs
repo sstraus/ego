@@ -636,7 +636,7 @@ mod store {
         // category when the header started carrying it.
         assert_eq!(
             after_creation[0].workspace_root,
-            Some(std::path::PathBuf::from("/ws"))
+            std::path::PathBuf::from("/ws")
         );
         assert_eq!(after_creation[0].model, None);
         assert_eq!(after_creation[0].title, None);

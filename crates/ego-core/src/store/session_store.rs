@@ -22,19 +22,27 @@ use crate::event::time::Timestamp;
 /// stores them — the exact on-disk bytes are the implementation's concern,
 /// not this type's.
 ///
-/// `workspace_root`, `model` and `title` are `Option` because
-/// `SessionStore::append` is the only way this port learns anything: it
-/// receives just a `SessionId` and a `DomainEvent`, and no `EventKind`
-/// (`ARCHITECTURE.md` §1) carries workspace, model or title information. A
-/// store built only from `append` calls therefore has no way to populate
-/// them at this milestone; a later story (session creation, once the loop
-/// assembles that context) is what turns these into `Some`. `created` and
-/// `updated` are never optional: both come straight from the envelope
-/// timestamp of an event the store actually received.
+/// `model` and `title` are `Option` because `SessionStore::append` is the
+/// only way this port learns anything: it receives just a `SessionId` and a
+/// `DomainEvent`, and no `EventKind` (`ARCHITECTURE.md` §1) carries model or
+/// title information. A store built only from `append` calls therefore has
+/// no way to populate them at this milestone.
+///
+/// `workspace_root` is **not** among them, and used to be. The reason it was
+/// optional — that `append` cannot learn a workspace — stopped being true
+/// when the log header started carrying one at `CODEC_VERSION` 5: the store
+/// does not learn it from an event, it writes it once at session birth and
+/// reads it back from the header. An `Option` here would be a state no store
+/// in this build can produce, handed to `ego ls` and `ego resume` to write
+/// dead branches for. See
+/// `docs/decisions/2026-08-21-the-two-commands-the-header-unblocked.md` §1.
+///
+/// `created` and `updated` are never optional: both come straight from the
+/// envelope timestamp of an event the store actually received.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionMeta {
     pub id: SessionId,
-    pub workspace_root: Option<PathBuf>,
+    pub workspace_root: PathBuf,
     pub model: Option<String>,
     pub created: Timestamp,
     pub updated: Timestamp,
