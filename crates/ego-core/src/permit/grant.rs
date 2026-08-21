@@ -292,45 +292,51 @@ impl Permit {
 ///
 /// # Leg 1, continued
 ///
-/// **An `Authorized` cannot be assembled from a call and someone else's
-/// permit.** `E0451`: both fields are private, so there is no literal to
-/// write. This is the mutation §3 exists to kill — hold the permit from call
-/// A, pair it with call B, execute.
+/// **An `Authorized` cannot be taken apart by naming its fields.** `E0616`:
+/// both are private. Reaching the permit as a *field* is what would let it be
+/// moved out and re-paired with another call — §3's whole subject.
 ///
 /// ```compile_fail
-/// use ego_core::permit::{Authorized, CanonPath, Op, PolicyEngine, PreparedCall};
+/// use ego_core::permit::{CanonPath, Op, PolicyEngine, PreparedCall};
 /// let engine = PolicyEngine::new(CanonPath::new("/ws"));
-/// let a = engine
+/// let granted = engine
 ///     .authorize(PreparedCall {
 ///         tool: "read".to_string(),
 ///         ops: vec![Op::Read { path: CanonPath::new("/ws/a.rs") }],
 ///     })
 ///     .unwrap();
-/// let b = PreparedCall {
-///     tool: "read".to_string(),
-///     ops: vec![Op::Read { path: CanonPath::new("/ws/b.rs") }],
-/// };
-/// let _widened = Authorized { call: b, permit: a.permit() };
+/// let _stolen = &granted.permit;
 /// ```
 ///
-/// Control — both halves exist and are reachable; what is refused is putting
-/// them together:
+/// Control — the same value through the accessor, which lends and cannot be
+/// moved out:
 ///
 /// ```
 /// use ego_core::permit::{CanonPath, Op, PolicyEngine, PreparedCall};
 /// let engine = PolicyEngine::new(CanonPath::new("/ws"));
-/// let a = engine
+/// let granted = engine
 ///     .authorize(PreparedCall {
 ///         tool: "read".to_string(),
 ///         ops: vec![Op::Read { path: CanonPath::new("/ws/a.rs") }],
 ///     })
 ///     .unwrap();
-/// let b = PreparedCall {
-///     tool: "read".to_string(),
-///     ops: vec![Op::Read { path: CanonPath::new("/ws/b.rs") }],
-/// };
-/// let (_, _) = (a.permit(), b);
+/// let _borrowed = granted.permit();
 /// ```
+///
+/// **Assembling one is refused twice over, and the second reason is the
+/// stronger.** An `Authorized` literal needs an owned `Permit`, and outside
+/// `ego-core` no owned `Permit` can be obtained at all: `authorize` returns
+/// them already paired, `mint` is private, `permit()` lends. The pairing
+/// mutation is not merely rejected by field privacy — it has no ingredients.
+///
+/// **That second reason was found by running the mutation, not by reading the
+/// code.** An earlier version of this block wrote the literal
+/// `Authorized { call: b, permit: a.permit() }` and passed. It passed on a
+/// *type* error — `permit()` lends, the field wants an owned value — so
+/// making both fields `pub` did not disturb it, and the block asserted
+/// nothing whatever about privacy. The `compile_fail`-plus-control pairing
+/// does not catch that; only mutating the modifier does. Recorded here
+/// because the same trap is waiting for anyone who writes the next one.
 ///
 /// **And it cannot be split into its halves.** `E0624`: `into_parts` is
 /// crate-private. Splitting is what would make a pair available to mismatch
