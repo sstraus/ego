@@ -21,7 +21,7 @@ use std::sync::{Arc, Mutex};
 use ego_ai::generator::WireGenerator;
 use ego_ai::http::{Http, HttpError, HttpRequest, HttpResponse, Method};
 use ego_ai::provider::{Auth, ProviderRow};
-use ego_ai::wire::openai_completions::request_body;
+use ego_ai::wire::openai_completions::{OpenAiCompletions, request_body};
 use ego_core::budget::{BudgetGate, Metering, PricingQuote, SettlementSource};
 use ego_core::cost::{Amount, CurrencyCode, Money, PricingRevision};
 use ego_core::event::id::GenerationId;
@@ -131,6 +131,7 @@ fn row() -> ProviderRow {
     ProviderRow {
         id: "stub".to_string(),
         endpoint: Url::parse("https://api.example/v1/chat/completions").expect("a valid url"),
+        wire: &OpenAiCompletions,
         auth: Auth::BearerFromEnv {
             var: KEY_VAR.to_string(),
         },
@@ -550,5 +551,119 @@ async fn a_generation_whose_credential_is_gone_fails_without_sending() {
     assert!(
         named,
         "the error must name the variable and classify itself: {events:?}"
+    );
+}
+
+// --- the seam ---
+
+/// A second `WireFormat`, so that "the generator uses the row's mapping" is a
+/// claim a test can fail.
+///
+/// It exists only here. A second *production* mapping arrives with the
+/// provider that needs it — Anthropic's Messages API — and inventing one early
+/// would be the stub `AGENTS.md` forbids. But the property this proves is not
+/// Anthropic's: it is that `WireGenerator` reads `row.wire` rather than naming
+/// a mapping, and a fake is the only way to state that before a second real
+/// one exists. Hardcoding `OpenAiCompletions` back into the generator leaves
+/// every other test in this file green and fails exactly these two.
+#[derive(Debug)]
+struct MarkerFormat;
+
+/// What `MarkerFormat` writes and says, chosen so neither can be produced by
+/// `openai-completions` reading the same inputs.
+const MARKER_PATH: &str = "https://api.example/marker";
+const MARKER_TEXT: &str = "decoded by the marker format";
+
+impl ego_ai::wire::WireFormat for MarkerFormat {
+    fn build_request(
+        &self,
+        _endpoint: Url,
+        headers: Vec<(String, String)>,
+        _req: &GenRequest,
+    ) -> Result<HttpRequest, ego_ai::wire::Unexpressible> {
+        Ok(HttpRequest {
+            url: Url::parse(MARKER_PATH).expect("a constant this file controls"),
+            method: Method::Post,
+            headers,
+            body: None,
+        })
+    }
+
+    fn decode(
+        &self,
+        _response: Result<HttpResponse, HttpError>,
+        _cost: Option<Arc<dyn ego_ai::wire::provider_cost::ProviderCost>>,
+    ) -> futures::stream::BoxStream<'static, AiEvent> {
+        futures::stream::iter([
+            AiEvent::DeliveryObserved(DeliveryCertainty::PossiblySent),
+            AiEvent::TextDelta {
+                text: MARKER_TEXT.to_string(),
+            },
+            AiEvent::Stop(StopReason::Stop),
+        ])
+        .boxed()
+    }
+}
+
+fn marker_row() -> ProviderRow {
+    ProviderRow {
+        wire: &MarkerFormat,
+        ..row()
+    }
+}
+
+#[tokio::test]
+async fn the_request_sent_is_the_one_the_rows_mapping_built() {
+    let http = StubHttp::responding(200, TEXT_TRANSCRIPT);
+    let generator = WireGenerator::new(
+        marker_row(),
+        Arc::clone(&http) as Arc<dyn Http>,
+        Arc::new(FakeCredentials::holding(KEY)),
+    );
+    let mut gate = BudgetGate::new(usd("10"));
+    let request = request();
+    let attempt = attempt_for(&mut gate, &request);
+
+    let _ = generator
+        .generate(request, attempt)
+        .collect::<Vec<_>>()
+        .await;
+
+    let seen = http.seen.lock().expect("not poisoned");
+    let sent = seen.first().expect("one request was sent");
+    assert_eq!(
+        sent.url.as_str(),
+        MARKER_PATH,
+        "the generator built the request with a mapping the row did not name"
+    );
+    // The row's endpoint is still the openai one, so this also proves the
+    // mapping — not the row's address — decided where the bytes went.
+    assert!(sent.body.is_none(), "{sent:?}");
+}
+
+#[tokio::test]
+async fn the_events_returned_are_the_ones_the_rows_mapping_decoded() {
+    let http = StubHttp::responding(200, TEXT_TRANSCRIPT);
+    let generator = WireGenerator::new(
+        marker_row(),
+        http as Arc<dyn Http>,
+        Arc::new(FakeCredentials::holding(KEY)),
+    );
+    let mut gate = BudgetGate::new(usd("10"));
+    let request = request();
+    let attempt = attempt_for(&mut gate, &request);
+
+    let events: Vec<AiEvent> = generator
+        .generate(request, attempt)
+        .collect::<Vec<_>>()
+        .await;
+
+    let decoded = events
+        .iter()
+        .any(|event| matches!(event, AiEvent::TextDelta { text } if text == MARKER_TEXT));
+    assert!(
+        decoded,
+        "the transcript is openai-completions and would decode to its own \
+         text; only the row's mapping produces this: {events:?}"
     );
 }

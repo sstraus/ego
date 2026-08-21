@@ -27,6 +27,7 @@ use std::sync::{Arc, Mutex};
 
 use ego_ai::http::{Http, HttpError, HttpRequest, HttpResponse};
 use ego_ai::provider::{Auth, ProviderRow};
+use ego_ai::wire::openai_completions::OpenAiCompletions;
 use ego_ai::wire::provider_cost::{
     OPENROUTER_COST_FIELD, OpenRouterUsd, ProviderCost, XAI_COST_FIELD, XaiUsdTicks,
 };
@@ -244,6 +245,7 @@ fn row(id: &str, cost: Arc<dyn ProviderCost>) -> ProviderRow {
     ProviderRow {
         id: id.to_string(),
         endpoint: Url::parse("https://api.example/v1/chat/completions").expect("a valid url"),
+        wire: &OpenAiCompletions,
         auth: Auth::BearerFromEnv {
             var: "EGO_TEST_API_KEY".to_string(),
         },
@@ -532,6 +534,7 @@ async fn a_row_with_no_cost_decoder_settles_from_its_table_as_it_always_did() {
     let plain = ProviderRow {
         id: "openai".to_string(),
         endpoint: Url::parse("https://api.example/v1/chat/completions").expect("a valid url"),
+        wire: &OpenAiCompletions,
         auth: Auth::BearerFromEnv {
             var: "EGO_TEST_API_KEY".to_string(),
         },

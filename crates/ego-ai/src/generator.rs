@@ -6,8 +6,8 @@
 //! This module composes and returns. It folds no delivery certainty and
 //! decides no stop reason, because both already have exactly one owner:
 //! [`HttpError`](crate::http::HttpError) carries the transport's reading of
-//! delivery in both variants, [`decode`](crate::wire::openai_completions::decode)
-//! turns that into events, and `AttemptStream` folds them monotonically and
+//! delivery in both variants, [`WireFormat::decode`](crate::wire::WireFormat::decode) turns that into
+//! events, and `AttemptStream` folds them monotonically and
 //! keeps only the first terminal frame. A second fold here would be a
 //! competing spelling of an existing one, invisible until the two disagreed.
 
@@ -20,16 +20,15 @@ use futures::{StreamExt, stream};
 
 use crate::http::Http;
 use crate::provider::{Credentials, ProviderRow};
-use crate::wire::{self, openai_completions};
+use crate::wire;
 
-/// A [`Generator`] that sends `openai-completions` over an [`Http`].
+/// A [`Generator`] that sends a profile's own wire format over an [`Http`].
 ///
-/// Names the wire format directly rather than selecting one. There is still
-/// only one mapping to select between, so a selector would have nothing to
-/// select — but the reason has moved on from `wire/mod.rs`'s original one:
-/// `docs/decisions/2026-08-21-a-profile-is-not-a-protocol.md` has settled what
-/// the seam separates, and what it waits on is regression case settling `GenRequest`
-/// and `AiEvent`.
+/// It no longer names a mapping. The row does — `row.wire` — so this type is
+/// the same code for every one of the six providers, and adding a seventh
+/// changes nothing here. That is the ADR §5 test in its narrowest form: if
+/// adding a provider made this file grow, the seam would be in the wrong
+/// place.
 pub struct WireGenerator {
     row: ProviderRow,
     /// `Arc`, not a borrow, and that is forced rather than preferred:
@@ -83,41 +82,45 @@ impl Generator for WireGenerator {
                 return AttemptStream::new(attempt, stream::iter(events).boxed());
             }
         };
-        let request =
-            match openai_completions::build_request(self.row.endpoint.clone(), headers, &req) {
-                Ok(request) => request,
-                // Refused before a socket exists. `DefinitelyUnsent` is honest
-                // here for the same reason `HttpError::refused_before_sending` is
-                // allowed to assert it: the decision is a pure function of the
-                // request — no DNS, no connection, no bytes.
-                //
-                // Returning an empty stream instead would settle as an abort with
-                // a missing usage report, which says "the provider was called and
-                // went silent" about a provider that was never called.
-                //
-                // `Invalid`, and the one classification in the tree that needs
-                // no provider at all to be certain of: `build_request` refused
-                // because this wire format cannot express this request, which
-                // is a fact about the request and identical on every retry.
-                Err(refused) => {
-                    let events = wire::failed(
-                        refused.to_string(),
-                        DeliveryCertainty::DefinitelyUnsent,
-                        ErrorKind::Invalid,
-                    );
-                    return AttemptStream::new(attempt, stream::iter(events).boxed());
-                }
-            };
+        let request = match self
+            .row
+            .wire
+            .build_request(self.row.endpoint.clone(), headers, &req)
+        {
+            Ok(request) => request,
+            // Refused before a socket exists. `DefinitelyUnsent` is honest
+            // here for the same reason `HttpError::refused_before_sending` is
+            // allowed to assert it: the decision is a pure function of the
+            // request — no DNS, no connection, no bytes.
+            //
+            // Returning an empty stream instead would settle as an abort with
+            // a missing usage report, which says "the provider was called and
+            // went silent" about a provider that was never called.
+            //
+            // `Invalid`, and the one classification in the tree that needs
+            // no provider at all to be certain of: `build_request` refused
+            // because this wire format cannot express this request, which
+            // is a fact about the request and identical on every retry.
+            Err(refused) => {
+                let events = wire::failed(
+                    refused.to_string(),
+                    DeliveryCertainty::DefinitelyUnsent,
+                    ErrorKind::Invalid,
+                );
+                return AttemptStream::new(attempt, stream::iter(events).boxed());
+            }
+        };
 
         let http = Arc::clone(&self.http);
         // The row's own declaration of where it states a charge, carried to
-        // the decoder rather than looked up there: `openai_completions` is
-        // spoken by providers that report a cost and by providers that do
-        // not, and a `match` on the provider id inside a wire format is the
-        // special case the metering ADR §8 forbids.
+        // the decoder rather than looked up there: one mapping is spoken by
+        // providers that report a cost and by providers that do not, and a
+        // `match` on the provider id inside a wire format is the special case
+        // the metering ADR §8 forbids.
         let cost = self.row.cost.clone();
+        let wire = self.row.wire;
         let inner = stream::once(async move { http.execute(request).await })
-            .flat_map(move |response| openai_completions::decode(response, cost.clone()))
+            .flat_map(move |response| wire.decode(response, cost.clone()))
             .boxed();
         AttemptStream::new(attempt, inner)
     }

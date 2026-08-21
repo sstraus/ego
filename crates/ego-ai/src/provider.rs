@@ -20,6 +20,8 @@ use std::sync::Arc;
 
 use url::Url;
 
+use crate::wire::WireFormat;
+use crate::wire::openai_completions::OpenAiCompletions;
 use crate::wire::provider_cost::ProviderCost;
 
 /// A credential. Prints as `<redacted>`, in every formatter, forever.
@@ -152,17 +154,31 @@ impl fmt::Display for MissingCredential {
 
 impl std::error::Error for MissingCredential {}
 
-/// One provider: an id, an endpoint, and how to authenticate against it.
+/// One provider profile: who it is, where it lives, how it authenticates,
+/// which shape its bytes take, and whether it states a charge.
 ///
-/// No wire format field. `wire/mod.rs` states why there is no `WireFormat`
-/// trait yet — extracting one from a single implementation means inventing
-/// the second implementation's requirements from imagination — and a row that
-/// named a format it could not select would be that trait in disguise.
+/// `docs/decisions/2026-08-21-a-profile-is-not-a-protocol.md` §2. Everything
+/// here is configuration that varies per deployment, per key or per account;
+/// the code that varies per API shape is behind [`wire`](Self::wire) and
+/// nowhere else.
 #[derive(Debug, Clone)]
 pub struct ProviderRow {
     pub id: String,
     pub endpoint: Url,
     pub auth: Auth,
+    /// Which API shape this provider speaks.
+    ///
+    /// A `&'static dyn` and not an `Arc<dyn>` like [`cost`](Self::cost),
+    /// because the two are different kinds of thing. A cost decoder is chosen
+    /// per row and could in principle be built from configuration; a mapping
+    /// is code, every value of it is a unit struct with no state, and there
+    /// are exactly as many as this crate compiles. A `&'static` says that.
+    ///
+    /// This is the field `wire/mod.rs` used to argue against: a row that named
+    /// a format it could not select would have been a `WireFormat` trait in
+    /// disguise. It can select one now — that is precisely what the ADR
+    /// unblocked — so the field is the trait in the open.
+    pub wire: &'static dyn WireFormat,
     /// How this provider states the money it will charge, when it states it
     /// at all.
     ///
@@ -213,6 +229,7 @@ impl ProviderRow {
         ProviderRow {
             id: "openai".to_string(),
             endpoint,
+            wire: &OpenAiCompletions,
             auth: Auth::BearerFromEnv {
                 var: OPENAI_KEY_VAR.to_string(),
             },
@@ -250,6 +267,7 @@ impl ProviderRow {
         ProviderRow {
             id: "ollama".to_string(),
             endpoint,
+            wire: &OpenAiCompletions,
             auth: Auth::None,
             // A daemon serving its own weights charges nothing and states
             // nothing; the metering says so, not a cost field.

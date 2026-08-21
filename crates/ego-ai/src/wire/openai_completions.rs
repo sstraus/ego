@@ -87,6 +87,37 @@ use crate::http::{HttpError, HttpRequest, HttpResponse, Method};
 
 use super::provider_cost::ProviderCost;
 use super::sse::SseDecoder;
+use super::{Unexpressible, WireFormat};
+
+/// The `openai-completions` mapping, as a value a profile can name.
+///
+/// A unit struct: everything that varies between the providers speaking this
+/// shape — the address, the credential, whether a monetary total is stated —
+/// is on the profile and arrives as a parameter, so there is nothing left for
+/// an instance to hold. That emptiness is the ADR §4 claim made structural: a
+/// mapping with no per-provider state has nowhere to keep a per-provider
+/// branch.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct OpenAiCompletions;
+
+impl WireFormat for OpenAiCompletions {
+    fn build_request(
+        &self,
+        endpoint: Url,
+        headers: Vec<(String, String)>,
+        req: &GenRequest,
+    ) -> Result<HttpRequest, Unexpressible> {
+        build_request(endpoint, headers, req).map_err(Unexpressible::from)
+    }
+
+    fn decode(
+        &self,
+        response: Result<HttpResponse, HttpError>,
+        cost: Option<Arc<dyn ProviderCost>>,
+    ) -> BoxStream<'static, AiEvent> {
+        decode(response, cost)
+    }
+}
 
 /// The path a provider row appends to its base URL to reach this format.
 ///
@@ -127,6 +158,18 @@ impl std::fmt::Display for RequestRefused {
 }
 
 impl std::error::Error for RequestRefused {}
+
+/// The refusal, rendered for the seam.
+///
+/// The sentence is the whole payload, and it already names this format — which
+/// is why [`Unexpressible`] carries no separate discriminant. This mapping's
+/// own tests keep matching the enum; only the caller that renders loses the
+/// variant, and rendering is all it ever did with it.
+impl From<RequestRefused> for Unexpressible {
+    fn from(refused: RequestRefused) -> Self {
+        Unexpressible::new(refused.to_string())
+    }
+}
 
 #[derive(Debug, Serialize)]
 struct WireRequest<'a> {
