@@ -22,13 +22,123 @@ use super::scope::Scope;
 #[derive(Debug)]
 struct Sealed(());
 
-/// An unforgeable, scoped grant produced only by [`PolicyEngine::mint`].
+/// An unforgeable, scoped grant produced only by the policy engine.
 ///
 /// Deliberately does not implement `Clone`: every `Permit` that exists is
 /// one the policy engine chose to mint, and there is no operation — here or
 /// anywhere else — that turns one `Permit` into a second, possibly wider,
 /// one. A call that needs more must go back to the engine for a fresh
 /// decision.
+///
+/// # Leg 1 of Invariant W: unforgeability, decided by the compiler
+///
+/// `docs/decisions/2026-08-21-a-permit-nobody-can-widen.md` names three legs
+/// of proof and says only the first is total. This is the first.
+///
+/// These run as doctests, which rustdoc compiles as an *external* crate
+/// against the public API. That is the right vantage point: the question is
+/// what someone outside `ego-core` can construct, not what this file can.
+///
+/// **Every `compile_fail` block below is paired with a companion block that
+/// must compile, and the two differ only in the forbidden line.** The pairing
+/// is the whole instrument. A lone `compile_fail` passes when the code fails
+/// to build *for any reason at all* — a typo, a renamed import, a moved
+/// module — so on its own it proves nothing and degrades silently the first
+/// time something is renamed around it. The companion is the control: if the
+/// setup stops compiling, the companion goes red and says so.
+///
+/// The error codes named in prose are what each block *does* fail with,
+/// recorded to say which rule is doing the work. They are documentation and
+/// not assertions: rustdoc accepts a `compile_fail,E0451` annotation on
+/// stable and does not check it — verified by changing one to a nonexistent
+/// `E0001`, which still passed. The annotations are therefore left off rather
+/// than written in a form that reads like a check and is not one.
+///
+/// **A permit cannot be duplicated.** `E0277`: the bound is not satisfied,
+/// because `Clone` is not implemented. Written as a bound rather than as
+/// `permit.clone()`, which would silently compile — `&Permit` is `Clone`
+/// however `Permit` is declared, and would hand back another reference.
+///
+/// ```compile_fail
+/// fn assert_clone<T: Clone>() {}
+/// assert_clone::<ego_core::permit::Permit>();
+/// ```
+///
+/// Control — the same helper shape, the same path, a bound `Permit` does
+/// satisfy:
+///
+/// ```
+/// fn assert_debug<T: std::fmt::Debug>() {}
+/// assert_debug::<ego_core::permit::Permit>();
+/// ```
+///
+/// **A permit cannot be built by naming its fields.** `E0451`: the fields
+/// are private.
+///
+/// ```compile_fail
+/// use ego_core::permit::Permit;
+/// let _forged = Permit { scope: Default::default(), _sealed: Default::default() };
+/// ```
+///
+/// Control — the type is nameable and the import resolves; only the literal
+/// is refused:
+///
+/// ```
+/// use ego_core::permit::Permit;
+/// fn takes(_: &Permit) {}
+/// ```
+///
+/// **The seal cannot be named.** `E0432`: `Sealed` is not exported, so the
+/// import does not resolve. It is the whole reason `Permit`'s constructor is
+/// unreachable rather than merely inconvenient.
+///
+/// ```compile_fail
+/// use ego_core::permit::Sealed;
+/// ```
+///
+/// Control — `ego_core::permit` is the right module and it does export
+/// things, so the failure above is `Sealed`'s absence and not a bad path:
+///
+/// ```
+/// use ego_core::permit::Permit;
+/// fn takes(_: &Permit) {}
+/// ```
+///
+/// **A permit's scope cannot be read out and re-minted.** `E0616`: the field
+/// is private. There is no accessor either, and none returning `&mut`.
+///
+/// ```compile_fail
+/// use ego_core::permit::{CanonPath, Op, PolicyEngine, PreparedCall};
+/// let engine = PolicyEngine::new(CanonPath::new("/ws"));
+/// let granted = engine
+///     .authorize(PreparedCall {
+///         tool: "read".to_string(),
+///         ops: vec![Op::Read { path: CanonPath::new("/ws/a.rs") }],
+///     })
+///     .unwrap();
+/// let _scope = &granted.permit().scope;
+/// ```
+///
+/// Control — every other line of that setup compiles; only the field access
+/// does not:
+///
+/// ```
+/// use ego_core::permit::{CanonPath, Op, PolicyEngine, PreparedCall};
+/// let engine = PolicyEngine::new(CanonPath::new("/ws"));
+/// let granted = engine
+///     .authorize(PreparedCall {
+///         tool: "read".to_string(),
+///         ops: vec![Op::Read { path: CanonPath::new("/ws/a.rs") }],
+///     })
+///     .unwrap();
+/// let _permit = granted.permit();
+/// ```
+///
+/// **What this leg does not prove.** Nothing here says the scope is
+/// *enforced*. That is `GuardedIo`'s job and `POTENTIALS.md` P23's open
+/// window: a permit that cannot be widened, checked against a path that is
+/// re-resolved between the check and the open, is still a hole. Leg 1 is
+/// about where permits come from, and about nothing else.
 #[derive(Debug)]
 pub struct Permit {
     scope: Scope,
@@ -179,6 +289,78 @@ impl Permit {
 ///
 /// No `Clone` and no public constructor: an `Authorized` is produced by
 /// [`PolicyEngine::authorize`] and by nothing else.
+///
+/// # Leg 1, continued
+///
+/// **An `Authorized` cannot be assembled from a call and someone else's
+/// permit.** `E0451`: both fields are private, so there is no literal to
+/// write. This is the mutation §3 exists to kill — hold the permit from call
+/// A, pair it with call B, execute.
+///
+/// ```compile_fail
+/// use ego_core::permit::{Authorized, CanonPath, Op, PolicyEngine, PreparedCall};
+/// let engine = PolicyEngine::new(CanonPath::new("/ws"));
+/// let a = engine
+///     .authorize(PreparedCall {
+///         tool: "read".to_string(),
+///         ops: vec![Op::Read { path: CanonPath::new("/ws/a.rs") }],
+///     })
+///     .unwrap();
+/// let b = PreparedCall {
+///     tool: "read".to_string(),
+///     ops: vec![Op::Read { path: CanonPath::new("/ws/b.rs") }],
+/// };
+/// let _widened = Authorized { call: b, permit: a.permit() };
+/// ```
+///
+/// Control — both halves exist and are reachable; what is refused is putting
+/// them together:
+///
+/// ```
+/// use ego_core::permit::{CanonPath, Op, PolicyEngine, PreparedCall};
+/// let engine = PolicyEngine::new(CanonPath::new("/ws"));
+/// let a = engine
+///     .authorize(PreparedCall {
+///         tool: "read".to_string(),
+///         ops: vec![Op::Read { path: CanonPath::new("/ws/a.rs") }],
+///     })
+///     .unwrap();
+/// let b = PreparedCall {
+///     tool: "read".to_string(),
+///     ops: vec![Op::Read { path: CanonPath::new("/ws/b.rs") }],
+/// };
+/// let (_, _) = (a.permit(), b);
+/// ```
+///
+/// **And it cannot be split into its halves.** `E0624`: `into_parts` is
+/// crate-private. Splitting is what would make a pair available to mismatch
+/// in the first place, and `turn/tools.rs` is the only caller.
+///
+/// ```compile_fail
+/// use ego_core::permit::{CanonPath, Op, PolicyEngine, PreparedCall};
+/// let engine = PolicyEngine::new(CanonPath::new("/ws"));
+/// let granted = engine
+///     .authorize(PreparedCall {
+///         tool: "read".to_string(),
+///         ops: vec![Op::Read { path: CanonPath::new("/ws/a.rs") }],
+///     })
+///     .unwrap();
+/// let (_call, _permit) = granted.into_parts();
+/// ```
+///
+/// Control — the same `granted`, interrogated through what *is* public:
+///
+/// ```
+/// use ego_core::permit::{CanonPath, Op, PolicyEngine, PreparedCall};
+/// let engine = PolicyEngine::new(CanonPath::new("/ws"));
+/// let granted = engine
+///     .authorize(PreparedCall {
+///         tool: "read".to_string(),
+///         ops: vec![Op::Read { path: CanonPath::new("/ws/a.rs") }],
+///     })
+///     .unwrap();
+/// let (_call, _permit) = (granted.call(), granted.permit());
+/// ```
 #[derive(Debug)]
 pub struct Authorized {
     call: PreparedCall,
@@ -247,6 +429,57 @@ impl fmt::Display for PolicyDenied {
 impl std::error::Error for PolicyDenied {}
 
 /// The sole minter of [`Permit`]s (`ARCHITECTURE.md` §3.2, §3.4).
+///
+/// # Invariant W
+///
+/// > For every `Permit` p that exists at any instant of the process, there is
+/// > exactly one `PreparedCall` c such that every authority in p's scope was
+/// > contributed by an `Op` of c, and p was minted during the authorization
+/// > of c. No operation anywhere produces a second `Permit` from a first, and
+/// > no operation mutates a live one.
+///
+/// # Leg 1, continued
+///
+/// **`mint` is unreachable.** `E0599`: there is no such method on
+/// `PolicyEngine` from outside `grant.rs`. This is the widening primitive —
+/// give it a `Scope` and it hands back the matching authority, with no call
+/// involved — and its absence from the public surface is what makes
+/// [`authorize`](Self::authorize) the only source of a permit.
+///
+/// ```compile_fail
+/// use ego_core::permit::{CanonPath, PolicyEngine, Scope};
+/// let engine = PolicyEngine::new(CanonPath::new("/ws"));
+/// let _wide = engine.mint(Scope::default());
+/// ```
+///
+/// Control — the engine is constructible and `Scope::default()` exists; the
+/// method is the only missing piece:
+///
+/// ```
+/// use ego_core::permit::{CanonPath, PolicyEngine, Scope};
+/// let _engine = PolicyEngine::new(CanonPath::new("/ws"));
+/// let _empty = Scope::default();
+/// ```
+///
+/// **And a `Scope` cannot be composed to feed it.** `E0451`: the fields are
+/// `pub(super)`. Even reachable, `mint` would have nothing to be given.
+///
+/// ```compile_fail
+/// use ego_core::permit::{CanonPath, Scope};
+/// let _reachable = Scope {
+///     read_paths: vec![CanonPath::new("/")],
+///     ..Default::default()
+/// };
+/// ```
+///
+/// Control — a `Scope` is still a public, readable value. Composing one is
+/// what is refused, not naming or reading one:
+///
+/// ```
+/// use ego_core::permit::Scope;
+/// let empty = Scope::default();
+/// assert!(empty.read_paths().is_empty());
+/// ```
 ///
 /// Stands in for the full rule-grammar-plus-judge engine of §3.4 axes 2–3,
 /// which is a later milestone; for M0b it answers one question — see
