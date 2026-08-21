@@ -1117,7 +1117,7 @@ mod turn {
             .events()
             .iter()
             .find_map(|ev| match &ev.kind {
-                EventKind::Error { message } => Some(message.clone()),
+                EventKind::Error { message, .. } => Some(message.clone()),
                 _ => None,
             })
             .expect("the refusal is durable, or nobody can diagnose the run from the log");

@@ -8,7 +8,7 @@ use ego_core::event::domain::{DomainEvent, Envelope, EventKind};
 use ego_core::event::id::{Producer, Seq, SessionId};
 use ego_core::event::time::Timestamp;
 use ego_core::generator::attempt::{AttemptRef, DeliveryCertainty, Outcome, UsageReport};
-use ego_core::generator::types::StopReason;
+use ego_core::generator::types::{ErrorKind, ReasoningState, StopReason};
 use ego_core::state::Usage;
 use ego_core::store::codec::{
     CODEC_VERSION, CodecError, HeaderV1, IndexedCodecError, StoreLine, decode_line, decode_log,
@@ -648,6 +648,75 @@ mod codec {
             1125,
             "the breakdown is inside the output count, not beside it"
         );
+    }
+
+    /// An `Error` written before it could be classified decodes as
+    /// `Unclassified`, which is what it proved: nobody read a provider code
+    /// for it.
+    ///
+    /// This is the additivity proof for the field, and it is the reason the
+    /// change carries no `CODEC_VERSION` bump — a new field that decodes when
+    /// absent is additive by this module's own rule, and a required one would
+    /// not be.
+    #[test]
+    fn codec_an_error_written_before_it_could_be_classified_decodes_as_unclassified() {
+        let old = r#"{"env":{"seq":0,"id":"00000000-0000-0000-0000-00000000000b","turn":"00000000-0000-0000-0000-000000000002","item":null,"parent":null,"ts":1787206085400,"producer":"Main"},"kind":{"kind":"Error","message":"rate limited, retrying"}}"#;
+
+        let decoded: DomainEvent =
+            serde_json::from_str(old).expect("an error payload without the new field decodes");
+        let EventKind::Error { message, kind } = &decoded.kind else {
+            panic!("the fixture is an Error: {:?}", decoded.kind);
+        };
+        assert_eq!(message, "rate limited, retrying");
+        assert_eq!(
+            *kind,
+            ErrorKind::Unclassified,
+            "an absent classification must fail closed, not decode as retryable"
+        );
+
+        // The wire name is `error_kind`, because the enum is internally
+        // tagged on `kind` and a field of that name would collide with the
+        // discriminant. Pinned here so a later rename is caught as the codec
+        // break it would be.
+        let stated = old.replace(
+            r#""message":"rate limited, retrying""#,
+            r#""message":"rate limited, retrying","error_kind":"transient""#,
+        );
+        let decoded: DomainEvent =
+            serde_json::from_str(&stated).expect("a stated classification decodes");
+        let EventKind::Error { kind, .. } = &decoded.kind else {
+            panic!("still an Error: {:?}", decoded.kind);
+        };
+        assert_eq!(*kind, ErrorKind::Transient);
+
+        let round_tripped = serde_json::to_string(&decoded).expect("a DomainEvent serialises");
+        assert!(
+            round_tripped.contains(r#""error_kind":"transient""#),
+            "the classification survives a round trip under its wire name: {round_tripped}"
+        );
+    }
+
+    /// A reasoning state journalled as its own variant, round-tripped whole.
+    ///
+    /// The blob is opaque and the dialect beside it is what makes it
+    /// replayable into the right model, so losing either half in the codec
+    /// would leave a resumed session holding state it cannot use.
+    #[test]
+    fn codec_a_reasoning_state_round_trips_with_its_dialect() {
+        let event = DomainEvent {
+            env: golden_events()[0].env.clone(),
+            kind: EventKind::ReasoningState {
+                state: ReasoningState {
+                    blob: "opaque-continuation-token".to_string(),
+                    dialect: "anthropic-messages".to_string(),
+                },
+            },
+        };
+
+        let encoded = serde_json::to_string(&event).expect("a DomainEvent serialises");
+        let decoded: DomainEvent = serde_json::from_str(&encoded).expect("and decodes");
+        assert_eq!(decoded, event);
+        assert_eq!(decoded.kind.name(), "reasoning_state");
     }
 
     /// `ToolCallStarted` gained `call_id` in

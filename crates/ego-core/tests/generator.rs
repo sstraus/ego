@@ -18,7 +18,7 @@ use ego_core::generator::capabilities::{
 use ego_core::generator::fake::FakeGenerator;
 use ego_core::generator::port::{AiEvent, Generator};
 use ego_core::generator::types::{
-    ContentBlock, Conversation, GenRequest, Message, ReasoningState, Role, StopReason,
+    ContentBlock, Conversation, ErrorKind, GenRequest, Message, ReasoningState, Role, StopReason,
     ThinkingLevel, ToolDescriptor,
 };
 use ego_core::state::{SessionState, Usage};
@@ -299,6 +299,7 @@ mod generator {
                         env,
                         kind: EventKind::Error {
                             message: message.clone(),
+                            kind: ErrorKind::Unclassified,
                         },
                     }]
                 }

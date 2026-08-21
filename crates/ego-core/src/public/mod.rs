@@ -463,6 +463,14 @@ pub fn project_public(ev: &DomainEvent) -> Option<PublicEvent> {
             ok: *ok,
             exit_reason: *exit_reason,
         }),
+        // Never public, and this is a privacy decision rather than a
+        // tidiness one. The blob is provider-private and opaque — ego does
+        // not know what is encoded in it, which is precisely why it cannot
+        // publish it. A consumer that needs to know the model reasoned has
+        // the reasoning item and its deltas; nothing downstream can act on
+        // the continuation token, and `CLI.md` §4.2's rule is that a new
+        // internal event never becomes public automatically.
+        EventKind::ReasoningState { .. } => None,
         EventKind::Compacted { .. } => None,
         EventKind::Forked { .. } => None,
         EventKind::HookFired { .. } => None,
@@ -480,7 +488,11 @@ pub fn project_public(ev: &DomainEvent) -> Option<PublicEvent> {
             ok: true,
             text: Some(result.clone()),
         }),
-        EventKind::Error { message } => Some(PublicEvent::Error {
+        // INCOMPLETE: `kind` is dropped here because `PublicEvent::Error`
+        // has no field to hold it. Move 10 of the AiEvent ADR adds one; until
+        // then a consumer cannot tell a transient failure from a refusal, and
+        // the projection says so by omission rather than by guessing.
+        EventKind::Error { message, .. } => Some(PublicEvent::Error {
             turn,
             item,
             message: message.clone(),

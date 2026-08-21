@@ -369,7 +369,8 @@ pub fn project_v1(ev: &DomainEvent) -> Option<v1::SessionUpdate> {
         // need reduced state and resolved capabilities to project — see the
         // module doc comment's "third entry point" section and
         // `project_acp_v1`.
-        EventKind::PermissionRequested { .. }
+        EventKind::ReasoningState { .. }
+        | EventKind::PermissionRequested { .. }
         | EventKind::PermissionDecided { .. }
         | EventKind::UsageUpdated { .. }
         | EventKind::ContextWindowUpdated { .. }
@@ -474,7 +475,8 @@ pub fn project_v2(ev: &DomainEvent) -> Option<v2::SessionUpdate> {
         // See the module doc comment's "no counterpart in either version"
         // list, and its "third entry point" section for the two usage
         // events, which need state that is not in the event.
-        EventKind::PermissionRequested { .. }
+        EventKind::ReasoningState { .. }
+        | EventKind::PermissionRequested { .. }
         | EventKind::PermissionDecided { .. }
         | EventKind::UsageUpdated { .. }
         | EventKind::ContextWindowUpdated { .. }

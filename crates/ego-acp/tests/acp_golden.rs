@@ -46,6 +46,7 @@ use ego_core::generator::capabilities::{
     CacheRetention, CancelSemantics, ModelCapabilities, ReasoningCarryover, ReasoningEffortSupport,
     Transport,
 };
+use ego_core::generator::types::{ErrorKind, ReasoningState};
 use ego_core::state::{SessionState, Usage};
 
 // Wrapped in a module named `acp_golden` so `cargo test -p ego-acp
@@ -252,6 +253,7 @@ mod acp_golden {
                 None,
                 EventKind::Error {
                     message: "rate limited, retrying".to_string(),
+                    kind: ErrorKind::Unclassified,
                 },
             ),
             ev(
@@ -291,7 +293,7 @@ mod acp_golden {
         ]
     }
 
-    /// Every event kind in the domain's exhaustive 17-variant set, once.
+    /// Every event kind in the domain's exhaustive 18-variant set, once.
     ///
     /// This is the *source* the `None`-set test selects from by name, so
     /// that a kind renamed or removed upstream breaks a test instead of
@@ -312,6 +314,12 @@ mod acp_golden {
             },
             EventKind::ReasoningDelta {
                 text: String::new(),
+            },
+            EventKind::ReasoningState {
+                state: ReasoningState {
+                    blob: String::new(),
+                    dialect: String::new(),
+                },
             },
             EventKind::ToolCallStarted {
                 name: String::new(),
@@ -362,6 +370,7 @@ mod acp_golden {
             },
             EventKind::Error {
                 message: String::new(),
+                kind: ErrorKind::Unclassified,
             },
         ]
     }
@@ -517,6 +526,9 @@ mod acp_golden {
             "subagent_spawned",
             "subagent_returned",
             "error",
+            // The blob is provider-private and opaque, and ACP describes
+            // what the agent did rather than what it must replay.
+            "reasoning_state",
         ];
         let kinds: Vec<EventKind> = one_of_each_kind()
             .into_iter()

@@ -29,7 +29,9 @@ use crate::generator::attempt::{AttemptStream, GenerationAttempt, UsageReport, s
 use crate::generator::capabilities::ModelCapabilities;
 use crate::generator::history::conversation_from;
 use crate::generator::port::{AiEvent, Generator};
-use crate::generator::types::{Conversation, GenRequest, Message, Role, StopReason, ThinkingLevel};
+use crate::generator::types::{
+    Conversation, ErrorKind, GenRequest, Message, Role, StopReason, ThinkingLevel,
+};
 use crate::permit::PolicyDenied;
 use crate::public::PublicEvent;
 use crate::sink::EventSink;
@@ -473,6 +475,9 @@ impl<'a> TurnLoop<'a> {
                         .map(ToString::to_string)
                         .collect::<Vec<_>>()
                         .join("; "),
+                    // The request is unsendable and this run decided so
+                    // before a socket existed; no provider classified it.
+                    kind: ErrorKind::Unclassified,
                 },
             )?;
             return Ok(Generated::Ended(ExitReason::Usage));
@@ -505,6 +510,8 @@ impl<'a> TurnLoop<'a> {
                         None,
                         EventKind::Error {
                             message: denied.to_string(),
+                            // Ours, not the provider's: nothing was sent.
+                            kind: ErrorKind::Unclassified,
                         },
                     )?;
                     return Ok(Generated::Ended(ExitReason::Budget));
@@ -532,6 +539,9 @@ impl<'a> TurnLoop<'a> {
                     None,
                     EventKind::Error {
                         message: denied.to_string(),
+                        // Ours, not the provider's: `ErrorKind` classifies
+                        // what a provider said, and nothing was sent.
+                        kind: ErrorKind::Unclassified,
                     },
                 )?;
                 return Ok(Generated::Ended(ExitReason::Internal));
@@ -562,6 +572,9 @@ impl<'a> TurnLoop<'a> {
                     None,
                     EventKind::Error {
                         message: denied.to_string(),
+                        // Ours, not the provider's: `ErrorKind` classifies
+                        // what a provider said, and nothing was sent.
+                        kind: ErrorKind::Unclassified,
                     },
                 )?;
                 return Ok(Generated::Ended(ExitReason::Internal));
@@ -749,13 +762,9 @@ impl<'a> TurnLoop<'a> {
                     stated_cost = Some(cost);
                     Ok(())
                 }
-                // INCOMPLETE: `kind` is dropped here because `EventKind::Error`
-                // has no field to hold it yet. It gains one, and this carries
-                // it through to `ExitReason`, in the same change — nothing
-                // downstream may branch on an error until then.
-                AiEvent::Error { message, kind: _ } => self
+                AiEvent::Error { message, kind } => self
                     .journal
-                    .append(turn, None, None, EventKind::Error { message })
+                    .append(turn, None, None, EventKind::Error { message, kind })
                     .map(|_| ()),
                 // Folded by `AttemptStream` into the outcome, which is what
                 // `AttemptSettled` carries. A second spelling in the log

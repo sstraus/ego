@@ -14,6 +14,7 @@ use ego_core::cost::{
 use ego_core::event::domain::{DomainEvent, Envelope, EventKind, ExitReason, OccupancyProvenance};
 use ego_core::event::id::{EventId, ItemId, Producer, Seq, SessionId, TurnId};
 use ego_core::event::time::Timestamp;
+use ego_core::generator::types::ErrorKind;
 use ego_core::public::{
     InstructionDescriptor, InstructionSource, ItemKind, PUBLIC_EVENT_VERSION, PublicEvent,
     project_public,
@@ -260,6 +261,7 @@ mod public_golden {
                 None,
                 EventKind::Error {
                     message: "rate limited, retrying".to_string(),
+                    kind: ErrorKind::Unclassified,
                 },
             ),
             ev(

@@ -12,7 +12,7 @@ use ego_core::event::id::{AttemptId, GenerationId};
 use ego_core::event::id::{EventId, ItemId, Producer, Seq, SessionId, TurnId};
 use ego_core::event::time::Timestamp;
 use ego_core::generator::attempt::{AttemptRef, DeliveryCertainty, Outcome, UsageReport};
-use ego_core::generator::types::StopReason;
+use ego_core::generator::types::{ErrorKind, StopReason};
 use ego_core::state::{PermissionEvent, RefusalReason, SessionState, SubagentEvent, Usage};
 
 // Wrapped in a module named `reducer` so `cargo test -p ego-core reducer`
@@ -204,7 +204,8 @@ mod reducer {
         push!(
             None,
             EventKind::Error {
-                message: "a recoverable hiccup".to_string()
+                message: "a recoverable hiccup".to_string(),
+                kind: ErrorKind::Unclassified,
             }
         );
         push!(
@@ -278,6 +279,7 @@ mod reducer {
             Some(ghost_parent),
             EventKind::Error {
                 message: "boom".to_string(),
+                kind: ErrorKind::Unclassified,
             },
         );
         let id = e.env.id;
@@ -334,6 +336,7 @@ mod reducer {
             None,
             EventKind::Error {
                 message: "applied first".to_string(),
+                kind: ErrorKind::Unclassified,
             },
         );
         let logically_first = ev(
@@ -343,6 +346,7 @@ mod reducer {
             None,
             EventKind::Error {
                 message: "applied second".to_string(),
+                kind: ErrorKind::Unclassified,
             },
         );
 
@@ -518,6 +522,7 @@ mod reducer {
                 "error",
                 EventKind::Error {
                     message: String::new(),
+                    kind: ErrorKind::Unclassified,
                 },
             ),
             // The attempt lifecycle, last on purpose: `generation_started`
@@ -679,6 +684,7 @@ mod reducer {
             },
             kind: EventKind::Error {
                 message: "loop".to_string(),
+                kind: ErrorKind::Unclassified,
             },
         };
         state.apply(&self_referential);
@@ -1035,6 +1041,7 @@ mod reducer {
             None,
             EventKind::Error {
                 message: "oops".to_string(),
+                kind: ErrorKind::Unclassified,
             },
         ));
 

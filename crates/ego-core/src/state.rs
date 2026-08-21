@@ -554,6 +554,15 @@ impl SessionState {
                     item.text.push_str(text);
                 }
             }
+            // Replace and not append: this is one block's whole state, and a
+            // block that somehow reported twice reported a correction, not a
+            // continuation. Concatenating two opaque blobs would produce a
+            // third that no provider minted.
+            EventKind::ReasoningState { state } => {
+                if let Some(item) = self.item_mut(ev, ItemKind::Reasoning) {
+                    item.reasoning_state = Some(state.clone());
+                }
+            }
             EventKind::ToolCallStarted {
                 name,
                 args,
@@ -641,7 +650,11 @@ impl SessionState {
                     result: result.clone(),
                 });
             }
-            EventKind::Error { message } => self.errors.push(message.clone()),
+            // `kind` is deliberately not reduced: `errors` is a list of
+            // what was said, and nothing in the reducer branches on why.
+            // Adding a field no reader consults would be a second place for
+            // the classification to drift from the log's own copy.
+            EventKind::Error { message, .. } => self.errors.push(message.clone()),
         }
     }
 
