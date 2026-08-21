@@ -372,9 +372,13 @@ impl<'a> TurnLoop<'a> {
                 return Ok((ExitReason::Budget, None));
             }
 
-            let (reason, pending) = match self.generate(turn).await? {
+            let (reason, pending, error_kind) = match self.generate(turn).await? {
                 Generated::Ended(reason) => return Ok((reason, None)),
-                Generated::Stopped { reason, pending } => (reason, pending),
+                Generated::Stopped {
+                    reason,
+                    pending,
+                    error_kind,
+                } => (reason, pending, error_kind),
             };
 
             // A generation that says it stopped for tools and then names none
@@ -394,7 +398,31 @@ impl<'a> TurnLoop<'a> {
                         // wire format does not consume. Not our defect, so not
                         // `Internal`; the provider decided it, so it reads as an
                         // upstream condition like any other.
-                        StopReason::Error | StopReason::Deferred => ExitReason::Provider,
+                        StopReason::Deferred => ExitReason::Provider,
+                        // The one place a provider's classification changes
+                        // where the run lands. An `Invalid` is a request that
+                        // will be wrong again — schema, context length, an
+                        // unsupported parameter — so it is exit 2 and not
+                        // exit 4: `CLI.md:215` tells a script to retry on 4,
+                        // and a request that cannot succeed is precisely what
+                        // it must not retry.
+                        //
+                        // Everything else is exit 4. `Unclassified` lands
+                        // there by failing closed — nothing was read that
+                        // says otherwise, and one wasted attempt is cheaper
+                        // than a wrong exit code.
+                        //
+                        // `Refused` is knowingly imperfect: a `401` or an
+                        // exhausted credit balance will not succeed on retry
+                        // either, but `ExitReason` has no value for "the
+                        // credential, not the request", and inventing one is
+                        // a change to `CLI.md`'s published exit codes rather
+                        // than to this mapping. Recorded here so the next
+                        // reader knows it was seen and not missed.
+                        StopReason::Error => match error_kind {
+                            Some(ErrorKind::Invalid) => ExitReason::Usage,
+                            _ => ExitReason::Provider,
+                        },
                     },
                     None,
                 ));
@@ -623,6 +651,7 @@ impl<'a> TurnLoop<'a> {
         Ok(Generated::Stopped {
             reason: settlement.outcome.stop(),
             pending: drained.pending,
+            error_kind: drained.error_kind,
         })
     }
 
@@ -657,6 +686,7 @@ impl<'a> TurnLoop<'a> {
         let mut assembled = String::new();
         let mut failure = None;
         let mut cancelled = false;
+        let mut error_kind = None;
         // Under a provider-reported settlement the tokens and the money
         // arrive as two frames, and `EventKind::UsageUpdated` carries them
         // together because they are one observation. So both are held and
@@ -688,13 +718,28 @@ impl<'a> TurnLoop<'a> {
                         .append(turn, Some(item), None, EventKind::ReasoningDelta { text })
                         .map(|_| ())
                 }
-                // INCOMPLETE: this must journal the state against the open
-                // reasoning item and then close it, so the next
-                // `ReasoningDelta` opens a new one. Both halves need
-                // `EventKind::ReasoningState`, which does not exist yet;
-                // closing the item without recording why would lose the state
-                // rather than defer it.
-                AiEvent::ReasoningState(_) => Ok(()),
+                // The close of the block the deltas opened, so it is journalled
+                // against that item and then *takes* it: the next
+                // `ReasoningDelta` opens a new one rather than appending to a
+                // block the provider has already sealed.
+                //
+                // `take` and not a peek, because the boundary is the whole
+                // point. Anthropic documents a `400` when blocks are not
+                // replayed exactly, and two blocks merged into one is not an
+                // exact replay — it is a block no provider minted.
+                //
+                // State with no preceding delta still opens an item. A block
+                // whose `thinking` field is empty is the case Anthropic's
+                // `400` names explicitly, so an item is exactly what must
+                // exist for it.
+                AiEvent::ReasoningState(state) => {
+                    // `unwrap_or_default` mints a fresh id here, not a nil
+                    // one: `ItemId`'s `Default` is written as `new()`.
+                    let item = reasoning.take().unwrap_or_default();
+                    self.journal
+                        .append(turn, Some(item), None, EventKind::ReasoningState { state })
+                        .map(|_| ())
+                }
                 AiEvent::ToolCall {
                     call_id,
                     name,
@@ -762,10 +807,12 @@ impl<'a> TurnLoop<'a> {
                     stated_cost = Some(cost);
                     Ok(())
                 }
-                AiEvent::Error { message, kind } => self
-                    .journal
-                    .append(turn, None, None, EventKind::Error { message, kind })
-                    .map(|_| ()),
+                AiEvent::Error { message, kind } => {
+                    error_kind = Some(kind);
+                    self.journal
+                        .append(turn, None, None, EventKind::Error { message, kind })
+                        .map(|_| ())
+                }
                 // Folded by `AttemptStream` into the outcome, which is what
                 // `AttemptSettled` carries. A second spelling in the log
                 // would be a second place for it to disagree.
@@ -832,6 +879,7 @@ impl<'a> TurnLoop<'a> {
             pending,
             failure,
             cancelled,
+            error_kind,
         }
     }
 
@@ -880,6 +928,9 @@ enum Generated {
     Stopped {
         reason: StopReason,
         pending: Vec<PendingCall>,
+        /// How the provider classified its failure, when `reason` is
+        /// [`StopReason::Error`]. Meaningless otherwise, and not read.
+        error_kind: Option<ErrorKind>,
     },
 }
 
@@ -889,4 +940,14 @@ struct Drained {
     pending: Vec<PendingCall>,
     failure: Option<StoreError>,
     cancelled: bool,
+    /// The classification of the last error this generation reported, if it
+    /// reported one.
+    ///
+    /// The *last* and not the first: the terminal frame follows the error
+    /// that caused it — a wire format emits `Error` then `Stop(Error)` — so
+    /// the most recent classification is the one describing how the
+    /// generation ended. An earlier, recovered-from error does not decide
+    /// the exit of a stream that went on to end some other way, and is never
+    /// consulted, because this is only read when the stop reason is `Error`.
+    error_kind: Option<ErrorKind>,
 }
