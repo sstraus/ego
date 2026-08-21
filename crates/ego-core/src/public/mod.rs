@@ -440,6 +440,18 @@ pub fn project_public(ev: &DomainEvent) -> Option<PublicEvent> {
         // ACP host and every `--output jsonl` reader, for a field none of them
         // asks for.
         //
+        // **`CLI.md` §4.1 does publish an authority, and that is the same rule
+        // rather than an exception to it.** `Report.denied_by` reaches a
+        // consumer through `RunTermination`, not through this projection —
+        // `--output json` publishes to a `NullSink` and produces no events at
+        // all — and it has a reader that §4.4 names: exit 3 offers three
+        // opt-ins that act on different axes, and which one applies is the
+        // authority. So the field arrived on the surface that asks for it and
+        // not on the one that does not. Do not read this comment as "the
+        // authority is never published"; read it as "this projection adds
+        // nothing a consumer has not asked for". See
+        // `2026-08-21-an-exit-code-that-names-who-refused.md`.
+        //
         // **Not withheld for privacy, and the difference matters to whoever
         // reads this next.** `Source` is a six-value layer name
         // (`config/source.rs`) and `RuleId` is a truncated hash over the
