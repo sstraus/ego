@@ -40,11 +40,10 @@ use ego_core::generator::capabilities::{
     Transport,
 };
 use ego_core::generator::types::ThinkingLevel;
-use futures::StreamExt;
 use serde::Deserialize;
 
 use crate::catalogue::{ResolveError, ResolvedModel, control_plane, is_locally_served, unmetered};
-use crate::http::{Http, HttpRequest, HttpResponse, Method};
+use crate::http::{Http, HttpRequest, Method, fetch};
 use crate::provider::ProviderRow;
 
 /// One entry of `GET /api/tags`.
@@ -126,13 +125,13 @@ async fn installed(
         },
     )
     .await
-    .map_err(|message| ResolveError::DaemonUnreachable {
+    .map_err(|message| ResolveError::EndpointUnreachable {
         endpoint: url.to_string(),
         message,
     })?;
 
     let tags: Tags =
-        serde_json::from_slice(&body).map_err(|err| ResolveError::DaemonUnreachable {
+        serde_json::from_slice(&body).map_err(|err| ResolveError::EndpointUnreachable {
             endpoint: url.to_string(),
             message: format!("its model list did not parse: {err}"),
         })?;
@@ -190,15 +189,16 @@ async fn running_context(
         },
     )
     .await
-    .map_err(|message| ResolveError::DaemonUnreachable {
+    .map_err(|message| ResolveError::EndpointUnreachable {
         endpoint: url.to_string(),
         message,
     })?;
 
-    let ps: Ps = serde_json::from_slice(&body).map_err(|err| ResolveError::DaemonUnreachable {
-        endpoint: url.to_string(),
-        message: format!("its running-model list did not parse: {err}"),
-    })?;
+    let ps: Ps =
+        serde_json::from_slice(&body).map_err(|err| ResolveError::EndpointUnreachable {
+            endpoint: url.to_string(),
+            message: format!("its running-model list did not parse: {err}"),
+        })?;
 
     Ok(ps
         .models
@@ -223,35 +223,10 @@ async fn load(row: &ProviderRow, model: &str, http: &Arc<dyn Http>) -> Result<()
     )
     .await
     .map(|_| ())
-    .map_err(|message| ResolveError::DaemonUnreachable {
+    .map_err(|message| ResolveError::EndpointUnreachable {
         endpoint: url.to_string(),
         message,
     })
-}
-
-/// One control-plane exchange, buffered.
-///
-/// Buffering is right here and wrong for a generation: these bodies are a
-/// model list and a status object, and the whole point of the call is to have
-/// all of it before deciding anything.
-async fn fetch(http: &Arc<dyn Http>, req: HttpRequest) -> Result<Vec<u8>, String> {
-    let HttpResponse {
-        status,
-        headers: _,
-        mut body,
-    } = http.execute(req).await.map_err(|err| format!("{err:?}"))?;
-
-    let mut bytes = Vec::new();
-    while let Some(chunk) = body.next().await {
-        bytes.extend_from_slice(&chunk.map_err(|err| format!("{err:?}"))?);
-    }
-    if !(200..300).contains(&status) {
-        return Err(format!(
-            "it answered {status}: {}",
-            String::from_utf8_lossy(&bytes)
-        ));
-    }
-    Ok(bytes)
 }
 
 /// What the daemon stated, and nothing more.

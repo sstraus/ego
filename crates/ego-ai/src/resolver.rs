@@ -10,7 +10,7 @@
 //! is a second arm, written by whoever adds it, in a crate that should not
 //! have needed touching.
 //!
-//! # Two producers, and no third kept warm
+//! # Three producers, and the third is not a third kind of answer
 //!
 //! [`Supplied`] reads what an operator wrote down; [`OllamaDaemon`] asks the
 //! daemon. `2026-08-21-what-a-model-resolves-to.md` is the argument for why
@@ -18,10 +18,11 @@
 //! a hosted model's ceilings and prices are facts nobody can discover, and a
 //! local model's are facts nobody can write down.
 //!
-//! The ADR's §4 sketch has a third, `XaiLanguageModels` — prices asked of the
-//! provider per key. It is absent here because `AGENTS.md` forbids a variant
-//! kept warm for a producer that does not exist, and it arrives with the xAI
-//! row.
+//! [`XaiLanguageModels`] is the ADR's third, and it is a *composition* rather
+//! than a rival: capabilities from [`Supplied`], price from the provider. That
+//! it composes is the evidence the split above was drawn in the right place —
+//! xAI is a counter-example to "a hosted model's price cannot be discovered"
+//! and to nothing else, so it borrows the half that still holds.
 //!
 //! # A name, or the thing itself
 //!
@@ -45,7 +46,7 @@ use futures::future::BoxFuture;
 
 use crate::catalogue::{Catalogue, ModelSlug, ResolveError, ResolvedModel};
 use crate::http::Http;
-use crate::provider::ProviderRow;
+use crate::provider::{ProviderRow, ResolvedCredential};
 
 /// Everything a resolver may look at, and nothing else.
 ///
@@ -70,6 +71,25 @@ pub struct Resolution<'a> {
     /// property of this value (`http.rs`), so a resolver cannot reach the
     /// network the run refused.
     pub http: &'a Arc<dyn Http>,
+    /// The credential this run resolved for [`row`](Self::row), for a resolver
+    /// whose endpoint authenticates.
+    ///
+    /// **Borrowed, and that is what keeps §6 true.** The rule §6 states is not
+    /// "one holder" but *one read*: the check that refuses a missing key and
+    /// the header that goes on the wire must be the same read, or they can
+    /// disagree about whether a key exists. A resolver that called
+    /// `std::env::var` itself would be a second read — of a variable that may
+    /// have been rotated since the first — and would put a credential lookup
+    /// back inside a library that `AGENTS.md` says does not own the process
+    /// environment.
+    ///
+    /// So it arrives as a borrow of the value the caller already resolved. It
+    /// is reachable for the length of one resolution and cannot outlive it,
+    /// which is the property that matters: a
+    /// [`ResolvedModel`](crate::catalogue::ResolvedModel) is `Clone` and
+    /// `Debug` and travels to the budget gate and the ledger, and nothing here
+    /// may put this into one.
+    pub credential: &'a ResolvedCredential,
 }
 
 /// How a provider's models are turned into the facts a turn needs.
@@ -117,5 +137,30 @@ impl ModelResolver for OllamaDaemon {
         at: &'a Resolution<'a>,
     ) -> BoxFuture<'a, Result<ResolvedModel, ResolveError>> {
         Box::pin(crate::ollama::resolve(at.row, &at.slug.model, at.http))
+    }
+}
+
+/// Capabilities from what was supplied, price from xAI's own table.
+///
+/// `crate::xai` is the argument: xAI publishes `GET /v1/language-models` **per
+/// authenticating key**, which makes a price here the invoicing party's own
+/// figure rather than a rate this repository copied and hopes is current.
+/// `2026-08-21-what-a-model-resolves-to.md` §1 refuses to trust a price this
+/// build cannot verify, and asking is a better answer to that than refusing.
+///
+/// The two halves run in that order, and it is not cosmetic: a slug with no
+/// supplied capabilities fails here, before a request is sent.
+#[derive(Debug)]
+pub struct XaiLanguageModels;
+
+impl ModelResolver for XaiLanguageModels {
+    fn resolve<'a>(
+        &'a self,
+        at: &'a Resolution<'a>,
+    ) -> BoxFuture<'a, Result<ResolvedModel, ResolveError>> {
+        Box::pin(async move {
+            let supplied = at.catalogue.resolve_hosted(at.slug)?;
+            crate::xai::price(supplied, at.http, at.credential).await
+        })
     }
 }

@@ -20,11 +20,11 @@ use std::sync::Arc;
 
 use url::Url;
 
-use crate::resolver::{ModelResolver, OllamaDaemon, Supplied};
+use crate::resolver::{ModelResolver, OllamaDaemon, Supplied, XaiLanguageModels};
 use crate::wire::WireFormat;
 use crate::wire::ollama::Ollama;
 use crate::wire::openai_completions::OpenAiCompletions;
-use crate::wire::provider_cost::ProviderCost;
+use crate::wire::provider_cost::{OpenRouterUsd, ProviderCost, XaiUsdTicks};
 
 /// A credential. Prints as `<redacted>`, in every formatter, forever.
 ///
@@ -283,6 +283,23 @@ pub const OPENAI_BASE: &str = "https://api.openai.com/v1/";
 pub const OPENAI_KEY_VAR: &str = "OPENAI_API_KEY";
 /// The base a default Ollama install serves its openai-compatible API under.
 pub const OLLAMA_BASE: &str = "http://localhost:11434/v1/";
+/// The base xAI serves its API under.
+pub const XAI_BASE: &str = "https://api.x.ai/v1/";
+/// The environment variable xAI's credential is read from.
+pub const XAI_KEY_VAR: &str = "XAI_API_KEY";
+/// The base OpenRouter serves its API under.
+pub const OPENROUTER_BASE: &str = "https://openrouter.ai/api/v1/";
+/// The environment variable OpenRouter's credential is read from.
+pub const OPENROUTER_KEY_VAR: &str = "OPENROUTER_API_KEY";
+
+/// Which chat-completions schema the cost decoders were written against.
+///
+/// One string for both because it is one fact: the date this repository read
+/// the two response schemas and wrote decoders for the fields they document. A
+/// `ProviderCostRevision` exists to make a decoded figure attributable, and
+/// attributing it to a version number neither provider publishes would be
+/// worse than attributing it to the day somebody looked.
+const READ_ON: &str = "2026-08-21";
 
 /// A URL made safe to [`Url::join`] a mapping's path onto.
 ///
@@ -383,5 +400,75 @@ impl ProviderRow {
     /// The local row at the default install's address.
     pub fn ollama_default() -> Self {
         Self::ollama(Url::parse(OLLAMA_BASE).expect("a constant this file controls"))
+    }
+
+    /// The xAI row: the family's mapping, and a price asked rather than
+    /// written down.
+    ///
+    /// **A candidate, not a member.**
+    /// `docs/decisions/2026-08-21-a-shared-shape-is-not-a-shared-contract.md`
+    /// §7 puts xAI on `openai-completions` from its published schema, and §9
+    /// is explicit that a provider whose conformance is read rather than
+    /// measured is not runnable: this row is deliberately absent from the
+    /// table `crates/ego-cli/src/model.rs` builds, so `--model xai/...` does
+    /// not resolve. It exists so the offline evidence — a schema-derived
+    /// conformance profile, and the price decoder's tests — has something to
+    /// be evidence *about*, and it becomes selectable when a live recording
+    /// exists.
+    ///
+    /// [`XaiLanguageModels`] is what makes this row different from every other
+    /// family member: alone among the six, xAI publishes what it will charge
+    /// the key that asks.
+    pub fn xai(base: Url) -> Self {
+        ProviderRow {
+            id: "xai".to_string(),
+            base: as_base(base),
+            wire: &OpenAiCompletions,
+            resolver: &XaiLanguageModels,
+            credential: CredentialStrategy::BearerFromEnv {
+                var: XAI_KEY_VAR.to_string(),
+            },
+            cost: Some(Arc::new(XaiUsdTicks::new(READ_ON))),
+        }
+    }
+
+    /// The xAI row at xAI's own address.
+    pub fn xai_default() -> Self {
+        Self::xai(Url::parse(XAI_BASE).expect("a constant this file controls"))
+    }
+
+    /// The OpenRouter row: the family's mapping, and a charge it states itself.
+    ///
+    /// **A candidate for a sharper reason than [`xai`](Self::xai) is one.**
+    /// The ADR's §7 flags an open question about conformance check 1 that xAI
+    /// does not raise: OpenRouter's own documentation contradicts itself about
+    /// whether `usage.cost` arrives automatically or requires
+    /// `usage: {include: true}` in the request body — and if it requires one,
+    /// the family's request projection does not send it and this row is not a
+    /// family member at all but a fifth mapping. No amount of reading settles
+    /// that; one recording does. Until then the row is built, tested offline
+    /// and unreachable from `--model`.
+    ///
+    /// [`Supplied`] and not a discovering resolver: OpenRouter's models
+    /// endpoint publishes a *public* table rather than what this key is
+    /// charged, which is the property that earned xAI a resolver. A public
+    /// table read live is a third-party table with extra steps, and §5 ranks
+    /// it below the operator's own figures either way.
+    pub fn openrouter(base: Url) -> Self {
+        ProviderRow {
+            id: "openrouter".to_string(),
+            base: as_base(base),
+            wire: &OpenAiCompletions,
+            resolver: &Supplied,
+            credential: CredentialStrategy::BearerFromEnv {
+                var: OPENROUTER_KEY_VAR.to_string(),
+            },
+            cost: Some(Arc::new(OpenRouterUsd::new(READ_ON))),
+        }
+    }
+
+    /// The OpenRouter row at OpenRouter's own address.
+    pub fn openrouter_default() -> Self {
+        Self::openrouter(Url::parse(OPENROUTER_BASE).expect("a constant this file controls"))
     }
 }

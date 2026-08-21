@@ -66,6 +66,7 @@ use std::sync::Arc;
 
 use ego_core::generator::attempt::DeliveryCertainty;
 use ego_core::generator::types::ErrorKind;
+use futures::StreamExt;
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 use url::{Host, Url};
@@ -578,6 +579,36 @@ impl Http for ReqwestHttp {
             })
         })
     }
+}
+
+/// One control-plane exchange, buffered.
+///
+/// Buffering is right here and wrong for a generation: these bodies are a
+/// model list, a status object or a price table, and the whole point of the
+/// call is to have all of it before deciding anything.
+///
+/// Shared by every resolver that asks a provider something — `ollama`'s
+/// `/api/tags` and `/api/ps`, `xai`'s `/language-models` — because the two
+/// must not disagree about what a non-2xx means. It lives beside the
+/// transport rather than beside either caller for the same reason.
+pub(crate) async fn fetch(http: &Arc<dyn Http>, req: HttpRequest) -> Result<Vec<u8>, String> {
+    let HttpResponse {
+        status,
+        headers: _,
+        mut body,
+    } = http.execute(req).await.map_err(|err| format!("{err:?}"))?;
+
+    let mut bytes = Vec::new();
+    while let Some(chunk) = body.next().await {
+        bytes.extend_from_slice(&chunk.map_err(|err| format!("{err:?}"))?);
+    }
+    if !(200..300).contains(&status) {
+        return Err(format!(
+            "it answered {status}: {}",
+            String::from_utf8_lossy(&bytes)
+        ));
+    }
+    Ok(bytes)
 }
 
 /// [`LoopbackResolver`] is private, and it is the second of the three

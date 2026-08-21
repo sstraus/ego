@@ -26,7 +26,7 @@ use ego_core::generator::capabilities::ModelCapabilities;
 use url::Url;
 
 use crate::http::Http;
-use crate::provider::{MissingCredential, ProviderRow};
+use crate::provider::{MissingCredential, ProviderRow, ResolvedCredential};
 use crate::resolver::Resolution;
 use crate::wire::provider_cost::ProviderCost;
 
@@ -170,8 +170,16 @@ pub enum ResolveError {
     NotLocallyServed { model: String },
     /// The daemon answered, but not with a fact resolution needs.
     Undiscoverable { model: String, fact: &'static str },
-    /// The daemon could not be reached or refused the exchange.
-    DaemonUnreachable { endpoint: String, message: String },
+    /// A control-plane endpoint could not be reached, or answered without
+    /// the fact resolution went there for.
+    ///
+    /// Named for the endpoint rather than for a daemon, because the two
+    /// resolvers that produce it are asking different kinds of server the
+    /// same kind of question: Ollama's `/api/tags` is a daemon on loopback,
+    /// and xAI's `/language-models` is a hosted price table. Both refusals
+    /// have to name a URL an operator can go and try, which is the whole
+    /// content of the variant.
+    EndpointUnreachable { endpoint: String, message: String },
 }
 
 impl fmt::Display for ResolveError {
@@ -211,8 +219,11 @@ impl fmt::Display for ResolveError {
                 f,
                 "the daemon serves `{model}` but does not state its {fact}"
             ),
-            ResolveError::DaemonUnreachable { endpoint, message } => {
-                write!(f, "the daemon at {endpoint} did not answer: {message}")
+            ResolveError::EndpointUnreachable { endpoint, message } => {
+                write!(
+                    f,
+                    "{endpoint} did not answer with what was needed: {message}"
+                )
             }
         }
     }
@@ -368,14 +379,22 @@ impl Catalogue {
     /// §4), so the branch is gone and the second daemon costs a constructor
     /// rather than an arm in another crate.
     ///
-    /// The transport is taken by every call, including the ones that never
-    /// open a socket. Making it optional would put the branch back — the
-    /// caller would decide whether this resolution is the kind that needs a
-    /// network, which is the thing it must not know.
+    /// The transport and the credential are taken by every call, including
+    /// the ones that use neither. Making either optional would put the branch
+    /// back — the caller would decide whether this resolution is the kind that
+    /// needs a network or a key, which is the thing it must not know.
+    ///
+    /// The credential is the one this run already resolved, passed rather than
+    /// read again: a resolver whose endpoint authenticates (xAI publishes
+    /// prices per key) must send the same credential the generation will, and
+    /// a second read of the environment could disagree with the first
+    /// (`docs/decisions/2026-08-21-a-shared-shape-is-not-a-shared-contract.md`
+    /// §6).
     pub async fn resolve(
         &self,
         slug: &ModelSlug,
         http: &Arc<dyn Http>,
+        credential: &ResolvedCredential,
     ) -> Result<ResolvedModel, ResolveError> {
         let row = self.row(&slug.provider)?;
         let at = Resolution {
@@ -383,6 +402,7 @@ impl Catalogue {
             row,
             slug,
             http,
+            credential,
         };
         row.resolver.resolve(&at).await
     }

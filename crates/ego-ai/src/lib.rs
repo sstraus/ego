@@ -11,6 +11,7 @@ pub mod ollama;
 pub mod provider;
 pub mod resolver;
 pub mod wire;
+pub mod xai;
 
 use ego_core::generator::attempt::{AttemptStream, GenerationAttempt};
 use ego_core::generator::port::Generator;

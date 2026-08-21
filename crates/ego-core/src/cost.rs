@@ -461,14 +461,20 @@ pub struct PricingRevision(pub String);
 ///
 /// **Exactly the sources that exist.** §5 names three, in resolution order:
 /// an operator's quote, the provider's own pricing endpoint, and the cached
-/// third-party table. Only the first has a producer today — the other two
-/// arrive with the table and the endpoint, in story `regression_case`. They are not
-/// declared here in advance: a variant nothing can produce is a claim the
-/// code cannot back, and `AGENTS.md:22-37` forbids exactly that. Adding an
-/// arm when its source lands is ordinary additive growth, not a temporary
-/// contract being replaced.
+/// third-party table. Two have producers today; the cached table arrives with
+/// story `regression_case`. It is not declared here in advance: a variant nothing can
+/// produce is a claim the code cannot back, and `AGENTS.md:22-37` forbids
+/// exactly that. Adding an arm when its source lands is ordinary additive
+/// growth, not a temporary contract being replaced.
 ///
 /// The order of the variants is §5's resolution order, first hit wins.
+///
+/// **The wire form is the variant's name** (`#[serde(tag = "source")]`), so an
+/// arm added between two others changes no encoding any consumer has already
+/// seen. That is why [`PUBLIC_EVENT_VERSION`](crate::public::PUBLIC_EVENT_VERSION)
+/// does not move for it: the constant tracks the shape a consumer parses, and
+/// a consumer that never met a `provider_published` cost cannot have parsed it
+/// differently before.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "source", rename_all = "snake_case")]
 pub enum RateSource {
@@ -478,6 +484,14 @@ pub enum RateSource {
     /// Explicit operator configuration, which may hold a negotiated rate no
     /// public table knows about. First in §5's order for that reason.
     Operator,
+    /// The provider's own pricing endpoint, asked with this run's credential.
+    ///
+    /// Stronger evidence than [`Operator`](Self::Operator) about what will be
+    /// invoiced — it is the invoicing party's own figure — and weaker about
+    /// what was *agreed*, which is why it does not outrank it. `ego_ai::xai`
+    /// is the only producer: xAI is the one provider of the six that publishes
+    /// per-key prices.
+    ProviderPublished,
 }
 
 /// Which metering policy established that a row has no per-token price at
