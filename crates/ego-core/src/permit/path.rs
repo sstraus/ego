@@ -11,8 +11,16 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
+
 /// A path, as resolved by some [`Fs`](super::Fs) at a point in time.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+///
+/// Serialisable because `Escalation` is, and `Escalation` is recorded in a
+/// durable event. Unlike [`Scope`](super::Scope) — where a `Deserialize` impl
+/// would be a public constructor for a value the permit ADR deliberately made
+/// unconstructible — `CanonPath::new` is already public and does no
+/// resolution, so serde adds no capability that was not already there.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct CanonPath(PathBuf);
 
 impl CanonPath {

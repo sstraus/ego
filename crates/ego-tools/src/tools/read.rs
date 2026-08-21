@@ -1,8 +1,6 @@
 //! `read`: one named file, through the guarded seam.
 
-use ego_core::permit::{
-    GuardedIo, Op, Permit, PrepareCtx, PreparedCall, ToolError, ToolResult, TypedTool,
-};
+use ego_core::permit::{GuardedIo, Op, PrepareCtx, PreparedCall, ToolError, ToolResult, TypedTool};
 use futures::future::BoxFuture;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -45,7 +43,6 @@ impl TypedTool for ReadTool {
     fn execute<'a>(
         &'a self,
         call: PreparedCall,
-        _permit: &'a Permit,
         io: &'a dyn GuardedIo,
     ) -> BoxFuture<'a, Result<ToolResult, ToolError>> {
         Box::pin(async move {

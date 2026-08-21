@@ -50,6 +50,7 @@ use ego_core::generator::capabilities::{
     Transport,
 };
 use ego_core::generator::types::{ErrorKind, ReasoningState, StopReason};
+use ego_core::permit::{Authority, CanonPath, Escalation, OpName};
 use ego_core::public::project_public;
 use ego_core::state::{SessionState, Usage};
 
@@ -220,14 +221,21 @@ mod acp_golden {
                 turn1,
                 Some(item_perm_1),
                 EventKind::PermissionRequested {
-                    description: "write to /etc".to_string(),
+                    tool: "edit".to_string(),
+                    escalation: Escalation::NoRuleCovers {
+                        op: OpName::Write,
+                        path: CanonPath::new("/etc/hosts"),
+                    },
                 },
             ),
             ev(
                 seq.next(),
                 turn1,
                 Some(item_perm_1),
-                EventKind::PermissionDecided { allowed: false },
+                EventKind::PermissionDecided {
+                    allowed: false,
+                    by: Some(Authority::Boundary),
+                },
             ),
             ev(
                 seq.next(),
@@ -385,9 +393,16 @@ mod acp_golden {
                 output: String::new(),
             },
             EventKind::PermissionRequested {
-                description: String::new(),
+                tool: String::new(),
+                escalation: Escalation::NoRuleCovers {
+                    op: OpName::Read,
+                    path: CanonPath::new(""),
+                },
             },
-            EventKind::PermissionDecided { allowed: true },
+            EventKind::PermissionDecided {
+                allowed: true,
+                by: None,
+            },
             EventKind::GenerationStarted {
                 attempt: AttemptRef::first(GenerationId::new()),
             },

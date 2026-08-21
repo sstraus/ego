@@ -33,8 +33,9 @@ use crate::generator::port::{AiEvent, Generator};
 use crate::generator::types::{
     Conversation, ErrorKind, GenRequest, Message, Role, StopReason, ThinkingLevel,
 };
-use crate::permit::PolicyDenied;
+use crate::permit::{Authority, Classification, Pending, PolicyDenied, Resolution};
 use crate::public::PublicEvent;
+use crate::run::{Denial, DeniedBy};
 use crate::sink::EventSink;
 use crate::state::{SessionState, Usage};
 use crate::store::session_store::{SessionStore, StoreError};
@@ -143,11 +144,12 @@ pub struct TurnOutcome {
     pub turn: TurnId,
     pub ok: bool,
     pub exit_reason: ExitReason,
-    /// What was refused, when `exit_reason` is
+    /// What was refused and by whom, when `exit_reason` is
     /// [`ExitReason::PermissionRequired`]. `CLI.md` §4.1 requires the denied
     /// action in the result: a script handed exit 3 and no subject has been
-    /// told nothing it can act on.
-    pub denied: Option<String>,
+    /// told nothing it can act on. §4.4's four remedies need the authority
+    /// too, which is why this is one [`Denial`] and not a string.
+    pub denied: Option<Denial>,
 }
 
 /// A turn that could not be written down.
@@ -339,12 +341,12 @@ impl<'a> TurnLoop<'a> {
     /// Everything between the prompt and `TurnCompleted`.
     ///
     /// Returns the reason and, when that reason is
-    /// [`ExitReason::PermissionRequired`], the action that was refused.
+    /// [`ExitReason::PermissionRequired`], what was refused and by whom.
     async fn drive(
         &mut self,
         turn: TurnId,
         prompt: &str,
-    ) -> Result<(ExitReason, Option<String>), StoreError> {
+    ) -> Result<(ExitReason, Option<Denial>), StoreError> {
         self.journal.append(
             turn,
             Some(ItemId::new()),
@@ -430,33 +432,53 @@ impl<'a> TurnLoop<'a> {
             }
 
             for call in pending {
-                let (ok, output) = match self.run_tool(&call).await {
-                    ToolOutcome::Answered { ok, output } => (ok, output),
-                    // `CLI.md` §4.4: a run with nobody to ask does not answer
-                    // a permission question on the model's behalf. The denial
-                    // is still logged against the call — the model's audience
-                    // argument holds for the *record*, it just no longer
-                    // decides whether the run continues.
-                    ToolOutcome::Refused { denial } => {
-                        let action = denial.to_string();
+                // `CLI.md` §4.4: a run with nobody to ask does not answer a
+                // permission question on the model's behalf. The denial is
+                // still logged against the call — the model's audience
+                // argument holds for the *record*, it just no longer decides
+                // whether the run continues.
+                //
+                // Both endings below are exit 3 and they are not the same
+                // fact. "Denied by r1:…" tells an operator which line of their
+                // config to go and look at; "no rule covers write /ws/x" tells
+                // them there is no line to look at and they have to write one.
+                // Collapsing them would leave the commonest case — a run that
+                // needed an answer — reading like a refusal somebody
+                // configured on purpose. `DeniedBy` is what carries that
+                // difference past the prose and into §4.1's object.
+                let denial = match self.run_tool(turn, &call).await? {
+                    ToolOutcome::Answered { ok, output } => {
                         self.journal.append(
                             turn,
                             Some(call.item),
                             Some(call.started),
-                            EventKind::ToolCallCompleted {
-                                ok: false,
-                                output: action.clone(),
-                            },
+                            EventKind::ToolCallCompleted { ok, output },
                         )?;
-                        return Ok((ExitReason::PermissionRequired, Some(action)));
+                        continue;
                     }
+                    ToolOutcome::Refused { denial } => Denial {
+                        action: denial.to_string(),
+                        // Never assembled here: `PolicyDenied::authority` is
+                        // the single definition of who said so, and a second
+                        // caller deciding it from the arms would be a second
+                        // chance to attribute a denial to the wrong party.
+                        by: DeniedBy::Decided(denial.authority()),
+                    },
+                    ToolOutcome::Unanswerable { pending } => Denial {
+                        action: pending.request().to_string(),
+                        by: DeniedBy::Nobody,
+                    },
                 };
                 self.journal.append(
                     turn,
                     Some(call.item),
                     Some(call.started),
-                    EventKind::ToolCallCompleted { ok, output },
+                    EventKind::ToolCallCompleted {
+                        ok: false,
+                        output: denial.action.clone(),
+                    },
                 )?;
+                return Ok((ExitReason::PermissionRequired, Some(denial)));
             }
         }
     }
@@ -983,20 +1005,106 @@ impl<'a> TurnLoop<'a> {
     /// company. A denial is a question — "may this happen?" — and answering it
     /// on the model's behalf is the thing `CLI.md` §4.4 forbids in a run with
     /// nobody to ask. It comes back typed, and the caller decides.
-    async fn run_tool(&self, call: &PendingCall) -> ToolOutcome {
+    async fn run_tool(
+        &mut self,
+        turn: TurnId,
+        call: &PendingCall,
+    ) -> Result<ToolOutcome, StoreError> {
         let answered = |ok, output| ToolOutcome::Answered { ok, output };
         let (tool, prepared) = match self.tools.prepare(&call.name, &call.args) {
             Ok(prepared) => prepared,
-            Err(refusal) => return answered(false, refusal),
+            // Not a permission event. `prepare` refuses calls that never
+            // reached the engine — an unknown tool, unparseable arguments —
+            // and appending a decision here would record a fact the policy
+            // never established.
+            Err(refusal) => return Ok(answered(false, refusal)),
         };
         let authorized = match self.tools.authorize(prepared) {
-            Ok(authorized) => authorized,
-            Err(denial) => return ToolOutcome::Refused { denial },
+            Classification::Settled(Ok(authorized)) => {
+                self.decided(turn, call, true, authorized.by().clone())?;
+                authorized
+            }
+            Classification::Settled(Err(denial)) => {
+                self.decided(turn, call, false, denial.authority())?;
+                return Ok(ToolOutcome::Refused { denial });
+            }
+            // The rules did not settle it, so ask the next party in §6's
+            // order. That is the mode at step 5 today; the judge and the human
+            // are steps 6 and 7 and have no producer yet, so a question the
+            // mode hands back has reached the end of the order. The honest
+            // terminal state is then the one `CLI.md` §4.4 already specifies
+            // for a headless run: end it, with the action named. Not a stub
+            // standing in for a feature — the feature adds parties to a
+            // consultation that already happens.
+            Classification::Ask(pending) => match self.tools.settle(pending).await {
+                Resolution::Settled(Ok(authorized)) => {
+                    self.decided(turn, call, true, authorized.by().clone())?;
+                    authorized
+                }
+                Resolution::Settled(Err(denial)) => {
+                    self.decided(turn, call, false, denial.authority())?;
+                    return Ok(ToolOutcome::Refused { denial });
+                }
+                Resolution::Ask(pending) => {
+                    let kind = EventKind::PermissionRequested {
+                        tool: pending.request().tool().to_string(),
+                        escalation: pending.request().why().clone(),
+                    };
+                    self.permission(turn, call, kind)?;
+                    return Ok(ToolOutcome::Unanswerable { pending });
+                }
+            },
         };
-        match self.tools.execute(tool, authorized).await {
+        Ok(match self.tools.execute(tool, authorized).await {
             Ok(output) => answered(true, output),
             Err(failure) => answered(false, failure),
-        }
+        })
+    }
+
+    /// §7: *every decision is appended, asked or not.*
+    ///
+    /// So this fires for a call the rules waved through as well as for one
+    /// they refused, and the asymmetry with the single `PermissionRequested`
+    /// above is the point rather than an oversight. §7 gives that event one
+    /// producer — `Resolution::Ask`, a question this run genuinely raised and
+    /// could not answer — while the question an audit asks of the decisions
+    /// is what the run did **without** being asked, which only the silent ones
+    /// answer.
+    fn decided(
+        &mut self,
+        turn: TurnId,
+        call: &PendingCall,
+        allowed: bool,
+        by: Authority,
+    ) -> Result<(), StoreError> {
+        self.permission(
+            turn,
+            call,
+            EventKind::PermissionDecided {
+                allowed,
+                by: Some(by),
+            },
+        )
+    }
+
+    /// One permission event, on an item of its own and caused by the call's
+    /// `ToolCallStarted`.
+    ///
+    /// **Its own item, not the call's.** An item has one kind, and the tool
+    /// call already owns `call.item` as `ItemKind::Tool`; projecting a
+    /// permission onto it would put two kinds on one id and leave a consumer
+    /// unable to say which lifecycle it was watching. The parent link is what
+    /// ties the two together, and it is the tie that holds regardless of what
+    /// any projection chooses to do with the permission item.
+    fn permission(
+        &mut self,
+        turn: TurnId,
+        call: &PendingCall,
+        kind: EventKind,
+    ) -> Result<(), StoreError> {
+        self.journal
+            .append(turn, Some(ItemId::new()), Some(call.started), kind)?;
+        Ok(())
     }
 }
 
@@ -1004,9 +1112,12 @@ impl<'a> TurnLoop<'a> {
 enum ToolOutcome {
     /// It ran, or it failed in a way the model should read and adapt to.
     Answered { ok: bool, output: String },
-    /// Policy refused it. Not an answer — a question nobody in this run can
-    /// be asked, so it is the caller's to decide, not this method's.
+    /// Policy refused it. A settled answer, and still not one for the model:
+    /// telling it "denied" invites it to try a variant, which is a prompt loop
+    /// run against a boundary.
     Refused { denial: PolicyDenied },
+    /// Policy could not settle it and there is nobody here to ask.
+    Unanswerable { pending: Pending },
 }
 
 /// What one generation did.

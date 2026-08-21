@@ -158,6 +158,17 @@ fn a_json_run_that_was_refused_says_not_ok_and_names_what_was_refused() {
         denied.contains("read") && denied.contains("/etc/hosts"),
         "a script handed exit 3 and no subject has been told nothing: {denied}"
     );
+    // And *who* refused, which is what picks the remedy. §4.4 offers three
+    // and is explicit that this one is not a permission at all: "the workspace
+    // boundary belongs to ARCHITECTURE.md §3.4 axis 4 — the execution
+    // backend — and no mode moves it", so `--yolo` cannot help and
+    // `--sandbox` is the only thing that can. A caller reading prose has to
+    // regex ego's sentences to learn that; `denied_by` is the key that says it.
+    assert_eq!(
+        report["denied_by"],
+        serde_json::json!({ "by": "boundary" }),
+        "the boundary names no rule and no mode, because nobody wrote it"
+    );
 }
 
 /// `denied` is absent rather than null when nothing was denied: an optional key
@@ -178,11 +189,11 @@ fn a_json_run_that_was_not_refused_carries_no_denied_key() {
         .run();
 
     let report = finished.report();
+    let object = report.as_object().expect("an object");
+    assert!(!object.contains_key("denied"));
     assert!(
-        !report
-            .as_object()
-            .expect("an object")
-            .contains_key("denied")
+        !object.contains_key("denied_by"),
+        "and neither half of a denial appears on a run that had none"
     );
 }
 
@@ -689,11 +700,7 @@ fn a_command_line_that_cannot_be_honoured_exits_two_saying_why() {
 #[test]
 fn a_documented_flag_without_its_subsystem_is_refused_by_name() {
     for (flag, value) in [
-        ("--mode", Some("plan")),
         ("--sandbox", Some("workspace")),
-        ("--allow", Some("bash(git *)")),
-        ("--deny", Some("net(*)")),
-        ("--yolo", None),
         ("--attach", Some("diagram.png")),
         ("--mcp", Some("github")),
         ("--retry", Some("3")),
@@ -716,6 +723,291 @@ fn a_documented_flag_without_its_subsystem_is_refused_by_name() {
         assert!(
             finished.stderr.contains("waiting on"),
             "{flag} was refused without saying what it waits on: {}",
+            finished.stderr
+        );
+    }
+}
+
+// --- the permission flags, now that there is a subsystem behind them -------
+//
+// These five used to be in the loop above, refused by name because their
+// contract did not exist. `CLI.md` §4.5's rule was working: an accepted
+// `--allow` that enforced nothing would have looked like a permission
+// boundary. The reason expired when the engine landed, and the tests invert
+// rather than disappear — "is refused" becomes "is accepted and does what it
+// says", which is a larger claim and needs more than one test to carry it.
+
+/// The end-to-end one. A flag on the command line changes what a tool is
+/// allowed to do, and the refusal names the rule that did it.
+///
+/// `--deny` is the lever this can be proved with: the builtins are read-only,
+/// so a read inside the workspace is the only effect the binary can drive, and
+/// denying it is the only way a flag can change the outcome. A test that only
+/// asserted `--allow` was *accepted* would pass against a flag that parsed its
+/// argument and dropped it.
+#[test]
+fn a_deny_rule_on_the_command_line_stops_a_tool_and_names_the_rule() {
+    let stub = Stub::start(Plan {
+        completions: vec![Reply::Sse(tool_call(
+            "call_a",
+            "read",
+            "{\"path\":\"notes.md\"}",
+        ))],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub);
+    ego.file("notes.md", "the contents");
+    let finished = ego
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--ephemeral",
+            "--output",
+            "json",
+            "--deny",
+            "read(**)",
+            "Read notes.md",
+        ])
+        .run();
+
+    assert_eq!(finished.code, Some(3), "stderr: {}", finished.stderr);
+    let report = finished.report();
+    assert_eq!(report["exit_reason"], "permission");
+    let denied = report["denied"].as_str().expect("§4.4 requires the action");
+    assert!(
+        denied.contains("notes.md"),
+        "the denial must name what it denied: {denied}"
+    );
+    assert!(
+        denied.contains("denied by r"),
+        "and must name the rule, which is what `ego rules revoke` takes: {denied}"
+    );
+    assert!(
+        !denied.contains("the contents"),
+        "and must not quote what it refused to read: {denied}"
+    );
+
+    // The same fact as a key rather than as prose, and one thing more: the
+    // *layer*. `2026-08-21-a-deny-that-names-who-can-lift-it.md` exists
+    // because the only operational question an attribution answers is "can I
+    // change this", and a run that ends at exit 3 has no second invocation in
+    // which to show it. The rule came from `--deny`, so the layer is `flags`.
+    let by = &report["denied_by"];
+    assert_eq!(by["by"], "rules");
+    let rules = by["rules"]
+        .as_array()
+        .expect("an allow-or-deny names rules");
+    assert_eq!(rules.len(), 1, "one deny matched, so one rule is named");
+    assert_eq!(rules[0]["from"], "flags");
+    assert_eq!(
+        rules[0]["also"],
+        serde_json::json!([]),
+        "no other layer carries it, so there is nothing to subordinate"
+    );
+    let id = rules[0]["id"].as_str().expect("a rule id is a string");
+    assert!(
+        denied.contains(id),
+        "the key and the sentence must name the same rule: {id} is not in {denied}"
+    );
+}
+
+/// The same read, with the same tool, and no `--deny`: exit 0.
+///
+/// The control for the test above. Without it, that test passes if the binary
+/// refuses every read for some unrelated reason, and the flag is proved to
+/// have done nothing.
+#[test]
+fn the_same_read_without_the_deny_rule_completes() {
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(tool_call("call_a", "read", "{\"path\":\"notes.md\"}")),
+            Reply::Sse(text("I read it.")),
+        ],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub);
+    ego.file("notes.md", "the contents");
+    let finished = ego
+        .args(["--model", "ollama/qwen3", "--ephemeral", "Read notes.md"])
+        .run();
+
+    assert_eq!(finished.code, Some(0), "stderr: {}", finished.stderr);
+}
+
+/// A run that names no rule must not *erase* the rules a config file names.
+///
+/// **This test exists because a mutation survived without it, and the thing it
+/// survived is silent permission loss.** `resolve` replaces a layer's whole
+/// `permissions` block, so a flags layer that unconditionally wrote
+/// `permissions.allow = []` and `permissions.deny = []` would drop a project
+/// or user deny on *every single run* — and the system-deny ceiling would not
+/// notice, because it only restores denies from `/etc/ego`.
+///
+/// Written end-to-end rather than against `flags_layer`, because what the
+/// operator cares about is that the deny they wrote still bites. The emptiness
+/// guard in `config.rs` is the mechanism; this is the promise.
+///
+/// The deny is written into the **user** layer, not the project one. A headless
+/// run is untrusted, an untrusted workspace runs bare, and bare means
+/// `.ego/config.toml` is never even opened — a project deny here would not bite
+/// for a reason that has nothing to do with the guard, and the test would pass
+/// while proving nothing. `$EGO_HOME/config.toml` is not ambient discovery, so
+/// it survives the bare posture.
+///
+/// The second completion is scripted deliberately. Without it, a run where the
+/// deny *was* erased reaches the loop's second generation, the stub has none
+/// left, and the process dies on the harness's own duplicate-id check — a
+/// failure that names the stub instead of the permission loss.
+#[test]
+fn a_run_with_no_rule_flags_leaves_the_config_files_rules_alone() {
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(tool_call("call_a", "read", "{\"path\":\"notes.md\"}")),
+            Reply::Sse(text("I read it.")),
+        ],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub);
+    ego.file("notes.md", "the contents");
+    ego.home_file("config.toml", "permissions.deny = [\"read(**)\"]\n");
+    let finished = ego
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--ephemeral",
+            "--output",
+            "json",
+            "Read notes.md",
+        ])
+        .run();
+
+    assert_eq!(
+        finished.code,
+        Some(3),
+        "the user layer's deny stopped biting: {}",
+        finished.stderr
+    );
+    let denied = finished.report()["denied"]
+        .as_str()
+        .expect("§4.4 requires the action")
+        .to_string();
+    assert!(
+        denied.contains("notes.md") && denied.contains("denied by r"),
+        "{denied}"
+    );
+}
+
+/// A rule that is not a rule is a usage error, before any turn runs.
+///
+/// This is what proves the flag's argument reaches `Rule::load` rather than
+/// being carried as text nobody parsed until it was too late to say so. The
+/// teaching message for `bash(...)` is §2 of the rule ADR, and getting it from
+/// a flag is the evidence that a flag and a config file go through one parser.
+#[test]
+fn a_flag_rule_that_is_not_a_rule_is_refused_before_the_run() {
+    let finished = Ego::nowhere()
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--ephemeral",
+            "--allow",
+            "bash(git *)",
+            "Ask",
+        ])
+        .run();
+
+    assert_eq!(finished.code, Some(2), "stderr: {}", finished.stderr);
+    assert!(
+        finished.stderr.contains("exec"),
+        "the head names an effect, and the refusal has to teach that: {}",
+        finished.stderr
+    );
+}
+
+/// §6a: a head this build cannot enforce is refused **by name**, from a flag
+/// as from a file. Not a parse error and not a silent non-match — an
+/// `exec(...)` rule that parsed and never matched would be the same defect as
+/// the accepted-and-ignored flag this whole section replaced.
+#[test]
+fn a_flag_rule_this_build_cannot_enforce_is_refused_by_name() {
+    let finished = Ego::nowhere()
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--ephemeral",
+            "--deny",
+            "exec(rm *)",
+            "Ask",
+        ])
+        .run();
+
+    assert_eq!(finished.code, Some(2), "stderr: {}", finished.stderr);
+    assert!(
+        finished.stderr.contains("exec") && finished.stderr.contains("shell"),
+        "the refusal must name the head and what it waits on: {}",
+        finished.stderr
+    );
+}
+
+/// `--plan` and `--yolo` are spellings of `--mode`, so two of them together
+/// are a usage error rather than a silent precedence rule nobody documented.
+#[test]
+fn two_spellings_of_the_mode_at_once_are_refused() {
+    let both_shorthands = Ego::nowhere()
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--ephemeral",
+            "--plan",
+            "--yolo",
+            "Ask",
+        ])
+        .run();
+    assert_eq!(
+        both_shorthands.code,
+        Some(2),
+        "--plan --yolo was accepted: {}",
+        both_shorthands.stderr
+    );
+
+    let shorthand_and_long = Ego::nowhere()
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--ephemeral",
+            "--plan",
+            "--mode",
+            "edits",
+            "Ask",
+        ])
+        .run();
+    assert_eq!(
+        shorthand_and_long.code,
+        Some(2),
+        "--plan --mode edits was accepted: {}",
+        shorthand_and_long.stderr
+    );
+}
+
+/// A mode that is not a mode names the five that are.
+#[test]
+fn an_unknown_mode_is_refused_and_names_the_modes_that_exist() {
+    let finished = Ego::nowhere()
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--ephemeral",
+            "--mode",
+            "wat",
+            "Ask",
+        ])
+        .run();
+
+    assert_eq!(finished.code, Some(2), "stderr: {}", finished.stderr);
+    for mode in ["plan", "default", "auto", "edits", "yolo"] {
+        assert!(
+            finished.stderr.contains(mode),
+            "the refusal must name {mode}: {}",
             finished.stderr
         );
     }

@@ -131,6 +131,25 @@ fn flags_layer(args: &Args) -> Result<Sourced<ConfigLayer>, UsageError> {
     if let Some(budget) = &args.budget {
         toml.push_str(&format!("budget = {}\n", quote(budget)));
     }
+    if let Some(mode) = args.mode {
+        toml.push_str(&format!("mode = {}\n", quote(mode.as_str())));
+    }
+    // Written as **dotted keys**, not a `[permissions]` table header. A header
+    // captures every key after it, and `-c` overrides are appended below —
+    // `-c max_turns=3` after a header would land inside `permissions` and be
+    // refused as an unknown key, naming the wrong culprit.
+    //
+    // Emitted only when a rule was actually given. `resolve` replaces a
+    // layer's whole `permissions` block, so a `permissions.allow = []` written
+    // whenever the flag is absent would make every run erase the deny list a
+    // config file set.
+    for (key, rules) in [("allow", &args.allow), ("deny", &args.deny)] {
+        if rules.is_empty() {
+            continue;
+        }
+        let list = rules.iter().map(|rule| quote(rule)).collect::<Vec<_>>();
+        toml.push_str(&format!("permissions.{key} = [{}]\n", list.join(", ")));
+    }
     for entry in &args.set {
         let (key, value) = entry.split_once('=').ok_or_else(|| {
             UsageError(format!(
@@ -140,6 +159,20 @@ fn flags_layer(args: &Args) -> Result<Sourced<ConfigLayer>, UsageError> {
         })?;
         toml.push_str(&format!("{key} = {value}\n"));
     }
+    // KNOWN, AND DELIBERATELY LEFT: this prefix doubles. `ConfigError` renders
+    // its own origin (`error.rs:27`: "invalid config in {source} layer: …"),
+    // so the operator reads "the command line: invalid config in flags layer:
+    // …" — two names for one place, neither wrong.
+    //
+    // Two people have now found this and proposed the same fix: drop one of
+    // the two. Do not, in isolation. The flags layer is the only `Source` an
+    // operator never *writes* — there is no file to open — so the two halves
+    // are not redundant to a reader who does not already know that `flags` and
+    // "the command line" are the same layer. The fix worth making is to give
+    // `Source`'s `Display` a form that reads correctly in a sentence, which
+    // changes every config diagnostic and belongs with `Source::rank` going
+    // public (`docs/decisions/2026-08-21-a-deny-that-names-who-can-lift-it.md`
+    // "Consequences"), not with whichever caller noticed it.
     ConfigLayer::parse(Source::Flags, &toml)
         .map_err(|err| UsageError(format!("the command line: {err}")))
 }

@@ -750,6 +750,7 @@ name = "ego-core"
 version = "0.1.0"
 dependencies = [
  "futures",
+ "idna",
  "schemars 1.2.2",
  "serde",
  "serde_json",

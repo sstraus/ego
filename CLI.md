@@ -86,7 +86,7 @@ omitted when empty: two states, identical bytes.
 | Command | M0b | Waiting on |
 |---|---|---|
 | `ego run` | **yes** | the scripting workhorse; the whole of §4 is about it |
-| `ego [PROMPT]` | no | the interactive surface — the permission dialog, which needs an approver that can mint a `Permit` (**M1**) |
+| `ego [PROMPT]` | no | the terminal surface itself — a line editor for the prompt, and the dialog that renders a `PermissionRequest` and reads a person's answer. The `Approver` port that dialog would occupy is built and the mode already answers through it (**M1**); what is missing is the human seat and the screen it draws on |
 | `ego resume` | **yes** | continues a session that already exists, never creating one. `[ID]` is optional: without it the most recently updated session of this workspace is taken |
 | `ego ls` | **yes** | this workspace by default, `--all` for the whole store; `--output json\|jsonl` per §4.6 |
 | `ego fork` | no | session forking (**M3**), which needs the branch point to be nameable in the log rather than just a file copy |
@@ -96,7 +96,7 @@ omitted when empty: two states, identical bytes.
 | `ego auth` | no | a credential store. Every provider names one environment variable (`Auth::BearerFromEnv`), so there is nowhere for a login to put anything and nothing for a logout to remove |
 | `ego models` | no | a catalogue to enumerate. Hosted facts are supplied and local ones are discovered per resolution (`docs/decisions/2026-08-21-what-a-model-resolves-to.md`), so this build resolves one model at a time and holds no list to print or refresh; generated catalogues are **M5** |
 | `ego config` | no | a config writer. The loader is strict and read-only, and nothing in this build writes a config file — `-c/--set` overrides one run |
-| `ego rules` | no | the permission rule grammar (**M1**), the same subsystem `--allow` and `--deny` wait on: stable rule IDs are what `rules ls` would list and `rules revoke` would name |
+| `ego rules` | no | somewhere to keep a rule. The grammar and its stable IDs are built and `--allow`/`--deny` already reach the engine through them, so `ls` and `explain` have their material; what `allow`, `deny`, `revoke` and `remember` have nowhere to write to is a rule store — the same read-only loader `config` waits on |
 | `ego usage` | no | a report across sessions, which needs both the workspace attribution `ls` waits on and the per-session cost line budgets add in **M3** |
 | `ego acp` | **yes** | the Agent Client Protocol on stdio, v1. A host's `session/new` mints an ordinary ego session and its `session/prompt` runs an ordinary turn, so what it opens is listed by `ego ls` and continued by `ego resume`. v1 and not the v2 draft: see `docs/decisions/2026-08-21-the-version-an-agent-answers-with.md` §6.2 |
 | `ego doctor` | no | most of what it would diagnose: the credential store, the MCP client and the sandbox backend are each waiting on their own milestone, and a report on three absent subsystems is not a diagnosis |
@@ -140,9 +140,19 @@ Grouped; all long flags, short forms only for the hot five
                         allows/denies/escalates (permissions.judge in config:
                         a cheap tier like gpt-5.6-luna or GLM, or local ollama)
     --sandbox S         ro|workspace|off             (off = classifier only)
-    --allow RULE        repeatable   e.g. --allow 'bash(git *)' --allow 'net(api.github.com)'
+    --allow RULE        repeatable   e.g. --allow 'exec(git *)' --allow 'net(api.github.com)'
     --deny RULE         repeatable; deny beats allow
 ```
+
+A rule's head names an **effect** and never a tool: `exec(git *)`, not
+`bash(git *)`. A tool-named rule's coverage is a function of the tool
+inventory, so every new tool that shells out is a silent hole in every rule
+ever written, and the hole is invisible because the rule still reads
+correctly. `bash(...)` is a parse error whose message names `exec` rather than
+an alias for it. The heads are `read`, `write`, `list`, `search`, `exec`,
+`net` and `tool` — grammar in
+`docs/decisions/2026-08-21-a-rule-that-means-exactly-one-thing.md`, which
+corrects the example this line used to carry.
 
 Rules follow a published formal grammar matched against the *canonical* call
 (resolved paths, argv, endpoints — never rendered shell strings); the
@@ -199,7 +209,7 @@ you can actually run. Checked against the clap definitions in
 
 A flag marked **no** is **refused by name**, with the subsystem it waits on —
 not swallowed, and not reported as an unknown argument. That mechanism already
-exists: `UNAVAILABLE` in `crates/ego-cli/src/cli.rs:66-101`, checked before
+exists: `UNAVAILABLE` in `crates/ego-cli/src/cli.rs:67-94`, checked before
 clap sees the tokens, and it covers every "no" below. This table is the
 document half of it; the code is the source of truth, and the two were compared
 flag by flag against the built binary to write this.
@@ -222,14 +232,14 @@ flag by flag against the built binary to write this.
 | `--tools`, `--no-tools` | **yes** | |
 | `-C`, `-c/--set`, `--profile` | **yes** | |
 | `-q`, `-v`, `--no-color` | **yes** | |
-| `--mode`, `--plan`, `--yolo`, `--allow`, `--deny` | no | waiting on the permission rule grammar (**M1**). `PolicyEngine` today admits a read inside the workspace and nothing else, so a rule would parse and enforce nothing — which is why refusing beats accepting: an ignored `--allow` looks like a permission boundary. §4.4's "scripts opt in with `--allow`" therefore describes no shipping flag |
+| `--mode`, `--plan`, `--yolo`, `--allow`, `--deny` | **yes** | `--plan`/`--yolo` are spellings of `--mode`; two at once is a usage error. **Four of the seven rule heads run**: `read`, `write`, `list`, `search`. `exec`, `net` and `tool` parse and get stable IDs, and are then **refused by name at load** — no tool in this build produces those operations, so a rule naming one would enforce nothing. So `--allow 'exec(git *)'` (§3's example, which is design) is exit 2 here, as is `--allow 'bash(git *)'` with §3's teaching message. Both refuse **before** the run starts |
 | `--sandbox` | no | waiting on a sandbox backend (**M1**). No process is spawned anywhere in this build, so there is nothing yet to confine |
 | `-f`, `--file`, `--var` | no | waiting on executable agent files (**M4**). §5 is a design, not a feature: the shebang form runs nothing today |
 | `--attach` | no | waiting on a non-text content block — the conversation model carries text, tool calls and tool results, so an image has nothing to be sent in |
 | `--mcp` | no | waiting on the MCP client (**M2**). `mcp_errors` exists on `session.started`, but no flag attaches a server |
 | `--retry`, `--fallback` | no | waiting on a retry seam. Delivery certainty is implemented and enforced; a generation owns its reservation for its whole life, so re-issuing one changes the attempt contract rather than adding a loop |
 
-**Thirteen documented flag spellings do not ship.** That is the gap this table
+**Eight documented flag spellings do not ship.** That is the gap this table
 exists to stop being invisible, and it is not a defect list — every one of them
 refuses by name and says what it is waiting on. The defect would be §3 reading,
 to someone who has not run the binary, as though all of it worked.
@@ -311,6 +321,27 @@ silently: a retired flag errors **by name** with its replacement.
 Headless runs never hang on a prompt: an unresolvable permission ⇒ exit 3, with
 the denied action in the JSON result. Scripts opt in with `--allow` rules, a
 stronger `--sandbox`, or `--yolo` — never by answering prompts.
+
+Exit 3 has more than one cause, and the three opt-ins above are not
+interchangeable, so §4.1's object carries **who refused** beside what was
+refused: `denied` is the action, and `denied_by` names the authority — a rule
+(with the layer that owns it, which is what says whether it can be edited at
+all), the mode, or the workspace boundary. `denied_by` is **absent when nobody
+decided**: every party in the evaluation order was consulted and the question
+is still open, which is the case `--allow` answers and the only one where the
+absence of an authority is itself the fact. Present-or-absent, per §4.2's rule
+for this format. See
+`docs/decisions/2026-08-21-an-exit-code-that-names-who-refused.md`.
+
+The three remedies are alternatives because they act on different axes, and
+one of them is not a permission at all: **the workspace boundary belongs to
+`ARCHITECTURE.md` §3.4 axis 4 — the execution backend — and no mode moves it.**
+A mode says who approves; a backend says what is reachable. So an operation
+outside the workspace is refused rather than asked about, `--yolo` does not
+lift it, and none of the three remedies above resolves it — because it was
+never an unresolvable *permission* for them to resolve. Widening what ego may
+reach is `--sandbox`'s business, which is why that clause is listed beside
+`--yolo` rather than subsumed by it.
 
 ### 4.5 Parse and lifecycle contract (normative before release)
 
@@ -402,7 +433,7 @@ family as skills; `--var` fills `{{placeholders}}`; shebang makes it a program:
 model: anthropic/claude-sonnet-5
 mode: edits
 sandbox: workspace
-allow: ["bash(cargo *)"]
+allow: ["exec(cargo *)"]
 schema: "@review-schema.json"
 vars: [severity]
 ---

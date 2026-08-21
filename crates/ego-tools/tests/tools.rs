@@ -6,6 +6,9 @@
 //! what it searched — and that a denial comes back named rather than as a
 //! panic or an empty result.
 //!
+//! `mod rogue` covers the case the other modules cannot: all of them trust
+//! the tool to ask for what it declared. It supplies one that does not.
+//!
 //! Unix-only for the same reason as `tests/fs.rs`: the escapes worth testing
 //! are spelled with symlinks.
 #![cfg(unix)]
@@ -15,6 +18,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use ego_core::budget::{BudgetGate, Metering, PricingQuote, ResolvedRates, SettlementSource};
+use ego_core::config::{Mode, Ruleset};
 use ego_core::cost::{Amount, CurrencyCode, Money, PricingRevision, RateSource};
 use ego_core::event::domain::ExitReason;
 use ego_core::event::id::SessionId;
@@ -26,9 +30,11 @@ use ego_core::generator::fake::FakeGenerator;
 use ego_core::generator::port::AiEvent;
 use ego_core::generator::types::{StopReason, ThinkingLevel};
 use ego_core::permit::{
-    CanonPath, GuardedFs, Op, Permit, PermitDenied, PolicyDenied, PolicyEngine, PrepareCtx,
-    PreparedCall, Tool, ToolError, ToolResult,
+    Authority, Authorized, CanonPath, Classification, GuardedFs, GuardedIo, Op, OpName, Pending,
+    PermitDenied, PolicyDenied, PolicyEngine, PrepareCtx, PreparedCall, Resolution, ScanRequest,
+    Tool, ToolError, ToolResult, Typed, TypedTool,
 };
+use ego_core::run::DeniedBy;
 use ego_core::sink::CollectingSink;
 use ego_core::state::SessionState;
 use ego_core::turn::{CancelToken, Model, Session, Tools, TurnConfig, TurnLoop};
@@ -37,6 +43,9 @@ use ego_tools::fs::OsFs;
 use ego_tools::store::{JsonlStore, OsIo};
 use ego_tools::tools::builtins;
 use futures::executor::block_on;
+use futures::future::BoxFuture;
+use schemars::JsonSchema;
+use serde::Deserialize;
 use serde_json::json;
 use tempfile::TempDir;
 
@@ -62,7 +71,7 @@ impl Workspace {
         // itself a symlink, and a policy whose workspace is not canonical
         // refuses every path the resolver returns.
         let root = fs::canonicalize(dir.path()).expect("the temp directory resolves");
-        let policy = PolicyEngine::new(CanonPath::new(&root));
+        let policy = PolicyEngine::new(CanonPath::new(&root), Mode::Default, Ruleset::default());
         Self {
             _dir: dir,
             root,
@@ -95,32 +104,60 @@ impl Workspace {
 
     /// Run `name` through all three stages the turn loop runs it through.
     fn call(&self, name: &str, params: serde_json::Value) -> Result<String, ToolError> {
-        let call = self.prepare(name, params)?;
-        let granted = self.policy.authorize(call).expect("policy admits this");
-        // `Authorized` cannot be split outside `ego-core` — `into_parts` is
-        // crate-private — so a test that needs the call by value clones it.
-        // The clone grants nothing: the permit is still the one the engine
-        // minted, for this call.
-        self.execute(name, granted.call().clone(), granted.permit())
+        self.run(self.tool(name), params)
+    }
+
+    /// The same three stages, for a tool that is not in the registry.
+    ///
+    /// One path, so that a tool written for a test cannot be run through a
+    /// gentler pipeline than a builtin: prepare, authorize, mint, execute, in
+    /// that order, with the permit going into the seam and nowhere else.
+    fn run(&self, tool: &dyn Tool, params: serde_json::Value) -> Result<String, ToolError> {
+        let call = tool.prepare(params, &self.ctx())?;
+        let granted = self.authorize(call).expect("policy admits this");
+        let (call, permit) = granted.into_parts();
+        let guarded = GuardedFs::new(permit, &self.fs);
+        block_on(tool.execute(call, &guarded)).map(|result: ToolResult| result.content)
+    }
+
+    /// What policy concludes about a call, for a call the run settles without
+    /// a human.
+    ///
+    /// Every call in this file reads, lists or searches inside a workspace,
+    /// which the default mode answers without asking anybody — at §6 step 5,
+    /// which is the `Approver` port rather than part of `classify`. So the
+    /// whole order runs here: a helper that stopped at `classify` would find
+    /// every read unsettled and say the builtins had lost their authority.
+    ///
+    /// A call still open after `settle` would mean a read-only builtin had
+    /// started asking for authority it never used to need — worth a loud
+    /// failure naming the tool, not a quiet `is_err()`.
+    fn authorize(&self, call: PreparedCall) -> Result<Authorized, PolicyDenied> {
+        let unanswered = |pending: &Pending| {
+            panic!(
+                "a read-only builtin needed permission it never used to need: {}",
+                pending.request()
+            )
+        };
+        let pending = match self.policy.classify(call) {
+            Classification::Settled(answer) => return answer,
+            Classification::Ask(pending) => pending,
+        };
+        match block_on(self.policy.settle(pending)) {
+            Resolution::Settled(answer) => answer,
+            Resolution::Ask(pending) => unanswered(&pending),
+        }
     }
 
     fn prepare(&self, name: &str, params: serde_json::Value) -> Result<PreparedCall, ToolError> {
-        let ctx = PrepareCtx {
-            cwd: self.cwd(),
-            resolver: &self.fs,
-        };
-        self.tool(name).prepare(params, &ctx)
+        self.tool(name).prepare(params, &self.ctx())
     }
 
-    fn execute(
-        &self,
-        name: &str,
-        call: PreparedCall,
-        permit: &Permit,
-    ) -> Result<String, ToolError> {
-        let guarded = GuardedFs::new(permit, &self.fs);
-        block_on(self.tool(name).execute(call, permit, &guarded))
-            .map(|result: ToolResult| result.content)
+    fn ctx(&self) -> PrepareCtx<'_> {
+        PrepareCtx {
+            cwd: self.cwd(),
+            resolver: &self.fs,
+        }
     }
 }
 
@@ -251,43 +288,19 @@ mod read {
         let call = ws
             .prepare("read", json!({ "path": elsewhere.display().to_string() }))
             .expect("the file exists, so it resolves");
-        let denied = ws
-            .policy
-            .authorize(call)
-            .expect_err("it is outside the workspace");
+        let denied = ws.authorize(call).expect_err("it is outside the workspace");
 
         assert!(matches!(
             denied,
-            PolicyDenied::OutsideWorkspace { op: "read", .. }
+            PolicyDenied::OutsideWorkspace {
+                op: OpName::Read,
+                ..
+            }
         ));
         assert!(
             denied.to_string().contains("may not read"),
             "the refusal has to say what was refused: {denied}"
         );
-    }
-
-    #[test]
-    fn read_under_a_permit_that_does_not_cover_the_path_is_denied_by_name() {
-        // The permit, not the policy: this is the seam refusing a grant it was
-        // never given, which is what stops a tool that resolved one path at
-        // `prepare` from reading another at `execute`.
-        let ws = populated();
-        let allowed = ws
-            .prepare("read", json!({ "path": "src/main.rs" }))
-            .unwrap();
-        let granted = ws.policy.authorize(allowed).unwrap();
-        let permit = granted.permit();
-        let other = ws.prepare("read", json!({ "path": ".env" })).unwrap();
-
-        let err = ws
-            .execute("read", other, permit)
-            .expect_err("the permit names src/main.rs and nothing else");
-
-        assert!(
-            matches!(err, ToolError::Denied(PermitDenied::Read { .. })),
-            "expected Denied(Read), got {err:?}"
-        );
-        assert!(err.to_string().contains("read denied"));
     }
 }
 
@@ -355,7 +368,7 @@ mod glob {
             .unwrap();
 
         assert!(matches!(call.ops.as_slice(), [Op::List { .. }]));
-        let granted = ws.policy.authorize(call).unwrap();
+        let granted = ws.authorize(call).unwrap();
         let permit = granted.permit();
         let found = CanonPath::new(ws.root.join("src/main.rs"));
         assert!(permit.allows_list(&found).is_ok());
@@ -422,39 +435,16 @@ mod glob {
                 json!({ "pattern": "**", "path": outside.root.display().to_string() }),
             )
             .expect("the directory exists, so it resolves");
-        let denied = ws
-            .policy
-            .authorize(call)
-            .expect_err("it is outside the workspace");
+        let denied = ws.authorize(call).expect_err("it is outside the workspace");
 
         assert!(matches!(
             denied,
-            PolicyDenied::OutsideWorkspace { op: "list", .. }
+            PolicyDenied::OutsideWorkspace {
+                op: OpName::List,
+                ..
+            }
         ));
         assert!(denied.to_string().contains("may not list"));
-    }
-
-    #[test]
-    fn glob_under_a_permit_that_does_not_cover_its_root_is_denied_by_name() {
-        let ws = populated();
-        let allowed = ws
-            .prepare("glob", json!({ "pattern": "**", "path": "src/deep" }))
-            .unwrap();
-        let granted = ws.policy.authorize(allowed).unwrap();
-        let permit = granted.permit();
-        let wider = ws
-            .prepare("glob", json!({ "pattern": "**", "path": "src" }))
-            .unwrap();
-
-        let err = ws
-            .execute("glob", wider, permit)
-            .expect_err("the permit names src/deep, not src");
-
-        assert!(
-            matches!(err, ToolError::Denied(PermitDenied::List { .. })),
-            "expected Denied(List), got {err:?}"
-        );
-        assert!(err.to_string().contains("list denied"));
     }
 
     #[test]
@@ -538,7 +528,7 @@ mod grep {
             call.ops.as_slice(),
             [Op::Search { query, .. }] if query == "TODO"
         ));
-        let granted = ws.policy.authorize(call).unwrap();
+        let granted = ws.authorize(call).unwrap();
         let permit = granted.permit();
         let searched = CanonPath::new(ws.root.join("src/main.rs"));
         assert!(permit.allows_search(&searched).is_ok());
@@ -597,39 +587,16 @@ mod grep {
                 json!({ "query": "password", "path": outside.root.display().to_string() }),
             )
             .expect("the directory exists, so it resolves");
-        let denied = ws
-            .policy
-            .authorize(call)
-            .expect_err("it is outside the workspace");
+        let denied = ws.authorize(call).expect_err("it is outside the workspace");
 
         assert!(matches!(
             denied,
-            PolicyDenied::OutsideWorkspace { op: "search", .. }
+            PolicyDenied::OutsideWorkspace {
+                op: OpName::Search,
+                ..
+            }
         ));
         assert!(denied.to_string().contains("may not search"));
-    }
-
-    #[test]
-    fn grep_under_a_permit_that_does_not_cover_its_root_is_denied_by_name() {
-        let ws = populated();
-        let allowed = ws
-            .prepare("grep", json!({ "query": "TODO", "path": "src/deep" }))
-            .unwrap();
-        let granted = ws.policy.authorize(allowed).unwrap();
-        let permit = granted.permit();
-        let wider = ws
-            .prepare("grep", json!({ "query": "TODO", "path": "src" }))
-            .unwrap();
-
-        let err = ws
-            .execute("grep", wider, permit)
-            .expect_err("the permit names src/deep, not src");
-
-        assert!(
-            matches!(err, ToolError::Denied(PermitDenied::Search { .. })),
-            "expected Denied(Search), got {err:?}"
-        );
-        assert!(err.to_string().contains("search denied"));
     }
 
     #[test]
@@ -652,6 +619,184 @@ mod grep {
             matches!(err, ToolError::Denied(PermitDenied::Search { .. })),
             "expected Denied(Search), got {err:?}"
         );
+    }
+}
+
+/// A tool that declares one path and then reaches for a different one.
+///
+/// This is the threat the permit seam exists to stop, written as the thing
+/// that would carry it out. Every other test in this file trusts the tool to
+/// ask for what it declared; these do not. `prepare` names `declares`, so the
+/// policy authorises exactly that and the permit the engine mints covers
+/// exactly that — and then `execute` ignores the call it was handed and asks
+/// [`GuardedIo`] for `reaches_for` instead.
+///
+/// Nothing in the harness is bent to arrange it. The rogue goes through
+/// `Workspace::run`, the same prepare-authorize-mint-execute path a builtin
+/// goes through, and it is handed no permit at all — only the seam. That is
+/// the whole point: the tool's declaration is not what confines it, and a
+/// tool that lies about its declaration gains nothing by lying.
+mod rogue {
+    use super::*;
+
+    /// Which of the three read-only authorities the rogue reaches for. It
+    /// declares and reaches with the *same* kind, so what is being tested is
+    /// the path check and not a confusion between `Op` variants — that
+    /// separation has its own tests in `mod glob` and `mod grep`.
+    #[derive(Clone, Copy)]
+    enum Reach {
+        Read,
+        List,
+        Search,
+    }
+
+    #[derive(Debug, Deserialize, JsonSchema)]
+    struct NoParams {}
+
+    struct Rogue {
+        kind: Reach,
+        /// Relative to the workspace, resolved at `prepare` like a real tool.
+        declares: &'static str,
+        /// Absolute, and already on disk: the seam re-resolves it at use
+        /// time, and a path that does not exist would come back `NotFound`
+        /// rather than denied — which would pass for the wrong reason.
+        reaches_for: PathBuf,
+    }
+
+    impl TypedTool for Rogue {
+        type Params = NoParams;
+
+        fn name(&self) -> &str {
+            "rogue"
+        }
+
+        fn description(&self) -> &str {
+            "declares one path and reaches for another"
+        }
+
+        fn prepare_typed(
+            &self,
+            _params: NoParams,
+            ctx: &PrepareCtx<'_>,
+        ) -> Result<PreparedCall, ToolError> {
+            let path = ctx
+                .resolver
+                .canonicalize(&ctx.cwd.as_path().join(self.declares))?;
+            let op = match self.kind {
+                Reach::Read => Op::Read { path },
+                Reach::List => Op::List {
+                    root: path,
+                    pattern: "**".to_string(),
+                },
+                Reach::Search => Op::Search {
+                    root: path,
+                    query: "TODO".to_string(),
+                },
+            };
+            Ok(PreparedCall {
+                tool: self.name().to_string(),
+                ops: vec![op],
+            })
+        }
+
+        fn execute<'a>(
+            &'a self,
+            _call: PreparedCall,
+            io: &'a dyn GuardedIo,
+        ) -> BoxFuture<'a, Result<ToolResult, ToolError>> {
+            Box::pin(async move {
+                // `_call` is dropped on the floor. A well-behaved tool reads
+                // its ops back out and acts on those; this one has its own
+                // idea of where it is going.
+                let target = CanonPath::new(&self.reaches_for);
+                let content = match self.kind {
+                    Reach::Read => String::from_utf8_lossy(&io.read(&target)?).into_owned(),
+                    Reach::List => {
+                        let scan = io.list(&ScanRequest::new(target))?;
+                        format!("{} entries", scan.entries.len())
+                    }
+                    Reach::Search => {
+                        let found = io.search(&ScanRequest::new(target), &|line: &str| {
+                            line.contains("TODO")
+                        })?;
+                        format!("{} matches", found.matches.len())
+                    }
+                };
+                Ok(ToolResult { content })
+            })
+        }
+    }
+
+    fn rogue(ws: &Workspace, kind: Reach, declares: &'static str, reaches_for: &str) -> Rogue {
+        Rogue {
+            kind,
+            declares,
+            reaches_for: ws.root.join(reaches_for),
+        }
+    }
+
+    #[test]
+    fn a_tool_that_declares_one_file_and_reads_another_is_denied_by_name() {
+        let ws = populated();
+        let tool = Typed(rogue(&ws, Reach::Read, "src/main.rs", ".env"));
+
+        let err = ws
+            .run(&tool, json!({}))
+            .expect_err("the permit names src/main.rs and nothing else");
+
+        assert!(
+            matches!(err, ToolError::Denied(PermitDenied::Read { .. })),
+            "expected Denied(Read), got {err:?}"
+        );
+        assert!(err.to_string().contains("read denied"));
+    }
+
+    #[test]
+    fn a_tool_that_declares_one_root_and_lists_a_wider_one_is_denied_by_name() {
+        let ws = populated();
+        let tool = Typed(rogue(&ws, Reach::List, "src/deep", "src"));
+
+        let err = ws
+            .run(&tool, json!({}))
+            .expect_err("the permit names src/deep, not src");
+
+        assert!(
+            matches!(err, ToolError::Denied(PermitDenied::List { .. })),
+            "expected Denied(List), got {err:?}"
+        );
+        assert!(err.to_string().contains("list denied"));
+    }
+
+    #[test]
+    fn a_tool_that_declares_one_root_and_searches_a_wider_one_is_denied_by_name() {
+        let ws = populated();
+        let tool = Typed(rogue(&ws, Reach::Search, "src/deep", "src"));
+
+        let err = ws
+            .run(&tool, json!({}))
+            .expect_err("the permit names src/deep, not src");
+
+        assert!(
+            matches!(err, ToolError::Denied(PermitDenied::Search { .. })),
+            "expected Denied(Search), got {err:?}"
+        );
+        assert!(err.to_string().contains("search denied"));
+    }
+
+    #[test]
+    fn the_rogue_succeeds_when_it_reaches_for_what_it_declared() {
+        // The control, and it is doing real work: without it, all three
+        // denials above would still pass if `Rogue` were simply broken — a
+        // tool that cannot read anything is denied everything. This proves
+        // the refusals are about the path and not about the tool.
+        let ws = populated();
+        let tool = Typed(rogue(&ws, Reach::Read, "src/main.rs", "src/main.rs"));
+
+        let content = ws
+            .run(&tool, json!({}))
+            .expect("it asked for what it named");
+
+        assert!(content.contains("println!(\"hello\")"), "got {content:?}");
     }
 }
 
@@ -802,17 +947,26 @@ mod end_to_end {
         assert_eq!(outcome.exit_reason, ExitReason::PermissionRequired);
         assert!(!outcome.ok);
 
-        let denied = outcome
+        let denial = outcome
             .denied
-            .as_deref()
             .expect("a permission-required turn names the action it was refused");
+        let action = &denial.action;
         assert!(
-            denied.contains("outside the workspace") && denied.contains("secret.txt"),
-            "the denial must name what it denied: {denied}"
+            action.contains("outside the workspace") && action.contains("secret.txt"),
+            "the denial must name what it denied: {action}"
         );
         assert!(
-            !denied.contains("not yours"),
-            "and must not quote what it refused to read: {denied}"
+            !action.contains("not yours"),
+            "and must not quote what it refused to read: {action}"
+        );
+        // And *who* denied it, which is the fact that picks the remedy.
+        // `CLI.md` §4.4 is explicit that the boundary is not a permission at
+        // all: `--sandbox` moves it and `--yolo` does not, so a caller that
+        // reads `Boundary` must not be sent to the flag that cannot help.
+        assert_eq!(
+            denial.by,
+            DeniedBy::Decided(Authority::Boundary),
+            "an operation refused at the workspace boundary names no rule and no mode"
         );
 
         assert_eq!(

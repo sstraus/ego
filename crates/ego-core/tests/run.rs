@@ -8,8 +8,19 @@
 //! quotes a ratified line of `CLI.md`. If one fails, either the mapping
 //! drifted or `CLI.md` changed — and the second is a decision, not a fix.
 
+use ego_core::config::{Mode, Source};
 use ego_core::event::domain::{CancelCause, ExitReason};
-use ego_core::run::{RunTermination, Signal};
+use ego_core::permit::rule::Rule;
+use ego_core::permit::{Authority, RuleAuthority};
+use ego_core::run::{Denial, DeniedBy, RunTermination, Signal};
+
+/// A denial nobody answered, for the tests that only care that there was one.
+fn nobody(action: &str) -> Denial {
+    Denial {
+        action: action.to_string(),
+        by: DeniedBy::Nobody,
+    }
+}
 
 /// Every value the `after_turn` mapping can be asked about, so a new
 /// `ExitReason` variant cannot be added without this file failing to compile.
@@ -50,6 +61,7 @@ fn the_exit_codes_are_the_table_cli_md_publishes() {
         (
             RunTermination::PermissionRequired {
                 action: "read /etc/passwd".to_string(),
+                by: DeniedBy::Nobody,
             },
             3,
         ),
@@ -90,6 +102,7 @@ fn only_a_finished_run_exits_zero() {
         },
         RunTermination::PermissionRequired {
             action: "read /etc/passwd".to_string(),
+            by: DeniedBy::Nobody,
         },
         RunTermination::Provider {
             message: "connection reset".to_string(),
@@ -144,6 +157,7 @@ fn the_exit_reason_words_are_the_ones_cli_md_publishes() {
         (
             RunTermination::PermissionRequired {
                 action: "read /etc/passwd".to_string(),
+                by: DeniedBy::Decided(Authority::Boundary),
             },
             "permission",
         ),
@@ -228,7 +242,7 @@ fn every_other_way_a_turn_can_end_ends_the_run() {
         if reason == ExitReason::Completed {
             continue;
         }
-        let termination = RunTermination::after_turn(reason, Some("read /etc/passwd"));
+        let termination = RunTermination::after_turn(reason, Some(nobody("read /etc/passwd")));
         assert!(
             termination.is_some(),
             "{reason:?} ends a turn but nothing says how the run ends"
@@ -243,19 +257,123 @@ fn a_refused_call_carries_its_subject_all_the_way_to_exit_three() {
     // so the action travels with the outcome rather than being looked up.
     let termination = RunTermination::after_turn(
         ExitReason::PermissionRequired,
-        Some("read /etc/passwd, outside the workspace"),
+        Some(Denial {
+            action: "read /etc/passwd, outside the workspace".to_string(),
+            by: DeniedBy::Decided(Authority::Boundary),
+        }),
     )
     .expect("a refused call ends the run");
 
     assert_eq!(termination.exit_code(), 3);
     assert_eq!(termination.exit_reason(), "permission");
     match termination {
-        RunTermination::PermissionRequired { action } => assert_eq!(
+        RunTermination::PermissionRequired { action, .. } => assert_eq!(
             action, "read /etc/passwd, outside the workspace",
             "the action reaches the result unedited"
         ),
         other => panic!("a refused call is not {other:?}"),
     }
+}
+
+/// The fifth case, and the whole reason `by` exists.
+///
+/// `CLI.md` §4.4's three opt-ins "act on different axes": the boundary wants
+/// `--sandbox` and explicitly not `--yolo`, a question nobody answered wants
+/// `--allow`, and a deny rule wants none of them — it wants the config layer
+/// edited. Every one of those is exit 3 and every one is the word
+/// `permission`, so if the two endings below were equal the distinction would
+/// exist nowhere a caller can read it.
+#[test]
+fn a_refusal_somebody_made_is_not_a_question_nobody_answered() {
+    let refused = RunTermination::after_turn(
+        ExitReason::PermissionRequired,
+        Some(Denial {
+            action: "edit may not write /ws/x".to_string(),
+            by: DeniedBy::Decided(Authority::Boundary),
+        }),
+    )
+    .expect("a refused call ends the run");
+    let unanswered = RunTermination::after_turn(
+        ExitReason::PermissionRequired,
+        Some(nobody("edit may not write /ws/x")),
+    )
+    .expect("an unanswerable call ends the run too");
+
+    // Same code, same word — which is why neither can carry the difference.
+    assert_eq!(refused.exit_code(), unanswered.exit_code());
+    assert_eq!(refused.exit_reason(), unanswered.exit_reason());
+    assert_ne!(
+        refused, unanswered,
+        "exit 3 has two causes and the run termination must say which"
+    );
+}
+
+/// A deny rule's authority reaches exit 3 with the layer still on it.
+///
+/// The one operational question an attribution answers is *can I change
+/// this*, and `2026-08-21-a-deny-that-names-who-can-lift-it.md` is the reason
+/// `RuleAuthority` carries `from` at all. A run that ends at exit 3 has no
+/// second invocation in which to show it, so it travels here or nowhere.
+#[test]
+fn a_rule_that_denied_reaches_exit_three_with_the_layer_that_owns_it() {
+    let rule = Rule::load("read(**)").expect("a rule this build enforces");
+    let id = rule.id();
+    let termination = RunTermination::after_turn(
+        ExitReason::PermissionRequired,
+        Some(Denial {
+            action: "read may not read /ws/secret".to_string(),
+            by: DeniedBy::Decided(Authority::Rules {
+                rules: vec![RuleAuthority {
+                    id: id.clone(),
+                    from: Source::System,
+                    also: Default::default(),
+                }],
+            }),
+        }),
+    )
+    .expect("a refused call ends the run");
+
+    match termination {
+        RunTermination::PermissionRequired {
+            by: DeniedBy::Decided(Authority::Rules { rules }),
+            ..
+        } => {
+            assert_eq!(rules.len(), 1);
+            assert_eq!(rules[0].id, id);
+            assert_eq!(
+                rules[0].from,
+                Source::System,
+                "an operator told `user` would go and edit a file that cannot lift it"
+            );
+        }
+        other => panic!("a rule denied it, so the authority is a rule: {other:?}"),
+    }
+}
+
+/// The mode is its own authority and not a rule.
+///
+/// `plan` refuses every mutating op at §6 step 2, above the allow list, so
+/// there is no rule to grep for and no `ego rules revoke` to run. Recording
+/// `Rules { rules: [] }` instead would send an operator looking for a line
+/// nobody wrote.
+#[test]
+fn a_mode_that_forbade_it_names_the_mode_and_no_rule() {
+    let termination = RunTermination::after_turn(
+        ExitReason::PermissionRequired,
+        Some(Denial {
+            action: "edit may not write /ws/x".to_string(),
+            by: DeniedBy::Decided(Authority::Mode { mode: Mode::Plan }),
+        }),
+    )
+    .expect("a refused call ends the run");
+
+    assert!(matches!(
+        termination,
+        RunTermination::PermissionRequired {
+            by: DeniedBy::Decided(Authority::Mode { mode: Mode::Plan }),
+            ..
+        }
+    ));
 }
 
 #[test]

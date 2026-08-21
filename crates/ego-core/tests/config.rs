@@ -6,12 +6,41 @@
 use ego_core::ceiling::{Budget, Ceilings};
 use ego_core::config::{
     ConfigError, ConfigLayer, Mode, ModelRef, PermCfg, Posture, ProfileLayer, Source, Sourced,
-    Trust, resolve,
+    SourcedRule, Trust, resolve,
 };
 use ego_core::cost::{Amount, CurrencyCode, Money};
+use ego_core::permit::rule::Rule;
 
 fn layer(source: Source, value: ConfigLayer) -> Sourced<ConfigLayer> {
     Sourced { source, value }
+}
+
+/// A rule these tests build directly, bypassing the TOML they usually arrive
+/// in. `load` and not `parse`, so a test cannot hand `resolve` a rule that a
+/// config file could not have contained.
+fn rule(raw: &str) -> Rule {
+    Rule::load(raw).expect("a rule this build can enforce")
+}
+
+/// Whether `list` carries `raw` at all, ignoring which layers it came from.
+///
+/// Replaces `list.contains(&rule(raw))`, which stopped compiling when the
+/// resolved lists started carrying origins. The tests that only care *whether*
+/// a rule survived resolution say so with this; the ones that care *where it
+/// came from* use `origins` below and say that instead.
+fn carries(list: &[SourcedRule], raw: &str) -> bool {
+    origins(list, raw).is_some()
+}
+
+/// Every layer `list` records as carrying `raw`, or `None` if no entry does.
+///
+/// Collected into a `Vec` so a test can write the expected layers in order.
+/// `OriginSet` iterates most-authoritative-first, so that order is the
+/// authority order and not the order the layers happened to be merged in.
+fn origins(list: &[SourcedRule], raw: &str) -> Option<Vec<Source>> {
+    list.iter()
+        .find(|entry| entry.rule() == &rule(raw))
+        .map(|entry| entry.origins().iter().collect())
 }
 
 fn amount(decimal: &str, currency: &str) -> Option<Money> {
@@ -78,7 +107,7 @@ fn config_unknown_key_in_profile_table_is_named() {
 fn config_known_keys_parse_cleanly() {
     let sourced = ConfigLayer::parse(
         Source::Flags,
-        "model = \"anthropic/claude-sonnet-5\"\nmode = \"edits\"\n\n[permissions]\nallow = [\"bash(cargo *)\"]\ndeny = []\n",
+        "model = \"anthropic/claude-sonnet-5\"\nmode = \"edits\"\n\n[permissions]\nallow = [\"read(src/**)\"]\ndeny = []\n",
     )
     .unwrap();
     assert_eq!(sourced.source, Source::Flags);
@@ -87,7 +116,7 @@ fn config_known_keys_parse_cleanly() {
     assert_eq!(
         sourced.value.permissions,
         Some(PermCfg {
-            allow: vec!["bash(cargo *)".to_string()],
+            allow: vec![rule("read(src/**)")],
             deny: vec![],
         })
     );
@@ -399,15 +428,39 @@ fn config_no_layer_writing_a_budget_leaves_no_ceiling_at_all() {
     assert!(!effective.clamped.any());
 }
 
+/// The ceiling **survives the merge**. It does not decide anything.
+///
+/// This test was called `config_system_deny_ceiling_cannot_be_relaxed_by_flags`
+/// and that name is now a claim it does not check. "Cannot be relaxed" was
+/// true of `resolve` while `resolve` ended with
+/// `allow.retain(|e| !deny.contains(e))`, and that line is gone
+/// (`docs/decisions/2026-08-21-a-permit-nobody-can-widen.md` §6): whether a
+/// deny beats an allow is now decided per call, by the engine, against a
+/// canonical `PreparedCall`.
+///
+/// So the property did not lose its test — it changed owner. The owner is
+/// `tests/permit.rs`'s
+/// `permit_step1_a_deny_beats_an_allow_the_old_string_match_would_have_kept`,
+/// which uses an allow *narrower* than the deny: that is the case the retain
+/// let through, and the case a test with equal strings cannot see.
+///
+/// The two together are the whole property, and neither half is it alone.
+/// A green test whose *name* claims a security property nothing checks is how
+/// the next person concludes the property is covered, which is why the name
+/// moved with the property rather than staying here to look reassuring.
+///
+/// What is checked here is real and still worth checking: a `Flags` layer that
+/// sets `deny = []` would otherwise overwrite the system layer's deny outright,
+/// and the ceiling at `resolve.rs:121-147` puts it back.
 #[test]
-fn config_system_deny_ceiling_cannot_be_relaxed_by_flags() {
+fn config_system_deny_survives_a_higher_precedence_layer_that_clears_it() {
     let layers = [
         layer(
             Source::System,
             ConfigLayer {
                 permissions: Some(PermCfg {
                     allow: vec![],
-                    deny: vec!["bash(rm -rf *)".to_string()],
+                    deny: vec![rule("write(**)")],
                 }),
                 ..Default::default()
             },
@@ -416,7 +469,7 @@ fn config_system_deny_ceiling_cannot_be_relaxed_by_flags() {
             Source::Flags,
             ConfigLayer {
                 permissions: Some(PermCfg {
-                    allow: vec!["bash(rm -rf *)".to_string()],
+                    allow: vec![rule("write(**)")],
                     deny: vec![],
                 }),
                 ..Default::default()
@@ -424,12 +477,7 @@ fn config_system_deny_ceiling_cannot_be_relaxed_by_flags() {
         ),
     ];
     let effective = resolve(&layers, Trust::Trusted, None).unwrap();
-    assert!(
-        effective
-            .permissions
-            .deny
-            .contains(&"bash(rm -rf *)".to_string())
-    );
+    assert!(carries(&effective.permissions.deny, "write(**)"));
     // And the flags layer's allow is still *there*. Resolution's job is to
     // guarantee the system deny survives the merge, not to decide which of the
     // two wins: that is decided per call, against a canonical `PreparedCall`,
@@ -438,15 +486,10 @@ fn config_system_deny_ceiling_cannot_be_relaxed_by_flags() {
     // This assertion used to read `!allow.contains(...)`, satisfied by an
     // `allow.retain(|e| !deny.contains(e))` at the end of `resolve`. It passed
     // for a reason that does not generalise — the two strings happened to be
-    // equal. Change the allow to `bash(rm -rf /tmp/x)` and the retain kept it,
+    // equal. Change the allow to `write(src/**)` and the retain kept it,
     // while the deny it violates sat right beside it in the same `Effective`.
     // See `docs/decisions/2026-08-21-a-permit-nobody-can-widen.md` §6.
-    assert!(
-        effective
-            .permissions
-            .allow
-            .contains(&"bash(rm -rf *)".to_string())
-    );
+    assert!(carries(&effective.permissions.allow, "write(**)"));
 }
 
 #[test]
@@ -457,7 +500,7 @@ fn config_non_system_deny_can_be_relaxed_by_higher_precedence() {
             ConfigLayer {
                 permissions: Some(PermCfg {
                     allow: vec![],
-                    deny: vec!["bash(curl *)".to_string()],
+                    deny: vec![rule("read(secrets/**)")],
                 }),
                 ..Default::default()
             },
@@ -466,7 +509,7 @@ fn config_non_system_deny_can_be_relaxed_by_higher_precedence() {
             Source::Flags,
             ConfigLayer {
                 permissions: Some(PermCfg {
-                    allow: vec!["bash(curl *)".to_string()],
+                    allow: vec![rule("read(secrets/**)")],
                     deny: vec![],
                 }),
                 ..Default::default()
@@ -474,18 +517,8 @@ fn config_non_system_deny_can_be_relaxed_by_higher_precedence() {
         ),
     ];
     let effective = resolve(&layers, Trust::Trusted, None).unwrap();
-    assert!(
-        effective
-            .permissions
-            .allow
-            .contains(&"bash(curl *)".to_string())
-    );
-    assert!(
-        !effective
-            .permissions
-            .deny
-            .contains(&"bash(curl *)".to_string())
-    );
+    assert!(carries(&effective.permissions.allow, "read(secrets/**)"));
+    assert!(!carries(&effective.permissions.deny, "read(secrets/**)"));
 }
 
 #[test]
@@ -552,34 +585,24 @@ fn config_profile_defined_by_only_one_eligible_layer_still_applies() {
 }
 
 #[test]
-fn config_system_deny_ceiling_survives_profile_override_that_clears_deny() {
-    let toml = "[permissions]\ndeny = [\"bash(rm -rf *)\"]\n\n[profile.ci.permissions]\nallow = [\"bash(rm -rf *)\"]\ndeny = []\n";
+fn config_system_deny_survives_a_profile_override_that_clears_it() {
+    let toml = "[permissions]\ndeny = [\"write(**)\"]\n\n[profile.ci.permissions]\nallow = [\"write(**)\"]\ndeny = []\n";
     let system = ConfigLayer::parse(Source::System, toml).unwrap();
     let effective = resolve(&[system], Trust::Trusted, Some("ci")).unwrap();
-    assert!(
-        effective
-            .permissions
-            .deny
-            .contains(&"bash(rm -rf *)".to_string())
-    );
+    assert!(carries(&effective.permissions.deny, "write(**)"));
     // Carried, not subtracted — see
-    // `config_system_deny_ceiling_cannot_be_relaxed_by_flags`.
-    assert!(
-        effective
-            .permissions
-            .allow
-            .contains(&"bash(rm -rf *)".to_string())
-    );
+    // `config_system_deny_survives_a_higher_precedence_layer_that_clears_it`.
+    assert!(carries(&effective.permissions.allow, "write(**)"));
 }
 
 #[test]
-fn config_system_deny_ceiling_unions_across_multiple_system_layers() {
+fn config_system_deny_unions_across_multiple_system_layers() {
     let system_a = layer(
         Source::System,
         ConfigLayer {
             permissions: Some(PermCfg {
                 allow: vec![],
-                deny: vec!["bash(rm -rf *)".to_string()],
+                deny: vec![rule("write(**)")],
             }),
             ..Default::default()
         },
@@ -588,33 +611,18 @@ fn config_system_deny_ceiling_unions_across_multiple_system_layers() {
         Source::System,
         ConfigLayer {
             permissions: Some(PermCfg {
-                allow: vec!["bash(rm -rf *)".to_string()],
-                deny: vec!["bash(curl *)".to_string()],
+                allow: vec![rule("write(**)")],
+                deny: vec![rule("read(secrets/**)")],
             }),
             ..Default::default()
         },
     );
     let effective = resolve(&[system_a, system_b], Trust::Trusted, None).unwrap();
-    assert!(
-        effective
-            .permissions
-            .deny
-            .contains(&"bash(rm -rf *)".to_string())
-    );
-    assert!(
-        effective
-            .permissions
-            .deny
-            .contains(&"bash(curl *)".to_string())
-    );
+    assert!(carries(&effective.permissions.deny, "write(**)"));
+    assert!(carries(&effective.permissions.deny, "read(secrets/**)"));
     // Carried, not subtracted — see
-    // `config_system_deny_ceiling_cannot_be_relaxed_by_flags`.
-    assert!(
-        effective
-            .permissions
-            .allow
-            .contains(&"bash(rm -rf *)".to_string())
-    );
+    // `config_system_deny_survives_a_higher_precedence_layer_that_clears_it`.
+    assert!(carries(&effective.permissions.allow, "write(**)"));
 }
 
 #[test]
@@ -626,7 +634,7 @@ fn config_untrusted_project_and_local_cannot_affect_resolution() {
                 model: model("project"),
                 mode: Some(Mode::Yolo),
                 permissions: Some(PermCfg {
-                    allow: vec!["bash(*)".to_string()],
+                    allow: vec![rule("write(**)")],
                     deny: vec![],
                 }),
                 ..Default::default()
@@ -1216,4 +1224,195 @@ mod instructions {
         // reports the directory it actually lives in.
         assert_eq!(prompt.sources[0].scope, "/elsewhere");
     }
+}
+
+// --- rules are parsed by the layer, not carried as text -----------------
+
+/// A rule reaches `Effective` as a [`Rule`], so whatever consumes it cannot
+/// choose its own parser. `CLI.md:29-31` promises one language across four
+/// surfaces, and one language means one parser: a second one is how the config
+/// path and the frontmatter path start disagreeing about what a string means.
+#[test]
+fn config_permission_rules_arrive_parsed_and_not_as_strings() {
+    let layer = ConfigLayer::parse(
+        Source::Project,
+        "[permissions]\nallow = [\"read( src/** )\"]\ndeny = [\"write(**)\"]\n",
+    )
+    .expect("two well-formed rules");
+    let permissions = layer.value.permissions.expect("the table was written");
+
+    assert_eq!(permissions.allow, vec![rule("read(src/**)")]);
+    assert_eq!(permissions.deny, vec![rule("write(**)")]);
+    assert_eq!(
+        permissions.allow[0].to_string(),
+        "read(src/**)",
+        "the spelling the operator used is not what is stored — the AST is"
+    );
+}
+
+/// The teaching message survives the trip through serde. An operator meets the
+/// grammar here first, and `unknown rule head` with no suggestion would send
+/// them to look for a `bash` tool that is not the problem.
+#[test]
+fn config_a_tool_named_rule_is_refused_with_the_effect_it_should_have_named() {
+    let err = ConfigLayer::parse(
+        Source::Project,
+        "[permissions]\nallow = [\"bash(git *)\"]\n",
+    )
+    .expect_err("`bash` is not a head");
+    let said = err.to_string();
+
+    assert!(said.contains("unknown rule head `bash`"), "{said}");
+    assert!(said.contains("Rules name effects, not tools"), "{said}");
+    assert!(said.contains("exec"), "{said}");
+}
+
+/// §6a at the surface an operator actually types into. The rule is well formed
+/// and this build has nothing to match it with, so it is refused **here** —
+/// not accepted and quietly ignored at the moment it would have mattered.
+#[test]
+fn config_a_rule_this_build_cannot_enforce_is_refused_at_load() {
+    let err = ConfigLayer::parse(
+        Source::System,
+        "[permissions]\ndeny = [\"exec(rm -rf /)\"]\n",
+    )
+    .expect_err("no tool in this build produces exec operations");
+    let said = err.to_string();
+
+    assert!(said.contains("cannot be enforced"), "{said}");
+    assert!(said.contains("a shell tool"), "{said}");
+}
+
+/// The refusal is not confined to `deny`, and this is the direction that would
+/// be easy to miss: an unenforceable *allow* is harmless to the machine and
+/// still a lie to the operator, who believes they have widened something.
+#[test]
+fn config_an_unenforceable_allow_is_refused_the_same_way() {
+    let err = ConfigLayer::parse(
+        Source::Project,
+        "[permissions]\nallow = [\"net(api.github.com)\"]\n",
+    )
+    .expect_err("nothing in this build reaches the network through a rule");
+    assert!(err.to_string().contains("cannot be enforced"));
+}
+
+/// A `[profile.NAME]` table's rules go through the same parser. A profile that
+/// could smuggle an unparsed rule past the check would be a second surface,
+/// which is the thing §9 exists to prevent.
+#[test]
+fn config_profile_rules_are_parsed_by_the_same_parser() {
+    let err = ConfigLayer::parse(
+        Source::Project,
+        "[profile.ci.permissions]\nallow = [\"bash(cargo test)\"]\n",
+    )
+    .expect_err("`bash` is not a head in a profile either");
+    assert!(err.to_string().contains("unknown rule head `bash`"));
+}
+
+#[test]
+fn config_a_deny_written_in_two_layers_reports_the_layer_that_can_lift_it() {
+    // The system layer and the user layer deny the same predicate. The merge
+    // loop leaves `deny` holding the *user* copy; the ceiling pass then finds
+    // the system copy already present.
+    //
+    // One rule, one entry — that part is correct for enforcement and has not
+    // changed. What changed is that the entry now records *both* layers, so
+    // the attribution can name the one whose deletion actually lifts the
+    // denial. The old skip kept whichever origin arrived first, which is the
+    // user's: the one line an operator can delete without effect.
+    //
+    // `docs/decisions/2026-08-21-a-deny-that-names-who-can-lift-it.md`.
+    let overlapping = || PermCfg {
+        allow: vec![],
+        deny: vec![rule("read(/etc/**)")],
+    };
+    let layers = [
+        layer(
+            Source::System,
+            ConfigLayer {
+                permissions: Some(overlapping()),
+                ..Default::default()
+            },
+        ),
+        layer(
+            Source::User,
+            ConfigLayer {
+                permissions: Some(overlapping()),
+                ..Default::default()
+            },
+        ),
+    ];
+    let effective = resolve(&layers, Trust::Untrusted, None).unwrap();
+
+    assert_eq!(effective.permissions.deny.len(), 1, "one rule, one entry");
+    let entry = &effective.permissions.deny[0];
+    assert_eq!(entry.rule(), &rule("read(/etc/**)"));
+
+    // Both layers are recorded. The user copy is what the merge loop left and
+    // the system copy is what the ceiling pass unioned in, but the set reads
+    // back most-authoritative-first: the order rules arrived in is an
+    // implementation detail and nothing should depend on it.
+    assert_eq!(
+        entry.origins().iter().collect::<Vec<_>>(),
+        [Source::System, Source::User]
+    );
+
+    // And the answer to "can I change this" is the system layer — the *least*
+    // recently added and the *most* authoritative. An attribution that took
+    // the first origin, or the highest merge rank, would say `user` here and
+    // send the operator to delete a line that changes nothing.
+    assert_eq!(entry.authority(), Source::System);
+}
+
+/// The complement, and the reason `authority` is not just "the first origin".
+///
+/// Nothing system-level is involved, so the operator's own layer is both the
+/// only origin and the answer. Without this, a bug that hardcoded
+/// `Source::System` as the authority would pass the test above.
+#[test]
+fn config_a_deny_only_the_operator_wrote_is_attributed_to_them() {
+    let layers = [layer(
+        Source::User,
+        ConfigLayer {
+            permissions: Some(PermCfg {
+                allow: vec![],
+                deny: vec![rule("read(/etc/**)")],
+            }),
+            ..Default::default()
+        },
+    )];
+    let effective = resolve(&layers, Trust::Untrusted, None).unwrap();
+    let entry = &effective.permissions.deny[0];
+    assert_eq!(entry.origins().iter().collect::<Vec<_>>(), [Source::User]);
+    assert_eq!(entry.authority(), Source::User);
+}
+
+/// A rule the operator restated does not become theirs to lift, and the order
+/// they arrive in does not decide it.
+///
+/// The test above has the user copy arriving first because that is what the
+/// merge loop produces. This one pins the *rule* rather than that accident:
+/// authority is a property of the layer, and no amount of restating moves it
+/// (decision 1). Two layers above system, so the winner is not simply "the
+/// last one added" either.
+#[test]
+fn config_authority_is_the_layer_not_the_arrival_order() {
+    let mut entry = SourcedRule::new(rule("read(/etc/**)"), Source::Flags);
+    assert_eq!(entry.authority(), Source::Flags);
+    entry.also_carried_by(Source::User);
+    assert_eq!(entry.authority(), Source::User, "user outranks flags");
+    entry.also_carried_by(Source::Project);
+    assert_eq!(
+        entry.authority(),
+        Source::User,
+        "project is above user in merge precedence and below it in authority"
+    );
+    entry.also_carried_by(Source::System);
+    assert_eq!(entry.authority(), Source::System);
+    // Idempotent: restating does not duplicate.
+    entry.also_carried_by(Source::System);
+    assert_eq!(
+        entry.origins().iter().collect::<Vec<_>>(),
+        [Source::System, Source::User, Source::Project, Source::Flags]
+    );
 }

@@ -116,6 +116,16 @@ impl Host {
             append_system: None,
             instructions: None,
             bare: false,
+            // A host has no way to express a permission posture either: ACP
+            // asks about a call the agent is *already making*
+            // (`session/request_permission`), which is a different question
+            // from the one `--mode` and `--allow`/`--deny` answer up front.
+            // So these stay at what a bare `ego resume` resolves them to —
+            // `None` is `Mode::Default`, the posture that asks — and never at
+            // a permissive value invented because the protocol was silent.
+            mode: None,
+            allow: Vec::new(),
+            deny: Vec::new(),
             // `Id` and not `Resume`: `session/new` minted this id before the
             // session existed, so the first prompt has to create it and every
             // later one has to attach to it — which is precisely what `Id`

@@ -10,8 +10,8 @@ use std::sync::Arc;
 
 use crate::generator::types::ToolDescriptor as GenToolDescriptor;
 use crate::permit::{
-    Authorized, CanonPath, Fs, GuardedFs, PolicyDenied, PolicyEngine, PrepareCtx, PreparedCall,
-    Tool, ToolError,
+    Authorized, CanonPath, Classification, Fs, GuardedFs, Pending, PolicyEngine, PrepareCtx,
+    PreparedCall, Resolution, Tool, ToolError,
 };
 
 /// Everything the loop needs to turn a model's tool call into an effect.
@@ -86,16 +86,35 @@ impl<'a> Tools<'a> {
     }
 
     /// Stage two: ask policy what this call may do.
-    /// Returns the typed [`PolicyDenied`], not prose.
     ///
-    /// It used to flatten to a `String`, which is the same defect as an
-    /// `HttpError` flattened one layer down: the value already names what it
-    /// refused, and discarding the type at the seam left the loop unable to
-    /// tell "policy said no" from "the tool broke". Those are different
-    /// outcomes now — see `CLI.md` §4.4 and
-    /// `docs/decisions/2026-08-21-two-levels-of-ending.md`.
-    pub fn authorize(&self, call: PreparedCall) -> Result<Authorized, PolicyDenied> {
-        self.policy.authorize(call)
+    /// Returns the typed [`Classification`], not prose. It used to flatten to
+    /// a `String`, which is the same defect as an `HttpError` flattened one
+    /// layer down: the value already names what it refused, and discarding the
+    /// type at the seam left the loop unable to tell "policy said no" from
+    /// "the tool broke". Those are different outcomes now — see `CLI.md` §4.4
+    /// and `docs/decisions/2026-08-21-two-levels-of-ending.md`.
+    ///
+    /// Three outcomes rather than two, and the third is the one the loop must
+    /// not collapse: a call nobody in this run can answer is not a call that
+    /// was refused.
+    pub fn authorize(&self, call: PreparedCall) -> Classification {
+        self.policy.classify(call)
+    }
+
+    /// Stage two and a half: put a question the rules did not settle to the
+    /// next party in the order.
+    ///
+    /// A separate stage rather than folded into `authorize`, because the two
+    /// differ in the thing this module exists to keep straight: `authorize` is
+    /// pure and sync and answers from the run's own configuration; this one
+    /// awaits somebody. Collapsing them would put an `await` on the path every
+    /// authorised read already takes.
+    ///
+    /// The loop consults; it does not choose who answers. The approver is
+    /// built inside [`PolicyEngine::new`] from the resolved mode, so there is
+    /// nothing here to pass and nothing to substitute.
+    pub async fn settle(&self, pending: Pending) -> Resolution {
+        self.policy.settle(pending).await
     }
 
     /// Stage three: run it, under the grant policy issued and through the
@@ -111,8 +130,8 @@ impl<'a> Tools<'a> {
         authorized: Authorized,
     ) -> Result<String, String> {
         let (call, permit) = authorized.into_parts();
-        let guarded = GuardedFs::new(&permit, self.fs);
-        tool.execute(call, &permit, &guarded)
+        let guarded = GuardedFs::new(permit, self.fs);
+        tool.execute(call, &guarded)
             .await
             .map(|result| result.content)
             .map_err(|err| err.to_string())

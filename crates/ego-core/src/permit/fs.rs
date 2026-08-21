@@ -176,13 +176,26 @@ impl From<FsError> for IoDenied {
 
 /// The only implementation of [`GuardedIo`] in this crate: a [`Permit`]
 /// paired with the raw [`Fs`] it governs.
+///
+/// **Owns the permit rather than borrowing it.** The seam that enforces a
+/// grant is where the grant should end up: once a `GuardedFs` exists the
+/// permit is inside it, unreachable, and it dies with the seam. A borrowed
+/// permit meant somebody upstream still held one for the duration of the
+/// call, and that somebody was the only remaining place a permit and a
+/// foreign call could be brought together.
+///
+/// It is also the only shape that compiles. With `permit: &'a Permit`, a
+/// caller cannot both hand an [`Authorized`](super::Authorized) to
+/// `Tool::execute` by value and keep a `GuardedFs` built from that same
+/// permit — `E0505`, move out of a borrowed value, whose suggested fix is
+/// `Clone` on `Authorized`. That is the one thing Invariant W forbids.
 pub struct GuardedFs<'a> {
-    permit: &'a Permit,
+    permit: Permit,
     fs: &'a dyn Fs,
 }
 
 impl<'a> GuardedFs<'a> {
-    pub fn new(permit: &'a Permit, fs: &'a dyn Fs) -> Self {
+    pub fn new(permit: Permit, fs: &'a dyn Fs) -> Self {
         Self { permit, fs }
     }
 
@@ -201,7 +214,7 @@ impl<'a> GuardedFs<'a> {
         allows: fn(&Permit, &CanonPath) -> Result<(), PermitDenied>,
     ) -> Result<ScanRequest, IoDenied> {
         let fresh = self.fs.canonicalize(req.root.as_path())?;
-        allows(self.permit, &fresh)?;
+        allows(&self.permit, &fresh)?;
         Ok(ScanRequest {
             root: fresh,
             skip_dirs: req.skip_dirs.clone(),
@@ -223,7 +236,7 @@ impl<'a> GuardedFs<'a> {
         allows: fn(&Permit, &CanonPath) -> Result<(), PermitDenied>,
     ) -> Result<(), IoDenied> {
         for entry in entries {
-            allows(self.permit, &entry.path)?;
+            allows(&self.permit, &entry.path)?;
         }
         Ok(())
     }

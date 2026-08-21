@@ -18,6 +18,7 @@ use ego_cli::cli::{self, Invocation, Output, SessionChoice, Stdin};
 use ego_cli::prompt::{self, StdinSource};
 use ego_core::budget::Ledger;
 use ego_core::ceiling::Ceilings;
+use ego_core::config::Mode;
 use ego_core::cost::{Amount, CurrencyCode, Money};
 
 fn argv<const N: usize>(args: [&str; N]) -> Vec<String> {
@@ -107,11 +108,51 @@ fn the_separator_stops_a_subcommand_name_from_being_one() {
 
 /// Without a subcommand the invocation is the interactive one, and this build
 /// says which surface is missing rather than printing a usage block.
+///
+/// **The reason is asserted, not just the word "interactive", and that is a
+/// repair rather than thoroughness.** The refusal used to say the surface
+/// waited on "the permission dialog, which needs an approver that can mint a
+/// `Permit`". The `Approver` port landed; the sentence became false; this test
+/// stayed green, because it checked that a refusal *happened* and never what it
+/// claimed. A refusal is a factual assertion about the state of the build, and
+/// one nothing checks is one that decays into a confident falsehood — the same
+/// shape as an availability table nobody bound to its document.
 #[test]
 fn an_invocation_with_no_subcommand_names_the_surface_it_would_need() {
     let refusal = refused(["hello"]);
     assert!(refusal.contains("interactive"), "{refusal}");
     assert!(refusal.contains("ego run"), "{refusal}");
+    assert!(
+        refusal.contains(cli::INTERACTIVE_WAITING_ON),
+        "the refusal must say what the surface waits on: {refusal}"
+    );
+}
+
+/// And the reason it gives is the one `CLI.md` §2.1 publishes.
+///
+/// The companion to `every_unbuilt_subcommand_is_one_the_document_offers`, for
+/// the one row of that table `UNBUILT` does not cover: `ego [PROMPT]` is not a
+/// subcommand, so it has no entry there and had nothing holding it to the
+/// document. Which is exactly the row that went stale.
+#[test]
+fn the_interactive_refusal_says_what_the_document_says() {
+    let doc = include_str!("../../../CLI.md");
+    let availability = doc
+        .split("### 2.1 Availability")
+        .nth(1)
+        .expect("CLI.md has an availability section")
+        .split("## 3.")
+        .next()
+        .expect("the availability section ends");
+    // Whitespace-insensitive: the constant is a wrapped Rust string literal and
+    // the table row is one long line, so a literal `contains` would fail on the
+    // line breaks rather than on a disagreement about the reason.
+    let flatten = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        flatten(availability).contains(&flatten(cli::INTERACTIVE_WAITING_ON)),
+        "CLI.md §2.1's `ego [PROMPT]` row and the refusal disagree about what \
+         the interactive surface waits on"
+    );
 }
 
 /// A flag whose subsystem does not exist is refused by name *before* clap sees
@@ -276,6 +317,70 @@ fn the_session_flags_collapse_into_one_choice() {
         parsed(["run", "--ephemeral", "Ask"]).session,
         SessionChoice::Ephemeral
     );
+}
+
+/// The mode group, one axis over, and for the same reason: `--plan` and
+/// `--yolo` are spellings of `--mode`, so "which mode" has one answer.
+///
+/// **This test exists because a mutation survived without it.** `run.rs`
+/// drives the whole binary, and the builtins are read-only — so every mode
+/// admits a workspace read, refuses a workspace escape and never asks about
+/// either, and *no* end-to-end assertion can tell them apart. Mapping both
+/// `--plan` and `--yolo` to `Mode::Default` left all 787 tests green.
+///
+/// The engine's own tests already prove the five modes behave differently
+/// (`permit_step4_the_ceiling_answers_a_write_differently_in_every_mode`).
+/// What nothing checked was the wire between the flag and the engine, which
+/// is exactly the seam a process-level test cannot see and a function-level
+/// one can. That split is this file's whole premise.
+#[test]
+fn the_mode_flags_collapse_into_one_value() {
+    assert_eq!(parsed(["run", "Ask"]).mode, None);
+    assert_eq!(parsed(["run", "--plan", "Ask"]).mode, Some(Mode::Plan));
+    assert_eq!(parsed(["run", "--yolo", "Ask"]).mode, Some(Mode::Yolo));
+    for (spelling, mode) in [
+        ("plan", Mode::Plan),
+        ("default", Mode::Default),
+        ("auto", Mode::Auto),
+        ("edits", Mode::Edits),
+        ("yolo", Mode::Yolo),
+    ] {
+        assert_eq!(
+            parsed(["run", "--mode", spelling, "Ask"]).mode,
+            Some(mode),
+            "--mode {spelling}"
+        );
+    }
+    let refusal = refused(["run", "--plan", "--yolo", "Ask"]);
+    assert!(
+        refusal.contains("--plan") && refusal.contains("--yolo"),
+        "{refusal}"
+    );
+}
+
+/// The rules arrive in the order they were written, and both lists are kept.
+///
+/// Order matters: §7 of the rule ADR is first-match-wins within a list, so a
+/// parser that sorted or deduplicated would change which rule an operator's
+/// denial is attributed to. They stay text here — `Rule::load` runs in the
+/// config layer, so a flag and a file go through one parser and not two.
+#[test]
+fn the_rule_flags_are_repeatable_and_keep_their_order() {
+    let args = parsed([
+        "run",
+        "--allow",
+        "read(a/**)",
+        "--deny",
+        "write(**)",
+        "--allow",
+        "read(b/**)",
+        "Ask",
+    ]);
+    assert_eq!(args.allow, ["read(a/**)", "read(b/**)"]);
+    assert_eq!(args.deny, ["write(**)"]);
+
+    let none = parsed(["run", "Ask"]);
+    assert!(none.allow.is_empty() && none.deny.is_empty());
 }
 
 /// `-` is not a prompt that happens to be a hyphen; it says where the prompt

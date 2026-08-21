@@ -449,14 +449,57 @@ pub fn project_public(ev: &DomainEvent) -> Option<PublicEvent> {
             ok: *ok,
             text: Some(output.clone()),
         }),
-        EventKind::PermissionRequested { description } => Some(PublicEvent::ItemStarted {
+        // `name` carries the tool, as it does for `ToolCallStarted`. It used
+        // to be `None` because the internal event had no tool to give, not
+        // because a permission item has no name.
+        //
+        // `escalation` is rendered rather than projected as fields: the op
+        // and the path are structured *in the log*, where the audit reads
+        // them, and `PublicEvent` is a compatibility-governed schema that
+        // gains no permission vocabulary for a consumer that has not asked.
+        EventKind::PermissionRequested { tool, escalation } => Some(PublicEvent::ItemStarted {
             turn,
             item: item?,
             kind: ItemKind::Permission,
-            name: None,
-            text: Some(description.clone()),
+            name: Some(tool.clone()),
+            text: Some(escalation.to_string()),
         }),
-        EventKind::PermissionDecided { allowed } => Some(PublicEvent::ItemCompleted {
+        // `by` is likewise not projected, and this module's own governing
+        // line is the whole reason: *a new internal event never becomes
+        // public automatically*. Nothing reads an authority out of
+        // `PublicEvent`, and `Verdict`'s rule applies unchanged — a field
+        // whose only reader is unbuilt is a field nothing can be wrong about,
+        // so it arrives with its reader.
+        //
+        // `2026-08-21-a-permit-nobody-can-widen.md` §7 expected the opposite
+        // and priced a `PUBLIC_EVENT_VERSION` bump for it. What was wrong was
+        // the assumed consumer, not the projection rule: 5→6 is paid by every
+        // ACP host and every `--output jsonl` reader, for a field none of them
+        // asks for.
+        //
+        // **`CLI.md` §4.1 does publish an authority, and that is the same rule
+        // rather than an exception to it.** `Report.denied_by` reaches a
+        // consumer through `RunTermination`, not through this projection —
+        // `--output json` publishes to a `NullSink` and produces no events at
+        // all — and it has a reader that §4.4 names: exit 3 offers three
+        // opt-ins that act on different axes, and which one applies is the
+        // authority. So the field arrived on the surface that asks for it and
+        // not on the one that does not. Do not read this comment as "the
+        // authority is never published"; read it as "this projection adds
+        // nothing a consumer has not asked for". See
+        // `2026-08-21-an-exit-code-that-names-who-refused.md`.
+        //
+        // **Not withheld for privacy, and the difference matters to whoever
+        // reads this next.** `Source` is a six-value layer name
+        // (`config/source.rs`) and `RuleId` is a truncated hash over the
+        // canonical AST (`rule/id.rs`, "over the AST and never the input
+        // text"), which discloses no pattern and is already the handle an
+        // operator sees in a refusal. This projection publishes
+        // `InstructionDescriptor::path`, an absolute path, so it plainly does
+        // not withhold configuration. Reasoning from privacy here would send
+        // the next reader to strip a `RuleId` out of a refusal, where it is
+        // the one thing that tells them what to revoke.
+        EventKind::PermissionDecided { allowed, .. } => Some(PublicEvent::ItemCompleted {
             turn,
             item: item?,
             kind: ItemKind::Permission,

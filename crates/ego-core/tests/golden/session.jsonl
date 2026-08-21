@@ -5,7 +5,7 @@
 {"type":"item_started","turn":"00000000-0000-0000-0000-000000000002","item":"00000000-0000-0000-0000-000000000006","kind":"tool","name":"bash","text":"ls"}
 {"type":"item_delta","turn":"00000000-0000-0000-0000-000000000002","item":"00000000-0000-0000-0000-000000000006","kind":"tool","text":"file1\n"}
 {"type":"item_completed","turn":"00000000-0000-0000-0000-000000000002","item":"00000000-0000-0000-0000-000000000006","kind":"tool","ok":true,"text":"file1\nfile2\n"}
-{"type":"item_started","turn":"00000000-0000-0000-0000-000000000002","item":"00000000-0000-0000-0000-000000000007","kind":"permission","text":"write to /etc"}
+{"type":"item_started","turn":"00000000-0000-0000-0000-000000000002","item":"00000000-0000-0000-0000-000000000007","kind":"permission","name":"edit","text":"no rule covers write /etc/hosts"}
 {"type":"item_completed","turn":"00000000-0000-0000-0000-000000000002","item":"00000000-0000-0000-0000-000000000007","kind":"permission","ok":false}
 {"type":"item_started","turn":"00000000-0000-0000-0000-000000000002","item":"00000000-0000-0000-0000-000000000008","kind":"subagent","text":"explorer-1"}
 {"type":"item_completed","turn":"00000000-0000-0000-0000-000000000002","item":"00000000-0000-0000-0000-000000000008","kind":"subagent","ok":true,"text":"done"}

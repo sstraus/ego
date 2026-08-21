@@ -558,3 +558,68 @@ fn set_mode(at: &Path, mode: u32) {
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(at, fs::Permissions::from_mode(mode)).expect("the mode is set");
 }
+
+/// The two behaviours the grammar ADR reasoned about and did not measure.
+///
+/// `docs/decisions/2026-08-21-a-rule-that-means-exactly-one-thing.md` §5
+/// decides against case folding and against Unicode normalisation, and names
+/// both residuals as *unverified on this machine* — believed to fail closed,
+/// with one experiment each. These are those experiments. They belong here
+/// and not beside the grammar, because what is in question is not what the
+/// matcher does with a path but what `canonicalize` hands it in the first
+/// place, and only a real volume can answer that.
+///
+/// If either ever fails *open* — a pattern matching a path it does not spell
+/// — the ADR is wrong and needs amending rather than the code.
+mod rule_matching_against_a_real_volume {
+    use super::*;
+    use ego_core::permit::rule::Rule;
+
+    #[test]
+    fn a_rule_whose_casing_differs_from_the_disk_matches_nothing() {
+        // On a case-insensitive volume the file opens under either spelling,
+        // but `canonicalize` returns the casing that is on disk — so the rule
+        // visibly does nothing instead of quietly matching. That is the
+        // direction to fail in.
+        let tree = Tree::new();
+        let file = tree.file("src/main.rs", "fn main() {}\n");
+        let canonical = fs::canonicalize(&file).expect("the file resolves");
+
+        assert!(
+            canonical.ends_with("src/main.rs"),
+            "canonicalize folded the case: {}",
+            canonical.display()
+        );
+        assert!(
+            !parse("read(SRC/**)").matches(&read(&canonical), &tree.root),
+            "a rule spelled SRC matched a path spelled src"
+        );
+        assert!(parse("read(src/**)").matches(&read(&canonical), &tree.root));
+    }
+
+    #[test]
+    fn a_rule_composed_differently_from_the_disk_matches_nothing() {
+        // Composed é (U+00E9) as the rule, decomposed e + U+0301 on disk.
+        // Whether the volume stores the name as given or normalises it, the
+        // two spellings do not match, and the failure is closed either way.
+        let tree = Tree::new();
+        let file = tree.file("caf\u{65}\u{301}.txt", "beans\n");
+        let canonical = fs::canonicalize(&file).expect("the file resolves");
+
+        assert!(
+            !parse("read(caf\u{e9}.txt)").matches(&read(&canonical), &tree.root),
+            "a composed rule matched a decomposed name: {}",
+            canonical.display()
+        );
+    }
+
+    fn parse(raw: &str) -> Rule {
+        Rule::parse(raw).unwrap_or_else(|err| panic!("`{raw}` should parse: {err}"))
+    }
+
+    fn read(path: &Path) -> ego_core::permit::Op {
+        ego_core::permit::Op::Read {
+            path: CanonPath::new(path),
+        }
+    }
+}

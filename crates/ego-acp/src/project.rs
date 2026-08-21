@@ -179,7 +179,7 @@ use ego_core::event::domain::ExitReason;
 use ego_core::event::id::ItemId;
 use ego_core::generator::capabilities::ModelCapabilities;
 use ego_core::public::{ItemKind, PublicEvent};
-use ego_core::run::RunTermination;
+use ego_core::run::{DeniedBy, RunTermination};
 use ego_core::state::SessionState;
 
 /// The bare-string wire form ACP ids use (`MessageId`, `ToolCallId`, …).
@@ -269,7 +269,23 @@ pub fn stop_reason_v1(termination: &RunTermination) -> Result<v1::StopReason, St
         RunTermination::BudgetExceeded => {
             Err("the turn stopped because a budget ceiling was reached".to_string())
         }
-        RunTermination::PermissionRequired { action } => Err(format!(
+        // Split for the reason the line UI splits it (`ego-cli`'s
+        // `termination_note`): "nobody could grant it" describes a question
+        // the evaluation order exhausted, and said of a refusal somebody made
+        // it denies that anyone decided — the one thing that did happen. The
+        // authority is not named here and is not named there either, because
+        // `action`'s own rendering already carries the rule, the mode or the
+        // boundary that produced it.
+        RunTermination::PermissionRequired {
+            action,
+            by: DeniedBy::Decided(_),
+        } => Err(format!(
+            "the turn stopped because {action} was refused by a permission decision"
+        )),
+        RunTermination::PermissionRequired {
+            action,
+            by: DeniedBy::Nobody,
+        } => Err(format!(
             "the turn stopped because {action} needed a permission nobody could grant"
         )),
         RunTermination::TaskFailed => Err("the turn ran and the task did not succeed".to_string()),

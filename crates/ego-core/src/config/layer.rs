@@ -3,11 +3,12 @@
 
 use std::collections::HashMap;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use super::error::ConfigError;
 use super::source::{Source, Sourced};
 use crate::ceiling::Budget;
+use crate::permit::rule::Rule;
 
 /// A model reference in `provider/name` form, e.g. `anthropic/claude-sonnet-5`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -15,7 +16,7 @@ use crate::ceiling::Budget;
 pub struct ModelRef(pub String);
 
 /// Permission mode — `ARCHITECTURE.md` §3.4 axis 1.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Mode {
     Plan,
@@ -25,17 +26,62 @@ pub enum Mode {
     Yolo,
 }
 
-/// Permission rule identifiers (e.g. `"bash(cargo *)"`), split into allow and
-/// deny lists. The full rule grammar with stable IDs (`ARCHITECTURE.md` §3.4
-/// axis 2) is a later milestone; this is the minimal shape strict config and
-/// the system ceiling need today.
+impl Mode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Mode::Plan => "plan",
+            Mode::Default => "default",
+            Mode::Auto => "auto",
+            Mode::Edits => "edits",
+            Mode::Yolo => "yolo",
+        }
+    }
+}
+
+impl std::fmt::Display for Mode {
+    /// The spelling the operator types, so a refusal that names the mode names
+    /// something they can go and change.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Permission rules (e.g. `"exec(cargo *)"`), split into allow and deny lists.
+///
+/// **Parsed here, not carried as text.** A `Vec<String>` would mean the rule an
+/// operator wrote is validated at the moment it is first *used*, which is
+/// mid-run, against one call, with the rest of the file already in force. It
+/// also invites a second parser: whoever consumes the strings has to turn them
+/// into something, and `Rule::load` being the only way in is what stops the
+/// config path and the frontmatter path from disagreeing about what one string
+/// means.
+///
+/// So a rule that is not a rule is a config error with a file and a line, and a
+/// rule this build cannot enforce is refused by name at the same moment —
+/// `2026-08-21-a-rule-that-means-exactly-one-thing.md` §6a.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PermCfg {
-    #[serde(default)]
-    pub allow: Vec<String>,
-    #[serde(default)]
-    pub deny: Vec<String>,
+    #[serde(default, deserialize_with = "rules")]
+    pub allow: Vec<Rule>,
+    #[serde(default, deserialize_with = "rules")]
+    pub deny: Vec<Rule>,
+}
+
+/// Both lists, through the one parser.
+///
+/// The error carries `Rule::load`'s own message — which names the head, offers
+/// the effect when the operator wrote a tool, and says what is missing when the
+/// head has no operations — wrapped in serde's location so it arrives with the
+/// file and line attached.
+fn rules<'de, D>(deserializer: D) -> Result<Vec<Rule>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Vec::<String>::deserialize(deserializer)?
+        .iter()
+        .map(|raw| Rule::load(raw).map_err(serde::de::Error::custom))
+        .collect()
 }
 
 /// The overrides a `[profile.NAME]` table may apply on top of the layer that

@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use ego_ai::provider::{Credentials, EnvCredentials};
 use ego_core::config::{
-    Effective, Limits, Posture, Selection, SystemPrompt, Trust, resolve, system_prompt,
+    Effective, Limits, Mode, Posture, Selection, SystemPrompt, Trust, resolve, system_prompt,
 };
 use ego_core::cost::CurrencyCode;
 use ego_core::event::domain::CancelCause;
@@ -21,7 +21,7 @@ use ego_core::event::id::SessionId;
 use ego_core::generator::capabilities::ModelCapabilities;
 use ego_core::permit::{CanonPath, PolicyEngine, Tool};
 use ego_core::public::{PUBLIC_EVENT_VERSION, PublicEvent};
-use ego_core::run::{RunTermination, Signal};
+use ego_core::run::{DeniedBy, RunTermination, Signal};
 use ego_core::sink::EventSink;
 use ego_core::state::{ItemKind, SessionState};
 use ego_core::store::session_store::SessionStore;
@@ -504,7 +504,14 @@ async fn execute<S: EventSink>(
 
     let generator =
         ego_ai::generator::WireGenerator::new(resolved.row.clone(), Arc::clone(&http), creds);
-    let policy = PolicyEngine::new(CanonPath::new(&root));
+    // `CLI.md` §4.4: an untrusted workspace resolves to `Mode::Default`
+    // because no layer that could name a mode was eligible, which is the
+    // posture that asks rather than the one that assumes.
+    let policy = PolicyEngine::new(
+        CanonPath::new(&root),
+        effective.mode.unwrap_or(Mode::Default),
+        effective.permissions.clone(),
+    );
     let fs = OsFs;
     let mut gate = budget::gate(&effective.ceilings, effective.clamped.money, currency);
 
@@ -589,7 +596,7 @@ impl Turns<'_> {
             taken += 1;
 
             if let Some(termination) =
-                RunTermination::after_turn(outcome.exit_reason, outcome.denied.as_deref())
+                RunTermination::after_turn(outcome.exit_reason, outcome.denied)
             {
                 return (termination, self.answer(loop_.state()));
             }
@@ -824,9 +831,21 @@ pub fn diagnose(termination: &RunTermination, broken: Option<String>) {
             message.clone()
         }
         RunTermination::Failed { message } => message.clone(),
-        RunTermination::PermissionRequired { action } => {
-            format!("stopped: {action} needed a permission nobody could grant")
-        }
+        // Two sentences, because one of them was about to be false. "Nobody
+        // could grant it" describes a question the evaluation order exhausted;
+        // said of a refusal somebody made, it denies that anybody decided,
+        // which is the one thing that did happen. Both still lead with the
+        // class — a person who reads only this line has to see that exit 3 is
+        // about permission — and both name the action, whose own `Display`
+        // carries the rule, the mode or the boundary that produced it.
+        RunTermination::PermissionRequired {
+            action,
+            by: DeniedBy::Decided(_),
+        } => format!("stopped: permission refused — {action}"),
+        RunTermination::PermissionRequired {
+            action,
+            by: DeniedBy::Nobody,
+        } => format!("stopped: permission unresolved and nobody could be asked — {action}"),
         RunTermination::BudgetExceeded => "stopped: the budget was reached".to_string(),
         RunTermination::MaxTurns => "stopped: --max-turns was reached".to_string(),
         RunTermination::TimedOut => "stopped: --timeout expired".to_string(),

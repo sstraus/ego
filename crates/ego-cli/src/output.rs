@@ -12,8 +12,9 @@ use std::sync::Mutex;
 use ego_core::cost::CumulativeCost;
 use ego_core::event::domain::{CancelCause, OccupancyProvenance};
 use ego_core::event::id::SessionId;
+use ego_core::permit::Authority;
 use ego_core::public::{CeilingEffect, ItemKind, MeteringKind, PUBLIC_EVENT_VERSION, PublicEvent};
-use ego_core::run::RunTermination;
+use ego_core::run::{DeniedBy, RunTermination};
 use ego_core::sink::EventSink;
 use ego_core::state::SessionState;
 use ego_core::turn::CancelToken;
@@ -339,6 +340,25 @@ pub struct Report {
     /// script handed exit 3 and no subject has been told nothing.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub denied: Option<String>,
+    /// Who refused it, when somebody did.
+    ///
+    /// Beside [`denied`](Self::denied) rather than replacing it: the action
+    /// and the authority are two facts, and folding one into the other would
+    /// break every consumer of a documented §4.4 field for no gain.
+    ///
+    /// Absent means **nobody answered** — §6's evaluation order was exhausted
+    /// — which is unambiguous alongside `exit_reason: "permission"`. That is
+    /// the one place [`DeniedBy`](ego_core::run::DeniedBy)'s explicit `Nobody`
+    /// arm becomes an `Option`, and the one place the `Option` earns its keep.
+    ///
+    /// A new key and no version bump. §4.2 already ratifies presence as this
+    /// format's detection mechanism — error arrays "present only when
+    /// non-empty — a CI gate is a presence check" — so a key that appears only
+    /// on exit 3 is additive under a rule that was written down rather than
+    /// under one asserted here. See
+    /// `docs/decisions/2026-08-21-an-exit-code-that-names-who-refused.md` §4.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub denied_by: Option<Authority>,
     pub turns: usize,
     pub usage: ego_core::state::Usage,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -353,9 +373,18 @@ impl Report {
         termination: &RunTermination,
         result: serde_json::Value,
     ) -> Self {
-        let denied = match termination {
-            RunTermination::PermissionRequired { action } => Some(action.clone()),
-            _ => None,
+        // Both read off the one `RunTermination`, in one match, for the same
+        // reason `ok` and `exit_reason` are: two keys about one ending that
+        // were derived separately are two keys that can disagree.
+        let (denied, denied_by) = match termination {
+            RunTermination::PermissionRequired { action, by } => (
+                Some(action.clone()),
+                match by {
+                    DeniedBy::Decided(authority) => Some(authority.clone()),
+                    DeniedBy::Nobody => None,
+                },
+            ),
+            _ => (None, None),
         };
         Report {
             v: PUBLIC_EVENT_VERSION,
@@ -364,6 +393,7 @@ impl Report {
             ok: matches!(termination, RunTermination::Done),
             exit_reason: termination.exit_reason(),
             denied,
+            denied_by,
             turns: state.turns.len(),
             usage: state.usage,
             context: state.context.used_tokens.zip(state.context.provenance).map(
@@ -374,5 +404,70 @@ impl Report {
             ),
             cost: state.cost.clone(),
         }
+    }
+}
+
+/// The one arm of §4.1's denial mapping the binary cannot reach.
+///
+/// `DeniedBy::Nobody` needs a call the mode declines to auto-approve, and
+/// `ModeApprover` declines only mutating operations (`approver.rs`: "a read
+/// inside the workspace that stopped the run to ask would be the prompt
+/// fatigue `ARCHITECTURE.md:238` counts as a security bug"). This build's
+/// `builtins()` are `read`, `glob` and `grep` — every one of them
+/// non-mutating — so no argv reaches it, and a test that spawned `ego` could
+/// not produce one. It arrives with the write tool.
+///
+/// That is exactly why the arm is asserted here rather than left to the
+/// process tests: a mapping nothing exercises is an assumption with a match
+/// arm's syntax, and the change that first exercises it — the write tool — is
+/// the one that must not discover it was wrong.
+#[cfg(test)]
+mod tests {
+    use ego_core::event::id::SessionId;
+    use ego_core::state::SessionState;
+
+    use super::*;
+
+    fn report(termination: &RunTermination) -> serde_json::Value {
+        let report = Report::of(
+            SessionId::new(),
+            &SessionState::default(),
+            termination,
+            serde_json::Value::String(String::new()),
+        );
+        serde_json::to_value(report).expect("§4.1's object serialises")
+    }
+
+    #[test]
+    fn a_question_nobody_answered_names_the_action_and_no_authority() {
+        let object = report(&RunTermination::PermissionRequired {
+            action: "edit may not write /ws/x".to_string(),
+            by: DeniedBy::Nobody,
+        });
+        let object = object.as_object().expect("§4.1 publishes an object");
+
+        assert_eq!(object["exit_reason"], "permission");
+        assert_eq!(object["denied"], "edit may not write /ws/x");
+        // Absent, not null. §4.2 ratifies presence as this format's detection
+        // mechanism — error arrays "present only when non-empty — a CI gate is
+        // a presence check" — and a null would be a value every consumer has
+        // to special-case in order to learn the same thing.
+        assert!(
+            !object.contains_key("denied_by"),
+            "nobody decided, so there is no authority to name"
+        );
+    }
+
+    /// The other half, at the same level: absence means *nobody answered* and
+    /// nothing else. If a decided refusal could also drop the key, absence
+    /// would be ambiguous and the whole field would say nothing.
+    #[test]
+    fn a_refusal_somebody_made_always_names_them() {
+        let object = report(&RunTermination::PermissionRequired {
+            action: "read may not read /etc/hosts".to_string(),
+            by: DeniedBy::Decided(Authority::Boundary),
+        });
+
+        assert_eq!(object["denied_by"], serde_json::json!({ "by": "boundary" }));
     }
 }

@@ -23,6 +23,7 @@ use std::str::FromStr;
 
 use clap::error::ErrorKind;
 use clap::{ArgAction, Args as ClapArgs, Parser};
+use ego_core::config::Mode;
 use ego_core::event::id::SessionId;
 use ego_core::generator::types::ThinkingLevel;
 
@@ -86,14 +87,6 @@ struct Unavailable {
 /// `ARCHITECTURE.md`'s milestone table (line 424 onwards) is the source for
 /// every `waiting_on` here: these are subsystems, and the sentence says which.
 const UNAVAILABLE: &[Unavailable] = &[
-    Unavailable {
-        flags: &["--mode", "--plan", "--yolo", "--allow", "--deny"],
-        waiting_on: "the permission rule grammar — a canonical call AST, \
-                     stable rule IDs and an approver that can mint a Permit. \
-                     `PolicyEngine` today admits a read inside the workspace \
-                     and nothing else, so a rule would parse and enforce \
-                     nothing",
-    },
     Unavailable {
         flags: &["--sandbox"],
         waiting_on: "a sandbox backend. No process is spawned anywhere in \
@@ -194,9 +187,11 @@ pub const UNBUILT: &[(&str, &str)] = &[
     ),
     (
         "rules",
-        "the permission rule grammar (**M1**), the same subsystem `--allow` and \
-         `--deny` wait on: stable rule IDs are what `rules ls` would list and \
-         `rules revoke` would name",
+        "somewhere to keep a rule. The grammar and its stable IDs are built and \
+         `--allow`/`--deny` already reach the engine through them, so `ls` and \
+         `explain` have their material; what `allow`, `deny`, `revoke` and \
+         `remember` have nowhere to write to is a rule store — the same \
+         read-only loader `config` waits on",
     ),
     (
         "usage",
@@ -210,6 +205,23 @@ pub const UNBUILT: &[(&str, &str)] = &[
          report on three absent subsystems is not a diagnosis",
     ),
 ];
+
+/// What `ego` with no subcommand is waiting on.
+///
+/// A named constant rather than a phrase inside the refusal, so the message and
+/// `CLI.md` §2.1's `ego [PROMPT]` row are held to one another by a test — the
+/// same binding [`UNBUILT`] gets, and for a reason this entry has already
+/// demonstrated. It used to say the surface was waiting on "the permission
+/// dialog, which needs an approver that can mint a `Permit`". The `Approver`
+/// port and its mode implementation landed, that sentence stopped being true,
+/// and the test on this refusal asserted only the word "interactive" — so
+/// nothing went red. A reason nothing checks is a reason that decays into a
+/// confident falsehood.
+pub const INTERACTIVE_WAITING_ON: &str = "the terminal surface itself — a \
+     line editor for the prompt, and the dialog that renders a \
+     `PermissionRequest` and reads a person's answer. The `Approver` port that dialog would \
+     occupy is built and the mode already answers through it (**M1**); what \
+     is missing is the human seat and the screen it draws on";
 
 /// A flag that was removed, and what replaced it.
 ///
@@ -340,6 +352,19 @@ pub struct Args {
     pub append_system: Option<String>,
     pub instructions: Option<PathBuf>,
     pub bare: bool,
+    /// The permission mode (`ARCHITECTURE.md` §3.4 axis 1).
+    ///
+    /// One field, not three, for the same reason [`SessionChoice`] is one
+    /// field: `--plan` and `--yolo` are spellings of `--mode`, and three
+    /// booleans would be three ways to say something that can only be one
+    /// value — plus a fourth state, all-false, that means nothing.
+    pub mode: Option<Mode>,
+    /// Permission rules, in the grammar of
+    /// `2026-08-21-a-rule-that-means-exactly-one-thing.md`. Carried as text
+    /// and parsed by `Rule::load` inside the config layer, so a flag and a
+    /// config file go through exactly one parser.
+    pub allow: Vec<String>,
+    pub deny: Vec<String>,
     pub session: SessionChoice,
     pub session_dir: Option<PathBuf>,
     pub output: Output,
@@ -531,6 +556,26 @@ struct Flags {
     #[arg(long, conflicts_with = "tools")]
     no_tools: bool,
 
+    /// Permission mode: plan|default|auto|edits|yolo.
+    #[arg(long, value_parser = parse_mode, group = "mode-choice")]
+    mode: Option<Mode>,
+
+    /// Shorthand for --mode plan.
+    #[arg(long, group = "mode-choice")]
+    plan: bool,
+
+    /// Shorthand for --mode yolo.
+    #[arg(long, group = "mode-choice")]
+    yolo: bool,
+
+    /// Allow rule, e.g. 'read(src/**)'. Repeatable.
+    #[arg(long, value_name = "RULE", action = ArgAction::Append)]
+    allow: Vec<String>,
+
+    /// Deny rule, e.g. 'write(**)'. Repeatable.
+    #[arg(long, value_name = "RULE", action = ArgAction::Append)]
+    deny: Vec<String>,
+
     /// Dotted-path config override, value parsed as TOML.
     #[arg(short = 'c', long = "set", value_name = "K=V", action = ArgAction::Append)]
     set: Vec<String>,
@@ -547,6 +592,25 @@ struct Flags {
 
     #[arg(long)]
     no_color: bool,
+}
+
+/// The five modes, by the names an operator types.
+///
+/// Hand-written rather than a `clap::ValueEnum` derive on [`Mode`], for the
+/// reason `parse_thinking` below is hand-written: `Mode` lives in `ego-core`,
+/// which has no `clap` dependency and should not gain one to answer a
+/// question about spelling.
+fn parse_mode(value: &str) -> Result<Mode, String> {
+    match value {
+        "plan" => Ok(Mode::Plan),
+        "default" => Ok(Mode::Default),
+        "auto" => Ok(Mode::Auto),
+        "edits" => Ok(Mode::Edits),
+        "yolo" => Ok(Mode::Yolo),
+        other => Err(format!(
+            "`{other}` is not a permission mode: plan|default|auto|edits|yolo"
+        )),
+    }
 }
 
 fn parse_thinking(value: &str) -> Result<ThinkingLevel, String> {
@@ -698,9 +762,8 @@ pub fn parse(argv: Vec<String>) -> Result<Invocation, UsageError> {
             return Err(UsageError(format!(
                 "`{program}` with no subcommand starts an interactive session, \
                  and the interactive surface is not in this build: it is \
-                 waiting on the permission dialog, which needs an approver \
-                 that can mint a Permit. Use `{program} run` for a headless \
-                 one-shot"
+                 waiting on {INTERACTIVE_WAITING_ON}. Use `{program} run` for \
+                 a headless one-shot"
             )));
         }
     };
@@ -830,6 +893,17 @@ fn into_args(command: RunCommand) -> Result<Args, UsageError> {
         _ => (prompt, Stdin::Ambient),
     };
 
+    // The same collapse `SessionChoice` gets, one axis over. clap's group
+    // has already refused two of them together, so this cannot silently
+    // prefer one spelling over another.
+    let mode = if flags.plan {
+        Some(Mode::Plan)
+    } else if flags.yolo {
+        Some(Mode::Yolo)
+    } else {
+        flags.mode
+    };
+
     let session = if flags.ephemeral {
         SessionChoice::Ephemeral
     } else if let Some(name) = flags.session {
@@ -850,6 +924,9 @@ fn into_args(command: RunCommand) -> Result<Args, UsageError> {
         append_system: flags.append_system,
         instructions: flags.instructions,
         bare: flags.bare,
+        mode,
+        allow: flags.allow,
+        deny: flags.deny,
         session,
         session_dir: flags.common.places.session_dir,
         output: flags.common.output,

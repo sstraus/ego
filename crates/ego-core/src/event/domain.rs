@@ -9,6 +9,7 @@ use super::time::Timestamp;
 use crate::cost::CostDelta;
 use crate::generator::attempt::{AttemptRef, Outcome};
 use crate::generator::types::{ErrorKind, ReasoningState};
+use crate::permit::{Authority, Escalation};
 use crate::state::Usage;
 
 /// The full envelope every `DomainEvent` carries, per ARCH §1: a monotonic
@@ -204,9 +205,33 @@ pub enum EventKind {
     /// A tool call finished, with its outcome and final output.
     ToolCallCompleted { ok: bool, output: String },
     /// A sensitive action needs a permission decision.
-    PermissionRequested { description: String },
-    /// A permission decision was made.
-    PermissionDecided { allowed: bool },
+    ///
+    /// Structured rather than a rendered `description`, because the question
+    /// an audit asks of this log — *what did this run stop and ask about* —
+    /// is a filter over the op and the path, and a sentence is not something
+    /// you can filter. `Escalation` renders itself for anywhere a sentence is
+    /// what is wanted, so nothing is lost by keeping the fields.
+    PermissionRequested {
+        /// The tool whose call raised the question. Not the whole
+        /// `PreparedCall`: `Op::Write` carries the bytes to be written, and a
+        /// durable audit record is the last place file contents belong.
+        tool: String,
+        /// Which step asked, about which operation.
+        escalation: Escalation,
+    },
+    /// A permission decision was made, and who made it.
+    PermissionDecided {
+        allowed: bool,
+        /// The rules, the mode, the boundary or the party that decided —
+        /// `docs/decisions/2026-08-21-a-permit-nobody-can-widen.md` §7.
+        ///
+        /// `Option` because a required field would not decode from a record
+        /// written before it existed, which this type's own doc comment names
+        /// as the same break as a rename. `None` means the decision predates
+        /// the attribution, not that nobody decided.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by: Option<Authority>,
+    },
     /// One generation was admitted and is on its way to the provider.
     ///
     /// Opens the attempt's lifecycle in the log, which is what makes a
