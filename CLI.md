@@ -59,6 +59,43 @@ Notes:
 - `ego export --sanitize` redacts secrets before a transcript leaves the
   machine (opencode's idea; mandatory for CI artifacts).
 
+### 2.1 Availability — what ships today
+
+The same discipline as §3.1, and it was missing here until 2026-08-21. §2 lists
+fourteen commands; this build implements **one**. The other thirteen used to
+reach the *interactive* refusal, so `ego resume` was answered with a sentence
+about the permission dialog — true, and about a surface the caller had not
+asked for. They are now refused **by name**, each naming what it waits on, from
+the `UNBUILT` table in `crates/ego-cli/src/cli.rs`. A test binds that table to
+this section, so a command can be refused as documented only while this list
+still offers it.
+
+A word that is **not** on this list stays a prompt: §2's first line is
+`ego [PROMPT]`, so `ego "explain this failing test"` is the interactive form
+and gets the interactive answer. `ego -- resume` likewise prompts the word.
+
+| Command | M0b | Waiting on |
+|---|---|---|
+| `ego run` | **yes** | the scripting workhorse; the whole of §4 is about it |
+| `ego [PROMPT]` | no | the interactive surface — the permission dialog, which needs an approver that can mint a `Permit` (**M1**) |
+| `ego resume` | no | a session the catalogue can attribute to a workspace. `SessionMeta.workspace_root` is `None` for every entry because no `EventKind` carries it, so "latest in this workspace" has nothing to select on. The machinery beneath is already here — `--session NAME` attaches, and the store repairs a torn tail on the way in |
+| `ego ls` | no | the same attribution. `SessionStore::list` already returns every session, which is what `--all` would show; the default (this workspace only) is the half that cannot be computed |
+| `ego fork` | no | session forking (**M3**) |
+| `ego export` | no | replay/export with `--sanitize` (**M3**) — the projection exists, the redaction contract does not |
+| `ego mcp`, `ego mcp-server` | no | the MCP client and ego's own MCP surface (**M2**) |
+| `ego auth` | no | a credential store. Every provider reads one environment variable, so a login has nowhere to put anything |
+| `ego models` | no | a catalogue to enumerate — this build resolves one model at a time and holds no list; generated catalogues are **M5** |
+| `ego config` | no | a config writer. The loader is strict and read-only; `-c/--set` overrides one run |
+| `ego rules` | no | the permission rule grammar (**M1**), the subsystem `--allow`/`--deny` also wait on |
+| `ego usage` | no | a cross-session report: needs `ls`'s attribution and **M3**'s per-session cost line |
+| `ego acp` | no | an agent serving the protocol on stdio. `ego-acp` already projects onto v1 and v2, so the gap is the connection and its negotiation, not the mapping |
+| `ego doctor` | no | most of what it would diagnose — credential store, MCP client and sandbox each wait on their own milestone |
+
+**Three of M0b's four exit criteria are commands that do not exist yet**
+(`ARCHITECTURE.md` §8: interactive, `ego run … | jq`, `kill → ego resume`, and
+the same session over ACP). Only the second ships. That is the fact this table
+exists to stop being invisible.
+
 ## 3. Flags (the argument grammar)
 
 Grouped; all long flags, short forms only for the hot five

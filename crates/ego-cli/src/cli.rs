@@ -100,6 +100,105 @@ const UNAVAILABLE: &[Unavailable] = &[
     },
 ];
 
+/// A command `CLI.md` §2 documents that this build does not implement, and the
+/// subsystem it is waiting on.
+///
+/// The subcommand twin of [`UNAVAILABLE`], and it exists for the same reason.
+/// §2 offers fourteen commands and `run` is the only one here, so the other
+/// thirteen used to fall through to the *interactive* refusal below — which
+/// told someone who typed `ego resume` that the permission dialog was missing.
+/// True, and about a surface they had not asked for. `CLI.md` §3.1 states the
+/// standard for flags ("refused **by name**, with the subsystem it waits on")
+/// and nothing had applied it one level up.
+///
+/// A tuple rather than a struct, matching [`RETIRED`], because both halves are
+/// needed by the test that binds this table to the document.
+///
+/// `waiting_on` is sourced from `ARCHITECTURE.md` §8's milestone table where it
+/// places the work, and from the code where it does not — a subsystem that
+/// table does not place still gets a reason, never a milestone invented for it.
+pub const UNBUILT: &[(&str, &str)] = &[
+    (
+        "resume",
+        "a session the catalogue can attribute to a workspace. \
+         `SessionMeta.workspace_root` is `None` for every entry, because no \
+         `EventKind` carries it, so `no ID = latest in this workspace` has \
+         nothing to select on. The machinery underneath is already here: \
+         `--session NAME` attaches to a named session and the store repairs a \
+         torn tail on the way in",
+    ),
+    (
+        "ls",
+        "the same workspace attribution `resume` waits on. `SessionStore::list` \
+         exists and returns every session, which is what `--all` would show; \
+         the default — this workspace only — is the half that cannot be \
+         computed yet",
+    ),
+    (
+        "fork",
+        "session forking (**M3**), which needs the branch point to be nameable \
+         in the log rather than just a file copy",
+    ),
+    (
+        "export",
+        "replay and export with `--sanitize` (**M3**). The projection exists; \
+         the redaction contract that makes an exported session safe to hand \
+         over does not",
+    ),
+    (
+        "mcp",
+        "the MCP client (**M2**). There is no server to add, remove or log in to",
+    ),
+    (
+        "mcp-server",
+        "ego's own MCP server surface (**M2**): the scoped run/continue/cancel/\
+         status tools it would expose",
+    ),
+    (
+        "auth",
+        "a credential store. Every provider reads one environment variable \
+         (`Auth::bearer_from_env`), so there is nowhere for a login to put \
+         anything and nothing for a logout to remove",
+    ),
+    (
+        "models",
+        "a catalogue to enumerate. Hosted facts are supplied and local ones are \
+         discovered per resolution \
+         (`docs/decisions/2026-08-21-what-a-model-resolves-to.md`), so this \
+         build resolves one model at a time and holds no list to print or \
+         refresh; generated catalogues are **M5**",
+    ),
+    (
+        "config",
+        "a config writer. The loader is strict and read-only, and nothing in \
+         this build writes a config file — `-c/--set` overrides one run",
+    ),
+    (
+        "rules",
+        "the permission rule grammar (**M1**), the same subsystem `--allow` and \
+         `--deny` wait on: stable rule IDs are what `rules ls` would list and \
+         `rules revoke` would name",
+    ),
+    (
+        "usage",
+        "a report across sessions, which needs both the workspace attribution \
+         `ls` waits on and the per-session cost line budgets add in **M3**",
+    ),
+    (
+        "acp",
+        "an agent that serves the protocol on stdio. `ego-acp` already projects \
+         events onto v1 and v2 (`project_acp_v1`/`project_acp_v2`), so what is \
+         missing is the connection and its version negotiation, not the \
+         mapping",
+    ),
+    (
+        "doctor",
+        "most of what it would diagnose: the credential store, the MCP client \
+         and the sandbox backend are each waiting on their own milestone, and a \
+         report on three absent subsystems is not a diagnosis",
+    ),
+];
+
 /// A flag that was removed, and what replaced it.
 ///
 /// Empty, because nothing has been retired yet. It ships anyway, with its own
@@ -371,6 +470,19 @@ pub fn parse(argv: Vec<String>) -> Result<Invocation, UsageError> {
     // Before clap, and before the subcommand is decided: a refusal must be
     // able to name a flag clap would have rejected as unknown.
     check_matrix(&head)?;
+
+    // A documented command answers for itself, before the fallback below can
+    // answer for it. Only an exact first token counts: §2's first line is
+    // `ego [PROMPT]`, so a word that is not on this list is a prompt, and
+    // refusing every unrecognised token would turn a prompt into a typo.
+    if let Some(first) = head.first()
+        && let Some((name, waiting_on)) = UNBUILT.iter().find(|(name, _)| name == first)
+    {
+        return Err(UsageError(format!(
+            "`{program} {name}` is documented in CLI.md §2 and is not available \
+             in this build: it is waiting on {waiting_on}"
+        )));
+    }
 
     let is_run = head.first().map(|token| token == "run").unwrap_or(false);
     if !is_run {
