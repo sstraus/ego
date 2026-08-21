@@ -44,6 +44,12 @@
 //!   than mapped onto `Stop`, which would claim a filtered answer finished
 //!   normally.
 //!
+//!   `consume_finish_reason` maps a sixth, `end_turn`, which is *not* in the
+//!   schema and arrives anyway: a gateway passing its upstream's reason
+//!   through untranslated. Decoded for the whole family and not for the row
+//!   that sends it, on the same rule as the reasoning fields above — the
+//!   string is the contract and the vendor is not.
+//!
 //! # The one event ordering rule
 //!
 //! **`Stop` is last, always, exactly once.** Not at the `finish_reason` chunk,
@@ -648,6 +654,13 @@ impl StreamDecoder {
             out.push(AiEvent::DeliveryObserved(error.delivery()));
         }
         if self.usage_incoherent {
+            // `Unclassified` on purpose, and it is the honest answer rather
+            // than an unconsidered default. The generation itself did not
+            // fail — it completes and settles at its bound — so `Transient`
+            // would invite a retry of a turn that succeeded, and neither the
+            // request nor the account is what went wrong. None of the other
+            // three describes "the provider contradicted itself about a
+            // number", which is precisely what `Unclassified` is for.
             out.push(AiEvent::Error {
                 message: "the provider's prompt cache breakdown was larger than \
                           the prompt it broke down, so no usage figure could be \
@@ -689,9 +702,25 @@ impl StreamDecoder {
                 // done quietly.
                 let abandoned = self.calls.len();
                 self.calls.clear();
+                // A stream that stopped without saying why. When a transport
+                // failure killed it, that failure's own class is the answer.
+                // When nothing killed it — the body simply ended mid-protocol
+                // — `Transient` is still the honest reading: the request was
+                // accepted (this arm is only reachable past a 200) and
+                // partly answered, so neither the request nor the account is
+                // what went wrong, and the same bytes may well complete next
+                // time. This is not the fail-open the `Unclassified` default
+                // guards against, because that rule is about a provider that
+                // *stated* nothing about retryability; here the provider
+                // stated nothing at all, which is a different fact. Nor does
+                // it authorise a double-billed retry: `PossiblySent` is
+                // already on the stream and `--retry` gates on both.
+                let kind = transport
+                    .as_ref()
+                    .map_or(ErrorKind::Transient, HttpError::kind);
                 out.push(AiEvent::Error {
                     message: self.incomplete_message(transport.as_ref(), abandoned),
-                    kind: ErrorKind::Unclassified,
+                    kind,
                 });
                 out.push(AiEvent::Stop(StopReason::Error));
             }
@@ -873,6 +902,19 @@ impl StreamDecoder {
             // Deprecated in the schema, still emitted by older gateways, and
             // the same event: the model stopped in order to call something.
             "function_call" => StopReason::ToolUse,
+            // Anthropic's spelling of `stop`, reaching this wire because a
+            // gateway passes its upstream's reason through untranslated
+            // rather than mapping it (survey row 45; xAI is the measured
+            // case). It is not this format's vocabulary and it arrives in
+            // this format's stream anyway, which is the whole reason the
+            // table is widened here rather than made conditional on a
+            // provider id — a `match` on the row inside a wire format is what
+            // the sibling ADR §5's name-absence test forbids.
+            //
+            // Widening is safe in the direction that matters: `end_turn` has
+            // exactly one meaning wherever it is minted, so no row that does
+            // *not* emit it can be harmed by an arm it never reaches.
+            "end_turn" => StopReason::Stop,
             "content_filter" => {
                 out.push(AiEvent::Error {
                     message: "the provider's content filter stopped the generation".to_string(),
@@ -884,6 +926,28 @@ impl StreamDecoder {
                 });
                 StopReason::Error
             }
+            // Load-bearing, and it fails closed: an unrecognised reason ends
+            // the turn as an error that names the string, rather than being
+            // read as a clean stop. That is the right default for a wire
+            // spoken by six implementations with no shared enum — a reason
+            // nobody mapped is not a reason that said "finished".
+            //
+            // What this arm does *not* catch is the empty string, and the
+            // distinction is worth stating because it is the opposite
+            // failure. Ollama's `DoneReasonConnectionClosed` renders as `""`
+            // through `String()`, and its compat layer emits
+            // `cmp.Or(r.DoneReason, "stop")` — so a connection that died is
+            // laundered into a clean `"stop"` before it is ever sent, and
+            // never reaches this arm at all. That one **fails open**: a torn
+            // generation reports as a completed one.
+            //
+            // It is latent, not live. `DoneReasonConnectionClosed` has no
+            // assignment in Ollama's tree, so nothing produces it today, and
+            // handling it here would mean writing a branch for a string that
+            // cannot arrive — which is worse than recording it. The trigger
+            // is the first assignment of that constant upstream; the fix is
+            // upstream's too, because by the time the bytes reach ego the
+            // evidence has already been erased.
             other => {
                 out.push(AiEvent::Error {
                     message: format!(
@@ -913,7 +977,19 @@ impl StreamDecoder {
         // result message needs the `tool_call_id` to send back, and a dispatch
         // needs a name; inventing either produces a request the provider
         // rejects, or a call to the wrong tool.
-        let Some(call_id) = call.id else {
+        //
+        // `""` is treated as absent, and this guard is fail-closed rather
+        // than an accommodation for a row that needs it. No implementation
+        // speaking this wire is known to emit an empty id — Ollama's compat
+        // layer, the row the survey suspected, overwrites the field
+        // unconditionally and so cannot (measured, `server/routes.go`;
+        // the survey's original claim was retracted). The guard exists
+        // because an empty id is *unusable* if one ever arrives: it would be
+        // carried into `ContentBlock::ToolUse` as a legitimate key, where
+        // `Conversation`'s uniqueness invariant would then read two
+        // unidentified calls as one duplicate. Refusing it costs a call that
+        // could not have been answered anyway.
+        let Some(call_id) = call.id.filter(|id| !id.is_empty()) else {
             out.push(AiEvent::Error {
                 message: format!(
                     "the provider streamed a tool call at index {index} with no id, \
@@ -981,7 +1057,10 @@ pub fn decode(
                 response: Err(error),
                 ..
             } => Some((
-                super::failed(error.to_string(), error.delivery()).to_vec(),
+                // Both readings come off the transport error, and neither is
+                // recoverable from the prose it renders to — see
+                // `HttpError::kind`.
+                super::failed(error.to_string(), error.delivery(), error.kind()).to_vec(),
                 State::Done,
             )),
             State::Head {
@@ -1005,12 +1084,13 @@ pub fn decode(
                         },
                     ));
                 }
+                let kind = classify_status(response.status);
                 let message = read_error_body(response.status, response.body).await;
                 // The same three events, with the certainty already read off
                 // the status above rather than off a failure: a response at
                 // all proves the request arrived.
                 Some((
-                    super::failed(message, DeliveryCertainty::PossiblySent).to_vec(),
+                    super::failed(message, DeliveryCertainty::PossiblySent, kind).to_vec(),
                     State::Done,
                 ))
             }
@@ -1030,6 +1110,42 @@ pub fn decode(
     })
     .flat_map(stream::iter)
     .boxed()
+}
+
+/// What a non-200 status says about whether the request can ever succeed.
+///
+/// **The status and not the body.** The body on this wire is not one schema:
+/// [`ErrorEnvelope`] is OpenAI's shape, and a row behind a proxy answers a
+/// `502` with HTML that parses as neither. The status line is the one field
+/// every row that speaks this format sets, and it is set by something that
+/// cannot have been truncated. `read_error_body` keeps the body for the
+/// operator to read; this decides what the harness does.
+///
+/// Every arm is a status these APIs actually return, and the fall-through is
+/// [`ErrorKind::Unclassified`] on §2's fail-closed rule: a status nobody has
+/// mapped is not a status that said "retryable". The cost of being wrong here
+/// is one attempt, and the cost of guessing "transient" is `--retry N`
+/// attempts and an exit code that tells a script to try again.
+///
+/// **The known gap: `429`.** A rate limit and an exhausted quota can share
+/// it, and they are opposite answers — the first clears on its own, the
+/// second never does. Only the body distinguishes them, and only on the rows
+/// that publish a discriminator. `Transient` is the right reading of the
+/// status alone, and the wrong reading of an empty wallet.
+fn classify_status(status: u16) -> ErrorKind {
+    match status {
+        // The provider is momentarily unable. Nothing about the request is
+        // wrong, so the same bytes may work on the next attempt.
+        408 | 429 | 500..=599 => ErrorKind::Transient,
+        // The account or the credential, never the request: unauthenticated,
+        // forbidden, out of credit.
+        401..=403 => ErrorKind::Refused,
+        // The request is wrong and will be wrong again — a malformed body, a
+        // model that does not exist, a prompt over the limit, a parameter
+        // this row does not accept.
+        400 | 404 | 413 | 422 => ErrorKind::Invalid,
+        _ => ErrorKind::Unclassified,
+    }
 }
 
 async fn read_error_body(status: u16, mut body: crate::http::ByteStream) -> String {

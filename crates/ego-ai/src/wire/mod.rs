@@ -32,20 +32,16 @@ use ego_core::generator::types::{ErrorKind, StopReason};
 /// need it — a transport error, a non-200 status, and a request the format
 /// cannot express at all — and three hand-written copies of a three-event
 /// shape is three chances for them to drift apart.
-pub fn failed(message: String, delivery: DeliveryCertainty) -> [AiEvent; 3] {
+///
+/// `kind` is a parameter and not a constant because each of the three call
+/// sites knows something this function cannot see: the transport knows
+/// whether a socket died or a policy refused, and only the status line knows
+/// what the provider thought of the request. A default here would be one of
+/// those three answers imposed on the other two.
+pub fn failed(message: String, delivery: DeliveryCertainty, kind: ErrorKind) -> [AiEvent; 3] {
     [
         AiEvent::DeliveryObserved(delivery),
-        // INCOMPLETE: each of the three call sites knows more than this — a
-        // transport failure is `Transient`, a request this format cannot
-        // express is `Invalid`, and a non-200 carries a body that says which.
-        // Classifying them is this function taking the kind as an argument,
-        // and it happens with the rest of the mapping's error classification.
-        // `Unclassified` until then is the truth and not a placeholder: no
-        // provider code has been read.
-        AiEvent::Error {
-            message,
-            kind: ErrorKind::Unclassified,
-        },
+        AiEvent::Error { message, kind },
         AiEvent::Stop(StopReason::Error),
     ]
 }
