@@ -997,6 +997,126 @@ fn quiet_drops_the_tool_reports_and_keeps_the_answer() {
     assert!(finished.stderr.is_empty(), "{}", finished.stderr);
 }
 
+// --- a ceiling that does not do what its spelling says ---
+
+/// `CLI.md` §5 calls `--budget` a **hard cap**. On a row that is not metered in
+/// currency it is not a cap at all: every reservation is zero, so the gate
+/// admits until the provider refuses. `PublicEvent::MeteringSelected`'s own doc
+/// says the operator "has to be told it does not bind — a silently vacuous flag
+/// is not an acceptable way to deliver that", and until this test existed the
+/// default output mode was exactly that: the fact rode the event, and the only
+/// sink that rendered the event was `--output json/jsonl`.
+///
+/// Measured before it was written: `ego run … --budget '5$' -m ollama/…`
+/// against a real daemon exited 0 with an empty stderr.
+#[test]
+fn a_money_budget_that_cannot_bind_says_so_once_and_leaves_stdout_clean() {
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(tool_call("call_a", "read", "{\"path\":\"notes.md\"}")),
+            Reply::Sse(text("I read it.")),
+        ],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub);
+    ego.file("notes.md", "the contents");
+    let finished = ego
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--ephemeral",
+            "--budget",
+            "5$",
+            "Read notes.md",
+        ])
+        .run();
+
+    assert_eq!(finished.code, Some(0), "stderr: {}", finished.stderr);
+    assert_eq!(
+        finished.stdout.trim(),
+        "I read it.",
+        "a diagnostic reached stdout"
+    );
+    assert!(
+        finished.stderr.contains("does not bind this model"),
+        "the operator was never told the cap does not cap: {}",
+        finished.stderr
+    );
+    // The token form is what *does* constrain such a row, so the note points at
+    // it rather than only reporting the loss.
+    assert!(
+        finished.stderr.contains("token budget"),
+        "the note reports the loss without naming the remedy: {}",
+        finished.stderr
+    );
+    // `MeteringSelected` is per *generation* and this run has two. Announced on
+    // change, so the warning is said once — a per-generation repeat would make
+    // the diagnostic itself the noise that hides the next one.
+    assert_eq!(
+        finished.stderr.matches("does not bind this model").count(),
+        1,
+        "one warning per generation: {}",
+        finished.stderr
+    );
+}
+
+/// `-q` is presentation — §1.3 pairs it with `--no-color` and calls it "quiet
+/// progress". A guarantee the operator asked for and did not get is not
+/// progress, so this one warning survives it. Without this test the obvious
+/// tidying (fold the arm in beside the tool reports, which *are* gated) would
+/// put the flag's silence back where it was.
+#[test]
+fn quiet_does_not_silence_a_budget_that_cannot_bind() {
+    let stub = Stub::start(Plan::default());
+    let finished = Ego::against(&stub)
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--ephemeral",
+            "--budget",
+            "5$",
+            "-q",
+            "Ask",
+        ])
+        .run();
+
+    assert_eq!(finished.code, Some(0), "stderr: {}", finished.stderr);
+    assert!(
+        finished.stderr.contains("does not bind this model"),
+        "-q silenced a warning that is not progress: {}",
+        finished.stderr
+    );
+}
+
+/// The other half, and the one that stops the warning from becoming wallpaper:
+/// a money budget on a row that **is** metered in currency binds exactly as its
+/// spelling says, so there is nothing to report. A diagnostic that fires on the
+/// working case teaches operators to ignore it.
+#[test]
+fn a_money_budget_that_binds_is_not_announced() {
+    let stub = Stub::start(Plan::default());
+    let ego = Ego::against(&stub);
+    ego.home_file("models.toml", OPENAI_FACTS);
+    let finished = ego
+        .env("OPENAI_API_KEY", "sk-test")
+        .args([
+            "--model",
+            "openai/gpt-5.1",
+            "--ephemeral",
+            "--budget",
+            "5$",
+            "Ask",
+        ])
+        .run();
+
+    assert_eq!(finished.code, Some(0), "stderr: {}", finished.stderr);
+    assert!(
+        !finished.stderr.contains("does not bind"),
+        "a binding ceiling was reported as vacuous: {}",
+        finished.stderr
+    );
+}
+
 // --- both providers, end to end ---
 
 /// The hosted path, with the pricing and the credential an operator really
