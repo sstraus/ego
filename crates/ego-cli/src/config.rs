@@ -159,6 +159,20 @@ fn flags_layer(args: &Args) -> Result<Sourced<ConfigLayer>, UsageError> {
         })?;
         toml.push_str(&format!("{key} = {value}\n"));
     }
+    // KNOWN, AND DELIBERATELY LEFT: this prefix doubles. `ConfigError` renders
+    // its own origin (`error.rs:27`: "invalid config in {source} layer: …"),
+    // so the operator reads "the command line: invalid config in flags layer:
+    // …" — two names for one place, neither wrong.
+    //
+    // Two people have now found this and proposed the same fix: drop one of
+    // the two. Do not, in isolation. The flags layer is the only `Source` an
+    // operator never *writes* — there is no file to open — so the two halves
+    // are not redundant to a reader who does not already know that `flags` and
+    // "the command line" are the same layer. The fix worth making is to give
+    // `Source`'s `Display` a form that reads correctly in a sentence, which
+    // changes every config diagnostic and belongs with `Source::rank` going
+    // public (`docs/decisions/2026-08-21-a-deny-that-names-who-can-lift-it.md`
+    // "Consequences"), not with whichever caller noticed it.
     ConfigLayer::parse(Source::Flags, &toml)
         .map_err(|err| UsageError(format!("the command line: {err}")))
 }
