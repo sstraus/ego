@@ -12,7 +12,9 @@ use ego_core::event::domain::{DomainEvent, Envelope, EventKind};
 use ego_core::event::id::{EventId, ItemId, Producer, Seq, TurnId};
 use ego_core::event::time::Timestamp;
 use ego_core::generator::history::{Repair, conversation_from};
-use ego_core::generator::types::{ContentBlock, Conversation, HistoryError, Message, Role};
+use ego_core::generator::types::{
+    ContentBlock, Conversation, HistoryError, Message, ReasoningState, Role,
+};
 use ego_core::state::SessionState;
 
 mod conversation {
@@ -476,10 +478,11 @@ mod rebuild {
         );
     }
 
-    /// Reasoning is not sent back on any wire this repo implements —
-    /// openai-completions refuses `reasoning_state` outright — so a rebuild
-    /// that turned it into assistant text would be putting words in the
-    /// model's mouth that it never published.
+    /// Reasoning *text* is a transcript of something the model published
+    /// under its own rules, and rebuilding it as assistant text would put
+    /// words in the model's mouth that it never said as its answer. An item
+    /// that carries only text has nothing the provider asked to get back, so
+    /// it contributes nothing to the history.
     #[test]
     fn reasoning_is_not_rebuilt_as_assistant_text() {
         let mut log = Log::new();
@@ -498,6 +501,91 @@ mod rebuild {
             vec![ContentBlock::Text {
                 text: "done".to_string()
             }]
+        );
+    }
+
+    /// The block the provider sealed comes back where it stood. Its position
+    /// is the contract: Anthropic documents a `400` for state replayed out of
+    /// order, and one for a block dropped from the middle of a turn.
+    ///
+    /// This item has state and no text at all — exactly the block whose
+    /// `thinking` field is empty, which is the case the `400` calls out by
+    /// name and the one the old empty arm silently dropped.
+    #[test]
+    fn a_reasoning_block_with_state_is_replayed_where_it_stood() {
+        let mut log = Log::new();
+        log.item(prompt("think about it"));
+        log.item(EventKind::ReasoningState {
+            state: ReasoningState {
+                blob: "sealed".to_string(),
+                dialect: "anthropic".to_string(),
+            },
+        });
+        log.item(EventKind::AssistantMessage {
+            text: "done".to_string(),
+        });
+
+        let (conversation, repairs) = conversation_from(&log.state);
+        assert!(repairs.is_empty(), "nothing was torn");
+        assert_eq!(
+            conversation.messages(),
+            &[
+                Message {
+                    role: Role::User,
+                    content: vec![ContentBlock::Text {
+                        text: "think about it".to_string()
+                    }],
+                },
+                // One assistant turn, not two: the sealed block and the answer
+                // it produced were published together.
+                Message {
+                    role: Role::Assistant,
+                    content: vec![
+                        ContentBlock::Reasoning {
+                            state: ReasoningState {
+                                blob: "sealed".to_string(),
+                                dialect: "anthropic".to_string(),
+                            },
+                        },
+                        ContentBlock::Text {
+                            text: "done".to_string()
+                        },
+                    ],
+                },
+            ]
+        );
+    }
+
+    /// State and text are separate questions about the same item, and the
+    /// rebuild answers each one on its own terms: the state goes back because
+    /// the provider asked for it, and the text stays out because nobody did.
+    #[test]
+    fn a_block_with_both_carries_its_state_back_and_leaves_its_text_behind() {
+        let mut log = Log::new();
+        log.item(prompt("think about it"));
+        let reasoning = log.item(EventKind::ReasoningDelta {
+            text: "hmm".to_string(),
+        });
+        log.push(
+            Some(reasoning),
+            EventKind::ReasoningState {
+                state: ReasoningState {
+                    blob: "sealed".to_string(),
+                    dialect: "anthropic".to_string(),
+                },
+            },
+        );
+
+        let (conversation, _) = conversation_from(&log.state);
+        assert_eq!(
+            conversation.messages()[1].content,
+            vec![ContentBlock::Reasoning {
+                state: ReasoningState {
+                    blob: "sealed".to_string(),
+                    dialect: "anthropic".to_string(),
+                },
+            }],
+            "the blob, and nothing the model said while producing it"
         );
     }
 }

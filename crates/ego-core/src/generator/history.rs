@@ -51,11 +51,31 @@ pub fn conversation_from(state: &SessionState) -> (Conversation, Vec<Repair>) {
 
     for item in items {
         match item.kind {
-            // Never rebuilt as assistant text. No wire format this repo
-            // implements can carry reasoning back — openai-completions
-            // refuses `reasoning_state` outright — and promoting it to text
-            // would put words in the model's mouth it never published.
-            ItemKind::Reasoning => {}
+            // Replayed if — and only if — the provider sealed the block with
+            // continuation state.
+            //
+            // The *text* is still never rebuilt, and that half of the
+            // original reason is unchanged: promoting reasoning to assistant
+            // text would put words in the model's mouth it never published.
+            // What changed is that a block carrying state is no longer the
+            // same case. The state is what the provider asks to have handed
+            // back, opaque and positional, and dropping it is what produces
+            // the documented `400` — including for a block whose `thinking`
+            // field is empty, which is exactly the item with state and no
+            // text.
+            //
+            // So the two are separate questions and this asks the right one:
+            // state present, replay it; state absent, nothing to replay, and
+            // the text is not a substitute for it.
+            ItemKind::Reasoning => {
+                if let Some(state) = item.reasoning_state.clone() {
+                    push(
+                        &mut messages,
+                        Role::Assistant,
+                        ContentBlock::Reasoning { state },
+                    );
+                }
+            }
             ItemKind::UserPrompt => {
                 push(&mut messages, Role::User, text_block(&item.text));
             }
