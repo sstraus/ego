@@ -61,6 +61,11 @@ fn the_separator_stops_a_subcommand_name_from_being_one() {
         parsed(["run", "--", "--model"]).prompt.as_deref(),
         Some("--model")
     );
+    // `run` alone cannot prove the rule any more: it is the one command that
+    // *is* built, so a separator check that had stopped working would still
+    // reach the interactive refusal by the ordinary route. A name from
+    // `UNBUILT` has a competing meaning and so can tell the two apart.
+    assert!(refused(["--", "resume"]).contains("interactive"));
 }
 
 /// Without a subcommand the invocation is the interactive one, and this build
