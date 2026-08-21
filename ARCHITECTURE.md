@@ -106,33 +106,67 @@ their own crates so their heavyweight dependencies stay out of the core.
 pi's taxonomy (`docs/02-pi.md` §2): few **wire formats**, many **providers**.
 
 ```rust
-/// One implementation per API shape. v1 ships four:
-/// anthropic-messages, openai-completions, openai-responses,
-/// google-generative-ai — between them covering Anthropic, OpenAI,
-/// OpenRouter, Groq, Together, Fireworks, DeepSeek, xAI, Gemini,
-/// Ollama, vLLM, LM Studio.
+/// One implementation per API shape, and a mapping is told nothing about
+/// which provider it is serving.
+///
+/// The target is six providers end-to-end; the mappings are fewer, and how
+/// many is decided by measurement rather than by a vendor's badge — see
+/// `docs/decisions/2026-08-21-a-shared-shape-is-not-a-shared-contract.md` §9
+/// and `crates/ego-ai/tests/conformance.rs`. Ollama is the worked example: it
+/// speaks the openai-completions shape everywhere except the output-ceiling
+/// field, fails conformance check 1 on that one difference, and therefore has
+/// its own mapping — which shares the family's whole decoder rather than
+/// copying it.
 trait WireFormat: Send + Sync {
-    fn build_request(&self, p: &ProviderEntry, req: &GenRequest) -> HttpRequest;
-    fn parse_stream(&self, body: ByteStream) -> BoxStream<'static, AiEvent>;
+    /// A target, not a provider row: a base, opaque headers, and no id. §2 of
+    /// that ADR is this signature — a mapping that could ask who it is
+    /// serving is a mapping that will eventually branch on the answer.
+    fn build_request(&self, target: &RequestTarget, req: &GenRequest)
+        -> Result<HttpRequest, RequestRefused>;
+    /// The whole response, including a non-200, because a refusal is part of
+    /// the protocol and every mapping must say the same three things about
+    /// one (`wire::failed`).
+    fn decode(&self, response: Result<HttpResponse, HttpError>,
+              cost: Option<Arc<dyn ProviderCost>>) -> BoxStream<'static, AiEvent>;
 }
 
-/// A provider is a table row, not an integration.
-struct ProviderEntry {
-    id: ProviderId,
-    shape: ApiShape,
-    base_url: Url,
-    auth: AuthStrategy,          // env var, keyring, OAuth
-    headers: Vec<(String, String)>,
-    models: ModelCatalog,        // generated file, pi-style
-    thinking: ThinkingLevelMap,  // per-provider effort mapping
-    cache: CacheRetention,
+/// A provider is a table row, not an integration — and it selects rather
+/// than holds.
+struct ProviderRow {
+    id: String,
+    /// Scheme, host and any prefix; the *mapping* owns the path.
+    base: Url,
+    /// A variable name and a header name. Never a secret: the resolved
+    /// credential exists once, beside the model and not inside it (§6).
+    credential: CredentialStrategy,
+    /// Which API shape. The thing itself, not a name — a name needs a
+    /// registry, and a registry needs a configuration file this build does
+    /// not have yet.
+    wire: &'static dyn WireFormat,
+    /// What turns one of this provider's model ids into a `ResolvedModel`:
+    /// read from what an operator supplied, or asked of a daemon.
+    resolver: &'static dyn ModelResolver,
+    /// Whether this provider states a monetary figure on the wire, and how to
+    /// read it. `None` is a claim, not a gap.
+    cost: Option<Arc<dyn ProviderCost>>,
 }
 
-/// Transport seam: one method, reqwest impl behind a default feature.
+/// Transport seam: one method, reqwest impl. Also where `--offline` lives,
+/// because a host string is not a socket and the check belongs to whatever
+/// owns the socket.
 trait Http: Send + Sync {
-    fn execute(&self, req: HttpRequest) -> BoxFuture<'static, Result<ByteStream>>;
+    fn execute(&self, req: HttpRequest)
+        -> BoxFuture<'static, Result<HttpResponse, HttpError>>;
 }
 ```
+
+**What is deliberately *not* on the row**, each because it belongs to a model
+rather than to a provider: a model catalogue (hosted facts are supplied per
+model, local ones measured from the daemon), a thinking-level map and a cache
+retention (both are `ModelCapabilities` fields, resolved per model), and a
+pricing revision (one revision on a row would assert a single table priced
+every model under it, which is false as soon as two models are priced from
+different places).
 
 A provider row is configuration, **not** proof that models sharing an HTTP
 shape have equivalent conversation semantics (I5): a versioned
@@ -282,11 +316,25 @@ Resolution — v1 ships **four out-of-process extension surfaces** that already
 exist in the design: MCP servers (tools/resources/prompts — this *is* the tool
 plugin API, with an ecosystem attached), shell hooks (lifecycle, can block),
 skills (behaviour), and executable agent files (`CLI.md` §5). In-process
-extension is the **library API itself**: every port `ego-core` owns is a
-`Box<dyn Trait>` registry (`Tool`, `Hook`, `Generator`, `Host`, `Env`,
-`ExecutionBackend`; `WireFormat` registration lives in `ego-ai`), so
-any Rust embedder registers custom implementations without ego knowing — pi's
-extension richness, minus the runtime. A dynamic loader (WASM or dylib) is
+extension is the **library API itself**: every port `ego-core` owns is a trait
+an embedder implements (`Tool`, `Hook`, `Generator`, `Host`, `Env`,
+`ExecutionBackend`; `WireFormat` and `ModelResolver` live in `ego-ai`), so
+any Rust embedder supplies custom implementations without ego knowing — pi's
+extension richness, minus the runtime.
+
+**"Registry" was the wrong word and this corrects it.** A port is selected by
+*value*: a row holds a `&'static dyn WireFormat` and a `&'static dyn
+ModelResolver`, and an embedder that adds a protocol writes a row that names
+its adapter. A registry — a name, a table, and a lookup that can fail — buys
+exactly one thing that this does not: it lets a profile be written in a
+*file*, because a file can hold a name and cannot hold a trait object. That
+file does not exist yet, so the table would have one caller, be populated by
+the same constructors it serves, and live in the same crate. It arrives with
+the file, and nothing built now has to be undone for it
+(`docs/decisions/2026-08-21-a-shared-shape-is-not-a-shared-contract.md` §3,
+amended 2026-08-22).
+
+A dynamic loader (WASM or dylib) is
 **explicitly deferred**: it would add an ABI/runtime burden now, and the
 dyn-registry design means it can be bolted on later as "a loader that fills the
 same registries" — no redesign, so deferring costs nothing.
