@@ -74,22 +74,32 @@ A word that is **not** on this list stays a prompt: §2's first line is
 `ego [PROMPT]`, so `ego "explain this failing test"` is the interactive form
 and gets the interactive answer. `ego -- resume` likewise prompts the word.
 
+**The reason in each cell below is the string the binary prints**, not a
+paraphrase of it, and a test asserts that character for character (modulo
+whitespace). This column drifted from the code within an hour of being written
+— `ego rules` was still blaming the permission rule grammar after the grammar
+shipped — because the first test bound only the command *name* to §2 and left
+the reason free on both sides. Two prose surfaces that agree today, with
+nothing that can say when they stop, are the same defect as a field that is
+omitted when empty: two states, identical bytes.
+
 | Command | M0b | Waiting on |
 |---|---|---|
 | `ego run` | **yes** | the scripting workhorse; the whole of §4 is about it |
 | `ego [PROMPT]` | no | the terminal surface itself — a line editor for the prompt, and the dialog that renders a `PermissionRequest` and reads a person's answer. The `Approver` port that dialog would occupy is built and the mode already answers through it (**M1**); what is missing is the human seat and the screen it draws on |
-| `ego resume` | no | a session the catalogue can attribute to a workspace. `SessionMeta.workspace_root` is `None` for every entry because no `EventKind` carries it, so "latest in this workspace" has nothing to select on. The machinery beneath is already here — `--session NAME` attaches, and the store repairs a torn tail on the way in |
-| `ego ls` | no | the same attribution. `SessionStore::list` already returns every session, which is what `--all` would show; the default (this workspace only) is the half that cannot be computed |
-| `ego fork` | no | session forking (**M3**) |
-| `ego export` | no | replay/export with `--sanitize` (**M3**) — the projection exists, the redaction contract does not |
-| `ego mcp`, `ego mcp-server` | no | the MCP client and ego's own MCP surface (**M2**) |
-| `ego auth` | no | a credential store. Every provider reads one environment variable, so a login has nowhere to put anything |
-| `ego models` | no | a catalogue to enumerate — this build resolves one model at a time and holds no list; generated catalogues are **M5** |
-| `ego config` | no | a config writer. The loader is strict and read-only; `-c/--set` overrides one run |
-| `ego rules` | no | somewhere to keep a rule. The grammar and its stable IDs are built and `--allow`/`--deny` already reach the engine through them, so `ls` and `explain` have their material; `allow`, `deny`, `revoke` and `remember` have nowhere to write to — the same read-only loader `config` waits on |
-| `ego usage` | no | a cross-session report: needs `ls`'s attribution and **M3**'s per-session cost line |
-| `ego acp` | no | an agent serving the protocol on stdio. `ego-acp` already projects onto v1 and v2, so the gap is the connection and its negotiation, not the mapping |
-| `ego doctor` | no | most of what it would diagnose — credential store, MCP client and sandbox each wait on their own milestone |
+| `ego resume` | no | a session the catalogue can attribute to a workspace. `SessionMeta.workspace_root` is `None` for every entry, because no `EventKind` carries it, so `no ID = latest in this workspace` has nothing to select on. The machinery underneath is already here: `--session NAME` attaches to a named session and the store repairs a torn tail on the way in |
+| `ego ls` | no | the same workspace attribution `resume` waits on. `SessionStore::list` exists and returns every session, which is what `--all` would show; the default — this workspace only — is the half that cannot be computed yet |
+| `ego fork` | no | session forking (**M3**), which needs the branch point to be nameable in the log rather than just a file copy |
+| `ego export` | no | replay and export with `--sanitize` (**M3**). The projection exists; the redaction contract that makes an exported session safe to hand over does not |
+| `ego mcp` | no | the MCP client (**M2**). There is no server to add, remove or log in to |
+| `ego mcp-server` | no | ego's own MCP server surface (**M2**): the scoped run/continue/cancel/status tools it would expose |
+| `ego auth` | no | a credential store. Every provider reads one environment variable (`Auth::bearer_from_env`), so there is nowhere for a login to put anything and nothing for a logout to remove |
+| `ego models` | no | a catalogue to enumerate. Hosted facts are supplied and local ones are discovered per resolution (`docs/decisions/2026-08-21-what-a-model-resolves-to.md`), so this build resolves one model at a time and holds no list to print or refresh; generated catalogues are **M5** |
+| `ego config` | no | a config writer. The loader is strict and read-only, and nothing in this build writes a config file — `-c/--set` overrides one run |
+| `ego rules` | no | somewhere to keep a rule. The grammar and its stable IDs are built and `--allow`/`--deny` already reach the engine through them, so `ls` and `explain` have their material; what `allow`, `deny`, `revoke` and `remember` have nowhere to write to is a rule store — the same read-only loader `config` waits on |
+| `ego usage` | no | a report across sessions, which needs both the workspace attribution `ls` waits on and the per-session cost line budgets add in **M3** |
+| `ego acp` | no | an agent that serves the protocol on stdio. `ego-acp` already projects events onto v1 and v2 (`project_acp_v1`/`project_acp_v2`), so what is missing is the connection and its version negotiation, not the mapping |
+| `ego doctor` | no | most of what it would diagnose: the credential store, the MCP client and the sandbox backend are each waiting on their own milestone, and a report on three absent subsystems is not a diagnosis |
 
 **Three of M0b's four exit criteria are commands that do not exist yet**
 (`ARCHITECTURE.md` §8: interactive, `ego run … | jq`, `kill → ego resume`, and

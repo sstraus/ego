@@ -308,7 +308,8 @@ mod rebuild {
             },
         );
 
-        let (conversation, repairs) = conversation_from(&log.state);
+        let (conversation, repairs) =
+            conversation_from(&log.state).expect("a repairable history rebuilds");
         assert!(repairs.is_empty(), "nothing was torn");
         assert_eq!(
             conversation.messages(),
@@ -381,7 +382,8 @@ mod rebuild {
         log.item(prompt("read it"));
         log.item(started(Some("call_a")));
 
-        let (conversation, repairs) = conversation_from(&log.state);
+        let (conversation, repairs) =
+            conversation_from(&log.state).expect("a repairable history rebuilds");
         assert_eq!(
             repairs,
             vec![Repair::AnsweredTornCall {
@@ -432,7 +434,8 @@ mod rebuild {
             text: "it says hello".to_string(),
         });
 
-        let (conversation, repairs) = conversation_from(&log.state);
+        let (conversation, repairs) =
+            conversation_from(&log.state).expect("a repairable history rebuilds");
         assert_eq!(repairs, vec![Repair::TruncatedUnidentifiedCall]);
         assert_eq!(
             conversation.messages(),
@@ -443,6 +446,37 @@ mod rebuild {
                 }],
             }],
             "everything from the unidentifiable call onwards is dropped"
+        );
+    }
+
+    /// A log that already contains two calls under one provider id — written
+    /// before the ingress guard existed, or by something that is not this
+    /// build. The rebuild refuses it (ADR §6): §4's repairs complete a history
+    /// the harness itself tore, and this is not that. Truncating from the
+    /// duplicate would drop the `UserPrompt` of every turn after it on *every*
+    /// future rebuild, because the log is never rewritten — a permanent silent
+    /// amputation, not a one-time repair.
+    #[test]
+    fn duplicate_call_ids_are_not_repaired_lossily() {
+        let mut log = Log::new();
+        log.item(prompt("read it twice"));
+        for _ in 0..2 {
+            let call = log.item(started(Some("call_a")));
+            log.push(
+                Some(call),
+                EventKind::ToolCallCompleted {
+                    ok: true,
+                    output: "contents".to_string(),
+                },
+            );
+        }
+
+        assert_eq!(
+            conversation_from(&log.state),
+            Err(HistoryError::DuplicateCallId {
+                call_id: "call_a".to_string()
+            }),
+            "corruption the provider sent is refused, not rebuilt into a reading of it"
         );
     }
 
@@ -466,7 +500,8 @@ mod rebuild {
             },
         );
 
-        let (conversation, _) = conversation_from(&log.state);
+        let (conversation, _) =
+            conversation_from(&log.state).expect("a repairable history rebuilds");
         assert_eq!(
             conversation.messages()[0].content,
             vec![ContentBlock::Text {
@@ -491,7 +526,8 @@ mod rebuild {
             text: "done".to_string(),
         });
 
-        let (conversation, _) = conversation_from(&log.state);
+        let (conversation, _) =
+            conversation_from(&log.state).expect("a repairable history rebuilds");
         assert_eq!(conversation.messages().len(), 2);
         assert_eq!(
             conversation.messages()[1].content,

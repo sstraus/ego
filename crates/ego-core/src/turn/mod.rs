@@ -13,6 +13,7 @@
 mod journal;
 mod tools;
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 
@@ -452,7 +453,30 @@ impl<'a> TurnLoop<'a> {
 
     /// One generation: reserve, stream it into the log, settle.
     async fn generate(&mut self, turn: TurnId) -> Result<Generated, StoreError> {
-        let (history, repairs) = conversation_from(self.journal.state());
+        // A log this build wrote cannot fail here: the guard in `drain` refuses
+        // a reused call id before it is ever appended. A log written before
+        // that guard existed can, and there is nothing to do about it from
+        // here — the log is never rewritten, so the run ends visibly at the
+        // provider's exit code rather than resuming a session with a hole in
+        // it (ADR §6).
+        let (history, repairs) = match conversation_from(self.journal.state()) {
+            Ok(rebuilt) => rebuilt,
+            Err(malformed) => {
+                tracing::warn!(%malformed, "the stored history cannot be rebuilt into a request");
+                self.journal.append(
+                    turn,
+                    None,
+                    None,
+                    EventKind::Error {
+                        message: format!(
+                            "this session's log cannot be sent to a provider and \
+                             cannot be repaired: {malformed}"
+                        ),
+                    },
+                )?;
+                return Ok(Generated::Ended(ExitReason::Provider));
+            }
+        };
         let conversation = self.with_system(history);
         if !repairs.is_empty() {
             // Not a durable event: whether a repair becomes one is
@@ -630,6 +654,15 @@ impl<'a> TurnLoop<'a> {
                 self.cancel.cause().unwrap_or(CancelCause::User),
             )));
         }
+        // After the settlement and after cancellation: the attempt is paid for
+        // either way, and someone who asked to stop gets that answer rather
+        // than the provider's. The error is already in the log; this is only
+        // the exit. `Provider` and not `Internal` — `CLI.md` §4.3 makes them
+        // different codes, and a script that retries 4 is right to: the next
+        // response may well be well-formed.
+        if drained.corrupt.is_some() {
+            return Ok(Generated::Ended(ExitReason::Provider));
+        }
         Ok(Generated::Stopped {
             reason: settlement.outcome.stop(),
             pending: drained.pending,
@@ -667,6 +700,20 @@ impl<'a> TurnLoop<'a> {
         let mut assembled = String::new();
         let mut failure = None;
         let mut cancelled = false;
+        let mut corrupt: Option<String> = None;
+        // Every provider id this session has already used, seeded from the
+        // reduction rather than from this response. A decoder can only compare
+        // ids inside one response — `settle_identity` does not even do that
+        // much, comparing only within a single tool-call index — and reuse of
+        // an id from an *earlier* generation is just as unattributable. The
+        // set is built once per generation and grown as calls are accepted.
+        let mut seen: BTreeSet<String> = self
+            .journal
+            .state()
+            .items
+            .values()
+            .filter_map(|item| item.call_id.clone())
+            .collect();
         // Under a provider-reported settlement the tokens and the money
         // arrive as two frames, and `EventKind::UsageUpdated` carries them
         // together because they are one observation. So both are held and
@@ -698,12 +745,34 @@ impl<'a> TurnLoop<'a> {
                         .append(turn, Some(item), None, EventKind::ReasoningDelta { text })
                         .map(|_| ())
                 }
+                // A reused id ends the generation before anything runs (ADR
+                // §6). Not appended, because a `ToolCallStarted` the loop has
+                // already decided not to dispatch is a call the log says was
+                // made and no result will ever answer.
+                AiEvent::ToolCall { call_id, .. } if seen.contains(&call_id) => {
+                    corrupt = Some(call_id.clone());
+                    self.journal
+                        .append(
+                            turn,
+                            None,
+                            None,
+                            EventKind::Error {
+                                message: format!(
+                                    "the provider reused tool call id {call_id}, so a result \
+                                     could not be attributed to the call that earned it; \
+                                     nothing from this generation was run"
+                                ),
+                            },
+                        )
+                        .map(|_| ())
+                }
                 AiEvent::ToolCall {
                     call_id,
                     name,
                     args,
                 } => {
                     let item = ItemId::new();
+                    seen.insert(call_id.clone());
                     self.journal
                         .append(
                             turn,
@@ -832,9 +901,19 @@ impl<'a> TurnLoop<'a> {
 
         Drained {
             stream,
-            pending,
+            // Not one of them, and not just the duplicate. Once two calls
+            // claim one id, the *first* is no more attributable than the
+            // second: a result naming that id answers either. Running the one
+            // that happened to arrive first would be picking by stream order,
+            // which the provider did not promise means anything.
+            pending: if corrupt.is_some() {
+                Vec::new()
+            } else {
+                pending
+            },
             failure,
             cancelled,
+            corrupt,
         }
     }
 
@@ -908,4 +987,11 @@ struct Drained {
     pending: Vec<PendingCall>,
     failure: Option<StoreError>,
     cancelled: bool,
+    /// A provider `call_id` this session had already used, if one arrived.
+    ///
+    /// See the tool-use-history ADR §6. Held rather than raised so the stream
+    /// still drains and the attempt still settles — it is already paid for —
+    /// and separate from `failure`, which is *our* store breaking, because
+    /// `CLI.md` §4.3 gives those two different exits.
+    corrupt: Option<String>,
 }
