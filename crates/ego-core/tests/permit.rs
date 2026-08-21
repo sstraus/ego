@@ -575,4 +575,151 @@ mod permit {
         assert_eq!(fs.scans(), 0, "nothing may be walked before the refusal");
         assert_eq!(fs.reads(), 0, "and nothing may be read");
     }
+
+    // --- Leg 2 of Invariant W: containment ------------------------------
+    //
+    // `docs/decisions/2026-08-21-a-permit-nobody-can-widen.md` calls this leg
+    // **evidence, and not proof**, and that framing is load-bearing. Leg 1 is
+    // decided by the compiler and is total. This is a check over a domain
+    // somebody chose, and it is true of the domain it generated and silent
+    // about every call outside it. Nobody downstream may cite it as more.
+    //
+    // What is generated is small and exhaustive rather than large and random:
+    // every call of one or two ops drawn from three op kinds over six paths,
+    // and every one of those probed against every authority at every path in
+    // a wider set that includes escapes and sibling-prefix traps. That is
+    // 342 calls and 8208 authority checks, deterministic and reproducible,
+    // which is what this repository can do without a `proptest` dependency
+    // it does not have. A randomised generator would cover a wider domain and
+    // report a different one on every run.
+    //
+    // The assertion is stronger than the ADR asks for. The ADR asks that a
+    // path *not* contributed by an op be refused. This asserts the biconditional:
+    // `allows_x(p)` is `Ok` exactly when `p` is at or under a path some op of
+    // kind `x` contributed. One direction is containment; the other catches a
+    // scope that has quietly stopped granting what the call asked for, which
+    // is how a permit gets "fixed" by widening the next one.
+
+    /// Every path this leg probes, including three that must never be in
+    /// scope: an escape, a sibling sharing a textual prefix, and a
+    /// descendant of a sibling.
+    const PROBES: &[&str] = &[
+        "/ws",
+        "/ws/a",
+        "/ws/a/b",
+        "/ws/a/b/c",
+        "/ws/c",
+        "/ws/c-evil",
+        "/ws/c-evil/secret",
+        "/ws/a-evil",
+        "/wsx",
+        "/etc/passwd",
+    ];
+
+    /// The paths ops are built over. A subset of [`PROBES`]: the interesting
+    /// cases are the probes that are *not* here.
+    const ROOTS: &[&str] = &[
+        "/ws",
+        "/ws/a",
+        "/ws/a/b",
+        "/ws/c",
+        "/ws/c-evil",
+        "/ws/a/b/c",
+    ];
+
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    enum Kind {
+        Read,
+        List,
+        Search,
+    }
+
+    const KINDS: &[Kind] = &[Kind::Read, Kind::List, Kind::Search];
+
+    fn op_of(kind: Kind, path: &str) -> Op {
+        match kind {
+            Kind::Read => Op::Read {
+                path: CanonPath::new(path),
+            },
+            Kind::List => Op::List {
+                root: CanonPath::new(path),
+                pattern: "**".to_string(),
+            },
+            Kind::Search => Op::Search {
+                root: CanonPath::new(path),
+                query: "q".to_string(),
+            },
+        }
+    }
+
+    /// Every (kind, path) pair, as the alphabet calls are drawn from.
+    fn alphabet() -> Vec<(Kind, &'static str)> {
+        KINDS
+            .iter()
+            .flat_map(|kind| ROOTS.iter().map(move |path| (*kind, *path)))
+            .collect()
+    }
+
+    /// Is `probe` at or under a path some op of `kind` contributed?
+    fn expected(ops: &[(Kind, &str)], kind: Kind, probe: &str) -> bool {
+        let probe = CanonPath::new(probe);
+        ops.iter()
+            .filter(|(k, _)| *k == kind)
+            .any(|(_, root)| probe.is_or_under(&CanonPath::new(root)))
+    }
+
+    fn check(engine: &PolicyEngine, ops: &[(Kind, &str)]) {
+        let call = PreparedCall {
+            tool: "probe".to_string(),
+            ops: ops.iter().map(|(k, p)| op_of(*k, p)).collect(),
+        };
+        let granted = engine
+            .authorize(call)
+            .expect("every generated call reads, lists or searches inside /ws");
+        let permit = granted.permit();
+
+        for probe in PROBES {
+            let path = CanonPath::new(probe);
+            let checks = [
+                (Kind::Read, permit.allows_read(&path).is_ok()),
+                (Kind::List, permit.allows_list(&path).is_ok()),
+                (Kind::Search, permit.allows_search(&path).is_ok()),
+            ];
+            for (kind, allowed) in checks {
+                assert_eq!(
+                    allowed,
+                    expected(ops, kind, probe),
+                    "{kind:?} of {probe} under a permit for {ops:?}"
+                );
+            }
+            // No op in this alphabet contributes write authority, so no
+            // generated call may write anywhere at all.
+            assert!(
+                permit.allows_write(&path).is_err(),
+                "a call of reads, lists and searches granted a write to {probe}"
+            );
+        }
+    }
+
+    #[test]
+    fn permit_leg2_a_one_op_call_grants_exactly_what_that_op_named() {
+        let engine = PolicyEngine::new(CanonPath::new("/ws"));
+        for (kind, path) in alphabet() {
+            check(&engine, &[(kind, path)]);
+        }
+    }
+
+    #[test]
+    fn permit_leg2_a_two_op_call_grants_exactly_the_union_and_no_more() {
+        // The case a one-op sweep cannot see: two ops of *different* kinds
+        // over the same path must not lend each other authority, and two ops
+        // of the same kind must union rather than overwrite.
+        let engine = PolicyEngine::new(CanonPath::new("/ws"));
+        let alphabet = alphabet();
+        for first in &alphabet {
+            for second in &alphabet {
+                check(&engine, &[*first, *second]);
+            }
+        }
+    }
 }
