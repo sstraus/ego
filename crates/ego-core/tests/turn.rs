@@ -27,6 +27,8 @@ use ego_core::permit::{
     CanonPath, GuardedIo, Op, Permit, PolicyEngine, PrepareCtx, PreparedCall, ToolError,
     ToolResult, Typed, TypedTool,
 };
+use ego_core::public::PublicEvent;
+use ego_core::sink::{CollectingSink, EventSink};
 use ego_core::state::{ItemKind, SessionState, Usage};
 use ego_core::store::session_store::{SessionMeta, SessionStore, StoreError};
 use ego_core::turn::{CancelToken, Model, Session, Tools, TurnConfig, TurnLoop};
@@ -132,6 +134,25 @@ mod turn {
                     }
                     event
                 });
+            AttemptStream::new(attempt, Box::pin(stream))
+        }
+    }
+
+    /// A generator that says something and then never finishes.
+    ///
+    /// The only way to prove *live* rather than *eventually*: a batch handed
+    /// over at turn end and a sink fed as events happen are indistinguishable
+    /// once the turn is over, so the turn must be caught while it is still
+    /// running. This one yields its events and then pends forever, so a
+    /// single poll of `run` provably cannot have returned.
+    struct StallingGenerator {
+        events: Mutex<Vec<AiEvent>>,
+    }
+
+    impl Generator for StallingGenerator {
+        fn generate(&self, _req: GenRequest, attempt: GenerationAttempt) -> AttemptStream {
+            let events = std::mem::take(&mut *self.events.lock().unwrap());
+            let stream = futures::stream::iter(events).chain(futures::stream::pending());
             AttemptStream::new(attempt, Box::pin(stream))
         }
     }
@@ -243,6 +264,10 @@ mod turn {
         fs: FakeFs,
         registry: Vec<std::sync::Arc<dyn ego_core::permit::Tool>>,
         gate: RefCell<BudgetGate>,
+        /// Where the public projection goes. Collecting rather than null, so
+        /// a test can assert on what a host would have seen — which is now
+        /// the only way to see it.
+        sink: CollectingSink,
     }
 
     impl Fixture {
@@ -255,6 +280,7 @@ mod turn {
                 fs: FakeFs::default(),
                 registry: Vec::new(),
                 gate: RefCell::new(gate()),
+                sink: CollectingSink::new(),
             }
         }
 
@@ -268,6 +294,7 @@ mod turn {
         state: SessionState,
         store: &'a MemStore,
         clock: &'a FixedClock,
+        sink: &'a dyn EventSink,
         cancel: CancelToken,
     ) -> Session<'a> {
         Session {
@@ -275,6 +302,7 @@ mod turn {
             state,
             store,
             clock,
+            sink,
             cancel,
         }
     }
@@ -295,7 +323,7 @@ mod turn {
         let mut gate = fx.gate.borrow_mut();
         let tools = Tools::new(&fx.registry, &fx.policy, &fx.fs, CanonPath::new("/ws"));
         let mut turn = TurnLoop::new(
-            session(state, &fx.store, &fx.clock, CancelToken::new()),
+            session(state, &fx.store, &fx.clock, &fx.sink, CancelToken::new()),
             model(&fx.generator, &mut gate),
             tools,
         );
@@ -606,7 +634,13 @@ mod turn {
         let mut gate = fx.gate.borrow_mut();
         let tools = Tools::new(&fx.registry, &fx.policy, &fx.fs, CanonPath::new("/ws"));
         let mut turn = TurnLoop::new(
-            session(SessionState::default(), &fx.store, &fx.clock, token.clone()),
+            session(
+                SessionState::default(),
+                &fx.store,
+                &fx.clock,
+                &fx.sink,
+                token.clone(),
+            ),
             model(&generator, &mut gate),
             tools,
         );
@@ -703,7 +737,13 @@ mod turn {
         let mut gate = fx.gate.borrow_mut();
         let tools = Tools::new(&fx.registry, &fx.policy, &fx.fs, CanonPath::new("/ws"));
         let mut turn = TurnLoop::new(
-            session(SessionState::default(), &fx.store, &fx.clock, token),
+            session(
+                SessionState::default(),
+                &fx.store,
+                &fx.clock,
+                &fx.sink,
+                token,
+            ),
             model(&generator, &mut gate),
             tools,
         );
@@ -746,6 +786,7 @@ mod turn {
                 SessionState::default(),
                 &fx.store,
                 &fx.clock,
+                &fx.sink,
                 CancelToken::new(),
             ),
             model(&fx.generator, &mut gate),
@@ -802,6 +843,7 @@ mod turn {
                 SessionState::default(),
                 &fx.store,
                 &fx.clock,
+                &fx.sink,
                 CancelToken::new(),
             ),
             model(&fx.generator, &mut gate),
@@ -839,24 +881,29 @@ mod turn {
                 SessionState::default(),
                 &fx.store,
                 &fx.clock,
+                &fx.sink,
                 CancelToken::new(),
             ),
             model(&fx.generator, &mut gate),
             tools,
         );
 
-        let outcome = block_on(turn.run("hi")).expect("the store accepted");
+        block_on(turn.run("hi")).expect("the store accepted");
 
+        let published = fx.sink.events();
         assert!(
-            !outcome.published.is_empty(),
+            !published.is_empty(),
             "a turn that wrote a log published something"
         );
         // `GenerationStarted` and `AttemptSettled` have no public spelling:
         // the attempt lifecycle is internal accounting, not a host's business.
+        // `TurnStarted` is published and never appended, so the sink carries
+        // one more event than the log does public ones.
         assert_eq!(
-            outcome.published.len(),
-            fx.store.events().len() - 2,
-            "exactly the two attempt-lifecycle events stay internal"
+            published.len(),
+            fx.store.events().len() - 2 + 1,
+            "exactly the two attempt-lifecycle events stay internal, and \
+             turn.started is published without being logged"
         );
     }
 
@@ -875,6 +922,116 @@ mod turn {
             vec![ContentBlock::Text {
                 text: "the only thing said so far".to_string()
             }]
+        );
+    }
+
+    // --- the sink is live, and it is fed only what is durable ---
+
+    #[test]
+    fn an_event_reaches_the_sink_before_the_turn_that_produced_it_ends() {
+        // `CLI.md` §4.2: "one event per line, **live**". The turn below never
+        // ends, so anything the sink holds got there while it was running.
+        let fx = Fixture::new(Vec::new());
+        let generator = StallingGenerator {
+            events: Mutex::new(vec![AiEvent::TextDelta {
+                text: "thinking out loud".to_string(),
+            }]),
+        };
+        let mut gate = fx.gate.borrow_mut();
+        let tools = Tools::new(&fx.registry, &fx.policy, &fx.fs, CanonPath::new("/ws"));
+        let mut turn = TurnLoop::new(
+            session(
+                SessionState::default(),
+                &fx.store,
+                &fx.clock,
+                &fx.sink,
+                CancelToken::new(),
+            ),
+            model(&generator, &mut gate),
+            tools,
+        );
+
+        let mut running = Box::pin(turn.run("say something"));
+        let waker = futures::task::noop_waker();
+        let mut cx = std::task::Context::from_waker(&waker);
+        assert!(
+            running.as_mut().poll(&mut cx).is_pending(),
+            "the generator never finishes, so neither does the turn"
+        );
+
+        let seen = fx.sink.events();
+        assert!(
+            seen.iter().any(|event| matches!(
+                event,
+                PublicEvent::ItemDelta { text, .. } if text == "thinking out loud"
+            )),
+            "the delta was published while the turn was still running, got {seen:?}"
+        );
+    }
+
+    #[test]
+    fn a_turn_announces_itself_before_it_says_anything_else() {
+        // `turn.started` has no `EventKind`, so before the sink existed
+        // nothing in the workspace could emit it and §4.2's envelope was
+        // missing a level.
+        let fx = Fixture::new(vec![vec![
+            AiEvent::TextDelta {
+                text: "hello".to_string(),
+            },
+            AiEvent::Stop(StopReason::Stop),
+        ]]);
+
+        let (_, _, _) = run(&fx, SessionState::default(), "hi");
+
+        let seen = fx.sink.events();
+        match seen.first() {
+            Some(PublicEvent::TurnStarted { turn }) => assert!(
+                seen.iter().skip(1).any(|event| matches!(
+                    event,
+                    PublicEvent::TurnCompleted { turn: ended, .. } if ended == turn
+                )),
+                "the turn that announced itself is the one that finished"
+            ),
+            other => panic!("a turn announces itself first, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_event_the_store_refused_never_reaches_the_sink() {
+        // The ordering is the guarantee: a host told about an event no reader
+        // will find is being told about a turn nobody can resume into.
+        let fx = Fixture::new(vec![vec![
+            AiEvent::TextDelta {
+                text: "never written".to_string(),
+            },
+            AiEvent::Stop(StopReason::Stop),
+        ]]);
+        fx.store.fail_at(1);
+
+        let mut gate = fx.gate.borrow_mut();
+        let tools = Tools::new(&fx.registry, &fx.policy, &fx.fs, CanonPath::new("/ws"));
+        let mut turn = TurnLoop::new(
+            session(
+                SessionState::default(),
+                &fx.store,
+                &fx.clock,
+                &fx.sink,
+                CancelToken::new(),
+            ),
+            model(&fx.generator, &mut gate),
+            tools,
+        );
+        block_on(turn.run("hello")).expect_err("the store refused the first append");
+
+        // `TurnStarted` is published and never appended — it has no log entry
+        // to be refused — so it is the only thing a sink may hold here.
+        assert!(
+            fx.sink
+                .events()
+                .iter()
+                .all(|event| matches!(event, PublicEvent::TurnStarted { .. })),
+            "nothing the store refused was published: {:?}",
+            fx.sink.events()
         );
     }
 }

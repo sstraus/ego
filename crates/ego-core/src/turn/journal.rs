@@ -10,29 +10,35 @@ use crate::event::domain::{DomainEvent, Envelope, EventKind};
 use crate::event::id::{EventId, ItemId, Producer, Seq, SessionId, TurnId};
 use crate::event::time::Clock;
 use crate::public::{PublicEvent, project_public};
+use crate::sink::EventSink;
 use crate::state::SessionState;
 use crate::store::session_store::{SessionStore, StoreError};
 
-/// Assembles envelopes, appends them to the durable log, and folds them into
-/// the in-memory state — in that order, and nowhere else.
+/// Assembles envelopes, appends them to the durable log, folds them into the
+/// in-memory state, and publishes the projection — in that order, and nowhere
+/// else.
 ///
-/// The ordering is the point. A store failure must leave [`SessionState`]
-/// describing exactly what is on disk, so the fold happens only after the
-/// append returns. The reverse order would produce an in-memory session that
-/// remembers an event no reader will ever find.
+/// The ordering is the point, and it now has two halves. A store failure must
+/// leave [`SessionState`] describing exactly what is on disk, so the fold
+/// happens only after the append returns; the reverse order would produce an
+/// in-memory session that remembers an event no reader will ever find. The
+/// sink comes last for the same reason one layer out: a host told about an
+/// event that was never written would be reporting a turn nobody can resume
+/// into.
 pub struct Journal<'a> {
     session: SessionId,
     store: &'a dyn SessionStore,
     clock: &'a dyn Clock,
+    /// Where the public projection goes the moment it is durable. Held rather
+    /// than accumulated: `CLI.md` §4.2 says *live*, and a `Vec` handed over
+    /// at turn end is a different contract wearing the same flag — as well as
+    /// a buffer that grows for the life of the session.
+    sink: &'a dyn EventSink,
     producer: Producer,
     /// Continues from the resumed state's `last_seq`, so reloading a session
     /// and carrying on does not restart its ordering.
     seq: Seq,
     state: SessionState,
-    /// Everything this journal has published, in order. The loop's caller
-    /// reads it instead of the internal log — `PublicEvent` is the projection
-    /// that is allowed to leave the crate.
-    published: Vec<PublicEvent>,
 }
 
 impl<'a> Journal<'a> {
@@ -41,6 +47,7 @@ impl<'a> Journal<'a> {
         session: SessionId,
         store: &'a dyn SessionStore,
         clock: &'a dyn Clock,
+        sink: &'a dyn EventSink,
         producer: Producer,
         state: SessionState,
     ) -> Self {
@@ -48,10 +55,10 @@ impl<'a> Journal<'a> {
             session,
             store,
             clock,
+            sink,
             producer,
             seq: state.last_seq,
             state,
-            published: Vec::new(),
         }
     }
 
@@ -82,9 +89,21 @@ impl<'a> Journal<'a> {
         self.store.append(&self.session, &event)?;
         self.state.apply(&event);
         if let Some(public) = project_public(&event) {
-            self.published.push(public);
+            self.sink.publish(&public);
         }
         Ok(id)
+    }
+
+    /// Publish an event the reducer cannot produce.
+    ///
+    /// `SessionStarted` and `TurnStarted` have no `EventKind` counterpart —
+    /// they are facts the harness knows before any domain event exists (see
+    /// `public/mod.rs`) — so they reach the sink through here rather than
+    /// through [`append`](Self::append). Nothing is written to the log,
+    /// because there is nothing to write: an unwritten event cannot be
+    /// published out of order with one that was.
+    pub fn publish(&self, event: &PublicEvent) {
+        self.sink.publish(event);
     }
 
     /// The reduction of everything appended so far.
@@ -96,10 +115,5 @@ impl<'a> Journal<'a> {
     /// session with another turn.
     pub fn into_state(self) -> SessionState {
         self.state
-    }
-
-    /// Everything published so far, in order.
-    pub fn published(&self) -> &[PublicEvent] {
-        &self.published
     }
 }

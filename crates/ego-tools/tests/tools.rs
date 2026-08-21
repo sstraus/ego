@@ -28,6 +28,7 @@ use ego_core::permit::{
     CanonPath, GuardedFs, Op, Permit, PermitDenied, PolicyDenied, PolicyEngine, PrepareCtx,
     PreparedCall, Tool, ToolError, ToolResult,
 };
+use ego_core::sink::CollectingSink;
 use ego_core::state::SessionState;
 use ego_core::turn::{CancelToken, Model, Session, Tools, TurnConfig, TurnLoop};
 use ego_tools::clock::SystemClock;
@@ -672,6 +673,7 @@ mod end_to_end {
                 AiEvent::Stop(StopReason::Stop),
             ],
         ]);
+        let sink = CollectingSink::new();
         let mut gate = BudgetGate::new(usd("1000"));
 
         let outcome = {
@@ -681,6 +683,7 @@ mod end_to_end {
                     state: SessionState::default(),
                     store: &store,
                     clock: &clock,
+                    sink: &sink,
                     cancel: CancelToken::new(),
                 },
                 Model {
@@ -751,6 +754,7 @@ mod end_to_end {
                 AiEvent::Stop(StopReason::Stop),
             ],
         ]);
+        let sink = CollectingSink::new();
         let mut gate = BudgetGate::new(usd("1000"));
 
         let outcome = {
@@ -760,6 +764,7 @@ mod end_to_end {
                     state: SessionState::default(),
                     store: &store,
                     clock: &clock,
+                    sink: &sink,
                     cancel: CancelToken::new(),
                 },
                 Model {

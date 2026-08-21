@@ -29,6 +29,7 @@ use crate::generator::port::{AiEvent, Generator};
 use crate::generator::types::{GenRequest, StopReason, ThinkingLevel};
 use crate::permit::PolicyDenied;
 use crate::public::PublicEvent;
+use crate::sink::EventSink;
 use crate::state::SessionState;
 use crate::store::session_store::{SessionStore, StoreError};
 
@@ -110,7 +111,13 @@ pub struct TurnConfig {
     pub parallel_tool_calls: bool,
 }
 
-/// What ended a turn, and everything it published.
+/// What ended a turn.
+///
+/// No event list. Events reach their consumer through the
+/// [`EventSink`](crate::sink::EventSink) as they happen, because `CLI.md`
+/// §4.2 says *live* and a vector handed back here could only ever be a
+/// batch. A caller that wants the batch anyway supplies a
+/// [`CollectingSink`](crate::sink::CollectingSink) and takes it from there.
 #[derive(Debug)]
 pub struct TurnOutcome {
     pub turn: TurnId,
@@ -121,9 +128,6 @@ pub struct TurnOutcome {
     /// action in the result: a script handed exit 3 and no subject has been
     /// told nothing it can act on.
     pub denied: Option<String>,
-    /// The privacy-filtered projection, in order. The internal log stays
-    /// inside this crate; this is what a host is given.
-    pub published: Vec<PublicEvent>,
 }
 
 /// A turn that could not be written down.
@@ -163,6 +167,10 @@ pub struct Session<'a> {
     pub state: SessionState,
     pub store: &'a dyn SessionStore,
     pub clock: &'a dyn Clock,
+    /// Where the public projection goes as it happens. A session-level
+    /// concern beside the store and the clock, because it outlives any one
+    /// turn: a host subscribes once and watches the whole session.
+    pub sink: &'a dyn EventSink,
     /// Held by the caller, not minted here: whoever wants to stop a turn is
     /// by definition not the turn.
     pub cancel: CancelToken,
@@ -205,6 +213,7 @@ impl<'a> TurnLoop<'a> {
                 session.id,
                 session.store,
                 session.clock,
+                session.sink,
                 Producer::Main,
                 session.state,
             ),
@@ -232,7 +241,12 @@ impl<'a> TurnLoop<'a> {
     /// the tool calls in between.
     pub async fn run(&mut self, prompt: &str) -> Result<TurnOutcome, TurnAbandoned> {
         let turn = TurnId::new();
-        let published_before = self.journal.published().len();
+        // `turn.started` of `CLI.md` §4.2. Published rather than appended:
+        // `EventKind` has no counterpart, because the start of a turn is not
+        // something the reducer establishes — it is what the loop knows the
+        // instant it mints the id. Before this, nothing in the workspace
+        // could emit it at all.
+        self.journal.publish(&PublicEvent::TurnStarted { turn });
 
         let (exit_reason, denied) = match self.drive(turn, prompt).await {
             Ok(ended) => ended,
@@ -254,7 +268,6 @@ impl<'a> TurnLoop<'a> {
             ok,
             exit_reason,
             denied,
-            published: self.journal.published()[published_before..].to_vec(),
         })
     }
 

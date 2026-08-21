@@ -16,6 +16,7 @@ pub mod generator;
 pub mod permit;
 pub mod public;
 pub mod run;
+pub mod sink;
 pub mod state;
 pub mod store;
 pub mod turn;
