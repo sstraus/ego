@@ -764,4 +764,58 @@ mod store {
         );
         assert_eq!(metas[0].id, good_id);
     }
+
+    /// A copied session directory is listed under neither name.
+    ///
+    /// `list` is the only method that reads a session's id off the disk
+    /// instead of being handed one; every other method derives the directory
+    /// from the id. So a directory whose manifest names a different session
+    /// is the one place the two can disagree, and what it would produce is an
+    /// id `ego ls` prints and `ego resume` opens as something else — the
+    /// copy's contents under the original's name.
+    ///
+    /// `cp -r` is how it happens: nothing in this crate writes a manifest
+    /// anywhere but its own directory. The copy is skipped and the original
+    /// survives, because the original's two halves still agree.
+    #[test]
+    fn store_list_skips_a_session_directory_that_names_a_different_id_than_its_manifest() {
+        let dir = tempdir().unwrap();
+        let store = JsonlStore::new(dir.path(), "/ws", Box::new(OsIo));
+        let turn = TurnId::new();
+        let mut seq = Seq::default();
+
+        let good_id = SessionId::new();
+        store
+            .append(
+                &good_id,
+                &ev(
+                    seq.next(),
+                    turn,
+                    EventKind::UserPrompt {
+                        text: "hi".to_string(),
+                    },
+                ),
+            )
+            .unwrap();
+
+        // The snapshot someone takes by hand: same bytes, different name.
+        let copy_id = SessionId::new();
+        let original = manifest_path(dir.path(), &good_id);
+        let copy = manifest_path(dir.path(), &copy_id);
+        std::fs::create_dir_all(copy.parent().unwrap()).unwrap();
+        std::fs::copy(&original, &copy).unwrap();
+
+        let metas = store.list().unwrap();
+        assert_eq!(
+            metas.len(),
+            1,
+            "the copy must not be listed: its manifest names a session that \
+             lives in another directory"
+        );
+        assert_eq!(
+            metas[0].id, good_id,
+            "the directory that still agrees with its own manifest is the one \
+             that survives"
+        );
+    }
 }

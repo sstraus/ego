@@ -634,16 +634,45 @@ impl SessionStore for JsonlStore {
                     continue;
                 }
             };
-            match serde_json::from_slice::<SessionMeta>(&bytes) {
-                Ok(meta) => metas.push(meta),
+            let meta = match serde_json::from_slice::<SessionMeta>(&bytes) {
+                Ok(meta) => meta,
                 Err(error) => {
                     tracing::warn!(
                         dir = %dir.display(),
                         error = %error,
                         "skipping session with an unreadable manifest"
                     );
+                    continue;
                 }
+            };
+            // The id in the manifest has to be the id in the path, because
+            // every other method here goes the other way: `read`, `append`
+            // and `meta` all derive the directory from the id
+            // (`session_dir`). An entry whose two halves disagree is an id
+            // this method would hand out and those methods would then look
+            // for somewhere else — `ego ls` printing a session `ego resume`
+            // cannot open, or, if a directory of that name does exist,
+            // opening a different session than the one listed.
+            //
+            // Nothing this crate writes can produce the mismatch; a person
+            // copying a session directory to keep a snapshot can, and that
+            // is exactly when a wrong answer would be trusted. Skipped
+            // rather than repaired for the same reason the two arms above
+            // are: `list` reports what is on disk and never edits it, and
+            // which of the two names is the true one is not knowable from
+            // here.
+            if dir
+                .file_name()
+                .is_none_or(|name| name != &*session_dir_name(&meta.id))
+            {
+                tracing::warn!(
+                    dir = %dir.display(),
+                    manifest_id = %session_dir_name(&meta.id),
+                    "skipping session whose manifest names a different id than its directory"
+                );
+                continue;
             }
+            metas.push(meta);
         }
         Ok(metas)
     }

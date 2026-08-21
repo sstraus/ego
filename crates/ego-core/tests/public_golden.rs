@@ -85,13 +85,15 @@ mod public_golden {
         }
     }
 
-    /// A realistic two-turn log of 21 events covering 17 of the 18
+    /// A realistic two-turn log of 21 events covering 17 of the 21
     /// `EventKind` variants: `UserPrompt`, `AssistantDelta`,
     /// `AssistantMessage` and `TurnCompleted` each appear more than once,
-    /// and `ReasoningDelta` is absent — it is the one kind this log does
-    /// not reach, so it is covered by
-    /// `reasoning_delta_projects_to_an_item_delta_of_kind_reasoning` below
-    /// instead. The first turn covers every public item kind
+    /// and `ReasoningDelta`, `GenerationStarted`, `AttemptSettled` and
+    /// `UsageCorrected` are absent. The first is covered by
+    /// `reasoning_delta_projects_to_an_item_delta_of_kind_reasoning` below;
+    /// the other three are the accounting kinds `project_public` drops, and
+    /// `accounting_kinds_are_not_public` is what says so. The first turn
+    /// covers every public item kind
     /// (message, tool, permission, subagent), a `UsageUpdated` (public, as
     /// `usage_delta` — never a running total), a bare `Error`, and the
     /// three internal-only kinds (`Compacted`, `Forked`, `HookFired`) that
@@ -681,6 +683,54 @@ mod public_golden {
                 text: "weighing the options".to_string(),
             })
         );
+    }
+
+    /// The three accounting kinds are not public, and that is a privacy
+    /// boundary rather than an omission.
+    ///
+    /// `GenerationStarted`, `AttemptSettled` and `UsageCorrected` are the
+    /// attempt ledger: which attempt of which generation was made, whether
+    /// the request may have reached the provider, and what the provider later
+    /// said it really cost. A consumer of the public stream is told the
+    /// *totals* — `usage_delta` on the events that carry it — and never the
+    /// bookings they were folded from, because an attempt id is an internal
+    /// retry identity and a delivery certainty is a fact about our own
+    /// transport.
+    ///
+    /// Pinned here because the golden log does not contain these kinds:
+    /// without this, the projection could start emitting them and the only
+    /// test that would notice is one nobody has written.
+    #[test]
+    fn accounting_kinds_are_not_public() {
+        let generation = ego_core::event::id::GenerationId::new();
+        let attempt = ego_core::generator::attempt::AttemptRef::first(generation);
+        for kind in [
+            EventKind::GenerationStarted { attempt },
+            EventKind::AttemptSettled {
+                attempt,
+                outcome: ego_core::generator::attempt::Outcome::new(
+                    ego_core::generator::types::StopReason::Stop,
+                    ego_core::generator::attempt::DeliveryCertainty::DefinitelyUnsent,
+                    ego_core::generator::attempt::UsageReport::Missing,
+                ),
+            },
+            EventKind::UsageCorrected {
+                attempt,
+                usage: tokens(1, 0, 0, 1),
+                cost_delta: priced("0.000018"),
+            },
+        ] {
+            // With an item attached: the most favourable case for a wrong
+            // mapping, since every arm that needs an id would have one.
+            let name = kind.name();
+            let event = ev(Seq::default(), id(TURN_1), Some(id(ITEM_ASSISTANT_1)), kind);
+            assert_eq!(
+                project_public(&event),
+                None,
+                "`{name}` reached the public stream, which carries totals and \
+                 not the attempt ledger they came from"
+            );
+        }
     }
 
     /// `ItemKind` is a closed, snake_case-tagged set — pinned directly since

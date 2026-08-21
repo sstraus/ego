@@ -10,10 +10,12 @@ publish.workspace = true
 ego-core.workspace = true
 fd-lock = "4.0.4"
 futures = "0.3.34"
-# Not the `0.4.20` of `docs/04-crates.md`: that release raised its own floor
-# to Rust 1.88 and this workspace declares 1.86. Left as `0.4` so the
-# MSRV-aware resolver picks the newest release the declared floor allows,
-# rather than pinning us past our own gate.
+# `0.4` and not `0.4.20`, the version `docs/04-crates.md` names: a caret range
+# lets the MSRV-aware resolver pick the newest release our declared floor
+# allows, instead of a number here having to be kept level with that floor by
+# hand. It held us at `0.4.19` while the workspace declared 1.86, because
+# `0.4.20` raised its own floor to 1.88; the workspace declares 1.88 now, so
+# the same line resolves forward on its own.
 globset = "0.4"
 regex = "1.12"
 schemars = "1.2.2"

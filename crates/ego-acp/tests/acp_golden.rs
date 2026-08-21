@@ -26,12 +26,14 @@
 //! projection.
 //!
 //! The fixture is a representative session, **not** an exhaustive tour of
-//! the domain's 18 event kinds: its 21 events cover 17 distinct kinds
+//! the domain's 21 event kinds: its 21 events cover 17 distinct kinds
 //! (`UserPrompt`, `AssistantDelta`, `AssistantMessage` and `TurnCompleted`
-//! each appear more than once) and omit `ReasoningDelta` entirely.
+//! each appear more than once) and omit `ReasoningDelta`,
+//! `GenerationStarted`, `AttemptSettled` and `UsageCorrected` entirely.
 //! Exhaustiveness is the job of the per-kind tests below —
-//! `reasoning_delta_projects_to_a_thought_chunk_in_both_versions` covers
-//! the kind the fixture omits — not of this log.
+//! `reasoning_delta_projects_to_a_thought_chunk_in_both_versions` and
+//! `events_with_no_counterpart_in_either_version_project_to_none` cover the
+//! four kinds the fixture omits — not of this log.
 use agent_client_protocol_schema::{v1, v2};
 use ego_acp::project::{project_acp_v1, project_acp_v2, project_v1, project_v2};
 use ego_core::cost::{
@@ -40,12 +42,14 @@ use ego_core::cost::{
 use ego_core::event::domain::{
     CancelCause, DomainEvent, Envelope, EventKind, ExitReason, OccupancyProvenance,
 };
-use ego_core::event::id::{EventId, ItemId, Producer, Seq, SessionId, TurnId};
+use ego_core::event::id::{EventId, GenerationId, ItemId, Producer, Seq, SessionId, TurnId};
 use ego_core::event::time::Timestamp;
+use ego_core::generator::attempt::{AttemptRef, DeliveryCertainty, Outcome, UsageReport};
 use ego_core::generator::capabilities::{
     CacheRetention, CancelSemantics, ModelCapabilities, ReasoningCarryover, ReasoningEffortSupport,
     Transport,
 };
+use ego_core::generator::types::StopReason;
 use ego_core::public::project_public;
 use ego_core::state::{SessionState, Usage};
 
@@ -332,14 +336,22 @@ mod acp_golden {
         ]
     }
 
-    /// Every event kind in the domain's exhaustive 17-variant set, once.
+    /// Every event kind in the domain's 21-variant set, once.
     ///
     /// This is the *source* the `None`-set test selects from by name, so
     /// that a kind renamed or removed upstream breaks a test instead of
     /// silently shrinking the set being checked. It does not by itself
-    /// prove every kind is covered — the test below filters it to the nine
-    /// kinds it names, and the remaining eight are covered by the dedicated
+    /// prove every kind is covered — the test below filters it to the twelve
+    /// kinds it names, and the remaining nine are covered by the dedicated
     /// tests further down.
+    ///
+    /// The count in the first line is the part that goes stale, and did:
+    /// this list said seventeen while the domain had twenty-one, so
+    /// `GenerationStarted`, `AttemptSettled` and `UsageCorrected` were absent
+    /// from every test in this file. Nothing here is bound to the enum by the
+    /// compiler — a `Vec` of samples cannot be — so a kind added upstream has
+    /// to be added here by hand, and the only thing that notices otherwise is
+    /// a reader counting.
     fn one_of_each_kind() -> Vec<EventKind> {
         vec![
             EventKind::UserPrompt {
@@ -370,10 +382,26 @@ mod acp_golden {
                 description: String::new(),
             },
             EventKind::PermissionDecided { allowed: true },
+            EventKind::GenerationStarted {
+                attempt: AttemptRef::first(GenerationId::new()),
+            },
+            EventKind::AttemptSettled {
+                attempt: AttemptRef::first(GenerationId::new()),
+                outcome: Outcome::new(
+                    StopReason::Stop,
+                    DeliveryCertainty::DefinitelyUnsent,
+                    UsageReport::Missing,
+                ),
+            },
             EventKind::UsageUpdated {
                 usage: tokens(1, 1),
                 cost_delta: priced("0.000018"),
                 attempt: None,
+            },
+            EventKind::UsageCorrected {
+                attempt: AttemptRef::first(GenerationId::new()),
+                usage: tokens(1, 1),
+                cost_delta: priced("0.000018"),
             },
             EventKind::ContextWindowUpdated {
                 used_tokens: 2,
@@ -545,6 +573,13 @@ mod acp_golden {
     /// Every domain event kind that has no `SessionUpdate` counterpart in
     /// *either* protocol version, matching `project.rs`'s module doc
     /// comment's "no counterpart in either version" list.
+    ///
+    /// The last three are the accounting kinds, and they reach neither
+    /// protocol for a reason one link earlier than the rest: `project_public`
+    /// drops them, so nothing about them is public at all. Asserting it here
+    /// is what says an attempt's identity and a provider's revision of what
+    /// it spent stay inside this process — the `PublicEvent` a host sees
+    /// carries the totals, never the ledger they were folded from.
     #[test]
     fn events_with_no_counterpart_in_either_version_project_to_none() {
         let none_in_both = [
@@ -557,6 +592,9 @@ mod acp_golden {
             "subagent_spawned",
             "subagent_returned",
             "error",
+            "generation_started",
+            "attempt_settled",
+            "usage_corrected",
         ];
         let kinds: Vec<EventKind> = one_of_each_kind()
             .into_iter()
