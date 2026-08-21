@@ -705,11 +705,11 @@ impl<'a> TurnLoop<'a> {
             Ok(prepared) => prepared,
             Err(refusal) => return answered(false, refusal),
         };
-        let permit = match self.tools.authorize(&prepared) {
-            Ok(permit) => permit,
+        let authorized = match self.tools.authorize(prepared) {
+            Ok(authorized) => authorized,
             Err(denial) => return ToolOutcome::Refused { denial },
         };
-        match self.tools.execute(tool, prepared, &permit).await {
+        match self.tools.execute(tool, authorized).await {
             Ok(output) => answered(true, output),
             Err(failure) => answered(false, failure),
         }

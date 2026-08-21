@@ -389,9 +389,10 @@ mod permit {
     #[test]
     fn permit_policy_admits_a_read_inside_the_workspace() {
         let engine = PolicyEngine::new(CanonPath::new("/ws"));
-        let permit = engine
-            .authorize(&read_call("/ws/src/main.rs"))
+        let granted = engine
+            .authorize(read_call("/ws/src/main.rs"))
             .expect("a workspace read is what this policy exists to allow");
+        let permit = granted.permit();
         assert!(
             permit
                 .allows_read(&CanonPath::new("/ws/src/main.rs"))
@@ -404,9 +405,10 @@ mod permit {
         // The whole reason `authorize` exists rather than the loop calling
         // `mint`: a permit must not be wider than the call it authorises.
         let engine = PolicyEngine::new(CanonPath::new("/ws"));
-        let permit = engine
-            .authorize(&read_call("/ws/src/main.rs"))
+        let granted = engine
+            .authorize(read_call("/ws/src/main.rs"))
             .expect("a workspace read is allowed");
+        let permit = granted.permit();
         assert_eq!(
             permit.allows_read(&CanonPath::new("/ws/secrets.env")),
             Err(PermitDenied::Read {
@@ -427,7 +429,7 @@ mod permit {
             }],
         };
         let denied = engine
-            .authorize(&call)
+            .authorize(call)
             .expect_err("this session cannot write");
         assert_eq!(
             denied,
@@ -443,7 +445,7 @@ mod permit {
     fn permit_policy_refuses_a_read_outside_the_workspace_and_names_it() {
         let engine = PolicyEngine::new(CanonPath::new("/ws"));
         let denied = engine
-            .authorize(&read_call("/etc/passwd"))
+            .authorize(read_call("/etc/passwd"))
             .expect_err("the workspace is the boundary");
         assert_eq!(
             denied,
@@ -473,7 +475,7 @@ mod permit {
                 },
             ],
         };
-        assert!(engine.authorize(&call).is_err());
+        assert!(engine.authorize(call).is_err());
     }
 
     // --- listing and searching: looking without reading -------------------
@@ -516,9 +518,10 @@ mod permit {
         // enumerate a directory must not be able to read the files it names,
         // or "list the workspace" quietly means "exfiltrate the workspace".
         let engine = PolicyEngine::new(CanonPath::new("/ws"));
-        let permit = engine
-            .authorize(&list_call("/ws/src", "**/*.rs"))
+        let granted = engine
+            .authorize(list_call("/ws/src", "**/*.rs"))
             .expect("listing inside the workspace is allowed");
+        let permit = granted.permit();
 
         assert!(
             permit
@@ -547,9 +550,10 @@ mod permit {
         // were confused, because the parent is not under the file either way
         // — a test that cannot fail for the reason it names.
         let engine = PolicyEngine::new(CanonPath::new("/ws"));
-        let permit = engine
-            .authorize(&read_call("/ws/src"))
+        let granted = engine
+            .authorize(read_call("/ws/src"))
             .expect("reading inside the workspace is allowed");
+        let permit = granted.permit();
 
         assert!(
             permit
@@ -569,9 +573,10 @@ mod permit {
         // authority over the subtree it searches. If authorising a search also
         // granted `read_paths`, the whole distinction would be decorative.
         let engine = PolicyEngine::new(CanonPath::new("/ws"));
-        let permit = engine
-            .authorize(&search_call("/ws/src", "TODO"))
+        let granted = engine
+            .authorize(search_call("/ws/src", "TODO"))
             .expect("searching inside the workspace is allowed");
+        let permit = granted.permit();
 
         assert!(
             permit
@@ -592,7 +597,7 @@ mod permit {
     fn permit_policy_refuses_a_list_outside_the_workspace_and_names_the_operation() {
         let engine = PolicyEngine::new(CanonPath::new("/ws"));
         let denied = engine
-            .authorize(&list_call("/etc", "*"))
+            .authorize(list_call("/etc", "*"))
             .expect_err("the workspace is the boundary for listing too");
         assert_eq!(
             denied,
@@ -611,7 +616,7 @@ mod permit {
     fn permit_policy_refuses_a_search_outside_the_workspace_and_names_the_operation() {
         let engine = PolicyEngine::new(CanonPath::new("/ws"));
         let denied = engine
-            .authorize(&search_call("/etc", "password"))
+            .authorize(search_call("/etc", "password"))
             .expect_err("the workspace is the boundary for searching too");
         assert!(denied.to_string().contains("may not search /etc"));
     }
@@ -620,8 +625,8 @@ mod permit {
     fn permit_guarded_list_returns_the_names_under_an_authorised_root() {
         let fs = workspace();
         let engine = PolicyEngine::new(CanonPath::new("/ws"));
-        let permit = engine.authorize(&list_call("/ws/src", "**")).unwrap();
-        let guarded = GuardedFs::new(&permit, &fs);
+        let granted = engine.authorize(list_call("/ws/src", "**")).unwrap();
+        let guarded = GuardedFs::new(granted.permit(), &fs);
 
         let scan = guarded
             .list(&ScanRequest::new(CanonPath::new("/ws/src")))
@@ -653,8 +658,8 @@ mod permit {
         // suppressed.
         let fs = workspace();
         let engine = PolicyEngine::new(CanonPath::new("/ws"));
-        let permit = engine.authorize(&list_call("/ws/src", "**")).unwrap();
-        let guarded = GuardedFs::new(&permit, &fs);
+        let granted = engine.authorize(list_call("/ws/src", "**")).unwrap();
+        let guarded = GuardedFs::new(granted.permit(), &fs);
 
         let denied = guarded
             .list(&ScanRequest::new(CanonPath::new("/ws")))
@@ -676,8 +681,8 @@ mod permit {
         fs.file("/etc/passwd", "root:x:0:0");
         fs.symlink("/ws/src/innocent.rs", "/etc/passwd");
         let engine = PolicyEngine::new(CanonPath::new("/ws"));
-        let permit = engine.authorize(&list_call("/ws/src", "**")).unwrap();
-        let guarded = GuardedFs::new(&permit, &fs);
+        let granted = engine.authorize(list_call("/ws/src", "**")).unwrap();
+        let guarded = GuardedFs::new(granted.permit(), &fs);
 
         let denied = guarded
             .list(&ScanRequest::new(CanonPath::new("/ws/src")))
@@ -697,8 +702,8 @@ mod permit {
         fs.file("/elsewhere/secret.txt", "not yours");
         fs.symlink("/ws/src/out", "/elsewhere");
         let engine = PolicyEngine::new(CanonPath::new("/ws"));
-        let permit = engine.authorize(&list_call("/ws/src", "**")).unwrap();
-        let guarded = GuardedFs::new(&permit, &fs);
+        let granted = engine.authorize(list_call("/ws/src", "**")).unwrap();
+        let guarded = GuardedFs::new(granted.permit(), &fs);
 
         let scan = guarded
             .list(&ScanRequest::new(CanonPath::new("/ws/src")))
@@ -720,8 +725,8 @@ mod permit {
         // concludes the file it needed does not exist.
         let fs = workspace();
         let engine = PolicyEngine::new(CanonPath::new("/ws"));
-        let permit = engine.authorize(&list_call("/ws/src", "**")).unwrap();
-        let guarded = GuardedFs::new(&permit, &fs);
+        let granted = engine.authorize(list_call("/ws/src", "**")).unwrap();
+        let guarded = GuardedFs::new(granted.permit(), &fs);
 
         let capped = ScanRequest {
             root: CanonPath::new("/ws/src"),
@@ -741,8 +746,8 @@ mod permit {
     fn permit_a_scan_stops_at_max_depth() {
         let fs = workspace();
         let engine = PolicyEngine::new(CanonPath::new("/ws"));
-        let permit = engine.authorize(&list_call("/ws/src", "**")).unwrap();
-        let guarded = GuardedFs::new(&permit, &fs);
+        let granted = engine.authorize(list_call("/ws/src", "**")).unwrap();
+        let guarded = GuardedFs::new(granted.permit(), &fs);
 
         let shallow = ScanRequest {
             root: CanonPath::new("/ws/src"),
@@ -773,8 +778,8 @@ mod permit {
         let fs = workspace();
         fs.file("/ws/src/target/build.rs", "generated");
         let engine = PolicyEngine::new(CanonPath::new("/ws"));
-        let permit = engine.authorize(&list_call("/ws/src", "**")).unwrap();
-        let guarded = GuardedFs::new(&permit, &fs);
+        let granted = engine.authorize(list_call("/ws/src", "**")).unwrap();
+        let guarded = GuardedFs::new(granted.permit(), &fs);
 
         let skipping = ScanRequest {
             root: CanonPath::new("/ws/src"),
@@ -793,7 +798,8 @@ mod permit {
 
         // And the permit does not consult the skip list at all: a permit that
         // never named this subtree still refuses it, skipped or not.
-        let narrow = engine.authorize(&list_call("/ws/src/deep", "**")).unwrap();
+        let narrow_grant = engine.authorize(list_call("/ws/src/deep", "**")).unwrap();
+        let narrow = narrow_grant.permit();
         assert!(matches!(
             narrow.allows_list(&CanonPath::new("/ws/src/target/build.rs")),
             Err(PermitDenied::List { .. })
@@ -806,8 +812,8 @@ mod permit {
         // only the verdicts come back. `grep` never holds the bytes.
         let fs = workspace();
         let engine = PolicyEngine::new(CanonPath::new("/ws"));
-        let permit = engine.authorize(&search_call("/ws/src", "TODO")).unwrap();
-        let guarded = GuardedFs::new(&permit, &fs);
+        let granted = engine.authorize(search_call("/ws/src", "TODO")).unwrap();
+        let guarded = GuardedFs::new(granted.permit(), &fs);
 
         let found = guarded
             .search(
@@ -830,8 +836,8 @@ mod permit {
         // failure produces the wrong next move in both cases.
         let fs = workspace();
         let engine = PolicyEngine::new(CanonPath::new("/ws"));
-        let permit = engine.authorize(&read_call("/ws/src")).unwrap();
-        let guarded = GuardedFs::new(&permit, &fs);
+        let granted = engine.authorize(read_call("/ws/src")).unwrap();
+        let guarded = GuardedFs::new(granted.permit(), &fs);
 
         // Authorised, but there is nothing there.
         assert!(matches!(
@@ -853,8 +859,8 @@ mod permit {
         // had.
         let fs = workspace();
         let engine = PolicyEngine::new(CanonPath::new("/ws"));
-        let permit = engine.authorize(&search_call("/ws/src", "fn")).unwrap();
-        let guarded = GuardedFs::new(&permit, &fs);
+        let granted = engine.authorize(search_call("/ws/src", "fn")).unwrap();
+        let guarded = GuardedFs::new(granted.permit(), &fs);
 
         let starved = ScanRequest {
             root: CanonPath::new("/ws/src"),
@@ -879,8 +885,8 @@ mod permit {
     fn permit_guarded_search_refuses_an_unauthorised_root_without_reading_anything() {
         let fs = workspace();
         let engine = PolicyEngine::new(CanonPath::new("/ws"));
-        let permit = engine.authorize(&search_call("/ws/src", "SECRET")).unwrap();
-        let guarded = GuardedFs::new(&permit, &fs);
+        let granted = engine.authorize(search_call("/ws/src", "SECRET")).unwrap();
+        let guarded = GuardedFs::new(granted.permit(), &fs);
 
         let denied = guarded
             .search(&ScanRequest::new(CanonPath::new("/ws")), &|line: &str| {

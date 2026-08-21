@@ -165,6 +165,52 @@ impl Permit {
     }
 }
 
+/// A call and the grant that answers it, as one value.
+///
+/// [`Invariant W`](PolicyEngine) says a permit belongs to a call. Until this
+/// type existed nothing in the types said so: `authorize` handed back a bare
+/// [`Permit`], and a caller holding the permit from call A alongside call B
+/// had two values it could pass in either combination. Pairing them here
+/// makes the correspondence structural — the same argument
+/// `2026-08-21-attempt-accounting-ledger.md` used to keep a reservation
+/// inside its `GenerationAttempt` rather than beside it.
+///
+/// No `Clone` and no public constructor: an `Authorized` is produced by
+/// [`PolicyEngine::authorize`] and by nothing else.
+#[derive(Debug)]
+pub struct Authorized {
+    call: PreparedCall,
+    permit: Permit,
+}
+
+impl Authorized {
+    /// The call this grant answers.
+    pub fn call(&self) -> &PreparedCall {
+        &self.call
+    }
+
+    /// The grant, borrowed.
+    ///
+    /// A borrow is not a widening: it cannot be cloned, cannot be minted
+    /// from, and cannot outlive the `Authorized` that owns it. What it is
+    /// for is [`GuardedFs`](super::GuardedFs), which binds one permit to one
+    /// `Fs` at construction and rechecks every path against it at use time.
+    pub fn permit(&self) -> &Permit {
+        &self.permit
+    }
+
+    /// Split the pair, immediately before execution.
+    ///
+    /// `pub(crate)` and not `pub`: `turn/tools.rs` is the one place that
+    /// needs the call by value and the permit by reference at the same
+    /// instant, and it re-pairs them in the same expression. Outside this
+    /// crate there is no way to obtain a free-standing `Permit` at all, so
+    /// there is nothing to pair with the wrong call.
+    pub(crate) fn into_parts(self) -> (PreparedCall, Permit) {
+        (self.call, self.permit)
+    }
+}
+
 /// Why policy refused to authorise a call. Names the operation, never just
 /// the fact of a refusal — `ARCHITECTURE.md` §3.2.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -229,9 +275,12 @@ impl PolicyEngine {
     /// M0b's rule is one line long: a read inside the workspace is admitted,
     /// and nothing else is. `ARCHITECTURE.md` §3.4's grammar, modes and judge
     /// are M1's; the shape here is what lets them arrive without moving
-    /// anything — a mode that asks a human still returns a `Permit` or a
-    /// `PolicyDenied` from this method.
-    pub fn authorize(&self, call: &PreparedCall) -> Result<Permit, PolicyDenied> {
+    /// anything — a mode that asks a human still returns an [`Authorized`] or
+    /// a `PolicyDenied` from this method.
+    ///
+    /// Takes the call **by value** and gives it back inside the
+    /// [`Authorized`], so the pairing is the only thing a caller can hold.
+    pub fn authorize(&self, call: PreparedCall) -> Result<Authorized, PolicyDenied> {
         let mut scope = Scope::default();
         for op in &call.ops {
             if let Op::Write { path, .. } = op {
@@ -263,7 +312,8 @@ impl PolicyEngine {
         // that asked to read one file is not thereby allowed to read the
         // repository. `GuardedIo` re-resolves at use time, so a symlink
         // swapped in afterwards is judged against this same narrow list.
-        Ok(self.mint(scope))
+        let permit = self.mint(scope);
+        Ok(Authorized { call, permit })
     }
 
     /// Mint a permit for an explicit scope.

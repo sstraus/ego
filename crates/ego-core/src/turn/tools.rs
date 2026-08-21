@@ -10,8 +10,8 @@ use std::sync::Arc;
 
 use crate::generator::types::ToolDescriptor as GenToolDescriptor;
 use crate::permit::{
-    CanonPath, Fs, GuardedFs, Permit, PolicyDenied, PolicyEngine, PrepareCtx, PreparedCall, Tool,
-    ToolError,
+    Authorized, CanonPath, Fs, GuardedFs, PolicyDenied, PolicyEngine, PrepareCtx, PreparedCall,
+    Tool, ToolError,
 };
 
 /// Everything the loop needs to turn a model's tool call into an effect.
@@ -94,20 +94,25 @@ impl<'a> Tools<'a> {
     /// tell "policy said no" from "the tool broke". Those are different
     /// outcomes now — see `CLI.md` §4.4 and
     /// `docs/decisions/2026-08-21-two-levels-of-ending.md`.
-    pub fn authorize(&self, call: &PreparedCall) -> Result<Permit, PolicyDenied> {
+    pub fn authorize(&self, call: PreparedCall) -> Result<Authorized, PolicyDenied> {
         self.policy.authorize(call)
     }
 
     /// Stage three: run it, under the grant policy issued and through the
     /// facade that checks it.
+    ///
+    /// The one place an [`Authorized`] is split, and it re-pairs the halves in
+    /// the next two lines — the tool receives the call the permit was minted
+    /// for and a seam bound to that same permit, and there is no instant in
+    /// between where a different call could be substituted.
     pub async fn execute(
         &self,
         tool: &'a dyn Tool,
-        call: PreparedCall,
-        permit: &Permit,
+        authorized: Authorized,
     ) -> Result<String, String> {
-        let guarded = GuardedFs::new(permit, self.fs);
-        tool.execute(call, permit, &guarded)
+        let (call, permit) = authorized.into_parts();
+        let guarded = GuardedFs::new(&permit, self.fs);
+        tool.execute(call, &permit, &guarded)
             .await
             .map(|result| result.content)
             .map_err(|err| err.to_string())

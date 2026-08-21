@@ -96,8 +96,12 @@ impl Workspace {
     /// Run `name` through all three stages the turn loop runs it through.
     fn call(&self, name: &str, params: serde_json::Value) -> Result<String, ToolError> {
         let call = self.prepare(name, params)?;
-        let permit = self.policy.authorize(&call).expect("policy admits this");
-        self.execute(name, call, &permit)
+        let granted = self.policy.authorize(call).expect("policy admits this");
+        // `Authorized` cannot be split outside `ego-core` — `into_parts` is
+        // crate-private — so a test that needs the call by value clones it.
+        // The clone grants nothing: the permit is still the one the engine
+        // minted, for this call.
+        self.execute(name, granted.call().clone(), granted.permit())
     }
 
     fn prepare(&self, name: &str, params: serde_json::Value) -> Result<PreparedCall, ToolError> {
@@ -249,7 +253,7 @@ mod read {
             .expect("the file exists, so it resolves");
         let denied = ws
             .policy
-            .authorize(&call)
+            .authorize(call)
             .expect_err("it is outside the workspace");
 
         assert!(matches!(
@@ -271,11 +275,12 @@ mod read {
         let allowed = ws
             .prepare("read", json!({ "path": "src/main.rs" }))
             .unwrap();
-        let permit = ws.policy.authorize(&allowed).unwrap();
+        let granted = ws.policy.authorize(allowed).unwrap();
+        let permit = granted.permit();
         let other = ws.prepare("read", json!({ "path": ".env" })).unwrap();
 
         let err = ws
-            .execute("read", other, &permit)
+            .execute("read", other, permit)
             .expect_err("the permit names src/main.rs and nothing else");
 
         assert!(
@@ -350,7 +355,8 @@ mod glob {
             .unwrap();
 
         assert!(matches!(call.ops.as_slice(), [Op::List { .. }]));
-        let permit = ws.policy.authorize(&call).unwrap();
+        let granted = ws.policy.authorize(call).unwrap();
+        let permit = granted.permit();
         let found = CanonPath::new(ws.root.join("src/main.rs"));
         assert!(permit.allows_list(&found).is_ok());
         assert!(
@@ -418,7 +424,7 @@ mod glob {
             .expect("the directory exists, so it resolves");
         let denied = ws
             .policy
-            .authorize(&call)
+            .authorize(call)
             .expect_err("it is outside the workspace");
 
         assert!(matches!(
@@ -434,13 +440,14 @@ mod glob {
         let allowed = ws
             .prepare("glob", json!({ "pattern": "**", "path": "src/deep" }))
             .unwrap();
-        let permit = ws.policy.authorize(&allowed).unwrap();
+        let granted = ws.policy.authorize(allowed).unwrap();
+        let permit = granted.permit();
         let wider = ws
             .prepare("glob", json!({ "pattern": "**", "path": "src" }))
             .unwrap();
 
         let err = ws
-            .execute("glob", wider, &permit)
+            .execute("glob", wider, permit)
             .expect_err("the permit names src/deep, not src");
 
         assert!(
@@ -531,7 +538,8 @@ mod grep {
             call.ops.as_slice(),
             [Op::Search { query, .. }] if query == "TODO"
         ));
-        let permit = ws.policy.authorize(&call).unwrap();
+        let granted = ws.policy.authorize(call).unwrap();
+        let permit = granted.permit();
         let searched = CanonPath::new(ws.root.join("src/main.rs"));
         assert!(permit.allows_search(&searched).is_ok());
         assert!(
@@ -591,7 +599,7 @@ mod grep {
             .expect("the directory exists, so it resolves");
         let denied = ws
             .policy
-            .authorize(&call)
+            .authorize(call)
             .expect_err("it is outside the workspace");
 
         assert!(matches!(
@@ -607,13 +615,14 @@ mod grep {
         let allowed = ws
             .prepare("grep", json!({ "query": "TODO", "path": "src/deep" }))
             .unwrap();
-        let permit = ws.policy.authorize(&allowed).unwrap();
+        let granted = ws.policy.authorize(allowed).unwrap();
+        let permit = granted.permit();
         let wider = ws
             .prepare("grep", json!({ "query": "TODO", "path": "src" }))
             .unwrap();
 
         let err = ws
-            .execute("grep", wider, &permit)
+            .execute("grep", wider, permit)
             .expect_err("the permit names src/deep, not src");
 
         assert!(
