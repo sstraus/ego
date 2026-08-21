@@ -412,14 +412,26 @@ pub fn project_public(ev: &DomainEvent) -> Option<PublicEvent> {
             ok: *ok,
             text: Some(output.clone()),
         }),
-        EventKind::PermissionRequested { description } => Some(PublicEvent::ItemStarted {
+        // `name` carries the tool, as it does for `ToolCallStarted`. It used
+        // to be `None` because the internal event had no tool to give, not
+        // because a permission item has no name.
+        //
+        // `escalation` is rendered rather than projected as fields: the op
+        // and the path are structured *in the log*, where the audit reads
+        // them, and `PublicEvent` is a compatibility-governed schema that
+        // gains no permission vocabulary for a consumer that has not asked.
+        EventKind::PermissionRequested { tool, escalation } => Some(PublicEvent::ItemStarted {
             turn,
             item: item?,
             kind: ItemKind::Permission,
-            name: None,
-            text: Some(description.clone()),
+            name: Some(tool.clone()),
+            text: Some(escalation.to_string()),
         }),
-        EventKind::PermissionDecided { allowed } => Some(PublicEvent::ItemCompleted {
+        // `by` is likewise not projected. Which rule or which layer let a
+        // call through is exactly the internal detail `PublicEvent` filters:
+        // it names config layers and rule IDs, and the public schema
+        // describes what the agent did, not how this build is configured.
+        EventKind::PermissionDecided { allowed, .. } => Some(PublicEvent::ItemCompleted {
             turn,
             item: item?,
             kind: ItemKind::Permission,

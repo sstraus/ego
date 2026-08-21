@@ -413,13 +413,18 @@ impl SessionState {
                     item.ok = Some(*ok);
                 }
             }
-            EventKind::PermissionRequested { description } => {
+            EventKind::PermissionRequested { escalation, .. } => {
                 self.permissions.push(PermissionEvent::Requested {
                     item: ev.env.item,
-                    description: description.clone(),
+                    description: escalation.to_string(),
                 });
             }
-            EventKind::PermissionDecided { allowed } => {
+            // `by` is not reduced. State answers "what is this session's
+            // shape now"; who authorised a call is a fact about one decision,
+            // it is already in the log verbatim, and nothing reads
+            // `permissions` to ask. Keeping it here would put an `Authority`
+            // inside the snapshot for no consumer.
+            EventKind::PermissionDecided { allowed, .. } => {
                 self.permissions.push(PermissionEvent::Decided {
                     item: ev.env.item,
                     allowed: *allowed,

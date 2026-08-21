@@ -46,6 +46,7 @@ use ego_core::generator::capabilities::{
     CacheRetention, CancelSemantics, ModelCapabilities, ReasoningCarryover, ReasoningEffortSupport,
     Transport,
 };
+use ego_core::permit::{Authority, CanonPath, Escalation, OpName};
 use ego_core::state::{SessionState, Usage};
 
 // Wrapped in a module named `acp_golden` so `cargo test -p ego-acp
@@ -175,14 +176,21 @@ mod acp_golden {
                 turn1,
                 Some(item_perm_1),
                 EventKind::PermissionRequested {
-                    description: "write to /etc".to_string(),
+                    tool: "edit".to_string(),
+                    escalation: Escalation::NoRuleCovers {
+                        op: OpName::Write,
+                        path: CanonPath::new("/etc/hosts"),
+                    },
                 },
             ),
             ev(
                 seq.next(),
                 turn1,
                 Some(item_perm_1),
-                EventKind::PermissionDecided { allowed: false },
+                EventKind::PermissionDecided {
+                    allowed: false,
+                    by: Some(Authority::Boundary),
+                },
             ),
             ev(
                 seq.next(),
@@ -326,9 +334,16 @@ mod acp_golden {
                 output: String::new(),
             },
             EventKind::PermissionRequested {
-                description: String::new(),
+                tool: String::new(),
+                escalation: Escalation::NoRuleCovers {
+                    op: OpName::Read,
+                    path: CanonPath::new(""),
+                },
             },
-            EventKind::PermissionDecided { allowed: true },
+            EventKind::PermissionDecided {
+                allowed: true,
+                by: None,
+            },
             EventKind::UsageUpdated {
                 usage: tokens(1, 1),
                 cost_delta: priced("0.000018"),

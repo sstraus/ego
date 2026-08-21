@@ -11,7 +11,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ego_core::budget::{BudgetGate, Metering, PricingQuote, ResolvedRates, SettlementSource};
-use ego_core::config::{Mode, Ruleset, SystemPrompt};
+use ego_core::config::{Mode, PermCfg, Ruleset, Source, SystemPrompt};
 use ego_core::cost::{
     Amount, CostAttribution, CostDelta, CurrencyCode, MeteringRevision, Money, PricingRevision,
     ProviderCostRevision, RateSource, UnknownCost,
@@ -29,9 +29,10 @@ use ego_core::generator::port::{AiEvent, Generator};
 use ego_core::generator::types::{
     ContentBlock, GenRequest, Role, StopReason, ThinkingLevel, ToolDescriptor,
 };
+use ego_core::permit::rule::Rule;
 use ego_core::permit::{
-    CanonPath, Fs, GuardedIo, Op, PolicyEngine, PrepareCtx, PreparedCall, ToolError, ToolResult,
-    Typed, TypedTool,
+    Authority, CanonPath, Fs, GuardedIo, Op, PolicyEngine, PrepareCtx, PreparedCall, ToolError,
+    ToolResult, Typed, TypedTool,
 };
 use ego_core::public::PublicEvent;
 use ego_core::run::RunTermination;
@@ -311,6 +312,29 @@ mod turn {
         /// is settled and only a write has nobody to answer for it.
         fn with_write_tool(mut self) -> Self {
             self.registry = vec![std::sync::Arc::new(Typed(FakeWriteTool))];
+            self
+        }
+
+        /// Rules an operator wrote, so a call can be settled at §6 step 3 —
+        /// by a rule with an ID and a layer — rather than at step 5 by the
+        /// mode. `Project` because that is the layer an operator edits.
+        fn with_rules(mut self, allow: &[&str], deny: &[&str]) -> Self {
+            let load = |raws: &[&str]| {
+                raws.iter()
+                    .map(|raw| Rule::load(raw).expect("a rule this build enforces"))
+                    .collect()
+            };
+            self.policy = PolicyEngine::new(
+                CanonPath::new("/ws"),
+                Mode::Default,
+                Ruleset::from_layer(
+                    PermCfg {
+                        allow: load(allow),
+                        deny: load(deny),
+                    },
+                    Source::Project,
+                ),
+            );
             self
         }
     }
@@ -827,6 +851,181 @@ mod turn {
             !call.text.contains("root:x"),
             "the file must not have been read at all: {}",
             call.text
+        );
+    }
+
+    /// Everything the log recorded about permissions, in order.
+    fn permission_events(fx: &Fixture) -> Vec<EventKind> {
+        fx.store
+            .events()
+            .into_iter()
+            .map(|ev| ev.kind)
+            .filter(|kind| {
+                matches!(
+                    kind,
+                    EventKind::PermissionRequested { .. } | EventKind::PermissionDecided { .. }
+                )
+            })
+            .collect()
+    }
+
+    fn reading(path: &str) -> Vec<Vec<AiEvent>> {
+        vec![
+            vec![
+                AiEvent::ToolCall {
+                    call_id: "call_1".to_string(),
+                    name: "read".to_string(),
+                    args: format!(r#"{{"path":"{path}"}}"#),
+                },
+                AiEvent::Stop(StopReason::ToolUse),
+            ],
+            vec![AiEvent::Stop(StopReason::Stop)],
+        ]
+    }
+
+    /// §7: *every decision is appended, asked or not.*
+    ///
+    /// This is the case the audit event exists for. Nobody was asked, nothing
+    /// stopped, the file was read — and the log still says which rule, in
+    /// which layer, let it happen. Before §7 the only trace was a successful
+    /// `ToolCallCompleted`, which records that a read happened and not that
+    /// anybody authorised it.
+    #[test]
+    fn a_call_the_rules_allow_records_the_rule_that_allowed_it() {
+        let fx = Fixture::new(reading("/ws/notes.md"))
+            .with_read_tool()
+            .with_rules(&["read(**)"], &[]);
+        fx.fs.file("/ws/notes.md", "hello");
+
+        let (reason, _, _) = run(&fx, SessionState::default(), "read the notes");
+        assert_eq!(reason, ExitReason::Completed, "the read was allowed");
+
+        let recorded = permission_events(&fx);
+        let [EventKind::PermissionDecided { allowed, by }] = recorded.as_slice() else {
+            panic!("one decision, and no question: {recorded:?}");
+        };
+        assert!(allowed);
+        let Some(Authority::Rules { rules }) = by else {
+            panic!("a rule settled it at step 3, not the mode at step 5: {by:?}");
+        };
+        let [rule] = rules.as_slice() else {
+            panic!("one op, so one rule: {rules:?}");
+        };
+        assert_eq!(rule.from, Source::Project, "the layer an operator can edit");
+        assert!(
+            rule.also.is_empty(),
+            "one layer wrote it, so there is no other copy to mention"
+        );
+    }
+
+    /// The same event, from the other end of §6: no rule matched, so the mode
+    /// answered at step 5. `by` says so, and it names the mode rather than
+    /// inventing a rule ID for a decision no rule made.
+    #[test]
+    fn a_call_only_the_mode_allows_names_the_mode_and_not_a_rule() {
+        let fx = Fixture::new(reading("/ws/notes.md")).with_read_tool();
+        fx.fs.file("/ws/notes.md", "hello");
+
+        run(&fx, SessionState::default(), "read the notes");
+
+        let recorded = permission_events(&fx);
+        let [EventKind::PermissionDecided { allowed, by }] = recorded.as_slice() else {
+            panic!("one decision, and no question: {recorded:?}");
+        };
+        assert!(allowed);
+        assert_eq!(
+            by.as_ref(),
+            Some(&Authority::Mode {
+                mode: Mode::Default
+            })
+        );
+    }
+
+    /// A refusal at §6 step 0. The boundary is nobody's rule — no `--allow`
+    /// widens it and no layer carries it — so the authority has no ID to
+    /// record, and recording one would send an operator looking for a line of
+    /// config that does not exist.
+    #[test]
+    fn a_refusal_at_the_boundary_records_an_authority_with_no_rule_to_revoke() {
+        let fx = Fixture::new(reading("/etc/passwd")).with_read_tool();
+        fx.fs.file("/etc/passwd", "root:x:0:0");
+
+        let (reason, _, _) = run(&fx, SessionState::default(), "read /etc/passwd");
+        assert_eq!(reason, ExitReason::PermissionRequired);
+
+        let recorded = permission_events(&fx);
+        let [EventKind::PermissionDecided { allowed, by }] = recorded.as_slice() else {
+            panic!("one decision, and no question: {recorded:?}");
+        };
+        assert!(!allowed);
+        assert_eq!(by.as_ref(), Some(&Authority::Boundary));
+    }
+
+    /// §7 gives `PermissionRequested` exactly one producer: `Resolution::Ask`
+    /// — a question this run raised and nobody here could answer.
+    ///
+    /// So it is not the other half of a pair. The three tests above each
+    /// append a decision and no request, and this one appends a request and
+    /// no decision, because the run ended without one. Reading the two events
+    /// as an open/close bracket would make every one of the four look broken.
+    #[test]
+    fn a_question_nobody_can_answer_is_recorded_as_a_question_and_not_a_decision() {
+        let fx = Fixture::new(vec![
+            vec![
+                AiEvent::ToolCall {
+                    call_id: "call_1".to_string(),
+                    name: "fake_write".to_string(),
+                    args: r#"{"path":"/ws/out.txt","contents":"x"}"#.to_string(),
+                },
+                AiEvent::Stop(StopReason::ToolUse),
+            ],
+            vec![AiEvent::Stop(StopReason::Stop)],
+        ])
+        .with_write_tool();
+
+        let (reason, _, _) = run(&fx, SessionState::default(), "write it");
+        assert_eq!(reason, ExitReason::PermissionRequired);
+
+        let recorded = permission_events(&fx);
+        let [EventKind::PermissionRequested { tool, escalation }] = recorded.as_slice() else {
+            panic!("one question, and no decision: {recorded:?}");
+        };
+        assert_eq!(tool, "fake_write");
+        assert_eq!(
+            escalation.to_string(),
+            "default mode does not approve write /ws/out.txt on its own",
+            "the escalation names the step that asked and the op it asked about"
+        );
+    }
+
+    /// The permission event gets an item of its own, and the tool call keeps
+    /// its own. One id per item is what lets a consumer say which lifecycle
+    /// it is watching; the parent link is what still ties the two together.
+    #[test]
+    fn a_permission_event_is_its_own_item_and_names_the_call_as_its_cause() {
+        let fx = Fixture::new(reading("/ws/notes.md")).with_read_tool();
+        fx.fs.file("/ws/notes.md", "hello");
+
+        run(&fx, SessionState::default(), "read the notes");
+
+        let log = fx.store.events();
+        let started = log
+            .iter()
+            .find(|ev| matches!(ev.kind, EventKind::ToolCallStarted { .. }))
+            .expect("the call was logged");
+        let decided = log
+            .iter()
+            .find(|ev| matches!(ev.kind, EventKind::PermissionDecided { .. }))
+            .expect("the decision was logged");
+
+        assert_ne!(
+            decided.env.item, started.env.item,
+            "a permission is not the tool item wearing a second kind"
+        );
+        assert_eq!(
+            decided.env.parent,
+            Some(started.env.id),
+            "the decision is caused by the call it authorised"
         );
     }
 

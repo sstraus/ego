@@ -14,6 +14,7 @@ use ego_core::cost::{
 use ego_core::event::domain::{DomainEvent, Envelope, EventKind, ExitReason, OccupancyProvenance};
 use ego_core::event::id::{EventId, ItemId, Producer, Seq, SessionId, TurnId};
 use ego_core::event::time::Timestamp;
+use ego_core::permit::{Authority, CanonPath, Escalation, OpName};
 use ego_core::public::{
     InstructionDescriptor, InstructionSource, ItemKind, PUBLIC_EVENT_VERSION, PublicEvent,
     project_public,
@@ -176,14 +177,21 @@ mod public_golden {
                 turn1,
                 Some(item_perm_1),
                 EventKind::PermissionRequested {
-                    description: "write to /etc".to_string(),
+                    tool: "edit".to_string(),
+                    escalation: Escalation::NoRuleCovers {
+                        op: OpName::Write,
+                        path: CanonPath::new("/etc/hosts"),
+                    },
                 },
             ),
             ev(
                 seq.next(),
                 turn1,
                 Some(item_perm_1),
-                EventKind::PermissionDecided { allowed: false },
+                EventKind::PermissionDecided {
+                    allowed: false,
+                    by: Some(Authority::Boundary),
+                },
             ),
             ev(
                 seq.next(),

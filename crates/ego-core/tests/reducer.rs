@@ -3,6 +3,7 @@
 //!
 //! See `ARCHITECTURE.md` §1 and `plans/m0a-contracts.md` Step 2.
 
+use ego_core::config::Mode;
 use ego_core::cost::{
     Amount, CostAttribution, CostDelta, CumulativeCost, CurrencyCode, FxQuote, Money,
     PricingRevision,
@@ -13,6 +14,7 @@ use ego_core::event::id::{EventId, ItemId, Producer, Seq, SessionId, TurnId};
 use ego_core::event::time::Timestamp;
 use ego_core::generator::attempt::{AttemptRef, DeliveryCertainty, Outcome, UsageReport};
 use ego_core::generator::types::StopReason;
+use ego_core::permit::{Authority, CanonPath, Escalation, OpName};
 use ego_core::state::{PermissionEvent, RefusalReason, SessionState, SubagentEvent, Usage};
 
 // Wrapped in a module named `reducer` so `cargo test -p ego-core reducer`
@@ -146,12 +148,19 @@ mod reducer {
         push!(
             Some(tool_item),
             EventKind::PermissionRequested {
-                description: "read workspace".to_string()
+                tool: "read".to_string(),
+                escalation: Escalation::NoRuleCovers {
+                    op: OpName::Read,
+                    path: CanonPath::new("/ws"),
+                },
             }
         );
         push!(
             Some(tool_item),
-            EventKind::PermissionDecided { allowed: true }
+            EventKind::PermissionDecided {
+                allowed: true,
+                by: Some(Authority::Mode { mode: Mode::Edits }),
+            }
         );
         push!(
             None,
@@ -443,12 +452,19 @@ mod reducer {
             (
                 "permission_requested",
                 EventKind::PermissionRequested {
-                    description: String::new(),
+                    tool: String::new(),
+                    escalation: Escalation::NoRuleCovers {
+                        op: OpName::Read,
+                        path: CanonPath::new(""),
+                    },
                 },
             ),
             (
                 "permission_decided",
-                EventKind::PermissionDecided { allowed: false },
+                EventKind::PermissionDecided {
+                    allowed: false,
+                    by: None,
+                },
             ),
             (
                 "usage_updated",
@@ -821,7 +837,11 @@ mod reducer {
             Some(item),
             None,
             EventKind::PermissionRequested {
-                description: "write file".to_string(),
+                tool: "edit".to_string(),
+                escalation: Escalation::NoRuleCovers {
+                    op: OpName::Write,
+                    path: CanonPath::new("/ws/a.txt"),
+                },
             },
         ));
         state.apply(&ev(
@@ -829,15 +849,22 @@ mod reducer {
             turn,
             Some(item),
             None,
-            EventKind::PermissionDecided { allowed: true },
+            EventKind::PermissionDecided {
+                allowed: true,
+                by: Some(Authority::Mode { mode: Mode::Edits }),
+            },
         ));
 
         assert_eq!(
             state.permissions,
             vec![
+                // The escalation, rendered. The reducer keeps a sentence
+                // because nothing reads `permissions` for structure; the
+                // structured fields stay in the log, which is where the audit
+                // reads them.
                 PermissionEvent::Requested {
                     item: Some(item),
-                    description: "write file".to_string()
+                    description: "no rule covers write /ws/a.txt".to_string()
                 },
                 PermissionEvent::Decided {
                     item: Some(item),

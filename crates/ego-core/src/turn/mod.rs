@@ -31,7 +31,7 @@ use crate::generator::capabilities::ModelCapabilities;
 use crate::generator::history::conversation_from;
 use crate::generator::port::{AiEvent, Generator};
 use crate::generator::types::{Conversation, GenRequest, Message, Role, StopReason, ThinkingLevel};
-use crate::permit::{Classification, Pending, PolicyDenied, Resolution};
+use crate::permit::{Authority, Classification, Pending, PolicyDenied, Resolution};
 use crate::public::PublicEvent;
 use crate::sink::EventSink;
 use crate::state::{SessionState, Usage};
@@ -400,7 +400,7 @@ impl<'a> TurnLoop<'a> {
             }
 
             for call in pending {
-                let (ok, output) = match self.run_tool(&call).await {
+                let (ok, output) = match self.run_tool(turn, &call).await? {
                     ToolOutcome::Answered { ok, output } => (ok, output),
                     // `CLI.md` §4.4: a run with nobody to ask does not answer
                     // a permission question on the model's behalf. The denial
@@ -928,15 +928,29 @@ impl<'a> TurnLoop<'a> {
     /// company. A denial is a question — "may this happen?" — and answering it
     /// on the model's behalf is the thing `CLI.md` §4.4 forbids in a run with
     /// nobody to ask. It comes back typed, and the caller decides.
-    async fn run_tool(&self, call: &PendingCall) -> ToolOutcome {
+    async fn run_tool(
+        &mut self,
+        turn: TurnId,
+        call: &PendingCall,
+    ) -> Result<ToolOutcome, StoreError> {
         let answered = |ok, output| ToolOutcome::Answered { ok, output };
         let (tool, prepared) = match self.tools.prepare(&call.name, &call.args) {
             Ok(prepared) => prepared,
-            Err(refusal) => return answered(false, refusal),
+            // Not a permission event. `prepare` refuses calls that never
+            // reached the engine — an unknown tool, unparseable arguments —
+            // and appending a decision here would record a fact the policy
+            // never established.
+            Err(refusal) => return Ok(answered(false, refusal)),
         };
         let authorized = match self.tools.authorize(prepared) {
-            Classification::Settled(Ok(authorized)) => authorized,
-            Classification::Settled(Err(denial)) => return ToolOutcome::Refused { denial },
+            Classification::Settled(Ok(authorized)) => {
+                self.decided(turn, call, true, authorized.by().clone())?;
+                authorized
+            }
+            Classification::Settled(Err(denial)) => {
+                self.decided(turn, call, false, denial.authority())?;
+                return Ok(ToolOutcome::Refused { denial });
+            }
             // The rules did not settle it, so ask the next party in §6's
             // order. That is the mode at step 5 today; the judge and the human
             // are steps 6 and 7 and have no producer yet, so a question the
@@ -946,15 +960,74 @@ impl<'a> TurnLoop<'a> {
             // standing in for a feature — the feature adds parties to a
             // consultation that already happens.
             Classification::Ask(pending) => match self.tools.settle(pending).await {
-                Resolution::Settled(Ok(authorized)) => authorized,
-                Resolution::Settled(Err(denial)) => return ToolOutcome::Refused { denial },
-                Resolution::Ask(pending) => return ToolOutcome::Unanswerable { pending },
+                Resolution::Settled(Ok(authorized)) => {
+                    self.decided(turn, call, true, authorized.by().clone())?;
+                    authorized
+                }
+                Resolution::Settled(Err(denial)) => {
+                    self.decided(turn, call, false, denial.authority())?;
+                    return Ok(ToolOutcome::Refused { denial });
+                }
+                Resolution::Ask(pending) => {
+                    let kind = EventKind::PermissionRequested {
+                        tool: pending.request().tool().to_string(),
+                        escalation: pending.request().why().clone(),
+                    };
+                    self.permission(turn, call, kind)?;
+                    return Ok(ToolOutcome::Unanswerable { pending });
+                }
             },
         };
-        match self.tools.execute(tool, authorized).await {
+        Ok(match self.tools.execute(tool, authorized).await {
             Ok(output) => answered(true, output),
             Err(failure) => answered(false, failure),
-        }
+        })
+    }
+
+    /// §7: *every decision is appended, asked or not.*
+    ///
+    /// So this fires for a call the rules waved through as well as for one
+    /// they refused, and the asymmetry with the single `PermissionRequested`
+    /// above is the point rather than an oversight. §7 gives that event one
+    /// producer — `Resolution::Ask`, a question this run genuinely raised and
+    /// could not answer — while the question an audit asks of the decisions
+    /// is what the run did **without** being asked, which only the silent ones
+    /// answer.
+    fn decided(
+        &mut self,
+        turn: TurnId,
+        call: &PendingCall,
+        allowed: bool,
+        by: Authority,
+    ) -> Result<(), StoreError> {
+        self.permission(
+            turn,
+            call,
+            EventKind::PermissionDecided {
+                allowed,
+                by: Some(by),
+            },
+        )
+    }
+
+    /// One permission event, on an item of its own and caused by the call's
+    /// `ToolCallStarted`.
+    ///
+    /// **Its own item, not the call's.** An item has one kind, and the tool
+    /// call already owns `call.item` as `ItemKind::Tool`; projecting a
+    /// permission onto it would put two kinds on one id and leave a consumer
+    /// unable to say which lifecycle it was watching. The parent link is what
+    /// ties the two together, and it is the tie that holds regardless of what
+    /// any projection chooses to do with the permission item.
+    fn permission(
+        &mut self,
+        turn: TurnId,
+        call: &PendingCall,
+        kind: EventKind,
+    ) -> Result<(), StoreError> {
+        self.journal
+            .append(turn, Some(ItemId::new()), Some(call.started), kind)?;
+        Ok(())
     }
 }
 
