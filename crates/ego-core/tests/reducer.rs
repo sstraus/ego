@@ -4,7 +4,8 @@
 //! See `ARCHITECTURE.md` §1 and `plans/m0a-contracts.md` Step 2.
 
 use ego_core::cost::{
-    Amount, CostDelta, CumulativeCost, CurrencyCode, FxQuote, Money, PricingRevision,
+    Amount, CostAttribution, CostDelta, CumulativeCost, CurrencyCode, FxQuote, Money,
+    PricingRevision,
 };
 use ego_core::event::domain::{DomainEvent, Envelope, EventKind, ExitReason, OccupancyProvenance};
 use ego_core::event::id::{AttemptId, GenerationId};
@@ -63,7 +64,9 @@ mod reducer {
     fn priced(decimal: &str) -> CostDelta {
         CostDelta::Known {
             amount: usd(decimal),
-            pricing_revision: PricingRevision("test-2026-08".to_string()),
+            attribution: CostAttribution::Table {
+                revision: PricingRevision("test-2026-08".to_string()),
+            },
             fx: None,
         }
     }
@@ -1548,7 +1551,9 @@ mod reducer {
     fn eur_priced(decimal: &str) -> CostDelta {
         CostDelta::Known {
             amount: money(decimal, "EUR"),
-            pricing_revision: PricingRevision("test-2026-08".to_string()),
+            attribution: CostAttribution::Table {
+                revision: PricingRevision("test-2026-08".to_string()),
+            },
             fx: None,
         }
     }
@@ -1558,7 +1563,9 @@ mod reducer {
     fn usd_priced_with_eur_quote(decimal: &str, rate: &str) -> CostDelta {
         CostDelta::Known {
             amount: money(decimal, "USD"),
-            pricing_revision: PricingRevision("test-2026-08".to_string()),
+            attribution: CostAttribution::Table {
+                revision: PricingRevision("test-2026-08".to_string()),
+            },
             fx: Some(FxQuote {
                 from: CurrencyCode::new("USD").expect("USD is a valid code"),
                 to: CurrencyCode::new("EUR").expect("EUR is a valid code"),

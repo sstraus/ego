@@ -29,7 +29,7 @@ use ego_tools::instructions::OsInstructionIo;
 use ego_tools::tools::builtins;
 use serde_json::Value;
 
-use crate::budget::{self, Budget};
+use crate::budget;
 use crate::cli::{Args, Output, SessionChoice, UsageError};
 use crate::output::{JsonlSink, Report, Stdout, TextSink, note};
 use crate::session::{self, Opened};
@@ -277,10 +277,19 @@ async fn execute(args: Args, out: &Stdout, cancel: CancelToken) -> Result<Ended,
     debug_assert_eq!(effective.posture, Posture::Bare);
 
     let currency = CurrencyCode::new(SETTLEMENT).expect("a constant this file controls");
-    let budget = match args.budget.as_deref() {
-        Some(spec) => Some(budget::parse(spec, currency).map_err(usage)?),
-        None => None,
-    };
+    // §4 requires the clamp be stated, not silent: a `--budget 20$` reduced to
+    // an administrator's $5 must not read as binding at $20. The money half
+    // travels into the gate, which publishes it on every `MeteringSelected`;
+    // the token half has no such carrier, so it is said here.
+    if let Some(asked) = effective.clamped.tokens {
+        note(&format!(
+            "the token ceiling of {asked} was reduced to {} by a system ceiling",
+            effective
+                .ceilings
+                .tokens
+                .expect("a clamp leaves a ceiling in force")
+        ));
+    }
 
     let compiled = match args.schema.as_deref() {
         Some(spec) => {
@@ -311,20 +320,18 @@ async fn execute(args: Args, out: &Stdout, cancel: CancelToken) -> Result<Ended,
     let http = model::transport(args.offline).map_err(|err| RunTermination::Provider {
         message: err.to_string(),
     })?;
-    let hosted = facts::supplied().map_err(usage)?;
-    let resolved = model::resolve(&slug, hosted, currency, &http)
-        .await
-        .map_err(|err| {
-            if model::is_provider_failure(&err) {
-                RunTermination::Provider {
-                    message: err.to_string(),
-                }
-            } else {
-                RunTermination::UsageError {
-                    message: err.to_string(),
-                }
+    let hosted = facts::supplied(&effective.ceilings).map_err(usage)?;
+    let resolved = model::resolve(&slug, hosted, &http).await.map_err(|err| {
+        if model::is_provider_failure(&err) {
+            RunTermination::Provider {
+                message: err.to_string(),
             }
-        })?;
+        } else {
+            RunTermination::UsageError {
+                message: err.to_string(),
+            }
+        }
+    })?;
 
     let session_id = session::id_for(&args.session, &root).map_err(usage)?;
     let store_root = match args.session {
@@ -373,7 +380,7 @@ async fn execute(args: Args, out: &Stdout, cancel: CancelToken) -> Result<Ended,
     let generator = ego_ai::generator::WireGenerator::new(resolved.row.clone(), Arc::clone(&http));
     let policy = PolicyEngine::new(CanonPath::new(&root));
     let fs = OsFs;
-    let mut gate = budget::gate(budget.as_ref(), currency);
+    let mut gate = budget::gate(&effective.ceilings, effective.clamped.money, currency);
 
     let config = TurnConfig {
         model: resolved.model.clone(),
@@ -395,7 +402,9 @@ async fn execute(args: Args, out: &Stdout, cancel: CancelToken) -> Result<Ended,
         Model {
             generator: &generator,
             gate: &mut gate,
-            quote: resolved.pricing.clone(),
+            metering: resolved.metering.clone(),
+            rates: resolved.rates.clone(),
+            token_ceiling: effective.ceilings.tokens,
             caps: resolved.capabilities.clone(),
             config,
         },
@@ -403,7 +412,6 @@ async fn execute(args: Args, out: &Stdout, cancel: CancelToken) -> Result<Ended,
     );
 
     let turns = Turns {
-        budget: budget.as_ref(),
         schema: compiled.as_ref(),
         retries: args.schema_retries,
         max_turns: args.max_turns,
@@ -430,7 +438,6 @@ async fn execute(args: Args, out: &Stdout, cancel: CancelToken) -> Result<Ended,
 /// completed turns and is not honestly a cause of the preceding one, and a
 /// token budget cannot interrupt a generation that is already paid for.
 struct Turns<'a> {
-    budget: Option<&'a Budget>,
     schema: Option<&'a schema::Schema>,
     retries: u32,
     max_turns: Option<u32>,
@@ -453,13 +460,6 @@ impl Turns<'_> {
             if self.max_turns.is_some_and(|max| taken >= max) {
                 return (RunTermination::MaxTurns, self.answer(loop_.state()));
             }
-            // Checked before the turn starts, which is what makes §4.5's
-            // "budget beats schema-retry: exit 5" true: a re-prompt that would
-            // cross the ceiling never runs.
-            if budget::ceiling_reached(self.budget, loop_.state()) {
-                return (RunTermination::BudgetExceeded, self.answer(loop_.state()));
-            }
-
             let outcome = match self.one(loop_, &prompt, cancel).await {
                 Ok(outcome) => outcome,
                 Err(termination) => return (termination, self.answer(loop_.state())),

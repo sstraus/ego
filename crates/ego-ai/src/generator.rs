@@ -69,8 +69,14 @@ impl Generator for WireGenerator {
         };
 
         let http = Arc::clone(&self.http);
+        // The row's own declaration of where it states a charge, carried to
+        // the decoder rather than looked up there: `openai_completions` is
+        // spoken by providers that report a cost and by providers that do
+        // not, and a `match` on the provider id inside a wire format is the
+        // special case the metering ADR §8 forbids.
+        let cost = self.row.cost.clone();
         let inner = stream::once(async move { http.execute(request).await })
-            .flat_map(openai_completions::decode)
+            .flat_map(move |response| openai_completions::decode(response, cost.clone()))
             .boxed();
         AttemptStream::new(attempt, inner)
     }

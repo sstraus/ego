@@ -12,7 +12,7 @@
 //! `BudgetGate::reserve` — there is no other door, and that is the point.
 
 use ego_ai::SkeletonGenerator;
-use ego_core::budget::{BudgetGate, PricingQuote};
+use ego_core::budget::{BudgetGate, Metering, PricingQuote, SettlementSource};
 use ego_core::cost::{Amount, CurrencyCode, Money, PricingRevision};
 use ego_core::event::id::GenerationId;
 use ego_core::generator::attempt::{DeliveryCertainty, GenerationAttempt, UsageReport};
@@ -41,6 +41,13 @@ fn quote() -> PricingQuote {
         cache_read: Some("0.0000003".parse().unwrap()),
         cache_write: Some("0.00000375".parse().unwrap()),
         output: Some("0.000015".parse().unwrap()),
+    }
+}
+
+/// The fixture quote as a metering: a table that both bounds and settles.
+fn metered() -> Metering {
+    Metering::Currency {
+        settlement: SettlementSource::Quote,
     }
 }
 
@@ -88,13 +95,14 @@ fn request() -> GenRequest {
 fn the_skeleton_generator_drives_an_attempt_to_a_settlement() {
     let mut gate = BudgetGate::new(usd("10"));
     let reservation = gate
-        .reserve(&quote(), &request(), &caps())
+        .reserve(&metered(), Some(&quote()), &request(), &caps())
         .expect("a $10 budget admits an ordinary request");
-    let bound = *reservation.upper_bound();
+    let bound = *reservation.upper_bound().expect("a bounded reservation");
     let attempt = GenerationAttempt::new(
         GenerationId::new(),
         reservation,
-        &quote(),
+        &metered(),
+        Some(&quote()),
         &request(),
         &caps(),
     )
@@ -111,7 +119,7 @@ fn the_skeleton_generator_drives_an_attempt_to_a_settlement() {
     let events: Vec<AiEvent> = futures::executor::block_on(stream.by_ref().collect());
     assert!(events.is_empty(), "the skeleton has no wire format yet");
     assert_eq!(
-        *gate.outstanding(),
+        *gate.outstanding().expect("a limited gate keeps totals"),
         bound,
         "the hold is still held until settlement"
     );
@@ -131,12 +139,16 @@ fn the_skeleton_generator_drives_an_attempt_to_a_settlement() {
     assert!(settled.outcome.retry_is_safe());
 
     assert_eq!(
-        settled.reconciled.charged, bound,
+        settled.reconciled.charged,
+        Some(bound),
         "a provider that reported no usage is charged the pessimistic bound"
     );
     assert!(!settled.reconciled.exact);
     assert!(
-        gate.outstanding().amount.is_zero(),
+        gate.outstanding()
+            .expect("a limited gate keeps totals")
+            .amount
+            .is_zero(),
         "and the hold is released regardless: a silent provider must not \
          strand a gate's budget"
     );

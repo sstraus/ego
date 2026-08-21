@@ -11,8 +11,8 @@
 //! that puts `1.5` above `2`.
 
 use ego_core::cost::{
-    Amount, CostDelta, CumulativeCost, CurrencyCode, FxQuote, MAX_SCALE, Money, MoneyError,
-    PricingRevision, TokenCategory, UnknownCost,
+    Amount, CostAttribution, CostDelta, CumulativeCost, CurrencyCode, FxQuote, MAX_SCALE,
+    MeteringRevision, Money, MoneyError, PricingRevision, TokenCategory, UnknownCost,
 };
 use ego_core::event::time::Timestamp;
 
@@ -40,7 +40,9 @@ mod cost {
     fn known(decimal: &str, code: &str) -> CostDelta {
         CostDelta::Known {
             amount: money(decimal, code),
-            pricing_revision: revision(),
+            attribution: CostAttribution::Table {
+                revision: revision(),
+            },
             fx: None,
         }
     }
@@ -275,13 +277,35 @@ mod cost {
     /// Zero is a price. A local model that costs nothing must report
     /// `Known(0)`, because reporting `Unknown` would poison the session
     /// total for no reason.
+    ///
+    /// And the zero is attributed to the *policy* that produced it, not to a
+    /// price list: there is no table saying "zero per token" here, and
+    /// spelling one would be the confusion
+    /// `docs/decisions/2026-08-21-how-a-model-is-metered.md` §4 exists to
+    /// prevent.
     #[test]
     fn a_free_generation_is_known_zero_not_unknown() {
-        let free = CostDelta::free(currency("USD"), revision());
-        let CostDelta::Known { amount, .. } = &free else {
+        let policy = MeteringRevision("local-unmetered".to_string());
+        let free = CostDelta::free(
+            currency("USD"),
+            CostAttribution::MeteringPolicy {
+                revision: policy.clone(),
+            },
+        );
+        let CostDelta::Known {
+            amount,
+            attribution,
+            ..
+        } = &free
+        else {
             panic!("a free generation must be Known");
         };
         assert!(amount.amount.is_zero());
+        assert_eq!(
+            *attribution,
+            CostAttribution::MeteringPolicy { revision: policy },
+            "a zero has to name the policy that produced it, not a price list"
+        );
 
         let mut total = CumulativeCost::default();
         total.add_delta(&free);
@@ -418,7 +442,9 @@ mod cost {
         total.add_delta(&known("10.00", "USD"));
         total.add_delta(&CostDelta::Known {
             amount: money("10.00", "EUR"),
-            pricing_revision: revision(),
+            attribution: CostAttribution::Table {
+                revision: revision(),
+            },
             fx: Some(eur_to_usd("1.1")),
         });
         assert_eq!(
@@ -438,7 +464,9 @@ mod cost {
         total.add_delta(&known("10.00", "USD"));
         total.add_delta(&CostDelta::Known {
             amount: money("10.00", "EUR"),
-            pricing_revision: revision(),
+            attribution: CostAttribution::Table {
+                revision: revision(),
+            },
             fx: Some(FxQuote {
                 from: currency("EUR"),
                 to: currency("GBP"),
@@ -474,7 +502,9 @@ mod cost {
         let mut total = CumulativeCost::default();
         total.add_delta(&CostDelta::Known {
             amount: huge,
-            pricing_revision: revision(),
+            attribution: CostAttribution::Table {
+                revision: revision(),
+            },
             fx: None,
         });
         total.add_delta(&known("1", "USD"));
@@ -491,7 +521,9 @@ mod cost {
             known("0.001035", "USD"),
             CostDelta::Known {
                 amount: money("10.00", "EUR"),
-                pricing_revision: revision(),
+                attribution: CostAttribution::Table {
+                    revision: revision(),
+                },
                 fx: Some(eur_to_usd("1.1")),
             },
             CostDelta::Unknown(UnknownCost::NoPricingQuote),

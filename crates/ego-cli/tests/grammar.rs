@@ -1,16 +1,23 @@
-//! The pure halves of the command line: what argv means, what a budget spec
-//! means, and where a prompt comes from.
+//! The pure halves of the command line: what argv means, what a resolved
+//! ceiling becomes, and where a prompt comes from.
 //!
 //! These are functions, so they are tested as functions. Everything that needs
 //! a *process* — an exit status, two streams, a signal — is in `run.rs`, and
 //! the split is deliberate: a table of thirty budget spellings does not need
 //! thirty forks of a binary to say what it says.
+//!
+//! The budget *grammar* is no longer here. It moved to `ego-core` with the
+//! type (`crates/ego-core/tests/ceiling.rs`), because `--budget` and a config
+//! file's `budget` key are one parser with two surfaces, and a table of
+//! spellings sitting next to the flag would have said nothing about the key.
 
 use std::io::Result as IoResult;
 
-use ego_cli::budget::{self, Budget};
+use ego_cli::budget;
 use ego_cli::cli::{self, Invocation, Output, SessionChoice, Stdin};
 use ego_cli::prompt::{self, StdinSource};
+use ego_core::budget::Ledger;
+use ego_core::ceiling::Ceilings;
 use ego_core::cost::{Amount, CurrencyCode, Money};
 
 fn argv<const N: usize>(args: [&str; N]) -> Vec<String> {
@@ -150,65 +157,75 @@ fn the_output_mode_defaults_to_text_and_takes_the_three_names() {
 
 // --- budgets ---
 
-/// A bare number is refused rather than guessed. "budget 400" is either forty
-/// cents or four hundred tokens depending on who wrote it, and picking one
-/// silently is how a run costs a hundred times what its author intended.
-#[test]
-fn a_budget_with_no_unit_is_refused_rather_than_guessed() {
-    let refusal = budget::parse("400", usd())
-        .expect_err("no unit")
-        .to_string();
-    assert!(refusal.contains("names no unit"), "{refusal}");
-    assert!(refusal.contains("2.5$"), "the refusal shows both spellings");
-    assert!(refusal.contains("400k"), "the refusal shows both spellings");
+fn usd_money(decimal: &str) -> Money {
+    Money::new(decimal.parse::<Amount>().expect("a valid amount"), usd())
 }
 
+/// A run with only a token ceiling still gets a gate, because the loop cannot
+/// run without one — and the gate is genuinely unlimited, because the ceiling
+/// that run is subject to is checked at the generation boundary instead.
 #[test]
-fn both_spellings_of_money_are_the_same_budget() {
-    let expected = Budget::Money(Money::new(
-        Amount::new(250, 2).expect("2.50 is an amount"),
+fn a_gate_exists_even_when_the_ceiling_is_counted_in_tokens() {
+    let tokens_only = budget::gate(
+        &Ceilings {
+            money: None,
+            tokens: Some(400_000),
+        },
+        None,
         usd(),
-    ));
-    assert_eq!(budget::parse("2.5$", usd()).expect("a budget"), expected);
-    assert_eq!(budget::parse("$2.5", usd()).expect("a budget"), expected);
-    assert_eq!(budget::parse(" 2.50$ ", usd()).expect("a budget"), expected);
-}
+    );
+    let nothing = budget::gate(&Ceilings::default(), None, usd());
 
-#[test]
-fn token_budgets_take_the_suffixes_people_write() {
-    for (spec, tokens) in [
-        ("400k", 400_000),
-        ("400K", 400_000),
-        ("2m", 2_000_000),
-        ("2M", 2_000_000),
-    ] {
-        assert_eq!(
-            budget::parse(spec, usd()).expect("a budget"),
-            Budget::Tokens(tokens),
-            "{spec}"
-        );
-    }
-}
-
-#[test]
-fn a_token_count_that_does_not_fit_is_refused_rather_than_wrapped() {
-    let refusal = budget::parse("99999999999999999999m", usd())
-        .expect_err("it does not fit")
-        .to_string();
-    assert!(
-        refusal.contains("whole number") || refusal.contains("64 bits"),
-        "{refusal}"
+    assert_eq!(*tokens_only.ledger(), Ledger::Unlimited);
+    assert_eq!(*nothing.ledger(), Ledger::Unlimited);
+    assert_eq!(
+        tokens_only.currency(),
+        usd(),
+        "and it still knows what the session settles in"
     );
 }
 
-/// A token budget still gets a gate, because the loop cannot run without one —
-/// and the gate is unbounded, because the ceiling that run is subject to is
-/// checked between turns instead.
+/// A money ceiling becomes a limited ledger, and a clamped one carries the
+/// figure that was asked for. §4 requires the clamp be stated, not silent:
+/// dropping `clamped_from` here would make `--budget 20$` publish as though
+/// it bound at $20 when it binds at $5.
 #[test]
-fn a_gate_exists_even_when_the_budget_is_counted_in_tokens() {
-    let unbounded = budget::gate(Some(&Budget::Tokens(400_000)), usd());
-    let none = budget::gate(None, usd());
-    assert_eq!(unbounded.limit(), none.limit());
+fn a_money_ceiling_becomes_the_ledger_and_a_clamp_is_carried_into_it() {
+    let plain = budget::gate(
+        &Ceilings {
+            money: Some(usd_money("5")),
+            tokens: None,
+        },
+        None,
+        usd(),
+    );
+    assert_eq!(
+        *plain.ledger(),
+        Ledger::Limited {
+            limit: usd_money("5"),
+            clamped_from: None,
+            committed: usd_money("0"),
+            outstanding: usd_money("0"),
+        }
+    );
+
+    let clamped = budget::gate(
+        &Ceilings {
+            money: Some(usd_money("5")),
+            tokens: None,
+        },
+        Some(usd_money("20")),
+        usd(),
+    );
+    assert_eq!(
+        *clamped.ledger(),
+        Ledger::Limited {
+            limit: usd_money("5"),
+            clamped_from: Some(usd_money("20")),
+            committed: usd_money("0"),
+            outstanding: usd_money("0"),
+        }
+    );
 }
 
 // --- the prompt ---

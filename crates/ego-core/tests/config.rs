@@ -3,12 +3,26 @@
 //! See `plans/m0a-contracts.md` Step 12 and
 //! `ARCHITECTURE.md`.
 
+use ego_core::ceiling::{Budget, Ceilings};
 use ego_core::config::{
-    ConfigError, ConfigLayer, Mode, ModelRef, PermCfg, Posture, Source, Sourced, Trust, resolve,
+    ConfigError, ConfigLayer, Mode, ModelRef, PermCfg, Posture, ProfileLayer, Source, Sourced,
+    Trust, resolve,
 };
+use ego_core::cost::{Amount, CurrencyCode, Money};
 
 fn layer(source: Source, value: ConfigLayer) -> Sourced<ConfigLayer> {
     Sourced { source, value }
+}
+
+fn amount(decimal: &str, currency: &str) -> Option<Money> {
+    Some(Money::new(
+        decimal.parse::<Amount>().expect("a valid test amount"),
+        CurrencyCode::new(currency).expect("a valid test code"),
+    ))
+}
+
+fn money(decimal: &str, currency: &str) -> Budget {
+    Budget::Money(amount(decimal, currency).expect("built just above"))
 }
 
 fn model(name: &str) -> Option<ModelRef> {
@@ -182,6 +196,207 @@ fn config_precedence_is_independent_of_slice_order() {
         resolve(&scrambled, Trust::Trusted, None).unwrap().model,
         model("flags")
     );
+}
+
+// --- ceilings (`2026-08-21-a-run-with-no-ceiling.md` §4) ---------------
+
+/// The gap this closes against a published contract. `CLI.md:296-299`
+/// promises an administrator a `budget` key on `/etc/ego/config.toml` and
+/// calls the system layer "the only source of ceilings" — and every layer is
+/// `deny_unknown_fields`, so until the key existed, writing the ceiling
+/// `CLI.md` promises produced `ConfigError::UnknownKey`. The promise could
+/// not be kept by anybody.
+#[test]
+fn config_a_budget_key_is_a_known_key_in_every_layer() {
+    let base = ConfigLayer::parse(Source::System, "budget = \"5$\"\n").expect("a known key");
+    assert_eq!(base.value.budget, Some(money("5", "USD")));
+
+    let profiled = ConfigLayer::parse(Source::System, "[profile.ci]\nbudget = \"400k\"\n")
+        .expect("a known key in a profile too");
+    assert_eq!(
+        profiled.value.profile["ci"].budget,
+        Some(Budget::Tokens(400_000))
+    );
+}
+
+/// The same grammar the flag takes, refused the same way. A spelling the flag
+/// accepts and the config key rejects would be a ceiling an administrator
+/// believes they set.
+#[test]
+fn config_a_budget_that_names_no_unit_is_refused_by_the_layer() {
+    let err = ConfigLayer::parse(Source::System, "budget = \"400\"\n").unwrap_err();
+    let said = err.to_string();
+    assert!(said.contains("names no unit"), "{said}");
+}
+
+/// Ordinary precedence for the ordinary case: a higher layer's ceiling
+/// replaces a lower one's, and raising your own limit is yours to do.
+#[test]
+fn config_a_higher_layer_may_raise_its_own_ceiling() {
+    let layers = [
+        layer(
+            Source::User,
+            ConfigLayer {
+                budget: Some(money("1", "USD")),
+                ..Default::default()
+            },
+        ),
+        layer(
+            Source::Flags,
+            ConfigLayer {
+                budget: Some(money("20", "USD")),
+                ..Default::default()
+            },
+        ),
+    ];
+    let effective = resolve(&layers, Trust::Trusted, None).unwrap();
+    assert_eq!(effective.ceilings.money, amount("20", "USD"));
+    assert!(!effective.clamped.any(), "nobody capped anything");
+}
+
+/// The construction the deny ceiling already uses, one field over: a
+/// `system` ceiling is gathered outside the ordinary merge and re-applied
+/// after, so no higher-precedence layer can raise it. `min` and not "system
+/// wins" — `CLI.md:311` binds everyone to the administrator's *maximum*.
+#[test]
+fn config_a_system_ceiling_cannot_be_raised_by_flags() {
+    let layers = [
+        layer(
+            Source::System,
+            ConfigLayer {
+                budget: Some(money("5", "USD")),
+                ..Default::default()
+            },
+        ),
+        layer(
+            Source::Flags,
+            ConfigLayer {
+                budget: Some(money("20", "USD")),
+                ..Default::default()
+            },
+        ),
+    ];
+    let effective = resolve(&layers, Trust::Trusted, None).unwrap();
+
+    assert_eq!(effective.ceilings.money, amount("5", "USD"));
+    assert_eq!(
+        effective.clamped.money,
+        amount("20", "USD"),
+        "and what was asked for is reported, because §4 requires the clamp be stated"
+    );
+}
+
+/// The two fields clamp independently, which is what stops a user escaping a
+/// money cap by naming a token ceiling instead.
+#[test]
+fn config_naming_a_token_ceiling_does_not_escape_a_system_money_cap() {
+    let layers = [
+        layer(
+            Source::System,
+            ConfigLayer {
+                budget: Some(money("5", "USD")),
+                ..Default::default()
+            },
+        ),
+        layer(
+            Source::Flags,
+            ConfigLayer {
+                budget: Some(Budget::Tokens(10_000_000)),
+                ..Default::default()
+            },
+        ),
+    ];
+    let effective = resolve(&layers, Trust::Trusted, None).unwrap();
+
+    assert_eq!(
+        effective.ceilings.money,
+        amount("5", "USD"),
+        "the cap on the field nobody named is still in force"
+    );
+    assert_eq!(
+        effective.ceilings.tokens,
+        Some(10_000_000),
+        "and the token ceiling the operator did name is untouched, \
+         because no administrator capped it"
+    );
+}
+
+/// And it survives a profile that overrides the layer, the same way the deny
+/// ceiling does: a `[profile.NAME]` that names a larger budget changes what
+/// its own layer contributes, not what the administrator's caps at.
+#[test]
+fn config_a_system_ceiling_survives_a_profile_that_raises_it() {
+    let mut flags = ConfigLayer::default();
+    flags.profile.insert(
+        "ci".to_string(),
+        ProfileLayer {
+            budget: Some(money("50", "USD")),
+            ..Default::default()
+        },
+    );
+    let layers = [
+        layer(
+            Source::System,
+            ConfigLayer {
+                budget: Some(money("5", "USD")),
+                ..Default::default()
+            },
+        ),
+        layer(Source::Flags, flags),
+    ];
+    let effective = resolve(&layers, Trust::Trusted, Some("ci")).unwrap();
+
+    assert_eq!(effective.ceilings.money, amount("5", "USD"));
+    assert_eq!(effective.clamped.money, amount("50", "USD"));
+}
+
+/// A `system` layer's own active profile contributes to the ceiling, so an
+/// administrator can cap a named profile more tightly than the fleet default.
+#[test]
+fn config_a_system_profile_tightens_the_ceiling_it_names() {
+    let mut system = ConfigLayer {
+        budget: Some(money("20", "USD")),
+        ..Default::default()
+    };
+    system.profile.insert(
+        "ci".to_string(),
+        ProfileLayer {
+            budget: Some(money("2", "USD")),
+            ..Default::default()
+        },
+    );
+    let layers = [
+        layer(Source::System, system),
+        layer(
+            Source::Flags,
+            ConfigLayer {
+                budget: Some(money("10", "USD")),
+                ..Default::default()
+            },
+        ),
+    ];
+    let effective = resolve(&layers, Trust::Trusted, Some("ci")).unwrap();
+
+    assert_eq!(effective.ceilings.money, amount("2", "USD"));
+    assert_eq!(effective.clamped.money, amount("10", "USD"));
+}
+
+/// Nothing imposes a ceiling. `CLI.md:296-299` — "ego itself imposes none" —
+/// so a resolution with nobody writing one produces two absences and not two
+/// defaults.
+#[test]
+fn config_no_layer_writing_a_budget_leaves_no_ceiling_at_all() {
+    let layers = [layer(
+        Source::User,
+        ConfigLayer {
+            model: model("anthropic/claude-sonnet-5"),
+            ..Default::default()
+        },
+    )];
+    let effective = resolve(&layers, Trust::Trusted, None).unwrap();
+
+    assert_eq!(effective.ceilings, Ceilings::default());
+    assert!(!effective.clamped.any());
 }
 
 /// The ceiling **survives the merge**. It does not decide anything.

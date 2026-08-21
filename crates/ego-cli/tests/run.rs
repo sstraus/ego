@@ -76,7 +76,7 @@ fn a_json_run_writes_one_object_whose_success_and_reason_cannot_disagree() {
 
     assert_eq!(finished.code, Some(0), "stderr: {}", finished.stderr);
     let report = finished.report();
-    assert_eq!(report["v"], 4);
+    assert_eq!(report["v"], 5);
     assert_eq!(report["result"], "The answer.");
     assert_eq!(report["ok"], true);
     assert_eq!(report["exit_reason"], "done");
@@ -185,7 +185,7 @@ fn a_jsonl_run_writes_one_public_event_per_line() {
     // The version rides `session_started` and nothing else: a consumer learns
     // the schema once, from the event that opens the stream, and repeating it
     // on every line would be a number that could disagree with itself.
-    assert_eq!(finished.events()[0]["v"], 4);
+    assert_eq!(finished.events()[0]["v"], 5);
     assert!(
         finished.events()[1..]
             .iter()
@@ -1003,6 +1003,13 @@ fn quiet_drops_the_tool_reports_and_keeps_the_answer() {
 /// supplies. `models.toml` is the *configuring* the model-resolution ADR says
 /// the hosted path waits on: without it `Catalogue::with_hosted` has no caller
 /// and this slug could only ever refuse.
+///
+/// Run with a ceiling, because that is what makes the supplied rates apply:
+/// `2026-08-21-a-run-with-no-ceiling.md` §5 consults no rate source unless a
+/// ceiling needs one. The pair below — this and
+/// `a_hosted_run_with_no_ceiling_consults_no_rates_and_reports_no_cost` — is
+/// that gate made falsifiable. The budget is deliberately far above the
+/// worst case so it admits and the test stays about the rates.
 #[test]
 fn a_hosted_model_resolves_from_supplied_facts_and_a_real_credential() {
     let stub = Stub::start(Plan::default());
@@ -1014,6 +1021,8 @@ fn a_hosted_model_resolves_from_supplied_facts_and_a_real_credential() {
             "--model",
             "openai/gpt-5.1",
             "--ephemeral",
+            "--budget",
+            "100$",
             "--output",
             "json",
             "Ask",
@@ -1033,6 +1042,91 @@ fn a_hosted_model_resolves_from_supplied_facts_and_a_real_credential() {
             .iter()
             .all(|req| !req.path.starts_with("/api/")),
         "the hosted path went looking for a daemon"
+    );
+}
+
+/// The other half of §5's gate, and the ordinary invocation: the same
+/// `models.toml`, the same credential, no `--budget`.
+///
+/// The run works and is bounded by nothing (§1), and its cost comes back
+/// `unknown` rather than as a figure — because no rate source was consulted,
+/// which is what §5 says happens when no ceiling needs one. `unknown` is the
+/// point: the ADR's §Failure semantics chooses it over a fabricated zero,
+/// which is the one answer that would read as *free*. Tokens are still
+/// counted and still reported, so nothing is lost that was actually measured.
+///
+/// Today this gates one source, an operator's own file, and leaks nothing
+/// either way. It is the same predicate that will gate the provider pricing
+/// endpoint and the fetched third-party table, and §7's first row — "no fetch
+/// is attempted, offline or not" — is a property of *this* check rather than
+/// of the fetch code. A gate added only once there is something to leak
+/// through has already been wrong once.
+#[test]
+fn a_hosted_run_with_no_ceiling_consults_no_rates_and_reports_no_cost() {
+    let stub = Stub::start(Plan::default());
+    let ego = Ego::against(&stub);
+    ego.home_file("models.toml", OPENAI_FACTS);
+    let finished = ego
+        .env("OPENAI_API_KEY", "sk-test")
+        .args([
+            "--model",
+            "openai/gpt-5.1",
+            "--ephemeral",
+            "--output",
+            "json",
+            "Ask",
+        ])
+        .run();
+
+    assert_eq!(finished.code, Some(0), "stderr: {}", finished.stderr);
+    let report = finished.report();
+    assert_eq!(report["result"], "It is done.", "the run still works");
+    assert_eq!(
+        report["cost"]["state"], "unknown",
+        "no ceiling means no rates, and no rates means the cost is unknown"
+    );
+    assert!(
+        report["cost"]["total"].is_null(),
+        "and there is no total standing in for it: {}",
+        report["cost"]
+    );
+    assert_ne!(
+        report["usage"]["output_tokens"], 0,
+        "tokens are still counted and still reported: {}",
+        report["usage"]
+    );
+}
+
+/// And a token ceiling does not drag a price lookup in behind it. §9: the
+/// token ceiling is the only ceiling that needs no rates, no fetch and no
+/// network, which is why it is what an air-gapped operator reaches for. A
+/// gate written as "any ceiling at all" would look right on every other test
+/// and be wrong here.
+#[test]
+fn a_token_ceiling_alone_still_consults_no_rates() {
+    let stub = Stub::start(Plan::default());
+    let ego = Ego::against(&stub);
+    ego.home_file("models.toml", OPENAI_FACTS);
+    let finished = ego
+        .env("OPENAI_API_KEY", "sk-test")
+        .args([
+            "--model",
+            "openai/gpt-5.1",
+            "--ephemeral",
+            "--budget",
+            "400k",
+            "--output",
+            "json",
+            "Ask",
+        ])
+        .run();
+
+    assert_eq!(finished.code, Some(0), "stderr: {}", finished.stderr);
+    let report = finished.report();
+    assert_eq!(report["result"], "It is done.");
+    assert_eq!(
+        report["cost"]["state"], "unknown",
+        "a token ceiling asked for no price and must not have been given one"
     );
 }
 

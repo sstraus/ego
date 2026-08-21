@@ -12,7 +12,6 @@ use ego_ai::catalogue::{self, Catalogue, ModelSlug, ResolveError, ResolvedModel}
 use ego_ai::http::{EgressPolicy, Http, ReqwestHttp};
 use ego_ai::ollama;
 use ego_ai::provider::{OLLAMA_ENDPOINT, OPENAI_ENDPOINT, ProviderRow};
-use ego_core::cost::CurrencyCode;
 use url::Url;
 
 use crate::facts;
@@ -101,7 +100,6 @@ fn rows() -> Result<Vec<ProviderRow>, ResolveError> {
 pub async fn resolve(
     slug: &str,
     hosted: Vec<(String, facts::Hosted)>,
-    currency: CurrencyCode,
     http: &Arc<dyn Http>,
 ) -> Result<ResolvedModel, ResolveError> {
     let slug = ModelSlug::parse(slug)?;
@@ -111,7 +109,7 @@ pub async fn resolve(
     }
     if slug.provider == catalogue::OLLAMA {
         let row = catalogue.row(&slug.provider)?.clone();
-        return ollama::resolve(&row, &slug.model, currency, http).await;
+        return ollama::resolve(&row, &slug.model, http).await;
     }
     // The hosted path. `row` is consulted first so that a missing credential
     // is reported as a missing credential — the thing an operator can fix —

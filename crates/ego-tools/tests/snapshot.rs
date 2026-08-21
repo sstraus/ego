@@ -15,7 +15,9 @@
 
 use std::num::NonZeroUsize;
 
-use ego_core::cost::{Amount, CostDelta, CumulativeCost, CurrencyCode, Money, PricingRevision};
+use ego_core::cost::{
+    Amount, CostAttribution, CostDelta, CumulativeCost, CurrencyCode, Money, PricingRevision,
+};
 use ego_core::event::domain::{DomainEvent, Envelope, EventKind, ExitReason, OccupancyProvenance};
 use ego_core::event::id::{EventId, ItemId, Producer, Seq, SessionId, TurnId};
 use ego_core::event::time::Timestamp;
@@ -87,7 +89,9 @@ mod snapshot {
     fn priced(decimal: &str) -> CostDelta {
         CostDelta::Known {
             amount: usd(decimal),
-            pricing_revision: PricingRevision("test-2026-08".to_string()),
+            attribution: CostAttribution::Table {
+                revision: PricingRevision("test-2026-08".to_string()),
+            },
             fx: None,
         }
     }

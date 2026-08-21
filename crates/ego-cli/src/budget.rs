@@ -8,123 +8,56 @@
 //! - **Money goes to [`BudgetGate`]**, which is the only thing that can refuse
 //!   a generation *before* it is paid for. That is where a spending cap
 //!   belongs; anything checked afterwards is a report, not a cap.
-//! - **Tokens go to a between-turn ceiling**, because nothing in the workspace
-//!   can price a token count against a limit expressed in tokens without
-//!   inventing a rate. It is coarser and it says so: a turn already in flight
-//!   is not interrupted by it.
+//! - **Tokens go to a between-generation ceiling** inside `TurnLoop`, because
+//!   nothing in the workspace can price a token count against a limit
+//!   expressed in tokens without inventing a rate.
 //!
-//! ## This file is the seam the metering rewrite lands on
+//! ## Where a ceiling comes from
 //!
-//! `PricingQuote` is being replaced by a `Metering` sum type on another
-//! branch, which will change what a gate is constructed from. Everything this
-//! binary knows about that is [`gate`] and [`ceiling_reached`] — two functions,
-//! one file. When `Metering` lands, this is the edit; nothing else in
-//! `ego-cli` reads a quote, a rate or a limit.
+//! Not from here. `docs/decisions/2026-08-21-a-run-with-no-ceiling.md` §4:
+//! `CLI.md:296-299` makes an administrator's `/etc/ego/config.toml` "the only
+//! source of ceilings", so `--budget` is not parsed on the side — it is
+//! written into the flags layer (`config::flags_layer`) as the `budget` key
+//! and resolved by ordinary precedence, then clamped by any `system` layer's
+//! own. A flag parsed here would be a second precedence rule, and the layer
+//! it would silently outrank is the administrator's.
 //!
-//! One other module *builds* a quote — `facts.rs`, decoding the rates an
-//! operator wrote in `models.toml` — and it is named here rather than left to
-//! be found, because "one file" would otherwise be a claim this comment
-//! quietly makes false.
+//! What is left in this file is the one thing that is genuinely process
+//! knowledge: turning a *resolved* ceiling into the gate a run generates
+//! under. The grammar itself is `ego_core::ceiling::Budget`, shared with the
+//! config key so the two surfaces cannot drift.
 
 use ego_core::budget::BudgetGate;
-use ego_core::cost::{Amount, CurrencyCode, Money, MoneyError};
-use ego_core::state::SessionState;
-
-use crate::cli::UsageError;
-
-/// What `--budget` was understood to mean.
-///
-/// Two variants rather than a `Money` plus an `Option<u64>`, because the flag
-/// takes one value: a run has a money cap or a token cap, never both, and a
-/// shape that could hold both would need a rule about what happens when it
-/// does.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Budget {
-    /// `--budget 2.5$`, enforced by the gate before each generation.
-    Money(Money),
-    /// `--budget 400k`, checked against the session's own totals between
-    /// turns.
-    Tokens(u64),
-}
-
-/// The limit a gate is built with when the caller named none.
-///
-/// `CLI.md` §7: hard ceilings come only from an administrator's `/etc/ego`,
-/// and "ego itself imposes none". `TurnLoop` requires a gate regardless — the
-/// reservation is what makes a generation payable at all — so the honest way
-/// to impose nothing is the largest amount `Amount` can represent.
-fn no_ceiling(currency: CurrencyCode) -> Money {
-    Money::new(
-        Amount::new(u128::MAX, 0).expect("scale zero is always in range"),
-        currency,
-    )
-}
-
-/// Parse `--budget`, or say why it is not a budget.
-///
-/// `2.5$` and `$2.5` are both accepted because both are things people type;
-/// `400k`, `400K` and `400000` are the token form. A bare number with no
-/// marker is refused rather than guessed — "budget 400" is either forty cents
-/// or four hundred tokens depending on who wrote it, and picking one silently
-/// is how a run costs a hundred times what its author intended.
-pub fn parse(spec: &str, currency: CurrencyCode) -> Result<Budget, UsageError> {
-    let spec = spec.trim();
-    let refuse = |why: &str| {
-        UsageError(format!(
-            "`{spec}` is not a budget: {why}. Write money as `2.5$` or tokens \
-             as `400k`"
-        ))
-    };
-
-    if let Some(digits) = spec.strip_suffix('$').or_else(|| spec.strip_prefix('$')) {
-        let amount: Amount = digits
-            .trim()
-            .parse()
-            .map_err(|err: MoneyError| refuse(&err.to_string()))?;
-        return Ok(Budget::Money(Money::new(amount, currency)));
-    }
-
-    let (digits, scale) = match spec.strip_suffix(['k', 'K']) {
-        Some(digits) => (digits, 1_000),
-        None => match spec.strip_suffix(['m', 'M']) {
-            Some(digits) => (digits, 1_000_000),
-            None => (spec, 1),
-        },
-    };
-    if scale == 1 && !spec.is_empty() {
-        return Err(refuse("it names no unit"));
-    }
-    let count: u64 = digits
-        .trim()
-        .parse()
-        .map_err(|_| refuse("its token count is not a whole number"))?;
-    count
-        .checked_mul(scale)
-        .map(Budget::Tokens)
-        .ok_or_else(|| refuse("its token count does not fit in 64 bits"))
-}
+use ego_core::ceiling::Ceilings;
+use ego_core::cost::{CurrencyCode, Money};
 
 /// The gate this run generates under.
 ///
-/// **The one function that turns a command-line budget into a
-/// [`BudgetGate`].** A token budget still gets a gate — the loop cannot run
-/// without one — and the gate is unbounded, because the ceiling that run is
-/// actually subject to is [`ceiling_reached`]'s.
-pub fn gate(budget: Option<&Budget>, currency: CurrencyCode) -> BudgetGate {
-    match budget {
-        Some(Budget::Money(limit)) => BudgetGate::new(*limit),
-        Some(Budget::Tokens(_)) | None => BudgetGate::new(no_ceiling(currency)),
-    }
-}
-
-/// Whether a token budget has been reached, checked between turns.
+/// **The one function that turns a resolved ceiling into a [`BudgetGate`].**
+/// A run with only a token ceiling still gets a gate — the loop cannot run
+/// without one — and that gate is [`unlimited`](BudgetGate::unlimited),
+/// because the ceiling such a run is actually subject to is checked at the
+/// generation boundary instead.
 ///
-/// Reads `SessionState`'s own running totals rather than counting anything
-/// itself: `Usage::total_tokens` is the sum core already folds, and a second
-/// count here would be a second answer to how much this session has spent.
-pub fn ceiling_reached(budget: Option<&Budget>, state: &SessionState) -> bool {
-    match budget {
-        Some(Budget::Tokens(limit)) => state.usage.total_tokens() >= *limit,
-        Some(Budget::Money(_)) | None => false,
+/// `clamped_from` is the higher figure an administrator's ceiling reduced,
+/// when one did. It is passed rather than dropped because §4 requires the
+/// clamp be *stated, not silent*: the gate carries it into
+/// `CeilingEffect::Binds`, so a run under a reduced ceiling says which figure
+/// binds and which one was asked for.
+///
+/// `CLI.md` §7: hard ceilings come only from an administrator's `/etc/ego`,
+/// and "ego itself imposes none". Until `Ledger::Unlimited` existed the
+/// honest-sounding way to impose nothing was the largest amount `Amount` can
+/// represent, which made "nobody set a budget" indistinguishable from
+/// "somebody set an absurd one".
+pub fn gate(
+    ceilings: &Ceilings,
+    clamped_from: Option<Money>,
+    currency: CurrencyCode,
+) -> BudgetGate {
+    match (ceilings.money, clamped_from) {
+        (Some(limit), Some(requested)) => BudgetGate::clamped(limit, requested),
+        (Some(limit), None) => BudgetGate::new(limit),
+        (None, _) => BudgetGate::unlimited(currency),
     }
 }

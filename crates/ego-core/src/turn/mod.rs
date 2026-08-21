@@ -18,12 +18,14 @@ use std::sync::atomic::{AtomicU8, Ordering};
 
 use futures::StreamExt;
 
-use crate::budget::{BudgetGate, PricingQuote};
+use crate::budget::{BudgetGate, Metering, PricingQuote, ResolvedRates, SettlementSource};
+use crate::ceiling::tokens_reached;
 use crate::config::SystemPrompt;
+use crate::cost::{Money, RateSource};
 use crate::event::domain::{CancelCause, EventKind, ExitReason, OccupancyProvenance};
 use crate::event::id::{EventId, GenerationId, ItemId, Producer, SessionId, TurnId};
 use crate::event::time::Clock;
-use crate::generator::attempt::{AttemptStream, GenerationAttempt, UsageReport};
+use crate::generator::attempt::{AttemptStream, GenerationAttempt, UsageReport, settled_cost};
 use crate::generator::capabilities::ModelCapabilities;
 use crate::generator::history::conversation_from;
 use crate::generator::port::{AiEvent, Generator};
@@ -31,7 +33,7 @@ use crate::generator::types::{Conversation, GenRequest, Message, Role, StopReaso
 use crate::permit::PolicyDenied;
 use crate::public::PublicEvent;
 use crate::sink::EventSink;
-use crate::state::SessionState;
+use crate::state::{SessionState, Usage};
 use crate::store::session_store::{SessionStore, StoreError};
 
 pub use journal::Journal;
@@ -195,7 +197,21 @@ pub struct Session<'a> {
 pub struct Model<'a> {
     pub generator: &'a dyn Generator,
     pub gate: &'a mut BudgetGate,
-    pub quote: PricingQuote,
+    pub metering: Metering,
+    /// The rates this row was resolved with, and where they came from, when
+    /// a ceiling made anybody look them up. `None` is the ordinary case for a
+    /// run with no `--budget`: `2026-08-21-a-run-with-no-ceiling.md` §1
+    /// consults no rate source at all unless a ceiling was configured.
+    pub rates: Option<ResolvedRates>,
+    /// A ceiling on this session's cumulative billed tokens, when one was
+    /// configured.
+    ///
+    /// Beside the gate rather than inside it, because it is not money:
+    /// `2026-08-21-a-run-with-no-ceiling.md` §9 — it needs no rates, no fetch
+    /// and no network, and it binds on every metering class including the two
+    /// a monetary ceiling cannot touch. It is what an air-gapped operator, or
+    /// one who does not care to trust a third-party price table, reaches for.
+    pub token_ceiling: Option<u64>,
     pub caps: ModelCapabilities,
     pub config: TurnConfig,
 }
@@ -209,7 +225,9 @@ pub struct TurnLoop<'a> {
     journal: Journal<'a>,
     generator: &'a dyn Generator,
     gate: &'a mut BudgetGate,
-    quote: PricingQuote,
+    metering: Metering,
+    rates: Option<ResolvedRates>,
+    token_ceiling: Option<u64>,
     caps: ModelCapabilities,
     config: TurnConfig,
     tools: Tools<'a>,
@@ -234,7 +252,9 @@ impl<'a> TurnLoop<'a> {
             ),
             generator: model.generator,
             gate: model.gate,
-            quote: model.quote,
+            metering: model.metering,
+            rates: model.rates,
+            token_ceiling: model.token_ceiling,
             caps: model.caps,
             config: model.config,
             tools,
@@ -299,6 +319,20 @@ impl<'a> TurnLoop<'a> {
         }
     }
 
+    /// The rates themselves, without their provenance — what the arithmetic
+    /// takes. Where a rate came from must not change what it computes.
+    fn quote(&self) -> Option<&PricingQuote> {
+        self.rates.as_ref().map(|rates| &rates.quote)
+    }
+
+    /// Where the rates came from, or [`RateSource::None`] when nobody looked
+    /// any up. Published, never used to price anything.
+    fn rate_source(&self) -> &RateSource {
+        self.rates
+            .as_ref()
+            .map_or(&RateSource::None, |rates| &rates.source)
+    }
+
     /// Everything between the prompt and `TurnCompleted`.
     ///
     /// Returns the reason and, when that reason is
@@ -320,6 +354,20 @@ impl<'a> TurnLoop<'a> {
         loop {
             if let Some(cause) = self.cancel.cause() {
                 return Ok((ExitReason::Cancelled(cause), None));
+            }
+            // Beside the cancel check and for the same reason: this is the
+            // boundary between generations, the only place a turn can be
+            // stopped without abandoning an attempt that is already paid for.
+            //
+            // Post-generation where money is pre-generation, and the
+            // asymmetry is principled (§9). Money must be held before the
+            // request because once a provider reports what a generation cost
+            // the money is spent; tokens differ in exactly that property —
+            // on an unmetered or subscription row no charge is raised at all.
+            // `CLI.md:128` spells it the same way: "exit 5 when hit", not
+            // "when it would be hit".
+            if tokens_reached(self.token_ceiling, &self.journal.state().usage) {
+                return Ok((ExitReason::Budget, None));
             }
 
             let (reason, pending) = match self.generate(turn).await? {
@@ -433,26 +481,44 @@ impl<'a> TurnLoop<'a> {
             return Ok(Generated::Ended(ExitReason::Usage));
         }
 
-        let reservation = match self.gate.reserve(&self.quote, &request, &self.caps) {
-            Ok(reservation) => reservation,
-            Err(denied) => {
-                tracing::warn!(%denied, "the budget gate refused a generation");
-                self.journal.append(
-                    turn,
-                    None,
-                    None,
-                    EventKind::Error {
-                        message: denied.to_string(),
-                    },
-                )?;
-                return Ok(Generated::Ended(ExitReason::Budget));
-            }
-        };
+        // Per generation, and before the gate: a fallback chain can switch
+        // rows mid-turn, and on a row that is not metered in currency the
+        // gate is about to mint a zero reservation — which means a monetary
+        // `--budget` admits everything. The operator is told that here rather
+        // than discovering it from a limit that never fired.
+        self.journal.publish(&PublicEvent::metering_selected(
+            turn,
+            &self.metering,
+            self.gate.ledger(),
+            self.rate_source(),
+        ));
+
+        let quote = self.rates.as_ref().map(|rates| rates.quote.clone());
+        let reservation =
+            match self
+                .gate
+                .reserve(&self.metering, quote.as_ref(), &request, &self.caps)
+            {
+                Ok(reservation) => reservation,
+                Err(denied) => {
+                    tracing::warn!(%denied, "the budget gate refused a generation");
+                    self.journal.append(
+                        turn,
+                        None,
+                        None,
+                        EventKind::Error {
+                            message: denied.to_string(),
+                        },
+                    )?;
+                    return Ok(Generated::Ended(ExitReason::Budget));
+                }
+            };
 
         let attempt = match GenerationAttempt::new(
             GenerationId::new(),
             reservation,
-            &self.quote,
+            &self.metering,
+            self.quote(),
             &request,
             &self.caps,
         ) {
@@ -581,6 +647,21 @@ impl<'a> TurnLoop<'a> {
         let mut assembled = String::new();
         let mut failure = None;
         let mut cancelled = false;
+        // Under a provider-reported settlement the tokens and the money
+        // arrive as two frames, and `EventKind::UsageUpdated` carries them
+        // together because they are one observation. So both are held and
+        // booked once, when the stream is done — which also removes any
+        // dependence on the order a decoder chose to emit them in.
+        let held = matches!(
+            self.metering,
+            Metering::Currency {
+                settlement: SettlementSource::ProviderReported { .. },
+                ..
+            }
+        );
+        let mut held_usage: Option<Usage> = None;
+        let mut stated_cost: Option<Money> = None;
+        let settlement_currency = self.gate.currency();
 
         while let Some(event) = stream.next().await {
             let appended = match event {
@@ -627,6 +708,12 @@ impl<'a> TurnLoop<'a> {
                             });
                         })
                 }
+                AiEvent::Usage(usage) if held => {
+                    let mut total = held_usage.unwrap_or_default();
+                    total.add(&usage);
+                    held_usage = Some(total);
+                    Ok(())
+                }
                 AiEvent::Usage(usage) => self
                     .journal
                     .append(
@@ -635,15 +722,29 @@ impl<'a> TurnLoop<'a> {
                         None,
                         EventKind::UsageUpdated {
                             usage,
-                            // Priced with the same quote the gate reserved
-                            // against. A cost computed under another revision
-                            // cannot be reconciled with the authorisation
-                            // that admitted the request.
-                            cost_delta: self.quote.price(&usage),
+                            // Settled with the same metering the gate
+                            // reserved against, through the one function
+                            // `AttemptStream::settle` also uses. A cost the
+                            // log computed differently from the gate is a
+                            // cost the two can disagree about.
+                            cost_delta: settled_cost(
+                                &self.metering,
+                                self.quote(),
+                                UsageReport::Reported(usage),
+                                None,
+                                settlement_currency,
+                            ),
                             attempt: Some(reference),
                         },
                     )
                     .map(|_| ()),
+                // A total for the request, so the last statement replaces
+                // the previous one rather than adding to it — the rule
+                // `AttemptStream` folds it under.
+                AiEvent::ProviderCost { cost } => {
+                    stated_cost = Some(cost);
+                    Ok(())
+                }
                 AiEvent::Error { message } => self
                     .journal
                     .append(turn, None, None, EventKind::Error { message })
@@ -661,6 +762,35 @@ impl<'a> TurnLoop<'a> {
             if self.cancel.is_cancelled() {
                 cancelled = true;
                 break;
+            }
+        }
+
+        // What was held under a provider-reported settlement, booked once.
+        //
+        // Only when something arrived. A generation that reported neither
+        // tokens nor a cost — a request that never left, say — books nothing,
+        // exactly as it did before; the gate still charges it the full
+        // reserved bound at settlement, which is where that belongs.
+        if failure.is_none() && held && (held_usage.is_some() || stated_cost.is_some()) {
+            let usage = held_usage.unwrap_or_default();
+            let cost_delta = settled_cost(
+                &self.metering,
+                self.quote(),
+                held_usage.map_or(UsageReport::Missing, UsageReport::Reported),
+                stated_cost,
+                settlement_currency,
+            );
+            if let Err(cause) = self.journal.append(
+                turn,
+                None,
+                None,
+                EventKind::UsageUpdated {
+                    usage,
+                    cost_delta,
+                    attempt: Some(reference),
+                },
+            ) {
+                failure = Some(cause);
             }
         }
 

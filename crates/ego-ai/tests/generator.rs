@@ -22,7 +22,7 @@ use ego_ai::generator::WireGenerator;
 use ego_ai::http::{Http, HttpError, HttpRequest, HttpResponse, Method};
 use ego_ai::provider::{Auth, ProviderRow};
 use ego_ai::wire::openai_completions::request_body;
-use ego_core::budget::{BudgetGate, PricingQuote};
+use ego_core::budget::{BudgetGate, Metering, PricingQuote, SettlementSource};
 use ego_core::cost::{Amount, CurrencyCode, Money, PricingRevision};
 use ego_core::event::id::GenerationId;
 use ego_core::generator::attempt::{DeliveryCertainty, GenerationAttempt};
@@ -60,6 +60,13 @@ fn quote() -> PricingQuote {
     }
 }
 
+/// The fixture quote as a metering: a table that both bounds and settles.
+fn metered() -> Metering {
+    Metering::Currency {
+        settlement: SettlementSource::Quote,
+    }
+}
+
 fn caps() -> ModelCapabilities {
     ModelCapabilities {
         schema_version: 1,
@@ -93,6 +100,7 @@ fn row() -> ProviderRow {
         id: "stub".to_string(),
         endpoint: Url::parse("https://api.example/v1/chat/completions").expect("a valid url"),
         auth: Auth::Bearer("sk-not-a-real-key".into()),
+        cost: None,
     }
 }
 
@@ -103,10 +111,17 @@ fn row() -> ProviderRow {
 /// on, and the reason a generator cannot route around the gate.
 fn attempt_for(gate: &mut BudgetGate, req: &GenRequest) -> GenerationAttempt {
     let reservation = gate
-        .reserve(&quote(), req, &caps())
+        .reserve(&metered(), Some(&quote()), req, &caps())
         .expect("a $10 budget admits an ordinary request");
-    GenerationAttempt::new(GenerationId::new(), reservation, &quote(), req, &caps())
-        .expect("built from the request that was priced")
+    GenerationAttempt::new(
+        GenerationId::new(),
+        reservation,
+        &metered(),
+        Some(&quote()),
+        req,
+        &caps(),
+    )
+    .expect("built from the request that was priced")
 }
 
 // --- the stub transport ---
@@ -287,7 +302,12 @@ fn a_locally_refused_generation_still_settles_and_releases_the_hold() {
         settled.outcome.retry_is_safe(),
         "nothing was sent, so retrying cannot double-bill"
     );
-    assert!(gate.outstanding().amount.is_zero());
+    assert!(
+        gate.outstanding()
+            .expect("a limited gate keeps totals")
+            .amount
+            .is_zero()
+    );
 }
 
 // --- what comes back ---
@@ -330,17 +350,23 @@ async fn a_streamed_response_decodes_to_what_the_wire_format_decodes() {
     let attempt = attempt_for(&mut gate, &request());
     let through_binding: Vec<AiEvent> = generator.generate(request(), attempt).collect().await;
 
-    let direct: Vec<AiEvent> = ego_ai::wire::openai_completions::decode(Ok(HttpResponse {
-        status: 200,
-        headers: vec![("content-type".to_string(), "text/event-stream".to_string())],
-        body: Box::pin(futures::stream::iter(
-            TEXT_TRANSCRIPT
-                .as_bytes()
-                .chunks(7)
-                .map(|chunk| Ok(bytes::Bytes::copy_from_slice(chunk)))
-                .collect::<Vec<_>>(),
-        )),
-    }))
+    let direct: Vec<AiEvent> = ego_ai::wire::openai_completions::decode(
+        Ok(HttpResponse {
+            status: 200,
+            headers: vec![("content-type".to_string(), "text/event-stream".to_string())],
+            body: Box::pin(futures::stream::iter(
+                TEXT_TRANSCRIPT
+                    .as_bytes()
+                    .chunks(7)
+                    .map(|chunk| Ok(bytes::Bytes::copy_from_slice(chunk)))
+                    .collect::<Vec<_>>(),
+            )),
+        }),
+        // `row()` states no cost field, so the binding passes `None` too:
+        // "what the wire format decodes from it" has to mean the same
+        // configuration on both sides or the comparison proves nothing.
+        None,
+    )
     .collect()
     .await;
 
