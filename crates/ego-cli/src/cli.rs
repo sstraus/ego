@@ -21,6 +21,7 @@
 use std::path::PathBuf;
 use std::str::FromStr;
 
+use clap::error::ErrorKind;
 use clap::{ArgAction, Args as ClapArgs, Parser};
 use ego_core::event::id::SessionId;
 use ego_core::generator::types::ThinkingLevel;
@@ -40,6 +41,15 @@ pub enum Invocation {
     /// `ego acp` — serve the Agent Client Protocol on stdio, until the host
     /// closes it.
     Acp(Box<AcpArgs>),
+    /// `--help` or `--version`: the question was answered, and there is
+    /// nothing to run.
+    ///
+    /// A success and not a [`UsageError`], which is what it used to be. clap
+    /// reports both through `Err`, and treating every `Err` the same sent help
+    /// to *stderr* behind an `ego:` prefix and exited 2 — the code `CLI.md`
+    /// §4.3 defines as "usage error". Asking what a command does is not
+    /// misusing it, and a script that pipes `--help` got an empty stdout.
+    Answered(String),
 }
 
 /// A refusal decided before any turn exists.
@@ -571,6 +581,68 @@ fn split_at_separator(argv: Vec<String>) -> (Vec<String>, Vec<String>) {
     }
 }
 
+/// What clap produced: the command, or an answer to a question about it.
+enum Parsed<T> {
+    Command(T),
+    Answered(String),
+}
+
+/// Run one of the command structs, keeping `--help` and `--version` out of the
+/// error path.
+///
+/// clap signals both through `Err`, alongside the genuine failures, and the
+/// single `map_err` this replaces flattened the two into `UsageError` — so
+/// `ego ls --help` printed to stderr and exited 2. Only [`ErrorKind`] can tell
+/// them apart, which is why this is a function and not a scan of `tokens`: a
+/// `--help` sitting where a flag's value belongs is clap's question to answer.
+///
+/// The failure branch is unchanged: clap's own rendering already names the
+/// offending argument and the group it violated, and re-writing it here would
+/// be a second voice saying the same thing, worse.
+fn clap_or_answer<T: Parser>(tokens: &[String]) -> Result<Parsed<T>, UsageError> {
+    match T::try_parse_from(tokens) {
+        Ok(parsed) => Ok(Parsed::Command(parsed)),
+        Err(err)
+            if matches!(
+                err.kind(),
+                ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
+            ) =>
+        {
+            Ok(Parsed::Answered(err.to_string()))
+        }
+        Err(err) => Err(UsageError(err.to_string().trim_end().to_string())),
+    }
+}
+
+/// `ego --help`: the command set, from the tables the refusals read.
+///
+/// Deliberately short. It names what this build has and points at `CLI.md` §2
+/// for the rest rather than reprinting ten rows of "waiting on", because a
+/// caller who types one of those ten is told which subsystem it waits on by
+/// the refusal itself — which is where that sentence is already maintained.
+fn overview(program: &str) -> String {
+    let mut text = format!(
+        "ego {} — an agent you run from a terminal.\n\nUsage: {program} <COMMAND> [OPTIONS]\n\nCommands:\n",
+        env!("CARGO_PKG_VERSION")
+    );
+    for name in BUILT {
+        let about = match *name {
+            "run" => "Run an agent from a prompt, headless",
+            "resume" => "Continue a session; no ID = latest in this workspace",
+            "ls" => "List sessions (this workspace; --all for every one)",
+            "acp" => "Serve the Agent Client Protocol on stdio",
+            other => other,
+        };
+        text.push_str(&format!("  {name:<8}{about}\n"));
+    }
+    text.push_str(&format!(
+        "\n`{program} <COMMAND> --help` describes one of them. CLI.md §2 \
+         documents ten more; each is refused by name, with the subsystem it \
+         waits on.\n"
+    ));
+    text
+}
+
 /// Parse a full argument vector, `argv[0]` included.
 pub fn parse(argv: Vec<String>) -> Result<Invocation, UsageError> {
     let mut argv = argv;
@@ -598,6 +670,28 @@ pub fn parse(argv: Vec<String>) -> Result<Invocation, UsageError> {
         )));
     }
 
+    // `ego --help` on its own, which reached the interactive refusal below and
+    // therefore told someone looking for the command set about the permission
+    // dialog. There is no top-level clap command to render — §2's first line is
+    // `ego [PROMPT]`, so the four built commands are dispatched by hand — so
+    // this is written out, from the same table the refusals read.
+    //
+    // Exactly these argument vectors and no more. A `head` with anything else
+    // in it may be a flag carrying `--help` as its value, which is clap's
+    // question to answer and not one a scan here can answer correctly.
+    if let [only] = head.as_slice() {
+        match only.as_str() {
+            "--help" | "-h" => return Ok(Invocation::Answered(overview(&program))),
+            "--version" | "-V" => {
+                return Ok(Invocation::Answered(format!(
+                    "ego {}\n",
+                    env!("CARGO_PKG_VERSION")
+                )));
+            }
+            _ => {}
+        }
+    }
+
     let subcommand = match head.first().map(String::as_str) {
         Some(name) if BUILT.contains(&name) => name.to_string(),
         _ => {
@@ -612,7 +706,14 @@ pub fn parse(argv: Vec<String>) -> Result<Invocation, UsageError> {
     };
 
     let mut tokens: Vec<String> = head;
-    tokens[0] = program;
+    // Both words, not just the program. clap takes the command it names in
+    // `Usage:` from argv[0] and not from the `name` attribute on the struct, so
+    // replacing the subcommand with the bare program made `ego ls --help`
+    // answer `Usage: ego [OPTIONS]` — which is a line that does not work:
+    // `ego --all` has no subcommand, so it reaches the interactive refusal.
+    // Every error clap renders for these structs names the command this way,
+    // so it is one substitution rather than one per message.
+    tokens[0] = format!("{program} {subcommand}");
     // The separator and everything after it go back on the end, so clap sees
     // the prompt words as positionals it must not interpret.
     if !tail.is_empty() {
@@ -620,36 +721,31 @@ pub fn parse(argv: Vec<String>) -> Result<Invocation, UsageError> {
         tokens.extend(tail);
     }
 
-    // clap's own rendering, which already names the offending argument and the
-    // group it violated. Re-writing it here would be a second voice saying the
-    // same thing, worse.
-    let clap_said = |err: clap::Error| UsageError(err.to_string().trim_end().to_string());
-
     match subcommand.as_str() {
-        "resume" => {
-            let parsed = ResumeCommand::try_parse_from(&tokens).map_err(clap_said)?;
-            Ok(Invocation::Resume(Box::new(into_resume_args(parsed)?)))
-        }
-        "acp" => {
-            let parsed = AcpCommand::try_parse_from(&tokens).map_err(clap_said)?;
-            Ok(Invocation::Acp(Box::new(AcpArgs {
+        "resume" => match clap_or_answer::<ResumeCommand>(&tokens)? {
+            Parsed::Answered(text) => Ok(Invocation::Answered(text)),
+            Parsed::Command(parsed) => Ok(Invocation::Resume(Box::new(into_resume_args(parsed)?))),
+        },
+        "acp" => match clap_or_answer::<AcpCommand>(&tokens)? {
+            Parsed::Answered(text) => Ok(Invocation::Answered(text)),
+            Parsed::Command(parsed) => Ok(Invocation::Acp(Box::new(AcpArgs {
                 session_dir: parsed.places.session_dir,
                 directory: parsed.places.directory,
-            })))
-        }
-        "ls" => {
-            let parsed = LsCommand::try_parse_from(&tokens).map_err(clap_said)?;
-            Ok(Invocation::Ls(Box::new(LsArgs {
+            }))),
+        },
+        "ls" => match clap_or_answer::<LsCommand>(&tokens)? {
+            Parsed::Answered(text) => Ok(Invocation::Answered(text)),
+            Parsed::Command(parsed) => Ok(Invocation::Ls(Box::new(LsArgs {
                 all: parsed.all,
                 session_dir: parsed.common.places.session_dir,
                 directory: parsed.common.places.directory,
                 output: parsed.common.output,
-            })))
-        }
-        _ => {
-            let parsed = RunCommand::try_parse_from(&tokens).map_err(clap_said)?;
-            Ok(Invocation::Run(Box::new(into_args(parsed)?)))
-        }
+            }))),
+        },
+        _ => match clap_or_answer::<RunCommand>(&tokens)? {
+            Parsed::Answered(text) => Ok(Invocation::Answered(text)),
+            Parsed::Command(parsed) => Ok(Invocation::Run(Box::new(into_args(parsed)?))),
+        },
     }
 }
 

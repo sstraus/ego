@@ -34,6 +34,20 @@ fn parsed<const N: usize>(args: [&str; N]) -> ego_cli::cli::Args {
         Invocation::Run(args) | Invocation::Resume(args) => *args,
         Invocation::Ls(_) => panic!("`ls` takes no Args: use `listed` for it"),
         Invocation::Acp(_) => panic!("`acp` takes no Args: use `served` for it"),
+        Invocation::Answered(_) => panic!("that answered a question: use `answered` for it"),
+    }
+}
+
+/// The text `--help` or `--version` produced.
+///
+/// A separate helper from [`refused`] on purpose, and the separation is the
+/// property: both used to come back through `Err`, so `ego ls --help` was a
+/// usage error printed on stderr at exit 2. A test that reached for `refused`
+/// here would still pass under that bug.
+fn answered<const N: usize>(args: [&str; N]) -> String {
+    match cli::parse(argv(args)).expect("a question is answered, not refused") {
+        Invocation::Answered(text) => text,
+        _ => panic!("that is a command, not a question about one"),
     }
 }
 
@@ -642,6 +656,96 @@ fn acp_refuses_the_flag_that_would_corrupt_its_own_transport() {
 fn acp_takes_no_positional() {
     let refusal = refused(["acp", "something"]);
     assert!(refusal.contains("something"), "{refusal}");
+}
+
+// --- asking, which is not misusing ---
+
+/// `--help` on any built command is answered, not refused.
+///
+/// It used to be refused. clap reports `--help` through `Err` alongside the
+/// genuine failures, and one `map_err` turned every `Err` into a `UsageError`
+/// — so help went to stderr behind an `ego:` prefix and exited 2, the code
+/// `CLI.md` §4.3 reserves for a usage error. A script that piped `--help` got
+/// an empty stdout and a failure.
+#[test]
+fn asking_a_built_command_what_it_does_is_answered_and_not_refused() {
+    for name in cli::BUILT {
+        let text = answered([name, "--help"]);
+        assert!(
+            text.contains("Usage:"),
+            "`ego {name} --help` answered without a usage line: {text}"
+        );
+    }
+}
+
+/// The usage line names both words, because one word is a line that does not
+/// work.
+///
+/// clap takes the command in `Usage:` from `argv[0]`, not from the `name`
+/// attribute on the struct, and the dispatcher used to overwrite `argv[0]` with
+/// the bare program — so `ego ls --help` answered `Usage: ego [OPTIONS]`.
+/// Following that is `ego --all`, which has no subcommand and reaches the
+/// interactive refusal.
+#[test]
+fn a_usage_line_names_the_subcommand_it_belongs_to() {
+    for name in cli::BUILT {
+        let text = answered([name, "--help"]);
+        assert!(
+            text.contains(&format!("Usage: ego {name}")),
+            "`ego {name} --help` names a command that is not itself: {text}"
+        );
+    }
+}
+
+/// `ego --help` on its own lists the command set.
+///
+/// It used to reach the interactive refusal, so someone looking for the
+/// commands was told about the permission dialog — true, and about a surface
+/// they had not asked for. The same defect §2.1 exists to stop, one level
+/// further out.
+#[test]
+fn the_bare_help_lists_every_command_this_build_has() {
+    let text = answered(["--help"]);
+    for name in cli::BUILT {
+        assert!(
+            text.contains(name),
+            "`ego --help` does not mention `{name}`: {text}"
+        );
+    }
+}
+
+/// And it offers nothing this build refuses.
+///
+/// The complement, and the reason the overview reads `BUILT` rather than being
+/// typed out: an entry here for a command that is waiting on a subsystem would
+/// be `CLI.md` §2.1's hole again, in the one place a caller looks first.
+#[test]
+fn the_bare_help_offers_no_command_that_is_not_built() {
+    let text = answered(["--help"]);
+    for (name, _) in cli::UNBUILT {
+        assert!(
+            !text.contains(&format!("  {name} ")) && !text.contains(&format!("  {name}\n")),
+            "`ego --help` offers `{name}`, which this build refuses: {text}"
+        );
+    }
+}
+
+/// `--version` is answered too, and says a version.
+#[test]
+fn the_bare_version_is_answered_with_one() {
+    let text = answered(["--version"]);
+    assert!(
+        text.starts_with("ego ") && text.trim().len() > "ego ".len(),
+        "`ego --version` answered with no version: {text}"
+    );
+}
+
+/// A genuine mistake is still a refusal, so the split above is a split and not
+/// a widening.
+#[test]
+fn an_unknown_flag_is_still_refused_and_not_answered() {
+    let refusal = refused(["ls", "--nonsense"]);
+    assert!(refusal.contains("--nonsense"), "{refusal}");
 }
 
 /// §4.5's separator rule reaches the new commands too: after `--` the word is

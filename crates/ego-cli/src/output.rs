@@ -68,8 +68,9 @@ impl Stdout {
         self.emit(|out| writeln!(out, "{text}"));
     }
 
-    /// Write without a newline, for streamed text.
-    fn write(&self, text: &str) {
+    /// Write without a newline, for streamed text — and for text that already
+    /// ends in one, which is what clap's rendered help is.
+    pub fn write(&self, text: &str) {
         self.emit(|out| write!(out, "{text}"));
     }
 

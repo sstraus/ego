@@ -38,6 +38,20 @@ async fn main() -> std::process::ExitCode {
             state: ego_core::state::SessionState::default(),
             result: serde_json::Value::String(String::new()),
         },
+        // `--help` and `--version`. On **stdout** and exit 0, because the
+        // question was answered: `CLI.md` §4.3's exit 2 is a usage error, and
+        // asking what a command does is not misusing it. The text is written
+        // whole rather than through `out.line`, which appends a newline clap's
+        // rendering already has.
+        Ok(Invocation::Answered(text)) => {
+            out.write(&text);
+            Ended {
+                termination: RunTermination::Done,
+                session: ego_core::event::id::SessionId::new(),
+                state: ego_core::state::SessionState::default(),
+                result: serde_json::Value::String(String::new()),
+            }
+        }
         Ok(Invocation::Run(args) | Invocation::Resume(args)) => {
             let json = args.output == cli::Output::Json;
             let ended = run::run(*args, &out, cancel).await;

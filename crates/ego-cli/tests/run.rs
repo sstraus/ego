@@ -1797,3 +1797,61 @@ fn resume_with_no_prompt_exits_two() {
         refused.stderr
     );
 }
+
+/// `--help` goes to stdout and exits 0, on every built command and on none.
+///
+/// `tests/grammar.rs` asserts that `parse` answers rather than refuses; this
+/// asserts the other half, which only a process can show: *which stream* the
+/// answer arrives on and *what the shell sees*. Both were wrong together —
+/// help was rendered through the usage-error path, so it landed on stderr
+/// behind an `ego:` prefix at exit 2 — and a test of either half alone would
+/// have passed while the other stayed broken.
+#[test]
+fn help_is_written_to_stdout_and_exits_zero() {
+    for name in ["--help", "run", "resume", "ls", "acp"] {
+        let asked = if name == "--help" {
+            Ego::nowhere().subcommand("--help").run()
+        } else {
+            Ego::nowhere().subcommand(name).arg("--help").run()
+        };
+        assert_eq!(
+            asked.code,
+            Some(0),
+            "`ego {name} --help` failed: {}",
+            asked.stderr
+        );
+        assert!(
+            asked.stdout.contains("Usage:"),
+            "`ego {name} --help` wrote no usage line to stdout: {:?}",
+            asked.stdout
+        );
+        assert!(
+            asked.stderr.is_empty(),
+            "`ego {name} --help` wrote to stderr: {}",
+            asked.stderr
+        );
+    }
+}
+
+/// `--version` likewise, and it prints one.
+#[test]
+fn version_is_written_to_stdout_and_exits_zero() {
+    let asked = Ego::nowhere().subcommand("--version").run();
+    assert_eq!(asked.code, Some(0), "stderr: {}", asked.stderr);
+    assert_eq!(
+        asked.stdout.trim(),
+        format!("ego {}", env!("CARGO_PKG_VERSION")),
+        "stderr: {}",
+        asked.stderr
+    );
+}
+
+/// A real usage error still goes to stderr at exit 2, so the split above
+/// separated two things rather than moving both.
+#[test]
+fn a_usage_error_still_goes_to_stderr_and_exits_two() {
+    let refused = Ego::nowhere().subcommand("ls").arg("--nonsense").run();
+    assert_eq!(refused.code, Some(2), "stdout: {}", refused.stdout);
+    assert!(refused.stdout.is_empty(), "stdout: {}", refused.stdout);
+    assert!(refused.stderr.contains("--nonsense"), "{}", refused.stderr);
+}
