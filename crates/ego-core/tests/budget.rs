@@ -22,8 +22,8 @@
 //!    and hoping.
 
 use ego_core::budget::{
-    BudgetBinding, BudgetDenied, BudgetGate, Metering, MeteringIdentity, PricingQuote,
-    SettlementSource,
+    BudgetBinding, BudgetDenied, BudgetGate, Ledger, Metering, MeteringIdentity, PricingQuote,
+    Reserved, SettlementSource,
 };
 use ego_core::cost::{
     Amount, Ceiling, CostAttribution, CostDelta, CurrencyCode, MeteringRevision, Money,
@@ -1405,6 +1405,336 @@ mod budget {
         assert!(
             said.contains("the quote") && said.contains("usage.cost_in_usd_ticks"),
             "the denial must name both settlement sources: {said}"
+        );
+    }
+
+    // --- a run with no ceiling -------------------------------------------
+    //
+    // `docs/decisions/2026-08-21-a-run-with-no-ceiling.md` §§1-2. Nobody has
+    // to configure a ceiling, and a run without one still reserves, settles
+    // and reconciles — it simply has nothing to enforce. The four cases of
+    // §2's table are exercised below, plus what the shape it mints costs the
+    // caller.
+
+    /// An unlimited ledger holds no totals, and says so by having none
+    /// rather than by reporting zeroes. A zero `outstanding` on a gate with
+    /// no limit is a number nothing consults and nothing checks; reporting
+    /// it would invite a consumer to compare it against a limit that is not
+    /// there.
+    #[test]
+    fn a_gate_with_no_ceiling_reports_no_limit_and_no_totals() {
+        let gate = BudgetGate::unlimited(CurrencyCode::new("USD").expect("USD is valid"));
+
+        assert_eq!(gate.ledger(), &Ledger::Unlimited);
+        assert_eq!(gate.limit(), None);
+        assert_eq!(gate.committed(), None);
+        assert_eq!(gate.outstanding(), None);
+        assert_eq!(
+            gate.currency(),
+            CurrencyCode::new("USD").expect("USD is valid"),
+            "the settlement currency survives the ceiling's absence: a flat-fee \
+             row still costs an attributable zero, and a zero is denominated"
+        );
+    }
+
+    /// §2, row three: `Unlimited` and a computable bound still bounds. The
+    /// bound is not wasted work with nothing to compare against — it is what
+    /// `reconcile` charges when the real figure is unusable, and it is a
+    /// falsifiable claim about the quote and the capability record.
+    #[test]
+    fn a_run_with_no_ceiling_still_bounds_what_it_can_bound() {
+        let mut gate = BudgetGate::unlimited(CurrencyCode::new("USD").expect("USD is valid"));
+
+        let reservation = gate
+            .reserve(
+                &metered(),
+                Some(&quote()),
+                &request(Some(1_024)),
+                &caps(Some(200_000), Some(64_000)),
+            )
+            .expect("no ceiling refuses nothing");
+
+        assert_eq!(reservation.upper_bound(), Some(&standard_bound()));
+        assert_eq!(
+            gate.ledger(),
+            &Ledger::Unlimited,
+            "and the bound is held against nothing, because there is nothing to hold it against"
+        );
+    }
+
+    /// The invariant §2 turns on, in one test: the *same* generation, with
+    /// the same metering and the same missing rates, is admitted unbounded
+    /// where no ceiling was configured and refused by name where one was.
+    ///
+    /// Neither half means anything alone. Admitting without the refusal would
+    /// be a gate that never bounds; refusing without the admission is exactly
+    /// the "no price, no run" rule §1 deleted. The pair is what says the
+    /// operator's intent — not the state of our price tables — is what
+    /// decides.
+    #[test]
+    fn an_unbounded_reservation_is_admitted_where_a_limited_ledger_with_no_rates_refuses() {
+        let no_rates: Option<&PricingQuote> = None;
+
+        let mut unlimited = BudgetGate::unlimited(CurrencyCode::new("USD").expect("USD is valid"));
+        let admitted = unlimited
+            .reserve(
+                &metered(),
+                no_rates,
+                &request(Some(1_024)),
+                &caps(Some(200_000), Some(64_000)),
+            )
+            .expect("a run nobody asked to bound is not refused for a price nobody asked for");
+        assert_eq!(
+            admitted.reserved(),
+            &Reserved::Unbounded {
+                model: "claude-opus-5".to_string()
+            },
+            "and what it gets is a named absence, not a zero standing in for one"
+        );
+
+        let mut limited = BudgetGate::new(usd("10"));
+        let refused = limited
+            .reserve(
+                &metered(),
+                no_rates,
+                &request(Some(1_024)),
+                &caps(Some(200_000), Some(64_000)),
+            )
+            .expect_err("a ceiling was asked for and cannot be honoured");
+        assert_eq!(
+            refused,
+            BudgetDenied::CostUnknown(UnknownCost::NoPricingQuote),
+            "the refusal names the missing fact"
+        );
+    }
+
+    /// The same asymmetry for the other reason a bound fails: a model whose
+    /// context window nobody stated. §1 says this degrades under `Unlimited`
+    /// and stays fatal under `Limited`, and the two must not be allowed to
+    /// converge on either answer.
+    #[test]
+    fn an_unstated_ceiling_is_fatal_only_where_a_ceiling_was_asked_for() {
+        let no_window = caps(None, Some(64_000));
+
+        let mut unlimited = BudgetGate::unlimited(CurrencyCode::new("USD").expect("USD is valid"));
+        assert!(matches!(
+            unlimited
+                .reserve(
+                    &metered(),
+                    Some(&quote()),
+                    &request(Some(1_024)),
+                    &no_window
+                )
+                .expect("nothing to enforce, so nothing to refuse")
+                .reserved(),
+            Reserved::Unbounded { .. }
+        ));
+
+        let mut limited = BudgetGate::new(usd("10"));
+        assert_eq!(
+            limited
+                .reserve(
+                    &metered(),
+                    Some(&quote()),
+                    &request(Some(1_024)),
+                    &no_window
+                )
+                .expect_err("a ceiling cannot be honoured against an unknown context window"),
+            BudgetDenied::CostUnknown(UnknownCost::UnstatedCeiling {
+                ceiling: Ceiling::Context
+            })
+        );
+    }
+
+    /// An unbounded reservation is checked on the model, which is every fact
+    /// it holds. Nothing weaker than the bounded check in what it protects:
+    /// it authorised no figure, so no substitution can overspend one — but a
+    /// reservation for one model must still not run another.
+    #[test]
+    fn an_unbounded_reservation_still_refuses_a_different_model() {
+        let mut gate = BudgetGate::unlimited(CurrencyCode::new("USD").expect("USD is valid"));
+        let reservation = gate
+            .reserve(
+                &metered(),
+                None,
+                &request(Some(1_024)),
+                &caps(Some(200_000), Some(64_000)),
+            )
+            .expect("no ceiling refuses nothing");
+
+        assert_eq!(reservation.model(), "claude-opus-5");
+        assert_eq!(reservation.binding(), None, "there is no bound to bind");
+        assert_eq!(reservation.metering(), None);
+        assert!(
+            reservation
+                .authorises(
+                    &metered(),
+                    None,
+                    &request(Some(1_024)),
+                    &caps(Some(200_000), Some(64_000))
+                )
+                .is_ok(),
+            "the generation it was minted for is the one it authorises"
+        );
+
+        let elsewhere = GenRequest {
+            model: "claude-haiku-5".to_string(),
+            ..request(Some(1_024))
+        };
+        let denied = reservation
+            .authorises(
+                &metered(),
+                None,
+                &elsewhere,
+                &caps(Some(200_000), Some(64_000)),
+            )
+            .expect_err("a different model is a different generation");
+        assert_eq!(
+            denied,
+            BudgetDenied::WrongModel {
+                authorised: "claude-opus-5".to_string(),
+                presented: "claude-haiku-5".to_string()
+            }
+        );
+        let said = denied.to_string();
+        assert!(
+            said.contains("claude-opus-5") && said.contains("claude-haiku-5"),
+            "the denial names both models: {said}"
+        );
+    }
+
+    /// Reconciling an unbounded reservation releases nothing — there was no
+    /// hold — and charges the figure that actually arrived.
+    #[test]
+    fn an_unbounded_reservation_charges_what_was_stated_and_releases_nothing() {
+        let mut gate = BudgetGate::unlimited(CurrencyCode::new("USD").expect("USD is valid"));
+        let reservation = gate
+            .reserve(
+                &metered(),
+                None,
+                &request(Some(1_024)),
+                &caps(Some(200_000), Some(64_000)),
+            )
+            .expect("no ceiling refuses nothing");
+
+        let settled = gate
+            .reconcile(
+                reservation,
+                &CostDelta::Known {
+                    amount: usd("0.004"),
+                    attribution: CostAttribution::Table {
+                        revision: revision(),
+                    },
+                    fx: None,
+                },
+            )
+            .expect("its own gate settles it");
+
+        assert_eq!(settled.charged, Some(usd("0.004")));
+        assert!(settled.exact, "a stated figure is not a guess");
+        assert!(settled.over_bound.is_none(), "there was no bound to breach");
+        assert_eq!(
+            gate.ledger(),
+            &Ledger::Unlimited,
+            "and no total moved, because there is no total"
+        );
+    }
+
+    /// And when the figure does not arrive, nothing is charged. There is no
+    /// bound to fall back to, and a `Some(zero)` here would read as *free* —
+    /// which is the one thing an unpriced hosted generation certainly was
+    /// not. The unknown propagates instead, and poisons the run's cumulative
+    /// total where a fabricated zero would have quietly completed it.
+    #[test]
+    fn an_unbounded_reservation_with_no_usable_cost_charges_nothing_rather_than_zero() {
+        let mut gate = BudgetGate::unlimited(CurrencyCode::new("USD").expect("USD is valid"));
+        let reservation = gate
+            .reserve(
+                &metered(),
+                None,
+                &request(Some(1_024)),
+                &caps(Some(200_000), Some(64_000)),
+            )
+            .expect("no ceiling refuses nothing");
+
+        let settled = gate
+            .reconcile(
+                reservation,
+                &CostDelta::Unknown(UnknownCost::NoPricingQuote),
+            )
+            .expect("its own gate settles it");
+
+        assert_eq!(settled.charged, None);
+        assert!(!settled.exact);
+        assert!(settled.over_bound.is_none());
+    }
+
+    /// The one check that survives on an unbounded reservation: the currency.
+    /// It has no binding, so there is no authorised revision for an
+    /// attribution to contradict — but a figure denominated in something the
+    /// session does not settle in is still not this session's cost, and
+    /// adding it to a run total would be adding euros to dollars.
+    #[test]
+    fn an_unbounded_reservation_still_refuses_a_cost_in_another_currency() {
+        let mut gate = BudgetGate::unlimited(CurrencyCode::new("USD").expect("USD is valid"));
+        let reservation = gate
+            .reserve(
+                &metered(),
+                None,
+                &request(Some(1_024)),
+                &caps(Some(200_000), Some(64_000)),
+            )
+            .expect("no ceiling refuses nothing");
+
+        let settled = gate
+            .reconcile(
+                reservation,
+                &CostDelta::Known {
+                    amount: Money::new(
+                        amount("0.004"),
+                        CurrencyCode::new("EUR").expect("EUR is valid"),
+                    ),
+                    attribution: CostAttribution::Table {
+                        revision: revision(),
+                    },
+                    fx: None,
+                },
+            )
+            .expect("its own gate settles it");
+
+        assert_eq!(
+            settled.charged, None,
+            "euros are not this session's dollars, and there is no bound to fall back to"
+        );
+        assert!(!settled.exact);
+    }
+
+    /// A gate whose limit an administrator reduced remembers both figures.
+    /// §4 requires the clamp be *stated, not silent*: a `--budget $20` that
+    /// silently became $5 reads as binding at a figure it does not, and the
+    /// only thing that knows both numbers is the ledger they live in.
+    #[test]
+    fn a_clamped_ceiling_remembers_the_figure_that_was_asked_for() {
+        let gate = BudgetGate::clamped(usd("5"), usd("20"));
+
+        assert_eq!(
+            gate.ledger(),
+            &Ledger::Limited {
+                limit: usd("5"),
+                clamped_from: Some(usd("20")),
+                committed: usd("0"),
+                outstanding: usd("0"),
+            }
+        );
+        assert_eq!(
+            BudgetGate::new(usd("5")).ledger(),
+            &Ledger::Limited {
+                limit: usd("5"),
+                clamped_from: None,
+                committed: usd("0"),
+                outstanding: usd("0"),
+            },
+            "and an unclamped ceiling does not accidentally claim a clamp"
         );
     }
 

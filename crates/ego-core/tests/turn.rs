@@ -1384,6 +1384,53 @@ mod turn {
         );
     }
 
+    /// The ordinary case, end to end: nobody configured a ceiling, so the
+    /// run says so and runs anyway.
+    ///
+    /// This is §1's whole claim reduced to something falsifiable. The turn
+    /// has no rates at all — the state that used to be a refusal — and it
+    /// completes, publishing `ceiling: none` and `rates: none` rather than a
+    /// limit that is not there or a provenance for figures nobody has.
+    #[test]
+    fn a_run_with_no_ceiling_and_no_rates_completes_and_says_so() {
+        let fx = Fixture::new(vec![vec![
+            AiEvent::Usage(tokens(1_000, 0, 0, 200)),
+            AiEvent::Stop(StopReason::Stop),
+        ]]);
+        *fx.gate.borrow_mut() =
+            BudgetGate::unlimited(CurrencyCode::new("USD").expect("USD is valid"));
+
+        let (exit, ok, _) = run_with(
+            &fx,
+            SessionState::default(),
+            "hi",
+            metering(),
+            None,
+            config(),
+        );
+
+        assert_eq!(exit, ExitReason::Completed);
+        assert!(ok, "a run nobody asked to bound is not refused for a price");
+        assert_eq!(
+            metering_events(&fx),
+            vec![PublicEvent::MeteringSelected {
+                turn: match fx.sink.events().first() {
+                    Some(PublicEvent::TurnStarted { turn }) => *turn,
+                    other => panic!("a turn starts before it is metered: {other:?}"),
+                },
+                metering: ego_core::public::MeteringKind::Currency,
+                ceiling: ego_core::public::CeilingEffect::None,
+                rates: RateSource::None,
+            }],
+            "no ceiling and no rates are each announced as the absences they are"
+        );
+        assert_eq!(
+            fx.generator.calls().len(),
+            1,
+            "and the provider was actually reached"
+        );
+    }
+
     /// The three arrangements a monetary budget cannot bind, each said in its
     /// own words. Without this the variants would be constructible and
     /// invisible — an operator running a subscription model under `--budget

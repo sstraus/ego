@@ -1318,11 +1318,24 @@ impl BudgetGate {
             }));
         }
 
+        // A figure settles this reservation if it is in the currency this
+        // session settles in, and was produced by the arrangement the
+        // reservation authorised.
+        //
+        // An `Unbounded` reservation authorised no arrangement — there is no
+        // binding, because there was no bound to bind. The attribution check
+        // is therefore not *skipped* here so much as vacuous: there is no
+        // authorised revision for a figure to contradict, so any known cost
+        // in the settlement currency is the cost. Requiring a binding
+        // instead would make `charged` unconditionally `None` on every
+        // unbounded generation, turning an exact figure into an unknown one
+        // and poisoning a run's total that has a perfectly good answer.
         let settles = |attribution: &CostAttribution, amount: &Money| {
             amount.currency == self.currency
-                && reservation
-                    .binding()
-                    .is_some_and(|binding| binding.settles(attribution))
+                && match reservation.binding() {
+                    Some(binding) => binding.settles(attribution),
+                    None => true,
+                }
         };
         let stated = match actual {
             CostDelta::Known {
