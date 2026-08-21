@@ -226,7 +226,7 @@ pub struct HttpRequest {
 /// This is the one container [`Secret`](crate::provider::Secret)'s guarantee
 /// does not reach. That type refuses to print in every formatter, on the
 /// argument — correct, and recorded in the plan — that a value which refuses
-/// makes a forgetful container harmless. But `ProviderRow::headers` calls
+/// makes a forgetful container harmless. But `ResolvedCredential::headers` calls
 /// `expose()` and returns `format!("Bearer {}", …)` as an ordinary `String`,
 /// and from that line on the credential is no longer a `Secret`. This struct
 /// is what receives it, which makes it exactly "the next type that happens to

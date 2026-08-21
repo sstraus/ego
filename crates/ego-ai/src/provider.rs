@@ -37,8 +37,8 @@ pub struct Secret(String);
 
 impl Secret {
     /// The credential itself. Private to this module: the only legitimate
-    /// reader is [`ProviderRow::headers`], and a public accessor would make
-    /// the redaction above a formality.
+    /// reader is [`ResolvedCredential::headers`], and a public accessor would
+    /// make the redaction above a formality.
     fn expose(&self) -> &str {
         &self.0
     }
@@ -62,7 +62,8 @@ impl From<&str> for Secret {
     }
 }
 
-/// How a provider authenticates a request — the *strategy*, never the value.
+/// How a provider presents a credential, and where the credential is read
+/// from — the *strategy*, never the value.
 ///
 /// `docs/decisions/2026-08-21-a-profile-is-not-a-protocol.md` §3. A row used
 /// to carry a resolved [`Secret`], which was not readable outside this module
@@ -72,7 +73,7 @@ impl From<&str> for Secret {
 /// Naming the variable instead means every provider has a row whether or not
 /// anyone has configured it, and the refusal happens where it can be acted on.
 #[derive(Debug, Clone)]
-pub enum Auth {
+pub enum CredentialStrategy {
     /// None at all — a local daemon that does not authenticate. A distinct
     /// variant rather than an empty variable name, so "this provider needs no
     /// key" and "the key is missing" cannot be confused.
@@ -81,28 +82,70 @@ pub enum Auth {
     BearerFromEnv { var: String },
 }
 
-impl Auth {
-    /// The credential this strategy needs, resolved now and returned to a
-    /// caller that is about to put it in a header and drop it.
+impl CredentialStrategy {
+    /// The credential this strategy names, read once and turned into the
+    /// header that carries it.
     ///
-    /// `None` means the strategy needs no credential, which is not the same
-    /// answer as an error and must never collapse into one.
-    fn secret(&self, creds: &dyn Credentials) -> Result<Option<Secret>, MissingCredential> {
-        match self {
-            Auth::None => Ok(None),
-            Auth::BearerFromEnv { var } => creds.bearer(var).map(Some),
-        }
+    /// **Once**, and that is the whole of
+    /// `docs/decisions/2026-08-21-a-shared-shape-is-not-a-shared-contract.md`
+    /// §6. The Step 13.5 ADR weighed resolving *in the row* against resolving
+    /// *per request* and rejected the second, correctly: it makes every
+    /// generation fallible for a condition decided at startup, and it would
+    /// change behaviour mid-run if the variable were rotated. There was a
+    /// third option it did not consider — resolve once, **outside** the row —
+    /// and this is it. The row keeps a strategy with nothing in it to leak,
+    /// and exactly one [`ResolvedCredential`] exists, held by the one
+    /// generator that must send it.
+    pub fn resolve(
+        &self,
+        creds: &dyn Credentials,
+    ) -> Result<ResolvedCredential, MissingCredential> {
+        let header = match self {
+            // Not an error and not an empty header: a provider that
+            // authenticates nothing is a different fact from a key that is
+            // missing, and collapsing them would make a misconfigured hosted
+            // row look like a local daemon.
+            CredentialStrategy::None => None,
+            CredentialStrategy::BearerFromEnv { var } => Some((
+                "authorization".to_string(),
+                Secret::from(format!("Bearer {}", creds.bearer(var)?.expose())),
+            )),
+        };
+        Ok(ResolvedCredential { header })
     }
+}
 
-    /// Refuse now if the credential this strategy names is not there.
+/// One provider's credential, resolved: the header it becomes, or nothing.
+///
+/// The value the row deliberately does not hold. It exists once per run, in
+/// the generator that sends it, and it is reachable from no record: a
+/// [`ResolvedModel`](crate::catalogue::ResolvedModel) is `Clone` and `Debug`
+/// and travels to the budget gate and the ledger, which is precisely why the
+/// credential does not travel with it.
+///
+/// `Debug` is derived and safe because [`Secret`] refuses to print — the belt
+/// the profile ADR §3 argues for, still fastened now that the braces are
+/// structural.
+#[derive(Debug, Clone)]
+pub struct ResolvedCredential {
+    header: Option<(String, Secret)>,
+}
+
+impl ResolvedCredential {
+    /// The headers this credential contributes to a request.
     ///
-    /// Called at resolution, so "no key configured" is a refusal naming the
-    /// variable to set rather than a 401 from the provider several layers
-    /// later — by which point the request has been built, sent, and billed to
-    /// somebody's rate limit. It returns nothing on purpose: the value is
-    /// read again when a request is assembled and is never stored in between.
-    pub fn ensure_available(&self, creds: &dyn Credentials) -> Result<(), MissingCredential> {
-        self.secret(creds).map(|_| ())
+    /// Only the credential. Content type and accept belong to the wire
+    /// format, which adds them itself
+    /// ([`RequestTarget::post_json`](crate::wire::RequestTarget::post_json)),
+    /// because they are facts about the body — not about the provider.
+    ///
+    /// This is the one place the secret is exposed, and it is exposed into a
+    /// value the caller is about to put in a header.
+    pub fn headers(&self) -> Vec<(String, String)> {
+        match &self.header {
+            None => Vec::new(),
+            Some((name, secret)) => vec![(name.clone(), secret.expose().to_string())],
+        }
     }
 }
 
@@ -184,7 +227,7 @@ pub struct ProviderRow {
     /// `chat/completions` to `https://gateway.example/openai/chat/completions`
     /// — a silently wrong address for a deployment shape that really exists.
     pub base: Url,
-    pub auth: Auth,
+    pub credential: CredentialStrategy,
     /// Which API shape this provider speaks.
     ///
     /// A `&'static dyn` and not an `Arc<dyn>` like [`cost`](Self::cost),
@@ -264,7 +307,7 @@ impl ProviderRow {
             id: "openai".to_string(),
             base: as_base(base),
             wire: &OpenAiCompletions,
-            auth: Auth::BearerFromEnv {
+            credential: CredentialStrategy::BearerFromEnv {
                 var: OPENAI_KEY_VAR.to_string(),
             },
             // OpenAI reports token usage and no monetary total
@@ -310,7 +353,7 @@ impl ProviderRow {
             id: "ollama".to_string(),
             base: as_base(base),
             wire: &Ollama,
-            auth: Auth::None,
+            credential: CredentialStrategy::None,
             // A daemon serving its own weights charges nothing and states
             // nothing; the metering says so, not a cost field.
             cost: None,
@@ -320,29 +363,5 @@ impl ProviderRow {
     /// The local row at the default install's address.
     pub fn ollama_default() -> Self {
         Self::ollama(Url::parse(OLLAMA_BASE).expect("a constant this file controls"))
-    }
-
-    /// The headers this row contributes to a request.
-    ///
-    /// Only the credential. Content type and accept belong to the wire
-    /// format, which adds them itself (`openai_completions::build_request`),
-    /// because they are facts about the body — not about the provider.
-    ///
-    /// The credential is resolved *here*, per request, and the [`Secret`] it
-    /// comes back in lives exactly as long as the `format!` below. Nothing
-    /// holds it: that is what "no secret is reachable from `ProviderRow`"
-    /// means now that it is a claim about what the type holds rather than
-    /// about who can call an accessor.
-    pub fn headers(
-        &self,
-        creds: &dyn Credentials,
-    ) -> Result<Vec<(String, String)>, MissingCredential> {
-        Ok(match self.auth.secret(creds)? {
-            None => Vec::new(),
-            Some(secret) => vec![(
-                "authorization".to_string(),
-                format!("Bearer {}", secret.expose()),
-            )],
-        })
     }
 }

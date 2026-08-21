@@ -19,7 +19,7 @@ use ego_core::generator::types::{ErrorKind, GenRequest};
 use futures::{StreamExt, stream};
 
 use crate::http::Http;
-use crate::provider::{Credentials, ProviderRow};
+use crate::provider::{ProviderRow, ResolvedCredential};
 use crate::wire;
 
 /// A [`Generator`] that sends a profile's own wire format over an [`Http`].
@@ -35,17 +35,31 @@ pub struct WireGenerator {
     /// [`AttemptStream::new`] takes a `BoxStream<'static, _>`, so the future
     /// that calls [`Http::execute`] outlives any borrow of `self`.
     http: Arc<dyn Http>,
-    /// Where the row's credential strategy is resolved, once per request.
+    /// The row's credential, already resolved.
     ///
-    /// Held here rather than resolved into the row, because the row must not
-    /// hold a secret — `docs/decisions/2026-08-21-a-profile-is-not-a-protocol.md`
-    /// §3. This holds no secret either: it holds the *means* of getting one.
-    creds: Arc<dyn Credentials>,
+    /// The one copy in the process, and it lives here because this is the one
+    /// thing that must send it — the row must not hold a secret
+    /// (`docs/decisions/2026-08-21-a-profile-is-not-a-protocol.md` §3) and
+    /// neither may a `ResolvedModel`, which is `Clone` and travels to the
+    /// ledger.
+    ///
+    /// Resolved rather than resolvable, which is
+    /// `2026-08-21-a-shared-shape-is-not-a-shared-contract.md` §6's whole
+    /// point: this field used to be an `Arc<dyn Credentials>` and every
+    /// generation re-read the environment through it, so a variable rotated
+    /// mid-run changed behaviour silently and every generation was fallible
+    /// for a condition settled at startup. Now the failure has exactly one
+    /// site, and it is the site that can name the variable to set.
+    credential: ResolvedCredential,
 }
 
 impl WireGenerator {
-    pub fn new(row: ProviderRow, http: Arc<dyn Http>, creds: Arc<dyn Credentials>) -> Self {
-        WireGenerator { row, http, creds }
+    pub fn new(row: ProviderRow, http: Arc<dyn Http>, credential: ResolvedCredential) -> Self {
+        WireGenerator {
+            row,
+            http,
+            credential,
+        }
     }
 
     /// Which provider this generates against.
@@ -56,32 +70,14 @@ impl WireGenerator {
 
 impl Generator for WireGenerator {
     fn generate(&self, req: GenRequest, attempt: GenerationAttempt) -> AttemptStream {
-        // Resolved before the body is built, and refused the same way a
-        // request the format cannot express is refused. It should not happen:
-        // `model::resolve` already called `Auth::ensure_available`, so by the
-        // time a generation exists the variable was there. Should-not-happen
-        // is not the same as cannot, and the honest answer to "the credential
-        // vanished mid-run" is the one below — never a `Bearer ` header sent
-        // to be blamed on the provider.
-        //
-        // `Invalid` and deliberately not `Refused`, whose doc names a
-        // provider's answer — a 401, a 403, an exhausted balance. Nothing was
-        // asked here, so there is no such answer to report. `Invalid` is the
-        // one classification certain without a provider, and it is also the
-        // one that exits the way this cause already exits at resolution: a
-        // credential nobody configured is the operator's to fix, which
-        // `CLI.md` §4.3 spells 2 and not 4.
-        let headers = match self.row.headers(self.creds.as_ref()) {
-            Ok(headers) => headers,
-            Err(missing) => {
-                let events = wire::failed(
-                    missing.to_string(),
-                    DeliveryCertainty::DefinitelyUnsent,
-                    ErrorKind::Invalid,
-                );
-                return AttemptStream::new(attempt, stream::iter(events).boxed());
-            }
-        };
+        // No credential branch here, and its absence is the change §6 bought.
+        // A missing key is refused once, at resolution, where the message can
+        // name the variable to set and the exit code can be `CLI.md` §4.3's 2
+        // rather than a provider's 4. What used to sit here was the same
+        // refusal re-derived per generation, for a condition that could not
+        // have changed since — and it re-read the environment to do it, so a
+        // rotated variable silently changed a running turn.
+        let headers = self.credential.headers();
         let target = wire::RequestTarget::new(&self.row.base, &headers);
         let request = match self.row.wire.build_request(&target, &req) {
             Ok(request) => request,

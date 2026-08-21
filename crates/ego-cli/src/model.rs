@@ -11,7 +11,7 @@ use std::sync::Arc;
 use ego_ai::catalogue::{self, Catalogue, ModelSlug, ResolveError, ResolvedModel};
 use ego_ai::http::{EgressPolicy, Http, ReqwestHttp};
 use ego_ai::ollama;
-use ego_ai::provider::{Credentials, OLLAMA_BASE, OPENAI_BASE, ProviderRow};
+use ego_ai::provider::{Credentials, OLLAMA_BASE, OPENAI_BASE, ProviderRow, ResolvedCredential};
 use url::Url;
 
 use crate::facts;
@@ -109,31 +109,40 @@ fn rows() -> Result<Vec<ProviderRow>, ResolveError> {
 /// error it is. Folding it into [`ResolveError`] would make "your TOML has a
 /// stray bracket" arrive as a statement about a model.
 ///
-/// `creds` is passed in for the same reason and one more: it is the *same*
-/// source the generator will read from when it assembles a request, so the
-/// check below and the header built later cannot disagree about whether a key
-/// exists.
+/// `creds` is passed in for the same reason and one more: this is the *only*
+/// place a credential is read. What comes back beside the model is the
+/// resolved value itself, so the check here and the header sent later cannot
+/// disagree about whether a key exists — they are the same read
+/// (`docs/decisions/2026-08-21-a-shared-shape-is-not-a-shared-contract.md`
+/// §6).
+///
+/// Returned beside the [`ResolvedModel`] rather than inside it, and that is
+/// the point of the pair: a resolved model is `Clone` and `Debug` and travels
+/// to the budget gate and the ledger, and a credential must travel to exactly
+/// one place.
 pub async fn resolve(
     slug: &str,
     hosted: Vec<(String, facts::Hosted)>,
     http: &Arc<dyn Http>,
     creds: &dyn Credentials,
-) -> Result<ResolvedModel, ResolveError> {
+) -> Result<(ResolvedModel, ResolvedCredential), ResolveError> {
     let slug = ModelSlug::parse(slug)?;
     let mut catalogue = Catalogue::new(rows()?);
     for (supplied, model) in hosted {
         catalogue = catalogue.with_hosted(&supplied, model);
     }
     let row = catalogue.row(&slug.provider)?.clone();
-    // Refused here, where the operator can act on it, rather than as a 401
-    // several layers later. No per-provider branch: the row names its own
-    // variable, so this one line covers every provider that has one and says
-    // nothing about the ones that do not.
-    row.auth.ensure_available(creds)?;
-    if slug.provider == catalogue::OLLAMA {
-        return ollama::resolve(&row, &slug.model, http).await;
-    }
-    catalogue.resolve_hosted(&slug)
+    // Read here, where a refusal can name the variable to set, rather than as
+    // a 401 several layers later. No per-provider branch: the row names its
+    // own variable, so this one line covers every provider that has one and
+    // says nothing about the ones that do not.
+    let credential = row.credential.resolve(creds)?;
+    let model = if slug.provider == catalogue::OLLAMA {
+        ollama::resolve(&row, &slug.model, http).await?
+    } else {
+        catalogue.resolve_hosted(&slug)?
+    };
+    Ok((model, credential))
 }
 
 /// Whether a resolution failure is the network's fault or the caller's.

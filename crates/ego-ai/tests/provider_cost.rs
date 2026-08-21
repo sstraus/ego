@@ -26,7 +26,7 @@
 use std::sync::{Arc, Mutex};
 
 use ego_ai::http::{Http, HttpError, HttpRequest, HttpResponse};
-use ego_ai::provider::{Auth, ProviderRow};
+use ego_ai::provider::{CredentialStrategy, ProviderRow, ResolvedCredential};
 use ego_ai::wire::openai_completions::OpenAiCompletions;
 use ego_ai::wire::provider_cost::{
     OPENROUTER_COST_FIELD, OpenRouterUsd, ProviderCost, XAI_COST_FIELD, XaiUsdTicks,
@@ -246,7 +246,7 @@ fn row(id: &str, cost: Arc<dyn ProviderCost>) -> ProviderRow {
         id: id.to_string(),
         base: Url::parse("https://api.example/v1/").expect("a valid url"),
         wire: &OpenAiCompletions,
-        auth: Auth::BearerFromEnv {
+        credential: CredentialStrategy::BearerFromEnv {
             var: "EGO_TEST_API_KEY".to_string(),
         },
         cost: Some(cost),
@@ -258,8 +258,10 @@ fn row(id: &str, cost: Arc<dyn ProviderCost>) -> ProviderRow {
 /// Authentication is not what this file is about, but the rows above are the
 /// real thing rather than a keyless simplification — a fixture that could not
 /// authenticate would not exercise the same path a priced run takes.
-fn creds() -> Arc<FakeCredentials> {
-    Arc::new(FakeCredentials::holding("sk-not-a-real-key"))
+fn creds(row: &ProviderRow) -> ResolvedCredential {
+    row.credential
+        .resolve(&FakeCredentials::holding("sk-not-a-real-key"))
+        .expect("the fake holds every variable")
 }
 
 /// Everything from the socket to the committed total, for one provider.
@@ -289,10 +291,12 @@ async fn settle_through_core(
     )
     .expect("built from the request that was priced");
 
+    let row = row(id, decoder);
+    let credential = creds(&row);
     let generator = WireGenerator::new(
-        row(id, decoder),
+        row,
         StubHttp::new(transcript(usage)) as Arc<dyn Http>,
-        creds(),
+        credential,
     );
     let mut stream = generator.generate(request(), attempt);
     let events: Vec<AiEvent> = stream.by_ref().collect().await;
@@ -535,15 +539,16 @@ async fn a_row_with_no_cost_decoder_settles_from_its_table_as_it_always_did() {
         id: "openai".to_string(),
         base: Url::parse("https://api.example/v1/").expect("a valid url"),
         wire: &OpenAiCompletions,
-        auth: Auth::BearerFromEnv {
+        credential: CredentialStrategy::BearerFromEnv {
             var: "EGO_TEST_API_KEY".to_string(),
         },
         cost: None,
     };
+    let credential = creds(&plain);
     let generator = WireGenerator::new(
         plain,
         StubHttp::new(transcript(XAI_USAGE)) as Arc<dyn Http>,
-        creds(),
+        credential,
     );
     let mut stream = generator.generate(request(), attempt);
     let events: Vec<AiEvent> = stream.by_ref().collect().await;

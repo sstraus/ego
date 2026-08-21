@@ -451,7 +451,7 @@ async fn execute<S: EventSink>(
     // the header the generator builds read the same place, so they cannot
     // disagree about whether a key exists.
     let creds: Arc<dyn Credentials> = Arc::new(EnvCredentials);
-    let resolved = model::resolve(&slug, hosted, &http, creds.as_ref())
+    let (resolved, credential) = model::resolve(&slug, hosted, &http, creds.as_ref())
         .await
         .map_err(|err| {
             if model::is_provider_failure(&err) {
@@ -503,7 +503,7 @@ async fn execute<S: EventSink>(
     );
 
     let generator =
-        ego_ai::generator::WireGenerator::new(resolved.row.clone(), Arc::clone(&http), creds);
+        ego_ai::generator::WireGenerator::new(resolved.row.clone(), Arc::clone(&http), credential);
     // `CLI.md` §4.4: an untrusted workspace resolves to `Mode::Default`
     // because no layer that could name a mode was eligible, which is the
     // posture that asks rather than the one that assumes.

@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex};
 
 use ego_ai::generator::WireGenerator;
 use ego_ai::http::{Http, HttpError, HttpRequest, HttpResponse, Method};
-use ego_ai::provider::{Auth, ProviderRow};
+use ego_ai::provider::{CredentialStrategy, ProviderRow, ResolvedCredential};
 use ego_ai::wire::openai_completions::{OpenAiCompletions, request_body};
 use ego_core::budget::{BudgetGate, Metering, PricingQuote, SettlementSource};
 use ego_core::cost::{Amount, CurrencyCode, Money, PricingRevision};
@@ -32,7 +32,7 @@ use ego_core::generator::capabilities::{
 };
 use ego_core::generator::port::{AiEvent, Generator};
 use ego_core::generator::types::{
-    ContentBlock, Conversation, ErrorKind, GenRequest, Message, ReasoningState, Role, StopReason,
+    ContentBlock, Conversation, GenRequest, Message, ReasoningState, Role, StopReason,
     ThinkingLevel,
 };
 use futures::StreamExt;
@@ -132,7 +132,7 @@ fn row() -> ProviderRow {
         id: "stub".to_string(),
         base: Url::parse("https://api.example/v1/").expect("a valid url"),
         wire: &OpenAiCompletions,
-        auth: Auth::BearerFromEnv {
+        credential: CredentialStrategy::BearerFromEnv {
             var: KEY_VAR.to_string(),
         },
         cost: None,
@@ -145,7 +145,20 @@ fn row() -> ProviderRow {
 /// credential is not what they are about — so the three-argument constructor
 /// is spelled once here rather than at each call site.
 fn generator(http: Arc<dyn Http>) -> WireGenerator {
-    WireGenerator::new(row(), http, Arc::new(FakeCredentials::holding(KEY)))
+    WireGenerator::new(row(), http, credential(&FakeCredentials::holding(KEY)))
+}
+
+/// The fixture row's credential, resolved.
+///
+/// A generator cannot be built without one, which is the type-level half of
+/// `docs/decisions/2026-08-21-a-shared-shape-is-not-a-shared-contract.md` §6:
+/// there is no longer a state in which a generation exists and its credential
+/// does not.
+fn credential(creds: &dyn ego_ai::provider::Credentials) -> ResolvedCredential {
+    row()
+        .credential
+        .resolve(creds)
+        .expect("the fixture row's variable is set on this machine")
 }
 
 /// Mints a real attempt through the only door there is.
@@ -445,8 +458,10 @@ async fn a_streamed_response_decodes_to_what_the_wire_format_decodes() {
 fn resolving_a_credential_leaves_nothing_behind_in_the_row() {
     let row = row();
     let headers = row
-        .headers(&FakeCredentials::holding(KEY))
-        .expect("the fake holds every variable");
+        .credential
+        .resolve(&FakeCredentials::holding(KEY))
+        .expect("the fake holds every variable")
+        .headers();
 
     assert_eq!(
         headers,
@@ -471,92 +486,79 @@ fn resolving_a_credential_leaves_nothing_behind_in_the_row() {
 /// A provider that authenticates with nothing asks for nothing — and that is
 /// not the same answer as a failure.
 ///
-/// [`Auth::None`] is a distinct variant rather than an empty variable name for
-/// exactly this reason: collapsing the two would make every local run refuse,
-/// or would send `Bearer ` to a daemon that never wanted one.
+/// [`CredentialStrategy::None`] is a distinct variant rather than an empty
+/// variable name for exactly this reason: collapsing the two would make every
+/// local run refuse, or would send `Bearer ` to a daemon that never wanted
+/// one.
 #[test]
 fn a_row_that_authenticates_with_nothing_neither_asks_nor_fails() {
     let local = ProviderRow::ollama_default();
     let creds = FakeCredentials::empty();
 
     assert_eq!(
-        local.headers(&creds).expect("no credential is needed"),
+        local
+            .credential
+            .resolve(&creds)
+            .expect("a strategy that needs nothing resolves on a machine with nothing")
+            .headers(),
         Vec::new()
     );
-    local
-        .auth
-        .ensure_available(&creds)
-        .expect("a strategy that needs nothing is available on a machine with nothing");
 }
 
-/// A missing credential is refused by name at *both* doors, rather than
-/// leaving one of them to send an empty header and return a 401 from the
-/// provider.
+/// A missing credential is refused by name, at the one door there is.
+///
+/// There used to be two — a check at resolution and a second read when a
+/// request was assembled — and the test that lives here used to assert they
+/// agreed. §6 removed the second: the value is read once and carried, so the
+/// two cannot disagree because there is no longer a second one to disagree
+/// with. What must survive is the message, which is the whole reason the
+/// check is early: an operator can act on "set `OPENAI_API_KEY`" and cannot
+/// act on a 401.
 #[test]
 fn a_credential_that_is_not_configured_is_refused_by_name() {
-    let row = row();
-    let creds = FakeCredentials::empty();
-
-    let early = row
-        .auth
-        .ensure_available(&creds)
+    let refused = row()
+        .credential
+        .resolve(&FakeCredentials::empty())
         .expect_err("this variable is not set");
-    let late = row.headers(&creds).expect_err("nor is it set here");
 
-    assert_eq!(early, late, "one refusal, whichever door found it");
     assert!(
-        early.to_string().contains(KEY_VAR),
-        "the refusal must name the variable to set: {early}"
+        refused.to_string().contains(KEY_VAR),
+        "the refusal must name the variable to set: {refused}"
     );
 }
 
-/// And the generator refuses the same way, without a socket.
+/// The credential the row resolved is the credential the request carries,
+/// exactly once and under the header its strategy names.
 ///
-/// `model::resolve` calls `ensure_available` before a generation exists, so
-/// this should not happen — but should-not-happen is not cannot, and the
-/// honest answer to "the variable was unset mid-run" is a failed generation
-/// that was never sent, never a `Bearer ` header for the provider to reject.
+/// This replaces a test that drove a generator built with an *empty*
+/// `Credentials` and asserted it failed without sending. That state no longer
+/// exists: `WireGenerator::new` takes a `ResolvedCredential`, so a generation
+/// whose credential is missing cannot be constructed, and a test asserting it
+/// fails gracefully would be asserting something about code that cannot run.
+/// What remains testable — and is the property that mattered — is that the
+/// header actually goes out with the request rather than being resolved and
+/// dropped.
 #[tokio::test]
-async fn a_generation_whose_credential_is_gone_fails_without_sending() {
+async fn the_resolved_credential_is_what_the_request_carries() {
     let http = StubHttp::responding(200, TEXT_TRANSCRIPT);
     let mut gate = BudgetGate::new(usd("10"));
-    let generator = WireGenerator::new(
-        row(),
-        Arc::clone(&http) as Arc<dyn Http>,
-        Arc::new(FakeCredentials::empty()),
-    );
+    let generator = generator(Arc::clone(&http) as Arc<dyn Http>);
 
     let attempt = attempt_for(&mut gate, &request());
-    let events: Vec<AiEvent> = generator.generate(request(), attempt).collect().await;
+    let _: Vec<AiEvent> = generator.generate(request(), attempt).collect().await;
 
+    let seen = http.seen.lock().expect("not poisoned");
+    let sent = seen.first().expect("the transport was called once");
+    let auth: Vec<&(String, String)> = sent
+        .headers
+        .iter()
+        .filter(|(name, _)| name == "authorization")
+        .collect();
     assert_eq!(
-        http.calls(),
-        0,
-        "an unauthenticated request must not be sent"
-    );
-    assert!(
-        matches!(
-            events.first(),
-            Some(AiEvent::DeliveryObserved(
-                DeliveryCertainty::DefinitelyUnsent
-            ))
-        ),
-        "{events:?}"
-    );
-    assert!(
-        matches!(events.last(), Some(AiEvent::Stop(StopReason::Error))),
-        "{events:?}"
-    );
-    // `Invalid` and not `Refused`: nothing was asked, so no provider refused
-    // anything — and this is the classification that exits the way a missing
-    // credential already exits at resolution.
-    let named = events.iter().any(|event| {
-        matches!(event, AiEvent::Error { message, kind }
-            if message.contains(KEY_VAR) && *kind == ErrorKind::Invalid)
-    });
-    assert!(
-        named,
-        "the error must name the variable and classify itself: {events:?}"
+        auth,
+        vec![&("authorization".to_string(), format!("Bearer {KEY}"))],
+        "one authorization header, carrying the resolved credential: {:?}",
+        sent.headers
     );
 }
 
@@ -623,7 +625,7 @@ async fn the_request_sent_is_the_one_the_rows_mapping_built() {
     let generator = WireGenerator::new(
         marker_row(),
         Arc::clone(&http) as Arc<dyn Http>,
-        Arc::new(FakeCredentials::holding(KEY)),
+        credential(&FakeCredentials::holding(KEY)),
     );
     let mut gate = BudgetGate::new(usd("10"));
     let request = request();
@@ -652,7 +654,7 @@ async fn the_events_returned_are_the_ones_the_rows_mapping_decoded() {
     let generator = WireGenerator::new(
         marker_row(),
         http as Arc<dyn Http>,
-        Arc::new(FakeCredentials::holding(KEY)),
+        credential(&FakeCredentials::holding(KEY)),
     );
     let mut gate = BudgetGate::new(usd("10"));
     let request = request();
