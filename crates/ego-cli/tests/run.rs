@@ -374,6 +374,12 @@ fn an_explicitly_named_instruction_file_is_described_and_never_quoted() {
     );
     assert_eq!(described["source"], "explicit");
     assert_eq!(described["bytes"], secret.len());
+    // The fifth field this test's own doc claims, and the one it used to leave
+    // unasserted while the binary published `""` for it.
+    assert_eq!(
+        described["scope"], ".",
+        "a file at the workspace root governs the whole workspace"
+    );
     assert_eq!(
         described["sha256"].as_str().expect("a digest").len(),
         64,
@@ -389,6 +395,131 @@ fn an_explicitly_named_instruction_file_is_described_and_never_quoted() {
     assert!(
         system["content"].as_str().expect("text").contains(secret),
         "the file was described but never sent"
+    );
+}
+
+/// The same file named two ways is the same file, and the descriptor must not
+/// be able to tell which spelling the operator typed.
+///
+/// It could. `--instructions AGENTS.md` published `scope: ""` and
+/// `--instructions /abs/ws/AGENTS.md` published `scope: "/abs/ws"`, because the
+/// explicit path reached `scope_of` unresolved and `strip_prefix` against a
+/// canonical root missed. `"."` is what `public_golden.rs` ratifies for a root
+/// file, and ambient discovery already produced it — only the named file did
+/// not. The absolute spelling additionally wrote the host's own directory
+/// layout into a stream `InstructionDescriptor`'s doc says a CI job archives.
+#[test]
+fn the_two_ways_to_name_the_same_instruction_file_describe_it_identically() {
+    let scope_of = |spelling: &dyn Fn(&std::path::Path) -> String| {
+        let stub = Stub::start(Plan::default());
+        let ego = Ego::against(&stub);
+        let written = ego.file("AGENTS.md", "Prefer tabs.");
+        let finished = ego
+            .args([
+                "--model",
+                "ollama/qwen3",
+                "--ephemeral",
+                "--instructions",
+                &spelling(&written),
+                "--output",
+                "jsonl",
+                "Ask",
+            ])
+            .run();
+        assert_eq!(finished.code, Some(0), "stderr: {}", finished.stderr);
+        let started = finished.events().remove(0);
+        started["instructions"].as_array().expect("an array")[0]["scope"]
+            .as_str()
+            .expect("a scope")
+            .to_string()
+    };
+
+    let relative = scope_of(&|_| "AGENTS.md".to_string());
+    let absolute = scope_of(&|path: &std::path::Path| path.display().to_string());
+
+    assert_eq!(relative, ".", "a relative name at the root scopes to `.`");
+    assert_eq!(absolute, ".", "and so does the absolute spelling of it");
+}
+
+/// An instruction file the operator named and that is not there refuses the
+/// run. `CLI.md` §4.4: invalid config is never skipped silently.
+///
+/// It used to exit 0 with an empty stderr, having quietly run with no
+/// instructions at all — the same silently vacuous flag `--budget` was fixed
+/// for, and inconsistent with `--system @missing`, which already exits 2.
+#[test]
+fn an_instruction_file_that_is_not_there_refuses_rather_than_running_without_it() {
+    let stub = Stub::start(Plan::default());
+    let finished = Ego::against(&stub)
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--ephemeral",
+            "--instructions",
+            "nowhere.md",
+            "Ask",
+        ])
+        .run();
+
+    assert_eq!(
+        finished.code,
+        Some(2),
+        "a named file that is absent was ignored: {finished:?}"
+    );
+    assert!(
+        finished.stderr.contains("--instructions") && finished.stderr.contains("nowhere.md"),
+        "the refusal named neither the flag nor the file: {}",
+        finished.stderr
+    );
+    assert!(
+        stub.generations().is_empty(),
+        "the run reached the provider despite refusing its instructions"
+    );
+}
+
+/// Resolving the explicit path must resolve the *directory* and not the file,
+/// or a symlinked instruction file would be followed instead of refused.
+///
+/// This is the regression guard on that fix and not a new rule: the loader's
+/// symlink refusal is the mechanism behind `config::Refusal::Symlink`, and a
+/// `canonicalize` of the whole path would have handed it the resolved target
+/// and silently loaded the file the link pointed at.
+#[test]
+fn a_symlinked_instruction_file_is_still_refused_by_name() {
+    let stub = Stub::start(Plan::default());
+    let ego = Ego::against(&stub);
+    let target = ego.file("AGENTS.md", "Prefer tabs.");
+    let link = target.with_file_name("house-rules.md");
+    std::os::unix::fs::symlink(&target, &link).expect("a temp dir accepts a symlink");
+
+    let finished = ego
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--ephemeral",
+            "--instructions",
+            "house-rules.md",
+            "--output",
+            "jsonl",
+            "Ask",
+        ])
+        .run();
+
+    assert_eq!(finished.code, Some(0), "stderr: {}", finished.stderr);
+    assert!(
+        finished.stderr.contains("symlink"),
+        "the symlink was not refused by name: {}",
+        finished.stderr
+    );
+    let started = finished.events().remove(0);
+    assert!(
+        started.get("instructions").is_none(),
+        "a symlinked file was described as loaded: {started}"
+    );
+    let request = &stub.generations()[0];
+    assert_ne!(
+        request["messages"][0]["role"], "system",
+        "the symlink's target was sent as a system prompt"
     );
 }
 
@@ -995,6 +1126,126 @@ fn quiet_drops_the_tool_reports_and_keeps_the_answer() {
     assert_eq!(finished.code, Some(0), "stderr: {}", finished.stderr);
     assert_eq!(finished.stdout.trim(), "I read it.");
     assert!(finished.stderr.is_empty(), "{}", finished.stderr);
+}
+
+// --- a ceiling that does not do what its spelling says ---
+
+/// `CLI.md` §5 calls `--budget` a **hard cap**. On a row that is not metered in
+/// currency it is not a cap at all: every reservation is zero, so the gate
+/// admits until the provider refuses. `PublicEvent::MeteringSelected`'s own doc
+/// says the operator "has to be told it does not bind — a silently vacuous flag
+/// is not an acceptable way to deliver that", and until this test existed the
+/// default output mode was exactly that: the fact rode the event, and the only
+/// sink that rendered the event was `--output json/jsonl`.
+///
+/// Measured before it was written: `ego run … --budget '5$' -m ollama/…`
+/// against a real daemon exited 0 with an empty stderr.
+#[test]
+fn a_money_budget_that_cannot_bind_says_so_once_and_leaves_stdout_clean() {
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(tool_call("call_a", "read", "{\"path\":\"notes.md\"}")),
+            Reply::Sse(text("I read it.")),
+        ],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub);
+    ego.file("notes.md", "the contents");
+    let finished = ego
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--ephemeral",
+            "--budget",
+            "5$",
+            "Read notes.md",
+        ])
+        .run();
+
+    assert_eq!(finished.code, Some(0), "stderr: {}", finished.stderr);
+    assert_eq!(
+        finished.stdout.trim(),
+        "I read it.",
+        "a diagnostic reached stdout"
+    );
+    assert!(
+        finished.stderr.contains("does not bind this model"),
+        "the operator was never told the cap does not cap: {}",
+        finished.stderr
+    );
+    // The token form is what *does* constrain such a row, so the note points at
+    // it rather than only reporting the loss.
+    assert!(
+        finished.stderr.contains("token budget"),
+        "the note reports the loss without naming the remedy: {}",
+        finished.stderr
+    );
+    // `MeteringSelected` is per *generation* and this run has two. Announced on
+    // change, so the warning is said once — a per-generation repeat would make
+    // the diagnostic itself the noise that hides the next one.
+    assert_eq!(
+        finished.stderr.matches("does not bind this model").count(),
+        1,
+        "one warning per generation: {}",
+        finished.stderr
+    );
+}
+
+/// `-q` is presentation — §1.3 pairs it with `--no-color` and calls it "quiet
+/// progress". A guarantee the operator asked for and did not get is not
+/// progress, so this one warning survives it. Without this test the obvious
+/// tidying (fold the arm in beside the tool reports, which *are* gated) would
+/// put the flag's silence back where it was.
+#[test]
+fn quiet_does_not_silence_a_budget_that_cannot_bind() {
+    let stub = Stub::start(Plan::default());
+    let finished = Ego::against(&stub)
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--ephemeral",
+            "--budget",
+            "5$",
+            "-q",
+            "Ask",
+        ])
+        .run();
+
+    assert_eq!(finished.code, Some(0), "stderr: {}", finished.stderr);
+    assert!(
+        finished.stderr.contains("does not bind this model"),
+        "-q silenced a warning that is not progress: {}",
+        finished.stderr
+    );
+}
+
+/// The other half, and the one that stops the warning from becoming wallpaper:
+/// a money budget on a row that **is** metered in currency binds exactly as its
+/// spelling says, so there is nothing to report. A diagnostic that fires on the
+/// working case teaches operators to ignore it.
+#[test]
+fn a_money_budget_that_binds_is_not_announced() {
+    let stub = Stub::start(Plan::default());
+    let ego = Ego::against(&stub);
+    ego.home_file("models.toml", OPENAI_FACTS);
+    let finished = ego
+        .env("OPENAI_API_KEY", "sk-test")
+        .args([
+            "--model",
+            "openai/gpt-5.1",
+            "--ephemeral",
+            "--budget",
+            "5$",
+            "Ask",
+        ])
+        .run();
+
+    assert_eq!(finished.code, Some(0), "stderr: {}", finished.stderr);
+    assert!(
+        !finished.stderr.contains("does not bind"),
+        "a binding ceiling was reported as vacuous: {}",
+        finished.stderr
+    );
 }
 
 // --- both providers, end to end ---

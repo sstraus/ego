@@ -12,7 +12,7 @@ use std::sync::Mutex;
 use ego_core::cost::CumulativeCost;
 use ego_core::event::domain::{CancelCause, OccupancyProvenance};
 use ego_core::event::id::SessionId;
-use ego_core::public::{ItemKind, PUBLIC_EVENT_VERSION, PublicEvent};
+use ego_core::public::{CeilingEffect, ItemKind, MeteringKind, PUBLIC_EVENT_VERSION, PublicEvent};
 use ego_core::run::RunTermination;
 use ego_core::sink::EventSink;
 use ego_core::state::SessionState;
@@ -163,6 +163,11 @@ pub struct TextSink<'a> {
     /// Whether a partial line of assistant text is outstanding, so the run can
     /// finish the line before anything else is printed.
     open: Mutex<bool>,
+    /// The last ceiling effect this sink announced, so a per-generation event
+    /// does not repeat one warning per generation. See [`ceiling_note`].
+    ///
+    /// [`ceiling_note`]: TextSink::ceiling_note
+    ceiling: Mutex<Option<CeilingEffect>>,
 }
 
 impl<'a> TextSink<'a> {
@@ -171,6 +176,56 @@ impl<'a> TextSink<'a> {
             out,
             quiet,
             open: Mutex::new(false),
+            ceiling: Mutex::new(None),
+        }
+    }
+
+    /// What an operator has to be told about the ceiling they asked for, and
+    /// `None` when the flag does exactly what its spelling says.
+    ///
+    /// Two of [`CeilingEffect`]'s three values are a flag that behaves
+    /// differently from how it reads, and `CLI.md` §5 spells `--budget` as a
+    /// **hard cap**: `Inapplicable` is not a cap at all, and a clamped `Binds`
+    /// caps at a figure nobody typed. Both are already on
+    /// [`PublicEvent::MeteringSelected`] for `--output json/jsonl`; this is the
+    /// same fact for the operator who did not ask for a machine-readable
+    /// stream, and without it the default mode is exactly the "silently vacuous
+    /// flag" that event's own doc says is not acceptable.
+    ///
+    /// Money is rendered `{amount}{currency}` — the spelling `--budget` itself
+    /// accepts — so the figure quoted back can be retyped.
+    fn ceiling_note(effect: &CeilingEffect) -> Option<String> {
+        match effect {
+            CeilingEffect::None => None,
+            CeilingEffect::Binds {
+                clamped_from: None, ..
+            } => None,
+            CeilingEffect::Binds {
+                limit,
+                clamped_from: Some(asked),
+            } => Some(format!(
+                "the budget of {}{} was reduced to {}{} by a system ceiling",
+                asked.amount, asked.currency, limit.amount, limit.currency
+            )),
+            // A token budget is unaffected and constrains such a row exactly as
+            // it constrains any other, which is what the operator should reach
+            // for — so the note says so rather than only reporting the loss.
+            CeilingEffect::Inapplicable { limit, metering } => Some(format!(
+                "the budget of {}{} does not bind this model: it is {}, so no \
+                 monetary ceiling can reach it and the run continues until the \
+                 provider refuses. A token budget such as `--budget 400k` still \
+                 applies",
+                limit.amount,
+                limit.currency,
+                match metering {
+                    MeteringKind::Subscription => "paid for by a subscription",
+                    MeteringKind::Unmetered => "not metered — a daemon serving its own weights",
+                    // Unreachable as the gate builds it, and phrased rather
+                    // than panicked: a diagnostic that aborts the run it was
+                    // meant to explain is worse than a vague diagnostic.
+                    MeteringKind::Currency => "metered in a currency this ceiling cannot bind",
+                }
+            )),
         }
     }
 
@@ -213,6 +268,33 @@ impl EventSink for TextSink<'_> {
                 self.finish();
                 let args = text.as_deref().unwrap_or("");
                 note(&format!("{name} {args}"));
+            }
+            // Deliberately **not** gated on `quiet`. `-q` is presentation —
+            // CLI.md §1.3 pairs it with `--no-color` and calls it "quiet
+            // progress" — and a guarantee the operator asked for and did not
+            // get is not progress. Suppressing it would put the flag's silence
+            // back exactly where this arm removes it from.
+            PublicEvent::MeteringSelected { ceiling, .. } => {
+                let mut last = self
+                    .ceiling
+                    .lock()
+                    .expect("a poisoned lock means a writer panicked mid-line");
+                // Announced on *change*, not once: the event is per-generation
+                // because a fallback chain can switch rows mid-turn, and a
+                // switch from a metered row to an unmetered one changes whether
+                // the budget binds. Repeating the identical warning for every
+                // generation of a long run would be noise; dropping the second
+                // one when it says something new would be the original bug.
+                if last.as_ref() == Some(ceiling) {
+                    return;
+                }
+                let message = Self::ceiling_note(ceiling);
+                *last = Some(ceiling.clone());
+                drop(last);
+                if let Some(message) = message {
+                    self.finish();
+                    note(&message);
+                }
             }
             PublicEvent::Error { message, .. } => {
                 self.finish();

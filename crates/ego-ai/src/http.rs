@@ -210,12 +210,59 @@ pub enum Method {
 
 /// One request. The target is an ordinary [`Url`] and needs no prior
 /// blessing, because the transport admits it itself — see [`Http`].
-#[derive(Debug)]
+///
+/// `Debug` is written out by hand — see the impl below for why a derive is
+/// wrong here.
 pub struct HttpRequest {
     pub url: Url,
     pub method: Method,
     pub headers: Vec<(String, String)>,
     pub body: Option<Vec<u8>>,
+}
+
+/// Header **names**, never values, and the body's length rather than the body.
+///
+/// This is the one container [`Secret`](crate::provider::Secret)'s guarantee
+/// does not reach. That type refuses to print in every formatter, on the
+/// argument — correct, and recorded in the plan — that a value which refuses
+/// makes a forgetful container harmless. But `ProviderRow::headers` calls
+/// `expose()` and returns `format!("Bearer {}", …)` as an ordinary `String`,
+/// and from that line on the credential is no longer a `Secret`. This struct
+/// is what receives it, which makes it exactly "the next type that happens to
+/// hold one and derives `Debug`" — the failure the plan named while deciding
+/// to put the guarantee on the value.
+///
+/// The body is elided for the second half of the same checklist item: it is
+/// the prompt. `HttpResponse` solves both by having no `Debug` at all; that is
+/// not available here, because a request one cannot print is a request nobody
+/// can diagnose, and diagnosability is why `ProviderRow` derives `Debug` in
+/// the first place. So: everything a reader needs, and neither of the two
+/// things they must not have.
+impl fmt::Debug for HttpRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HttpRequest")
+            .field("url", &self.url)
+            .field("method", &self.method)
+            .field(
+                "headers",
+                &self
+                    .headers
+                    .iter()
+                    .map(|(name, _)| name.as_str())
+                    .collect::<Vec<_>>(),
+            )
+            .field("body", &self.body.as_ref().map(|body| Elided(body.len())))
+            .finish()
+    }
+}
+
+/// Prints as `<N bytes>`: a length is a diagnostic, the bytes are the prompt.
+struct Elided(usize);
+
+impl fmt::Debug for Elided {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "<{} bytes>", self.0)
+    }
 }
 
 /// One response: the status and headers a wire format needs to tell a stream
