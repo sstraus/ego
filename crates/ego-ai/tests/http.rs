@@ -565,3 +565,52 @@ fn the_manifest_never_lets_the_environment_choose_a_proxy() {
          would reintroduce the environment as an input to where bytes go"
     );
 }
+
+/// The checklist item is "no credentials or request bodies reachable from
+/// `PublicEvent`", and `Secret`'s redaction does not reach this far.
+///
+/// `Secret` refuses to print in every formatter, and the plan records the
+/// argument for putting the guarantee there: a value that refuses makes a
+/// forgetful container harmless. That holds right up to
+/// `ProviderRow::headers`, which calls `expose()` and hands back
+/// `format!("Bearer {…}")` as an ordinary `String`. `HttpRequest` is what
+/// receives it, so it is the container the argument does not cover — and it
+/// carries the prompt as well.
+///
+/// Nothing formats an `HttpRequest` today, so this asserts no live leak. It
+/// asserts that the obvious next line of transport debugging —
+/// `tracing::debug!(?req)` — cannot become one.
+#[test]
+fn a_formatted_request_prints_neither_the_credential_nor_the_body() {
+    let printed = format!(
+        "{:?}",
+        HttpRequest {
+            url: Url::parse("https://api.example.com/v1/chat/completions").unwrap(),
+            method: Method::Post,
+            headers: vec![
+                (
+                    "authorization".to_string(),
+                    "Bearer sk-live-SECRET".to_string()
+                ),
+                ("content-type".to_string(), "application/json".to_string()),
+            ],
+            body: Some(br#"{"messages":[{"role":"user","content":"PROMPT"}]}"#.to_vec()),
+        }
+    );
+
+    assert!(
+        !printed.contains("sk-live-SECRET") && !printed.contains("Bearer"),
+        "a credential reached a formatter: {printed}"
+    );
+    assert!(
+        !printed.contains("PROMPT") && !printed.contains("messages"),
+        "a request body reached a formatter: {printed}"
+    );
+    // Diagnosability is the reason this is a redacting `Debug` and not a
+    // deleted one: a reader still gets the destination, the method, which
+    // headers were set, and how big the body was.
+    assert!(printed.contains("api.example.com"), "{printed}");
+    assert!(printed.contains("authorization"), "{printed}");
+    assert!(printed.contains("content-type"), "{printed}");
+    assert!(printed.contains("<49 bytes>"), "{printed}");
+}
