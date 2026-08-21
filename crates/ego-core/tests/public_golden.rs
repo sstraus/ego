@@ -6,7 +6,9 @@
 //! inline string literals, so a change to the projection shows up as a
 //! reviewable diff in a data file rather than a diff in test code.
 
-use ego_core::cost::{Amount, CostDelta, CurrencyCode, Money, PricingRevision, UnknownCost};
+use ego_core::cost::{
+    Amount, CostAttribution, CostDelta, CurrencyCode, Money, PricingRevision, UnknownCost,
+};
 use ego_core::event::domain::{DomainEvent, Envelope, EventKind, ExitReason, OccupancyProvenance};
 use ego_core::event::id::{EventId, ItemId, Producer, Seq, SessionId, TurnId};
 use ego_core::event::time::Timestamp;
@@ -50,7 +52,9 @@ mod public_golden {
     fn priced(decimal: &str) -> CostDelta {
         CostDelta::Known {
             amount: usd(decimal),
-            pricing_revision: PricingRevision("test-2026-08".to_string()),
+            attribution: CostAttribution::Table {
+                revision: PricingRevision("test-2026-08".to_string()),
+            },
             fx: None,
         }
     }

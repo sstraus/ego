@@ -6,6 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::budget::{Metering, SettlementSource};
 use crate::cost::CostDelta;
 use crate::event::domain::{DomainEvent, EventKind, ExitReason, OccupancyProvenance};
 use crate::event::id::{ItemId, SessionId, TurnId};
@@ -14,7 +15,7 @@ use crate::state::Usage;
 /// The current `PublicEvent` schema version, carried in `SessionStarted`'s
 /// `v` field. `CLI.md` §4.2: "the schema is versioned in the header and
 /// published".
-pub const PUBLIC_EVENT_VERSION: u32 = 4;
+pub const PUBLIC_EVENT_VERSION: u32 = 5;
 
 /// How a run came to load one instruction file.
 ///
@@ -78,18 +79,35 @@ pub enum ItemKind {
     Subagent,
 }
 
+/// How a generation is metered, as the public stream spells it.
+///
+/// The three ways ego is paid for, and the reason a monetary budget binds
+/// only the first: the other two have no per-token currency charge to
+/// reserve against. Deliberately not carrying the rates — a public event
+/// says how a run is billed, not what a provider's table contains.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MeteringKind {
+    /// Metered in money, per token. A monetary budget binds.
+    Currency,
+    /// Paid for by a flat fee. No per-token currency charge exists.
+    Subscription,
+    /// Nobody is charging — a daemon serving its own weights.
+    Unmetered,
+}
+
 /// The privacy-filtered, versioned JSONL wire event — `CLI.md` §4.2's
 /// three-level envelope: `session.started` / `turn.started|completed` /
 /// `item.started|delta|completed`.
 ///
-/// `SessionStarted` and `TurnStarted` have no `DomainEvent` counterpart:
-/// nothing in `EventKind` (ARCH §1's exhaustive internal set) marks the
-/// start of a session or a turn, because that's not a fact the *reducer*
-/// establishes — it's a fact the harness that drives a session already
-/// knows the instant it opens one, before any domain event exists. So the
-/// harness constructs these two variants directly; `project_public` below
-/// only ever returns the other variants, which do each originate from a
-/// `DomainEvent`.
+/// `SessionStarted`, `TurnStarted` and `MeteringSelected` have no
+/// `DomainEvent` counterpart: nothing in `EventKind` (ARCH §1's exhaustive
+/// internal set) marks the start of a session or a turn, or the choice of a
+/// metering, because none of those is a fact the *reducer* establishes —
+/// they are facts the harness that drives a session already knows, before
+/// any domain event exists. So the harness constructs those three variants
+/// directly; `project_public` below only ever returns the others, which do
+/// each originate from a `DomainEvent`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PublicEvent {
@@ -118,6 +136,43 @@ pub enum PublicEvent {
     },
     /// A turn began.
     TurnStarted { turn: TurnId },
+    /// How the generation about to run is metered.
+    ///
+    /// Emitted **per generation**, not once per session, because a fallback
+    /// chain can switch rows mid-turn — the same argument
+    /// [`TurnCompleted`](Self::TurnCompleted)'s doc already makes for keeping
+    /// usage off a turn-level event.
+    ///
+    /// It exists because a monetary `--budget` bounds nothing on a row that
+    /// is not metered in currency: every reservation there is zero, so the
+    /// gate admits until the provider refuses. The operator asked for a
+    /// ceiling and has to be told it does not bind — a silently vacuous flag
+    /// is not an acceptable way to deliver that. The *token* form of
+    /// `--budget` is unaffected and constrains such a row exactly as it
+    /// constrains any other, which is what this event points an operator
+    /// towards.
+    ///
+    /// Deliberately **not** a `SessionStarted.capabilities` entry: that field
+    /// is feature detection by name, answered before any model is resolved,
+    /// and how a particular generation is metered is neither a feature of the
+    /// harness nor known at session start.
+    MeteringSelected {
+        turn: TurnId,
+        /// Whether a monetary budget can bind this generation at all:
+        /// [`MeteringKind::Currency`] binds, the other two do not.
+        metering: MeteringKind,
+        /// The pricing table or the policy the figures are attributable to.
+        /// An opaque label, never parsed — its job is to make a past figure
+        /// traceable to the artefact that produced it.
+        revision: String,
+        /// Whether the settled figure will be the provider's own statement of
+        /// the charge rather than this side's arithmetic over a table.
+        ///
+        /// Independent of `metering`: a currency row can settle either way,
+        /// and a row that is not metered in currency settles from neither, so
+        /// this is `false` there.
+        provider_reported: bool,
+    },
     /// An item (message, reasoning block, tool call, permission request or
     /// subagent invocation) began.
     ItemStarted {
@@ -211,6 +266,40 @@ pub enum PublicEvent {
         item: Option<ItemId>,
         message: String,
     },
+}
+
+impl PublicEvent {
+    /// Announce how the generation about to run is metered.
+    ///
+    /// The mapping from [`Metering`] lives here rather than at the one call
+    /// site in the turn loop, so a second caller cannot spell it differently:
+    /// this event is the only thing that tells an operator their monetary
+    /// ceiling does not bind, and a version of it that said otherwise would
+    /// be worse than no event at all.
+    pub fn metering_selected(turn: TurnId, metering: &Metering) -> Self {
+        let (kind, revision, provider_reported) = match metering {
+            Metering::Currency {
+                reservation,
+                settlement,
+            } => (
+                MeteringKind::Currency,
+                reservation.revision.0.clone(),
+                matches!(settlement, SettlementSource::ProviderReported { .. }),
+            ),
+            Metering::Subscription { revision } => {
+                (MeteringKind::Subscription, revision.0.clone(), false)
+            }
+            Metering::Unmetered { revision } => {
+                (MeteringKind::Unmetered, revision.0.clone(), false)
+            }
+        };
+        PublicEvent::MeteringSelected {
+            turn,
+            metering: kind,
+            revision,
+            provider_reported,
+        }
+    }
 }
 
 /// Project one internal `DomainEvent` onto the public wire contract.

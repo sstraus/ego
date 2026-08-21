@@ -12,7 +12,7 @@
 //! `BudgetGate::reserve` — there is no other door, and that is the point.
 
 use ego_ai::SkeletonGenerator;
-use ego_core::budget::{BudgetGate, PricingQuote};
+use ego_core::budget::{BudgetGate, Metering, PricingQuote, SettlementSource};
 use ego_core::cost::{Amount, CurrencyCode, Money, PricingRevision};
 use ego_core::event::id::GenerationId;
 use ego_core::generator::attempt::{DeliveryCertainty, GenerationAttempt, UsageReport};
@@ -41,6 +41,14 @@ fn quote() -> PricingQuote {
         cache_read: Some("0.0000003".parse().unwrap()),
         cache_write: Some("0.00000375".parse().unwrap()),
         output: Some("0.000015".parse().unwrap()),
+    }
+}
+
+/// The fixture quote as a metering: a table that both bounds and settles.
+fn metered() -> Metering {
+    Metering::Currency {
+        reservation: quote(),
+        settlement: SettlementSource::Quote,
     }
 }
 
@@ -88,13 +96,13 @@ fn request() -> GenRequest {
 fn the_skeleton_generator_drives_an_attempt_to_a_settlement() {
     let mut gate = BudgetGate::new(usd("10"));
     let reservation = gate
-        .reserve(&quote(), &request(), &caps())
+        .reserve(&metered(), &request(), &caps())
         .expect("a $10 budget admits an ordinary request");
     let bound = *reservation.upper_bound();
     let attempt = GenerationAttempt::new(
         GenerationId::new(),
         reservation,
-        &quote(),
+        &metered(),
         &request(),
         &caps(),
     )

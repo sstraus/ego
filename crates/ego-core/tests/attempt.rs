@@ -145,7 +145,7 @@ mod attempt {
 mod lifecycle {
     use std::sync::{Arc, Mutex};
 
-    use ego_core::budget::{BudgetGate, PricingQuote};
+    use ego_core::budget::{BudgetGate, Metering, PricingQuote, SettlementSource};
     use ego_core::cost::{Amount, CostDelta, CurrencyCode, Money, PricingRevision};
     use ego_core::event::id::GenerationId;
     use ego_core::generator::attempt::{
@@ -184,6 +184,15 @@ mod lifecycle {
             cache_read: Some("0.0000003".parse().unwrap()),
             cache_write: Some("0.00000375".parse().unwrap()),
             output: Some("0.000015".parse().unwrap()),
+        }
+    }
+
+    /// The fixture quote as a metering: priced from a table and settled
+    /// from the same table, which is what every test in this module assumes.
+    fn metered() -> Metering {
+        Metering::Currency {
+            reservation: quote(),
+            settlement: SettlementSource::Quote,
         }
     }
 
@@ -246,12 +255,12 @@ mod lifecycle {
     fn gate_and_attempt() -> (BudgetGate, GenerationAttempt) {
         let mut gate = BudgetGate::new(usd("10"));
         let reservation = gate
-            .reserve(&quote(), &request(), &caps())
+            .reserve(&metered(), &request(), &caps())
             .expect("a $10 budget admits an ordinary request");
         let attempt = GenerationAttempt::new(
             GenerationId::new(),
             reservation,
-            &quote(),
+            &metered(),
             &request(),
             &caps(),
         )
@@ -281,11 +290,11 @@ mod lifecycle {
     #[test]
     fn an_attempt_refuses_a_reservation_that_does_not_authorise_the_request() {
         let mut gate = BudgetGate::new(usd("10"));
-        let reservation = gate.reserve(&quote(), &request(), &caps()).unwrap();
+        let reservation = gate.reserve(&metered(), &request(), &caps()).unwrap();
         let denied = GenerationAttempt::new(
             GenerationId::new(),
             reservation,
-            &quote(),
+            &metered(),
             &request_for("some-other-model"),
             &caps(),
         )

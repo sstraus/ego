@@ -19,25 +19,30 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use ego_core::budget::PricingQuote;
-use ego_core::cost::{Amount, CurrencyCode, PricingRevision};
+use ego_core::budget::{Metering, PricingQuote, SettlementSource};
+use ego_core::cost::MeteringRevision;
 use ego_core::generator::capabilities::ModelCapabilities;
 use url::Url;
 
 use crate::provider::{MissingCredential, ProviderRow};
+use crate::wire::provider_cost::ProviderCost;
 
 /// The provider id of the hosted row this milestone ships.
 pub const OPENAI: &str = "openai";
 /// The provider id of the local daemon this milestone ships.
 pub const OLLAMA: &str = "ollama";
 
-/// The revision stamped on a local model's zero quote.
+/// The policy under which a locally served model is not metered at all.
 ///
-/// It names the *policy* that produced the figure, not a date it was copied
-/// on. `PricingRevision` exists to make a past cost attributable — "this
-/// number came from that table" — and a date attributes a built-in policy to
-/// nothing anyone can go and check. This string says exactly what was
+/// It names the *policy*, not a date it was copied on. A revision exists to
+/// make a past figure attributable — and a date attributes a built-in policy
+/// to nothing anyone can go and check. This string says exactly what was
 /// asserted and under what condition, which is checkable.
+///
+/// A [`MeteringRevision`] and deliberately not a `PricingRevision`: there is
+/// no price list here to attribute anything to, and the all-zero quote this
+/// used to be spelled through claimed there was
+/// (`docs/decisions/2026-08-21-how-a-model-is-metered.md` §4).
 pub const LOCAL_UNMETERED: &str = "ego/builtin/ollama-local-unmetered/v1";
 
 /// Everything a generation needs to know about the model it is about to run.
@@ -55,7 +60,7 @@ pub struct ResolvedModel {
     pub model: String,
     pub row: ProviderRow,
     pub capabilities: ModelCapabilities,
-    pub pricing: PricingQuote,
+    pub metering: Metering,
 }
 
 /// A hosted model's facts, which nobody in this repository is in a position
@@ -68,7 +73,11 @@ pub struct ResolvedModel {
 #[derive(Debug, Clone)]
 pub struct HostedModel {
     pub capabilities: ModelCapabilities,
-    pub pricing: PricingQuote,
+    /// How the row is metered — a supplied table, a table plus the
+    /// provider's own figure, or a flat fee with no per-token price at all.
+    /// This is the slot every operator-supplied metering enters through, and
+    /// the reason `Metering::Subscription` has a producer.
+    pub metering: Metering,
 }
 
 /// A model reference that has been split but not yet resolved.
@@ -191,23 +200,77 @@ impl From<MissingCredential> for ResolveError {
     }
 }
 
-/// A quote asserting the provider charges nothing, in `currency`.
+/// Nobody is charging for this model, under [`LOCAL_UNMETERED`].
 ///
-/// Every category is `Some(zero)` and never `None`: `None` means *unpriced*,
-/// and `upper_bound` consults all three input categories plus output, so one
-/// `None` would fail the gate closed before the network and run nothing.
+/// Takes no currency, and losing that parameter is the point. The old
+/// all-zero [`PricingQuote`] had to be denominated in something because a
+/// price list is denominated in something; this states that there is no price
+/// list, so the only currency in sight is the one the budget gate mints its
+/// zero reservation in — which is the gate's own limit currency, the only
+/// currency the zero could be compared against.
 ///
-/// This is a price claim, not the absence of one (`cost.rs`: "zero is a
-/// price"), so it is only ever built for a model the daemon reports as served
-/// locally — never for a provider id.
-pub fn unmetered(currency: CurrencyCode) -> PricingQuote {
-    PricingQuote {
-        revision: PricingRevision(LOCAL_UNMETERED.to_string()),
-        currency,
-        uncached_input: Some(Amount::ZERO),
-        cache_read: Some(Amount::ZERO),
-        cache_write: Some(Amount::ZERO),
-        output: Some(Amount::ZERO),
+/// It is still a claim, and still only ever built for a model the daemon
+/// reports as served locally — never for a provider id. What changed is that
+/// the claim is now "not metered", which the daemon's own answer establishes,
+/// instead of "the provider charges zero per token", which nothing did.
+pub fn unmetered() -> Metering {
+    Metering::Unmetered {
+        revision: MeteringRevision(LOCAL_UNMETERED.to_string()),
+    }
+}
+
+/// A row whose access is paid for by a flat fee, under the policy `revision`
+/// names.
+///
+/// The revision is supplied because the policy is: this repository knows of
+/// no subscription it could name, and inventing a label for someone else's
+/// billing arrangement would be the same fabrication the all-zero quote was.
+/// An operator who pays a flat fee for a row supplies this the way they
+/// supply a [`HostedModel`] — the "explicitly operator-supplied, pinned
+/// source" slot of `docs/decisions/2026-08-21-how-a-model-is-metered.md` §7.
+///
+/// What it buys them: the gate reserves zero, so a *monetary* `--budget`
+/// admits every generation and says so through
+/// [`PublicEvent::MeteringSelected`](ego_core::public::PublicEvent::MeteringSelected)
+/// rather than appearing to cap something. The *token* form of `--budget`
+/// binds such a row exactly as it binds any other.
+pub fn subscription(revision: &str) -> Metering {
+    Metering::Subscription {
+        revision: MeteringRevision(revision.to_string()),
+    }
+}
+
+/// A row priced from a supplied table, and settled from the same table.
+///
+/// The ordinary hosted case: the quote bounds the reservation before the
+/// request and prices the observed usage after it.
+pub fn tabulated(reservation: PricingQuote) -> Metering {
+    Metering::Currency {
+        reservation,
+        settlement: SettlementSource::Quote,
+    }
+}
+
+/// A row priced from a supplied table, and settled from the provider's own
+/// statement of what it will charge.
+///
+/// The best accounting available: an estimate computed from a table for the
+/// reservation, replaced at settlement by the figure that will appear on the
+/// invoice. It **removes no requirement** — `reservation` is not optional,
+/// because no ex-post figure supplies an ex-ante bound, however exact it is.
+/// A provider-reported row with no rates has nothing to reserve against and
+/// refuses at resolution rather than running unbounded.
+///
+/// The [`ProviderCostRevision`](ego_core::cost::ProviderCostRevision) is
+/// taken from `cost` rather than written out here, so the declaration
+/// recorded at resolution and the attribution stamped on the settled figure
+/// are one value and cannot drift apart.
+pub fn provider_reported(reservation: PricingQuote, cost: &dyn ProviderCost) -> Metering {
+    Metering::Currency {
+        reservation,
+        settlement: SettlementSource::ProviderReported {
+            revision: cost.revision().clone(),
+        },
     }
 }
 
@@ -264,7 +327,7 @@ impl Catalogue {
             model: slug.model.clone(),
             row: row.clone(),
             capabilities: hosted.capabilities.clone(),
-            pricing: hosted.pricing.clone(),
+            metering: hosted.metering.clone(),
         })
     }
 }

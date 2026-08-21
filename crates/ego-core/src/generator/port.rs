@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use super::attempt::{AttemptStream, DeliveryCertainty, GenerationAttempt};
 use super::types::{GenRequest, StopReason};
+use crate::cost::Money;
 use crate::state::Usage;
 
 /// One increment of a generation's output stream.
@@ -36,6 +37,23 @@ pub enum AiEvent {
     },
     /// Incremental usage for this generation.
     Usage(Usage),
+    /// What the provider says it will charge for this request.
+    ///
+    /// A **total for the request**, not an increment — the opposite of
+    /// [`Usage`](Self::Usage) one variant up, which is why it is a separate
+    /// variant and not a field on it: `Usage` is summed with
+    /// `saturating_add` and folded into a context-occupancy proxy, and a
+    /// currency figure has no business in either.
+    ///
+    /// This is the one landing site for every provider that states a cost.
+    /// OpenRouter's `usage.cost` and xAI's `usage.cost_in_usd_ticks` differ
+    /// in the unit, the field name and the decoder that reads them; they do
+    /// not differ past this port, and nothing downstream of it can tell which
+    /// produced a given figure except by reading the
+    /// [`ProviderCostRevision`](crate::cost::ProviderCostRevision) that the
+    /// *metering* carries. Adding a third decoder must not change this file.
+    /// See `docs/decisions/2026-08-21-how-a-model-is-metered.md` §8.
+    ProviderCost { cost: Money },
     /// The transport's reading of whether the request bytes reached the
     /// provider.
     ///

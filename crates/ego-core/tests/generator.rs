@@ -5,8 +5,8 @@
 
 use std::collections::BTreeSet;
 
-use ego_core::budget::{BudgetGate, PricingQuote};
-use ego_core::cost::{Amount, CostDelta, CurrencyCode, Money, PricingRevision};
+use ego_core::budget::{BudgetGate, Metering, PricingQuote, SettlementSource};
+use ego_core::cost::{Amount, CostAttribution, CostDelta, CurrencyCode, Money, PricingRevision};
 use ego_core::event::domain::{CancelCause, DomainEvent, Envelope, EventKind, ExitReason};
 use ego_core::event::id::{EventId, GenerationId, ItemId, Producer, Seq, TurnId};
 use ego_core::event::time::Timestamp;
@@ -88,6 +88,15 @@ mod generator {
         }
     }
 
+    /// The fixture quote as a metering: a table that both bounds and
+    /// settles, which is the arrangement this whole file was written for.
+    fn metered() -> Metering {
+        Metering::Currency {
+            reservation: quote(),
+            settlement: SettlementSource::Quote,
+        }
+    }
+
     /// A reservation minted by a real [`BudgetGate`] against a generous
     /// limit.
     ///
@@ -100,12 +109,12 @@ mod generator {
         let mut gate = BudgetGate::new(usd("1000"));
         let caps = capabilities(ReasoningCarryover::Portable);
         let reservation = gate
-            .reserve(&quote(), &gen_request(), &caps)
+            .reserve(&metered(), &gen_request(), &caps)
             .expect("a generous budget admits an ordinary request");
         let attempt = GenerationAttempt::new(
             GenerationId::new(),
             reservation,
-            &quote(),
+            &metered(),
             &gen_request(),
             &caps,
         )
@@ -249,6 +258,12 @@ mod generator {
                 // it reaches the log through `AttemptSettled` (Step 6), not
                 // through turn assembly.
                 AiEvent::DeliveryObserved(_) => Vec::new(),
+                // Nor is a stated charge. This assembler settles from the
+                // quote — that is what `metered()` above says — so a
+                // provider-stated figure has nothing to add here. The turn
+                // loop, which does know its own metering, is where a stated
+                // cost becomes a `UsageUpdated`.
+                AiEvent::ProviderCost { .. } => Vec::new(),
                 AiEvent::Error { message } => {
                     let env = self.envelope(None);
                     vec![DomainEvent {
@@ -332,7 +347,9 @@ mod generator {
                 // 12 x 0.000003 + 34 x 0.000015 = 0.000546, exactly.
                 cost_delta: CostDelta::Known {
                     amount: usd("0.000546"),
-                    pricing_revision: PricingRevision("test-2026-08".to_string()),
+                    attribution: CostAttribution::Table {
+                        revision: PricingRevision("test-2026-08".to_string())
+                    },
                     fx: None,
                 },
                 attempt: None,

@@ -34,7 +34,9 @@
 //! the kind the fixture omits — not of this log.
 use agent_client_protocol_schema::{v1, v2};
 use ego_acp::project::{project_acp_v1, project_acp_v2, project_v1, project_v2};
-use ego_core::cost::{Amount, CostDelta, CurrencyCode, Money, PricingRevision, UnknownCost};
+use ego_core::cost::{
+    Amount, CostAttribution, CostDelta, CurrencyCode, Money, PricingRevision, UnknownCost,
+};
 use ego_core::event::domain::{
     CancelCause, DomainEvent, Envelope, EventKind, ExitReason, OccupancyProvenance,
 };
@@ -386,7 +388,9 @@ mod acp_golden {
     fn priced(decimal: &str) -> CostDelta {
         CostDelta::Known {
             amount: usd(decimal),
-            pricing_revision: PricingRevision("test-2026-08".to_string()),
+            attribution: CostAttribution::Table {
+                revision: PricingRevision("test-2026-08".to_string()),
+            },
             fx: None,
         }
     }

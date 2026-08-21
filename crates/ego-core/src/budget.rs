@@ -56,8 +56,8 @@
 use std::fmt;
 
 use crate::cost::{
-    Amount, Ceiling, CostDelta, CurrencyCode, Money, MoneyError, PricingRevision, TokenCategory,
-    UnknownCost,
+    Amount, Ceiling, CostAttribution, CostDelta, CurrencyCode, MeteringRevision, Money, MoneyError,
+    PricingRevision, ProviderCostRevision, TokenCategory, UnknownCost,
 };
 use crate::event::id::GateId;
 use crate::generator::capabilities::ModelCapabilities;
@@ -142,7 +142,9 @@ impl PricingQuote {
         }
         CostDelta::Known {
             amount: Money::new(total, self.currency),
-            pricing_revision: self.revision.clone(),
+            attribution: CostAttribution::Table {
+                revision: self.revision.clone(),
+            },
             fx: None,
         }
     }
@@ -199,6 +201,222 @@ impl PricingQuote {
         let output = self.line(TokenCategory::Output, output)?;
         let total = input.checked_add(&output).ok_or(UnknownCost::Overflow)?;
         Ok(Money::new(total, self.currency))
+    }
+}
+
+/// Where the settled figure for a currency-metered generation comes from.
+///
+/// Only ever found inside [`Metering::Currency`], and that placement is the
+/// whole point: "provider-reported settlement but no reservation quote" is
+/// not a value. A stated cost arrives after the tokens are spent, so it can
+/// improve the record and can never gate the spend — a provider-reported row
+/// still needs rates, for the reservation, or it cannot be bounded.
+///
+/// See `docs/decisions/2026-08-21-how-a-model-is-metered.md` §1 and §2.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SettlementSource {
+    /// The same quote that minted the reservation prices the observed usage.
+    Quote,
+    /// The provider states the charge for the request outright, and that
+    /// figure settles it — strictly better than any table, because it is
+    /// what will appear on the invoice.
+    ProviderReported { revision: ProviderCostRevision },
+}
+
+impl fmt::Display for SettlementSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SettlementSource::Quote => f.write_str("the quote"),
+            SettlementSource::ProviderReported { revision } => {
+                write!(f, "{}'s {}", revision.provider, revision.field)
+            }
+        }
+    }
+}
+
+/// How a model is metered, and therefore what the gate may reserve and what
+/// may settle it.
+///
+/// A sum-product rather than four peer discriminants or two independent
+/// fields. "Where the bound comes from" and "where the settled figure comes
+/// from" are two axes, not one — a model with a table *and* a provider-stated
+/// cost is the best-instrumented case there is, and four flat variants leave
+/// it nowhere to sit. Two unconstrained fields fail the other way, by
+/// admitting a fourth combination that must never occur. See
+/// `docs/decisions/2026-08-21-how-a-model-is-metered.md` §1.
+///
+/// `ego-core` gains no constant and opens no file for any of this.
+/// `Metering` is a shape; every number that fills it enters through the
+/// resolver in `ego-ai`.
+///
+/// The `Currency` variant is ~300 bytes against the other two's 24, and that
+/// is deliberately not boxed. `large_enum_variant` is a warning about values
+/// that get moved in bulk — collections, channels, hot returns. A `Metering`
+/// is resolved once per model and read once per generation; boxing it would
+/// buy a 280-byte saving on a value that exists in single figures per
+/// session, and pay for it with an allocation and a `Box` in the pattern of
+/// every construction site in the workspace.
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Metering {
+    /// Metered in money, per token. The quote is not optional: it is what
+    /// bounds the generation before it runs, whatever settles it afterwards.
+    Currency {
+        reservation: PricingQuote,
+        settlement: SettlementSource,
+    },
+    /// Access is paid for by a flat fee, so no per-token currency charge
+    /// exists to quote. **Not** an all-zero [`PricingQuote`]: a price list
+    /// saying "zero per token" and a row that has no per-token price at all
+    /// are different facts, and once they share a spelling nothing downstream
+    /// can tell them apart.
+    Subscription { revision: MeteringRevision },
+    /// Nobody is charging: a daemon serving its own weights. Same reasoning
+    /// as [`Subscription`](Self::Subscription), one row over.
+    Unmetered { revision: MeteringRevision },
+}
+
+impl Metering {
+    /// The labels this metering is authorised under, without its figures.
+    pub fn identity(&self) -> MeteringIdentity {
+        match self {
+            Metering::Currency {
+                reservation,
+                settlement,
+            } => MeteringIdentity::Currency {
+                revision: reservation.revision.clone(),
+                settlement: settlement.clone(),
+            },
+            Metering::Subscription { revision } => MeteringIdentity::Subscription {
+                revision: revision.clone(),
+            },
+            Metering::Unmetered { revision } => MeteringIdentity::Unmetered {
+                revision: revision.clone(),
+            },
+        }
+    }
+
+    /// The most `req` could cost against a model with `caps`, under this
+    /// metering.
+    ///
+    /// For a currency row this is [`PricingQuote::upper_bound`], unchanged.
+    /// For the other two it is **a zero monetary reservation minted from the
+    /// policy**, in `settlement` — the currency it will be compared against,
+    /// because neither variant states one of its own.
+    ///
+    /// The ceilings are still resolved, and still refuse when they are
+    /// missing. A row that is not metered in currency is not thereby a row
+    /// whose shape nobody has to know: the binding says what was authorised,
+    /// and "against a model with an unstated context window" is not an
+    /// authorisation anyone can check later.
+    pub fn upper_bound(
+        &self,
+        req: &GenRequest,
+        caps: &ModelCapabilities,
+        settlement: CurrencyCode,
+    ) -> Result<Money, UnknownCost> {
+        match self {
+            Metering::Currency { reservation, .. } => reservation.upper_bound(req, caps),
+            Metering::Subscription { .. } | Metering::Unmetered { .. } => {
+                ceilings(req, caps)?;
+                Ok(Money::zero(settlement))
+            }
+        }
+    }
+
+    /// What a settled figure under this metering is attributable to, when it
+    /// is the metering itself that produced it.
+    ///
+    /// `None` for a currency row: there the figure comes from the quote or
+    /// from the provider, and both mint their own attribution.
+    pub fn policy_attribution(&self) -> Option<CostAttribution> {
+        match self {
+            Metering::Currency { .. } => None,
+            Metering::Subscription { revision } | Metering::Unmetered { revision } => {
+                Some(CostAttribution::MeteringPolicy {
+                    revision: revision.clone(),
+                })
+            }
+        }
+    }
+}
+
+/// A [`Metering`] with its figures removed: the labels a reservation binds
+/// itself to, and nothing that could be substituted cheaply behind one.
+///
+/// Deliberately not the `Metering` itself, for exactly the reason
+/// [`BudgetBinding`] has always held a [`PricingRevision`] rather than a
+/// quote. A fabricated cheap table wearing a genuine label is caught by
+/// *recomputing the bound* in [`Reservation::authorises`], not by comparing
+/// labels; folding the rates into the binding would collapse two checks that
+/// catch different things into one, and leave the cheaper-quote substitution
+/// reported as a moved binding rather than as the changed quote it is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MeteringIdentity {
+    Currency {
+        revision: PricingRevision,
+        settlement: SettlementSource,
+    },
+    Subscription {
+        revision: MeteringRevision,
+    },
+    Unmetered {
+        revision: MeteringRevision,
+    },
+}
+
+impl MeteringIdentity {
+    /// Whether a figure attributed this way may be charged as the real cost
+    /// of a generation authorised under this metering.
+    ///
+    /// A **table** figure must have been computed under the very revision the
+    /// reservation was authorised with: that check exists to stop a
+    /// mid-session table change from pricing one generation two ways.
+    ///
+    /// A **provider-reported** figure is accepted whatever table the
+    /// reservation used, and that is a deliberate exception rather than an
+    /// oversight. It carries no table revision at all, so the revision check
+    /// would reject it on every single generation and the gate would silently
+    /// discard the best figure it will ever receive in favour of a
+    /// pessimistic bound. A provider's own invoice figure is not a table
+    /// change — the reason for the check does not reach it. See
+    /// `docs/decisions/2026-08-21-how-a-model-is-metered.md` §5.
+    ///
+    /// A **policy** figure must name the policy that was authorised, for the
+    /// same reason as a table.
+    fn settles(&self, attribution: &CostAttribution) -> bool {
+        match (self, attribution) {
+            (_, CostAttribution::ProviderReported(_)) => true,
+            (
+                MeteringIdentity::Currency { revision, .. },
+                CostAttribution::Table { revision: settled },
+            ) => revision == settled,
+            (
+                MeteringIdentity::Subscription { revision }
+                | MeteringIdentity::Unmetered { revision },
+                CostAttribution::MeteringPolicy { revision: settled },
+            ) => revision == settled,
+            _ => false,
+        }
+    }
+}
+
+impl fmt::Display for MeteringIdentity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            MeteringIdentity::Currency {
+                revision,
+                settlement,
+            } => write!(
+                f,
+                "currency under {}, settled from {settlement}",
+                revision.0
+            ),
+            MeteringIdentity::Subscription { revision } => {
+                write!(f, "a subscription under {}", revision.0)
+            }
+            MeteringIdentity::Unmetered { revision } => write!(f, "unmetered under {}", revision.0),
+        }
     }
 }
 
@@ -262,25 +480,25 @@ pub struct BudgetBinding {
     model: String,
     context_ceiling: u64,
     output_ceiling: u64,
-    revision: PricingRevision,
+    metering: MeteringIdentity,
 }
 
 impl BudgetBinding {
-    /// The budget-relevant shape of `req` against `caps` under `revision`,
+    /// The budget-relevant shape of `req` against `caps` under `metering`,
     /// or the reason it has none — the same reason
-    /// [`PricingQuote::upper_bound`] would refuse, because it is the same
+    /// [`Metering::upper_bound`] would refuse, because it is the same
     /// resolution.
     pub fn of(
         req: &GenRequest,
         caps: &ModelCapabilities,
-        revision: &PricingRevision,
+        metering: &Metering,
     ) -> Result<Self, UnknownCost> {
         let (context_ceiling, output_ceiling) = ceilings(req, caps)?;
         Ok(Self {
             model: req.model.clone(),
             context_ceiling,
             output_ceiling,
-            revision: revision.clone(),
+            metering: metering.identity(),
         })
     }
 
@@ -299,9 +517,9 @@ impl BudgetBinding {
         self.output_ceiling
     }
 
-    /// The pricing table this was authorised under.
-    pub fn revision(&self) -> &PricingRevision {
-        &self.revision
+    /// The metering this was authorised under.
+    pub fn metering(&self) -> &MeteringIdentity {
+        &self.metering
     }
 }
 
@@ -337,12 +555,8 @@ impl BindingMismatch {
                 p.output_ceiling.to_string(),
             ));
         }
-        if a.revision != p.revision {
-            out.push((
-                "pricing revision",
-                a.revision.0.clone(),
-                p.revision.0.clone(),
-            ));
+        if a.metering != p.metering {
+            out.push(("metering", a.metering.to_string(), p.metering.to_string()));
         }
         out
     }
@@ -515,42 +729,46 @@ impl Reservation {
         &self.binding
     }
 
-    /// The pricing revision this was authorised under. The same revision
-    /// must price the actual usage, so a mid-session pricing change cannot
-    /// make one generation cost two different things.
-    pub fn revision(&self) -> &PricingRevision {
-        self.binding.revision()
+    /// The metering this was authorised under. The same metering must settle
+    /// the actual usage, so a mid-session pricing change cannot make one
+    /// generation cost two different things.
+    pub fn metering(&self) -> &MeteringIdentity {
+        self.binding.metering()
     }
 
     /// Refuse unless this reservation is the one that authorised exactly
     /// this generation.
     ///
     /// Two checks, because neither implies the other. The [`BudgetBinding`]
-    /// catches a substituted model or moved ceilings and names which; the
-    /// recomputed bound catches a substituted *quote*, which the binding
-    /// cannot see because [`PricingRevision`] is an opaque public string and
-    /// a fabricated cheap table can wear a genuine label.
+    /// catches a substituted model, moved ceilings or a switched metering and
+    /// names which; the recomputed bound catches a substituted *quote*, which
+    /// the binding cannot see because [`PricingRevision`] is an opaque public
+    /// string and a fabricated cheap table can wear a genuine label.
     ///
     /// Not called by [`BudgetGate::reconcile`], which has no request to
     /// check against: this is the check at the moment of *use*, and it takes
-    /// the same `(quote, req, caps)` as [`BudgetGate::reserve`] so a caller
-    /// that has one has the other.
+    /// the same `(metering, req, caps)` as [`BudgetGate::reserve`] so a
+    /// caller that has one has the other.
     pub fn authorises(
         &self,
-        quote: &PricingQuote,
+        metering: &Metering,
         req: &GenRequest,
         caps: &ModelCapabilities,
     ) -> Result<(), BudgetDenied> {
         let presented =
-            BudgetBinding::of(req, caps, &quote.revision).map_err(BudgetDenied::CostUnknown)?;
+            BudgetBinding::of(req, caps, metering).map_err(BudgetDenied::CostUnknown)?;
         if presented != self.binding {
             return Err(BudgetDenied::WrongBinding(Box::new(BindingMismatch {
                 authorised: self.binding.clone(),
                 presented,
             })));
         }
-        let recomputed = quote
-            .upper_bound(req, caps)
+        // Recomputed in the currency the authorised bound is already stated
+        // in: a metering that is not in currency mints its zero against
+        // whatever it will be compared to, and that is the only currency this
+        // reservation was ever measured in.
+        let recomputed = metering
+            .upper_bound(req, caps, self.upper_bound.currency)
             .map_err(BudgetDenied::CostUnknown)?;
         if recomputed != self.upper_bound {
             return Err(BudgetDenied::QuoteChanged {
@@ -659,23 +877,32 @@ impl BudgetGate {
     /// this gate has watched fail. Continuing to admit would be exactly the
     /// "we do not know what this will cost, but proceed anyway" the gate
     /// exists to refuse — only worse, because the evidence is in hand.
+    /// A row that is not metered in currency is admitted with a **zero**
+    /// reservation, minted from its policy in this gate's own limit currency.
+    /// A monetary limit then bounds nothing: every reservation is zero, so
+    /// the gate admits until the provider refuses. That is the honest
+    /// arithmetic, and it is why the run announces
+    /// [`PublicEvent::MeteringSelected`](crate::public::PublicEvent::MeteringSelected)
+    /// per generation rather than leaving `--budget` silently vacuous.
     pub fn reserve(
         &mut self,
-        quote: &PricingQuote,
+        metering: &Metering,
         req: &GenRequest,
         caps: &ModelCapabilities,
     ) -> Result<Reservation, BudgetDenied> {
         if let Some(breach) = self.breached {
             return Err(BudgetDenied::BoundBreached(breach));
         }
-        if quote.currency != self.limit.currency {
+        if let Metering::Currency { reservation, .. } = metering
+            && reservation.currency != self.limit.currency
+        {
             return Err(BudgetDenied::CurrencyMismatch {
                 limit: self.limit.currency,
-                quote: quote.currency,
+                quote: reservation.currency,
             });
         }
-        let upper_bound = quote
-            .upper_bound(req, caps)
+        let upper_bound = metering
+            .upper_bound(req, caps, self.limit.currency)
             .map_err(BudgetDenied::CostUnknown)?;
 
         let held = self
@@ -692,8 +919,7 @@ impl BudgetGate {
             })));
         }
 
-        let binding =
-            BudgetBinding::of(req, caps, &quote.revision).map_err(BudgetDenied::CostUnknown)?;
+        let binding = BudgetBinding::of(req, caps, metering).map_err(BudgetDenied::CostUnknown)?;
         self.outstanding = self
             .outstanding
             .checked_add(&upper_bound)
@@ -752,9 +978,9 @@ impl BudgetGate {
         let (charged, exact) = match actual {
             CostDelta::Known {
                 amount,
-                pricing_revision,
+                attribution,
                 ..
-            } if pricing_revision == reservation.revision()
+            } if reservation.metering().settles(attribution)
                 && amount.currency == self.limit.currency =>
             {
                 (*amount, true)

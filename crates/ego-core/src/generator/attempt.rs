@@ -53,9 +53,9 @@ use super::capabilities::ModelCapabilities;
 use super::port::AiEvent;
 use super::types::{GenRequest, StopReason};
 use crate::budget::{
-    BudgetDenied, BudgetGate, PricingQuote, ReconcileDenied, Reconciled, Reservation,
+    BudgetDenied, BudgetGate, Metering, ReconcileDenied, Reconciled, Reservation, SettlementSource,
 };
-use crate::cost::{CostDelta, UnknownCost};
+use crate::cost::{CostAttribution, CostDelta, CurrencyCode, Money, UnknownCost};
 use crate::event::id::{AttemptId, GenerationId};
 use crate::state::Usage;
 
@@ -219,8 +219,8 @@ impl Outcome {
 
 /// One generation's authorisation, owned until it settles.
 ///
-/// Holds the [`Reservation`] and the [`PricingQuote`] that priced it, so the
-/// same quote that authorised the generation also prices what it actually
+/// Holds the [`Reservation`] and the [`Metering`] it was minted under, so the
+/// same metering that authorised the generation also settles what it actually
 /// cost — the invariant `crate::budget`'s module doc states, now enforced by
 /// the type rather than by the caller passing the right `CostDelta`.
 ///
@@ -229,7 +229,7 @@ impl Outcome {
 #[must_use = "an unsettled attempt holds budget that nothing else will release"]
 pub struct GenerationAttempt {
     attempt: AttemptRef,
-    quote: PricingQuote,
+    metering: Metering,
     /// Taken by [`AttemptStream::settle`]. While it is `Some`, this attempt
     /// still holds budget, which is exactly what [`Drop`] reports on.
     reservation: Option<Reservation>,
@@ -240,21 +240,27 @@ impl GenerationAttempt {
     /// does not authorise this request.
     ///
     /// This is where [`Reservation::authorises`] finally has a caller, and
-    /// it is the right place: `req`, `caps` and the quote are all still in
+    /// it is the right place: `req`, `caps` and the metering are all still in
     /// hand here, and they are not once the stream is running.
     pub fn new(
         generation: GenerationId,
         reservation: Reservation,
-        quote: &PricingQuote,
+        metering: &Metering,
         req: &GenRequest,
         caps: &ModelCapabilities,
     ) -> Result<Self, BudgetDenied> {
-        reservation.authorises(quote, req, caps)?;
+        reservation.authorises(metering, req, caps)?;
         Ok(Self {
             attempt: AttemptRef::first(generation),
-            quote: quote.clone(),
+            metering: metering.clone(),
             reservation: Some(reservation),
         })
+    }
+
+    /// How this generation is metered. Read by the loop to decide what a
+    /// usage report is worth in money, and by [`AttemptStream::settle`].
+    pub fn metering(&self) -> &Metering {
+        &self.metering
     }
 
     /// Which generation this is, and which attempt at it.
@@ -302,6 +308,64 @@ impl Drop for GenerationAttempt {
     }
 }
 
+/// What one generation cost, from what the stream observed and how the row
+/// is metered.
+///
+/// One function rather than one rule in [`AttemptStream::settle`] and another
+/// in the turn loop's log: the gate's charge and the log's `cost_delta` are
+/// the same figure, and two spellings of it are two places for it to
+/// disagree.
+///
+/// The three cases, and why each is not the other
+/// (`docs/decisions/2026-08-21-how-a-model-is-metered.md` §5):
+///
+/// - **Quote settlement** prices the observed usage. No usage frame means no
+///   quantity to price, so the cost is unknown and the gate charges its
+///   pessimistic bound.
+/// - **Provider-reported settlement** takes the provider's own figure and
+///   never consults the usage at all. A stated total settles the *money* even
+///   when the usage frame never arrived — the tokens are still missing and
+///   `Usage` still records nothing, but the cost is not unknown. A provider
+///   that declared it would state a cost and did not is
+///   [`UnknownCost::ProviderReportedCostMissing`], named rather than
+///   collapsed into a bare `exact: false`.
+/// - **A row not metered in currency** costs zero, minted from its policy in
+///   `settlement` — the currency the zero will be compared against, since
+///   neither variant states one.
+pub fn settled_cost(
+    metering: &Metering,
+    usage: UsageReport,
+    provider_cost: Option<Money>,
+    settlement: CurrencyCode,
+) -> CostDelta {
+    match metering {
+        Metering::Currency {
+            reservation,
+            settlement: SettlementSource::Quote,
+        } => match usage {
+            UsageReport::Reported(usage) => reservation.price(&usage),
+            UsageReport::Missing => CostDelta::Unknown(UnknownCost::ProviderReportedNoUsage),
+        },
+        Metering::Currency {
+            settlement: SettlementSource::ProviderReported { revision },
+            ..
+        } => match provider_cost {
+            Some(amount) => CostDelta::Known {
+                amount,
+                attribution: CostAttribution::ProviderReported(revision.clone()),
+                fx: None,
+            },
+            None => CostDelta::Unknown(UnknownCost::ProviderReportedCostMissing),
+        },
+        Metering::Subscription { revision } | Metering::Unmetered { revision } => CostDelta::free(
+            settlement,
+            CostAttribution::MeteringPolicy {
+                revision: revision.clone(),
+            },
+        ),
+    }
+}
+
 /// An attempt settled against its gate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Settlement {
@@ -327,6 +391,15 @@ pub struct AttemptStream {
     inner: BoxStream<'static, AiEvent>,
     delivery: DeliveryCertainty,
     usage: UsageReport,
+    /// What the provider said this request will cost, when it says so at all.
+    ///
+    /// Replaced rather than accumulated, and that is the opposite rule to
+    /// `usage` one field up. A [`Usage`] frame is an *increment*; a stated
+    /// cost is a *total for the request*, so a provider that restates it is
+    /// restating it and adding the two would bill the sum of the
+    /// restatements. Same reasoning the wire decoder applies to its own
+    /// cumulative usage chunk.
+    provider_cost: Option<Money>,
     /// The *first* terminal stop reason seen. Exactly one outcome per
     /// attempt: a provider that emits two is not believed twice.
     terminal: Option<StopReason>,
@@ -343,6 +416,7 @@ impl AttemptStream {
             inner,
             delivery: DeliveryCertainty::default(),
             usage: UsageReport::Missing,
+            provider_cost: None,
             terminal: None,
         }
     }
@@ -371,6 +445,9 @@ impl AttemptStream {
                 total.add(delta);
                 self.usage = UsageReport::Reported(total);
             }
+
+            // A total, not an increment: see the field's own doc.
+            AiEvent::ProviderCost { cost } => self.provider_cost = Some(*cost),
 
             // First terminal wins: a provider that sends two is not believed
             // twice.
@@ -416,6 +493,7 @@ impl AttemptStream {
                 | AiEvent::ReasoningDelta { .. }
                 | AiEvent::ToolCall { .. }
                 | AiEvent::Usage(_)
+                | AiEvent::ProviderCost { .. }
         ) {
             self.delivery.observe(DeliveryCertainty::PossiblySent);
         }
@@ -447,10 +525,12 @@ impl AttemptStream {
     /// the error, not because it was dropped on the floor.
     pub fn settle(mut self, gate: &mut BudgetGate) -> Result<Settlement, Box<ReconcileDenied>> {
         let outcome = self.outcome();
-        let actual = match self.usage {
-            UsageReport::Reported(usage) => self.attempt.quote.price(&usage),
-            UsageReport::Missing => CostDelta::Unknown(UnknownCost::ProviderReportedNoUsage),
-        };
+        let actual = settled_cost(
+            &self.attempt.metering,
+            self.usage,
+            self.provider_cost,
+            gate.limit().currency,
+        );
         let reservation = self
             .attempt
             .reservation

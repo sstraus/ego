@@ -51,7 +51,9 @@
 //! nothing before it.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
+use ego_core::cost::Money;
 use ego_core::generator::attempt::DeliveryCertainty;
 use ego_core::generator::port::AiEvent;
 use ego_core::generator::types::{
@@ -60,10 +62,12 @@ use ego_core::generator::types::{
 use ego_core::state::Usage;
 use futures::stream::{self, BoxStream, StreamExt};
 use serde::{Deserialize, Serialize};
+use serde_json::value::RawValue;
 use url::Url;
 
 use crate::http::{HttpError, HttpRequest, HttpResponse, Method};
 
+use super::provider_cost::ProviderCost;
 use super::sse::SseDecoder;
 
 /// The path a provider row appends to its base URL to reach this format.
@@ -361,8 +365,16 @@ pub fn build_request(
 struct Chunk {
     #[serde(default)]
     choices: Vec<Choice>,
+    /// Kept as unparsed bytes rather than deserialised in place.
+    ///
+    /// Two readers want this object and they want different things from it:
+    /// [`map_usage`] wants the four token counts, and the row's
+    /// [`ProviderCost`] decoder wants whichever money field *that provider*
+    /// declares. Parsing it here would decide for both — and would put an
+    /// OpenRouter cost through an `f64` on the way, which is the one thing
+    /// `ego-core`'s money contract exists to prevent.
     #[serde(default)]
-    usage: Option<WireUsage>,
+    usage: Option<Box<RawValue>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -519,6 +531,17 @@ enum Incomplete {
 /// cut mid-frame is handled rather than merely survived.
 #[derive(Debug, Default)]
 pub struct StreamDecoder {
+    /// How this provider states the money it will charge, when it states it.
+    ///
+    /// Carried by the provider row, not chosen here: this format is spoken by
+    /// OpenAI, xAI, OpenRouter, Groq and every local daemon, and only two of
+    /// them report a cost. A `match` on the provider id in this file would be
+    /// exactly the special case the metering ADR §8 forbids.
+    cost: Option<Arc<dyn ProviderCost>>,
+    /// The last figure the cost decoder read, held rather than forwarded, for
+    /// the same reason `usage` below is: a stated cost is a total for the
+    /// request, and a gateway that restates it must not be billed the sum.
+    stated_cost: Option<Money>,
     sse: SseDecoder,
     /// Ordered by index so a flush is deterministic regardless of the order
     /// the provider interleaved the fragments in.
@@ -541,6 +564,20 @@ pub struct StreamDecoder {
 }
 
 impl StreamDecoder {
+    /// A decoder for a provider that states what it will charge.
+    ///
+    /// [`Default`] is the decoder for one that does not, which is most of
+    /// them — and the difference has to be configured rather than inferred:
+    /// a row that expects a cost and never receives one settles at its bound
+    /// and says so, which is only correct if something actually declared the
+    /// expectation.
+    pub fn reporting_cost(cost: Arc<dyn ProviderCost>) -> Self {
+        Self {
+            cost: Some(cost),
+            ..Self::default()
+        }
+    }
+
     /// Feed bytes; get the events that completed within them.
     pub fn push(&mut self, chunk: &[u8]) -> Vec<AiEvent> {
         let mut out = Vec::new();
@@ -567,6 +604,15 @@ impl StreamDecoder {
                           trusted; this generation settles at its bound"
                     .to_string(),
             });
+        }
+        // Before the usage frame, deliberately. The two are one observation
+        // as far as the log is concerned, and a reader that folds them in
+        // arrival order should see the money already in hand when the tokens
+        // land. Nothing downstream *depends* on the order — `AttemptStream`
+        // and the turn loop both hold whichever arrives first — but an order
+        // that has to be explained is worse than one that reads correctly.
+        if let Some(cost) = self.stated_cost.take() {
+            out.push(AiEvent::ProviderCost { cost });
         }
         if let Some(usage) = self.usage.take() {
             out.push(AiEvent::Usage(usage));
@@ -670,18 +716,40 @@ impl StreamDecoder {
                 self.consume_finish_reason(reason, out);
             }
         }
-        if let Some(usage) = &chunk.usage {
-            match map_usage(usage) {
-                Some(mapped) => self.usage = Some(mapped),
-                None => {
-                    tracing::warn!(
-                        prompt_tokens = usage.prompt_tokens,
-                        "the reported prompt cache breakdown exceeds the prompt; \
-                         discarding the whole usage report rather than repairing it"
-                    );
-                    self.usage = None;
-                    self.usage_incoherent = true;
-                }
+        if let Some(raw) = &chunk.usage {
+            self.consume_usage(raw);
+        }
+    }
+
+    /// The `usage` object, read twice: once for the token counts, and once
+    /// for whatever money field this provider declares.
+    ///
+    /// The two readings are independent on purpose. A provider that reports a
+    /// cost and an incoherent token breakdown still stated the cost, and
+    /// under a provider-reported settlement that figure is the one that
+    /// settles the generation — discarding it because the *tokens* did not
+    /// add up would throw away the better number over the worse one.
+    fn consume_usage(&mut self, raw: &RawValue) {
+        if let Some(cost) = self.cost.as_ref().and_then(|decoder| decoder.read(raw)) {
+            self.stated_cost = Some(cost);
+        }
+        let Ok(usage) = serde_json::from_str::<WireUsage>(raw.get()) else {
+            // Not the incoherent-breakdown case below: this is a `usage` that
+            // is not a usage object at all, which is the same kind of thing
+            // as a frame this format cannot decode.
+            tracing::warn!("skipping a usage object this wire format cannot decode");
+            return;
+        };
+        match map_usage(&usage) {
+            Some(mapped) => self.usage = Some(mapped),
+            None => {
+                tracing::warn!(
+                    prompt_tokens = usage.prompt_tokens,
+                    "the reported prompt cache breakdown exceeds the prompt; \
+                     discarding the whole usage report rather than repairing it"
+                );
+                self.usage = None;
+                self.usage_incoherent = true;
             }
         }
     }
@@ -822,7 +890,10 @@ impl StreamDecoder {
 const MAX_ERROR_BODY: usize = 64 * 1024;
 
 enum State {
-    Head(Result<HttpResponse, HttpError>),
+    Head {
+        response: Result<HttpResponse, HttpError>,
+        cost: Option<Arc<dyn ProviderCost>>,
+    },
     Body {
         body: crate::http::ByteStream,
         decoder: StreamDecoder,
@@ -836,14 +907,26 @@ enum State {
 /// got a response is the same kind of thing as one that failed halfway: both
 /// end in exactly one `Stop`, and both report their
 /// [`DeliveryCertainty`] from the transport that watched them.
-pub fn decode(response: Result<HttpResponse, HttpError>) -> BoxStream<'static, AiEvent> {
-    stream::unfold(State::Head(response), |state| async move {
+///
+/// `cost` is the provider row's own declaration of where it states a charge,
+/// carried through rather than decided here — see [`StreamDecoder::cost`].
+pub fn decode(
+    response: Result<HttpResponse, HttpError>,
+    cost: Option<Arc<dyn ProviderCost>>,
+) -> BoxStream<'static, AiEvent> {
+    stream::unfold(State::Head { response, cost }, |state| async move {
         match state {
-            State::Head(Err(error)) => Some((
+            State::Head {
+                response: Err(error),
+                ..
+            } => Some((
                 super::failed(error.to_string(), error.delivery()).to_vec(),
                 State::Done,
             )),
-            State::Head(Ok(response)) => {
+            State::Head {
+                response: Ok(response),
+                cost,
+            } => {
                 // A status at all proves the request arrived, whatever the
                 // status says. This is the earliest honest reading, and it is
                 // the one that matters: it is taken before anything can cut
@@ -854,7 +937,10 @@ pub fn decode(response: Result<HttpResponse, HttpError>) -> BoxStream<'static, A
                         vec![arrived],
                         State::Body {
                             body: response.body,
-                            decoder: StreamDecoder::default(),
+                            decoder: match cost {
+                                Some(cost) => StreamDecoder::reporting_cost(cost),
+                                None => StreamDecoder::default(),
+                            },
                         },
                     ));
                 }

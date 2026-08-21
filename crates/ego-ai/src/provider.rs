@@ -16,8 +16,11 @@
 //! the other end can do.
 
 use std::fmt;
+use std::sync::Arc;
 
 use url::Url;
+
+use crate::wire::provider_cost::ProviderCost;
 
 /// A credential. Prints as `<redacted>`, in every formatter, forever.
 ///
@@ -115,6 +118,24 @@ pub struct ProviderRow {
     pub id: String,
     pub endpoint: Url,
     pub auth: Auth,
+    /// How this provider states the money it will charge, when it states it
+    /// at all.
+    ///
+    /// Not the wire format field the doc above rules out, and the difference
+    /// is the point: a wire format is a shape several providers share, while
+    /// this is one provider's own statement about one field in its own
+    /// responses. OpenAI and Anthropic report billing *dimensions* and no
+    /// monetary total, so their rows carry `None`; OpenRouter and xAI report
+    /// a figure, and theirs carry the decoder that reads it.
+    ///
+    /// `None` is not "we have not got round to it": it is the row asserting
+    /// that no cost will be stated, which is what makes
+    /// [`UnknownCost::ProviderReportedCostMissing`](ego_core::cost::UnknownCost::ProviderReportedCostMissing)
+    /// meaningful on the rows that do carry one.
+    ///
+    /// Behind an `Arc` because a row is `Clone` and a decoder is immutable
+    /// configuration shared by every generation against that row.
+    pub cost: Option<Arc<dyn ProviderCost>>,
 }
 
 /// Where OpenAI's chat-completions endpoint lives.
@@ -147,6 +168,10 @@ impl ProviderRow {
             id: "openai".to_string(),
             endpoint,
             auth: Auth::bearer_from_env(OPENAI_KEY_VAR)?,
+            // OpenAI reports token usage and no monetary total
+            // (`docs/decisions/2026-08-21-how-a-model-is-metered.md` §6), so
+            // this row is priced from a supplied table or not at all.
+            cost: None,
         })
     }
 
@@ -163,6 +188,9 @@ impl ProviderRow {
             id: "ollama".to_string(),
             endpoint,
             auth: Auth::None,
+            // A daemon serving its own weights charges nothing and states
+            // nothing; the metering says so, not a cost field.
+            cost: None,
         }
     }
 

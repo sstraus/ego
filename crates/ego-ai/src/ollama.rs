@@ -34,7 +34,6 @@
 
 use std::sync::Arc;
 
-use ego_core::cost::CurrencyCode;
 use ego_core::generator::capabilities::{
     CacheRetention, CancelSemantics, ModelCapabilities, ReasoningCarryover, ReasoningEffortSupport,
     Transport,
@@ -75,13 +74,13 @@ struct Ps {
 
 /// Resolve a local model against the daemon `row` points at.
 ///
-/// `currency` is the session's settlement currency: the zero quote asserts
-/// "this provider charges nothing", and a claim about money still has to be
-/// expressed in the money the session settles in.
+/// Takes no currency. A locally served model is not metered in one — it has
+/// no per-token price to express in any money — and the zero the budget gate
+/// reserves for it is minted in the gate's own limit currency, which is the
+/// only currency that zero could be compared against.
 pub async fn resolve(
     row: &ProviderRow,
     model: &str,
-    currency: CurrencyCode,
     http: &Arc<dyn Http>,
 ) -> Result<ResolvedModel, ResolveError> {
     // Before anything is asked of the daemon. A `:cloud` identifier is
@@ -100,7 +99,7 @@ pub async fn resolve(
         model: model.to_string(),
         row: row.clone(),
         capabilities: capabilities_from(&tag, context),
-        pricing: unmetered(currency),
+        metering: unmetered(),
     })
 }
 

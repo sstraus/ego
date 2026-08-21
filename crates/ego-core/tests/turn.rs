@@ -10,7 +10,7 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use ego_core::budget::{BudgetGate, PricingQuote};
+use ego_core::budget::{BudgetGate, Metering, PricingQuote, SettlementSource};
 use ego_core::config::SystemPrompt;
 use ego_core::cost::{Amount, CurrencyCode, Money, PricingRevision};
 use ego_core::event::domain::{CancelCause, DomainEvent, EventKind, ExitReason};
@@ -231,6 +231,16 @@ mod turn {
         }
     }
 
+    /// The fixture quote as a metering: a table that both bounds and
+    /// settles. Every turn test here was written against that arrangement;
+    /// the other three arrangements are exercised in `tests/metering.rs`.
+    fn metering() -> Metering {
+        Metering::Currency {
+            reservation: quote(),
+            settlement: SettlementSource::Quote,
+        }
+    }
+
     fn caps() -> ModelCapabilities {
         ModelCapabilities {
             schema_version: 1,
@@ -325,7 +335,7 @@ mod turn {
         Model {
             generator,
             gate,
-            quote: quote(),
+            metering: metering(),
             caps: caps(),
             config,
         }
@@ -1117,13 +1127,15 @@ mod turn {
         );
         // `GenerationStarted` and `AttemptSettled` have no public spelling:
         // the attempt lifecycle is internal accounting, not a host's business.
-        // `TurnStarted` is published and never appended, so the sink carries
-        // one more event than the log does public ones.
+        // `TurnStarted` and `MeteringSelected` go the other way — both are
+        // published and neither is appended, so the sink carries two more
+        // events than the log does public ones.
         assert_eq!(
             published.len(),
-            fx.store.events().len() - 2 + 1,
+            fx.store.events().len() - 2 + 2,
             "exactly the two attempt-lifecycle events stay internal, and \
-             turn.started is published without being logged"
+             turn.started and metering.selected are published without being \
+             logged"
         );
     }
 

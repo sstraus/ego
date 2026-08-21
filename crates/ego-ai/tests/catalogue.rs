@@ -15,13 +15,15 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use ego_ai::catalogue::{
-    Catalogue, HostedModel, LOCAL_UNMETERED, ModelSlug, ResolveError, unmetered,
+    Catalogue, HostedModel, LOCAL_UNMETERED, ModelSlug, ResolveError, subscription, tabulated,
+    unmetered,
 };
 use ego_ai::http::{Http, HttpError, HttpRequest, HttpResponse, Method};
 use ego_ai::ollama;
 use ego_ai::provider::{Auth, ProviderRow};
-use ego_core::budget::PricingQuote;
-use ego_core::cost::{Amount, CurrencyCode, PricingRevision, TokenCategory, UnknownCost};
+use ego_ai::wire::provider_cost::{ProviderCost, XaiUsdTicks};
+use ego_core::budget::{Metering, PricingQuote, SettlementSource};
+use ego_core::cost::{CurrencyCode, MeteringRevision, PricingRevision, UnknownCost};
 use ego_core::generator::capabilities::{
     CacheRetention, CancelSemantics, ModelCapabilities, ReasoningCarryover, ReasoningEffortSupport,
     Transport,
@@ -139,6 +141,7 @@ fn hosted_row() -> ProviderRow {
         id: "openai".to_string(),
         endpoint: Url::parse("https://api.openai.com/v1/chat/completions").unwrap(),
         auth: Auth::Bearer("sk-not-a-real-key".into()),
+        cost: None,
     }
 }
 
@@ -244,7 +247,7 @@ fn a_supplied_hosted_model_resolves_to_exactly_what_was_supplied() {
         "openai/gpt-5.6",
         HostedModel {
             capabilities: hosted_caps(),
-            pricing: hosted_quote(),
+            metering: tabulated(hosted_quote()),
         },
     );
 
@@ -255,7 +258,7 @@ fn a_supplied_hosted_model_resolves_to_exactly_what_was_supplied() {
     assert_eq!(resolved.model, "gpt-5.6", "the provider half is not sent");
     assert_eq!(resolved.row.id, "openai");
     assert_eq!(resolved.capabilities, hosted_caps());
-    assert_eq!(resolved.pricing, hosted_quote());
+    assert_eq!(resolved.metering, tabulated(hosted_quote()));
 }
 
 #[test]
@@ -267,7 +270,7 @@ fn a_hosted_model_is_not_quietly_free() {
         "openai/gpt-5.6",
         HostedModel {
             capabilities: hosted_caps(),
-            pricing: hosted_quote(),
+            metering: tabulated(hosted_quote()),
         },
     );
     let resolved = catalogue
@@ -275,18 +278,36 @@ fn a_hosted_model_is_not_quietly_free() {
         .expect("it was supplied");
 
     let bound = resolved
-        .pricing
-        .upper_bound(&request(), &resolved.capabilities)
+        .metering
+        .upper_bound(&request(), &resolved.capabilities, usd())
         .expect("a fully priced model with stated ceilings can be bounded");
 
     assert!(
         !bound.amount.is_zero(),
         "a hosted generation that bounds to nothing is a table that forgot to charge"
     );
+    // Two spellings of "not the local policy", and both are needed. The
+    // variant check is the one the type system now makes possible: a hosted
+    // row that came out `Unmetered` would bound to zero whatever its
+    // revision said. The revision check is the one that survives if someone
+    // ever hands a hosted row an all-zero table wearing the local label.
+    assert!(
+        matches!(resolved.metering, Metering::Currency { .. }),
+        "a hosted row is metered in currency, not by policy: {:?}",
+        resolved.metering
+    );
     assert_ne!(
-        resolved.pricing.revision,
-        PricingRevision(LOCAL_UNMETERED.to_string()),
+        resolved.metering,
+        unmetered(),
         "the local-unmetered policy must never reach a hosted row"
+    );
+    let Metering::Currency { reservation, .. } = &resolved.metering else {
+        unreachable!("asserted above");
+    };
+    assert_ne!(
+        reservation.revision,
+        PricingRevision(LOCAL_UNMETERED.to_string()),
+        "nor may its label be borrowed for a hosted table"
     );
 }
 
@@ -316,13 +337,8 @@ fn a_loaded_local_model_resolves_to_the_context_the_daemon_actually_serves() {
     // tell the gate there is four times the room there is.
     let (http, stub) = daemon([(200, TAGS), (200, PS_LOADED)]);
 
-    let resolved = block_on(ollama::resolve(
-        &local_row(),
-        "gemma4:e4b-mlx",
-        usd(),
-        &http,
-    ))
-    .expect("the daemon serves it and says how much context it has");
+    let resolved = block_on(ollama::resolve(&local_row(), "gemma4:e4b-mlx", &http))
+        .expect("the daemon serves it and says how much context it has");
 
     assert_eq!(resolved.capabilities.max_context_tokens, Some(32_768));
     assert_eq!(
@@ -348,13 +364,8 @@ fn a_cold_local_model_is_loaded_by_the_control_plane_and_never_by_a_generation()
         (200, PS_LOADED),
     ]);
 
-    let resolved = block_on(ollama::resolve(
-        &local_row(),
-        "gemma4:e4b-mlx",
-        usd(),
-        &http,
-    ))
-    .expect("it loads, then answers");
+    let resolved = block_on(ollama::resolve(&local_row(), "gemma4:e4b-mlx", &http))
+        .expect("it loads, then answers");
 
     assert_eq!(resolved.capabilities.max_context_tokens, Some(32_768));
     assert_eq!(
@@ -389,7 +400,7 @@ fn a_local_model_the_daemon_does_not_serve_is_refused_with_the_ones_it_does() {
     // repository: what is installed is a fact about the operator's machine.
     let (http, _) = daemon([(200, TAGS)]);
 
-    let refused = block_on(ollama::resolve(&local_row(), "llama9:70b", usd(), &http))
+    let refused = block_on(ollama::resolve(&local_row(), "llama9:70b", &http))
         .expect_err("it is not installed");
 
     match refused {
@@ -410,13 +421,8 @@ fn a_cloud_relayed_model_is_refused_rather_than_priced_at_zero() {
     // to nothing, which is the free-first table's exact failure mode.
     let (http, stub) = daemon([(200, TAGS)]);
 
-    let refused = block_on(ollama::resolve(
-        &local_row(),
-        "gpt-oss:120b-cloud",
-        usd(),
-        &http,
-    ))
-    .expect_err("it is relayed upstream");
+    let refused = block_on(ollama::resolve(&local_row(), "gpt-oss:120b-cloud", &http))
+        .expect_err("it is relayed upstream");
 
     assert_eq!(
         refused,
@@ -443,13 +449,8 @@ fn a_local_model_that_states_no_context_is_refused_and_no_ceiling_is_invented() 
         (200, PS_NO_CONTEXT),
     ]);
 
-    let refused = block_on(ollama::resolve(
-        &local_row(),
-        "gemma4:e4b-mlx",
-        usd(),
-        &http,
-    ))
-    .expect_err("it never says how much context it serves");
+    let refused = block_on(ollama::resolve(&local_row(), "gemma4:e4b-mlx", &http))
+        .expect_err("it never says how much context it serves");
 
     match refused {
         ResolveError::Undiscoverable { model, fact } => {
@@ -467,13 +468,8 @@ fn a_local_model_that_states_no_context_is_refused_and_no_ceiling_is_invented() 
 fn a_daemon_that_is_not_running_is_refused_naming_where_it_was_looked_for() {
     let (http, _) = daemon([]);
 
-    let refused = block_on(ollama::resolve(
-        &local_row(),
-        "gemma4:e4b-mlx",
-        usd(),
-        &http,
-    ))
-    .expect_err("nothing answered");
+    let refused = block_on(ollama::resolve(&local_row(), "gemma4:e4b-mlx", &http))
+        .expect_err("nothing answered");
 
     match refused {
         ResolveError::DaemonUnreachable { endpoint, .. } => assert!(
@@ -491,7 +487,7 @@ fn the_control_plane_is_derived_from_the_row_and_not_configured_twice() {
     let row = ProviderRow::ollama(Url::parse("http://10.0.0.7:9999/v1/chat/completions").unwrap());
     let (http, stub) = daemon([(200, TAGS), (200, PS_LOADED)]);
 
-    block_on(ollama::resolve(&row, "gemma4:e4b-mlx", usd(), &http)).expect("it resolves");
+    block_on(ollama::resolve(&row, "gemma4:e4b-mlx", &http)).expect("it resolves");
 
     let empty = stub.seen.lock().unwrap().is_empty();
     assert!(
@@ -511,13 +507,8 @@ fn a_capability_the_daemon_does_not_state_is_not_inferred() {
     // ceiling at all, so that stays `None` and the request must cap itself.
     let (http, _) = daemon([(200, TAGS), (200, PS_LOADED)]);
 
-    let resolved = block_on(ollama::resolve(
-        &local_row(),
-        "gemma4:e4b-mlx",
-        usd(),
-        &http,
-    ))
-    .expect("resolved");
+    let resolved =
+        block_on(ollama::resolve(&local_row(), "gemma4:e4b-mlx", &http)).expect("resolved");
 
     assert!(!resolved.capabilities.supports_parallel_tool_calls);
     assert_eq!(resolved.capabilities.max_output_tokens, None);
@@ -532,13 +523,8 @@ fn a_local_model_with_no_output_ceiling_is_refused_for_the_ceiling_and_not_the_p
     // operator the *price* is unknown would send them hunting for a table
     // that is already there and already correct.
     let (http, _) = daemon([(200, TAGS), (200, PS_LOADED)]);
-    let resolved = block_on(ollama::resolve(
-        &local_row(),
-        "gemma4:e4b-mlx",
-        usd(),
-        &http,
-    ))
-    .expect("resolved");
+    let resolved =
+        block_on(ollama::resolve(&local_row(), "gemma4:e4b-mlx", &http)).expect("resolved");
 
     let uncapped = GenRequest {
         max_output_tokens: None,
@@ -547,8 +533,8 @@ fn a_local_model_with_no_output_ceiling_is_refused_for_the_ceiling_and_not_the_p
 
     assert_eq!(
         resolved
-            .pricing
-            .upper_bound(&uncapped, &resolved.capabilities),
+            .metering
+            .upper_bound(&uncapped, &resolved.capabilities, usd()),
         Err(UnknownCost::UnstatedCeiling {
             ceiling: ego_core::cost::Ceiling::Output
         }),
@@ -556,53 +542,172 @@ fn a_local_model_with_no_output_ceiling_is_refused_for_the_ceiling_and_not_the_p
     );
 
     // And with a cap, the same model bounds cleanly — at zero, because it is
-    // genuinely unmetered.
+    // genuinely unmetered. Note that `Unmetered` does *not* skip the ceiling
+    // check to get there: a row nobody charges for is still a row whose
+    // shape the binding has to state.
     let bound = resolved
-        .pricing
-        .upper_bound(&request(), &resolved.capabilities)
-        .expect("a capped request against a fully priced model");
+        .metering
+        .upper_bound(&request(), &resolved.capabilities, usd())
+        .expect("a capped request against an unmetered model");
     assert!(bound.amount.is_zero());
 }
 
-// --- the zero quote ---
+// --- the two rows nobody charges per token ---
+//
+// These two tests replace a pair that pinned the *all-zero `PricingQuote`*:
+// that every category was `Some(Amount::ZERO)` and never `None`, and that
+// the quote's `PricingRevision` named the policy. That subject no longer
+// exists — `docs/decisions/2026-08-21-how-a-model-is-metered.md` §4 removed
+// the all-zero quote precisely because "zero per token" and "no per-token
+// price at all" were sharing one spelling. What survives is the property the
+// pair was really defending, which is that a row nobody charges per token
+// still bounds cleanly and is still attributable; both are asserted below
+// against the shape that replaced it.
 
 #[test]
-fn the_unmetered_quote_prices_every_category_and_leaves_none_unpriced() {
-    // `None` means *unpriced*, not free, and `upper_bound` consults all three
-    // input categories plus output — so a single `None` here would fail the
-    // gate closed before the network and run nothing at all.
-    let quote = unmetered(usd());
+fn a_row_with_no_per_token_price_carries_no_rates_at_all_rather_than_zeroed_ones() {
+    // The old failure mode was a table with one category left `None`:
+    // `upper_bound` consults all three input categories plus output, so a
+    // single missing rate failed the gate closed before the network and ran
+    // nothing. `Unmetered` cannot reach that state, because it holds no
+    // rates to leave out — the bound is zero by construction, not by
+    // arithmetic over four zeroes that someone has to remember to fill in.
+    let metering = unmetered();
+    assert!(
+        !matches!(metering, Metering::Currency { .. }),
+        "an unmetered row must not be spelled as a currency row: {metering:?}"
+    );
 
-    for category in [
-        TokenCategory::UncachedInput,
-        TokenCategory::CacheRead,
-        TokenCategory::CacheWrite,
-        TokenCategory::Output,
-    ] {
-        let rate = match category {
-            TokenCategory::UncachedInput => quote.uncached_input,
-            TokenCategory::CacheRead => quote.cache_read,
-            TokenCategory::CacheWrite => quote.cache_write,
-            TokenCategory::Output => quote.output,
-        };
-        assert_eq!(
-            rate,
-            Some(Amount::ZERO),
-            "{category:?} must be priced at zero, never left unpriced"
-        );
-    }
+    let (http, _) = daemon([(200, TAGS), (200, PS_LOADED)]);
+    let resolved =
+        block_on(ollama::resolve(&local_row(), "gemma4:e4b-mlx", &http)).expect("resolved");
+    assert_eq!(resolved.metering, metering, "the resolver mints that row");
+
+    let bound = resolved
+        .metering
+        .upper_bound(&request(), &resolved.capabilities, usd())
+        .expect("no category can be unpriced when there are no categories");
+    assert!(bound.amount.is_zero());
 }
 
 #[test]
-fn the_unmetered_quote_names_the_policy_that_produced_it_not_a_date() {
-    // `PricingRevision` exists to make a past figure attributable — "this
-    // number came from that table". A date attributes a built-in policy to
-    // nothing anyone can check; this string states what was asserted and
-    // under what condition.
-    let quote = unmetered(usd());
-    assert_eq!(quote.revision, PricingRevision(LOCAL_UNMETERED.to_string()));
+fn a_policy_metered_row_names_the_policy_that_produced_it_not_a_date() {
+    // A revision exists to make a past figure attributable — "this zero came
+    // from that decision". A date attributes a built-in policy to nothing
+    // anyone can check; these strings state what was asserted and under what
+    // condition. `MeteringRevision`, not `PricingRevision`: there is no
+    // price list here to point at.
+    assert_eq!(
+        unmetered(),
+        Metering::Unmetered {
+            revision: MeteringRevision(LOCAL_UNMETERED.to_string())
+        }
+    );
     assert!(
         LOCAL_UNMETERED.contains("local") && LOCAL_UNMETERED.contains("unmetered"),
         "the revision says what it claims: {LOCAL_UNMETERED}"
+    );
+
+    // The subscription row is the operator's to name, because only the
+    // operator knows which plan they are on — there is no built-in constant
+    // that could be right for everybody.
+    assert_eq!(
+        subscription("acme/pro-plan/2026-08"),
+        Metering::Subscription {
+            revision: MeteringRevision("acme/pro-plan/2026-08".to_string())
+        }
+    );
+}
+
+/// A subscription row is supplied through the same slot a priced hosted row
+/// is, and comes back out of the resolver intact. Without this, the variant
+/// would be constructible and unreachable — a shape with no producer.
+#[test]
+fn a_subscription_hosted_row_resolves_to_the_subscription_that_was_supplied() {
+    let catalogue = Catalogue::new([hosted_row()]).with_hosted(
+        "openai/gpt-5.6",
+        HostedModel {
+            capabilities: hosted_caps(),
+            metering: subscription("acme/pro-plan/2026-08"),
+        },
+    );
+
+    let resolved = catalogue
+        .resolve_hosted(&ModelSlug::parse("openai/gpt-5.6").unwrap())
+        .expect("it was supplied");
+
+    assert_eq!(resolved.metering, subscription("acme/pro-plan/2026-08"));
+    let bound = resolved
+        .metering
+        .upper_bound(&request(), &resolved.capabilities, usd())
+        .expect("stated ceilings, and no per-token charge to bound");
+    assert!(
+        bound.amount.is_zero(),
+        "a flat fee is not spent per request, so there is nothing to reserve"
+    );
+}
+
+/// The other half of that: a subscription still needs the model's shape.
+/// A row nobody meters per token is not thereby a row whose ceilings may go
+/// unstated — the binding has to say what was authorised, and "against a
+/// model with an unknown context window" is not something anyone can check
+/// later.
+#[test]
+fn a_subscription_with_no_stated_context_window_is_still_refused() {
+    let no_window = ModelCapabilities {
+        max_context_tokens: None,
+        ..hosted_caps()
+    };
+    assert_eq!(
+        subscription("acme/pro-plan/2026-08").upper_bound(&request(), &no_window, usd()),
+        Err(UnknownCost::UnstatedCeiling {
+            ceiling: ego_core::cost::Ceiling::Context
+        })
+    );
+}
+
+/// A provider-reported row keeps its reservation quote, and the settlement
+/// source it was given. The pairing is the ADR's §1 invariant — a stated
+/// cost arrives after the tokens are spent, so it can never bound them —
+/// and `provider_reported` is where the pairing is made.
+#[test]
+fn a_provider_reported_row_still_carries_the_table_that_bounds_it() {
+    let decoder = XaiUsdTicks::new("2026-08-21");
+    let metering = ego_ai::catalogue::provider_reported(hosted_quote(), &decoder);
+
+    let Metering::Currency {
+        reservation,
+        settlement,
+    } = &metering
+    else {
+        panic!("a provider-reported row is a currency row: {metering:?}");
+    };
+    assert_eq!(*reservation, hosted_quote(), "the bound still needs rates");
+    assert_eq!(
+        *settlement,
+        SettlementSource::ProviderReported {
+            revision: decoder.revision().clone()
+        }
+    );
+
+    let catalogue = Catalogue::new([hosted_row()]).with_hosted(
+        "openai/gpt-5.6",
+        HostedModel {
+            capabilities: hosted_caps(),
+            metering: metering.clone(),
+        },
+    );
+    let resolved = catalogue
+        .resolve_hosted(&ModelSlug::parse("openai/gpt-5.6").unwrap())
+        .expect("it was supplied");
+    assert_eq!(resolved.metering, metering);
+    assert!(
+        !resolved
+            .metering
+            .upper_bound(&request(), &resolved.capabilities, usd())
+            .expect("the quote bounds it")
+            .amount
+            .is_zero(),
+        "a stated cost settles the charge; it does not excuse the reservation"
     );
 }

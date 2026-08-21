@@ -14,7 +14,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use ego_core::budget::{BudgetGate, PricingQuote};
+use ego_core::budget::{BudgetGate, Metering, PricingQuote, SettlementSource};
 use ego_core::cost::{Amount, CurrencyCode, Money, PricingRevision};
 use ego_core::event::domain::ExitReason;
 use ego_core::event::id::SessionId;
@@ -690,7 +690,7 @@ mod end_to_end {
                 Model {
                     generator: &generator,
                     gate: &mut gate,
-                    quote: quote(),
+                    metering: metering(),
                     caps: caps(),
                     config: config(),
                 },
@@ -771,7 +771,7 @@ mod end_to_end {
                 Model {
                     generator: &generator,
                     gate: &mut gate,
-                    quote: quote(),
+                    metering: metering(),
                     caps: caps(),
                     config: config(),
                 },
@@ -824,6 +824,15 @@ mod end_to_end {
             cache_read: rate("0.0000003"),
             cache_write: rate("0.00000375"),
             output: rate("0.000015"),
+        }
+    }
+
+    /// The fixture quote as a metering: a table that both bounds and
+    /// settles, which is what these turn-loop fixtures assume.
+    fn metering() -> Metering {
+        Metering::Currency {
+            reservation: quote(),
+            settlement: SettlementSource::Quote,
         }
     }
 
