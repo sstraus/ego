@@ -774,3 +774,50 @@ fn rule_a_host_that_looks_like_an_address_and_is_one_still_parses() {
         );
     }
 }
+
+/// §9's structural half: the head grammar is decomposed in exactly one place.
+///
+/// `Rule::parse`'s doc comment claims "there is no second one, in this crate
+/// or any other". That was a sentence with nothing holding it, which is the
+/// shape a claim takes right before it stops being true.
+///
+/// **Why a source scan is sound here rather than best-effort.** `parse::split`
+/// is `pub` inside a *private* module and is not re-exported, so the compiler
+/// already guarantees that every possible caller lives under this one
+/// directory. The scan is not searching for callers it might miss; it is
+/// enumerating a set the type system has already closed.
+///
+/// **What it does not cover, stated so nobody reads more into a green test.**
+/// `Rule`'s variants are public and so are `PathPattern::parse`,
+/// `ArgvPattern::parse` and `Endpoint::parse`, so another crate can build
+/// `Rule::Read(PathPattern::parse("**")?)` and never touch the head grammar or
+/// §6a's enforceability check. This test says the head is split once. It does
+/// not say a `Rule` can only be made by splitting one.
+#[test]
+fn rule_the_head_grammar_has_exactly_one_caller() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/permit/rule");
+    let mut callers = Vec::new();
+    for entry in std::fs::read_dir(&dir).expect("the rule module is where it has always been") {
+        let path = entry.expect("a readable directory entry").path();
+        if path.extension().is_none_or(|ext| ext != "rs") {
+            continue;
+        }
+        let source = std::fs::read_to_string(&path).expect("a readable source file");
+        for (n, line) in source.lines().enumerate() {
+            // `.split(` is `str`'s method and is not this. `fn split(` is the
+            // definition, which is not a caller either.
+            if line.contains("split(") && !line.contains(".split(") && !line.contains("fn split(") {
+                callers.push(format!("{}:{}", path.display(), n + 1));
+            }
+        }
+    }
+    assert_eq!(
+        callers.len(),
+        1,
+        "one caller, and it is `Rule::parse`. A second is how the flags path \
+         and the frontmatter path start disagreeing about what one string \
+         means — `AGENTS.md:60-64` wants recorded evidence of a different \
+         trust boundary before that happens, and a rule in frontmatter is a \
+         rule. Found: {callers:?}"
+    );
+}
