@@ -218,6 +218,16 @@ Headless runs never hang on a prompt: an unresolvable permission ⇒ exit 3, wit
 the denied action in the JSON result. Scripts opt in with `--allow` rules, a
 stronger `--sandbox`, or `--yolo` — never by answering prompts.
 
+The three remedies are alternatives because they act on different axes, and
+one of them is not a permission at all: **the workspace boundary belongs to
+`ARCHITECTURE.md` §3.4 axis 4 — the execution backend — and no mode moves it.**
+A mode says who approves; a backend says what is reachable. So an operation
+outside the workspace is refused rather than asked about, `--yolo` does not
+lift it, and none of the three remedies above resolves it — because it was
+never an unresolvable *permission* for them to resolve. Widening what ego may
+reach is `--sandbox`'s business, which is why that clause is listed beside
+`--yolo` rather than subsumed by it.
+
 ### 4.5 Parse and lifecycle contract (normative before release)
 
 The grammar ships with: a command × flag **applicability matrix** (no flag

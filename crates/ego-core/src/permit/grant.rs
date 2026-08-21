@@ -568,9 +568,15 @@ impl fmt::Display for PermissionRequest {
 /// approver in this build there is no `grant`, so a carried scope would be a
 /// field nothing reads. The scope is instead derived by one private function
 /// that `classify` calls and that `grant` will call, which keeps the single
-/// definition §5 wanted and gives a stronger version of its property: the loop
-/// cannot read, widen or mint a scope because it cannot reach the function at
-/// all, not merely because a field is private.
+/// definition §5 wanted.
+///
+/// That is not a smaller version of §5's property. It is a larger one, and the
+/// difference is what each rests on: **a private field is hidden from the
+/// loop; an unreachable function cannot be named by it.** Hiding is a fact
+/// about visibility, which one `pub(crate)` erases. Unreachability is a fact
+/// about the call graph. The field version would also need a `dead_code`
+/// allow until `grant` exists, and an `allow` outlives the reason somebody
+/// wrote it.
 #[derive(Debug)]
 pub struct Pending {
     call: PreparedCall,
