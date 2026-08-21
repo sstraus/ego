@@ -6,10 +6,18 @@
 //! [`crate::http`] and to the provider table — so a wire format is testable
 //! against a transcript, which is what the goldens here do.
 //!
-//! There is deliberately no `WireFormat` trait yet. `ARCHITECTURE.md` sketches
-//! one taking a `ProviderEntry`, and it will exist; extracting it from a
-//! single implementation would mean inventing the second implementation's
-//! requirements from imagination.
+//! There is no `WireFormat` trait here yet, and the reason has changed. It used
+//! to be that extracting one from a single implementation would mean inventing
+//! the second implementation's requirements from imagination. That is no longer
+//! true — maintainer set the target at six providers, so Anthropic's Messages API and
+//! Gemini's `generateContent` are certain, and
+//! `docs/decisions/2026-08-21-a-profile-is-not-a-protocol.md` records what the
+//! seam separates and where the credential goes.
+//!
+//! What the extraction now waits on is its own inputs: regression case moves
+//! `GenRequest` and `AiEvent`, which are the types the signature is made of. A
+//! trait written today would be rewritten before it had a second implementer.
+//! The ADR's §6 says why that is waiting rather than deferring.
 
 pub mod openai_completions;
 pub mod provider_cost;

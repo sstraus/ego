@@ -24,9 +24,12 @@ use crate::wire::{self, openai_completions};
 
 /// A [`Generator`] that sends `openai-completions` over an [`Http`].
 ///
-/// Names the wire format directly rather than selecting one, for the reason
-/// `wire/mod.rs` gives: there is one implementation, and a seam built to a
-/// second one that does not exist yet is built to an imagined requirement.
+/// Names the wire format directly rather than selecting one. There is still
+/// only one mapping to select between, so a selector would have nothing to
+/// select — but the reason has moved on from `wire/mod.rs`'s original one:
+/// `docs/decisions/2026-08-21-a-profile-is-not-a-protocol.md` has settled what
+/// the seam separates, and what it waits on is regression case settling `GenRequest`
+/// and `AiEvent`.
 pub struct WireGenerator {
     row: ProviderRow,
     /// `Arc`, not a borrow, and that is forced rather than preferred:
