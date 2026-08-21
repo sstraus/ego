@@ -374,6 +374,12 @@ fn an_explicitly_named_instruction_file_is_described_and_never_quoted() {
     );
     assert_eq!(described["source"], "explicit");
     assert_eq!(described["bytes"], secret.len());
+    // The fifth field this test's own doc claims, and the one it used to leave
+    // unasserted while the binary published `""` for it.
+    assert_eq!(
+        described["scope"], ".",
+        "a file at the workspace root governs the whole workspace"
+    );
     assert_eq!(
         described["sha256"].as_str().expect("a digest").len(),
         64,
@@ -389,6 +395,131 @@ fn an_explicitly_named_instruction_file_is_described_and_never_quoted() {
     assert!(
         system["content"].as_str().expect("text").contains(secret),
         "the file was described but never sent"
+    );
+}
+
+/// The same file named two ways is the same file, and the descriptor must not
+/// be able to tell which spelling the operator typed.
+///
+/// It could. `--instructions AGENTS.md` published `scope: ""` and
+/// `--instructions /abs/ws/AGENTS.md` published `scope: "/abs/ws"`, because the
+/// explicit path reached `scope_of` unresolved and `strip_prefix` against a
+/// canonical root missed. `"."` is what `public_golden.rs` ratifies for a root
+/// file, and ambient discovery already produced it — only the named file did
+/// not. The absolute spelling additionally wrote the host's own directory
+/// layout into a stream `InstructionDescriptor`'s doc says a CI job archives.
+#[test]
+fn the_two_ways_to_name_the_same_instruction_file_describe_it_identically() {
+    let scope_of = |spelling: &dyn Fn(&std::path::Path) -> String| {
+        let stub = Stub::start(Plan::default());
+        let ego = Ego::against(&stub);
+        let written = ego.file("AGENTS.md", "Prefer tabs.");
+        let finished = ego
+            .args([
+                "--model",
+                "ollama/qwen3",
+                "--ephemeral",
+                "--instructions",
+                &spelling(&written),
+                "--output",
+                "jsonl",
+                "Ask",
+            ])
+            .run();
+        assert_eq!(finished.code, Some(0), "stderr: {}", finished.stderr);
+        let started = finished.events().remove(0);
+        started["instructions"].as_array().expect("an array")[0]["scope"]
+            .as_str()
+            .expect("a scope")
+            .to_string()
+    };
+
+    let relative = scope_of(&|_| "AGENTS.md".to_string());
+    let absolute = scope_of(&|path: &std::path::Path| path.display().to_string());
+
+    assert_eq!(relative, ".", "a relative name at the root scopes to `.`");
+    assert_eq!(absolute, ".", "and so does the absolute spelling of it");
+}
+
+/// An instruction file the operator named and that is not there refuses the
+/// run. `CLI.md` §4.4: invalid config is never skipped silently.
+///
+/// It used to exit 0 with an empty stderr, having quietly run with no
+/// instructions at all — the same silently vacuous flag `--budget` was fixed
+/// for, and inconsistent with `--system @missing`, which already exits 2.
+#[test]
+fn an_instruction_file_that_is_not_there_refuses_rather_than_running_without_it() {
+    let stub = Stub::start(Plan::default());
+    let finished = Ego::against(&stub)
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--ephemeral",
+            "--instructions",
+            "nowhere.md",
+            "Ask",
+        ])
+        .run();
+
+    assert_eq!(
+        finished.code,
+        Some(2),
+        "a named file that is absent was ignored: {finished:?}"
+    );
+    assert!(
+        finished.stderr.contains("--instructions") && finished.stderr.contains("nowhere.md"),
+        "the refusal named neither the flag nor the file: {}",
+        finished.stderr
+    );
+    assert!(
+        stub.generations().is_empty(),
+        "the run reached the provider despite refusing its instructions"
+    );
+}
+
+/// Resolving the explicit path must resolve the *directory* and not the file,
+/// or a symlinked instruction file would be followed instead of refused.
+///
+/// This is the regression guard on that fix and not a new rule: the loader's
+/// symlink refusal is the mechanism behind `config::Refusal::Symlink`, and a
+/// `canonicalize` of the whole path would have handed it the resolved target
+/// and silently loaded the file the link pointed at.
+#[test]
+fn a_symlinked_instruction_file_is_still_refused_by_name() {
+    let stub = Stub::start(Plan::default());
+    let ego = Ego::against(&stub);
+    let target = ego.file("AGENTS.md", "Prefer tabs.");
+    let link = target.with_file_name("house-rules.md");
+    std::os::unix::fs::symlink(&target, &link).expect("a temp dir accepts a symlink");
+
+    let finished = ego
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--ephemeral",
+            "--instructions",
+            "house-rules.md",
+            "--output",
+            "jsonl",
+            "Ask",
+        ])
+        .run();
+
+    assert_eq!(finished.code, Some(0), "stderr: {}", finished.stderr);
+    assert!(
+        finished.stderr.contains("symlink"),
+        "the symlink was not refused by name: {}",
+        finished.stderr
+    );
+    let started = finished.events().remove(0);
+    assert!(
+        started.get("instructions").is_none(),
+        "a symlinked file was described as loaded: {started}"
+    );
+    let request = &stub.generations()[0];
+    assert_ne!(
+        request["messages"][0]["role"], "system",
+        "the symlink's target was sent as a system prompt"
     );
 }
 

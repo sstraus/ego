@@ -127,6 +127,49 @@ fn workspace(directory: Option<&PathBuf>) -> Result<PathBuf, UsageError> {
         })
 }
 
+/// `--instructions FILE`, resolved against this workspace.
+///
+/// Two things happen here and neither is cosmetic.
+///
+/// **The directory is resolved and the file name deliberately is not.**
+/// `Selection::Explicit` reaches `config::plan` verbatim, and that module
+/// states its inputs must already be canonical — `root` and `cwd` are, because
+/// [`workspace`] canonicalises them, and this path was not. A relative
+/// `AGENTS.md` therefore reached `scope_of` with an empty parent and published
+/// `scope: ""`, while an absolute one published the host's own directory into
+/// a stream `InstructionDescriptor`'s doc says a CI job archives. `"."` is the
+/// documented answer for both. Resolving only the parent leaves the final
+/// component untouched, so a symlinked file still arrives at the loader as a
+/// symlink and is still refused by name instead of quietly followed.
+///
+/// **A file that is not there refuses the run.** `CLI.md` §4.4: invalid config
+/// is never skipped silently. The operator named this file; proceeding without
+/// it ignores an instruction that was given, which is the silently vacuous
+/// flag `--budget` was fixed for one flag over — and `--system @file` already
+/// exits 2 for the same mistake. `symlink_metadata` rather than `exists`,
+/// because a *dangling* symlink must reach the loader and be refused as the
+/// symlink it is, not reported here as an absence.
+fn explicit(path: &Path, cwd: &Path) -> Result<PathBuf, UsageError> {
+    let refuse =
+        |err: std::io::Error| UsageError(format!("--instructions {}: {err}", path.display()));
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    };
+    let name = absolute.file_name().ok_or_else(|| {
+        UsageError(format!(
+            "--instructions {}: that is a directory, not an instruction file",
+            path.display()
+        ))
+    })?;
+    let resolved = std::fs::canonicalize(absolute.parent().unwrap_or(cwd))
+        .map_err(refuse)?
+        .join(name);
+    std::fs::symlink_metadata(&resolved).map_err(refuse)?;
+    Ok(resolved)
+}
+
 /// The instructions and system prompt this run generates under.
 ///
 /// **`--bare`, and a headless run in an untrusted workspace, call
@@ -152,7 +195,11 @@ fn instructions(
         return Ok(Some(SystemPrompt::verbatim(text)));
     }
 
-    let selection = Selection::of(effective.posture, args.instructions.clone());
+    let named = match &args.instructions {
+        Some(path) => Some(explicit(path, cwd)?),
+        None => None,
+    };
+    let selection = Selection::of(effective.posture, named);
     let set = ego_core::config::load(&OsInstructionIo, root, cwd, &selection, Limits::default())
         .map_err(|err| UsageError(err.to_string()))?;
 
