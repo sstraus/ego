@@ -4,7 +4,7 @@
 
 use std::path::Path;
 
-use ego_core::config::{Mode, PermCfg, Ruleset, Source};
+use ego_core::config::{Mode, OriginSet, PermCfg, Ruleset, Source};
 use ego_core::permit::rule::Rule;
 use ego_core::permit::{
     Authorized, CanonPath, Classification, EntryKind, Escalation, FsError, GuardedFs, GuardedIo,
@@ -288,6 +288,10 @@ mod permit {
                 op: "write",
                 path: CanonPath::new("/ws/src/main.rs"),
                 by: rule("write(**)").id(),
+                // `engine` builds its ruleset from one layer, so one origin
+                // and no subordinate clause.
+                from: Source::Project,
+                also: OriginSet::default(),
             }
         );
         assert!(
@@ -581,7 +585,102 @@ mod permit {
                 op: "read",
                 path: CanonPath::new("/ws/secrets/prod.env"),
                 by: rule("read(secrets/**)").id(),
+                // `engine` builds its ruleset from one layer, so one origin
+                // and no subordinate clause.
+                from: Source::Project,
+                also: OriginSet::default(),
             }
+        );
+    }
+
+    // --- what a denial tells the operator about lifting it ---
+    // `docs/decisions/2026-08-21-a-deny-that-names-who-can-lift-it.md` §3, §5a.
+
+    /// An engine denying `raw`, with that rule carried by `origins`.
+    fn denying(raw: &str, origins: &[Source]) -> PolicyEngine {
+        let (first, rest) = origins.split_first().expect("at least one origin");
+        let mut ruleset = Ruleset::from_layer(
+            PermCfg {
+                allow: vec![rule("read(**)")],
+                deny: vec![rule(raw)],
+            },
+            *first,
+        );
+        for origin in rest {
+            Ruleset::merge(&mut ruleset.deny, rule(raw), *origin);
+        }
+        PolicyEngine::new(CanonPath::new("/ws"), Mode::Default, ruleset)
+    }
+
+    fn refusal(engine: &PolicyEngine, path: &str) -> String {
+        engine
+            .classify_settled(read_call(path))
+            .expect_err("the rule denies this read")
+            .to_string()
+    }
+
+    /// A deny the operator wrote is theirs to delete, and the message says so
+    /// by naming their layer. One origin, so it reads as one answer — no list
+    /// of length one (decision 5a).
+    #[test]
+    fn permit_a_denial_names_the_layer_that_wrote_it() {
+        let denied = refusal(
+            &denying("read(secrets/**)", &[Source::User]),
+            "/ws/secrets/prod.env",
+        );
+        assert!(denied.contains("user config"), "{denied}");
+        assert!(
+            !denied.contains("denies it too"),
+            "one origin must not render a subordinate clause: {denied}"
+        );
+    }
+
+    /// The fact an operator most needs and least expects. Every other layer is
+    /// theirs to edit, so the default assumption is that this one is too —
+    /// and a message that merely named the layer would leave them to infer
+    /// that `--allow` is not a way around it.
+    #[test]
+    fn permit_a_system_denial_says_that_nothing_lifts_it() {
+        let denied = refusal(
+            &denying("read(secrets/**)", &[Source::System]),
+            "/ws/secrets/prod.env",
+        );
+        assert!(denied.contains("system config"), "{denied}");
+        assert!(
+            denied.contains("--allow"),
+            "a system deny must say the flag will not lift it, because that is \
+             the remedy an operator reaches for first: {denied}"
+        );
+    }
+
+    /// The scenario the ADR was written for, end to end.
+    ///
+    /// The rule is denied in both `/etc/ego` and the operator's own config.
+    /// The old code attributed it to whichever layer the merge loop left —
+    /// the user's — and sent them to delete a line that changes nothing. The
+    /// message must lead with the system layer and say that their own copy is
+    /// redundant, or they will delete it, re-run, and be denied again by a
+    /// copy nothing has mentioned.
+    #[test]
+    fn permit_a_denial_written_in_two_layers_leads_with_the_one_that_binds() {
+        let denied = refusal(
+            &denying("read(secrets/**)", &[Source::User, Source::System]),
+            "/ws/secrets/prod.env",
+        );
+        assert!(
+            denied.contains("system config"),
+            "the system layer is the one that binds: {denied}"
+        );
+        assert!(
+            denied.contains("user config denies it too"),
+            "and their own copy must be named as redundant rather than \
+             silently dropped: {denied}"
+        );
+        let system = denied.find("system config").expect("system is named");
+        let user = denied.find("user config").expect("user is named");
+        assert!(
+            system < user,
+            "decision 5a: the winner leads, the rest is subordinate: {denied}"
         );
     }
 
@@ -1202,3 +1301,4 @@ mod permit {
         }
     }
 }
+

@@ -15,6 +15,22 @@ pub enum Source {
 }
 
 impl Source {
+    /// Every layer, in rank order.
+    ///
+    /// Declaration order and rank order are the same, and [`OriginSet`] relies
+    /// on that to iterate a set of layers most-authoritative-first without
+    /// sorting.
+    ///
+    /// [`OriginSet`]: super::OriginSet
+    pub const ALL: [Source; 6] = [
+        Source::System,
+        Source::User,
+        Source::Project,
+        Source::Local,
+        Source::Env,
+        Source::Flags,
+    ];
+
     /// Precedence rank, lowest first. Used to order layers before merging —
     /// `resolve` does not trust the caller's slice order.
     pub(super) fn rank(self) -> u8 {

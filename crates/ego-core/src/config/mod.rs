@@ -17,5 +17,5 @@ pub use discovery::{
 pub use error::ConfigError;
 pub use layer::{ConfigLayer, Mode, ModelRef, PermCfg, ProfileLayer};
 pub use resolve::{Effective, Posture, resolve};
-pub use ruleset::{Ruleset, SourcedRule};
+pub use ruleset::{OriginSet, Ruleset, SourcedRule};
 pub use source::{Source, Sourced, Trust};

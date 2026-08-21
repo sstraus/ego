@@ -11,6 +11,54 @@ use super::layer::PermCfg;
 use super::source::Source;
 use crate::permit::rule::Rule;
 
+/// Which layers carry a rule.
+///
+/// A **set**, because "the user config denies this" is true or false and
+/// cannot be true twice — so dedup is structural rather than a `contains`
+/// check somebody can forget. One byte over six known layers, which also
+/// keeps [`PolicyDenied`] small enough to return by value.
+///
+/// Iteration is most-authoritative-first, so the first element is the
+/// [`authority`](SourcedRule::authority) and no caller has to sort.
+///
+/// [`PolicyDenied`]: crate::permit::PolicyDenied
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct OriginSet(u8);
+
+impl OriginSet {
+    pub fn just(source: Source) -> Self {
+        let mut set = Self::default();
+        set.insert(source);
+        set
+    }
+
+    pub fn insert(&mut self, source: Source) {
+        self.0 |= 1 << source.rank();
+    }
+
+    pub fn contains(self, source: Source) -> bool {
+        self.0 & (1 << source.rank()) != 0
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    pub fn len(self) -> usize {
+        self.0.count_ones() as usize
+    }
+
+    /// The layers in this set, most authoritative first.
+    pub fn iter(self) -> impl Iterator<Item = Source> {
+        Source::ALL.into_iter().filter(move |s| self.contains(*s))
+    }
+
+    /// Everything in `self` that is not in `other`.
+    pub fn without(self, other: Source) -> Self {
+        Self(self.0 & !(1 << other.rank()))
+    }
+}
+
 /// A resolved rule and every layer that carries it.
 ///
 /// `origins` is non-empty and deduplicated, and it is *every* layer rather
@@ -21,7 +69,7 @@ use crate::permit::rule::Rule;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourcedRule {
     rule: Rule,
-    origins: Vec<Source>,
+    origins: OriginSet,
 }
 
 impl SourcedRule {
@@ -29,7 +77,7 @@ impl SourcedRule {
     pub fn new(rule: Rule, origin: Source) -> Self {
         Self {
             rule,
-            origins: vec![origin],
+            origins: OriginSet::just(origin),
         }
     }
 
@@ -41,22 +89,20 @@ impl SourcedRule {
     /// two places that both decide which layer wins is one place too many.
     /// That is the shape of the defect this whole document is about.
     pub fn also_carried_by(&mut self, origin: Source) {
-        if !self.origins.contains(&origin) {
-            self.origins.push(origin);
-        }
+        self.origins.insert(origin);
     }
 
     pub fn rule(&self) -> &Rule {
         &self.rule
     }
 
-    /// Every layer that carries this rule, in the order they were merged.
+    /// Every layer that carries this rule, most authoritative first.
     ///
     /// For rendering a subordinate clause, never for re-deriving the winner:
     /// that is [`authority`](Self::authority)'s job and it lives in one place
     /// on purpose (decision 5b).
-    pub fn origins(&self) -> &[Source] {
-        &self.origins
+    pub fn origins(&self) -> OriginSet {
+        self.origins
     }
 
     /// The layer whose copy an operator cannot get around — decision 1.
@@ -79,9 +125,23 @@ impl SourcedRule {
     pub fn authority(&self) -> Source {
         self.origins
             .iter()
-            .copied()
-            .min_by_key(|source| source.rank())
+            .next()
             .expect("a SourcedRule is constructed with an origin and never loses one")
+    }
+
+    /// The winner, and every other layer that also carries this rule.
+    ///
+    /// Split here rather than at the renderer, so decision 5a — *lead with
+    /// the winner, the rest is a subordinate clause* — is a property of the
+    /// value instead of a habit at each call site. Every source in the second
+    /// half lost to the first, which is what makes "removing that line
+    /// changes nothing" true of all of them and not just of the common case.
+    ///
+    /// The second half is empty for the ordinary single-layer rule, and that
+    /// case must read as one answer rather than as a list of length one.
+    pub fn attribution(&self) -> (Source, OriginSet) {
+        let winner = self.authority();
+        (winner, self.origins.without(winner))
     }
 }
 

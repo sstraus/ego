@@ -17,7 +17,7 @@ use super::path::CanonPath;
 use super::prepared_call::{Op, PreparedCall};
 use super::rule::RuleId;
 use super::scope::Scope;
-use crate::config::{Mode, Ruleset, SourcedRule};
+use crate::config::{Mode, OriginSet, Ruleset, Source, SourcedRule};
 
 /// A capability token whose constructor only this module can reach. Its
 /// only job is to make [`Permit`]'s constructor equally unreachable from
@@ -482,11 +482,26 @@ pub enum PolicyDenied {
     /// "denied" without it leaves an operator grepping their config for which
     /// of forty lines did it — and the ID is exactly what `ego rules revoke`
     /// takes.
+    ///
+    /// It also carries **where the rule came from**, because the ID alone does
+    /// not answer the question an operator actually has. `RuleId` hashes the
+    /// predicate, so the same rule written in two layers has one ID by
+    /// construction — its own doc says the origin "is metadata that `rules ls`
+    /// shows" — and a run that ends at exit 3 has no second invocation in
+    /// which to show it. See
+    /// `docs/decisions/2026-08-21-a-deny-that-names-who-can-lift-it.md`.
     Denied {
         tool: String,
         op: &'static str,
         path: CanonPath,
         by: RuleId,
+        /// The layer whose copy cannot be got around: the answer to "can I
+        /// change this". Decided by [`SourcedRule::attribution`] and never
+        /// recomputed here.
+        from: Source,
+        /// Every other layer that also denies this predicate. Empty for an
+        /// ordinary single-layer rule.
+        also: OriginSet,
     },
     /// The mode forbids this operation outright — `plan` and a mutating op.
     /// Not a rule and not relaxable by one: the floor is evaluated before
@@ -524,8 +539,52 @@ pub enum PolicyDenied {
 impl fmt::Display for PolicyDenied {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            PolicyDenied::Denied { tool, op, path, by } => {
-                write!(f, "{tool} may not {op} {path}: denied by {by}")
+            PolicyDenied::Denied {
+                tool,
+                op,
+                path,
+                by,
+                from,
+                also,
+            } => {
+                write!(f, "{tool} may not {op} {path}: denied by {by} in the ")?;
+                // Decision 3: the remedy is *in* the sentence, not inferable
+                // from it. A system deny is the fact an operator most needs
+                // and least expects — every other layer is theirs to edit, so
+                // the default assumption is that this one is too.
+                match from {
+                    Source::System => write!(
+                        f,
+                        "system config, which no --allow and no higher layer can lift"
+                    )?,
+                    _ => write!(f, "{from} config")?,
+                }
+                // Decision 5a: a subordinate clause, and only when there is
+                // something to subordinate. Every layer here lost to `from`,
+                // which is what makes the advice true of all of them.
+                if !also.is_empty() {
+                    let list = also
+                        .iter()
+                        .map(|source| source.to_string())
+                        .collect::<Vec<_>>()
+                        .join(" and ");
+                    // Agreement, because `also` is a set and a sentence that
+                    // reads "the user and project config denies it" would be
+                    // wrong the first time a second layer appears. Today
+                    // `resolve` produces at most one — the merge loop leaves
+                    // one layer's copy and only the system pass unions — so
+                    // this is the renderer being correct about its input type
+                    // rather than about a planned feature.
+                    let (noun, verb) = match also.len() {
+                        1 => ("config", "denies"),
+                        _ => ("configs", "deny"),
+                    };
+                    write!(
+                        f,
+                        "; the {list} {noun} {verb} it too, so removing that changes nothing"
+                    )?;
+                }
+                Ok(())
             }
             PolicyDenied::ModeForbids {
                 tool,
@@ -1022,11 +1081,14 @@ impl PolicyEngine {
 
         // 1. Deny, before any allow at any scope.
         if let Some(entry) = self.matching(&self.deny, op) {
+            let (from, also) = entry.attribution();
             return Err(PolicyDenied::Denied {
                 tool: call.tool.clone(),
                 op: op.name(),
                 path: path.clone(),
                 by: entry.rule().id(),
+                from,
+                also,
             });
         }
 

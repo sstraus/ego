@@ -33,10 +33,14 @@ fn carries(list: &[SourcedRule], raw: &str) -> bool {
 }
 
 /// Every layer `list` records as carrying `raw`, or `None` if no entry does.
+///
+/// Collected into a `Vec` so a test can write the expected layers in order.
+/// `OriginSet` iterates most-authoritative-first, so that order is the
+/// authority order and not the order the layers happened to be merged in.
 fn origins(list: &[SourcedRule], raw: &str) -> Option<Vec<Source>> {
     list.iter()
         .find(|entry| entry.rule() == &rule(raw))
-        .map(|entry| entry.origins().to_vec())
+        .map(|entry| entry.origins().iter().collect())
 }
 
 fn amount(decimal: &str, currency: &str) -> Option<Money> {
@@ -1344,9 +1348,14 @@ fn config_a_deny_written_in_two_layers_reports_the_layer_that_can_lift_it() {
     let entry = &effective.permissions.deny[0];
     assert_eq!(entry.rule(), &rule("read(/etc/**)"));
 
-    // Both layers are recorded, in merge order: the user copy is what the
-    // merge loop left, the system copy is what the ceiling pass unioned in.
-    assert_eq!(entry.origins(), [Source::User, Source::System]);
+    // Both layers are recorded. The user copy is what the merge loop left and
+    // the system copy is what the ceiling pass unioned in, but the set reads
+    // back most-authoritative-first: the order rules arrived in is an
+    // implementation detail and nothing should depend on it.
+    assert_eq!(
+        entry.origins().iter().collect::<Vec<_>>(),
+        [Source::System, Source::User]
+    );
 
     // And the answer to "can I change this" is the system layer — the *least*
     // recently added and the *most* authoritative. An attribution that took
@@ -1374,7 +1383,7 @@ fn config_a_deny_only_the_operator_wrote_is_attributed_to_them() {
     )];
     let effective = resolve(&layers, Trust::Untrusted, None).unwrap();
     let entry = &effective.permissions.deny[0];
-    assert_eq!(entry.origins(), [Source::User]);
+    assert_eq!(entry.origins().iter().collect::<Vec<_>>(), [Source::User]);
     assert_eq!(entry.authority(), Source::User);
 }
 
@@ -1403,7 +1412,7 @@ fn config_authority_is_the_layer_not_the_arrival_order() {
     // Idempotent: restating does not duplicate.
     entry.also_carried_by(Source::System);
     assert_eq!(
-        entry.origins(),
-        [Source::Flags, Source::User, Source::Project, Source::System]
+        entry.origins().iter().collect::<Vec<_>>(),
+        [Source::System, Source::User, Source::Project, Source::Flags]
     );
 }
