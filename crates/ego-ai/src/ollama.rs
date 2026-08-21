@@ -100,6 +100,10 @@ pub async fn resolve(
         row: row.clone(),
         capabilities: capabilities_from(&tag, context),
         metering: unmetered(),
+        // Nobody publishes a price for weights the daemon serves itself, and
+        // `Unmetered` already says the charge is zero. A quote here would be
+        // a price list for something that has no prices.
+        rates: None,
     })
 }
 

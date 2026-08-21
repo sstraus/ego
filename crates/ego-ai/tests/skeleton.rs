@@ -47,7 +47,6 @@ fn quote() -> PricingQuote {
 /// The fixture quote as a metering: a table that both bounds and settles.
 fn metered() -> Metering {
     Metering::Currency {
-        reservation: quote(),
         settlement: SettlementSource::Quote,
     }
 }
@@ -96,13 +95,14 @@ fn request() -> GenRequest {
 fn the_skeleton_generator_drives_an_attempt_to_a_settlement() {
     let mut gate = BudgetGate::new(usd("10"));
     let reservation = gate
-        .reserve(&metered(), &request(), &caps())
+        .reserve(&metered(), Some(&quote()), &request(), &caps())
         .expect("a $10 budget admits an ordinary request");
-    let bound = *reservation.upper_bound();
+    let bound = *reservation.upper_bound().expect("a bounded reservation");
     let attempt = GenerationAttempt::new(
         GenerationId::new(),
         reservation,
         &metered(),
+        Some(&quote()),
         &request(),
         &caps(),
     )
@@ -119,7 +119,7 @@ fn the_skeleton_generator_drives_an_attempt_to_a_settlement() {
     let events: Vec<AiEvent> = futures::executor::block_on(stream.by_ref().collect());
     assert!(events.is_empty(), "the skeleton has no wire format yet");
     assert_eq!(
-        *gate.outstanding(),
+        *gate.outstanding().expect("a limited gate keeps totals"),
         bound,
         "the hold is still held until settlement"
     );
@@ -139,12 +139,16 @@ fn the_skeleton_generator_drives_an_attempt_to_a_settlement() {
     assert!(settled.outcome.retry_is_safe());
 
     assert_eq!(
-        settled.reconciled.charged, bound,
+        settled.reconciled.charged,
+        Some(bound),
         "a provider that reported no usage is charged the pessimistic bound"
     );
     assert!(!settled.reconciled.exact);
     assert!(
-        gate.outstanding().amount.is_zero(),
+        gate.outstanding()
+            .expect("a limited gate keeps totals")
+            .amount
+            .is_zero(),
         "and the hold is released regardless: a silent provider must not \
          strand a gate's budget"
     );

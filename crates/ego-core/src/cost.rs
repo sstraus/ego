@@ -451,6 +451,36 @@ impl FxQuote {
 #[serde(transparent)]
 pub struct PricingRevision(pub String);
 
+/// Where the rates that priced a reservation came from.
+///
+/// Not decoration: a ceiling enforced against the provider's own published
+/// rates and one enforced against a third-party table are materially
+/// different guarantees — the first is what the party that will charge says,
+/// the second is a summary of someone else's prices with no detector behind
+/// it — and a consumer that cannot tell them apart cannot report honestly on
+/// either. See `2026-08-21-a-run-with-no-ceiling.md` §5 and §Consequences.
+///
+/// The order of the variants is §5's resolution order, first hit wins.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "source", rename_all = "snake_case")]
+pub enum RateSource {
+    /// Nobody looked any up. The ordinary case for a run with no ceiling, and
+    /// a *property* rather than an omission: no third party was contacted.
+    None,
+    /// Explicit operator configuration, which may hold a negotiated rate no
+    /// public table knows about. First in §5's order for that reason.
+    Operator,
+    /// The provider's own pricing endpoint, per key — the strongest evidence
+    /// available short of the invoice.
+    ProviderPublished,
+    /// The cached third-party table. The only source that names its revision
+    /// here, because it is the only one whose identity a consumer cannot
+    /// otherwise establish: an operator's quote is in the operator's own file
+    /// and a provider's is the provider's, while this is a hash-pinned
+    /// artefact fetched from somewhere else entirely.
+    Table { revision: PricingRevision },
+}
+
 /// Which metering policy established that a row has no per-token price at
 /// all.
 ///

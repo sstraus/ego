@@ -10,11 +10,11 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use ego_core::budget::{BudgetGate, Metering, PricingQuote, SettlementSource};
+use ego_core::budget::{BudgetGate, Metering, PricingQuote, ResolvedRates, SettlementSource};
 use ego_core::config::SystemPrompt;
 use ego_core::cost::{
     Amount, CostAttribution, CostDelta, CurrencyCode, MeteringRevision, Money, PricingRevision,
-    ProviderCostRevision, UnknownCost,
+    ProviderCostRevision, RateSource, UnknownCost,
 };
 use ego_core::event::domain::{CancelCause, DomainEvent, EventKind, ExitReason};
 use ego_core::event::id::{Seq, SessionId};
@@ -239,7 +239,6 @@ mod turn {
     /// the other three arrangements are exercised in `tests/metering.rs`.
     fn metering() -> Metering {
         Metering::Currency {
-            reservation: quote(),
             settlement: SettlementSource::Quote,
         }
     }
@@ -326,20 +325,32 @@ mod turn {
         }
     }
 
+    /// The fixture quote as the run resolved it: operator-supplied, which is
+    /// the only source `models.toml` has and the first of the three §5
+    /// consults.
+    fn rates() -> ResolvedRates {
+        ResolvedRates {
+            quote: quote(),
+            source: RateSource::Operator,
+        }
+    }
+
     fn model<'a>(generator: &'a dyn Generator, gate: &'a mut BudgetGate) -> Model<'a> {
-        model_with(generator, gate, metering(), config())
+        model_with(generator, gate, metering(), Some(rates()), config())
     }
 
     fn model_with<'a>(
         generator: &'a dyn Generator,
         gate: &'a mut BudgetGate,
         metering: Metering,
+        rates: Option<ResolvedRates>,
         config: TurnConfig,
     ) -> Model<'a> {
         Model {
             generator,
             gate,
             metering,
+            rates,
             caps: caps(),
             config,
         }
@@ -348,7 +359,7 @@ mod turn {
     /// Run one turn against `fx`, starting from `state`, and hand back where
     /// the session got to.
     fn run(fx: &Fixture, state: SessionState, prompt: &str) -> (ExitReason, bool, SessionState) {
-        run_with(fx, state, prompt, metering(), config())
+        run_with(fx, state, prompt, metering(), Some(rates()), config())
     }
 
     /// The same, under a metering of the caller's choosing.
@@ -358,22 +369,23 @@ mod turn {
         prompt: &str,
         metering: Metering,
     ) -> (ExitReason, bool, SessionState) {
-        run_with(fx, state, prompt, metering, config())
+        run_with(fx, state, prompt, metering, Some(rates()), config())
     }
 
-    /// The same, under a metering and a config the caller chose.
+    /// The same, under a metering, rates and a config the caller chose.
     fn run_with(
         fx: &Fixture,
         state: SessionState,
         prompt: &str,
         metering: Metering,
+        rates: Option<ResolvedRates>,
         config: TurnConfig,
     ) -> (ExitReason, bool, SessionState) {
         let mut gate = fx.gate.borrow_mut();
         let tools = Tools::new(&fx.registry, &fx.policy, &fx.fs, CanonPath::new("/ws"));
         let mut turn = TurnLoop::new(
             session(state, &fx.store, &fx.clock, &fx.sink, CancelToken::new()),
-            model_with(&fx.generator, &mut gate, metering, config),
+            model_with(&fx.generator, &mut gate, metering, rates, config),
             tools,
         );
         let outcome = block_on(turn.run(prompt)).expect("the store accepted every append");
@@ -574,6 +586,7 @@ mod turn {
             SessionState::default(),
             "what is in note.txt?",
             metering(),
+            Some(rates()),
             config,
         );
 
@@ -808,7 +821,7 @@ mod turn {
         drop(turn);
         assert_eq!(
             gate.outstanding(),
-            &usd("0"),
+            Some(&usd("0")),
             "the reservation was released, not leaked"
         );
     }
@@ -993,7 +1006,7 @@ mod turn {
         drop(turn);
         assert_eq!(
             gate.outstanding(),
-            &usd("0"),
+            Some(&usd("0")),
             "an abandoned turn still settles the attempt it had in flight"
         );
     }
@@ -1038,8 +1051,12 @@ mod turn {
         assert_eq!(outcome.exit_reason, ExitReason::Usage);
         assert!(!outcome.ok);
         drop(turn);
-        assert_eq!(gate.outstanding(), &usd("0"), "the gate reserved anyway");
-        assert_eq!(gate.committed(), &usd("0"), "the gate settled anyway");
+        assert_eq!(
+            gate.outstanding(),
+            Some(&usd("0")),
+            "the gate reserved anyway"
+        );
+        assert_eq!(gate.committed(), Some(&usd("0")), "the gate settled anyway");
         assert!(
             fx.generator.calls().is_empty(),
             "the request was sent to the provider anyway"
@@ -1315,7 +1332,6 @@ mod turn {
 
     fn provider_reported() -> Metering {
         Metering::Currency {
-            reservation: quote(),
             settlement: SettlementSource::ProviderReported {
                 revision: ProviderCostRevision {
                     provider: "xai".to_string(),
@@ -1339,8 +1355,11 @@ mod turn {
                     other => panic!("a turn starts before it is metered: {other:?}"),
                 },
                 metering: ego_core::public::MeteringKind::Currency,
-                revision: "test-2026-08".to_string(),
-                provider_reported: false,
+                ceiling: ego_core::public::CeilingEffect::Binds {
+                    limit: usd("1000"),
+                    clamped_from: None,
+                },
+                rates: RateSource::Operator,
             }]
         );
 
@@ -1368,29 +1387,40 @@ mod turn {
     /// The three arrangements a monetary budget cannot bind, each said in its
     /// own words. Without this the variants would be constructible and
     /// invisible — an operator running a subscription model under `--budget
-    /// $5` would see a limit that silently never applies.
+    /// $5` would see a limit that silently never applies. §10 says that
+    /// outright: the ceiling on a flat-fee row is announced `inapplicable`,
+    /// naming the limit that will never fire and the metering that defeats
+    /// it.
     #[test]
     fn each_metering_is_announced_as_the_thing_it_actually_is() {
-        for (metering, expected_kind, expected_revision, expected_reported) in [
+        use ego_core::public::{CeilingEffect, MeteringKind};
+
+        for (metering, expected_kind, expected_ceiling) in [
             (
                 subscription(),
-                ego_core::public::MeteringKind::Subscription,
-                "acme/pro-plan/2026-08",
-                false,
+                MeteringKind::Subscription,
+                CeilingEffect::Inapplicable {
+                    limit: usd("1000"),
+                    metering: MeteringKind::Subscription,
+                },
             ),
             (
                 Metering::Unmetered {
                     revision: MeteringRevision("ego/builtin/local/v1".to_string()),
                 },
-                ego_core::public::MeteringKind::Unmetered,
-                "ego/builtin/local/v1",
-                false,
+                MeteringKind::Unmetered,
+                CeilingEffect::Inapplicable {
+                    limit: usd("1000"),
+                    metering: MeteringKind::Unmetered,
+                },
             ),
             (
                 provider_reported(),
-                ego_core::public::MeteringKind::Currency,
-                "test-2026-08",
-                true,
+                MeteringKind::Currency,
+                CeilingEffect::Binds {
+                    limit: usd("1000"),
+                    clamped_from: None,
+                },
             ),
         ] {
             let fx = Fixture::new(vec![vec![AiEvent::Stop(StopReason::Stop)]]);
@@ -1400,8 +1430,8 @@ mod turn {
             let [
                 PublicEvent::MeteringSelected {
                     metering: kind,
-                    revision,
-                    provider_reported,
+                    ceiling,
+                    rates,
                     ..
                 },
             ] = announced.as_slice()
@@ -1409,8 +1439,13 @@ mod turn {
                 panic!("exactly one metering announcement per generation: {announced:?}");
             };
             assert_eq!(*kind, expected_kind, "for {metering:?}");
-            assert_eq!(revision, expected_revision, "for {metering:?}");
-            assert_eq!(*provider_reported, expected_reported, "for {metering:?}");
+            assert_eq!(*ceiling, expected_ceiling, "for {metering:?}");
+            assert_eq!(
+                *rates,
+                RateSource::Operator,
+                "every fixture run resolves its rates from the operator's file, \
+                 whatever the arrangement: for {metering:?}"
+            );
         }
     }
 
@@ -1438,7 +1473,14 @@ mod turn {
         let (exit, ok, _) = run_metered(&flat, SessionState::default(), "hi", subscription());
         assert_eq!(exit, ExitReason::Completed);
         assert!(ok, "a flat fee is not spent per request");
-        assert!(flat.gate.borrow().committed().amount.is_zero());
+        assert!(
+            flat.gate
+                .borrow()
+                .committed()
+                .expect("a limited gate keeps totals")
+                .amount
+                .is_zero()
+        );
     }
 
     /// And the zero it settles at is `Known`, attributed to the policy.
@@ -1526,7 +1568,7 @@ mod turn {
             quote().price(&tokens(1_000, 0, 0, 200)),
             "a stated cost is not the table's answer"
         );
-        assert_eq!(*fx.gate.borrow().committed(), usd("0.0012345678"));
+        assert_eq!(fx.gate.borrow().committed(), Some(&usd("0.0012345678")));
     }
 
     /// The cost may arrive before the usage or after it — SSE gives no
@@ -1588,8 +1630,8 @@ mod turn {
             "the tokens arrived, so `ProviderReportedNoUsage` would name the wrong silence"
         );
         assert_eq!(
-            *fx.gate.borrow().committed(),
-            usd("0.76536"),
+            fx.gate.borrow().committed(),
+            Some(&usd("0.76536")),
             "an unknown cost charges the bound, never zero"
         );
     }

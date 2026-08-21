@@ -63,7 +63,6 @@ fn quote() -> PricingQuote {
 /// The fixture quote as a metering: a table that both bounds and settles.
 fn metered() -> Metering {
     Metering::Currency {
-        reservation: quote(),
         settlement: SettlementSource::Quote,
     }
 }
@@ -112,10 +111,17 @@ fn row() -> ProviderRow {
 /// on, and the reason a generator cannot route around the gate.
 fn attempt_for(gate: &mut BudgetGate, req: &GenRequest) -> GenerationAttempt {
     let reservation = gate
-        .reserve(&metered(), req, &caps())
+        .reserve(&metered(), Some(&quote()), req, &caps())
         .expect("a $10 budget admits an ordinary request");
-    GenerationAttempt::new(GenerationId::new(), reservation, &metered(), req, &caps())
-        .expect("built from the request that was priced")
+    GenerationAttempt::new(
+        GenerationId::new(),
+        reservation,
+        &metered(),
+        Some(&quote()),
+        req,
+        &caps(),
+    )
+    .expect("built from the request that was priced")
 }
 
 // --- the stub transport ---
@@ -296,7 +302,12 @@ fn a_locally_refused_generation_still_settles_and_releases_the_hold() {
         settled.outcome.retry_is_safe(),
         "nothing was sent, so retrying cannot double-bill"
     );
-    assert!(gate.outstanding().amount.is_zero());
+    assert!(
+        gate.outstanding()
+            .expect("a limited gate keeps totals")
+            .amount
+            .is_zero()
+    );
 }
 
 // --- what comes back ---

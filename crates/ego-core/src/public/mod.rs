@@ -6,8 +6,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::budget::{Metering, SettlementSource};
-use crate::cost::CostDelta;
+use crate::budget::{Ledger, Metering};
+use crate::cost::{CostDelta, Money, RateSource};
 use crate::event::domain::{DomainEvent, EventKind, ExitReason, OccupancyProvenance};
 use crate::event::id::{ItemId, SessionId, TurnId};
 use crate::state::Usage;
@@ -96,6 +96,37 @@ pub enum MeteringKind {
     Unmetered,
 }
 
+/// What the configured ceiling actually does to a generation.
+///
+/// Three values and not an `Option<Money>`, because a flag that *appears* to
+/// bind and does not is a false statement, and the two ways it fails to bind
+/// are different: nobody set one, or one was set against a row no monetary
+/// ceiling can reach. See `2026-08-21-a-run-with-no-ceiling.md` §10.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "effect", rename_all = "snake_case")]
+pub enum CeilingEffect {
+    /// No ceiling was configured, so nothing binds and no rates were looked
+    /// up. The ordinary case: ego imposes no ceiling of its own (§4).
+    None,
+    /// A ceiling is in force at `limit`.
+    Binds {
+        limit: Money,
+        /// The higher figure that was asked for, when an administrator's
+        /// non-relaxable ceiling reduced it. §4 requires the clamp be
+        /// **stated, not silent** — otherwise the flag reads as binding at a
+        /// figure it does not.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        clamped_from: Option<Money>,
+    },
+    /// A monetary ceiling was configured against a row no monetary ceiling
+    /// can bind: every reservation on a flat-fee row is zero, so the gate
+    /// admits until the provider refuses.
+    Inapplicable {
+        limit: Money,
+        metering: MeteringKind,
+    },
+}
+
 /// The privacy-filtered, versioned JSONL wire event — `CLI.md` §4.2's
 /// three-level envelope: `session.started` / `turn.started|completed` /
 /// `item.started|delta|completed`.
@@ -161,17 +192,10 @@ pub enum PublicEvent {
         /// Whether a monetary budget can bind this generation at all:
         /// [`MeteringKind::Currency`] binds, the other two do not.
         metering: MeteringKind,
-        /// The pricing table or the policy the figures are attributable to.
-        /// An opaque label, never parsed — its job is to make a past figure
-        /// traceable to the artefact that produced it.
-        revision: String,
-        /// Whether the settled figure will be the provider's own statement of
-        /// the charge rather than this side's arithmetic over a table.
-        ///
-        /// Independent of `metering`: a currency row can settle either way,
-        /// and a row that is not metered in currency settles from neither, so
-        /// this is `false` there.
-        provider_reported: bool,
+        /// What the configured ceiling does to this generation.
+        ceiling: CeilingEffect,
+        /// What the ceiling rests on, when it rests on anything.
+        rates: RateSource,
     },
     /// An item (message, reasoning block, tool call, permission request or
     /// subagent invocation) began.
@@ -276,28 +300,47 @@ impl PublicEvent {
     /// this event is the only thing that tells an operator their monetary
     /// ceiling does not bind, and a version of it that said otherwise would
     /// be worse than no event at all.
-    pub fn metering_selected(turn: TurnId, metering: &Metering) -> Self {
-        let (kind, revision, provider_reported) = match metering {
-            Metering::Currency {
-                reservation,
-                settlement,
-            } => (
-                MeteringKind::Currency,
-                reservation.revision.0.clone(),
-                matches!(settlement, SettlementSource::ProviderReported { .. }),
-            ),
-            Metering::Subscription { revision } => {
-                (MeteringKind::Subscription, revision.0.clone(), false)
+    /// `ceiling` is derived from the gate's own [`Ledger`] rather than from
+    /// whatever the caller believes it configured, so the event cannot claim
+    /// a ceiling the gate is not holding, nor report an unclamped figure
+    /// while the gate holds a clamped one.
+    pub fn metering_selected(
+        turn: TurnId,
+        metering: &Metering,
+        ledger: &Ledger,
+        rates: &RateSource,
+    ) -> Self {
+        let kind = match metering {
+            Metering::Currency { .. } => MeteringKind::Currency,
+            Metering::Subscription { .. } => MeteringKind::Subscription,
+            Metering::Unmetered { .. } => MeteringKind::Unmetered,
+        };
+        let ceiling = match ledger {
+            Ledger::Unlimited => CeilingEffect::None,
+            // A monetary ceiling cannot reach a row with no per-token
+            // currency charge: the metering mints a zero reservation, so the
+            // limit admits everything. Said outright rather than left for the
+            // operator to infer from a limit that never fires.
+            Ledger::Limited { limit, .. } if kind != MeteringKind::Currency => {
+                CeilingEffect::Inapplicable {
+                    limit: *limit,
+                    metering: kind,
+                }
             }
-            Metering::Unmetered { revision } => {
-                (MeteringKind::Unmetered, revision.0.clone(), false)
-            }
+            Ledger::Limited {
+                limit,
+                clamped_from,
+                ..
+            } => CeilingEffect::Binds {
+                limit: *limit,
+                clamped_from: *clamped_from,
+            },
         };
         PublicEvent::MeteringSelected {
             turn,
             metering: kind,
-            revision,
-            provider_reported,
+            ceiling,
+            rates: rates.clone(),
         }
     }
 }

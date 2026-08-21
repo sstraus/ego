@@ -257,15 +257,16 @@ async fn settle_through_core(
     decoder: Arc<dyn ProviderCost>,
     usage: &str,
 ) -> (BudgetGate, Settlement, Vec<AiEvent>) {
-    let metering = catalogue::provider_reported(quote(), decoder.as_ref());
+    let metering = catalogue::provider_reported(decoder.as_ref());
     let mut gate = BudgetGate::new(usd("10"));
     let reservation = gate
-        .reserve(&metering, &request(), &caps())
+        .reserve(&metering, Some(&quote()), &request(), &caps())
         .expect("the reservation quote bounds it, whatever settles it");
     let attempt = GenerationAttempt::new(
         GenerationId::new(),
         reservation,
         &metering,
+        Some(&quote()),
         &request(),
         &caps(),
     )
@@ -287,15 +288,21 @@ async fn settle_through_core(
 #[tokio::test]
 async fn a_provider_reported_row_is_still_bounded_by_its_table_before_it_runs() {
     let decoder = XaiUsdTicks::new("2026-08-21");
-    let metering = catalogue::provider_reported(quote(), &decoder);
+    let metering = catalogue::provider_reported(&decoder);
     let mut gate = BudgetGate::new(usd("10"));
 
     let reservation = gate
-        .reserve(&metering, &request(), &caps())
+        .reserve(&metering, Some(&quote()), &request(), &caps())
         .expect("a $10 budget admits it");
     // 200_000 cache-write tokens at $3.75/MTok plus 1_024 output at $15/MTok.
-    assert_eq!(*reservation.upper_bound(), usd("0.76536"));
-    assert_eq!(*gate.outstanding(), usd("0.76536"));
+    assert_eq!(
+        *reservation.upper_bound().expect("a bounded reservation"),
+        usd("0.76536")
+    );
+    assert_eq!(
+        *gate.outstanding().expect("a limited gate keeps totals"),
+        usd("0.76536")
+    );
 }
 
 /// The event the port gained, produced by a real decoder reading a real
@@ -327,10 +334,16 @@ async fn two_unrelated_wire_conventions_settle_through_the_identical_core_path()
     .await;
 
     // Each committed its own provider's figure, exactly.
-    assert_eq!(xai.reconciled.charged, usd("0.0012345678"));
-    assert_eq!(openrouter.reconciled.charged, usd("0.0000123456"));
-    assert_eq!(*xai_gate.committed(), usd("0.0012345678"));
-    assert_eq!(*or_gate.committed(), usd("0.0000123456"));
+    assert_eq!(xai.reconciled.charged, Some(usd("0.0012345678")));
+    assert_eq!(openrouter.reconciled.charged, Some(usd("0.0000123456")));
+    assert_eq!(
+        *xai_gate.committed().expect("a limited gate keeps totals"),
+        usd("0.0012345678")
+    );
+    assert_eq!(
+        *or_gate.committed().expect("a limited gate keeps totals"),
+        usd("0.0000123456")
+    );
 
     // Both exact, both released, neither a breach — the same three
     // properties, from the same `reconcile`.
@@ -338,8 +351,20 @@ async fn two_unrelated_wire_conventions_settle_through_the_identical_core_path()
         assert!(settled.reconciled.exact, "a stated total is not a guess");
         assert!(settled.reconciled.over_bound.is_none());
     }
-    assert!(xai_gate.outstanding().amount.is_zero());
-    assert!(or_gate.outstanding().amount.is_zero());
+    assert!(
+        xai_gate
+            .outstanding()
+            .expect("a limited gate keeps totals")
+            .amount
+            .is_zero()
+    );
+    assert!(
+        or_gate
+            .outstanding()
+            .expect("a limited gate keeps totals")
+            .amount
+            .is_zero()
+    );
     assert!(xai_gate.breached().is_none() && or_gate.breached().is_none());
 
     // And neither is the table's answer. The transcript reports 1000 prompt
@@ -358,8 +383,8 @@ async fn two_unrelated_wire_conventions_settle_through_the_identical_core_path()
     else {
         panic!("the fixture quote prices every category");
     };
-    assert_ne!(xai.reconciled.charged, tabulated);
-    assert_ne!(openrouter.reconciled.charged, tabulated);
+    assert_ne!(xai.reconciled.charged, Some(tabulated));
+    assert_ne!(openrouter.reconciled.charged, Some(tabulated));
 }
 
 /// The attribution that reaches the log names *which* provider contract
@@ -372,6 +397,7 @@ async fn each_settlement_is_attributed_to_the_contract_that_produced_it() {
 
     let attribution = |metering: &Metering, cost: Money| match settled_cost(
         metering,
+        Some(&quote()),
         UsageReport::Missing,
         Some(cost),
         CurrencyCode::new("USD").expect("USD is valid"),
@@ -380,12 +406,9 @@ async fn each_settlement_is_attributed_to_the_contract_that_produced_it() {
         other => panic!("a stated cost is known: {other:?}"),
     };
 
-    let from_xai = attribution(
-        &catalogue::provider_reported(quote(), &xai),
-        usd("0.0012345678"),
-    );
+    let from_xai = attribution(&catalogue::provider_reported(&xai), usd("0.0012345678"));
     let from_openrouter = attribution(
-        &catalogue::provider_reported(quote(), &openrouter),
+        &catalogue::provider_reported(&openrouter),
         usd("0.0000123456"),
     );
 
@@ -427,16 +450,27 @@ async fn a_provider_that_states_no_cost_settles_at_the_bound_and_names_why() {
             .any(|event| matches!(event, AiEvent::ProviderCost { .. })),
         "nothing was stated, so nothing may be reported: {events:?}"
     );
-    assert_eq!(settled.reconciled.charged, usd("0.76536"), "the bound");
+    assert_eq!(
+        settled.reconciled.charged,
+        Some(usd("0.76536")),
+        "the bound"
+    );
     assert!(
         !settled.reconciled.exact,
         "the committed total is an overestimate and must not claim otherwise"
     );
-    assert!(gate.outstanding().amount.is_zero(), "the hold is released");
+    assert!(
+        gate.outstanding()
+            .expect("a limited gate keeps totals")
+            .amount
+            .is_zero(),
+        "the hold is released"
+    );
 
     assert_eq!(
         settled_cost(
-            &catalogue::provider_reported(quote(), &XaiUsdTicks::new("2026-08-21")),
+            &catalogue::provider_reported(&XaiUsdTicks::new("2026-08-21")),
+            Some(&quote()),
             UsageReport::Reported(ego_core::state::Usage {
                 uncached_input_tokens: 1_000,
                 cache_read_tokens: 0,
@@ -457,17 +491,17 @@ async fn a_provider_that_states_no_cost_settles_at_the_bound_and_names_why() {
 #[tokio::test]
 async fn a_row_with_no_cost_decoder_settles_from_its_table_as_it_always_did() {
     let metering = Metering::Currency {
-        reservation: quote(),
         settlement: SettlementSource::Quote,
     };
     let mut gate = BudgetGate::new(usd("10"));
     let reservation = gate
-        .reserve(&metering, &request(), &caps())
+        .reserve(&metering, Some(&quote()), &request(), &caps())
         .expect("a $10 budget admits it");
     let attempt = GenerationAttempt::new(
         GenerationId::new(),
         reservation,
         &metering,
+        Some(&quote()),
         &request(),
         &caps(),
     )
@@ -493,6 +527,10 @@ async fn a_row_with_no_cost_decoder_settles_from_its_table_as_it_always_did() {
     );
 
     let settled = stream.settle(&mut gate).expect("its own gate settles it");
-    assert_eq!(settled.reconciled.charged, usd("0.00675"), "the table");
+    assert_eq!(
+        settled.reconciled.charged,
+        Some(usd("0.00675")),
+        "the table"
+    );
     assert!(settled.reconciled.exact);
 }

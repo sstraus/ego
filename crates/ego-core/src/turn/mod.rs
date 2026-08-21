@@ -18,9 +18,9 @@ use std::sync::atomic::{AtomicU8, Ordering};
 
 use futures::StreamExt;
 
-use crate::budget::{BudgetGate, Metering, SettlementSource};
+use crate::budget::{BudgetGate, Metering, PricingQuote, ResolvedRates, SettlementSource};
 use crate::config::SystemPrompt;
-use crate::cost::Money;
+use crate::cost::{Money, RateSource};
 use crate::event::domain::{CancelCause, EventKind, ExitReason, OccupancyProvenance};
 use crate::event::id::{EventId, GenerationId, ItemId, Producer, SessionId, TurnId};
 use crate::event::time::Clock;
@@ -197,6 +197,11 @@ pub struct Model<'a> {
     pub generator: &'a dyn Generator,
     pub gate: &'a mut BudgetGate,
     pub metering: Metering,
+    /// The rates this row was resolved with, and where they came from, when
+    /// a ceiling made anybody look them up. `None` is the ordinary case for a
+    /// run with no `--budget`: `2026-08-21-a-run-with-no-ceiling.md` §1
+    /// consults no rate source at all unless a ceiling was configured.
+    pub rates: Option<ResolvedRates>,
     pub caps: ModelCapabilities,
     pub config: TurnConfig,
 }
@@ -211,6 +216,7 @@ pub struct TurnLoop<'a> {
     generator: &'a dyn Generator,
     gate: &'a mut BudgetGate,
     metering: Metering,
+    rates: Option<ResolvedRates>,
     caps: ModelCapabilities,
     config: TurnConfig,
     tools: Tools<'a>,
@@ -236,6 +242,7 @@ impl<'a> TurnLoop<'a> {
             generator: model.generator,
             gate: model.gate,
             metering: model.metering,
+            rates: model.rates,
             caps: model.caps,
             config: model.config,
             tools,
@@ -298,6 +305,20 @@ impl<'a> TurnLoop<'a> {
             cause,
             state: self.journal.state().clone(),
         }
+    }
+
+    /// The rates themselves, without their provenance — what the arithmetic
+    /// takes. Where a rate came from must not change what it computes.
+    fn quote(&self) -> Option<&PricingQuote> {
+        self.rates.as_ref().map(|rates| &rates.quote)
+    }
+
+    /// Where the rates came from, or [`RateSource::None`] when nobody looked
+    /// any up. Published, never used to price anything.
+    fn rate_source(&self) -> &RateSource {
+        self.rates
+            .as_ref()
+            .map_or(&RateSource::None, |rates| &rates.source)
     }
 
     /// Everything between the prompt and `TurnCompleted`.
@@ -439,29 +460,39 @@ impl<'a> TurnLoop<'a> {
         // gate is about to mint a zero reservation — which means a monetary
         // `--budget` admits everything. The operator is told that here rather
         // than discovering it from a limit that never fired.
-        self.journal
-            .publish(&PublicEvent::metering_selected(turn, &self.metering));
+        self.journal.publish(&PublicEvent::metering_selected(
+            turn,
+            &self.metering,
+            self.gate.ledger(),
+            self.rate_source(),
+        ));
 
-        let reservation = match self.gate.reserve(&self.metering, &request, &self.caps) {
-            Ok(reservation) => reservation,
-            Err(denied) => {
-                tracing::warn!(%denied, "the budget gate refused a generation");
-                self.journal.append(
-                    turn,
-                    None,
-                    None,
-                    EventKind::Error {
-                        message: denied.to_string(),
-                    },
-                )?;
-                return Ok(Generated::Ended(ExitReason::Budget));
-            }
-        };
+        let quote = self.rates.as_ref().map(|rates| rates.quote.clone());
+        let reservation =
+            match self
+                .gate
+                .reserve(&self.metering, quote.as_ref(), &request, &self.caps)
+            {
+                Ok(reservation) => reservation,
+                Err(denied) => {
+                    tracing::warn!(%denied, "the budget gate refused a generation");
+                    self.journal.append(
+                        turn,
+                        None,
+                        None,
+                        EventKind::Error {
+                            message: denied.to_string(),
+                        },
+                    )?;
+                    return Ok(Generated::Ended(ExitReason::Budget));
+                }
+            };
 
         let attempt = match GenerationAttempt::new(
             GenerationId::new(),
             reservation,
             &self.metering,
+            self.quote(),
             &request,
             &self.caps,
         ) {
@@ -604,7 +635,7 @@ impl<'a> TurnLoop<'a> {
         );
         let mut held_usage: Option<Usage> = None;
         let mut stated_cost: Option<Money> = None;
-        let settlement_currency = self.gate.limit().currency;
+        let settlement_currency = self.gate.currency();
 
         while let Some(event) = stream.next().await {
             let appended = match event {
@@ -672,6 +703,7 @@ impl<'a> TurnLoop<'a> {
                             // cost the two can disagree about.
                             cost_delta: settled_cost(
                                 &self.metering,
+                                self.quote(),
                                 UsageReport::Reported(usage),
                                 None,
                                 settlement_currency,
@@ -717,6 +749,7 @@ impl<'a> TurnLoop<'a> {
             let usage = held_usage.unwrap_or_default();
             let cost_delta = settled_cost(
                 &self.metering,
+                self.quote(),
                 held_usage.map_or(UsageReport::Missing, UsageReport::Reported),
                 stated_cost,
                 settlement_currency,

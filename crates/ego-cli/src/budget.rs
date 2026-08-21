@@ -13,18 +13,12 @@
 //!   inventing a rate. It is coarser and it says so: a turn already in flight
 //!   is not interrupted by it.
 //!
-//! ## This file is the seam the metering rewrite lands on
+//! ## Where a ceiling comes from
 //!
-//! `PricingQuote` is being replaced by a `Metering` sum type on another
-//! branch, which will change what a gate is constructed from. Everything this
-//! binary knows about that is [`gate`] and [`ceiling_reached`] — two functions,
-//! one file. When `Metering` lands, this is the edit; nothing else in
-//! `ego-cli` reads a quote, a rate or a limit.
-//!
-//! One other module *builds* a quote — `facts.rs`, decoding the rates an
-//! operator wrote in `models.toml` — and it is named here rather than left to
-//! be found, because "one file" would otherwise be a claim this comment
-//! quietly makes false.
+//! Everything this binary knows about turning a ceiling into a gate is
+//! [`gate`] and [`ceiling_reached`] — two functions, one file. One other
+//! module *builds* a quote: `facts.rs`, decoding the rates an operator wrote
+//! in `models.toml`.
 
 use ego_core::budget::BudgetGate;
 use ego_core::cost::{Amount, CurrencyCode, Money, MoneyError};
@@ -45,19 +39,6 @@ pub enum Budget {
     /// `--budget 400k`, checked against the session's own totals between
     /// turns.
     Tokens(u64),
-}
-
-/// The limit a gate is built with when the caller named none.
-///
-/// `CLI.md` §7: hard ceilings come only from an administrator's `/etc/ego`,
-/// and "ego itself imposes none". `TurnLoop` requires a gate regardless — the
-/// reservation is what makes a generation payable at all — so the honest way
-/// to impose nothing is the largest amount `Amount` can represent.
-fn no_ceiling(currency: CurrencyCode) -> Money {
-    Money::new(
-        Amount::new(u128::MAX, 0).expect("scale zero is always in range"),
-        currency,
-    )
 }
 
 /// Parse `--budget`, or say why it is not a budget.
@@ -108,12 +89,20 @@ pub fn parse(spec: &str, currency: CurrencyCode) -> Result<Budget, UsageError> {
 ///
 /// **The one function that turns a command-line budget into a
 /// [`BudgetGate`].** A token budget still gets a gate — the loop cannot run
-/// without one — and the gate is unbounded, because the ceiling that run is
-/// actually subject to is [`ceiling_reached`]'s.
+/// without one — and that gate is [`unlimited`](BudgetGate::unlimited),
+/// because the ceiling such a run is actually subject to is
+/// [`ceiling_reached`]'s.
+///
+/// `CLI.md` §7: hard ceilings come only from an administrator's `/etc/ego`,
+/// and "ego itself imposes none". Until this commit the honest-sounding way
+/// to impose nothing was the largest amount `Amount` can represent, which
+/// made "nobody set a budget" indistinguishable from "somebody set an absurd
+/// one" and forced every unpriced row through a refusal it had not earned.
+/// `Ledger::Unlimited` is the shape that surrogate was standing in for.
 pub fn gate(budget: Option<&Budget>, currency: CurrencyCode) -> BudgetGate {
     match budget {
         Some(Budget::Money(limit)) => BudgetGate::new(*limit),
-        Some(Budget::Tokens(_)) | None => BudgetGate::new(no_ceiling(currency)),
+        Some(Budget::Tokens(_)) | None => BudgetGate::unlimited(currency),
     }
 }
 

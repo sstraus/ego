@@ -92,7 +92,6 @@ mod generator {
     /// settles, which is the arrangement this whole file was written for.
     fn metered() -> Metering {
         Metering::Currency {
-            reservation: quote(),
             settlement: SettlementSource::Quote,
         }
     }
@@ -109,12 +108,13 @@ mod generator {
         let mut gate = BudgetGate::new(usd("1000"));
         let caps = capabilities(ReasoningCarryover::Portable);
         let reservation = gate
-            .reserve(&metered(), &gen_request(), &caps)
+            .reserve(&metered(), Some(&quote()), &gen_request(), &caps)
             .expect("a generous budget admits an ordinary request");
         let attempt = GenerationAttempt::new(
             GenerationId::new(),
             reservation,
             &metered(),
+            Some(&quote()),
             &gen_request(),
             &caps,
         )

@@ -19,8 +19,8 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use ego_core::budget::{Metering, PricingQuote, SettlementSource};
-use ego_core::cost::MeteringRevision;
+use ego_core::budget::{Metering, PricingQuote, ResolvedRates, SettlementSource};
+use ego_core::cost::{MeteringRevision, RateSource};
 use ego_core::generator::capabilities::ModelCapabilities;
 use url::Url;
 
@@ -48,11 +48,11 @@ pub const LOCAL_UNMETERED: &str = "ego/builtin/ollama-local-unmetered/v1";
 /// Everything a generation needs to know about the model it is about to run.
 ///
 /// One value rather than three lookups, because the three are only correct
-/// *together*: capabilities bound the reservation that the pricing prices,
-/// and both are resolved against the row the request is then sent to. A
-/// caller that could fetch them separately could mix a quote with another
-/// model's ceilings, which is the confusion `BudgetBinding` exists to catch
-/// one layer down.
+/// *together*: capabilities bound the reservation that the rates price, and
+/// both are resolved against the row the request is then sent to. A caller
+/// that could fetch them separately could mix a quote with another model's
+/// ceilings, which is the confusion `BudgetBinding` exists to catch one layer
+/// down.
 #[derive(Debug, Clone)]
 pub struct ResolvedModel {
     /// The model id as the wire format must spell it — the part after the
@@ -61,23 +61,42 @@ pub struct ResolvedModel {
     pub row: ProviderRow,
     pub capabilities: ModelCapabilities,
     pub metering: Metering,
+    /// What this build knows the row costs, which may be nothing.
+    ///
+    /// Split from `metering` along the line
+    /// `docs/decisions/2026-08-21-a-run-with-no-ceiling.md` §3 draws: the
+    /// metering is a fact about the billing arrangement, the rates are a fact
+    /// about our knowledge, and a run that configured no ceiling looks no
+    /// rates up at all.
+    pub rates: Option<ResolvedRates>,
 }
 
 /// A hosted model's facts, which nobody in this repository is in a position
 /// to know.
 ///
-/// Both halves are supplied for the same reason. A price written from memory
-/// is a number the budget gate will trust and nothing can check; a context
-/// window written from memory is the identical claim one field over, since
-/// no hosted provider publishes a capability endpoint either.
+/// **Capabilities stay required and rates do not**, and the asymmetry is the
+/// ruling's, not an oversight. maintainer ruled about prices: a run that asks for
+/// no ceiling needs none, so demanding one refuses a working run to buy
+/// nothing. The argument for supplied *capabilities* was always a separate
+/// one and survives intact — a context window written from memory is the same
+/// unverifiable claim a price is, and it feeds far more than the budget:
+/// `CLI.md` §4.1 publishes context occupancy from it, compaction triggers on
+/// it, and `fallback_gaps` compares it.
 #[derive(Debug, Clone)]
 pub struct HostedModel {
     pub capabilities: ModelCapabilities,
-    /// How the row is metered — a supplied table, a table plus the
-    /// provider's own figure, or a flat fee with no per-token price at all.
-    /// This is the slot every operator-supplied metering enters through, and
-    /// the reason `Metering::Subscription` has a producer.
+    /// How the row is metered — currency, or a flat fee with no per-token
+    /// price at all. This is the slot every operator-supplied metering enters
+    /// through, and the reason `Metering::Subscription` has a producer.
     pub metering: Metering,
+    /// What the operator says the row costs, if they said.
+    ///
+    /// Optional, and **not** a reason to reach for `Metering::Unmetered`. An
+    /// OpenAI row is metered in currency whether or not this build holds
+    /// rates for it — the provider will charge — and spelling ignorance as
+    /// "nobody is charging" would under-reserve every metered row the moment
+    /// somebody did ask for a ceiling.
+    pub rates: Option<ResolvedRates>,
 }
 
 /// A model reference that has been split but not yet resolved.
@@ -127,9 +146,12 @@ pub enum ResolveError {
         provider: String,
         known: Vec<String>,
     },
-    /// A hosted model with no supplied quote or capabilities. The final
-    /// behaviour, not a placeholder: M5's generated catalogue becomes another
-    /// producer of the same value and does not change this refusal.
+    /// A hosted model with no supplied **capabilities**.
+    ///
+    /// Narrowed from "no pricing or capabilities" by
+    /// `docs/decisions/2026-08-21-a-run-with-no-ceiling.md` §3: pricing is no
+    /// longer required, and "cannot be bounded" is no longer the reason,
+    /// because a run that asked for no ceiling does not need bounding.
     HostedModelNotConfigured { slug: String },
     /// The provider needs a credential that is not set.
     MissingCredential(MissingCredential),
@@ -163,8 +185,9 @@ impl fmt::Display for ResolveError {
             ),
             ResolveError::HostedModelNotConfigured { slug } => write!(
                 f,
-                "no pricing or capabilities are configured for `{slug}`: a hosted \
-                 model cannot be bounded from figures this build does not have"
+                "no capabilities are configured for `{slug}`: a hosted provider \
+                 publishes no capability endpoint, so its context window and \
+                 output ceiling have to be supplied"
             ),
             ResolveError::MissingCredential(missing) => write!(f, "{missing}"),
             ResolveError::NotInstalled { model, installed } => write!(
@@ -240,34 +263,53 @@ pub fn subscription(revision: &str) -> Metering {
     }
 }
 
-/// A row priced from a supplied table, and settled from the same table.
+/// A row metered in currency and settled from whatever table priced it.
 ///
-/// The ordinary hosted case: the quote bounds the reservation before the
-/// request and prices the observed usage after it.
-pub fn tabulated(reservation: PricingQuote) -> Metering {
+/// The ordinary hosted case. It takes no quote: under
+/// `docs/decisions/2026-08-21-a-run-with-no-ceiling.md` §3 the rates travel
+/// beside the metering rather than inside it, so "this row is billed in
+/// money" and "we hold rates for it" stay two separate assertions. A row with
+/// no rates is still this — the provider still charges — and settles as
+/// `UnknownCost::NoPricingQuote` rather than as a fabricated zero.
+pub fn tabulated() -> Metering {
     Metering::Currency {
-        reservation,
         settlement: SettlementSource::Quote,
+    }
+}
+
+/// Rates an operator wrote down, the first of §5's three sources.
+///
+/// Named rather than constructed inline so the provenance and the quote are
+/// minted together: a `ResolvedRates` whose `source` disagreed with where its
+/// quote actually came from would make `MeteringSelected` publish a false
+/// statement about the strength of a guarantee.
+pub fn operator_rates(quote: PricingQuote) -> ResolvedRates {
+    ResolvedRates {
+        quote,
+        source: RateSource::Operator,
     }
 }
 
 /// A row priced from a supplied table, and settled from the provider's own
 /// statement of what it will charge.
 ///
-/// The best accounting available: an estimate computed from a table for the
-/// reservation, replaced at settlement by the figure that will appear on the
-/// invoice. It **removes no requirement** — `reservation` is not optional,
-/// because no ex-post figure supplies an ex-ante bound, however exact it is.
-/// A provider-reported row with no rates has nothing to reserve against and
-/// refuses at resolution rather than running unbounded.
+/// The best accounting available: the provider's own figure settles what the
+/// generation cost, replacing anything a table would have computed.
+///
+/// Takes no quote, for the reason [`tabulated`] does not — and the change is
+/// a real one rather than a rename. A provider-reported row **with no rates**
+/// is now legal and useful: with no ceiling configured it runs unbounded and
+/// still settles exactly, from the figure that will appear on the invoice.
+/// What it cannot do is bound a ceiling, and that requirement now lives at
+/// `BudgetGate::reserve`, which refuses a `Limited` ledger with no rates
+/// whatever the settlement source is.
 ///
 /// The [`ProviderCostRevision`](ego_core::cost::ProviderCostRevision) is
 /// taken from `cost` rather than written out here, so the declaration
 /// recorded at resolution and the attribution stamped on the settled figure
 /// are one value and cannot drift apart.
-pub fn provider_reported(reservation: PricingQuote, cost: &dyn ProviderCost) -> Metering {
+pub fn provider_reported(cost: &dyn ProviderCost) -> Metering {
     Metering::Currency {
-        reservation,
         settlement: SettlementSource::ProviderReported {
             revision: cost.revision().clone(),
         },
@@ -328,6 +370,7 @@ impl Catalogue {
             row: row.clone(),
             capabilities: hosted.capabilities.clone(),
             metering: hosted.metering.clone(),
+            rates: hosted.rates.clone(),
         })
     }
 }

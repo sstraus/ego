@@ -6,10 +6,10 @@
 //! inline string literals, so a change to the projection shows up as a
 //! reviewable diff in a data file rather than a diff in test code.
 
-use ego_core::budget::{Metering, PricingQuote, SettlementSource};
+use ego_core::budget::{BudgetGate, Metering, SettlementSource};
 use ego_core::cost::{
     Amount, CostAttribution, CostDelta, CurrencyCode, MeteringRevision, Money, PricingRevision,
-    ProviderCostRevision, UnknownCost,
+    ProviderCostRevision, RateSource, UnknownCost,
 };
 use ego_core::event::domain::{DomainEvent, Envelope, EventKind, ExitReason, OccupancyProvenance};
 use ego_core::event::id::{EventId, ItemId, Producer, Seq, SessionId, TurnId};
@@ -430,64 +430,109 @@ mod public_golden {
 
     /// `MeteringSelected`, the third event with no `DomainEvent` counterpart.
     ///
-    /// The serialised shape is pinned per variant rather than once, because
-    /// its whole job is to let a host tell the four arrangements apart:
-    /// `metering` says whether a monetary budget can bind at all, and
-    /// `provider_reported` says whether the figures that follow are the
-    /// provider's own or this side's arithmetic. A host reading only one of
-    /// the two fields would get a currency row settled from an invoice wrong.
+    /// The serialised shape is pinned per case rather than once, because its
+    /// whole job is to let a host tell the arrangements apart: `metering`
+    /// says whether a monetary budget can bind at all, `ceiling` says what
+    /// the configured limit actually does to *this* generation, and `rates`
+    /// says what that ceiling rests on. A host reading only `metering` would
+    /// report a `--budget` as in force on a subscription row it can never
+    /// bind.
     #[test]
     fn metering_selected_distinguishes_all_four_arrangements() {
         let turn: TurnId = id(TURN_1);
-        let quote = PricingQuote {
-            revision: PricingRevision("openai-2026-08".to_string()),
-            currency: CurrencyCode::new("USD").expect("USD is a valid code"),
-            uncached_input: Some("0.000003".parse().expect("a valid rate")),
-            cache_read: None,
-            cache_write: None,
-            output: Some("0.000015".parse().expect("a valid rate")),
+        let usd = |decimal: &str| {
+            Money::new(
+                decimal.parse::<Amount>().expect("a valid test amount"),
+                CurrencyCode::new("USD").expect("USD is a valid code"),
+            )
         };
+        let currency = || Metering::Currency {
+            settlement: SettlementSource::Quote,
+        };
+        let invoiced = || Metering::Currency {
+            settlement: SettlementSource::ProviderReported {
+                revision: ProviderCostRevision {
+                    provider: "xai".to_string(),
+                    field: "usage.cost_in_usd_ticks".to_string(),
+                    schema_revision: "2026-08-21".to_string(),
+                },
+            },
+        };
+        // The ledgers are taken from real gates rather than built by hand, so
+        // the golden pins what a session actually publishes.
+        let unlimited = BudgetGate::unlimited(CurrencyCode::new("USD").expect("USD is valid"));
+        let limited = BudgetGate::new(usd("5"));
+        let clamped = BudgetGate::clamped(usd("5"), usd("20"));
+
         let cases = [
+            // No ceiling at all: the ordinary case (§4), and the one where no
+            // rate source was consulted because nothing needed one.
             (
-                Metering::Currency {
-                    reservation: quote.clone(),
-                    settlement: SettlementSource::Quote,
-                },
-                r#"{"type":"metering_selected","turn":"00000000-0000-0000-0000-000000000002","metering":"currency","revision":"openai-2026-08","provider_reported":false}"#,
+                currency(),
+                unlimited.ledger(),
+                RateSource::None,
+                r#"{"type":"metering_selected","turn":"00000000-0000-0000-0000-000000000002","metering":"currency","ceiling":{"effect":"none"},"rates":{"source":"none"}}"#,
             ),
+            // A ceiling that binds, resting on the operator's own figures.
             (
-                Metering::Currency {
-                    reservation: quote,
-                    settlement: SettlementSource::ProviderReported {
-                        revision: ProviderCostRevision {
-                            provider: "xai".to_string(),
-                            field: "usage.cost_in_usd_ticks".to_string(),
-                            schema_revision: "2026-08-21".to_string(),
-                        },
-                    },
-                },
-                r#"{"type":"metering_selected","turn":"00000000-0000-0000-0000-000000000002","metering":"currency","revision":"openai-2026-08","provider_reported":true}"#,
+                currency(),
+                limited.ledger(),
+                RateSource::Operator,
+                r#"{"type":"metering_selected","turn":"00000000-0000-0000-0000-000000000002","metering":"currency","ceiling":{"effect":"binds","limit":{"amount":"5","currency":"USD"}},"rates":{"source":"operator"}}"#,
             ),
+            // The same ceiling resting on a third-party table, whose revision
+            // is the only thing that identifies which figures were used.
+            (
+                currency(),
+                limited.ledger(),
+                RateSource::Table {
+                    revision: PricingRevision("litellm/2026-08-21".to_string()),
+                },
+                r#"{"type":"metering_selected","turn":"00000000-0000-0000-0000-000000000002","metering":"currency","ceiling":{"effect":"binds","limit":{"amount":"5","currency":"USD"}},"rates":{"source":"table","revision":"litellm/2026-08-21"}}"#,
+            ),
+            // A currency row settled from the provider's own invoice, whose
+            // ceiling still had to be estimated from published rates.
+            (
+                invoiced(),
+                limited.ledger(),
+                RateSource::ProviderPublished,
+                r#"{"type":"metering_selected","turn":"00000000-0000-0000-0000-000000000002","metering":"currency","ceiling":{"effect":"binds","limit":{"amount":"5","currency":"USD"}},"rates":{"source":"provider_published"}}"#,
+            ),
+            // An administrator's non-relaxable ceiling reduced what was asked
+            // for. §4 requires the clamp be stated, not silent.
+            (
+                currency(),
+                clamped.ledger(),
+                RateSource::Operator,
+                r#"{"type":"metering_selected","turn":"00000000-0000-0000-0000-000000000002","metering":"currency","ceiling":{"effect":"binds","limit":{"amount":"5","currency":"USD"},"clamped_from":{"amount":"20","currency":"USD"}},"rates":{"source":"operator"}}"#,
+            ),
+            // The two arrangements no monetary ceiling can bind. The limit is
+            // named anyway: an operator who passed `--budget` deserves to be
+            // told it will never fire, not left to infer it.
             (
                 Metering::Subscription {
                     revision: MeteringRevision("acme/pro-plan/2026-08".to_string()),
                 },
-                r#"{"type":"metering_selected","turn":"00000000-0000-0000-0000-000000000002","metering":"subscription","revision":"acme/pro-plan/2026-08","provider_reported":false}"#,
+                limited.ledger(),
+                RateSource::None,
+                r#"{"type":"metering_selected","turn":"00000000-0000-0000-0000-000000000002","metering":"subscription","ceiling":{"effect":"inapplicable","limit":{"amount":"5","currency":"USD"},"metering":"subscription"},"rates":{"source":"none"}}"#,
             ),
             (
                 Metering::Unmetered {
                     revision: MeteringRevision("ego/builtin/local/v1".to_string()),
                 },
-                r#"{"type":"metering_selected","turn":"00000000-0000-0000-0000-000000000002","metering":"unmetered","revision":"ego/builtin/local/v1","provider_reported":false}"#,
+                limited.ledger(),
+                RateSource::None,
+                r#"{"type":"metering_selected","turn":"00000000-0000-0000-0000-000000000002","metering":"unmetered","ceiling":{"effect":"inapplicable","limit":{"amount":"5","currency":"USD"},"metering":"unmetered"},"rates":{"source":"none"}}"#,
             ),
         ];
 
-        for (metering, expected) in cases {
-            let event = PublicEvent::metering_selected(turn, &metering);
+        for (metering, ledger, rates, expected) in cases {
+            let event = PublicEvent::metering_selected(turn, &metering, ledger, &rates);
             assert_eq!(
                 serde_json::to_string(&event).expect("it serialises"),
                 expected,
-                "for {metering:?}"
+                "for {metering:?} under {ledger:?} from {rates:?}"
             );
         }
     }

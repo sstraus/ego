@@ -53,7 +53,8 @@ use super::capabilities::ModelCapabilities;
 use super::port::AiEvent;
 use super::types::{GenRequest, StopReason};
 use crate::budget::{
-    BudgetDenied, BudgetGate, Metering, ReconcileDenied, Reconciled, Reservation, SettlementSource,
+    BudgetDenied, BudgetGate, Metering, PricingQuote, ReconcileDenied, Reconciled, Reservation,
+    SettlementSource,
 };
 use crate::cost::{CostAttribution, CostDelta, CurrencyCode, Money, UnknownCost};
 use crate::event::id::{AttemptId, GenerationId};
@@ -230,6 +231,11 @@ impl Outcome {
 pub struct GenerationAttempt {
     attempt: AttemptRef,
     metering: Metering,
+    /// The rates that priced the reservation, when any were resolved. Carried
+    /// beside the metering rather than inside it for the reason
+    /// `2026-08-21-a-run-with-no-ceiling.md` §3 gives: the arrangement and
+    /// our knowledge of its prices are different facts.
+    rates: Option<PricingQuote>,
     /// Taken by [`AttemptStream::settle`]. While it is `Some`, this attempt
     /// still holds budget, which is exactly what [`Drop`] reports on.
     reservation: Option<Reservation>,
@@ -240,19 +246,21 @@ impl GenerationAttempt {
     /// does not authorise this request.
     ///
     /// This is where [`Reservation::authorises`] finally has a caller, and
-    /// it is the right place: `req`, `caps` and the metering are all still in
-    /// hand here, and they are not once the stream is running.
+    /// it is the right place: `req`, `caps`, the metering and the rates are
+    /// all still in hand here, and they are not once the stream is running.
     pub fn new(
         generation: GenerationId,
         reservation: Reservation,
         metering: &Metering,
+        rates: Option<&PricingQuote>,
         req: &GenRequest,
         caps: &ModelCapabilities,
     ) -> Result<Self, BudgetDenied> {
-        reservation.authorises(metering, req, caps)?;
+        reservation.authorises(metering, rates, req, caps)?;
         Ok(Self {
             attempt: AttemptRef::first(generation),
             metering: metering.clone(),
+            rates: rates.cloned(),
             reservation: Some(reservation),
         })
     }
@@ -263,14 +271,19 @@ impl GenerationAttempt {
         &self.metering
     }
 
+    /// The rates this generation was priced with, if any were.
+    pub fn rates(&self) -> Option<&PricingQuote> {
+        self.rates.as_ref()
+    }
+
     /// Which generation this is, and which attempt at it.
     pub fn attempt(&self) -> AttemptRef {
         self.attempt
     }
 
-    /// The bound this attempt is holding against its gate.
+    /// The bound this attempt is holding against its gate, when it holds one.
     pub fn bound(&self) -> Option<&crate::cost::Money> {
-        self.reservation.as_ref().map(Reservation::upper_bound)
+        self.reservation.as_ref().and_then(Reservation::upper_bound)
     }
 }
 
@@ -300,7 +313,7 @@ impl Drop for GenerationAttempt {
                 generation = ?self.attempt.generation(),
                 attempt = ?self.attempt.attempt(),
                 gate = ?reservation.gate(),
-                bound = %reservation.upper_bound().amount,
+                bound = reservation.upper_bound().map(|bound| bound.amount.to_string()),
                 "generation attempt dropped without settling; its hold is \
                  never released and the gate's budget stays narrowed"
             );
@@ -321,7 +334,11 @@ impl Drop for GenerationAttempt {
 ///
 /// - **Quote settlement** prices the observed usage. No usage frame means no
 ///   quantity to price, so the cost is unknown and the gate charges its
-///   pessimistic bound.
+///   pessimistic bound. **No rates** means the same thing one step earlier —
+///   [`UnknownCost::NoPricingQuote`], the ordinary settlement of a run that
+///   asked for no ceiling and therefore looked no prices up. Its session
+///   total is `CumulativeCost::Unknown` and stays there, because the cost is
+///   unknown; the alternative is a fabricated zero.
 /// - **Provider-reported settlement** takes the provider's own figure and
 ///   never consults the usage at all. A stated total settles the *money* even
 ///   when the usage frame never arrived — the tokens are still missing and
@@ -334,21 +351,23 @@ impl Drop for GenerationAttempt {
 ///   neither variant states one.
 pub fn settled_cost(
     metering: &Metering,
+    rates: Option<&PricingQuote>,
     usage: UsageReport,
     provider_cost: Option<Money>,
     settlement: CurrencyCode,
 ) -> CostDelta {
     match metering {
         Metering::Currency {
-            reservation,
             settlement: SettlementSource::Quote,
-        } => match usage {
-            UsageReport::Reported(usage) => reservation.price(&usage),
-            UsageReport::Missing => CostDelta::Unknown(UnknownCost::ProviderReportedNoUsage),
+        } => match (rates, usage) {
+            (Some(quote), UsageReport::Reported(usage)) => quote.price(&usage),
+            (Some(_), UsageReport::Missing) => {
+                CostDelta::Unknown(UnknownCost::ProviderReportedNoUsage)
+            }
+            (None, _) => CostDelta::Unknown(UnknownCost::NoPricingQuote),
         },
         Metering::Currency {
             settlement: SettlementSource::ProviderReported { revision },
-            ..
         } => match provider_cost {
             Some(amount) => CostDelta::Known {
                 amount,
@@ -527,9 +546,10 @@ impl AttemptStream {
         let outcome = self.outcome();
         let actual = settled_cost(
             &self.attempt.metering,
+            self.attempt.rates.as_ref(),
             self.usage,
             self.provider_cost,
-            gate.limit().currency,
+            gate.currency(),
         );
         let reservation = self
             .attempt

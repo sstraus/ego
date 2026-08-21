@@ -191,7 +191,6 @@ mod lifecycle {
     /// from the same table, which is what every test in this module assumes.
     fn metered() -> Metering {
         Metering::Currency {
-            reservation: quote(),
             settlement: SettlementSource::Quote,
         }
     }
@@ -255,12 +254,13 @@ mod lifecycle {
     fn gate_and_attempt() -> (BudgetGate, GenerationAttempt) {
         let mut gate = BudgetGate::new(usd("10"));
         let reservation = gate
-            .reserve(&metered(), &request(), &caps())
+            .reserve(&metered(), Some(&quote()), &request(), &caps())
             .expect("a $10 budget admits an ordinary request");
         let attempt = GenerationAttempt::new(
             GenerationId::new(),
             reservation,
             &metered(),
+            Some(&quote()),
             &request(),
             &caps(),
         )
@@ -290,11 +290,14 @@ mod lifecycle {
     #[test]
     fn an_attempt_refuses_a_reservation_that_does_not_authorise_the_request() {
         let mut gate = BudgetGate::new(usd("10"));
-        let reservation = gate.reserve(&metered(), &request(), &caps()).unwrap();
+        let reservation = gate
+            .reserve(&metered(), Some(&quote()), &request(), &caps())
+            .unwrap();
         let denied = GenerationAttempt::new(
             GenerationId::new(),
             reservation,
             &metered(),
+            Some(&quote()),
             &request_for("some-other-model"),
             &caps(),
         )
@@ -343,14 +346,17 @@ mod lifecycle {
             AiEvent::Stop(StopReason::Stop),
         ]]);
         let (mut gate, attempt) = gate_and_attempt();
-        assert_eq!(*gate.outstanding(), bound());
+        assert_eq!(
+            *gate.outstanding().expect("a limited gate keeps totals"),
+            bound()
+        );
 
         let mut stream = fake.generate(request(), attempt);
         for _ in 0..3 {
             let event = futures::executor::block_on(stream.next());
             assert!(event.is_some());
             assert_eq!(
-                *gate.outstanding(),
+                *gate.outstanding().expect("a limited gate keeps totals"),
                 bound(),
                 "the hold must not be released part-way through a stream"
             );
@@ -358,7 +364,10 @@ mod lifecycle {
 
         let settled = stream.settle(&mut gate).expect("its own gate");
         assert!(
-            gate.outstanding().amount.is_zero(),
+            gate.outstanding()
+                .expect("a limited gate keeps totals")
+                .amount
+                .is_zero(),
             "and must be released exactly once, at settlement"
         );
         assert_eq!(settled.outcome.stop(), StopReason::Stop);
@@ -375,9 +384,17 @@ mod lifecycle {
             AiEvent::Stop(StopReason::Stop),
         ]);
         // stream.settle(&mut gate);   // error[E0382]: use of moved value
-        assert_eq!(settled.reconciled.charged, usd("0.006"));
-        assert_eq!(*gate.committed(), usd("0.006"));
-        assert!(gate.outstanding().amount.is_zero());
+        assert_eq!(settled.reconciled.charged, Some(usd("0.006")));
+        assert_eq!(
+            *gate.committed().expect("a limited gate keeps totals"),
+            usd("0.006")
+        );
+        assert!(
+            gate.outstanding()
+                .expect("a limited gate keeps totals")
+                .amount
+                .is_zero()
+        );
     }
 
     /// Dropping an unsettled attempt cannot release the hold — `Drop` has no
@@ -393,7 +410,10 @@ mod lifecycle {
         };
 
         assert!(
-            gate.outstanding().amount == bound().amount,
+            gate.outstanding()
+                .expect("a limited gate keeps totals")
+                .amount
+                == bound().amount,
             "a leaked hold must stay held: narrowing the budget is safe, \
              releasing it silently is not"
         );
@@ -453,7 +473,10 @@ mod lifecycle {
             let (gate, settled) = run(vec![AiEvent::Stop(stop)]);
             assert_eq!(settled.outcome.stop(), stop);
             assert!(
-                gate.outstanding().amount.is_zero(),
+                gate.outstanding()
+                    .expect("a limited gate keeps totals")
+                    .amount
+                    .is_zero(),
                 "{stop:?} must still release its hold"
             );
         }
@@ -510,7 +533,12 @@ mod lifecycle {
 
         let settled = stream.settle(&mut gate).expect("its own gate");
         assert_eq!(settled.outcome.stop(), StopReason::Aborted);
-        assert!(gate.outstanding().amount.is_zero());
+        assert!(
+            gate.outstanding()
+                .expect("a limited gate keeps totals")
+                .amount
+                .is_zero()
+        );
         assert!(
             !settled.outcome.retry_is_safe(),
             "the provider already answered, so a retry would be billed twice"
@@ -543,10 +571,13 @@ mod lifecycle {
             AiEvent::Stop(StopReason::Stop),
         ]);
         // 1000 x $0.000003 + 200 x $0.000015
-        assert_eq!(settled.reconciled.charged, usd("0.006"));
+        assert_eq!(settled.reconciled.charged, Some(usd("0.006")));
         assert!(settled.reconciled.exact);
         assert!(settled.reconciled.over_bound.is_none());
-        assert_eq!(*gate.committed(), usd("0.006"));
+        assert_eq!(
+            *gate.committed().expect("a limited gate keeps totals"),
+            usd("0.006")
+        );
     }
 
     /// "Reported nothing" and "reported zero" settle differently, which is
@@ -555,7 +586,7 @@ mod lifecycle {
     fn a_missing_usage_report_charges_the_bound_while_a_reported_zero_charges_nothing() {
         let (_, missing) = run(vec![AiEvent::Stop(StopReason::Stop)]);
         assert_eq!(missing.outcome.usage(), UsageReport::Missing);
-        assert_eq!(missing.reconciled.charged, bound());
+        assert_eq!(missing.reconciled.charged, Some(bound()));
         assert!(!missing.reconciled.exact);
 
         let (_, zero) = run(vec![
@@ -566,7 +597,7 @@ mod lifecycle {
             zero.outcome.usage(),
             UsageReport::Reported(Usage::default())
         );
-        assert_eq!(zero.reconciled.charged, usd("0"));
+        assert_eq!(zero.reconciled.charged, Some(usd("0")));
         assert!(zero.reconciled.exact);
     }
 
@@ -582,8 +613,18 @@ mod lifecycle {
             .settle(&mut theirs)
             .expect_err("this attempt belongs to another gate");
 
-        assert!(theirs.outstanding().amount.is_zero());
-        assert_eq!(*mine.outstanding(), bound(), "still held by the real gate");
+        assert!(
+            theirs
+                .outstanding()
+                .expect("a limited gate keeps totals")
+                .amount
+                .is_zero()
+        );
+        assert_eq!(
+            *mine.outstanding().expect("a limited gate keeps totals"),
+            bound(),
+            "still held by the real gate"
+        );
         // The authorisation is not lost — it travels inside the refusal, so
         // the caller can settle it where it belongs.
         assert!(
@@ -593,7 +634,12 @@ mod lifecycle {
             )
             .is_ok()
         );
-        assert!(mine.outstanding().amount.is_zero());
+        assert!(
+            mine.outstanding()
+                .expect("a limited gate keeps totals")
+                .amount
+                .is_zero()
+        );
     }
 
     // --- delivery certainty across a real stream ---------------------------

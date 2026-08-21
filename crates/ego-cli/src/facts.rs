@@ -58,7 +58,13 @@ struct Facts {
 #[serde(deny_unknown_fields)]
 struct Supplied {
     capabilities: ModelCapabilities,
-    pricing: Quote,
+    /// Optional, per `docs/decisions/2026-08-21-a-run-with-no-ceiling.md` §3.
+    /// A run that configures no ceiling needs no prices, so a `[model."x"]`
+    /// entry with capabilities alone is a complete entry and resolves.
+    /// Capabilities are not optional beside it, and the asymmetry is the
+    /// ruling's: maintainer ruled about prices.
+    #[serde(default)]
+    pricing: Option<Quote>,
 }
 
 /// A price list as an operator writes it.
@@ -137,7 +143,14 @@ pub fn supplied() -> Result<Vec<(String, HostedModel)>, UsageError> {
                 slug,
                 HostedModel {
                     capabilities: supplied.capabilities,
-                    metering: catalogue::tabulated(supplied.pricing.into()),
+                    // A `models.toml` row is billed in money whether or not
+                    // the operator wrote its rates down: the provider will
+                    // charge either way, and this file is not where that
+                    // fact is decided.
+                    metering: catalogue::tabulated(),
+                    rates: supplied
+                        .pricing
+                        .map(|quote| catalogue::operator_rates(quote.into())),
                 },
             )
         })
