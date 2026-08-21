@@ -82,7 +82,21 @@ pub enum Authority {
     /// and every implementation in this build would return a constant. When a
     /// party acquires an identity — the human seat at step 7 is the first that
     /// will need one — giving it a field here is that story's change to make,
-    /// on the evidence of a real second implementation.
+    /// on the evidence of a real second implementation. It costs no
+    /// `CODEC_VERSION` bump when it comes: this is `{"by":"party"}` on the
+    /// wire, and `event::domain::EventKind`'s codec rule names a field that
+    /// decodes when absent as additive.
+    ///
+    /// **Nothing in a release build writes this, and a log where `party` never
+    /// appears is therefore correct rather than suspicious.** Worth saying
+    /// because it differs from [`Verdict::Deny`](super::Verdict::Deny), whose
+    /// doc comment makes the same point about production paths: `Verdict`
+    /// derives no serde and never leaves memory, while `Authority` is
+    /// persisted through `EventKind::PermissionDecided`. So this arm is
+    /// readable *out of* a log that no shipping code path can put it *into*.
+    /// The producers are `AlwaysDenies` and the doctest in `grant.rs`, and
+    /// they are what pin it — do not conclude from an empty grep over real
+    /// sessions that the arm is dead.
     Party,
     /// The workspace boundary, at §6 step 0. Not a rule: nobody wrote it,
     /// `--allow` cannot widen it and no mode lifts it, so there is no ID to

@@ -7,8 +7,8 @@ use std::path::Path;
 use ego_core::config::{Mode, OriginSet, PermCfg, Ruleset, Source};
 use ego_core::permit::rule::Rule;
 use ego_core::permit::{
-    Authorized, CanonPath, Classification, EntryKind, Escalation, FsError, GuardedFs, GuardedIo,
-    IoDenied, Op, OpName, Pending, PermitDenied, PolicyDenied, PolicyEngine, PrepareCtx,
+    Authority, Authorized, CanonPath, Classification, EntryKind, Escalation, FsError, GuardedFs,
+    GuardedIo, IoDenied, Op, OpName, Pending, PermitDenied, PolicyDenied, PolicyEngine, PrepareCtx,
     PreparedCall, Resolution, ScanLimits, ScanRequest, Tool, ToolError, Typed,
 };
 use futures::executor::block_on;
@@ -1298,6 +1298,44 @@ mod permit {
             for second in &alphabet {
                 check(&engine, &[*first, *second]);
             }
+        }
+    }
+
+    /// `Authority`'s wire form, pinned because two doc comments state it and
+    /// an operator greps for it.
+    ///
+    /// `Authority` is persisted — `EventKind::PermissionDecided` carries it —
+    /// so the tag name and the variant spellings are a durable contract, not a
+    /// serde default anybody may retune. Changing `tag` or `rename_all` here
+    /// is a re-tag, which `event::domain::EventKind`'s codec rule prices at a
+    /// `CODEC_VERSION` bump and a migration.
+    ///
+    /// `party` is in the list deliberately. Nothing in a release build writes
+    /// it, so no real log contains it and no golden covers it; without this
+    /// assertion the one arm whose spelling nothing else exercises would be
+    /// the one arm free to drift.
+    #[test]
+    fn permit_the_authority_wire_form_is_a_durable_contract() {
+        let cases = [
+            (Authority::Party, json!({ "by": "party" })),
+            (Authority::Boundary, json!({ "by": "boundary" })),
+            (
+                Authority::Mode {
+                    mode: Mode::Default,
+                },
+                json!({ "by": "mode", "mode": "default" }),
+            ),
+            (
+                Authority::Rules { rules: Vec::new() },
+                json!({ "by": "rules", "rules": [] }),
+            ),
+        ];
+        for (authority, expected) in cases {
+            let encoded = serde_json::to_value(&authority).expect("an authority serialises");
+            assert_eq!(encoded, expected, "{authority:?} moved on the wire");
+            let decoded: Authority =
+                serde_json::from_value(encoded).expect("and reads back as itself");
+            assert_eq!(decoded, authority);
         }
     }
 }
