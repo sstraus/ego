@@ -1,0 +1,471 @@
+//! The argument grammar: `CLI.md` §3 and the parse half of §4.5.
+//!
+//! Three things happen here, in this order, and the order is the contract:
+//!
+//! 1. **`--` is honoured first.** §4.5 reserves it for prompt
+//!    disambiguation — `ego -- run` prompts the word "run" — so nothing
+//!    downstream may look at a token past it. `clap`'s own `--` handling is
+//!    per-subcommand and would have to decide `run` is a subcommand *before*
+//!    it could apply, which is the wrong way round.
+//! 2. **The applicability matrix.** A flag `CLI.md` documents whose subsystem
+//!    this build does not have is refused **by name**, naming what it waits
+//!    on, and a retired flag is refused by name with its replacement (§4.3:
+//!    "flags are never removed silently"). Both run before `clap` sees the
+//!    vector, so the answer is a sentence about *that flag* rather than
+//!    clap's "unexpected argument".
+//! 3. **`clap`, over what is left.** `docs/04-crates.md` names clap for
+//!    argv, and generating the reference and the completions from the same
+//!    definition (§4.5's last clause) is only possible while there is exactly
+//!    one definition.
+
+use std::path::PathBuf;
+
+use clap::{ArgAction, Args as ClapArgs, Parser};
+use ego_core::generator::types::ThinkingLevel;
+
+/// What the process was asked to do.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Invocation {
+    /// `ego run [PROMPT]` — the headless one-shot of `CLI.md` §2.
+    Run(Box<Args>),
+}
+
+/// A refusal decided before any turn exists.
+///
+/// One type and not several, because every one of them is `CLI.md` §4.3's
+/// exit 2 and the caller turns it into `RunTermination::UsageError` at a
+/// single place. The message is the whole product: a script that gets 2 and
+/// no sentence has been told nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsageError(pub String);
+
+impl std::fmt::Display for UsageError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for UsageError {}
+
+/// A flag `CLI.md` §3 documents that this build cannot honour, and the
+/// subsystem it is waiting on.
+///
+/// **Not a convenience.** Each entry names a component that does not exist —
+/// not a switch someone has not got round to reading. A `--allow` that parsed
+/// a rule and enforced nothing would be worse than this refusal by exactly the
+/// margin that matters: it would look like a permission boundary.
+struct Unavailable {
+    flags: &'static [&'static str],
+    waiting_on: &'static str,
+}
+
+/// The applicability matrix of `CLI.md` §4.5.
+///
+/// `ARCHITECTURE.md`'s milestone table (line 424 onwards) is the source for
+/// every `waiting_on` here: these are subsystems, and the sentence says which.
+const UNAVAILABLE: &[Unavailable] = &[
+    Unavailable {
+        flags: &["--mode", "--plan", "--yolo", "--allow", "--deny"],
+        waiting_on: "the permission rule grammar — a canonical call AST, \
+                     stable rule IDs and an approver that can mint a Permit. \
+                     `PolicyEngine` today admits a read inside the workspace \
+                     and nothing else, so a rule would parse and enforce \
+                     nothing",
+    },
+    Unavailable {
+        flags: &["--sandbox"],
+        waiting_on: "a sandbox backend. No process is spawned anywhere in \
+                     this build, so there is nothing yet to confine",
+    },
+    Unavailable {
+        flags: &["-f", "--file", "--var"],
+        waiting_on: "executable agent files (`CLI.md` §5): YAML frontmatter, \
+                     `{{placeholder}}` variables and a versioned format",
+    },
+    Unavailable {
+        flags: &["--attach"],
+        waiting_on: "a non-text content block. The provider-neutral \
+                     conversation model carries text, tool calls and tool \
+                     results, so an image has no representation to be sent in",
+    },
+    Unavailable {
+        flags: &["--mcp"],
+        waiting_on: "the MCP client",
+    },
+    Unavailable {
+        flags: &["--retry", "--fallback"],
+        waiting_on: "a retry seam. A generation owns a reservation for its \
+                     whole life, so re-issuing one is a change to the attempt \
+                     contract rather than a loop that runs twice",
+    },
+];
+
+/// A flag that was removed, and what replaced it.
+///
+/// Empty, because nothing has been retired yet. It ships anyway, with its own
+/// test: `CLI.md` §4.3 says a retired flag errors by name with its
+/// replacement, and the moment that rule is easiest to forget is the first
+/// retirement — when there is no mechanism, only a note in a changelog.
+const RETIRED: &[(&str, &str)] = &[];
+
+/// The flag name in `token`, if it is one. `--budget=2.5$` is `--budget`.
+fn flag_name(token: &str) -> Option<&str> {
+    if !token.starts_with('-') || token == "-" || token == "--" {
+        return None;
+    }
+    Some(match token.split_once('=') {
+        Some((name, _)) => name,
+        None => token,
+    })
+}
+
+/// Refuse a documented-but-unavailable or retired flag, by name.
+fn check_matrix(tokens: &[String]) -> Result<(), UsageError> {
+    for token in tokens {
+        let Some(name) = flag_name(token) else {
+            continue;
+        };
+        if let Some((_, replacement)) = RETIRED.iter().find(|(retired, _)| *retired == name) {
+            return Err(UsageError(format!(
+                "{name} has been retired; use {replacement}"
+            )));
+        }
+        if let Some(entry) = UNAVAILABLE
+            .iter()
+            .find(|entry| entry.flags.contains(&name))
+        {
+            return Err(UsageError(format!(
+                "{name} is documented in CLI.md §3 and is not available in this \
+                 build: it is waiting on {}",
+                entry.waiting_on
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Where the prompt comes from when it is not on the command line.
+///
+/// `CLI.md` §2's stdin contract, which is Codex's: `-` reads the prompt from
+/// stdin, and with *both* an argv prompt and piped stdin, stdin is appended
+/// as a delimited context block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stdin {
+    /// `-` was given: stdin *is* the prompt.
+    IsThePrompt,
+    /// Nothing said otherwise; whether stdin is piped is decided at run time.
+    Ambient,
+}
+
+/// How the run reports itself (`CLI.md` §4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+#[value(rename_all = "lowercase")]
+pub enum Output {
+    Text,
+    Json,
+    Jsonl,
+}
+
+/// Where a session is written, or that it is not (`CLI.md` §3, "Session").
+///
+/// One value rather than three independent flags, because §4.5 calls them a
+/// mutually-exclusive group and a group is a thing the type can *be*, not a
+/// rule someone has to remember to check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionChoice {
+    /// A fresh session, written under the store root.
+    New,
+    /// A named session: created if it is not there, attached if it is.
+    Named(String),
+    /// An id the caller supplied, so there is no capture-then-resume dance.
+    Id(String),
+    /// Nothing is written.
+    Ephemeral,
+}
+
+/// The parsed command line of `ego run`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Args {
+    pub prompt: Option<String>,
+    pub stdin: Stdin,
+    pub model: Option<String>,
+    pub offline: bool,
+    pub thinking: ThinkingLevel,
+    pub system: Option<String>,
+    pub append_system: Option<String>,
+    pub instructions: Option<PathBuf>,
+    pub bare: bool,
+    pub session: SessionChoice,
+    pub session_dir: Option<PathBuf>,
+    pub output: Output,
+    pub schema: Option<String>,
+    pub schema_retries: u32,
+    pub budget: Option<String>,
+    pub max_turns: Option<u32>,
+    pub timeout: Option<String>,
+    pub tools: Option<Vec<String>>,
+    pub directory: Option<PathBuf>,
+    pub set: Vec<String>,
+    pub profile: Option<String>,
+    pub quiet: bool,
+    pub verbose: bool,
+    pub no_color: bool,
+}
+
+/// The clap definition. Kept separate from [`Args`] so that the shape the
+/// rest of the binary reads is the shape §4.5 describes — a mutually
+/// exclusive group is one field — rather than clap's flat set of options.
+#[derive(Debug, Parser)]
+#[command(
+    name = "ego",
+    about = "Run an agent from a prompt, headless.",
+    disable_help_subcommand = true
+)]
+struct RunCommand {
+    /// The prompt. `-` reads it from stdin.
+    prompt: Option<String>,
+
+    #[command(flatten)]
+    flags: Flags,
+}
+
+#[derive(Debug, ClapArgs)]
+struct Flags {
+    /// provider/model slug, e.g. ollama/qwen3
+    #[arg(short = 'm', long)]
+    model: Option<String>,
+
+    /// No non-loopback egress from ego's own HTTP transport.
+    #[arg(long)]
+    offline: bool,
+
+    /// off|minimal|low|medium|high|xhigh|max
+    #[arg(long, value_parser = parse_thinking, default_value = "off")]
+    thinking: ThinkingLevel,
+
+    /// Replace the system prompt. `@file` reads it from a file.
+    #[arg(long)]
+    system: Option<String>,
+
+    /// Append to the system prompt. `@file` reads it from a file.
+    #[arg(long)]
+    append_system: Option<String>,
+
+    /// Use this instruction file instead of discovering one.
+    #[arg(long)]
+    instructions: Option<PathBuf>,
+
+    /// No ambient discovery, even in a trusted workspace.
+    #[arg(long)]
+    bare: bool,
+
+    /// Named session: created or attached.
+    #[arg(long, group = "session-choice")]
+    session: Option<String>,
+
+    /// A session id supplied by the caller.
+    #[arg(long, group = "session-choice")]
+    session_id: Option<String>,
+
+    /// Write no session at all.
+    #[arg(long, group = "session-choice")]
+    ephemeral: bool,
+
+    /// Override the store location.
+    #[arg(long)]
+    session_dir: Option<PathBuf>,
+
+    /// text|json|jsonl
+    #[arg(long, value_enum, default_value_t = Output::Text)]
+    output: Output,
+
+    /// JSON Schema the final answer must validate against; `@file` or inline.
+    #[arg(long)]
+    schema: Option<String>,
+
+    /// How many times to re-prompt on a schema mismatch.
+    #[arg(long, default_value_t = 2)]
+    schema_retries: u32,
+
+    /// Hard cap: '2.5$' or '400k' tokens.
+    #[arg(long)]
+    budget: Option<String>,
+
+    /// Cap the turns this run may take.
+    #[arg(long)]
+    max_turns: Option<u32>,
+
+    /// Wall clock, e.g. '90s' or '10m'.
+    #[arg(long)]
+    timeout: Option<String>,
+
+    /// Restrict the builtin tools to this comma-separated list.
+    #[arg(long, value_delimiter = ',')]
+    tools: Option<Vec<String>>,
+
+    /// Offer no tools at all.
+    #[arg(long, conflicts_with = "tools")]
+    no_tools: bool,
+
+    /// Run as if started in DIR.
+    #[arg(short = 'C', value_name = "DIR")]
+    directory: Option<PathBuf>,
+
+    /// Dotted-path config override, value parsed as TOML.
+    #[arg(short = 'c', long = "set", value_name = "K=V", action = ArgAction::Append)]
+    set: Vec<String>,
+
+    /// Layer [profile.NAME] from config.
+    #[arg(long)]
+    profile: Option<String>,
+
+    #[arg(short = 'q', long)]
+    quiet: bool,
+
+    #[arg(short = 'v', long)]
+    verbose: bool,
+
+    #[arg(long)]
+    no_color: bool,
+}
+
+fn parse_thinking(value: &str) -> Result<ThinkingLevel, String> {
+    match value {
+        "off" => Ok(ThinkingLevel::Off),
+        "minimal" => Ok(ThinkingLevel::Minimal),
+        "low" => Ok(ThinkingLevel::Low),
+        "medium" => Ok(ThinkingLevel::Medium),
+        "high" => Ok(ThinkingLevel::High),
+        "xhigh" => Ok(ThinkingLevel::XHigh),
+        "max" => Ok(ThinkingLevel::Max),
+        other => Err(format!(
+            "`{other}` is not a thinking level: off|minimal|low|medium|high|xhigh|max"
+        )),
+    }
+}
+
+/// Split `argv` at the first bare `--`.
+///
+/// Everything after it is prompt words. `ego -- run` is therefore the
+/// *interactive* form with the prompt "run", never the `run` subcommand, and
+/// `ego run -- --model` prompts the two words after the separator.
+fn split_at_separator(argv: Vec<String>) -> (Vec<String>, Vec<String>) {
+    match argv.iter().position(|token| token == "--") {
+        Some(at) => {
+            let mut head = argv;
+            let tail = head.split_off(at + 1);
+            head.pop();
+            (head, tail)
+        }
+        None => (argv, Vec::new()),
+    }
+}
+
+/// Parse a full argument vector, `argv[0]` included.
+pub fn parse(argv: Vec<String>) -> Result<Invocation, UsageError> {
+    let mut argv = argv;
+    let program = if argv.is_empty() {
+        "ego".to_string()
+    } else {
+        argv.remove(0)
+    };
+    let (head, tail) = split_at_separator(argv);
+
+    // Before clap, and before the subcommand is decided: a refusal must be
+    // able to name a flag clap would have rejected as unknown.
+    check_matrix(&head)?;
+
+    let is_run = head.first().map(|token| token == "run").unwrap_or(false);
+    if !is_run {
+        return Err(UsageError(format!(
+            "`{program}` with no subcommand starts an interactive session, and \
+             the interactive surface is not in this build: it is waiting on \
+             the permission dialog, which needs an approver that can mint a \
+             Permit. Use `{program} run` for a headless one-shot"
+        )));
+    }
+
+    let mut tokens: Vec<String> = head;
+    tokens[0] = program;
+    // The separator and everything after it go back on the end, so clap sees
+    // the prompt words as positionals it must not interpret.
+    if !tail.is_empty() {
+        tokens.push("--".to_string());
+        tokens.extend(tail);
+    }
+
+    let parsed = RunCommand::try_parse_from(&tokens).map_err(|err| {
+        // clap's own rendering, which already names the offending argument and
+        // the group it violated. Re-writing it here would be a second voice
+        // saying the same thing, worse.
+        UsageError(err.to_string().trim_end().to_string())
+    })?;
+
+    Ok(Invocation::Run(Box::new(into_args(parsed)?)))
+}
+
+fn into_args(command: RunCommand) -> Result<Args, UsageError> {
+    let RunCommand { prompt, flags } = command;
+
+    // §4.5's applicability conflict, and the one the instructions ADR said
+    // belonged here rather than in the loader: from a resolved posture alone,
+    // "the user demanded bare" and "the workspace is untrusted" are the same
+    // value and want opposite answers.
+    if flags.bare && flags.instructions.is_some() {
+        return Err(UsageError(
+            "--bare and --instructions contradict each other: --bare turns \
+             ambient discovery off, and --instructions names a file to use \
+             instead. Drop --bare — an explicitly named file is not ambient"
+                .to_string(),
+        ));
+    }
+
+    let (prompt, stdin) = match prompt.as_deref() {
+        Some("-") => (None, Stdin::IsThePrompt),
+        _ => (prompt, Stdin::Ambient),
+    };
+
+    let session = if flags.ephemeral {
+        SessionChoice::Ephemeral
+    } else if let Some(name) = flags.session {
+        SessionChoice::Named(name)
+    } else if let Some(id) = flags.session_id {
+        SessionChoice::Id(id)
+    } else {
+        SessionChoice::New
+    };
+
+    Ok(Args {
+        prompt,
+        stdin,
+        model: flags.model,
+        offline: flags.offline,
+        thinking: flags.thinking,
+        system: flags.system,
+        append_system: flags.append_system,
+        instructions: flags.instructions,
+        bare: flags.bare,
+        session,
+        session_dir: flags.session_dir,
+        output: flags.output,
+        schema: flags.schema,
+        schema_retries: flags.schema_retries,
+        budget: flags.budget,
+        max_turns: flags.max_turns,
+        timeout: flags.timeout,
+        // `--no-tools` is the empty list rather than a second field: "no
+        // tools" and "these tools" are the same question answered, and two
+        // fields would let them disagree.
+        tools: if flags.no_tools {
+            Some(Vec::new())
+        } else {
+            flags.tools
+        },
+        directory: flags.directory,
+        set: flags.set,
+        profile: flags.profile,
+        quiet: flags.quiet,
+        verbose: flags.verbose,
+        no_color: flags.no_color,
+    })
+}

@@ -4,6 +4,7 @@ members = [
     "crates/ego-ai",
     "crates/ego-tools",
     "crates/ego-acp",
+    "crates/ego-cli",
 ]
 resolver = "3"
 

@@ -20,6 +20,43 @@ impl Default for SessionId {
     }
 }
 
+/// A caller's session id that is not one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MalformedId(pub String);
+
+impl std::fmt::Display for MalformedId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "`{}` is not a UUID", self.0)
+    }
+}
+
+impl std::error::Error for MalformedId {}
+
+impl std::str::FromStr for SessionId {
+    type Err = MalformedId;
+
+    /// A session id the caller supplied — `CLI.md` §3's `--session-id UUID`,
+    /// "no capture-then-resume dance", and the id an ACP host names when it
+    /// reattaches.
+    ///
+    /// Any UUID is accepted, not only a v7. The version is what makes an id
+    /// this crate *mints* sortable by time, and refusing a v4 would refuse a
+    /// perfectly good identity a host already has on the strength of a
+    /// property nothing here depends on for correctness — the log's order is
+    /// `Seq`, never the id.
+    fn from_str(text: &str) -> Result<Self, MalformedId> {
+        Uuid::parse_str(text)
+            .map(SessionId)
+            .map_err(|_| MalformedId(text.to_string()))
+    }
+}
+
+impl std::fmt::Display for SessionId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 /// Stable, sortable turn identity (UUIDv7).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct TurnId(Uuid);
