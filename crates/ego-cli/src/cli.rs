@@ -21,6 +21,7 @@
 use std::path::PathBuf;
 
 use clap::{ArgAction, Args as ClapArgs, Parser};
+use ego_core::config::Mode;
 use ego_core::generator::types::ThinkingLevel;
 
 /// What the process was asked to do.
@@ -64,14 +65,6 @@ struct Unavailable {
 /// `ARCHITECTURE.md`'s milestone table (line 424 onwards) is the source for
 /// every `waiting_on` here: these are subsystems, and the sentence says which.
 const UNAVAILABLE: &[Unavailable] = &[
-    Unavailable {
-        flags: &["--mode", "--plan", "--yolo", "--allow", "--deny"],
-        waiting_on: "the permission rule grammar — a canonical call AST, \
-                     stable rule IDs and an approver that can mint a Permit. \
-                     `PolicyEngine` today admits a read inside the workspace \
-                     and nothing else, so a rule would parse and enforce \
-                     nothing",
-    },
     Unavailable {
         flags: &["--sandbox"],
         waiting_on: "a sandbox backend. No process is spawned anywhere in \
@@ -192,6 +185,19 @@ pub struct Args {
     pub append_system: Option<String>,
     pub instructions: Option<PathBuf>,
     pub bare: bool,
+    /// The permission mode (`ARCHITECTURE.md` §3.4 axis 1).
+    ///
+    /// One field, not three, for the same reason [`SessionChoice`] is one
+    /// field: `--plan` and `--yolo` are spellings of `--mode`, and three
+    /// booleans would be three ways to say something that can only be one
+    /// value — plus a fourth state, all-false, that means nothing.
+    pub mode: Option<Mode>,
+    /// Permission rules, in the grammar of
+    /// `2026-08-21-a-rule-that-means-exactly-one-thing.md`. Carried as text
+    /// and parsed by `Rule::load` inside the config layer, so a flag and a
+    /// config file go through exactly one parser.
+    pub allow: Vec<String>,
+    pub deny: Vec<String>,
     pub session: SessionChoice,
     pub session_dir: Option<PathBuf>,
     pub output: Output,
@@ -304,6 +310,26 @@ struct Flags {
     #[arg(long, conflicts_with = "tools")]
     no_tools: bool,
 
+    /// Permission mode: plan|default|auto|edits|yolo.
+    #[arg(long, value_parser = parse_mode, group = "mode-choice")]
+    mode: Option<Mode>,
+
+    /// Shorthand for --mode plan.
+    #[arg(long, group = "mode-choice")]
+    plan: bool,
+
+    /// Shorthand for --mode yolo.
+    #[arg(long, group = "mode-choice")]
+    yolo: bool,
+
+    /// Allow rule, e.g. 'read(src/**)'. Repeatable.
+    #[arg(long, value_name = "RULE", action = ArgAction::Append)]
+    allow: Vec<String>,
+
+    /// Deny rule, e.g. 'write(**)'. Repeatable.
+    #[arg(long, value_name = "RULE", action = ArgAction::Append)]
+    deny: Vec<String>,
+
     /// Run as if started in DIR.
     #[arg(short = 'C', value_name = "DIR")]
     directory: Option<PathBuf>,
@@ -324,6 +350,25 @@ struct Flags {
 
     #[arg(long)]
     no_color: bool,
+}
+
+/// The five modes, by the names an operator types.
+///
+/// Hand-written rather than a `clap::ValueEnum` derive on [`Mode`], for the
+/// reason `parse_thinking` below is hand-written: `Mode` lives in `ego-core`,
+/// which has no `clap` dependency and should not gain one to answer a
+/// question about spelling.
+fn parse_mode(value: &str) -> Result<Mode, String> {
+    match value {
+        "plan" => Ok(Mode::Plan),
+        "default" => Ok(Mode::Default),
+        "auto" => Ok(Mode::Auto),
+        "edits" => Ok(Mode::Edits),
+        "yolo" => Ok(Mode::Yolo),
+        other => Err(format!(
+            "`{other}` is not a permission mode: plan|default|auto|edits|yolo"
+        )),
+    }
 }
 
 fn parse_thinking(value: &str) -> Result<ThinkingLevel, String> {
@@ -422,6 +467,17 @@ fn into_args(command: RunCommand) -> Result<Args, UsageError> {
         _ => (prompt, Stdin::Ambient),
     };
 
+    // The same collapse `SessionChoice` gets, one axis over. clap's group
+    // has already refused two of them together, so this cannot silently
+    // prefer one spelling over another.
+    let mode = if flags.plan {
+        Some(Mode::Plan)
+    } else if flags.yolo {
+        Some(Mode::Yolo)
+    } else {
+        flags.mode
+    };
+
     let session = if flags.ephemeral {
         SessionChoice::Ephemeral
     } else if let Some(name) = flags.session {
@@ -442,6 +498,9 @@ fn into_args(command: RunCommand) -> Result<Args, UsageError> {
         append_system: flags.append_system,
         instructions: flags.instructions,
         bare: flags.bare,
+        mode,
+        allow: flags.allow,
+        deny: flags.deny,
         session,
         session_dir: flags.session_dir,
         output: flags.output,

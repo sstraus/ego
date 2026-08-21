@@ -131,6 +131,25 @@ fn flags_layer(args: &Args) -> Result<Sourced<ConfigLayer>, UsageError> {
     if let Some(budget) = &args.budget {
         toml.push_str(&format!("budget = {}\n", quote(budget)));
     }
+    if let Some(mode) = args.mode {
+        toml.push_str(&format!("mode = {}\n", quote(mode.as_str())));
+    }
+    // Written as **dotted keys**, not a `[permissions]` table header. A header
+    // captures every key after it, and `-c` overrides are appended below —
+    // `-c max_turns=3` after a header would land inside `permissions` and be
+    // refused as an unknown key, naming the wrong culprit.
+    //
+    // Emitted only when a rule was actually given. `resolve` replaces a
+    // layer's whole `permissions` block, so a `permissions.allow = []` written
+    // whenever the flag is absent would make every run erase the deny list a
+    // config file set.
+    for (key, rules) in [("allow", &args.allow), ("deny", &args.deny)] {
+        if rules.is_empty() {
+            continue;
+        }
+        let list = rules.iter().map(|rule| quote(rule)).collect::<Vec<_>>();
+        toml.push_str(&format!("permissions.{key} = [{}]\n", list.join(", ")));
+    }
     for entry in &args.set {
         let (key, value) = entry.split_once('=').ok_or_else(|| {
             UsageError(format!(

@@ -159,7 +159,7 @@ you can actually run. Checked against the clap definitions in
 
 A flag marked **no** is **refused by name**, with the subsystem it waits on —
 not swallowed, and not reported as an unknown argument. That mechanism already
-exists: `UNAVAILABLE` in `crates/ego-cli/src/cli.rs:66-101`, checked before
+exists: `UNAVAILABLE` in `crates/ego-cli/src/cli.rs:67-94`, checked before
 clap sees the tokens, and it covers every "no" below. This table is the
 document half of it; the code is the source of truth, and the two were compared
 flag by flag against the built binary to write this.
@@ -181,14 +181,14 @@ flag by flag against the built binary to write this.
 | `--tools`, `--no-tools` | **yes** | |
 | `-C`, `-c/--set`, `--profile` | **yes** | |
 | `-q`, `-v`, `--no-color` | **yes** | |
-| `--mode`, `--plan`, `--yolo`, `--allow`, `--deny` | no | waiting on the permission rule grammar (**M1**). `PolicyEngine` today admits a read inside the workspace and nothing else, so a rule would parse and enforce nothing — which is why refusing beats accepting: an ignored `--allow` looks like a permission boundary. §4.4's "scripts opt in with `--allow`" therefore describes no shipping flag |
+| `--mode`, `--plan`, `--yolo`, `--allow`, `--deny` | **yes** | `--plan`/`--yolo` are spellings of `--mode`; two at once is a usage error. **Four of the seven rule heads run**: `read`, `write`, `list`, `search`. `exec`, `net` and `tool` parse and get stable IDs, and are then **refused by name at load** — no tool in this build produces those operations, so a rule naming one would enforce nothing. So `--allow 'exec(git *)'` (§3's example, which is design) is exit 2 here, as is `--allow 'bash(git *)'` with §3's teaching message. Both refuse **before** the run starts |
 | `--sandbox` | no | waiting on a sandbox backend (**M1**). No process is spawned anywhere in this build, so there is nothing yet to confine |
 | `-f`, `--file`, `--var` | no | waiting on executable agent files (**M4**). §5 is a design, not a feature: the shebang form runs nothing today |
 | `--attach` | no | waiting on a non-text content block — the conversation model carries text, tool calls and tool results, so an image has nothing to be sent in |
 | `--mcp` | no | waiting on the MCP client (**M2**). `mcp_errors` exists on `session.started`, but no flag attaches a server |
 | `--retry`, `--fallback` | no | waiting on a retry seam. Delivery certainty is implemented and enforced; a generation owns its reservation for its whole life, so re-issuing one changes the attempt contract rather than adding a loop |
 
-**Thirteen documented flag spellings do not ship.** That is the gap this table
+**Eight documented flag spellings do not ship.** That is the gap this table
 exists to stop being invisible, and it is not a defect list — every one of them
 refuses by name and says what it is waiting on. The defect would be §3 reading,
 to someone who has not run the binary, as though all of it worked.
