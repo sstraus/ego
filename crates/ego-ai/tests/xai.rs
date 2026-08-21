@@ -70,6 +70,24 @@ const FLAT: &str = r#"{"models":[
    "fingerprint":"fp-77","version":"3"}
 ]}"#;
 
+/// Figures with no threshold behind them — the *third* combination, and the
+/// only one in which the zero-threshold sentinel is load-bearing.
+///
+/// `FLAT` zeroes both, so a decoder that had dropped the threshold check
+/// entirely would still take the base figures there, on the strength of the
+/// twin check alone. This list is what tells the two apart.
+const FIGURES_WITHOUT_THRESHOLD: &str = r#"{"models":[
+  {"id":"grok-4",
+   "prompt_text_token_price":30000,
+   "cached_prompt_text_token_price":7500,
+   "completion_text_token_price":150000,
+   "prompt_text_token_price_long_context":60000,
+   "cached_prompt_text_token_price_long_context":15000,
+   "completion_text_token_price_long_context":300000,
+   "long_context_threshold":0,
+   "fingerprint":"fp-77","version":"3"}
+]}"#;
+
 /// A threshold with no figures behind it — the other zero, and a different
 /// fact from the one above.
 const THRESHOLD_WITHOUT_FIGURES: &str = r#"{"models":[
@@ -262,6 +280,22 @@ fn a_zero_threshold_is_no_long_tier_and_not_a_free_one() {
     assert_eq!(quote.uncached_input, Some(rate("0.000003")));
     assert_ne!(quote.uncached_input, Some(Amount::ZERO));
     assert_ne!(quote.output, Some(Amount::ZERO));
+}
+
+#[test]
+fn a_zero_threshold_beats_a_long_figure_that_is_published_anyway() {
+    // The case that makes the threshold check load-bearing rather than
+    // redundant, and it was missing: `FLAT` zeroes the threshold *and* the
+    // twins, so a decoder that consulted only the twins passed it. Here the
+    // twins are real and the threshold says there is no tier for them to
+    // apply at — a length no request can reach, since a threshold of zero
+    // would otherwise mean "every request qualifies" and reserve double for
+    // every model that publishes rates it never charges.
+    let quote = quote_from(FIGURES_WITHOUT_THRESHOLD, Some(256_000));
+
+    assert_eq!(quote.uncached_input, Some(rate("0.000003")));
+    assert_eq!(quote.cache_read, Some(rate("0.00000075")));
+    assert_eq!(quote.output, Some(rate("0.000015")));
 }
 
 #[test]

@@ -3,6 +3,7 @@
 use ego_ai::http::{HttpError, HttpResponse};
 use ego_ai::provider::{CredentialStrategy, ProviderRow};
 use ego_ai::wire::RequestTarget;
+use ego_ai::wire::provider_cost::{OPENROUTER_COST_FIELD, XAI_COST_FIELD};
 use ego_core::generator::attempt::DeliveryCertainty;
 use ego_core::generator::port::AiEvent;
 use ego_core::generator::types::StopReason;
@@ -385,25 +386,54 @@ fn usage_fixture_name(transcript: &str) -> String {
     format!("{}.0.json", transcript.trim_end_matches(".sse"))
 }
 
-/// A row that says the provider states a charge is a row whose transcripts
-/// state one — and a row that says it does not is a row whose transcripts do
-/// not.
+/// Every field of a provider's `usage` object that is a *charge*.
 ///
-/// Both halves, because `cost: None` is not "we have not got round to it": it
-/// is the row asserting that no cost will arrive, which is the assertion that
-/// makes `UnknownCost::ProviderReportedCostMissing` mean anything on the rows
-/// that carry a decoder. An unchecked `None` would let a provider quietly
-/// start reporting a figure that nothing read.
+/// Derived from the decoders' own published constants rather than respelled,
+/// so a decoder that moved to a different field cannot leave this list behind
+/// asserting the old one. The leaf is taken because the constants name the
+/// path from the response root and a fixture's `usage` object is already at
+/// the parent.
+fn cost_fields() -> Vec<&'static str> {
+    [XAI_COST_FIELD, OPENROUTER_COST_FIELD]
+        .into_iter()
+        .map(|field| field.rsplit('.').next().expect("a non-empty path"))
+        .collect()
+}
+
+/// A row that says the provider states a charge is a row that reads the charge
+/// its own transcripts carry — and a row that says it does not is a row whose
+/// transcripts carry none.
+///
+/// **Anchored to the bytes, not to the row.** An earlier version asked only
+/// whether a `cost: None` row emitted no `ProviderCost`, which is vacuously
+/// true: deleting the decoder deletes both the claim and the only thing that
+/// could contradict it, and the check passed a row that had stopped reading a
+/// figure its fixtures still contained. The question has to start from the
+/// fixture — *does this provider state a charge?* — and only then ask what the
+/// row does about it.
+///
+/// That matters because `cost: None` is not "we have not got round to it": it
+/// is the row asserting no figure will arrive, which is what makes
+/// `UnknownCost::ProviderReportedCostMissing` mean anything on the rows that
+/// carry a decoder.
 ///
 /// This is the fifth thing a fixture can be evidence about, and it belongs
 /// beside check 4 rather than in `provider_cost.rs`: that file proves the
 /// decoders against handcrafted `usage` objects, and this proves the *row's
 /// own claim* against the same bytes every other check reads.
 #[tokio::test]
-async fn a_rows_cost_claim_is_what_its_transcripts_do() {
+async fn a_rows_cost_claim_is_what_its_transcripts_carry() {
     for profile in ALL {
         let row = (profile.row)();
         for name in ["text.sse", "tool_calls.sse"] {
+            let stated: serde_json::Value =
+                serde_json::from_str(&read(profile, "usage", &usage_fixture_name(name)))
+                    .expect("a usage fixture is JSON");
+            let carried: Vec<&str> = cost_fields()
+                .into_iter()
+                .filter(|field| !stated["usage"][field].is_null())
+                .collect();
+
             let events = stream_events(profile, name).await;
             let reported: Vec<_> = events
                 .iter()
@@ -412,21 +442,49 @@ async fn a_rows_cost_claim_is_what_its_transcripts_do() {
                     _ => None,
                 })
                 .collect();
-            match &row.cost {
-                Some(decoder) => assert_eq!(
-                    reported.len(),
-                    1,
-                    "{} carries a decoder for {} and its {name} reported {} costs",
+
+            if carried.is_empty() {
+                assert!(
+                    row.cost.is_none(),
+                    "{} carries a decoder for {:?} and its {name} states no charge at all",
                     profile.id,
-                    decoder.revision().field,
-                    reported.len()
-                ),
-                None => assert!(
+                    row.cost.as_ref().map(|cost| cost.revision().field.clone())
+                );
+                assert!(
                     reported.is_empty(),
-                    "{} says it states no charge and its {name} states {reported:?}",
+                    "{} states no charge in {name} and reported {reported:?}",
                     profile.id
-                ),
+                );
+                continue;
             }
+
+            let decoder = row.cost.as_ref().unwrap_or_else(|| {
+                panic!(
+                    "{}'s {name} states a charge in {carried:?} and its row reads none",
+                    profile.id
+                )
+            });
+            assert!(
+                carried.contains(
+                    &decoder
+                        .revision()
+                        .field
+                        .rsplit('.')
+                        .next()
+                        .expect("a non-empty path")
+                ),
+                "{} reads {} and its {name} states {carried:?}",
+                profile.id,
+                decoder.revision().field
+            );
+            assert_eq!(
+                reported.len(),
+                1,
+                "{} reads {} and its {name} produced {} costs",
+                profile.id,
+                decoder.revision().field,
+                reported.len()
+            );
         }
     }
 }
