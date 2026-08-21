@@ -11,7 +11,7 @@
 //! once. The transcripts it replays were captured from the real thing; the
 //! measurement they encode is recorded in the ADR.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use ego_ai::catalogue::{
@@ -329,6 +329,50 @@ fn a_loaded_local_model_resolves_to_the_context_the_daemon_actually_serves() {
         stub.paths(),
         vec!["/api/tags".to_string(), "/api/ps".to_string()],
         "a model that is already loaded must not be loaded again"
+    );
+}
+
+#[test]
+fn ollama_reports_the_levels_it_honours_and_not_the_ones_it_merely_accepts() {
+    // Read from `ollama/ollama@v0.32.14`, `openai/openai.go`:
+    //
+    //     case "minimal":                    return "low"
+    //     case "low","medium","high","max":  return effort
+    //     case "xhigh","ultra":              return "max"
+    //
+    // Every one of the seven answers `200`. Two of them come back a tier
+    // away from what was asked. This row reported `Any` until the wire
+    // survey read that function, because the measurement behind `Any` had
+    // tested acceptance and the comment had written "validates".
+    //
+    // The set below is therefore the answer to "which levels survive the
+    // round trip", which is the only question `ReasoningEffortSupport`
+    // exists to answer — its own preamble says the parameter is not
+    // advisory. `Minimal` and `XHigh` are refused by `request_gaps` before
+    // a request is built, naming these five; that refusal is pinned in
+    // `ego-core`'s `a_level_outside_the_stated_set_is_refused_naming_the_ones_that_would_work`,
+    // so this test owns the fact and that one owns the behaviour.
+    let (http, _stub) = daemon([(200, TAGS), (200, PS_LOADED)]);
+
+    let resolved = block_on(ollama::resolve(
+        &local_row(),
+        "gemma4:e4b-mlx",
+        usd(),
+        &http,
+    ))
+    .expect("the daemon serves it");
+
+    assert_eq!(
+        resolved.capabilities.reasoning_efforts,
+        ReasoningEffortSupport::Only(BTreeSet::from([
+            ThinkingLevel::Off,
+            ThinkingLevel::Low,
+            ThinkingLevel::Medium,
+            ThinkingLevel::High,
+            ThinkingLevel::Max,
+        ])),
+        "a 200 proves the daemon took the request, never that it did what \
+         the request said"
     );
 }
 

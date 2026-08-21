@@ -153,11 +153,26 @@ impl ProviderRow {
     /// The local row, on the same wire format as the hosted one.
     ///
     /// Measured against a live Ollama 0.32.14 rather than assumed: it accepts
-    /// the exact body `openai_completions` builds, honours
-    /// `stream_options.include_usage`, and validates `reasoning_effort`
-    /// against a strict superset of what `ThinkingLevel` can produce. So it
-    /// needs no mapping of its own, and this row differs from the hosted one
-    /// only in endpoint and [`Auth`].
+    /// the exact body `openai_completions` builds and honours
+    /// `stream_options.include_usage`.
+    ///
+    /// **"Accepts" is the whole claim, and it is narrower than it reads.** An
+    /// earlier version of this comment added that Ollama "validates
+    /// `reasoning_effort` against a strict superset of what `ThinkingLevel`
+    /// can produce", and [`ollama::capabilities`](crate::ollama) reported
+    /// `ReasoningEffortSupport::Any` on the strength of it. Both were true
+    /// about acceptance and false about behaviour: `thinkFromReasoningEffort`
+    /// clamps `minimal` to `low` and `xhigh` to `max` and answers `200`. The
+    /// capability now names the five levels that survive the round trip.
+    ///
+    /// The general lesson is worth more than the fix: **a 200 proves the
+    /// server took the request, never that it did what the request said.**
+    /// Every remaining claim in this comment is an acceptance claim, so none
+    /// of them may be read as a claim about honouring either — which is why
+    /// this row still owes a recorded transcript and a local smoke rather
+    /// than a sentence.
+    ///
+    /// This row differs from the hosted one only in endpoint and [`Auth`].
     pub fn ollama(endpoint: Url) -> Self {
         ProviderRow {
             id: "ollama".to_string(),

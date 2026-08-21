@@ -32,6 +32,7 @@
 //! uses) succeeds and `/api/ps` still reports 32768. Same runner, same
 //! context, no reload.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use ego_core::cost::CurrencyCode;
@@ -39,6 +40,7 @@ use ego_core::generator::capabilities::{
     CacheRetention, CancelSemantics, ModelCapabilities, ReasoningCarryover, ReasoningEffortSupport,
     Transport,
 };
+use ego_core::generator::types::ThinkingLevel;
 use futures::StreamExt;
 use serde::Deserialize;
 
@@ -274,12 +276,34 @@ fn capabilities_from(tag: &Tag, served_context: u64) -> ModelCapabilities {
         } else {
             ReasoningCarryover::Unsupported
         },
-        // Earned, not assumed. `provider.rs:143` records that a live
-        // Ollama 0.32.14 validates `reasoning_effort` against a strict
-        // superset of what `ThinkingLevel` can produce — which is the same
-        // measurement that lets the local row reuse the hosted wire format
-        // with no mapping of its own. `Any` is the honest reading of it.
-        reasoning_efforts: ReasoningEffortSupport::Any,
+        // The five levels Ollama *honours*, which is not the seven it
+        // *accepts*. Read from `openai/openai.go::thinkFromReasoningEffort`
+        // at tag v0.32.14 — the same version `provider.rs` measured:
+        //
+        //     case "minimal":                  return "low"
+        //     case "low","medium","high","max": return effort
+        //     case "xhigh","ultra":            return "max"
+        //
+        // with a source comment electing to "clamp those to the nearest
+        // Ollama tier rather than rejecting the request". So `minimal` and
+        // `xhigh` come back one tier away from what the caller asked for,
+        // silently and with a 200.
+        //
+        // This field was `Any` until the wire survey caught it. The earlier
+        // measurement was not wrong, it was narrower than it read: it proved
+        // every level is *accepted*, and accepted was taken for honoured.
+        // That is the mistranslation `docs/08-codex-critique.md` I5 calls
+        // worse than a refusal, and `ReasoningEffortSupport`'s own preamble
+        // says the parameter is not advisory. Naming the five refuses the
+        // other two at `request_gaps`, before the request is built, telling
+        // the caller which levels would have worked.
+        reasoning_efforts: ReasoningEffortSupport::Only(BTreeSet::from([
+            ThinkingLevel::Off,
+            ThinkingLevel::Low,
+            ThinkingLevel::Medium,
+            ThinkingLevel::High,
+            ThinkingLevel::Max,
+        ])),
         // Dropping the connection stops the runner at a token boundary.
         cancel: CancelSemantics::Cooperative,
         // Ollama's prompt cache does not survive the model being unloaded,
