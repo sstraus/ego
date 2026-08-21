@@ -12,9 +12,11 @@
 
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
+
 use super::approver::{Approver, ModeApprover, Verdict};
 use super::path::CanonPath;
-use super::prepared_call::{Op, PreparedCall};
+use super::prepared_call::{Op, OpName, PreparedCall};
 use super::rule::RuleId;
 use super::scope::Scope;
 use crate::config::{Mode, OriginSet, Ruleset, Source, SourcedRule};
@@ -492,7 +494,7 @@ pub enum PolicyDenied {
     /// `docs/decisions/2026-08-21-a-deny-that-names-who-can-lift-it.md`.
     Denied {
         tool: String,
-        op: &'static str,
+        op: OpName,
         path: CanonPath,
         by: RuleId,
         /// The layer whose copy cannot be got around: the answer to "can I
@@ -509,7 +511,7 @@ pub enum PolicyDenied {
     ModeForbids {
         tool: String,
         mode: Mode,
-        op: &'static str,
+        op: OpName,
         path: CanonPath,
     },
     /// The call wants to reach outside the workspace. Carries which kind of
@@ -518,7 +520,7 @@ pub enum PolicyDenied {
     /// "denied" teaches a model nothing.
     OutsideWorkspace {
         tool: String,
-        op: &'static str,
+        op: OpName,
         path: CanonPath,
     },
     /// A party that was asked said no. Distinct from `Denied` because nobody
@@ -531,7 +533,7 @@ pub enum PolicyDenied {
     /// amendment.
     Refused {
         tool: String,
-        op: &'static str,
+        op: OpName,
         path: CanonPath,
     },
 }
@@ -625,16 +627,20 @@ impl std::error::Error for PolicyDenied {}
 /// mode replaces it with its own reason if it declines too. Both are true; the
 /// second is the one that stopped the run, and it is the one an operator can
 /// act on.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Serialisable, because it is recorded in `EventKind::PermissionRequested`.
+/// That is why `op` is an [`OpName`] and not the `&'static str` it began as —
+/// see `OpName`'s own doc.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Escalation {
     /// No allow rule covered it. `PolicyEngine::classify` is the producer:
     /// steps 0 to 3 ran and none of them settled it.
-    NoRuleCovers { op: &'static str, path: CanonPath },
+    NoRuleCovers { op: OpName, path: CanonPath },
     /// The mode does not auto-approve this operation. `ModeApprover` is the
     /// producer, at §6 step 5.
     ModeAsks {
         mode: Mode,
-        op: &'static str,
+        op: OpName,
         path: CanonPath,
     },
 }
@@ -643,9 +649,9 @@ impl Escalation {
     /// The operation the escalation is about. Every arm names one, because a
     /// question that cannot say what it is about is not a question anybody
     /// can answer.
-    pub fn op(&self) -> &'static str {
+    pub fn op(&self) -> OpName {
         match self {
-            Escalation::NoRuleCovers { op, .. } | Escalation::ModeAsks { op, .. } => op,
+            Escalation::NoRuleCovers { op, .. } | Escalation::ModeAsks { op, .. } => *op,
         }
     }
 
@@ -1262,7 +1268,7 @@ mod tests {
             denied,
             PolicyDenied::Refused {
                 tool: "edit".to_string(),
-                op: "write",
+                op: OpName::Write,
                 path: CanonPath::new("/ws/src/main.rs"),
             }
         );

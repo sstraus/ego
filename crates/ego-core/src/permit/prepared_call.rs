@@ -3,6 +3,10 @@
 //! This is what the policy engine classifies to mint a `Permit`, and what a
 //! judge model evaluates in `auto` mode.
 
+use std::fmt;
+
+use serde::{Deserialize, Serialize};
+
 use super::path::CanonPath;
 
 /// One canonical operation a `Tool::execute` intends to perform.
@@ -45,14 +49,51 @@ pub enum Op {
     },
 }
 
+/// Which kind of operation a denial or a question is about.
+///
+/// A closed vocabulary rather than the `&'static str` this used to be. Two
+/// reasons, and the second is the one that forced it:
+///
+/// - It is closed in fact — there are exactly four [`Op`] variants — so a
+///   type that admits any string admits values the rest of the system cannot
+///   act on.
+/// - It is recorded in a durable event (`EventKind::PermissionRequested`),
+///   and `&'static str` cannot deserialise: there is no owned data to borrow
+///   from. `String` would decode, and would also let a hand-edited log
+///   reappear as an op nothing can match on. This decodes to one of four
+///   values or fails.
+///
+/// `Copy`, so carrying it costs nothing and no producer allocates on the path
+/// that has already decided to stop and ask somebody.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OpName {
+    Read,
+    List,
+    Search,
+    Write,
+}
+
+impl fmt::Display for OpName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let name = match self {
+            OpName::Read => "read",
+            OpName::List => "list",
+            OpName::Search => "search",
+            OpName::Write => "write",
+        };
+        write!(f, "{name}")
+    }
+}
+
 impl Op {
     /// The violating-operation name a denial or an approval prompt shows.
-    pub fn name(&self) -> &'static str {
+    pub fn name(&self) -> OpName {
         match self {
-            Op::Read { .. } => "read",
-            Op::List { .. } => "list",
-            Op::Search { .. } => "search",
-            Op::Write { .. } => "write",
+            Op::Read { .. } => OpName::Read,
+            Op::List { .. } => OpName::List,
+            Op::Search { .. } => OpName::Search,
+            Op::Write { .. } => OpName::Write,
         }
     }
 

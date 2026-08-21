@@ -30,7 +30,7 @@ use ego_core::generator::fake::FakeGenerator;
 use ego_core::generator::port::AiEvent;
 use ego_core::generator::types::{StopReason, ThinkingLevel};
 use ego_core::permit::{
-    Authorized, CanonPath, Classification, GuardedFs, GuardedIo, Op, Pending, PermitDenied,
+    Authorized, CanonPath, Classification, GuardedFs, GuardedIo, Op, OpName, Pending, PermitDenied,
     PolicyDenied, PolicyEngine, PrepareCtx, PreparedCall, Resolution, ScanRequest, Tool, ToolError,
     ToolResult, Typed, TypedTool,
 };
@@ -291,7 +291,10 @@ mod read {
 
         assert!(matches!(
             denied,
-            PolicyDenied::OutsideWorkspace { op: "read", .. }
+            PolicyDenied::OutsideWorkspace {
+                op: OpName::Read,
+                ..
+            }
         ));
         assert!(
             denied.to_string().contains("may not read"),
@@ -435,7 +438,10 @@ mod glob {
 
         assert!(matches!(
             denied,
-            PolicyDenied::OutsideWorkspace { op: "list", .. }
+            PolicyDenied::OutsideWorkspace {
+                op: OpName::List,
+                ..
+            }
         ));
         assert!(denied.to_string().contains("may not list"));
     }
@@ -584,7 +590,10 @@ mod grep {
 
         assert!(matches!(
             denied,
-            PolicyDenied::OutsideWorkspace { op: "search", .. }
+            PolicyDenied::OutsideWorkspace {
+                op: OpName::Search,
+                ..
+            }
         ));
         assert!(denied.to_string().contains("may not search"));
     }

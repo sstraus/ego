@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use super::error::ConfigError;
 use super::source::{Source, Sourced};
@@ -16,7 +16,7 @@ use crate::permit::rule::Rule;
 pub struct ModelRef(pub String);
 
 /// Permission mode — `ARCHITECTURE.md` §3.4 axis 1.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Mode {
     Plan,

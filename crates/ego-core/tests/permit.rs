@@ -8,8 +8,8 @@ use ego_core::config::{Mode, OriginSet, PermCfg, Ruleset, Source};
 use ego_core::permit::rule::Rule;
 use ego_core::permit::{
     Authorized, CanonPath, Classification, EntryKind, Escalation, FsError, GuardedFs, GuardedIo,
-    IoDenied, Op, Pending, PermitDenied, PolicyDenied, PolicyEngine, PrepareCtx, PreparedCall,
-    Resolution, ScanLimits, ScanRequest, Tool, ToolError, Typed,
+    IoDenied, Op, OpName, Pending, PermitDenied, PolicyDenied, PolicyEngine, PrepareCtx,
+    PreparedCall, Resolution, ScanLimits, ScanRequest, Tool, ToolError, Typed,
 };
 use futures::executor::block_on;
 use serde_json::json;
@@ -172,7 +172,7 @@ mod permit {
             PolicyDenied::ModeForbids {
                 tool: "edit".to_string(),
                 mode: Mode::Plan,
-                op: "write",
+                op: OpName::Write,
                 path: CanonPath::new("/ws/src/main.rs"),
             }
         );
@@ -197,7 +197,7 @@ mod permit {
         assert_eq!(
             pending.request().why(),
             &Escalation::NoRuleCovers {
-                op: "write",
+                op: OpName::Write,
                 path: CanonPath::new("/ws/src/main.rs"),
             }
         );
@@ -214,7 +214,7 @@ mod permit {
             denied,
             PolicyDenied::OutsideWorkspace {
                 tool: "read".to_string(),
-                op: "read",
+                op: OpName::Read,
                 path: CanonPath::new("/etc/passwd"),
             }
         );
@@ -285,7 +285,7 @@ mod permit {
             denied,
             PolicyDenied::Denied {
                 tool: "edit".to_string(),
-                op: "write",
+                op: OpName::Write,
                 path: CanonPath::new("/ws/src/main.rs"),
                 by: rule("write(**)").id(),
                 // `engine` builds its ruleset from one layer, so one origin
@@ -330,7 +330,7 @@ mod permit {
             denied,
             PolicyDenied::ModeForbids {
                 mode: Mode::Plan,
-                op: "write",
+                op: OpName::Write,
                 ..
             }
         ));
@@ -389,7 +389,7 @@ mod permit {
         assert_eq!(
             pending.request().why(),
             &Escalation::NoRuleCovers {
-                op: "write",
+                op: OpName::Write,
                 path: CanonPath::new("/ws/docs/README.md"),
             }
         );
@@ -457,7 +457,7 @@ mod permit {
         assert_eq!(
             pending.request().why(),
             &Escalation::NoRuleCovers {
-                op: "write",
+                op: OpName::Write,
                 path: CanonPath::new("/ws/src/main.rs"),
             },
             "steps 0-3 ran and none of them covered it"
@@ -470,7 +470,7 @@ mod permit {
             pending.request().why(),
             &Escalation::ModeAsks {
                 mode: Mode::Default,
-                op: "write",
+                op: OpName::Write,
                 path: CanonPath::new("/ws/src/main.rs"),
             },
             "and the mode declined too, which is the reason that stopped the run"
@@ -525,7 +525,7 @@ mod permit {
             denied,
             PolicyDenied::OutsideWorkspace {
                 tool: "write".to_string(),
-                op: "read",
+                op: OpName::Read,
                 path: CanonPath::new("/etc/shadow"),
             }
         );
@@ -582,7 +582,7 @@ mod permit {
             denied,
             PolicyDenied::Denied {
                 tool: "read".to_string(),
-                op: "read",
+                op: OpName::Read,
                 path: CanonPath::new("/ws/secrets/prod.env"),
                 by: rule("read(secrets/**)").id(),
                 // `engine` builds its ruleset from one layer, so one origin
@@ -829,7 +829,7 @@ mod permit {
             denied,
             PolicyDenied::OutsideWorkspace {
                 tool: "glob".to_string(),
-                op: "list",
+                op: OpName::List,
                 path: CanonPath::new("/etc"),
             }
         );
