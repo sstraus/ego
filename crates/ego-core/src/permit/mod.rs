@@ -15,7 +15,10 @@ mod scope;
 mod tool;
 
 pub use fs::{Fs, FsError, GuardedFs, GuardedIo, IoDenied, PathResolver};
-pub use grant::{Authorized, Permit, PermitDenied, PolicyDenied, PolicyEngine};
+pub use grant::{
+    Authorized, Classification, Escalation, Pending, PermissionRequest, Permit, PermitDenied,
+    PolicyDenied, PolicyEngine,
+};
 pub use path::CanonPath;
 pub use prepared_call::{Op, PreparedCall};
 pub use scan::{Entry, EntryKind, Found, LineMatcher, Match, Scan, ScanLimits, ScanRequest};

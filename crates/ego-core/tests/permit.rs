@@ -4,9 +4,11 @@
 
 use std::path::Path;
 
+use ego_core::config::{Mode, PermCfg};
 use ego_core::permit::{
-    CanonPath, EntryKind, FsError, GuardedFs, GuardedIo, IoDenied, Op, PermitDenied, PolicyDenied,
-    PolicyEngine, PrepareCtx, PreparedCall, ScanLimits, ScanRequest, Tool, ToolError, Typed,
+    Authorized, CanonPath, Classification, EntryKind, Escalation, FsError, GuardedFs, GuardedIo,
+    IoDenied, Op, PermitDenied, PolicyDenied, PolicyEngine, PrepareCtx, PreparedCall, ScanLimits,
+    ScanRequest, Tool, ToolError, Typed,
 };
 use serde_json::json;
 
@@ -51,6 +53,40 @@ mod permit {
     // --- policy: what a `PreparedCall` is actually authorised to do ---
     // `docs/decisions/2026-08-21-the-turn-loop.md` §1.
 
+    /// The engine an operator gets when they configure nothing: `default`
+    /// mode, no rules of their own.
+    ///
+    /// Every test below that does not name a mode is asserting about *that*
+    /// operator, which is why the helper hardcodes the default rather than
+    /// taking a mode: a test that had to spell out `Mode::Default` could be
+    /// changed to spell out something else, and the claim "this is what you
+    /// get out of the box" would quietly stop being tested.
+    fn in_default_mode(root: &str) -> PolicyEngine {
+        PolicyEngine::new(CanonPath::new(root), Mode::Default, PermCfg::default())
+    }
+
+    /// The answer, for a call the engine settles on its own.
+    ///
+    /// Lives in the test rather than on `PolicyEngine` because a caller that
+    /// cannot handle [`Classification::Ask`] is a test and never the loop —
+    /// the third outcome is the loop's whole job, and a library method that
+    /// flattened it away would be there for something to accidentally call.
+    trait Settles {
+        fn classify_settled(&self, call: PreparedCall) -> Result<Authorized, PolicyDenied>;
+    }
+
+    impl Settles for PolicyEngine {
+        fn classify_settled(&self, call: PreparedCall) -> Result<Authorized, PolicyDenied> {
+            match self.classify(call) {
+                Classification::Settled(answer) => answer,
+                Classification::Ask(pending) => panic!(
+                    "expected an answer, got a question for the operator: {}",
+                    pending.request()
+                ),
+            }
+        }
+    }
+
     fn read_call(path: &str) -> PreparedCall {
         PreparedCall {
             tool: "read".to_string(),
@@ -62,9 +98,9 @@ mod permit {
 
     #[test]
     fn permit_policy_admits_a_read_inside_the_workspace() {
-        let engine = PolicyEngine::new(CanonPath::new("/ws"));
+        let engine = in_default_mode("/ws");
         let granted = engine
-            .authorize(read_call("/ws/src/main.rs"))
+            .classify_settled(read_call("/ws/src/main.rs"))
             .expect("a workspace read is what this policy exists to allow");
         let permit = granted.permit();
         assert!(
@@ -78,9 +114,9 @@ mod permit {
     fn permit_policy_grants_only_the_paths_the_call_named() {
         // The whole reason `authorize` exists rather than the loop calling
         // `mint`: a permit must not be wider than the call it authorises.
-        let engine = PolicyEngine::new(CanonPath::new("/ws"));
+        let engine = in_default_mode("/ws");
         let granted = engine
-            .authorize(read_call("/ws/src/main.rs"))
+            .classify_settled(read_call("/ws/src/main.rs"))
             .expect("a workspace read is allowed");
         let permit = granted.permit();
         assert_eq!(
@@ -92,34 +128,69 @@ mod permit {
         );
     }
 
-    #[test]
-    fn permit_policy_refuses_a_write_and_names_it() {
-        let engine = PolicyEngine::new(CanonPath::new("/ws"));
-        let call = PreparedCall {
+    fn write_call(path: &str) -> PreparedCall {
+        PreparedCall {
             tool: "edit".to_string(),
             ops: vec![Op::Write {
-                path: CanonPath::new("/ws/src/main.rs"),
+                path: CanonPath::new(path),
                 contents: b"pwned".to_vec(),
             }],
-        };
+        }
+    }
+
+    #[test]
+    fn permit_policy_refuses_a_write_in_plan_mode_and_names_it() {
+        // This assertion used to hold in every mode, because the engine had
+        // one hardcoded rule saying writes are refused. What refuses now is
+        // the mode floor, so the same call gets a different answer under
+        // `edits` — and *that* is the property worth pinning: `plan` is the
+        // mode where a write cannot happen, not the build.
+        let engine = PolicyEngine::new(CanonPath::new("/ws"), Mode::Plan, PermCfg::default());
         let denied = engine
-            .authorize(call)
-            .expect_err("this session cannot write");
+            .classify_settled(write_call("/ws/src/main.rs"))
+            .expect_err("plan mode changes nothing");
         assert_eq!(
             denied,
-            PolicyDenied::WriteRefused {
+            PolicyDenied::ModeForbids {
                 tool: "edit".to_string(),
+                mode: Mode::Plan,
+                op: "write",
                 path: CanonPath::new("/ws/src/main.rs"),
             }
         );
         assert!(denied.to_string().contains("/ws/src/main.rs"));
+        assert!(
+            denied.to_string().contains("plan"),
+            "a refusal by the mode must name the mode, or the operator has \
+             nothing to go and change: {denied}"
+        );
+    }
+
+    #[test]
+    fn permit_policy_asks_about_a_write_in_default_mode() {
+        // The other half of the old test's claim. `default` does not refuse a
+        // write and does not perform one either: it has no answer, which is a
+        // third outcome and not a quieter denial.
+        let engine = in_default_mode("/ws");
+        let Classification::Ask(pending) = engine.classify(write_call("/ws/src/main.rs")) else {
+            panic!("default mode has no rule covering a write, so it must ask");
+        };
+        assert_eq!(pending.request().tool(), "edit");
+        assert_eq!(
+            pending.request().why(),
+            &Escalation::NoRuleCovers {
+                op: "write",
+                path: CanonPath::new("/ws/src/main.rs"),
+            }
+        );
+        assert_eq!(pending.call().ops, write_call("/ws/src/main.rs").ops);
     }
 
     #[test]
     fn permit_policy_refuses_a_read_outside_the_workspace_and_names_it() {
-        let engine = PolicyEngine::new(CanonPath::new("/ws"));
+        let engine = in_default_mode("/ws");
         let denied = engine
-            .authorize(read_call("/etc/passwd"))
+            .classify_settled(read_call("/etc/passwd"))
             .expect_err("the workspace is the boundary");
         assert_eq!(
             denied,
@@ -137,7 +208,7 @@ mod permit {
         // A call is authorised or it is not. Minting a permit for the
         // acceptable half would let a tool do part of something nobody
         // approved.
-        let engine = PolicyEngine::new(CanonPath::new("/ws"));
+        let engine = in_default_mode("/ws");
         let call = PreparedCall {
             tool: "read".to_string(),
             ops: vec![
@@ -149,7 +220,7 @@ mod permit {
                 },
             ],
         };
-        assert!(engine.authorize(call).is_err());
+        assert!(engine.classify_settled(call).is_err());
     }
 
     // --- listing and searching: looking without reading -------------------
@@ -191,9 +262,9 @@ mod permit {
         // The whole reason `list_paths` is not `read_paths`. A glob that can
         // enumerate a directory must not be able to read the files it names,
         // or "list the workspace" quietly means "exfiltrate the workspace".
-        let engine = PolicyEngine::new(CanonPath::new("/ws"));
+        let engine = in_default_mode("/ws");
         let granted = engine
-            .authorize(list_call("/ws/src", "**/*.rs"))
+            .classify_settled(list_call("/ws/src", "**/*.rs"))
             .expect("listing inside the workspace is allowed");
         let permit = granted.permit();
 
@@ -223,9 +294,9 @@ mod permit {
         // and then asking about its parent would pass even if the two lists
         // were confused, because the parent is not under the file either way
         // — a test that cannot fail for the reason it names.
-        let engine = PolicyEngine::new(CanonPath::new("/ws"));
+        let engine = in_default_mode("/ws");
         let granted = engine
-            .authorize(read_call("/ws/src"))
+            .classify_settled(read_call("/ws/src"))
             .expect("reading inside the workspace is allowed");
         let permit = granted.permit();
 
@@ -246,9 +317,9 @@ mod permit {
         // `Op::Search` exists precisely so that grep does not need read
         // authority over the subtree it searches. If authorising a search also
         // granted `read_paths`, the whole distinction would be decorative.
-        let engine = PolicyEngine::new(CanonPath::new("/ws"));
+        let engine = in_default_mode("/ws");
         let granted = engine
-            .authorize(search_call("/ws/src", "TODO"))
+            .classify_settled(search_call("/ws/src", "TODO"))
             .expect("searching inside the workspace is allowed");
         let permit = granted.permit();
 
@@ -269,9 +340,9 @@ mod permit {
 
     #[test]
     fn permit_policy_refuses_a_list_outside_the_workspace_and_names_the_operation() {
-        let engine = PolicyEngine::new(CanonPath::new("/ws"));
+        let engine = in_default_mode("/ws");
         let denied = engine
-            .authorize(list_call("/etc", "*"))
+            .classify_settled(list_call("/etc", "*"))
             .expect_err("the workspace is the boundary for listing too");
         assert_eq!(
             denied,
@@ -288,9 +359,9 @@ mod permit {
 
     #[test]
     fn permit_policy_refuses_a_search_outside_the_workspace_and_names_the_operation() {
-        let engine = PolicyEngine::new(CanonPath::new("/ws"));
+        let engine = in_default_mode("/ws");
         let denied = engine
-            .authorize(search_call("/etc", "password"))
+            .classify_settled(search_call("/etc", "password"))
             .expect_err("the workspace is the boundary for searching too");
         assert!(denied.to_string().contains("may not search /etc"));
     }
@@ -298,8 +369,8 @@ mod permit {
     #[test]
     fn permit_guarded_list_returns_the_names_under_an_authorised_root() {
         let fs = workspace();
-        let engine = PolicyEngine::new(CanonPath::new("/ws"));
-        let granted = engine.authorize(list_call("/ws/src", "**")).unwrap();
+        let engine = in_default_mode("/ws");
+        let granted = engine.classify_settled(list_call("/ws/src", "**")).unwrap();
         let guarded = GuardedFs::new(granted.into_parts().1, &fs);
 
         let scan = guarded
@@ -331,8 +402,8 @@ mod permit {
         // directory had already been read, and only the report of the denial
         // suppressed.
         let fs = workspace();
-        let engine = PolicyEngine::new(CanonPath::new("/ws"));
-        let granted = engine.authorize(list_call("/ws/src", "**")).unwrap();
+        let engine = in_default_mode("/ws");
+        let granted = engine.classify_settled(list_call("/ws/src", "**")).unwrap();
         let guarded = GuardedFs::new(granted.into_parts().1, &fs);
 
         let denied = guarded
@@ -354,8 +425,8 @@ mod permit {
         let fs = workspace();
         fs.file("/etc/passwd", "root:x:0:0");
         fs.symlink("/ws/src/innocent.rs", "/etc/passwd");
-        let engine = PolicyEngine::new(CanonPath::new("/ws"));
-        let granted = engine.authorize(list_call("/ws/src", "**")).unwrap();
+        let engine = in_default_mode("/ws");
+        let granted = engine.classify_settled(list_call("/ws/src", "**")).unwrap();
         let guarded = GuardedFs::new(granted.into_parts().1, &fs);
 
         let denied = guarded
@@ -375,8 +446,8 @@ mod permit {
         let fs = workspace();
         fs.file("/elsewhere/secret.txt", "not yours");
         fs.symlink("/ws/src/out", "/elsewhere");
-        let engine = PolicyEngine::new(CanonPath::new("/ws"));
-        let granted = engine.authorize(list_call("/ws/src", "**")).unwrap();
+        let engine = in_default_mode("/ws");
+        let granted = engine.classify_settled(list_call("/ws/src", "**")).unwrap();
         let guarded = GuardedFs::new(granted.into_parts().1, &fs);
 
         let scan = guarded
@@ -398,8 +469,8 @@ mod permit {
         // A model that cannot tell a complete answer from a truncated one
         // concludes the file it needed does not exist.
         let fs = workspace();
-        let engine = PolicyEngine::new(CanonPath::new("/ws"));
-        let granted = engine.authorize(list_call("/ws/src", "**")).unwrap();
+        let engine = in_default_mode("/ws");
+        let granted = engine.classify_settled(list_call("/ws/src", "**")).unwrap();
         let guarded = GuardedFs::new(granted.into_parts().1, &fs);
 
         let capped = ScanRequest {
@@ -419,8 +490,8 @@ mod permit {
     #[test]
     fn permit_a_scan_stops_at_max_depth() {
         let fs = workspace();
-        let engine = PolicyEngine::new(CanonPath::new("/ws"));
-        let granted = engine.authorize(list_call("/ws/src", "**")).unwrap();
+        let engine = in_default_mode("/ws");
+        let granted = engine.classify_settled(list_call("/ws/src", "**")).unwrap();
         let guarded = GuardedFs::new(granted.into_parts().1, &fs);
 
         let shallow = ScanRequest {
@@ -451,8 +522,8 @@ mod permit {
         // directory is still refused by the permit exactly like any other.
         let fs = workspace();
         fs.file("/ws/src/target/build.rs", "generated");
-        let engine = PolicyEngine::new(CanonPath::new("/ws"));
-        let granted = engine.authorize(list_call("/ws/src", "**")).unwrap();
+        let engine = in_default_mode("/ws");
+        let granted = engine.classify_settled(list_call("/ws/src", "**")).unwrap();
         let guarded = GuardedFs::new(granted.into_parts().1, &fs);
 
         let skipping = ScanRequest {
@@ -472,7 +543,9 @@ mod permit {
 
         // And the permit does not consult the skip list at all: a permit that
         // never named this subtree still refuses it, skipped or not.
-        let narrow_grant = engine.authorize(list_call("/ws/src/deep", "**")).unwrap();
+        let narrow_grant = engine
+            .classify_settled(list_call("/ws/src/deep", "**"))
+            .unwrap();
         let narrow = narrow_grant.permit();
         assert!(matches!(
             narrow.allows_list(&CanonPath::new("/ws/src/target/build.rs")),
@@ -485,8 +558,10 @@ mod permit {
         // The point of `Op::Search`: the seam reads, the caller judges, and
         // only the verdicts come back. `grep` never holds the bytes.
         let fs = workspace();
-        let engine = PolicyEngine::new(CanonPath::new("/ws"));
-        let granted = engine.authorize(search_call("/ws/src", "TODO")).unwrap();
+        let engine = in_default_mode("/ws");
+        let granted = engine
+            .classify_settled(search_call("/ws/src", "TODO"))
+            .unwrap();
         let guarded = GuardedFs::new(granted.into_parts().1, &fs);
 
         let found = guarded
@@ -509,8 +584,8 @@ mod permit {
         // a model told "not found" should look elsewhere. One collapsed
         // failure produces the wrong next move in both cases.
         let fs = workspace();
-        let engine = PolicyEngine::new(CanonPath::new("/ws"));
-        let granted = engine.authorize(read_call("/ws/src")).unwrap();
+        let engine = in_default_mode("/ws");
+        let granted = engine.classify_settled(read_call("/ws/src")).unwrap();
         let guarded = GuardedFs::new(granted.into_parts().1, &fs);
 
         // Authorised, but there is nothing there.
@@ -532,8 +607,10 @@ mod permit {
         // stopped reading has not searched, and must not report as though it
         // had.
         let fs = workspace();
-        let engine = PolicyEngine::new(CanonPath::new("/ws"));
-        let granted = engine.authorize(search_call("/ws/src", "fn")).unwrap();
+        let engine = in_default_mode("/ws");
+        let granted = engine
+            .classify_settled(search_call("/ws/src", "fn"))
+            .unwrap();
         let guarded = GuardedFs::new(granted.into_parts().1, &fs);
 
         let starved = ScanRequest {
@@ -558,8 +635,10 @@ mod permit {
     #[test]
     fn permit_guarded_search_refuses_an_unauthorised_root_without_reading_anything() {
         let fs = workspace();
-        let engine = PolicyEngine::new(CanonPath::new("/ws"));
-        let granted = engine.authorize(search_call("/ws/src", "SECRET")).unwrap();
+        let engine = in_default_mode("/ws");
+        let granted = engine
+            .classify_settled(search_call("/ws/src", "SECRET"))
+            .unwrap();
         let guarded = GuardedFs::new(granted.into_parts().1, &fs);
 
         let denied = guarded
@@ -674,7 +753,7 @@ mod permit {
             ops: ops.iter().map(|(k, p)| op_of(*k, p)).collect(),
         };
         let granted = engine
-            .authorize(call)
+            .classify_settled(call)
             .expect("every generated call reads, lists or searches inside /ws");
         let permit = granted.permit();
 
@@ -703,7 +782,7 @@ mod permit {
 
     #[test]
     fn permit_leg2_a_one_op_call_grants_exactly_what_that_op_named() {
-        let engine = PolicyEngine::new(CanonPath::new("/ws"));
+        let engine = in_default_mode("/ws");
         for (kind, path) in alphabet() {
             check(&engine, &[(kind, path)]);
         }
@@ -714,7 +793,7 @@ mod permit {
         // The case a one-op sweep cannot see: two ops of *different* kinds
         // over the same path must not lend each other authority, and two ops
         // of the same kind must union rather than overwrite.
-        let engine = PolicyEngine::new(CanonPath::new("/ws"));
+        let engine = in_default_mode("/ws");
         let alphabet = alphabet();
         for first in &alphabet {
             for second in &alphabet {

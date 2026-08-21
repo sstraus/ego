@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ego_core::config::{
-    Effective, Limits, Posture, Selection, SystemPrompt, Trust, resolve, system_prompt,
+    Effective, Limits, Mode, Posture, Selection, SystemPrompt, Trust, resolve, system_prompt,
 };
 use ego_core::cost::CurrencyCode;
 use ego_core::event::domain::CancelCause;
@@ -378,7 +378,14 @@ async fn execute(args: Args, out: &Stdout, cancel: CancelToken) -> Result<Ended,
     });
 
     let generator = ego_ai::generator::WireGenerator::new(resolved.row.clone(), Arc::clone(&http));
-    let policy = PolicyEngine::new(CanonPath::new(&root));
+    // `CLI.md` §4.4: an untrusted workspace resolves to `Mode::Default`
+    // because no layer that could name a mode was eligible, which is the
+    // posture that asks rather than the one that assumes.
+    let policy = PolicyEngine::new(
+        CanonPath::new(&root),
+        effective.mode.unwrap_or(Mode::Default),
+        effective.permissions.clone(),
+    );
     let fs = OsFs;
     let mut gate = budget::gate(&effective.ceilings, effective.clamped.money, currency);
 

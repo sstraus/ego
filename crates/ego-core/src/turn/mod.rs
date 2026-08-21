@@ -30,7 +30,7 @@ use crate::generator::capabilities::ModelCapabilities;
 use crate::generator::history::conversation_from;
 use crate::generator::port::{AiEvent, Generator};
 use crate::generator::types::{Conversation, GenRequest, Message, Role, StopReason, ThinkingLevel};
-use crate::permit::PolicyDenied;
+use crate::permit::{Classification, Pending, PolicyDenied};
 use crate::public::PublicEvent;
 use crate::sink::EventSink;
 use crate::state::{SessionState, Usage};
@@ -406,8 +406,28 @@ impl<'a> TurnLoop<'a> {
                     // is still logged against the call — the model's audience
                     // argument holds for the *record*, it just no longer
                     // decides whether the run continues.
+                    // Both end the run at exit 3 and they are not the same
+                    // event. "Denied by r1:…" tells an operator which line of
+                    // their config to go and look at; "no rule covers write
+                    // /ws/x" tells them there is no line to look at and they
+                    // have to write one. Collapsing them would leave the
+                    // commonest case — a run that needed an answer — reading
+                    // like a refusal somebody configured on purpose.
                     ToolOutcome::Refused { denial } => {
                         let action = denial.to_string();
+                        self.journal.append(
+                            turn,
+                            Some(call.item),
+                            Some(call.started),
+                            EventKind::ToolCallCompleted {
+                                ok: false,
+                                output: action.clone(),
+                            },
+                        )?;
+                        return Ok((ExitReason::PermissionRequired, Some(action)));
+                    }
+                    ToolOutcome::Unanswerable { pending } => {
+                        let action = pending.request().to_string();
                         self.journal.append(
                             turn,
                             Some(call.item),
@@ -836,8 +856,15 @@ impl<'a> TurnLoop<'a> {
             Err(refusal) => return answered(false, refusal),
         };
         let authorized = match self.tools.authorize(prepared) {
-            Ok(authorized) => authorized,
-            Err(denial) => return ToolOutcome::Refused { denial },
+            Classification::Settled(Ok(authorized)) => authorized,
+            Classification::Settled(Err(denial)) => return ToolOutcome::Refused { denial },
+            // Nobody in this run can answer it. §6's steps 6 and 7 — the judge
+            // and the human — have no producer in this build, so the honest
+            // terminal state is the one `CLI.md` §4.4 already specifies for a
+            // headless run: end it, with the action named. Not a stub standing
+            // in for a feature; the feature adds a fourth answer source to a
+            // loop that already runs.
+            Classification::Ask(pending) => return ToolOutcome::Unanswerable { pending },
         };
         match self.tools.execute(tool, authorized).await {
             Ok(output) => answered(true, output),
@@ -850,9 +877,12 @@ impl<'a> TurnLoop<'a> {
 enum ToolOutcome {
     /// It ran, or it failed in a way the model should read and adapt to.
     Answered { ok: bool, output: String },
-    /// Policy refused it. Not an answer — a question nobody in this run can
-    /// be asked, so it is the caller's to decide, not this method's.
+    /// Policy refused it. A settled answer, and still not one for the model:
+    /// telling it "denied" invites it to try a variant, which is a prompt loop
+    /// run against a boundary.
     Refused { denial: PolicyDenied },
+    /// Policy could not settle it and there is nobody here to ask.
+    Unanswerable { pending: Pending },
 }
 
 /// What one generation did.

@@ -56,6 +56,25 @@ impl Op {
         }
     }
 
+    /// Does this operation change the world?
+    ///
+    /// The one axis the mode floor and ceiling turn on
+    /// (`2026-08-21-a-permit-nobody-can-widen.md` §6): `plan` refuses every
+    /// mutating op outright, and `default` reviews unresolved *sensitive*
+    /// actions rather than every action, because `ARCHITECTURE.md:238` counts
+    /// prompt fatigue as a security bug. A read inside the workspace that
+    /// stopped the run to ask would be that bug.
+    ///
+    /// Derived from the variant and not from a table, because unlike §6a's
+    /// head→operations mapping this is not a fact about *this build* — a
+    /// write mutates in every build there will ever be.
+    pub fn mutates(&self) -> bool {
+        match self {
+            Op::Read { .. } | Op::List { .. } | Op::Search { .. } => false,
+            Op::Write { .. } => true,
+        }
+    }
+
     /// The path this operation is judged against: the file for a read or a
     /// write, the root for a traversal.
     pub fn path(&self) -> &CanonPath {

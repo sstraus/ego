@@ -11,7 +11,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ego_core::budget::{BudgetGate, Metering, PricingQuote, ResolvedRates, SettlementSource};
-use ego_core::config::SystemPrompt;
+use ego_core::config::{Mode, PermCfg, SystemPrompt};
 use ego_core::cost::{
     Amount, CostAttribution, CostDelta, CurrencyCode, MeteringRevision, Money, PricingRevision,
     ProviderCostRevision, RateSource, UnknownCost,
@@ -293,7 +293,7 @@ mod turn {
                 store: MemStore::default(),
                 clock: FixedClock(1_787_000_000_000),
                 generator: FakeGenerator::new(script),
-                policy: PolicyEngine::new(CanonPath::new("/ws")),
+                policy: PolicyEngine::new(CanonPath::new("/ws"), Mode::Default, PermCfg::default()),
                 fs: FakeFs::default(),
                 registry: Vec::new(),
                 gate: RefCell::new(gate()),

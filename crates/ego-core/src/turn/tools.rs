@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use crate::generator::types::ToolDescriptor as GenToolDescriptor;
 use crate::permit::{
-    Authorized, CanonPath, Fs, GuardedFs, PolicyDenied, PolicyEngine, PrepareCtx, PreparedCall,
+    Authorized, CanonPath, Classification, Fs, GuardedFs, PolicyEngine, PrepareCtx, PreparedCall,
     Tool, ToolError,
 };
 
@@ -86,16 +86,19 @@ impl<'a> Tools<'a> {
     }
 
     /// Stage two: ask policy what this call may do.
-    /// Returns the typed [`PolicyDenied`], not prose.
     ///
-    /// It used to flatten to a `String`, which is the same defect as an
-    /// `HttpError` flattened one layer down: the value already names what it
-    /// refused, and discarding the type at the seam left the loop unable to
-    /// tell "policy said no" from "the tool broke". Those are different
-    /// outcomes now — see `CLI.md` §4.4 and
-    /// `docs/decisions/2026-08-21-two-levels-of-ending.md`.
-    pub fn authorize(&self, call: PreparedCall) -> Result<Authorized, PolicyDenied> {
-        self.policy.authorize(call)
+    /// Returns the typed [`Classification`], not prose. It used to flatten to
+    /// a `String`, which is the same defect as an `HttpError` flattened one
+    /// layer down: the value already names what it refused, and discarding the
+    /// type at the seam left the loop unable to tell "policy said no" from
+    /// "the tool broke". Those are different outcomes now — see `CLI.md` §4.4
+    /// and `docs/decisions/2026-08-21-two-levels-of-ending.md`.
+    ///
+    /// Three outcomes rather than two, and the third is the one the loop must
+    /// not collapse: a call nobody in this run can answer is not a call that
+    /// was refused.
+    pub fn authorize(&self, call: PreparedCall) -> Classification {
+        self.policy.classify(call)
     }
 
     /// Stage three: run it, under the grant policy issued and through the

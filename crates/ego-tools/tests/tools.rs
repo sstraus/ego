@@ -18,6 +18,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use ego_core::budget::{BudgetGate, Metering, PricingQuote, ResolvedRates, SettlementSource};
+use ego_core::config::{Mode, PermCfg};
 use ego_core::cost::{Amount, CurrencyCode, Money, PricingRevision, RateSource};
 use ego_core::event::domain::ExitReason;
 use ego_core::event::id::SessionId;
@@ -29,8 +30,9 @@ use ego_core::generator::fake::FakeGenerator;
 use ego_core::generator::port::AiEvent;
 use ego_core::generator::types::{StopReason, ThinkingLevel};
 use ego_core::permit::{
-    CanonPath, GuardedFs, GuardedIo, Op, PermitDenied, PolicyDenied, PolicyEngine, PrepareCtx,
-    PreparedCall, ScanRequest, Tool, ToolError, ToolResult, Typed, TypedTool,
+    Authorized, CanonPath, Classification, GuardedFs, GuardedIo, Op, PermitDenied, PolicyDenied,
+    PolicyEngine, PrepareCtx, PreparedCall, ScanRequest, Tool, ToolError, ToolResult, Typed,
+    TypedTool,
 };
 use ego_core::sink::CollectingSink;
 use ego_core::state::SessionState;
@@ -68,7 +70,7 @@ impl Workspace {
         // itself a symlink, and a policy whose workspace is not canonical
         // refuses every path the resolver returns.
         let root = fs::canonicalize(dir.path()).expect("the temp directory resolves");
-        let policy = PolicyEngine::new(CanonPath::new(&root));
+        let policy = PolicyEngine::new(CanonPath::new(&root), Mode::Default, PermCfg::default());
         Self {
             _dir: dir,
             root,
@@ -111,10 +113,27 @@ impl Workspace {
     /// that order, with the permit going into the seam and nowhere else.
     fn run(&self, tool: &dyn Tool, params: serde_json::Value) -> Result<String, ToolError> {
         let call = tool.prepare(params, &self.ctx())?;
-        let granted = self.policy.authorize(call).expect("policy admits this");
+        let granted = self.authorize(call).expect("policy admits this");
         let (call, permit) = granted.into_parts();
         let guarded = GuardedFs::new(permit, &self.fs);
         block_on(tool.execute(call, &guarded)).map(|result: ToolResult| result.content)
+    }
+
+    /// What policy concludes about a call, for a call it settles on its own.
+    ///
+    /// Every call in this file reads, lists or searches inside a workspace,
+    /// which the default mode answers without asking anybody. A test that
+    /// reached [`Classification::Ask`] here would mean a read-only builtin had
+    /// started asking for authority it never used to need — worth a loud
+    /// failure naming the tool, not a quiet `is_err()`.
+    fn authorize(&self, call: PreparedCall) -> Result<Authorized, PolicyDenied> {
+        match self.policy.classify(call) {
+            Classification::Settled(answer) => answer,
+            Classification::Ask(pending) => panic!(
+                "a read-only builtin needed permission it never used to need: {}",
+                pending.request()
+            ),
+        }
     }
 
     fn prepare(&self, name: &str, params: serde_json::Value) -> Result<PreparedCall, ToolError> {
@@ -256,10 +275,7 @@ mod read {
         let call = ws
             .prepare("read", json!({ "path": elsewhere.display().to_string() }))
             .expect("the file exists, so it resolves");
-        let denied = ws
-            .policy
-            .authorize(call)
-            .expect_err("it is outside the workspace");
+        let denied = ws.authorize(call).expect_err("it is outside the workspace");
 
         assert!(matches!(
             denied,
@@ -336,7 +352,7 @@ mod glob {
             .unwrap();
 
         assert!(matches!(call.ops.as_slice(), [Op::List { .. }]));
-        let granted = ws.policy.authorize(call).unwrap();
+        let granted = ws.authorize(call).unwrap();
         let permit = granted.permit();
         let found = CanonPath::new(ws.root.join("src/main.rs"));
         assert!(permit.allows_list(&found).is_ok());
@@ -403,10 +419,7 @@ mod glob {
                 json!({ "pattern": "**", "path": outside.root.display().to_string() }),
             )
             .expect("the directory exists, so it resolves");
-        let denied = ws
-            .policy
-            .authorize(call)
-            .expect_err("it is outside the workspace");
+        let denied = ws.authorize(call).expect_err("it is outside the workspace");
 
         assert!(matches!(
             denied,
@@ -496,7 +509,7 @@ mod grep {
             call.ops.as_slice(),
             [Op::Search { query, .. }] if query == "TODO"
         ));
-        let granted = ws.policy.authorize(call).unwrap();
+        let granted = ws.authorize(call).unwrap();
         let permit = granted.permit();
         let searched = CanonPath::new(ws.root.join("src/main.rs"));
         assert!(permit.allows_search(&searched).is_ok());
@@ -555,10 +568,7 @@ mod grep {
                 json!({ "query": "password", "path": outside.root.display().to_string() }),
             )
             .expect("the directory exists, so it resolves");
-        let denied = ws
-            .policy
-            .authorize(call)
-            .expect_err("it is outside the workspace");
+        let denied = ws.authorize(call).expect_err("it is outside the workspace");
 
         assert!(matches!(
             denied,

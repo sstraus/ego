@@ -26,6 +26,26 @@ pub enum Mode {
     Yolo,
 }
 
+impl Mode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Mode::Plan => "plan",
+            Mode::Default => "default",
+            Mode::Auto => "auto",
+            Mode::Edits => "edits",
+            Mode::Yolo => "yolo",
+        }
+    }
+}
+
+impl std::fmt::Display for Mode {
+    /// The spelling the operator types, so a refusal that names the mode names
+    /// something they can go and change.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Permission rules (e.g. `"exec(cargo *)"`), split into allow and deny lists.
 ///
 /// **Parsed here, not carried as text.** A `Vec<String>` would mean the rule an

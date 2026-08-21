@@ -8,13 +8,15 @@
 //! `fs.rs`, not a consumer crate — can name `Sealed(())`, so the only way
 //! to produce a `Permit` anywhere in the program is this module's private
 //! `mint`, and the only way to reach *that* is
-//! [`PolicyEngine::authorize`], which derives the scope from the call.
+//! [`PolicyEngine::classify`], which derives the scope from the call.
 
 use std::fmt;
 
 use super::path::CanonPath;
 use super::prepared_call::{Op, PreparedCall};
+use super::rule::{Rule, RuleId};
 use super::scope::Scope;
+use crate::config::{Mode, PermCfg};
 
 /// A capability token whose constructor only this module can reach. Its
 /// only job is to make [`Permit`]'s constructor equally unreachable from
@@ -108,14 +110,15 @@ struct Sealed(());
 /// is private. There is no accessor either, and none returning `&mut`.
 ///
 /// ```compile_fail
-/// use ego_core::permit::{CanonPath, Op, PolicyEngine, PreparedCall};
-/// let engine = PolicyEngine::new(CanonPath::new("/ws"));
-/// let granted = engine
-///     .authorize(PreparedCall {
-///         tool: "read".to_string(),
-///         ops: vec![Op::Read { path: CanonPath::new("/ws/a.rs") }],
-///     })
-///     .unwrap();
+/// use ego_core::config::{Mode, PermCfg};
+/// use ego_core::permit::{CanonPath, Classification, Op, PolicyEngine, PreparedCall};
+/// let engine = PolicyEngine::new(CanonPath::new("/ws"), Mode::Default, PermCfg::default());
+/// let call = PreparedCall {
+///     tool: "read".to_string(),
+///     ops: vec![Op::Read { path: CanonPath::new("/ws/a.rs") }],
+/// };
+/// let Classification::Settled(Ok(granted)) = engine.classify(call)
+///     else { panic!("a workspace read is allowed") };
 /// let _scope = &granted.permit().scope;
 /// ```
 ///
@@ -123,14 +126,15 @@ struct Sealed(());
 /// does not:
 ///
 /// ```
-/// use ego_core::permit::{CanonPath, Op, PolicyEngine, PreparedCall};
-/// let engine = PolicyEngine::new(CanonPath::new("/ws"));
-/// let granted = engine
-///     .authorize(PreparedCall {
-///         tool: "read".to_string(),
-///         ops: vec![Op::Read { path: CanonPath::new("/ws/a.rs") }],
-///     })
-///     .unwrap();
+/// use ego_core::config::{Mode, PermCfg};
+/// use ego_core::permit::{CanonPath, Classification, Op, PolicyEngine, PreparedCall};
+/// let engine = PolicyEngine::new(CanonPath::new("/ws"), Mode::Default, PermCfg::default());
+/// let call = PreparedCall {
+///     tool: "read".to_string(),
+///     ops: vec![Op::Read { path: CanonPath::new("/ws/a.rs") }],
+/// };
+/// let Classification::Settled(Ok(granted)) = engine.classify(call)
+///     else { panic!("a workspace read is allowed") };
 /// let _permit = granted.permit();
 /// ```
 ///
@@ -280,7 +284,7 @@ impl Permit {
 /// A call and the grant that answers it, as one value.
 ///
 /// [`Invariant W`](PolicyEngine) says a permit belongs to a call. Until this
-/// type existed nothing in the types said so: `authorize` handed back a bare
+/// type existed nothing in the types said so: `classify` handed back a bare
 /// [`Permit`], and a caller holding the permit from call A alongside call B
 /// had two values it could pass in either combination. Pairing them here
 /// makes the correspondence structural — the same argument
@@ -288,7 +292,7 @@ impl Permit {
 /// inside its `GenerationAttempt` rather than beside it.
 ///
 /// No `Clone` and no public constructor: an `Authorized` is produced by
-/// [`PolicyEngine::authorize`] and by nothing else.
+/// [`PolicyEngine::classify`] and by nothing else.
 ///
 /// # Leg 1, continued
 ///
@@ -297,14 +301,15 @@ impl Permit {
 /// moved out and re-paired with another call — §3's whole subject.
 ///
 /// ```compile_fail
-/// use ego_core::permit::{CanonPath, Op, PolicyEngine, PreparedCall};
-/// let engine = PolicyEngine::new(CanonPath::new("/ws"));
-/// let granted = engine
-///     .authorize(PreparedCall {
-///         tool: "read".to_string(),
-///         ops: vec![Op::Read { path: CanonPath::new("/ws/a.rs") }],
-///     })
-///     .unwrap();
+/// use ego_core::config::{Mode, PermCfg};
+/// use ego_core::permit::{CanonPath, Classification, Op, PolicyEngine, PreparedCall};
+/// let engine = PolicyEngine::new(CanonPath::new("/ws"), Mode::Default, PermCfg::default());
+/// let call = PreparedCall {
+///     tool: "read".to_string(),
+///     ops: vec![Op::Read { path: CanonPath::new("/ws/a.rs") }],
+/// };
+/// let Classification::Settled(Ok(granted)) = engine.classify(call)
+///     else { panic!("a workspace read is allowed") };
 /// let _stolen = &granted.permit;
 /// ```
 ///
@@ -312,14 +317,15 @@ impl Permit {
 /// moved out:
 ///
 /// ```
-/// use ego_core::permit::{CanonPath, Op, PolicyEngine, PreparedCall};
-/// let engine = PolicyEngine::new(CanonPath::new("/ws"));
-/// let granted = engine
-///     .authorize(PreparedCall {
-///         tool: "read".to_string(),
-///         ops: vec![Op::Read { path: CanonPath::new("/ws/a.rs") }],
-///     })
-///     .unwrap();
+/// use ego_core::config::{Mode, PermCfg};
+/// use ego_core::permit::{CanonPath, Classification, Op, PolicyEngine, PreparedCall};
+/// let engine = PolicyEngine::new(CanonPath::new("/ws"), Mode::Default, PermCfg::default());
+/// let call = PreparedCall {
+///     tool: "read".to_string(),
+///     ops: vec![Op::Read { path: CanonPath::new("/ws/a.rs") }],
+/// };
+/// let Classification::Settled(Ok(granted)) = engine.classify(call)
+///     else { panic!("a workspace read is allowed") };
 /// let _borrowed = granted.permit();
 /// ```
 ///
@@ -333,14 +339,20 @@ impl Permit {
 /// privacy it names.
 ///
 /// ```compile_fail
-/// use ego_core::permit::{Authorized, CanonPath, Op, PolicyEngine, PreparedCall};
-/// let engine = PolicyEngine::new(CanonPath::new("/ws"));
-/// let read = |path: &str| PreparedCall {
-///     tool: "read".to_string(),
-///     ops: vec![Op::Read { path: CanonPath::new(path) }],
+/// use ego_core::config::{Mode, PermCfg};
+/// use ego_core::permit::{Authorized, CanonPath, Classification, Op, PolicyEngine, PreparedCall};
+/// let engine = PolicyEngine::new(CanonPath::new("/ws"), Mode::Default, PermCfg::default());
+/// let split = |path: &str| {
+///     let call = PreparedCall {
+///         tool: "read".to_string(),
+///         ops: vec![Op::Read { path: CanonPath::new(path) }],
+///     };
+///     let Classification::Settled(Ok(granted)) = engine.classify(call)
+///         else { panic!("a workspace read is allowed") };
+///     granted.into_parts()
 /// };
-/// let (_, permit) = engine.authorize(read("/ws/a.rs")).unwrap().into_parts();
-/// let (call, _) = engine.authorize(read("/ws/b.rs")).unwrap().into_parts();
+/// let (_, permit) = split("/ws/a.rs");
+/// let (call, _) = split("/ws/b.rs");
 /// let _forged = Authorized { call, permit };
 /// ```
 ///
@@ -349,14 +361,20 @@ impl Permit {
 /// above fails on the constructor rather than on a missing value.
 ///
 /// ```
-/// use ego_core::permit::{CanonPath, Op, PolicyEngine, PreparedCall};
-/// let engine = PolicyEngine::new(CanonPath::new("/ws"));
-/// let read = |path: &str| PreparedCall {
-///     tool: "read".to_string(),
-///     ops: vec![Op::Read { path: CanonPath::new(path) }],
+/// use ego_core::config::{Mode, PermCfg};
+/// use ego_core::permit::{CanonPath, Classification, Op, PolicyEngine, PreparedCall};
+/// let engine = PolicyEngine::new(CanonPath::new("/ws"), Mode::Default, PermCfg::default());
+/// let split = |path: &str| {
+///     let call = PreparedCall {
+///         tool: "read".to_string(),
+///         ops: vec![Op::Read { path: CanonPath::new(path) }],
+///     };
+///     let Classification::Settled(Ok(granted)) = engine.classify(call)
+///         else { panic!("a workspace read is allowed") };
+///     granted.into_parts()
 /// };
-/// let (_, _permit) = engine.authorize(read("/ws/a.rs")).unwrap().into_parts();
-/// let (_call, _) = engine.authorize(read("/ws/b.rs")).unwrap().into_parts();
+/// let (_, _permit) = split("/ws/a.rs");
+/// let (_call, _) = split("/ws/b.rs");
 /// ```
 ///
 /// **The forgery buys nothing even where it is available.** Inside
@@ -416,10 +434,32 @@ impl Authorized {
 
 /// Why policy refused to authorise a call. Names the operation, never just
 /// the fact of a refusal — `ARCHITECTURE.md` §3.2.
+///
+/// Every arm is a **settled** answer: the question was asked and the answer is
+/// no. A call nobody in this run can answer is not here — it is
+/// [`Classification::Ask`], which is a different thing wearing a different
+/// type.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PolicyDenied {
-    /// The call wants to write, and this milestone's tools are read-only.
-    WriteRefused { tool: String, path: CanonPath },
+    /// A deny rule covers this operation. Carries the rule's ID, because
+    /// "denied" without it leaves an operator grepping their config for which
+    /// of forty lines did it — and the ID is exactly what `ego rules revoke`
+    /// takes.
+    Denied {
+        tool: String,
+        op: &'static str,
+        path: CanonPath,
+        by: RuleId,
+    },
+    /// The mode forbids this operation outright — `plan` and a mutating op.
+    /// Not a rule and not relaxable by one: the floor is evaluated before
+    /// every allow.
+    ModeForbids {
+        tool: String,
+        mode: Mode,
+        op: &'static str,
+        path: CanonPath,
+    },
     /// The call wants to reach outside the workspace. Carries which kind of
     /// operation it was: "you may not read /etc/passwd" and "you may not list
     /// /etc" are different refusals, and a prompt that flattens them into
@@ -434,9 +474,18 @@ pub enum PolicyDenied {
 impl fmt::Display for PolicyDenied {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            PolicyDenied::WriteRefused { tool, path } => write!(
+            PolicyDenied::Denied { tool, op, path, by } => {
+                write!(f, "{tool} may not {op} {path}: denied by {by}")
+            }
+            PolicyDenied::ModeForbids {
+                tool,
+                mode,
+                op,
+                path,
+            } => write!(
                 f,
-                "{tool} may not write {path}: this session's tools are read-only"
+                "{tool} may not {op} {path}: {mode} mode forbids every \
+                 operation that changes anything"
             ),
             PolicyDenied::OutsideWorkspace { tool, op, path } => {
                 write!(f, "{tool} may not {op} {path}: it is outside the workspace")
@@ -446,6 +495,113 @@ impl fmt::Display for PolicyDenied {
 }
 
 impl std::error::Error for PolicyDenied {}
+
+/// Why a call could not be settled without asking somebody.
+///
+/// A value and not a `bool` because `ARCHITECTURE.md` §3.4 requires the
+/// *reason* to reach both the human and the audit event: they produce
+/// different prompts and different headless behaviours.
+///
+/// **Two arms, not four.** `2026-08-21-a-permit-nobody-can-widen.md` §4 also
+/// names "the judge was unavailable" and "the judge was uncertain". There is
+/// no judge in this build, so those have no producer and are not declared —
+/// the same rule that keeps `Op::Spawn` out of the `Op` enum.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Escalation {
+    /// No rule covered it and the mode does not auto-approve it.
+    NoRuleCovers { op: &'static str, path: CanonPath },
+}
+
+impl fmt::Display for Escalation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Escalation::NoRuleCovers { op, path } => {
+                write!(f, "no rule covers {op} {path}")
+            }
+        }
+    }
+}
+
+/// What a host would render to ask a human.
+///
+/// **It does not carry the [`Scope`].** The scope is ego's internal answer to
+/// a question the human has not answered yet, and a host that could read one
+/// is one step from a host that proposes one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PermissionRequest {
+    tool: String,
+    ops: Vec<Op>,
+    why: Escalation,
+}
+
+impl PermissionRequest {
+    pub fn tool(&self) -> &str {
+        &self.tool
+    }
+
+    /// The canonical operations, which is what a prompt must show. Rendering
+    /// the tool's raw parameters instead would show the model's words rather
+    /// than the resolved effect — the thing `prepare` exists to replace.
+    pub fn ops(&self) -> &[Op] {
+        &self.ops
+    }
+
+    pub fn why(&self) -> &Escalation {
+        &self.why
+    }
+}
+
+impl fmt::Display for PermissionRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} needs permission: {}", self.tool, self.why)
+    }
+}
+
+/// A call that reached the end of the evaluation order without being settled.
+///
+/// No `Clone`, private fields, and constructible only in this module. A loop
+/// can carry one and hand it back; it cannot open one, and it cannot turn one
+/// into a [`Permit`] — [`PolicyEngine::classify`] remains the only path to
+/// one, so §5's separation is enforced by visibility rather than by a comment.
+///
+/// **It does not carry the computed `Scope`, and §5 says it should.** With no
+/// approver in this build there is no `grant`, so a carried scope would be a
+/// field nothing reads. The scope is instead derived by one private function
+/// that `classify` calls and that `grant` will call, which keeps the single
+/// definition §5 wanted and gives a stronger version of its property: the loop
+/// cannot read, widen or mint a scope because it cannot reach the function at
+/// all, not merely because a field is private.
+#[derive(Debug)]
+pub struct Pending {
+    call: PreparedCall,
+    ask: PermissionRequest,
+}
+
+impl Pending {
+    /// The call that could not be settled.
+    pub fn call(&self) -> &PreparedCall {
+        &self.call
+    }
+
+    /// What to put to whoever can answer.
+    pub fn request(&self) -> &PermissionRequest {
+        &self.ask
+    }
+}
+
+/// What [`PolicyEngine::classify`] concluded.
+///
+/// Two arms because "the answer is no" and "nobody here can answer" are
+/// different facts. Both end a headless run at exit 3 today
+/// (`CLI.md` §4.4), and they say different things while doing it — which is
+/// the whole of what an operator has to go on.
+#[derive(Debug)]
+pub enum Classification {
+    /// Decided, one way or the other, without asking anybody.
+    Settled(Result<Authorized, PolicyDenied>),
+    /// Not ours to answer.
+    Ask(Pending),
+}
 
 /// The sole minter of [`Permit`]s (`ARCHITECTURE.md` §3.2, §3.4).
 ///
@@ -463,11 +619,12 @@ impl std::error::Error for PolicyDenied {}
 /// `PolicyEngine` from outside `grant.rs`. This is the widening primitive —
 /// give it a `Scope` and it hands back the matching authority, with no call
 /// involved — and its absence from the public surface is what makes
-/// [`authorize`](Self::authorize) the only source of a permit.
+/// [`classify`](Self::classify) the only source of a permit.
 ///
 /// ```compile_fail
+/// use ego_core::config::{Mode, PermCfg};
 /// use ego_core::permit::{CanonPath, PolicyEngine, Scope};
-/// let engine = PolicyEngine::new(CanonPath::new("/ws"));
+/// let engine = PolicyEngine::new(CanonPath::new("/ws"), Mode::Default, PermCfg::default());
 /// let _wide = engine.mint(Scope::default());
 /// ```
 ///
@@ -475,8 +632,9 @@ impl std::error::Error for PolicyDenied {}
 /// method is the only missing piece:
 ///
 /// ```
+/// use ego_core::config::{Mode, PermCfg};
 /// use ego_core::permit::{CanonPath, PolicyEngine, Scope};
-/// let _engine = PolicyEngine::new(CanonPath::new("/ws"));
+/// let _engine = PolicyEngine::new(CanonPath::new("/ws"), Mode::Default, PermCfg::default());
 /// let _empty = Scope::default();
 /// ```
 ///
@@ -500,21 +658,36 @@ impl std::error::Error for PolicyDenied {}
 /// assert!(empty.read_paths().is_empty());
 /// ```
 ///
-/// Stands in for the full rule-grammar-plus-judge engine of §3.4 axes 2–3,
-/// which is a later milestone; for M0b it answers one question — see
-/// [`authorize`](Self::authorize). There is deliberately no `widen` method,
-/// here or anywhere: a call that needs a broader grant is a new decision,
-/// made by minting a new `Permit`, not by mutating an old one.
+/// Two of §3.4's three axes are here: the mode and the rules. The third, the
+/// judge, has nothing to build it out of yet, so a call the first two cannot
+/// settle leaves as a question — see [`classify`](Self::classify).
+///
+/// There is deliberately no `widen` method, here or anywhere: a call that
+/// needs a broader grant is a new decision, made by minting a new `Permit`,
+/// not by mutating an old one.
 #[derive(Debug)]
 pub struct PolicyEngine {
-    /// Everything at or under this path may be read. Nothing else may.
+    /// The boundary ego draws for itself. Not a rule: nobody wrote it, and no
+    /// rule lifts it.
     workspace: CanonPath,
+    mode: Mode,
+    /// Both lists intact, matched per call. `resolve` no longer subtracts one
+    /// from the other — that comparison was string equality between two lists
+    /// and `deny = ["exec(git *)"]` left `allow = ["exec(git push)"]` standing.
+    allow: Vec<Rule>,
+    deny: Vec<Rule>,
 }
 
 impl PolicyEngine {
-    /// A policy that admits reads inside `workspace`.
-    pub fn new(workspace: CanonPath) -> Self {
-        Self { workspace }
+    /// A policy that decides `mode`'s way, under `permissions`, inside
+    /// `workspace`.
+    pub fn new(workspace: CanonPath, mode: Mode, permissions: PermCfg) -> Self {
+        Self {
+            workspace,
+            mode,
+            allow: permissions.allow,
+            deny: permissions.deny,
+        }
     }
 
     /// Decide what a prepared call may do, and hand back the grant that says
@@ -526,48 +699,138 @@ impl PolicyEngine {
     /// chose the `Scope` was the real policy, and the caller is the turn
     /// loop, which has no business holding that authority.
     ///
-    /// M0b's rule is one line long: a read inside the workspace is admitted,
-    /// and nothing else is. `ARCHITECTURE.md` §3.4's grammar, modes and judge
-    /// are M1's; the shape here is what lets them arrive without moving
-    /// anything — a mode that asks a human still returns an [`Authorized`] or
-    /// a `PolicyDenied` from this method.
-    ///
     /// Takes the call **by value** and gives it back inside the
     /// [`Authorized`], so the pairing is the only thing a caller can hold.
-    pub fn authorize(&self, call: PreparedCall) -> Result<Authorized, PolicyDenied> {
-        let mut scope = Scope::default();
+    ///
+    /// **Pure and sync**, which is what lets the async decision be somebody
+    /// else's problem: nothing here awaits, opens anything or reads a clock.
+    ///
+    /// The order is fixed
+    /// (`docs/decisions/2026-08-21-a-permit-nobody-can-widen.md` §6), first
+    /// match wins, and it is evaluated **per operation** — a call with three
+    /// ops is three questions and every one of them must be answered before
+    /// the call is authorised. That is why §4 of the rule ADR refuses a
+    /// conjunction across heads: it would be a second way to write what the
+    /// loop below already does.
+    ///
+    /// ```text
+    /// 0. the workspace boundary   (not a rule; no mode lifts it)
+    /// 1. deny                     (system denies are unioned in by resolve)
+    /// 2. mode floor               (plan refuses every mutating op)
+    /// 3. allow
+    /// 4. mode ceiling             (edits approves workspace writes; yolo all)
+    /// →  ask
+    /// ```
+    ///
+    /// Steps 1 and 2 of the ADR's seven are one step here, and nothing is lost
+    /// by it: `resolve` unions the system layer's denies into the deny list
+    /// through a ceiling no higher layer can clear, and deny precedes allow
+    /// either way. What a separate step would buy is *attribution* in the
+    /// audit event, and that arrives with the event.
+    ///
+    /// Steps 6 and 7 — the judge and the human — have no producer in this
+    /// build, so the order ends by returning the question rather than
+    /// answering it.
+    pub fn classify(&self, call: PreparedCall) -> Classification {
         for op in &call.ops {
-            if let Op::Write { path, .. } = op {
-                return Err(PolicyDenied::WriteRefused {
-                    tool: call.tool.clone(),
-                    path: path.clone(),
-                });
+            if let Err(denied) = self.judge(&call, op) {
+                return Classification::Settled(Err(denied));
             }
-            let path = op.path();
-            if !path.is_or_under(&self.workspace) {
-                return Err(PolicyDenied::OutsideWorkspace {
-                    tool: call.tool.clone(),
-                    op: op.name(),
-                    path: path.clone(),
+            if !self.approves(op) {
+                return Classification::Ask(Pending {
+                    ask: PermissionRequest {
+                        tool: call.tool.clone(),
+                        ops: call.ops.clone(),
+                        why: Escalation::NoRuleCovers {
+                            op: op.name(),
+                            path: op.path().clone(),
+                        },
+                    },
+                    call,
                 });
-            }
-            // Each op widens only its own authority. A call that lists a
-            // directory gets `list_paths` and no `read_paths`, so the tool
-            // learns names and cannot then read what it found — the whole
-            // reason these are separate lists.
-            match op {
-                Op::Read { .. } => scope.read_paths.push(path.clone()),
-                Op::List { .. } => scope.list_paths.push(path.clone()),
-                Op::Search { .. } => scope.search_paths.push(path.clone()),
-                Op::Write { .. } => unreachable!("refused above"),
             }
         }
-        // Scoped to the paths this call named, not to the workspace: a tool
-        // that asked to read one file is not thereby allowed to read the
-        // repository. `GuardedIo` re-resolves at use time, so a symlink
-        // swapped in afterwards is judged against this same narrow list.
-        let permit = self.mint(scope);
-        Ok(Authorized { call, permit })
+        let permit = self.mint(scope_of(&call));
+        Classification::Settled(Ok(Authorized { call, permit }))
+    }
+
+    /// Steps 0 to 2: everything that can refuse an operation outright.
+    fn judge(&self, call: &PreparedCall, op: &Op) -> Result<(), PolicyDenied> {
+        let path = op.path();
+
+        // 0. The workspace boundary. Evaluated before the rules because it is
+        //    not one of them: no operator wrote it, `--allow` cannot widen it,
+        //    and `yolo` does not lift it. `yolo` bypasses *asking*; the
+        //    sandbox (`ARCHITECTURE.md` §3.4 axis 4) is the axis that widens
+        //    or narrows where ego may reach, and it is a separate control.
+        if !path.is_or_under(&self.workspace) {
+            return Err(PolicyDenied::OutsideWorkspace {
+                tool: call.tool.clone(),
+                op: op.name(),
+                path: path.clone(),
+            });
+        }
+
+        // 1. Deny, before any allow at any scope.
+        if let Some(rule) = self.matching(&self.deny, op) {
+            return Err(PolicyDenied::Denied {
+                tool: call.tool.clone(),
+                op: op.name(),
+                path: path.clone(),
+                by: rule.id(),
+            });
+        }
+
+        // 2. The mode floor. Above the allow list, so an allow rule cannot
+        //    relax it: `plan` means the run does not change anything, and a
+        //    mode a rule could switch off would not mean that.
+        if self.mode == Mode::Plan && op.mutates() {
+            return Err(PolicyDenied::ModeForbids {
+                tool: call.tool.clone(),
+                mode: self.mode,
+                op: op.name(),
+                path: path.clone(),
+            });
+        }
+
+        Ok(())
+    }
+
+    /// Steps 3 and 4: everything that can approve one without asking.
+    fn approves(&self, op: &Op) -> bool {
+        // 3. An allow rule the operator wrote.
+        if self.matching(&self.allow, op).is_some() {
+            return true;
+        }
+
+        // 4. The mode ceiling.
+        match self.mode {
+            // Bypass. Not "wider authority" — the scope is still derived from
+            // the call — but "do not ask about it".
+            Mode::Yolo => true,
+            // Auto-approves workspace writes; step 0 already established that
+            // every path here is inside the workspace.
+            Mode::Edits => true,
+            // `ARCHITECTURE.md:242` — these review unresolved **sensitive**
+            // actions, not every action. A read inside the workspace that
+            // stopped the run to ask would be the prompt fatigue that
+            // `ARCHITECTURE.md:238` counts as a security bug.
+            //
+            // `Auto` behaves as `Default` because step 6's judge does not
+            // exist. When it does, `Auto` consults it here instead of falling
+            // through, and `Default` is unchanged.
+            Mode::Plan | Mode::Default | Mode::Auto => !op.mutates(),
+        }
+    }
+
+    /// The first rule in `rules` that covers `op`, if any.
+    ///
+    /// First match wins, in the order the lists were resolved. Matching is
+    /// against the canonical operation and never against rendered text.
+    fn matching<'r>(&self, rules: &'r [Rule], op: &Op) -> Option<&'r Rule> {
+        rules
+            .iter()
+            .find(|rule| rule.matches(op, self.workspace.as_path()))
     }
 
     /// Mint a permit for an explicit scope.
@@ -582,8 +845,8 @@ impl PolicyEngine {
     /// any holder of a `&PolicyEngine` could compose a `Scope` covering the
     /// whole disk and get a `Permit` for it.
     ///
-    /// With it private, [`authorize`](Self::authorize) is the only path to a
-    /// `Permit` in the entire program, and `authorize` derives the scope from
+    /// With it private, [`classify`](Self::classify) is the only path to a
+    /// `Permit` in the entire program, and `classify` derives the scope from
     /// the call. A loop that chooses its own `Scope` is a loop that is its own
     /// policy, and now it cannot.
     fn mint(&self, scope: Scope) -> Permit {
@@ -592,6 +855,36 @@ impl PolicyEngine {
             _sealed: Sealed(()),
         }
     }
+}
+
+/// The authority a call's own operations contribute — **the** definition,
+/// called once and never inlined at a second site.
+///
+/// §1 of `2026-08-21-a-permit-nobody-can-widen.md`: the scope comes from the
+/// call, so a permit can never allow more than the call asked for and a rule
+/// that matched could not widen it if it wanted to. Nothing decides here; by
+/// the time this runs, every operation has already been approved.
+///
+/// Scoped to the paths this call named, not to the workspace: a tool that
+/// asked to read one file is not thereby allowed to read the repository.
+/// `GuardedIo` re-resolves at use time, so a symlink swapped in afterwards is
+/// judged against this same narrow list.
+fn scope_of(call: &PreparedCall) -> Scope {
+    let mut scope = Scope::default();
+    for op in &call.ops {
+        let path = op.path().clone();
+        // Each op widens only its own authority. A call that lists a
+        // directory gets `list_paths` and no `read_paths`, so the tool learns
+        // names and cannot then read what it found — the whole reason these
+        // are separate lists.
+        match op {
+            Op::Read { .. } => scope.read_paths.push(path),
+            Op::List { .. } => scope.list_paths.push(path),
+            Op::Search { .. } => scope.search_paths.push(path),
+            Op::Write { .. } => scope.write_paths.push(path),
+        }
+    }
+    scope
 }
 
 /// Scope mechanics, and the one place `mint` can still be called.
@@ -622,6 +915,16 @@ mod tests {
         }
     }
 
+    /// An engine whose only job below is to be the thing that can `mint`.
+    ///
+    /// The mode and the rules decide *whether* a scope is minted, and none of
+    /// these tests goes through `classify` — they hand `mint` a scope
+    /// directly and ask what the resulting permit means. So the defaults are
+    /// not a choice here; there is nothing for them to affect.
+    fn minter() -> PolicyEngine {
+        PolicyEngine::new(CanonPath::new("/ws"), Mode::Default, PermCfg::default())
+    }
+
     #[test]
     fn permit_typed_tool_writes_inside_permit_ok() {
         let fs = FakeFs::default();
@@ -634,7 +937,7 @@ mod tests {
             )
             .unwrap();
 
-        let engine = PolicyEngine::new(CanonPath::new("/ws"));
+        let engine = minter();
         let permit = engine.mint(Scope {
             write_paths: vec![CanonPath::new("/ws/allowed")],
             ..Scope::default()
@@ -658,7 +961,7 @@ mod tests {
             .prepare(json!({ "path": "/etc/passwd", "contents": "pwned" }), &ctx)
             .unwrap();
 
-        let engine = PolicyEngine::new(CanonPath::new("/ws"));
+        let engine = minter();
         let permit = engine.mint(Scope {
             write_paths: vec![CanonPath::new("/ws/allowed")],
             ..Scope::default()
@@ -705,7 +1008,7 @@ mod tests {
             }]
         );
 
-        let engine = PolicyEngine::new(CanonPath::new("/ws"));
+        let engine = minter();
         let permit = engine.mint(Scope {
             write_paths: vec![CanonPath::new("/ws/allowed")],
             ..Scope::default()
@@ -737,7 +1040,7 @@ mod tests {
         fs.file("/ws/readable/notes.md", "public notes");
         fs.file("/ws/private/notes.md", "private notes");
 
-        let engine = PolicyEngine::new(CanonPath::new("/ws"));
+        let engine = minter();
         let permit = engine.mint(Scope {
             read_paths: vec![CanonPath::new("/ws/readable")],
             ..Scope::default()
@@ -759,7 +1062,7 @@ mod tests {
     #[test]
     fn permit_guarded_fs_write_denies_sibling_prefix_directory() {
         let fs = FakeFs::default();
-        let engine = PolicyEngine::new(CanonPath::new("/ws"));
+        let engine = minter();
         let permit = engine.mint(Scope {
             write_paths: vec![CanonPath::new("/ws/allowed")],
             ..Scope::default()
@@ -785,7 +1088,7 @@ mod tests {
     #[test]
     fn permit_guarded_fs_write_allows_scope_root_and_nested_descendant() {
         let fs = FakeFs::default();
-        let engine = PolicyEngine::new(CanonPath::new("/ws"));
+        let engine = minter();
         let permit = engine.mint(Scope {
             write_paths: vec![CanonPath::new("/ws/allowed")],
             ..Scope::default()
@@ -815,7 +1118,7 @@ mod tests {
         let fs = FakeFs::default();
         fs.file("/ws/allowed-evil/secret.txt", "leaked");
 
-        let engine = PolicyEngine::new(CanonPath::new("/ws"));
+        let engine = minter();
         let permit = engine.mint(Scope {
             read_paths: vec![CanonPath::new("/ws/allowed")],
             ..Scope::default()
@@ -833,7 +1136,7 @@ mod tests {
 
     #[test]
     fn permit_scope_covers_paths_endpoints_and_argv() {
-        let engine = PolicyEngine::new(CanonPath::new("/ws"));
+        let engine = minter();
         let permit = engine.mint(Scope {
             write_paths: vec![CanonPath::new("/ws/allowed")],
             read_paths: vec![CanonPath::new("/ws/readable")],
