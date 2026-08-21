@@ -252,7 +252,7 @@ them; the flags with none are waiting on a subsystem that table does not place.
 
 ```json
 {
-  "v": 1,
+  "v": 5,
   "session": "s_9f2k…",
   "result": "…final assistant text or --schema-validated object…",
   "exit_reason": "done|budget|max_turns|timeout|permission|error",
@@ -264,6 +264,13 @@ them; the flags with none are waiting on a subsystem that table does not place.
             "total": { "amount": "0.083", "currency": "USD" } }
 }
 ```
+
+`v` is **`PUBLIC_EVENT_VERSION`**, the same number §4.2's events carry, and not
+a number of its own. This object is a projection of the same public model —
+`usage`, `cost` and `context` are that vocabulary's types, so a change to them
+changes both surfaces at once, and a second number would let one of the two
+move without the other. §4.6's catalogue is versioned separately for the
+opposite reason: it publishes no part of the event model.
 
 `usage` is the sum of the per-generation deltas, split by the categories that
 are *priced differently*; it is a flow and only grows. `context` is the

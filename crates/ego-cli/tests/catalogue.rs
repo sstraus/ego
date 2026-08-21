@@ -174,6 +174,27 @@ fn resume_refuses_an_id_no_session_has_rather_than_creating_one() {
         refusal.contains("--all"),
         "the refusal should say how to see what there is: {refusal}"
     );
+    names_the_id_and_nothing_rustish(&refusal, id(7));
+}
+
+/// A refusal an operator reads must carry the id they can hand back to
+/// `ego resume`, and must not carry the name of a Rust type.
+///
+/// `SessionId` derives `Debug` and implements `Display`, and the two differ:
+/// `{id:?}` renders `SessionId(0192…)`. Both compile, both look right in a
+/// format string, and only one is a sentence — which is why this is asserted
+/// rather than left to whoever writes the next refusal. It was `Debug` in both
+/// of `resolve`'s refusals until an operator-eye look at the built binary
+/// showed `session SessionId(0192aaaa-…) belongs to /somewhere/else`.
+fn names_the_id_and_nothing_rustish(refusal: &str, wanted: SessionId) {
+    assert!(
+        refusal.contains(&wanted.to_string()),
+        "the refusal must name the id: {refusal}"
+    );
+    assert!(
+        !refusal.contains("SessionId("),
+        "a Rust type name reached an operator: {refusal}"
+    );
 }
 
 /// The session's history was recorded against one tree and this run's tools
@@ -191,6 +212,7 @@ fn resume_refuses_a_session_belonging_to_another_workspace_naming_both() {
         refusal.contains("-C /elsewhere"),
         "the refusal should be actionable: {refusal}"
     );
+    names_the_id_and_nothing_rustish(&refusal, id(1));
 }
 
 /// An explicitly named session of this workspace is simply resolved — this is
