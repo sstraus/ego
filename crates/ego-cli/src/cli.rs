@@ -106,7 +106,7 @@ const UNAVAILABLE: &[Unavailable] = &[
 /// test: `CLI.md` §4.3 says a retired flag errors by name with its
 /// replacement, and the moment that rule is easiest to forget is the first
 /// retirement — when there is no mechanism, only a note in a changelog.
-const RETIRED: &[(&str, &str)] = &[];
+pub const RETIRED: &[(&str, &str)] = &[];
 
 /// The flag name in `token`, if it is one. `--budget=2.5$` is `--budget`.
 fn flag_name(token: &str) -> Option<&str> {
@@ -130,10 +130,7 @@ fn check_matrix(tokens: &[String]) -> Result<(), UsageError> {
                 "{name} has been retired; use {replacement}"
             )));
         }
-        if let Some(entry) = UNAVAILABLE
-            .iter()
-            .find(|entry| entry.flags.contains(&name))
-        {
+        if let Some(entry) = UNAVAILABLE.iter().find(|entry| entry.flags.contains(&name)) {
             return Err(UsageError(format!(
                 "{name} is documented in CLI.md §3 and is not available in this \
                  build: it is waiting on {}",

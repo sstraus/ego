@@ -15,6 +15,7 @@
 pub mod budget;
 pub mod cli;
 pub mod config;
+pub mod facts;
 pub mod model;
 pub mod output;
 pub mod prompt;

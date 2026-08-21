@@ -132,9 +132,20 @@ impl ProviderRow {
     /// several layers later — by which point the request has been built,
     /// sent, and charged to somebody's rate limit.
     pub fn openai() -> Result<Self, MissingCredential> {
+        Self::openai_at(Url::parse(OPENAI_ENDPOINT).expect("a constant this file controls"))
+    }
+
+    /// The hosted row against a different address.
+    ///
+    /// The same pairing [`ollama`](Self::ollama) and
+    /// [`ollama_default`](Self::ollama_default) already have, and for the same
+    /// reason: the endpoint is the caller's knowledge, the credential and the
+    /// id are the row's. Azure and the compatible gateways serve this wire
+    /// format at their own hostnames, and a test serves it on loopback.
+    pub fn openai_at(endpoint: Url) -> Result<Self, MissingCredential> {
         Ok(ProviderRow {
             id: "openai".to_string(),
-            endpoint: Url::parse(OPENAI_ENDPOINT).expect("a constant this file controls"),
+            endpoint,
             auth: Auth::bearer_from_env(OPENAI_KEY_VAR)?,
         })
     }

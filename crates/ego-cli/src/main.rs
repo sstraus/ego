@@ -42,6 +42,6 @@ async fn main() -> std::process::ExitCode {
         },
     };
 
-    run::diagnose(&ended.termination);
+    run::diagnose(&ended.termination, out.broken());
     std::process::ExitCode::from(ended.termination.exit_code())
 }

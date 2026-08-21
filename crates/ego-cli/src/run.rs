@@ -15,7 +15,7 @@ use ego_core::config::{
     Effective, Limits, Posture, Selection, SystemPrompt, Trust, resolve, system_prompt,
 };
 use ego_core::cost::CurrencyCode;
-use ego_core::event::domain::{CancelCause, ExitReason};
+use ego_core::event::domain::CancelCause;
 use ego_core::event::id::SessionId;
 use ego_core::permit::{CanonPath, PolicyEngine, Tool};
 use ego_core::public::{PUBLIC_EVENT_VERSION, PublicEvent};
@@ -33,7 +33,7 @@ use crate::budget::{self, Budget};
 use crate::cli::{Args, Output, SessionChoice, UsageError};
 use crate::output::{JsonlSink, Report, Stdout, TextSink, note};
 use crate::session::{self, Opened};
-use crate::{config, model, prompt, schema};
+use crate::{config, facts, model, prompt, schema};
 
 /// The currency a session settles in.
 ///
@@ -115,13 +115,16 @@ fn deadline(spec: &str) -> Result<Duration, UsageError> {
 /// later step agrees with it.
 fn workspace(directory: Option<&PathBuf>) -> Result<PathBuf, UsageError> {
     if let Some(dir) = directory {
-        std::env::set_current_dir(dir).map_err(|err| {
-            UsageError(format!("-C {}: {err}", dir.display()))
-        })?;
+        std::env::set_current_dir(dir)
+            .map_err(|err| UsageError(format!("-C {}: {err}", dir.display())))?;
     }
     std::env::current_dir()
         .and_then(std::fs::canonicalize)
-        .map_err(|err| UsageError(format!("the working directory could not be resolved: {err}")))
+        .map_err(|err| {
+            UsageError(format!(
+                "the working directory could not be resolved: {err}"
+            ))
+        })
 }
 
 /// The instructions and system prompt this run generates under.
@@ -150,14 +153,8 @@ fn instructions(
     }
 
     let selection = Selection::of(effective.posture, args.instructions.clone());
-    let set = ego_core::config::load(
-        &OsInstructionIo,
-        root,
-        cwd,
-        &selection,
-        Limits::default(),
-    )
-    .map_err(|err| UsageError(err.to_string()))?;
+    let set = ego_core::config::load(&OsInstructionIo, root, cwd, &selection, Limits::default())
+        .map_err(|err| UsageError(err.to_string()))?;
 
     for skipped in &set.skipped {
         note(&format!(
@@ -194,7 +191,10 @@ fn tools(selected: Option<&Vec<String>>) -> Result<Vec<Arc<dyn Tool>>, UsageErro
         return Ok(all);
     };
     for name in names {
-        if !all.iter().any(|tool| tool.descriptor().name == name.as_str()) {
+        if !all
+            .iter()
+            .any(|tool| tool.descriptor().name == name.as_str())
+        {
             let known: Vec<String> = all.iter().map(|tool| tool.descriptor().name).collect();
             return Err(UsageError(format!(
                 "--tools {name}: there is no such builtin; this build has {}",
@@ -206,6 +206,25 @@ fn tools(selected: Option<&Vec<String>>) -> Result<Vec<Arc<dyn Tool>>, UsageErro
         .into_iter()
         .filter(|tool| names.contains(&tool.descriptor().name))
         .collect())
+}
+
+/// The output ceiling the request carries.
+///
+/// `BudgetGate::reserve` needs one from somewhere: with neither the model nor
+/// the request stating a cap it refuses with `UnstatedCeiling { Output }`,
+/// which is right — a generation with no bound on its output has no bound on
+/// its price. Ollama states none (`ollama.rs`: "the daemon states no output
+/// ceiling, so the request must cap itself"), so this is the ordinary path for
+/// every local run rather than an edge case, and there is no `CLI.md` §3 flag
+/// to supply it with.
+///
+/// The served context window is the answer, because it is a bound rather than
+/// a guess: no generation can emit more output tokens than fit in the window it
+/// is generating into. It over-reserves — the prompt already occupies part of
+/// that window — and over-reserving is the safe direction for a gate whose only
+/// failure that matters is authorising too much.
+fn output_ceiling(caps: &ego_core::generator::capabilities::ModelCapabilities) -> Option<u64> {
+    caps.max_output_tokens.or(caps.max_context_tokens)
 }
 
 /// The capability names `session.started` publishes.
@@ -292,7 +311,8 @@ async fn execute(args: Args, out: &Stdout, cancel: CancelToken) -> Result<Ended,
     let http = model::transport(args.offline).map_err(|err| RunTermination::Provider {
         message: err.to_string(),
     })?;
-    let resolved = model::resolve(&slug, currency, &http)
+    let hosted = facts::supplied().map_err(usage)?;
+    let resolved = model::resolve(&slug, hosted, currency, &http)
         .await
         .map_err(|err| {
             if model::is_provider_failure(&err) {
@@ -359,7 +379,7 @@ async fn execute(args: Args, out: &Stdout, cancel: CancelToken) -> Result<Ended,
         model: resolved.model.clone(),
         system,
         thinking: args.thinking,
-        max_output_tokens: resolved.capabilities.max_output_tokens,
+        max_output_tokens: output_ceiling(&resolved.capabilities),
         parallel_tool_calls: resolved.capabilities.supports_parallel_tool_calls,
     };
 
@@ -485,9 +505,9 @@ impl Turns<'_> {
         prompt: &str,
         cancel: &CancelToken,
     ) -> Result<TurnOutcome, RunTermination> {
-        let remaining = self.timeout.map(|budget| {
-            budget.saturating_sub(self.started.elapsed())
-        });
+        let remaining = self
+            .timeout
+            .map(|budget| budget.saturating_sub(self.started.elapsed()));
 
         let outcome = {
             let mut running = Box::pin(loop_.run(prompt));
@@ -586,7 +606,12 @@ pub fn report(ended: &Ended) -> Report {
 /// A run that exits non-zero with nothing on stderr has told a person only a
 /// number. `--output json` says it in the object instead, and saying it twice
 /// would put diagnostics on stdout.
-pub fn diagnose(termination: &RunTermination) {
+///
+/// `broken` is what [`Stdout`] recorded if a write failed. A run stopped by a
+/// closed pipe ends as `Signalled(Term)`, which on its own reads as "somebody
+/// sent SIGTERM"; naming the real cause is the difference between a report and
+/// a guess.
+pub fn diagnose(termination: &RunTermination, broken: Option<String>) {
     let message = match termination {
         RunTermination::Done => return,
         RunTermination::TaskFailed => "the answer never satisfied the schema".to_string(),
@@ -601,12 +626,10 @@ pub fn diagnose(termination: &RunTermination) {
         RunTermination::MaxTurns => "stopped: --max-turns was reached".to_string(),
         RunTermination::TimedOut => "stopped: --timeout expired".to_string(),
         RunTermination::Signalled(Signal::Int) => "interrupted".to_string(),
-        RunTermination::Signalled(Signal::Term) => "terminated".to_string(),
+        RunTermination::Signalled(Signal::Term) => match broken {
+            Some(why) => format!("stopped: {why}"),
+            None => "terminated".to_string(),
+        },
     };
     note(&message);
-}
-
-/// What a turn ended as, for the text UI's benefit.
-pub fn is_completed(reason: ExitReason) -> bool {
-    matches!(reason, ExitReason::Completed)
 }

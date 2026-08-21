@@ -6,20 +6,18 @@
 //! write to stdout at all — [`Stdout`] — and by the diagnostic path
 //! ([`note`]) not being able to reach it.
 
-use std::io::{ErrorKind, IsTerminal, Write};
+use std::io::{ErrorKind, Write};
 use std::sync::Mutex;
 
+use ego_core::cost::CumulativeCost;
 use ego_core::event::domain::{CancelCause, OccupancyProvenance};
 use ego_core::event::id::SessionId;
 use ego_core::public::{ItemKind, PUBLIC_EVENT_VERSION, PublicEvent};
 use ego_core::run::RunTermination;
 use ego_core::sink::EventSink;
-use ego_core::cost::CumulativeCost;
 use ego_core::state::SessionState;
 use ego_core::turn::CancelToken;
 use serde::Serialize;
-
-use crate::cli::Output;
 
 /// The exclusive owner of the process's standard output.
 ///
@@ -112,11 +110,6 @@ impl Stdout {
             .lock()
             .expect("a poisoned lock means a writer panicked mid-line")
             .clone()
-    }
-
-    /// Whether stdout is a terminal, for the TTY-aware defaults of §1.3.
-    pub fn is_terminal(&self) -> bool {
-        std::io::stdout().is_terminal()
     }
 }
 
@@ -293,20 +286,5 @@ impl Report {
             ),
             cost: state.cost.clone(),
         }
-    }
-}
-
-/// Write whatever this output mode owes at the end of a run.
-///
-/// `jsonl` owes nothing: §4.2 says the final result rides the terminal event,
-/// so a summary object here would be a second answer to the same question.
-pub fn finish(out: &Stdout, mode: Output, text: &TextSink<'_>, report: &Report) {
-    match mode {
-        Output::Text => text.finish(),
-        Output::Json => match serde_json::to_string(report) {
-            Ok(line) => out.line(&line),
-            Err(err) => note(&format!("the result could not be serialised: {err}")),
-        },
-        Output::Jsonl => {}
     }
 }

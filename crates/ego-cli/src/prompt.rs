@@ -64,9 +64,9 @@ pub fn assemble(
     stdin: &dyn StdinSource,
 ) -> Result<String, UsageError> {
     let piped = || -> Result<String, UsageError> {
-        stdin.read().map_err(|err| {
-            UsageError(format!("the prompt could not be read from stdin: {err}"))
-        })
+        stdin
+            .read()
+            .map_err(|err| UsageError(format!("the prompt could not be read from stdin: {err}")))
     };
 
     if mode == Stdin::IsThePrompt {

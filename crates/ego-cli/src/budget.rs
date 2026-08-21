@@ -20,6 +20,11 @@
 //! binary knows about that is [`gate`] and [`ceiling_reached`] — two functions,
 //! one file. When `Metering` lands, this is the edit; nothing else in
 //! `ego-cli` reads a quote, a rate or a limit.
+//!
+//! One other module *builds* a quote — `facts.rs`, decoding the rates an
+//! operator wrote in `models.toml` — and it is named here rather than left to
+//! be found, because "one file" would otherwise be a claim this comment
+//! quietly makes false.
 
 use ego_core::budget::BudgetGate;
 use ego_core::cost::{Amount, CurrencyCode, Money, MoneyError};

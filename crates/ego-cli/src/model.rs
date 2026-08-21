@@ -11,9 +11,11 @@ use std::sync::Arc;
 use ego_ai::catalogue::{self, Catalogue, ModelSlug, ResolveError, ResolvedModel};
 use ego_ai::http::{EgressPolicy, Http, ReqwestHttp};
 use ego_ai::ollama;
-use ego_ai::provider::{ProviderRow, OLLAMA_ENDPOINT};
+use ego_ai::provider::{OLLAMA_ENDPOINT, OPENAI_ENDPOINT, ProviderRow};
 use ego_core::cost::CurrencyCode;
 use url::Url;
+
+use crate::facts;
 
 /// The environment variable Ollama's own client reads to find the daemon.
 ///
@@ -23,24 +25,35 @@ use url::Url;
 /// point the binary at a loopback stub without a network.
 pub const OLLAMA_HOST: &str = "OLLAMA_HOST";
 
-/// Where the local daemon serves its openai-compatible endpoint.
+/// The environment variable every openai-compatible client reads to be pointed
+/// somewhere other than `api.openai.com`.
 ///
-/// `OLLAMA_HOST` is conventionally a bare `host:port`, and is also written as
-/// a full URL; both are accepted, and anything else is refused rather than
-/// half-parsed into a request to somewhere unintended.
-fn ollama_endpoint() -> Result<Url, ResolveError> {
-    let Ok(host) = std::env::var(OLLAMA_HOST) else {
-        return Ok(Url::parse(OLLAMA_ENDPOINT).expect("a constant this file controls"));
+/// Same argument as [`OLLAMA_HOST`]: Azure deployments and the compatible
+/// gateways serve this wire format at their own hostnames, and the machine
+/// that uses one has already set this. It is also how a test reaches a
+/// loopback stub without a network.
+pub const OPENAI_BASE_URL: &str = "OPENAI_BASE_URL";
+
+/// The chat-completions endpoint an address variable names, or the default.
+///
+/// `OLLAMA_HOST` is conventionally a bare `host:port` and `OPENAI_BASE_URL` is
+/// conventionally a base URL without the path; both spellings are accepted for
+/// both, and anything else is refused rather than half-parsed into a request to
+/// somewhere unintended. The path is always set, so a variable that already
+/// carries one and a variable that does not resolve to the same address.
+fn endpoint(var: &str, fallback: &str) -> Result<Url, ResolveError> {
+    let Ok(given) = std::env::var(var) else {
+        return Ok(Url::parse(fallback).expect("a constant this file controls"));
     };
-    let host = host.trim();
-    let base = if host.contains("://") {
-        host.to_string()
+    let given = given.trim();
+    let base = if given.contains("://") {
+        given.to_string()
     } else {
-        format!("http://{host}")
+        format!("http://{given}")
     };
     let mut url = Url::parse(&base).map_err(|err| ResolveError::DaemonUnreachable {
-        endpoint: host.to_string(),
-        message: format!("{OLLAMA_HOST} is not an address: {err}"),
+        endpoint: given.to_string(),
+        message: format!("{var} is not an address: {err}"),
     })?;
     url.set_path("/v1/chat/completions");
     Ok(url)
@@ -72,21 +85,30 @@ pub fn transport(offline: bool) -> Result<Arc<dyn Http>, ResolveError> {
 /// built eagerly would make *every* invocation fail for want of a key, even
 /// `--model ollama/qwen3`.
 fn rows() -> Result<Vec<ProviderRow>, ResolveError> {
-    let mut rows = vec![ProviderRow::ollama(ollama_endpoint()?)];
-    if let Ok(openai) = ProviderRow::openai() {
+    let mut rows = vec![ProviderRow::ollama(endpoint(OLLAMA_HOST, OLLAMA_ENDPOINT)?)];
+    if let Ok(openai) = ProviderRow::openai_at(endpoint(OPENAI_BASE_URL, OPENAI_ENDPOINT)?) {
         rows.push(openai);
     }
     Ok(rows)
 }
 
 /// Resolve `slug` against the daemon or against what was supplied.
+///
+/// `hosted` comes from [`facts::supplied`] and is passed in rather than read
+/// here, so that a `models.toml` which cannot be parsed is reported as the file
+/// error it is. Folding it into [`ResolveError`] would make "your TOML has a
+/// stray bracket" arrive as a statement about a model.
 pub async fn resolve(
     slug: &str,
+    hosted: Vec<(String, facts::Hosted)>,
     currency: CurrencyCode,
     http: &Arc<dyn Http>,
 ) -> Result<ResolvedModel, ResolveError> {
     let slug = ModelSlug::parse(slug)?;
-    let catalogue = Catalogue::new(rows()?);
+    let mut catalogue = Catalogue::new(rows()?);
+    for (supplied, model) in hosted {
+        catalogue = catalogue.with_hosted(&supplied, model);
+    }
     if slug.provider == catalogue::OLLAMA {
         let row = catalogue.row(&slug.provider)?.clone();
         return ollama::resolve(&row, &slug.model, currency, http).await;

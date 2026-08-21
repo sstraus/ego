@@ -80,12 +80,14 @@ pub fn store_root(explicit: Option<&PathBuf>) -> Result<PathBuf, UsageError> {
 }
 
 /// The id this run writes under.
-pub fn id_for(choice: &SessionChoice, workspace: &std::path::Path) -> Result<SessionId, UsageError> {
+pub fn id_for(
+    choice: &SessionChoice,
+    workspace: &std::path::Path,
+) -> Result<SessionId, UsageError> {
     match choice {
         SessionChoice::New | SessionChoice::Ephemeral => Ok(SessionId::new()),
-        SessionChoice::Id(text) => SessionId::from_str(text).map_err(|err| {
-            UsageError(format!("--session-id {err}: pass the id of a session"))
-        }),
+        SessionChoice::Id(text) => SessionId::from_str(text)
+            .map_err(|err| UsageError(format!("--session-id {err}: pass the id of a session"))),
         SessionChoice::Named(name) => {
             let key = format!("{}\u{0}{name}", workspace.display());
             let derived = uuid::Uuid::new_v5(&NAMESPACE, key.as_bytes());

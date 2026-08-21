@@ -42,9 +42,7 @@ fn layer(source: Source, path: &Path) -> Result<Option<Sourced<ConfigLayer>>, Us
     match std::fs::read_to_string(path) {
         Ok(text) => ConfigLayer::parse(source, &text)
             .map(Some)
-            .map_err(|err: ConfigError| {
-                UsageError(format!("{}: {err}", path.display()))
-            }),
+            .map_err(|err: ConfigError| UsageError(format!("{}: {err}", path.display()))),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(err) => Err(UsageError(format!(
             "{} could not be read: {err}",
