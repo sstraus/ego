@@ -1302,3 +1302,39 @@ fn config_profile_rules_are_parsed_by_the_same_parser() {
     .expect_err("`bash` is not a head in a profile either");
     assert!(err.to_string().contains("unknown rule head `bash`"));
 }
+
+#[test]
+fn config_a_deny_written_in_two_layers_resolves_to_one_entry() {
+    // The system layer and the user layer deny the same predicate. The merge
+    // loop leaves `deny` holding the *user* copy; the ceiling pass then finds
+    // the system copy already present and skips it. One rule, one entry — and
+    // nothing in the result records that two layers wanted it.
+    //
+    // That is correct for enforcement and it is the whole difficulty for
+    // attribution: an origin derived from "which layer put this entry in the
+    // list" would name the user, the layer whose line can be deleted without
+    // lifting the denial. See
+    // `docs/decisions/2026-08-21-a-deny-that-names-who-can-lift-it.md`.
+    let overlapping = || PermCfg {
+        allow: vec![],
+        deny: vec![rule("read(/etc/**)")],
+    };
+    let layers = [
+        layer(
+            Source::System,
+            ConfigLayer {
+                permissions: Some(overlapping()),
+                ..Default::default()
+            },
+        ),
+        layer(
+            Source::User,
+            ConfigLayer {
+                permissions: Some(overlapping()),
+                ..Default::default()
+            },
+        ),
+    ];
+    let effective = resolve(&layers, Trust::Untrusted, None).unwrap();
+    assert_eq!(effective.permissions.deny, vec![rule("read(/etc/**)")]);
+}
