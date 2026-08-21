@@ -26,8 +26,9 @@
 //! what they say.
 
 use ego_ai::http::{HttpError, HttpResponse};
+use ego_ai::wire::RequestTarget;
 use ego_ai::wire::openai_completions::{
-    RequestRefused, StreamDecoder, build_request, decode, request_body,
+    Inexpressible, StreamDecoder, build_request, decode, request_body,
 };
 use ego_core::generator::attempt::DeliveryCertainty;
 use ego_core::generator::port::AiEvent;
@@ -273,21 +274,22 @@ fn reasoning_state_is_refused_rather_than_dropped() {
     };
     assert_eq!(
         request_body(&req),
-        Err(RequestRefused::ReasoningStateNotCarriable)
+        Err(Inexpressible::ReasoningStateNotCarriable)
     );
 }
 
 #[test]
 fn the_request_declares_what_it_sends_and_what_it_expects_back() {
-    let endpoint = Url::parse("https://api.openai.com/v1/chat/completions").expect("a URL");
-    let req = build_request(
-        endpoint.clone(),
-        vec![("authorization".to_string(), "Bearer sk-test".to_string())],
-        &golden_request(),
-    )
-    .expect("this request is expressible");
+    let base = Url::parse("https://api.openai.com/v1/").expect("a URL");
+    let headers = vec![("authorization".to_string(), "Bearer sk-test".to_string())];
+    let target = RequestTarget::new(&base, &headers);
+    let req = build_request(&target, &golden_request()).expect("this request is expressible");
 
-    assert_eq!(req.url, endpoint);
+    // The row carries the base; the mapping owns the path and joins it on.
+    assert_eq!(
+        req.url,
+        Url::parse("https://api.openai.com/v1/chat/completions").expect("a URL")
+    );
     let header = |name: &str| {
         req.headers
             .iter()

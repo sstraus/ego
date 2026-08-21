@@ -46,25 +46,21 @@ use provider_cost::ProviderCost;
 /// `Debug` and a row worth logging must not lose which shape it speaks.
 /// `Send + Sync` because a row is shared across a generation's tasks.
 pub trait WireFormat: fmt::Debug + Send + Sync {
-    /// The complete HTTP request for `req` against `endpoint`.
+    /// The complete HTTP request for `req` against `target`.
     ///
-    /// `headers` is the profile's contribution — the credential above all —
-    /// because a wire format is not allowed to know one
-    /// (`ARCHITECTURE.md` §3.1). A mapping adds the headers that are facts
-    /// about *the body it is about to write*, and no others.
-    /// Nothing else arrives, and that is the point: a mapping is handed an
-    /// address, a credential and a request, and is told nothing about who it
-    /// is speaking to. A provider that needs a different body is a different
-    /// value of this trait —
-    /// `docs/decisions/2026-08-21-a-shared-shape-is-not-a-shared-contract.md`
-    /// §4 allows a model fact, a transport fact or another mapping, and no
-    /// fourth option and no flag.
+    /// A [`RequestTarget`] and not a URL, and that is the whole enforcement
+    /// mechanism for "no per-provider branch in shared code": the target
+    /// carries a base and a list of headers and **no provider identity**, so
+    /// a mapping that wanted to branch on who it serves has nothing to branch
+    /// on (`docs/decisions/2026-08-21-a-shared-shape-is-not-a-shared-contract.md`
+    /// §2). A provider that needs a different body is a different value of
+    /// this trait — §4 allows a model fact, a transport fact or another
+    /// mapping, and no fourth option and no flag.
     fn build_request(
         &self,
-        endpoint: Url,
-        headers: Vec<(String, String)>,
+        target: &RequestTarget<'_>,
         req: &GenRequest,
-    ) -> Result<HttpRequest, Unexpressible>;
+    ) -> Result<HttpRequest, RequestRefused>;
 
     /// One provider response, decoded into the generation's events.
     ///
@@ -80,6 +76,80 @@ pub trait WireFormat: fmt::Debug + Send + Sync {
     ) -> BoxStream<'static, AiEvent>;
 }
 
+/// Everything a mapping needs about where a request goes.
+///
+/// Deliberately carries no provider id: a mapping that cannot learn who it is
+/// serving cannot branch on it, and "no per-provider branch in shared code"
+/// stops being a rule anyone has to remember
+/// (`docs/decisions/2026-08-21-a-shared-shape-is-not-a-shared-contract.md`
+/// §2).
+///
+/// The fields are private and the ADR's sketch has them public. The data and
+/// its visibility to a mapping are identical either way; what the accessors
+/// buy is that [`url`](Self::url) is the **only** way to reach a URL from
+/// here, so every mapping joins its path to the base the same way. A mapping
+/// holding the base directly would be a mapping that could `set_path` it, and
+/// the difference between `join` and `set_path` on a base with a prefix is a
+/// request sent somewhere unintended.
+pub struct RequestTarget<'a> {
+    base: &'a Url,
+    headers: &'a [(String, String)],
+}
+
+impl<'a> RequestTarget<'a> {
+    /// `base` is the row's, ending in `/` — see
+    /// [`ProviderRow::base`](crate::provider::ProviderRow::base), which is
+    /// where that is guaranteed. `headers` is the profile's contribution, the
+    /// credential above all, and it is opaque here because a wire format is
+    /// not allowed to know a credential (`ARCHITECTURE.md` §3.1).
+    pub fn new(base: &'a Url, headers: &'a [(String, String)]) -> Self {
+        RequestTarget { base, headers }
+    }
+
+    /// The row's base with this mapping's own path joined onto it.
+    ///
+    /// `join` and not `set_path`, which is absolute and would discard any
+    /// prefix the base carries — `https://gateway.example/openai/v1/` is a
+    /// real deployment shape, and `set_path` would send its requests to
+    /// `https://gateway.example/chat/completions`.
+    pub fn url(&self, path: &str) -> Url {
+        self.base
+            .join(path)
+            .expect("a relative path joined onto a base URL is a URL")
+    }
+
+    /// The profile's headers, verbatim and opaque.
+    ///
+    /// For a mapping whose request is not one JSON body and which therefore
+    /// cannot use [`post_json`](Self::post_json). Reading them is allowed;
+    /// interpreting them is not — a mapping that looked for a credential in
+    /// here would be a mapping that knows what a credential is.
+    pub fn headers(&self) -> &[(String, String)] {
+        self.headers
+    }
+
+    /// A JSON body posted to this target's `path`, asking for an event stream
+    /// back.
+    ///
+    /// The two headers it adds are facts about *what is being sent and what is
+    /// wanted back*, which is the only kind of header a mapping is allowed to
+    /// add (`ARCHITECTURE.md` §3.1). It lives here rather than in each mapping
+    /// because it is the same two headers for every streaming JSON API, and a
+    /// mapping that had to remember them is a mapping that can forget one.
+    pub fn post_json(&self, path: &str, body: Vec<u8>) -> HttpRequest {
+        let mut headers = Vec::with_capacity(self.headers.len() + 2);
+        headers.push(("content-type".to_string(), "application/json".to_string()));
+        headers.push(("accept".to_string(), "text/event-stream".to_string()));
+        headers.extend(self.headers.iter().cloned());
+        HttpRequest {
+            url: self.url(path),
+            method: Method::Post,
+            headers,
+            body: Some(body),
+        }
+    }
+}
+
 /// A [`GenRequest`] a wire format cannot express without lying about it.
 ///
 /// One type at the seam, and a precise enum inside each mapping that converts
@@ -89,7 +159,9 @@ pub trait WireFormat: fmt::Debug + Send + Sync {
 /// Messages API has nowhere to put an absent `max_tokens` — so a shared enum
 /// would give every mapping variants that mean nothing for it, and a per-
 /// mapping enum at the seam would make the caller match on which mapping it
-/// happened to be holding.
+/// happened to be holding. The mapping-local enums are named `Inexpressible`
+/// for that reason: this type says a request was *refused*, and theirs
+/// enumerate what their own format cannot *say*.
 ///
 /// A rendered sentence and not a code, because there is exactly one caller —
 /// `WireGenerator`, which turns it into
@@ -97,21 +169,21 @@ pub trait WireFormat: fmt::Debug + Send + Sync {
 /// sentence. A discriminant nothing reads is a field nothing can be wrong
 /// about, so it arrives when a reader does.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Unexpressible(String);
+pub struct RequestRefused(String);
 
-impl Unexpressible {
+impl RequestRefused {
     pub fn new(reason: impl Into<String>) -> Self {
-        Unexpressible(reason.into())
+        RequestRefused(reason.into())
     }
 }
 
-impl fmt::Display for Unexpressible {
+impl fmt::Display for RequestRefused {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
     }
 }
 
-impl std::error::Error for Unexpressible {}
+impl std::error::Error for RequestRefused {}
 
 /// The events a generation that produced no terminal frame still owes.
 ///
@@ -138,29 +210,4 @@ pub fn failed(message: String, delivery: DeliveryCertainty, kind: ErrorKind) -> 
         AiEvent::Error { message, kind },
         AiEvent::Stop(StopReason::Error),
     ]
-}
-
-/// A JSON body posted to `url`, asking for an event stream back.
-///
-/// The two headers are facts about *what is being sent and what is wanted
-/// back*, which is the only kind of header a mapping is allowed to add
-/// (`ARCHITECTURE.md` §3.1) — everything else in `headers` is the profile's,
-/// the credential above all. It lives at the seam because it is the same two
-/// headers for every streaming JSON API, and a mapping that had to remember
-/// them is a mapping that can forget one.
-pub(crate) fn json_sse_post(
-    url: Url,
-    headers: Vec<(String, String)>,
-    body: Vec<u8>,
-) -> HttpRequest {
-    let mut all = Vec::with_capacity(headers.len() + 2);
-    all.push(("content-type".to_string(), "application/json".to_string()));
-    all.push(("accept".to_string(), "text/event-stream".to_string()));
-    all.extend(headers);
-    HttpRequest {
-        url,
-        method: Method::Post,
-        headers: all,
-        body: Some(body),
-    }
 }

@@ -376,12 +376,22 @@ impl Catalogue {
 }
 
 /// The endpoint a local daemon's control plane lives on, derived from the
-/// generation endpoint the row already carries.
+/// base the row already carries.
 ///
 /// Derived rather than configured twice: two URLs that must agree about which
 /// daemon they mean is two chances to point at different ones.
+///
+/// **Not general, and the signature flatters it.** `set_path` is absolute, so
+/// this discards any prefix the base carries — correct for Ollama, whose
+/// control plane really does live at the host's root (`/api/tags`, `/api/ps`)
+/// while its openai-compatible surface lives under `/v1/`, and wrong for any
+/// provider served behind a path prefix. Ollama is the only caller and the
+/// only daemon with a control plane at all; a second one is the point at which
+/// this stops being a function and becomes the daemon resolver's business
+/// (`docs/decisions/2026-08-21-a-shared-shape-is-not-a-shared-contract.md` §2
+/// names this as the one casualty of the base/path split).
 pub fn control_plane(row: &ProviderRow, path: &str) -> Result<Url, ResolveError> {
-    let mut url = row.endpoint.clone();
+    let mut url = row.base.clone();
     url.set_path(path);
     url.set_query(None);
     Ok(url)

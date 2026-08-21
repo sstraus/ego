@@ -165,7 +165,25 @@ impl std::error::Error for MissingCredential {}
 #[derive(Debug, Clone)]
 pub struct ProviderRow {
     pub id: String,
-    pub endpoint: Url,
+    /// Scheme, host and any prefix — and **no path this row owns**.
+    ///
+    /// A base and not a full endpoint, because a path is a fact about the API
+    /// shape rather than about a vendor: every provider speaking a given
+    /// mapping serves it at that mapping's own path, which is why `PATH` is
+    /// declared beside the mapping and joined on by
+    /// [`RequestTarget::url`](crate::wire::RequestTarget::url). A row carrying
+    /// the whole endpoint would be a row that could disagree with its own
+    /// mapping about where the mapping lives
+    /// (`docs/decisions/2026-08-21-a-shared-shape-is-not-a-shared-contract.md`
+    /// §2).
+    ///
+    /// **Always ends in `/`**, and the constructors guarantee it rather than
+    /// asking callers to. `Url::join` treats a base without a trailing slash
+    /// as a *file* and replaces its last segment, so
+    /// `https://gateway.example/openai/v1` would resolve
+    /// `chat/completions` to `https://gateway.example/openai/chat/completions`
+    /// — a silently wrong address for a deployment shape that really exists.
+    pub base: Url,
     pub auth: Auth,
     /// Which API shape this provider speaks.
     ///
@@ -200,12 +218,27 @@ pub struct ProviderRow {
     pub cost: Option<Arc<dyn ProviderCost>>,
 }
 
-/// Where OpenAI's chat-completions endpoint lives.
-pub const OPENAI_ENDPOINT: &str = "https://api.openai.com/v1/chat/completions";
+/// The base OpenAI serves its API under.
+pub const OPENAI_BASE: &str = "https://api.openai.com/v1/";
 /// The environment variable OpenAI's credential is read from.
 pub const OPENAI_KEY_VAR: &str = "OPENAI_API_KEY";
-/// Where a default Ollama install serves its openai-compatible endpoint.
-pub const OLLAMA_ENDPOINT: &str = "http://localhost:11434/v1/chat/completions";
+/// The base a default Ollama install serves its openai-compatible API under.
+pub const OLLAMA_BASE: &str = "http://localhost:11434/v1/";
+
+/// A URL made safe to [`Url::join`] a mapping's path onto.
+///
+/// One line, and it is the difference between a request reaching a gateway's
+/// `/openai/v1/chat/completions` and reaching its `/openai/chat/completions`.
+/// Applied in the constructors rather than asserted in a doc, because the
+/// caller supplying the base is an operator with an environment variable and
+/// a trailing slash is not a thing an operator should have to know about.
+fn as_base(mut base: Url) -> Url {
+    if !base.path().ends_with('/') {
+        let path = format!("{}/", base.path());
+        base.set_path(&path);
+    }
+    base
+}
 
 impl ProviderRow {
     /// The hosted row.
@@ -216,20 +249,20 @@ impl ProviderRow {
     /// fallible a missing key made the provider *disappear*, and the resolver
     /// had to special-case one provider by name to report the true error.
     pub fn openai() -> Self {
-        Self::openai_at(Url::parse(OPENAI_ENDPOINT).expect("a constant this file controls"))
+        Self::openai_at(Url::parse(OPENAI_BASE).expect("a constant this file controls"))
     }
 
     /// The hosted row against a different address.
     ///
     /// The same pairing [`ollama`](Self::ollama) and
     /// [`ollama_default`](Self::ollama_default) already have, and for the same
-    /// reason: the endpoint is the caller's knowledge, the credential strategy
+    /// reason: the base is the caller's knowledge, the credential strategy
     /// and the id are the row's. Azure and the compatible gateways serve this
     /// wire format at their own hostnames, and a test serves it on loopback.
-    pub fn openai_at(endpoint: Url) -> Self {
+    pub fn openai_at(base: Url) -> Self {
         ProviderRow {
             id: "openai".to_string(),
-            endpoint,
+            base: as_base(base),
             wire: &OpenAiCompletions,
             auth: Auth::BearerFromEnv {
                 var: OPENAI_KEY_VAR.to_string(),
@@ -272,10 +305,10 @@ impl ProviderRow {
     /// conformance check is not a member. So this row names its own mapping,
     /// which shares the family's request projection and its whole decoder and
     /// differs in one field.
-    pub fn ollama(endpoint: Url) -> Self {
+    pub fn ollama(base: Url) -> Self {
         ProviderRow {
             id: "ollama".to_string(),
-            endpoint,
+            base: as_base(base),
             wire: &Ollama,
             auth: Auth::None,
             // A daemon serving its own weights charges nothing and states
@@ -286,7 +319,7 @@ impl ProviderRow {
 
     /// The local row at the default install's address.
     pub fn ollama_default() -> Self {
-        Self::ollama(Url::parse(OLLAMA_ENDPOINT).expect("a constant this file controls"))
+        Self::ollama(Url::parse(OLLAMA_BASE).expect("a constant this file controls"))
     }
 
     /// The headers this row contributes to a request.

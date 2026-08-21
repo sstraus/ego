@@ -83,13 +83,12 @@ use ego_core::state::Usage;
 use futures::stream::{self, BoxStream, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
-use url::Url;
 
 use crate::http::{HttpError, HttpRequest, HttpResponse};
 
 use super::provider_cost::ProviderCost;
 use super::sse::SseDecoder;
-use super::{Unexpressible, WireFormat};
+use super::{RequestRefused, RequestTarget, WireFormat};
 
 /// The `openai-completions` mapping, as a value a profile can name.
 ///
@@ -105,11 +104,10 @@ pub struct OpenAiCompletions;
 impl WireFormat for OpenAiCompletions {
     fn build_request(
         &self,
-        endpoint: Url,
-        headers: Vec<(String, String)>,
+        target: &RequestTarget<'_>,
         req: &GenRequest,
-    ) -> Result<HttpRequest, Unexpressible> {
-        build_request(endpoint, headers, req).map_err(Unexpressible::from)
+    ) -> Result<HttpRequest, RequestRefused> {
+        build_request(target, req).map_err(RequestRefused::from)
     }
 
     fn decode(
@@ -138,7 +136,7 @@ pub const PATH: &str = "chat/completions";
 /// and a silent mistranslation is worse than a refusal because nothing
 /// downstream can tell it happened.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RequestRefused {
+pub enum Inexpressible {
     /// The request carries reasoning state, and this format has nowhere to put
     /// it: the chat-completions request schema has no field for a reasoning
     /// signature. Dropping it silently would be
@@ -147,10 +145,10 @@ pub enum RequestRefused {
     ReasoningStateNotCarriable,
 }
 
-impl std::fmt::Display for RequestRefused {
+impl std::fmt::Display for Inexpressible {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            RequestRefused::ReasoningStateNotCarriable => write!(
+            Inexpressible::ReasoningStateNotCarriable => write!(
                 f,
                 "openai-completions has no field for reasoning state, so \
                  carrying it over would mean dropping it"
@@ -159,7 +157,7 @@ impl std::fmt::Display for RequestRefused {
     }
 }
 
-impl std::error::Error for RequestRefused {}
+impl std::error::Error for Inexpressible {}
 
 /// The refusal, rendered for the seam.
 ///
@@ -167,9 +165,9 @@ impl std::error::Error for RequestRefused {}
 /// is why [`Unexpressible`] carries no separate discriminant. This mapping's
 /// own tests keep matching the enum; only the caller that renders loses the
 /// variant, and rendering is all it ever did with it.
-impl From<RequestRefused> for Unexpressible {
-    fn from(refused: RequestRefused) -> Self {
-        Unexpressible::new(refused.to_string())
+impl From<Inexpressible> for RequestRefused {
+    fn from(refused: Inexpressible) -> Self {
+        RequestRefused::new(refused.to_string())
     }
 }
 
@@ -396,7 +394,7 @@ fn flush<'a>(
 /// Separate from [`build_request`] so the golden can pin the body without a
 /// URL or a credential in it — the body is the contract with the provider;
 /// the endpoint and the auth header are the provider row's business.
-pub fn request_body(req: &GenRequest) -> Result<Vec<u8>, RequestRefused> {
+pub fn request_body(req: &GenRequest) -> Result<Vec<u8>, Inexpressible> {
     let wire = WireRequest {
         common: common_request(req)?,
         max_completion_tokens: req.max_output_tokens,
@@ -410,7 +408,7 @@ pub fn request_body(req: &GenRequest) -> Result<Vec<u8>, RequestRefused> {
 /// reasoning state is unexpressible on this *shape*, and both members send the
 /// shape. `pub(crate)` for [`super::ollama`], which supplies the other
 /// ceiling field and nothing else.
-pub(crate) fn common_request(req: &GenRequest) -> Result<CommonRequest<'_>, RequestRefused> {
+pub(crate) fn common_request(req: &GenRequest) -> Result<CommonRequest<'_>, Inexpressible> {
     let carries_reasoning = req
         .messages
         .messages()
@@ -418,7 +416,7 @@ pub(crate) fn common_request(req: &GenRequest) -> Result<CommonRequest<'_>, Requ
         .flat_map(|message| &message.content)
         .any(|block| matches!(block, ContentBlock::Reasoning { .. }));
     if carries_reasoning {
-        return Err(RequestRefused::ReasoningStateNotCarriable);
+        return Err(Inexpressible::ReasoningStateNotCarriable);
     }
     let messages = wire_messages(req.messages.messages());
     let tools: Vec<WireTool<'_>> = req
@@ -447,17 +445,18 @@ pub(crate) fn common_request(req: &GenRequest) -> Result<CommonRequest<'_>, Requ
     })
 }
 
-/// A complete HTTP request for `req` against `endpoint`.
+/// A complete HTTP request for `req` against `target`.
 ///
-/// `headers` comes from the provider row — the auth header above all — because
-/// credentials are not this module's to know (`ARCHITECTURE.md` §3.1).
+/// The target's headers come from the provider row — the auth header above all
+/// — because credentials are not this module's to know
+/// (`ARCHITECTURE.md` §3.1), and its base is joined with [`PATH`] here rather
+/// than carried whole by the row, because a path is a fact about the API shape
+/// and the row is not allowed to know one.
 pub fn build_request(
-    endpoint: Url,
-    headers: Vec<(String, String)>,
+    target: &RequestTarget<'_>,
     req: &GenRequest,
-) -> Result<HttpRequest, RequestRefused> {
-    let body = request_body(req)?;
-    Ok(super::json_sse_post(endpoint, headers, body))
+) -> Result<HttpRequest, Inexpressible> {
+    Ok(target.post_json(PATH, request_body(req)?))
 }
 
 // --- response ---

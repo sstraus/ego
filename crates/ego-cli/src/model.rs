@@ -11,7 +11,7 @@ use std::sync::Arc;
 use ego_ai::catalogue::{self, Catalogue, ModelSlug, ResolveError, ResolvedModel};
 use ego_ai::http::{EgressPolicy, Http, ReqwestHttp};
 use ego_ai::ollama;
-use ego_ai::provider::{Credentials, OLLAMA_ENDPOINT, OPENAI_ENDPOINT, ProviderRow};
+use ego_ai::provider::{Credentials, OLLAMA_BASE, OPENAI_BASE, ProviderRow};
 use url::Url;
 
 use crate::facts;
@@ -33,14 +33,20 @@ pub const OLLAMA_HOST: &str = "OLLAMA_HOST";
 /// loopback stub without a network.
 pub const OPENAI_BASE_URL: &str = "OPENAI_BASE_URL";
 
-/// The chat-completions endpoint an address variable names, or the default.
+/// The API base an address variable names, or the default.
 ///
 /// `OLLAMA_HOST` is conventionally a bare `host:port` and `OPENAI_BASE_URL` is
 /// conventionally a base URL without the path; both spellings are accepted for
 /// both, and anything else is refused rather than half-parsed into a request to
 /// somewhere unintended. The path is always set, so a variable that already
 /// carries one and a variable that does not resolve to the same address.
-fn endpoint(var: &str, fallback: &str) -> Result<Url, ResolveError> {
+///
+/// It sets `/v1/` and not `/v1/chat/completions`: a row carries a base and the
+/// mapping joins its own path onto it
+/// (`docs/decisions/2026-08-21-a-shared-shape-is-not-a-shared-contract.md`
+/// §2). Both variables name a *server*, which is what a base is, so this is
+/// also the spelling an operator already has in them.
+fn base(var: &str, fallback: &str) -> Result<Url, ResolveError> {
     let Ok(given) = std::env::var(var) else {
         return Ok(Url::parse(fallback).expect("a constant this file controls"));
     };
@@ -54,7 +60,7 @@ fn endpoint(var: &str, fallback: &str) -> Result<Url, ResolveError> {
         endpoint: given.to_string(),
         message: format!("{var} is not an address: {err}"),
     })?;
-    url.set_path("/v1/chat/completions");
+    url.set_path("/v1/");
     Ok(url)
 }
 
@@ -91,8 +97,8 @@ pub fn transport(offline: bool) -> Result<Arc<dyn Http>, ResolveError> {
 /// and forced [`resolve`] to name one provider by hand to say the true thing.
 fn rows() -> Result<Vec<ProviderRow>, ResolveError> {
     Ok(vec![
-        ProviderRow::ollama(endpoint(OLLAMA_HOST, OLLAMA_ENDPOINT)?),
-        ProviderRow::openai_at(endpoint(OPENAI_BASE_URL, OPENAI_ENDPOINT)?),
+        ProviderRow::ollama(base(OLLAMA_HOST, OLLAMA_BASE)?),
+        ProviderRow::openai_at(base(OPENAI_BASE_URL, OPENAI_BASE)?),
     ])
 }
 

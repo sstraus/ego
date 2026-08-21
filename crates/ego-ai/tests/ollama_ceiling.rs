@@ -194,9 +194,10 @@ fn the_ceiling_the_ollama_profile_sends_is_the_one_this_daemon_reads() {
     };
 
     let row = ProviderRow::ollama_default();
+    let target = ego_ai::wire::RequestTarget::new(&row.base, &[]);
     let request = row
         .wire
-        .build_request(row.endpoint.clone(), Vec::new(), &req)
+        .build_request(&target, &req)
         .expect("this request is expressible");
     let adapted: serde_json::Value =
         serde_json::from_slice(&request.body.expect("a generation posts a body"))

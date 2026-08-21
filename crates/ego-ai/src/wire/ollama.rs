@@ -24,13 +24,12 @@ use ego_core::generator::port::AiEvent;
 use ego_core::generator::types::GenRequest;
 use futures::stream::BoxStream;
 use serde::Serialize;
-use url::Url;
 
 use crate::http::{HttpError, HttpRequest, HttpResponse};
 
-use super::openai_completions::{self, CommonRequest, RequestRefused};
+use super::openai_completions::{self, CommonRequest, Inexpressible};
 use super::provider_cost::ProviderCost;
-use super::{Unexpressible, WireFormat};
+use super::{RequestRefused, RequestTarget, WireFormat};
 
 /// The `ollama` mapping, as a value a profile can name.
 ///
@@ -44,11 +43,10 @@ pub struct Ollama;
 impl WireFormat for Ollama {
     fn build_request(
         &self,
-        endpoint: Url,
-        headers: Vec<(String, String)>,
+        target: &RequestTarget<'_>,
         req: &GenRequest,
-    ) -> Result<HttpRequest, Unexpressible> {
-        build_request(endpoint, headers, req).map_err(Unexpressible::from)
+    ) -> Result<HttpRequest, RequestRefused> {
+        build_request(target, req).map_err(RequestRefused::from)
     }
 
     fn decode(
@@ -60,12 +58,12 @@ impl WireFormat for Ollama {
     }
 }
 
-/// The path a provider row appends to its base URL to reach this mapping.
+/// The path this mapping joins onto a row's base URL.
 ///
 /// The same path the family serves, and stated here anyway: it is Ollama's
 /// compatibility surface that happens to agree, not a constant inherited from
 /// a format this daemon does not implement.
-pub const PATH: &str = "v1/chat/completions";
+pub const PATH: &str = "chat/completions";
 
 /// The body this mapping sends: the family's common part, plus the ceiling in
 /// the field this daemon actually reads.
@@ -87,7 +85,7 @@ struct WireRequest<'a> {
 ///
 /// Separate from [`build_request`] for the same reason its counterpart is: the
 /// body is the contract with the daemon, and pinning it needs no URL.
-pub fn request_body(req: &GenRequest) -> Result<Vec<u8>, RequestRefused> {
+pub fn request_body(req: &GenRequest) -> Result<Vec<u8>, Inexpressible> {
     let wire = WireRequest {
         common: openai_completions::common_request(req)?,
         max_tokens: req.max_output_tokens,
@@ -95,15 +93,13 @@ pub fn request_body(req: &GenRequest) -> Result<Vec<u8>, RequestRefused> {
     Ok(serde_json::to_vec(&wire).expect("WireRequest has no non-string map keys and no NaN"))
 }
 
-/// A complete HTTP request for `req` against `endpoint`.
+/// A complete HTTP request for `req` against `target`.
 ///
-/// The headers are the family's — `content-type` and `accept` — because the
-/// difference this mapping exists for is in the body and nowhere else.
+/// The headers and the path are the family's, because the difference this
+/// mapping exists for is in the body and nowhere else.
 pub fn build_request(
-    endpoint: Url,
-    headers: Vec<(String, String)>,
+    target: &RequestTarget<'_>,
     req: &GenRequest,
-) -> Result<HttpRequest, RequestRefused> {
-    let body = request_body(req)?;
-    Ok(super::json_sse_post(endpoint, headers, body))
+) -> Result<HttpRequest, Inexpressible> {
+    Ok(target.post_json(PATH, request_body(req)?))
 }

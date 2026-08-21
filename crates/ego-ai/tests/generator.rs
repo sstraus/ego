@@ -130,7 +130,7 @@ fn request_carrying_reasoning() -> GenRequest {
 fn row() -> ProviderRow {
     ProviderRow {
         id: "stub".to_string(),
-        endpoint: Url::parse("https://api.example/v1/chat/completions").expect("a valid url"),
+        base: Url::parse("https://api.example/v1/").expect("a valid url"),
         wire: &OpenAiCompletions,
         auth: Auth::BearerFromEnv {
             var: KEY_VAR.to_string(),
@@ -237,7 +237,13 @@ async fn the_transport_is_handed_exactly_what_the_wire_format_would_send() {
     let seen = http.seen.lock().expect("not poisoned");
     let sent = seen.first().expect("the transport was called once");
     assert_eq!(sent.method, Method::Post);
-    assert_eq!(sent.url, row().endpoint);
+    assert_eq!(
+        sent.url,
+        row()
+            .base
+            .join(ego_ai::wire::openai_completions::PATH)
+            .expect("a path")
+    );
     assert_eq!(
         sent.body.as_deref(),
         Some(
@@ -577,14 +583,13 @@ const MARKER_TEXT: &str = "decoded by the marker format";
 impl ego_ai::wire::WireFormat for MarkerFormat {
     fn build_request(
         &self,
-        _endpoint: Url,
-        headers: Vec<(String, String)>,
+        target: &ego_ai::wire::RequestTarget<'_>,
         _req: &GenRequest,
-    ) -> Result<HttpRequest, ego_ai::wire::Unexpressible> {
+    ) -> Result<HttpRequest, ego_ai::wire::RequestRefused> {
         Ok(HttpRequest {
             url: Url::parse(MARKER_PATH).expect("a constant this file controls"),
             method: Method::Post,
-            headers,
+            headers: target.headers().to_vec(),
             body: None,
         })
     }

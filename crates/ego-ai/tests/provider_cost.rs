@@ -244,7 +244,7 @@ impl Http for StubHttp {
 fn row(id: &str, cost: Arc<dyn ProviderCost>) -> ProviderRow {
     ProviderRow {
         id: id.to_string(),
-        endpoint: Url::parse("https://api.example/v1/chat/completions").expect("a valid url"),
+        base: Url::parse("https://api.example/v1/").expect("a valid url"),
         wire: &OpenAiCompletions,
         auth: Auth::BearerFromEnv {
             var: "EGO_TEST_API_KEY".to_string(),
@@ -533,7 +533,7 @@ async fn a_row_with_no_cost_decoder_settles_from_its_table_as_it_always_did() {
     // declare that it reads one, so nothing may read it.
     let plain = ProviderRow {
         id: "openai".to_string(),
-        endpoint: Url::parse("https://api.example/v1/chat/completions").expect("a valid url"),
+        base: Url::parse("https://api.example/v1/").expect("a valid url"),
         wire: &OpenAiCompletions,
         auth: Auth::BearerFromEnv {
             var: "EGO_TEST_API_KEY".to_string(),

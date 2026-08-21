@@ -82,11 +82,8 @@ impl Generator for WireGenerator {
                 return AttemptStream::new(attempt, stream::iter(events).boxed());
             }
         };
-        let request = match self
-            .row
-            .wire
-            .build_request(self.row.endpoint.clone(), headers, &req)
-        {
+        let target = wire::RequestTarget::new(&self.row.base, &headers);
+        let request = match self.row.wire.build_request(&target, &req) {
             Ok(request) => request,
             // Refused before a socket exists. `DefinitelyUnsent` is honest
             // here for the same reason `HttpError::refused_before_sending` is
