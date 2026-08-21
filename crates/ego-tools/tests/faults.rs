@@ -107,7 +107,7 @@ mod faults {
     fn healthy_session() -> Fixture {
         let dir = tempdir().unwrap();
         let root = dir.path().to_path_buf();
-        let store = JsonlStore::new(&root, Box::new(OsIo));
+        let store = JsonlStore::new(&root, "/ws", Box::new(OsIo));
         let id = SessionId::new();
         let turn = TurnId::new();
         let mut seq = Seq::default();
@@ -305,7 +305,7 @@ mod faults {
     /// answer is to refuse it and leave the bytes alone so a later build, or
     /// a human, still has something to read.
     ///
-    /// This is also the gate on ever adding a field to `HeaderV1`. Without
+    /// This is also the gate on ever adding a field to `Header`. Without
     /// it, the commit that does so deletes every session written before it,
     /// on first open — `open_writer` calls `recover` before `resume`.
     #[test]
@@ -369,14 +369,15 @@ mod faults {
         // this build has never heard of — which decodes fine and must still
         // be refused.
         let session = serde_json::to_string(&fx.id).unwrap();
-        let mut future =
-            format!(r#"{{"v":5,"session":{session},"created":1,"workspace_root":"/ws"}}"#)
-                .into_bytes();
+        let mut future = format!(
+            r#"{{"v":6,"session":{session},"created":1,"workspace_root":"/ws","invented":true}}"#
+        )
+        .into_bytes();
         future.extend_from_slice(&tail);
         std::fs::write(fx.log_path(), &future).unwrap();
 
         match fx.store.recover(&fx.id) {
-            Err(StoreError::UnsupportedLog { found }) => assert_eq!(found, 5),
+            Err(StoreError::UnsupportedLog { found }) => assert_eq!(found, 6),
             other => panic!("a later codec version must be named, not repaired: {other:?}"),
         }
         assert_eq!(fx.log_bytes(), future, "not one byte may be removed");
@@ -530,7 +531,7 @@ mod faults {
     #[test]
     fn faults_recover_on_an_unknown_session_is_clean_and_creates_nothing() {
         let dir = tempdir().unwrap();
-        let store = JsonlStore::new(dir.path(), Box::new(OsIo));
+        let store = JsonlStore::new(dir.path(), "/ws", Box::new(OsIo));
         let id = SessionId::new();
 
         let repair = store.recover(&id).unwrap();
@@ -592,7 +593,7 @@ mod faults {
         // else changed — same tmp-write-then-`rename`, same `set_len` — so
         // the sweep still meets real filesystem semantics rather than a
         // fake's idea of them.
-        let store = JsonlStore::new(dir.path(), Box::new(NonDurableOsIo));
+        let store = JsonlStore::new(dir.path(), "/ws", Box::new(NonDurableOsIo));
 
         for cut in 0..=full.len() {
             let id = plant_log(dir.path(), &full[..cut]);
@@ -646,7 +647,7 @@ mod faults {
         assert_eq!(boundaries.len(), 5, "header + 4 records");
 
         let dir = tempdir().unwrap();
-        let store = JsonlStore::new(dir.path(), Box::new(OsIo));
+        let store = JsonlStore::new(dir.path(), "/ws", Box::new(OsIo));
 
         // Skip the header-only boundary: it has no records to yield.
         for (records, cut) in boundaries.iter().copied().enumerate().skip(1) {

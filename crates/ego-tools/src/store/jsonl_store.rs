@@ -14,7 +14,7 @@ use ego_core::event::id::{Seq, SessionId};
 use ego_core::event::time::Timestamp;
 use ego_core::state::SessionState;
 use ego_core::store::codec::{
-    CODEC_VERSION, CodecError, HeaderV1, StoreLine, decode_line, encode_header, encode_record,
+    CODEC_VERSION, CodecError, Header, StoreLine, decode_line, encode_header, encode_record,
 };
 use ego_core::store::session_store::{SessionMeta, SessionStore, StoreError};
 use futures::stream::{self, BoxStream};
@@ -161,10 +161,10 @@ fn split_lines(bytes: &[u8]) -> Vec<&[u8]> {
 /// every line here is known to decode; a line that somehow does not is
 /// skipped rather than failing recovery, since refusing to rebuild a
 /// manifest is a worse outcome than rebuilding it from one event less.
-fn log_bounds(log: &[u8]) -> Option<(Timestamp, Timestamp)> {
+fn log_bounds(log: &[u8]) -> Option<(Timestamp, PathBuf, Timestamp)> {
     let mut lines = split_lines(log).into_iter();
-    let created = match decode_line(lines.next()?) {
-        Ok(StoreLine::Header(header)) => header.created,
+    let (created, workspace_root) = match decode_line(lines.next()?) {
+        Ok(StoreLine::Header(header)) => (header.created, header.workspace_root),
         _ => return None,
     };
     let last_ts = lines
@@ -176,7 +176,7 @@ fn log_bounds(log: &[u8]) -> Option<(Timestamp, Timestamp)> {
         })
         .map(|ev| ev.env.ts)
         .next_back()?;
-    Some((created, last_ts))
+    Some((created, workspace_root, last_ts))
 }
 
 /// The filesystem `SessionStore`. Real I/O goes through the injected
@@ -184,15 +184,39 @@ fn log_bounds(log: &[u8]) -> Option<(Timestamp, Timestamp)> {
 /// the filesystem itself.
 pub struct JsonlStore {
     root: PathBuf,
+    workspace: PathBuf,
     io: Box<dyn StoreIo>,
 }
 
 impl JsonlStore {
-    /// Build a store rooted at `root` (e.g. `~/.ego/sessions`), performing
-    /// its I/O through `io`.
-    pub fn new(root: impl Into<PathBuf>, io: Box<dyn StoreIo>) -> Self {
+    /// Build a store rooted at `root` (e.g. `~/.ego/sessions`), creating new
+    /// sessions on behalf of `workspace`, and performing its I/O through
+    /// `io`.
+    ///
+    /// **`workspace` is required, and it is only ever written.** It is
+    /// stamped into the header of a session this store *creates* and is read
+    /// back from the header of every session it lists — so `list` still
+    /// returns sessions belonging to every workspace, and filtering to one is
+    /// the caller's question, not this constructor's. One store serves one
+    /// process, and a process has exactly one workspace: `run.rs` applies
+    /// `-C DIR` before anything reads a path, so there is a single notion of
+    /// "here".
+    ///
+    /// It must already be canonical. This type does not resolve it — that
+    /// would be a second canonicaliser to keep in step with `run.rs`'s, and
+    /// `AGENTS.md`'s reuse-first rule says one. A path that has not been
+    /// through `std::fs::canonicalize` will not compare equal to the same
+    /// directory reached through a symlink or through `/var` instead of
+    /// `/private/var`, and the failure is a session that quietly does not
+    /// belong to the workspace it was created in.
+    pub fn new(
+        root: impl Into<PathBuf>,
+        workspace: impl Into<PathBuf>,
+        io: Box<dyn StoreIo>,
+    ) -> Self {
         Self {
             root: root.into(),
+            workspace: workspace.into(),
             io,
         }
     }
@@ -417,7 +441,7 @@ impl JsonlStore {
     /// unreadable, or older than the log's last event. Returns whether it
     /// wrote anything.
     fn rebuild_manifest_if_stale(&self, id: &SessionId, log: &[u8]) -> Result<bool, StoreError> {
-        let Some((created, last_ts)) = log_bounds(log) else {
+        let Some((created, workspace_root, last_ts)) = log_bounds(log) else {
             // A log with a header but no surviving records has no `updated`
             // to offer, so it cannot make an existing manifest more
             // accurate than it already is.
@@ -446,7 +470,14 @@ impl JsonlStore {
         );
         let meta = SessionMeta {
             id: *id,
-            workspace_root: previous.as_ref().and_then(|m| m.workspace_root.clone()),
+            // From the log header, for exactly the reason `created` is —
+            // and this is the whole point of the field being there. Carrying
+            // it forward from the previous manifest, as this line used to,
+            // meant a session whose manifest was lost came back with
+            // `workspace_root: None` and silently left its workspace. The
+            // recovery path that loses the manifest is the one directly
+            // above.
+            workspace_root: Some(workspace_root),
             model: previous.as_ref().and_then(|m| m.model.clone()),
             // `created` comes from the log header rather than the old
             // manifest: the header is written once, at session creation, and
@@ -479,7 +510,10 @@ impl JsonlStore {
         let previous = self.read_manifest(id)?;
         let meta = SessionMeta {
             id: *id,
-            workspace_root: previous.as_ref().and_then(|m| m.workspace_root.clone()),
+            // This store created the session, so its own workspace is the
+            // one the header carries. Reading the header back to confirm
+            // would be an I/O round trip to learn a value already in hand.
+            workspace_root: Some(self.workspace.clone()),
             model: previous.as_ref().and_then(|m| m.model.clone()),
             created: previous.as_ref().map_or(ev.env.ts, |m| m.created),
             updated: ev.env.ts,
@@ -496,7 +530,7 @@ impl SessionStore for JsonlStore {
         let log_path = self.log_path(id);
         let is_new_session = !self.io.exists(&log_path)?;
         if is_new_session {
-            let header = HeaderV1::new(*id, ev.env.ts);
+            let header = Header::new(*id, ev.env.ts, self.workspace.clone());
             self.io.append_line(&log_path, &encode_header(&header))?;
         }
 

@@ -160,12 +160,12 @@ pub fn resolve(
                 }
             }
         }
-        if let Some(profile) = active_profile.and_then(|name| sourced.value.profile.get(name)) {
-            if let Some(perm) = &profile.permissions {
-                for entry in &perm.deny {
-                    if !system_deny.contains(entry) {
-                        system_deny.push(entry.clone());
-                    }
+        if let Some(profile) = active_profile.and_then(|name| sourced.value.profile.get(name))
+            && let Some(perm) = &profile.permissions
+        {
+            for entry in &perm.deny {
+                if !system_deny.contains(entry) {
+                    system_deny.push(entry.clone());
                 }
             }
         }

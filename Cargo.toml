@@ -15,7 +15,7 @@ edition = "2024"
 # `&dyn PathResolver` it is a supertrait of. The alternatives were a
 # `as_resolver()` method on `Fs` that exists only to launder a coercion, or
 # storing both halves and letting them disagree.
-rust-version = "1.86"
+rust-version = "1.88"
 license = "MIT"
 publish = false
 

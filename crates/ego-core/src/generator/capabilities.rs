@@ -232,10 +232,10 @@ impl ModelCapabilities {
                 gaps.push(CapabilityGap::TooManyTools { requested, max });
             }
         }
-        if let (Some(requested), Some(max)) = (req.max_output_tokens, self.max_output_tokens) {
-            if requested > max {
-                gaps.push(CapabilityGap::OutputTooLarge { requested, max });
-            }
+        if let (Some(requested), Some(max)) = (req.max_output_tokens, self.max_output_tokens)
+            && requested > max
+        {
+            gaps.push(CapabilityGap::OutputTooLarge { requested, max });
         }
         match &self.reasoning_efforts {
             ReasoningEffortSupport::Unknown => {

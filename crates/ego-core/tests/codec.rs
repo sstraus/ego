@@ -11,7 +11,7 @@ use ego_core::generator::attempt::{AttemptRef, DeliveryCertainty, Outcome, Usage
 use ego_core::generator::types::StopReason;
 use ego_core::state::Usage;
 use ego_core::store::codec::{
-    CODEC_VERSION, CodecError, HeaderV1, IndexedCodecError, StoreLine, decode_line, decode_log,
+    CODEC_VERSION, CodecError, Header, IndexedCodecError, StoreLine, decode_line, decode_log,
     encode_header, encode_record,
 };
 use serde::{Deserialize, Serialize};
@@ -38,8 +38,12 @@ mod codec {
         }
     }
 
-    fn header() -> HeaderV1 {
-        HeaderV1::new(SessionId::new(), Timestamp::from_millis(1_787_206_085_352))
+    fn header() -> Header {
+        Header::new(
+            SessionId::new(),
+            Timestamp::from_millis(1_787_206_085_352),
+            "/ws".into(),
+        )
     }
 
     fn seq_of(n: u64) -> Seq {
@@ -74,15 +78,32 @@ mod codec {
         assert_eq!(line, StoreLine::Header(h));
     }
 
+    /// The version is named in this test's own name on purpose: a bump has
+    /// to be a deliberate edit here, not a constant quietly following the
+    /// code that changed it.
     #[test]
-    fn codec_header_carries_codec_version_4() {
+    fn codec_header_carries_codec_version_5() {
         let h = header();
-        assert_eq!(h.v, 4);
-        assert_eq!(CODEC_VERSION, 4);
+        assert_eq!(h.v, 5);
+        assert_eq!(CODEC_VERSION, 5);
 
         let bytes = encode_header(&h);
         match decode_line(&bytes).unwrap() {
-            StoreLine::Header(decoded) => assert_eq!(decoded.v, 4),
+            StoreLine::Header(decoded) => assert_eq!(decoded.v, 5),
+            other => panic!("expected Header, got {other:?}"),
+        }
+    }
+
+    /// The field the bump to 5 exists for. A header that round-trips its
+    /// version and loses its workspace would satisfy every other assertion
+    /// in this file.
+    #[test]
+    fn codec_header_carries_the_workspace_the_session_belongs_to() {
+        let bytes = encode_header(&header());
+        match decode_line(&bytes).unwrap() {
+            StoreLine::Header(decoded) => {
+                assert_eq!(decoded.workspace_root, std::path::PathBuf::from("/ws"));
+            }
             other => panic!("expected Header, got {other:?}"),
         }
     }
@@ -387,9 +408,10 @@ mod codec {
     /// A log with a fixed session, fixed ids and fixed timestamps, so its
     /// encoding is byte-for-byte reproducible.
     fn golden_log() -> Vec<u8> {
-        let header = HeaderV1::new(
+        let header = Header::new(
             common::id(GOLDEN_SESSION),
             Timestamp::from_millis(1_787_206_085_352),
+            "/ws".into(),
         );
         let mut log = encode_header(&header);
         for (n, event) in golden_events().iter().enumerate() {

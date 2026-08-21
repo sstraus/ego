@@ -386,7 +386,11 @@ async fn execute(args: Args, out: &Stdout, cancel: CancelToken) -> Result<Ended,
         _ => Some(session::store_root(args.session_dir.as_ref()).map_err(usage)?),
     };
     let clock = SystemClock;
-    let jsonl_store = store_root.map(session::jsonl);
+    // The same `root` that derives a named session's id (`session::id_for`
+    // above), so "the session called build in this workspace" and "the
+    // sessions belonging to this workspace" cannot disagree about which
+    // workspace that is.
+    let jsonl_store = store_root.map(|dir| session::jsonl(dir, root.clone()));
     let opened = match &jsonl_store {
         Some(store) => Opened::Durable(Box::new(
             session::open(store, &session_id, &clock).map_err(|err| RunTermination::Failed {

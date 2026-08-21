@@ -4,7 +4,7 @@
 //! See `plans/m0a-contracts.md` Step 3. No I/O lives here.
 //!
 //! A session's `events.jsonl` (ARCH §5) is a sequence of lines. The first
-//! line is a versioned [`HeaderV1`]; every line after that is either a
+//! line is a versioned [`Header`]; every line after that is either a
 //! [`StoreRecord`] or, once the codec grows a new record shape in a later
 //! version, a line this build of the codec doesn't recognise. That third
 //! case is [`StoreLine::Unknown`] — its raw bytes are preserved verbatim
@@ -18,6 +18,8 @@
 //! bytes are the only thing `Unknown` carries) but cannot itself prevent a
 //! caller from choosing to drop them.
 
+use std::path::PathBuf;
+
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use xxhash_rust::xxh64::xxh64;
@@ -25,32 +27,65 @@ use xxhash_rust::xxh64::xxh64;
 use crate::event::id::{Seq, SessionId};
 use crate::event::time::Timestamp;
 
-/// The codec version written into every session's header line.
-pub const CODEC_VERSION: u32 = 4;
+/// The codec version written into every session's header line, and — since
+/// `docs/decisions/2026-08-21-a-header-the-repair-must-not-delete.md` §3 —
+/// actually compared when one is read.
+///
+/// Bumped to 5 by that ADR's §4, which added `Header::workspace_root`. A v4
+/// log is refused, not migrated: this is 0.1 and there is nothing deployed to
+/// stay compatible with.
+pub const CODEC_VERSION: u32 = 5;
 
 /// The fixed xxhash64 seed for record checksums. Part of the codec v1
 /// contract: changing it would silently invalidate every checksum already
 /// written to disk, so it is not configurable.
 const CHECKSUM_SEED: u64 = 0;
 
-/// The first line of every `events.jsonl`: `{v, session, created}`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HeaderV1 {
+/// The first line of every `events.jsonl`:
+/// `{v, session, created, workspace_root}`.
+///
+/// Named `Header` and not `HeaderV1`: [`CODEC_VERSION`] is the version, and a
+/// type suffix reading `V1` while `v` read `4` was already two numbers for one
+/// fact. There is exactly one header shape any build understands, because a
+/// log at another version is refused rather than parsed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Header {
     /// The codec version this log was written with.
     pub v: u32,
     /// The session this log belongs to.
     pub session: SessionId,
     /// When the session was created.
     pub created: Timestamp,
+    /// The workspace this session belongs to, canonicalised by whoever
+    /// created it.
+    ///
+    /// Here rather than in the manifest because the manifest is a derived
+    /// cache: `rebuild_manifest_if_stale` can only carry this forward from a
+    /// previous manifest, so a session whose manifest was lost would leave
+    /// the workspace it belongs to and never come back. Here rather than in
+    /// an `EventKind` because a session's start is a fact the harness knows,
+    /// not one the reducer establishes — see `crate::public`'s note on why
+    /// `PublicEvent::SessionStarted` has no domain counterpart.
+    ///
+    /// **Required, deliberately.** An `Option` would admit a v5 log that
+    /// cannot answer the one question this field exists for.
+    pub workspace_root: PathBuf,
 }
 
-impl HeaderV1 {
+impl Header {
     /// Build a header for the current codec version.
-    pub fn new(session: SessionId, created: Timestamp) -> Self {
+    ///
+    /// `workspace_root` must already be canonical. This constructor cannot
+    /// check that — `ego-core` opens no files — so the obligation sits with
+    /// the caller, which is the only party that had a filesystem to resolve
+    /// against. An unresolved path here is not a corrupt log; it is a session
+    /// that will not compare equal to itself when reached by another route.
+    pub fn new(session: SessionId, created: Timestamp, workspace_root: PathBuf) -> Self {
         Self {
             v: CODEC_VERSION,
             session,
             created,
+            workspace_root,
         }
     }
 }
@@ -92,7 +127,7 @@ impl PartialEq for StoreRecord {
 impl Eq for StoreRecord {}
 
 /// The verbatim bytes of a line this build of the codec doesn't recognise
-/// as either a [`HeaderV1`] or a [`StoreRecord`], but which is still
+/// as either a [`Header`] or a [`StoreRecord`], but which is still
 /// syntactically valid JSON. See the module doc comment for why this must
 /// never be silently dropped.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -117,7 +152,7 @@ impl RawLine {
 /// One decoded line of `events.jsonl`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StoreLine {
-    Header(HeaderV1),
+    Header(Header),
     Record(StoreRecord),
     Unknown(RawLine),
 }
@@ -183,10 +218,10 @@ fn checksum_of(seq_bytes: &[u8], payload_bytes: &[u8]) -> u64 {
     xxh64(&buf, CHECKSUM_SEED)
 }
 
-/// Encode a session's header line. Infallible: every `HeaderV1` value is
+/// Encode a session's header line. Infallible: every `Header` value is
 /// representable in the codec's wire format.
-pub fn encode_header(header: &HeaderV1) -> Vec<u8> {
-    serde_json::to_vec(header).expect("HeaderV1 always serialises")
+pub fn encode_header(header: &Header) -> Vec<u8> {
+    serde_json::to_vec(header).expect("Header always serialises")
 }
 
 /// Encode one record line: `seq` plus `payload`, checksummed over both
@@ -270,7 +305,7 @@ pub fn decode_line(bytes: &[u8]) -> Result<StoreLine, CodecError> {
     }
 
     if obj.contains_key("v") {
-        let header: HeaderV1 =
+        let header: Header =
             serde_json::from_str(text).map_err(|e| CodecError::Malformed(e.to_string()))?;
         return Ok(StoreLine::Header(header));
     }

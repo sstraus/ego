@@ -131,9 +131,15 @@ pub fn open<'a>(
     })
 }
 
-/// A store on disk, at `root`.
-pub fn jsonl(root: PathBuf) -> JsonlStore {
-    JsonlStore::new(root, Box::new(OsIo))
+/// A store on disk at `root`, creating sessions on behalf of `workspace`.
+///
+/// `workspace` must be the value `run::workspace` produced — it is already
+/// through `std::fs::canonicalize`, which is what makes a session reached
+/// through a symlink, or through `/var` rather than `/private/var`, compare
+/// equal to itself. Resolving it a second time here would be the second
+/// canonicaliser `AGENTS.md`'s reuse-first rule exists to prevent.
+pub fn jsonl(root: PathBuf, workspace: PathBuf) -> JsonlStore {
+    JsonlStore::new(root, workspace, Box::new(OsIo))
 }
 
 /// The state a run starts from, and the store it writes through.

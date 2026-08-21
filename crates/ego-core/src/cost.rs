@@ -190,7 +190,7 @@ impl Amount {
 
     /// Strip trailing fractional zeros, so equal values have equal fields.
     fn canonical(mut self) -> Self {
-        while self.scale > 0 && self.coefficient % 10 == 0 {
+        while self.scale > 0 && self.coefficient.is_multiple_of(10) {
             self.coefficient /= 10;
             self.scale -= 1;
         }

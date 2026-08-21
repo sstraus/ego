@@ -286,7 +286,7 @@ mod store {
     #[test]
     fn store_append_then_read_roundtrips_events_in_order() {
         let dir = tempdir().unwrap();
-        let store = JsonlStore::new(dir.path(), Box::new(OsIo));
+        let store = JsonlStore::new(dir.path(), "/ws", Box::new(OsIo));
         let id = SessionId::new();
         let turn = TurnId::new();
         let mut seq = Seq::default();
@@ -318,7 +318,7 @@ mod store {
     #[test]
     fn store_append_writes_header_before_first_record() {
         let dir = tempdir().unwrap();
-        let store = JsonlStore::new(dir.path(), Box::new(OsIo));
+        let store = JsonlStore::new(dir.path(), "/ws", Box::new(OsIo));
         let id = SessionId::new();
         let turn = TurnId::new();
         let mut seq = Seq::default();
@@ -348,7 +348,7 @@ mod store {
     #[test]
     fn store_append_never_rewrites_the_header_on_later_events() {
         let dir = tempdir().unwrap();
-        let store = JsonlStore::new(dir.path(), Box::new(OsIo));
+        let store = JsonlStore::new(dir.path(), "/ws", Box::new(OsIo));
         let id = SessionId::new();
         let turn = TurnId::new();
         let mut seq = Seq::default();
@@ -380,7 +380,7 @@ mod store {
     #[test]
     fn store_read_missing_session_returns_not_found() {
         let dir = tempdir().unwrap();
-        let store = JsonlStore::new(dir.path(), Box::new(OsIo));
+        let store = JsonlStore::new(dir.path(), "/ws", Box::new(OsIo));
         let id = SessionId::new();
         match store.read(&id) {
             Err(StoreError::NotFound) => {}
@@ -392,7 +392,7 @@ mod store {
     #[test]
     fn store_read_rejects_a_log_whose_first_line_is_not_a_header() {
         let dir = tempdir().unwrap();
-        let store = JsonlStore::new(dir.path(), Box::new(OsIo));
+        let store = JsonlStore::new(dir.path(), "/ws", Box::new(OsIo));
         let id = SessionId::new();
 
         let path = log_path(dir.path(), &id);
@@ -411,7 +411,7 @@ mod store {
     #[test]
     fn store_read_surfaces_a_corrupt_line_without_hiding_the_rest_of_the_stream() {
         let dir = tempdir().unwrap();
-        let store = JsonlStore::new(dir.path(), Box::new(OsIo));
+        let store = JsonlStore::new(dir.path(), "/ws", Box::new(OsIo));
         let id = SessionId::new();
         let turn = TurnId::new();
         let mut seq = Seq::default();
@@ -489,7 +489,7 @@ mod store {
             inner: OsIo,
             fsyncs: fsyncs.clone(),
         };
-        let store = JsonlStore::new(dir.path(), Box::new(io));
+        let store = JsonlStore::new(dir.path(), "/ws", Box::new(io));
         let id = SessionId::new();
         let turn = TurnId::new();
         let mut seq = Seq::default();
@@ -561,7 +561,7 @@ mod store {
             inner: OsIo,
             reads: reads.clone(),
         };
-        let store = JsonlStore::new(dir.path(), Box::new(io));
+        let store = JsonlStore::new(dir.path(), "/ws", Box::new(io));
         let id = SessionId::new();
         let turn = TurnId::new();
         let mut seq = Seq::default();
@@ -600,14 +600,14 @@ mod store {
     fn store_list_on_empty_root_returns_no_sessions() {
         let dir = tempdir().unwrap();
         let root = dir.path().join("sessions"); // deliberately does not exist yet
-        let store = JsonlStore::new(&root, Box::new(OsIo));
+        let store = JsonlStore::new(&root, "/ws", Box::new(OsIo));
         assert_eq!(store.list().unwrap(), Vec::new());
     }
 
     #[test]
     fn store_list_reports_meta_written_at_creation_and_turn_boundaries_only() {
         let dir = tempdir().unwrap();
-        let store = JsonlStore::new(dir.path(), Box::new(OsIo));
+        let store = JsonlStore::new(dir.path(), "/ws", Box::new(OsIo));
         let id = SessionId::new();
         let turn = TurnId::new();
         let mut seq = Seq::default();
@@ -630,7 +630,14 @@ mod store {
         assert_eq!(after_creation[0].id, id);
         assert_eq!(after_creation[0].created, Timestamp::from_millis(1_000));
         assert_eq!(after_creation[0].updated, Timestamp::from_millis(1_000));
-        assert_eq!(after_creation[0].workspace_root, None);
+        // The one the store was built for, stamped into the header at
+        // creation. `model` and `title` are still `None` because nothing in
+        // `append` can learn them; the workspace stopped being in that
+        // category when the header started carrying it.
+        assert_eq!(
+            after_creation[0].workspace_root,
+            Some(std::path::PathBuf::from("/ws"))
+        );
         assert_eq!(after_creation[0].model, None);
         assert_eq!(after_creation[0].title, None);
 
@@ -680,7 +687,7 @@ mod store {
     #[test]
     fn store_list_skips_a_session_with_an_unreadable_manifest_rather_than_failing() {
         let dir = tempdir().unwrap();
-        let store = JsonlStore::new(dir.path(), Box::new(OsIo));
+        let store = JsonlStore::new(dir.path(), "/ws", Box::new(OsIo));
         let turn = TurnId::new();
         let mut seq = Seq::default();
 
@@ -723,7 +730,7 @@ mod store {
         let turn = TurnId::new();
         let mut seq = Seq::default();
         {
-            let store = JsonlStore::new(dir.path(), Box::new(OsIo));
+            let store = JsonlStore::new(dir.path(), "/ws", Box::new(OsIo));
             store
                 .append(
                     &good_id,
@@ -747,7 +754,7 @@ mod store {
             inner: OsIo,
             fail_path: bad_manifest,
         };
-        let store = JsonlStore::new(dir.path(), Box::new(io));
+        let store = JsonlStore::new(dir.path(), "/ws", Box::new(io));
 
         let metas = store.list().unwrap();
         assert_eq!(

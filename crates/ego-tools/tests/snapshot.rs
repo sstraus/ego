@@ -110,7 +110,7 @@ mod snapshot {
     /// `known_events` and `unresolved_parents` are exercised too.
     fn session_with_events() -> Fixture {
         let dir = tempdir().unwrap();
-        let store = JsonlStore::new(dir.path(), Box::new(OsIo));
+        let store = JsonlStore::new(dir.path(), "/ws", Box::new(OsIo));
         let id = SessionId::new();
         let turn1 = TurnId::new();
         let turn2 = TurnId::new();
