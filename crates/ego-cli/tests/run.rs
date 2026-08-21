@@ -1431,6 +1431,32 @@ fn a_hosted_model_without_its_credential_names_the_variable() {
     );
 }
 
+/// A variable set to whitespace is not a credential, and is refused as though
+/// it were unset.
+///
+/// The one case only a child process can reach: `EnvCredentials` reads the
+/// real environment, and `std::env::set_var` is `unsafe` under edition 2024
+/// while this workspace denies `unsafe_code` — so an in-process test cannot
+/// put a value there at all. Left uncovered, the emptiness check is a guard
+/// nothing exercises, and a build that dropped it would send `Bearer ` and
+/// have the provider's 401 blamed on the key rather than on the blank.
+#[test]
+fn a_credential_set_to_whitespace_is_refused_like_a_missing_one() {
+    let stub = Stub::start(Plan::default());
+    let ego = Ego::against(&stub).env("OPENAI_API_KEY", "   ");
+    ego.home_file("models.toml", OPENAI_FACTS);
+    let finished = ego
+        .args(["--model", "openai/gpt-5.1", "--ephemeral", "Ask"])
+        .run();
+
+    assert_eq!(finished.code, Some(2), "stderr: {}", finished.stderr);
+    assert!(
+        finished.stderr.contains("OPENAI_API_KEY"),
+        "{}",
+        finished.stderr
+    );
+}
+
 /// With the credential and no supplied facts, the refusal is the one the ADR
 /// ratified: a hosted model cannot be bounded from figures this build does not
 /// have. Refusing is not a gap — a remembered rate would mint a reservation
