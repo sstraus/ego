@@ -8,10 +8,12 @@
 //! is worth logging, and the value that must never appear in a log is the
 //! one that refuses to print itself wherever it goes.
 //!
-//! There is deliberately no provider *table* here yet. Which row ships first
-//! is `plans/m0b-vertical-slice.md` Open Question 3 and is maintainer's to answer;
-//! the shape below holds either way, and inventing a table before the answer
-//! would be inventing the answer.
+//! The two rows this milestone ships are constructors, not a static table.
+//! A row needs a credential read from the environment and an endpoint an
+//! operator may point elsewhere, and neither is a constant. What a model
+//! *resolves to* — capabilities and price — lives in `catalogue.rs`, because
+//! a row is where to send a request and says nothing about what the model on
+//! the other end can do.
 
 use std::fmt;
 
@@ -115,7 +117,49 @@ pub struct ProviderRow {
     pub auth: Auth,
 }
 
+/// Where OpenAI's chat-completions endpoint lives.
+pub const OPENAI_ENDPOINT: &str = "https://api.openai.com/v1/chat/completions";
+/// The environment variable OpenAI's credential is read from.
+pub const OPENAI_KEY_VAR: &str = "OPENAI_API_KEY";
+/// Where a default Ollama install serves its openai-compatible endpoint.
+pub const OLLAMA_ENDPOINT: &str = "http://localhost:11434/v1/chat/completions";
+
 impl ProviderRow {
+    /// The hosted row.
+    ///
+    /// The credential is read here rather than per request, so "no key
+    /// configured" is a refusal naming the variable to set instead of a 401
+    /// several layers later — by which point the request has been built,
+    /// sent, and charged to somebody's rate limit.
+    pub fn openai() -> Result<Self, MissingCredential> {
+        Ok(ProviderRow {
+            id: "openai".to_string(),
+            endpoint: Url::parse(OPENAI_ENDPOINT).expect("a constant this file controls"),
+            auth: Auth::bearer_from_env(OPENAI_KEY_VAR)?,
+        })
+    }
+
+    /// The local row, on the same wire format as the hosted one.
+    ///
+    /// Measured against a live Ollama 0.32.14 rather than assumed: it accepts
+    /// the exact body `openai_completions` builds, honours
+    /// `stream_options.include_usage`, and validates `reasoning_effort`
+    /// against a strict superset of what `ThinkingLevel` can produce. So it
+    /// needs no mapping of its own, and this row differs from the hosted one
+    /// only in endpoint and [`Auth`].
+    pub fn ollama(endpoint: Url) -> Self {
+        ProviderRow {
+            id: "ollama".to_string(),
+            endpoint,
+            auth: Auth::None,
+        }
+    }
+
+    /// The local row at the default install's address.
+    pub fn ollama_default() -> Self {
+        Self::ollama(Url::parse(OLLAMA_ENDPOINT).expect("a constant this file controls"))
+    }
+
     /// The headers this row contributes to a request.
     ///
     /// Only the credential. Content type and accept belong to the wire

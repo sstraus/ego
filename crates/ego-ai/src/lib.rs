@@ -4,8 +4,10 @@
 //! See `ARCHITECTURE.md` §3.1. Implements `ego-core`'s `Generator` port and
 //! owns `Http`, credentials and the provider tables.
 
+pub mod catalogue;
 pub mod generator;
 pub mod http;
+pub mod ollama;
 pub mod provider;
 pub mod wire;
 
