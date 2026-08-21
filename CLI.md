@@ -90,9 +90,19 @@ Grouped; all long flags, short forms only for the hot five
                         allows/denies/escalates (permissions.judge in config:
                         a cheap tier like gpt-5.6-luna or GLM, or local ollama)
     --sandbox S         ro|workspace|off             (off = classifier only)
-    --allow RULE        repeatable   e.g. --allow 'bash(git *)' --allow 'net(api.github.com)'
+    --allow RULE        repeatable   e.g. --allow 'exec(git *)' --allow 'net(api.github.com)'
     --deny RULE         repeatable; deny beats allow
 ```
+
+A rule's head names an **effect** and never a tool: `exec(git *)`, not
+`bash(git *)`. A tool-named rule's coverage is a function of the tool
+inventory, so every new tool that shells out is a silent hole in every rule
+ever written, and the hole is invisible because the rule still reads
+correctly. `bash(...)` is a parse error whose message names `exec` rather than
+an alias for it. The heads are `read`, `write`, `list`, `search`, `exec`,
+`net` and `tool` — grammar in
+`docs/decisions/2026-08-21-a-rule-that-means-exactly-one-thing.md`, which
+corrects the example this line used to carry.
 
 Rules follow a published formal grammar matched against the *canonical* call
 (resolved paths, argv, endpoints — never rendered shell strings); the
@@ -242,7 +252,7 @@ family as skills; `--var` fills `{{placeholders}}`; shebang makes it a program:
 model: anthropic/claude-sonnet-5
 mode: edits
 sandbox: workspace
-allow: ["bash(cargo *)"]
+allow: ["exec(cargo *)"]
 schema: "@review-schema.json"
 vars: [severity]
 ---
