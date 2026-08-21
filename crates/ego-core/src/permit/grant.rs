@@ -39,6 +39,8 @@ pub struct Permit {
 pub enum PermitDenied {
     Write { path: CanonPath },
     Read { path: CanonPath },
+    List { path: CanonPath },
+    Search { path: CanonPath },
     Connect { endpoint: String },
     Argv { argv: Vec<String> },
 }
@@ -51,6 +53,12 @@ impl fmt::Display for PermitDenied {
             }
             PermitDenied::Read { path } => {
                 write!(f, "read denied: {path} is outside the permit's scope")
+            }
+            PermitDenied::List { path } => {
+                write!(f, "list denied: {path} is outside the permit's scope")
+            }
+            PermitDenied::Search { path } => {
+                write!(f, "search denied: {path} is outside the permit's scope")
             }
             PermitDenied::Connect { endpoint } => {
                 write!(
@@ -71,34 +79,57 @@ impl fmt::Display for PermitDenied {
 impl std::error::Error for PermitDenied {}
 
 impl Permit {
+    /// The one prefix check the four path authorities share.
+    ///
+    /// Written once rather than four times: the *policy* difference between
+    /// reading and listing lives entirely in which list is consulted, and
+    /// four copies of this loop would be four places for that decision to
+    /// drift.
+    fn allows(
+        list: &[CanonPath],
+        path: &CanonPath,
+        deny: fn(CanonPath) -> PermitDenied,
+    ) -> Result<(), PermitDenied> {
+        if list.iter().any(|allowed| path.is_or_under(allowed)) {
+            Ok(())
+        } else {
+            Err(deny(path.clone()))
+        }
+    }
+
     /// Checks a write against [`Scope::write_paths`]. Callers pass a
     /// freshly resolved [`CanonPath`] — never one cached from an earlier
     /// point in time — so this only ever judges the current truth.
     pub fn allows_write(&self, path: &CanonPath) -> Result<(), PermitDenied> {
-        if self
-            .scope
-            .write_paths
-            .iter()
-            .any(|allowed| path.is_or_under(allowed))
-        {
-            Ok(())
-        } else {
-            Err(PermitDenied::Write { path: path.clone() })
-        }
+        Self::allows(&self.scope.write_paths, path, |path| PermitDenied::Write {
+            path,
+        })
     }
 
     /// Checks a read against [`Scope::read_paths`].
     pub fn allows_read(&self, path: &CanonPath) -> Result<(), PermitDenied> {
-        if self
-            .scope
-            .read_paths
-            .iter()
-            .any(|allowed| path.is_or_under(allowed))
-        {
-            Ok(())
-        } else {
-            Err(PermitDenied::Read { path: path.clone() })
-        }
+        Self::allows(&self.scope.read_paths, path, |path| PermitDenied::Read {
+            path,
+        })
+    }
+
+    /// Checks an enumeration against [`Scope::list_paths`].
+    ///
+    /// Deliberately does not fall back to [`Scope::read_paths`]: a permit that
+    /// may read a file says nothing about whether the directory holding it may
+    /// be enumerated, and inferring one from the other is how least privilege
+    /// quietly stops being enforced.
+    pub fn allows_list(&self, path: &CanonPath) -> Result<(), PermitDenied> {
+        Self::allows(&self.scope.list_paths, path, |path| PermitDenied::List {
+            path,
+        })
+    }
+
+    /// Checks a search against [`Scope::search_paths`].
+    pub fn allows_search(&self, path: &CanonPath) -> Result<(), PermitDenied> {
+        Self::allows(&self.scope.search_paths, path, |path| {
+            PermitDenied::Search { path }
+        })
     }
 
     /// Checks a network endpoint against [`Scope::endpoints`].
@@ -140,8 +171,15 @@ impl Permit {
 pub enum PolicyDenied {
     /// The call wants to write, and this milestone's tools are read-only.
     WriteRefused { tool: String, path: CanonPath },
-    /// The call wants to read outside the workspace.
-    ReadOutsideWorkspace { tool: String, path: CanonPath },
+    /// The call wants to reach outside the workspace. Carries which kind of
+    /// operation it was: "you may not read /etc/passwd" and "you may not list
+    /// /etc" are different refusals, and a prompt that flattens them into
+    /// "denied" teaches a model nothing.
+    OutsideWorkspace {
+        tool: String,
+        op: &'static str,
+        path: CanonPath,
+    },
 }
 
 impl fmt::Display for PolicyDenied {
@@ -151,8 +189,8 @@ impl fmt::Display for PolicyDenied {
                 f,
                 "{tool} may not write {path}: this session's tools are read-only"
             ),
-            PolicyDenied::ReadOutsideWorkspace { tool, path } => {
-                write!(f, "{tool} may not read {path}: it is outside the workspace")
+            PolicyDenied::OutsideWorkspace { tool, op, path } => {
+                write!(f, "{tool} may not {op} {path}: it is outside the workspace")
             }
         }
     }
@@ -194,34 +232,38 @@ impl PolicyEngine {
     /// anything — a mode that asks a human still returns a `Permit` or a
     /// `PolicyDenied` from this method.
     pub fn authorize(&self, call: &PreparedCall) -> Result<Permit, PolicyDenied> {
-        let mut read_paths = Vec::with_capacity(call.ops.len());
+        let mut scope = Scope::default();
         for op in &call.ops {
+            if let Op::Write { path, .. } = op {
+                return Err(PolicyDenied::WriteRefused {
+                    tool: call.tool.clone(),
+                    path: path.clone(),
+                });
+            }
+            let path = op.path();
+            if !path.is_or_under(&self.workspace) {
+                return Err(PolicyDenied::OutsideWorkspace {
+                    tool: call.tool.clone(),
+                    op: op.name(),
+                    path: path.clone(),
+                });
+            }
+            // Each op widens only its own authority. A call that lists a
+            // directory gets `list_paths` and no `read_paths`, so the tool
+            // learns names and cannot then read what it found — the whole
+            // reason these are separate lists.
             match op {
-                Op::Write { path, .. } => {
-                    return Err(PolicyDenied::WriteRefused {
-                        tool: call.tool.clone(),
-                        path: path.clone(),
-                    });
-                }
-                Op::Read { path } => {
-                    if !path.is_or_under(&self.workspace) {
-                        return Err(PolicyDenied::ReadOutsideWorkspace {
-                            tool: call.tool.clone(),
-                            path: path.clone(),
-                        });
-                    }
-                    read_paths.push(path.clone());
-                }
+                Op::Read { .. } => scope.read_paths.push(path.clone()),
+                Op::List { .. } => scope.list_paths.push(path.clone()),
+                Op::Search { .. } => scope.search_paths.push(path.clone()),
+                Op::Write { .. } => unreachable!("refused above"),
             }
         }
         // Scoped to the paths this call named, not to the workspace: a tool
         // that asked to read one file is not thereby allowed to read the
         // repository. `GuardedIo` re-resolves at use time, so a symlink
         // swapped in afterwards is judged against this same narrow list.
-        Ok(self.mint(Scope {
-            read_paths,
-            ..Scope::default()
-        }))
+        Ok(self.mint(scope))
     }
 
     /// Mint a permit for an explicit scope.

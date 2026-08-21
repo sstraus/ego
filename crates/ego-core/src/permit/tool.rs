@@ -7,7 +7,7 @@ use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
-use super::fs::{GuardedIo, PathResolver};
+use super::fs::{FsError, GuardedIo, IoDenied, PathResolver};
 use super::grant::{Permit, PermitDenied};
 use super::path::CanonPath;
 use super::prepared_call::PreparedCall;
@@ -29,12 +29,22 @@ pub struct PrepareCtx<'a> {
 }
 
 /// Why a `Tool` call failed, before or during execution.
+///
+/// `Denied` and `Fs` stay separate all the way to the model: a model told it
+/// was refused should stop asking, and a model told the file is not there
+/// should look somewhere else. One collapsed "it didn't work" produces the
+/// wrong next move in both cases.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolError {
     /// `prepare`'s params didn't match the tool's schema.
     InvalidParams(String),
     /// `execute` hit an operation the `Permit` doesn't cover.
     Denied(PermitDenied),
+    /// The filesystem refused or could not find something. Reachable from
+    /// `prepare` too: resolving a path the model named is the first thing a
+    /// read-only tool does, and a missing file fails there, before there is
+    /// anything to authorise.
+    Fs(FsError),
 }
 
 impl std::fmt::Display for ToolError {
@@ -42,6 +52,7 @@ impl std::fmt::Display for ToolError {
         match self {
             ToolError::InvalidParams(msg) => write!(f, "invalid params: {msg}"),
             ToolError::Denied(denied) => write!(f, "{denied}"),
+            ToolError::Fs(err) => write!(f, "{err}"),
         }
     }
 }
@@ -51,6 +62,21 @@ impl std::error::Error for ToolError {}
 impl From<PermitDenied> for ToolError {
     fn from(denied: PermitDenied) -> Self {
         ToolError::Denied(denied)
+    }
+}
+
+impl From<FsError> for ToolError {
+    fn from(err: FsError) -> Self {
+        ToolError::Fs(err)
+    }
+}
+
+impl From<IoDenied> for ToolError {
+    fn from(denied: IoDenied) -> Self {
+        match denied {
+            IoDenied::Permit(denied) => ToolError::Denied(denied),
+            IoDenied::Fs(err) => ToolError::Fs(err),
+        }
     }
 }
 

@@ -8,12 +8,14 @@ mod fs;
 mod grant;
 mod path;
 mod prepared_call;
+mod scan;
 mod scope;
 mod tool;
 
-pub use fs::{Fs, GuardedFs, GuardedIo, PathResolver};
+pub use fs::{Fs, FsError, GuardedFs, GuardedIo, IoDenied, PathResolver};
 pub use grant::{Permit, PermitDenied, PolicyDenied, PolicyEngine};
 pub use path::CanonPath;
 pub use prepared_call::{Op, PreparedCall};
+pub use scan::{Entry, EntryKind, Found, LineMatcher, Match, Scan, ScanLimits, ScanRequest};
 pub use scope::Scope;
 pub use tool::{PrepareCtx, Tool, ToolDescriptor, ToolError, ToolResult, Typed, TypedTool};

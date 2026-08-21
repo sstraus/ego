@@ -164,7 +164,7 @@ mod turn {
             Ok(PreparedCall {
                 tool: self.name().to_string(),
                 ops: vec![Op::Read {
-                    path: ctx.resolver.canonicalize(Path::new(&params.path)),
+                    path: ctx.resolver.canonicalize(Path::new(&params.path))?,
                 }],
             })
         }
@@ -179,7 +179,7 @@ mod turn {
                 let Some(Op::Read { path }) = call.ops.into_iter().next() else {
                     return Err(ToolError::InvalidParams("expected one Read op".into()));
                 };
-                let bytes = io.read(&path)?.unwrap_or_default();
+                let bytes = io.read(&path)?;
                 Ok(ToolResult {
                     content: String::from_utf8_lossy(&bytes).into_owned(),
                 })
