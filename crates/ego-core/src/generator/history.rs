@@ -9,7 +9,7 @@
 //! The durable log is never rewritten. Everything below produces the request
 //! that is about to be assembled, and nothing else.
 
-use super::types::{ContentBlock, Conversation, Message, Role};
+use super::types::{ContentBlock, Conversation, HistoryError, Message, Role};
 use crate::state::{ItemKind, ItemState, SessionState};
 
 /// Something the rebuild had to do to make the history sendable.
@@ -35,9 +35,16 @@ const TORN: &str = "the tool call did not complete: the session ended before its
 /// Rebuild `state`'s history as something a provider will accept, and say
 /// what had to be repaired to get there.
 ///
-/// The result is always a valid [`Conversation`]: every branch either
-/// completes the history or truncates to a prefix that was already complete.
-pub fn conversation_from(state: &SessionState) -> (Conversation, Vec<Repair>) {
+/// Every branch either completes the history or truncates to a prefix that was
+/// already complete, so no repair below can *cause* an `Err`. What it can do is
+/// fail to cure one that was already in the log: a log holding two calls under
+/// one provider id is corruption, not a tear, and it is refused rather than
+/// given a reading (ADR §6). The whole [`HistoryError`] propagates and not just
+/// that variant, because a rebuild that names the one error it believes
+/// reachable is the exact claim §6 was written to retract.
+pub fn conversation_from(
+    state: &SessionState,
+) -> Result<(Conversation, Vec<Repair>), HistoryError> {
     let mut items: Vec<&ItemState> = state.items.values().collect();
     // By `seq`, not by `ItemId` — see `ItemState::seq`.
     items.sort_by_key(|item| item.seq);
@@ -70,8 +77,8 @@ pub fn conversation_from(state: &SessionState) -> (Conversation, Vec<Repair>) {
                     // torn *before* this one are still answered by `finish`,
                     // because their turn is part of the surviving prefix.
                     repairs.push(Repair::TruncatedUnidentifiedCall);
-                    let conversation = finish(messages, unanswered, &mut repairs);
-                    return (conversation, repairs);
+                    let conversation = finish(messages, unanswered, &mut repairs)?;
+                    return Ok((conversation, repairs));
                 };
                 push(
                     &mut messages,
@@ -102,8 +109,8 @@ pub fn conversation_from(state: &SessionState) -> (Conversation, Vec<Repair>) {
         }
     }
 
-    let conversation = finish(messages, unanswered, &mut repairs);
-    (conversation, repairs)
+    let conversation = finish(messages, unanswered, &mut repairs)?;
+    Ok((conversation, repairs))
 }
 
 /// Answer every outstanding call, then check the result.
@@ -111,7 +118,7 @@ fn finish(
     mut messages: Vec<Message>,
     unanswered: Vec<String>,
     repairs: &mut Vec<Repair>,
-) -> Conversation {
+) -> Result<Conversation, HistoryError> {
     for call_id in unanswered {
         repairs.push(Repair::AnsweredTornCall {
             call_id: call_id.clone(),
@@ -126,9 +133,7 @@ fn finish(
             },
         );
     }
-    Conversation::new(messages).expect(
-        "the rebuild answers every call it emits, so the history it produces satisfies Conversation",
-    )
+    Conversation::new(messages)
 }
 
 fn text_block(text: &str) -> ContentBlock {

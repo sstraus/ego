@@ -433,7 +433,30 @@ impl<'a> TurnLoop<'a> {
 
     /// One generation: reserve, stream it into the log, settle.
     async fn generate(&mut self, turn: TurnId) -> Result<Generated, StoreError> {
-        let (history, repairs) = conversation_from(self.journal.state());
+        // A log this build wrote cannot fail here: the guard in `drain` refuses
+        // a reused call id before it is ever appended. A log written before
+        // that guard existed can, and there is nothing to do about it from
+        // here — the log is never rewritten, so the run ends visibly at the
+        // provider's exit code rather than resuming a session with a hole in
+        // it (ADR §6).
+        let (history, repairs) = match conversation_from(self.journal.state()) {
+            Ok(rebuilt) => rebuilt,
+            Err(malformed) => {
+                tracing::warn!(%malformed, "the stored history cannot be rebuilt into a request");
+                self.journal.append(
+                    turn,
+                    None,
+                    None,
+                    EventKind::Error {
+                        message: format!(
+                            "this session's log cannot be sent to a provider and \
+                             cannot be repaired: {malformed}"
+                        ),
+                    },
+                )?;
+                return Ok(Generated::Ended(ExitReason::Provider));
+            }
+        };
         let conversation = self.with_system(history);
         if !repairs.is_empty() {
             // Not a durable event: whether a repair becomes one is
