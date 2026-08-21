@@ -612,6 +612,7 @@ name = "ego-tools"
 version = "0.1.0"
 dependencies = [
  "ego-core",
+ "ego-tools",
  "fd-lock",
  "futures",
  "globset",
