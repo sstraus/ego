@@ -11,7 +11,21 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
-use super::types::{GenRequest, ThinkingLevel};
+use super::types::{ContentBlock, GenRequest, ReasoningState, ThinkingLevel};
+
+/// Every reasoning state `req`'s history carries, in the order it carries
+/// them.
+fn carried_reasoning(req: &GenRequest) -> Vec<&ReasoningState> {
+    req.messages
+        .messages()
+        .iter()
+        .flat_map(|message| &message.content)
+        .filter_map(|block| match block {
+            ContentBlock::Reasoning { state } => Some(state),
+            _ => None,
+        })
+        .collect()
+}
 
 /// Whether a model can accept reasoning state carried over from another
 /// generation (its own prior turn, or — for a fallback — a different model).
@@ -116,6 +130,25 @@ pub struct ModelCapabilities {
     /// [`Unknown`]: ReasoningEffortSupport::Unknown
     #[serde(default)]
     pub reasoning_efforts: ReasoningEffortSupport,
+    /// Which reasoning-state dialect this model mints and accepts, when
+    /// anybody said.
+    ///
+    /// Compared for equality against [`ReasoningState::dialect`], never
+    /// matched on: this is the target's half of a check whose other half
+    /// travels with the state. It matters only under
+    /// [`ReasoningCarryover::SameProviderOnly`], which constrains *whose*
+    /// state a model accepts while saying nothing about who minted the state
+    /// in hand — so without both tags the check cannot be made at all, and
+    /// Anthropic state passes for a Gemini target.
+    ///
+    /// `None` is "nobody stated one", not "any dialect". A record written
+    /// before this field existed decodes that way and has proved nothing
+    /// about the model, exactly as a `1` record proves nothing about
+    /// [`reasoning_efforts`](ModelCapabilities::reasoning_efforts).
+    ///
+    /// [`ReasoningState::dialect`]: super::types::ReasoningState::dialect
+    #[serde(default)]
+    pub reasoning_state_dialect: Option<String>,
     pub cancel: CancelSemantics,
     pub cache: CacheRetention,
     pub transport: Transport,
@@ -152,6 +185,27 @@ pub enum CapabilityGap {
         requested: ThinkingLevel,
         accepted: BTreeSet<ThinkingLevel>,
     },
+    /// `req` carries reasoning state minted by one dialect, and this model
+    /// accepts only its own — a different one.
+    ///
+    /// Reached only under [`ReasoningCarryover::SameProviderOnly`]:
+    /// `Unsupported` refuses any carried state before the dialects are
+    /// consulted, and `Portable` accepts every dialect by definition.
+    ReasoningStateDialectMismatch { carried: String, accepted: String },
+    /// `req` carries reasoning state and nobody ever stated which dialect
+    /// this model speaks, so whether the state is replayable is unknown.
+    ///
+    /// Separate from [`ReasoningStateDialectMismatch`] on the same grounds
+    /// that separate [`ReasoningEffortUnstated`] from
+    /// [`ReasoningEffortUnsupported`]: the remedy is "re-resolve this model",
+    /// not "carry different state". Failing closed here rather than assuming
+    /// a match, because a wrong guess sends state a provider documents a
+    /// `400` for.
+    ///
+    /// [`ReasoningStateDialectMismatch`]: CapabilityGap::ReasoningStateDialectMismatch
+    /// [`ReasoningEffortUnstated`]: CapabilityGap::ReasoningEffortUnstated
+    /// [`ReasoningEffortUnsupported`]: CapabilityGap::ReasoningEffortUnsupported
+    ReasoningStateDialectUnstated { carried: String },
 }
 
 /// What the caller is told. Every gap names both what was asked for and what
@@ -197,6 +251,16 @@ impl std::fmt::Display for CapabilityGap {
                     accepted.join(", ")
                 )
             }
+            Self::ReasoningStateDialectMismatch { carried, accepted } => write!(
+                f,
+                "the history carries {carried} reasoning state and this model accepts \
+                 only its own {accepted} state"
+            ),
+            Self::ReasoningStateDialectUnstated { carried } => write!(
+                f,
+                "the history carries {carried} reasoning state and nobody ever stated \
+                 which dialect this model accepts — resolve the model again"
+            ),
         }
     }
 }
@@ -205,10 +269,18 @@ impl ModelCapabilities {
     /// The version this build writes. Bumped whenever the field set or its
     /// meaning changes; `2` added [`reasoning_efforts`], so a `1` record
     /// decodes with [`ReasoningEffortSupport::Unknown`] — which is what it
-    /// proved about that model, namely nothing.
+    /// proved about that model, namely nothing. `3` added
+    /// [`reasoning_state_dialect`] on the same terms: a `2` record decodes
+    /// with `None`, which is likewise what it proved.
+    ///
+    /// Read this at merge rather than trusting it. A sibling ADR names a
+    /// possible `2` -> `3` for an Anthropic thinking budget; if both land
+    /// together it is one bump and not two, and the number here is arithmetic
+    /// on the base this branch forked from.
     ///
     /// [`reasoning_efforts`]: ModelCapabilities::reasoning_efforts
-    pub const SCHEMA_VERSION: u32 = 2;
+    /// [`reasoning_state_dialect`]: ModelCapabilities::reasoning_state_dialect
+    pub const SCHEMA_VERSION: u32 = 3;
 
     /// Every way `req` does not fit *this* model — empty means it can be
     /// sent. Checked after the model resolves and before the budget gate
@@ -218,10 +290,36 @@ impl ModelCapabilities {
     pub fn request_gaps(&self, req: &GenRequest) -> Vec<CapabilityGap> {
         let mut gaps = Vec::new();
 
-        if req.reasoning_state.is_some()
-            && self.reasoning_carryover == ReasoningCarryover::Unsupported
-        {
-            gaps.push(CapabilityGap::ReasoningStateCarryoverUnsupported);
+        // Read off the conversation rather than a field beside it: the state
+        // is positional, so the block list is the only place it can live, and
+        // a second copy on the request would be the same fact twice.
+        let carried = carried_reasoning(req);
+        match self.reasoning_carryover {
+            _ if carried.is_empty() => {}
+            ReasoningCarryover::Unsupported => {
+                gaps.push(CapabilityGap::ReasoningStateCarryoverUnsupported);
+            }
+            // Constrains *whose* state this model accepts, so the tags have
+            // to be compared. Reported once per offending dialect and not
+            // once per block: a history with forty blocks from one other
+            // provider is one problem with one remedy.
+            ReasoningCarryover::SameProviderOnly => {
+                let mut reported = BTreeSet::new();
+                for state in &carried {
+                    match &self.reasoning_state_dialect {
+                        Some(mine) if *mine == state.dialect => {}
+                        _ if !reported.insert(state.dialect.clone()) => {}
+                        Some(mine) => gaps.push(CapabilityGap::ReasoningStateDialectMismatch {
+                            carried: state.dialect.clone(),
+                            accepted: mine.clone(),
+                        }),
+                        None => gaps.push(CapabilityGap::ReasoningStateDialectUnstated {
+                            carried: state.dialect.clone(),
+                        }),
+                    }
+                }
+            }
+            ReasoningCarryover::Portable => {}
         }
         if req.parallel_tool_calls && !self.supports_parallel_tool_calls {
             gaps.push(CapabilityGap::ParallelToolCallsUnsupported);

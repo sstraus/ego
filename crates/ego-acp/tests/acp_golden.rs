@@ -49,7 +49,7 @@ use ego_core::generator::capabilities::{
     CacheRetention, CancelSemantics, ModelCapabilities, ReasoningCarryover, ReasoningEffortSupport,
     Transport,
 };
-use ego_core::generator::types::StopReason;
+use ego_core::generator::types::{ErrorKind, ReasoningState, StopReason};
 use ego_core::public::project_public;
 use ego_core::state::{SessionState, Usage};
 
@@ -297,6 +297,7 @@ mod acp_golden {
                 None,
                 EventKind::Error {
                     message: "rate limited, retrying".to_string(),
+                    kind: ErrorKind::Unclassified,
                 },
             ),
             ev(
@@ -336,22 +337,21 @@ mod acp_golden {
         ]
     }
 
-    /// Every event kind in the domain's 21-variant set, once.
+    /// Every event kind in the domain's 22-variant set, once each.
     ///
     /// This is the *source* the `None`-set test selects from by name, so
     /// that a kind renamed or removed upstream breaks a test instead of
-    /// silently shrinking the set being checked. It does not by itself
-    /// prove every kind is covered — the test below filters it to the twelve
-    /// kinds it names, and the remaining nine are covered by the dedicated
-    /// tests further down.
+    /// silently shrinking the set being checked. It does not by itself prove
+    /// every kind is covered — the test below filters it to the kinds it
+    /// names, and the rest are covered by the dedicated tests further down.
     ///
-    /// The count in the first line is the part that goes stale, and did:
-    /// this list said seventeen while the domain had twenty-one, so
-    /// `GenerationStarted`, `AttemptSettled` and `UsageCorrected` were absent
-    /// from every test in this file. Nothing here is bound to the enum by the
-    /// compiler — a `Vec` of samples cannot be — so a kind added upstream has
-    /// to be added here by hand, and the only thing that notices otherwise is
-    /// a reader counting.
+    /// **It catches removal and not addition**, and that hole has now been
+    /// stood in twice. The list said seventeen while the domain had
+    /// twenty-one, so `GenerationStarted`, `AttemptSettled` and
+    /// `UsageCorrected` were absent from every test in this file; and it
+    /// silently missed `ReasoningState` when that variant was added. A `Vec`
+    /// literal has no relationship to the enum, so nothing but a reader
+    /// counting notices. `POTENTIALS.md` P27.
     fn one_of_each_kind() -> Vec<EventKind> {
         vec![
             EventKind::UserPrompt {
@@ -365,6 +365,12 @@ mod acp_golden {
             },
             EventKind::ReasoningDelta {
                 text: String::new(),
+            },
+            EventKind::ReasoningState {
+                state: ReasoningState {
+                    blob: String::new(),
+                    dialect: String::new(),
+                },
             },
             EventKind::ToolCallStarted {
                 name: String::new(),
@@ -431,6 +437,7 @@ mod acp_golden {
             },
             EventKind::Error {
                 message: String::new(),
+                kind: ErrorKind::Unclassified,
             },
         ]
     }
@@ -443,7 +450,7 @@ mod acp_golden {
         Usage {
             uncached_input_tokens: uncached_input,
             output_tokens: output,
-            ..Usage::default()
+            ..Usage::IDENTITY
         }
     }
 
@@ -476,6 +483,7 @@ mod acp_golden {
             supports_parallel_tool_calls: true,
             reasoning_carryover: ReasoningCarryover::Portable,
             reasoning_efforts: ReasoningEffortSupport::Any,
+            reasoning_state_dialect: None,
             cancel: CancelSemantics::Cooperative,
             cache: CacheRetention::Short,
             transport: Transport::Sse,
@@ -595,6 +603,9 @@ mod acp_golden {
             "generation_started",
             "attempt_settled",
             "usage_corrected",
+            // The blob is provider-private and opaque, and ACP describes
+            // what the agent did rather than what it must replay.
+            "reasoning_state",
         ];
         let kinds: Vec<EventKind> = one_of_each_kind()
             .into_iter()

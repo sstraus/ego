@@ -8,6 +8,7 @@ use super::id::{EventId, ItemId, Producer, Seq, SessionId, TurnId};
 use super::time::Timestamp;
 use crate::cost::CostDelta;
 use crate::generator::attempt::{AttemptRef, Outcome};
+use crate::generator::types::{ErrorKind, ReasoningState};
 use crate::state::Usage;
 
 /// The full envelope every `DomainEvent` carries, per ARCH §1: a monotonic
@@ -165,6 +166,16 @@ pub enum EventKind {
     AssistantMessage { text: String },
     /// A streamed increment of the model's reasoning/thinking.
     ReasoningDelta { text: String },
+    /// One reasoning block's opaque continuation state, complete.
+    ///
+    /// The *close* of the block the preceding `ReasoningDelta`s opened, so it
+    /// is a boundary as well as a payload: the next delta after this opens a
+    /// new block. Journalled rather than derived, because the state is
+    /// positional — Anthropic documents a `400` when blocks are not replayed
+    /// exactly, including blocks whose `thinking` field is empty — and a
+    /// resumed session that reconstructed the order by guesswork would be
+    /// reconstructing the one thing the provider checks.
+    ReasoningState { state: ReasoningState },
     /// A tool call began, with its name and raw (unvalidated) arguments.
     ToolCallStarted {
         name: String,
@@ -277,7 +288,24 @@ pub enum EventKind {
     /// A subagent returned its final result.
     SubagentReturned { subagent_id: String, result: String },
     /// An error occurred.
-    Error { message: String },
+    ///
+    /// `kind` is `#[serde(default)]`, which is
+    /// [`ErrorKind::Unclassified`] — what a record written before this field
+    /// existed actually proved, since no provider code was ever read for it.
+    /// Failing closed on an absent classification rather than guessing at one
+    /// is the same reading `ReasoningEffortSupport::Unknown` takes.
+    ///
+    /// Serialised as `error_kind` and not `kind`, because this enum is
+    /// internally tagged on `kind` and a field of that name would collide
+    /// with the discriminant. Renaming the *tag* instead would be a
+    /// re-tagging, which this module's own rule puts on the far side of a
+    /// `CODEC_VERSION` bump; renaming the field is free because no record
+    /// carrying it exists yet.
+    Error {
+        message: String,
+        #[serde(default, rename = "error_kind")]
+        kind: ErrorKind,
+    },
 }
 
 impl EventKind {
@@ -290,6 +318,7 @@ impl EventKind {
             EventKind::AssistantDelta { .. } => "assistant_delta",
             EventKind::AssistantMessage { .. } => "assistant_message",
             EventKind::ReasoningDelta { .. } => "reasoning_delta",
+            EventKind::ReasoningState { .. } => "reasoning_state",
             EventKind::ToolCallStarted { .. } => "tool_call_started",
             EventKind::ToolCallDelta { .. } => "tool_call_delta",
             EventKind::ToolCallCompleted { .. } => "tool_call_completed",

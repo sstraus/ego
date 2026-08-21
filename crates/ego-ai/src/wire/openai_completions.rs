@@ -19,18 +19,36 @@
 //!   to `prompt + completion` with nothing counted twice. Subtracting only
 //!   `cached_tokens` — the obvious reading, and the one the per-request schema
 //!   alone would leave you with — would double-count every cache-write token.
-//! - **There is no reasoning text on this wire.** The streaming delta schema
+//! - **There is no reasoning text in *OpenAI's* schema.** The streaming delta
 //!   has `content`, `refusal`, `tool_calls`, `role` and `function_call`, and
 //!   nothing else; reasoning appears only as a *count*
-//!   (`completion_tokens_details.reasoning_tokens`). So this format never
-//!   emits [`AiEvent::ReasoningDelta`]. Providers that extend the shape with
-//!   `reasoning_content` are a different row's problem, not a field this one
-//!   may guess at.
+//!   (`completion_tokens_details.reasoning_tokens`).
+//!
+//!   But this format serves a family, and other members of it do stream the
+//!   text — as `reasoning` or as `reasoning_content`, in the same `delta`
+//!   object. Those are not a different row's problem: `ARCHITECTURE.md`'s
+//!   wire decision §4 rules that an extension field is decoded
+//!   **opportunistically and uniformly for every member**, because the field
+//!   *name* is the contract and the vendor is not. A member that never sends
+//!   it simply leaves the field absent, so there is nothing to branch on and
+//!   no provider identity to consult.
+//!
+//!   `Delta` does not decode either name yet, so this format still emits no
+//!   [`AiEvent::ReasoningDelta`] and silently drops text a provider sent. That
+//!   is a **recorded gap** (`POTENTIALS.md` P24), not a policy — an earlier
+//!   version of this comment argued the drop was correct, which `b00822e`
+//!   reversed.
 //! - **`finish_reason` has five spellings**, and one of them —
 //!   `content_filter` — has no [`StopReason`] to land on. It is reported as
 //!   [`StopReason::Error`] with a named [`AiEvent::Error`] beside it rather
 //!   than mapped onto `Stop`, which would claim a filtered answer finished
 //!   normally.
+//!
+//!   `consume_finish_reason` maps a sixth, `end_turn`, which is *not* in the
+//!   schema and arrives anyway: a gateway passing its upstream's reason
+//!   through untranslated. Decoded for the whole family and not for the row
+//!   that sends it, on the same rule as the reasoning fields above — the
+//!   string is the contract and the vendor is not.
 //!
 //! # The one event ordering rule
 //!
@@ -57,7 +75,7 @@ use ego_core::cost::Money;
 use ego_core::generator::attempt::DeliveryCertainty;
 use ego_core::generator::port::AiEvent;
 use ego_core::generator::types::{
-    ContentBlock, GenRequest, Message, Role, StopReason, ThinkingLevel,
+    ContentBlock, ErrorKind, GenRequest, Message, Role, StopReason, ThinkingLevel,
 };
 use ego_core::state::Usage;
 use futures::stream::{self, BoxStream, StreamExt};
@@ -238,6 +256,11 @@ fn wire_messages(messages: &[Message]) -> Vec<WireMessage<'_>> {
         let mut tool_calls = Vec::new();
         for block in &message.content {
             match block {
+                // Unreachable in practice: `request_body` refuses a history
+                // carrying one before this runs, because this schema has
+                // nowhere to put it. Dropped rather than refused a second
+                // time so that the refusal stays in one place.
+                ContentBlock::Reasoning { .. } => {}
                 ContentBlock::Text { text: chunk } => {
                     if !text.is_empty() {
                         text.push('\n');
@@ -305,7 +328,13 @@ fn flush<'a>(
 /// URL or a credential in it — the body is the contract with the provider;
 /// the endpoint and the auth header are the provider row's business.
 pub fn request_body(req: &GenRequest) -> Result<Vec<u8>, RequestRefused> {
-    if req.reasoning_state.is_some() {
+    let carries_reasoning = req
+        .messages
+        .messages()
+        .iter()
+        .flat_map(|message| &message.content)
+        .any(|block| matches!(block, ContentBlock::Reasoning { .. }));
+    if carries_reasoning {
         return Err(RequestRefused::ReasoningStateNotCarriable);
     }
     let messages = wire_messages(req.messages.messages());
@@ -425,6 +454,12 @@ struct WireUsage {
     completion_tokens: u64,
     #[serde(default)]
     prompt_tokens_details: Option<PromptTokensDetails>,
+    /// Absent on rows that publish no reasoning breakdown, which is why the
+    /// `Option` survives all the way to
+    /// [`Usage::reasoning_tokens`](ego_core::state::Usage::reasoning_tokens)
+    /// rather than being flattened to a zero here.
+    #[serde(default)]
+    completion_tokens_details: Option<CompletionTokensDetails>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -433,6 +468,12 @@ struct PromptTokensDetails {
     cached_tokens: u64,
     #[serde(default)]
     cache_write_tokens: u64,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct CompletionTokensDetails {
+    #[serde(default)]
+    reasoning_tokens: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -475,7 +516,22 @@ fn map_usage(usage: &WireUsage) -> Option<Usage> {
         uncached_input_tokens,
         cache_read_tokens,
         cache_write_tokens,
+        // A measured zero, not an absent figure. This wire's schema
+        // partitions `prompt_tokens` into cached and cache-write and has no
+        // extended-retention category at all, so every provider speaking it
+        // wrote nothing at an extended retention.
+        cache_write_extended_tokens: 0,
         output_tokens: usage.completion_tokens,
+        // Read where it is published and left unknown where it is not — the
+        // same opportunistic, uniform decode the sibling ADR §4 rules for
+        // every extension field, with no provider id anywhere near it.
+        // OpenRouter and xAI fill this in; Ollama sends no
+        // `completion_tokens_details` at all, and `None` says so rather than
+        // claiming it reasoned for nothing.
+        reasoning_tokens: usage
+            .completion_tokens_details
+            .as_ref()
+            .map(|details| details.reasoning_tokens),
     })
 }
 
@@ -598,11 +654,19 @@ impl StreamDecoder {
             out.push(AiEvent::DeliveryObserved(error.delivery()));
         }
         if self.usage_incoherent {
+            // `Unclassified` on purpose, and it is the honest answer rather
+            // than an unconsidered default. The generation itself did not
+            // fail — it completes and settles at its bound — so `Transient`
+            // would invite a retry of a turn that succeeded, and neither the
+            // request nor the account is what went wrong. None of the other
+            // three describes "the provider contradicted itself about a
+            // number", which is precisely what `Unclassified` is for.
             out.push(AiEvent::Error {
                 message: "the provider's prompt cache breakdown was larger than \
                           the prompt it broke down, so no usage figure could be \
                           trusted; this generation settles at its bound"
                     .to_string(),
+                kind: ErrorKind::Unclassified,
             });
         }
         // Before the usage frame, deliberately. The two are one observation
@@ -638,8 +702,25 @@ impl StreamDecoder {
                 // done quietly.
                 let abandoned = self.calls.len();
                 self.calls.clear();
+                // A stream that stopped without saying why. When a transport
+                // failure killed it, that failure's own class is the answer.
+                // When nothing killed it — the body simply ended mid-protocol
+                // — `Transient` is still the honest reading: the request was
+                // accepted (this arm is only reachable past a 200) and
+                // partly answered, so neither the request nor the account is
+                // what went wrong, and the same bytes may well complete next
+                // time. This is not the fail-open the `Unclassified` default
+                // guards against, because that rule is about a provider that
+                // *stated* nothing about retryability; here the provider
+                // stated nothing at all, which is a different fact. Nor does
+                // it authorise a double-billed retry: `PossiblySent` is
+                // already on the stream and `--retry` gates on both.
+                let kind = transport
+                    .as_ref()
+                    .map_or(ErrorKind::Transient, HttpError::kind);
                 out.push(AiEvent::Error {
                     message: self.incomplete_message(transport.as_ref(), abandoned),
+                    kind,
                 });
                 out.push(AiEvent::Stop(StopReason::Error));
             }
@@ -821,18 +902,59 @@ impl StreamDecoder {
             // Deprecated in the schema, still emitted by older gateways, and
             // the same event: the model stopped in order to call something.
             "function_call" => StopReason::ToolUse,
+            // Anthropic's spelling of `stop`, reaching this wire because a
+            // gateway passes its upstream's reason through untranslated
+            // rather than mapping it (survey row 45; xAI is the measured
+            // case). It is not this format's vocabulary and it arrives in
+            // this format's stream anyway, which is the whole reason the
+            // table is widened here rather than made conditional on a
+            // provider id — a `match` on the row inside a wire format is what
+            // the sibling ADR §5's name-absence test forbids.
+            //
+            // Widening is safe in the direction that matters: `end_turn` has
+            // exactly one meaning wherever it is minted, so no row that does
+            // *not* emit it can be harmed by an arm it never reaches.
+            "end_turn" => StopReason::Stop,
             "content_filter" => {
                 out.push(AiEvent::Error {
                     message: "the provider's content filter stopped the generation".to_string(),
+                    // Refused and not `Invalid`: the request was well formed
+                    // and the provider declined to answer it. No retry of the
+                    // same request changes that either way, but the two are
+                    // different facts and only one of them blames the schema.
+                    kind: ErrorKind::Refused,
                 });
                 StopReason::Error
             }
+            // Load-bearing, and it fails closed: an unrecognised reason ends
+            // the turn as an error that names the string, rather than being
+            // read as a clean stop. That is the right default for a wire
+            // spoken by six implementations with no shared enum — a reason
+            // nobody mapped is not a reason that said "finished".
+            //
+            // What this arm does *not* catch is the empty string, and the
+            // distinction is worth stating because it is the opposite
+            // failure. Ollama's `DoneReasonConnectionClosed` renders as `""`
+            // through `String()`, and its compat layer emits
+            // `cmp.Or(r.DoneReason, "stop")` — so a connection that died is
+            // laundered into a clean `"stop"` before it is ever sent, and
+            // never reaches this arm at all. That one **fails open**: a torn
+            // generation reports as a completed one.
+            //
+            // It is latent, not live. `DoneReasonConnectionClosed` has no
+            // assignment in Ollama's tree, so nothing produces it today, and
+            // handling it here would mean writing a branch for a string that
+            // cannot arrive — which is worse than recording it. The trigger
+            // is the first assignment of that constant upstream; the fix is
+            // upstream's too, because by the time the bytes reach ego the
+            // evidence has already been erased.
             other => {
                 out.push(AiEvent::Error {
                     message: format!(
                         "the provider reported a finish_reason this wire format \
                          does not know: {other}"
                     ),
+                    kind: ErrorKind::Unclassified,
                 });
                 StopReason::Error
             }
@@ -847,6 +969,7 @@ impl StreamDecoder {
                     "the provider streamed {conflict}, so which call the \
                      arguments belong to cannot be told; it was not dispatched"
                 ),
+                kind: ErrorKind::Unclassified,
             });
             return;
         }
@@ -854,18 +977,32 @@ impl StreamDecoder {
         // result message needs the `tool_call_id` to send back, and a dispatch
         // needs a name; inventing either produces a request the provider
         // rejects, or a call to the wrong tool.
-        let Some(call_id) = call.id else {
+        //
+        // `""` is treated as absent, and this guard is fail-closed rather
+        // than an accommodation for a row that needs it. No implementation
+        // speaking this wire is known to emit an empty id — Ollama's compat
+        // layer, the row the survey suspected, overwrites the field
+        // unconditionally and so cannot (measured, `server/routes.go`;
+        // the survey's original claim was retracted). The guard exists
+        // because an empty id is *unusable* if one ever arrives: it would be
+        // carried into `ContentBlock::ToolUse` as a legitimate key, where
+        // `Conversation`'s uniqueness invariant would then read two
+        // unidentified calls as one duplicate. Refusing it costs a call that
+        // could not have been answered anyway.
+        let Some(call_id) = call.id.filter(|id| !id.is_empty()) else {
             out.push(AiEvent::Error {
                 message: format!(
                     "the provider streamed a tool call at index {index} with no id, \
                      so its result could never be attributed back to it"
                 ),
+                kind: ErrorKind::Unclassified,
             });
             return;
         };
         let Some(name) = call.name.filter(|name| !name.is_empty()) else {
             out.push(AiEvent::Error {
                 message: format!("tool call {call_id} arrived with no function name"),
+                kind: ErrorKind::Unclassified,
             });
             return;
         };
@@ -920,7 +1057,10 @@ pub fn decode(
                 response: Err(error),
                 ..
             } => Some((
-                super::failed(error.to_string(), error.delivery()).to_vec(),
+                // Both readings come off the transport error, and neither is
+                // recoverable from the prose it renders to — see
+                // `HttpError::kind`.
+                super::failed(error.to_string(), error.delivery(), error.kind()).to_vec(),
                 State::Done,
             )),
             State::Head {
@@ -944,12 +1084,13 @@ pub fn decode(
                         },
                     ));
                 }
+                let kind = classify_status(response.status);
                 let message = read_error_body(response.status, response.body).await;
                 // The same three events, with the certainty already read off
                 // the status above rather than off a failure: a response at
                 // all proves the request arrived.
                 Some((
-                    super::failed(message, DeliveryCertainty::PossiblySent).to_vec(),
+                    super::failed(message, DeliveryCertainty::PossiblySent, kind).to_vec(),
                     State::Done,
                 ))
             }
@@ -969,6 +1110,50 @@ pub fn decode(
     })
     .flat_map(stream::iter)
     .boxed()
+}
+
+/// What a non-200 status says about whether the request can ever succeed.
+///
+/// **The status and not the body.** The body on this wire is not one schema:
+/// [`ErrorEnvelope`] is OpenAI's shape, and a row behind a proxy answers a
+/// `502` with HTML that parses as neither. The status line is the one field
+/// every row that speaks this format sets, and it is set by something that
+/// cannot have been truncated. `read_error_body` keeps the body for the
+/// operator to read; this decides what the harness does.
+///
+/// Every arm is a status these APIs actually return, and the fall-through is
+/// [`ErrorKind::Unclassified`] on §2's fail-closed rule: a status nobody has
+/// mapped is not a status that said "retryable". The cost of being wrong here
+/// is one attempt, and the cost of guessing "transient" is `--retry N`
+/// attempts and an exit code that tells a script to try again.
+///
+/// **The known gap: `429`.** A rate limit and an exhausted quota can share
+/// it, and they are opposite answers — the first clears on its own, the
+/// second never does. Only the body distinguishes them, and only on the rows
+/// that publish a discriminator. `Transient` is the right reading of the
+/// status alone, and the wrong reading of an empty wallet. `POTENTIALS.md`
+/// P26, whose trigger is an OpenAI credential existing.
+///
+/// **What this does not do.** It classifies the non-200 path and only that.
+/// A row can answer `200` to a request that was wrong — Ollama accepts
+/// `role: "wizard"`, a negative `max_tokens` and a tool with no function
+/// body, and generates a normal completion for each — and none of those
+/// reaches this function, because nothing about them is a failure as far as
+/// the transport is concerned. No status table closes that gap.
+fn classify_status(status: u16) -> ErrorKind {
+    match status {
+        // The provider is momentarily unable. Nothing about the request is
+        // wrong, so the same bytes may work on the next attempt.
+        408 | 429 | 500..=599 => ErrorKind::Transient,
+        // The account or the credential, never the request: unauthenticated,
+        // forbidden, out of credit.
+        401..=403 => ErrorKind::Refused,
+        // The request is wrong and will be wrong again — a malformed body, a
+        // model that does not exist, a prompt over the limit, a parameter
+        // this row does not accept.
+        400 | 404 | 413 | 422 => ErrorKind::Invalid,
+        _ => ErrorKind::Unclassified,
+    }
 }
 
 async fn read_error_body(status: u16, mut body: crate::http::ByteStream) -> String {

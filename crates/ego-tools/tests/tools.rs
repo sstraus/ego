@@ -842,6 +842,7 @@ mod end_to_end {
             uncached_input: rate("0.000003"),
             cache_read: rate("0.0000003"),
             cache_write: rate("0.00000375"),
+            cache_write_extended: None,
             output: rate("0.000015"),
         }
     }
@@ -863,6 +864,7 @@ mod end_to_end {
             supports_parallel_tool_calls: true,
             reasoning_carryover: ReasoningCarryover::Unsupported,
             reasoning_efforts: ReasoningEffortSupport::Any,
+            reasoning_state_dialect: None,
             cancel: CancelSemantics::Cooperative,
             cache: CacheRetention::Short,
             transport: Transport::Sse,

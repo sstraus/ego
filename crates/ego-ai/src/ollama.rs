@@ -294,6 +294,15 @@ fn capabilities_from(tag: &Tag, served_context: u64) -> ModelCapabilities {
         } else {
             ReasoningCarryover::Unsupported
         },
+        // Stated, and stating it is what makes the sentence above enforceable:
+        // `SameProviderOnly` constrains whose state is accepted, so without a
+        // tag on this side the check cannot run and foreign state passes. The
+        // daemon mints no reasoning state of its own — it streams thinking as
+        // text, never as a replayable blob — so nothing will ever carry this
+        // tag, and every carried state is therefore foreign and refused by
+        // name. That is the intended answer arrived at by comparison rather
+        // than by an unknown.
+        reasoning_state_dialect: Some("ollama".to_string()),
         // The five levels Ollama *honours*, which is not the seven it
         // *accepts*. Read from `openai/openai.go::thinkFromReasoningEffort`
         // at tag v0.32.14 — the same version `provider.rs` measured:

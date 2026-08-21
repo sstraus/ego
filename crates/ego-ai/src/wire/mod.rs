@@ -25,7 +25,7 @@ pub mod sse;
 
 use ego_core::generator::attempt::DeliveryCertainty;
 use ego_core::generator::port::AiEvent;
-use ego_core::generator::types::StopReason;
+use ego_core::generator::types::{ErrorKind, StopReason};
 
 /// The events a generation that produced no terminal frame still owes.
 ///
@@ -40,10 +40,16 @@ use ego_core::generator::types::StopReason;
 /// need it — a transport error, a non-200 status, and a request the format
 /// cannot express at all — and three hand-written copies of a three-event
 /// shape is three chances for them to drift apart.
-pub fn failed(message: String, delivery: DeliveryCertainty) -> [AiEvent; 3] {
+///
+/// `kind` is a parameter and not a constant because each of the three call
+/// sites knows something this function cannot see: the transport knows
+/// whether a socket died or a policy refused, and only the status line knows
+/// what the provider thought of the request. A default here would be one of
+/// those three answers imposed on the other two.
+pub fn failed(message: String, delivery: DeliveryCertainty, kind: ErrorKind) -> [AiEvent; 3] {
     [
         AiEvent::DeliveryObserved(delivery),
-        AiEvent::Error { message },
+        AiEvent::Error { message, kind },
         AiEvent::Stop(StopReason::Error),
     ]
 }

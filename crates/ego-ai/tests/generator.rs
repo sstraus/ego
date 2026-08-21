@@ -32,7 +32,8 @@ use ego_core::generator::capabilities::{
 };
 use ego_core::generator::port::{AiEvent, Generator};
 use ego_core::generator::types::{
-    Conversation, GenRequest, Message, ReasoningState, Role, StopReason, ThinkingLevel,
+    ContentBlock, Conversation, ErrorKind, GenRequest, Message, ReasoningState, Role, StopReason,
+    ThinkingLevel,
 };
 use futures::StreamExt;
 use futures::future::BoxFuture;
@@ -65,6 +66,7 @@ fn quote() -> PricingQuote {
         uncached_input: Some("0.000003".parse().unwrap()),
         cache_read: Some("0.0000003".parse().unwrap()),
         cache_write: Some("0.00000375".parse().unwrap()),
+        cache_write_extended: None,
         output: Some("0.000015".parse().unwrap()),
     }
 }
@@ -85,6 +87,7 @@ fn caps() -> ModelCapabilities {
         supports_parallel_tool_calls: true,
         reasoning_carryover: ReasoningCarryover::Portable,
         reasoning_efforts: ReasoningEffortSupport::Any,
+        reasoning_state_dialect: None,
         cancel: CancelSemantics::Cooperative,
         cache: CacheRetention::Short,
         transport: Transport::Sse,
@@ -100,7 +103,27 @@ fn request() -> GenRequest {
         thinking: ThinkingLevel::Off,
         max_output_tokens: Some(1_024),
         parallel_tool_calls: false,
-        reasoning_state: None,
+    }
+}
+
+/// [`request`] with one reasoning block in its history — the thing this wire
+/// format has nowhere to put, and refuses rather than drops.
+fn request_carrying_reasoning() -> GenRequest {
+    GenRequest {
+        messages: Conversation::new(vec![
+            Message::text(Role::User, "list the files"),
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::Reasoning {
+                    state: ReasoningState {
+                        blob: "opaque".to_string(),
+                        dialect: "anthropic-messages".to_string(),
+                    },
+                }],
+            },
+        ])
+        .expect("a reasoning block takes no part in the call invariants"),
+        ..request()
     }
 }
 
@@ -264,8 +287,7 @@ async fn a_request_this_format_cannot_express_stops_the_generation() {
     let mut gate = BudgetGate::new(usd("10"));
     let generator = generator(Arc::clone(&http) as Arc<dyn Http>);
 
-    let mut req = request();
-    req.reasoning_state = Some(ReasoningState("opaque".to_string()));
+    let req = request_carrying_reasoning();
     let attempt = attempt_for(&mut gate, &req);
 
     let events: Vec<AiEvent> = generator.generate(req, attempt).collect().await;
@@ -289,7 +311,7 @@ async fn a_request_this_format_cannot_express_stops_the_generation() {
         "{events:?}"
     );
     let named = events.iter().any(
-        |event| matches!(event, AiEvent::Error { message } if message.contains("reasoning state")),
+        |event| matches!(event, AiEvent::Error { message, .. } if message.contains("reasoning state")),
     );
     assert!(named, "the error must say what it refused: {events:?}");
 }
@@ -303,8 +325,7 @@ fn a_locally_refused_generation_still_settles_and_releases_the_hold() {
     let mut gate = BudgetGate::new(usd("10"));
     let generator = generator(http as Arc<dyn Http>);
 
-    let mut req = request();
-    req.reasoning_state = Some(ReasoningState("opaque".to_string()));
+    let req = request_carrying_reasoning();
     let attempt = attempt_for(&mut gate, &req);
 
     let mut stream = generator.generate(req, attempt);
@@ -519,8 +540,15 @@ async fn a_generation_whose_credential_is_gone_fails_without_sending() {
         matches!(events.last(), Some(AiEvent::Stop(StopReason::Error))),
         "{events:?}"
     );
-    let named = events
-        .iter()
-        .any(|event| matches!(event, AiEvent::Error { message } if message.contains(KEY_VAR)));
-    assert!(named, "the error must name the variable: {events:?}");
+    // `Invalid` and not `Refused`: nothing was asked, so no provider refused
+    // anything — and this is the classification that exits the way a missing
+    // credential already exits at resolution.
+    let named = events.iter().any(|event| {
+        matches!(event, AiEvent::Error { message, kind }
+            if message.contains(KEY_VAR) && *kind == ErrorKind::Invalid)
+    });
+    assert!(
+        named,
+        "the error must name the variable and classify itself: {events:?}"
+    );
 }

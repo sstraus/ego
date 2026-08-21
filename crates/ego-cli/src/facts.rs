@@ -106,6 +106,7 @@ struct Quote {
     uncached_input: Option<Amount>,
     cache_read: Option<Amount>,
     cache_write: Option<Amount>,
+    cache_write_extended: Option<Amount>,
     output: Option<Amount>,
 }
 
@@ -117,6 +118,7 @@ impl From<Quote> for PricingQuote {
             uncached_input: quote.uncached_input,
             cache_read: quote.cache_read,
             cache_write: quote.cache_write,
+            cache_write_extended: quote.cache_write_extended,
             output: quote.output,
         }
     }

@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::attempt::{AttemptStream, DeliveryCertainty, GenerationAttempt};
-use super::types::{GenRequest, StopReason};
+use super::types::{ErrorKind, GenRequest, ReasoningState, StopReason};
 use crate::cost::Money;
 use crate::state::Usage;
 
@@ -24,7 +24,28 @@ pub enum AiEvent {
     /// A streamed increment of the assistant's visible text.
     TextDelta { text: String },
     /// A streamed increment of the model's reasoning/thinking.
+    ///
+    /// What a human reads. Not the same value as
+    /// [`ReasoningState`](Self::ReasoningState) below, and the two are not
+    /// interchangeable: three of the six wires publish readable reasoning and
+    /// mint nothing replayable, and a block sent with `display: "omitted"` —
+    /// or any `redacted_thinking` block — is the opposite, state with no
+    /// readable text at all.
     ReasoningDelta { text: String },
+    /// One reasoning block's opaque continuation state, complete.
+    ///
+    /// Emitted when the block *closes*, which is why this is not a delta:
+    /// every wire that carries such state delivers it whole, at the end of
+    /// the block it belongs to — Anthropic's `signature_delta` arrives
+    /// immediately before `content_block_stop`, Gemini's `thought_signature`
+    /// is the last delta before `step.stop`.
+    ///
+    /// Being the close, it is also the block *boundary*, which is the whole
+    /// of ego's need for one: `turn/drain` closes the current reasoning item
+    /// when this arrives and opens a new one for the next
+    /// [`ReasoningDelta`](Self::ReasoningDelta). No separate boundary event
+    /// and no index field — ordering is already `ItemState::seq`'s.
+    ReasoningState(ReasoningState),
     /// The model decided to call a tool, with fully assembled arguments.
     /// Provider streams typically deliver a tool call's arguments as JSON
     /// fragments; assembling those fragments into one JSON string is
@@ -36,6 +57,22 @@ pub enum AiEvent {
         args: String,
     },
     /// Incremental usage for this generation.
+    ///
+    /// An **increment**, never a running total. `AttemptStream::observe` adds
+    /// every one it sees into a total, so a mapping that forwarded a
+    /// provider's cumulative figure on each frame would be billed the sum of
+    /// its own restatements — and three of the six wires do report
+    /// cumulatively. The obligation is therefore the mapping's, and it is
+    /// stated here rather than in one mapping's source where only that
+    /// mapping's author reads it: **buffer, and emit at a clean close**, a
+    /// later report replacing the held one rather than adding to it.
+    ///
+    /// More than one is legal, and sometimes better. A wire that states its
+    /// input tokens before generating can report them the moment they arrive,
+    /// so a stream cut before any output settles against a real figure
+    /// instead of `UsageReport::Missing` and its pessimistic bound. What must
+    /// hold is not "exactly one" but that the events **sum to the provider's
+    /// final total**.
     Usage(Usage),
     /// What the provider says it will charge for this request.
     ///
@@ -66,7 +103,12 @@ pub enum AiEvent {
     /// The generation reached a terminal state.
     Stop(StopReason),
     /// The provider reported an error mid-stream.
-    Error { message: String },
+    ///
+    /// The `kind` is what a caller can act on; the `message` is what a human
+    /// reads. Both are needed and neither substitutes for the other — a
+    /// message is not matchable without matching on a provider's prose, and a
+    /// kind cannot say which parameter was wrong.
+    Error { message: String, kind: ErrorKind },
 }
 
 /// The provider-neutral seam for generating the next assistant turn.

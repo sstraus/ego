@@ -459,7 +459,7 @@ impl AttemptStream {
             AiEvent::Usage(delta) => {
                 let mut total = match self.usage {
                     UsageReport::Reported(usage) => usage,
-                    UsageReport::Missing => Usage::default(),
+                    UsageReport::Missing => Usage::IDENTITY,
                 };
                 total.add(delta);
                 self.usage = UsageReport::Reported(total);
@@ -476,6 +476,7 @@ impl AttemptStream {
 
             AiEvent::TextDelta { .. }
             | AiEvent::ReasoningDelta { .. }
+            | AiEvent::ReasoningState(_)
             | AiEvent::ToolCall { .. } => {}
 
             // Deliberately not treated as proof of arrival: an `Error` can
@@ -510,6 +511,7 @@ impl AttemptStream {
             event,
             AiEvent::TextDelta { .. }
                 | AiEvent::ReasoningDelta { .. }
+                | AiEvent::ReasoningState(_)
                 | AiEvent::ToolCall { .. }
                 | AiEvent::Usage(_)
                 | AiEvent::ProviderCost { .. }

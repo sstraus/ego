@@ -27,7 +27,8 @@ use ego_core::generator::capabilities::{
 use ego_core::generator::fake::FakeGenerator;
 use ego_core::generator::port::{AiEvent, Generator};
 use ego_core::generator::types::{
-    ContentBlock, GenRequest, Role, StopReason, ThinkingLevel, ToolDescriptor,
+    ContentBlock, ErrorKind, GenRequest, ReasoningState, Role, StopReason, ThinkingLevel,
+    ToolDescriptor,
 };
 use ego_core::permit::{
     CanonPath, GuardedIo, Op, Permit, PolicyEngine, PrepareCtx, PreparedCall, ToolError,
@@ -230,6 +231,7 @@ mod turn {
             uncached_input: rate("0.000003"),
             cache_read: rate("0.0000003"),
             cache_write: rate("0.00000375"),
+            cache_write_extended: None,
             output: rate("0.000015"),
         }
     }
@@ -252,6 +254,7 @@ mod turn {
             supports_parallel_tool_calls: true,
             reasoning_carryover: ReasoningCarryover::Unsupported,
             reasoning_efforts: ReasoningEffortSupport::Any,
+            reasoning_state_dialect: None,
             cancel: CancelSemantics::Cooperative,
             cache: CacheRetention::Short,
             transport: Transport::Sse,
@@ -425,7 +428,9 @@ mod turn {
             uncached_input_tokens: uncached_input,
             cache_read_tokens: cache_read,
             cache_write_tokens: cache_write,
+            cache_write_extended_tokens: 0,
             output_tokens: output,
+            reasoning_tokens: None,
         }
     }
 
@@ -969,6 +974,7 @@ mod turn {
         let fx = Fixture::new(vec![vec![
             AiEvent::Error {
                 message: "the provider fell over".to_string(),
+                kind: ErrorKind::Unclassified,
             },
             AiEvent::Stop(StopReason::Error),
         ]]);
@@ -1110,6 +1116,169 @@ mod turn {
         );
     }
 
+    /// The one classification that changes where the run lands. `CLI.md:215`
+    /// tells a script to retry on exit 4; a request that will be wrong again
+    /// is precisely what it must not retry, so an `Invalid` is exit 2.
+    #[test]
+    fn a_provider_error_the_request_caused_exits_as_usage_and_not_as_provider() {
+        let fx = Fixture::new(vec![vec![
+            AiEvent::Error {
+                message: "context length exceeded".to_string(),
+                kind: ErrorKind::Invalid,
+            },
+            AiEvent::Stop(StopReason::Error),
+        ]]);
+
+        let (reason, ok, _) = run(&fx, SessionState::default(), "hello");
+
+        assert_eq!(reason, ExitReason::Usage);
+        assert!(!ok);
+    }
+
+    /// The other three classifications land on exit 4, and this pins that as
+    /// a decision rather than an accident — including `Unclassified`, which
+    /// gets there by failing closed rather than by being read from anything.
+    #[test]
+    fn every_other_classification_still_exits_as_provider() {
+        for kind in [
+            ErrorKind::Transient,
+            ErrorKind::Refused,
+            ErrorKind::Unclassified,
+        ] {
+            let fx = Fixture::new(vec![vec![
+                AiEvent::Error {
+                    message: "upstream said no".to_string(),
+                    kind,
+                },
+                AiEvent::Stop(StopReason::Error),
+            ]]);
+
+            let (reason, _, _) = run(&fx, SessionState::default(), "hello");
+            assert_eq!(reason, ExitReason::Provider, "for {kind:?}");
+        }
+    }
+
+    /// The last classification decides, because the terminal frame follows
+    /// the error that caused it. An earlier error the stream recovered from
+    /// does not describe how it ended.
+    #[test]
+    fn the_last_error_classification_is_the_one_that_decides_the_exit() {
+        let fx = Fixture::new(vec![vec![
+            AiEvent::Error {
+                message: "a blip".to_string(),
+                kind: ErrorKind::Transient,
+            },
+            AiEvent::Error {
+                message: "context length exceeded".to_string(),
+                kind: ErrorKind::Invalid,
+            },
+            AiEvent::Stop(StopReason::Error),
+        ]]);
+
+        let (reason, _, state) = run(&fx, SessionState::default(), "hello");
+
+        assert_eq!(reason, ExitReason::Usage);
+        assert_eq!(
+            state.errors.len(),
+            2,
+            "both are still journalled; only the exit is decided by the last"
+        );
+    }
+
+    /// A classification is never consulted for a generation that ended some
+    /// other way — otherwise a recovered-from error would rewrite the exit of
+    /// a turn that finished cleanly.
+    #[test]
+    fn an_error_the_stream_recovered_from_does_not_change_a_clean_exit() {
+        let fx = Fixture::new(vec![vec![
+            AiEvent::Error {
+                message: "a blip".to_string(),
+                kind: ErrorKind::Invalid,
+            },
+            AiEvent::TextDelta {
+                text: "recovered".to_string(),
+            },
+            AiEvent::Stop(StopReason::Stop),
+        ]]);
+
+        let (reason, ok, _) = run(&fx, SessionState::default(), "hello");
+
+        assert_eq!(reason, ExitReason::Completed);
+        assert!(ok);
+    }
+
+    // --- reasoning state closes its block ----------------------------------
+
+    /// The state is the block's close, so the next delta opens a new item.
+    /// Anthropic documents a `400` when blocks are not replayed exactly, and
+    /// two blocks merged into one is not an exact replay.
+    #[test]
+    fn reasoning_state_closes_its_block_so_the_next_delta_opens_another() {
+        let fx = Fixture::new(vec![vec![
+            AiEvent::ReasoningDelta {
+                text: "first".to_string(),
+            },
+            AiEvent::ReasoningState(ReasoningState {
+                blob: "sealed-one".to_string(),
+                dialect: "anthropic-messages".to_string(),
+            }),
+            AiEvent::ReasoningDelta {
+                text: "second".to_string(),
+            },
+            AiEvent::ReasoningState(ReasoningState {
+                blob: "sealed-two".to_string(),
+                dialect: "anthropic-messages".to_string(),
+            }),
+            AiEvent::Stop(StopReason::Stop),
+        ]]);
+
+        run(&fx, SessionState::default(), "hello");
+
+        let items: Vec<_> = fx
+            .store
+            .events()
+            .iter()
+            .filter(|ev| {
+                matches!(
+                    ev.kind,
+                    EventKind::ReasoningDelta { .. } | EventKind::ReasoningState { .. }
+                )
+            })
+            .map(|ev| ev.env.item.expect("reasoning events carry an item"))
+            .collect();
+
+        assert_eq!(items.len(), 4);
+        assert_eq!(items[0], items[1], "the state seals the block it closes");
+        assert_eq!(items[2], items[3]);
+        assert_ne!(
+            items[0], items[2],
+            "the second block must be a new item, not a continuation of the sealed one"
+        );
+    }
+
+    /// A block whose `thinking` field is empty is the case Anthropic's `400`
+    /// names explicitly, so state arriving with no delta before it still
+    /// needs an item to hang on.
+    #[test]
+    fn reasoning_state_with_no_preceding_delta_still_gets_an_item() {
+        let fx = Fixture::new(vec![vec![
+            AiEvent::ReasoningState(ReasoningState {
+                blob: "sealed-and-silent".to_string(),
+                dialect: "anthropic-messages".to_string(),
+            }),
+            AiEvent::Stop(StopReason::Stop),
+        ]]);
+
+        run(&fx, SessionState::default(), "hello");
+
+        let events = fx.store.events();
+        let logged = events
+            .iter()
+            .find(|ev| matches!(ev.kind, EventKind::ReasoningState { .. }))
+            .expect("the state is journalled even with no text before it");
+        assert!(logged.env.item.is_some());
+    }
+
     #[test]
     fn a_turn_whose_log_cannot_be_written_is_abandoned_with_the_state_intact() {
         let fx = Fixture::new(vec![vec![
@@ -1241,7 +1410,7 @@ mod turn {
             .events()
             .iter()
             .find_map(|ev| match &ev.kind {
-                EventKind::Error { message } => Some(message.clone()),
+                EventKind::Error { message, .. } => Some(message.clone()),
                 _ => None,
             })
             .expect("the refusal is durable, or nobody can diagnose the run from the log");

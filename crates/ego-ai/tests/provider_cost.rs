@@ -160,6 +160,7 @@ fn quote() -> PricingQuote {
         uncached_input: rate("0.000003"),
         cache_read: rate("0.0000003"),
         cache_write: rate("0.00000375"),
+        cache_write_extended: None,
         output: rate("0.000015"),
     }
 }
@@ -173,6 +174,7 @@ fn caps() -> ModelCapabilities {
         supports_parallel_tool_calls: true,
         reasoning_carryover: ReasoningCarryover::SameProviderOnly,
         reasoning_efforts: ReasoningEffortSupport::Any,
+        reasoning_state_dialect: None,
         cancel: CancelSemantics::Cooperative,
         cache: CacheRetention::Long,
         transport: Transport::Sse,
@@ -188,7 +190,6 @@ fn request() -> GenRequest {
         thinking: ThinkingLevel::Off,
         max_output_tokens: Some(1_024),
         parallel_tool_calls: false,
-        reasoning_state: None,
     }
 }
 
@@ -390,7 +391,9 @@ async fn two_unrelated_wire_conventions_settle_through_the_identical_core_path()
         uncached_input_tokens: 1_000,
         cache_read_tokens: 0,
         cache_write_tokens: 0,
+        cache_write_extended_tokens: 0,
         output_tokens: 250,
+        reasoning_tokens: None,
     });
     let CostDelta::Known {
         amount: tabulated, ..
@@ -490,7 +493,9 @@ async fn a_provider_that_states_no_cost_settles_at_the_bound_and_names_why() {
                 uncached_input_tokens: 1_000,
                 cache_read_tokens: 0,
                 cache_write_tokens: 0,
+                cache_write_extended_tokens: 0,
                 output_tokens: 250,
+                reasoning_tokens: None,
             }),
             None,
             CurrencyCode::new("USD").expect("USD is valid"),

@@ -630,8 +630,18 @@ pub enum TokenCategory {
     UncachedInput,
     /// Input tokens served from the provider's prompt cache.
     CacheRead,
-    /// Input tokens written into the provider's prompt cache.
+    /// Input tokens written into the provider's prompt cache at its standard
+    /// retention.
     CacheWrite,
+    /// Input tokens written at an extended retention the request asked for.
+    ///
+    /// Its own category rather than a multiplier on [`Self::CacheWrite`],
+    /// because it is a rate a table states rather than one ego derives:
+    /// Anthropic prices a 1-hour write at 2x base against a 5-minute write's
+    /// 1.25x, and nothing guarantees the ratio holds for the next provider or
+    /// the next revision. A derived price would be a guess wearing a
+    /// measurement's clothes.
+    CacheWriteExtended,
     /// Generated tokens, including reasoning tokens the provider bills as
     /// output.
     Output,

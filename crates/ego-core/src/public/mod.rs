@@ -10,12 +10,30 @@ use crate::budget::{Ledger, Metering};
 use crate::cost::{CostDelta, Money, RateSource};
 use crate::event::domain::{DomainEvent, EventKind, ExitReason, OccupancyProvenance};
 use crate::event::id::{ItemId, SessionId, TurnId};
+use crate::generator::types::ErrorKind;
 use crate::state::Usage;
 
 /// The current `PublicEvent` schema version, carried in `SessionStarted`'s
 /// `v` field. `CLI.md` §4.2: "the schema is versioned in the header and
 /// published".
-pub const PUBLIC_EVENT_VERSION: u32 = 5;
+///
+/// **Incremented when the shape moves, not when the branch merges.** This
+/// went 5 → 6 for two changes that ship together: `UsageUpdated`'s
+/// `usage_delta`, which embeds [`Usage`] and so gained
+/// `cache_write_extended_tokens` and `reasoning_tokens`, and
+/// [`PublicEvent::Error`]'s new `kind`. One increment covers both because 6
+/// describes a shape, not a changeset, and no consumer ever saw a 6 without
+/// the second half. A version left behind is a claim a consumer acts on; a
+/// version raised early is only an integer pending confirmation, and the two
+/// are not equally wrong.
+///
+/// **The integer is re-derived at merge, never carried from here.** Three
+/// branches move this constant — metering, permissions and this one — so the
+/// number above is arithmetic on the base this branch forked from, not a
+/// measurement of the merged tree. At merge: read the constant on the merge
+/// base and add one. A value that is not what you expect means another branch
+/// moved it too, and is a reason to stop and look rather than to overwrite.
+pub const PUBLIC_EVENT_VERSION: u32 = 6;
 
 /// How a run came to load one instruction file.
 ///
@@ -293,11 +311,21 @@ pub enum PublicEvent {
         provenance: OccupancyProvenance,
     },
     /// An error occurred, possibly outside any single item.
+    ///
+    /// `kind` is what a consumer can act on; `message` is what it can show.
+    /// Published unconditionally, including when it is
+    /// [`ErrorKind::Unclassified`]: that value says "nobody classified this",
+    /// which is a fact about the error and not an absence of one. Omitting it
+    /// would leave a consumer unable to tell an unclassified error from an
+    /// older stream that never carried the field, and reading a missing field
+    /// as `Unclassified` is exactly the guess that
+    /// [`ErrorKind`]'s fail-closed default exists to make unnecessary.
     Error {
         turn: TurnId,
         #[serde(skip_serializing_if = "Option::is_none")]
         item: Option<ItemId>,
         message: String,
+        kind: ErrorKind,
     },
 }
 
@@ -459,6 +487,14 @@ pub fn project_public(ev: &DomainEvent) -> Option<PublicEvent> {
             ok: *ok,
             exit_reason: *exit_reason,
         }),
+        // Never public, and this is a privacy decision rather than a
+        // tidiness one. The blob is provider-private and opaque — ego does
+        // not know what is encoded in it, which is precisely why it cannot
+        // publish it. A consumer that needs to know the model reasoned has
+        // the reasoning item and its deltas; nothing downstream can act on
+        // the continuation token, and `CLI.md` §4.2's rule is that a new
+        // internal event never becomes public automatically.
+        EventKind::ReasoningState { .. } => None,
         EventKind::Compacted { .. } => None,
         EventKind::Forked { .. } => None,
         EventKind::HookFired { .. } => None,
@@ -476,10 +512,16 @@ pub fn project_public(ev: &DomainEvent) -> Option<PublicEvent> {
             ok: true,
             text: Some(result.clone()),
         }),
-        EventKind::Error { message } => Some(PublicEvent::Error {
+        // Passed through as classified, never re-derived. The adapter that
+        // saw the provider's own answer is the only thing that could classify
+        // it; this projection has the message and nothing else, and a
+        // projection that sniffed the message for "rate limit" would be
+        // inventing a classification the wire never made.
+        EventKind::Error { message, kind } => Some(PublicEvent::Error {
             turn,
             item,
             message: message.clone(),
+            kind: *kind,
         }),
 
         // The attempt lifecycle is internal, and stays internal. A client

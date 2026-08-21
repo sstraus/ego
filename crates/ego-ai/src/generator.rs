@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use ego_core::generator::attempt::{AttemptStream, DeliveryCertainty, GenerationAttempt};
 use ego_core::generator::port::Generator;
-use ego_core::generator::types::GenRequest;
+use ego_core::generator::types::{ErrorKind, GenRequest};
 use futures::{StreamExt, stream};
 
 use crate::http::Http;
@@ -64,10 +64,22 @@ impl Generator for WireGenerator {
         // is not the same as cannot, and the honest answer to "the credential
         // vanished mid-run" is the one below — never a `Bearer ` header sent
         // to be blamed on the provider.
+        //
+        // `Invalid` and deliberately not `Refused`, whose doc names a
+        // provider's answer — a 401, a 403, an exhausted balance. Nothing was
+        // asked here, so there is no such answer to report. `Invalid` is the
+        // one classification certain without a provider, and it is also the
+        // one that exits the way this cause already exits at resolution: a
+        // credential nobody configured is the operator's to fix, which
+        // `CLI.md` §4.3 spells 2 and not 4.
         let headers = match self.row.headers(self.creds.as_ref()) {
             Ok(headers) => headers,
             Err(missing) => {
-                let events = wire::failed(missing.to_string(), DeliveryCertainty::DefinitelyUnsent);
+                let events = wire::failed(
+                    missing.to_string(),
+                    DeliveryCertainty::DefinitelyUnsent,
+                    ErrorKind::Invalid,
+                );
                 return AttemptStream::new(attempt, stream::iter(events).boxed());
             }
         };
@@ -82,9 +94,17 @@ impl Generator for WireGenerator {
                 // Returning an empty stream instead would settle as an abort with
                 // a missing usage report, which says "the provider was called and
                 // went silent" about a provider that was never called.
+                //
+                // `Invalid`, and the one classification in the tree that needs
+                // no provider at all to be certain of: `build_request` refused
+                // because this wire format cannot express this request, which
+                // is a fact about the request and identical on every retry.
                 Err(refused) => {
-                    let events =
-                        wire::failed(refused.to_string(), DeliveryCertainty::DefinitelyUnsent);
+                    let events = wire::failed(
+                        refused.to_string(),
+                        DeliveryCertainty::DefinitelyUnsent,
+                        ErrorKind::Invalid,
+                    );
                     return AttemptStream::new(attempt, stream::iter(events).boxed());
                 }
             };

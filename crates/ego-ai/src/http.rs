@@ -65,6 +65,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use ego_core::generator::attempt::DeliveryCertainty;
+use ego_core::generator::types::ErrorKind;
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 use url::{Host, Url};
@@ -336,6 +337,27 @@ impl HttpError {
         match self {
             HttpError::Refused { refused, .. } => Some(refused),
             HttpError::Transport { .. } => None,
+        }
+    }
+
+    /// Which class of failure this is, in the caller's vocabulary.
+    ///
+    /// Beside [`delivery`](Self::delivery) and for the same reason: by the
+    /// time a failure is prose, a refused destination and a dead socket read
+    /// identically, and they are opposite answers to whether a retry can
+    /// succeed. The distinction exists exactly once, here.
+    ///
+    /// A [`Refused`](HttpError::Refused) is [`ErrorKind::Invalid`] and not
+    /// [`ErrorKind::Refused`], whose name is the near miss to watch for:
+    /// `ErrorKind::Refused` means *the provider* refused the account, and
+    /// nothing here reached a provider. An egress refusal is ego's own policy
+    /// answering a question about the request's destination — which is a
+    /// property of the request, will be the same on every retry, and belongs
+    /// in front of the operator as a usage error rather than as an outage.
+    pub fn kind(&self) -> ErrorKind {
+        match self {
+            HttpError::Refused { .. } => ErrorKind::Invalid,
+            HttpError::Transport { .. } => ErrorKind::Transient,
         }
     }
 }

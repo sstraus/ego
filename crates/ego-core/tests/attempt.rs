@@ -158,7 +158,7 @@ mod lifecycle {
     use ego_core::generator::fake::FakeGenerator;
     use ego_core::generator::port::{AiEvent, Generator};
     use ego_core::generator::types::{
-        Conversation, GenRequest, Message, Role, StopReason, ThinkingLevel,
+        Conversation, ErrorKind, GenRequest, Message, Role, StopReason, ThinkingLevel,
     };
     use ego_core::state::Usage;
     use futures::StreamExt;
@@ -183,6 +183,7 @@ mod lifecycle {
             uncached_input: Some("0.000003".parse().unwrap()),
             cache_read: Some("0.0000003".parse().unwrap()),
             cache_write: Some("0.00000375".parse().unwrap()),
+            cache_write_extended: None,
             output: Some("0.000015".parse().unwrap()),
         }
     }
@@ -204,6 +205,7 @@ mod lifecycle {
             supports_parallel_tool_calls: true,
             reasoning_carryover: ReasoningCarryover::Portable,
             reasoning_efforts: ReasoningEffortSupport::Any,
+            reasoning_state_dialect: None,
             cancel: CancelSemantics::Cooperative,
             cache: CacheRetention::Short,
             transport: Transport::Sse,
@@ -222,7 +224,6 @@ mod lifecycle {
             thinking: ThinkingLevel::Off,
             max_output_tokens: Some(1_024),
             parallel_tool_calls: false,
-            reasoning_state: None,
         }
     }
 
@@ -241,7 +242,9 @@ mod lifecycle {
             uncached_input_tokens: uncached_input,
             cache_read_tokens: 0,
             cache_write_tokens: 0,
+            cache_write_extended_tokens: 0,
             output_tokens: output,
+            reasoning_tokens: None,
         }
     }
 
@@ -508,7 +511,7 @@ mod lifecycle {
             let outcome = Outcome::new(
                 stop,
                 DeliveryCertainty::PossiblySent,
-                UsageReport::Reported(Usage::default()),
+                UsageReport::Reported(Usage::IDENTITY),
             );
             let json = serde_json::to_string(&outcome).expect("an outcome serialises");
             let back: Outcome = serde_json::from_str(&json).expect("and decodes back");
@@ -590,13 +593,10 @@ mod lifecycle {
         assert!(!missing.reconciled.exact);
 
         let (_, zero) = run(vec![
-            AiEvent::Usage(Usage::default()),
+            AiEvent::Usage(Usage::IDENTITY),
             AiEvent::Stop(StopReason::Stop),
         ]);
-        assert_eq!(
-            zero.outcome.usage(),
-            UsageReport::Reported(Usage::default())
-        );
+        assert_eq!(zero.outcome.usage(), UsageReport::Reported(Usage::IDENTITY));
         assert_eq!(zero.reconciled.charged, Some(usd("0")));
         assert!(zero.reconciled.exact);
     }
@@ -678,6 +678,7 @@ mod lifecycle {
     fn an_error_alone_is_not_read_as_proof_the_request_arrived() {
         let outcome = outcome_of(vec![AiEvent::Error {
             message: "connection refused".to_string(),
+            kind: ErrorKind::Transient,
         }]);
         assert_eq!(outcome.delivery(), DeliveryCertainty::DefinitelyUnsent);
         assert!(
@@ -703,6 +704,7 @@ mod lifecycle {
             AiEvent::DeliveryObserved(DeliveryCertainty::DefinitelyUnsent),
             AiEvent::Error {
                 message: "loopback-only policy refused api.example".to_string(),
+                kind: ErrorKind::Transient,
             },
             AiEvent::Stop(StopReason::Error),
         ]);

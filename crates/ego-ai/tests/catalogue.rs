@@ -150,6 +150,7 @@ fn hosted_quote() -> PricingQuote {
         uncached_input: Some("0.000003".parse().unwrap()),
         cache_read: Some("0.0000003".parse().unwrap()),
         cache_write: Some("0.00000375".parse().unwrap()),
+        cache_write_extended: None,
         output: Some("0.000015".parse().unwrap()),
     }
 }
@@ -163,6 +164,7 @@ fn hosted_caps() -> ModelCapabilities {
         supports_parallel_tool_calls: true,
         reasoning_carryover: ReasoningCarryover::SameProviderOnly,
         reasoning_efforts: ReasoningEffortSupport::Any,
+        reasoning_state_dialect: None,
         cancel: CancelSemantics::Cooperative,
         cache: CacheRetention::Long,
         transport: Transport::Sse,
@@ -177,7 +179,6 @@ fn request() -> GenRequest {
         thinking: ThinkingLevel::Off,
         max_output_tokens: Some(1_024),
         parallel_tool_calls: false,
-        reasoning_state: None,
     }
 }
 

@@ -8,7 +8,7 @@ use ego_core::event::domain::{DomainEvent, Envelope, EventKind};
 use ego_core::event::id::{Producer, Seq, SessionId};
 use ego_core::event::time::Timestamp;
 use ego_core::generator::attempt::{AttemptRef, DeliveryCertainty, Outcome, UsageReport};
-use ego_core::generator::types::StopReason;
+use ego_core::generator::types::{ErrorKind, ReasoningState, StopReason};
 use ego_core::state::Usage;
 use ego_core::store::codec::{
     CODEC_VERSION, CodecError, Header, IndexedCodecError, StoreLine, decode_line, decode_log,
@@ -464,9 +464,11 @@ mod codec {
                 },
             },
             // Chosen deliberately: this is the money event. Its durable shape
-            // carries the four priced token categories and an exact decimal
-            // amount as a *string*, and a silent change to either would
-            // misprice every session already on disk.
+            // carries every priced token category and an exact decimal amount
+            // as a *string*, and a silent change to either would misprice
+            // every session already on disk. Its reasoning split is unknown,
+            // so this fixture also pins how *unknown* is spelled on disk:
+            // absent, exactly as in a log written before the field existed.
             DomainEvent {
                 env: envelope(GOLDEN_EVENT_2, Some(GOLDEN_EVENT_1)),
                 kind: EventKind::UsageUpdated {
@@ -474,7 +476,9 @@ mod codec {
                         uncached_input_tokens: 120,
                         cache_read_tokens: 900,
                         cache_write_tokens: 60,
+                        cache_write_extended_tokens: 0,
                         output_tokens: 45,
+                        reasoning_tokens: None,
                     },
                     cost_delta: CostDelta::Known {
                         amount: Money::new(
@@ -512,7 +516,9 @@ mod codec {
                         uncached_input_tokens: 120,
                         cache_read_tokens: 900,
                         cache_write_tokens: 60,
+                        cache_write_extended_tokens: 0,
                         output_tokens: 45,
+                        reasoning_tokens: None,
                     },
                     cost_delta: CostDelta::Known {
                         amount: Money::new(
@@ -538,7 +544,9 @@ mod codec {
                             uncached_input_tokens: 120,
                             cache_read_tokens: 900,
                             cache_write_tokens: 60,
+                            cache_write_extended_tokens: 0,
                             output_tokens: 45,
+                            reasoning_tokens: None,
                         }),
                     ),
                 },
@@ -594,6 +602,143 @@ mod codec {
                 other => panic!("expected a record, got {other:?}"),
             }
         }
+    }
+
+    /// `Usage` gained two fields in
+    /// `docs/decisions/2026-08-21-a-vocabulary-settled-before-the-second-mapping.md`
+    /// — one for cache writes at an extended retention, one for the share of
+    /// the output the provider attributed to reasoning — and that ADR's
+    /// argument for leaving `CODEC_VERSION` alone is that both decode when
+    /// absent. This is the test that argument rests on, and it is written
+    /// against the bytes the *previous* build committed rather than against
+    /// anything this build can produce.
+    ///
+    /// The two fields decode to different things on purpose. Nothing ego has
+    /// ever spoken to offers an extended cache retention, so a record without
+    /// that field was written by a run that wrote nothing at one: **zero is
+    /// that run's measurement.** A reasoning split is the opposite — three of
+    /// the six wires publish one and this repository used to drop it — so an
+    /// absent field means nobody said, and `None` is the only honest reading.
+    /// A zero there would claim a turn did no reasoning on the strength of a
+    /// field that did not exist when it ran.
+    #[test]
+    fn codec_a_usage_written_before_the_two_new_fields_decodes_without_inventing_them() {
+        let old = r#"{"env":{"seq":0,"id":"00000000-0000-0000-0000-00000000000b","turn":"00000000-0000-0000-0000-000000000002","item":"00000000-0000-0000-0000-000000000003","parent":"00000000-0000-0000-0000-00000000000a","ts":1787206085400,"producer":"Main"},"kind":{"kind":"UsageUpdated","usage":{"uncached_input_tokens":120,"cache_read_tokens":900,"cache_write_tokens":60,"output_tokens":45},"cost_delta":{"cost":"known","amount":{"amount":"0.0027","currency":"USD"},"attribution":{"source":"table","revision":"test-2026-08"}}}}"#;
+
+        let decoded: DomainEvent = serde_json::from_str(old)
+            .expect("a usage payload without the new fields still decodes");
+        let EventKind::UsageUpdated { usage, .. } = &decoded.kind else {
+            panic!("the fixture is a UsageUpdated: {:?}", decoded.kind);
+        };
+        assert_eq!(usage.cache_write_extended_tokens, 0);
+        assert_eq!(
+            usage.reasoning_tokens, None,
+            "an absent breakdown is unknown, and a zero would state a \
+             measurement this record never carried"
+        );
+
+        // And it does not grow one on the way back out. Same rule as
+        // `call_id` below: an unknown has one spelling on disk, and a log
+        // round-tripped by this build stays byte-identical to the one the
+        // older build wrote — except for the field whose zero is a real
+        // measurement, which is why that one is asserted separately.
+        let round_tripped = serde_json::to_string(&decoded).expect("a DomainEvent serialises");
+        assert!(
+            !round_tripped.contains("reasoning_tokens"),
+            "an unknown reasoning split must not be written back at all: {round_tripped}"
+        );
+        assert!(
+            round_tripped.contains(r#""cache_write_extended_tokens":0"#),
+            "a measured zero is written: {round_tripped}"
+        );
+
+        // The converse, so both spellings are pinned and not just the one the
+        // committed fixture happens to carry: a row that *did* publish a
+        // breakdown reads back as the figure it published.
+        let stated = old.replace(
+            r#""output_tokens":45"#,
+            r#""output_tokens":45,"reasoning_tokens":40"#,
+        );
+        let decoded: DomainEvent =
+            serde_json::from_str(&stated).expect("a stated breakdown decodes");
+        let EventKind::UsageUpdated { usage, .. } = &decoded.kind else {
+            panic!("still a UsageUpdated: {:?}", decoded.kind);
+        };
+        assert_eq!(usage.reasoning_tokens, Some(40));
+        assert_eq!(
+            usage.total_tokens(),
+            1125,
+            "the breakdown is inside the output count, not beside it"
+        );
+    }
+
+    /// An `Error` written before it could be classified decodes as
+    /// `Unclassified`, which is what it proved: nobody read a provider code
+    /// for it.
+    ///
+    /// This is the additivity proof for the field, and it is the reason the
+    /// change carries no `CODEC_VERSION` bump — a new field that decodes when
+    /// absent is additive by this module's own rule, and a required one would
+    /// not be.
+    #[test]
+    fn codec_an_error_written_before_it_could_be_classified_decodes_as_unclassified() {
+        let old = r#"{"env":{"seq":0,"id":"00000000-0000-0000-0000-00000000000b","turn":"00000000-0000-0000-0000-000000000002","item":null,"parent":null,"ts":1787206085400,"producer":"Main"},"kind":{"kind":"Error","message":"rate limited, retrying"}}"#;
+
+        let decoded: DomainEvent =
+            serde_json::from_str(old).expect("an error payload without the new field decodes");
+        let EventKind::Error { message, kind } = &decoded.kind else {
+            panic!("the fixture is an Error: {:?}", decoded.kind);
+        };
+        assert_eq!(message, "rate limited, retrying");
+        assert_eq!(
+            *kind,
+            ErrorKind::Unclassified,
+            "an absent classification must fail closed, not decode as retryable"
+        );
+
+        // The wire name is `error_kind`, because the enum is internally
+        // tagged on `kind` and a field of that name would collide with the
+        // discriminant. Pinned here so a later rename is caught as the codec
+        // break it would be.
+        let stated = old.replace(
+            r#""message":"rate limited, retrying""#,
+            r#""message":"rate limited, retrying","error_kind":"transient""#,
+        );
+        let decoded: DomainEvent =
+            serde_json::from_str(&stated).expect("a stated classification decodes");
+        let EventKind::Error { kind, .. } = &decoded.kind else {
+            panic!("still an Error: {:?}", decoded.kind);
+        };
+        assert_eq!(*kind, ErrorKind::Transient);
+
+        let round_tripped = serde_json::to_string(&decoded).expect("a DomainEvent serialises");
+        assert!(
+            round_tripped.contains(r#""error_kind":"transient""#),
+            "the classification survives a round trip under its wire name: {round_tripped}"
+        );
+    }
+
+    /// A reasoning state journalled as its own variant, round-tripped whole.
+    ///
+    /// The blob is opaque and the dialect beside it is what makes it
+    /// replayable into the right model, so losing either half in the codec
+    /// would leave a resumed session holding state it cannot use.
+    #[test]
+    fn codec_a_reasoning_state_round_trips_with_its_dialect() {
+        let event = DomainEvent {
+            env: golden_events()[0].env.clone(),
+            kind: EventKind::ReasoningState {
+                state: ReasoningState {
+                    blob: "opaque-continuation-token".to_string(),
+                    dialect: "anthropic-messages".to_string(),
+                },
+            },
+        };
+
+        let encoded = serde_json::to_string(&event).expect("a DomainEvent serialises");
+        let decoded: DomainEvent = serde_json::from_str(&encoded).expect("and decodes");
+        assert_eq!(decoded, event);
+        assert_eq!(decoded.kind.name(), "reasoning_state");
     }
 
     /// `ToolCallStarted` gained `call_id` in

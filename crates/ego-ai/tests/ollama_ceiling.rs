@@ -135,7 +135,6 @@ fn the_ceiling_ego_sends_is_the_one_this_daemon_threw_away() {
         thinking: ThinkingLevel::Low,
         max_output_tokens: Some(CEILING),
         parallel_tool_calls: false,
-        reasoning_state: None,
     };
     let body: serde_json::Value =
         serde_json::from_slice(&request_body(&req).expect("this request is expressible"))

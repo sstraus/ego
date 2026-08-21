@@ -18,8 +18,8 @@ use ego_core::generator::capabilities::{
 use ego_core::generator::fake::FakeGenerator;
 use ego_core::generator::port::{AiEvent, Generator};
 use ego_core::generator::types::{
-    Conversation, GenRequest, Message, ReasoningState, Role, StopReason, ThinkingLevel,
-    ToolDescriptor,
+    ContentBlock, Conversation, ErrorKind, GenRequest, Message, ReasoningState, Role, StopReason,
+    ThinkingLevel, ToolDescriptor,
 };
 use ego_core::state::{SessionState, Usage};
 use futures::StreamExt;
@@ -48,7 +48,31 @@ mod generator {
             thinking: ThinkingLevel::Off,
             max_output_tokens: Some(1024),
             parallel_tool_calls: false,
-            reasoning_state: None,
+        }
+    }
+
+    /// [`gen_request`] with one reasoning block in its history.
+    ///
+    /// The state used to be a field beside the conversation; it is a
+    /// [`ContentBlock`] inside it now, because it is positional — so
+    /// "carries reasoning state" is a question about the history and the
+    /// checks that answer it read the history.
+    fn request_carrying_reasoning() -> GenRequest {
+        GenRequest {
+            messages: Conversation::new(vec![
+                Message::text(Role::User, "list the files".to_string()),
+                Message {
+                    role: Role::Assistant,
+                    content: vec![ContentBlock::Reasoning {
+                        state: ReasoningState {
+                            blob: "provider-opaque-token".to_string(),
+                            dialect: "anthropic-messages".to_string(),
+                        },
+                    }],
+                },
+            ])
+            .expect("a reasoning block takes no part in the call invariants"),
+            ..gen_request()
         }
     }
 
@@ -61,6 +85,7 @@ mod generator {
             supports_parallel_tool_calls: true,
             reasoning_carryover,
             reasoning_efforts: ReasoningEffortSupport::Any,
+            reasoning_state_dialect: None,
             cancel: CancelSemantics::Cooperative,
             cache: CacheRetention::Short,
             transport: Transport::Sse,
@@ -84,6 +109,7 @@ mod generator {
             uncached_input: rate("0.000003"),
             cache_read: rate("0.0000003"),
             cache_write: rate("0.00000375"),
+            cache_write_extended: None,
             output: rate("0.000015"),
         }
     }
@@ -184,6 +210,9 @@ mod generator {
 
         fn assemble(&mut self, event: &AiEvent) -> Vec<DomainEvent> {
             match event {
+                // Not journalled by this stub assembler: it exists to test
+                // turn assembly, and the reasoning carrier is `turn/drain`'s.
+                AiEvent::ReasoningState(_) => Vec::new(),
                 AiEvent::TextDelta { text } => {
                     let item = *self.message_item.get_or_insert_with(ItemId::new);
                     let env = self.envelope(Some(item));
@@ -264,12 +293,13 @@ mod generator {
                 // loop, which does know its own metering, is where a stated
                 // cost becomes a `UsageUpdated`.
                 AiEvent::ProviderCost { .. } => Vec::new(),
-                AiEvent::Error { message } => {
+                AiEvent::Error { message, .. } => {
                     let env = self.envelope(None);
                     vec![DomainEvent {
                         env,
                         kind: EventKind::Error {
                             message: message.clone(),
+                            kind: ErrorKind::Unclassified,
                         },
                     }]
                 }
@@ -297,7 +327,9 @@ mod generator {
                 uncached_input_tokens: 12,
                 cache_read_tokens: 0,
                 cache_write_tokens: 0,
+                cache_write_extended_tokens: 0,
                 output_tokens: 34,
+                reasoning_tokens: None,
             }),
             AiEvent::Stop(StopReason::ToolUse),
         ];
@@ -342,7 +374,9 @@ mod generator {
                     uncached_input_tokens: 12,
                     cache_read_tokens: 0,
                     cache_write_tokens: 0,
+                    cache_write_extended_tokens: 0,
                     output_tokens: 34,
+                    reasoning_tokens: None,
                 },
                 // 12 x 0.000003 + 34 x 0.000015 = 0.000546, exactly.
                 cost_delta: CostDelta::Known {
@@ -472,6 +506,128 @@ mod generator {
         let json = serde_json::to_string(&caps).expect("serialize");
         let back: ModelCapabilities = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(caps, back);
+    }
+
+    // --- Whose reasoning state a model accepts -----------------------------
+
+    /// `SameProviderOnly` is a property of the *target* and says nothing
+    /// about who minted the state in hand. Without comparing the two tags the
+    /// check is vacuous, and Anthropic state sails into a Gemini target — the
+    /// failure `ReasoningState::dialect`'s own doc was added to prevent.
+    #[test]
+    fn a_same_provider_model_refuses_reasoning_state_minted_by_another_dialect() {
+        let mut caps = capabilities(ReasoningCarryover::SameProviderOnly);
+        caps.reasoning_state_dialect = Some("gemini-interactions".to_string());
+
+        let gaps = caps.request_gaps(&request_carrying_reasoning());
+
+        assert!(
+            gaps.contains(&CapabilityGap::ReasoningStateDialectMismatch {
+                carried: "anthropic-messages".to_string(),
+                accepted: "gemini-interactions".to_string(),
+            }),
+            "expected a dialect mismatch, got {gaps:?}"
+        );
+    }
+
+    /// The same model, its own state: nothing to report. Without this the
+    /// test above would also pass against a check that refuses everything.
+    #[test]
+    fn a_same_provider_model_accepts_reasoning_state_it_minted_itself() {
+        let mut caps = capabilities(ReasoningCarryover::SameProviderOnly);
+        caps.reasoning_state_dialect = Some("anthropic-messages".to_string());
+
+        assert_eq!(caps.request_gaps(&request_carrying_reasoning()), Vec::new());
+    }
+
+    /// Silence about the dialect is not a match, on the same grounds that
+    /// silence about reasoning efforts is not permission. The remedy differs
+    /// from a mismatch's — resolve the model again, rather than carry other
+    /// state — so it is a gap of its own and says so.
+    #[test]
+    fn silence_about_the_dialect_refuses_rather_than_assuming_a_match() {
+        let caps = capabilities(ReasoningCarryover::SameProviderOnly);
+        assert_eq!(caps.reasoning_state_dialect, None, "the fixture is silent");
+
+        let gaps = caps.request_gaps(&request_carrying_reasoning());
+
+        assert!(
+            gaps.contains(&CapabilityGap::ReasoningStateDialectUnstated {
+                carried: "anthropic-messages".to_string(),
+            }),
+            "expected an unstated-dialect gap, got {gaps:?}"
+        );
+    }
+
+    /// A dialect check on a model that accepts every dialect would be a
+    /// refusal invented out of nothing, and one on a model that accepts none
+    /// would report the same problem twice with two different remedies.
+    #[test]
+    fn the_dialect_is_only_consulted_when_the_model_constrains_whose_state_it_takes() {
+        let portable = capabilities(ReasoningCarryover::Portable);
+        assert_eq!(
+            portable.request_gaps(&request_carrying_reasoning()),
+            Vec::new(),
+            "a portable model accepts any dialect by definition"
+        );
+
+        let unsupported = capabilities(ReasoningCarryover::Unsupported);
+        assert_eq!(
+            unsupported.request_gaps(&request_carrying_reasoning()),
+            vec![CapabilityGap::ReasoningStateCarryoverUnsupported],
+            "carries no state at all is one problem, not two"
+        );
+    }
+
+    /// A history with many blocks from one other provider is one problem with
+    /// one remedy. Reporting it per block would bury the other gaps under
+    /// forty copies of the same sentence.
+    #[test]
+    fn one_foreign_dialect_is_reported_once_however_many_blocks_carry_it() {
+        let mut caps = capabilities(ReasoningCarryover::SameProviderOnly);
+        caps.reasoning_state_dialect = Some("ollama".to_string());
+
+        let foreign = |dialect: &str| ContentBlock::Reasoning {
+            state: ReasoningState {
+                blob: "opaque".to_string(),
+                dialect: dialect.to_string(),
+            },
+        };
+        let req = GenRequest {
+            messages: Conversation::new(vec![
+                Message::text(Role::User, "list the files".to_string()),
+                Message {
+                    role: Role::Assistant,
+                    content: vec![
+                        foreign("anthropic-messages"),
+                        foreign("anthropic-messages"),
+                        foreign("gemini-interactions"),
+                    ],
+                },
+            ])
+            .expect("reasoning blocks take no part in the call invariants"),
+            ..gen_request()
+        };
+
+        let mismatches: Vec<_> = caps
+            .request_gaps(&req)
+            .into_iter()
+            .filter(|gap| matches!(gap, CapabilityGap::ReasoningStateDialectMismatch { .. }))
+            .collect();
+        assert_eq!(
+            mismatches,
+            vec![
+                CapabilityGap::ReasoningStateDialectMismatch {
+                    carried: "anthropic-messages".to_string(),
+                    accepted: "ollama".to_string(),
+                },
+                CapabilityGap::ReasoningStateDialectMismatch {
+                    carried: "gemini-interactions".to_string(),
+                    accepted: "ollama".to_string(),
+                },
+            ],
+            "one gap per offending dialect, in the order the history carries them"
+        );
     }
 
     // --- What the model accepts, asked of one model ------------------------
@@ -626,10 +782,7 @@ mod generator {
     fn generator_fallback_reasoning_carryover_gap_is_detected() {
         let current = capabilities(ReasoningCarryover::Portable);
         let target = capabilities(ReasoningCarryover::Unsupported);
-        let req = GenRequest {
-            reasoning_state: Some(ReasoningState("provider-opaque-token".to_string())),
-            ..gen_request()
-        };
+        let req = request_carrying_reasoning();
 
         let gaps = current.fallback_gaps(&target, &req);
 
@@ -640,7 +793,7 @@ mod generator {
     fn generator_fallback_without_reasoning_state_has_no_carryover_gap() {
         let current = capabilities(ReasoningCarryover::Portable);
         let target = capabilities(ReasoningCarryover::Unsupported);
-        let req = gen_request(); // reasoning_state: None
+        let req = gen_request(); // no reasoning block in its history
 
         let gaps = current.fallback_gaps(&target, &req);
 

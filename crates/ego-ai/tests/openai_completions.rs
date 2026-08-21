@@ -32,7 +32,7 @@ use ego_ai::wire::openai_completions::{
 use ego_core::generator::attempt::DeliveryCertainty;
 use ego_core::generator::port::AiEvent;
 use ego_core::generator::types::{
-    ContentBlock, Conversation, GenRequest, Message, ReasoningState, Role, StopReason,
+    ContentBlock, Conversation, ErrorKind, GenRequest, Message, ReasoningState, Role, StopReason,
     ThinkingLevel, ToolDescriptor,
 };
 use ego_core::state::Usage;
@@ -68,7 +68,6 @@ fn golden_request() -> GenRequest {
         thinking: ThinkingLevel::High,
         max_output_tokens: Some(4096),
         parallel_tool_calls: true,
-        reasoning_state: None,
     }
 }
 
@@ -257,8 +256,21 @@ fn an_assistant_turn_of_pure_tool_calls_sends_no_content_key() {
 /// exactly the kind `ModelCapabilities::fallback_gaps` exists to catch.
 #[test]
 fn reasoning_state_is_refused_rather_than_dropped() {
-    let mut req = golden_request();
-    req.reasoning_state = Some(ReasoningState("opaque".to_string()));
+    let req = GenRequest {
+        messages: conversation(vec![
+            Message::text(Role::User, "What is in ./src?"),
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::Reasoning {
+                    state: ReasoningState {
+                        blob: "opaque".to_string(),
+                        dialect: "anthropic-messages".to_string(),
+                    },
+                }],
+            },
+        ]),
+        ..golden_request()
+    };
     assert_eq!(
         request_body(&req),
         Err(RequestRefused::ReasoningStateNotCarriable)
@@ -330,11 +342,16 @@ fn a_golden_transcript_decodes_to_an_exact_event_sequence() {
                 text: "file — perché no? 😀".to_string()
             },
             // 1000 prompt tokens = 400 cached + 100 written + 500 uncached.
+            // The 180 reasoning tokens are *inside* the 250 output tokens,
+            // not beside them: this golden's own `total_tokens` is 1250, and
+            // the breakdown is read because the transcript publishes one.
             AiEvent::Usage(Usage {
                 uncached_input_tokens: 500,
                 cache_read_tokens: 400,
                 cache_write_tokens: 100,
+                cache_write_extended_tokens: 0,
                 output_tokens: 250,
+                reasoning_tokens: Some(180),
             }),
             AiEvent::Stop(StopReason::Stop),
         ],
@@ -384,7 +401,9 @@ fn a_usage_report_without_a_cache_breakdown_is_all_uncached() {
                 uncached_input_tokens: 30,
                 cache_read_tokens: 0,
                 cache_write_tokens: 0,
+                cache_write_extended_tokens: 0,
                 output_tokens: 7,
+                reasoning_tokens: None,
             }),
             AiEvent::Stop(StopReason::Stop),
         ]
@@ -413,7 +432,7 @@ fn a_usage_report_whose_parts_exceed_its_total_is_discarded_not_repaired() {
     );
     assert!(
         events.iter().any(|event| match event {
-            AiEvent::Error { message } => message.contains("breakdown"),
+            AiEvent::Error { message, .. } => message.contains("breakdown"),
             _ => false,
         }),
         "and the caller has to be told why the turn settles at its bound: {events:?}"
@@ -447,7 +466,9 @@ fn a_restated_usage_total_is_not_added_to_itself() {
                 uncached_input_tokens: 100,
                 cache_read_tokens: 0,
                 cache_write_tokens: 0,
+                cache_write_extended_tokens: 0,
                 output_tokens: 40,
+                reasoning_tokens: None,
             }),
             AiEvent::Stop(StopReason::Stop),
         ],
@@ -477,7 +498,9 @@ fn tool_call_arguments_are_assembled_by_index_across_interleaved_fragments() {
                 uncached_input_tokens: 800,
                 cache_read_tokens: 0,
                 cache_write_tokens: 0,
+                cache_write_extended_tokens: 0,
                 output_tokens: 64,
+                reasoning_tokens: None,
             }),
             AiEvent::Stop(StopReason::ToolUse),
         ],
@@ -531,6 +554,10 @@ fn every_ending_produces_exactly_one_terminal_stop() {
             finish_reason("content_filter"),
         ),
         (
+            "an upstream spelling passed through".to_string(),
+            finish_reason("end_turn"),
+        ),
+        (
             "a finish_reason nobody has heard of".to_string(),
             finish_reason("solar_flare"),
         ),
@@ -573,6 +600,11 @@ fn a_finish_reason_maps_to_the_stop_it_names() {
         ("length", StopReason::Length),
         ("tool_calls", StopReason::ToolUse),
         ("function_call", StopReason::ToolUse),
+        // Not in this format's schema, and it arrives on this format's wire
+        // anyway — a gateway passing its upstream's spelling through. Before
+        // it was mapped it fell into the unknown arm and ended a perfectly
+        // normal turn as an error.
+        ("end_turn", StopReason::Stop),
         // No `StopReason` says "a filter stopped this". `Stop` would claim it
         // finished normally, so it is reported as an error that names itself.
         ("content_filter", StopReason::Error),
@@ -590,7 +622,7 @@ fn a_finish_reason_maps_to_the_stop_it_names() {
         );
         if expected == StopReason::Error {
             let named = events.iter().any(|event| match event {
-                AiEvent::Error { message } => {
+                AiEvent::Error { message, .. } => {
                     message.contains(reason) || reason == "content_filter"
                 }
                 _ => false,
@@ -623,7 +655,7 @@ fn a_stream_cut_mid_frame_is_an_error_and_not_a_short_answer() {
     );
     assert_eq!(events.last(), Some(&AiEvent::Stop(StopReason::Error)));
     let explained = events.iter().any(|event| match event {
-        AiEvent::Error { message } => message.contains("connection reset by peer"),
+        AiEvent::Error { message, .. } => message.contains("connection reset by peer"),
         _ => false,
     });
     assert!(
@@ -682,7 +714,7 @@ fn a_tool_call_cut_before_its_finish_reason_is_not_dispatched() {
     );
     assert_eq!(events.last(), Some(&AiEvent::Stop(StopReason::Error)));
     let counted = events.iter().any(|event| match event {
-        AiEvent::Error { message } => message.contains("discarded"),
+        AiEvent::Error { message, .. } => message.contains("discarded"),
         _ => false,
     });
     assert!(counted, "dropping them must be said out loud: {events:?}");
@@ -705,10 +737,40 @@ fn a_tool_call_the_provider_never_named_is_reported_rather_than_invented() {
     );
     assert!(
         events.iter().any(|event| match event {
-            AiEvent::Error { message } => message.contains("no id"),
+            AiEvent::Error { message, .. } => message.contains("no id"),
             _ => false,
         }),
         "{events:?}"
+    );
+    assert_eq!(events.last(), Some(&AiEvent::Stop(StopReason::ToolUse)));
+}
+
+/// An empty-string id is no id. Nothing that speaks this wire is known to
+/// send one — Ollama's compat layer, the row this was suspected of, sets the
+/// field unconditionally — so this is a fail-closed guard rather than an
+/// accommodation. What it prevents is worse than a dropped call: `""` would
+/// pass into `ContentBlock::ToolUse` as a legitimate key, and two of them in
+/// one turn would read as `DuplicateCallId` — a history error blaming the
+/// conversation for a provider's omission.
+#[test]
+fn an_empty_tool_call_id_is_refused_the_same_way_a_missing_one_is() {
+    const EMPTY_ID: &str = "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":\
+         [{\"index\":0,\"id\":\"\",\"type\":\"function\",\
+         \"function\":{\"name\":\"read_file\",\"arguments\":\"{}\"}}]},\
+         \"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n";
+    let events = decode_whole(EMPTY_ID.as_bytes());
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AiEvent::ToolCall { .. })),
+        "an unanswerable call must not be dispatched: {events:?}"
+    );
+    assert!(
+        events.iter().any(|event| match event {
+            AiEvent::Error { message, .. } => message.contains("no id"),
+            _ => false,
+        }),
+        "and dropping it must be said out loud: {events:?}"
     );
     assert_eq!(events.last(), Some(&AiEvent::Stop(StopReason::ToolUse)));
 }
@@ -760,7 +822,8 @@ fn two_ids_at_one_tool_call_index_are_reported_rather_than_spliced() {
     );
     assert!(
         events.iter().any(|event| match event {
-            AiEvent::Error { message } => message.contains("call_a") && message.contains("call_b"),
+            AiEvent::Error { message, .. } =>
+                message.contains("call_a") && message.contains("call_b"),
             _ => false,
         }),
         "the error must name both ids it could not choose between: {events:?}"
@@ -838,8 +901,9 @@ async fn a_streamed_response_reports_that_it_arrived_before_it_decodes_anything(
     assert_eq!(events[1..], decode_whole(TEXT_TRANSCRIPT.as_bytes())[..]);
 }
 
-/// An error status is not an event stream. The body is a JSON envelope, and
-/// the message inside it is the only useful thing about the whole response.
+/// An error status is not an event stream. The body is a JSON envelope, the
+/// message inside it is what the operator reads, and the status is what the
+/// harness acts on.
 #[tokio::test]
 async fn an_error_status_is_reported_with_what_the_provider_said() {
     const BODY: &str = "{\"error\":{\"message\":\"Rate limit reached for gpt-5.1\",\
@@ -851,7 +915,67 @@ async fn an_error_status_is_reported_with_what_the_provider_said() {
             AiEvent::DeliveryObserved(DeliveryCertainty::PossiblySent),
             AiEvent::Error {
                 message: "the provider returned HTTP 429: Rate limit reached for gpt-5.1"
-                    .to_string()
+                    .to_string(),
+                kind: ErrorKind::Transient,
+            },
+            AiEvent::Stop(StopReason::Error),
+        ]
+    );
+}
+
+/// Every status this mapping claims to know, and the classification it
+/// claims. Table-driven because the value of the table is that it is
+/// exhaustive over what it asserts, and one status per test would let a row
+/// go missing without anything noticing.
+///
+/// `402` and `403` are `Refused` beside `401` and not folded into it: they
+/// are three different ways for an account to be turned away and one answer
+/// to what a caller should do about any of them.
+#[tokio::test]
+async fn each_status_is_classified_by_what_it_says_about_retrying() {
+    const CASES: &[(u16, ErrorKind)] = &[
+        (400, ErrorKind::Invalid),
+        (401, ErrorKind::Refused),
+        (402, ErrorKind::Refused),
+        (403, ErrorKind::Refused),
+        (404, ErrorKind::Invalid),
+        (408, ErrorKind::Transient),
+        (413, ErrorKind::Invalid),
+        (422, ErrorKind::Invalid),
+        (429, ErrorKind::Transient),
+        (500, ErrorKind::Transient),
+        (502, ErrorKind::Transient),
+        (503, ErrorKind::Transient),
+        // Anthropic's overload status, which is a 5xx outside the block the
+        // other four sit in — the range arm is what covers it.
+        (529, ErrorKind::Transient),
+    ];
+    for (status, expected) in CASES {
+        let events: Vec<AiEvent> = decode(responding(*status, "{}"), None).collect().await;
+        let kind = events.iter().find_map(|event| match event {
+            AiEvent::Error { kind, .. } => Some(*kind),
+            _ => None,
+        });
+        assert_eq!(kind, Some(*expected), "HTTP {status}");
+    }
+}
+
+/// A status nobody mapped fails closed. `418` stands in for the real case: a
+/// proxy or a gateway inventing a status the provider never returns. Reading
+/// it as `Transient` would spend `--retry N` attempts on it and then report a
+/// provider outage; `Unclassified` spends one and exits 4.
+#[tokio::test]
+async fn an_unmapped_status_is_unclassified_rather_than_assumed_retryable() {
+    let events: Vec<AiEvent> = decode(responding(418, "not json at all"), None)
+        .collect()
+        .await;
+    assert_eq!(
+        events,
+        vec![
+            AiEvent::DeliveryObserved(DeliveryCertainty::PossiblySent),
+            AiEvent::Error {
+                message: "the provider returned HTTP 418: not json at all".to_string(),
+                kind: ErrorKind::Unclassified,
             },
             AiEvent::Stop(StopReason::Error),
         ]
@@ -884,11 +1008,75 @@ async fn a_request_that_never_left_says_so() {
     assert_eq!(events.last(), Some(&AiEvent::Stop(StopReason::Error)));
     assert!(
         events.iter().any(|event| match event {
-            AiEvent::Error { message } => message.contains("api.openai.com"),
+            AiEvent::Error { message, .. } => message.contains("api.openai.com"),
             _ => false,
         }),
         "the refusal must still name what it refused: {events:?}"
     );
+}
+
+/// The transport is the only layer that can tell these two apart, and by the
+/// time either is prose they read identically — which is why the class comes
+/// off `HttpError` and not off the message.
+///
+/// An egress refusal is `Invalid` and not `Refused`, and the near miss is the
+/// point of the test: `ErrorKind::Refused` means the *provider* turned the
+/// account away, and a request the policy stopped never reached a provider.
+/// It is ego's own answer about the request's destination — the same on every
+/// retry, and an operator's configuration problem rather than an outage.
+#[tokio::test]
+async fn a_transport_failure_and_a_policy_refusal_are_different_classes() {
+    use ego_ai::http::EgressRefused;
+
+    let class_of = |events: &[AiEvent]| {
+        events.iter().find_map(|event| match event {
+            AiEvent::Error { kind, .. } => Some(*kind),
+            _ => None,
+        })
+    };
+
+    let refused: Vec<AiEvent> = decode(
+        Err(HttpError::refused_before_sending(
+            EgressRefused::NameNeedsResolution {
+                host: "api.openai.com".to_string(),
+            },
+        )),
+        None,
+    )
+    .collect()
+    .await;
+    assert_eq!(class_of(&refused), Some(ErrorKind::Invalid));
+
+    let transport: Vec<AiEvent> = decode(
+        Err(HttpError::Transport {
+            message: "connection refused".to_string(),
+            delivery: DeliveryCertainty::DefinitelyUnsent,
+        }),
+        None,
+    )
+    .collect()
+    .await;
+    assert_eq!(class_of(&transport), Some(ErrorKind::Transient));
+}
+
+/// A stream that ended without saying why, after a status that proved the
+/// request was accepted. Neither the request nor the account is what went
+/// wrong and the same bytes may well complete next time, so it is
+/// `Transient` — the reading `Unclassified` would have withheld while
+/// claiming to be cautious.
+#[test]
+fn a_stream_that_stops_without_a_finish_reason_is_transient() {
+    const CUT: &str = "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"par";
+    let events = decode_whole(CUT.as_bytes());
+    assert_eq!(
+        events.iter().find_map(|event| match event {
+            AiEvent::Error { kind, .. } => Some(*kind),
+            _ => None,
+        }),
+        Some(ErrorKind::Transient),
+        "{events:?}"
+    );
+    assert_eq!(events.last(), Some(&AiEvent::Stop(StopReason::Error)));
 }
 
 /// A body that dies halfway is `PossiblySent`, and it reaches the caller
