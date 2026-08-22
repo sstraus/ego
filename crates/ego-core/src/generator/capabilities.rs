@@ -99,12 +99,31 @@ pub enum ReasoningEffortSupport {
 }
 
 /// The wire transport a generation streams over.
+///
+/// One variant, because one is what this build can enact. `Http`
+/// (`ego_ai::http`) is request/response plus a byte stream and opens no
+/// socket, so there is no seam a second transport could be reached through,
+/// no decoder that frames one, and nothing that would select between them.
+///
+/// enum (`docs/02-pi.md:64`) rather than anything measured here, and neither
+/// was ever constructed. `Auto` was the worse of the two on its own terms: it
+/// is a selection *policy*, and this record states what a generation did — a
+/// manifest saying `auto` names no transport at all.
+///
+/// They were not merely unreachable. `models.toml` decodes
+/// [`ModelCapabilities`] directly (`ego-cli`'s `facts.rs`), so `serde` was a
+/// producer an operator could reach: a file could say `web_socket`, decode,
+/// and the run would stream SSE anyway. Removing the variants is what makes
+/// that file refuse.
+///
+/// **A variant is added here when a row produces it** — an implemented
+/// transport, a decoder that frames it, and a generation that resolves to it.
+/// A vendor documenting one as optional beside an SSE this build already
+/// speaks is not that.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Transport {
     Sse,
-    WebSocket,
-    Auto,
 }
 
 /// A versioned snapshot of what a model can do in conversation, resolved per
