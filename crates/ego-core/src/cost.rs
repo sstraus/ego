@@ -461,11 +461,10 @@ pub struct PricingRevision(pub String);
 ///
 /// **Exactly the sources that exist.** §5 names three, in resolution order:
 /// an operator's quote, the provider's own pricing endpoint, and the cached
-/// third-party table. Two have producers today; the cached table arrives with
-/// story `regression_case`. It is not declared here in advance: a variant nothing can
-/// produce is a claim the code cannot back, and `AGENTS.md:22-37` forbids
-/// exactly that. Adding an arm when its source lands is ordinary additive
-/// growth, not a temporary contract being replaced.
+/// third-party table. All three have producers now — the last arrived with
+/// the pricing table of story `regression_case` — and none was declared before its
+/// producer existed, because a variant nothing can produce is a claim the
+/// code cannot back and `AGENTS.md:22-37` forbids exactly that.
 ///
 /// The order of the variants is §5's resolution order, first hit wins.
 ///
@@ -492,6 +491,26 @@ pub enum RateSource {
     /// is the only producer: xAI is the one provider of the six that publishes
     /// per-key prices.
     ProviderPublished,
+    /// A cached third-party table — litellm's — naming what it believes the
+    /// provider charges.
+    ///
+    /// Last, and the doc above says why: it is a summary of prices its author
+    /// is not party to and will not be invoicing. It is still worth having,
+    /// because the alternative for a row whose operator wrote nothing down is
+    /// no ceiling at all.
+    ///
+    /// The only arm that carries a payload, and it is not decoration either.
+    /// The other two name a *kind* of source that a reader can go and inspect
+    /// — the operator's own configuration, the provider's own endpoint — while
+    /// this one names a file that is replaced as prices change, so "a table
+    /// said so" is unattributable until it says which. Minted from the
+    /// quote's own `revision` rather than restated beside it (see
+    /// `ego_ai::catalogue::table_rates`), for the reason
+    /// [`SettlementSource::ProviderReported`](crate::budget::SettlementSource)
+    /// takes its revision from the decoder: two values describing one source,
+    /// assembled in two places, are two values that can disagree once they
+    /// are bytes on disk.
+    Table { revision: PricingRevision },
 }
 
 /// Which metering policy established that a row has no per-token price at

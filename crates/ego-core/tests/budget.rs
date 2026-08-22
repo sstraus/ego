@@ -1830,4 +1830,45 @@ mod budget {
             Err(BudgetDenied::WrongBinding(_) | BudgetDenied::QuoteChanged { .. })
         ));
     }
+
+    /// Whether it is worth going and *finding* rates at all.
+    ///
+    /// `docs/decisions/2026-08-21-a-run-with-no-ceiling.md` §5 says the three
+    /// sources are consulted "only when a ceiling is configured", and §10
+    /// says a monetary ceiling on a row with no per-token charge binds
+    /// nothing. Those are not two rules: they are the single question "will
+    /// a ceiling rest on rates", and it is asked here so that no caller can
+    /// answer it a second way — reading a cached table, or reaching for the
+    /// network, on behalf of a run that will never consult the answer.
+    ///
+    /// The predicate is exactly `CeilingEffect::Binds`, which is why
+    /// `PublicEvent::metering_selected` is made to ask it too rather than
+    /// re-deriving the same condition beside it.
+    #[test]
+    fn only_a_binding_money_ceiling_is_worth_looking_rates_up_for() {
+        let unlimited = BudgetGate::unlimited(CurrencyCode::new("USD").expect("USD is a code"));
+        let limited = BudgetGate::new(usd("5"));
+        let currency = Metering::Currency {
+            settlement: SettlementSource::Quote,
+        };
+
+        assert!(currency.ceiling_needs_rates(limited.ledger()));
+        assert!(
+            !currency.ceiling_needs_rates(unlimited.ledger()),
+            "a run that asked for no ceiling contacts no third party"
+        );
+        // A money ceiling on a row nobody charges per token for mints a zero
+        // reservation, so the limit admits every generation whatever a table
+        // would have said. Fetching one would be a network call whose result
+        // cannot change a single decision.
+        for metered_by_policy in [
+            Metering::Unmetered { revision: policy() },
+            Metering::Subscription { revision: policy() },
+        ] {
+            assert!(
+                !metered_by_policy.ceiling_needs_rates(limited.ledger()),
+                "{metered_by_policy:?} takes no rates from any source"
+            );
+        }
+    }
 }

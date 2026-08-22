@@ -539,15 +539,28 @@ mod public_golden {
             // A currency row settled from the provider's own invoice. Its
             // ceiling still rests on rates, because a stated cost arrives
             // after the tokens are spent and can never bound them — and the
-            // rates it rests on are the operator's, because that is the only
-            // source this build has. §5's other two arrive with the pricing
-            // table in story `regression_case`, and the enum grows an arm each when
-            // they do.
+            // rates it rests on are the operator's, which §5 ranks first.
             (
                 invoiced(),
                 limited.ledger(),
                 RateSource::Operator,
                 r#"{"type":"metering_selected","turn":"00000000-0000-0000-0000-000000000002","metering":"currency","ceiling":{"effect":"binds","limit":{"amount":"5","currency":"USD"}},"rates":{"source":"operator"}}"#,
+            ),
+            // §5's third and weakest source: a ceiling resting on a third
+            // party's summary of someone else's prices. This is the case §10
+            // adds `rates` to the event *for* — the two lines above and this
+            // one report the same binding ceiling and are materially
+            // different guarantees, and a consumer that could not tell them
+            // apart could not report honestly on either. The revision travels
+            // with it because "a table said so" is not attributable until it
+            // says which table.
+            (
+                currency(),
+                limited.ledger(),
+                RateSource::Table {
+                    revision: PricingRevision("litellm@1.79.3#9f86d081".to_string()),
+                },
+                r#"{"type":"metering_selected","turn":"00000000-0000-0000-0000-000000000002","metering":"currency","ceiling":{"effect":"binds","limit":{"amount":"5","currency":"USD"}},"rates":{"source":"table","revision":"litellm@1.79.3#9f86d081"}}"#,
             ),
             // An administrator's non-relaxable ceiling reduced what was asked
             // for. §4 requires the clamp be stated, not silent.

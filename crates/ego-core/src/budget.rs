@@ -402,6 +402,27 @@ impl Metering {
         }
     }
 
+    /// Whether a ceiling held on `ledger` will rest on per-token rates —
+    /// which is exactly when it is worth going and finding some.
+    ///
+    /// The gate does not need this: [`upper_bound`](Self::upper_bound) above
+    /// already tolerates every case it excludes, minting a zero for a
+    /// policy-metered row and `None` for a currency row with no quote.
+    /// *Resolution* needs it. `2026-08-21-a-run-with-no-ceiling.md` §5 makes
+    /// the three rate sources conditional — "none of them is consulted at all
+    /// unless a ceiling is configured" — and one of the three reads a cached
+    /// file while another opens a socket. So the condition has to be askable
+    /// before any of that happens, by something that holds no rates yet.
+    ///
+    /// It answers the same question [`CeilingEffect`](crate::public::CeilingEffect)
+    /// publishes, and `PublicEvent::metering_selected` is written in terms of
+    /// it for that reason: a build where the event said a ceiling binds while
+    /// resolution had skipped the lookup would be enforcing nothing and
+    /// reporting that it was.
+    pub fn ceiling_needs_rates(&self, ledger: &Ledger) -> bool {
+        matches!(self, Metering::Currency { .. }) && matches!(ledger, Ledger::Limited { .. })
+    }
+
     /// What a settled figure under this metering is attributable to, when it
     /// is the metering itself that produced it.
     ///

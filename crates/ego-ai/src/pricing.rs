@@ -48,7 +48,8 @@
 //! *stated* zero — which litellm writes for locally served rows — is untouched,
 //! because its digits are zero rather than merely small.
 
-use ego_core::cost::{Amount, MAX_SCALE, MoneyError};
+use ego_core::budget::PricingQuote;
+use ego_core::cost::{Amount, CurrencyCode, MAX_SCALE, MoneyError, PricingRevision};
 
 /// Why a figure in the table could not become an [`Amount`].
 ///
@@ -438,6 +439,52 @@ impl TableEntry {
             && self.cache_write_extended == other.cache_write_extended
             && self.output == other.output
     }
+
+    /// The same five figures, as the quote a budget gate consumes.
+    ///
+    /// **Nothing is completed, derived or defaulted.** A category the document
+    /// left out arrives here as `None` and leaves as `None`, and what follows
+    /// is `ego-core`'s to decide: an unpriced *input* category makes the upper
+    /// bound unknown, so a money ceiling on such a model refuses and names the
+    /// category (`budget.rs`'s `dearest_input_rate`). That refusal is the
+    /// intended behaviour and not a gap to be papered over — §5 ranks an
+    /// operator's own `models.toml` above this table precisely so there is a
+    /// place to put a rate the third party does not carry.
+    ///
+    /// A per-provider rule completing the quote from the input rate was
+    /// considered and refused on the data: `gpt-5.6` states a cache-write rate
+    /// of 6.25e-06 against a 5e-06 input while every `gpt-5.x` below it states
+    /// none, so "how this provider bills cache writes" is not a fact about a
+    /// provider at all. A field on `ProviderRow` asserting one would be wrong
+    /// for the model this build targets, and a rate ego invented would be a
+    /// reservation resting on a number nobody published.
+    ///
+    /// `revision` is supplied rather than derived: this type is the decode of
+    /// a *document*, and which fetch of that document it was is known to
+    /// whatever read the bytes, not to the parser.
+    pub fn into_quote(self, revision: PricingRevision) -> PricingQuote {
+        PricingQuote {
+            revision,
+            currency: currency(),
+            uncached_input: self.uncached_input,
+            cache_read: self.cache_read,
+            cache_write: self.cache_write,
+            cache_write_extended: self.cache_write_extended,
+            output: self.output,
+        }
+    }
+}
+
+/// The currency every rate in the litellm document is expressed in.
+///
+/// **An assertion about the artefact, not a decoded field.** No entry carries
+/// a currency of any kind — the figures are US dollars per token by the file's
+/// own convention, which is stated in its documentation and nowhere in its
+/// data. Written down once, so a day when that convention changes, or a
+/// second table in another currency arrives, has one place to be wrong instead
+/// of one per call site.
+fn currency() -> CurrencyCode {
+    CurrencyCode::new("USD").expect("three ASCII letters")
 }
 
 impl Row<'_> {

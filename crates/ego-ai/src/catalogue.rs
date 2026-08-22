@@ -304,6 +304,29 @@ pub fn operator_rates(quote: PricingQuote) -> ResolvedRates {
     }
 }
 
+/// Rates read out of the cached third-party table, the last of §5's three.
+///
+/// Beside [`operator_rates`] and minted the same way, for the same reason: the
+/// provenance and the figures are built together so they cannot describe two
+/// different sources.
+///
+/// This one has a second thing that must not drift.
+/// [`RateSource::Table`](ego_core::cost::RateSource::Table) carries the table
+/// revision — §10 puts it there so an operator can see *which* table their
+/// ceiling rests on — and the quote carries one too. They are taken from the
+/// quote rather than passed in separately, exactly as
+/// [`provider_reported`] takes its revision from the decoder: a signature that
+/// accepted both would be a signature that admits a caller pairing one table's
+/// prices with another table's name.
+pub fn table_rates(quote: PricingQuote) -> ResolvedRates {
+    ResolvedRates {
+        source: RateSource::Table {
+            revision: quote.revision.clone(),
+        },
+        quote,
+    }
+}
+
 /// A row priced from a supplied table, and settled from the provider's own
 /// statement of what it will charge.
 ///

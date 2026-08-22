@@ -354,24 +354,34 @@ impl PublicEvent {
         };
         let ceiling = match ledger {
             Ledger::Unlimited => CeilingEffect::None,
-            // A monetary ceiling cannot reach a row with no per-token
-            // currency charge: the metering mints a zero reservation, so the
-            // limit admits everything. Said outright rather than left for the
-            // operator to infer from a limit that never fires.
-            Ledger::Limited { limit, .. } if kind != MeteringKind::Currency => {
-                CeilingEffect::Inapplicable {
-                    limit: *limit,
-                    metering: kind,
-                }
-            }
             Ledger::Limited {
                 limit,
                 clamped_from,
                 ..
-            } => CeilingEffect::Binds {
-                limit: *limit,
-                clamped_from: *clamped_from,
-            },
+            } => {
+                // Asked of `Metering` rather than decided here, because
+                // resolution asks the same question earlier to decide whether
+                // to look any rates up at all
+                // (`Metering::ceiling_needs_rates`). Two spellings of one
+                // condition could drift into a build that skipped the lookup
+                // and then announced that the ceiling binds.
+                if metering.ceiling_needs_rates(ledger) {
+                    CeilingEffect::Binds {
+                        limit: *limit,
+                        clamped_from: *clamped_from,
+                    }
+                } else {
+                    // A monetary ceiling cannot reach a row with no per-token
+                    // currency charge: the metering mints a zero reservation,
+                    // so the limit admits everything. Said outright rather
+                    // than left for the operator to infer from a limit that
+                    // never fires.
+                    CeilingEffect::Inapplicable {
+                        limit: *limit,
+                        metering: kind,
+                    }
+                }
+            }
         };
         PublicEvent::MeteringSelected {
             turn,
