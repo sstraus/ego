@@ -51,18 +51,23 @@
 //! an inert field. `docs/15-provider-contract-audit.md` §3 is where that
 //! argument lives in full.
 
-use ego_ai::wire::{ollama, openai_completions};
+use ego_ai::wire::{anthropic_messages, gemini_interactions, ollama, openai_completions};
 use ego_core::generator::types::{
     ContentBlock, Conversation, GenRequest, Message, Role, ThinkingLevel, ToolDescriptor,
 };
 
-/// The two mappings this build serialises a request with, named by module.
+/// The four mappings this build serialises a request with, named by module.
 ///
 /// `openai-completions` is what the OpenAI, xAI and OpenRouter rows send;
-/// `ollama` is the daemon's own. There is no third, and
-/// [`the_table_names_only_mappings_this_build_has`] keeps that true.
+/// `ollama` is the daemon's own; Anthropic and Gemini each have their own.
+/// Two tests keep the list honest in both directions:
+/// [`the_table_names_only_mappings_this_build_has`] asserts no entry names a
+/// mapping that is gone, and [`every_mapping_this_build_has_is_walked`]
+/// asserts no mapping is missing from it.
 const OPENAI_COMPLETIONS: &str = "wire::openai_completions";
 const OLLAMA: &str = "wire::ollama";
+const ANTHROPIC_MESSAGES: &str = "wire::anthropic_messages";
+const GEMINI_INTERACTIONS: &str = "wire::gemini_interactions";
 
 /// One spelling a vendor has retired, and the mapping forbidden to send it.
 struct Retired {
@@ -167,20 +172,42 @@ fn widest_request() -> GenRequest {
 }
 
 /// Each mapping's body for [`widest_request`], as JSON.
+///
+/// All four, and [`every_mapping_this_build_has_is_walked`] is what keeps the
+/// count honest as a fifth lands.
 fn bodies() -> Vec<(&'static str, serde_json::Value)> {
     let req = widest_request();
-    let openai = openai_completions::request_body(&req).expect("expressible on this mapping");
-    let ollama = ollama::request_body(&req).expect("expressible on this mapping");
-    vec![
+    // Each mapping refuses with a refusal type of its own — the seam has no
+    // shared one, deliberately — so each is flattened to its own sentence
+    // here rather than unified into a type this test would have to invent.
+    [
         (
             OPENAI_COMPLETIONS,
-            serde_json::from_slice(&openai).expect("the body is valid JSON"),
+            openai_completions::request_body(&req).map_err(|why| format!("{why:?}")),
         ),
         (
             OLLAMA,
-            serde_json::from_slice(&ollama).expect("the body is valid JSON"),
+            ollama::request_body(&req).map_err(|why| format!("{why:?}")),
+        ),
+        (
+            ANTHROPIC_MESSAGES,
+            anthropic_messages::request_body(&req).map_err(|why| format!("{why:?}")),
+        ),
+        (
+            GEMINI_INTERACTIONS,
+            gemini_interactions::request_body(&req).map_err(|why| format!("{why:?}")),
         ),
     ]
+    .into_iter()
+    .map(|(mapping, built)| {
+        let bytes = built
+            .unwrap_or_else(|why| panic!("{mapping} cannot express the widest request: {why}"));
+        (
+            mapping,
+            serde_json::from_slice(&bytes).expect("the body is valid JSON"),
+        )
+    })
+    .collect()
 }
 
 /// Every object key in `value`, at every depth, with the path that reaches it.
@@ -290,6 +317,59 @@ fn the_walk_reaches_a_key_nested_inside_an_array() {
     );
 }
 
+/// The modules under `wire/` that are not mappings, and why.
+///
+/// Named rather than inferred, because "which of these builds a request body"
+/// is exactly the question [`every_mapping_this_build_has_is_walked`] exists
+/// to stop anyone answering by eye.
+const NOT_A_MAPPING: &[&str] = &[
+    // A usage decoder. It reads a provider's answer and never writes a
+    // request, so there is no body for a retired key to appear in.
+    "provider_cost",
+    // The SSE framing, shared by the mappings above rather than a mapping of
+    // its own. It carries no field of its own into any body.
+    "sse",
+];
+
+/// Every mapping this build has is walked, not only the ones remembered.
+///
+/// [`the_table_names_only_mappings_this_build_has`] is the other direction and
+/// cannot catch this: it asks that each *table entry* names a real mapping,
+/// which stays true no matter how many mappings the table has never heard of.
+/// This is the direction that bites. It caught the live case — `bodies()`
+/// listed two mappings and the module doc said "there is no third" while
+/// `anthropic_messages` and `gemini_interactions` had been serialising
+/// requests unwalked, so `AGENTS.md`'s "current models only" was enforced on
+/// half the build.
+///
+/// Read off `wire/mod.rs`'s own declarations, so a fifth mapping is caught by
+/// existing, and the two non-mappings must be excluded **by name** in
+/// [`NOT_A_MAPPING`] rather than by a pattern that would quietly swallow a
+/// third.
+#[test]
+fn every_mapping_this_build_has_is_walked() {
+    let declared = include_str!("../src/wire/mod.rs");
+    let walked: Vec<&str> = bodies().iter().map(|(mapping, _)| *mapping).collect();
+    for line in declared.lines() {
+        let Some(module) = line
+            .strip_prefix("pub mod ")
+            .and_then(|rest| rest.strip_suffix(';'))
+        else {
+            continue;
+        };
+        if NOT_A_MAPPING.contains(&module) {
+            continue;
+        }
+        assert!(
+            walked.contains(&format!("wire::{module}").as_str()),
+            "`wire::{module}` serialises requests and no body of its is \
+             walked, so a spelling its vendor has retired could be sent and \
+             nothing here would notice. Add it to `bodies()`, or say why it is \
+             not a mapping in `NOT_A_MAPPING`.\nwalked: {walked:?}"
+        );
+    }
+}
+
 /// Every mapping the table names is a mapping this build serialises with.
 ///
 /// A renamed or merged mapping would otherwise leave entries that guard
@@ -318,13 +398,33 @@ fn the_table_names_only_mappings_this_build_has() {
 /// mapping's own contract still requires. It is the assertion that would have
 /// failed had regression case resolved the question the other way, and it is here so
 /// the module doc above cannot drift away from the code.
+///
+/// **Two mappings, not all four.** `stream_options.include_usage` is a field
+/// of OpenAI's chat-completions schema, which is the contract
+/// `openai-completions` targets and the one Ollama's compatibility surface
+/// honours. Anthropic and Gemini report usage through their own frames and
+/// have no such field to send — asserting it of them would not be a stricter
+/// test, it would be a false claim about their contracts. That is the same
+/// reason [`RETIRED`] is keyed on (spelling, mapping): a deprecation belongs
+/// to a contract, and so does a precondition.
 #[test]
 fn the_current_usage_precondition_survives_a_members_deprecation_of_it() {
-    for (mapping, body) in bodies() {
-        assert_eq!(
-            body["stream_options"],
-            serde_json::json!({ "include_usage": true }),
-            "{mapping} must still ask for the usage chunk"
-        );
-    }
+    let family = [OPENAI_COMPLETIONS, OLLAMA];
+    let asked: Vec<&str> = bodies()
+        .into_iter()
+        .filter(|(mapping, _)| family.contains(mapping))
+        .map(|(mapping, body)| {
+            assert_eq!(
+                body["stream_options"],
+                serde_json::json!({ "include_usage": true }),
+                "{mapping} must still ask for the usage chunk"
+            );
+            mapping
+        })
+        .collect();
+
+    // So that scoping the loop cannot become the way this test stops
+    // asserting anything: a mapping renamed out of `family` would otherwise
+    // leave it filtering everything away and passing.
+    assert_eq!(asked, family, "the family this claim is about changed");
 }
