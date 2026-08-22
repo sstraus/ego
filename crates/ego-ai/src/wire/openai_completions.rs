@@ -225,6 +225,19 @@ struct StreamOptions {
     /// Buys one extra chunk before `data: [DONE]` carrying the whole request's
     /// usage. Without it the settlement has no figures at all and every
     /// generation reconciles at its pessimistic bound.
+    ///
+    /// **One member of this family calls the field deprecated, and it is sent
+    /// anyway.** OpenRouter states that this flag and its own
+    /// `usage: {include: true}` "are deprecated and have no effect", returning
+    /// full usage automatically. That is not a reason to drop it:
+    /// `ChatCompletionStreamOptions.include_usage` is undeprecated on the
+    /// contract *this mapping is derived from*, where it is the only way usage
+    /// arrives at all; xAI requires it on the REST path and Ollama honours it.
+    /// OpenRouter retired a **precondition, not a spelling** — nothing
+    /// succeeded it — so there is no second spelling to be carrying, which is
+    /// the shape `AGENTS.md` forbids. Audited in
+    /// `docs/15-provider-contract-audit.md` §3 and guarded by
+    /// `tests/deprecated_spellings.rs`.
     include_usage: bool,
 }
 

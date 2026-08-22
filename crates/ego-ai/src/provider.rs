@@ -439,15 +439,23 @@ impl ProviderRow {
 
     /// The OpenRouter row: the family's mapping, and a charge it states itself.
     ///
-    /// **A candidate for a sharper reason than [`xai`](Self::xai) is one.**
-    /// The ADR's §7 flags an open question about conformance check 1 that xAI
-    /// does not raise: OpenRouter's own documentation contradicts itself about
-    /// whether `usage.cost` arrives automatically or requires
-    /// `usage: {include: true}` in the request body — and if it requires one,
-    /// the family's request projection does not send it and this row is not a
-    /// family member at all but a fifth mapping. No amount of reading settles
-    /// that; one recording does. Until then the row is built, tested offline
-    /// and unreachable from `--model`.
+    /// **A candidate, and the question that made it a sharp one is answered.**
+    /// The ADR's §7 flagged an open question about conformance check 1 that xAI
+    /// does not raise: whether `usage.cost` arrives automatically or requires
+    /// `usage: {include: true}` in the request body — because if it requires
+    /// one, the family's request projection does not send it and this row is
+    /// not a family member at all but a fifth mapping. OpenRouter's own
+    /// usage-accounting page now answers it: that field **and** the
+    /// `stream_options.include_usage` this family already sends are
+    /// "deprecated and have no effect", with full usage returned automatically
+    /// in every response. So the projection is compatible, and the inert flag
+    /// stays — it is current on the contract the mapping is derived from
+    /// (`docs/15-provider-contract-audit.md` §3).
+    ///
+    /// That is a document read, which is what `SchemaDerived` means, so the
+    /// row is still built, tested offline and unreachable from `--model`. What
+    /// changed is which gap remains: the ordinary schema-derived one every
+    /// candidate has, rather than a question about membership.
     ///
     /// [`Supplied`] and not a discovering resolver: OpenRouter's models
     /// endpoint publishes a *public* table rather than what this key is
