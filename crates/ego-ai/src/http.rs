@@ -592,9 +592,51 @@ impl Http for ReqwestHttp {
 /// must not disagree about what a non-2xx means. It lives beside the
 /// transport rather than beside either caller for the same reason.
 pub(crate) async fn fetch(http: &Arc<dyn Http>, req: HttpRequest) -> Result<Vec<u8>, String> {
+    let answer = exchange(http, req).await?;
+    if !(200..300).contains(&answer.status) {
+        return Err(format!(
+            "it answered {}: {}",
+            answer.status,
+            String::from_utf8_lossy(&answer.bytes)
+        ));
+    }
+    Ok(answer.bytes)
+}
+
+/// What a buffered exchange actually returned, with no verdict on it.
+pub(crate) struct Exchange {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pub bytes: Vec<u8>,
+}
+
+impl Exchange {
+    /// The first value of `name`, matched case-insensitively.
+    ///
+    /// HTTP field names are case-insensitive and nothing between here and the
+    /// wire normalises them, so a comparison on the exact spelling would work
+    /// against one server and silently find nothing against the next.
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(field, _)| field.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+    }
+}
+
+/// The exchange [`fetch`] is built from, for the one caller whose non-2xx is
+/// not an error.
+///
+/// A conditional request answered `304 Not Modified` is the *best* outcome for
+/// the price table — the cached bytes are still current and 1.8 MB did not
+/// have to cross the network — so it cannot go through the verdict above,
+/// which exists so the two resolvers cannot disagree about what a failure is.
+/// Splitting it out keeps that shared verdict in one place rather than giving
+/// the pricing fetch a private copy of the buffering loop.
+pub(crate) async fn exchange(http: &Arc<dyn Http>, req: HttpRequest) -> Result<Exchange, String> {
     let HttpResponse {
         status,
-        headers: _,
+        headers,
         mut body,
     } = http.execute(req).await.map_err(|err| format!("{err:?}"))?;
 
@@ -602,13 +644,11 @@ pub(crate) async fn fetch(http: &Arc<dyn Http>, req: HttpRequest) -> Result<Vec<
     while let Some(chunk) = body.next().await {
         bytes.extend_from_slice(&chunk.map_err(|err| format!("{err:?}"))?);
     }
-    if !(200..300).contains(&status) {
-        return Err(format!(
-            "it answered {status}: {}",
-            String::from_utf8_lossy(&bytes)
-        ));
-    }
-    Ok(bytes)
+    Ok(Exchange {
+        status,
+        headers,
+        bytes,
+    })
 }
 
 /// [`LoopbackResolver`] is private, and it is the second of the three

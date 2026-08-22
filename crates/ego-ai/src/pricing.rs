@@ -7,9 +7,16 @@
 //! that owns `Http` and the wire formats, and the reading and writing in
 //! `ego-tools`, which owns `StoreIo`.
 //!
-//! What lives in this file is only the decode. Nothing here opens a socket or a
-//! file: it turns bytes that arrived from somewhere into values `ego-core` can
-//! consume, which is what every other decoder in this crate does.
+//! What lives in this file is the fetch and the decode, and **no file is
+//! opened by either**. The bytes arrive from a socket or from a caller and
+//! become values `ego-core` can consume; where they are kept, and for how long
+//! they stay usable, is `ego_tools::pricing`'s question and is asked through
+//! `StoreIo`.
+//!
+//! The two halves are separable on purpose and are read in the opposite order
+//! from which they are written: a run reads the cache first and only fetches
+//! when what it found is missing or stale (§7's table), so [`Table::decode`]
+//! runs on every priced run and [`fetch`] runs on roughly one a week.
 //!
 //! # Why the numbers get their own parser
 //!
@@ -507,5 +514,194 @@ impl Row<'_> {
             cache_write_extended: rate(self.cache_creation_input_token_cost_above_1hr, FIELDS[3])?,
             output: rate(self.output_cost_per_token, FIELDS[4])?,
         })
+    }
+}
+
+// --- the fetch ---
+
+use std::fmt;
+use std::sync::Arc;
+
+use url::Url;
+
+use crate::http::{Exchange, Http, HttpRequest, Method, exchange};
+
+/// The document itself, on the branch litellm publishes from.
+///
+/// The raw artefact and not a page about it: this is the file litellm's own
+/// client reads, so what ego prices against and what litellm prices against are
+/// the same bytes rather than two renderings of them.
+///
+/// `main` and not a release tag, because the file is not released — it changes
+/// on merge, several times a week, and there is no tag whose contents are
+/// promised to be any particular version of it. Which *fetch* a figure came
+/// from is answered by the content hash, which is exact where a tag would only
+/// have been suggestive.
+pub const UPSTREAM: &str =
+    "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
+
+/// [`UPSTREAM`], parsed.
+pub fn upstream() -> Url {
+    Url::parse(UPSTREAM).expect("a constant this file controls")
+}
+
+/// The response header that identifies which upstream artefact these bytes are.
+const ETAG: &str = "etag";
+/// The request header that offers a known identity back, so the server can
+/// answer [`NOT_MODIFIED`] instead of resending 1.8 MB.
+const IF_NONE_MATCH: &str = "if-none-match";
+/// "What you have is still current."
+const NOT_MODIFIED: u16 = 304;
+
+/// What a conditional fetch came back with.
+#[derive(Debug)]
+pub enum Fetched {
+    /// A table, and the identity the server served it under.
+    Table {
+        bytes: Vec<u8>,
+        /// The `ETag`, verbatim — quotes, weak-validator prefix and all.
+        ///
+        /// **An upstream identity, and deliberately not called a version
+        /// anywhere it could be mistaken for one.** litellm publishes no
+        /// version for this file (see [`UPSTREAM`]); what the server states is
+        /// an opaque validator, and its two uses are exactly the two a
+        /// validator has: offering it back on the next fetch, and naming in a
+        /// [`PricingRevision`] which upstream artefact a past figure came
+        /// from. Verbatim because it is an opaque token — normalising it would
+        /// be inventing structure the specification says it has not got, and a
+        /// re-spelled validator no longer matches on `If-None-Match`.
+        upstream_version: String,
+    },
+    /// The copy already cached is still current, on the server's own word.
+    ///
+    /// The good outcome of a refresh: nothing crossed the network but a
+    /// header, and the cached blob's clock can be moved forward without a
+    /// second copy of identical bytes
+    /// (`ego_tools::pricing::PricingCache::publish`).
+    Unchanged,
+}
+
+/// Why no table came back.
+#[derive(Debug)]
+pub enum FetchError {
+    /// The exchange did not deliver: transport failure, or a status that is
+    /// neither success nor [`NOT_MODIFIED`].
+    ///
+    /// §7's "online, fetch fails" row, which takes exit 4 when nothing usable
+    /// is cached — the exit `CLI.md:211-212` reserves for what a script
+    /// retries.
+    Unreachable { endpoint: String, message: String },
+    /// Bytes arrived and are not a price table.
+    ///
+    /// Its own variant rather than a failed fetch, because it is not a network
+    /// problem and retrying does not fix it: the realistic cause is an
+    /// interception — a captive portal, a proxy's rate-limit page, an HTML
+    /// error served with a 200 — and §6 names every cached file by its content
+    /// hash, so admitting one would leave a permanent, hash-named non-table in
+    /// `$EGO_HOME/pricing/`.
+    NotATable { source: TableError },
+    /// Nothing upstream identifies these bytes.
+    ///
+    /// §6 requires the `PricingRevision` to name "the source, the upstream
+    /// version and the content hash". The source is a constant and the hash is
+    /// ours; the middle term exists only if the server states one, and a
+    /// revision reading `litellm@unknown#…` would be attributable to bytes and
+    /// to no artefact anyone can go and look at — the silently-vacuous shape
+    /// this ADR refuses everywhere else.
+    ///
+    /// GitHub always sends one, so this fires only behind something that
+    /// strips validators. That operator is told which header is missing, and
+    /// §5 leaves `models.toml` open to them, ranked above this table anyway.
+    Unidentified { header: &'static str },
+}
+
+impl fmt::Display for FetchError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            FetchError::Unreachable { endpoint, message } => {
+                write!(f, "{endpoint} did not answer with a price table: {message}")
+            }
+            FetchError::NotATable { source } => {
+                write!(f, "what {UPSTREAM} answered is not a price table: {source}")
+            }
+            FetchError::Unidentified { header } => write!(
+                f,
+                "{UPSTREAM} answered with no `{header}`, so the table it sent \
+                 cannot be pinned to an upstream artefact"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for FetchError {}
+
+/// Ask upstream for the table, offering back whatever is already cached.
+///
+/// `known` is the validator of the copy on disk, when there is one. Supplying
+/// it is what makes "fetched once" cheap: an unchanged table costs one round
+/// trip and no body, and the cached blob's age is refreshed without a second
+/// identical file.
+///
+/// **This opens a socket and nothing else decides whether it should.** §5 gates
+/// every rate source on a ceiling existing and §7 makes `--offline` a property
+/// of the transport, so both refusals happen above and below this function
+/// rather than inside it: `Metering::ceiling_needs_rates` decides whether to
+/// call at all, and `EgressPolicy::LoopbackOnly` refuses the request with no
+/// special case here. A check written here as well would be a third opinion
+/// that could disagree with either.
+pub async fn fetch(http: &Arc<dyn Http>, known: Option<&str>) -> Result<Fetched, FetchError> {
+    let unreachable = |message: String| FetchError::Unreachable {
+        endpoint: UPSTREAM.to_string(),
+        message,
+    };
+    let answer = exchange(
+        http,
+        HttpRequest {
+            url: upstream(),
+            method: Method::Get,
+            headers: known
+                .map(|known| vec![(IF_NONE_MATCH.to_string(), known.to_string())])
+                .unwrap_or_default(),
+            body: None,
+        },
+    )
+    .await
+    .map_err(unreachable)?;
+
+    if answer.status == NOT_MODIFIED {
+        return Ok(Fetched::Unchanged);
+    }
+    if !(200..300).contains(&answer.status) {
+        return Err(unreachable(format!(
+            "it answered {}: {}",
+            answer.status,
+            summarise(&answer)
+        )));
+    }
+    // Decoded before the header is looked at, so that bytes which are not a
+    // table say so rather than being reported as a header problem: an
+    // interception page usually has neither, and "this is not the file" is the
+    // more actionable of the two.
+    Table::decode(&answer.bytes).map_err(|source| FetchError::NotATable { source })?;
+    let upstream_version = answer
+        .header(ETAG)
+        .ok_or(FetchError::Unidentified { header: ETAG })?
+        .to_string();
+    Ok(Fetched::Table {
+        bytes: answer.bytes,
+        upstream_version,
+    })
+}
+
+/// An error body, short enough to put in a message.
+///
+/// A failing origin can answer with anything, including something the size of
+/// the table itself, and an error string is going to be rendered to a terminal.
+fn summarise(answer: &Exchange) -> String {
+    const KEPT: usize = 200;
+    let text = String::from_utf8_lossy(&answer.bytes);
+    match text.char_indices().nth(KEPT) {
+        None => text.into_owned(),
+        Some((cut, _)) => format!("{}…", &text[..cut]),
     }
 }

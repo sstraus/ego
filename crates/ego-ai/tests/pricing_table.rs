@@ -222,22 +222,30 @@ fn a_body_that_is_not_json_is_refused_before_any_model_is_asked_for() {
     assert!(matches!(err, TableError::NotATable { .. }), "{err}");
 }
 
-/// `sample_spec` is documentation living in the data, and it is not a model.
+/// The document carries entries that are not models, and they are tolerated.
 ///
-/// The real file carries an entry by that name listing every field litellm
-/// supports. It has no `litellm_provider`, so the provider-matched lookup
-/// already cannot reach it — this pins that the decoder tolerates its presence
-/// rather than choking on an entry shaped unlike the rest.
+/// Re-measured on 2026-08-22 rather than left as written: the real file's one
+/// non-model key today is `fallback_generalizations`, whose value is a
+/// `{"rules": [...]}` object sharing not one field with a price row. An
+/// earlier version of this test named `sample_spec` — litellm's old
+/// field-listing stub — and that key is **no longer in the artefact**, so the
+/// comment was making a false claim about a file nobody re-read.
+///
+/// What is pinned is unchanged and is the point: a key with no
+/// `litellm_provider` cannot be reached by a provider-matched lookup anyway,
+/// so the decoder must ignore it rather than choke on an entry shaped unlike
+/// the rest. `#[serde(deny_unknown_fields)]` is deliberately absent from `Row`
+/// for the same reason.
 #[test]
 fn an_entry_with_no_provider_is_ignored_rather_than_fatal() {
     let bytes = br#"{
-      "sample_spec": {"input_cost_per_token": 0.0, "notes": "the fields we support"},
+      "fallback_generalizations": {"rules": [{"name": "bedrock-claude-ids"}]},
       "real": {"input_cost_per_token": 1e-06, "litellm_provider": "acme", "mode": "chat"}
     }"#;
     let table = Table::decode(bytes).expect("an odd entry is not a broken document");
     assert!(table.quote("acme", "real").is_ok());
     assert!(matches!(
-        table.quote("", "sample_spec"),
+        table.quote("", "fallback_generalizations"),
         Err(TableError::NoEntry { .. })
     ));
 }

@@ -32,7 +32,7 @@ use futures::executor::block_on;
 use url::Url;
 
 mod support;
-use support::{credential, server};
+use support::{credential, server, unasked};
 
 // --- fixtures ---
 
@@ -493,7 +493,7 @@ fn a_local_model_that_states_no_context_is_refused_and_no_ceiling_is_invented() 
 
 #[test]
 fn a_daemon_that_is_not_running_is_refused_naming_where_it_was_looked_for() {
-    let (http, _) = server([]);
+    let (http, _) = unasked();
 
     let refused = block_on(ollama::resolve(&local_row(), "gemma4:e4b-mlx", &http))
         .expect_err("nothing answered");
@@ -793,7 +793,7 @@ fn a_provider_reported_row_with_no_rates_has_no_bound_and_is_not_an_error() {
 /// that reached for the network would fail here instead of passing.
 #[test]
 fn a_hosted_slug_resolves_from_the_table_and_asks_nothing() {
-    let (http, stub) = server([]);
+    let (http, stub) = unasked();
     let catalogue = Catalogue::new([hosted_row()]).with_hosted(
         "openai/gpt-5.6",
         HostedModel {
@@ -880,7 +880,7 @@ fn a_row_that_is_not_called_ollama_can_still_be_a_daemon() {
 /// that the id is consulted for nothing at all.
 #[test]
 fn a_row_called_ollama_that_names_the_supplied_resolver_asks_nothing() {
-    let (http, stub) = server([]);
+    let (http, stub) = unasked();
     let supplied_locally = ProviderRow {
         resolver: &Supplied,
         ..local_row()
@@ -916,7 +916,7 @@ fn a_row_called_ollama_that_names_the_supplied_resolver_asks_nothing() {
 /// keeps the shape it had: a slug naming no row has no resolver to ask.
 #[test]
 fn an_unknown_provider_is_refused_before_a_resolver_is_chosen() {
-    let (http, stub) = server([]);
+    let (http, stub) = unasked();
     let catalogue = Catalogue::new([hosted_row(), local_row()]);
 
     let refused = block_on(catalogue.resolve(

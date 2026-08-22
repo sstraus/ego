@@ -35,7 +35,7 @@ use futures::executor::block_on;
 use url::Url;
 
 mod support;
-use support::{TEST_KEY, credential, server};
+use support::{TEST_KEY, credential, server, unasked};
 
 /// The slug every test resolves.
 const SLUG: &str = "xai/grok-4";
@@ -431,7 +431,7 @@ fn an_operator_who_wrote_the_rates_down_is_not_second_guessed() {
     // public, and an operator may hold a negotiated one no endpoint admits
     // to. The stub is scripted with nothing, so a resolution that asked
     // anyway would fail here.
-    let (http, stub) = server([]);
+    let (http, stub) = unasked();
     let theirs = operator_rates(PricingQuote {
         revision: PricingRevision("negotiated".to_string()),
         currency: usd(),

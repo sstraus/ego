@@ -91,19 +91,45 @@ pub struct Asked {
 /// *order* the resolver asks in as well as what it does with the replies, and
 /// a map keyed by path would silently pass a resolver that asked backwards.
 pub struct StubServer {
-    answers: Mutex<VecDeque<(u16, String)>>,
+    answers: Mutex<VecDeque<Answer>>,
     seen: Mutex<Vec<Asked>>,
 }
 
+/// One scripted reply.
+///
+/// A struct rather than the `(status, body)` pair it grew from, because a
+/// caching fetch is scripted by its *headers* — an `ETag` is what a `304` is
+/// about — and a pair cannot carry one. The `From` below keeps every existing
+/// call site spelled as a pair, since a test that does not care about headers
+/// should not have to say so.
+pub struct Answer {
+    pub status: u16,
+    pub body: String,
+    /// Beside the `content-type` every answer carries.
+    pub headers: Vec<(String, String)>,
+}
+
+impl From<(u16, &'static str)> for Answer {
+    fn from((status, body): (u16, &'static str)) -> Self {
+        Answer {
+            status,
+            body: body.to_string(),
+            headers: Vec::new(),
+        }
+    }
+}
+
+impl Answer {
+    pub fn with_header(mut self, name: &str, value: &str) -> Self {
+        self.headers.push((name.to_string(), value.to_string()));
+        self
+    }
+}
+
 impl StubServer {
-    pub fn new(answers: impl IntoIterator<Item = (u16, &'static str)>) -> Arc<Self> {
+    pub fn new(answers: impl IntoIterator<Item = impl Into<Answer>>) -> Arc<Self> {
         Arc::new(StubServer {
-            answers: Mutex::new(
-                answers
-                    .into_iter()
-                    .map(|(status, body)| (status, body.to_string()))
-                    .collect(),
-            ),
+            answers: Mutex::new(answers.into_iter().map(Into::into).collect()),
             seen: Mutex::new(Vec::new()),
         })
     }
@@ -136,11 +162,16 @@ impl Http for StubServer {
         let answer = self.answers.lock().unwrap().pop_front();
         Box::pin(async move {
             match answer {
-                Some((status, body)) => Ok(HttpResponse {
-                    status,
-                    headers: vec![("content-type".to_string(), "application/json".to_string())],
+                Some(answer) => Ok(HttpResponse {
+                    status: answer.status,
+                    headers: std::iter::once((
+                        "content-type".to_string(),
+                        "application/json".to_string(),
+                    ))
+                    .chain(answer.headers)
+                    .collect(),
                     body: Box::pin(futures::stream::once(async move {
-                        Ok(bytes::Bytes::from(body.into_bytes()))
+                        Ok(bytes::Bytes::from(answer.body.into_bytes()))
                     })),
                 }),
                 None => Err(HttpError::Transport {
@@ -154,8 +185,20 @@ impl Http for StubServer {
 
 /// A scripted server, as the two things a caller needs: the port, and the
 /// record.
+/// A server scripted with nothing, for a test whose claim is that nothing is
+/// asked.
+///
+/// Named rather than spelled `server([])`, which no longer infers now that an
+/// answer may be written as a pair *or* as an [`Answer`] — and which read as
+/// "an empty script" where what the caller means is "any request at all is the
+/// failure". The stub errors on an unscripted request, so that is exactly what
+/// this asserts.
+pub fn unasked() -> (Arc<dyn Http>, Arc<StubServer>) {
+    server(Vec::<Answer>::new())
+}
+
 pub fn server(
-    answers: impl IntoIterator<Item = (u16, &'static str)>,
+    answers: impl IntoIterator<Item = impl Into<Answer>>,
 ) -> (Arc<dyn Http>, Arc<StubServer>) {
     let stub = StubServer::new(answers);
     (Arc::clone(&stub) as Arc<dyn Http>, stub)
