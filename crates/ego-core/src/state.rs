@@ -60,11 +60,14 @@ pub struct Usage {
     ///
     /// A plain `u64` where [`Self::reasoning_tokens`] below is an `Option`,
     /// and the asymmetry is the point: only a provider that *offers* an
-    /// extended retention can write at one, ego speaks to none that does, so
-    /// a record without this field was written by a run that provably wrote
-    /// nothing at extended retention. Zero is that run's measurement. The
-    /// reasoning split is the opposite case — a figure some rows publish and
-    /// this one used to discard.
+    /// extended retention can write at one, and the one row that does —
+    /// `anthropic-messages`, which reports the split under
+    /// `cache_creation.ephemeral_1h` — was added no earlier than this field
+    /// was. So a record without this field still came from a run that provably
+    /// wrote nothing at extended retention: there was no row it could have
+    /// written to. Zero is that run's measurement. The reasoning split is the
+    /// opposite case — a figure some rows publish and this one used to
+    /// discard.
     #[serde(default)]
     pub cache_write_extended_tokens: u64,
     /// Generated tokens, including reasoning tokens billed as output.

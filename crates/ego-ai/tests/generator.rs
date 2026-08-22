@@ -507,6 +507,43 @@ fn a_row_that_authenticates_with_nothing_neither_asks_nor_fails() {
     );
 }
 
+/// A provider that does not spell its credential `Authorization: Bearer`.
+///
+/// Anthropic reads `x-api-key` and Gemini reads `x-goog-api-key`, and neither
+/// takes a scheme prefix — so the value travels **verbatim**, which is the
+/// whole difference between this strategy and
+/// [`CredentialStrategy::BearerFromEnv`]. Both halves are asserted here
+/// because getting either wrong produces the same symptom, a 401, and the
+/// operator cannot tell from it which mistake was made.
+///
+/// The variant exists now and not before because `AGENTS.md` forbids one with
+/// no producer; its two producers are the mappings this story adds.
+#[test]
+fn a_credential_can_travel_under_a_header_the_provider_names() {
+    let strategy = CredentialStrategy::HeaderFromEnv {
+        header: "x-api-key".to_string(),
+        var: KEY_VAR.to_string(),
+    };
+
+    assert_eq!(
+        strategy
+            .resolve(&FakeCredentials::holding(KEY))
+            .expect("the fake holds every variable")
+            .headers(),
+        vec![("x-api-key".to_string(), KEY.to_string())],
+        "the value verbatim: `Bearer ` is the other strategy's scheme, and a \
+         provider that did not ask for one is sent a key it cannot read"
+    );
+    assert!(
+        strategy
+            .resolve(&FakeCredentials::empty())
+            .expect_err("this variable is not set")
+            .to_string()
+            .contains(KEY_VAR),
+        "and a missing one is refused by name, like every other"
+    );
+}
+
 /// A missing credential is refused by name, at the one door there is.
 ///
 /// There used to be two — a check at resolution and a second read when a

@@ -15,6 +15,7 @@
 //! `GenRequest` and `AiEvent`, the types the signature is made of. Both have
 //! landed, so the signature is written against types that have stopped moving.
 
+pub mod anthropic_messages;
 pub mod ollama;
 pub mod openai_completions;
 pub mod provider_cost;
@@ -26,7 +27,8 @@ use std::sync::Arc;
 use ego_core::generator::attempt::DeliveryCertainty;
 use ego_core::generator::port::AiEvent;
 use ego_core::generator::types::{ErrorKind, GenRequest, StopReason};
-use futures::stream::BoxStream;
+use futures::stream::{self, BoxStream, StreamExt};
+use serde::Deserialize;
 use url::Url;
 
 use crate::http::{HttpError, HttpRequest, HttpResponse, Method};
@@ -219,4 +221,214 @@ pub fn failed(message: String, delivery: DeliveryCertainty, kind: ErrorKind) -> 
         AiEvent::Error { message, kind },
         AiEvent::Stop(StopReason::Error),
     ]
+}
+
+// --- what every streaming mapping does with a response, once ---
+
+/// One mapping's stream decoder, as the two operations [`decode_response`]
+/// performs on it.
+///
+/// A trait rather than a third copy of the same eight-line state machine. The
+/// mappings differ in what a *frame* means — `openai-completions` has a
+/// `[DONE]` sentinel and `anthropic-messages` has a terminal event — and agree
+/// completely about what a *response* means: a transport error is three
+/// events, a non-200 is three events, and a 200 is bytes fed to a decoder
+/// until they run out. That agreement is not a coincidence to be re-derived
+/// per mapping; it is `AttemptStream`'s contract, and one implementation of it
+/// is one place to get it wrong.
+///
+/// `finish` takes `Box<Self>` because a decoder is consumed by ending — a
+/// decoder that could be pushed to after its terminal frame is a decoder that
+/// could emit two `Stop`s.
+pub(crate) trait StreamSink: Send + 'static {
+    fn push(&mut self, chunk: &[u8]) -> Vec<AiEvent>;
+    fn finish(self: Box<Self>, transport: Option<HttpError>) -> Vec<AiEvent>;
+}
+
+enum State {
+    Head {
+        response: Result<HttpResponse, HttpError>,
+        decoder: Box<dyn StreamSink>,
+    },
+    Body {
+        body: crate::http::ByteStream,
+        decoder: Box<dyn StreamSink>,
+    },
+    Done,
+}
+
+/// Decode one provider response into the generation's events.
+///
+/// Takes the `Result` rather than the response so that a request that never
+/// got a response is the same kind of thing as one that failed halfway: both
+/// end in exactly one `Stop`, and both report their [`DeliveryCertainty`] from
+/// the transport that watched them.
+///
+/// The decoder is built by the caller and handed over already configured,
+/// because what a mapping needs to construct one differs — the family's takes
+/// the row's cost decoder, and Anthropic's takes nothing — and that difference
+/// has no business in here.
+pub(crate) fn decode_response(
+    response: Result<HttpResponse, HttpError>,
+    decoder: Box<dyn StreamSink>,
+) -> BoxStream<'static, AiEvent> {
+    stream::unfold(State::Head { response, decoder }, |state| async move {
+        match state {
+            State::Head {
+                response: Err(error),
+                ..
+            } => Some((
+                // Both readings come off the transport error, and neither is
+                // recoverable from the prose it renders to — see
+                // `HttpError::kind`.
+                failed(error.to_string(), error.delivery(), error.kind()).to_vec(),
+                State::Done,
+            )),
+            State::Head {
+                response: Ok(response),
+                decoder,
+            } => {
+                // A status at all proves the request arrived, whatever the
+                // status says. This is the earliest honest reading, and it is
+                // the one that matters: it is taken before anything can cut
+                // the body and leave nobody to report it.
+                let arrived = AiEvent::DeliveryObserved(DeliveryCertainty::PossiblySent);
+                if response.status == 200 {
+                    return Some((
+                        vec![arrived],
+                        State::Body {
+                            body: response.body,
+                            decoder,
+                        },
+                    ));
+                }
+                let kind = classify_status(response.status);
+                let message = read_error_body(response.status, response.body).await;
+                // The same three events, with the certainty already read off
+                // the status above rather than off a failure: a response at
+                // all proves the request arrived.
+                Some((
+                    failed(message, DeliveryCertainty::PossiblySent, kind).to_vec(),
+                    State::Done,
+                ))
+            }
+            State::Body {
+                mut body,
+                mut decoder,
+            } => match body.next().await {
+                Some(Ok(bytes)) => {
+                    let events = decoder.push(&bytes);
+                    Some((events, State::Body { body, decoder }))
+                }
+                Some(Err(error)) => Some((decoder.finish(Some(error)), State::Done)),
+                None => Some((decoder.finish(None), State::Done)),
+            },
+            State::Done => None,
+        }
+    })
+    .flat_map(stream::iter)
+    .boxed()
+}
+
+/// What a non-200 status says about whether the request can ever succeed.
+///
+/// **The status and not the body.** A body is not one schema — OpenAI's
+/// envelope, xAI's flatter one, Anthropic's typed one, and a proxy's HTML
+/// `502` that parses as none of them — while the status line is the one field
+/// every provider sets, set by something that cannot have been truncated.
+/// [`read_error_body`] keeps the body for the operator to read; this decides
+/// what the harness does.
+///
+/// Every arm is a status these APIs actually return, and the fall-through is
+/// [`ErrorKind::Unclassified`] on the fail-closed rule: a status nobody has
+/// mapped is not a status that said "retryable". The cost of being wrong here
+/// is one attempt, and the cost of guessing "transient" is `--retry N`
+/// attempts and an exit code that tells a script to try again.
+///
+/// **The known gap: `429`.** A rate limit and an exhausted quota can share it,
+/// and they are opposite answers — the first clears on its own, the second
+/// never does. Only the body distinguishes them, and only on the rows that
+/// publish a discriminator. `Transient` is the right reading of the status
+/// alone, and the wrong reading of an empty wallet. `POTENTIALS.md` P26, whose
+/// trigger is an OpenAI credential existing.
+///
+/// **What this does not do.** It classifies the non-200 path and only that. A
+/// row can answer `200` to a request that was wrong — Ollama accepts `role:
+/// "wizard"`, a negative `max_tokens` and a tool with no function body, and
+/// generates a normal completion for each — and none of those reaches this
+/// function, because nothing about them is a failure as far as the transport
+/// is concerned. No status table closes that gap.
+///
+/// Shared by every mapping rather than copied into each: the four classes are
+/// `ego-core`'s, the statuses are HTTP's, and neither is a fact about a wire
+/// shape. Anthropic's own list lands on it exactly — `402 billing_error` is
+/// `Refused` and `529 overloaded_error` is `Transient` — which is evidence
+/// that the table is about statuses and not about OpenAI.
+pub(crate) fn classify_status(status: u16) -> ErrorKind {
+    match status {
+        // The provider is momentarily unable. Nothing about the request is
+        // wrong, so the same bytes may work on the next attempt.
+        408 | 429 | 500..=599 => ErrorKind::Transient,
+        // The account or the credential, never the request: unauthenticated,
+        // forbidden, out of credit.
+        401..=403 => ErrorKind::Refused,
+        // The request is wrong and will be wrong again — a malformed body, a
+        // model that does not exist, a prompt over the limit, a parameter this
+        // row does not accept.
+        400 | 404 | 413 | 422 => ErrorKind::Invalid,
+        _ => ErrorKind::Unclassified,
+    }
+}
+
+/// How much of a non-200 body is read before giving up on it.
+///
+/// An error body is a small JSON object. A cap is here because the far side
+/// having gone wrong is exactly when "it will be small" stops being a
+/// guarantee.
+const MAX_ERROR_BODY: usize = 64 * 1024;
+
+/// `{"error": {"message": …}}` — the envelope OpenAI defined, which
+/// OpenRouter copied and which Anthropic's typed error body also satisfies.
+///
+/// The parse is a *best effort* and the fallback is what makes this shared
+/// rather than per-provider: a body that does not fit is relayed verbatim, so
+/// xAI's flat shape and a proxy's HTML both still reach the operator. There is
+/// nothing here to branch on and no provider id to branch with.
+#[derive(Debug, Deserialize)]
+struct ErrorEnvelope {
+    error: ErrorBody,
+}
+
+#[derive(Debug, Deserialize)]
+struct ErrorBody {
+    message: String,
+}
+
+pub(crate) async fn read_error_body(status: u16, mut body: crate::http::ByteStream) -> String {
+    let mut raw = Vec::new();
+    while let Some(chunk) = body.next().await {
+        match chunk {
+            Ok(bytes) => {
+                raw.extend_from_slice(&bytes);
+                if raw.len() >= MAX_ERROR_BODY {
+                    raw.truncate(MAX_ERROR_BODY);
+                    break;
+                }
+            }
+            // The status is the news; a body that also failed to arrive does
+            // not change it.
+            Err(_) => break,
+        }
+    }
+    let text = String::from_utf8_lossy(&raw);
+    match serde_json::from_str::<ErrorEnvelope>(&text) {
+        Ok(envelope) => format!(
+            "the provider returned HTTP {status}: {}",
+            envelope.error.message
+        ),
+        Err(_) if text.trim().is_empty() => {
+            format!("the provider returned HTTP {status} with an empty body")
+        }
+        Err(_) => format!("the provider returned HTTP {status}: {}", text.trim()),
+    }
 }

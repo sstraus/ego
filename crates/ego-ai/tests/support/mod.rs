@@ -60,7 +60,7 @@ impl FakeCredentials {
 }
 
 impl Credentials for FakeCredentials {
-    fn bearer(&self, var: &str) -> Result<Secret, MissingCredential> {
+    fn secret(&self, var: &str) -> Result<Secret, MissingCredential> {
         match self.0 {
             Ok(value) => Ok(value.into()),
             Err(()) => Err(MissingCredential {

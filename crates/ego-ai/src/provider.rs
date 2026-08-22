@@ -81,6 +81,16 @@ pub enum CredentialStrategy {
     None,
     /// `Authorization: Bearer <the value of this variable>`.
     BearerFromEnv { var: String },
+    /// `<header>: <the value of this variable>`, **verbatim and with no
+    /// scheme**.
+    ///
+    /// Anthropic reads `x-api-key` and Gemini reads `x-goog-api-key`, and
+    /// neither is an `Authorization` header with a different spelling: there
+    /// is no `Bearer ` to prepend, and prepending one sends a key the provider
+    /// cannot read. A second variant rather than a nullable prefix on the
+    /// first, because "which header" and "which scheme" are one fact per
+    /// provider and a mapping never sees either.
+    HeaderFromEnv { header: String, var: String },
 }
 
 impl CredentialStrategy {
@@ -109,8 +119,11 @@ impl CredentialStrategy {
             CredentialStrategy::None => None,
             CredentialStrategy::BearerFromEnv { var } => Some((
                 "authorization".to_string(),
-                Secret::from(format!("Bearer {}", creds.bearer(var)?.expose())),
+                Secret::from(format!("Bearer {}", creds.secret(var)?.expose())),
             )),
+            CredentialStrategy::HeaderFromEnv { header, var } => {
+                Some((header.clone(), creds.secret(var)?))
+            }
         };
         Ok(ResolvedCredential { header })
     }
@@ -160,8 +173,13 @@ impl ResolvedCredential {
 /// edition 2024 and this workspace denies `unsafe_code`, so a test that had to
 /// set a variable to exercise the success path could not be written.
 pub trait Credentials: Send + Sync {
-    /// The bearer token in `var`, or a refusal naming it.
-    fn bearer(&self, var: &str) -> Result<Secret, MissingCredential>;
+    /// The secret in `var`, or a refusal naming it.
+    ///
+    /// `secret` and not `bearer`: what a variable holds is a key, and whether
+    /// it is presented as a bearer token or as an `x-api-key` is
+    /// [`CredentialStrategy`]'s business. The method was named for the one
+    /// caller it had, and the second caller made the name false.
+    fn secret(&self, var: &str) -> Result<Secret, MissingCredential>;
 }
 
 /// The process environment: the only [`Credentials`] a real run uses.
@@ -169,7 +187,7 @@ pub trait Credentials: Send + Sync {
 pub struct EnvCredentials;
 
 impl Credentials for EnvCredentials {
-    fn bearer(&self, var: &str) -> Result<Secret, MissingCredential> {
+    fn secret(&self, var: &str) -> Result<Secret, MissingCredential> {
         match std::env::var(var) {
             Ok(value) if !value.trim().is_empty() => Ok(value.into()),
             // A variable that is set to whitespace is not a credential, and

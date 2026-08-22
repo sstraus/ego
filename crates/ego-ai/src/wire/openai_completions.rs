@@ -74,13 +74,12 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use ego_core::cost::Money;
-use ego_core::generator::attempt::DeliveryCertainty;
 use ego_core::generator::port::AiEvent;
 use ego_core::generator::types::{
     ContentBlock, ErrorKind, GenRequest, Message, Role, StopReason, ThinkingLevel,
 };
 use ego_core::state::Usage;
-use futures::stream::{self, BoxStream, StreamExt};
+use futures::stream::BoxStream;
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 
@@ -582,16 +581,6 @@ struct CompletionTokensDetails {
     reasoning_tokens: u64,
 }
 
-#[derive(Debug, Deserialize)]
-struct ErrorEnvelope {
-    error: ErrorBody,
-}
-
-#[derive(Debug, Deserialize)]
-struct ErrorBody {
-    message: String,
-}
-
 /// The four-way split, or nothing.
 ///
 /// A daemon that reports no `prompt_tokens_details` at all is not hiding a
@@ -723,6 +712,16 @@ pub struct StreamDecoder {
     /// A usage object whose parts did not fit its total. Held so it can be
     /// reported once, at the end, beside everything else that went wrong.
     usage_incoherent: bool,
+}
+
+impl super::StreamSink for StreamDecoder {
+    fn push(&mut self, chunk: &[u8]) -> Vec<AiEvent> {
+        StreamDecoder::push(self, chunk)
+    }
+
+    fn finish(self: Box<Self>, transport: Option<HttpError>) -> Vec<AiEvent> {
+        StreamDecoder::finish(*self, transport)
+    }
 }
 
 impl StreamDecoder {
@@ -1138,31 +1137,11 @@ impl StreamDecoder {
     }
 }
 
-/// How much of a non-200 body is read before giving up on it.
-///
-/// An error body is a small JSON object. A cap is here because the far side
-/// having gone wrong is exactly when "it will be small" stops being a
-/// guarantee.
-const MAX_ERROR_BODY: usize = 64 * 1024;
-
-enum State {
-    Head {
-        response: Result<HttpResponse, HttpError>,
-        cost: Option<Arc<dyn ProviderCost>>,
-    },
-    Body {
-        body: crate::http::ByteStream,
-        decoder: StreamDecoder,
-    },
-    Done,
-}
-
 /// Decode one provider response into the generation's events.
 ///
-/// Takes the `Result` rather than the response so that a request that never
-/// got a response is the same kind of thing as one that failed halfway: both
-/// end in exactly one `Stop`, and both report their
-/// [`DeliveryCertainty`] from the transport that watched them.
+/// The state machine is [`super::decode_response`]'s, shared with every other
+/// streaming mapping: what a *response* means is `AttemptStream`'s contract
+/// and not this format's, and only what a *frame* means belongs here.
 ///
 /// `cost` is the provider row's own declaration of where it states a charge,
 /// carried through rather than decided here — see [`StreamDecoder::cost`].
@@ -1170,136 +1149,9 @@ pub fn decode(
     response: Result<HttpResponse, HttpError>,
     cost: Option<Arc<dyn ProviderCost>>,
 ) -> BoxStream<'static, AiEvent> {
-    stream::unfold(State::Head { response, cost }, |state| async move {
-        match state {
-            State::Head {
-                response: Err(error),
-                ..
-            } => Some((
-                // Both readings come off the transport error, and neither is
-                // recoverable from the prose it renders to — see
-                // `HttpError::kind`.
-                super::failed(error.to_string(), error.delivery(), error.kind()).to_vec(),
-                State::Done,
-            )),
-            State::Head {
-                response: Ok(response),
-                cost,
-            } => {
-                // A status at all proves the request arrived, whatever the
-                // status says. This is the earliest honest reading, and it is
-                // the one that matters: it is taken before anything can cut
-                // the body and leave nobody to report it.
-                let arrived = AiEvent::DeliveryObserved(DeliveryCertainty::PossiblySent);
-                if response.status == 200 {
-                    return Some((
-                        vec![arrived],
-                        State::Body {
-                            body: response.body,
-                            decoder: match cost {
-                                Some(cost) => StreamDecoder::reporting_cost(cost),
-                                None => StreamDecoder::default(),
-                            },
-                        },
-                    ));
-                }
-                let kind = classify_status(response.status);
-                let message = read_error_body(response.status, response.body).await;
-                // The same three events, with the certainty already read off
-                // the status above rather than off a failure: a response at
-                // all proves the request arrived.
-                Some((
-                    super::failed(message, DeliveryCertainty::PossiblySent, kind).to_vec(),
-                    State::Done,
-                ))
-            }
-            State::Body {
-                mut body,
-                mut decoder,
-            } => match body.next().await {
-                Some(Ok(bytes)) => {
-                    let events = decoder.push(&bytes);
-                    Some((events, State::Body { body, decoder }))
-                }
-                Some(Err(error)) => Some((decoder.finish(Some(error)), State::Done)),
-                None => Some((decoder.finish(None), State::Done)),
-            },
-            State::Done => None,
-        }
-    })
-    .flat_map(stream::iter)
-    .boxed()
-}
-
-/// What a non-200 status says about whether the request can ever succeed.
-///
-/// **The status and not the body.** The body on this wire is not one schema:
-/// [`ErrorEnvelope`] is OpenAI's shape, and a row behind a proxy answers a
-/// `502` with HTML that parses as neither. The status line is the one field
-/// every row that speaks this format sets, and it is set by something that
-/// cannot have been truncated. `read_error_body` keeps the body for the
-/// operator to read; this decides what the harness does.
-///
-/// Every arm is a status these APIs actually return, and the fall-through is
-/// [`ErrorKind::Unclassified`] on §2's fail-closed rule: a status nobody has
-/// mapped is not a status that said "retryable". The cost of being wrong here
-/// is one attempt, and the cost of guessing "transient" is `--retry N`
-/// attempts and an exit code that tells a script to try again.
-///
-/// **The known gap: `429`.** A rate limit and an exhausted quota can share
-/// it, and they are opposite answers — the first clears on its own, the
-/// second never does. Only the body distinguishes them, and only on the rows
-/// that publish a discriminator. `Transient` is the right reading of the
-/// status alone, and the wrong reading of an empty wallet. `POTENTIALS.md`
-/// P26, whose trigger is an OpenAI credential existing.
-///
-/// **What this does not do.** It classifies the non-200 path and only that.
-/// A row can answer `200` to a request that was wrong — Ollama accepts
-/// `role: "wizard"`, a negative `max_tokens` and a tool with no function
-/// body, and generates a normal completion for each — and none of those
-/// reaches this function, because nothing about them is a failure as far as
-/// the transport is concerned. No status table closes that gap.
-fn classify_status(status: u16) -> ErrorKind {
-    match status {
-        // The provider is momentarily unable. Nothing about the request is
-        // wrong, so the same bytes may work on the next attempt.
-        408 | 429 | 500..=599 => ErrorKind::Transient,
-        // The account or the credential, never the request: unauthenticated,
-        // forbidden, out of credit.
-        401..=403 => ErrorKind::Refused,
-        // The request is wrong and will be wrong again — a malformed body, a
-        // model that does not exist, a prompt over the limit, a parameter
-        // this row does not accept.
-        400 | 404 | 413 | 422 => ErrorKind::Invalid,
-        _ => ErrorKind::Unclassified,
-    }
-}
-
-async fn read_error_body(status: u16, mut body: crate::http::ByteStream) -> String {
-    let mut raw = Vec::new();
-    while let Some(chunk) = body.next().await {
-        match chunk {
-            Ok(bytes) => {
-                raw.extend_from_slice(&bytes);
-                if raw.len() >= MAX_ERROR_BODY {
-                    raw.truncate(MAX_ERROR_BODY);
-                    break;
-                }
-            }
-            // The status is the news; a body that also failed to arrive does
-            // not change it.
-            Err(_) => break,
-        }
-    }
-    let text = String::from_utf8_lossy(&raw);
-    match serde_json::from_str::<ErrorEnvelope>(&text) {
-        Ok(envelope) => format!(
-            "the provider returned HTTP {status}: {}",
-            envelope.error.message
-        ),
-        Err(_) if text.trim().is_empty() => {
-            format!("the provider returned HTTP {status} with an empty body")
-        }
-        Err(_) => format!("the provider returned HTTP {status}: {}", text.trim()),
-    }
+    let decoder = match cost {
+        Some(cost) => StreamDecoder::reporting_cost(cost),
+        None => StreamDecoder::default(),
+    };
+    super::decode_response(response, Box::new(decoder))
 }

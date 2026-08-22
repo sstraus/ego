@@ -30,7 +30,7 @@ const RECORD: &str = "EGO_CONFORMANCE_RECORD";
 struct Configured;
 
 impl ego_ai::provider::Credentials for Configured {
-    fn bearer(
+    fn secret(
         &self,
         _var: &str,
     ) -> Result<ego_ai::provider::Secret, ego_ai::provider::MissingCredential> {
