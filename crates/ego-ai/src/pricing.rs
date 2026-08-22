@@ -189,3 +189,240 @@ fn finish(coefficient: u128, scale: u32, text: &str) -> Result<Amount, PriceErro
         },
     })
 }
+
+// --- the document ---
+
+use std::collections::BTreeMap;
+
+use serde::Deserialize;
+use serde_json::value::RawValue;
+
+/// The five rate fields, in the order [`PricingQuote`] declares its own.
+///
+/// A constant rather than five string literals at the point of use, because
+/// [`TableError::Rate`] names the field it choked on and the name it reports
+/// must be the one it read.
+///
+/// [`PricingQuote`]: ego_core::budget::PricingQuote
+const FIELDS: [&str; 5] = [
+    "input_cost_per_token",
+    "cache_read_input_token_cost",
+    "cache_creation_input_token_cost",
+    "cache_creation_input_token_cost_above_1hr",
+    "output_cost_per_token",
+];
+
+/// The mode of the rows `--model` can select.
+///
+/// The document mixes embeddings, rerankers, image and audio rows into the
+/// same map, and an image row is priced *per image* while carrying the same
+/// field names — so reading one as a per-token rate yields a number wrong by
+/// orders of magnitude that looks entirely plausible.
+const CHAT: &str = "chat";
+
+/// A decoded litellm document, holding its entries unparsed.
+///
+/// Lazy on purpose. The file carries 3111 entries and a run asks about one; a
+/// decoder that parsed every rate up front would let a malformed figure on a
+/// model nobody selected refuse a run that never needed it. The blast radius
+/// of a bad entry is the entry.
+///
+/// It also keeps the rates as their original **text**. `serde_json`'s number
+/// type is an `f64`, and a rate that has been through one is no longer the
+/// rate — see this module's header.
+#[derive(Debug)]
+pub struct Table {
+    entries: BTreeMap<String, Box<RawValue>>,
+}
+
+/// What one model costs per token, as the table states it.
+///
+/// Every category is `Option` and none defaults, because
+/// `docs/decisions/2026-08-21-how-a-model-is-metered.md` §9 requires an absent
+/// figure to decode as absent. What an absence *means* for a ceiling is not
+/// decided here: this type reports what the document says.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TableEntry {
+    /// Which key in the document this came from, so a figure stays traceable
+    /// to the line that stated it.
+    pub key: String,
+    pub uncached_input: Option<Amount>,
+    pub cache_read: Option<Amount>,
+    pub cache_write: Option<Amount>,
+    pub cache_write_extended: Option<Amount>,
+    pub output: Option<Amount>,
+}
+
+/// Why the table could not answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TableError {
+    /// The bytes are not a JSON object of entries at all — a proxy's error
+    /// page, a truncated download, a rate-limit body.
+    NotATable { message: String },
+    /// No chat row under this provider and model.
+    ///
+    /// Distinct from a row that exists and prices nothing, so that
+    /// `UnknownCost::NoPricingQuote` can answer only its own question.
+    NoEntry { provider: String, model: String },
+    /// One of the five rate fields is not a number.
+    Rate {
+        key: String,
+        field: &'static str,
+        source: PriceError,
+    },
+    /// The document carries this model twice, under two spellings, with
+    /// different prices.
+    ///
+    /// Refused rather than resolved by preference, and the reason is
+    /// measured: four models in the real file disagree with themselves, and
+    /// `gemini-exp-1206` disagrees in the direction that matters — one of its
+    /// two entries prices it at **zero**, so a run that preferred that
+    /// spelling would reserve nothing against a money ceiling and the ceiling
+    /// would admit everything.
+    ///
+    /// Neither available preference is safe. "Prefer the prefixed key" picks
+    /// the zero; "take the dearer" publishes a price no source stated, which
+    /// is the fabrication `cost.rs:335-339` refuses. A third party's table
+    /// that contradicts itself about a price is not evidence a guarantee can
+    /// rest on — and §5's first source, an operator's own `models.toml`,
+    /// already outranks it.
+    Contradiction { model: String, keys: Vec<String> },
+}
+
+impl std::fmt::Display for TableError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TableError::NotATable { message } => {
+                write!(f, "the pricing table is not a table: {message}")
+            }
+            TableError::NoEntry { provider, model } => {
+                write!(f, "the pricing table has no chat model {provider}/{model}")
+            }
+            TableError::Rate { key, field, source } => {
+                write!(f, "{key}: {field} is not a rate: {source}")
+            }
+            TableError::Contradiction { model, keys } => write!(
+                f,
+                "the pricing table states different prices for {model} under \
+                 {} — it contradicts itself, so no ceiling can rest on it; \
+                 supply the rates in models.toml instead",
+                keys.join(" and ")
+            ),
+        }
+    }
+}
+
+impl std::error::Error for TableError {}
+
+/// The fields of one entry this decoder reads, and nothing else.
+///
+/// `deny_unknown_fields` is deliberately **absent**, which is the opposite of
+/// what every ego-owned schema does. This document is a third party's and it
+/// carries ~30 fields per entry that ego has no opinion about; refusing an
+/// entry because litellm added a `supports_web_search` flag would make an
+/// upstream addition break every ceiling.
+#[derive(Deserialize)]
+struct Row<'a> {
+    #[serde(borrow, default)]
+    litellm_provider: Option<&'a str>,
+    #[serde(borrow, default)]
+    mode: Option<&'a str>,
+    #[serde(borrow, default)]
+    input_cost_per_token: Option<&'a RawValue>,
+    #[serde(borrow, default)]
+    cache_read_input_token_cost: Option<&'a RawValue>,
+    #[serde(borrow, default)]
+    cache_creation_input_token_cost: Option<&'a RawValue>,
+    #[serde(borrow, default)]
+    cache_creation_input_token_cost_above_1hr: Option<&'a RawValue>,
+    #[serde(borrow, default)]
+    output_cost_per_token: Option<&'a RawValue>,
+}
+
+impl Table {
+    /// Decode the fetched bytes into entries, without reading a single rate.
+    pub fn decode(bytes: &[u8]) -> Result<Table, TableError> {
+        serde_json::from_slice(bytes)
+            .map(|entries| Table { entries })
+            .map_err(|err| TableError::NotATable {
+                message: err.to_string(),
+            })
+    }
+
+    /// The rates for one model, or why there are none.
+    ///
+    /// `provider` is litellm's own provider name and `model` is the model half
+    /// of ego's slug. Both spellings the document uses are tried — the
+    /// prefixed `provider/model` and the bare `model` — and an entry answers
+    /// only if it *states* that provider, so one provider's bare key cannot
+    /// pick up another's prices among the 576 bare keys the file carries.
+    pub fn quote(&self, provider: &str, model: &str) -> Result<TableEntry, TableError> {
+        let mut found: Vec<TableEntry> = Vec::new();
+        for key in [format!("{provider}/{model}"), model.to_string()] {
+            let Some(raw) = self.entries.get(&key) else {
+                continue;
+            };
+            let Ok(row) = serde_json::from_str::<Row>(raw.get()) else {
+                // An entry shaped unlike the rest — `sample_spec` is one — is
+                // not a model and is not a broken document either.
+                continue;
+            };
+            if row.litellm_provider != Some(provider) || row.mode != Some(CHAT) {
+                continue;
+            }
+            let entry = row.into_entry(&key)?;
+            if !found.iter().any(|seen| seen.same_rates(&entry)) {
+                found.push(entry);
+            }
+        }
+        match found.len() {
+            0 => Err(TableError::NoEntry {
+                provider: provider.to_string(),
+                model: model.to_string(),
+            }),
+            1 => Ok(found.remove(0)),
+            _ => Err(TableError::Contradiction {
+                model: model.to_string(),
+                keys: found.into_iter().map(|entry| entry.key).collect(),
+            }),
+        }
+    }
+}
+
+impl TableEntry {
+    /// Whether two entries state the same five prices.
+    ///
+    /// Compares the rates and not the key: two spellings of one model that
+    /// agree are one fact written twice, and refusing them would refuse 15 of
+    /// the 19 duplicated models in the real file for no reason.
+    fn same_rates(&self, other: &TableEntry) -> bool {
+        self.uncached_input == other.uncached_input
+            && self.cache_read == other.cache_read
+            && self.cache_write == other.cache_write
+            && self.cache_write_extended == other.cache_write_extended
+            && self.output == other.output
+    }
+}
+
+impl Row<'_> {
+    fn into_entry(self, key: &str) -> Result<TableEntry, TableError> {
+        let rate = |raw: Option<&RawValue>, field: &'static str| match raw {
+            None => Ok(None),
+            Some(raw) => decimal(raw.get())
+                .map(Some)
+                .map_err(|source| TableError::Rate {
+                    key: key.to_string(),
+                    field,
+                    source,
+                }),
+        };
+        Ok(TableEntry {
+            key: key.to_string(),
+            uncached_input: rate(self.input_cost_per_token, FIELDS[0])?,
+            cache_read: rate(self.cache_read_input_token_cost, FIELDS[1])?,
+            cache_write: rate(self.cache_creation_input_token_cost, FIELDS[2])?,
+            cache_write_extended: rate(self.cache_creation_input_token_cost_above_1hr, FIELDS[3])?,
+            output: rate(self.output_cost_per_token, FIELDS[4])?,
+        })
+    }
+}
