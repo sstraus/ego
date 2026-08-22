@@ -27,10 +27,15 @@
 //! the budget gate and the ledger, which is the code I1 and I2 say must not
 //! have to know who it is serving.
 //!
-//! I3 is not here. Under §4 the second provider-reported cost decoder is a
-//! second row in one adapter's field→unit table rather than a second decoder,
-//! so the change that would test it does not exist yet; `tests/provider_cost.rs`
-//! covers the table.
+//! I3 is proved the same way and in `tests/provider_cost.rs`, not here,
+//! because its subject is a decoder rather than a whole turn. This paragraph
+//! used to say I3 was untestable — that a second provider-reported cost
+//! decoder would be "a second row in one adapter's field→unit table" and so
+//! not a second decoder at all. There is no such table: `ProviderCost` is a
+//! trait, each decoder is a self-contained value a row carries, and
+//! `TollgateStated` at the bottom of that file is a third one written outside
+//! `ego-ai`'s `src/` for exactly the reason I1 and I2 are written outside
+//! `ego-core`.
 
 use std::sync::{Arc, Mutex};
 

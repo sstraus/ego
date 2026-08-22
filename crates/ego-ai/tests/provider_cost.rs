@@ -19,9 +19,18 @@
 //! Different field names, different JSON types, different units, a factor of
 //! `1e10` between the numbers on the wire. Everything downstream of
 //! `ProviderCost::read` — the event, the gate, the attribution, the settled
-//! `Money` — is byte-for-byte the same code, and the last test here asserts
-//! that by running both through it and comparing the *shape* of what came
-//! out, not just the figures.
+//! `Money` — is byte-for-byte the same code, and one test here asserts that by
+//! running both through it and comparing the *shape* of what came out, not
+//! just the figures.
+//!
+//! Two shipped decoders still leave the rule half-proved, though, because both
+//! were written by whoever built the mechanism. So a **third** lives at the
+//! bottom of this file rather than in `src/`: `TollgateStated`, a convention
+//! that agrees with neither, written where it can reach nothing but public
+//! API. `ego-ai` depends on `ego-core` and never the reverse, so a decoder
+//! that needed something added to `budget.rs`, `cost.rs` or `port.rs` could
+//! not be written from here at all — which turns "requires no change" from a
+//! promise into something the compiler checks.
 
 use std::sync::{Arc, Mutex};
 
@@ -50,6 +59,7 @@ use ego_core::generator::port::{AiEvent, Generator};
 use ego_core::generator::types::{Conversation, GenRequest, Message, Role, ThinkingLevel};
 use futures::StreamExt;
 use futures::future::BoxFuture;
+use serde::Deserialize;
 use serde_json::value::RawValue;
 use url::Url;
 
@@ -569,4 +579,159 @@ async fn a_row_with_no_cost_decoder_settles_from_its_table_as_it_always_did() {
         "the table"
     );
     assert!(settled.reconciled.exact);
+}
+
+// --- the third decoder, written from outside ---
+
+/// The field this stranger states a charge in.
+///
+/// Nested, which is the first thing neither shipped decoder does. The
+/// `field` helper they share reads one key off the top of the `usage` object
+/// and is private to `ego-ai`; a decoder that needs a path has to bring its
+/// own reader, and the fact that it *can* is the point.
+const TOLLGATE_COST_FIELD: &str = "usage.billing.charged";
+
+/// A provider that shares no wire convention with either shipped decoder.
+///
+/// The two that ship differ in field, unit and JSON type, and a reader might
+/// still conclude that `ProviderCost` was shaped around the pair of them.
+/// This one is the control: it disagrees with both on every axis at once —
+/// a **nested** path, a decimal sent as a JSON **string**, and a currency
+/// **read off the wire** rather than assumed. `provider_cost.rs` says a
+/// decoder for another currency "would say so itself"; this is what saying
+/// so looks like.
+///
+/// It lives here rather than in `src/` because that is the claim. An
+/// integration test reaches public API only, and `ego-ai` depends on
+/// `ego-core` and never the reverse — so if a third decoder needed anything
+/// added to `budget.rs`, `cost.rs` or `port.rs`, this file could not be made
+/// to compile from where it sits. Passing is the settlement; **compiling** is
+/// the invariant.
+#[derive(Debug)]
+struct TollgateStated {
+    revision: ProviderCostRevision,
+}
+
+impl TollgateStated {
+    fn new(schema_revision: &str) -> Self {
+        Self {
+            revision: ProviderCostRevision {
+                provider: "tollgate".to_string(),
+                field: TOLLGATE_COST_FIELD.to_string(),
+                schema_revision: schema_revision.to_string(),
+            },
+        }
+    }
+}
+
+impl ProviderCost for TollgateStated {
+    fn revision(&self) -> &ProviderCostRevision {
+        &self.revision
+    }
+
+    /// The digits as sent, in the currency sent beside them.
+    ///
+    /// Borrowed straight out of the response bytes and parsed by `Amount`,
+    /// for the same reason the shipped pair do it: a decimal charge that went
+    /// through `f64` on its way here would already have been rounded. A
+    /// `unit` this build cannot name as a currency reports nothing rather
+    /// than guessing dollars, which is the direction that costs budget
+    /// instead of mis-stating it.
+    fn read(&self, usage: &RawValue) -> Option<Money> {
+        #[derive(Deserialize)]
+        struct Stated<'a> {
+            #[serde(borrow)]
+            billing: Option<Billing<'a>>,
+        }
+
+        #[derive(Deserialize)]
+        struct Billing<'a> {
+            charged: &'a str,
+            unit: &'a str,
+        }
+
+        let billing = serde_json::from_str::<Stated<'_>>(usage.get())
+            .ok()?
+            .billing?;
+        Some(Money::new(
+            billing.charged.parse::<Amount>().ok()?,
+            CurrencyCode::new(billing.unit).ok()?,
+        ))
+    }
+}
+
+/// Tollgate: a decimal in a JSON string, nested, with its currency beside it.
+const TOLLGATE_USAGE: &str = r#"{"prompt_tokens":1000,"completion_tokens":250,
+  "total_tokens":1250,"billing":{"charged":"0.004275","unit":"USD"}}"#;
+
+/// A decoder nobody in `ego-ai` wrote settles a generation through the same
+/// code the shipped two do.
+///
+/// This is the ADR rule's *sufficient* condition, and the counterpart of
+/// `crates/ego-core/tests/near_side.rs`, which is its necessary one: that
+/// grep proves the near side never names a provider, and this proves a
+/// stranger can add one anyway. Neither implies the other — a `match` on
+/// something other than a name would pass the grep, and a near side that
+/// named providers freely could still happen to be extensible.
+///
+/// The figure asserted is Tollgate's own and is nowhere near the table's
+/// $0.00675 for the same transcript, so a settlement that had quietly fallen
+/// back to the quote fails here rather than looking correct.
+#[tokio::test]
+async fn a_decoder_written_outside_this_crate_settles_without_touching_the_near_side() {
+    let (gate, settled, events) = settle_through_core(
+        "tollgate",
+        Arc::new(TollgateStated::new("2026-08-22")),
+        TOLLGATE_USAGE,
+    )
+    .await;
+
+    assert!(
+        events.contains(&AiEvent::ProviderCost {
+            cost: usd("0.004275")
+        }),
+        "a stranger's figure reaches the port under the same event as anybody else's: {events:?}"
+    );
+    assert_eq!(settled.reconciled.charged, Some(usd("0.004275")));
+    assert!(
+        settled.reconciled.exact,
+        "a stated total is not a guess, whoever stated it"
+    );
+    assert!(settled.reconciled.over_bound.is_none());
+    assert!(
+        gate.outstanding()
+            .expect("a limited gate keeps totals")
+            .amount
+            .is_zero(),
+        "the hold is released"
+    );
+    assert!(gate.breached().is_none());
+}
+
+/// The stranger's settlement is attributed to the stranger's own contract.
+///
+/// Without this the test above is satisfied by a figure that arrived
+/// correctly and was then logged as somebody else's — the log would name a
+/// provider contract that never produced it, and no later audit could tell.
+#[tokio::test]
+async fn the_stranger_is_attributed_to_its_own_contract_and_not_a_shipped_one() {
+    let tollgate = TollgateStated::new("2026-08-22");
+    let CostDelta::Known { attribution, .. } = settled_cost(
+        &catalogue::provider_reported(&tollgate),
+        Some(&quote()),
+        UsageReport::Missing,
+        Some(usd("0.004275")),
+        CurrencyCode::new("USD").expect("USD is valid"),
+    ) else {
+        panic!("a stated cost is known");
+    };
+
+    assert_eq!(
+        attribution,
+        CostAttribution::ProviderReported(ProviderCostRevision {
+            provider: "tollgate".to_string(),
+            field: TOLLGATE_COST_FIELD.to_string(),
+            schema_revision: "2026-08-22".to_string(),
+        })
+    );
 }
