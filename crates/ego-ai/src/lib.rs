@@ -8,6 +8,7 @@ pub mod catalogue;
 pub mod generator;
 pub mod http;
 pub mod ollama;
+pub mod pricing;
 pub mod provider;
 pub mod resolver;
 pub mod wire;
