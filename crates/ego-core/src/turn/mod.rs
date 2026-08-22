@@ -493,23 +493,19 @@ impl<'a> TurnLoop<'a> {
         // it (ADR §6).
         let (history, repairs) = match conversation_from(self.journal.state()) {
             Ok(rebuilt) => rebuilt,
+            // `Provider` is the exit even though the history on disk is what
+            // broke and no provider was asked: §4.3's exit 4 is "the run could
+            // not get a generation", and this run cannot.
             Err(malformed) => {
                 tracing::warn!(%malformed, "the stored history cannot be rebuilt into a request");
-                self.journal.append(
+                return self.refuse(
                     turn,
-                    None,
-                    None,
-                    EventKind::Error {
-                        message: format!(
-                            "this session's log cannot be sent to a provider and \
-                             cannot be repaired: {malformed}"
-                        ),
-                        // Ours: the history on disk is what broke, and no
-                        // provider was asked about it.
-                        kind: ErrorKind::Unclassified,
-                    },
-                )?;
-                return Ok(Generated::Ended(ExitReason::Provider));
+                    format!(
+                        "this session's log cannot be sent to a provider and \
+                         cannot be repaired: {malformed}"
+                    ),
+                    ExitReason::Provider,
+                );
             }
         };
         let conversation = self.with_system(history);
@@ -542,22 +538,14 @@ impl<'a> TurnLoop<'a> {
                 ?gaps,
                 "the model does not accept the request this run asks for"
             );
-            self.journal.append(
+            return self.refuse(
                 turn,
-                None,
-                None,
-                EventKind::Error {
-                    message: gaps
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect::<Vec<_>>()
-                        .join("; "),
-                    // The request is unsendable and this run decided so
-                    // before a socket existed; no provider classified it.
-                    kind: ErrorKind::Unclassified,
-                },
-            )?;
-            return Ok(Generated::Ended(ExitReason::Usage));
+                gaps.iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("; "),
+                ExitReason::Usage,
+            );
         }
 
         // Per generation, and before the gate: a fallback chain can switch
@@ -581,17 +569,7 @@ impl<'a> TurnLoop<'a> {
                 Ok(reservation) => reservation,
                 Err(denied) => {
                     tracing::warn!(%denied, "the budget gate refused a generation");
-                    self.journal.append(
-                        turn,
-                        None,
-                        None,
-                        EventKind::Error {
-                            message: denied.to_string(),
-                            // Ours, not the provider's: nothing was sent.
-                            kind: ErrorKind::Unclassified,
-                        },
-                    )?;
-                    return Ok(Generated::Ended(ExitReason::Budget));
+                    return self.refuse(turn, denied.to_string(), ExitReason::Budget);
                 }
             };
 
@@ -610,18 +588,7 @@ impl<'a> TurnLoop<'a> {
                 // authorise its own request is a defect in this loop, not a
                 // condition to work around.
                 tracing::error!(%denied, "a reservation did not authorise the request it was minted for");
-                self.journal.append(
-                    turn,
-                    None,
-                    None,
-                    EventKind::Error {
-                        message: denied.to_string(),
-                        // Ours, not the provider's: `ErrorKind` classifies
-                        // what a provider said, and nothing was sent.
-                        kind: ErrorKind::Unclassified,
-                    },
-                )?;
-                return Ok(Generated::Ended(ExitReason::Internal));
+                return self.refuse(turn, denied.to_string(), ExitReason::Internal);
             }
         };
 
@@ -642,19 +609,11 @@ impl<'a> TurnLoop<'a> {
             Ok(settlement) => settlement,
             Err(denied) => {
                 tracing::error!(%denied, "the gate refused to settle an attempt it minted");
+                // Before the refusal is written: a store that has already
+                // failed cannot record why the gate refused, and the store
+                // failure is the one that has to reach the caller.
                 drained.failure.map_or(Ok(()), Err)?;
-                self.journal.append(
-                    turn,
-                    None,
-                    None,
-                    EventKind::Error {
-                        message: denied.to_string(),
-                        // Ours, not the provider's: `ErrorKind` classifies
-                        // what a provider said, and nothing was sent.
-                        kind: ErrorKind::Unclassified,
-                    },
-                )?;
-                return Ok(Generated::Ended(ExitReason::Internal));
+                return self.refuse(turn, denied.to_string(), ExitReason::Internal);
             }
         };
         drained.failure.map_or(Ok(()), Err)?;
@@ -711,6 +670,38 @@ impl<'a> TurnLoop<'a> {
             pending: drained.pending,
             error_kind: drained.error_kind,
         })
+    }
+
+    /// Write down why this loop stopped a generation, and end the turn on it.
+    ///
+    /// Every caller is a refusal *ego* made — a history that cannot be rebuilt,
+    /// a request the model does not accept, a gate that would not authorise, a
+    /// reservation that does not cover the request it was minted for, a
+    /// settlement the gate rejected. None of them is something a provider said,
+    /// and most happen before a socket exists, which is why the kind is
+    /// `Unclassified` here rather than chosen five times: `ErrorKind`
+    /// classifies a provider's own answer and there is none to classify.
+    ///
+    /// The `ExitReason` stays the caller's, because these refusals are four
+    /// different exit codes (`CLI.md` §4.3). What they share is the order — the
+    /// reason is in the log *before* the turn ends — so a session says why it
+    /// stopped and not only that it did.
+    fn refuse(
+        &mut self,
+        turn: TurnId,
+        reason: String,
+        exit: ExitReason,
+    ) -> Result<Generated, StoreError> {
+        self.journal.append(
+            turn,
+            None,
+            None,
+            EventKind::Error {
+                message: reason,
+                kind: ErrorKind::Unclassified,
+            },
+        )?;
+        Ok(Generated::Ended(exit))
     }
 
     /// The rebuilt history with this turn's system prompt in front of it.

@@ -64,31 +64,30 @@ pub fn layers(
     args: &Args,
     trust: Trust,
 ) -> Result<Vec<Sourced<ConfigLayer>>, UsageError> {
-    let mut found = Vec::new();
-
-    if let Some(system) = layer(Source::System, Path::new(SYSTEM_CONFIG))? {
-        found.push(system);
-    }
-    if let Some(home) = ego_home()
-        && let Some(user) = layer(Source::User, &home.join("config.toml"))?
-    {
-        found.push(user);
+    // Which files this invocation is subject to, decided before any of them is
+    // opened: whether a layer is *eligible* is a question about the posture and
+    // the environment, and answering it separately from reading keeps the trust
+    // gate below in one place instead of once per layer.
+    let mut files = vec![(Source::System, PathBuf::from(SYSTEM_CONFIG))];
+    if let Some(home) = ego_home() {
+        files.push((Source::User, home.join("config.toml")));
     }
     // Read only in a trusted workspace. `resolve` would drop them anyway, but
     // "an untrusted workspace is never even looked at" is the stronger claim
     // and the one a headless run depends on — the same rule the instruction
     // loader keeps.
     if trust == Trust::Trusted {
-        if let Some(project) = layer(Source::Project, &workspace.join(".ego/config.toml"))? {
-            found.push(project);
-        }
-        if let Some(local) = layer(Source::Local, &workspace.join(".ego/config.local.toml"))? {
-            found.push(local);
-        }
+        files.push((Source::Project, workspace.join(".ego/config.toml")));
+        files.push((Source::Local, workspace.join(".ego/config.local.toml")));
     }
-    if let Some(env) = env_layer()? {
-        found.push(env);
+
+    let mut found = Vec::new();
+    for (source, path) in files {
+        // `extend` and not `push`: a file that is not there contributes no
+        // layer, which is the `None` `layer` returns.
+        found.extend(layer(source, &path)?);
     }
+    found.extend(env_layer()?);
     found.push(flags_layer(args)?);
 
     Ok(found)
