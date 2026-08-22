@@ -103,6 +103,27 @@ struct LanguageModels {
 /// endpoint: a published figure is what xAI charges the public, and an operator
 /// who wrote a rate down may hold a negotiated one that no endpoint will admit
 /// to.
+///
+/// # A known defect, stated at the line that causes it
+///
+/// **`rates.is_some()` is the wrong question**, and `POTENTIALS.md` P28 is the
+/// entry. `ego_cli::facts` produces `rates: None` for two different facts:
+/// nobody supplied a price, *and* somebody did but this run has no ceiling
+/// that needs one, so it was deliberately stripped. This function reads that
+/// absence as the first alone, so on an unbudgeted run it would open a
+/// connection the operator asked not to be opened, and attach
+/// [`RateSource::ProviderPublished`] to a resolution meant to carry no rates —
+/// contradicting `2026-08-21-a-run-with-no-ceiling.md` §5, which `facts.rs`'s
+/// own comment states correctly and this function was written without reading.
+///
+/// It cannot fire today: xAI is a candidate, its row is not in
+/// `ego_cli::model::rows`, and the test pinning that names this defect in its
+/// failure message so a promotion cannot miss it. The fix belongs on
+/// `Resolution`, which should carry whether this run needs rates the same way
+/// it already carries the credential — **inferring a decision from the absence
+/// of its output is the general shape of the bug**, not an xAI quirk. Story
+/// 034 owns that path; a gate built for xAI alone is one thrown away when it
+/// lands.
 pub async fn price(
     supplied: ResolvedModel,
     http: &Arc<dyn Http>,

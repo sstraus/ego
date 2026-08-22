@@ -197,14 +197,37 @@ mod tests {
             assert!(
                 !ids.contains(&candidate.to_string()),
                 "{candidate} has a row and no live recording, so it must not be \
-                 selectable: {ids:?}"
+                 selectable: {ids:?}\n\
+                 If you are promoting it deliberately: check the recording is \
+                 committed, and for xai read POTENTIALS.md P28 first. \
+                 `facts.rs` strips operator rates on a run with no money \
+                 ceiling, `xai::price` reads that absence as permission to ask \
+                 the provider, and promoting the row makes an unbudgeted run \
+                 open a connection and report a price it was told not to fetch."
             );
         }
     }
 
     /// And the converse, so the test above is not satisfied by an empty table.
+    ///
+    /// **Named for what is true of both rows, which is that they are
+    /// selectable — not that they are measured.** An earlier version of this
+    /// test was called `the_measured_providers_are_selectable`, and only one
+    /// of the two it names is measured: `profiles::OLLAMA` is
+    /// `Provenance::Recorded` and `profiles::OPENAI` is
+    /// `Provenance::SchemaDerived`. A test name is a claim like any other, and
+    /// that one was false.
+    ///
+    /// The gap it was papering over is real and is **maintainer's call, recorded in
+    /// §9's amendment**: §9 makes membership "passes all five checks" and check
+    /// 5 is a live call, so OpenAI being selectable on schema-derived evidence
+    /// is either a violation of §9 or a sign §9 overreaches. Codex reads it as
+    /// the former and would remove the row until its smoke runs; I read a check
+    /// *not run* and a check *failed* as different evidence, and note that the
+    /// stricter rule takes OpenAI out alongside the candidates. Either way the
+    /// name here should not have decided it silently.
     #[test]
-    fn the_measured_providers_are_selectable() {
+    fn the_selectable_providers_are_the_two_this_build_ships() {
         let ids: Vec<String> = rows()
             .expect("the built-in bases parse")
             .into_iter()
