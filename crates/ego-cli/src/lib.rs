@@ -21,6 +21,7 @@ pub mod facts;
 pub mod model;
 pub mod output;
 pub mod prompt;
+pub mod render;
 pub mod run;
 pub mod schema;
 pub mod session;

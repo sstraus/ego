@@ -1,0 +1,331 @@
+//! Rendering an answer that has not finished arriving.
+//!
+//! A model streams tokens; markdown is a block language. The first two cells
+//! of a table say nothing about how wide its columns will be, and a fence is
+//! not code until it closes. So a renderer has exactly three choices, and two
+//! of them are wrong:
+//!
+//! - **Render each delta.** Cheap and incoherent: `| a | b |` is a paragraph
+//!   until the delimiter row arrives, and by then it has been printed.
+//! - **Buffer the whole message.** Correct and dead: `CLI.md` §4 makes text
+//!   mode *live*, and a run that shows nothing for ninety seconds and then
+//!   everything is a progress bar that only draws at 100%.
+//! - **Flush at block boundaries.** A markdown block ends at a blank line
+//!   outside a fence — a rule the source states, not one a renderer guesses.
+//!   Everything before the last such boundary is final and can be rendered;
+//!   everything after it is still arriving.
+//!
+//! The third is what this does. It is also why the non-TTY path does none of
+//! it: `docs/decisions/2026-08-22-two-axes-and-a-terminal-that-answers.md` §2
+//! rules that a redirected run is a *different* rendering, and for a pipe the
+//! right rendering of the model's markdown is the model's markdown — byte for
+//! byte, so `ego run … > answer.md` is a markdown file and not a transcript of
+//! one being drawn.
+
+use pulldown_cmark::{Event, Parser};
+
+use super::caps::Capabilities;
+use super::{block, markdown};
+
+/// Buffers a streaming answer and hands back whatever is finished.
+pub struct Answer {
+    capabilities: Capabilities,
+    /// Text received and not yet rendered.
+    pending: String,
+    /// Whether anything has been emitted, so a run can know it has to close
+    /// the last line.
+    started: bool,
+}
+
+impl Answer {
+    pub fn new(capabilities: Capabilities) -> Self {
+        Answer {
+            capabilities,
+            pending: String::new(),
+            started: false,
+        }
+    }
+
+    /// Whether this answer is being drawn rather than piped.
+    fn rendering(&self) -> bool {
+        self.capabilities.on_screen()
+    }
+
+    pub fn started(&self) -> bool {
+        self.started
+    }
+
+    /// Take a delta; return the bytes that are ready to be written.
+    pub fn push(&mut self, delta: &str) -> String {
+        if !self.rendering() {
+            self.started = true;
+            return delta.to_string();
+        }
+        self.pending.push_str(delta);
+        match self.split() {
+            Some(at) => {
+                let finished: String = self.pending.drain(..at).collect();
+                self.render(&finished)
+            }
+            None => String::new(),
+        }
+    }
+
+    /// End of message: render whatever is left.
+    pub fn finish(&mut self) -> String {
+        if !self.rendering() {
+            return String::new();
+        }
+        let rest = std::mem::take(&mut self.pending);
+        self.render(&rest)
+    }
+
+    fn render(&mut self, source: &str) -> String {
+        if source.trim().is_empty() {
+            return String::new();
+        }
+        let lines = markdown::render(source, self.capabilities.width);
+        if lines.is_empty() {
+            return String::new();
+        }
+        // A blank line between blocks, but never one before the first: the
+        // separation belongs *between* what was flushed and what comes next,
+        // and only the writer knows it has written before.
+        let separator = if self.started { "\n" } else { "" };
+        self.started = true;
+        format!("{separator}{}", block(&lines, self.capabilities.depth))
+    }
+
+    /// The offset just past the last block boundary that is safe to render.
+    ///
+    /// Two conditions, and the first is the one a lexical scan gets wrong.
+    ///
+    /// **The block must be at the top level.** A blank line inside a list
+    /// separates two items of one list; inside a blockquote it separates two
+    /// of its paragraphs. Flushing there does not split the output early, it
+    /// renders it *differently* — the first half becomes a finished list and
+    /// the continuation becomes an indented paragraph that has lost its
+    /// bullet. So the boundary is not "a blank line" but "a blank line that
+    /// nothing is inside", and the only thing that knows what we are inside is
+    /// the parser. Depth is counted over its own events, which is also why
+    /// [`markdown::options`] is shared: two parsers configured differently
+    /// would disagree about where a block ends.
+    ///
+    /// **The block must be finished.** The parser closes every open construct
+    /// at end of input, so the last block always *looks* complete — a
+    /// paragraph still arriving one word at a time ends, on paper, after every
+    /// word. So a boundary counts only when the source proves the block is
+    /// over: a blank line after it, or content that has already started the
+    /// next block.
+    ///
+    /// ## What this still cannot see
+    ///
+    /// A link reference definition (`[x]: https://…`) changes how an earlier
+    /// `[x]` renders, and it can arrive after that paragraph was frozen. No
+    /// checkpoint rule fixes that — the fix is to not freeze at all, which is
+    /// the dead-renderer option §1 of this module rejects. It is rare enough,
+    /// and wrong in a small enough way (a link renders as literal text), to be
+    /// worth the trade rather than worth blocking a live stream over.
+    fn split(&self) -> Option<usize> {
+        let mut depth = 0usize;
+        let mut last_safe = None;
+        for (event, range) in Parser::new_ext(&self.pending, markdown::options()).into_offset_iter()
+        {
+            match event {
+                Event::Start(_) => depth += 1,
+                Event::End(_) => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 && self.settled(range.end) {
+                        last_safe = Some(range.end);
+                    }
+                }
+                _ => {}
+            }
+        }
+        last_safe
+    }
+
+    /// Whether the source after `offset` proves the block before it is closed.
+    ///
+    /// **A blank line, and nothing weaker.** "Some text follows it" is not
+    /// proof and was the first thing tried: a table whose delimiter row had
+    /// arrived but whose first data row had not parses as a complete
+    /// header-only table with a `|` after it, and flushing there printed the
+    /// header and threw every row away. The same shape catches a lazy
+    /// paragraph continuation, a setext underline and the next item of a list
+    /// — in each case the parser will fold the following text back into the
+    /// block once enough of it arrives.
+    ///
+    /// A blank line cannot be folded back into anything. It is the one
+    /// separator CommonMark treats as terminal, which is exactly why it is the
+    /// one this asks for.
+    fn settled(&self, offset: usize) -> bool {
+        self.pending[offset..]
+            .trim_start_matches([' ', '\t'])
+            .starts_with('\n')
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::render::caps::{Depth, OscProfile};
+
+    fn screen() -> Capabilities {
+        Capabilities {
+            depth: Depth::TrueColor,
+            width: 40,
+            hyperlinks: true,
+            progress: true,
+            osc: OscProfile::Standard,
+        }
+    }
+
+    /// A line with its SGR removed, so a test can measure what is displayed.
+    fn bare(line: &str) -> String {
+        let mut out = String::new();
+        let mut rest = line;
+        while let Some(at) = rest.find('\x1b') {
+            out.push_str(&rest[..at]);
+            match rest[at..].find('m') {
+                Some(end) => rest = &rest[at + end + 1..],
+                None => return out,
+            }
+        }
+        out.push_str(rest);
+        out
+    }
+
+    fn drain(capabilities: Capabilities, deltas: &[&str]) -> String {
+        let mut answer = Answer::new(capabilities);
+        let mut out = String::new();
+        for delta in deltas {
+            out.push_str(&answer.push(delta));
+        }
+        out.push_str(&answer.finish());
+        out
+    }
+
+    /// §2's promise about redirection, and the one that must not regress:
+    /// `ego run … > answer.md` is unchanged from before any of this existed.
+    #[test]
+    fn a_pipe_receives_the_models_markdown_byte_for_byte() {
+        let source = "# Title\n\nSome **bold** text.\n\n| a | b |\n|---|---|\n| 1 | 2 |\n";
+        let deltas: Vec<&str> = source.split_inclusive(' ').collect();
+        assert_eq!(drain(Capabilities::plain(), &deltas), source);
+    }
+
+    #[test]
+    fn a_screen_receives_a_rendering() {
+        let out = drain(screen(), &["Some **bold** text.\n"]);
+        assert!(out.contains("\x1b[1mbold\x1b[0m"), "{out:?}");
+        assert!(!out.contains("**"));
+    }
+
+    /// The point of splitting at all: a finished paragraph is drawn while the
+    /// next one is still arriving.
+    #[test]
+    fn a_finished_block_is_drawn_before_the_next_one_arrives() {
+        let mut answer = Answer::new(screen());
+        assert_eq!(answer.push("First paragraph."), "");
+        let flushed = answer.push("\n\nSecond para");
+        assert!(flushed.contains("First paragraph."), "{flushed:?}");
+        assert!(
+            !flushed.contains("Second"),
+            "the unfinished block waits: {flushed:?}"
+        );
+        assert!(answer.finish().contains("Second para"));
+    }
+
+    /// The case that makes a naive "flush on blank line" wrong. A blank line
+    /// *inside* a fence is not a block boundary, and flushing there renders
+    /// half a code block as prose.
+    #[test]
+    fn a_blank_line_inside_a_fence_is_not_a_boundary() {
+        let mut answer = Answer::new(screen());
+        answer.push("```rust\nfn a() {}\n");
+        let flushed = answer.push("\nfn b() {}\n");
+        assert_eq!(flushed, "", "still inside the fence: {flushed:?}");
+        let out = answer.push("```\n\n");
+        assert!(out.contains("fn a()") && out.contains("fn b()"), "{out:?}");
+        assert!(!out.contains("```"));
+    }
+
+    /// A table cannot be laid out until its widest cell has arrived. It must
+    /// therefore never be flushed halfway.
+    #[test]
+    fn a_table_is_rendered_once_and_whole() {
+        let source =
+            "| provider | endpoint |\n|---|---|\n| a | one |\n| bb | a much longer one |\n\n";
+        let out = drain(screen(), &source.split_inclusive('|').collect::<Vec<_>>());
+        let rows: Vec<&str> = out.lines().filter(|line| line.contains('│')).collect();
+        assert_eq!(rows.len(), 3, "header and two rows, drawn once: {out}");
+        // Every rule and every row is the same width, which is only true if the
+        // whole table was laid out together.
+        let widths: Vec<usize> = out
+            .lines()
+            .map(|line| crate::render::line::cells(&bare(line)))
+            .collect();
+        assert_eq!(widths.len(), 6, "{out}");
+        assert!(widths.windows(2).all(|pair| pair[0] == pair[1]), "{out}");
+    }
+
+    /// However the deltas are cut up, the rendering is the same. A boundary
+    /// that depended on where the provider chunked its SSE would be a
+    /// rendering that changed with the network.
+    #[test]
+    fn the_result_does_not_depend_on_where_the_stream_was_cut() {
+        let source = "# H\n\nOne **two** three.\n\n- a\n- b\n\n```rs\nlet x = 1;\n```\n\nEnd.\n";
+        let whole = drain(screen(), &[source]);
+        let by_char: Vec<String> = source.chars().map(|c| c.to_string()).collect();
+        let by_char: Vec<&str> = by_char.iter().map(String::as_str).collect();
+        assert_eq!(drain(screen(), &by_char), whole);
+        let by_line: Vec<&str> = source.split_inclusive('\n').collect();
+        assert_eq!(drain(screen(), &by_line), whole);
+    }
+
+    /// A blank line is only a block boundary at the **top level**. Inside a
+    /// list it separates two items of one list, and flushing there renders the
+    /// first half as a finished list and the continuation as something else
+    /// entirely — an indented paragraph that has lost its bullet, or an ordered
+    /// list that starts counting again.
+    ///
+    /// The rule is not "a blank line ends a block". It is "a blank line ends a
+    /// block that nothing is inside".
+    #[test]
+    fn a_blank_line_inside_a_list_is_not_a_boundary() {
+        let loose = "- first item\n\n- second item\n\n  a continuation of the second\n\n";
+        let out = drain(screen(), &[loose]);
+        assert_eq!(out.matches('•').count(), 2, "one list, two bullets: {out}");
+
+        // And the same document cut into deltas renders identically, which is
+        // the property a mid-list flush destroys.
+        let by_line: Vec<&str> = loose.split_inclusive('\n').collect();
+        assert_eq!(drain(screen(), &by_line), out);
+    }
+
+    /// The same rule for the other containers: a table row is not a block, and
+    /// a blockquote that continues after a blank line is one quote.
+    #[test]
+    fn no_container_is_flushed_before_it_closes() {
+        let quote = "> first paragraph of the quote\n>\n> second paragraph\n\nAfter.\n";
+        let out = drain(screen(), &quote.split_inclusive('\n').collect::<Vec<_>>());
+        let bars = out.lines().filter(|line| line.contains('▌')).count();
+        assert_eq!(bars, 3, "one quote, three lines of it: {out}");
+    }
+
+    #[test]
+    fn an_empty_answer_writes_nothing() {
+        assert_eq!(drain(screen(), &[]), "");
+        assert_eq!(drain(screen(), &["   \n\n  "]), "");
+        assert_eq!(drain(Capabilities::plain(), &[]), "");
+    }
+
+    #[test]
+    fn blocks_are_separated_by_one_blank_line_and_none_leads() {
+        let out = drain(screen(), &["one\n\n", "two\n\n", "three\n"]);
+        assert!(!out.starts_with('\n'), "{out:?}");
+        assert!(!out.contains("\n\n\n"), "{out:?}");
+        assert_eq!(out.matches("\n\n").count(), 2, "{out:?}");
+    }
+}

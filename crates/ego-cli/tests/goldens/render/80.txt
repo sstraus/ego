@@ -1,0 +1,52 @@
+The renderer
+
+A paragraph with strong weight, emphasis, a retraction and inline_code() in it,
+long enough that it has to wrap at every width this document is rendered at.
+
+Two axes
+
+Syntax highlighting writes a foreground; a diff writes a background. They
+compose on one cell grid. See the decision record.
+
+─── Rules
+
+• Measure in display cells, never in bytes.
+• Degrade at the gate, never at the call site.
+  ◦ A nested claim, wrapped so the continuation has to keep its column.
+• Emit nothing a terminal in the matrix would draw as garbage.
+
+1. Parse.
+2. Measure.
+3. Draw.
+
+▌ A blockquote, which carries a bar in the left column and wraps like any other
+▌ prose.
+
+rust
+  fn cells(text: &str) -> usize {
+      text.graphemes(true).map(width).sum()
+  }
+
+┌──────────┬──────────────────────────────────────────┬───────────────────────┐
+│ Sequence │                 Purpose                  │ TUICommander          │
+├──────────┼──────────────────────────────────────────┼───────────────────────┤
+│ OSC 8    │                hyperlink                 │ yes                   │
+│ OSC 133  │ command blocks, so a host stops guessing │ yes                   │
+│ OSC 7770 │             state and intent             │ yes, and nowhere else │
+└──────────┴──────────────────────────────────────────┴───────────────────────┘
+
+Loose lists are the case a tight one hides:
+
+• The first item, which is a paragraph in its own right.
+• The second item, whose continuation follows a blank line and has to keep the
+  column the bullet set.
+
+  A second paragraph inside that same item.
+
+▌ A quote in two paragraphs.
+▌
+▌ The blank line between them belongs to the quote, and carries its bar.
+
+────────────────────────────────────────────────────────────
+
+The last paragraph.

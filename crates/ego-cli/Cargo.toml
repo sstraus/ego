@@ -42,6 +42,11 @@ url = "2.5.8"
 # name, so there is no index file to fall out of step with the sessions. Ids
 # this build mints are still `SessionId::new`'s v7.
 uuid = { version = "1.24.1", features = ["v5"] }
+unicode-width = "0.2.2"
+unicode-segmentation = "1.13.3"
+terminal_size = "0.4.4"
+pulldown-cmark = { version = "0.13.4", default-features = false }
+similar = { version = "3.2.0", default-features = false, features = ["text", "inline", "unicode"] }
 
 [dev-dependencies]
 tempfile = "3.27.0"

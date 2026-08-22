@@ -231,7 +231,7 @@ flag by flag against the built binary to write this.
 | `--max-turns`, `--timeout` | **yes** | |
 | `--tools`, `--no-tools` | **yes** | |
 | `-C`, `-c/--set`, `--profile` | **yes** | |
-| `-q`, `-v`, `--no-color` | **yes** | |
+| `-q`, `-v`, `--no-color` | **yes** | `--no-color` was marked **yes** here on 2026-08-21 while being parsed and read by nothing — the same silently vacuous flag §4.4 refuses elsewhere. It decides for real from 2026-08-22: it is the highest-precedence input to the one capability gate (`crates/ego-cli/src/render/caps.rs`), above `NO_COLOR`, above `TERM`/`COLORTERM`, above `isatty`. See `docs/decisions/2026-08-22-two-axes-and-a-terminal-that-answers.md` §1 |
 | `--mode`, `--plan`, `--yolo`, `--allow`, `--deny` | **yes** | `--plan`/`--yolo` are spellings of `--mode`; two at once is a usage error. **Four of the seven rule heads run**: `read`, `write`, `list`, `search`. `exec`, `net` and `tool` parse and get stable IDs, and are then **refused by name at load** — no tool in this build produces those operations, so a rule naming one would enforce nothing. So `--allow 'exec(git *)'` (§3's example, which is design) is exit 2 here, as is `--allow 'bash(git *)'` with §3's teaching message. Both refuse **before** the run starts |
 | `--sandbox` | no | waiting on a sandbox backend (**M1**). No process is spawned anywhere in this build, so there is nothing yet to confine |
 | `-f`, `--file`, `--var` | no | waiting on executable agent files (**M4**). §5 is a design, not a feature: the shebang form runs nothing today |
@@ -422,6 +422,46 @@ Default `--output text` is a table for the person who typed it: id, updated,
 model, title, and a `WORKSPACE` column only under `--all` — without `--all`
 every row would carry the same path.
 
+### 4.7 `--output text` (the default): two renderings, one gate
+
+§4.1, §4.2 and §4.6 are contracts with a *program*. This one is a contract with
+a **screen or a file**, and they are not the same contract with escapes
+removed. Full argument in
+`docs/decisions/2026-08-22-two-axes-and-a-terminal-that-answers.md`.
+
+**Redirected — a pipe, a file, `TERM=dumb`, `--output json|jsonl`.** stdout
+carries the model's own markdown, byte for byte: nothing wrapped, nothing
+re-flowed, no escape sequence of any kind, in-band or out. `ego run "…" >
+answer.md` produces a markdown file, and it is the *same* file from any
+terminal — the wrap column of a redirected run comes from a constant, never
+from the window that happened to launch it. Everything that is *about* the run
+rather than *of* it stays on stderr, as before.
+
+**On a screen.** The markdown is rendered: headings, emphasis, inline and
+fenced code, lists, block quotes, links, and tables drawn in box-drawing
+characters and measured in display cells. Rendering is **block-wise as blocks
+close** — a paragraph is drawn when the blank line after it arrives, a table
+when its last row does — so the output is live without a half-built table ever
+reaching the screen. Colour depth is whatever the gate found: 24-bit, 256, 16,
+or none.
+
+**One gate decides, once** (`crates/ego-cli/src/render/caps.rs`). In precedence
+order: `--no-color`, then `NO_COLOR` (presence, not value), then whether stdout
+is a terminal, then `TERM`, then `COLORTERM`, then `TERM_PROGRAM`. No other
+code in the workspace reads one of those variables or formats an escape by
+hand. `--no-color` on a real terminal removes the *colour*, not the layout: the
+person asked for no colour, not for a file.
+
+**Out of band**, on a screen only: OSC 133 C/D around the run (so a host
+segments the output into a command block instead of pattern-matching tool
+headers), OSC 9;4 for the progress indicator — cleared on every exit path,
+including failure — the window title, a desktop notification for a run that
+took longer than a minute (suppressed by `-q`), and OSC 7770 `state`/`intent`
+under TUICommander, which is proven by `TUIC_SOCKET` and not by `TERM_PROGRAM`.
+Every payload is stripped of control characters before it goes into a sequence:
+a tool name, an error message and an intent line all come from somewhere that
+is not ego.
+
 ## 5. Agent files — the scripting language
 
 An **executable agent file** is YAML frontmatter + prompt body. Same format
@@ -458,6 +498,45 @@ Slash commands: `/help /model /thinking /mode /plan /yolo /permissions /mcp
 completion and multiline via reedline. The permission prompt is fx's proven
 dialog: number keys choose, **Tab amends the proposed command**, Enter
 confirms, Esc cancels.
+
+### 6.1 Paste
+
+The input line runs in **bracketed paste** mode (`ESC[?2004h`, off on exit).
+Every terminal in the compliance matrix implements it, and without it a pasted
+newline submits the first line of a paste as a whole prompt — the failure that
+makes pasting a stack trace impossible. A paste arrives as one edit, never as
+keystrokes, so it is never interpreted as a slash command or a control
+sequence.
+
+**Ctrl+V asks for an image first and text second.** The image cannot come
+through the terminal: bracketed paste carries what the emulator decided to
+send, which is text, and OSC 52's read form is disabled by default on every
+host in the matrix — it lets anything on the far end of a PTY exfiltrate the
+clipboard, so a host that answered it would be the bug. It comes from the
+platform pasteboard, read directly. An image found there becomes a temporary
+file and then the same content block `--attach` produces; anything else is
+pasted as text.
+
+That works where ego runs on the machine that owns the pasteboard. Over SSH
+there is usually no pasteboard to read, and Ctrl+V falls through to text — the
+image is attached by naming it instead (`--attach PATH|URL`, §3). Stated here
+because it is a limit of where the clipboard lives, not a limit ego can lift:
+no CLI on the far end of a PTY can reach the pasteboard in front of the person
+typing.
+
+### 6.2 Availability — what ships today
+
+Same discipline as §2.1 and §3.1. **None of §6 ships**: this build is headless,
+there is no input line, and `ego` with no prompt is a usage error rather than a
+REPL. The renderer §4 depends on is built and used by `ego run`; the reader is
+not.
+
+| Surface | M0b | Note |
+|---|---|---|
+| Slash commands | no | waiting on the REPL |
+| Bracketed paste, Ctrl+V | no | waiting on the REPL *and* on `--attach`'s content block. §6.1 is the design, not a shipped behaviour |
+| `--attach` | no | §3.1's row: waiting on a non-text content block |
+| OSC 133 A (prompt mark), OSC 7 (cwd) | no | deliberately: both describe a process that *occupies* the pane. A one-shot run that announced its `-C` directory would leave the pane pointing somewhere the shell returns from the moment ego exits. `ego run` emits 133 C/D, OSC 9;4 and — under TUICommander — 7770 |
 
 ## 7. Configuration
 
