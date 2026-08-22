@@ -1814,7 +1814,10 @@ fn a_transport_no_row_can_speak_is_refused_where_it_is_written() {
         let ego = Ego::against(&stub);
         ego.home_file(
             "models.toml",
-            &OPENAI_FACTS.replace(r#"transport = "sse""#, &format!("transport = \"{spelling}\"")),
+            &OPENAI_FACTS.replace(
+                r#"transport = "sse""#,
+                &format!("transport = \"{spelling}\""),
+            ),
         );
         let finished = ego
             .env("OPENAI_API_KEY", "sk-test")

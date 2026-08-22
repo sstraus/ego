@@ -60,7 +60,8 @@ use futures::StreamExt;
 
 mod profiles;
 use profiles::{
-    OLLAMA, OPENAI, Profile, TOOL_CEILING, canonical, request_fixture, tool_calling, write,
+    ANTHROPIC, GEMINI, OLLAMA, OPENAI, OPENROUTER, Profile, TOOL_CEILING, XAI, canonical,
+    request_fixture, tool_calling, write,
 };
 
 /// The variable that turns any of this on, and the only thing it is for.
@@ -427,6 +428,41 @@ async fn openai_accepts_the_body_this_build_sends() {
     smoke(&OPENAI, &today()).await;
 }
 
+// --- the four candidates ---
+//
+// Each has offline fixtures assembled from a published document and no
+// acceptance evidence, which is exactly what makes it a candidate rather than
+// a member (`crates/ego-cli/src/model.rs` keeps them out of `rows()`). These
+// are the runs that would change that. Nothing here can be run without a key
+// this repository does not hold, and that is the point: the test exists so
+// that whoever has one does not have to write it first, and so
+// `EGO_SMOKE_RECORD=1` writes the recording in the shape the suite already
+// reads.
+
+#[tokio::test]
+#[ignore = "sends a real, billable request; set EGO_SMOKE=xai"]
+async fn xai_accepts_the_body_this_build_sends() {
+    smoke(&XAI, &today()).await;
+}
+
+#[tokio::test]
+#[ignore = "sends a real, billable request; set EGO_SMOKE=openrouter"]
+async fn openrouter_accepts_the_body_this_build_sends() {
+    smoke(&OPENROUTER, &today()).await;
+}
+
+#[tokio::test]
+#[ignore = "sends a real, billable request; set EGO_SMOKE=anthropic"]
+async fn anthropic_accepts_the_body_this_build_sends() {
+    smoke(&ANTHROPIC, &today()).await;
+}
+
+#[tokio::test]
+#[ignore = "sends a real, billable request; set EGO_SMOKE=gemini"]
+async fn gemini_accepts_the_body_this_build_sends() {
+    smoke(&GEMINI, &today()).await;
+}
+
 /// The gate itself, which is the one thing here that must run offline.
 ///
 /// Without it, an inverted condition would make every smoke silently inert —
@@ -443,4 +479,35 @@ fn a_provider_that_was_not_named_is_not_smoked() {
     // providers rather than answering yes.
     assert!(!named("1", "ollama"));
     assert!(!named("true", "openai"));
+}
+
+/// Every profile this build ships a row for has a smoke here.
+///
+/// Check 5 — that the provider *accepts* the body check 1 pinned — is the one
+/// `tests/conformance.rs` says cannot be made offline, and this file is where
+/// it lives. A profile with four offline families and no smoke has four
+/// answers and no way to ask the fifth question, which for a **candidate** is
+/// the whole of what stands between it and membership: the smoke is not a
+/// nicety it lacks, it is the mechanism by which it would stop being a
+/// candidate.
+///
+/// Read off this file's own source because Rust cannot enumerate its test
+/// functions. Anchored on the `#[ignore]` reason rather than the function
+/// name: the reason is what tells an operator which provider to name in
+/// `EGO_SMOKE`, so a smoke that is present but unrunnable-by-instruction fails
+/// here too.
+#[test]
+fn every_profile_has_a_smoke() {
+    let source = include_str!("smoke.rs");
+    for profile in profiles::ALL {
+        let instruction = format!("set {OPT_IN}={}", profile.id);
+        assert!(
+            source.contains(&instruction),
+            "{} has offline fixtures and no smoke, so check 5 can never be \
+             asked of it. Add one calling `smoke(&{}, &today())`, ignored with \
+             `{instruction}`.",
+            profile.id,
+            profile.id.to_uppercase()
+        );
+    }
 }
