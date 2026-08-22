@@ -95,6 +95,16 @@ pub struct Cached {
     /// three facts `cost.rs:444-452` asks of a revision, so a past figure
     /// stays attributable to the artefact that produced it.
     pub revision: PricingRevision,
+    /// The validator upstream served these bytes under, on its own.
+    ///
+    /// Also inside [`revision`](Self::revision), and carried separately
+    /// anyway, because the two are read by different callers for different
+    /// reasons. A revision is opaque — `ego-core` neither parses nor orders it
+    /// — so a caller recovering the validator by taking a substring would be
+    /// picking apart a type that exists in order not to be picked apart. This
+    /// one is a header value, and its use is to be sent back on the next
+    /// `If-None-Match`.
+    pub upstream_version: String,
     pub fetched_at: Timestamp,
 }
 
@@ -291,7 +301,38 @@ impl<'a> PricingCache<'a> {
     }
 
     /// The current table, if there is one and it is young enough.
+    ///
+    /// The question a run about to price something asks, and the only one it
+    /// should: a table too old to bound a ceiling with is refused rather than
+    /// returned with a caveat, because §6 says "refused, not warned about".
     pub fn load(&self, now: Timestamp, max_age: Duration) -> Result<Cached, CacheError> {
+        let cached = self.current(now)?;
+        let age = Duration::from_millis(
+            now.as_millis()
+                .saturating_sub(cached.fetched_at.as_millis()),
+        );
+        if age > max_age {
+            return Err(CacheError::Stale { age, max_age });
+        }
+        Ok(cached)
+    }
+
+    /// The current table whatever its age.
+    ///
+    /// [`load`](Self::load) less one judgement, and every other refusal
+    /// intact — an absent pointer, a torn one, a version this build cannot
+    /// verify, a blob that does not hash to its name, and a clock that has run
+    /// backwards are all still failures here. Dropping the age check is not
+    /// dropping the fail-closed posture; `FromTheFuture` in particular stays,
+    /// because it *is* the age computation refusing to underflow, and a reader
+    /// that skipped it would be trusting a pointer by not looking at it.
+    ///
+    /// It exists for the caller that has to *fix* a stale table rather than
+    /// price against one. Refreshing means offering the server back the
+    /// validator of what is already on disk, and a caller that could not read
+    /// a stale entry would have to download the whole document to discover it
+    /// already had those exact bytes.
+    pub fn current(&self, now: Timestamp) -> Result<Cached, CacheError> {
         let Some(raw) = self.io.read(&self.pointer())? else {
             return Err(CacheError::Empty);
         };
@@ -302,17 +343,16 @@ impl<'a> PricingCache<'a> {
             return Err(CacheError::UnknownPointerVersion { found: pointer.v });
         }
 
-        // Age before bytes: a stale table is refused whatever its blob says,
-        // and reading a megabyte to then discard it is work for nothing.
-        let Some(elapsed) = now.as_millis().checked_sub(pointer.fetched_at.as_millis()) else {
+        // The clock before the bytes. This is not the age *judgement* — that
+        // belongs to `load` — it is the arithmetic refusing to underflow: a
+        // pointer stamped after the reader's own clock would otherwise present
+        // an arbitrarily old table as brand new, which is wrong in the one
+        // direction that costs money.
+        if now.as_millis() < pointer.fetched_at.as_millis() {
             return Err(CacheError::FromTheFuture {
                 fetched_at: pointer.fetched_at,
                 now,
             });
-        };
-        let age = Duration::from_millis(elapsed);
-        if age > max_age {
-            return Err(CacheError::Stale { age, max_age });
         }
 
         let Some(bytes) = self.io.read(&self.blob(&pointer.sha256))? else {
@@ -333,6 +373,7 @@ impl<'a> PricingCache<'a> {
         Ok(Cached {
             bytes,
             revision: revision(&pointer.upstream_version, &pointer.sha256),
+            upstream_version: pointer.upstream_version,
             fetched_at: pointer.fetched_at,
         })
     }
