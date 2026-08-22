@@ -992,6 +992,88 @@ fn a_flag_rule_this_build_cannot_enforce_is_refused_by_name() {
     );
 }
 
+/// §6a's rule, applied to the one value that had escaped it.
+///
+/// `auto` is the mode whose entire content is "a judge model evaluates the
+/// call" (`CLI.md` §3). There is no judge in this build — `approver.rs:132`
+/// folds `Auto` into `Default` and says so — so an operator who selected it got
+/// `default` and was told nothing. That is the accepted-and-ignored flag `§4.5`
+/// forbids, wearing a value instead of a spelling: `--sandbox` is refused by
+/// name for exactly this reason while `--mode auto` was not, and the difference
+/// was that one is a flag and the other is one of its values.
+///
+/// It expires the way the `exec(...)` refusal will: when step 6 exists, this
+/// test inverts into "is accepted and consults a judge".
+#[test]
+fn the_mode_whose_judge_does_not_exist_is_refused_by_name() {
+    let finished = Ego::nowhere()
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--ephemeral",
+            "--mode",
+            "auto",
+            "Ask",
+        ])
+        .run();
+
+    assert_eq!(finished.code, Some(2), "stderr: {}", finished.stderr);
+    assert!(
+        finished.stderr.contains("auto") && finished.stderr.contains("judge"),
+        "the refusal must name the mode and what it waits on: {}",
+        finished.stderr
+    );
+}
+
+/// The same refusal from a file, because the flag is not the only way in.
+///
+/// `--mode auto` becomes `mode = "auto"` in the flags layer (`config.rs:133`),
+/// so a refusal written at the flag would leave the config file — and the
+/// profile table, and every layer — accepting a mode the flag rejects. Refusing
+/// where the layers are read is what makes one refusal cover all of them.
+#[test]
+fn the_mode_whose_judge_does_not_exist_is_refused_from_a_file_too() {
+    let ego = Ego::nowhere();
+    ego.home_file("config.toml", "mode = \"auto\"\n");
+    let finished = ego
+        .args(["--model", "ollama/qwen3", "--ephemeral", "Ask"])
+        .run();
+
+    assert_eq!(finished.code, Some(2), "stderr: {}", finished.stderr);
+    assert!(
+        finished.stderr.contains("auto") && finished.stderr.contains("judge"),
+        "the refusal must name the mode and what it waits on: {}",
+        finished.stderr
+    );
+}
+
+/// The control: the refusal is about `auto` and not about `--mode`.
+///
+/// Without it, the two tests above pass on a build that refuses every mode, and
+/// the value is proved to have done nothing.
+#[test]
+fn the_modes_whose_machinery_does_exist_are_accepted() {
+    let stub = Stub::start(Plan::default());
+    for mode in ["plan", "default", "edits", "yolo"] {
+        let finished = Ego::against(&stub)
+            .args([
+                "--model",
+                "ollama/qwen3",
+                "--ephemeral",
+                "--mode",
+                mode,
+                "Ask",
+            ])
+            .run();
+        assert_eq!(
+            finished.code,
+            Some(0),
+            "`--mode {mode}` was refused: {}",
+            finished.stderr
+        );
+    }
+}
+
 /// `--plan` and `--yolo` are spellings of `--mode`, so two of them together
 /// are a usage error rather than a silent precedence rule nobody documented.
 #[test]

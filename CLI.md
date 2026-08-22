@@ -209,11 +209,20 @@ you can actually run. Checked against the clap definitions in
 `crates/ego-cli/src/cli.rs`, not against intent, on 2026-08-21.
 
 A flag marked **no** is **refused by name**, with the subsystem it waits on —
-not swallowed, and not reported as an unknown argument. That mechanism already
-exists: `UNAVAILABLE` in `crates/ego-cli/src/cli.rs:67-94`, checked before
-clap sees the tokens, and it covers every "no" below. This table is the
-document half of it; the code is the source of truth, and the two were compared
-flag by flag against the built binary to write this.
+not swallowed, and not reported as an unknown argument. That mechanism is
+`UNAVAILABLE` in `crates/ego-cli/src/cli.rs`, checked before clap sees the
+tokens, and it covers every "no" below. This table is the document half of it;
+the code is the source of truth, and the two were compared flag by flag against
+the built binary to write this.
+
+A row marked **partly** is a flag that ships and a *value* of it that does not.
+Those cannot use `UNAVAILABLE`, which matches spellings and would have to
+inspect arguments to see a value — and would still miss the config file, since
+every mode and every rule reaches the same layers whether it was typed or
+written down. They are refused where the layers are read
+(`crates/ego-core/src/config/layer.rs`) instead, which is one refusal covering
+the flag, the file, the profile table and `-c`, and which arrives with the file
+and line that said it.
 
 | Flag | M0b | Note |
 |---|---|---|
@@ -233,7 +242,7 @@ flag by flag against the built binary to write this.
 | `--tools`, `--no-tools` | **yes** | |
 | `-C`, `-c/--set`, `--profile` | **yes** | |
 | `-q`, `-v`, `--no-color` | **yes** | `--no-color` was marked **yes** here on 2026-08-21 while being parsed and read by nothing — the same silently vacuous flag §4.4 refuses elsewhere. It decides for real from 2026-08-22: it is the highest-precedence input to the one capability gate (`crates/ego-cli/src/render/caps.rs`), above `NO_COLOR`, above `TERM`/`COLORTERM`, above `isatty`. See `docs/decisions/2026-08-22-two-axes-and-a-terminal-that-answers.md` §1 |
-| `--mode`, `--plan`, `--yolo`, `--allow`, `--deny` | **yes** | `--plan`/`--yolo` are spellings of `--mode`; two at once is a usage error. **Four of the seven rule heads run**: `read`, `write`, `list`, `search`. `exec`, `net` and `tool` parse and get stable IDs, and are then **refused by name at load** — no tool in this build produces those operations, so a rule naming one would enforce nothing. So `--allow 'exec(git *)'` (§3's example, which is design) is exit 2 here, as is `--allow 'bash(git *)'` with §3's teaching message. Both refuse **before** the run starts |
+| `--mode`, `--plan`, `--yolo`, `--allow`, `--deny` | **partly** | `--plan`/`--yolo` are spellings of `--mode`; two at once is a usage error. **Four of the five modes run**: `plan`, `default`, `edits`, `yolo`. `auto` is **refused by name**, because the whole of what it means is that a judge model decides and there is no judge in this build (**M1**) — it was accepted and silently behaved as `default` until 2026-08-22, which is the accepted-and-ignored flag §4.5 forbids, wearing a value rather than a spelling. **Four of the seven rule heads run**: `read`, `write`, `list`, `search`. `exec`, `net` and `tool` parse and get stable IDs, and are then **refused by name at load** — no tool in this build produces those operations, so a rule naming one would enforce nothing. So `--allow 'exec(git *)'` (§3's example, which is design) is exit 2 here, as is `--allow 'bash(git *)'` with §3's teaching message. All of them refuse **before** the run starts |
 | `--sandbox` | no | waiting on a sandbox backend (**M1**). No process is spawned anywhere in this build, so there is nothing yet to confine |
 | `-f`, `--file`, `--var` | no | waiting on executable agent files (**M4**). §5 is a design, not a feature: the shebang form runs nothing today |
 | `--attach` | no | waiting on a non-text content block — the conversation model carries text, tool calls and tool results, so an image has nothing to be sent in |
