@@ -7,5 +7,6 @@
 pub mod clock;
 pub mod fs;
 pub mod instructions;
+pub mod pricing;
 pub mod store;
 pub mod tools;

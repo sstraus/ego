@@ -12,6 +12,7 @@ pub mod budget;
 pub mod ceiling;
 pub mod config;
 pub mod cost;
+pub mod digest;
 pub mod event;
 pub mod generator;
 pub mod permit;

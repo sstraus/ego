@@ -21,8 +21,6 @@
 
 use std::path::{Path, PathBuf};
 
-use sha2::{Digest, Sha256};
-
 use super::resolve::Posture;
 use crate::public::{InstructionDescriptor, InstructionSource};
 
@@ -457,13 +455,7 @@ fn scope_of(path: &Path, root: &Path) -> String {
     }
 }
 
-/// Lowercase hex SHA-256.
+/// Lowercase hex SHA-256, from the one place that spells it.
 fn digest_of(bytes: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    hasher
-        .finalize()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    crate::digest::sha256_hex(bytes)
 }
