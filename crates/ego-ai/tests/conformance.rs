@@ -134,10 +134,23 @@ async fn check_1_the_request_each_profile_builds_is_the_one_it_committed() {
         // value is not. Both halves matter: without the first, a profile that
         // stopped sending its credential would pass; without the second, a
         // recording could carry a live key into the repository.
-        if matches!(row.credential, CredentialStrategy::BearerFromEnv { .. }) {
+        //
+        // Matched exhaustively rather than tested with `matches!`. A strategy
+        // this arm does not know is a compile error, which is the point: the
+        // shape it replaced asserted nothing at all for any strategy that was
+        // not `BearerFromEnv`, so the first row to authenticate under its own
+        // header name — Anthropic's `x-api-key` — would have been waved
+        // through by a check that reads as though it covered it.
+        let names = match &row.credential {
+            CredentialStrategy::None => None,
+            CredentialStrategy::BearerFromEnv { .. } => Some("authorization"),
+            CredentialStrategy::HeaderFromEnv { header, .. } => Some(header.as_str()),
+        };
+        if let Some(header) = names {
             assert!(
-                committed.contains("authorization"),
-                "{} authenticates and its request fixture names no credential header",
+                committed.contains(header),
+                "{} authenticates under {header} and its request fixture names \
+                 no such header",
                 profile.id
             );
         }

@@ -239,7 +239,10 @@ fn a_request_with_no_ceiling_is_refused_rather_than_given_one() {
 
 #[test]
 fn the_ceiling_is_sent_under_the_name_the_api_reads() {
-    assert_eq!(body_of(&wide_request())["max_tokens"], serde_json::json!(4096));
+    assert_eq!(
+        body_of(&wide_request())["max_tokens"],
+        serde_json::json!(4096)
+    );
 }
 
 // --- the request: thinking is an effort level ---
@@ -404,8 +407,7 @@ fn declining_parallel_calls_is_spelled_on_tool_choice() {
 /// and the only choice that satisfies "exactly as received" is all of it.
 #[test]
 fn reasoning_state_is_replayed_exactly_as_the_provider_minted_it() {
-    let block =
-        r#"{"type":"thinking","thinking":"Due file, quindi.","signature":"EpoGCpcGCkgIBRABGAIiQL2f"}"#;
+    let block = r#"{"type":"thinking","thinking":"Due file, quindi.","signature":"EpoGCpcGCkgIBRABGAIiQL2f"}"#;
     let req = GenRequest {
         messages: conversation(vec![
             Message::text(Role::User, "What is in ./src?"),
@@ -805,7 +807,10 @@ fn each_stop_reason_becomes_what_it_means_or_says_it_cannot() {
         ("refusal", StopReason::Error),
         ("model_context_window_exceeded", StopReason::Length),
         ("pause_turn", StopReason::Error),
-        ("a_reason_invented_after_this_was_written", StopReason::Error),
+        (
+            "a_reason_invented_after_this_was_written",
+            StopReason::Error,
+        ),
     ] {
         let transcript = format!(
             "event: message_delta\n\
@@ -929,12 +934,10 @@ fn a_transport_failure_keeps_what_the_transport_observed() {
     })));
 
     assert!(
-        events
-            .iter()
-            .any(|event| matches!(
-                event,
-                AiEvent::DeliveryObserved(DeliveryCertainty::PossiblySent)
-            )),
+        events.iter().any(|event| matches!(
+            event,
+            AiEvent::DeliveryObserved(DeliveryCertainty::PossiblySent)
+        )),
         "{events:?}"
     );
     assert_eq!(events.last(), Some(&AiEvent::Stop(StopReason::Error)));

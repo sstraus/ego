@@ -22,6 +22,7 @@ use url::Url;
 
 use crate::resolver::{ModelResolver, OllamaDaemon, Supplied, XaiLanguageModels};
 use crate::wire::WireFormat;
+use crate::wire::anthropic_messages::AnthropicMessages;
 use crate::wire::ollama::Ollama;
 use crate::wire::openai_completions::OpenAiCompletions;
 use crate::wire::provider_cost::{OpenRouterUsd, ProviderCost, XaiUsdTicks};
@@ -309,6 +310,10 @@ pub const XAI_KEY_VAR: &str = "XAI_API_KEY";
 pub const OPENROUTER_BASE: &str = "https://openrouter.ai/api/v1/";
 /// The environment variable OpenRouter's credential is read from.
 pub const OPENROUTER_KEY_VAR: &str = "OPENROUTER_API_KEY";
+/// The base Anthropic serves its API under.
+pub const ANTHROPIC_BASE: &str = "https://api.anthropic.com/v1/";
+/// The environment variable Anthropic's credential is read from.
+pub const ANTHROPIC_KEY_VAR: &str = "ANTHROPIC_API_KEY";
 
 /// Which chat-completions schema the cost decoders were written against.
 ///
@@ -496,5 +501,50 @@ impl ProviderRow {
     /// The OpenRouter row at OpenRouter's own address.
     pub fn openrouter_default() -> Self {
         Self::openrouter(Url::parse(OPENROUTER_BASE).expect("a constant this file controls"))
+    }
+
+    /// The Anthropic row: its own mapping, and a header rather than a scheme.
+    ///
+    /// **A candidate, not a member.** Like xAI and OpenRouter, this row is
+    /// absent from the table `crates/ego-cli/src/model.rs` builds, so
+    /// `--model anthropic/…` does not resolve. §9 of
+    /// `docs/decisions/2026-08-21-a-shared-shape-is-not-a-shared-contract.md`
+    /// is the reason: its conformance is read from the published contract
+    /// rather than measured against a live server, and a provider whose
+    /// evidence is schema-derived is not runnable. It becomes selectable when
+    /// a recording exists.
+    ///
+    /// The first row on a wire format that is not the family's, which is what
+    /// it was added to prove: `anthropic-messages` and `openai-completions`
+    /// share no request field, and the seam carries the difference without a
+    /// per-provider branch on either side of it.
+    ///
+    /// [`CredentialStrategy::HeaderFromEnv`] rather than `BearerFromEnv`
+    /// because Anthropic reads `x-api-key` and does not accept a scheme in
+    /// front of the key. `anthropic-version` is **not** here: it is a fact
+    /// about the mapping's contract, not about this row's address or its
+    /// credential, and [`wire::anthropic_messages`](crate::wire::anthropic_messages)
+    /// owns it.
+    pub fn anthropic(base: Url) -> Self {
+        ProviderRow {
+            id: "anthropic".to_string(),
+            base: as_base(base),
+            wire: &AnthropicMessages,
+            resolver: &Supplied,
+            credential: CredentialStrategy::HeaderFromEnv {
+                header: "x-api-key".to_string(),
+                var: ANTHROPIC_KEY_VAR.to_string(),
+            },
+            // Anthropic reports the billing dimensions — four token
+            // categories, including the cache-write split this row is the
+            // first to exercise — and no monetary total. See this field's own
+            // doc: `None` is the assertion that none will be stated.
+            cost: None,
+        }
+    }
+
+    /// The Anthropic row at Anthropic's own address.
+    pub fn anthropic_default() -> Self {
+        Self::anthropic(Url::parse(ANTHROPIC_BASE).expect("a constant this file controls"))
     }
 }

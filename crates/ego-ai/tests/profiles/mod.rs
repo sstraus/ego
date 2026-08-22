@@ -16,7 +16,9 @@
 use std::path::PathBuf;
 
 use ego_ai::http::HttpRequest;
-use ego_ai::provider::{OLLAMA_BASE, OPENAI_BASE, OPENROUTER_BASE, ProviderRow, XAI_BASE};
+use ego_ai::provider::{
+    ANTHROPIC_BASE, OLLAMA_BASE, OPENAI_BASE, OPENROUTER_BASE, ProviderRow, XAI_BASE,
+};
 use ego_core::budget::{Metering, SettlementSource};
 use ego_core::generator::types::{
     Conversation, GenRequest, Message, Role, ThinkingLevel, ToolDescriptor,
@@ -168,13 +170,37 @@ pub const OPENROUTER: Profile = Profile {
     error_message_at: NESTED,
 };
 
+/// Anthropic: schema-derived, a candidate, and the first profile that is not
+/// on the family's mapping.
+///
+/// The other four differ from each other in a base, a resolver, a credential
+/// and an error envelope, and agree on every request field. This one shares no
+/// request field with them: system is a parameter rather than a role, a tool
+/// result is a block rather than a message, the ceiling is `max_tokens` beside
+/// a `thinking` object, and the stream has no `[DONE]`. That is what makes it
+/// evidence for the ADR's claim rather than a fifth copy of one test — the
+/// suite's seven checks are written about *provider behaviour*, so a profile
+/// on a second wire format is the first real test of whether they were.
+///
+/// Its error envelope is the family's nesting by coincidence, not by descent:
+/// Anthropic publishes `{"type":"error","error":{"type":…,"message":…}}`, and
+/// only the path the check reads is shared.
+pub const ANTHROPIC: Profile = Profile {
+    id: "anthropic",
+    base: ANTHROPIC_BASE,
+    model: "claude-opus-5",
+    row: ProviderRow::anthropic_default,
+    provenance: Provenance::SchemaDerived,
+    error_message_at: NESTED,
+};
+
 /// Every profile this build ships a row for.
 ///
-/// Two of the four are candidates: a row exists, so there is something to
+/// Three of the five are candidates: a row exists, so there is something to
 /// build a request from and decode an answer with, and it is not in the
 /// catalogue a run assembles. That is the shape §9 asks for — the evidence is
 /// gathered before the provider is selectable, not after.
-pub const ALL: &[&Profile] = &[&OLLAMA, &OPENAI, &XAI, &OPENROUTER];
+pub const ALL: &[&Profile] = &[&OLLAMA, &OPENAI, &XAI, &OPENROUTER, &ANTHROPIC];
 
 // --- fixtures ---
 

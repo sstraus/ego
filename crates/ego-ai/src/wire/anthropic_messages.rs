@@ -360,9 +360,7 @@ fn effort(level: ThinkingLevel) -> Result<Option<&'static str>, Inexpressible> {
 /// One walk producing both, because the split *is* the projection: a system
 /// turn is not a message here, so deciding which turns are messages and
 /// building them are the same decision.
-fn project(
-    messages: &[Message],
-) -> Result<(Option<String>, Vec<WireMessage<'_>>), Inexpressible> {
+fn project(messages: &[Message]) -> Result<(Option<String>, Vec<WireMessage<'_>>), Inexpressible> {
     let mut system = String::new();
     let mut wire = Vec::with_capacity(messages.len());
     for message in messages {
@@ -402,10 +400,7 @@ fn project(
 
 fn wire_block(block: &ContentBlock) -> Result<WireBlock<'_>, Inexpressible> {
     Ok(match block {
-        ContentBlock::Text { text } => WireBlock::Text {
-            kind: "text",
-            text,
-        },
+        ContentBlock::Text { text } => WireBlock::Text { kind: "text", text },
         ContentBlock::Reasoning { state } => {
             if state.dialect != DIALECT {
                 return Err(Inexpressible::ReasoningStateFromAnotherDialect {
@@ -618,7 +613,10 @@ struct WireError {
 enum StartBlock {
     Text,
     Thinking,
-    ToolUse { id: String, name: String },
+    ToolUse {
+        id: String,
+        name: String,
+    },
     /// Server-side tool calls and their results, container uploads, and the
     /// twelve-and-growing rest of the block union. Opened and closed with
     /// nothing emitted: ego runs none of them, and inventing a `ToolCall` for
@@ -630,10 +628,18 @@ enum StartBlock {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum BlockDelta {
-    TextDelta { text: String },
-    ThinkingDelta { thinking: String },
-    SignatureDelta { signature: String },
-    InputJsonDelta { partial_json: String },
+    TextDelta {
+        text: String,
+    },
+    ThinkingDelta {
+        thinking: String,
+    },
+    SignatureDelta {
+        signature: String,
+    },
+    InputJsonDelta {
+        partial_json: String,
+    },
     /// `citations_delta`, and whatever follows it.
     #[serde(other)]
     Other,
@@ -643,8 +649,15 @@ enum BlockDelta {
 #[derive(Debug)]
 enum Block {
     Text,
-    Thinking { thinking: String, signature: String },
-    ToolUse { id: String, name: String, args: String },
+    Thinking {
+        thinking: String,
+        signature: String,
+    },
+    ToolUse {
+        id: String,
+        name: String,
+        args: String,
+    },
     Other,
 }
 
@@ -929,7 +942,10 @@ impl StreamDecoder {
 
     fn consume_delta(&mut self, index: u32, delta: BlockDelta, out: &mut Vec<AiEvent>) {
         let Some(block) = self.blocks.get_mut(&index) else {
-            tracing::warn!(index, "a delta arrived for a content block that never opened");
+            tracing::warn!(
+                index,
+                "a delta arrived for a content block that never opened"
+            );
             return;
         };
         match (block, delta) {
