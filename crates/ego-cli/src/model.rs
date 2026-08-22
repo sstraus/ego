@@ -98,17 +98,18 @@ pub fn transport(offline: bool) -> Result<Arc<dyn Http>, ResolveError> {
 ///
 /// # What is deliberately missing
 ///
-/// `ego_ai::provider` also builds an `xai` row and an `openrouter` row, and
-/// neither is here. They are **candidates**:
+/// `ego_ai::provider` builds **four** rows that are not here — `xai`,
+/// `openrouter`, `anthropic` and `gemini`. They are **candidates**:
 /// `docs/decisions/2026-08-21-a-shared-shape-is-not-a-shared-contract.md` §9
-/// puts both on the family's mapping from a published document rather than
-/// from a live recording, and rules that a provider whose conformance is read
-/// rather than measured is not runnable — *no row, so `--model` cannot select
-/// it*. The rows exist so the offline evidence has a subject
-/// (`crates/ego-ai/tests/goldens/profile/`); this list is what makes them
-/// unreachable until a recording exists.
+/// puts each on its mapping from a published document rather than from a live
+/// recording, and rules that a provider whose conformance is read rather than
+/// measured is not runnable — *no row, so `--model` cannot select it*. The
+/// rows exist so the offline evidence has a subject
+/// (`crates/ego-ai/tests/goldens/profile/`, and `profiles::ALL` says the same
+/// count from the other side: "four of the six are candidates"); this list is
+/// what makes them unreachable until a recording exists.
 ///
-/// The test below is what keeps that true, because nothing else would notice.
+/// The tests below are what keep that true, because nothing else would notice.
 fn rows() -> Result<Vec<ProviderRow>, ResolveError> {
     Ok(vec![
         ProviderRow::ollama(base(OLLAMA_HOST, OLLAMA_BASE)?),
@@ -172,6 +173,16 @@ pub fn is_provider_failure(err: &ResolveError) -> bool {
 mod tests {
     use super::*;
 
+    /// The provider ids `--model` can select, which is the only thing either
+    /// test below reads off a row.
+    fn selectable() -> Vec<String> {
+        rows()
+            .expect("the built-in bases parse")
+            .into_iter()
+            .map(|row| row.id)
+            .collect()
+    }
+
     /// A candidate is not runnable, and this is what enforces it.
     ///
     /// `docs/decisions/2026-08-21-a-shared-shape-is-not-a-shared-contract.md`
@@ -187,13 +198,9 @@ mod tests {
     /// the moment to check that the recording is committed, not a nuisance.
     #[test]
     fn a_candidate_provider_cannot_be_selected() {
-        let ids: Vec<String> = rows()
-            .expect("the built-in bases parse")
-            .into_iter()
-            .map(|row| row.id)
-            .collect();
+        let ids = selectable();
 
-        for candidate in ["xai", "openrouter"] {
+        for candidate in ["xai", "openrouter", "anthropic", "gemini"] {
             assert!(
                 !ids.contains(&candidate.to_string()),
                 "{candidate} has a row and no live recording, so it must not be \
@@ -226,15 +233,23 @@ mod tests {
     /// *not run* and a check *failed* as different evidence, and note that the
     /// stricter rule takes OpenAI out alongside the candidates. Either way the
     /// name here should not have decided it silently.
+    ///
+    /// **An exact set, not two `contains`.** The list above names the
+    /// candidates it knows about, and a list of names can only ever catch the
+    /// rows somebody remembered to add to it — which it had already failed to
+    /// do: `anthropic` and `gemini` gained rows and were absent from it for as
+    /// long as they existed. This assertion needs no list. Any row reaching
+    /// [`rows`] fails it, including one this comment has never heard of, and
+    /// the failure names it.
     #[test]
     fn the_selectable_providers_are_the_two_this_build_ships() {
-        let ids: Vec<String> = rows()
-            .expect("the built-in bases parse")
-            .into_iter()
-            .map(|row| row.id)
-            .collect();
-
-        assert!(ids.contains(&"ollama".to_string()), "{ids:?}");
-        assert!(ids.contains(&"openai".to_string()), "{ids:?}");
+        assert_eq!(
+            selectable(),
+            ["ollama", "openai"],
+            "the selectable set changed. A row here is a claim that this \
+             provider's conformance was *measured* — §9's check 5 is a live \
+             call — so promoting one means its recording is committed, and \
+             removing one means saying which claim was withdrawn."
+        );
     }
 }
