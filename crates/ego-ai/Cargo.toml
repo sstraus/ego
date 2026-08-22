@@ -11,7 +11,12 @@ ego-core.workspace = true
 futures = "0.3.34"
 bytes = "1.10"
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.151"
+# `raw_value` is declared here rather than relied on through another crate's
+# feature unification: `wire/` and `pricing/` both hold a `RawValue` to keep
+# bytes ego must not reinterpret — a tool call's arguments, a rate that must
+# never touch an `f64` — and a build that dropped the unrelated dependency
+# supplying the feature would stop compiling for a reason unrelated to either.
+serde_json = { version = "1.0.151", features = ["raw_value"] }
 tracing = "0.1.44"
 url = "2.5.8"
 # `default-features = false` is load-bearing, not tidiness: it leaves the

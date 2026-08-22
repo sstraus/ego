@@ -113,30 +113,56 @@ pub fn decimal(text: &str) -> Result<Amount, PriceError> {
         return Err(invalid());
     }
 
+    let too_large = || PriceError::OutOfRange {
+        found: text.to_owned(),
+    };
+
+    // The significant digits, with leading zeros gone. Stripping them first is
+    // what makes the length checks below mean "how big is this number" rather
+    // than "how verbosely was it written": `0e100` has 101 digits written out
+    // and is zero, and refusing it for its length would be a false refusal.
+    //
+    // It does not disturb the rounding either — dropping k leading zeros drops
+    // both the total length and the kept length by k, so the surviving digits
+    // and the discarded tail are unchanged.
+    let mut digits = format!("{int}{frac}");
+    let significant = digits.len() - digits.bytes().take_while(|&b| b == b'0').count();
+    if significant == 0 {
+        return finish(0, 0, text);
+    }
+    digits.drain(..digits.len() - significant);
+
     // The scale the value would need if it were written out in full: one
     // fractional digit per digit after the point, less whatever the exponent
     // shifts the point by. Negative means the point moves right, past every
     // digit there is.
-    let scale = i32::try_from(frac.len()).map_err(|_| invalid())? - exponent;
-    let mut digits = format!("{int}{frac}");
+    //
+    // Checked, because a hugely negative exponent overflows the subtraction —
+    // and a release build would **wrap** it, minting a scale, and therefore a
+    // price, with no relation to the digits.
+    let scale = i32::try_from(frac.len())
+        .map_err(|_| invalid())?
+        .checked_sub(exponent)
+        .ok_or_else(too_large)?;
 
     if scale <= 0 {
-        // A whole number with `-scale` zeros to append. `10^40` is a legal
-        // JSON number and not a legal `Amount`, so the multiplication is the
-        // one that can overflow.
-        let zeros = usize::try_from(-scale).map_err(|_| invalid())?;
+        // A whole number with `-scale` zeros appended. The count is refused
+        // *before* the zeros are materialised: these bytes came off a network
+        // from a third party, and `1e+2147483647` would otherwise ask for two
+        // gigabytes of them so that the result could then be found not to fit.
+        // Proving it cannot fit has to come first.
+        let zeros = usize::try_from(-i64::from(scale)).map_err(|_| invalid())?;
+        if digits.len().saturating_add(zeros) > U128_DIGITS {
+            return Err(too_large());
+        }
         digits.push_str(&"0".repeat(zeros));
-        let coefficient = digits.parse::<u128>().map_err(|_| PriceError::OutOfRange {
-            found: text.to_owned(),
-        })?;
+        let coefficient = digits.parse::<u128>().map_err(|_| too_large())?;
         return finish(coefficient, 0, text);
     }
 
     let scale = u32::try_from(scale).expect("positive by the branch above");
     if scale <= MAX_SCALE {
-        let coefficient = digits.parse::<u128>().map_err(|_| PriceError::OutOfRange {
-            found: text.to_owned(),
-        })?;
+        let coefficient = digits.parse::<u128>().map_err(|_| too_large())?;
         return finish(coefficient, scale, text);
     }
 
@@ -150,13 +176,23 @@ pub fn decimal(text: &str) -> Result<Amount, PriceError> {
     let truncated: u128 = if digits.is_empty() {
         0
     } else {
-        digits.parse().map_err(|_| PriceError::OutOfRange {
-            found: text.to_owned(),
-        })?
+        digits.parse().map_err(|_| too_large())?
     };
-    let coefficient = truncated + u128::from(remainder_is_nonzero);
+    // Checked: at the maximum coefficient the carry does not fit, and a wrap
+    // would turn the largest representable number into the smallest — which a
+    // budget gate would read as free.
+    let coefficient = truncated
+        .checked_add(u128::from(remainder_is_nonzero))
+        .ok_or_else(too_large)?;
     finish(coefficient, MAX_SCALE, text)
 }
+
+/// How many decimal digits `u128::MAX` has.
+///
+/// The cheap upper bound the allocation guard uses: anything longer cannot be
+/// an [`Amount`]'s coefficient, so it can be refused by counting rather than
+/// by being built first.
+const U128_DIGITS: usize = 39;
 
 /// The exponent's own grammar: an optional sign, then digits.
 ///

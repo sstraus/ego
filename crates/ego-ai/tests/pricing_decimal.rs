@@ -114,6 +114,18 @@ fn a_rate_below_the_last_place_rounds_up_to_the_smallest_amount_not_to_zero() {
     parses("1e-30", "0.000000000001");
 }
 
+/// A zero with a huge exponent is zero, not an overflow.
+///
+/// The guard that refuses `1e+2147483647` before allocating for it counts
+/// digits, and `0e100` would have 101 of them once written out. It is still
+/// zero, so leading zeros are stripped before anything is counted.
+#[test]
+fn a_zero_with_a_huge_exponent_is_still_zero() {
+    parses("0e100", "0");
+    parses("0e2147483646", "0");
+    parses("0.000e50", "0");
+}
+
 /// A true zero stays zero, so the guard above does not invent a price.
 ///
 /// litellm writes `0.0` for locally served rows, and zero is a *stated* rate
@@ -204,4 +216,75 @@ fn every_rate_spelling_in_the_real_table_decodes_to_the_exact_value() {
     for (text, expected) in rows {
         parses(&text, &expected);
     }
+}
+
+// --- hostile input ---
+//
+// These bytes arrive from a third party over the network, so "no rate in
+// today's table looks like this" is not a safety argument. Codex found all
+// three of these by reading the first implementation; each was a real defect
+// and none was reachable from the 408 spellings above, which is exactly why
+// an artefact-shaped test suite is not a substitute for an adversarial one.
+
+/// An exponent large enough to overflow the scale arithmetic is refused.
+///
+/// The scale is `frac.len() - exponent`, and a hugely negative exponent makes
+/// that subtraction overflow `i32`. In a release build it would **wrap**,
+/// silently producing a scale — and therefore a price — with no relation to
+/// the digits.
+#[test]
+fn an_exponent_that_would_overflow_the_scale_is_refused() {
+    for text in ["1.0e-2147483647", "1.0e-2147483648", "1e-9999999999"] {
+        let err = decimal(text).expect_err("{text} cannot be scaled");
+        assert!(
+            matches!(
+                err,
+                PriceError::OutOfRange { .. } | PriceError::NotANumber { .. }
+            ),
+            "{text}: {err:?}"
+        );
+    }
+}
+
+/// A huge positive exponent is refused *before* anything is allocated.
+///
+/// `1e+2147483647` asks for two gigabytes of zeros to be materialised so that
+/// the result can then be found not to fit a `u128`. The order matters: the
+/// bytes are attacker-controlled, so proving the value cannot fit has to come
+/// before making room for it.
+#[test]
+fn a_huge_positive_exponent_is_refused_without_allocating_for_it() {
+    for text in ["1e+2147483647", "1e2147483646", "9e999999999"] {
+        let err = decimal(text).expect_err("{text} is not representable");
+        assert!(
+            matches!(err, PriceError::OutOfRange { .. }),
+            "{text}: {err:?}"
+        );
+    }
+}
+
+/// Rounding up at the maximum coefficient overflows, and is refused.
+///
+/// `u128::MAX` is 39 digits. A value whose kept digits are exactly that and
+/// whose discarded tail is nonzero rounds up past the type. Narrow, and the
+/// alternative is a wrap: the largest representable number becoming the
+/// smallest, which a budget gate would read as free.
+#[test]
+fn rounding_up_past_the_largest_coefficient_is_refused_rather_than_wrapped() {
+    // `u128::MAX` split so that exactly its 39 digits survive the truncation
+    // and a single nonzero digit is discarded past them. A first draft used
+    // 39 nines, which is *larger* than `u128::MAX` and so was refused by the
+    // parse rather than by the carry — passing without exercising the defect.
+    let max = "340282366920938463463374607431768211455";
+    let text = format!("{}.{}1", &max[..27], &max[27..]);
+    let err = decimal(&text).expect_err("the carry does not fit");
+    assert!(matches!(err, PriceError::OutOfRange { .. }), "{err:?}");
+}
+
+/// And the ordinary large value still parses, so the guards above did not
+/// simply refuse everything big.
+#[test]
+fn the_largest_representable_amount_still_parses() {
+    let max = "340282366920938463463374607431768211455";
+    assert_eq!(decimal(max).expect("exactly u128::MAX").to_string(), max);
 }
