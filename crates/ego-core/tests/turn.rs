@@ -25,6 +25,7 @@ use ego_core::generator::capabilities::{
     Transport,
 };
 use ego_core::generator::fake::FakeGenerator;
+use ego_core::generator::history::conversation_from;
 use ego_core::generator::port::{AiEvent, Generator};
 use ego_core::generator::types::{
     ContentBlock, ErrorKind, GenRequest, ReasoningState, Role, StopReason, ThinkingLevel,
@@ -1273,6 +1274,54 @@ mod turn {
     /// **`executions == 0`**. A check that merely stopped the panic would
     /// leave the double effect, which is survivable only while every tool is
     /// read-only.
+    /// The loop's half of `POTENTIALS.md` P22, and the only place it can be
+    /// proved: a hand-built log can assert what a *rebuild* does with a
+    /// parent edge, but only a run can assert that the loop writes one. The
+    /// history is rebuilt from the state the run produced, exactly as the
+    /// next generation would rebuild it.
+    ///
+    /// Without the edge this is five turns: use, answer, use, answer — a
+    /// conversation in which the model saw `/ws/a`'s contents before asking
+    /// for `/ws/b`, which is not what it did.
+    #[test]
+    fn two_calls_from_one_generation_rebuild_as_the_turn_the_model_took() {
+        let fx = Fixture::new(vec![
+            vec![
+                AiEvent::ToolCall {
+                    call_id: "call_1".to_string(),
+                    name: "read".to_string(),
+                    args: r#"{"path":"/ws/a"}"#.to_string(),
+                },
+                AiEvent::ToolCall {
+                    call_id: "call_2".to_string(),
+                    name: "read".to_string(),
+                    args: r#"{"path":"/ws/b"}"#.to_string(),
+                },
+                AiEvent::Stop(StopReason::ToolUse),
+            ],
+            vec![AiEvent::Stop(StopReason::Stop)],
+        ])
+        .with_read_tool();
+
+        let (reason, ok, state) = run(&fx, SessionState::default(), "read both");
+
+        assert_eq!(reason, ExitReason::Completed);
+        assert!(ok);
+        let (conversation, repairs) =
+            conversation_from(&state).expect("a history the loop just wrote rebuilds");
+        assert!(repairs.is_empty(), "{repairs:?}");
+        let shape: Vec<(Role, usize)> = conversation
+            .messages()
+            .iter()
+            .map(|message| (message.role, message.content.len()))
+            .collect();
+        assert_eq!(
+            shape,
+            [(Role::User, 1), (Role::Assistant, 2), (Role::User, 2)],
+            "one assistant turn made both calls, and one user turn answers both"
+        );
+    }
+
     #[test]
     fn duplicate_provider_call_ids_end_the_turn_before_any_tool_runs() {
         let fx = Fixture::new(vec![

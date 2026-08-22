@@ -126,9 +126,13 @@ pub struct TurnConfig {
     pub system: Option<SystemPrompt>,
     pub thinking: ThinkingLevel,
     pub max_output_tokens: Option<u64>,
-    /// Whether the model may ask for several tools at once. The loop runs
-    /// them one after another either way — see `POTENTIALS.md` P22 for why
-    /// that is currently the *more* faithful choice.
+    /// Whether the model may ask for several tools at once.
+    ///
+    /// The loop runs them one after another either way, and that is now a
+    /// scheduling choice rather than a fidelity one: the calls of a single
+    /// generation are recorded as such and rebuild into one assistant turn
+    /// however they were executed. See
+    /// `docs/decisions/2026-08-22-the-generation-a-call-came-out-of.md`.
     pub parallel_tool_calls: bool,
 }
 
@@ -593,7 +597,11 @@ impl<'a> TurnLoop<'a> {
         };
 
         let reference = attempt.attempt();
-        self.journal.append(
+        // Kept, not discarded: this is the id every item from this generation
+        // names as its causal parent, and it is the only record of which
+        // generation produced which call. Without it a rebuilt history cannot
+        // tell two calls issued at once from two issued in turn.
+        let generation = self.journal.append(
             turn,
             None,
             None,
@@ -601,7 +609,7 @@ impl<'a> TurnLoop<'a> {
         )?;
 
         let stream = self.generator.generate(request, attempt);
-        let drained = self.drain(turn, stream).await;
+        let drained = self.drain(turn, generation, stream).await;
 
         // Settle before reporting anything, including a store failure: the
         // stream owns the reservation, and returning early would drop it.
@@ -727,7 +735,12 @@ impl<'a> TurnLoop<'a> {
     /// Returns the stream so its caller can settle it. A store failure is
     /// carried back rather than propagated with `?` for the same reason:
     /// leaving here early would drop an unsettled attempt.
-    async fn drain(&mut self, turn: TurnId, mut stream: AttemptStream) -> Drained {
+    async fn drain(
+        &mut self,
+        turn: TurnId,
+        generation: EventId,
+        mut stream: AttemptStream,
+    ) -> Drained {
         let reference = stream.attempt();
         let mut pending = Vec::new();
         let mut message: Option<ItemId> = None;
@@ -843,7 +856,13 @@ impl<'a> TurnLoop<'a> {
                         .append(
                             turn,
                             Some(item),
-                            None,
+                            // The generation that issued it, named as the
+                            // causal parent the envelope already has room
+                            // for. This is what lets a rebuilt history put
+                            // the calls of one generation in one turn; a
+                            // second attribution field beside it would be a
+                            // second fact that could disagree with this one.
+                            Some(generation),
                             EventKind::ToolCallStarted {
                                 name: name.clone(),
                                 args: args.clone(),
