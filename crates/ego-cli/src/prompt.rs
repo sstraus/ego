@@ -105,6 +105,26 @@ pub fn assemble(
     }
 }
 
+/// The prompt an interactive session *starts* with, which it is allowed not to
+/// have.
+///
+/// [`assemble`]'s last row refuses when there is no argument and stdin is a
+/// terminal, and that refusal is right for a one-shot: a headless run with
+/// nothing to ask has nothing to do. An interactive session with nothing to
+/// ask has something to do — it asks the person. Every other row is
+/// [`assemble`]'s unchanged, so `ego "explain this" ` seeds the first turn and
+/// a piped prompt still seeds it.
+pub fn seed(
+    argv: Option<&str>,
+    mode: Stdin,
+    stdin: &dyn StdinSource,
+) -> Result<String, UsageError> {
+    if mode != Stdin::IsThePrompt && argv.is_none() && stdin.is_terminal() {
+        return Ok(String::new());
+    }
+    assemble(argv, mode, stdin)
+}
+
 fn non_empty(text: &str, why: &str) -> Result<String, UsageError> {
     if text.is_empty() {
         Err(UsageError(format!("{why}: there is nothing to ask")))

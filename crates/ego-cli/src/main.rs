@@ -52,6 +52,7 @@ async fn main() -> std::process::ExitCode {
                 result: serde_json::Value::String(String::new()),
             }
         }
+        Ok(Invocation::Interactive(args)) => run::interactive(*args, &out, cancel).await,
         Ok(Invocation::Run(args) | Invocation::Resume(args)) => {
             let json = args.output == cli::Output::Json;
             let ended = run::run(*args, &out, cancel).await;

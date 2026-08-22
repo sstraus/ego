@@ -393,3 +393,38 @@ impl ModelCapabilities {
         target.request_gaps(req)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The converse of removing the two variants: an operator's file must be
+    /// *refused* for naming one, not quietly accepted.
+    ///
+    /// `models.toml` decodes [`ModelCapabilities`] directly, so `serde` is a
+    /// producer an operator can reach. Removing `WebSocket` and `Auto` only
+    /// closes that door if the decoder says no, and nothing here asserted it
+    /// did — the enum's own doc claims the removal "is what makes that file
+    /// refuse", which is a claim about behaviour with no test behind it.
+    #[test]
+    fn a_transport_this_build_cannot_speak_does_not_decode() {
+        for spelling in ["web_socket", "auto", "websocket", "grpc"] {
+            let named = format!("\"{spelling}\"");
+
+            assert!(
+                serde_json::from_str::<Transport>(&named).is_err(),
+                "`{spelling}` decoded as a transport this build cannot speak"
+            );
+        }
+    }
+
+    /// And the one it can still does, so the guard above cannot pass by
+    /// refusing everything.
+    #[test]
+    fn the_transport_this_build_speaks_still_decodes() {
+        assert_eq!(
+            serde_json::from_str::<Transport>("\"sse\"").expect("sse decodes"),
+            Transport::Sse
+        );
+    }
+}

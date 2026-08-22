@@ -39,7 +39,7 @@ use crate::output::{JsonlSink, Report, Stdout, TextSink, note};
 use crate::render::caps::{Capabilities, Environment, Terminal};
 use crate::render::osc::{Osc, Progress, State};
 use crate::session::{self, Opened};
-use crate::{config, facts, model, prompt, schema};
+use crate::{config, facts, model, prompt, repl, schema};
 
 /// The currency a session settles in.
 ///
@@ -116,6 +116,49 @@ pub async fn run(args: Args, out: &Stdout, cancel: CancelToken) -> Ended {
     if output == Output::Text {
         text_sink.finish();
     }
+    announce.closing(&ended.termination);
+    ended
+}
+
+/// Talk to the model until the person stops, then say how it ended.
+///
+/// The mirror of [`run`] for a session driven from a keyboard: one resolution,
+/// one session, one lease, many turns.
+pub async fn interactive(args: Args, out: &Stdout, cancel: CancelToken) -> Ended {
+    // A machine-readable stream has no reader here. `--output json` is a
+    // single document at completion and a conversation has no completion, so
+    // the flag is refused by name rather than quietly producing a stream
+    // nobody can consume — `CLI.md` §4.5.
+    if args.output != Output::Text {
+        return Ended::refused(RunTermination::UsageError {
+            message: format!(
+                "`--output {}` has no meaning for an interactive session: it is \
+                 one document at completion, and a conversation does not have \
+                 one. Use `ego run --output {}` for a headless one-shot",
+                args.output, args.output
+            ),
+        });
+    }
+
+    let quiet = args.quiet;
+    let environment = Environment::read();
+    let capabilities = Capabilities::of(&Terminal::from_process(args.no_color, &environment));
+    let text_sink = TextSink::new(out, quiet, capabilities);
+
+    let mut seat = repl::Seat::new();
+    let announce = Announce::new(out, capabilities, quiet);
+
+    let ended = converse(
+        args,
+        |_| &text_sink as &dyn EventSink,
+        cancel,
+        &mut seat,
+        // Between turns: draw the block the renderer was holding back, and
+        // close the line, so the next prompt starts on a row of its own.
+        &|| text_sink.finish(),
+    )
+    .await;
+
     announce.closing(&ended.termination);
     ended
 }
@@ -287,7 +330,33 @@ pub async fn run_with<S: EventSink>(
     destination: impl FnOnce(&ModelCapabilities) -> S,
     cancel: CancelToken,
 ) -> Ended {
-    match execute(args, destination, cancel).await {
+    match execute(args, destination, cancel, Driver::Once).await {
+        Ok(ended) => ended,
+        Err(refusal) => Ended::refused(refusal),
+    }
+}
+
+/// The same run, driven by a person instead of by argv.
+///
+/// Everything before the first turn is identical — one resolution, one
+/// session, one lease — which is why this is a driver and not a second
+/// pipeline. `session::open` replays the log from disk, so opening one per
+/// typed line would make a conversation get slower the longer it went on.
+pub async fn converse<S: EventSink>(
+    args: Args,
+    destination: impl FnOnce(&ModelCapabilities) -> S,
+    cancel: CancelToken,
+    seat: &mut (dyn Reads + Send),
+    between: &(dyn Fn() + Send + Sync),
+) -> Ended {
+    match execute(
+        args,
+        destination,
+        cancel,
+        Driver::Interactive { seat, between },
+    )
+    .await
+    {
         Ok(ended) => ended,
         Err(refusal) => Ended::refused(refusal),
     }
@@ -584,14 +653,20 @@ struct Materials {
 /// Gathered before a store is chosen and before a model is resolved, so a run
 /// naming a schema that will not compile or a tool this build does not have
 /// refuses without creating a session or reaching a network.
-fn materials(settings: &Settings, args: &Args) -> Result<Materials, UsageError> {
+fn materials(settings: &Settings, args: &Args, seeded: bool) -> Result<Materials, UsageError> {
     let compiled = match args.schema.as_deref() {
         Some(spec) => Some(schema::Schema::compile(&prompt::at_file(spec)?)?),
         None => None,
     };
     let system = instructions(&settings.effective, args, &settings.root, &settings.cwd)?;
     let registry = tools(args.tools.as_ref())?;
-    let text = prompt::assemble(args.prompt.as_deref(), args.stdin, &prompt::ProcessStdin)?;
+    // An interactive session may start with nothing to ask; a one-shot may
+    // not. Same table otherwise.
+    let text = if seeded {
+        prompt::seed(args.prompt.as_deref(), args.stdin, &prompt::ProcessStdin)?
+    } else {
+        prompt::assemble(args.prompt.as_deref(), args.stdin, &prompt::ProcessStdin)?
+    };
     let slug = args
         .model
         .clone()
@@ -708,6 +783,7 @@ async fn execute<S: EventSink>(
     args: Args,
     destination: impl FnOnce(&ModelCapabilities) -> S,
     cancel: CancelToken,
+    driver: Driver<'_>,
 ) -> Result<Ended, RunTermination> {
     let usage = |err: UsageError| RunTermination::UsageError {
         message: err.to_string(),
@@ -720,7 +796,12 @@ async fn execute<S: EventSink>(
         compiled,
         text,
         slug,
-    } = materials(&settings, &args).map_err(usage)?;
+    } = materials(
+        &settings,
+        &args,
+        matches!(driver, Driver::Interactive { .. }),
+    )
+    .map_err(usage)?;
 
     let Settings {
         started,
@@ -801,27 +882,6 @@ async fn execute<S: EventSink>(
         parallel_tool_calls: resolved.capabilities.supports_parallel_tool_calls,
     };
 
-    let mut loop_ = TurnLoop::new(
-        Session {
-            id: session_id,
-            state: opening,
-            store: opened.store(),
-            clock: &clock,
-            sink,
-            cancel: cancel.clone(),
-        },
-        Model {
-            generator: &generator,
-            gate: &mut gate,
-            metering: resolved.metering.clone(),
-            rates: resolved.rates.clone(),
-            token_ceiling: effective.ceilings.tokens,
-            caps: resolved.capabilities.clone(),
-            config,
-        },
-        Tools::new(&registry, &policy, &fs, CanonPath::new(&cwd)),
-    );
-
     let turns = Turns {
         schema: compiled.as_ref(),
         retries: args.schema_retries,
@@ -829,14 +889,144 @@ async fn execute<S: EventSink>(
         timeout,
         started,
     };
-    let (termination, result) = turns.drive(&mut loop_, &text, &cancel).await;
 
-    Ok(Ended {
-        termination,
-        session: session_id,
-        state: loop_.into_state(),
-        result,
-    })
+    // One turn's worth of loop, built from the state the last one left behind.
+    //
+    // Rebuilt per turn rather than held across the session, and that is
+    // `CancelToken`'s doing rather than a preference: the token is latching
+    // (`ego-core/src/turn/mod.rs:89`, "the first cause wins") and lives inside
+    // `Session`, so a `Ctrl+C` on turn one would leave every later turn to
+    // abort before its first check. A fresh loop takes a fresh token. It costs
+    // nothing — every field below is a borrow or a clone of something already
+    // resolved, and no I/O is repeated.
+    // A macro and not a closure: the loop borrows from this function's locals,
+    // and a closure cannot name the lifetime of a `TurnLoop<'_>` it returns.
+    macro_rules! build {
+        ($state:expr, $cancel:expr) => {
+            TurnLoop::new(
+                Session {
+                    id: session_id,
+                    state: $state,
+                    store: opened.store(),
+                    clock: &clock,
+                    sink,
+                    cancel: $cancel.clone(),
+                },
+                Model {
+                    generator: &generator,
+                    gate: &mut gate,
+                    metering: resolved.metering.clone(),
+                    rates: resolved.rates.clone(),
+                    token_ceiling: effective.ceilings.tokens,
+                    caps: resolved.capabilities.clone(),
+                    config: config.clone(),
+                },
+                Tools::new(&registry, &policy, &fs, CanonPath::new(&cwd)),
+            )
+        };
+    }
+
+    match driver {
+        Driver::Once => {
+            let mut loop_ = build!(opening, &cancel);
+            let (termination, result) = turns.drive(&mut loop_, &text, &cancel).await;
+
+            Ok(Ended {
+                termination,
+                session: session_id,
+                state: loop_.into_state(),
+                result,
+            })
+        }
+        Driver::Interactive { seat, between } => {
+            let mut state = opening;
+            let mut last = Ended {
+                termination: RunTermination::Done,
+                session: session_id,
+                state: state.clone(),
+                result: Value::String(String::new()),
+            };
+
+            // `ego "explain this failing test"` seeds the first turn; `ego`
+            // alone starts at the prompt. Both are one session — the argument
+            // is a first thing to say, not a different mode.
+            let mut seeded = (!text.trim().is_empty()).then(|| text.clone());
+
+            loop {
+                // The editor is the only writer while it reads, and it is
+                // gone before the turn renders. R12, held by construction
+                // rather than by care.
+                let line = match seeded.take() {
+                    Some(first) => repl::Line::Submitted(first),
+                    None => seat.read(),
+                };
+
+                let asked = match line {
+                    repl::Line::Submitted(text) => text,
+                    repl::Line::Blank => continue,
+                    // Ctrl+C at an idle prompt drops the line and nothing
+                    // else. Someone who pressed it to stop a turn must not
+                    // lose the session by pressing it once more.
+                    repl::Line::Interrupted => continue,
+                    repl::Line::Ended => break,
+                    repl::Line::Refused(why) => {
+                        note(why);
+                        continue;
+                    }
+                };
+
+                // Per turn, for the reason `build` documents.
+                let turn_cancel = CancelToken::new();
+                let mut loop_ = build!(state, &turn_cancel);
+                let (termination, result) = turns.drive(&mut loop_, &asked, &turn_cancel).await;
+                state = loop_.into_state();
+                between();
+
+                last = Ended {
+                    termination,
+                    session: session_id,
+                    state: state.clone(),
+                    result,
+                };
+
+                // The person's own cancellations end a turn; the process's end
+                // the process. A broken stdout or a SIGTERM is not a turn to
+                // return to a prompt from.
+                if cancel.is_cancelled() {
+                    break;
+                }
+            }
+
+            Ok(last)
+        }
+    }
+}
+
+/// What drives the turns once the session is open.
+///
+/// The setup above is identical either way — the same resolution, the same
+/// session, the same policy — so it is the tail that branches rather than the
+/// function that is duplicated.
+enum Driver<'a> {
+    /// One prompt from argv or stdin, and the run is over.
+    Once,
+    /// Lines from a person, until they stop.
+    Interactive {
+        seat: &'a mut (dyn Reads + Send),
+        /// Run after each turn: the screen holds the last block back until it
+        /// knows no more is coming, and between turns is when it knows.
+        between: &'a (dyn Fn() + Send + Sync),
+    },
+}
+
+/// The seat, as the run loop needs it.
+///
+/// A trait so a test can drive the whole interactive path from a script of
+/// lines, with no terminal and no editor — the real [`repl::Seat`] needs a tty
+/// and would make every one of those tests unrunnable in CI.
+pub trait Reads {
+    /// Read one line, blocking until there is one.
+    fn read(&mut self) -> repl::Line;
 }
 
 /// The run-level limits, and the loop that applies them between turns.

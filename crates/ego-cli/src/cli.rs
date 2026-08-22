@@ -42,6 +42,12 @@ pub enum Invocation {
     /// `ego acp` — serve the Agent Client Protocol on stdio, until the host
     /// closes it.
     Acp(Box<AcpArgs>),
+    /// `ego [PROMPT]` — the interactive session of `CLI.md` §6.
+    ///
+    /// One [`Args`] again, and for [`Invocation::Resume`]'s reason: a prompt
+    /// given on the command line is the first thing said, not a different
+    /// mode, and everything else a session needs to resolve is the same.
+    Interactive(Box<Args>),
     /// `--help` or `--version`: the question was answered, and there is
     /// nothing to run.
     ///
@@ -217,11 +223,14 @@ pub const UNBUILT: &[(&str, &str)] = &[
 /// and the test on this refusal asserted only the word "interactive" — so
 /// nothing went red. A reason nothing checks is a reason that decays into a
 /// confident falsehood.
-pub const INTERACTIVE_WAITING_ON: &str = "the terminal surface itself — a \
-     line editor for the prompt, and the dialog that renders a \
-     `PermissionRequest` and reads a person's answer. The `Approver` port that dialog would \
-     occupy is built and the mode already answers through it (**M1**); what \
-     is missing is the human seat and the screen it draws on";
+pub const INTERACTIVE_WAITING_ON: &str = "the permission dialog — the screen \
+     that renders a `PermissionRequest` and reads a person's answer. The line \
+     editor ships, so a session reads, runs turns and renders them; what a \
+     person cannot yet do is *answer* an escalation, so one ends the turn with \
+     nobody to decide it, exactly as it does headless (`CLI.md` §4.4). The \
+     `Approver` port that dialog would occupy is built and the mode answers \
+     through it, but `PolicyEngine` builds its own approver and admitting a \
+     human party is a change to that contract rather than wiring in the CLI";
 
 /// A flag that was removed, and what replaced it.
 ///
@@ -284,6 +293,18 @@ pub enum Output {
     Text,
     Json,
     Jsonl,
+}
+
+/// The spelling `--output` accepts, so a refusal can quote back something the
+/// operator can retype rather than a debug rendering they cannot.
+impl std::fmt::Display for Output {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Output::Text => "text",
+            Output::Json => "json",
+            Output::Jsonl => "jsonl",
+        })
+    }
 }
 
 /// Where a session is written, or that it is not (`CLI.md` §3, "Session").
@@ -756,16 +777,14 @@ pub fn parse(argv: Vec<String>) -> Result<Invocation, UsageError> {
         }
     }
 
+    // No subcommand is the interactive session of `CLI.md` §6, not an error.
+    // What is left is parsed by exactly the `run` grammar, because a session
+    // resolves a model, a workspace and a ruleset the same way a one-shot
+    // does — the difference is who supplies the prompts, and that is a
+    // difference in driver rather than in grammar.
     let subcommand = match head.first().map(String::as_str) {
-        Some(name) if BUILT.contains(&name) => name.to_string(),
-        _ => {
-            return Err(UsageError(format!(
-                "`{program}` with no subcommand starts an interactive session, \
-                 and the interactive surface is not in this build: it is \
-                 waiting on {INTERACTIVE_WAITING_ON}. Use `{program} run` for \
-                 a headless one-shot"
-            )));
-        }
+        Some(name) if BUILT.contains(&name) => Some(name.to_string()),
+        _ => None,
     };
 
     let mut tokens: Vec<String> = head;
@@ -776,7 +795,14 @@ pub fn parse(argv: Vec<String>) -> Result<Invocation, UsageError> {
     // `ego --all` has no subcommand, so it reaches the interactive refusal.
     // Every error clap renders for these structs names the command this way,
     // so it is one substitution rather than one per message.
-    tokens[0] = format!("{program} {subcommand}");
+    match &subcommand {
+        // Replaces the subcommand token, which has now been read.
+        Some(name) => tokens[0] = format!("{program} {name}"),
+        // Nothing to replace: the first token is already an argument. clap
+        // still needs an argv[0], so the program name is prepended rather
+        // than written over something a person typed.
+        None => tokens.insert(0, program.to_string()),
+    }
     // The separator and everything after it go back on the end, so clap sees
     // the prompt words as positionals it must not interpret.
     if !tail.is_empty() {
@@ -784,19 +810,23 @@ pub fn parse(argv: Vec<String>) -> Result<Invocation, UsageError> {
         tokens.extend(tail);
     }
 
-    match subcommand.as_str() {
-        "resume" => match clap_or_answer::<ResumeCommand>(&tokens)? {
+    match subcommand.as_deref() {
+        None => match clap_or_answer::<RunCommand>(&tokens)? {
+            Parsed::Answered(text) => Ok(Invocation::Answered(text)),
+            Parsed::Command(parsed) => Ok(Invocation::Interactive(Box::new(into_args(parsed)?))),
+        },
+        Some("resume") => match clap_or_answer::<ResumeCommand>(&tokens)? {
             Parsed::Answered(text) => Ok(Invocation::Answered(text)),
             Parsed::Command(parsed) => Ok(Invocation::Resume(Box::new(into_resume_args(parsed)?))),
         },
-        "acp" => match clap_or_answer::<AcpCommand>(&tokens)? {
+        Some("acp") => match clap_or_answer::<AcpCommand>(&tokens)? {
             Parsed::Answered(text) => Ok(Invocation::Answered(text)),
             Parsed::Command(parsed) => Ok(Invocation::Acp(Box::new(AcpArgs {
                 session_dir: parsed.places.session_dir,
                 directory: parsed.places.directory,
             }))),
         },
-        "ls" => match clap_or_answer::<LsCommand>(&tokens)? {
+        Some("ls") => match clap_or_answer::<LsCommand>(&tokens)? {
             Parsed::Answered(text) => Ok(Invocation::Answered(text)),
             Parsed::Command(parsed) => Ok(Invocation::Ls(Box::new(LsArgs {
                 all: parsed.all,

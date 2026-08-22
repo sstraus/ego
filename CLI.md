@@ -72,7 +72,8 @@ still offers it.
 
 A word that is **not** on this list stays a prompt: §2's first line is
 `ego [PROMPT]`, so `ego "explain this failing test"` is the interactive form
-and gets the interactive answer. `ego -- resume` likewise prompts the word.
+and opens a session with that as its first turn. `ego -- resume` likewise
+prompts the word rather than running the command.
 
 **The reason in each cell below is the string the binary prints**, not a
 paraphrase of it, and a test asserts that character for character (modulo
@@ -86,7 +87,7 @@ omitted when empty: two states, identical bytes.
 | Command | M0b | Waiting on |
 |---|---|---|
 | `ego run` | **yes** | the scripting workhorse; the whole of §4 is about it |
-| `ego [PROMPT]` | no | the terminal surface itself — a line editor for the prompt, and the dialog that renders a `PermissionRequest` and reads a person's answer. The `Approver` port that dialog would occupy is built and the mode already answers through it (**M1**); what is missing is the human seat and the screen it draws on |
+| `ego [PROMPT]` | **partly** | the permission dialog — the screen that renders a `PermissionRequest` and reads a person's answer. The line editor ships, so a session reads, runs turns and renders them; what a person cannot yet do is *answer* an escalation, so one ends the turn with nobody to decide it, exactly as it does headless (`CLI.md` §4.4). The `Approver` port that dialog would occupy is built and the mode answers through it, but `PolicyEngine` builds its own approver and admitting a human party is a change to that contract rather than wiring in the CLI |
 | `ego resume` | **yes** | continues a session that already exists, never creating one. `[ID]` is optional: without it the most recently updated session of this workspace is taken |
 | `ego ls` | **yes** | this workspace by default, `--all` for the whole store; `--output json\|jsonl` per §4.6 |
 | `ego fork` | no | session forking (**M3**), which needs the branch point to be nameable in the log rather than just a file copy |
@@ -526,17 +527,23 @@ typing.
 
 ### 6.2 Availability — what ships today
 
-Same discipline as §2.1 and §3.1. **None of §6 ships**: this build is headless,
-there is no input line, and `ego` with no prompt is a usage error rather than a
-REPL. The renderer §4 depends on is built and used by `ego run`; the reader is
-not.
+Same discipline as §2.1 and §3.1. **The reader ships; the dialog does not.**
+`ego` with no subcommand opens a session: it reads lines, runs a turn for each
+and renders it through §4. What it cannot do is let a person *answer* a
+permission escalation — so one ends the turn with nobody to decide it, exactly
+as it does headless (§4.4). The editor and the renderer are never live at the
+same time, which is how §4's "exactly one writer" survives a second writer
+existing at all: the editor is dropped before a turn renders.
 
 | Surface | M0b | Note |
 |---|---|---|
-| Slash commands | no | waiting on the REPL |
-| Bracketed paste, Ctrl+V | no | waiting on the REPL *and* on `--attach`'s content block. §6.1 is the design, not a shipped behaviour |
+| Input line, history, multiline | **yes** | reedline. `Ctrl+C` abandons the line and keeps the session; `Ctrl+D` ends it |
+| Bracketed paste | **yes** | on for every read, off on exit. A pasted stack trace is one prompt, not its first line |
+| Ctrl+V | **refused by name** | it asks for a pasteboard *image* first (§6.1), and there is nowhere to put one — the same gap that refuses `--attach`. It refuses rather than silently pasting text, because only one of those two can be discovered |
+| Permission dialog | no | the gap that keeps `ego [PROMPT]` at *partly* in §2.1. `PolicyEngine` builds its own approver, so admitting a human party is a change to that contract rather than wiring here |
+| Slash commands | no | waiting on the subsystems they would drive; §2.1 already refuses each by name |
 | `--attach` | no | §3.1's row: waiting on a non-text content block |
-| OSC 133 A (prompt mark), OSC 7 (cwd) | no | deliberately: both describe a process that *occupies* the pane. A one-shot run that announced its `-C` directory would leave the pane pointing somewhere the shell returns from the moment ego exits. `ego run` emits 133 C/D, OSC 9;4 and — under TUICommander — 7770 |
+| OSC 133 A (prompt mark), OSC 7 (cwd) | no | deliberately, and *still* deliberately now that a REPL exists: both are owned by the surface rather than by the run, and neither is emitted until the dialog makes a prompt a place a person is actually asked something. `ego run` emits 133 C/D, OSC 9;4 and — under TUICommander — 7770 |
 
 ## 7. Configuration
 

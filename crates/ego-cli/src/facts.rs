@@ -191,3 +191,46 @@ pub fn supplied(ceilings: &Ceilings) -> Result<Vec<(String, HostedModel)>, Usage
         })
         .collect())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A transport no row can speak must be refused *by the decoder the file
+    /// actually goes through*.
+    ///
+    /// The guard in `ego-core` asserts this against `serde_json`. This file is
+    /// TOML, and a guard that proves a property of a decoder the operator
+    /// never reaches proves nothing about the operator's file.
+    #[test]
+    fn a_transport_no_row_can_speak_does_not_decode_from_toml() {
+        let entry = |transport: &str| {
+            format!(
+                r#"
+[model."openai/gpt-5.1".capabilities]
+schema_version = 2
+max_context_tokens = 400000
+max_output_tokens = 128000
+max_tools = 128
+supports_parallel_tool_calls = true
+reasoning_carryover = "same_provider_only"
+reasoning_efforts = "any"
+cancel = "cooperative"
+cache = "long"
+transport = "{transport}"
+"#
+            )
+        };
+
+        assert!(
+            toml::from_str::<Facts>(&entry("sse")).is_ok(),
+            "the transport this build speaks must still decode"
+        );
+        for spelling in ["web_socket", "auto"] {
+            assert!(
+                toml::from_str::<Facts>(&entry(spelling)).is_err(),
+                "`{spelling}` decoded from a TOML file this build reads"
+            );
+        }
+    }
+}
