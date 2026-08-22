@@ -84,6 +84,49 @@ fn a_run_that_finishes_writes_its_answer_to_stdout_and_exits_zero() {
     assert_eq!(finished.stdout.trim(), "It is done.");
 }
 
+/// The same run without the word `run` in it.
+///
+/// `ego "…"` is the conversational surface, and it is the surface `CLI.md`
+/// §2.1 describes rather than a spelling of `ego run`: the argument seeds the
+/// first turn and the loop then asks for another line. Here there is no
+/// terminal to ask, so the session ends after the turn it was seeded with —
+/// which is exactly the property that makes it testable without a pty, and the
+/// one that would otherwise leave a CI runner holding a prompt forever.
+#[test]
+fn a_session_seeded_from_argv_runs_its_turn_and_ends_when_nobody_is_there() {
+    let stub = Stub::start(Plan::default());
+    let finished = Ego::against(&stub)
+        .conversing()
+        .args(["--model", "ollama/qwen3", "--ephemeral", "Do the thing"])
+        .run();
+
+    assert_eq!(finished.code, Some(0), "stderr: {}", finished.stderr);
+    assert_eq!(finished.stdout.trim(), "It is done.");
+    assert_eq!(
+        stub.generations().len(),
+        1,
+        "the seed is a first thing to say and not a thing to say twice"
+    );
+}
+
+/// A piped prompt still seeds it.
+///
+/// `prompt::seed` only differs from `prompt::assemble` in the one row where
+/// there is nothing to ask *and* nobody to ask — every other row is the
+/// headless algorithm unchanged, and a pipe is one of them.
+#[test]
+fn a_session_can_be_seeded_from_a_pipe_the_way_a_run_is() {
+    let stub = Stub::start(Plan::default());
+    let finished = Ego::against(&stub)
+        .conversing()
+        .args(["--model", "ollama/qwen3", "--ephemeral"])
+        .stdin("Do the thing")
+        .run();
+
+    assert_eq!(finished.code, Some(0), "stderr: {}", finished.stderr);
+    assert_eq!(finished.stdout.trim(), "It is done.");
+}
+
 /// §4.1's object, field by field — and the rule §4.2 states about it: one error
 /// field. `ok` and `exit_reason` are read off the same `RunTermination`, so
 /// there is no second status to contradict the first the way Claude's

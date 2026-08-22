@@ -438,6 +438,16 @@ impl Ego {
         self
     }
 
+    /// Run `ego` with no subcommand at all — the conversational surface.
+    ///
+    /// Not `subcommand("")`: an empty argument is a *first argument*, and
+    /// `ego ""` is a run with an empty prompt rather than a session. The
+    /// distinction is the whole of what this method exists to make.
+    pub fn conversing(mut self) -> Self {
+        self.subcommand.clear();
+        self
+    }
+
     pub fn arg(mut self, arg: &str) -> Self {
         self.args.push(arg.to_string());
         self
@@ -488,7 +498,9 @@ impl Ego {
             command.env(key, value);
         }
         command.current_dir(&self.workspace);
-        command.arg(&self.subcommand);
+        if !self.subcommand.is_empty() {
+            command.arg(&self.subcommand);
+        }
         command.args(&self.args);
         command
     }
