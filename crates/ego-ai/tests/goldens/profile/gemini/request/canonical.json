@@ -1,0 +1,29 @@
+{
+  "body": {
+    "generation_config": {
+      "max_output_tokens": 16,
+      "thinking_level": "minimal"
+    },
+    "input": [
+      {
+        "content": [
+          {
+            "text": "Reply with the single word: ok",
+            "type": "text"
+          }
+        ],
+        "type": "user_input"
+      }
+    ],
+    "model": "gemini-3.7-flash",
+    "store": false,
+    "stream": true
+  },
+  "header_names": [
+    "content-type",
+    "accept",
+    "x-goog-api-key"
+  ],
+  "method": "Post",
+  "url": "https://generativelanguage.googleapis.com/v1beta/interactions?alt=sse"
+}

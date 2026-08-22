@@ -246,7 +246,7 @@ async fn smoke(profile: &Profile, when: &str) {
     let http = transport();
 
     // --- check 5, for the canonical body ---
-    let req = canonical(profile.model);
+    let req = canonical(profile);
     bounded(&req, &profile.metering());
     let request = built(&row, &creds, &req);
     // The fixture is taken from the request before it is sent, because an
@@ -297,7 +297,7 @@ async fn smoke(profile: &Profile, when: &str) {
     );
 
     // --- the tool-calling transcript ---
-    let tools = tool_calling(profile.model);
+    let tools = tool_calling(profile);
     bounded(&tools, &profile.metering());
     let (status, tool_transcript) = send(http.as_ref(), built(&row, &creds, &tools)).await;
     assert_eq!(status, 200, "{}: {tool_transcript}", profile.id);
@@ -313,7 +313,10 @@ async fn smoke(profile: &Profile, when: &str) {
     // Provoked by naming a model that cannot exist, which is the one refusal
     // every provider owes an answer to and the cheapest to ask for: it is
     // rejected before any generation happens, so it costs nothing.
-    let absent = canonical("this-model-does-not-exist");
+    let absent = GenRequest {
+        model: "this-model-does-not-exist".to_string(),
+        ..canonical(profile)
+    };
     let (status, error_body) = send(http.as_ref(), built(&row, &creds, &absent)).await;
     assert_ne!(
         status, 200,

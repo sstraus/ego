@@ -17,7 +17,7 @@ use std::path::PathBuf;
 
 use ego_ai::http::HttpRequest;
 use ego_ai::provider::{
-    ANTHROPIC_BASE, OLLAMA_BASE, OPENAI_BASE, OPENROUTER_BASE, ProviderRow, XAI_BASE,
+    ANTHROPIC_BASE, GEMINI_BASE, OLLAMA_BASE, OPENAI_BASE, OPENROUTER_BASE, ProviderRow, XAI_BASE,
 };
 use ego_core::budget::{Metering, SettlementSource};
 use ego_core::generator::types::{
@@ -67,6 +67,19 @@ pub struct Profile {
     /// shapes, relaying a body it could not parse verbatim, and that is exactly
     /// why xAI passes a check written around OpenAI's envelope.
     pub error_message_at: &'static [&'static str],
+    /// The reasoning level this provider's canonical request asks for.
+    ///
+    /// Per profile, because **no single level every provider can express
+    /// exists**, and that is a finding rather than an inconvenience:
+    /// `anthropic-messages` refuses `Minimal` and `gemini-interactions`
+    /// refuses `Off`, so a shared constant would have had to pick one of them
+    /// to break. It is the same fact `ReasoningEffortSupport` carries in the
+    /// product — what a provider can be asked for is the provider's, not the
+    /// request's.
+    ///
+    /// Data in this table and not a branch in either suite, exactly like
+    /// [`Self::error_message_at`].
+    pub thinking: ThinkingLevel,
 }
 
 /// `{"error": {"message": …}}` — the envelope OpenAI defined and most of the
@@ -96,6 +109,7 @@ impl Profile {
 /// and its smoke is the one a developer can run freely.
 pub const OLLAMA: Profile = Profile {
     id: "ollama",
+    thinking: ThinkingLevel::Off,
     base: OLLAMA_BASE,
     model: "gemma4:12b-mlx",
     row: ProviderRow::ollama_default,
@@ -112,6 +126,7 @@ pub const OLLAMA: Profile = Profile {
 /// that gap closes, on a machine that has a key and asks for it by name.
 pub const OPENAI: Profile = Profile {
     id: "openai",
+    thinking: ThinkingLevel::Off,
     base: OPENAI_BASE,
     model: "gpt-5.1",
     row: ProviderRow::openai,
@@ -135,6 +150,7 @@ pub const OPENAI: Profile = Profile {
 /// thing a live smoke should overwrite.
 pub const XAI: Profile = Profile {
     id: "xai",
+    thinking: ThinkingLevel::Off,
     base: XAI_BASE,
     model: "grok-4",
     row: ProviderRow::xai_default,
@@ -163,6 +179,7 @@ pub const XAI: Profile = Profile {
 /// one that would notice a split on the last separator rather than the first.
 pub const OPENROUTER: Profile = Profile {
     id: "openrouter",
+    thinking: ThinkingLevel::Off,
     base: OPENROUTER_BASE,
     model: "z-ai/glm-4.7",
     row: ProviderRow::openrouter_default,
@@ -187,6 +204,7 @@ pub const OPENROUTER: Profile = Profile {
 /// only the path the check reads is shared.
 pub const ANTHROPIC: Profile = Profile {
     id: "anthropic",
+    thinking: ThinkingLevel::Off,
     base: ANTHROPIC_BASE,
     model: "claude-opus-5",
     row: ProviderRow::anthropic_default,
@@ -194,13 +212,34 @@ pub const ANTHROPIC: Profile = Profile {
     error_message_at: NESTED,
 };
 
+/// Gemini: schema-derived, a candidate, and the third wire format.
+///
+/// Two mappings could be a special case; three is a seam. This one shares no
+/// request field with either of the others — a conversation is a list of
+/// *steps* with no role on them, the terminal signal is an interaction
+/// `status` rather than any finish reason, and the stream is asked for in the
+/// query string.
+///
+/// It is also the only row that cannot offer every level ego names:
+/// `thinking_level` has no `off`, so `ThinkingLevel::Off` is refused at the
+/// mapping. That is the cost `docs/14` §3.6 accepted in writing.
+pub const GEMINI: Profile = Profile {
+    id: "gemini",
+    thinking: ThinkingLevel::Minimal,
+    base: GEMINI_BASE,
+    model: "gemini-3.7-flash",
+    row: ProviderRow::gemini_default,
+    provenance: Provenance::SchemaDerived,
+    error_message_at: NESTED,
+};
+
 /// Every profile this build ships a row for.
 ///
-/// Three of the five are candidates: a row exists, so there is something to
+/// Four of the six are candidates: a row exists, so there is something to
 /// build a request from and decode an answer with, and it is not in the
 /// catalogue a run assembles. That is the shape §9 asks for — the evidence is
 /// gathered before the provider is selectable, not after.
-pub const ALL: &[&Profile] = &[&OLLAMA, &OPENAI, &XAI, &OPENROUTER, &ANTHROPIC];
+pub const ALL: &[&Profile] = &[&OLLAMA, &OPENAI, &XAI, &OPENROUTER, &ANTHROPIC, &GEMINI];
 
 // --- fixtures ---
 
@@ -327,13 +366,13 @@ pub const TOOL_CEILING: u64 = 128;
 /// for byte: the smoke sends this body and records what came back, and check 1
 /// rebuilds it offline and compares against the fixture. Two spellings would
 /// let the pair disagree about what was tested and still both pass.
-pub fn canonical(model: &str) -> GenRequest {
+pub fn canonical(profile: &Profile) -> GenRequest {
     GenRequest {
-        model: model.to_string(),
+        model: profile.model.to_string(),
         messages: Conversation::new(vec![Message::text(Role::User, PROMPT)])
             .expect("one user message is a conversation"),
         tools: Vec::new(),
-        thinking: ThinkingLevel::Off,
+        thinking: profile.thinking,
         max_output_tokens: Some(CEILING),
         parallel_tool_calls: false,
     }
@@ -344,7 +383,7 @@ pub fn canonical(model: &str) -> GenRequest {
 /// The tool is deliberately trivial — one required string — because check 2 is
 /// about whether the arguments arrive assembled, not about whether a model can
 /// fill in a complicated schema.
-pub fn tool_calling(model: &str) -> GenRequest {
+pub fn tool_calling(profile: &Profile) -> GenRequest {
     GenRequest {
         messages: Conversation::new(vec![Message::text(
             Role::User,
@@ -362,6 +401,6 @@ pub fn tool_calling(model: &str) -> GenRequest {
             }),
         }],
         max_output_tokens: Some(TOOL_CEILING),
-        ..canonical(model)
+        ..canonical(profile)
     }
 }

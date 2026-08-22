@@ -23,6 +23,7 @@ use url::Url;
 use crate::resolver::{ModelResolver, OllamaDaemon, Supplied, XaiLanguageModels};
 use crate::wire::WireFormat;
 use crate::wire::anthropic_messages::AnthropicMessages;
+use crate::wire::gemini_interactions::GeminiInteractions;
 use crate::wire::ollama::Ollama;
 use crate::wire::openai_completions::OpenAiCompletions;
 use crate::wire::provider_cost::{OpenRouterUsd, ProviderCost, XaiUsdTicks};
@@ -314,6 +315,10 @@ pub const OPENROUTER_KEY_VAR: &str = "OPENROUTER_API_KEY";
 pub const ANTHROPIC_BASE: &str = "https://api.anthropic.com/v1/";
 /// The environment variable Anthropic's credential is read from.
 pub const ANTHROPIC_KEY_VAR: &str = "ANTHROPIC_API_KEY";
+/// The base Google serves the Gemini developer API under.
+pub const GEMINI_BASE: &str = "https://generativelanguage.googleapis.com/v1beta/";
+/// The environment variable Gemini's credential is read from.
+pub const GEMINI_KEY_VAR: &str = "GEMINI_API_KEY";
 
 /// Which chat-completions schema the cost decoders were written against.
 ///
@@ -546,5 +551,41 @@ impl ProviderRow {
     /// The Anthropic row at Anthropic's own address.
     pub fn anthropic_default() -> Self {
         Self::anthropic(Url::parse(ANTHROPIC_BASE).expect("a constant this file controls"))
+    }
+
+    /// The Gemini row, on the Interactions API.
+    ///
+    /// **A candidate, not a member**, for the same §9 reason as the other
+    /// three: absent from `crates/ego-cli/src/model.rs`'s table, so
+    /// `--model gemini/…` does not resolve.
+    ///
+    /// The third wire format, and the one that turns two into a seam. It also
+    /// carries the one cost `docs/14` §3.6 accepted with its eyes open:
+    /// `thinking_level` has no `off`, so a row on this mapping cannot offer
+    /// every level ego names and `ThinkingLevel::Off` is refused at the
+    /// mapping rather than mistranslated.
+    ///
+    /// `x-goog-api-key`, like Anthropic's `x-api-key`, is a header the
+    /// provider names rather than a scheme — which is why
+    /// [`CredentialStrategy::HeaderFromEnv`] is data and not a second enum.
+    pub fn gemini(base: Url) -> Self {
+        ProviderRow {
+            id: "gemini".to_string(),
+            base: as_base(base),
+            wire: &GeminiInteractions,
+            resolver: &Supplied,
+            credential: CredentialStrategy::HeaderFromEnv {
+                header: "x-goog-api-key".to_string(),
+                var: GEMINI_KEY_VAR.to_string(),
+            },
+            // "No monetary figure, ever" — `docs/14` §3.3, confirmed against a
+            // recorded fixture. `None` is that assertion, not an omission.
+            cost: None,
+        }
+    }
+
+    /// The Gemini row at Google's own address.
+    pub fn gemini_default() -> Self {
+        Self::gemini(Url::parse(GEMINI_BASE).expect("a constant this file controls"))
     }
 }

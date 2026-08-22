@@ -102,7 +102,7 @@ fn usages(events: &[AiEvent]) -> Vec<Usage> {
 async fn check_1_the_request_each_profile_builds_is_the_one_it_committed() {
     for profile in ALL {
         let row = (profile.row)();
-        let req = canonical(profile.model);
+        let req = canonical(profile);
         let credential = row
             .credential
             .resolve(&Configured)

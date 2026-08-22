@@ -16,6 +16,7 @@
 //! landed, so the signature is written against types that have stopped moving.
 
 pub mod anthropic_messages;
+pub mod gemini_interactions;
 pub mod ollama;
 pub mod openai_completions;
 pub mod provider_cost;

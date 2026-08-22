@@ -1,0 +1,40 @@
+: schema-derived from the Gemini Interactions API types in google-genai v2.19.0
+event: interaction.created
+data: {"interaction":{"id":"v1_4de1","model":"gemini-3.7-flash","status":"in_progress","object":"interaction"},"event_type":"interaction.created"}
+
+event: step.start
+data: {"index":0,"step":{"type":"model_output"},"event_type":"step.start"}
+
+event: step.delta
+data: {"index":0,"delta":{"type":"text","text":"Reading both."},"event_type":"step.delta"}
+
+event: step.stop
+data: {"index":0,"event_type":"step.stop"}
+
+event: step.start
+data: {"index":1,"step":{"type":"function_call","id":"un6k8t18","name":"read_file","arguments":{}},"event_type":"step.start"}
+
+event: step.delta
+data: {"index":1,"delta":{"type":"arguments_delta","arguments":"{\"path\":"},"event_type":"step.delta"}
+
+event: step.delta
+data: {"index":1,"delta":{"type":"arguments_delta","arguments":" \"a.txt\"}"},"event_type":"step.delta"}
+
+event: step.stop
+data: {"index":1,"event_type":"step.stop"}
+
+event: step.start
+data: {"index":2,"step":{"type":"function_call","id":"un6k8t19","name":"read_file","arguments":{}},"event_type":"step.start"}
+
+event: step.delta
+data: {"index":2,"delta":{"type":"arguments_delta","arguments":"{\"path\": \"b.txt\"}"},"event_type":"step.delta"}
+
+event: step.stop
+data: {"index":2,"event_type":"step.stop"}
+
+event: interaction.status_update
+data: {"interaction_id":"v1_4de1","status":"requires_action","event_type":"interaction.status_update"}
+
+event: interaction.completed
+data: {"interaction":{"id":"v1_4de1","status":"requires_action","usage":{"total_tokens":896,"total_input_tokens":700,"total_cached_tokens":200,"total_output_tokens":96,"total_thought_tokens":0,"total_tool_use_tokens":100},"created":"2026-08-22T10:20:00Z","updated":"2026-08-22T10:20:03Z","service_tier":"standard","object":"interaction","model":"gemini-3.7-flash"},"event_type":"interaction.completed"}
+
