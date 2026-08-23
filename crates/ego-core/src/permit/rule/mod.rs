@@ -28,11 +28,13 @@
 //!
 //! All seven heads parse, canonicalise and take an ID, because the grammar is
 //! published as one thing — `ARCHITECTURE.md:252` makes that a gate. Only
-//! four of them can currently *match*: `read`, `write`, `list` and `search`
-//! name operations that exist. `exec`, `net` and `tool` name operations no
-//! tool in this workspace produces yet.
+//! three of them can currently *match*: `read`, `list` and `search` name
+//! operations some tool in this workspace produces. `write`, `exec`, `net`
+//! and `tool` do not — `Op::Write` is a variant with a matcher and no
+//! constructor, which is the same vacuous boundary as a head with no variant
+//! at all and is why it sits with the other three.
 //!
-//! A rule with one of those three heads is well-formed, has a stable ID and
+//! A rule with one of those four heads is well-formed, has a stable ID and
 //! renders in `rules ls` — and [`Rule::load`] **refuses it**, by name, saying
 //! that no tool in this build produces operations of that shape. Not a parse
 //! error, which would lie about the grammar and churn the ID later; and not a
