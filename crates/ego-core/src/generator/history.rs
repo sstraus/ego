@@ -30,7 +30,23 @@ pub enum Repair {
 
 /// What a synthesized answer says. Deliberately not a tool's own vocabulary:
 /// the tool did not say this, the harness did.
-const TORN: &str = "the tool call did not complete: the session ended before its result was known";
+///
+/// **The second sentence is `POTENTIALS.md` P21's answer.** P21's trigger was
+/// "the first tool whose `descriptor` cannot honestly claim to be read-only",
+/// and `write` is it. A tear is precisely the case where nobody knows whether
+/// the call took effect, so repeating it and not repeating it are both capable
+/// of being wrong — and the party best placed to find out is the one holding
+/// the tools. Telling it "this did not complete" and nothing more is what
+/// makes the repeat the default.
+///
+/// P21 sketches a bigger answer — a `safe_to_repeat` on `ToolDescriptor`, a
+/// per-dispatch delivery certainty modelled on the transport's. None of that
+/// is built, because all of it exists to decide *without* asking, and there is
+/// a model in the loop here that can simply look. It becomes owed when
+/// something has to resolve a tear with nobody to ask.
+const TORN: &str = "the tool call did not complete: the session ended before its result was known. \
+     It may already have taken effect. Check the current state of whatever it \
+     would have changed before calling it again";
 
 /// Rebuild `state`'s history as something a provider will accept, and say
 /// what had to be repaired to get there.

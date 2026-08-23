@@ -222,6 +222,44 @@ impl<'a> GuardedFs<'a> {
         })
     }
 
+    /// Re-derive what a write is about to land on, which may not exist yet.
+    ///
+    /// [`read`](GuardedIo::read) can simply canonicalize: a file it is about
+    /// to read is on disk or the call was a mistake. A write's target
+    /// frequently is not on disk — creating a file is most of what writing is
+    /// for — and `Fs::canonicalize` cannot resolve what is not there, so the
+    /// two cases are separated here rather than in every caller:
+    ///
+    /// - **The target exists.** It is judged as what it *is*. A final
+    ///   component that is a symlink out of the workspace resolves to its
+    ///   target, so the permit is shown the file the bytes would actually
+    ///   reach — the same rule `Fs::scan` follows when it reports a symlinked
+    ///   file under its canonical name.
+    /// - **It does not.** The *parent* is resolved and the final component
+    ///   appended, so every component but the last is still chased. The last
+    ///   is the one a creating write must be allowed not to find.
+    ///
+    /// A missing parent stays `NotFound`, naming the parent. A write is not a
+    /// `mkdir -p`: creating directories is an effect the call did not
+    /// describe and the permit was never shown.
+    fn write_target(&self, path: &CanonPath) -> Result<CanonPath, IoDenied> {
+        match self.fs.canonicalize(path.as_path()) {
+            Ok(fresh) => Ok(fresh),
+            Err(FsError::NotFound { .. }) => {
+                let named = path.as_path();
+                let (Some(parent), Some(name)) = (named.parent(), named.file_name()) else {
+                    // A path that is a root, or ends in `..`. There is no file
+                    // for a write to name here, and the error says which path
+                    // was refused rather than which component was missing.
+                    return Err(FsError::NotAFile { path: path.clone() }.into());
+                };
+                let parent = self.fs.canonicalize(parent)?;
+                Ok(CanonPath::new(parent.as_path().join(name)))
+            }
+            Err(other) => Err(other.into()),
+        }
+    }
+
     /// Check every entry a traversal yielded, and fail the whole operation if
     /// any of them left the authorised subtree.
     ///
@@ -245,8 +283,9 @@ impl<'a> GuardedFs<'a> {
 impl GuardedIo for GuardedFs<'_> {
     fn write(&self, path: &CanonPath, bytes: &[u8]) -> Result<(), IoDenied> {
         // Re-resolve now, at use time, rather than trusting `path` — see
-        // the trait doc comment.
-        let fresh = self.fs.canonicalize(path.as_path())?;
+        // the trait doc comment. `write_target` and not `canonicalize`,
+        // because a write's target is allowed not to exist yet.
+        let fresh = self.write_target(path)?;
         self.permit.allows_write(&fresh)?;
         Ok(self.fs.write(&fresh, bytes)?)
     }

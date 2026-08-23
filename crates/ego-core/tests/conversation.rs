@@ -446,6 +446,55 @@ mod rebuild {
         );
     }
 
+    /// `POTENTIALS.md` P21, answered at the only cost worth paying.
+    ///
+    /// The synthesized answer is the harness talking to a model that is about
+    /// to decide whether to repeat a call nobody knows the outcome of, and
+    /// with `write` in the registry that call may have already landed bytes.
+    /// Saying only "it did not complete" invites the repeat, and for a plain
+    /// replace the target is now the old contents, the new contents, or a
+    /// truncated file — three states the model cannot distinguish without
+    /// looking.
+    ///
+    /// So the text says to look. That is the whole answer: **no
+    /// `safe_to_repeat` on `ToolDescriptor`, no per-dispatch delivery
+    /// certainty, no automatic replay and no automatic suppression** — the
+    /// generic machinery P21 sketches is built when something needs to make a
+    /// decision without a model in the loop, and here there is one. Pi
+    /// synthesizes "No result provided" and never replays; Hermes strips
+    /// dangling call tails on resume and forbids re-execution. Both leave the
+    /// judgement where this does.
+    ///
+    /// Pinned because it is a behavioural contract and not a string: a message
+    /// that stops telling the model to check is a message that has silently
+    /// changed what a resumed session does after a write.
+    #[test]
+    fn the_answer_to_a_torn_call_tells_the_model_to_look_before_repeating_it() {
+        let mut log = Log::new();
+        log.item(prompt("write it"));
+        log.item(started(Some("call_a")));
+
+        let (conversation, _) = conversation_from(&log.state).unwrap();
+        let [ContentBlock::ToolResult { output, .. }] =
+            &conversation.messages().last().unwrap().content[..]
+        else {
+            panic!("the synthesized answer is one tool result");
+        };
+
+        assert!(
+            output.contains("did not complete"),
+            "it still has to say what happened: {output}"
+        );
+        assert!(
+            output.contains("may already have"),
+            "a torn call may have taken effect, and the model has to be told: {output}"
+        );
+        assert!(
+            output.to_lowercase().contains("check"),
+            "and told what to do about it before repeating the call: {output}"
+        );
+    }
+
     /// A record written before `call_id` was persisted. The id is the
     /// provider's and unguessable, so this call can never be sent — and,
     /// because a call must appear before its answer, neither can anything

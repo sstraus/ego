@@ -1,4 +1,4 @@
-//! The three read-only builtins: `read`, `glob` and `grep`.
+//! The builtins: `read`, `glob`, `grep` and `write`.
 //!
 //! See `docs/decisions/2026-08-21-reading-without-reading-everything.md` and
 //! `docs/decisions/2026-08-21-three-tools-on-a-real-filesystem.md`. Each
@@ -7,16 +7,24 @@
 //! root would be handed the right to read every byte under it, having asked
 //! only for names.
 //!
-//! None of the three holds an `Fs`. They receive a `GuardedIo`, which
-//! re-resolves and re-checks every path before touching it.
+//! `write` is the fourth and it is not one more of the same. It is the only
+//! one that produces a *mutating* op, and until it existed `ModeApprover`
+//! approved every call this workspace could make in every mode — so the five
+//! modes, the `plan` floor and every rule with a `write(...)` head were
+//! machinery with no reachable input (`docs/13-effect-tools.md` §0).
+//!
+//! None of them holds an `Fs`. They receive a `GuardedIo`, which re-resolves
+//! and re-checks every path before touching it.
 
 mod glob;
 mod grep;
 mod read;
+mod write;
 
 pub use glob::{GlobParams, GlobTool};
 pub use grep::{GrepParams, GrepTool};
 pub use read::{ReadParams, ReadTool};
+pub use write::{WriteParams, WriteTool};
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -32,12 +40,13 @@ use ego_core::permit::{
 /// never consulted when deciding whether something is in scope.
 pub const SKIP_DIRS: [&str; 3] = [".git", "target", "node_modules"];
 
-/// The three, ready to hand to `Tools::new`.
+/// The four, ready to hand to `Tools::new`.
 pub fn builtins() -> Vec<Arc<dyn Tool>> {
     vec![
         Arc::new(Typed(ReadTool)),
         Arc::new(Typed(GlobTool)),
         Arc::new(Typed(GrepTool)),
+        Arc::new(Typed(WriteTool)),
     ]
 }
 
@@ -56,6 +65,42 @@ fn resolve(ctx: &PrepareCtx<'_>, path: &str) -> Result<CanonPath, ToolError> {
         ctx.cwd.as_path().join(named)
     };
     Ok(ctx.resolver.canonicalize(&joined)?)
+}
+
+/// Resolve a path a tool is about to *create or replace*.
+///
+/// [`resolve`] is right for every tool that reads, and its failure on a
+/// missing file is a feature there. A write inverts it: the ordinary case is
+/// a file that is not on disk yet, so the parent is resolved and the final
+/// component appended, and only a missing *parent* is an error.
+///
+/// The distinction is the same one [`GuardedFs::write_target`] draws at
+/// execute time, and it is drawn twice on purpose rather than shared: this
+/// one runs before any permit exists and produces the path policy will
+/// *judge*, and that one runs after and produces the path the bytes will
+/// *reach*. A single helper would have to belong to one of those two moments,
+/// and the seam re-deriving the target independently of what a tool claimed
+/// is the whole reason the seam is there.
+fn resolve_target(ctx: &PrepareCtx<'_>, path: &str) -> Result<CanonPath, ToolError> {
+    let named = Path::new(path);
+    let joined: PathBuf = if named.is_absolute() {
+        named.to_path_buf()
+    } else {
+        ctx.cwd.as_path().join(named)
+    };
+    // Already there: resolve it whole, so a symlinked target is judged as
+    // the file the bytes would actually reach.
+    if let Ok(existing) = ctx.resolver.canonicalize(&joined) {
+        return Ok(existing);
+    }
+    let (Some(parent), Some(name)) = (joined.parent(), joined.file_name()) else {
+        return Err(ToolError::InvalidParams(format!(
+            "{path} does not name a file"
+        )));
+    };
+    Ok(CanonPath::new(
+        ctx.resolver.canonicalize(parent)?.as_path().join(name),
+    ))
 }
 
 /// The root a traversal tool was pointed at, defaulting to the working
