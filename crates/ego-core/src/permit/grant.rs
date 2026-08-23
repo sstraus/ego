@@ -1240,7 +1240,7 @@ mod tests {
     use super::*;
     use crate::permit::fake::{FakeFs, FakeWriteTool};
     use crate::permit::{
-        Fs, GuardedFs, GuardedIo, IoDenied, Op, PrepareCtx, Tool, ToolError, Typed,
+        Change, Fs, GuardedFs, GuardedIo, IoDenied, Op, PrepareCtx, Tool, ToolError, Typed,
     };
 
     fn prepare_ctx<'a>(fs: &'a FakeFs) -> PrepareCtx<'a> {
@@ -1291,7 +1291,7 @@ mod tests {
             tool: "edit".to_string(),
             ops: vec![Op::Write {
                 path: CanonPath::new(path),
-                contents: b"whatever".to_vec(),
+                change: Change::Whole(b"whatever".to_vec()),
             }],
         }
     }
@@ -1426,7 +1426,7 @@ mod tests {
             call.ops,
             vec![Op::Write {
                 path: CanonPath::new("/ws/allowed/file.txt"),
-                contents: b"hi".to_vec(),
+                change: Change::Whole(b"hi".to_vec()),
             }]
         );
 

@@ -7,9 +7,9 @@ use std::path::Path;
 use ego_core::config::{Mode, OriginSet, PermCfg, Ruleset, Source};
 use ego_core::permit::rule::Rule;
 use ego_core::permit::{
-    Authority, Authorized, CanonPath, Classification, EntryKind, Escalation, FsError, GuardedFs,
-    GuardedIo, IoDenied, Op, OpName, Pending, PermitDenied, PolicyDenied, PolicyEngine, PrepareCtx,
-    PreparedCall, Resolution, ScanLimits, ScanRequest, Tool, ToolError, Typed,
+    Authority, Authorized, CanonPath, Change, Classification, EntryKind, Escalation, FsError,
+    GuardedFs, GuardedIo, IoDenied, Op, OpName, Pending, PermitDenied, PolicyDenied, PolicyEngine,
+    PrepareCtx, PreparedCall, Resolution, ScanLimits, ScanRequest, Tool, ToolError, Typed,
 };
 use futures::executor::block_on;
 use serde_json::json;
@@ -151,7 +151,7 @@ mod permit {
             tool: "edit".to_string(),
             ops: vec![Op::Write {
                 path: CanonPath::new(path),
-                contents: b"pwned".to_vec(),
+                change: Change::Whole(b"pwned".to_vec()),
             }],
         }
     }
@@ -527,7 +527,7 @@ mod permit {
             ops: vec![
                 Op::Write {
                     path: CanonPath::new("/ws/src/main.rs"),
-                    contents: b"harmless".to_vec(),
+                    change: Change::Whole(b"harmless".to_vec()),
                 },
                 Op::Read {
                     path: CanonPath::new("/etc/shadow"),
@@ -588,7 +588,7 @@ mod permit {
                 },
                 Op::Write {
                     path: CanonPath::new("/ws/src/main.rs"),
-                    contents: b"pwned".to_vec(),
+                    change: Change::Whole(b"pwned".to_vec()),
                 },
             ],
         };
@@ -1229,7 +1229,7 @@ mod permit {
             },
             Kind::Write => Op::Write {
                 path: CanonPath::new(path),
-                contents: b"x".to_vec(),
+                change: Change::Whole(b"x".to_vec()),
             },
         }
     }

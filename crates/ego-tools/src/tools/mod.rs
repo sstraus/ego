@@ -1,4 +1,4 @@
-//! The builtins: `read`, `glob`, `grep` and `write`.
+//! The builtins: `read`, `glob`, `grep`, `write` and `edit`.
 //!
 //! See `docs/decisions/2026-08-21-reading-without-reading-everything.md` and
 //! `docs/decisions/2026-08-21-three-tools-on-a-real-filesystem.md`. Each
@@ -13,14 +13,23 @@
 //! modes, the `plan` floor and every rule with a `write(...)` head were
 //! machinery with no reachable input (`docs/13-effect-tools.md` §0).
 //!
+//! `edit` is the fifth and it is also not one more of the same. It is the only
+//! one that prepares *two* operations for one call — a `Read` and a `Write` of
+//! the same file, because it genuinely performs both — so it is the first call
+//! in this tree that can observe that `classify` and `scope_of` treat a call's
+//! ops as a conjunction. Both were written that way for it and neither had ever
+//! been exercised.
+//!
 //! None of them holds an `Fs`. They receive a `GuardedIo`, which re-resolves
 //! and re-checks every path before touching it.
 
+mod edit;
 mod glob;
 mod grep;
 mod read;
 mod write;
 
+pub use edit::{EditParams, EditTool};
 pub use glob::{GlobParams, GlobTool};
 pub use grep::{GrepParams, GrepTool};
 pub use read::{ReadParams, ReadTool};
@@ -40,13 +49,14 @@ use ego_core::permit::{
 /// never consulted when deciding whether something is in scope.
 pub const SKIP_DIRS: [&str; 3] = [".git", "target", "node_modules"];
 
-/// The four, ready to hand to `Tools::new`.
+/// The five, ready to hand to `Tools::new`.
 pub fn builtins() -> Vec<Arc<dyn Tool>> {
     vec![
         Arc::new(Typed(ReadTool)),
         Arc::new(Typed(GlobTool)),
         Arc::new(Typed(GrepTool)),
         Arc::new(Typed(WriteTool)),
+        Arc::new(Typed(EditTool)),
     ]
 }
 

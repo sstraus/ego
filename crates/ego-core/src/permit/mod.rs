@@ -27,7 +27,7 @@ pub use grant::{
     PolicyDenied, PolicyEngine, Resolution,
 };
 pub use path::CanonPath;
-pub use prepared_call::{Op, OpName, PreparedCall};
+pub use prepared_call::{Change, Op, OpName, PreparedCall};
 pub use scan::{Entry, EntryKind, Found, LineMatcher, Match, Scan, ScanLimits, ScanRequest};
 pub use scope::Scope;
 pub use tool::{PrepareCtx, Tool, ToolDescriptor, ToolError, ToolResult, Typed, TypedTool};

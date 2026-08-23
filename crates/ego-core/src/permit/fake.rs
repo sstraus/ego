@@ -17,7 +17,7 @@ use serde::Deserialize;
 
 use super::fs::{Fs, FsError, GuardedIo, PathResolver};
 use super::path::CanonPath;
-use super::prepared_call::{Op, PreparedCall};
+use super::prepared_call::{Change, Op, PreparedCall};
 use super::scan::{Entry, EntryKind, Scan, ScanRequest};
 use super::tool::{PrepareCtx, ToolError, ToolResult, TypedTool};
 
@@ -247,7 +247,7 @@ impl TypedTool for FakeWriteTool {
             tool: self.name().to_string(),
             ops: vec![Op::Write {
                 path: resolved,
-                contents: params.contents.into_bytes(),
+                change: Change::Whole(params.contents.into_bytes()),
             }],
         })
     }
@@ -258,8 +258,14 @@ impl TypedTool for FakeWriteTool {
         io: &'a dyn GuardedIo,
     ) -> BoxFuture<'a, Result<ToolResult, ToolError>> {
         Box::pin(async move {
-            let Some(Op::Write { path, contents }) = call.ops.into_iter().next() else {
-                return Err(ToolError::InvalidParams("expected one Write op".into()));
+            let Some(Op::Write {
+                path,
+                change: Change::Whole(contents),
+            }) = call.ops.into_iter().next()
+            else {
+                return Err(ToolError::InvalidParams(
+                    "expected one whole Write op".into(),
+                ));
             };
             io.write(&path, &contents)?;
             Ok(ToolResult {

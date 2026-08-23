@@ -1,6 +1,8 @@
 //! `write`: one named file, replaced whole, through the guarded seam.
 
-use ego_core::permit::{GuardedIo, Op, PrepareCtx, PreparedCall, ToolError, ToolResult, TypedTool};
+use ego_core::permit::{
+    Change, GuardedIo, Op, PrepareCtx, PreparedCall, ToolError, ToolResult, TypedTool,
+};
 use futures::future::BoxFuture;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -19,13 +21,12 @@ pub struct WriteParams {
 
 /// Replaces one file's contents. The first builtin that can do damage.
 ///
-/// **Whole-file, and that is the shape rather than a simplification.** A
-/// partial write — append, insert at a line — is an operation whose effect
-/// cannot be read off the call: `Op::Write` carries the bytes that will be on
-/// disk afterwards, and that is what makes a write something the permission
-/// system, and eventually a human, can be *shown*. An `edit` that changes a
-/// region is the next tool and needs a pre-image to be reviewable
-/// (`docs/13-effect-tools.md` Step C); it is not this one with an offset.
+/// **Whole-file, and that is the shape rather than a simplification.** This is
+/// the tool whose effect can be read off the call with nothing else known:
+/// [`Change::Whole`] carries the bytes that will be on disk afterwards, so what
+/// the permission system weighs — and what a human would be shown — is the
+/// content itself. `edit` is the tool for changing a region, and it pays for
+/// that with a `Change` whose result depends on the file it finds.
 pub struct WriteTool;
 
 impl TypedTool for WriteTool {
@@ -57,7 +58,7 @@ impl TypedTool for WriteTool {
                 // promise about it. A tool that kept its params and wrote
                 // those instead would be authorised for one thing and perform
                 // another.
-                contents: params.contents.into_bytes(),
+                change: Change::Whole(params.contents.into_bytes()),
             }],
         })
     }
@@ -68,7 +69,11 @@ impl TypedTool for WriteTool {
         io: &'a dyn GuardedIo,
     ) -> BoxFuture<'a, Result<ToolResult, ToolError>> {
         Box::pin(async move {
-            let Op::Write { path, contents } = only_op(call)? else {
+            let Op::Write {
+                path,
+                change: Change::Whole(contents),
+            } = only_op(call)?
+            else {
                 return Err(wrong_op(self.name()));
             };
             // The bytes come out of the authorised call, never out of the

@@ -213,7 +213,8 @@ pub enum EventKind {
     /// what is wanted, so nothing is lost by keeping the fields.
     PermissionRequested {
         /// The tool whose call raised the question. Not the whole
-        /// `PreparedCall`: `Op::Write` carries the bytes to be written, and a
+        /// `PreparedCall`: an `Op::Write` carries what will land — the whole
+        /// file for a `write`, the replacement text for an `edit` — and a
         /// durable audit record is the last place file contents belong.
         tool: String,
         /// Which step asked, about which operation.
