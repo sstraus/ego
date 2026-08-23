@@ -29,6 +29,7 @@ use ego_core::generator::capabilities::{
 use ego_core::generator::fake::FakeGenerator;
 use ego_core::generator::port::AiEvent;
 use ego_core::generator::types::{StopReason, ThinkingLevel};
+use ego_core::permit::rule::Head;
 use ego_core::permit::{
     Authority, Authorized, CanonPath, Classification, GuardedFs, GuardedIo, Op, OpName, Pending,
     PermitDenied, PolicyDenied, PolicyEngine, PrepareCtx, PreparedCall, Resolution, ScanRequest,
@@ -208,6 +209,84 @@ mod registration {
                 !descriptor.description.is_empty(),
                 "{} has no description",
                 descriptor.name
+            );
+        }
+    }
+
+    /// §6a's table, checked against the tools instead of against itself.
+    ///
+    /// `OPERATIONS` (`ego-core/src/permit/rule/rule/parse.rs`) says, per head,
+    /// whether this build produces operations of that shape — and an operator
+    /// who writes a head it says exists gets a rule that loads and matches
+    /// nothing, which the table's own doc calls the failure it is there to
+    /// prevent: they "cannot tell that apart from a boundary that works".
+    ///
+    /// **The table could not be wrong about `exec` and was wrong about
+    /// `write`**, and the reason is structural rather than careless. `exec`
+    /// waits on a tool nobody has written, so the entry and the absence were
+    /// authored together. `write` was declared to have operations because
+    /// `Op::Write` exists as a *variant* — and it does, with a matcher, a
+    /// scope arm and a `mutates()` arm — while no tool in the registry ever
+    /// constructs one. Nothing connected the two facts, because they live in
+    /// different crates: the table is in `ego-core` and the registry is in
+    /// `ego-tools`, which is the only place that can see both.
+    ///
+    /// So this test is here rather than beside the table, and it derives the
+    /// answer instead of restating it: every builtin is prepared with a call
+    /// it accepts, the operations it actually asks for are collected, and the
+    /// table is required to agree. A head marked available with no producer
+    /// fails, and so does the reverse.
+    #[test]
+    fn the_heads_this_build_says_it_enforces_are_the_ones_its_tools_ask_for() {
+        let ws = populated();
+        // One representative call per builtin. Not exhaustive over arguments
+        // — a tool that asked for a *different* op shape depending on its
+        // parameters would be a tool whose authority is unpredictable, which
+        // `mod rogue` is the place to catch.
+        let produced: Vec<OpName> = [
+            ("read", json!({ "path": "src/main.rs" })),
+            ("glob", json!({ "pattern": "src/**/*.rs" })),
+            ("grep", json!({ "query": "TODO", "path": "src" })),
+        ]
+        .into_iter()
+        .flat_map(|(name, params)| {
+            ws.prepare(name, params)
+                .unwrap_or_else(|err| panic!("{name} should prepare: {err}"))
+                .ops
+                .iter()
+                .map(Op::name)
+                .collect::<Vec<_>>()
+        })
+        .collect();
+
+        for (head, op) in [
+            (Head::Read, OpName::Read),
+            (Head::List, OpName::List),
+            (Head::Search, OpName::Search),
+            (Head::Write, OpName::Write),
+        ] {
+            let asked_for = produced.contains(&op);
+            let table_says_available = head.awaiting().is_none();
+            assert_eq!(
+                table_says_available,
+                asked_for,
+                "§6a's table says `{op}` operations {} in this build, and the \
+                 builtins {} one. A rule with that head would {}",
+                if table_says_available {
+                    "exist"
+                } else {
+                    "do not exist"
+                },
+                if asked_for {
+                    "ask for"
+                } else {
+                    "never ask for"
+                },
+                if table_says_available {
+                    "load and match nothing"
+                } else {
+                    "be refused although it would have matched"
+                },
             );
         }
     }

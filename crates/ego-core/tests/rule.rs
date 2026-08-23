@@ -645,6 +645,7 @@ fn rule_different_predicates_have_different_ids() {
 #[test]
 fn rule_an_unenforceable_head_still_parses_and_still_has_an_id() {
     for raw in [
+        "write(src/**)",
         "exec(git *)",
         "net(github.com)",
         "tool(github/create_issue)",
@@ -672,6 +673,7 @@ fn rule_an_unenforceable_head_still_parses_and_still_has_an_id() {
 #[test]
 fn rule_load_refuses_a_head_with_no_operations_and_parse_does_not() {
     for raw in [
+        "write(src/**)",
         "exec(git *)",
         "net(github.com)",
         "tool(github/create_issue)",
@@ -714,17 +716,20 @@ fn rule_the_refusal_says_which_rule_which_effect_and_what_is_missing() {
     assert!(said.contains("a shell tool"), "{said}");
 }
 
-/// The four heads that name operations this build produces are not refused.
-/// The control that stops the test above from passing because `load` refuses
+/// The heads that name operations this build produces are not refused. The
+/// control that stops the test above from passing because `load` refuses
 /// everything.
+///
+/// **`write(src/**)` used to be in this list and is not any more.** It was
+/// here because `Op::Write` exists as a variant, not because anything
+/// constructs one — no builtin does — so a stored `write(...)` rule loaded and
+/// matched nothing, which is the failure §6a exists to prevent. What binds
+/// this list to reality now is
+/// `ego-tools/tests/tools.rs::the_heads_this_build_says_it_enforces_are_the_ones_its_tools_ask_for`,
+/// which derives the answer from the registry rather than restating it here.
 #[test]
 fn rule_load_admits_every_head_that_names_an_operation_that_exists() {
-    for raw in [
-        "read(src/**)",
-        "write(src/**)",
-        "list(src)",
-        "search(src/**)",
-    ] {
+    for raw in ["read(src/**)", "list(src)", "search(src/**)"] {
         assert_eq!(
             parse(raw).head().awaiting(),
             None,

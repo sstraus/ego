@@ -248,8 +248,25 @@ mod permit {
         )
     }
 
+    /// `parse`, not `load`, and the difference is the whole reason these
+    /// tests can say anything about `write`.
+    ///
+    /// `load` answers "may an operator store this today", and its §6a table
+    /// now says no for `write`: no tool in the registry constructs an
+    /// `Op::Write`, so a stored `write(...)` rule would match nothing and be
+    /// indistinguishable from a boundary that works. `parse` answers "is this
+    /// a sentence in the published grammar", which `write(**)` is and always
+    /// was.
+    ///
+    /// These tests are about the *engine* — the plan floor at step 2, the
+    /// allow list at step 3 — and the engine is asked about calls a
+    /// `PreparedCall` built here supplies. Its arithmetic over a mutating op
+    /// is real, testable and untouched by which tools happen to exist, and it
+    /// is exactly what would break silently on the day a write tool lands if
+    /// nothing exercised it in the meantime. So the rules are parsed rather
+    /// than loaded, and the coverage stays.
     fn rule(raw: &str) -> Rule {
-        Rule::load(raw).unwrap_or_else(|err| panic!("{raw} is a rule this build enforces: {err}"))
+        Rule::parse(raw).unwrap_or_else(|err| panic!("{raw} is a sentence in the grammar: {err}"))
     }
 
     #[test]

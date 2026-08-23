@@ -79,7 +79,14 @@ impl Head {
 /// enforceability rather than a false one about grammar.
 const OPERATIONS: &[(Head, Option<&str>)] = &[
     (Head::Read, None),
-    (Head::Write, None),
+    // Not `None`, though `Op::Write` exists as a variant with a matcher, a
+    // scope arm and a `mutates()` arm. A *variant* is not an operation: no
+    // tool in the registry constructs one, so a `write(...)` rule loaded and
+    // matched nothing — the vacuous boundary two paragraphs up, which the
+    // table was declaring impossible while containing it. Bound to the
+    // registry by `ego-tools/tests/tools.rs`, the only crate that can see
+    // both ends.
+    (Head::Write, Some("a tool that writes files")),
     (Head::List, None),
     (Head::Search, None),
     (Head::Exec, Some("a shell tool")),
