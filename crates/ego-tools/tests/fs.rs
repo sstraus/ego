@@ -225,6 +225,163 @@ mod reading {
     }
 }
 
+/// `Fs::write`, and the reason it is still a plain in-place replace.
+///
+/// **Every test here passes against `fs::write` and was written expecting not
+/// to.** They were the red half of a change that was going to make this a
+/// same-directory tmp-then-rename, which is what Hermes does
+/// (`docs/13-effect-tools.md` Step B) and what a reviewer recommended. They
+/// went green immediately, and that is the finding rather than a wasted
+/// afternoon.
+///
+/// The property an atomic replace buys — a concurrent reader never observes a
+/// half-written file — cannot be tested here: winning that race needs a reader
+/// scheduled against the writer, and a test that wins it by luck fails on a
+/// loaded machine. Everything that *is* observable already holds, and holds
+/// for free: truncating in place keeps the inode, so the mode survives with no
+/// code to preserve it; there is no scratch file, so none can be left behind
+/// or collide with a real sibling; and a failure creates nothing. A rename
+/// would have to re-earn all three, and would have three new ways to lose
+/// them — which is what the reviewer's own list of failure modes was.
+///
+/// So this module is a **guard rather than a specification**. It pins what
+/// this build does today so that anyone who does introduce a scratch file has
+/// to keep it: not leave one behind, not take a name a repository can already
+/// contain (`a.txt.tmp` is a legitimate file, and the permit covers `a.txt`),
+/// and not hand the target the scratch file's mode. Until then the honest
+/// statement of the bound is in Step B: a torn write leaves a truncated file,
+/// which is also what Codex's `apply_patch` does and admits in its own source.
+mod replacing {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn mode_of(at: &Path) -> u32 {
+        fs::metadata(at).expect("it is there").permissions().mode() & 0o777
+    }
+
+    #[test]
+    fn a_replace_leaves_the_new_bytes_and_nothing_beside_them() {
+        // The scratch file is an implementation detail of atomicity and must
+        // not survive as one: a `write` that leaves `main.rs.tmp` in a source
+        // tree has added a file nobody asked for, to a directory the permit
+        // authorised one path in.
+        let tree = Tree::new();
+        let at = tree.file("src/main.rs", "old\n");
+        let os = OsFs;
+
+        os.write(&CanonPath::new(&at), b"new\n")
+            .expect("the file is writable");
+
+        assert_eq!(fs::read_to_string(&at).unwrap(), "new\n");
+        let mut left: Vec<String> = fs::read_dir(tree.path("src"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        assert_eq!(left, ["main.rs"], "the directory gained nothing");
+    }
+
+    #[test]
+    fn a_replace_does_not_disturb_a_sibling_whose_name_a_scratch_file_would_take() {
+        // The defect a deterministic `<target>.tmp` has, and the reason
+        // `StoreIo::replace_atomic` was not reused here: `a.txt.tmp` is a
+        // legitimate name a repository can contain, and the permit covers
+        // `a.txt` and nothing else. Truncating the sibling would be an effect
+        // on a path policy never saw.
+        let tree = Tree::new();
+        let target = tree.file("a.txt", "old\n");
+        let sibling = tree.file("a.txt.tmp", "somebody else's file\n");
+        let os = OsFs;
+
+        os.write(&CanonPath::new(&target), b"new\n")
+            .expect("the file is writable");
+
+        assert_eq!(fs::read_to_string(&target).unwrap(), "new\n");
+        assert_eq!(
+            fs::read_to_string(&sibling).unwrap(),
+            "somebody else's file\n",
+            "the scratch name may not be one a real file can hold"
+        );
+    }
+
+    #[test]
+    fn a_replace_keeps_the_mode_the_file_already_had() {
+        // An executable that stops being executable because it was edited is
+        // a broken build, and the model has no way to know it happened. A
+        // rename brings the *scratch* file's mode with it, so preserving this
+        // is work rather than the default.
+        let tree = Tree::new();
+        let at = tree.file("run.sh", "#!/bin/sh\necho old\n");
+        set_mode(&at, 0o755);
+        let os = OsFs;
+
+        os.write(&CanonPath::new(&at), b"#!/bin/sh\necho new\n")
+            .expect("the file is writable");
+
+        assert_eq!(mode_of(&at), 0o755, "the executable bit survived the edit");
+    }
+
+    #[test]
+    fn a_created_file_is_readable_and_writable_by_its_owner() {
+        // Nothing to preserve, so this pins the floor rather than a
+        // preservation rule: a file the tool just created that the tool
+        // cannot read back is useless to the next call.
+        let tree = Tree::new();
+        let at = tree.path("fresh.txt");
+        let os = OsFs;
+
+        os.write(&CanonPath::new(&at), b"hello\n")
+            .expect("the parent exists");
+
+        assert_eq!(fs::read_to_string(&at).unwrap(), "hello\n");
+        assert_eq!(mode_of(&at) & 0o600, 0o600, "got {:o}", mode_of(&at));
+    }
+
+    #[test]
+    fn a_write_whose_parent_is_missing_fails_and_creates_no_directories() {
+        let tree = Tree::new();
+        let os = OsFs;
+
+        let err = os
+            .write(&CanonPath::new(tree.path("nowhere/deep/f.txt")), b"hi")
+            .expect_err("there is no directory to write into");
+
+        assert!(
+            matches!(err, FsError::NotFound { .. }),
+            "expected NotFound, got {err:?}"
+        );
+        assert!(
+            !tree.path("nowhere").exists(),
+            "a failed write invents no directories"
+        );
+    }
+
+    #[test]
+    fn a_failed_write_leaves_no_scratch_file_behind() {
+        // The cleanup path, reached by making the directory unwritable so the
+        // scratch file cannot be created in the first place. A tmp file left
+        // by every failure turns a read-only directory into one that slowly
+        // fills up.
+        let tree = Tree::new();
+        let dir = tree.dir("locked");
+        let at = dir.join("f.txt");
+        deny_all(&dir);
+        let os = OsFs;
+
+        let err = os
+            .write(&CanonPath::new(&at), b"hi")
+            .expect_err("no access");
+
+        allow_all(&dir);
+        assert!(matches!(err, FsError::Io { .. }), "got {err:?}");
+        assert_eq!(
+            fs::read_dir(&dir).unwrap().count(),
+            0,
+            "nothing was left in the directory"
+        );
+    }
+}
+
 mod walking {
     use super::*;
 
