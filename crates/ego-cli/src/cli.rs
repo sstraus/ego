@@ -114,6 +114,17 @@ const UNAVAILABLE: &[Unavailable] = &[
         waiting_on: "the MCP client",
     },
     Unavailable {
+        flags: &["-v", "--verbose"],
+        waiting_on: "a decision about what it shows. Every other entry here \
+                     waits on a subsystem; this one waits on a meaning. \
+                     `CLI.md` §4.7 says exactly what `-q` suppresses and \
+                     nothing says what `-v` adds — and the obvious answer, \
+                     turning up `tracing`, stops being obvious at R12: this \
+                     build installs no subscriber, and adding one puts a \
+                     second writer on the stream the marks and the \
+                     notification already own",
+    },
+    Unavailable {
         flags: &["--retry", "--fallback"],
         waiting_on: "a retry seam. A generation owns a reservation for its \
                      whole life, so re-issuing one is a change to the attempt \
@@ -399,7 +410,6 @@ pub struct Args {
     pub set: Vec<String>,
     pub profile: Option<String>,
     pub quiet: bool,
-    pub verbose: bool,
     pub no_color: bool,
 }
 
@@ -607,9 +617,6 @@ struct Flags {
 
     #[arg(short = 'q', long)]
     quiet: bool,
-
-    #[arg(short = 'v', long)]
-    verbose: bool,
 
     #[arg(long)]
     no_color: bool,
@@ -977,7 +984,6 @@ fn into_args(command: RunCommand) -> Result<Args, UsageError> {
         set: flags.set,
         profile: flags.profile,
         quiet: flags.quiet,
-        verbose: flags.verbose,
         no_color: flags.no_color,
     })
 }

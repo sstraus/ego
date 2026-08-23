@@ -967,6 +967,60 @@ fn a_flag_rule_that_is_not_a_rule_is_refused_before_the_run() {
     );
 }
 
+/// The third instance of `--no-color`'s defect, found by auditing for it.
+///
+/// `-v` sits in the same `CLI.md` §3.1 row as `--no-color`, which spends four
+/// lines explaining that it was marked **yes** while being parsed and read by
+/// nothing. `-v` was beside it, still parsed and still read by nothing:
+/// `Args::verbose` has no reader anywhere in the workspace.
+///
+/// It is refused rather than implemented, and the distinction from `--sandbox`
+/// is worth having. `--sandbox` waits on a subsystem somebody has designed.
+/// `-v` waits on a **decision**: §4.7 says exactly what `-q` suppresses and
+/// nothing anywhere says what `-v` adds. The obvious candidate — turning up
+/// `tracing`, which the whole workspace is already instrumented for — is not
+/// obvious at all once R12 is read, because this build installs no subscriber
+/// and adding one puts a second writer on a stream `note` and `Announce`
+/// already own.
+#[test]
+fn the_flag_whose_meaning_was_never_decided_is_refused_by_name() {
+    for spelling in ["-v", "--verbose"] {
+        let finished = Ego::nowhere()
+            .args(["--model", "ollama/qwen3", "--ephemeral", spelling, "Ask"])
+            .run();
+
+        assert_eq!(
+            finished.code,
+            Some(2),
+            "`{spelling}` was accepted: {}",
+            finished.stderr
+        );
+        // The spelling the operator typed, not the canonical one: a refusal
+        // that renames the flag makes them go looking for something they did
+        // not write.
+        assert!(
+            finished.stderr.contains(spelling) && finished.stderr.contains("waiting on"),
+            "`{spelling}` must be refused by name and say what it waits on: {}",
+            finished.stderr
+        );
+    }
+}
+
+/// The control: `-q`, its neighbour in the same row, still works.
+///
+/// Without it the test above passes on a build that refuses both, and the
+/// refusal is proved to have been aimed at nothing in particular.
+#[test]
+fn the_neighbour_in_the_same_row_still_does_its_job() {
+    let stub = Stub::start(Plan::default());
+    let finished = Ego::against(&stub)
+        .args(["--model", "ollama/qwen3", "--ephemeral", "-q", "Ask"])
+        .run();
+
+    assert_eq!(finished.code, Some(0), "stderr: {}", finished.stderr);
+    assert_eq!(finished.stdout.trim(), "It is done.");
+}
+
 /// §6a: a head this build cannot enforce is refused **by name**, from a flag
 /// as from a file. Not a parse error and not a silent non-match — an
 /// `exec(...)` rule that parsed and never matched would be the same defect as

@@ -148,7 +148,6 @@ impl Host {
             set: Vec::new(),
             profile: None,
             quiet: false,
-            verbose: false,
             no_color: false,
         }
     }
