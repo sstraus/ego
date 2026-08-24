@@ -551,12 +551,19 @@ impl JsonlStore {
     /// comment for why this store cannot populate the latter two from an
     /// `append` call alone) and updating `updated` to `ev`'s envelope
     /// timestamp.
-    fn write_manifest(&self, id: &SessionId, ev: &DomainEvent) -> Result<(), StoreError> {
+    fn write_manifest(
+        &self,
+        id: &SessionId,
+        ev: &DomainEvent,
+        is_new_session: bool,
+    ) -> Result<(), StoreError> {
         let previous = self.read_manifest(id)?;
         // A missing cache is not evidence of an empty catalogue. Consult the
-        // current authoritative log once while recreating it; ordinary
-        // appends with a manifest present stay O(1).
-        let log_facts = if previous.is_none() {
+        // current authoritative log once while recreating it for an existing
+        // session; a newly-created session has no earlier facts to recover,
+        // and reading back the header and event just appended would turn its
+        // first append into an unnecessary whole-log read.
+        let log_facts = if previous.is_none() && !is_new_session {
             self.io
                 .read(&self.log_path(id))?
                 .as_deref()
@@ -639,7 +646,7 @@ impl SessionStore for JsonlStore {
             || is_execution_observation
             || is_hook_admission
         {
-            self.write_manifest(id, ev)?;
+            self.write_manifest(id, ev, is_new_session)?;
         }
 
         Ok(())
