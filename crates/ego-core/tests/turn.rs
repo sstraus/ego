@@ -5,10 +5,10 @@
 //! `plans/m0b-vertical-slice.md` Step 10.
 
 use std::cell::RefCell;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 use std::path::Path;
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use ego_core::budget::{BudgetGate, Metering, PricingQuote, ResolvedRates, SettlementSource};
 use ego_core::config::{Mode, PermCfg, Ruleset, Source, SystemPrompt};
@@ -33,8 +33,8 @@ use ego_core::generator::types::{
 };
 use ego_core::permit::rule::Rule;
 use ego_core::permit::{
-    Authority, CanonPath, Fs, GuardedIo, Op, PolicyEngine, PrepareCtx, PreparedCall, ToolError,
-    ToolResult, Typed, TypedTool,
+    Authority, CanonPath, Fs, GuardedIo, HumanApprover, Op, PermissionDecision, PermissionRequest,
+    PolicyEngine, PrepareCtx, PreparedCall, ToolError, ToolResult, Typed, TypedTool,
 };
 use ego_core::public::PublicEvent;
 use ego_core::run::RunTermination;
@@ -48,6 +48,7 @@ use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 use schemars::JsonSchema;
 use serde::Deserialize;
+use serde_json::json;
 
 mod common;
 
@@ -64,6 +65,7 @@ mod turn {
         appends: AtomicUsize,
         /// Fail the append with this 1-based index. `0` never fails.
         fail_at: AtomicUsize,
+        permission_requested: Arc<AtomicBool>,
     }
 
     impl MemStore {
@@ -92,6 +94,9 @@ mod turn {
                 return Err(StoreError::Io(std::io::Error::other("the disk said no")));
             }
             self.events.lock().unwrap().push(ev.clone());
+            if matches!(ev.kind, EventKind::PermissionRequested { .. }) {
+                self.permission_requested.store(true, Ordering::SeqCst);
+            }
             Ok(())
         }
 
@@ -130,6 +135,55 @@ mod turn {
         /// Cancel once the stream has yielded this many events.
         after: usize,
         token: CancelToken,
+    }
+
+    /// A human seat whose answers are explicit and finite. Exhausting the
+    /// script is a test defect: production EOF is represented by an explicit
+    /// fail-closed `Deny`, never by the approver inventing an answer.
+    #[derive(Debug)]
+    struct ScriptedHuman {
+        answers: Mutex<VecDeque<PermissionDecision>>,
+    }
+
+    #[derive(Debug)]
+    struct RequestObservingHuman {
+        permission_requested: Arc<AtomicBool>,
+    }
+
+    impl HumanApprover for RequestObservingHuman {
+        fn decide<'a>(
+            &'a self,
+            _request: &'a PermissionRequest,
+        ) -> BoxFuture<'a, PermissionDecision> {
+            assert!(
+                self.permission_requested.load(Ordering::SeqCst),
+                "PermissionRequested must be durable before the human is called"
+            );
+            Box::pin(futures::future::ready(PermissionDecision::Allow))
+        }
+    }
+
+    impl ScriptedHuman {
+        fn new(answers: impl IntoIterator<Item = PermissionDecision>) -> Self {
+            Self {
+                answers: Mutex::new(answers.into_iter().collect()),
+            }
+        }
+    }
+
+    impl HumanApprover for ScriptedHuman {
+        fn decide<'a>(
+            &'a self,
+            _request: &'a PermissionRequest,
+        ) -> BoxFuture<'a, PermissionDecision> {
+            let answer = self
+                .answers
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("the test supplied one human answer per question");
+            Box::pin(futures::future::ready(answer))
+        }
     }
 
     impl Generator for CancellingGenerator {
@@ -338,6 +392,52 @@ mod turn {
                     },
                     Source::Project,
                 ),
+            );
+            self
+        }
+
+        fn with_human(mut self, answers: impl IntoIterator<Item = PermissionDecision>) -> Self {
+            self.policy = PolicyEngine::with_human(
+                CanonPath::new("/ws"),
+                Mode::Default,
+                Ruleset::default(),
+                Arc::new(ScriptedHuman::new(answers)),
+            );
+            self
+        }
+
+        fn with_request_observing_human(mut self) -> Self {
+            self.policy = PolicyEngine::with_human(
+                CanonPath::new("/ws"),
+                Mode::Default,
+                Ruleset::default(),
+                Arc::new(RequestObservingHuman {
+                    permission_requested: Arc::clone(&self.store.permission_requested),
+                }),
+            );
+            self
+        }
+
+        fn with_human_and_rules(
+            mut self,
+            answers: impl IntoIterator<Item = PermissionDecision>,
+            deny: &[&str],
+        ) -> Self {
+            let denied = deny
+                .iter()
+                .map(|raw| Rule::load(raw).expect("a rule this build enforces"))
+                .collect();
+            self.policy = PolicyEngine::with_human(
+                CanonPath::new("/ws"),
+                Mode::Default,
+                Ruleset::from_layer(
+                    PermCfg {
+                        allow: Vec::new(),
+                        deny: denied,
+                    },
+                    Source::Project,
+                ),
+                Arc::new(ScriptedHuman::new(answers)),
             );
             self
         }
@@ -869,7 +969,9 @@ mod turn {
             .filter(|kind| {
                 matches!(
                     kind,
-                    EventKind::PermissionRequested { .. } | EventKind::PermissionDecided { .. }
+                    EventKind::PermissionRequested { .. }
+                        | EventKind::PermissionAmended { .. }
+                        | EventKind::PermissionDecided { .. }
                 )
             })
             .collect()
@@ -967,13 +1069,9 @@ mod turn {
         assert_eq!(by.as_ref(), Some(&Authority::Boundary));
     }
 
-    /// §7 gives `PermissionRequested` exactly one producer: `Resolution::Ask`
-    /// — a question this run raised and nobody here could answer.
-    ///
-    /// So it is not the other half of a pair. The three tests above each
-    /// append a decision and no request, and this one appends a request and
-    /// no decision, because the run ended without one. Reading the two events
-    /// as an open/close bracket would make every one of the four look broken.
+    /// The mode raised a canonical question and the headless run had no final
+    /// seat. The request is still durable even though no decision follows.
+    /// Silent rule/mode decisions above remain decisions without requests.
     #[test]
     fn a_question_nobody_can_answer_is_recorded_as_a_question_and_not_a_decision() {
         let fx = Fixture::new(vec![
@@ -1002,6 +1100,180 @@ mod turn {
             "default mode does not approve write /ws/out.txt on its own",
             "the escalation names the step that asked and the op it asked about"
         );
+    }
+
+    fn writing(path: &str, contents: &str) -> Vec<Vec<AiEvent>> {
+        vec![
+            vec![
+                AiEvent::ToolCall {
+                    call_id: "call_1".to_string(),
+                    name: "fake_write".to_string(),
+                    args: format!(r#"{{"path":"{path}","contents":"{contents}"}}"#),
+                },
+                AiEvent::Stop(StopReason::ToolUse),
+            ],
+            vec![AiEvent::Stop(StopReason::Stop)],
+        ]
+    }
+
+    #[test]
+    fn a_human_allow_mints_for_and_executes_the_exact_prepared_call() {
+        let fx = Fixture::new(writing("/ws/out.txt", "allowed"))
+            .with_write_tool()
+            .with_human([PermissionDecision::Allow]);
+
+        let (reason, ok, _) = run(&fx, SessionState::default(), "write it");
+
+        assert_eq!(reason, ExitReason::Completed);
+        assert!(ok);
+        assert_eq!(
+            fx.fs.read(&CanonPath::new("/ws/out.txt")).unwrap(),
+            b"allowed"
+        );
+        let recorded = permission_events(&fx);
+        assert!(matches!(
+            recorded.as_slice(),
+            [
+                EventKind::PermissionRequested { .. },
+                EventKind::PermissionDecided {
+                    allowed: true,
+                    by: Some(Authority::Party)
+                }
+            ]
+        ));
+    }
+
+    #[test]
+    fn a_permission_request_is_durable_before_the_human_is_called() {
+        let fx = Fixture::new(writing("/ws/out.txt", "allowed"))
+            .with_write_tool()
+            .with_request_observing_human();
+
+        let (reason, ok, _) = run(&fx, SessionState::default(), "write it");
+
+        assert_eq!(reason, ExitReason::Completed);
+        assert!(ok);
+        assert!(matches!(
+            permission_events(&fx).as_slice(),
+            [
+                EventKind::PermissionRequested { .. },
+                EventKind::PermissionDecided {
+                    allowed: true,
+                    by: Some(Authority::Party)
+                }
+            ]
+        ));
+    }
+
+    #[test]
+    fn a_human_deny_is_a_settled_refusal_and_executes_nothing() {
+        let fx = Fixture::new(writing("/ws/out.txt", "denied"))
+            .with_write_tool()
+            .with_human([PermissionDecision::Deny]);
+
+        let (reason, ok, _) = run(&fx, SessionState::default(), "write it");
+
+        assert_eq!(reason, ExitReason::PermissionRequired);
+        assert!(!ok);
+        assert!(fx.fs.read(&CanonPath::new("/ws/out.txt")).is_err());
+        let recorded = permission_events(&fx);
+        assert!(matches!(
+            recorded.as_slice(),
+            [
+                EventKind::PermissionRequested { .. },
+                EventKind::PermissionDecided {
+                    allowed: false,
+                    by: Some(Authority::Party)
+                }
+            ]
+        ));
+    }
+
+    #[test]
+    fn an_amendment_restarts_at_prepare_and_cannot_cross_the_workspace_boundary() {
+        let fx = Fixture::new(writing("/ws/out.txt", "original"))
+            .with_write_tool()
+            .with_human([PermissionDecision::Amend {
+                params: json!({"path": "/etc/ego-owned", "contents": "escaped"}),
+            }]);
+
+        let (reason, ok, _) = run(&fx, SessionState::default(), "write it");
+
+        assert_eq!(reason, ExitReason::PermissionRequired);
+        assert!(!ok);
+        assert!(fx.fs.read(&CanonPath::new("/ws/out.txt")).is_err());
+        assert!(fx.fs.read(&CanonPath::new("/etc/ego-owned")).is_err());
+        let recorded = permission_events(&fx);
+        assert!(matches!(
+            recorded.as_slice(),
+            [
+                EventKind::PermissionRequested { .. },
+                EventKind::PermissionAmended { .. },
+                EventKind::PermissionDecided {
+                    allowed: false,
+                    by: Some(Authority::Boundary)
+                }
+            ]
+        ));
+    }
+
+    #[test]
+    fn an_amendment_restarts_at_classification_and_cannot_cross_a_deny_rule() {
+        let fx = Fixture::new(writing("/ws/out.txt", "original"))
+            .with_write_tool()
+            .with_human_and_rules(
+                [PermissionDecision::Amend {
+                    params: json!({"path": "/ws/blocked.txt", "contents": "blocked"}),
+                }],
+                &["write(blocked.txt)"],
+            );
+
+        let (reason, ok, _) = run(&fx, SessionState::default(), "write it");
+
+        assert_eq!(reason, ExitReason::PermissionRequired);
+        assert!(!ok);
+        assert!(fx.fs.read(&CanonPath::new("/ws/out.txt")).is_err());
+        assert!(fx.fs.read(&CanonPath::new("/ws/blocked.txt")).is_err());
+        let recorded = permission_events(&fx);
+        assert!(matches!(
+            recorded.as_slice(),
+            [
+                EventKind::PermissionRequested { .. },
+                EventKind::PermissionAmended { .. },
+                EventKind::PermissionDecided {
+                    allowed: false,
+                    by: Some(Authority::Rules { .. })
+                }
+            ]
+        ));
+    }
+
+    #[test]
+    fn malformed_amended_params_are_tool_feedback_and_execute_nothing() {
+        let fx = Fixture::new(writing("/ws/out.txt", "original"))
+            .with_write_tool()
+            .with_human([PermissionDecision::Amend {
+                params: json!({"path": "/ws/out.txt"}),
+            }]);
+
+        let (reason, _, state) = run(&fx, SessionState::default(), "write it");
+
+        assert_eq!(reason, ExitReason::Completed);
+        assert!(fx.fs.read(&CanonPath::new("/ws/out.txt")).is_err());
+        let call = state
+            .items
+            .values()
+            .find(|item| item.kind == ItemKind::ToolCall)
+            .expect("the amended call still completes its tool item");
+        assert_eq!(call.ok, Some(false));
+        assert!(call.text.contains("contents"), "{}", call.text);
+        assert!(matches!(
+            permission_events(&fx).as_slice(),
+            [
+                EventKind::PermissionRequested { .. },
+                EventKind::PermissionAmended { .. }
+            ]
+        ));
     }
 
     /// The permission event gets an item of its own, and the tool call keeps

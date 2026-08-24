@@ -19,7 +19,7 @@ mod tool;
 /// `ModeApprover` is deliberately not re-exported: §6 step 5's implementation
 /// is chosen by `PolicyEngine::new` from the resolved mode, and a type a
 /// caller could name is one step from a caller that supplies one.
-pub use approver::{Approver, Verdict};
+pub use approver::{Approver, HumanApprover, PermissionDecision, Verdict};
 pub use authority::{Authority, RuleAuthority};
 pub use fs::{Fs, FsError, GuardedFs, GuardedIo, IoDenied, PathResolver};
 pub use grant::{

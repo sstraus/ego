@@ -2,20 +2,23 @@
 //!
 //! `docs/decisions/2026-08-21-a-permit-nobody-can-widen.md` §6 orders three of
 //! them: the mode at step 5, the judge at step 6, the human at step 7. One
-//! trait serves all three, because "may this proceed" is one question however
-//! it is answered — and the engine, not the party, decides what the answer
-//! means.
+//! trait serves the policy parties because "may this proceed" is one question
+//! however it is answered — and the engine, not the party, decides what the
+//! answer means. The human has a distinct port so the turn can durably record
+//! the request before awaiting that final seat.
 //!
-//! Only the mode exists in this build. It is deliberately *not* public: an
-//! [`Approver`] is a seam for implementations, never a lever for choosing
-//! whose authority applies, and the mode's authority comes from the config
-//! layers rather than from whoever holds the engine.
+//! The mode and a distinct optional human seat exist in this build. The mode
+//! implementation is deliberately *not* public: an [`Approver`] is a seam for
+//! policy parties, never a lever for choosing whose authority applies. The
+//! human has its own [`HumanApprover`] vocabulary because only a person may
+//! amend raw tool parameters.
 
 use futures::future::{self, BoxFuture};
+use serde_json::Value;
 use std::fmt;
 
 use super::authority::Authority;
-use super::grant::{Escalation, Pending};
+use super::grant::{Escalation, Pending, PermissionRequest};
 use crate::config::Mode;
 
 /// What a party answered about a [`Pending`].
@@ -42,10 +45,8 @@ pub enum Verdict {
     /// Refused. The call does not run and no later party is consulted.
     /// `by` names the party, for the same reason `Allow`'s does.
     ///
-    /// **No production approver returns this yet, and that is not a gap.**
-    /// The human seat at §6 step 7 is what produces it in anger, and that
-    /// seat belongs to regression case. `Deny` is here because it defines the
-    /// port rather than anticipating a feature: [`Approver`] models the
+    /// The human uses [`PermissionDecision::Deny`], not this policy-layer
+    /// verdict. `Deny` remains because it defines the port: [`Approver`] models the
     /// parties who may *answer* a question, and a party that cannot say no is
     /// an escalator, not an approver. Trimming the vocabulary to today's one
     /// implementation would make this trait describe [`ModeApprover`] instead
@@ -66,10 +67,9 @@ pub enum Verdict {
 
 /// A party that may answer a [`Pending`].
 ///
-/// Async, and that is not anticipation: the human at §6 step 7 is asked over
-/// a wire, and a sync signature is one regression case would have to break in
-/// order to implement. **That ACP implementation belongs to regression_case, not to
-/// this story.**
+/// Async because later policy parties such as the judge are model calls. The
+/// terminal human has a separate port below; an ACP human may also implement
+/// that port asynchronously without changing the engine contract.
 ///
 /// Takes the `Pending` by reference. An approver reads the question and
 /// answers it; it never consumes it, because deciding what becomes of the
@@ -77,6 +77,29 @@ pub enum Verdict {
 /// that turns a verdict into a permit or a refusal.
 pub trait Approver: fmt::Debug + Send + Sync {
     fn approve<'a>(&'a self, pending: &'a Pending) -> BoxFuture<'a, Verdict>;
+}
+
+/// What the final, human party answered.
+///
+/// Distinct from [`Verdict`]: policy parties may escalate but never rewrite a
+/// call; a human may amend but is the end of the chain and therefore cannot
+/// escalate. Raw parameters deliberately go back through `Tool::prepare` and
+/// the whole classifier before any permit can be minted.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PermissionDecision {
+    Allow,
+    Deny,
+    Amend { params: Value },
+}
+
+/// The final party in the permission order, called only after the turn has
+/// durably appended the canonical request.
+///
+/// This port cannot replace [`ModeApprover`]. `PolicyEngine::with_human`
+/// always constructs the mode from resolved config and installs this party
+/// after it.
+pub trait HumanApprover: fmt::Debug + Send + Sync {
+    fn decide<'a>(&'a self, request: &'a PermissionRequest) -> BoxFuture<'a, PermissionDecision>;
 }
 
 /// §6 step 5: the mode ceiling.

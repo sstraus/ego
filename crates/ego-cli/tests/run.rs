@@ -2333,14 +2333,16 @@ fn resume_in_a_workspace_with_no_session_refuses_by_naming_it() {
     );
 }
 
-/// `resume` with nothing to say would open a session and do nothing to it, and
-/// this build has no interactive surface to hand it to.
+/// Promptless `resume` enters the interactive driver, but it still must not
+/// create a session when this workspace has none. EOF is the fail-closed trust
+/// answer in this non-TTY process; session selection then gives the same
+/// truthful catalogue refusal as every other resume spelling.
 #[test]
-fn resume_with_no_prompt_exits_two() {
+fn promptless_resume_with_no_session_still_exits_two_without_creating_one() {
     let refused = Ego::nowhere().subcommand("resume").run();
     assert_eq!(refused.code, Some(2), "stdout: {}", refused.stdout);
     assert!(
-        refused.stderr.contains("needs something to say"),
+        refused.stderr.contains("no session belongs"),
         "{}",
         refused.stderr
     );

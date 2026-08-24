@@ -1021,7 +1021,7 @@ impl<'a> TurnLoop<'a> {
         call: &PendingCall,
     ) -> Result<ToolOutcome, StoreError> {
         let answered = |ok, output| ToolOutcome::Answered { ok, output };
-        let (tool, prepared) = match self.tools.prepare(&call.name, &call.args) {
+        let (tool, mut prepared) = match self.tools.prepare(&call.name, &call.args) {
             Ok(prepared) => prepared,
             // Not a permission event. `prepare` refuses calls that never
             // reached the engine — an unknown tool, unparseable arguments —
@@ -1029,41 +1029,91 @@ impl<'a> TurnLoop<'a> {
             // never established.
             Err(refusal) => return Ok(answered(false, refusal)),
         };
-        let authorized = match self.tools.authorize(prepared) {
-            Classification::Settled(Ok(authorized)) => {
-                self.decided(turn, call, true, authorized.by().clone())?;
-                authorized
-            }
-            Classification::Settled(Err(denial)) => {
-                self.decided(turn, call, false, denial.authority())?;
-                return Ok(ToolOutcome::Refused { denial });
-            }
-            // The rules did not settle it, so ask the next party in §6's
-            // order. That is the mode at step 5 today; the judge and the human
-            // are steps 6 and 7 and have no producer yet, so a question the
-            // mode hands back has reached the end of the order. The honest
-            // terminal state is then the one `CLI.md` §4.4 already specifies
-            // for a headless run: end it, with the action named. Not a stub
-            // standing in for a feature — the feature adds parties to a
-            // consultation that already happens.
-            Classification::Ask(pending) => match self.tools.settle(pending).await {
-                Resolution::Settled(Ok(authorized)) => {
+        let authorized = loop {
+            match self.tools.authorize(prepared) {
+                Classification::Settled(Ok(authorized)) => {
                     self.decided(turn, call, true, authorized.by().clone())?;
-                    authorized
+                    break authorized;
                 }
-                Resolution::Settled(Err(denial)) => {
+                Classification::Settled(Err(denial)) => {
                     self.decided(turn, call, false, denial.authority())?;
                     return Ok(ToolOutcome::Refused { denial });
                 }
-                Resolution::Ask(pending) => {
-                    let kind = EventKind::PermissionRequested {
-                        tool: pending.request().tool().to_string(),
-                        escalation: pending.request().why().clone(),
-                    };
-                    self.permission(turn, call, kind)?;
-                    return Ok(ToolOutcome::Unanswerable { pending });
-                }
-            },
+                Classification::Ask(pending) => match self.tools.settle(pending).await {
+                    Resolution::Settled(Ok(authorized)) => {
+                        self.decided(turn, call, true, authorized.by().clone())?;
+                        break authorized;
+                    }
+                    Resolution::Settled(Err(denial)) => {
+                        self.decided(turn, call, false, denial.authority())?;
+                        return Ok(ToolOutcome::Refused { denial });
+                    }
+                    Resolution::Ask(pending) => {
+                        self.requested(turn, call, pending.request())?;
+                        match self.tools.decide(pending).await {
+                            Resolution::Ask(pending) => {
+                                return Ok(ToolOutcome::Unanswerable { pending });
+                            }
+                            Resolution::HumanSettled { result, .. } => match result {
+                                Ok(authorized) => {
+                                    self.decided(turn, call, true, authorized.by().clone())?;
+                                    break authorized;
+                                }
+                                Err(denial) => {
+                                    self.decided(turn, call, false, denial.authority())?;
+                                    return Ok(ToolOutcome::Refused { denial });
+                                }
+                            },
+                            Resolution::Reclassify { request, params } => {
+                                self.permission(
+                                    turn,
+                                    call,
+                                    EventKind::PermissionAmended {
+                                        tool: request.tool().to_string(),
+                                    },
+                                )?;
+                                prepared = match self.tools.prepare_amendment(tool, params) {
+                                    Ok(prepared) => prepared,
+                                    Err(refusal) => return Ok(answered(false, refusal)),
+                                };
+                            }
+                            Resolution::Settled(result) => match result {
+                                Ok(authorized) => {
+                                    self.decided(turn, call, true, authorized.by().clone())?;
+                                    break authorized;
+                                }
+                                Err(denial) => {
+                                    self.decided(turn, call, false, denial.authority())?;
+                                    return Ok(ToolOutcome::Refused { denial });
+                                }
+                            },
+                        }
+                    }
+                    Resolution::HumanSettled { result, .. } => match result {
+                        Ok(authorized) => {
+                            self.decided(turn, call, true, authorized.by().clone())?;
+                            break authorized;
+                        }
+                        Err(denial) => {
+                            self.decided(turn, call, false, denial.authority())?;
+                            return Ok(ToolOutcome::Refused { denial });
+                        }
+                    },
+                    Resolution::Reclassify { request, params } => {
+                        self.permission(
+                            turn,
+                            call,
+                            EventKind::PermissionAmended {
+                                tool: request.tool().to_string(),
+                            },
+                        )?;
+                        prepared = match self.tools.prepare_amendment(tool, params) {
+                            Ok(prepared) => prepared,
+                            Err(refusal) => return Ok(answered(false, refusal)),
+                        };
+                    }
+                },
+            }
         };
         Ok(match self.tools.execute(tool, authorized).await {
             Ok(output) => answered(true, output),
@@ -1071,15 +1121,29 @@ impl<'a> TurnLoop<'a> {
         })
     }
 
+    /// Record the canonical question that was actually presented.
+    fn requested(
+        &mut self,
+        turn: TurnId,
+        call: &PendingCall,
+        request: &crate::permit::PermissionRequest,
+    ) -> Result<(), StoreError> {
+        self.permission(
+            turn,
+            call,
+            EventKind::PermissionRequested {
+                tool: request.tool().to_string(),
+                escalation: request.why().clone(),
+            },
+        )
+    }
+
     /// §7: *every decision is appended, asked or not.*
     ///
     /// So this fires for a call the rules waved through as well as for one
-    /// they refused, and the asymmetry with the single `PermissionRequested`
-    /// above is the point rather than an oversight. §7 gives that event one
-    /// producer — `Resolution::Ask`, a question this run genuinely raised and
-    /// could not answer — while the question an audit asks of the decisions
-    /// is what the run did **without** being asked, which only the silent ones
-    /// answer.
+    /// they refused. `PermissionRequested` is appended when mode settlement
+    /// raises the canonical question, before either a human answer or the
+    /// headless unanswerable result.
     fn decided(
         &mut self,
         turn: TurnId,

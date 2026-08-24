@@ -4,9 +4,9 @@
 //! time, and that is the point rather than an implementation detail:
 //! `ARCHITECTURE.md` R12 says exactly one component writes to the terminal,
 //! and a line editor is a writer — it paints a prompt, redraws on every
-//! keystroke and clears what it drew. So the editor is asked for one line and
-//! then dropped, the turn renders with no editor in existence, and the next
-//! line gets a fresh one. See
+//! keystroke and clears what it drew. The editor lock is held for one read and
+//! released before the turn renders; a permission read likewise begins only
+//! after the renderer's current write. See
 //! `docs/decisions/2026-08-22-the-seat-reads-before-the-screen-writes.md` §2.
 
 mod keys;
@@ -103,9 +103,9 @@ mod tests {
     }
 
     /// The refusal is a factual claim about this build, so it names the thing
-    /// that is actually missing rather than saying "unsupported". `cli.rs`'s
-    /// `INTERACTIVE_WAITING_ON` records why that matters: a reason nothing
-    /// checks decays into a confident falsehood the day the gap is closed.
+    /// that is actually missing rather than saying "unsupported". A reason
+    /// nothing checks decays into a confident falsehood the day the gap is
+    /// closed.
     #[test]
     fn the_refusal_names_the_missing_piece_and_the_flag_that_shares_it() {
         assert!(

@@ -87,8 +87,8 @@ omitted when empty: two states, identical bytes.
 | Command | M0b | Waiting on |
 |---|---|---|
 | `ego run` | **yes** | the scripting workhorse; the whole of §4 is about it |
-| `ego [PROMPT]` | **partly** | the permission dialog — the screen that renders a `PermissionRequest` and reads a person's answer. The line editor ships, so a session reads, runs turns and renders them; what a person cannot yet do is *answer* an escalation, so one ends the turn with nobody to decide it, exactly as it does headless (`CLI.md` §4.4). The `Approver` port that dialog would occupy is built and the mode answers through it, but `PolicyEngine` builds its own approver and admitting a human party is a change to that contract rather than wiring in the CLI |
-| `ego resume` | **yes** | continues a session that already exists, never creating one. `[ID]` is optional: without it the most recently updated session of this workspace is taken |
+| `ego [PROMPT]` | **yes** | asks once whether to trust project files before ambient reads, then runs the line-oriented session. Permission questions accept `allow`, `deny`, or `amend`; amended raw JSON parameters are prepared and classified again from the beginning |
+| `ego resume` | **yes** | continues a session that already exists, never creating one. `[ID]` is optional: without it the most recently updated session of this workspace is taken. Without a prompt source it enters the interactive driver; with a prompt or `-` it remains headless |
 | `ego ls` | **yes** | this workspace by default, `--all` for the whole store; `--output json\|jsonl` per §4.6 |
 | `ego fork` | no | session forking (**M3**), which needs the branch point to be nameable in the log rather than just a file copy |
 | `ego export` | no | replay and export with `--sanitize` (**M3**). The projection exists; the redaction contract that makes an exported session safe to hand over does not |
@@ -102,13 +102,10 @@ omitted when empty: two states, identical bytes.
 | `ego acp` | **yes** | the Agent Client Protocol on stdio, v1. A host's `session/new` mints an ordinary ego session and its `session/prompt` runs an ordinary turn, so what it opens is listed by `ego ls` and continued by `ego resume`. v1 and not the v2 draft: see `docs/decisions/2026-08-21-the-version-an-agent-answers-with.md` §6.2 |
 | `ego doctor` | no | most of what it would diagnose: the credential store, the MCP client and the sandbox backend are each waiting on their own milestone, and a report on three absent subsystems is not a diagnosis |
 
-**One of M0b's four exit criteria is a command that does not exist yet**
-(`ARCHITECTURE.md` §8: interactive, `ego run … | jq`, `kill → ego resume`, and
-the same session over ACP). Three of the four ship; the interactive surface does
-not, because it waits on an approver that can mint a `Permit`. That is the fact
-this table exists to stop being invisible, and the count is part of it — it read
-"three of four" until `ego resume` landed and "two of four" until `ego acp`
-did.
+All four M0b demonstrations now have an entry point (`ARCHITECTURE.md` §8): an
+interactive session, `ego run … | jq`, `kill → ego resume`, and the same
+session over ACP. This is availability, not a release boundary; later
+milestones remain dependencies of the final product.
 
 ## 3. Flags (the argument grammar)
 
@@ -506,9 +503,11 @@ templates are not executables).
 
 Slash commands: `/help /model /thinking /mode /plan /yolo /permissions /mcp
 /sessions /fork /compact /clear /usage /export /doctor /quit`. History,
-completion and multiline via reedline. The permission prompt is fx's proven
-dialog: number keys choose, **Tab amends the proposed command**, Enter
-confirms, Esc cancels.
+completion and multiline via reedline.
+The permission prompt has a plain representation that works in every terminal
+and scripted transcript: `allow`, `deny`, or `amend`. Amend reads a complete
+JSON object of replacement tool parameters, then re-runs prepare and policy
+from the beginning. Invalid answers re-prompt; Ctrl-C and EOF deny.
 
 ### 6.1 Paste
 
@@ -537,23 +536,21 @@ typing.
 
 ### 6.2 Availability — what ships today
 
-Same discipline as §2.1 and §3.1. **The reader ships; the dialog does not.**
-`ego` with no subcommand opens a session: it reads lines, runs a turn for each
-and renders it through §4. What it cannot do is let a person *answer* a
-permission escalation — so one ends the turn with nobody to decide it, exactly
-as it does headless (§4.4). The editor and the renderer are never live at the
-same time, which is how §4's "exactly one writer" survives a second writer
-existing at all: the editor is dropped before a turn renders.
+Same discipline as §2.1 and §3.1. The reader, trust question and permission
+answer path ship. `ego` with no subcommand opens a session: it reads lines,
+runs a turn for each and renders it through §4. The editor and the renderer are
+never live at the same time, which is how §4's "exactly one writer" survives a
+second writer existing at all: each read ends before a turn renders.
 
 | Surface | M0b | Note |
 |---|---|---|
 | Input line, history, multiline | **yes** | reedline. `Ctrl+C` abandons the line and keeps the session; `Ctrl+D` ends it |
 | Bracketed paste | **yes** | on for every read, off on exit. A pasted stack trace is one prompt, not its first line |
 | Ctrl+V | **refused by name** | it asks for a pasteboard *image* first (§6.1), and there is nowhere to put one — the same gap that refuses `--attach`. It refuses rather than silently pasting text, because only one of those two can be discovered |
-| Permission dialog | no | the gap that keeps `ego [PROMPT]` at *partly* in §2.1. `PolicyEngine` builds its own approver, so admitting a human party is a change to that contract rather than wiring here |
+| Permission dialog | **yes** | plain `allow`, `deny`, or `amend`; amend then reads replacement JSON parameters. Invalid answers re-prompt; Ctrl-C and EOF deny. The engine keeps the configured mode first and re-prepares/re-classifies every amendment |
 | Slash commands | no | waiting on the subsystems they would drive; §2.1 already refuses each by name |
 | `--attach` | no | §3.1's row: waiting on a non-text content block |
-| OSC 133 A (prompt mark), OSC 7 (cwd) | no | deliberately, and *still* deliberately now that a REPL exists: both are owned by the surface rather than by the run, and neither is emitted until the dialog makes a prompt a place a person is actually asked something. `ego run` emits 133 C/D, OSC 9;4 and — under TUICommander — 7770 |
+| OSC 133 A (prompt mark), OSC 7 (cwd) | no | deliberately: both are owned by the surface rather than by a run, and their exact terminal contract is not implemented. `ego run` emits 133 C/D, OSC 9;4 and — under TUICommander — 7770 |
 
 ## 7. Configuration
 

@@ -42,7 +42,8 @@ pub enum Invocation {
     /// `ego acp` — serve the Agent Client Protocol on stdio, until the host
     /// closes it.
     Acp(Box<AcpArgs>),
-    /// `ego [PROMPT]` — the interactive session of `CLI.md` §6.
+    /// `ego [PROMPT]`, or promptless `ego resume [ID]` — the interactive
+    /// session of `CLI.md` §6.
     ///
     /// One [`Args`] again, and for [`Invocation::Resume`]'s reason: a prompt
     /// given on the command line is the first thing said, not a different
@@ -222,26 +223,6 @@ pub const UNBUILT: &[(&str, &str)] = &[
          report on three absent subsystems is not a diagnosis",
     ),
 ];
-
-/// What `ego` with no subcommand is waiting on.
-///
-/// A named constant rather than a phrase inside the refusal, so the message and
-/// `CLI.md` §2.1's `ego [PROMPT]` row are held to one another by a test — the
-/// same binding [`UNBUILT`] gets, and for a reason this entry has already
-/// demonstrated. It used to say the surface was waiting on "the permission
-/// dialog, which needs an approver that can mint a `Permit`". The `Approver`
-/// port and its mode implementation landed, that sentence stopped being true,
-/// and the test on this refusal asserted only the word "interactive" — so
-/// nothing went red. A reason nothing checks is a reason that decays into a
-/// confident falsehood.
-pub const INTERACTIVE_WAITING_ON: &str = "the permission dialog — the screen \
-     that renders a `PermissionRequest` and reads a person's answer. The line \
-     editor ships, so a session reads, runs turns and renders them; what a \
-     person cannot yet do is *answer* an escalation, so one ends the turn with \
-     nobody to decide it, exactly as it does headless (`CLI.md` §4.4). The \
-     `Approver` port that dialog would occupy is built and the mode answers \
-     through it, but `PolicyEngine` builds its own approver and admitting a \
-     human party is a change to that contract rather than wiring in the CLI";
 
 /// A flag that was removed, and what replaced it.
 ///
@@ -714,7 +695,7 @@ fn clap_or_answer<T: Parser>(tokens: &[String]) -> Result<Parsed<T>, UsageError>
 /// the refusal itself — which is where that sentence is already maintained.
 fn overview(program: &str) -> String {
     let mut text = format!(
-        "ego {} — an agent you run from a terminal.\n\nUsage: {program} <COMMAND> [OPTIONS]\n\nCommands:\n",
+        "ego {} — an agent you run from a terminal.\n\nUsage:\n  {program} [OPTIONS] [PROMPT]\n  {program} <COMMAND> [OPTIONS]\n\nInteractive:\n  {program} -m ollama/qwen3\n\nCommands:\n",
         env!("CARGO_PKG_VERSION")
     );
     for name in BUILT {
@@ -730,7 +711,8 @@ fn overview(program: &str) -> String {
     text.push_str(&format!(
         "\n`{program} <COMMAND> --help` describes one of them. CLI.md §2 \
          documents ten more; each is refused by name, with the subsystem it \
-         waits on.\n"
+         waits on. Start Ollama and run `ollama pull qwen3` before the local \
+         example above.\n"
     ));
     text
 }
@@ -824,7 +806,14 @@ pub fn parse(argv: Vec<String>) -> Result<Invocation, UsageError> {
         },
         Some("resume") => match clap_or_answer::<ResumeCommand>(&tokens)? {
             Parsed::Answered(text) => Ok(Invocation::Answered(text)),
-            Parsed::Command(parsed) => Ok(Invocation::Resume(Box::new(into_resume_args(parsed)?))),
+            Parsed::Command(parsed) => {
+                let args = into_resume_args(parsed)?;
+                if args.prompt.is_none() && args.stdin == Stdin::Ambient {
+                    Ok(Invocation::Interactive(Box::new(args)))
+                } else {
+                    Ok(Invocation::Resume(Box::new(args)))
+                }
+            }
         },
         Some("acp") => match clap_or_answer::<AcpCommand>(&tokens)? {
             Parsed::Answered(text) => Ok(Invocation::Answered(text)),
@@ -889,22 +878,7 @@ fn into_resume_args(command: ResumeCommand) -> Result<Args, UsageError> {
         )));
     }
 
-    // §2's second positional is what a resumed session is *for*. Without it
-    // there is nothing to say to the session, and this build has no
-    // interactive surface to hand it to — so opening one and stopping would be
-    // work with no product.
-    let Some(prompt) = prompt else {
-        return Err(UsageError(
-            "`resume` needs something to say to the session: pass a prompt, or \
-             `-` to read one from stdin"
-                .to_string(),
-        ));
-    };
-
-    let mut args = into_args(RunCommand {
-        prompt: Some(prompt),
-        flags,
-    })?;
+    let mut args = into_args(RunCommand { prompt, flags })?;
     args.session = SessionChoice::Resume(id);
     Ok(args)
 }

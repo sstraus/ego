@@ -321,6 +321,10 @@ pub enum PermissionEvent {
         item: Option<ItemId>,
         description: String,
     },
+    Amended {
+        item: Option<ItemId>,
+        tool: String,
+    },
     Decided {
         item: Option<ItemId>,
         allowed: bool,
@@ -626,6 +630,12 @@ impl SessionState {
                 self.permissions.push(PermissionEvent::Requested {
                     item: ev.env.item,
                     description: escalation.to_string(),
+                });
+            }
+            EventKind::PermissionAmended { tool } => {
+                self.permissions.push(PermissionEvent::Amended {
+                    item: ev.env.item,
+                    tool: tool.clone(),
                 });
             }
             // `by` is not reduced. State answers "what is this session's

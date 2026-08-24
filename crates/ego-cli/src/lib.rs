@@ -12,6 +12,9 @@
 //! the built binary precisely because an exit code is not observable from
 //! inside the process that produces it.
 
+/// The product name shown to a person. Machine-facing names remain `ego`.
+pub(crate) const DISPLAY_NAME: &str = "εgo";
+
 pub mod acp;
 pub mod budget;
 pub mod catalogue;

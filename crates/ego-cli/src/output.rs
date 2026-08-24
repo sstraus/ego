@@ -20,6 +20,7 @@ use ego_core::state::SessionState;
 use ego_core::turn::CancelToken;
 use serde::Serialize;
 
+use crate::DISPLAY_NAME;
 use crate::render::{Answer, Capabilities};
 
 /// The exclusive owner of the process's standard output.
@@ -121,9 +122,13 @@ impl Stdout {
 /// why it does not take a [`Stdout`] and could not use one if it wanted to.
 pub fn note(message: &str) {
     let mut err = std::io::stderr();
+    write_note(&mut err, message);
+}
+
+fn write_note(mut err: impl Write, message: &str) {
     // Nothing to be done if the diagnostic channel itself is gone, and a
     // panic here would replace a report with a crash.
-    let _ = writeln!(err, "ego: {message}");
+    let _ = writeln!(err, "{DISPLAY_NAME}: {message}");
 }
 
 /// The live view of a run: one `PublicEvent` per line, as it happens.
@@ -465,6 +470,14 @@ mod tests {
             serde_json::Value::String(String::new()),
         );
         serde_json::to_value(report).expect("§4.1's object serialises")
+    }
+
+    #[test]
+    fn a_diagnostic_uses_the_human_facing_product_name_byte_for_byte() {
+        let mut err = Vec::new();
+        write_note(&mut err, "something failed");
+
+        assert_eq!(err, "εgo: something failed\n".as_bytes());
     }
 
     #[test]

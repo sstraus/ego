@@ -1,11 +1,14 @@
-//! The seat: an editor that exists only while a line is being read.
+//! The seat: an editor that is active only while a line is being read.
 //!
-//! It is built per line and dropped before the turn runs, so the renderer is
-//! the only writer on the terminal for the whole of a turn — see
+//! Its lock is held only for that read, so the renderer is the only writer
+//! while it renders a turn — see
 //! `docs/decisions/2026-08-22-the-seat-reads-before-the-screen-writes.md` §2.
 
 use std::borrow::Cow;
+use std::io::IsTerminal;
+use std::path::Path;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crossterm::event::Event;
@@ -16,11 +19,20 @@ use reedline::{
 
 use super::keys::{Intercept, intercept};
 use super::{Line, answer};
+use ego_core::config::Trust;
+use ego_core::permit::{PermissionDecision, PermissionRequest};
 
 /// A line editor, and the one key ego takes from it.
 pub struct Seat {
-    editor: Reedline,
+    editor: Mutex<Reedline>,
     asked_for_image: Arc<AtomicBool>,
+    terminal: bool,
+}
+
+impl std::fmt::Debug for Seat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Seat")
+    }
 }
 
 impl Seat {
@@ -37,16 +49,23 @@ impl Seat {
         };
 
         Self {
-            editor: Reedline::create()
-                .with_edit_mode(Box::new(mode))
-                .use_bracketed_paste(true),
+            editor: Mutex::new(
+                Reedline::create()
+                    .with_edit_mode(Box::new(mode))
+                    .use_bracketed_paste(true),
+            ),
             asked_for_image,
+            terminal: std::io::stdin().is_terminal(),
         }
     }
 
     /// Read one line.
-    pub fn read(&mut self) -> Line {
-        let signal = self.editor.read_line(&Waiting);
+    pub fn read(&self) -> Line {
+        self.read_with(&Waiting)
+    }
+
+    fn read_with(&self, prompt: &dyn Prompt) -> Line {
+        let signal = self.editor.lock().unwrap().read_line(prompt);
         // Taken, not read: the key is consumed here so it cannot leak into
         // the next line.
         let asked_for_image = self.asked_for_image.swap(false, Ordering::Relaxed);
@@ -62,8 +81,98 @@ impl Default for Seat {
 }
 
 impl crate::run::Reads for Seat {
-    fn read(&mut self) -> Line {
+    fn read(&self) -> Line {
         Seat::read(self)
+    }
+}
+
+impl crate::run::InteractiveSeat for Seat {
+    fn has_human(&self) -> bool {
+        self.terminal
+    }
+
+    fn trust(&self, workspace: &Path) -> Trust {
+        // Piped stdin may itself be the first prompt. Consuming it as a trust
+        // answer would turn user content into authority. With no terminal
+        // there is no human seat, so the only truthful answer is untrusted.
+        if !self.terminal {
+            return Trust::Untrusted;
+        }
+        let prompt = Question(format!(
+            "Trust project files in {}? [y/N] ",
+            workspace.display()
+        ));
+        loop {
+            match self.read_with(&prompt) {
+                Line::Submitted(answer) => match parse_trust(&answer) {
+                    Some(trust) => return trust,
+                    None => crate::output::note("answer yes or no"),
+                },
+                Line::Blank | Line::Interrupted | Line::Ended => return Trust::Untrusted,
+                Line::Refused(why) => crate::output::note(why),
+            }
+        }
+    }
+
+    fn permission(&self, request: &PermissionRequest) -> PermissionDecision {
+        if !self.terminal {
+            return PermissionDecision::Deny;
+        }
+        let prompt = Question(format!("{request}. [allow/deny/amend] "));
+        loop {
+            match self.read_with(&prompt) {
+                Line::Submitted(answer) => match parse_permission(&answer) {
+                    Some(PermissionWord::Allow) => return PermissionDecision::Allow,
+                    Some(PermissionWord::Deny) => return PermissionDecision::Deny,
+                    Some(PermissionWord::Amend) => return self.amendment(),
+                    None => crate::output::note("answer allow, deny, or amend"),
+                },
+                Line::Interrupted | Line::Ended => return PermissionDecision::Deny,
+                Line::Blank => crate::output::note("answer allow, deny, or amend"),
+                Line::Refused(why) => crate::output::note(why),
+            }
+        }
+    }
+}
+
+impl Seat {
+    fn amendment(&self) -> PermissionDecision {
+        let prompt = Question("New JSON parameters: ".to_string());
+        loop {
+            match self.read_with(&prompt) {
+                Line::Submitted(raw) => match serde_json::from_str(&raw) {
+                    Ok(params) => return PermissionDecision::Amend { params },
+                    Err(err) => crate::output::note(&format!("invalid JSON parameters: {err}")),
+                },
+                Line::Interrupted | Line::Ended => return PermissionDecision::Deny,
+                Line::Blank => crate::output::note("enter the amended parameters as JSON"),
+                Line::Refused(why) => crate::output::note(why),
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PermissionWord {
+    Allow,
+    Deny,
+    Amend,
+}
+
+fn parse_trust(answer: &str) -> Option<Trust> {
+    match answer.trim().to_ascii_lowercase().as_str() {
+        "y" | "yes" => Some(Trust::Trusted),
+        "n" | "no" => Some(Trust::Untrusted),
+        _ => None,
+    }
+}
+
+fn parse_permission(answer: &str) -> Option<PermissionWord> {
+    match answer.trim().to_ascii_lowercase().as_str() {
+        "a" | "allow" => Some(PermissionWord::Allow),
+        "d" | "deny" => Some(PermissionWord::Deny),
+        "m" | "amend" => Some(PermissionWord::Amend),
+        _ => None,
     }
 }
 
@@ -90,6 +199,30 @@ impl Prompt for Waiting {
 
     /// Alt+Enter and a bracketed paste both put a real newline in the buffer,
     /// and this is the only mark that the line being typed is still one line.
+    fn render_prompt_multiline_indicator(&self) -> Cow<'_, str> {
+        Cow::Borrowed("… ")
+    }
+
+    fn render_prompt_history_search_indicator(&self, search: PromptHistorySearch) -> Cow<'_, str> {
+        Cow::Owned(format!("(search: {}) ", search.term))
+    }
+}
+
+struct Question(String);
+
+impl Prompt for Question {
+    fn render_prompt_left(&self) -> Cow<'_, str> {
+        Cow::Borrowed(&self.0)
+    }
+
+    fn render_prompt_right(&self) -> Cow<'_, str> {
+        Cow::Borrowed("")
+    }
+
+    fn render_prompt_indicator(&self, _mode: PromptEditMode) -> Cow<'_, str> {
+        Cow::Borrowed("")
+    }
+
     fn render_prompt_multiline_indicator(&self) -> Cow<'_, str> {
         Cow::Borrowed("… ")
     }
@@ -133,5 +266,40 @@ impl EditMode for Ours {
 
     fn edit_mode(&self) -> PromptEditMode {
         self.editor.edit_mode()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trust_accepts_only_an_explicit_yes_or_no() {
+        for yes in ["y", "yes", " YES "] {
+            assert_eq!(parse_trust(yes), Some(Trust::Trusted));
+        }
+        for no in ["n", "no", " NO "] {
+            assert_eq!(parse_trust(no), Some(Trust::Untrusted));
+        }
+        for invalid in ["", "maybe", "allow", "1"] {
+            assert_eq!(parse_trust(invalid), None, "{invalid:?}");
+        }
+    }
+
+    #[test]
+    fn the_plain_permission_vocabulary_includes_amend() {
+        for (raw, expected) in [
+            ("allow", PermissionWord::Allow),
+            ("deny", PermissionWord::Deny),
+            ("amend", PermissionWord::Amend),
+            (" A ", PermissionWord::Allow),
+            ("d", PermissionWord::Deny),
+            ("m", PermissionWord::Amend),
+        ] {
+            assert_eq!(parse_permission(raw), Some(expected), "{raw:?}");
+        }
+        for invalid in ["", "yes", "no", "approve", "cancel"] {
+            assert_eq!(parse_permission(invalid), None, "{invalid:?}");
+        }
     }
 }

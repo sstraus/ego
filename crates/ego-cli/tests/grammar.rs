@@ -143,42 +143,6 @@ fn the_separator_stops_a_subcommand_name_from_being_one() {
 #[test]
 fn an_invocation_with_no_subcommand_starts_the_surface_it_used_to_refuse() {
     assert_eq!(converses(["hello"]).prompt.as_deref(), Some("hello"));
-
-    // The gap that remains is the dialog, and only the dialog.
-    let waiting_on = cli::INTERACTIVE_WAITING_ON;
-    assert!(waiting_on.contains("permission dialog"), "{waiting_on}");
-    assert!(
-        !waiting_on.contains("line editor for the prompt"),
-        "the editor ships; a reason that still names it is a refusal outliving \
-         the thing it refused: {waiting_on}"
-    );
-}
-
-/// And the reason it gives is the one `CLI.md` §2.1 publishes.
-///
-/// The companion to `every_unbuilt_subcommand_is_one_the_document_offers`, for
-/// the one row of that table `UNBUILT` does not cover: `ego [PROMPT]` is not a
-/// subcommand, so it has no entry there and had nothing holding it to the
-/// document. Which is exactly the row that went stale.
-#[test]
-fn the_interactive_refusal_says_what_the_document_says() {
-    let doc = include_str!("../../../CLI.md");
-    let availability = doc
-        .split("### 2.1 Availability")
-        .nth(1)
-        .expect("CLI.md has an availability section")
-        .split("## 3.")
-        .next()
-        .expect("the availability section ends");
-    // Whitespace-insensitive: the constant is a wrapped Rust string literal and
-    // the table row is one long line, so a literal `contains` would fail on the
-    // line breaks rather than on a disagreement about the reason.
-    let flatten = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
-    assert!(
-        flatten(availability).contains(&flatten(cli::INTERACTIVE_WAITING_ON)),
-        "CLI.md §2.1's `ego [PROMPT]` row and the refusal disagree about what \
-         the interactive surface waits on"
-    );
 }
 
 /// A flag whose subsystem does not exist is refused by name *before* clap sees
@@ -562,6 +526,43 @@ fn an_empty_pipe_beside_an_argument_adds_no_fence() {
     );
 }
 
+/// Interactive input has the same precedence as one-shot input, except that
+/// absence is itself a valid seed. In particular, a closed non-TTY stdin is
+/// absence rather than an explicit promise that a prompt exists.
+#[test]
+fn every_row_of_the_interactive_seed_table_lands_somewhere() {
+    let cases = [
+        (None, Stdin::Ambient, Piped(None), ""),
+        (None, Stdin::Ambient, Piped(Some("")), ""),
+        (
+            None,
+            Stdin::Ambient,
+            Piped(Some("from the pipe")),
+            "from the pipe",
+        ),
+        (Some("Ask"), Stdin::Ambient, Piped(None), "Ask"),
+        (Some("Ask"), Stdin::Ambient, Piped(Some("")), "Ask"),
+        (
+            Some("Ask"),
+            Stdin::Ambient,
+            Piped(Some("context")),
+            "Ask\n\n--- piped input ---\ncontext\n---",
+        ),
+    ];
+
+    for (argv, mode, stdin, expected) in cases {
+        assert_eq!(
+            prompt::seed(argv, mode, &stdin).expect("an interactive seed"),
+            expected
+        );
+    }
+
+    let refusal = prompt::seed(None, Stdin::IsThePrompt, &Piped(Some("")))
+        .expect_err("explicit `-` still promises a prompt")
+        .to_string();
+    assert!(refusal.contains("stdin was empty"), "{refusal}");
+}
+
 /// `-` with nothing on stdin is refused rather than run as the empty prompt:
 /// the caller said the prompt was there and it was not.
 #[test]
@@ -614,11 +615,17 @@ fn a_lone_positional_that_is_not_an_id_is_the_prompt() {
 }
 
 /// A lone positional that *is* an id is an id, not a prompt that happens to
-/// look like one — and then there is no prompt, which is the refusal below.
+/// look like one. With no prompt source, the existing interactive driver takes
+/// over that session.
 #[test]
 fn a_lone_positional_that_is_an_id_is_not_read_as_a_prompt() {
-    let refusal = refused(["resume", SOME_ID]);
-    assert!(refusal.contains("needs something to say"), "{refusal}");
+    let args = converses(["resume", SOME_ID]);
+    assert_eq!(
+        args.session,
+        SessionChoice::Resume(Some(SOME_ID.to_string()))
+    );
+    assert_eq!(args.prompt, None);
+    assert_eq!(args.stdin, Stdin::Ambient);
 }
 
 /// With a second positional the first was unambiguously meant as an id, so a
@@ -631,17 +638,14 @@ fn a_first_of_two_positionals_must_be_an_id() {
     assert!(refusal.contains("not a session id"), "{refusal}");
 }
 
-/// `resume` with nothing to say would open a session and do nothing to it.
-/// §2 spells the prompt optional because the interactive surface takes over
-/// when it is absent, and this build has no interactive surface.
+/// §2 spells both positionals optional because the interactive surface takes
+/// over the latest session when neither was given.
 #[test]
-fn resume_with_no_prompt_is_refused() {
-    let refusal = refused(["resume"]);
-    assert!(refusal.contains("needs something to say"), "{refusal}");
-    assert!(
-        !refusal.contains("interactive session"),
-        "a named command must not be answered with the interactive refusal: {refusal}"
-    );
+fn resume_with_no_prompt_enters_the_interactive_driver() {
+    let args = converses(["resume"]);
+    assert_eq!(args.session, SessionChoice::Resume(None));
+    assert_eq!(args.prompt, None);
+    assert_eq!(args.stdin, Stdin::Ambient);
 }
 
 /// `-` is the prompt from stdin here exactly as it is for `run`: one contract,
@@ -841,6 +845,27 @@ fn the_bare_help_lists_every_command_this_build_has() {
             "`ego --help` does not mention `{name}`: {text}"
         );
     }
+}
+
+#[test]
+fn top_help_and_readme_offer_the_same_runnable_ollama_quickstart() {
+    let help = answered(["--help"]);
+    let readme = include_str!("../../../README.md");
+
+    for fact in ["ollama/qwen3", "ollama pull qwen3"] {
+        assert!(help.contains(fact), "top help omits `{fact}`: {help}");
+        assert!(readme.contains(fact), "README omits `{fact}`");
+    }
+    for command in cli::BUILT {
+        assert!(
+            readme.contains(&format!("ego {command}")),
+            "README omits `ego {command}`"
+        );
+    }
+    assert!(
+        readme.contains("ego run") && readme.contains("--output json"),
+        "README has no headless scripting example"
+    );
 }
 
 /// And it offers nothing this build refuses.

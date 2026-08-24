@@ -7,7 +7,7 @@
 //! and the two that are not universal ([`Osc::notify`], [`Osc::tuic`]) are
 //! chosen by [`OscProfile`] rather than emitted hopefully.
 //!
-//! ## Why every payload is sanitised
+//! ## Why every dynamic payload is sanitised
 //!
 //! An OSC string is terminated by BEL or by ST. The payloads below are not
 //! ours: a tool name comes from a tool, an intent line comes from the model,
@@ -16,12 +16,16 @@
 //! screen**, and a payload containing `\x1b` starts a new one — which is a
 //! model deciding what escape sequences reach the terminal. That is the
 //! injection this module exists to make impossible, and it is why every
-//! constructor goes through [`sanitise`] rather than trusting its caller.
+//! dynamic field goes through [`sanitise`] rather than trusting its caller.
+//! Fixed source literals, including the title prefix, are safe by construction
+//! and are not mixed into the text being sanitised.
 
 use super::caps::{Capabilities, OscProfile};
 
 /// The escape that opens every sequence here.
 const OSC: &str = "\x1b]";
+/// The fixed start of every OSC 0 payload.
+const TITLE_PREFIX: &str = "ɛ । ";
 /// BEL, and not ST (`ESC \`).
 ///
 /// Both are legal and every terminal in the matrix accepts both. BEL is
@@ -88,12 +92,15 @@ impl Osc {
         self.profile != OscProfile::None
     }
 
-    /// OSC 0 — window and icon title.
+    /// OSC 0 — window and icon title, always carrying the fixed brand prefix.
+    ///
+    /// Only `text` is dynamic and sanitised. An empty `text` still emits the
+    /// prefix, so callers cannot accidentally produce an unbranded payload.
     pub fn title(&self, text: &str) -> String {
         if !self.on() {
             return String::new();
         }
-        format!("{OSC}0;{}{END}", sanitise(text))
+        format!("{OSC}0;{TITLE_PREFIX}{}{END}", sanitise(text))
     }
 
     /// OSC 7 — the working directory, as a `file://` URL.
@@ -286,16 +293,28 @@ mod tests {
     #[test]
     fn a_pipe_receives_no_sequence_at_all() {
         let osc = off();
-        assert_eq!(osc.title("ego"), "");
+        assert_eq!(osc.title("εgo"), "");
         assert_eq!(osc.cwd("/ws"), "");
         assert_eq!(osc.progress(Progress::Indeterminate), "");
-        assert_eq!(osc.notify("ego", "done"), "");
+        assert_eq!(osc.notify("εgo", "done"), "");
         assert_eq!(osc.prompt_start(), "");
         assert_eq!(osc.output_end(0), "");
         assert_eq!(osc.state(State::Busy), "");
         // A hyperlink degrades to its text rather than to nothing: the link
         // was carrying a word, and dropping the word would delete content.
         assert_eq!(osc.file_link("/ws/a.rs", Some(4), "a.rs:4"), "a.rs:4");
+    }
+
+    #[test]
+    fn every_title_payload_has_the_fixed_prefix_byte_for_byte() {
+        let osc = standard();
+
+        assert_eq!(osc.title("εgo"), "\x1b]0;ɛ । εgo\x07");
+        assert_eq!(osc.title(""), "\x1b]0;ɛ । \x07");
+        assert_eq!(
+            osc.title("safe\x07 title\x1b\n"),
+            "\x1b]0;ɛ । safe title\x07"
+        );
     }
 
     /// The private protocol is unreachable without the profile that proves the
@@ -317,12 +336,12 @@ mod tests {
     #[test]
     fn a_notification_is_spelled_once_per_host() {
         assert_eq!(
-            tuic().notify("ego", "turn finished"),
-            "\x1b]777;notify;ego;turn finished\x07"
+            tuic().notify("εgo", "turn finished"),
+            "\x1b]777;notify;εgo;turn finished\x07"
         );
         assert_eq!(
-            standard().notify("ego", "turn finished"),
-            "\x1b]9;ego: turn finished\x07"
+            standard().notify("εgo", "turn finished"),
+            "\x1b]9;εgo: turn finished\x07"
         );
     }
 
@@ -398,9 +417,9 @@ mod tests {
         assert_eq!(hostile.progress(Progress::Indeterminate), "");
         // Everything else still goes: the two exceptions are two sequences,
         // not a downgrade of the whole surface.
-        assert_eq!(hostile.title("ego"), "\x1b]0;ego\x07");
+        assert_eq!(hostile.title("εgo"), "\x1b]0;ɛ । εgo\x07");
         assert_eq!(hostile.output_start(), "\x1b]133;C\x07");
-        assert_eq!(hostile.notify("ego", "done"), "\x1b]9;ego: done\x07");
+        assert_eq!(hostile.notify("εgo", "done"), "\x1b]9;εgo: done\x07");
     }
 
     /// A percentage above 100 is a budget computed from a figure that grew.

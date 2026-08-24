@@ -19,7 +19,9 @@ use ego_core::cost::CurrencyCode;
 use ego_core::event::domain::CancelCause;
 use ego_core::event::id::SessionId;
 use ego_core::generator::capabilities::ModelCapabilities;
-use ego_core::permit::{CanonPath, PolicyEngine, Tool};
+use ego_core::permit::{
+    CanonPath, HumanApprover, PermissionDecision, PermissionRequest, PolicyEngine, Tool,
+};
 use ego_core::public::{PUBLIC_EVENT_VERSION, PublicEvent};
 use ego_core::run::{DeniedBy, RunTermination, Signal};
 use ego_core::sink::EventSink;
@@ -145,14 +147,14 @@ pub async fn interactive(args: Args, out: &Stdout, cancel: CancelToken) -> Ended
     let capabilities = Capabilities::of(&Terminal::from_process(args.no_color, &environment));
     let text_sink = TextSink::new(out, quiet, capabilities);
 
-    let mut seat = repl::Seat::new();
+    let seat: Arc<dyn InteractiveSeat> = Arc::new(repl::Seat::new());
     let announce = Announce::new(out, capabilities, quiet);
 
     let ended = converse(
         args,
         |_| &text_sink as &dyn EventSink,
         cancel,
-        &mut seat,
+        seat,
         // Between turns: draw the block the renderer was holding back, and
         // close the line, so the next prompt starts on a row of its own.
         &|| text_sink.finish(),
@@ -251,7 +253,7 @@ impl<'a> Announce<'a> {
             String::new()
         } else {
             self.osc.notify(
-                "ego",
+                crate::DISPLAY_NAME,
                 &format!("{} after {}", termination.exit_reason(), duration(elapsed)),
             )
         };
@@ -266,10 +268,12 @@ impl<'a> Announce<'a> {
             }),
             notification,
             self.osc.state(State::Idle),
-            // Emptied rather than restored. Restoring needs the previous title,
-            // which is only readable through a query (OSC 21) that half the
-            // matrix answers and the other half echoes onto the screen. An
-            // empty title is what the shell overwrites at its next prompt.
+            // Reduced to the fixed brand prefix rather than restored. Restoring
+            // needs the previous title, which is only readable through a query
+            // (OSC 21) that half the matrix answers and the other half echoes
+            // onto the screen. `Osc::title` owns the invariant that even this
+            // empty dynamic title still emits the fixed prefix; the shell
+            // overwrites it at its next prompt.
             self.osc.title(""),
             // Last, because it is the mark that says everything above it
             // belongs to this command.
@@ -288,16 +292,16 @@ impl<'a> Announce<'a> {
 fn title(prompt: Option<&str>) -> String {
     const CELLS: usize = 48;
     let Some(prompt) = prompt.map(str::trim).filter(|text| !text.is_empty()) else {
-        return "ego".to_string();
+        return crate::DISPLAY_NAME.to_string();
     };
     // `-` is the spelling for "read the prompt from stdin", so it is the one
     // prompt that says nothing about the run.
     if prompt == "-" {
-        return "ego".to_string();
+        return crate::DISPLAY_NAME.to_string();
     }
     let first = prompt.lines().next().unwrap_or_default();
     let short = crate::render::Line::plain(first).truncate_to(CELLS);
-    format!("ego: {}", short.text().trim_end())
+    short.text().trim_end().to_string()
 }
 
 /// A duration a person reads, not one a machine parses.
@@ -346,7 +350,7 @@ pub async fn converse<S: EventSink>(
     args: Args,
     destination: impl FnOnce(&ModelCapabilities) -> S,
     cancel: CancelToken,
-    seat: &mut (dyn Reads + Send),
+    seat: Arc<dyn InteractiveSeat>,
     between: &(dyn Fn() + Send + Sync),
 ) -> Ended {
     match execute(
@@ -592,7 +596,7 @@ struct Settings {
 }
 
 /// The command line and the config layers, resolved into one answer.
-fn settings(args: &Args) -> Result<Settings, UsageError> {
+fn settings(args: &Args, trust_for: impl FnOnce(&Path) -> Trust) -> Result<Settings, UsageError> {
     let started = std::time::Instant::now();
     let timeout = match args.timeout.as_deref() {
         Some(spec) => Some(deadline(spec)?),
@@ -605,15 +609,16 @@ fn settings(args: &Args) -> Result<Settings, UsageError> {
     // may not be installed; `-C` is how a caller says otherwise.
     let root = cwd.clone();
 
-    // §4.5: "headless in an untrusted workspace runs bare automatically (no
-    // dialog, no ambient code execution)". There is no trust store, and a
-    // headless run has nobody to ask, so this is not a default that a later
-    // milestone relaxes — it is what the section says to do.
-    let trust = Trust::Untrusted;
+    // The caller can return `Trusted` only when it owns a human seat. A
+    // headless caller passes a closure that always returns `Untrusted`, so no
+    // terminal or stdin read is reachable from that path.
+    let trust = trust_for(&root);
     let layers = config::layers(&root, args, trust)?;
     let effective = resolve(&layers, trust, config::profile(args).as_deref())
         .map_err(|err| UsageError(err.to_string()))?;
-    debug_assert_eq!(effective.posture, Posture::Bare);
+    if trust == Trust::Untrusted || args.bare {
+        debug_assert_eq!(effective.posture, Posture::Bare);
+    }
 
     // §4 requires the clamp be stated, not silent: a `--budget 20$` reduced to
     // an administrator's $5 must not read as binding at $20. The money half
@@ -775,10 +780,11 @@ async fn provider(
 ///
 /// What is left here after the four steps above is the *order* they happen in,
 /// which is the part that is genuinely this function's: settings before
-/// materials because a profile decides which instructions load, materials
-/// before the provider because a bad `--tools` must not reach a network, the
-/// provider before the session is opened because a session must not be created
-/// for a run whose model does not resolve.
+/// session choice before materials because a missing `resume` target is true
+/// independently of model configuration, materials before the provider because
+/// a bad `--tools` must not reach a network, and the provider before the session
+/// is opened because a session must not be created for a run whose model does
+/// not resolve.
 async fn execute<S: EventSink>(
     args: Args,
     destination: impl FnOnce(&ModelCapabilities) -> S,
@@ -789,7 +795,11 @@ async fn execute<S: EventSink>(
         message: err.to_string(),
     };
 
-    let settings = settings(&args).map_err(usage)?;
+    let settings = settings(&args, |root| run_trust(&args, &driver, root)).map_err(usage)?;
+    let Chosen {
+        store: jsonl_store,
+        id: session_id,
+    } = chosen(&args, &settings.root).map_err(usage)?;
     let Materials {
         system,
         registry,
@@ -799,7 +809,7 @@ async fn execute<S: EventSink>(
     } = materials(
         &settings,
         &args,
-        matches!(driver, Driver::Interactive { .. }),
+        matches!(&driver, Driver::Interactive { .. }),
     )
     .map_err(usage)?;
 
@@ -810,11 +820,6 @@ async fn execute<S: EventSink>(
         cwd,
         effective,
     } = settings;
-
-    let Chosen {
-        store: jsonl_store,
-        id: session_id,
-    } = chosen(&args, &root).map_err(usage)?;
 
     let Provider {
         http,
@@ -863,14 +868,25 @@ async fn execute<S: EventSink>(
 
     let generator =
         ego_ai::generator::WireGenerator::new(resolved.row.clone(), Arc::clone(&http), credential);
-    // `CLI.md` §4.4: an untrusted workspace resolves to `Mode::Default`
-    // because no layer that could name a mode was eligible, which is the
-    // posture that asks rather than the one that assumes.
-    let policy = PolicyEngine::new(
-        CanonPath::new(&root),
-        effective.mode.unwrap_or(Mode::Default),
-        effective.permissions.clone(),
-    );
+    // An untrusted workspace resolves to `Mode::Default`; a trusted
+    // interactive run may obtain its mode from the admitted config layers.
+    let mode = effective.mode.unwrap_or(Mode::Default);
+    let policy = match &driver {
+        Driver::Once => {
+            PolicyEngine::new(CanonPath::new(&root), mode, effective.permissions.clone())
+        }
+        Driver::Interactive { seat, .. } if seat.has_human() => PolicyEngine::with_human(
+            CanonPath::new(&root),
+            mode,
+            effective.permissions.clone(),
+            Arc::new(SeatApprover {
+                seat: Arc::clone(seat),
+            }),
+        ),
+        Driver::Interactive { .. } => {
+            PolicyEngine::new(CanonPath::new(&root), mode, effective.permissions.clone())
+        }
+    };
     let fs = OsFs;
     let mut gate = budget::gate(&effective.ceilings, effective.clamped.money, currency);
 
@@ -953,9 +969,9 @@ async fn execute<S: EventSink>(
             let mut seeded = (!text.trim().is_empty()).then(|| text.clone());
 
             loop {
-                // The editor is the only writer while it reads, and it is
-                // gone before the turn renders. R12, held by construction
-                // rather than by care.
+                // The editor is the only writer while it reads, and no read
+                // remains active while the turn renders. R12, held by
+                // construction rather than by care.
                 let line = match seeded.take() {
                     Some(first) => repl::Line::Submitted(first),
                     None => seat.read(),
@@ -1012,11 +1028,19 @@ enum Driver<'a> {
     Once,
     /// Lines from a person, until they stop.
     Interactive {
-        seat: &'a mut (dyn Reads + Send),
+        seat: Arc<dyn InteractiveSeat>,
         /// Run after each turn: the screen holds the last block back until it
         /// knows no more is coming, and between turns is when it knows.
         between: &'a (dyn Fn() + Send + Sync),
     },
+}
+
+fn run_trust(args: &Args, driver: &Driver<'_>, root: &Path) -> Trust {
+    match driver {
+        Driver::Once => Trust::Untrusted,
+        Driver::Interactive { seat, .. } if !args.bare && seat.has_human() => seat.trust(root),
+        Driver::Interactive { .. } => Trust::Untrusted,
+    }
 }
 
 /// The seat, as the run loop needs it.
@@ -1026,7 +1050,28 @@ enum Driver<'a> {
 /// and would make every one of those tests unrunnable in CI.
 pub trait Reads {
     /// Read one line, blocking until there is one.
-    fn read(&mut self) -> repl::Line;
+    fn read(&self) -> repl::Line;
+}
+
+/// The two explicit decisions only a human-driven run may make.
+pub trait InteractiveSeat: Reads + std::fmt::Debug + Send + Sync {
+    fn has_human(&self) -> bool;
+    fn trust(&self, workspace: &Path) -> Trust;
+    fn permission(&self, request: &PermissionRequest) -> PermissionDecision;
+}
+
+#[derive(Debug)]
+struct SeatApprover {
+    seat: Arc<dyn InteractiveSeat>,
+}
+
+impl HumanApprover for SeatApprover {
+    fn decide<'a>(
+        &'a self,
+        request: &'a PermissionRequest,
+    ) -> futures::future::BoxFuture<'a, PermissionDecision> {
+        Box::pin(futures::future::ready(self.seat.permission(request)))
+    }
 }
 
 /// The run-level limits, and the loop that applies them between turns.
@@ -1341,6 +1386,82 @@ pub fn diagnose(termination: &RunTermination, broken: Option<String>) {
 mod tests {
     use super::*;
     use crate::render::caps::{Depth, OscProfile};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Debug)]
+    struct TrustingSeat {
+        asked: AtomicUsize,
+    }
+
+    impl Reads for TrustingSeat {
+        fn read(&self) -> repl::Line {
+            repl::Line::Ended
+        }
+    }
+
+    impl InteractiveSeat for TrustingSeat {
+        fn has_human(&self) -> bool {
+            true
+        }
+
+        fn trust(&self, _workspace: &Path) -> Trust {
+            self.asked.fetch_add(1, Ordering::SeqCst);
+            Trust::Trusted
+        }
+
+        fn permission(&self, _request: &PermissionRequest) -> PermissionDecision {
+            PermissionDecision::Deny
+        }
+    }
+
+    fn interactive_args(extra: &[&str]) -> Args {
+        let argv = std::iter::once("ego".to_string())
+            .chain(extra.iter().map(|arg| arg.to_string()))
+            .collect();
+        let crate::cli::Invocation::Interactive(args) = crate::cli::parse(argv).unwrap() else {
+            panic!("the test invocation is interactive");
+        };
+        *args
+    }
+
+    #[test]
+    fn only_an_interactive_non_bare_run_can_ask_for_trust() {
+        let seat = Arc::new(TrustingSeat {
+            asked: AtomicUsize::new(0),
+        });
+        let dyn_seat: Arc<dyn InteractiveSeat> = seat.clone();
+        let between = || {};
+        let interactive = Driver::Interactive {
+            seat: dyn_seat,
+            between: &between,
+        };
+        assert_eq!(
+            run_trust(&interactive_args(&[]), &interactive, Path::new("/ws")),
+            Trust::Trusted
+        );
+        assert_eq!(seat.asked.load(Ordering::SeqCst), 1);
+
+        assert_eq!(
+            run_trust(
+                &interactive_args(&["--bare"]),
+                &interactive,
+                Path::new("/ws")
+            ),
+            Trust::Untrusted
+        );
+        assert_eq!(
+            seat.asked.load(Ordering::SeqCst),
+            1,
+            "--bare must skip the seat"
+        );
+
+        assert_eq!(
+            run_trust(&interactive_args(&[]), &Driver::Once, Path::new("/ws")),
+            Trust::Untrusted,
+            "headless has no seat to consult"
+        );
+        assert_eq!(seat.asked.load(Ordering::SeqCst), 1);
+    }
 
     fn capabilities(osc: OscProfile) -> Capabilities {
         Capabilities {
@@ -1372,6 +1493,25 @@ mod tests {
         assert!(failed.ends_with("\x1b]133;D;1\x07"), "{failed:?}");
         let done = announce.postamble(&RunTermination::Done, Duration::ZERO);
         assert!(done.ends_with("\x1b]133;D;0\x07"), "{done:?}");
+    }
+
+    #[test]
+    fn a_title_is_branded_once_and_closing_keeps_only_the_fixed_prefix() {
+        let (out, capabilities, quiet) = announce(OscProfile::Standard, false);
+        let announce = Announce::new(&out, capabilities, quiet);
+
+        assert_eq!(
+            announce.preamble(Some("explain the diff")),
+            "\x1b]0;ɛ । explain the diff\x07\x1b]9;4;3;0\x07\x1b]133;C\x07"
+        );
+        assert_eq!(
+            announce.preamble(None),
+            "\x1b]0;ɛ । εgo\x07\x1b]9;4;3;0\x07\x1b]133;C\x07"
+        );
+        assert_eq!(
+            announce.postamble(&RunTermination::Done, Duration::ZERO),
+            "\x1b]9;4;0;0\x07\x1b]0;ɛ । \x07\x1b]133;D;0\x07"
+        );
     }
 
     /// A progress indicator left set outlives the process that set it: the tab
@@ -1422,17 +1562,17 @@ mod tests {
         let (out, capabilities, _) = announce(OscProfile::Standard, false);
         let loud = Announce::new(&out, capabilities, false);
 
-        // `\x1b]9;ego`, not `\x1b]9;` — OSC 9;4 is the progress indicator and
+        // `\x1b]9;εgo`, not `\x1b]9;` — OSC 9;4 is the progress indicator and
         // shares the prefix.
         assert!(
             !loud
                 .postamble(&RunTermination::Done, NOTIFY_AFTER - Duration::from_secs(1))
-                .contains("\x1b]9;ego"),
+                .contains("\x1b]9;εgo"),
             "a run somebody watched finish"
         );
         let long = loud.postamble(&RunTermination::Done, Duration::from_secs(252));
         assert!(
-            long.contains("\x1b]9;ego: done after 4m 12s\x07"),
+            long.contains("\x1b]9;εgo: done after 4m 12s\x07"),
             "{long:?}"
         );
 
@@ -1440,7 +1580,7 @@ mod tests {
         assert!(
             !quiet
                 .postamble(&RunTermination::Done, Duration::from_secs(252))
-                .contains("\x1b]9;ego"),
+                .contains("\x1b]9;εgo"),
             "-q suppresses it at any duration"
         );
     }
@@ -1464,13 +1604,13 @@ mod tests {
 
     #[test]
     fn the_title_says_what_was_asked_and_never_says_a_dash() {
-        assert_eq!(title(Some("explain the diff")), "ego: explain the diff");
+        assert_eq!(title(Some("explain the diff")), "explain the diff");
         // `-` is the spelling for "the prompt is on stdin".
-        assert_eq!(title(Some("-")), "ego");
-        assert_eq!(title(None), "ego");
-        assert_eq!(title(Some("   ")), "ego");
+        assert_eq!(title(Some("-")), "εgo");
+        assert_eq!(title(None), "εgo");
+        assert_eq!(title(Some("   ")), "εgo");
         // A prompt is often a paragraph; a tab is one line.
-        assert_eq!(title(Some("first line\nsecond line")), "ego: first line");
+        assert_eq!(title(Some("first line\nsecond line")), "first line");
     }
 
     /// Cut in cells, like everything else that reaches a terminal. A title cut
@@ -1479,9 +1619,8 @@ mod tests {
     fn a_long_title_is_cut_where_a_grapheme_ends() {
         let flag = "\u{1f1ee}\u{1f1f9}";
         let title = title(Some(&flag.repeat(40)));
-        assert!(title.starts_with("ego: "));
         assert!(!title.contains('\u{fffd}'));
-        assert_eq!(crate::render::line::cells(&title["ego: ".len()..]), 48);
+        assert_eq!(crate::render::line::cells(&title), 48);
     }
 
     #[test]
