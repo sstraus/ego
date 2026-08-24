@@ -596,10 +596,10 @@ typing.
 
 Same discipline as §2.1 and §3.1. This table records the implementation that
 ships today; §§6.3-6.5 are the final product contract and are not optional
-scope. The current reader, trust question, and permission answer path ship.
-`ego` with no subcommand opens a session, but today the editor still ends each
-read before the turn renders. regression case replaces that sequential ownership
-without relaxing the one-writer invariant.
+scope. The current reader, trust question, permission answer path, and live
+composer ship. `ego` with no subcommand opens a session whose single Reedline
+owner stays active while rendered output, tools, and modal prompts cross
+bounded channels.
 
 | Surface | M0b | Note |
 |---|---|---|
@@ -608,7 +608,7 @@ without relaxing the one-writer invariant.
 | Ctrl+V | **refused by name** | it asks for a pasteboard *image* first (§6.1), and there is nowhere to put one — the same gap that refuses `--attach`. It refuses rather than silently pasting text, because only one of those two can be discovered |
 | Permission dialog | **yes** | plain `allow`, `deny`, or `amend`; amend then reads replacement JSON parameters. Invalid answers re-prompt; Ctrl-C and EOF deny. The engine keeps the configured mode first and re-prepares/re-classifies every amendment |
 | Slash commands | no | there is no parser or registry yet; slash-looking composer input currently goes to the model. regression case introduces the final action surface |
-| Live composer during a turn | no | regression case; reedline's external printer is the selected output boundary |
+| Live composer during a turn | **yes** | one Reedline owner accepts bounded external-printer output and preserves the exact draft through streaming, tools, permission waits, paste, and resize |
 | Ctrl-S drafts, prompt queue, steering | no | regression case |
 | Model/question menus and status line | no | regression case |
 | `--attach` | no | §3.1's row: waiting on a non-text content block |
