@@ -17,7 +17,7 @@ use ego_core::event::domain::{
 use ego_core::event::id::{EventId, ItemId, Producer, Seq, SessionId, TurnId};
 use ego_core::event::time::Timestamp;
 use ego_core::generator::types::{ErrorKind, ReasoningState};
-use ego_core::permit::{Authority, CanonPath, Escalation, OpName};
+use ego_core::permit::{Authority, CanonPath, Escalation, OpName, ToolResult};
 use ego_core::public::{
     InstructionDescriptor, InstructionSource, ItemKind, PUBLIC_EVENT_VERSION, PublicEvent,
     project_public,
@@ -183,7 +183,7 @@ mod public_golden {
                 Some(item_tool_1),
                 EventKind::ToolCallCompleted {
                     ok: true,
-                    output: "file1\nfile2\n".to_string(),
+                    result: ToolResult::builtin("file1\nfile2\n"),
                 },
             ),
             ev(

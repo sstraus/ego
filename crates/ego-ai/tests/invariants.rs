@@ -61,13 +61,18 @@ use ego_core::generator::capabilities::{
 use ego_core::generator::port::AiEvent;
 use ego_core::generator::types::{ErrorKind, GenRequest, StopReason, ThinkingLevel};
 use ego_core::permit::fake::FakeFs;
-use ego_core::permit::{CanonPath, PolicyEngine, Tool};
+use ego_core::permit::{
+    CanonPath, PolicyEngine, ProcessError, ProcessExecutor, SpawnSpec, Tool, ToolResult,
+};
 use ego_core::sink::NullSink;
 use ego_core::state::{ItemKind, SessionState, Usage};
+use ego_core::store::evidence::{
+    EvidenceError, EvidencePage, EvidenceRead, EvidenceStore, EvidenceWriter,
+};
 use ego_core::store::session_store::{SessionMeta, SessionStore, StoreError};
 use ego_core::turn::{CancelToken, Model, Session, Tools, TurnConfig, TurnLoop};
 use futures::StreamExt;
-use futures::future::BoxFuture;
+use futures::future::{self, BoxFuture};
 use futures::stream::BoxStream;
 use serde::Deserialize;
 use url::Url;
@@ -166,6 +171,36 @@ impl Clock for FixedClock {
     }
 }
 
+struct NoProcess;
+
+impl ProcessExecutor for NoProcess {
+    fn execute<'a>(
+        &'a self,
+        _spec: &'a SpawnSpec,
+    ) -> BoxFuture<'a, Result<ToolResult, ProcessError>> {
+        Box::pin(future::ready(Err(ProcessError::Invariant(
+            "provider invariant tests have no process tools".to_string(),
+        ))))
+    }
+}
+
+struct NoEvidence;
+
+impl EvidenceStore for NoEvidence {
+    fn begin(&self) -> Result<Box<dyn EvidenceWriter>, EvidenceError> {
+        Err(EvidenceError::Limit { limit: 0 })
+    }
+
+    fn read_page<'a>(
+        &'a self,
+        request: &'a EvidenceRead,
+    ) -> BoxFuture<'a, Result<EvidencePage, EvidenceError>> {
+        Box::pin(future::ready(Err(EvidenceError::NotFound {
+            reference: request.reference.id.clone(),
+        })))
+    }
+}
+
 /// Answers one request with one canned body, in small chunks.
 ///
 /// Chunked at a size that falls inside every frame of both transcripts, so a
@@ -238,6 +273,8 @@ async fn one_turn(
     let clock = FixedClock;
     let policy = PolicyEngine::new(CanonPath::new("/ws"), Mode::Default, Ruleset::default());
     let fs = FakeFs::default();
+    let process = NoProcess;
+    let evidence = NoEvidence;
     let registry: Vec<Arc<dyn Tool>> = Vec::new();
     let mut gate = BudgetGate::new(usd("10"));
 
@@ -265,7 +302,14 @@ async fn one_turn(
                 parallel_tool_calls: false,
             },
         },
-        Tools::new(&registry, &policy, &fs, CanonPath::new("/ws")),
+        Tools::new(
+            &registry,
+            &policy,
+            &fs,
+            &process,
+            &evidence,
+            CanonPath::new("/ws"),
+        ),
     );
 
     let outcome = loop_

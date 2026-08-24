@@ -40,7 +40,7 @@ use ego_core::cost::{
     Amount, CostAttribution, CostDelta, CurrencyCode, Money, PricingRevision, UnknownCost,
 };
 use ego_core::event::domain::{
-    CancelCause, DomainEvent, Envelope, EventKind, ExitReason, OccupancyProvenance,
+    CancelCause, DomainEvent, Envelope, EventKind, ExitReason, GenerationRole, OccupancyProvenance,
 };
 use ego_core::event::id::{EventId, GenerationId, ItemId, Producer, Seq, SessionId, TurnId};
 use ego_core::event::time::Timestamp;
@@ -50,7 +50,7 @@ use ego_core::generator::capabilities::{
     Transport,
 };
 use ego_core::generator::types::{ErrorKind, ReasoningState, StopReason};
-use ego_core::permit::{Authority, CanonPath, Escalation, OpName};
+use ego_core::permit::{Authority, CanonPath, Escalation, OpName, ToolResult};
 use ego_core::public::project_public;
 use ego_core::state::{SessionState, Usage};
 
@@ -213,7 +213,7 @@ mod acp_golden {
                 Some(item_tool_1),
                 EventKind::ToolCallCompleted {
                     ok: true,
-                    output: "file1\nfile2\n".to_string(),
+                    result: ToolResult::builtin("file1\nfile2\n"),
                 },
             ),
             ev(
@@ -233,8 +233,9 @@ mod acp_golden {
                 turn1,
                 Some(item_perm_1),
                 EventKind::PermissionDecided {
-                    allowed: false,
+                    allowed: Some(false),
                     by: Some(Authority::Boundary),
+                    reason: None,
                 },
             ),
             ev(
@@ -390,7 +391,7 @@ mod acp_golden {
             },
             EventKind::ToolCallCompleted {
                 ok: true,
-                output: String::new(),
+                result: ToolResult::builtin(String::new()),
             },
             EventKind::PermissionRequested {
                 tool: String::new(),
@@ -400,11 +401,13 @@ mod acp_golden {
                 },
             },
             EventKind::PermissionDecided {
-                allowed: true,
+                allowed: Some(true),
                 by: None,
+                reason: None,
             },
             EventKind::GenerationStarted {
                 attempt: AttemptRef::first(GenerationId::new()),
+                role: GenerationRole::Main,
             },
             EventKind::AttemptSettled {
                 attempt: AttemptRef::first(GenerationId::new()),
@@ -929,7 +932,7 @@ mod acp_golden {
             },
             EventKind::ToolCallCompleted {
                 ok: true,
-                output: "orphaned".to_string(),
+                result: ToolResult::builtin("orphaned"),
             },
         ];
         for kind in kinds {
@@ -955,7 +958,7 @@ mod acp_golden {
             },
             EventKind::ToolCallCompleted {
                 ok: true,
-                output: "orphaned".to_string(),
+                result: ToolResult::builtin("orphaned"),
             },
         ];
         for kind in kinds {

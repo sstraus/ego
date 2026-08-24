@@ -22,7 +22,7 @@ use ego_core::event::domain::{DomainEvent, Envelope, EventKind, ExitReason, Occu
 use ego_core::event::id::{EventId, ItemId, Producer, Seq, SessionId, TurnId};
 use ego_core::event::time::Timestamp;
 use ego_core::generator::types::ErrorKind;
-use ego_core::permit::{Authority, CanonPath, Escalation, OpName};
+use ego_core::permit::{Authority, CanonPath, Escalation, OpName, ToolResult};
 use ego_core::state::{SessionState, Usage};
 use ego_core::store::session_store::SessionStore;
 use ego_tools::store::{
@@ -174,7 +174,7 @@ mod snapshot {
             Some(item_tool),
             EventKind::ToolCallCompleted {
                 ok: true,
-                output: "file1\n".to_string(),
+                result: ToolResult::builtin("file1\n"),
             },
             None,
             EventId::new(),

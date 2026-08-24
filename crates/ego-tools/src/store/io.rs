@@ -273,14 +273,14 @@ fn publish_new_with(staging: &Path, target: &Path, barrier: Barrier) -> io::Resu
                 return Err(error);
             }
             fs::remove_file(staging)?;
-            if let Some(parent) = staging.parent() {
-                if let Err(error) = barrier.apply(&fs::File::open(parent)?) {
-                    let _ = fs::remove_file(target);
-                    if let Ok(directory) = fs::File::open(parent) {
-                        let _ = barrier.apply(&directory);
-                    }
-                    return Err(error);
+            if let Some(parent) = staging.parent()
+                && let Err(error) = barrier.apply(&fs::File::open(parent)?)
+            {
+                let _ = fs::remove_file(target);
+                if let Ok(directory) = fs::File::open(parent) {
+                    let _ = barrier.apply(&directory);
                 }
+                return Err(error);
             }
             Ok(true)
         }

@@ -886,7 +886,13 @@ impl Pending {
 ///
 /// Two arms because "the answer is settled by rules" and "the next policy
 /// party must be consulted" are different facts.
+///
+/// The size difference between the variants is deliberate. A classification
+/// is produced once per call and consumed immediately; it is never retained
+/// or collected. Boxing the settled result would add a heap allocation to
+/// every decided authorization only to shrink this short-lived stack value.
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)]
 pub enum Classification {
     /// Decided, one way or the other, without asking anybody.
     Settled(Result<Authorized, PolicyDenied>),
@@ -1446,14 +1452,57 @@ fn scope_of(call: &PreparedCall) -> Scope {
 /// prefix, and the guarded seam rechecks at use time.
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsString;
+    use std::time::Duration;
+
     use futures::executor::block_on;
+    use futures::future::{self, BoxFuture};
     use serde_json::json;
 
     use super::*;
     use crate::permit::fake::{FakeFs, FakeWriteTool};
     use crate::permit::{
-        Change, Fs, GuardedFs, GuardedIo, IoDenied, Op, PrepareCtx, Tool, ToolError, Typed,
+        Change, EnvPolicy, Fs, GuardedEffects, GuardedIo, IoDenied, Op, PrepareCtx, ProcessError,
+        ProcessExecutor, Tool, ToolError, ToolResult, Typed,
     };
+    use crate::store::evidence::{EvidenceError, EvidencePage, EvidenceStore, EvidenceWriter};
+
+    struct NoProcess;
+
+    impl ProcessExecutor for NoProcess {
+        fn execute<'a>(
+            &'a self,
+            _spec: &'a SpawnSpec,
+        ) -> BoxFuture<'a, Result<ToolResult, ProcessError>> {
+            Box::pin(future::ready(Err(ProcessError::Invariant(
+                "process execution is not used by filesystem tests".to_string(),
+            ))))
+        }
+    }
+
+    struct NoEvidence;
+
+    impl EvidenceStore for NoEvidence {
+        fn begin(&self) -> Result<Box<dyn EvidenceWriter>, EvidenceError> {
+            Err(EvidenceError::Limit { limit: 0 })
+        }
+
+        fn read_page<'a>(
+            &'a self,
+            request: &'a EvidenceRead,
+        ) -> BoxFuture<'a, Result<EvidencePage, EvidenceError>> {
+            Box::pin(future::ready(Err(EvidenceError::NotFound {
+                reference: request.reference.id.clone(),
+            })))
+        }
+    }
+
+    static NO_PROCESS: NoProcess = NoProcess;
+    static NO_EVIDENCE: NoEvidence = NoEvidence;
+
+    fn guarded(permit: Permit, fs: &dyn Fs) -> GuardedEffects<'_> {
+        GuardedEffects::new(permit, fs, &NO_PROCESS, &NO_EVIDENCE)
+    }
 
     fn prepare_ctx<'a>(fs: &'a FakeFs) -> PrepareCtx<'a> {
         PrepareCtx {
@@ -1647,10 +1696,10 @@ mod tests {
             write_paths: vec![CanonPath::new("/ws/allowed")],
             ..Scope::default()
         });
-        let guarded = GuardedFs::new(permit, &fs);
+        let guarded = guarded(permit, &fs);
 
         let result = block_on(tool.execute(call, &guarded)).unwrap();
-        assert_eq!(result.content, "wrote 5 bytes to /ws/allowed/note.txt");
+        assert_eq!(result.model_text(), "wrote 5 bytes to /ws/allowed/note.txt");
         assert_eq!(
             fs.read(&CanonPath::new("/ws/allowed/note.txt")).unwrap(),
             b"hello"
@@ -1671,7 +1720,7 @@ mod tests {
             write_paths: vec![CanonPath::new("/ws/allowed")],
             ..Scope::default()
         });
-        let guarded = GuardedFs::new(permit, &fs);
+        let guarded = guarded(permit, &fs);
 
         let err = block_on(tool.execute(call, &guarded)).unwrap_err();
         assert_eq!(
@@ -1724,7 +1773,7 @@ mod tests {
         // for a symlink pointing outside the permitted scope.
         fs.symlink("/ws/allowed/file.txt", "/ws/secret/passwords.txt");
 
-        let guarded = GuardedFs::new(permit, &fs);
+        let guarded = guarded(permit, &fs);
         let err = block_on(tool.execute(call, &guarded)).unwrap_err();
         assert_eq!(
             err,
@@ -1750,7 +1799,7 @@ mod tests {
             read_paths: vec![CanonPath::new("/ws/readable")],
             ..Scope::default()
         });
-        let guarded = GuardedFs::new(permit, &fs);
+        let guarded = guarded(permit, &fs);
 
         assert_eq!(
             guarded
@@ -1772,7 +1821,7 @@ mod tests {
             write_paths: vec![CanonPath::new("/ws/allowed")],
             ..Scope::default()
         });
-        let guarded = GuardedFs::new(permit, &fs);
+        let guarded = guarded(permit, &fs);
 
         // "/ws/allowed-evil" shares a textual prefix with the scoped
         // "/ws/allowed" but is a sibling, not a descendant of it —
@@ -1798,7 +1847,7 @@ mod tests {
             write_paths: vec![CanonPath::new("/ws/allowed")],
             ..Scope::default()
         });
-        let guarded = GuardedFs::new(permit, &fs);
+        let guarded = guarded(permit, &fs);
 
         // The scope boundary itself is in scope ("is or under", not
         // strictly-under-only)...
@@ -1828,7 +1877,7 @@ mod tests {
             read_paths: vec![CanonPath::new("/ws/allowed")],
             ..Scope::default()
         });
-        let guarded = GuardedFs::new(permit, &fs);
+        let guarded = guarded(permit, &fs);
 
         // Same sibling-prefix hazard as the write case, checked against
         // `Scope::read_paths` — read and write scope independently, each
@@ -1840,7 +1889,14 @@ mod tests {
     }
 
     #[test]
-    fn permit_scope_covers_paths_endpoints_and_argv() {
+    fn permit_scope_covers_paths_endpoints_and_exact_spawn_spec() {
+        let allowed_spawn = SpawnSpec::new(
+            vec![OsString::from("git"), OsString::from("status")],
+            Some(CanonPath::new("/ws")),
+            Some(Duration::from_secs(30)),
+            EnvPolicy::Inherited,
+        )
+        .unwrap();
         let engine = minter();
         let permit = engine.mint(Scope {
             write_paths: vec![CanonPath::new("/ws/allowed")],
@@ -1848,7 +1904,8 @@ mod tests {
             list_paths: vec![CanonPath::new("/ws/listable")],
             search_paths: vec![CanonPath::new("/ws/searchable")],
             endpoints: vec!["api.example.com:443".to_string()],
-            argv: vec![vec!["git".to_string(), "status".to_string()]],
+            spawn: Some(allowed_spawn.clone()),
+            ..Scope::default()
         });
 
         assert!(
@@ -1882,18 +1939,21 @@ mod tests {
             Err(PermitDenied::Connect { .. })
         ));
 
-        assert!(
-            permit
-                .allows_argv(&[
-                    "git".to_string(),
-                    "status".to_string(),
-                    "--short".to_string()
-                ])
-                .is_ok()
-        );
+        assert!(permit.allows_spawn(&allowed_spawn).is_ok());
+        let widened_spawn = SpawnSpec::new(
+            vec![
+                OsString::from("git"),
+                OsString::from("status"),
+                OsString::from("--short"),
+            ],
+            Some(CanonPath::new("/ws")),
+            Some(Duration::from_secs(30)),
+            EnvPolicy::Inherited,
+        )
+        .unwrap();
         assert!(matches!(
-            permit.allows_argv(&["rm".to_string(), "-rf".to_string()]),
-            Err(PermitDenied::Argv { .. })
+            permit.allows_spawn(&widened_spawn),
+            Err(PermitDenied::Spawn { .. })
         ));
     }
 }

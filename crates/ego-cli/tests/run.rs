@@ -10,7 +10,40 @@ use std::io::BufRead;
 use std::time::Duration;
 
 use ego_core::public::PUBLIC_EVENT_VERSION;
-use support::{Ego, Places, Plan, Reply, Stub, costing, paced, text, tool_call};
+use support::{
+    Ego as HarnessEgo, Places as HarnessPlaces, Plan, Reply, Stub, costing, paced, text, tool_call,
+};
+
+/// This suite isolates the CLI/provider contract from host sandbox
+/// availability. Step 14's dedicated sandbox contract owns the workspace
+/// default, capability probing, and fail-closed behavior.
+struct Ego;
+
+impl Ego {
+    fn against(stub: &Stub) -> HarnessEgo {
+        HarnessEgo::against(stub).args(["--sandbox", "off"])
+    }
+
+    fn nowhere() -> HarnessEgo {
+        HarnessEgo::nowhere().args(["--sandbox", "off"])
+    }
+}
+
+struct Places(HarnessPlaces);
+
+impl Places {
+    fn new() -> Self {
+        Self(HarnessPlaces::new())
+    }
+
+    fn ego(&self, stub: &Stub) -> HarnessEgo {
+        self.0.ego(stub).args(["--sandbox", "off"])
+    }
+
+    fn raw_ego(&self, stub: &Stub) -> HarnessEgo {
+        self.0.ego(stub)
+    }
+}
 
 /// The number `CLI.md` §4.1's own example object carries.
 ///
@@ -2157,7 +2190,7 @@ fn ls_finds_the_session_a_run_just_wrote() {
     assert_eq!(run.code, Some(0), "stderr: {}", run.stderr);
 
     let listed = places
-        .ego(&stub)
+        .raw_ego(&stub)
         .subcommand("ls")
         .args(["--output", "json"])
         .run();
@@ -2179,7 +2212,7 @@ fn ls_finds_the_session_a_run_just_wrote() {
 /// to run.
 #[test]
 fn ls_on_an_empty_store_is_an_empty_list_and_not_a_failure() {
-    let listed = Ego::nowhere()
+    let listed = HarnessEgo::nowhere()
         .subcommand("ls")
         .args(["--output", "json"])
         .run();
@@ -2197,7 +2230,7 @@ fn ls_on_an_empty_store_is_an_empty_list_and_not_a_failure() {
 /// empty, because stdout is the listing.
 #[test]
 fn ls_with_nothing_to_list_still_prints_a_header_and_explains_on_stderr() {
-    let listed = Ego::nowhere().subcommand("ls").run();
+    let listed = HarnessEgo::nowhere().subcommand("ls").run();
     assert_eq!(listed.code, Some(0), "stderr: {}", listed.stderr);
     assert!(listed.stdout.starts_with("ID"), "{:?}", listed.stdout);
     assert!(
@@ -2227,7 +2260,7 @@ fn ls_jsonl_writes_one_session_per_line() {
     }
 
     let listed = places
-        .ego(&stub)
+        .raw_ego(&stub)
         .subcommand("ls")
         .args(["--output", "jsonl"])
         .run();
@@ -2310,7 +2343,7 @@ fn resume_with_an_unknown_id_is_a_usage_error_and_writes_no_session() {
     assert!(refused.stderr.contains("no session"), "{}", refused.stderr);
 
     let listed = places
-        .ego(&stub)
+        .raw_ego(&stub)
         .subcommand("ls")
         .args(["--all", "--output", "json"])
         .run();
@@ -2365,9 +2398,9 @@ fn promptless_resume_with_no_session_still_exits_two_without_creating_one() {
 fn help_is_written_to_stdout_and_exits_zero() {
     for name in ["--help", "run", "resume", "ls", "acp"] {
         let asked = if name == "--help" {
-            Ego::nowhere().subcommand("--help").run()
+            HarnessEgo::nowhere().subcommand("--help").run()
         } else {
-            Ego::nowhere().subcommand(name).arg("--help").run()
+            HarnessEgo::nowhere().subcommand(name).arg("--help").run()
         };
         assert_eq!(
             asked.code,
@@ -2391,7 +2424,7 @@ fn help_is_written_to_stdout_and_exits_zero() {
 /// `--version` likewise, and it prints one.
 #[test]
 fn version_is_written_to_stdout_and_exits_zero() {
-    let asked = Ego::nowhere().subcommand("--version").run();
+    let asked = HarnessEgo::nowhere().subcommand("--version").run();
     assert_eq!(asked.code, Some(0), "stderr: {}", asked.stderr);
     assert_eq!(
         asked.stdout.trim(),
@@ -2405,7 +2438,10 @@ fn version_is_written_to_stdout_and_exits_zero() {
 /// separated two things rather than moving both.
 #[test]
 fn a_usage_error_still_goes_to_stderr_and_exits_two() {
-    let refused = Ego::nowhere().subcommand("ls").arg("--nonsense").run();
+    let refused = HarnessEgo::nowhere()
+        .subcommand("ls")
+        .arg("--nonsense")
+        .run();
     assert_eq!(refused.code, Some(2), "stdout: {}", refused.stdout);
     assert!(refused.stdout.is_empty(), "stdout: {}", refused.stdout);
     assert!(refused.stderr.contains("--nonsense"), "{}", refused.stderr);

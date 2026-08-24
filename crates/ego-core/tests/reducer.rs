@@ -16,7 +16,7 @@ use ego_core::event::id::{EventId, ItemId, Producer, Seq, SessionId, TurnId};
 use ego_core::event::time::Timestamp;
 use ego_core::generator::attempt::{AttemptRef, DeliveryCertainty, Outcome, UsageReport};
 use ego_core::generator::types::{ErrorKind, StopReason};
-use ego_core::permit::{Authority, CanonPath, Escalation, OpName};
+use ego_core::permit::{Authority, CanonPath, Escalation, OpName, ToolResult};
 use ego_core::state::{PermissionEvent, RefusalReason, SessionState, SubagentEvent, Usage};
 
 // Wrapped in a module named `reducer` so `cargo test -p ego-core reducer`
@@ -144,7 +144,7 @@ mod reducer {
             Some(tool_item),
             EventKind::ToolCallCompleted {
                 ok: true,
-                output: "a.txt\nb.txt".to_string()
+                result: ToolResult::builtin("a.txt\nb.txt")
             }
         );
         push!(
@@ -453,7 +453,7 @@ mod reducer {
                 "tool_call_completed",
                 EventKind::ToolCallCompleted {
                     ok: false,
-                    output: String::new(),
+                    result: ToolResult::builtin(String::new()),
                 },
             ),
             (
@@ -810,13 +810,17 @@ mod reducer {
             None,
             EventKind::ToolCallCompleted {
                 ok: true,
-                output: "final output".to_string(),
+                result: ToolResult::builtin("final output"),
             },
         ));
 
         let it = &state.items[&item];
         assert_eq!(it.tool_name.as_deref(), Some("grep"));
-        assert_eq!(it.text, "final output");
+        assert!(it.text.is_empty());
+        assert_eq!(
+            it.tool_result.as_ref().map(ToolResult::model_text),
+            Some("final output".to_string())
+        );
         assert!(it.completed);
         assert_eq!(it.ok, Some(true));
     }

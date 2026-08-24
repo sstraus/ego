@@ -187,14 +187,6 @@ fn read_evidence_pages(evidence: &SessionEvidenceStore, reference: &EvidenceRef)
     bytes
 }
 
-fn store_evidence(evidence: &SessionEvidenceStore, chunks: &[&[u8]]) -> EvidenceRef {
-    let mut writer = evidence.begin().expect("evidence staging");
-    for chunk in chunks {
-        writer.append(chunk).expect("evidence chunk");
-    }
-    writer.commit().expect("evidence commit")
-}
-
 fn fixture_arg_spec(
     name: &str,
     args: impl IntoIterator<Item = OsString>,

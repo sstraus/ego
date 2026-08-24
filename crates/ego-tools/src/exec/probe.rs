@@ -66,7 +66,6 @@ pub(crate) async fn landlock(
                     .map_err(ProcessError::Evidence)?;
             let capabilities = measure(
                 backend.clone(),
-                maximum,
                 policy,
                 &scratch_path,
                 &runtime_roots,
@@ -118,7 +117,6 @@ pub(crate) async fn seatbelt(
                     .map_err(ProcessError::Evidence)?;
             let mut capabilities = measure(
                 backend.clone(),
-                maximum,
                 policy,
                 &scratch_path,
                 &runtime_roots,
@@ -556,7 +554,6 @@ where
 
 async fn measure(
     backend: Arc<dyn Backend>,
-    maximum: ExecCaps,
     policy: &RunConfinement,
     scratch: &CanonPath,
     runtime_roots: &[CanonPath],
@@ -564,6 +561,7 @@ async fn measure(
     cancel: CancelToken,
     limits: ExecLimits,
 ) -> ExecCaps {
+    let maximum = backend.maximum_demonstrable_caps();
     let Some(fixture) = ProbeFixture::new(policy.workspace(), scratch) else {
         return ExecCaps::empty();
     };

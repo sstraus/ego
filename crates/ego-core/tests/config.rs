@@ -116,6 +116,7 @@ fn config_known_keys_parse_cleanly() {
     assert_eq!(
         sourced.value.permissions,
         Some(PermCfg {
+            judge: None,
             allow: vec![rule("read(src/**)")],
             deny: vec![],
         })
@@ -531,6 +532,7 @@ fn config_system_deny_survives_a_higher_precedence_layer_that_clears_it() {
             Source::System,
             ConfigLayer {
                 permissions: Some(PermCfg {
+                    judge: None,
                     allow: vec![],
                     deny: vec![rule("list(**)")],
                 }),
@@ -541,6 +543,7 @@ fn config_system_deny_survives_a_higher_precedence_layer_that_clears_it() {
             Source::Flags,
             ConfigLayer {
                 permissions: Some(PermCfg {
+                    judge: None,
                     allow: vec![rule("list(**)")],
                     deny: vec![],
                 }),
@@ -571,6 +574,7 @@ fn config_non_system_deny_can_be_relaxed_by_higher_precedence() {
             Source::Project,
             ConfigLayer {
                 permissions: Some(PermCfg {
+                    judge: None,
                     allow: vec![],
                     deny: vec![rule("read(secrets/**)")],
                 }),
@@ -581,6 +585,7 @@ fn config_non_system_deny_can_be_relaxed_by_higher_precedence() {
             Source::Flags,
             ConfigLayer {
                 permissions: Some(PermCfg {
+                    judge: None,
                     allow: vec![rule("read(secrets/**)")],
                     deny: vec![],
                 }),
@@ -673,6 +678,7 @@ fn config_system_deny_unions_across_multiple_system_layers() {
         Source::System,
         ConfigLayer {
             permissions: Some(PermCfg {
+                judge: None,
                 allow: vec![],
                 deny: vec![rule("list(**)")],
             }),
@@ -683,6 +689,7 @@ fn config_system_deny_unions_across_multiple_system_layers() {
         Source::System,
         ConfigLayer {
             permissions: Some(PermCfg {
+                judge: None,
                 allow: vec![rule("list(**)")],
                 deny: vec![rule("read(secrets/**)")],
             }),
@@ -706,6 +713,7 @@ fn config_untrusted_project_and_local_cannot_affect_resolution() {
                 model: model("project"),
                 mode: Some(Mode::Yolo),
                 permissions: Some(PermCfg {
+                    judge: None,
                     allow: vec![rule("list(**)")],
                     deny: vec![],
                 }),
@@ -1346,13 +1354,13 @@ fn config_a_tool_named_rule_is_refused_with_the_effect_it_should_have_named() {
 fn config_a_rule_this_build_cannot_enforce_is_refused_at_load() {
     let err = ConfigLayer::parse(
         Source::System,
-        "[permissions]\ndeny = [\"exec(rm -rf /)\"]\n",
+        "[permissions]\ndeny = [\"net(api.github.com)\"]\n",
     )
-    .expect_err("no tool in this build produces exec operations");
+    .expect_err("no tool in this build produces net operations");
     let said = err.to_string();
 
     assert!(said.contains("cannot be enforced"), "{said}");
-    assert!(said.contains("a shell tool"), "{said}");
+    assert!(said.contains("a tool that reaches the network"), "{said}");
 }
 
 /// The refusal is not confined to `deny`, and this is the direction that would
@@ -1395,6 +1403,7 @@ fn config_a_deny_written_in_two_layers_reports_the_layer_that_can_lift_it() {
     //
     // `docs/decisions/2026-08-21-a-deny-that-names-who-can-lift-it.md`.
     let overlapping = || PermCfg {
+        judge: None,
         allow: vec![],
         deny: vec![rule("read(/etc/**)")],
     };
@@ -1447,6 +1456,7 @@ fn config_a_deny_only_the_operator_wrote_is_attributed_to_them() {
         Source::User,
         ConfigLayer {
             permissions: Some(PermCfg {
+                judge: None,
                 allow: vec![],
                 deny: vec![rule("read(/etc/**)")],
             }),

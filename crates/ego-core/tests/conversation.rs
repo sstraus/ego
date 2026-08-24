@@ -16,6 +16,7 @@ use ego_core::generator::history::{Repair, conversation_from};
 use ego_core::generator::types::{
     ContentBlock, Conversation, HistoryError, Message, ReasoningState, Role,
 };
+use ego_core::permit::ToolResult;
 use ego_core::state::SessionState;
 
 mod conversation {
@@ -338,7 +339,7 @@ mod rebuild {
             Some(call),
             EventKind::ToolCallCompleted {
                 ok: true,
-                output: "contents".to_string(),
+                result: ToolResult::builtin("contents"),
             },
         );
 
@@ -397,13 +398,20 @@ mod rebuild {
             Some(call),
             EventKind::ToolCallCompleted {
                 ok: true,
-                output: "contents".to_string(),
+                result: ToolResult::builtin("contents"),
             },
         );
 
         let item = &log.state.items[&call];
         assert_eq!(item.args, r#"{"path":"a.txt"}"#);
-        assert_eq!(item.text, "contents");
+        assert!(
+            item.text.is_empty(),
+            "completed tool deltas are not the result"
+        );
+        assert_eq!(
+            item.tool_result.as_ref().map(ToolResult::model_text),
+            Some("contents".to_string())
+        );
     }
 
     /// The Step 12 case: killed between dispatching a call and recording its
@@ -510,7 +518,7 @@ mod rebuild {
             Some(call),
             EventKind::ToolCallCompleted {
                 ok: true,
-                output: "contents".to_string(),
+                result: ToolResult::builtin("contents"),
             },
         );
         log.item(EventKind::AssistantMessage {
@@ -549,7 +557,7 @@ mod rebuild {
                 Some(call),
                 EventKind::ToolCallCompleted {
                     ok: true,
-                    output: "contents".to_string(),
+                    result: ToolResult::builtin("contents"),
                 },
             );
         }
@@ -725,7 +733,7 @@ mod rebuild {
                 Some(call),
                 EventKind::ToolCallCompleted {
                     ok: true,
-                    output: output.to_string(),
+                    result: ToolResult::builtin(output),
                 },
             );
         }
@@ -756,7 +764,7 @@ mod rebuild {
                 Some(call),
                 EventKind::ToolCallCompleted {
                     ok: true,
-                    output: output.to_string(),
+                    result: ToolResult::builtin(output),
                 },
             );
         }
@@ -791,7 +799,7 @@ mod rebuild {
             Some(answered),
             EventKind::ToolCallCompleted {
                 ok: true,
-                output: "contents".to_string(),
+                result: ToolResult::builtin("contents"),
             },
         );
         log.item_under(generation, started(None));
