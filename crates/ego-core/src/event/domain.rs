@@ -4,6 +4,9 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::hook::{
+    HookCatalogueEvidence, HookId, HookInvocationId, HookLifecycle, HookResult, HookSubject,
+};
 use super::id::{EventId, ItemId, Producer, Seq, SessionId, TurnId};
 use super::time::Timestamp;
 use crate::cost::CostDelta;
@@ -137,16 +140,12 @@ pub enum OccupancyProvenance {
 ///
 /// ```text
 /// UserPrompt | AssistantDelta | AssistantMessage | ReasoningDelta |
-/// ToolCallStarted | ToolCallDelta | ToolCallCompleted | PermissionRequested |
-/// PermissionAmended | PermissionDecided | UsageUpdated | ContextWindowUpdated | TurnCompleted |
-/// Compacted | Forked | HookFired | SubagentSpawned | SubagentReturned | Error
-/// ```
-///
-/// plus the attempt lifecycle and accounting variants added in
-/// `docs/decisions/2026-08-21-attempt-accounting-ledger.md`:
-///
-/// ```text
-/// GenerationStarted | AttemptSettled | UsageCorrected
+/// ReasoningState | ToolCallStarted | ToolCallDelta | ToolCallCompleted |
+/// PermissionRequested | PermissionAmended | PermissionDecided |
+/// GenerationStarted | ExecutionObserved | AttemptSettled | UsageUpdated |
+/// UsageCorrected | ContextWindowUpdated | TurnCompleted | Compacted | Forked |
+/// HookCatalogueAdmitted | HookInvocationStarted | HookInvocationSettled |
+/// SubagentSpawned | SubagentReturned | Error
 /// ```
 ///
 /// This is the internal representation: it evolves freely with core, and
@@ -333,8 +332,21 @@ pub enum EventKind {
     Compacted { summary: String },
     /// This session was forked from `source` at `at_seq`.
     Forked { source: SessionId, at_seq: Seq },
-    /// A hook fired; `blocked` is whether it blocked the action it observed.
-    HookFired { name: String, blocked: bool },
+    /// One complete ordered hook catalogue was admitted atomically.
+    HookCatalogueAdmitted { descriptors: HookCatalogueEvidence },
+    /// A hook handler crossed its external-delivery boundary.
+    HookInvocationStarted {
+        hook: HookId,
+        invocation: HookInvocationId,
+        lifecycle: HookLifecycle,
+        subject: HookSubject,
+    },
+    /// A previously started hook handler reached one final settlement.
+    HookInvocationSettled {
+        hook: HookId,
+        invocation: HookInvocationId,
+        result: HookResult,
+    },
     /// A subagent was spawned.
     SubagentSpawned { subagent_id: String },
     /// A subagent returned its final result.
@@ -386,7 +398,9 @@ impl EventKind {
             EventKind::TurnCompleted { .. } => "turn_completed",
             EventKind::Compacted { .. } => "compacted",
             EventKind::Forked { .. } => "forked",
-            EventKind::HookFired { .. } => "hook_fired",
+            EventKind::HookCatalogueAdmitted { .. } => "hook_catalogue_admitted",
+            EventKind::HookInvocationStarted { .. } => "hook_invocation_started",
+            EventKind::HookInvocationSettled { .. } => "hook_invocation_settled",
             EventKind::SubagentSpawned { .. } => "subagent_spawned",
             EventKind::SubagentReturned { .. } => "subagent_returned",
             EventKind::Error { .. } => "error",

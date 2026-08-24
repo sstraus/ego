@@ -1,4 +1,4 @@
-//! `StoreRecord` codec v1: pure encode/decode with an xxhash64 integrity
+//! `StoreRecord` codec: pure encode/decode with an xxhash64 integrity
 //! checksum over `seq` and canonical payload bytes.
 //!
 //! See `plans/m0a-contracts.md` Step 3. No I/O lives here.
@@ -31,10 +31,11 @@ use crate::event::time::Timestamp;
 /// `docs/decisions/2026-08-21-a-header-the-repair-must-not-delete.md` §3 —
 /// actually compared when one is read.
 ///
-/// v6 replaces `ToolCallCompleted.output` with the final structured
-/// `ToolResult`. A v5 log is refused, not decoded through a second spelling:
-/// old string-only records cannot truthfully acquire full-evidence references.
-pub const CODEC_VERSION: u32 = 6;
+/// v7 replaces the unshipped `HookFired` placeholder with the final admitted
+/// catalogue and invocation start/settlement evidence. A v6 log is refused,
+/// not decoded through a compatibility shape that could invent hook identity
+/// or external-delivery certainty.
+pub const CODEC_VERSION: u32 = 7;
 
 /// The fixed xxhash64 seed for record checksums. Part of the codec v1
 /// contract: changing it would silently invalidate every checksum already

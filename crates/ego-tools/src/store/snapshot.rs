@@ -55,7 +55,11 @@ use serde::{Deserialize, Serialize};
 /// flattening their evidence into `ItemState.text`. The event log is the
 /// authority, so older snapshots are discarded and rebuilt rather than
 /// migrated.
-pub const SNAPSHOT_VERSION: u32 = 4;
+///
+/// v5: `SessionState` gained the admitted hook catalogue, live hook
+/// invocations, and their settlements. A v4 cache cannot reconstruct that
+/// state, so it is discarded and the authoritative log is replayed.
+pub const SNAPSHOT_VERSION: u32 = 5;
 
 /// A reduced [`SessionState`] plus the point in the log it reduces.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

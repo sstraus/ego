@@ -19,6 +19,9 @@ use ego_core::cost::{
     Amount, CostAttribution, CostDelta, CumulativeCost, CurrencyCode, Money, PricingRevision,
 };
 use ego_core::event::domain::{DomainEvent, Envelope, EventKind, ExitReason, OccupancyProvenance};
+use ego_core::event::hook::{
+    HookCatalogueEvidence, HookDescriptorEvidence, HookSourceAuthority, HookSourceLocation,
+};
 use ego_core::event::id::{EventId, ItemId, Producer, Seq, SessionId, TurnId};
 use ego_core::event::time::Timestamp;
 use ego_core::generator::types::ErrorKind;
@@ -206,9 +209,16 @@ mod snapshot {
             seq.next(),
             turn1,
             None,
-            EventKind::HookFired {
-                name: "pre-tool-use".to_string(),
-                blocked: false,
+            EventKind::HookCatalogueAdmitted {
+                descriptors: HookCatalogueEvidence::new(vec![HookDescriptorEvidence::new(
+                    HookSourceAuthority::Project,
+                    HookSourceLocation::parse("hooks/project.json").unwrap(),
+                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                        .parse()
+                        .unwrap(),
+                    0,
+                )])
+                .unwrap(),
             },
             None,
             EventId::new(),
@@ -359,7 +369,7 @@ mod snapshot {
         assert_eq!(expected.context.used_tokens, Some(165));
         assert!(!expected.permissions.is_empty());
         assert!(!expected.subagents.is_empty());
-        assert!(!expected.hooks.is_empty());
+        assert!(!expected.hook_catalogue().is_empty());
         assert!(!expected.errors.is_empty());
         assert!(!expected.compactions.is_empty());
         assert!(!expected.known_events.is_empty());

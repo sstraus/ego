@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use ego_core::event::domain::{DomainEvent, EventKind};
+use ego_core::event::hook::HookCatalogueEvidence;
 use ego_core::event::id::{Seq, SessionId};
 use ego_core::event::time::Timestamp;
 use ego_core::permit::ExecObservation;
@@ -24,14 +25,17 @@ use futures::stream::{self, BoxStream};
 use super::io::{StoreIo, tmp_path_for};
 use super::snapshot::{SNAPSHOT_VERSION, Snapshot, SnapshotRejection, validate};
 
-/// Filesystem-private catalogue projection. The public store port exposes
-/// only [`SessionMeta`]; execution evidence remains an internal log fact.
+/// Filesystem-private cache projection. The public store port exposes only
+/// [`SessionMeta`]; execution and admitted-hook evidence remain internal log
+/// facts, projected here only for bounded catalogue reads and recovery.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct RunManifest {
     #[serde(flatten)]
     meta: SessionMeta,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     execution: Option<ExecObservation>,
+    #[serde(default)]
+    hooks: HookCatalogueEvidence,
 }
 
 struct LogManifestFacts {
@@ -39,6 +43,7 @@ struct LogManifestFacts {
     workspace_root: PathBuf,
     last_ts: Option<Timestamp>,
     execution: Option<ExecObservation>,
+    hooks: HookCatalogueEvidence,
 }
 
 /// What [`JsonlStore::recover`] actually had to repair.
@@ -187,6 +192,7 @@ fn log_manifest_facts(log: &[u8]) -> Option<LogManifestFacts> {
     };
     let mut last_ts = None;
     let mut execution = None;
+    let mut hooks = HookCatalogueEvidence::default();
     for event in lines.filter_map(|line| match decode_line(line) {
         Ok(StoreLine::Record(record)) => {
             serde_json::from_str::<DomainEvent>(record.payload.get()).ok()
@@ -194,8 +200,10 @@ fn log_manifest_facts(log: &[u8]) -> Option<LogManifestFacts> {
         _ => None,
     }) {
         last_ts = Some(event.env.ts);
-        if let EventKind::ExecutionObserved { observation } = event.kind {
-            execution = Some(observation);
+        match event.kind {
+            EventKind::ExecutionObserved { observation } => execution = Some(observation),
+            EventKind::HookCatalogueAdmitted { descriptors } => hooks = descriptors,
+            _ => {}
         }
     }
     Some(LogManifestFacts {
@@ -203,6 +211,7 @@ fn log_manifest_facts(log: &[u8]) -> Option<LogManifestFacts> {
         workspace_root,
         last_ts,
         execution,
+        hooks,
     })
 }
 
@@ -522,6 +531,7 @@ impl JsonlStore {
         let manifest = RunManifest {
             meta,
             execution: facts.execution,
+            hooks: facts.hooks,
         };
         if previous.as_ref() == Some(&manifest) {
             return Ok(false);
@@ -543,6 +553,17 @@ impl JsonlStore {
     /// timestamp.
     fn write_manifest(&self, id: &SessionId, ev: &DomainEvent) -> Result<(), StoreError> {
         let previous = self.read_manifest(id)?;
+        // A missing cache is not evidence of an empty catalogue. Consult the
+        // current authoritative log once while recreating it; ordinary
+        // appends with a manifest present stay O(1).
+        let log_facts = if previous.is_none() {
+            self.io
+                .read(&self.log_path(id))?
+                .as_deref()
+                .and_then(log_manifest_facts)
+        } else {
+            None
+        };
         let meta = SessionMeta {
             id: *id,
             // This store created the session, so its own workspace is the
@@ -550,15 +571,34 @@ impl JsonlStore {
             // would be an I/O round trip to learn a value already in hand.
             workspace_root: self.workspace.clone(),
             model: previous.as_ref().and_then(|m| m.meta.model.clone()),
-            created: previous.as_ref().map_or(ev.env.ts, |m| m.meta.created),
+            created: previous
+                .as_ref()
+                .map(|m| m.meta.created)
+                .or_else(|| log_facts.as_ref().map(|facts| facts.created))
+                .unwrap_or(ev.env.ts),
             updated: ev.env.ts,
             title: previous.as_ref().and_then(|m| m.meta.title.clone()),
         };
         let execution = match &ev.kind {
             EventKind::ExecutionObserved { observation } => Some(observation.clone()),
-            _ => previous.and_then(|manifest| manifest.execution),
+            _ => previous
+                .as_ref()
+                .and_then(|manifest| manifest.execution.clone())
+                .or_else(|| log_facts.as_ref().and_then(|facts| facts.execution.clone())),
         };
-        let manifest = RunManifest { meta, execution };
+        let hooks = match &ev.kind {
+            EventKind::HookCatalogueAdmitted { descriptors } => descriptors.clone(),
+            _ => previous
+                .as_ref()
+                .map(|manifest| manifest.hooks.clone())
+                .or_else(|| log_facts.as_ref().map(|facts| facts.hooks.clone()))
+                .unwrap_or_default(),
+        };
+        let manifest = RunManifest {
+            meta,
+            execution,
+            hooks,
+        };
         let bytes = serde_json::to_vec(&manifest).expect("RunManifest always serialises");
         self.io.replace_atomic(&self.manifest_path(id), &bytes)?;
         Ok(())
@@ -577,24 +617,28 @@ impl SessionStore for JsonlStore {
         let record_line = encode_record(ev.env.seq, ev)?;
         self.io.append_line(&log_path, &record_line)?;
 
-        // ARCHITECTURE.md §5's documented fsync policy: force bytes to
-        // stable storage on a turn boundary, not on every event. Decided
-        // here, from `ev.kind` directly — see `SessionStore::append`'s doc
-        // comment on why this predicate does not live on `DomainEvent`.
+        // Force the established turn/execution boundaries and every hook
+        // durability boundary. In particular, catalogue bytes must be stable
+        // before their derived manifest projection can be published.
         let is_turn_boundary = matches!(ev.kind, EventKind::TurnCompleted { .. });
         let is_execution_observation = matches!(ev.kind, EventKind::ExecutionObserved { .. });
-        if is_turn_boundary || is_execution_observation {
+        let is_hook_admission = matches!(ev.kind, EventKind::HookCatalogueAdmitted { .. });
+        let is_hook_invocation = matches!(
+            ev.kind,
+            EventKind::HookInvocationStarted { .. } | EventKind::HookInvocationSettled { .. }
+        );
+        if is_turn_boundary || is_execution_observation || is_hook_admission || is_hook_invocation {
             self.io.fsync(&log_path)?;
         }
 
-        // The manifest is rewritten at session creation and at every turn
-        // boundary — the same cadence as the fsync policy above — not on
-        // every event. Streamed deltas (`AssistantDelta`, `ToolCallDelta`,
-        // …) can arrive many times a second; paying a tmp+rename for each
-        // would make the manifest the append path's bottleneck for no
-        // benefit `list()` needs, since nothing reads `updated` at
-        // sub-turn granularity.
-        if is_new_session || is_turn_boundary || is_execution_observation {
+        // The manifest follows creation, turn/execution boundaries, and a
+        // complete catalogue admission. Invocation start and settlement are
+        // log-only facts and never pay for a manifest replacement.
+        if (is_new_session && !is_hook_invocation)
+            || is_turn_boundary
+            || is_execution_observation
+            || is_hook_admission
+        {
             self.write_manifest(id, ev)?;
         }
 

@@ -414,11 +414,7 @@ impl TryFrom<String> for PolicyDigest {
     type Error = PolicyDigestError;
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
-        if value.len() == 64
-            && value
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        {
+        if crate::digest::is_lower_sha256(&value) {
             Ok(Self(value))
         } else {
             Err(PolicyDigestError(value))

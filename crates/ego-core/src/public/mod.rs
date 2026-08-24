@@ -396,8 +396,9 @@ impl PublicEvent {
 ///
 /// Returns `None` for:
 /// - internal-only event kinds that never leak into the public stream
-///   (`Compacted`, `Forked`, `HookFired` — none of them is one of the five
-///   public item kinds, and none belongs on the three-level envelope);
+///   (`Compacted`, `Forked`, and all three hook evidence events — none of
+///   them is one of the six public item kinds, and none belongs on the
+///   three-level envelope);
 /// - an item-shaped event (message/tool/permission/subagent content) whose
 ///   envelope carries no item id. `state.rs`'s reducer already tolerates
 ///   this degenerate case without panicking (`SessionState::item_mut`
@@ -556,7 +557,9 @@ pub fn project_public(ev: &DomainEvent) -> Option<PublicEvent> {
         EventKind::ReasoningState { .. } => None,
         EventKind::Compacted { .. } => None,
         EventKind::Forked { .. } => None,
-        EventKind::HookFired { .. } => None,
+        EventKind::HookCatalogueAdmitted { .. }
+        | EventKind::HookInvocationStarted { .. }
+        | EventKind::HookInvocationSettled { .. } => None,
         EventKind::SubagentSpawned { subagent_id } => Some(PublicEvent::ItemStarted {
             turn,
             item: item?,

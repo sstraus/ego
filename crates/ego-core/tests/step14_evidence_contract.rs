@@ -62,10 +62,10 @@ fn evidence_ref_has_one_canonical_string_wire_and_schema() {
         format!("{}:01", hash),
         format!("{}:+1", hash),
         format!("{}:1:0", hash),
-        format!("{}", hash),
+        hash.to_string(),
         format!("{}:1", hash.to_ascii_uppercase()),
         format!("{}:1", &hash[..63]),
-        format!("{}:1", format!("{}0", hash)),
+        format!("{hash}0:1"),
     ] {
         assert!(
             serde_json::from_value::<EvidenceRef>(json!(malformed.clone())).is_err(),
@@ -453,8 +453,8 @@ fn failed_structured_result_survives_turn_reduction_and_history_roundtrip() {
     assert_eq!(item_state.tool_result.as_ref(), Some(&result));
     assert!(item_state.text.is_empty());
 
-    let bytes = encode_record(completed.env.seq, &completed).expect("codec encodes v6 result");
-    let StoreLine::Record(record) = decode_line(&bytes).expect("codec decodes v6 result") else {
+    let bytes = encode_record(completed.env.seq, &completed).expect("codec encodes v7 result");
+    let StoreLine::Record(record) = decode_line(&bytes).expect("codec decodes v7 result") else {
         panic!("structured result must be a durable record");
     };
     let decoded: DomainEvent = serde_json::from_str(record.payload.get()).unwrap();
@@ -463,7 +463,7 @@ fn failed_structured_result_survives_turn_reduction_and_history_roundtrip() {
 
 #[test]
 fn failed_structured_result_public_projection_stays_text_only_without_version_bump() {
-    assert_eq!(CODEC_VERSION, 6);
+    assert_eq!(CODEC_VERSION, 7);
     assert_eq!(PUBLIC_EVENT_VERSION, 6);
     let item = ItemId::new();
     let completed = event(

@@ -9,7 +9,7 @@
 //!
 //! ## Fixture provenance
 //!
-//! This reuses the same 20-event, two-turn log as
+//! This reuses the same 22-event, two-turn log as
 //! `ego-core/tests/public_golden.rs` rather than inventing a second one.
 //! `ego-core`'s test fixture is private to that crate's own test binary —
 //! integration tests are separate compilation units and cannot import each
@@ -26,7 +26,7 @@
 //! projection.
 //!
 //! The fixture is a representative session, **not** an exhaustive tour of
-//! the domain's 21 event kinds: its 21 events cover 17 distinct kinds
+//! the domain's 26 event kinds: its 22 events cover 20 distinct kinds
 //! (`UserPrompt`, `AssistantDelta`, `AssistantMessage` and `TurnCompleted`
 //! each appear more than once) and omit `ReasoningDelta`,
 //! `GenerationStarted`, `AttemptSettled` and `UsageCorrected` entirely.
@@ -41,6 +41,10 @@ use ego_core::cost::{
 };
 use ego_core::event::domain::{
     CancelCause, DomainEvent, Envelope, EventKind, ExitReason, GenerationRole, OccupancyProvenance,
+};
+use ego_core::event::hook::{
+    HookCatalogueEvidence, HookDecision, HookDescriptorEvidence, HookInvocationId, HookOutcome,
+    HookSourceAuthority, HookSourceLocation,
 };
 use ego_core::event::id::{EventId, GenerationId, ItemId, Producer, Seq, SessionId, TurnId};
 use ego_core::event::time::Timestamp;
@@ -295,9 +299,16 @@ mod acp_golden {
                 seq.next(),
                 turn1,
                 None,
-                EventKind::HookFired {
-                    name: "pre-tool-use".to_string(),
-                    blocked: false,
+                EventKind::HookCatalogueAdmitted {
+                    descriptors: HookCatalogueEvidence::new(vec![HookDescriptorEvidence::new(
+                        HookSourceAuthority::Project,
+                        HookSourceLocation::parse("hooks/project.json").unwrap(),
+                        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                            .parse()
+                            .unwrap(),
+                        0,
+                    )])
+                    .unwrap(),
                 },
             ),
             ev(
@@ -346,7 +357,7 @@ mod acp_golden {
         ]
     }
 
-    /// Every event kind in the domain's 22-variant set, once each.
+    /// Every event kind in the domain's 26-variant set, once each.
     ///
     /// This is the *source* the `None`-set test selects from by name, so
     /// that a kind renamed or removed upstream breaks a test instead of
@@ -400,6 +411,9 @@ mod acp_golden {
                     path: CanonPath::new(""),
                 },
             },
+            EventKind::PermissionAmended {
+                tool: String::new(),
+            },
             EventKind::PermissionDecided {
                 allowed: Some(true),
                 by: None,
@@ -408,6 +422,15 @@ mod acp_golden {
             EventKind::GenerationStarted {
                 attempt: AttemptRef::first(GenerationId::new()),
                 role: GenerationRole::Main,
+            },
+            EventKind::ExecutionObserved {
+                observation: ego_core::permit::ExecObservation::new(
+                    ego_core::permit::BackendIdentity::new("test", "v1"),
+                    ego_core::permit::ExecCaps::empty(),
+                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                        .try_into()
+                        .unwrap(),
+                ),
             },
             EventKind::AttemptSettled {
                 attempt: AttemptRef::first(GenerationId::new()),
@@ -442,9 +465,45 @@ mod acp_golden {
                 source: SessionId::new(),
                 at_seq: Seq::default(),
             },
-            EventKind::HookFired {
-                name: String::new(),
-                blocked: false,
+            EventKind::HookCatalogueAdmitted {
+                descriptors: HookCatalogueEvidence::new(vec![HookDescriptorEvidence::new(
+                    HookSourceAuthority::Project,
+                    HookSourceLocation::parse("hooks/project.json").unwrap(),
+                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                        .parse()
+                        .unwrap(),
+                    0,
+                )])
+                .unwrap(),
+            },
+            EventKind::HookInvocationStarted {
+                hook: HookDescriptorEvidence::new(
+                    HookSourceAuthority::Project,
+                    HookSourceLocation::parse("hooks/project.json").unwrap(),
+                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                        .parse()
+                        .unwrap(),
+                    0,
+                )
+                .id(),
+                invocation: HookInvocationId::new(),
+                lifecycle: ego_core::event::hook::HookLifecycle::PreToolUse,
+                subject: ego_core::event::hook::HookSubject::Session,
+            },
+            EventKind::HookInvocationSettled {
+                hook: HookDescriptorEvidence::new(
+                    HookSourceAuthority::Project,
+                    HookSourceLocation::parse("hooks/project.json").unwrap(),
+                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                        .parse()
+                        .unwrap(),
+                    0,
+                )
+                .id(),
+                invocation: HookInvocationId::new(),
+                result: ego_core::event::hook::HookResult::Outcome {
+                    outcome: HookOutcome::new(HookDecision::Continue, None),
+                },
             },
             EventKind::SubagentSpawned {
                 subagent_id: String::new(),
@@ -608,13 +667,20 @@ mod acp_golden {
     /// carries the totals, never the ledger they were folded from.
     #[test]
     fn events_with_no_counterpart_in_either_version_project_to_none() {
+        assert_eq!(
+            one_of_each_kind().len(),
+            26,
+            "the current internal event set is exhaustive"
+        );
         let none_in_both = [
             "permission_requested",
             "permission_decided",
             "usage_updated",
             "compacted",
             "forked",
-            "hook_fired",
+            "hook_catalogue_admitted",
+            "hook_invocation_started",
+            "hook_invocation_settled",
             "subagent_spawned",
             "subagent_returned",
             "error",

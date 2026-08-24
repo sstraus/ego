@@ -5,6 +5,10 @@
 
 use ego_core::cost::{Amount, CostAttribution, CostDelta, CurrencyCode, Money, PricingRevision};
 use ego_core::event::domain::{DomainEvent, Envelope, EventKind, GenerationRole};
+use ego_core::event::hook::{
+    HookCatalogueEvidence, HookDecision, HookDescriptorEvidence, HookInvocationId, HookLifecycle,
+    HookOutcome, HookResult, HookSourceAuthority, HookSourceLocation,
+};
 use ego_core::event::id::{Producer, Seq, SessionId};
 use ego_core::event::time::Timestamp;
 use ego_core::generator::attempt::{AttemptRef, DeliveryCertainty, Outcome, UsageReport};
@@ -82,16 +86,30 @@ mod codec {
     /// to be a deliberate edit here, not a constant quietly following the
     /// code that changed it.
     #[test]
-    fn codec_header_carries_codec_version_6() {
+    fn codec_header_carries_codec_version_7() {
         let h = header();
-        assert_eq!(h.v, 6);
-        assert_eq!(CODEC_VERSION, 6);
+        assert_eq!(h.v, 7);
+        assert_eq!(CODEC_VERSION, 7);
 
         let bytes = encode_header(&h);
         match decode_line(&bytes).unwrap() {
-            StoreLine::Header(decoded) => assert_eq!(decoded.v, 6),
+            StoreLine::Header(decoded) => assert_eq!(decoded.v, 7),
             other => panic!("expected Header, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn codec_has_no_hook_fired_compatibility_decoder() {
+        let old = br#"{"env":{"seq":0,"id":"00000000-0000-0000-0000-00000000000a","turn":"00000000-0000-0000-0000-000000000002","item":null,"parent":null,"ts":1787206085400,"producer":"Main"},"kind":{"kind":"HookFired","name":"old","blocked":false}}"#;
+        let record = encode_record(
+            seq_of(1),
+            &serde_json::from_slice::<serde_json::Value>(old).unwrap(),
+        )
+        .unwrap();
+        let StoreLine::Record(decoded) = decode_line(&record).unwrap() else {
+            panic!("record")
+        };
+        assert!(serde_json::from_str::<DomainEvent>(decoded.payload.get()).is_err());
     }
 
     /// The field the bump to 5 exists for. A header that round-trips its
@@ -429,8 +447,12 @@ mod codec {
     const GOLDEN_EVENT_3: &str = "00000000-0000-0000-0000-00000000000c";
     const GOLDEN_EVENT_4: &str = "00000000-0000-0000-0000-00000000000d";
     const GOLDEN_EVENT_5: &str = "00000000-0000-0000-0000-00000000000e";
+    const GOLDEN_EVENT_6: &str = "00000000-0000-0000-0000-000000000012";
+    const GOLDEN_EVENT_7: &str = "00000000-0000-0000-0000-000000000013";
+    const GOLDEN_EVENT_8: &str = "00000000-0000-0000-0000-000000000014";
     const GOLDEN_GENERATION: &str = "00000000-0000-0000-0000-000000000010";
     const GOLDEN_ATTEMPT: &str = "00000000-0000-0000-0000-000000000011";
+    const GOLDEN_HOOK_INVOCATION: &str = "01900000-0000-7000-8000-000000000012";
 
     /// An `AttemptRef` over fixed ids.
     ///
@@ -444,6 +466,21 @@ mod codec {
             "attempt": GOLDEN_ATTEMPT,
         }))
         .expect("an AttemptRef is two ids")
+    }
+
+    fn golden_hook() -> HookDescriptorEvidence {
+        HookDescriptorEvidence::new(
+            HookSourceAuthority::Project,
+            HookSourceLocation::parse("hooks/project.json").unwrap(),
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                .parse()
+                .unwrap(),
+            0,
+        )
+    }
+
+    fn golden_hook_invocation() -> HookInvocationId {
+        HookInvocationId::parse(GOLDEN_HOOK_INVOCATION).unwrap()
     }
 
     fn golden_events() -> Vec<DomainEvent> {
@@ -550,6 +587,36 @@ mod codec {
                             reasoning_tokens: None,
                         }),
                     ),
+                },
+            },
+            DomainEvent {
+                env: envelope(GOLDEN_EVENT_6, Some(GOLDEN_EVENT_5)),
+                kind: EventKind::HookCatalogueAdmitted {
+                    descriptors: HookCatalogueEvidence::new(vec![golden_hook()]).unwrap(),
+                },
+            },
+            DomainEvent {
+                env: envelope(GOLDEN_EVENT_7, Some(GOLDEN_EVENT_6)),
+                kind: EventKind::HookInvocationStarted {
+                    hook: golden_hook().id(),
+                    invocation: golden_hook_invocation(),
+                    lifecycle: HookLifecycle::PreToolUse,
+                    subject: ego_core::event::hook::HookSubject::Item {
+                        item: common::id(GOLDEN_ITEM),
+                    },
+                },
+            },
+            DomainEvent {
+                env: Envelope {
+                    producer: ego_core::event::id::Producer::Hook(golden_hook().id()),
+                    ..envelope(GOLDEN_EVENT_8, Some(GOLDEN_EVENT_7))
+                },
+                kind: EventKind::HookInvocationSettled {
+                    hook: golden_hook().id(),
+                    invocation: golden_hook_invocation(),
+                    result: HookResult::Outcome {
+                        outcome: HookOutcome::new(HookDecision::Continue, None),
+                    },
                 },
             },
         ]

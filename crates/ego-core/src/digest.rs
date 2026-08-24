@@ -22,6 +22,14 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
         .collect()
 }
 
+/// Whether `value` is the one canonical spelling of a SHA-256 digest.
+pub(crate) fn is_lower_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

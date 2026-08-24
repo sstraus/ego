@@ -11,6 +11,10 @@ use ego_core::cost::{
 use ego_core::event::domain::{
     DomainEvent, Envelope, EventKind, ExitReason, GenerationRole, OccupancyProvenance,
 };
+use ego_core::event::hook::{
+    HookCatalogueEvidence, HookDecision, HookDescriptorEvidence, HookInvocationId, HookOutcome,
+    HookSourceAuthority, HookSourceLocation,
+};
 use ego_core::event::id::{AttemptId, GenerationId};
 use ego_core::event::id::{EventId, ItemId, Producer, Seq, SessionId, TurnId};
 use ego_core::event::time::Timestamp;
@@ -73,6 +77,17 @@ mod reducer {
             },
             fx: None,
         }
+    }
+
+    fn hook_descriptor() -> HookDescriptorEvidence {
+        HookDescriptorEvidence::new(
+            HookSourceAuthority::Project,
+            HookSourceLocation::parse("hooks/project.json").unwrap(),
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                .parse()
+                .unwrap(),
+            0,
+        )
     }
 
     /// A realistic single-turn log exercising every `EventKind` variant, with
@@ -180,11 +195,31 @@ mod reducer {
                 provenance: OccupancyProvenance::GenerationBoundary,
             }
         );
+        let hook = hook_descriptor();
         push!(
             None,
-            EventKind::HookFired {
-                name: "pre-tool".to_string(),
-                blocked: false
+            EventKind::HookCatalogueAdmitted {
+                descriptors: HookCatalogueEvidence::new(vec![hook.clone()]).unwrap(),
+            }
+        );
+        let invocation = HookInvocationId::new();
+        push!(
+            None,
+            EventKind::HookInvocationStarted {
+                hook: hook.id(),
+                invocation,
+                lifecycle: ego_core::event::hook::HookLifecycle::PreToolUse,
+                subject: ego_core::event::hook::HookSubject::Session,
+            }
+        );
+        push!(
+            None,
+            EventKind::HookInvocationSettled {
+                hook: hook.id(),
+                invocation,
+                result: ego_core::event::hook::HookResult::Outcome {
+                    outcome: HookOutcome::new(HookDecision::Continue, None),
+                },
             }
         );
         push!(
@@ -436,6 +471,15 @@ mod reducer {
                 },
             ),
             (
+                "reasoning_state",
+                EventKind::ReasoningState {
+                    state: ego_core::generator::types::ReasoningState {
+                        blob: String::new(),
+                        dialect: String::new(),
+                    },
+                },
+            ),
+            (
                 "tool_call_started",
                 EventKind::ToolCallStarted {
                     name: String::new(),
@@ -464,6 +508,12 @@ mod reducer {
                         op: OpName::Read,
                         path: CanonPath::new(""),
                     },
+                },
+            ),
+            (
+                "permission_amended",
+                EventKind::PermissionAmended {
+                    tool: String::new(),
                 },
             ),
             (
@@ -519,10 +569,30 @@ mod reducer {
                 },
             ),
             (
-                "hook_fired",
-                EventKind::HookFired {
-                    name: String::new(),
-                    blocked: false,
+                "hook_catalogue_admitted",
+                EventKind::HookCatalogueAdmitted {
+                    descriptors: HookCatalogueEvidence::new(vec![hook_descriptor()]).unwrap(),
+                },
+            ),
+            (
+                "hook_invocation_started",
+                EventKind::HookInvocationStarted {
+                    hook: hook_descriptor().id(),
+                    invocation: HookInvocationId::parse("01900000-0000-7000-8000-000000000012")
+                        .unwrap(),
+                    lifecycle: ego_core::event::hook::HookLifecycle::PreToolUse,
+                    subject: ego_core::event::hook::HookSubject::Session,
+                },
+            ),
+            (
+                "hook_invocation_settled",
+                EventKind::HookInvocationSettled {
+                    hook: hook_descriptor().id(),
+                    invocation: HookInvocationId::parse("01900000-0000-7000-8000-000000000012")
+                        .unwrap(),
+                    result: ego_core::event::hook::HookResult::Outcome {
+                        outcome: HookOutcome::new(HookDecision::Continue, None),
+                    },
                 },
             ),
             (
@@ -559,6 +629,18 @@ mod reducer {
                 },
             ),
             (
+                "execution_observed",
+                EventKind::ExecutionObserved {
+                    observation: ego_core::permit::ExecObservation::new(
+                        ego_core::permit::BackendIdentity::new("test", "v1"),
+                        ego_core::permit::ExecCaps::empty(),
+                        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                            .try_into()
+                            .unwrap(),
+                    ),
+                },
+            ),
+            (
                 "attempt_settled",
                 EventKind::AttemptSettled {
                     attempt: AttemptRef::first(GenerationId::new()),
@@ -580,7 +662,7 @@ mod reducer {
         ];
         assert_eq!(
             table.len(),
-            21,
+            26,
             "keep this table in sync with EventKind's variant count (ARCH §1)"
         );
 
@@ -590,7 +672,7 @@ mod reducer {
                 name,
                 "table entry out of sync with EventKind::name()"
             );
-            let e = DomainEvent {
+            let mut e = DomainEvent {
                 env: Envelope {
                     seq: regressed_seq,
                     id: duplicate_id,
@@ -602,12 +684,15 @@ mod reducer {
                 },
                 kind,
             };
+            if matches!(e.kind, EventKind::HookInvocationSettled { .. }) {
+                e.env.producer = Producer::Hook(hook_descriptor().id());
+            }
             state.apply(&e); // must not panic, for every variant, under every degenerate axis at once
         }
 
         assert_eq!(
             state.unresolved_parents.len(),
-            21,
+            26,
             "every event's parent was unresolvable"
         );
         assert_eq!(
@@ -620,8 +705,12 @@ mod reducer {
                 .iter()
                 .map(|r| r.reason)
                 .collect::<Vec<RefusalReason>>(),
-            vec![RefusalReason::UnknownAttempt, RefusalReason::UnknownAttempt],
-            "the settlement and the correction name attempts nobody started, \
+            vec![
+                RefusalReason::HookInvocationParentMismatch,
+                RefusalReason::UnknownAttempt,
+                RefusalReason::UnknownAttempt,
+            ],
+            "the hook settlement has the wrong parent, while the settlement and the correction name attempts nobody started, \
              and a refusal is recorded rather than raised"
         );
         assert_eq!(
@@ -1042,16 +1131,46 @@ mod reducer {
                 result: "ok".to_string(),
             },
         ));
+        let hook = hook_descriptor();
+        let invocation = HookInvocationId::new();
         state.apply(&ev(
             seq.next(),
             turn,
             None,
             None,
-            EventKind::HookFired {
-                name: "pre-commit".to_string(),
-                blocked: true,
+            EventKind::HookCatalogueAdmitted {
+                descriptors: HookCatalogueEvidence::new(vec![hook.clone()]).unwrap(),
             },
         ));
+        let started = ev(
+            seq.next(),
+            turn,
+            None,
+            None,
+            EventKind::HookInvocationStarted {
+                hook: hook.id(),
+                invocation,
+                lifecycle: ego_core::event::hook::HookLifecycle::PreToolUse,
+                subject: ego_core::event::hook::HookSubject::Session,
+            },
+        );
+        let started_id = started.env.id;
+        state.apply(&started);
+        let mut settled = ev(
+            seq.next(),
+            turn,
+            None,
+            Some(started_id),
+            EventKind::HookInvocationSettled {
+                hook: hook.id(),
+                invocation,
+                result: ego_core::event::hook::HookResult::Outcome {
+                    outcome: HookOutcome::new(HookDecision::Block, None),
+                },
+            },
+        );
+        settled.env.producer = Producer::Hook(hook.id());
+        state.apply(&settled);
         state.apply(&ev(
             seq.next(),
             turn,
@@ -1094,8 +1213,8 @@ mod reducer {
                 },
             ]
         );
-        assert_eq!(state.hooks.len(), 1);
-        assert!(state.hooks[0].blocked);
+        assert_eq!(state.hook_catalogue().len(), 1);
+        assert_eq!(state.hook_settlements().len(), 1);
         assert_eq!(state.compactions, vec!["trimmed".to_string()]);
         assert_eq!(state.forks.len(), 1);
         assert_eq!(state.forks[0].source, source);

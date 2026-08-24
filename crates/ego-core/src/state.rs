@@ -10,8 +10,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::cost::{CostDelta, CumulativeCost};
 use crate::event::domain::{DomainEvent, EventKind, ExitReason, OccupancyProvenance};
-use crate::event::id::{AttemptId, EventId, GenerationId, ItemId, Seq, SessionId, TurnId};
-use crate::generator::attempt::{AttemptRef, Outcome, UsageReport};
+use crate::event::hook::{
+    HookCatalogueEvidence, HookDecision, HookId, HookInvocationId, HookLifecycle, HookResult,
+    HookSubject,
+};
+use crate::event::id::{
+    AttemptId, EventId, GenerationId, ItemId, Producer, Seq, SessionId, TurnId,
+};
+use crate::generator::attempt::{AttemptRef, DeliveryCertainty, Outcome, UsageReport};
 use crate::generator::types::ReasoningState;
 use crate::permit::ToolResult;
 
@@ -336,11 +342,101 @@ pub enum PermissionEvent {
     },
 }
 
-/// A hook firing, in application order.
+/// A hook invocation that crossed its external-delivery boundary but has not
+/// yet settled.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HookRecord {
-    pub name: String,
-    pub blocked: bool,
+pub struct LiveHookInvocation {
+    start: EventId,
+    hook: HookId,
+    lifecycle: HookLifecycle,
+    subject: HookSubject,
+    turn: TurnId,
+    item: Option<ItemId>,
+}
+
+impl LiveHookInvocation {
+    pub fn start(&self) -> EventId {
+        self.start
+    }
+
+    pub fn hook(&self) -> HookId {
+        self.hook
+    }
+
+    pub fn lifecycle(&self) -> HookLifecycle {
+        self.lifecycle
+    }
+
+    pub fn subject(&self) -> HookSubject {
+        self.subject
+    }
+
+    pub fn turn(&self) -> TurnId {
+        self.turn
+    }
+
+    pub fn item(&self) -> Option<ItemId> {
+        self.item
+    }
+
+    /// Crossing the start boundary cannot prove whether an external handler
+    /// received the invocation.
+    pub fn delivery(&self) -> DeliveryCertainty {
+        DeliveryCertainty::PossiblySent
+    }
+
+    pub fn replay_disposition(&self) -> HookReplayDisposition {
+        if self.lifecycle.phase().is_pre_effect() {
+            HookReplayDisposition::FailClosed
+        } else {
+            HookReplayDisposition::ObserverUncertain
+        }
+    }
+}
+
+/// What replay must do with an invocation whose settlement is absent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HookReplayDisposition {
+    FailClosed,
+    ObserverUncertain,
+}
+
+/// One accepted settlement, retained in application order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HookSettlement {
+    event: EventId,
+    hook: HookId,
+    invocation: HookInvocationId,
+    result: HookResult,
+    turn: TurnId,
+    item: Option<ItemId>,
+}
+
+impl HookSettlement {
+    pub fn event(&self) -> EventId {
+        self.event
+    }
+
+    pub fn hook(&self) -> HookId {
+        self.hook
+    }
+
+    pub fn invocation(&self) -> HookInvocationId {
+        self.invocation
+    }
+
+    pub fn result(&self) -> &HookResult {
+        &self.result
+    }
+
+    pub fn turn(&self) -> TurnId {
+        self.turn
+    }
+
+    pub fn item(&self) -> Option<ItemId> {
+        self.item
+    }
 }
 
 /// A subagent lifecycle event, in application order.
@@ -422,6 +518,35 @@ pub enum RefusalReason {
     /// evidence about them. Discarding the booking because a late frame
     /// disagrees would let the provider rewrite what was already paid.
     UsageDisagreesWithSettlement,
+    /// A hook invocation named no descriptor in the current admitted
+    /// catalogue.
+    HookNotAdmitted,
+    /// A hook invocation id is already live.
+    HookInvocationAlreadyStarted,
+    /// A hook invocation id has already settled and cannot be reopened.
+    HookInvocationAlreadySettled,
+    /// A settlement named an invocation that never started.
+    HookInvocationUnknown,
+    /// The subject correlation does not agree with the event envelope.
+    HookSubjectMismatch,
+    /// A hook-produced effect attempted to recursively start another hook.
+    RecursiveHookInvocation,
+    /// A settlement named a different hook than its start.
+    HookInvocationHookMismatch,
+    /// A settlement's turn differs from its start.
+    HookInvocationTurnMismatch,
+    /// A settlement's item differs from its start.
+    HookInvocationItemMismatch,
+    /// A settlement is not causally parented by its start event.
+    HookInvocationParentMismatch,
+    /// A settlement was not produced by the hook named by its start.
+    HookProducerMismatch,
+    /// Settlement feedback claimed a source other than the invoked hook.
+    HookFeedbackSourceMismatch,
+    /// An observer attempted to block an effect that had already settled.
+    HookBlockAtObserver,
+    /// Escalation was requested outside the sole `PreToolUse` owner.
+    HookEscalationOutsidePreToolUse,
 }
 
 /// An event whose effect the reducer declined to apply.
@@ -502,8 +627,14 @@ pub struct SessionState {
     pub context: ContextWindow,
     /// Permission requests and decisions, in application order.
     pub permissions: Vec<PermissionEvent>,
-    /// Hooks that fired, in application order.
-    pub hooks: Vec<HookRecord>,
+    /// The latest complete admitted hook catalogue.
+    hook_catalogue: HookCatalogueEvidence,
+    /// Hook invocations that started but have not settled.
+    live_hooks: HashMap<HookInvocationId, LiveHookInvocation>,
+    /// Accepted hook settlements, in application order.
+    hook_settlements: Vec<HookSettlement>,
+    /// Every invocation id that has settled, so it cannot be reopened.
+    settled_hooks: HashSet<HookInvocationId>,
     /// Subagent lifecycle events, in application order.
     pub subagents: Vec<SubagentEvent>,
     /// Error messages, in application order.
@@ -541,7 +672,10 @@ impl Default for SessionState {
             refusals: Vec::default(),
             context: ContextWindow::default(),
             permissions: Vec::default(),
-            hooks: Vec::default(),
+            hook_catalogue: HookCatalogueEvidence::default(),
+            live_hooks: HashMap::default(),
+            hook_settlements: Vec::default(),
+            settled_hooks: HashSet::default(),
             subagents: Vec::default(),
             errors: Vec::default(),
             compactions: Vec::default(),
@@ -551,6 +685,18 @@ impl Default for SessionState {
 }
 
 impl SessionState {
+    pub fn hook_catalogue(&self) -> &HookCatalogueEvidence {
+        &self.hook_catalogue
+    }
+
+    pub fn live_hooks(&self) -> &HashMap<HookInvocationId, LiveHookInvocation> {
+        &self.live_hooks
+    }
+
+    pub fn hook_settlements(&self) -> &[HookSettlement] {
+        &self.hook_settlements
+    }
+
     /// Apply one domain event to the state.
     ///
     /// Pure and sync: no I/O, no wall-clock reads, no randomness. Total: no
@@ -692,10 +838,20 @@ impl SessionState {
                 source: *source,
                 at_seq: *at_seq,
             }),
-            EventKind::HookFired { name, blocked } => self.hooks.push(HookRecord {
-                name: name.clone(),
-                blocked: *blocked,
-            }),
+            EventKind::HookCatalogueAdmitted { descriptors } => {
+                self.hook_catalogue = descriptors.clone();
+            }
+            EventKind::HookInvocationStarted {
+                hook,
+                invocation,
+                lifecycle,
+                subject,
+            } => self.start_hook(ev, *hook, *invocation, *lifecycle, *subject),
+            EventKind::HookInvocationSettled {
+                hook,
+                invocation,
+                result,
+            } => self.settle_hook(ev, *hook, *invocation, result),
             EventKind::SubagentSpawned { subagent_id } => {
                 self.subagents.push(SubagentEvent::Spawned {
                     subagent_id: subagent_id.clone(),
@@ -716,6 +872,99 @@ impl SessionState {
             // the classification to drift from the log's own copy.
             EventKind::Error { message, .. } => self.errors.push(message.clone()),
         }
+    }
+
+    fn start_hook(
+        &mut self,
+        ev: &DomainEvent,
+        hook: HookId,
+        invocation: HookInvocationId,
+        lifecycle: HookLifecycle,
+        subject: HookSubject,
+    ) {
+        if self.settled_hooks.contains(&invocation) {
+            return self.refuse(ev, RefusalReason::HookInvocationAlreadySettled);
+        }
+        if self.live_hooks.contains_key(&invocation) {
+            return self.refuse(ev, RefusalReason::HookInvocationAlreadyStarted);
+        }
+        if !ev.env.producer.may_trigger_hooks() {
+            return self.refuse(ev, RefusalReason::RecursiveHookInvocation);
+        }
+        if !self.hook_catalogue.contains(hook) {
+            return self.refuse(ev, RefusalReason::HookNotAdmitted);
+        }
+        if !hook_subject_matches_envelope(subject, ev.env.turn, ev.env.item) {
+            return self.refuse(ev, RefusalReason::HookSubjectMismatch);
+        }
+        self.live_hooks.insert(
+            invocation,
+            LiveHookInvocation {
+                start: ev.env.id,
+                hook,
+                lifecycle,
+                subject,
+                turn: ev.env.turn,
+                item: ev.env.item,
+            },
+        );
+    }
+
+    fn settle_hook(
+        &mut self,
+        ev: &DomainEvent,
+        hook: HookId,
+        invocation: HookInvocationId,
+        result: &HookResult,
+    ) {
+        if self.settled_hooks.contains(&invocation) {
+            return self.refuse(ev, RefusalReason::HookInvocationAlreadySettled);
+        }
+        let Some(live) = self.live_hooks.get(&invocation).cloned() else {
+            return self.refuse(ev, RefusalReason::HookInvocationUnknown);
+        };
+        if hook != live.hook {
+            return self.refuse(ev, RefusalReason::HookInvocationHookMismatch);
+        }
+        if ev.env.turn != live.turn {
+            return self.refuse(ev, RefusalReason::HookInvocationTurnMismatch);
+        }
+        if ev.env.item != live.item {
+            return self.refuse(ev, RefusalReason::HookInvocationItemMismatch);
+        }
+        if ev.env.parent != Some(live.start) {
+            return self.refuse(ev, RefusalReason::HookInvocationParentMismatch);
+        }
+        if ev.env.producer != Producer::Hook(live.hook) {
+            return self.refuse(ev, RefusalReason::HookProducerMismatch);
+        }
+        if result
+            .feedback()
+            .is_some_and(|feedback| feedback.hook() != live.hook)
+        {
+            return self.refuse(ev, RefusalReason::HookFeedbackSourceMismatch);
+        }
+        if let HookResult::Outcome { outcome } = result {
+            if outcome.decision() == HookDecision::Block && live.lifecycle.phase().is_observer() {
+                return self.refuse(ev, RefusalReason::HookBlockAtObserver);
+            }
+            if outcome.decision() == HookDecision::RequestEscalation
+                && live.lifecycle != HookLifecycle::PreToolUse
+            {
+                return self.refuse(ev, RefusalReason::HookEscalationOutsidePreToolUse);
+            }
+        }
+
+        self.live_hooks.remove(&invocation);
+        self.settled_hooks.insert(invocation);
+        self.hook_settlements.push(HookSettlement {
+            event: ev.env.id,
+            hook,
+            invocation,
+            result: result.clone(),
+            turn: ev.env.turn,
+            item: ev.env.item,
+        });
     }
 
     /// Decline an event's effect, recording why. See [`RefusalReason`].
@@ -944,5 +1193,13 @@ impl SessionState {
             item.generation = generation;
         }
         Some(item)
+    }
+}
+
+fn hook_subject_matches_envelope(subject: HookSubject, turn: TurnId, item: Option<ItemId>) -> bool {
+    match subject {
+        HookSubject::Session => item.is_none(),
+        HookSubject::Turn { turn: subject_turn } => subject_turn == turn && item.is_none(),
+        HookSubject::Item { item: subject_item } => item == Some(subject_item),
     }
 }

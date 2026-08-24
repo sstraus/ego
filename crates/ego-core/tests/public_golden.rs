@@ -14,6 +14,10 @@ use ego_core::cost::{
 use ego_core::event::domain::{
     DomainEvent, Envelope, EventKind, ExitReason, GenerationRole, OccupancyProvenance,
 };
+use ego_core::event::hook::{
+    HookCatalogueEvidence, HookDecision, HookDescriptorEvidence, HookInvocationId, HookOutcome,
+    HookSourceAuthority, HookSourceLocation,
+};
 use ego_core::event::id::{EventId, ItemId, Producer, Seq, SessionId, TurnId};
 use ego_core::event::time::Timestamp;
 use ego_core::generator::types::{ErrorKind, ReasoningState};
@@ -97,13 +101,13 @@ mod public_golden {
         }
     }
 
-    /// A realistic two-turn log of 22 events covering 18 of the 22
+    /// A realistic two-turn log of 24 events covering 20 of the 26
     /// `EventKind` variants: `UserPrompt`, `AssistantDelta`,
     /// `AssistantMessage` and `TurnCompleted` each appear more than once.
     /// The first turn covers every public item kind (message, tool,
     /// permission, subagent), a `UsageUpdated` (public, as `usage_delta` —
     /// never a running total), a classified `Error`, and the four
-    /// internal-only kinds (`Compacted`, `Forked`, `HookFired`,
+    /// internal-only kinds (`Compacted`, `Forked`, and all three hook facts,
     /// `ReasoningState`) that must not appear in the projection. The second,
     /// final turn is deliberately minimal so the golden's last line is a
     /// plain `turn_completed` — proving "the final result rides the terminal
@@ -265,9 +269,55 @@ mod public_golden {
                 seq.next(),
                 turn1,
                 None,
-                EventKind::HookFired {
-                    name: "pre-tool-use".to_string(),
-                    blocked: false,
+                EventKind::HookCatalogueAdmitted {
+                    descriptors: HookCatalogueEvidence::new(vec![HookDescriptorEvidence::new(
+                        HookSourceAuthority::Project,
+                        HookSourceLocation::parse("hooks/project.json").unwrap(),
+                        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                            .parse()
+                            .unwrap(),
+                        0,
+                    )])
+                    .unwrap(),
+                },
+            ),
+            ev(
+                seq.next(),
+                turn1,
+                None,
+                EventKind::HookInvocationStarted {
+                    hook: HookDescriptorEvidence::new(
+                        HookSourceAuthority::Project,
+                        HookSourceLocation::parse("hooks/project.json").unwrap(),
+                        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                            .parse()
+                            .unwrap(),
+                        0,
+                    )
+                    .id(),
+                    invocation: HookInvocationId::new(),
+                    lifecycle: ego_core::event::hook::HookLifecycle::PostToolUse,
+                    subject: ego_core::event::hook::HookSubject::Session,
+                },
+            ),
+            ev(
+                seq.next(),
+                turn1,
+                None,
+                EventKind::HookInvocationSettled {
+                    hook: HookDescriptorEvidence::new(
+                        HookSourceAuthority::Project,
+                        HookSourceLocation::parse("hooks/project.json").unwrap(),
+                        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                            .parse()
+                            .unwrap(),
+                        0,
+                    )
+                    .id(),
+                    invocation: HookInvocationId::new(),
+                    result: ego_core::event::hook::HookResult::Outcome {
+                        outcome: HookOutcome::new(HookDecision::Continue, None),
+                    },
                 },
             ),
             // The blob is provider-private, and the golden is the pin that
@@ -356,14 +406,16 @@ mod public_golden {
                     e.kind,
                     EventKind::Compacted { .. }
                         | EventKind::Forked { .. }
-                        | EventKind::HookFired { .. }
+                        | EventKind::HookCatalogueAdmitted { .. }
+                        | EventKind::HookInvocationStarted { .. }
+                        | EventKind::HookInvocationSettled { .. }
                         | EventKind::ReasoningState { .. }
                 )
             })
             .collect::<Vec<_>>();
         assert_eq!(
             internal_kinds.len(),
-            4,
+            6,
             "fixture should exercise all four internal-only kinds"
         );
         for event in &internal_kinds {

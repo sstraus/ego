@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 
 use futures::future::BoxFuture;
 
+use crate::digest::is_lower_sha256;
+
 /// The one model-visible retrieval bound. Callers choose an original-byte
 /// offset, never a page size.
 pub const EVIDENCE_PAGE_BYTES: usize = 32 * 1024;
@@ -22,11 +24,7 @@ pub struct EvidenceId(String);
 impl EvidenceId {
     pub fn parse(value: impl Into<String>) -> Result<Self, EvidenceError> {
         let value = value.into();
-        if value.len() != 64
-            || !value
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        {
+        if !is_lower_sha256(&value) {
             return Err(EvidenceError::InvalidReference { reference: value });
         }
         Ok(Self(value))

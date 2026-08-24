@@ -3,6 +3,8 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use super::hook::HookId;
+
 /// Stable, sortable session identity (UUIDv7).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct SessionId(Uuid);
@@ -212,8 +214,16 @@ pub enum Producer {
     Main,
     /// A subagent, identified by its id.
     Subagent(String),
-    /// A hook, identified by its name.
-    Hook(String),
+    /// A hook, identified by its durable admitted identity.
+    Hook(HookId),
+}
+
+impl Producer {
+    /// Whether effects from this producer may themselves enter hook matching.
+    /// Hook effects are deliberately non-recursive.
+    pub fn may_trigger_hooks(&self) -> bool {
+        !matches!(self, Self::Hook(_))
+    }
 }
 
 #[cfg(test)]
@@ -316,7 +326,13 @@ mod tests {
 
     #[test]
     fn producer_serde_roundtrip_hook() {
-        let p = Producer::Hook("pre-commit".to_string());
+        let source = super::super::hook::HookSourceAuthority::Project;
+        let location = super::super::hook::HookSourceLocation::parse("hooks/project.json").unwrap();
+        let digest = super::super::hook::HookContentDigest::parse(
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        .unwrap();
+        let p = Producer::Hook(HookId::derive(source, &location, &digest, 0));
         let json = serde_json::to_string(&p).unwrap();
         let back: Producer = serde_json::from_str(&json).unwrap();
         assert_eq!(p, back);
