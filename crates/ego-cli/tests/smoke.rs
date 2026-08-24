@@ -61,9 +61,9 @@ use futures::StreamExt;
 #[path = "../../ego-ai/tests/profiles/mod.rs"]
 mod profiles;
 use profiles::{
-    ANTHROPIC, GITHUB_COPILOT, KIMI_CODING, MINIMAX_OAUTH, NOUS, OLLAMA, OPENAI, OPENAI_CODEX,
-    OPENROUTER, Profile, QWEN_OAUTH, TOOL_CEILING, XAI_OAUTH, canonical, request_fixture,
-    tool_calling, write,
+    ANTHROPIC, GEMINI, GITHUB_COPILOT, KIMI_CODING, MINIMAX_OAUTH, NOUS, OLLAMA, OPENAI,
+    OPENAI_CODEX, OPENROUTER, Profile, QWEN_OAUTH, TOOL_CEILING, XAI_OAUTH, canonical,
+    request_fixture, tool_calling, write,
 };
 
 /// The variable that turns any of this on, and the only thing it is for.
@@ -503,6 +503,12 @@ async fn openrouter_accepts_the_body_this_build_sends() {
     smoke(&OPENROUTER, &today()).await;
 }
 
+#[tokio::test]
+#[ignore = "sends a real, billable request; set EGO_SMOKE=gemini"]
+async fn gemini_accepts_the_body_this_build_sends() {
+    smoke(&GEMINI, &today()).await;
+}
+
 /// The gate itself, which is the one thing here that must run offline.
 ///
 /// Without it, an inverted condition would make every smoke silently inert —
@@ -519,4 +525,42 @@ fn a_provider_that_was_not_named_is_not_smoked() {
     // providers rather than answering yes.
     assert!(!named("1", "ollama"));
     assert!(!named("true", "openai"));
+}
+
+/// Every current profile has a smoke here; retired xAI Chat does not.
+///
+/// Check 5 — that the provider *accepts* the body check 1 pinned — is the one
+/// `tests/conformance.rs` says cannot be made offline, and this file is where
+/// it lives. A profile with four offline families and no smoke has four
+/// answers and no way to ask the fifth question, which for a **candidate** is
+/// the whole of what stands between it and membership: the smoke is not a
+/// nicety it lacks, it is the mechanism by which it would stop being a
+/// candidate.
+///
+/// Read off this file's own source because Rust cannot enumerate its test
+/// functions. Anchored on the `#[ignore]` reason rather than the function
+/// name: the reason is what tells an operator which provider to name in
+/// `EGO_SMOKE`, so a smoke that is present but unrunnable-by-instruction fails
+/// here too.
+#[test]
+fn every_current_profile_has_a_smoke_and_retired_xai_does_not() {
+    let source = include_str!("smoke.rs");
+    for profile in profiles::ALL {
+        let instruction = format!("set {OPT_IN}={}", profile.id);
+        if profile.id == "xai" {
+            assert!(
+                !source.contains("set EGO_SMOKE=xai\"]"),
+                "the API-key xAI fixture targets the retired Chat endpoint and must not be live-smoked"
+            );
+            continue;
+        }
+        assert!(
+            source.contains(&instruction),
+            "{} has offline fixtures and no smoke, so check 5 can never be \
+             asked of it. Add one calling `smoke(&{}, &today())`, ignored with \
+             `{instruction}`.",
+            profile.id,
+            profile.id.to_uppercase()
+        );
+    }
 }

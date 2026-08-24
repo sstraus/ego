@@ -18,24 +18,29 @@ use ego_core::cost::CurrencyCode;
 use ego_core::event::domain::CancelCause;
 use ego_core::event::id::SessionId;
 use ego_core::generator::capabilities::ModelCapabilities;
-use ego_core::permit::{CanonPath, PolicyEngine, Tool};
+use ego_core::permit::{
+    CanonPath, HumanApprover, PermissionDecision, PermissionRequest, PolicyEngine, Tool,
+};
 use ego_core::public::{PUBLIC_EVENT_VERSION, PublicEvent};
 use ego_core::run::{DeniedBy, RunTermination, Signal};
 use ego_core::sink::EventSink;
 use ego_core::state::{ItemKind, SessionState};
-use ego_core::store::session_store::SessionStore;
+use ego_core::store::session_store::{SessionMeta, SessionStore};
 use ego_core::turn::{CancelToken, Model, Session, Tools, TurnConfig, TurnLoop, TurnOutcome};
 use ego_tools::clock::SystemClock;
 use ego_tools::fs::OsFs;
 use ego_tools::instructions::OsInstructionIo;
+use ego_tools::store::JsonlStore;
 use ego_tools::tools::builtins;
 use serde_json::Value;
 
 use crate::budget;
 use crate::cli::{Args, Output, SessionChoice, UsageError};
 use crate::output::{JsonlSink, Report, Stdout, TextSink, note};
+use crate::render::caps::{Capabilities, Environment, Terminal};
+use crate::render::osc::{Osc, Progress, State};
 use crate::session::{self, Opened};
-use crate::{config, facts, model, prompt, schema};
+use crate::{config, facts, model, prompt, repl, schema};
 
 /// The currency a session settles in.
 ///
@@ -81,7 +86,16 @@ impl Ended {
 pub async fn run(args: Args, out: &Stdout, cancel: CancelToken) -> Ended {
     let output = args.output;
     let quiet = args.quiet;
-    let text_sink = TextSink::new(out, quiet);
+    // The one place the terminal is asked what it is. §4.5's "stdout is
+    // protocol-clean" is why the machine-readable modes are not asked at all
+    // rather than asked and ignored: there is no environment in which a JSON
+    // document acquires an escape sequence.
+    let environment = Environment::read();
+    let capabilities = match output {
+        Output::Text => Capabilities::of(&Terminal::from_process(args.no_color, &environment)),
+        Output::Json | Output::Jsonl => Capabilities::plain(),
+    };
+    let text_sink = TextSink::new(out, quiet, capabilities);
     let jsonl_sink = JsonlSink::new(out);
     let sink: &dyn EventSink = match output {
         Output::Text => &text_sink,
@@ -92,15 +106,210 @@ pub async fn run(args: Args, out: &Stdout, cancel: CancelToken) -> Ended {
         Output::Json => &ego_core::sink::NullSink,
     };
 
+    let announce = Announce::new(out, capabilities, quiet);
+    announce.opening(args.prompt.as_deref());
+
     let ended = run_with(args, |_| sink, cancel).await;
 
-    // A no-op unless text mode left a streamed line open, which is why it can
-    // run on the refusal path too: a run that refused before the first token
-    // has nothing outstanding to close.
+    // Draws the last block and closes the last line. A no-op unless text mode
+    // has something outstanding, which is why it can run on the refusal path
+    // too: a run that refused before the first token held nothing back.
     if output == Output::Text {
         text_sink.finish();
     }
+    announce.closing(&ended.termination);
     ended
+}
+
+/// Talk to the model until the person stops, then say how it ended.
+///
+/// The mirror of [`run`] for a session driven from a keyboard: one resolution,
+/// one session, one lease, many turns.
+pub async fn interactive(args: Args, out: &Stdout, cancel: CancelToken) -> Ended {
+    // A machine-readable stream has no reader here. `--output json` is a
+    // single document at completion and a conversation has no completion, so
+    // the flag is refused by name rather than quietly producing a stream
+    // nobody can consume — `CLI.md` §4.5.
+    if args.output != Output::Text {
+        return Ended::refused(RunTermination::UsageError {
+            message: format!(
+                "`--output {}` has no meaning for an interactive session: it is \
+                 one document at completion, and a conversation does not have \
+                 one. Use `ego run --output {}` for a headless one-shot",
+                args.output, args.output
+            ),
+        });
+    }
+
+    let quiet = args.quiet;
+    let environment = Environment::read();
+    let capabilities = Capabilities::of(&Terminal::from_process(args.no_color, &environment));
+    let text_sink = TextSink::new(out, quiet, capabilities);
+
+    let seat: Arc<dyn InteractiveSeat> = Arc::new(repl::Seat::new());
+    let announce = Announce::new(out, capabilities, quiet);
+
+    let ended = converse(
+        args,
+        |_| &text_sink as &dyn EventSink,
+        cancel,
+        seat,
+        // Between turns: draw the block the renderer was holding back, and
+        // close the line, so the next prompt starts on a row of its own.
+        &|| text_sink.finish(),
+    )
+    .await;
+
+    announce.closing(&ended.termination);
+    ended
+}
+
+/// Everything ego tells the host that is *not* the answer: the marks, the
+/// progress indicator, the window title, the notification.
+///
+/// It lives beside the run rather than inside the sink because none of it is a
+/// projection of an event. "This process started producing output" and "it
+/// exited 3" are facts about the *process*, and the process is what this module
+/// is. The sink publishes what happened in the session; this publishes what
+/// happened to the program.
+///
+/// Everything here is silent unless [`Capabilities`] found a screen, so no arm
+/// needs to ask again — see [`crate::render::osc`].
+///
+/// ## What is deliberately not here
+///
+/// **OSC 7 (working directory)** and **OSC 133 A (prompt start)**. Both are
+/// correct for a process that *occupies* the pane and wrong for one that
+/// borrows it: OSC 7 tells the terminal where the shell is, and `ego -C sub`
+/// announcing `sub` would leave the pane pointing at a directory the shell
+/// returns from the moment ego exits. They belong to the REPL, which is also
+/// where a prompt to mark exists at all.
+struct Announce<'a> {
+    out: &'a Stdout,
+    osc: Osc,
+    quiet: bool,
+    started: std::time::Instant,
+}
+
+/// How long a run has to take before finishing it is worth a desktop
+/// notification.
+///
+/// A notification for a run the operator watched finish is an interruption
+/// reporting something they already know. A minute is the point past which
+/// they have plausibly looked at something else — and `-q`, which `CLI.md` §1.3
+/// calls quiet progress, suppresses it at any duration.
+const NOTIFY_AFTER: Duration = Duration::from_secs(60);
+
+impl<'a> Announce<'a> {
+    fn new(out: &'a Stdout, capabilities: Capabilities, quiet: bool) -> Self {
+        Announce {
+            out,
+            osc: Osc::new(capabilities),
+            quiet,
+            started: std::time::Instant::now(),
+        }
+    }
+
+    fn opening(&self, prompt: Option<&str>) {
+        self.emit(self.preamble(prompt));
+    }
+
+    fn closing(&self, termination: &RunTermination) {
+        self.emit(self.postamble(termination, self.started.elapsed()));
+    }
+
+    /// Write a sequence, or nothing at all.
+    ///
+    /// The empty check is not an optimisation: [`Stdout::write`] flushes, and a
+    /// run in `--output json` would otherwise flush for the privilege of
+    /// writing zero bytes.
+    fn emit(&self, sequence: String) {
+        if !sequence.is_empty() {
+            self.out.write(&sequence);
+        }
+    }
+
+    /// One string rather than four writes, so a pipe that breaks mid-preamble
+    /// cannot leave half of an escape sequence in the stream — and so the whole
+    /// announcement is a value a test can read.
+    fn preamble(&self, prompt: Option<&str>) -> String {
+        [
+            self.osc.title(&title(prompt)),
+            self.osc.state(State::Busy),
+            // Indeterminate rather than a percentage: the number of turns is
+            // not known in advance, and a bar that advances on a guess is a lie
+            // with a progress bar's authority. `--budget` would make a fraction
+            // meaningful; that is the story that gives `Progress::At` a caller.
+            self.osc.progress(Progress::Indeterminate),
+            self.osc.output_start(),
+        ]
+        .concat()
+    }
+
+    fn postamble(&self, termination: &RunTermination, elapsed: Duration) -> String {
+        let code = termination.exit_code();
+        let notification = if self.quiet || elapsed < NOTIFY_AFTER {
+            String::new()
+        } else {
+            self.osc.notify(
+                crate::DISPLAY_NAME,
+                &format!("{} after {}", termination.exit_reason(), duration(elapsed)),
+            )
+        };
+        [
+            // Cleared on the way out on *every* path, including failure: an
+            // indicator left set is a tab that stays orange until the terminal
+            // is restarted, and the exit status is already carried by 133 D.
+            self.osc.progress(if code == 0 {
+                Progress::Cleared
+            } else {
+                Progress::Failed
+            }),
+            notification,
+            self.osc.state(State::Idle),
+            // Reduced to the fixed brand prefix rather than restored. Restoring
+            // needs the previous title, which is only readable through a query
+            // (OSC 21) that half the matrix answers and the other half echoes
+            // onto the screen. `Osc::title` owns the invariant that even this
+            // empty dynamic title still emits the fixed prefix; the shell
+            // overwrites it at its next prompt.
+            self.osc.title(""),
+            // Last, because it is the mark that says everything above it
+            // belongs to this command.
+            self.osc.output_end(i32::from(code)),
+        ]
+        .concat()
+    }
+}
+
+/// The window title for a run: what it was asked, short enough to read in a
+/// tab.
+///
+/// Measured in cells rather than bytes, like everything else that reaches a
+/// terminal — a title cut mid-grapheme is how a tab ends up with a replacement
+/// character in it.
+fn title(prompt: Option<&str>) -> String {
+    const CELLS: usize = 48;
+    let Some(prompt) = prompt.map(str::trim).filter(|text| !text.is_empty()) else {
+        return crate::DISPLAY_NAME.to_string();
+    };
+    // `-` is the spelling for "read the prompt from stdin", so it is the one
+    // prompt that says nothing about the run.
+    if prompt == "-" {
+        return crate::DISPLAY_NAME.to_string();
+    }
+    let first = prompt.lines().next().unwrap_or_default();
+    let short = crate::render::Line::plain(first).truncate_to(CELLS);
+    short.text().trim_end().to_string()
+}
+
+/// A duration a person reads, not one a machine parses.
+fn duration(elapsed: Duration) -> String {
+    let seconds = elapsed.as_secs();
+    if seconds < 60 {
+        return format!("{seconds}s");
+    }
+    format!("{}m {}s", seconds / 60, seconds % 60)
 }
 
 /// Run `args` to completion, publishing through the sink `destination` builds.
@@ -124,7 +333,33 @@ pub async fn run_with<S: EventSink>(
     destination: impl FnOnce(&ModelCapabilities) -> S,
     cancel: CancelToken,
 ) -> Ended {
-    match execute(args, destination, cancel).await {
+    match execute(args, destination, cancel, Driver::Once).await {
+        Ok(ended) => ended,
+        Err(refusal) => Ended::refused(refusal),
+    }
+}
+
+/// The same run, driven by a person instead of by argv.
+///
+/// Everything before the first turn is identical — one resolution, one
+/// session, one lease — which is why this is a driver and not a second
+/// pipeline. `session::open` replays the log from disk, so opening one per
+/// typed line would make a conversation get slower the longer it went on.
+pub async fn converse<S: EventSink>(
+    args: Args,
+    destination: impl FnOnce(&ModelCapabilities) -> S,
+    cancel: CancelToken,
+    seat: Arc<dyn InteractiveSeat>,
+    between: &(dyn Fn() + Send + Sync),
+) -> Ended {
+    match execute(
+        args,
+        destination,
+        cancel,
+        Driver::Interactive { seat, between },
+    )
+    .await
+    {
         Ok(ended) => ended,
         Err(refusal) => Ended::refused(refusal),
     }
@@ -343,39 +578,47 @@ fn capabilities(tools: &[Arc<dyn Tool>], instructions: bool, schema: bool) -> Ve
     names
 }
 
-/// Everything before the first turn.
-async fn execute<S: EventSink>(
-    args: Args,
-    destination: impl FnOnce(&ModelCapabilities) -> S,
-    cancel: CancelToken,
-) -> Result<Ended, RunTermination> {
-    let usage = |err: UsageError| RunTermination::UsageError {
-        message: err.to_string(),
-    };
+/// Everything the command line and the config layers settle before this run
+/// touches a store, a provider, or a file of its own.
+struct Settings {
+    /// When the run began. `--timeout` is measured from here rather than from
+    /// the first turn, because the time a model took to resolve is time the
+    /// operator spent waiting for this command.
+    started: std::time::Instant,
+    timeout: Option<Duration>,
+    /// The workspace root, and the directory relative paths resolve against.
+    /// The same path today — [`workspace`] makes the root *be* the working
+    /// directory — and two fields because they answer two questions.
+    root: PathBuf,
+    cwd: PathBuf,
+    effective: Effective,
+}
 
+/// The command line and the config layers, resolved into one answer.
+fn settings(args: &Args, trust_for: impl FnOnce(&Path) -> Trust) -> Result<Settings, UsageError> {
     let started = std::time::Instant::now();
     let timeout = match args.timeout.as_deref() {
-        Some(spec) => Some(deadline(spec).map_err(usage)?),
+        Some(spec) => Some(deadline(spec)?),
         None => None,
     };
 
-    let cwd = workspace(args.directory.as_ref()).map_err(usage)?;
+    let cwd = workspace(args.directory.as_ref())?;
     // The workspace root is the working directory. Discovering a repository
     // root is `git`'s question and would make the answer depend on a tool that
     // may not be installed; `-C` is how a caller says otherwise.
     let root = cwd.clone();
 
-    // §4.5: "headless in an untrusted workspace runs bare automatically (no
-    // dialog, no ambient code execution)". There is no trust store, and a
-    // headless run has nobody to ask, so this is not a default that a later
-    // milestone relaxes — it is what the section says to do.
-    let trust = Trust::Untrusted;
-    let layers = config::layers(&root, &args, trust).map_err(usage)?;
-    let effective = resolve(&layers, trust, config::profile(&args).as_deref())
-        .map_err(|err| usage(UsageError(err.to_string())))?;
-    debug_assert_eq!(effective.posture, Posture::Bare);
+    // The caller can return `Trusted` only when it owns a human seat. A
+    // headless caller passes a closure that always returns `Untrusted`, so no
+    // terminal or stdin read is reachable from that path.
+    let trust = trust_for(&root);
+    let layers = config::layers(&root, args, trust)?;
+    let effective = resolve(&layers, trust, config::profile(args).as_deref())
+        .map_err(|err| UsageError(err.to_string()))?;
+    if trust == Trust::Untrusted || args.bare {
+        debug_assert_eq!(effective.posture, Posture::Bare);
+    }
 
-    let currency = CurrencyCode::new(SETTLEMENT).expect("a constant this file controls");
     // §4 requires the clamp be stated, not silent: a `--budget 20$` reduced to
     // an administrator's $5 must not read as binding at $20. The money half
     // travels into the gate, which publishes it on every `MeteringSelected`;
@@ -390,68 +633,133 @@ async fn execute<S: EventSink>(
         ));
     }
 
+    Ok(Settings {
+        started,
+        timeout,
+        root,
+        cwd,
+        effective,
+    })
+}
+
+/// What a turn is made of: the prompt, its system half, the tools on offer,
+/// the schema the answer must satisfy, and the name of the model to ask.
+struct Materials {
+    system: Option<SystemPrompt>,
+    registry: Vec<Arc<dyn Tool>>,
+    compiled: Option<schema::Schema>,
+    text: String,
+    slug: String,
+}
+
+/// Everything a turn needs that comes from a file, a flag or stdin.
+///
+/// Gathered before a store is chosen and before a model is resolved, so a run
+/// naming a schema that will not compile or a tool this build does not have
+/// refuses without creating a session or reaching a network.
+fn materials(settings: &Settings, args: &Args, seeded: bool) -> Result<Materials, UsageError> {
     let compiled = match args.schema.as_deref() {
-        Some(spec) => {
-            let text = prompt::at_file(spec).map_err(usage)?;
-            Some(schema::Schema::compile(&text).map_err(usage)?)
-        }
+        Some(spec) => Some(schema::Schema::compile(&prompt::at_file(spec)?)?),
         None => None,
     };
-
-    let system = instructions(&effective, &args, &root, &cwd).map_err(usage)?;
-    let registry = tools(args.tools.as_ref()).map_err(usage)?;
-
-    let text = prompt::assemble(args.prompt.as_deref(), args.stdin, &prompt::ProcessStdin)
-        .map_err(usage)?;
-
+    let system = instructions(&settings.effective, args, &settings.root, &settings.cwd)?;
+    let registry = tools(args.tools.as_ref())?;
+    // An interactive session may start with nothing to ask; a one-shot may
+    // not. Same table otherwise.
+    let text = if seeded {
+        prompt::seed(args.prompt.as_deref(), args.stdin, &prompt::ProcessStdin)?
+    } else {
+        prompt::assemble(args.prompt.as_deref(), args.stdin, &prompt::ProcessStdin)?
+    };
     let slug = args
         .model
         .clone()
-        .or_else(|| effective.model.clone().map(|model| model.0))
+        .or_else(|| settings.effective.model.clone().map(|model| model.0))
         .ok_or_else(|| {
-            usage(UsageError(
+            UsageError(
                 "no model: pass --model provider/model, set EGO_MODEL, or put \
                  `model = \"…\"` in a config file"
                     .to_string(),
-            ))
+            )
         })?;
 
+    Ok(Materials {
+        system,
+        registry,
+        compiled,
+        text,
+        slug,
+    })
+}
+
+/// The store this run logs through, and which session in it.
+struct Chosen {
+    /// `None` under `--ephemeral`: a run that keeps nothing needs no store.
+    store: Option<JsonlStore>,
+    id: SessionId,
+}
+
+/// *Which* session this run continues or creates — not the opening of it.
+///
+/// The two halves are separated on purpose, and this is the half that happens
+/// before the model resolves. Choosing is a read-only catalogue query and it
+/// can refuse: `ego resume` in a directory that owns no session is a usage
+/// error about the command as typed, and it would be true whatever the
+/// provider said. Answering it *after* the model resolved told an operator
+/// standing in the wrong directory that the network was down. Opening stays in
+/// [`execute`], because that takes a lease and can create, and a session must
+/// not be created for a run whose model does not resolve.
+fn chosen(args: &Args, root: &Path) -> Result<Chosen, UsageError> {
     let store_root = match args.session {
         SessionChoice::Ephemeral => None,
-        _ => Some(session::store_root(args.session_dir.as_ref()).map_err(usage)?),
+        _ => Some(session::store_root(args.session_dir.as_ref())?),
     };
-    let clock = SystemClock;
-    // The same `root` that derives a named session's id (`session::id_for`
-    // below), so "the session called build in this workspace" and "the
-    // sessions belonging to this workspace" cannot disagree about which
-    // workspace that is.
-    let jsonl_store = store_root.map(|dir| session::jsonl(dir, root.clone()));
-    // *Which* session, before the model — and *opening* it, further down,
-    // after. The two halves are separated on purpose. Choosing is a read-only
-    // catalogue query and can refuse: `ego resume` in a directory that owns no
-    // session is a usage error about the command as typed, and it would be
-    // true whatever the provider said. Answering it after the model resolves
-    // told an operator standing in the wrong directory that the network was
-    // down. Opening stays below, because that takes a lease and can create,
-    // and a session must not be created for a run whose model does not
-    // resolve.
-    let session_id = session::id_for(
+    // The same `root` that derives a named session's id below, so "the session
+    // called build in this workspace" and "the sessions belonging to this
+    // workspace" cannot disagree about which workspace that is.
+    let store = store_root.map(|dir| session::jsonl(dir, root.to_path_buf()));
+    let id = session::id_for(
         &args.session,
-        &root,
-        jsonl_store.as_ref().map(|store| store as &dyn SessionStore),
-    )
-    .map_err(usage)?;
+        root,
+        store.as_ref().map(|store| store as &dyn SessionStore),
+    )?;
 
+    Ok(Chosen { store, id })
+}
+
+/// The provider this run generates through.
+struct Provider {
+    http: Arc<dyn ego_ai::http::Http>,
+    resolved: ego_ai::catalogue::ResolvedModel,
+    credential: ego_ai::provider::ResolvedCredential,
+}
+
+/// A transport, the catalogue row `--model` names, and the credential that
+/// will sign for it.
+///
+/// The two ways this fails are two exit codes, which is what
+/// `is_provider_failure` is asked: a slug nobody has heard of is the operator's
+/// mistake (exit 2) and a daemon that is not listening is not (exit 4), and one
+/// answer covering both would tell half of them the wrong thing.
+async fn provider(
+    slug: &str,
+    effective: &Effective,
+    offline: bool,
+) -> Result<Provider, RunTermination> {
     let provider_id = slug
         .split_once('/')
         .map(|(provider, _)| provider)
-        .unwrap_or(&slug);
-    model::ensure_provider_mapping(provider_id)
-        .map_err(|err| usage(UsageError(err.to_string())))?;
-    let http = model::transport(args.offline).map_err(|err| RunTermination::Provider {
+        .unwrap_or(slug);
+    model::ensure_provider_mapping(provider_id).map_err(|err| RunTermination::UsageError {
         message: err.to_string(),
     })?;
-    let hosted = facts::supplied(&effective.ceilings).map_err(usage)?;
+    let http = model::transport(offline).map_err(|err| RunTermination::Provider {
+        message: err.to_string(),
+    })?;
+    let hosted =
+        facts::supplied(&effective.ceilings).map_err(|err| RunTermination::UsageError {
+            message: err.to_string(),
+        })?;
     // One credential source for the whole request: refresh, resolution and
     // header assembly share the locked auth store selected by `ego auth`.
     let creds = crate::auth::request_credentials(
@@ -460,25 +768,84 @@ async fn execute<S: EventSink>(
             .auth
             .get(provider_id)
             .and_then(|auth| auth.credential_command.as_deref()),
-        args.offline,
+        offline,
     )
     .await
-    .map_err(|err| usage(UsageError(err.to_string())))?;
+    .map_err(|err| RunTermination::UsageError {
+        message: err.to_string(),
+    })?;
     let (resolved, credential) =
-        model::resolve(&slug, hosted, &http, creds.as_ref(), &effective.auth)
+        model::resolve(slug, hosted, &http, creds.as_ref(), &effective.auth)
             .await
             .map_err(|err| {
+                let message = err.to_string();
                 if model::is_provider_failure(&err) {
-                    RunTermination::Provider {
-                        message: err.to_string(),
-                    }
+                    RunTermination::Provider { message }
                 } else {
-                    RunTermination::UsageError {
-                        message: err.to_string(),
-                    }
+                    RunTermination::UsageError { message }
                 }
             })?;
 
+    Ok(Provider {
+        http,
+        resolved,
+        credential,
+    })
+}
+
+/// Everything before the first turn.
+///
+/// What is left here after the four steps above is the *order* they happen in,
+/// which is the part that is genuinely this function's: settings before
+/// session choice before materials because a missing `resume` target is true
+/// independently of model configuration, materials before the provider because
+/// a bad `--tools` must not reach a network, and the provider before the session
+/// is opened because a session must not be created for a run whose model does
+/// not resolve.
+async fn execute<S: EventSink>(
+    args: Args,
+    destination: impl FnOnce(&ModelCapabilities) -> S,
+    cancel: CancelToken,
+    driver: Driver<'_>,
+) -> Result<Ended, RunTermination> {
+    let usage = |err: UsageError| RunTermination::UsageError {
+        message: err.to_string(),
+    };
+
+    let settings = settings(&args, |root| run_trust(&args, &driver, root)).map_err(usage)?;
+    let Chosen {
+        store: jsonl_store,
+        id: session_id,
+    } = chosen(&args, &settings.root).map_err(usage)?;
+    let Materials {
+        system,
+        registry,
+        compiled,
+        text,
+        slug,
+    } = materials(
+        &settings,
+        &args,
+        matches!(&driver, Driver::Interactive { .. }),
+    )
+    .map_err(usage)?;
+
+    let Settings {
+        started,
+        timeout,
+        root,
+        cwd,
+        effective,
+    } = settings;
+
+    let Provider {
+        http,
+        resolved,
+        credential,
+    } = provider(&slug, &effective, args.offline).await?;
+
+    let currency = CurrencyCode::new(SETTLEMENT).expect("a constant this file controls");
+    let clock = SystemClock;
     let opened = match &jsonl_store {
         Some(store) => Opened::Durable(Box::new(
             session::open(store, &session_id, &clock).map_err(|err| RunTermination::Failed {
@@ -518,14 +885,25 @@ async fn execute<S: EventSink>(
 
     let generator =
         ego_ai::generator::WireGenerator::new(resolved.row.clone(), Arc::clone(&http), credential);
-    // `CLI.md` §4.4: an untrusted workspace resolves to `Mode::Default`
-    // because no layer that could name a mode was eligible, which is the
-    // posture that asks rather than the one that assumes.
-    let policy = PolicyEngine::new(
-        CanonPath::new(&root),
-        effective.mode.unwrap_or(Mode::Default),
-        effective.permissions.clone(),
-    );
+    // An untrusted workspace resolves to `Mode::Default`; a trusted
+    // interactive run may obtain its mode from the admitted config layers.
+    let mode = effective.mode.unwrap_or(Mode::Default);
+    let policy = match &driver {
+        Driver::Once => {
+            PolicyEngine::new(CanonPath::new(&root), mode, effective.permissions.clone())
+        }
+        Driver::Interactive { seat, .. } if seat.has_human() => PolicyEngine::with_human(
+            CanonPath::new(&root),
+            mode,
+            effective.permissions.clone(),
+            Arc::new(SeatApprover {
+                seat: Arc::clone(seat),
+            }),
+        ),
+        Driver::Interactive { .. } => {
+            PolicyEngine::new(CanonPath::new(&root), mode, effective.permissions.clone())
+        }
+    };
     let fs = OsFs;
     let mut gate = budget::gate(&effective.ceilings, effective.clamped.money, currency);
 
@@ -537,27 +915,6 @@ async fn execute<S: EventSink>(
         parallel_tool_calls: resolved.capabilities.supports_parallel_tool_calls,
     };
 
-    let mut loop_ = TurnLoop::new(
-        Session {
-            id: session_id,
-            state: opening,
-            store: opened.store(),
-            clock: &clock,
-            sink,
-            cancel: cancel.clone(),
-        },
-        Model {
-            generator: &generator,
-            gate: &mut gate,
-            metering: resolved.metering.clone(),
-            rates: resolved.rates.clone(),
-            token_ceiling: effective.ceilings.tokens,
-            caps: resolved.capabilities.clone(),
-            config,
-        },
-        Tools::new(&registry, &policy, &fs, CanonPath::new(&cwd)),
-    );
-
     let turns = Turns {
         schema: compiled.as_ref(),
         retries: args.schema_retries,
@@ -565,14 +922,173 @@ async fn execute<S: EventSink>(
         timeout,
         started,
     };
-    let (termination, result) = turns.drive(&mut loop_, &text, &cancel).await;
 
-    Ok(Ended {
-        termination,
-        session: session_id,
-        state: loop_.into_state(),
-        result,
-    })
+    // One turn's worth of loop, built from the state the last one left behind.
+    //
+    // Rebuilt per turn rather than held across the session, and that is
+    // `CancelToken`'s doing rather than a preference: the token is latching
+    // (`ego-core/src/turn/mod.rs:89`, "the first cause wins") and lives inside
+    // `Session`, so a `Ctrl+C` on turn one would leave every later turn to
+    // abort before its first check. A fresh loop takes a fresh token. It costs
+    // nothing — every field below is a borrow or a clone of something already
+    // resolved, and no I/O is repeated.
+    // A macro and not a closure: the loop borrows from this function's locals,
+    // and a closure cannot name the lifetime of a `TurnLoop<'_>` it returns.
+    macro_rules! build {
+        ($state:expr, $cancel:expr) => {
+            TurnLoop::new(
+                Session {
+                    id: session_id,
+                    state: $state,
+                    store: opened.store(),
+                    clock: &clock,
+                    sink,
+                    cancel: $cancel.clone(),
+                },
+                Model {
+                    generator: &generator,
+                    gate: &mut gate,
+                    metering: resolved.metering.clone(),
+                    rates: resolved.rates.clone(),
+                    token_ceiling: effective.ceilings.tokens,
+                    caps: resolved.capabilities.clone(),
+                    config: config.clone(),
+                },
+                Tools::new(&registry, &policy, &fs, CanonPath::new(&cwd)),
+            )
+        };
+    }
+
+    match driver {
+        Driver::Once => {
+            let mut loop_ = build!(opening, &cancel);
+            let (termination, result) = turns.drive(&mut loop_, &text, &cancel).await;
+
+            Ok(Ended {
+                termination,
+                session: session_id,
+                state: loop_.into_state(),
+                result,
+            })
+        }
+        Driver::Interactive { seat, between } => {
+            let mut state = opening;
+            let mut last = Ended {
+                termination: RunTermination::Done,
+                session: session_id,
+                state: state.clone(),
+                result: Value::String(String::new()),
+            };
+
+            // `ego "explain this failing test"` seeds the first turn; `ego`
+            // alone starts at the prompt. Both are one session — the argument
+            // is a first thing to say, not a different mode.
+            let mut seeded = (!text.trim().is_empty()).then(|| text.clone());
+
+            loop {
+                // The editor is the only writer while it reads, and no read
+                // remains active while the turn renders. R12, held by
+                // construction rather than by care.
+                let line = match seeded.take() {
+                    Some(first) => repl::Line::Submitted(first),
+                    None => seat.read(),
+                };
+
+                let asked = match line {
+                    repl::Line::Submitted(text) => text,
+                    repl::Line::Blank => continue,
+                    // Ctrl+C at an idle prompt drops the line and nothing
+                    // else. Someone who pressed it to stop a turn must not
+                    // lose the session by pressing it once more.
+                    repl::Line::Interrupted => continue,
+                    repl::Line::Ended => break,
+                    repl::Line::Refused(why) => {
+                        note(why);
+                        continue;
+                    }
+                };
+
+                // Per turn, for the reason `build` documents.
+                let turn_cancel = CancelToken::new();
+                let mut loop_ = build!(state, &turn_cancel);
+                let (termination, result) = turns.drive(&mut loop_, &asked, &turn_cancel).await;
+                state = loop_.into_state();
+                between();
+
+                last = Ended {
+                    termination,
+                    session: session_id,
+                    state: state.clone(),
+                    result,
+                };
+
+                // The person's own cancellations end a turn; the process's end
+                // the process. A broken stdout or a SIGTERM is not a turn to
+                // return to a prompt from.
+                if cancel.is_cancelled() {
+                    break;
+                }
+            }
+
+            Ok(last)
+        }
+    }
+}
+
+/// What drives the turns once the session is open.
+///
+/// The setup above is identical either way — the same resolution, the same
+/// session, the same policy — so it is the tail that branches rather than the
+/// function that is duplicated.
+enum Driver<'a> {
+    /// One prompt from argv or stdin, and the run is over.
+    Once,
+    /// Lines from a person, until they stop.
+    Interactive {
+        seat: Arc<dyn InteractiveSeat>,
+        /// Run after each turn: the screen holds the last block back until it
+        /// knows no more is coming, and between turns is when it knows.
+        between: &'a (dyn Fn() + Send + Sync),
+    },
+}
+
+fn run_trust(args: &Args, driver: &Driver<'_>, root: &Path) -> Trust {
+    match driver {
+        Driver::Once => Trust::Untrusted,
+        Driver::Interactive { seat, .. } if !args.bare && seat.has_human() => seat.trust(root),
+        Driver::Interactive { .. } => Trust::Untrusted,
+    }
+}
+
+/// The seat, as the run loop needs it.
+///
+/// A trait so a test can drive the whole interactive path from a script of
+/// lines, with no terminal and no editor — the real [`repl::Seat`] needs a tty
+/// and would make every one of those tests unrunnable in CI.
+pub trait Reads {
+    /// Read one line, blocking until there is one.
+    fn read(&self) -> repl::Line;
+}
+
+/// The two explicit decisions only a human-driven run may make.
+pub trait InteractiveSeat: Reads + std::fmt::Debug + Send + Sync {
+    fn has_human(&self) -> bool;
+    fn trust(&self, workspace: &Path) -> Trust;
+    fn permission(&self, request: &PermissionRequest) -> PermissionDecision;
+}
+
+#[derive(Debug)]
+struct SeatApprover {
+    seat: Arc<dyn InteractiveSeat>,
+}
+
+impl HumanApprover for SeatApprover {
+    fn decide<'a>(
+        &'a self,
+        request: &'a PermissionRequest,
+    ) -> futures::future::BoxFuture<'a, PermissionDecision> {
+        Box::pin(futures::future::ready(self.seat.permission(request)))
+    }
 }
 
 /// The run-level limits, and the loop that applies them between turns.
@@ -742,79 +1258,90 @@ fn last_assistant_message(state: &SessionState) -> String {
 /// they are for a run. There is no session and no turn, so nothing here can
 /// produce the endings that are about one.
 pub fn ls(args: &crate::cli::LsArgs, out: &Stdout) -> RunTermination {
+    match listed(args, out) {
+        Ok(()) => RunTermination::Done,
+        Err(termination) => termination,
+    }
+}
+
+/// [`ls`], with the endings as an error so each step can be one line.
+///
+/// The `Ok(())` case is `RunTermination::Done` and nothing else, so there is
+/// no ending decided here that [`ls`] does not name.
+fn listed(args: &crate::cli::LsArgs, out: &Stdout) -> Result<(), RunTermination> {
     let usage = |err: UsageError| RunTermination::UsageError {
         message: err.to_string(),
     };
 
-    let root = match workspace(args.directory.as_ref()) {
-        Ok(root) => root,
-        Err(err) => return usage(err),
-    };
-    let store_root = match session::store_root(args.session_dir.as_ref()) {
-        Ok(dir) => dir,
-        Err(err) => return usage(err),
-    };
+    let root = workspace(args.directory.as_ref()).map_err(usage)?;
+    let store_root = session::store_root(args.session_dir.as_ref()).map_err(usage)?;
     // The workspace is handed over for the same reason `run` hands it over —
     // a store writes it into the header of any session it creates — even
     // though listing creates none. One constructor, one meaning.
     let store = session::jsonl(store_root, root.clone());
 
-    let metas = match crate::catalogue::listing(&store, &root, args.all) {
-        Ok(metas) => metas,
-        Err(err) => {
-            return RunTermination::Failed {
-                message: format!("the session store could not be listed: {err}"),
-            };
+    let metas = crate::catalogue::listing(&store, &root, args.all).map_err(|err| {
+        RunTermination::Failed {
+            message: format!("the session store could not be listed: {err}"),
         }
-    };
+    })?;
 
     match args.output {
         // §4.6's single object. Rendered even when there is nothing to list:
         // a script that gets no output cannot tell an empty store from a
         // command that failed to run.
-        Output::Json => match serde_json::to_string(&crate::catalogue::Listing::of(&metas)) {
-            Ok(line) => out.line(&line),
-            Err(err) => {
-                return RunTermination::Failed {
-                    message: format!("the listing could not be rendered: {err}"),
-                };
-            }
-        },
+        Output::Json => render(out, &crate::catalogue::Listing::of(&metas), "the listing")?,
         // One session per line, which is what §4.2's spelling means for a
         // list: the unit of a catalogue is a session, as the unit of a run is
         // an event.
         Output::Jsonl => {
             for meta in &metas {
-                match serde_json::to_string(&crate::catalogue::Row::of(meta)) {
-                    Ok(line) => out.line(&line),
-                    Err(err) => {
-                        return RunTermination::Failed {
-                            message: format!("a session could not be rendered: {err}"),
-                        };
-                    }
-                }
+                render(out, &crate::catalogue::Row::of(meta), "a session")?;
             }
         }
-        // The header row is printed even for an empty store, so the person who
-        // typed `ego ls` sees that the command ran. The empty case says so on
-        // stderr rather than on stdout, which stays the listing.
-        Output::Text => {
-            for line in crate::catalogue::table(&metas, args.all) {
-                out.line(&line);
-            }
-            if metas.is_empty() {
-                note(&if args.all {
-                    "no sessions in this store".to_string()
-                } else {
-                    format!(
-                        "no session belongs to {}; `ego ls --all` lists every one",
-                        root.display()
-                    )
-                });
-            }
-        }
+        Output::Text => tabulate(out, &metas, &root, args.all),
     }
-    RunTermination::Done
+    Ok(())
+}
+
+/// The catalogue as a table, and the sentence an empty one owes.
+///
+/// The header row is printed even for an empty store, so the person who typed
+/// `ego ls` sees that the command ran. The empty case says so on stderr rather
+/// than on stdout, which stays the listing — which is also why this cannot
+/// fail: nothing is serialised, so there is no rendering to refuse.
+fn tabulate(out: &Stdout, metas: &[SessionMeta], root: &Path, all: bool) {
+    for line in crate::catalogue::table(metas, all) {
+        out.line(&line);
+    }
+    if metas.is_empty() {
+        note(&if all {
+            "no sessions in this store".to_string()
+        } else {
+            format!(
+                "no session belongs to {}; `ego ls --all` lists every one",
+                root.display()
+            )
+        });
+    }
+}
+
+/// One JSON value on one line, or the ending a value that will not serialise
+/// produces.
+///
+/// `what` names the thing rather than the error: a `Listing` and a `Row` fail
+/// for the same reason and the operator needs to know which of the two the
+/// command was in the middle of.
+fn render<T: serde::Serialize>(out: &Stdout, value: &T, what: &str) -> Result<(), RunTermination> {
+    match serde_json::to_string(value) {
+        Ok(line) => {
+            out.line(&line);
+            Ok(())
+        }
+        Err(err) => Err(RunTermination::Failed {
+            message: format!("{what} could not be rendered: {err}"),
+        }),
+    }
 }
 
 /// The result of a run, rendered for `--output json` (`CLI.md` §4.1).
@@ -870,4 +1397,253 @@ pub fn diagnose(termination: &RunTermination, broken: Option<String>) {
         },
     };
     note(&message);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::render::caps::{Depth, OscProfile};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Debug)]
+    struct TrustingSeat {
+        asked: AtomicUsize,
+    }
+
+    impl Reads for TrustingSeat {
+        fn read(&self) -> repl::Line {
+            repl::Line::Ended
+        }
+    }
+
+    impl InteractiveSeat for TrustingSeat {
+        fn has_human(&self) -> bool {
+            true
+        }
+
+        fn trust(&self, _workspace: &Path) -> Trust {
+            self.asked.fetch_add(1, Ordering::SeqCst);
+            Trust::Trusted
+        }
+
+        fn permission(&self, _request: &PermissionRequest) -> PermissionDecision {
+            PermissionDecision::Deny
+        }
+    }
+
+    fn interactive_args(extra: &[&str]) -> Args {
+        let argv = std::iter::once("ego".to_string())
+            .chain(extra.iter().map(|arg| arg.to_string()))
+            .collect();
+        let crate::cli::Invocation::Interactive(args) = crate::cli::parse(argv).unwrap() else {
+            panic!("the test invocation is interactive");
+        };
+        *args
+    }
+
+    #[test]
+    fn only_an_interactive_non_bare_run_can_ask_for_trust() {
+        let seat = Arc::new(TrustingSeat {
+            asked: AtomicUsize::new(0),
+        });
+        let dyn_seat: Arc<dyn InteractiveSeat> = seat.clone();
+        let between = || {};
+        let interactive = Driver::Interactive {
+            seat: dyn_seat,
+            between: &between,
+        };
+        assert_eq!(
+            run_trust(&interactive_args(&[]), &interactive, Path::new("/ws")),
+            Trust::Trusted
+        );
+        assert_eq!(seat.asked.load(Ordering::SeqCst), 1);
+
+        assert_eq!(
+            run_trust(
+                &interactive_args(&["--bare"]),
+                &interactive,
+                Path::new("/ws")
+            ),
+            Trust::Untrusted
+        );
+        assert_eq!(
+            seat.asked.load(Ordering::SeqCst),
+            1,
+            "--bare must skip the seat"
+        );
+
+        assert_eq!(
+            run_trust(&interactive_args(&[]), &Driver::Once, Path::new("/ws")),
+            Trust::Untrusted,
+            "headless has no seat to consult"
+        );
+        assert_eq!(seat.asked.load(Ordering::SeqCst), 1);
+    }
+
+    fn capabilities(osc: OscProfile) -> Capabilities {
+        Capabilities {
+            depth: Depth::TrueColor,
+            width: 80,
+            hyperlinks: true,
+            progress: true,
+            osc,
+        }
+    }
+
+    fn announce(osc: OscProfile, quiet: bool) -> (Stdout, Capabilities, bool) {
+        (Stdout::new(CancelToken::new()), capabilities(osc), quiet)
+    }
+
+    /// The reason any of this exists: TUICommander segments a pane into command
+    /// blocks from 133 A/C/D and otherwise falls back to pattern-matching
+    /// tool-call headers (`tuicommander/docs/FEATURES.md:187`). C opens the
+    /// block, D closes it carrying the exit status, and nothing may come after
+    /// D — anything that did would belong to the next command.
+    #[test]
+    fn the_block_opens_with_c_and_closes_with_d_carrying_the_status() {
+        let (out, capabilities, quiet) = announce(OscProfile::Standard, false);
+        let announce = Announce::new(&out, capabilities, quiet);
+
+        assert!(announce.preamble(Some("hello")).ends_with("\x1b]133;C\x07"));
+
+        let failed = announce.postamble(&RunTermination::TaskFailed, Duration::ZERO);
+        assert!(failed.ends_with("\x1b]133;D;1\x07"), "{failed:?}");
+        let done = announce.postamble(&RunTermination::Done, Duration::ZERO);
+        assert!(done.ends_with("\x1b]133;D;0\x07"), "{done:?}");
+    }
+
+    #[test]
+    fn a_title_is_branded_once_and_closing_keeps_only_the_fixed_prefix() {
+        let (out, capabilities, quiet) = announce(OscProfile::Standard, false);
+        let announce = Announce::new(&out, capabilities, quiet);
+
+        assert_eq!(
+            announce.preamble(Some("explain the diff")),
+            "\x1b]0;ɛ । explain the diff\x07\x1b]9;4;3;0\x07\x1b]133;C\x07"
+        );
+        assert_eq!(
+            announce.preamble(None),
+            "\x1b]0;ɛ । εgo\x07\x1b]9;4;3;0\x07\x1b]133;C\x07"
+        );
+        assert_eq!(
+            announce.postamble(&RunTermination::Done, Duration::ZERO),
+            "\x1b]9;4;0;0\x07\x1b]0;ɛ । \x07\x1b]133;D;0\x07"
+        );
+    }
+
+    /// A progress indicator left set outlives the process that set it: the tab
+    /// stays marked until the terminal is restarted. So it is cleared on the
+    /// failure path too, and the failure is reported by 133 D instead.
+    #[test]
+    fn the_indicator_is_always_taken_down_however_the_run_ended() {
+        let (out, capabilities, quiet) = announce(OscProfile::Standard, false);
+        let announce = Announce::new(&out, capabilities, quiet);
+
+        assert!(
+            announce.preamble(None).contains("\x1b]9;4;3;0\x07"),
+            "a run of unknown length is indeterminate"
+        );
+        for termination in [
+            RunTermination::Done,
+            RunTermination::TaskFailed,
+            RunTermination::Signalled(Signal::Int),
+        ] {
+            let closing = announce.postamble(&termination, Duration::ZERO);
+            let state = if termination.exit_code() == 0 { 0 } else { 2 };
+            assert!(
+                closing.contains(&format!("\x1b]9;4;{state};0\x07")),
+                "{termination:?} left the indicator: {closing:?}"
+            );
+        }
+    }
+
+    /// §4.5, applied to the out-of-band channel. A JSON document with an OSC in
+    /// it is not JSON, and the gate is what prevents that rather than a rule
+    /// each call site remembers.
+    #[test]
+    fn a_machine_readable_run_announces_nothing_at_all() {
+        let out = Stdout::new(CancelToken::new());
+        let announce = Announce::new(&out, Capabilities::plain(), false);
+        assert_eq!(announce.preamble(Some("hello")), "");
+        assert_eq!(
+            announce.postamble(&RunTermination::Done, Duration::from_secs(3_600)),
+            ""
+        );
+    }
+
+    /// A notification is an interruption. It is worth it for a run the operator
+    /// stopped watching, and it is noise for one they saw finish — so the
+    /// duration decides, and `-q` overrules the duration.
+    #[test]
+    fn only_a_long_run_is_worth_interrupting_someone_over() {
+        let (out, capabilities, _) = announce(OscProfile::Standard, false);
+        let loud = Announce::new(&out, capabilities, false);
+
+        // `\x1b]9;εgo`, not `\x1b]9;` — OSC 9;4 is the progress indicator and
+        // shares the prefix.
+        assert!(
+            !loud
+                .postamble(&RunTermination::Done, NOTIFY_AFTER - Duration::from_secs(1))
+                .contains("\x1b]9;εgo"),
+            "a run somebody watched finish"
+        );
+        let long = loud.postamble(&RunTermination::Done, Duration::from_secs(252));
+        assert!(
+            long.contains("\x1b]9;εgo: done after 4m 12s\x07"),
+            "{long:?}"
+        );
+
+        let quiet = Announce::new(&out, capabilities, true);
+        assert!(
+            !quiet
+                .postamble(&RunTermination::Done, Duration::from_secs(252))
+                .contains("\x1b]9;εgo"),
+            "-q suppresses it at any duration"
+        );
+    }
+
+    /// The private protocol reaches TUIC and nowhere else, and it is the
+    /// capability gate that decides — not a call site that checks a variable.
+    #[test]
+    fn only_tuic_is_told_what_ego_is_doing() {
+        let (out, standard, _) = announce(OscProfile::Standard, false);
+        let elsewhere = Announce::new(&out, standard, false);
+        assert!(!elsewhere.preamble(None).contains("7770"));
+
+        let inside = Announce::new(&out, capabilities(OscProfile::Tuic), false);
+        assert!(inside.preamble(None).contains("\x1b]7770;state=busy\x07"));
+        assert!(
+            inside
+                .postamble(&RunTermination::Done, Duration::ZERO)
+                .contains("\x1b]7770;state=idle\x07")
+        );
+    }
+
+    #[test]
+    fn the_title_says_what_was_asked_and_never_says_a_dash() {
+        assert_eq!(title(Some("explain the diff")), "explain the diff");
+        // `-` is the spelling for "the prompt is on stdin".
+        assert_eq!(title(Some("-")), "εgo");
+        assert_eq!(title(None), "εgo");
+        assert_eq!(title(Some("   ")), "εgo");
+        // A prompt is often a paragraph; a tab is one line.
+        assert_eq!(title(Some("first line\nsecond line")), "first line");
+    }
+
+    /// Cut in cells, like everything else that reaches a terminal. A title cut
+    /// by bytes puts a replacement character in the tab.
+    #[test]
+    fn a_long_title_is_cut_where_a_grapheme_ends() {
+        let flag = "\u{1f1ee}\u{1f1f9}";
+        let title = title(Some(&flag.repeat(40)));
+        assert!(!title.contains('\u{fffd}'));
+        assert_eq!(crate::render::line::cells(&title), 48);
+    }
+
+    #[test]
+    fn a_duration_is_written_for_a_person() {
+        assert_eq!(duration(Duration::from_secs(9)), "9s");
+        assert_eq!(duration(Duration::from_secs(60)), "1m 0s");
+        assert_eq!(duration(Duration::from_secs(252)), "4m 12s");
+    }
 }

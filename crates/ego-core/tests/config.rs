@@ -532,7 +532,7 @@ fn config_system_deny_survives_a_higher_precedence_layer_that_clears_it() {
             ConfigLayer {
                 permissions: Some(PermCfg {
                     allow: vec![],
-                    deny: vec![rule("write(**)")],
+                    deny: vec![rule("list(**)")],
                 }),
                 ..Default::default()
             },
@@ -541,7 +541,7 @@ fn config_system_deny_survives_a_higher_precedence_layer_that_clears_it() {
             Source::Flags,
             ConfigLayer {
                 permissions: Some(PermCfg {
-                    allow: vec![rule("write(**)")],
+                    allow: vec![rule("list(**)")],
                     deny: vec![],
                 }),
                 ..Default::default()
@@ -549,7 +549,7 @@ fn config_system_deny_survives_a_higher_precedence_layer_that_clears_it() {
         ),
     ];
     let effective = resolve(&layers, Trust::Trusted, None).unwrap();
-    assert!(carries(&effective.permissions.deny, "write(**)"));
+    assert!(carries(&effective.permissions.deny, "list(**)"));
     // And the flags layer's allow is still *there*. Resolution's job is to
     // guarantee the system deny survives the merge, not to decide which of the
     // two wins: that is decided per call, against a canonical `PreparedCall`,
@@ -558,10 +558,10 @@ fn config_system_deny_survives_a_higher_precedence_layer_that_clears_it() {
     // This assertion used to read `!allow.contains(...)`, satisfied by an
     // `allow.retain(|e| !deny.contains(e))` at the end of `resolve`. It passed
     // for a reason that does not generalise — the two strings happened to be
-    // equal. Change the allow to `write(src/**)` and the retain kept it,
+    // equal. Change the allow to `list(src/**)` and the retain kept it,
     // while the deny it violates sat right beside it in the same `Effective`.
     // See `docs/decisions/2026-08-21-a-permit-nobody-can-widen.md` §6.
-    assert!(carries(&effective.permissions.allow, "write(**)"));
+    assert!(carries(&effective.permissions.allow, "list(**)"));
 }
 
 #[test]
@@ -658,13 +658,13 @@ fn config_profile_defined_by_only_one_eligible_layer_still_applies() {
 
 #[test]
 fn config_system_deny_survives_a_profile_override_that_clears_it() {
-    let toml = "[permissions]\ndeny = [\"write(**)\"]\n\n[profile.ci.permissions]\nallow = [\"write(**)\"]\ndeny = []\n";
+    let toml = "[permissions]\ndeny = [\"list(**)\"]\n\n[profile.ci.permissions]\nallow = [\"list(**)\"]\ndeny = []\n";
     let system = ConfigLayer::parse(Source::System, toml).unwrap();
     let effective = resolve(&[system], Trust::Trusted, Some("ci")).unwrap();
-    assert!(carries(&effective.permissions.deny, "write(**)"));
+    assert!(carries(&effective.permissions.deny, "list(**)"));
     // Carried, not subtracted — see
     // `config_system_deny_survives_a_higher_precedence_layer_that_clears_it`.
-    assert!(carries(&effective.permissions.allow, "write(**)"));
+    assert!(carries(&effective.permissions.allow, "list(**)"));
 }
 
 #[test]
@@ -674,7 +674,7 @@ fn config_system_deny_unions_across_multiple_system_layers() {
         ConfigLayer {
             permissions: Some(PermCfg {
                 allow: vec![],
-                deny: vec![rule("write(**)")],
+                deny: vec![rule("list(**)")],
             }),
             ..Default::default()
         },
@@ -683,18 +683,18 @@ fn config_system_deny_unions_across_multiple_system_layers() {
         Source::System,
         ConfigLayer {
             permissions: Some(PermCfg {
-                allow: vec![rule("write(**)")],
+                allow: vec![rule("list(**)")],
                 deny: vec![rule("read(secrets/**)")],
             }),
             ..Default::default()
         },
     );
     let effective = resolve(&[system_a, system_b], Trust::Trusted, None).unwrap();
-    assert!(carries(&effective.permissions.deny, "write(**)"));
+    assert!(carries(&effective.permissions.deny, "list(**)"));
     assert!(carries(&effective.permissions.deny, "read(secrets/**)"));
     // Carried, not subtracted — see
     // `config_system_deny_survives_a_higher_precedence_layer_that_clears_it`.
-    assert!(carries(&effective.permissions.allow, "write(**)"));
+    assert!(carries(&effective.permissions.allow, "list(**)"));
 }
 
 #[test]
@@ -706,7 +706,7 @@ fn config_untrusted_project_and_local_cannot_affect_resolution() {
                 model: model("project"),
                 mode: Some(Mode::Yolo),
                 permissions: Some(PermCfg {
-                    allow: vec![rule("write(**)")],
+                    allow: vec![rule("list(**)")],
                     deny: vec![],
                 }),
                 ..Default::default()
@@ -1308,13 +1308,13 @@ mod instructions {
 fn config_permission_rules_arrive_parsed_and_not_as_strings() {
     let layer = ConfigLayer::parse(
         Source::Project,
-        "[permissions]\nallow = [\"read( src/** )\"]\ndeny = [\"write(**)\"]\n",
+        "[permissions]\nallow = [\"read( src/** )\"]\ndeny = [\"list(**)\"]\n",
     )
     .expect("two well-formed rules");
     let permissions = layer.value.permissions.expect("the table was written");
 
     assert_eq!(permissions.allow, vec![rule("read(src/**)")]);
-    assert_eq!(permissions.deny, vec![rule("write(**)")]);
+    assert_eq!(permissions.deny, vec![rule("list(**)")]);
     assert_eq!(
         permissions.allow[0].to_string(),
         "read(src/**)",

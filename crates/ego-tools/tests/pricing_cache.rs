@@ -487,3 +487,81 @@ impl StoreIo for Counting {
 fn the_default_maximum_age_is_the_week_the_adr_states() {
     assert_eq!(MAX_AGE, Duration::from_secs(7 * 24 * 60 * 60));
 }
+
+/// A table too old to *use* is still readable, and reading it is what makes a
+/// refresh cost nothing.
+///
+/// `load` answers one question — "is there a table I may price against" — and
+/// a stale one is `Err(Stale)` with the bytes discarded. That is right for a
+/// caller about to run, and wrong for the caller that has to go and fix it:
+/// refreshing means offering the server back the validator of what is already
+/// here, and an unchanged table then costs one round trip and no body. A
+/// caller that could not read a stale entry would have to re-download 1.8 MB
+/// to discover it already had those exact bytes.
+///
+/// So `current` is `load` without the age judgement, and `load` is written in
+/// terms of it rather than beside it.
+#[test]
+fn a_stale_table_is_still_readable_so_a_refresh_can_be_conditional() {
+    let home = Home::new();
+    let cache = home.cache();
+    publish(&cache, b"{}", "\"v1\"", 1_000).expect("published");
+
+    let long_after = 1_000 + MAX_AGE.as_millis() as u64 + 1;
+    assert!(
+        matches!(load(&cache, long_after), Err(CacheError::Stale { .. })),
+        "too old to price against"
+    );
+
+    let current = cache
+        .current(Timestamp::from_millis(long_after))
+        .expect("and still perfectly readable");
+    assert_eq!(current.bytes, b"{}");
+    assert_eq!(current.fetched_at, Timestamp::from_millis(1_000));
+}
+
+/// The validator travels with the bytes, because that is what it is for.
+///
+/// The revision embeds it, and the revision is deliberately opaque
+/// (`cost.rs`), so recovering it by taking a substring would be a caller
+/// parsing a type that exists to not be parsed.
+#[test]
+fn the_cached_table_carries_the_validator_it_was_served_under() {
+    let home = Home::new();
+    let cache = home.cache();
+    publish(&cache, b"{}", "\"8cc8759e\"", 1_000).expect("published");
+
+    let current = cache
+        .current(Timestamp::from_millis(2_000))
+        .expect("readable");
+    assert_eq!(current.upstream_version, "\"8cc8759e\"");
+    assert_eq!(
+        load(&cache, 2_000).expect("fresh").upstream_version,
+        "\"8cc8759e\""
+    );
+}
+
+/// Everything `load` refuses for a reason other than age, `current` refuses
+/// too — it drops one judgement, not the rest of them.
+#[test]
+fn reading_without_the_age_check_still_fails_closed_on_everything_else() {
+    let home = Home::new();
+    let cache = home.cache();
+    assert!(
+        matches!(
+            cache.current(Timestamp::from_millis(1_000)),
+            Err(CacheError::Empty)
+        ),
+        "no pointer is no table, at any age"
+    );
+
+    publish(&cache, b"{}", "\"v1\"", 5_000).expect("published");
+    assert!(
+        matches!(
+            cache.current(Timestamp::from_millis(1_000)),
+            Err(CacheError::FromTheFuture { .. })
+        ),
+        "a pointer stamped after the reader's clock is not trusted by dropping \
+         the age check — that is the check it would have been computed by"
+    );
+}

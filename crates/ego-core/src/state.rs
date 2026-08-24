@@ -277,6 +277,23 @@ pub struct ItemState {
     pub reasoning_state: Option<ReasoningState>,
     pub completed: bool,
     pub ok: Option<bool>,
+    /// The generation this item came out of, when the log says which.
+    ///
+    /// Derived, not recorded: no event carries this field. It is resolved
+    /// from the envelope's causal parent through
+    /// [`SessionState::generations`], which is why there is exactly one fact
+    /// about attribution in the log and not two that can disagree.
+    ///
+    /// The full [`AttemptRef`] and not the generation alone: retries
+    /// deliberately share a generation, so grouping by generation would merge
+    /// a retried call with the attempt it replaced.
+    ///
+    /// `None` on every record written before the parent edge existed, and on
+    /// any item whose producer names no parent. It means "this log does not
+    /// say", which is not the same as "on its own" — readers must not infer
+    /// grouping from its absence.
+    #[serde(default)]
+    pub generation: Option<AttemptRef>,
 }
 
 impl ItemState {
@@ -292,6 +309,7 @@ impl ItemState {
             reasoning_state: None,
             completed: false,
             ok: None,
+            generation: None,
         }
     }
 }
@@ -302,6 +320,10 @@ pub enum PermissionEvent {
     Requested {
         item: Option<ItemId>,
         description: String,
+    },
+    Amended {
+        item: Option<ItemId>,
+        tool: String,
     },
     Decided {
         item: Option<ItemId>,
@@ -422,6 +444,20 @@ pub struct SessionState {
     /// `apply` is total: an unresolvable parent is recorded here rather than
     /// rejected or silently dropped.
     pub unresolved_parents: Vec<EventId>,
+    /// Which attempt each accepted `GenerationStarted` opened, keyed by the
+    /// event's own id — the table [`ItemState::generation`] is resolved
+    /// through.
+    ///
+    /// Only accepted starts are here. A start the reducer refused opened
+    /// nothing, so an item naming it as parent belongs to no generation this
+    /// state knows, and saying otherwise would attribute items to a record
+    /// that was declined.
+    ///
+    /// Grows by one entry per generation and is not pruned, for the same
+    /// reason [`Self::settled_attempts`] is not: a parent may be named long
+    /// after the generation that wrote it settled.
+    #[serde(default)]
+    pub generations: HashMap<EventId, AttemptRef>,
     /// Running usage totals across the session. The fold of [`Self::charges`].
     pub usage: Usage,
     /// The running cost of the session, or why it is not known. The fold of
@@ -491,6 +527,7 @@ impl Default for SessionState {
             items: HashMap::default(),
             known_events: HashSet::default(),
             unresolved_parents: Vec::default(),
+            generations: HashMap::default(),
             cost: CumulativeCost::default(),
             charges: Vec::default(),
             settled_attempts: HashMap::default(),
@@ -593,6 +630,12 @@ impl SessionState {
                 self.permissions.push(PermissionEvent::Requested {
                     item: ev.env.item,
                     description: escalation.to_string(),
+                });
+            }
+            EventKind::PermissionAmended { tool } => {
+                self.permissions.push(PermissionEvent::Amended {
+                    item: ev.env.item,
+                    tool: tool.clone(),
                 });
             }
             // `by` is not reduced. State answers "what is this session's
@@ -702,6 +745,9 @@ impl SessionState {
                 generation: attempt.generation(),
             },
         );
+        // Recorded only once the start stands, and kept after it settles: an
+        // item may name this event as its parent at any point in the log.
+        self.generations.insert(ev.env.id, *attempt);
     }
 
     /// Book one usage observation against the ledger.
@@ -870,12 +916,24 @@ impl SessionState {
     /// against the same id does not re-author the item: `apply` is total and
     /// has to survive a hostile or torn log, and silently changing an item's
     /// author mid-stream is worse than keeping the first claim.
+    ///
+    /// [`ItemState::generation`] is resolved here and follows the same rule
+    /// for the same reason: the first event that attributes the item is the
+    /// one believed, so a later event naming a different generation as its
+    /// parent cannot move an item into another turn.
     fn item_mut(&mut self, ev: &DomainEvent, kind: ItemKind) -> Option<&mut ItemState> {
         let item_id = ev.env.item?;
-        Some(
-            self.items
-                .entry(item_id)
-                .or_insert_with(|| ItemState::new(ev.env.turn, ev.env.seq, kind)),
-        )
+        let generation = ev
+            .env
+            .parent
+            .and_then(|parent| self.generations.get(&parent).copied());
+        let item = self
+            .items
+            .entry(item_id)
+            .or_insert_with(|| ItemState::new(ev.env.turn, ev.env.seq, kind));
+        if item.generation.is_none() {
+            item.generation = generation;
+        }
+        Some(item)
     }
 }

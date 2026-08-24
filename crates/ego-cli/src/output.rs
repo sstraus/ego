@@ -20,6 +20,9 @@ use ego_core::state::SessionState;
 use ego_core::turn::CancelToken;
 use serde::Serialize;
 
+use crate::DISPLAY_NAME;
+use crate::render::{Answer, Capabilities};
+
 /// The exclusive owner of the process's standard output.
 ///
 /// One type, holding one lock, so "stdout is protocol-clean" is a property of
@@ -119,9 +122,13 @@ impl Stdout {
 /// why it does not take a [`Stdout`] and could not use one if it wanted to.
 pub fn note(message: &str) {
     let mut err = std::io::stderr();
+    write_note(&mut err, message);
+}
+
+fn write_note(mut err: impl Write, message: &str) {
     // Nothing to be done if the diagnostic channel itself is gone, and a
     // panic here would replace a report with a crash.
-    let _ = writeln!(err, "ego: {message}");
+    let _ = writeln!(err, "{DISPLAY_NAME}: {message}");
 }
 
 /// The live view of a run: one `PublicEvent` per line, as it happens.
@@ -162,9 +169,13 @@ impl EventSink for JsonlSink<'_> {
 pub struct TextSink<'a> {
     out: &'a Stdout,
     quiet: bool,
-    /// Whether a partial line of assistant text is outstanding, so the run can
-    /// finish the line before anything else is printed.
-    open: Mutex<bool>,
+    /// The answer being written, and whether it has left a partial line
+    /// outstanding so the run can close it before anything else is printed.
+    ///
+    /// One mutex over both because they are one fact: what was written last
+    /// decides whether a newline is owed, and two locks would let a tool note
+    /// interleave between the write and the bookkeeping about it.
+    text: Mutex<Streaming>,
     /// The last ceiling effect this sink announced, so a per-generation event
     /// does not repeat one warning per generation. See [`ceiling_note`].
     ///
@@ -172,12 +183,21 @@ pub struct TextSink<'a> {
     ceiling: Mutex<Option<CeilingEffect>>,
 }
 
+/// The state of the answer currently being written.
+struct Streaming {
+    answer: Answer,
+    open: bool,
+}
+
 impl<'a> TextSink<'a> {
-    pub fn new(out: &'a Stdout, quiet: bool) -> Self {
+    pub fn new(out: &'a Stdout, quiet: bool, capabilities: Capabilities) -> Self {
         TextSink {
             out,
             quiet,
-            open: Mutex::new(false),
+            text: Mutex::new(Streaming {
+                answer: Answer::new(capabilities),
+                open: false,
+            }),
             ceiling: Mutex::new(None),
         }
     }
@@ -231,25 +251,39 @@ impl<'a> TextSink<'a> {
         }
     }
 
-    /// End the streamed line, if one is open.
+    /// Draw whatever is still held back, and end the line if one is open.
+    ///
+    /// Called at the end of a run and before every diagnostic. On a screen the
+    /// first half matters as much as the second: a tool note is about to appear
+    /// on stderr, and prose the model finished before calling that tool should
+    /// be on the screen *above* the note rather than after it.
     pub fn finish(&self) {
-        let mut open = self
-            .open
+        let mut text = self
+            .text
             .lock()
             .expect("a poisoned lock means a writer panicked mid-line");
-        if *open {
+        let rest = text.answer.finish();
+        if !rest.is_empty() {
+            self.out.write(&rest);
+            text.open = !rest.ends_with('\n');
+        }
+        if text.open {
             self.out.line("");
-            *open = false;
+            text.open = false;
         }
     }
 
-    fn stream(&self, text: &str) {
-        let mut open = self
-            .open
+    fn stream(&self, delta: &str) {
+        let mut text = self
+            .text
             .lock()
             .expect("a poisoned lock means a writer panicked mid-line");
-        self.out.write(text);
-        *open = true;
+        let ready = text.answer.push(delta);
+        if ready.is_empty() {
+            return;
+        }
+        self.out.write(&ready);
+        text.open = !ready.ends_with('\n');
     }
 }
 
@@ -436,6 +470,14 @@ mod tests {
             serde_json::Value::String(String::new()),
         );
         serde_json::to_value(report).expect("§4.1's object serialises")
+    }
+
+    #[test]
+    fn a_diagnostic_uses_the_human_facing_product_name_byte_for_byte() {
+        let mut err = Vec::new();
+        write_note(&mut err, "something failed");
+
+        assert_eq!(err, "εgo: something failed\n".as_bytes());
     }
 
     #[test]

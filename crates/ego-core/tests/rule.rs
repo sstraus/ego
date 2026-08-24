@@ -644,6 +644,10 @@ fn rule_different_predicates_have_different_ids() {
 /// lacks is an operation of that shape to match.
 #[test]
 fn rule_an_unenforceable_head_still_parses_and_still_has_an_id() {
+    // `write(src/**)` was here for one commit and has left again, which is
+    // §6a self-healing rather than churn: the head was unenforceable while
+    // `Op::Write` was a variant nothing constructed, and `WriteTool` now
+    // constructs one. Its ID did not move, which is what the design promised.
     for raw in [
         "exec(git *)",
         "net(github.com)",
@@ -671,6 +675,10 @@ fn rule_an_unenforceable_head_still_parses_and_still_has_an_id() {
 /// visible only to us.
 #[test]
 fn rule_load_refuses_a_head_with_no_operations_and_parse_does_not() {
+    // `write(src/**)` was here for one commit and has left again, which is
+    // §6a self-healing rather than churn: the head was unenforceable while
+    // `Op::Write` was a variant nothing constructed, and `WriteTool` now
+    // constructs one. Its ID did not move, which is what the design promised.
     for raw in [
         "exec(git *)",
         "net(github.com)",
@@ -714,9 +722,23 @@ fn rule_the_refusal_says_which_rule_which_effect_and_what_is_missing() {
     assert!(said.contains("a shell tool"), "{said}");
 }
 
-/// The four heads that name operations this build produces are not refused.
-/// The control that stops the test above from passing because `load` refuses
+/// The heads that name operations this build produces are not refused. The
+/// control that stops the test above from passing because `load` refuses
 /// everything.
+///
+/// **`write(src/**)` left this list and has come back**, and the round trip is
+/// worth more than either state. It was here originally because `Op::Write`
+/// exists as a variant, not because anything constructed one — no builtin did
+/// — so a stored `write(...)` rule loaded and matched nothing, which is the
+/// failure §6a exists to prevent. `WriteTool` constructs one now, so the head
+/// is enforceable again, and no rule was rewritten and no ID recomputed on
+/// either crossing.
+///
+/// What decides which list this spelling belongs in is not this file. It is
+/// `ego-tools/tests/tools.rs::the_heads_this_build_says_it_enforces_are_the_ones_its_tools_ask_for`,
+/// which derives the answer from the registry instead of restating it — and
+/// which was itself blind to a newly registered tool until it started
+/// checking its sample list against `builtins()`.
 #[test]
 fn rule_load_admits_every_head_that_names_an_operation_that_exists() {
     for raw in [

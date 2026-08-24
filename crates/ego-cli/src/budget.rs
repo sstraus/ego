@@ -22,14 +22,36 @@
 //! own. A flag parsed here would be a second precedence rule, and the layer
 //! it would silently outrank is the administrator's.
 //!
-//! What is left in this file is the one thing that is genuinely process
+//! What is left in this file is the two things that are genuinely process
 //! knowledge: turning a *resolved* ceiling into the gate a run generates
-//! under. The grammar itself is `ego_core::ceiling::Budget`, shared with the
-//! config key so the two surfaces cannot drift.
+//! under, and finding the rates that ceiling will rest on. The grammar itself
+//! is `ego_core::ceiling::Budget`, shared with the config key so the two
+//! surfaces cannot drift.
+//!
+//! ## Why the table lookup is here and not in a library
+//!
+//! [`TableSource`] is the only place in the workspace where the three crates
+//! that own the pieces meet. `ego-tools` owns the cache because it owns
+//! `StoreIo`; `ego-ai` owns the fetch and the decode because it owns `Http`;
+//! `ego-core` owns the types and opens nothing. None of the three may depend
+//! on another, and §6 drew the split that way on purpose — so the composition
+//! belongs to the binary that already holds all three, beside the ceiling that
+//! is the reason to perform it at all.
 
-use ego_core::budget::BudgetGate;
+use std::fmt;
+use std::path::Path;
+use std::sync::Arc;
+use std::time::Duration;
+
+use ego_ai::catalogue::{ResolvedModel, table_rates};
+use ego_ai::http::Http;
+use ego_ai::pricing::{self, FetchError, Fetched, Table, TableError};
+use ego_core::budget::{BudgetGate, Ledger, ResolvedRates};
 use ego_core::ceiling::Ceilings;
-use ego_core::cost::{CurrencyCode, Money};
+use ego_core::cost::{CurrencyCode, Money, PricingRevision};
+use ego_core::event::time::Timestamp;
+use ego_tools::pricing::{CacheError, Cached, PricingCache};
+use ego_tools::store::StoreIo;
 
 /// The gate this run generates under.
 ///
@@ -59,5 +81,222 @@ pub fn gate(
         (Some(limit), Some(requested)) => BudgetGate::clamped(limit, requested),
         (Some(limit), None) => BudgetGate::new(limit),
         (None, _) => BudgetGate::unlimited(currency),
+    }
+}
+
+/// Everything §5's third rate source needs, which a run with no ceiling never
+/// builds.
+///
+/// A struct rather than six parameters because five of the six are the *same*
+/// fact from different angles — where the cache lives, what time it is, how
+/// old is too old, whether egress is allowed, and what to ask if it is — and a
+/// caller that could pass them separately could pass one run's clock with
+/// another run's posture.
+pub struct TableSource<'a> {
+    pub io: &'a dyn StoreIo,
+    pub ego_home: &'a Path,
+    pub http: &'a Arc<dyn Http>,
+    /// Whether `--offline` was asked for.
+    ///
+    /// **Carried rather than inferred from the transport's refusal**, because
+    /// §7 indexes its outcomes by *posture* and gives two of them different
+    /// exit codes: `--offline` with nothing cached is a self-contradictory
+    /// invocation and takes exit 2, while a failed fetch while online is a
+    /// network failure and takes the exit `CLI.md:211-212` reserves for what a
+    /// script retries. Reading that distinction back out of an `HttpError`
+    /// would be recovering a fact the caller already had.
+    pub offline: bool,
+    pub now: Timestamp,
+    /// How old a table may be and still bound a ceiling.
+    ///
+    /// Supplied, because §6 makes it configurable and this file is not where a
+    /// policy is decided. `ego_tools::pricing::MAX_AGE` is the default.
+    pub max_age: Duration,
+}
+
+/// Why a ceiling could not be given rates to rest on.
+///
+/// Every arm is a *refusal*. There is deliberately no arm for "the table does
+/// not list this model": that is not a failure here but an absence, returned
+/// as `Ok(None)` so the gate can answer it with
+/// [`UnknownCost::NoPricingQuote`](ego_core::cost::UnknownCost::NoPricingQuote)
+/// — which `034`'s fourth criterion requires to mean only "you asked for a
+/// ceiling on a model I cannot price". A table that could not be fetched and a
+/// table that simply does not list your model send an operator to two
+/// different places.
+#[derive(Debug)]
+pub enum NoRates {
+    /// `--offline`, and nothing usable is cached.
+    ///
+    /// §7's exit 2: the operator asked for an air-gapped posture *and* for a
+    /// guarantee that needs the network, so the command line is what must
+    /// change. Carries what the cache said so the message can distinguish "no
+    /// table has ever been fetched here" from "the one here is too old".
+    Offline { cache: CacheError },
+    /// Online, and the fetch did not produce a table.
+    ///
+    /// §7's exit 4, reached only when nothing usable was cached — a fresh
+    /// cache is used without a fetch at all, so there is no "fetch failed but
+    /// we carried on" case for this build to report.
+    Fetch { source: FetchError },
+    /// A table was found and cannot be read for this model.
+    ///
+    /// Not "unlisted", which is `Ok(None)`. This is the document being wrong:
+    /// bytes that are not a table, a rate that is not a number, or a model
+    /// listed twice under two spellings with different prices.
+    Table { source: TableError },
+    /// The cache itself could not be read or written.
+    Cache { source: CacheError },
+}
+
+impl fmt::Display for NoRates {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            NoRates::Offline { cache } => write!(
+                f,
+                "a money ceiling needs prices and --offline forbids fetching them: {cache}"
+            ),
+            NoRates::Fetch { source } => write!(f, "{source}"),
+            NoRates::Table { source } => write!(f, "the cached price table is unusable: {source}"),
+            NoRates::Cache { source } => {
+                write!(f, "the price table cache: {cache}", cache = source)
+            }
+        }
+    }
+}
+
+impl std::error::Error for NoRates {}
+
+impl TableSource<'_> {
+    /// The rates this run's ceiling will rest on, or the reason there are
+    /// none.
+    ///
+    /// §5's order, first hit wins, and the gate in front of all of it:
+    ///
+    /// 1. **No ceiling that needs rates?** Nothing is consulted — no file is
+    ///    opened and no socket. That is §7's first row and it is a privacy
+    ///    property rather than an optimisation: an ordinary run contacts
+    ///    nobody but the model provider, and a run whose row is metered by
+    ///    policy rather than per token gets the same answer, because a limit
+    ///    that admits every generation cannot be changed by any table.
+    /// 2. **Already resolved?** An operator's own figures, or the provider's
+    ///    published ones, are never second-guessed by a third party's summary.
+    /// 3. Otherwise the cache, and the network only if the cache cannot
+    ///    answer.
+    ///
+    /// The fetch is attempted **only** when nothing usable is cached, which
+    /// makes §7's fifth row — "online, fetch fails, cache fresh" — unreachable
+    /// rather than unhandled. That row distinguishes itself from the fourth
+    /// only in a design that revalidates on every priced run, and this one
+    /// does not: a fresh table is used as it stands.
+    pub async fn rates(
+        &self,
+        model: &ResolvedModel,
+        ledger: &Ledger,
+    ) -> Result<Option<ResolvedRates>, NoRates> {
+        if !model.metering.ceiling_needs_rates(ledger) {
+            return Ok(None);
+        }
+        if model.rates.is_some() {
+            return Ok(model.rates.clone());
+        }
+
+        let cache = PricingCache::new(self.io, self.ego_home);
+        // Read whatever is here regardless of age, then judge it. The stale
+        // copy is not useless: its validator is what makes the refresh below
+        // cost one round trip instead of the whole document.
+        let held = cache.current(self.now);
+        if let Ok(fresh) = &held
+            && self.age(fresh) <= self.max_age
+        {
+            return self.price(model, &fresh.bytes, &fresh.revision);
+        }
+
+        if self.offline {
+            return Err(NoRates::Offline {
+                cache: held.err().unwrap_or(CacheError::Empty),
+            });
+        }
+        self.refresh(model, held.ok()).await
+    }
+
+    fn age(&self, cached: &Cached) -> Duration {
+        Duration::from_millis(
+            self.now
+                .as_millis()
+                .saturating_sub(cached.fetched_at.as_millis()),
+        )
+    }
+
+    /// Fetch, store, and price — offering `stale` back so an unchanged table
+    /// costs no body.
+    ///
+    /// The lease is taken *before* the fetch rather than around the write, so
+    /// two ego processes that both notice a stale table do not both download
+    /// 1.8 MB. It is `PricingCache::lease`'s stated reason for being public.
+    async fn refresh(
+        &self,
+        model: &ResolvedModel,
+        stale: Option<Cached>,
+    ) -> Result<Option<ResolvedRates>, NoRates> {
+        let cache = PricingCache::new(self.io, self.ego_home);
+        let held = cache
+            .lease(self.now, std::process::id(), &crate::session::assume_alive)
+            .map_err(|source| NoRates::Cache { source })?;
+
+        let known = stale.as_ref().map(|cached| cached.upstream_version.clone());
+        let fetched = pricing::fetch(self.http, known.as_deref())
+            .await
+            .map_err(|source| NoRates::Fetch { source })?;
+
+        // Both arms publish. `Unchanged` republishes the bytes already on disk
+        // under a fresh timestamp, because the freshness gate is about when
+        // ego last *checked* and not about when the document last changed —
+        // and the blob is named by its content hash, so no second copy of
+        // identical bytes is written.
+        let (bytes, version) = match (fetched, stale) {
+            (
+                Fetched::Table {
+                    bytes,
+                    upstream_version,
+                },
+                _,
+            ) => (bytes, upstream_version),
+            (Fetched::Unchanged, Some(cached)) => (cached.bytes, cached.upstream_version),
+            // A `304` with nothing cached would mean the server answered a
+            // conditional request nobody made conditional. Refused rather than
+            // guessed at: there are no bytes to price from either way.
+            (Fetched::Unchanged, None) => {
+                return Err(NoRates::Fetch {
+                    source: FetchError::Unreachable {
+                        endpoint: pricing::UPSTREAM.to_string(),
+                        message: "it answered 304 to an unconditional request".to_string(),
+                    },
+                });
+            }
+        };
+
+        let revision = cache
+            .publish_held(&bytes, &version, self.now)
+            .map_err(|source| NoRates::Cache { source })?;
+        drop(held);
+        self.price(model, &bytes, &revision)
+    }
+
+    /// What `bytes` say this model costs, or nothing if they do not say.
+    fn price(
+        &self,
+        model: &ResolvedModel,
+        bytes: &[u8],
+        revision: &PricingRevision,
+    ) -> Result<Option<ResolvedRates>, NoRates> {
+        let table = Table::decode(bytes).map_err(|source| NoRates::Table { source })?;
+        match table.quote(&model.row.id, &model.model) {
+            Ok(entry) => Ok(Some(table_rates(entry.into_quote(revision.clone())))),
+            // The one absence that is not a failure: the gate turns it into
+            // `NoPricingQuote`, naming the model rather than the table.
+            Err(TableError::NoEntry { .. }) => Ok(None),
+            Err(source) => Err(NoRates::Table { source }),
+        }
     }
 }

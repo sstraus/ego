@@ -23,6 +23,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use ego_ai::http::{
     EgressPolicy, EgressRefused, Http, HttpError, HttpRequest, Method, ReqwestHttp,
 };
+use ego_ai::provider::{CredentialStrategy, Credentials, MissingCredential, Secret};
 use ego_core::generator::attempt::DeliveryCertainty;
 use futures::StreamExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -613,4 +614,56 @@ fn a_formatted_request_prints_neither_the_credential_nor_the_body() {
     assert!(printed.contains("authorization"), "{printed}");
     assert!(printed.contains("content-type"), "{printed}");
     assert!(printed.contains("<49 bytes>"), "{printed}");
+}
+
+/// The other half of the same guarantee, and the half everything else assumes.
+///
+/// The test above covers the one container `Secret` does not reach. This
+/// covers `Secret` itself, which had no test at all — and it is the claim the
+/// rest of the design is built on. `ResolvedCredential` **derives** `Debug`
+/// and its own doc says that is "safe because `Secret` refuses to print"; a
+/// `ResolvedModel` is `Clone` and `Debug` and travels to the budget gate and
+/// the ledger on the argument that the credential is not in it. Every one of
+/// those sentences is true because of four lines of hand-written `fmt::Debug`
+/// that a derive would silently replace.
+///
+/// Asserted through `resolve` rather than by constructing a `Secret`, because
+/// that is the path a run takes: an environment variable, a strategy, and the
+/// container a generator holds.
+#[test]
+fn a_resolved_credential_prints_no_part_of_the_credential() {
+    let credential = CredentialStrategy::BearerFromEnv {
+        var: "PROVIDER_KEY".to_string(),
+    }
+    .resolve(&Configured)
+    .expect("the fake holds every variable");
+    let printed = format!("{credential:?}");
+
+    assert!(
+        !printed.contains(LIVE_KEY),
+        "a credential reached a formatter: {printed}"
+    );
+    // Not only the secret: the `Bearer ` the strategy prepended is part of the
+    // header value, and a formatter that printed it would be printing the
+    // start of the string the secret is the rest of.
+    assert!(
+        !printed.contains("Bearer"),
+        "the credential's header value reached a formatter: {printed}"
+    );
+    // Redacting, not deleted — the same trade the request's `Debug` makes.
+    // Which header was set is diagnosable; what it was set to is not.
+    assert!(printed.contains("authorization"), "{printed}");
+}
+
+/// The value [`Configured`] answers with, so the test above has something to
+/// look for that could not appear by chance.
+const LIVE_KEY: &str = "sk-live-a-string-nothing-else-here-contains";
+
+/// A [`Credentials`] with every variable set, to [`LIVE_KEY`].
+struct Configured;
+
+impl Credentials for Configured {
+    fn secret(&self, _var: &str) -> Result<Secret, MissingCredential> {
+        Ok(LIVE_KEY.into())
+    }
 }

@@ -8,10 +8,11 @@
 
 use std::ffi::OsString;
 use std::fs;
-use std::io;
-use std::path::Path;
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 
 use ego_core::permit::{CanonPath, Entry, EntryKind, Fs, FsError, PathResolver, Scan, ScanRequest};
+use tempfile::NamedTempFile;
 
 /// `std::fs`, behind the port.
 #[derive(Debug, Default, Clone, Copy)]
@@ -68,13 +69,84 @@ impl PathResolver for OsFs {
     }
 }
 
+/// A complete replacement staged beside its target but not yet visible at
+/// the target's name.
+///
+/// The type is the deterministic boundary between preparation and commit:
+/// dropping it removes the [`NamedTempFile`] and leaves the target unchanged;
+/// `commit` is the only operation that publishes the new inode.
+struct PreparedReplacement {
+    target: PathBuf,
+    parent: PathBuf,
+    temp: NamedTempFile,
+}
+
+impl PreparedReplacement {
+    fn new(target: &Path, bytes: &[u8]) -> io::Result<Self> {
+        let parent = target.parent().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "a file target must have a parent",
+            )
+        })?;
+
+        // The temporary file is exclusive, unpredictably named and on the
+        // target's filesystem. Unlike StoreIo's recovery scratch, its name is
+        // not repository state and cannot collide by construction.
+        let permissions = match fs::metadata(target) {
+            Ok(metadata) => Some(metadata.permissions()),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => None,
+            Err(err) => return Err(err),
+        };
+        let mut temp = NamedTempFile::new_in(parent)?;
+
+        temp.write_all(bytes)?;
+        if let Some(permissions) = permissions {
+            // Apply the final mode after writing: a read-only target still
+            // needs to be replaceable by a caller that may replace it, and
+            // the open scratch handle must not be made unwritable midway.
+            temp.as_file().set_permissions(permissions)?;
+        }
+        // The rename may become durable before dirty data pages do. Sync the
+        // complete replacement first so the published inode is never an
+        // atomically installed empty or partial file after a crash.
+        temp.as_file().sync_all()?;
+
+        Ok(Self {
+            target: target.to_path_buf(),
+            parent: parent.to_path_buf(),
+            temp,
+        })
+    }
+
+    fn commit(self) -> io::Result<()> {
+        let Self {
+            target,
+            parent,
+            temp,
+        } = self;
+
+        // `persist` is one atomic replacement. On error it returns ownership
+        // of the NamedTempFile; converting the PersistError to io::Error drops
+        // that file and therefore removes the scratch path.
+        let persisted = temp.persist(&target).map_err(io::Error::from)?;
+        drop(persisted);
+
+        // The file data is already stable. This barrier makes the directory
+        // entry that names it stable before success is reported.
+        fs::File::open(parent)?.sync_all()
+    }
+}
+
 impl Fs for OsFs {
     fn read(&self, path: &CanonPath) -> Result<Vec<u8>, FsError> {
         fs::read(path.as_path()).map_err(|err| Self::error(path.as_path(), &err))
     }
 
     fn write(&self, path: &CanonPath, bytes: &[u8]) -> Result<(), FsError> {
-        fs::write(path.as_path(), bytes).map_err(|err| Self::error(path.as_path(), &err))
+        PreparedReplacement::new(path.as_path(), bytes)
+            .and_then(PreparedReplacement::commit)
+            .map_err(|err| Self::error(path.as_path(), &err))
     }
 
     fn scan(&self, req: &ScanRequest) -> Result<Scan, FsError> {
@@ -225,5 +297,43 @@ impl Walk<'_> {
                 "a directory could not be walked and was skipped"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    /// Preparing a replacement is allowed to create and fill a private
+    /// scratch file, but the named target must remain untouched until commit.
+    /// Dropping an uncommitted preparation models every failure before
+    /// persistence without scheduling a reader against a writer.
+    #[test]
+    fn an_uncommitted_replacement_keeps_the_old_target_and_cleans_its_scratch() {
+        let dir = TempDir::new().expect("a temp directory");
+        let target = dir.path().join("target.txt");
+        fs::write(&target, b"old").expect("the target is created");
+        let mut scratch = None;
+
+        let failed = (|| -> io::Result<()> {
+            let prepared = PreparedReplacement::new(&target, b"new")?;
+            scratch = Some(prepared.temp.path().to_path_buf());
+
+            assert_eq!(fs::read(&target).unwrap(), b"old");
+            assert!(
+                scratch.as_ref().is_some_and(|path| path.exists()),
+                "the prepared bytes live beside the target"
+            );
+
+            Err(io::Error::other("injected failure before commit"))
+        })();
+
+        assert!(failed.is_err(), "the pre-commit failure was injected");
+        assert_eq!(fs::read(&target).unwrap(), b"old");
+        assert!(
+            scratch.as_ref().is_some_and(|path| !path.exists()),
+            "returning the error drops the preparation and cleans its scratch"
+        );
     }
 }

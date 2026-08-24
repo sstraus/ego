@@ -79,6 +79,16 @@ impl Head {
 /// enforceability rather than a false one about grammar.
 const OPERATIONS: &[(Head, Option<&str>)] = &[
     (Head::Read, None),
+    // `None` again, and the round trip is the mechanism working rather than
+    // churn. It was `Some("a tool that writes files")` for as long as that
+    // sentence was true: `Op::Write` existed as a *variant*, with a matcher,
+    // a scope arm and a `mutates()` arm, and no tool in the registry
+    // constructed one — so a `write(...)` rule loaded and matched nothing,
+    // which is the vacuous boundary two paragraphs up. `WriteTool` now
+    // constructs one, so the entry flips back, and nothing else did: no rule
+    // was rewritten and no ID recomputed. Which side this entry is on is
+    // decided by `ego-tools/tests/tools.rs`, the only crate that can see both
+    // this table and `builtins()`.
     (Head::Write, None),
     (Head::List, None),
     (Head::Search, None),

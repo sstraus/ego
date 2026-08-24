@@ -105,6 +105,33 @@ pub fn assemble(
     }
 }
 
+/// The prompt an interactive session *starts* with, which it is allowed not to
+/// have.
+///
+/// [`assemble`]'s last row refuses when there is no argument and stdin is a
+/// terminal, and that refusal is right for a one-shot: a headless run with
+/// nothing to ask has nothing to do. An interactive session with nothing to
+/// ask has something to do — it asks the person. A closed, empty non-terminal
+/// stdin is the same absence (as in a test harness or redirected `/dev/null`),
+/// while non-empty piped input remains the seed. Explicit `-` is unchanged: it
+/// promises stdin contains a prompt, so an empty stream is refused.
+pub fn seed(
+    argv: Option<&str>,
+    mode: Stdin,
+    stdin: &dyn StdinSource,
+) -> Result<String, UsageError> {
+    if mode != Stdin::IsThePrompt && argv.is_none() {
+        if stdin.is_terminal() {
+            return Ok(String::new());
+        }
+        return stdin
+            .read()
+            .map(|text| text.trim().to_string())
+            .map_err(|err| UsageError(format!("the prompt could not be read from stdin: {err}")));
+    }
+    assemble(argv, mode, stdin)
+}
+
 fn non_empty(text: &str, why: &str) -> Result<String, UsageError> {
     if text.is_empty() {
         Err(UsageError(format!("{why}: there is nothing to ask")))

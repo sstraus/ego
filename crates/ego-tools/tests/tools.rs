@@ -1,10 +1,11 @@
-//! The three read-only builtins, over a real filesystem.
+//! The five builtins, over a real filesystem.
 //!
 //! `crates/ego-core/tests/permit.rs` proves the *seam* refuses what it should.
 //! What is proved here is that each tool asks for the authority it actually
 //! needs and no more — `glob` cannot read what it listed, `grep` cannot read
-//! what it searched — and that a denial comes back named rather than as a
-//! panic or an empty result.
+//! what it searched, `edit` cannot be authorised by a `write(...)` rule alone —
+//! and that a denial comes back named rather than as a panic or an empty
+//! result.
 //!
 //! `mod rogue` covers the case the other modules cannot: all of them trust
 //! the tool to ask for what it declared. It supplies one that does not.
@@ -18,7 +19,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use ego_core::budget::{BudgetGate, Metering, PricingQuote, ResolvedRates, SettlementSource};
-use ego_core::config::{Mode, Ruleset};
+use ego_core::config::{Mode, PermCfg, Ruleset, Source};
 use ego_core::cost::{Amount, CurrencyCode, Money, PricingRevision, RateSource};
 use ego_core::event::domain::ExitReason;
 use ego_core::event::id::SessionId;
@@ -29,10 +30,11 @@ use ego_core::generator::capabilities::{
 use ego_core::generator::fake::FakeGenerator;
 use ego_core::generator::port::AiEvent;
 use ego_core::generator::types::{StopReason, ThinkingLevel};
+use ego_core::permit::rule::{Head, Rule};
 use ego_core::permit::{
-    Authority, Authorized, CanonPath, Classification, GuardedFs, GuardedIo, Op, OpName, Pending,
-    PermitDenied, PolicyDenied, PolicyEngine, PrepareCtx, PreparedCall, Resolution, ScanRequest,
-    Tool, ToolError, ToolResult, Typed, TypedTool,
+    Authority, Authorized, CanonPath, Change, Classification, Escalation, GuardedFs, GuardedIo, Op,
+    OpName, Pending, PermitDenied, PolicyDenied, PolicyEngine, PrepareCtx, PreparedCall,
+    Resolution, ScanRequest, Tool, ToolError, ToolResult, Typed, TypedTool,
 };
 use ego_core::run::DeniedBy;
 use ego_core::sink::CollectingSink;
@@ -66,12 +68,35 @@ impl Workspace {
     /// `src/main.rs`, `src/deep/lib.rs` and a `.env` nobody should be able to
     /// reach by listing.
     fn new() -> Self {
+        Self::in_mode(Mode::Default)
+    }
+
+    /// The same workspace under a named mode.
+    ///
+    /// Every other test in this file goes through [`Workspace::new`] and its
+    /// hardcoded `Default`, which is the posture worth pinning as "what you
+    /// get out of the box". A write is the first operation in this tree that
+    /// any mode has ever had to discriminate on — until one existed, all five
+    /// modes approved every call a tool could produce — so naming a mode only
+    /// became a thing a test could be *about* here.
+    fn in_mode(mode: Mode) -> Self {
+        Self::with_rules(mode, Ruleset::default())
+    }
+
+    /// The same workspace under a named mode and a named ruleset.
+    ///
+    /// Every test above runs on `Ruleset::default()` — no rule at all — so
+    /// what settles their calls is always the mode at step 5. A rule that
+    /// covers one of a call's operations and not another is the only way to
+    /// observe that step 3 is a conjunction, and until a tool prepared two
+    /// operations there was no call in this workspace that could show it.
+    fn with_rules(mode: Mode, rules: Ruleset) -> Self {
         let dir = TempDir::new().expect("a temp directory");
         // Canonical: on macOS `TempDir` hands back a `/var/folders/...` that is
         // itself a symlink, and a policy whose workspace is not canonical
         // refuses every path the resolver returns.
         let root = fs::canonicalize(dir.path()).expect("the temp directory resolves");
-        let policy = PolicyEngine::new(CanonPath::new(&root), Mode::Default, Ruleset::default());
+        let policy = PolicyEngine::new(CanonPath::new(&root), mode, rules);
         Self {
             _dir: dir,
             root,
@@ -146,6 +171,30 @@ impl Workspace {
         match block_on(self.policy.settle(pending)) {
             Resolution::Settled(answer) => answer,
             Resolution::Ask(pending) => unanswered(&pending),
+            Resolution::HumanSettled { .. } | Resolution::Reclassify { .. } => {
+                unreachable!("this engine has no human seat")
+            }
+        }
+    }
+
+    /// What policy concludes when the answer is a *question*.
+    ///
+    /// The mirror of [`Workspace::authorize`], which panics on one. Both are
+    /// needed for the same reason the mode is now a parameter: a question the
+    /// run cannot answer is the outcome `CLI.md` §4.4 is written about, and
+    /// until a tool could produce a mutating op nothing in this workspace
+    /// could reach it.
+    fn asks(&self, call: PreparedCall) -> Pending {
+        let pending = match self.policy.classify(call) {
+            Classification::Ask(pending) => pending,
+            Classification::Settled(_) => panic!("the rules settled a call that should have asked"),
+        };
+        match block_on(self.policy.settle(pending)) {
+            Resolution::Ask(pending) => pending,
+            Resolution::Settled(_) => panic!("the mode answered a call that should have asked"),
+            Resolution::HumanSettled { .. } | Resolution::Reclassify { .. } => {
+                unreachable!("this engine has no human seat")
+            }
         }
     }
 
@@ -177,14 +226,14 @@ mod registration {
     use super::*;
 
     #[test]
-    fn the_three_builtins_are_registered_under_the_names_a_model_calls() {
+    fn the_builtins_are_registered_under_the_names_a_model_calls() {
         let mut names: Vec<String> = builtins()
             .iter()
             .map(|tool| tool.descriptor().name)
             .collect();
         names.sort();
 
-        assert_eq!(names, ["glob", "grep", "read"]);
+        assert_eq!(names, ["edit", "glob", "grep", "read", "write"]);
     }
 
     #[test]
@@ -208,6 +257,112 @@ mod registration {
                 !descriptor.description.is_empty(),
                 "{} has no description",
                 descriptor.name
+            );
+        }
+    }
+
+    /// §6a's table, checked against the tools instead of against itself.
+    ///
+    /// `OPERATIONS` (`ego-core/src/permit/rule/rule/parse.rs`) says, per head,
+    /// whether this build produces operations of that shape — and an operator
+    /// who writes a head it says exists gets a rule that loads and matches
+    /// nothing, which the table's own doc calls the failure it is there to
+    /// prevent: they "cannot tell that apart from a boundary that works".
+    ///
+    /// **The table could not be wrong about `exec` and was wrong about
+    /// `write`**, and the reason is structural rather than careless. `exec`
+    /// waits on a tool nobody has written, so the entry and the absence were
+    /// authored together. `write` was declared to have operations because
+    /// `Op::Write` exists as a *variant* — and it does, with a matcher, a
+    /// scope arm and a `mutates()` arm — while no tool in the registry ever
+    /// constructs one. Nothing connected the two facts, because they live in
+    /// different crates: the table is in `ego-core` and the registry is in
+    /// `ego-tools`, which is the only place that can see both.
+    ///
+    /// So this test is here rather than beside the table, and it derives the
+    /// answer instead of restating it: every builtin is prepared with a call
+    /// it accepts, the operations it actually asks for are collected, and the
+    /// table is required to agree. A head marked available with no producer
+    /// fails, and so does the reverse.
+    ///
+    /// **The sample list is checked against the registry first**, and that
+    /// check is not ceremony — it is the half this test was missing. Written
+    /// with the three read-only builtins hardcoded, it went on passing when
+    /// `write` was registered: the new tool was never prepared, so the op it
+    /// produces never appeared, so the table's `write` entry still agreed with
+    /// a survey that had not looked. A derivation that silently stops covering
+    /// its subject is worse than no derivation, because it reports agreement.
+    #[test]
+    fn the_heads_this_build_says_it_enforces_are_the_ones_its_tools_ask_for() {
+        let ws = populated();
+        // One representative call per builtin. Not exhaustive over arguments
+        // — a tool that asked for a *different* op shape depending on its
+        // parameters would be a tool whose authority is unpredictable, which
+        // `mod rogue` is the place to catch.
+        let samples = [
+            ("read", json!({ "path": "src/main.rs" })),
+            ("glob", json!({ "pattern": "src/**/*.rs" })),
+            ("grep", json!({ "query": "TODO", "path": "src" })),
+            ("write", json!({ "path": "src/new.rs", "contents": "hi\n" })),
+            (
+                "edit",
+                json!({ "path": "src/main.rs", "old_string": "hello", "new_string": "goodbye" }),
+            ),
+        ];
+
+        let mut surveyed: Vec<&str> = samples.iter().map(|(name, _)| *name).collect();
+        surveyed.sort_unstable();
+        let mut registered: Vec<String> = builtins()
+            .iter()
+            .map(|tool| tool.descriptor().name)
+            .collect();
+        registered.sort();
+        assert_eq!(
+            surveyed, registered,
+            "a builtin with no sample call here contributes no operations, and the table \
+             below would then be checked against a survey that skipped it"
+        );
+
+        let produced: Vec<OpName> = samples
+            .into_iter()
+            .flat_map(|(name, params)| {
+                ws.prepare(name, params)
+                    .unwrap_or_else(|err| panic!("{name} should prepare: {err}"))
+                    .ops
+                    .iter()
+                    .map(Op::name)
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+
+        for (head, op) in [
+            (Head::Read, OpName::Read),
+            (Head::List, OpName::List),
+            (Head::Search, OpName::Search),
+            (Head::Write, OpName::Write),
+        ] {
+            let asked_for = produced.contains(&op);
+            let table_says_available = head.awaiting().is_none();
+            assert_eq!(
+                table_says_available,
+                asked_for,
+                "§6a's table says `{op}` operations {} in this build, and the \
+                 builtins {} one. A rule with that head would {}",
+                if table_says_available {
+                    "exist"
+                } else {
+                    "do not exist"
+                },
+                if asked_for {
+                    "ask for"
+                } else {
+                    "never ask for"
+                },
+                if table_says_available {
+                    "load and match nothing"
+                } else {
+                    "be refused although it would have matched"
+                },
             );
         }
     }
@@ -300,6 +455,575 @@ mod read {
         assert!(
             denied.to_string().contains("may not read"),
             "the refusal has to say what was refused: {denied}"
+        );
+    }
+}
+
+/// The first builtin that can do damage, and what that makes observable.
+///
+/// Every test above this module runs against a permission system governing a
+/// set of actions that needed no governing: `read`, `glob` and `grep` produce
+/// only non-mutating ops, so `ModeApprover` approved every call in every mode
+/// and the five modes were behaviourally one. The assertions here that are
+/// *about the mode* rather than about the tool are the point of the module as
+/// much as the writing is.
+mod write {
+    use super::*;
+
+    /// The mode that auto-approves workspace writes, which is the mode a test
+    /// about writing bytes has to run in for the write to be the subject.
+    fn writable() -> Workspace {
+        let ws = Workspace::in_mode(Mode::Edits);
+        ws.file("src/main.rs", "fn main() {}\n");
+        ws
+    }
+
+    #[test]
+    fn write_creates_a_file_that_was_not_there() {
+        // The case `resolve` cannot serve: `canonicalize` cannot resolve what
+        // is not on disk, so a write tool that resolved its target the way
+        // `read` does could only ever overwrite. Creating a file is most of
+        // what a write is for.
+        let ws = writable();
+
+        ws.call(
+            "write",
+            json!({ "path": "src/new.rs", "contents": "pub fn added() {}\n" }),
+        )
+        .expect("a new file inside the workspace");
+
+        assert_eq!(
+            fs::read_to_string(ws.root.join("src/new.rs")).expect("the file is on disk"),
+            "pub fn added() {}\n"
+        );
+    }
+
+    #[test]
+    fn write_replaces_the_contents_of_a_file_that_was() {
+        let ws = writable();
+
+        ws.call(
+            "write",
+            json!({ "path": "src/main.rs", "contents": "fn main() { done() }\n" }),
+        )
+        .expect("an existing file inside the workspace");
+
+        assert_eq!(
+            fs::read_to_string(ws.root.join("src/main.rs")).unwrap(),
+            "fn main() { done() }\n",
+            "a replace leaves the new bytes and none of the old"
+        );
+    }
+
+    #[test]
+    fn write_prepares_the_operation_it_names_and_carries_the_bytes() {
+        // The permit is minted from the call, so the bytes policy was shown
+        // are the bytes that land. A tool that prepared `Op::Write` with an
+        // empty body and wrote its params instead would pass every assertion
+        // above and authorise nothing it did.
+        let ws = writable();
+
+        let call = ws
+            .prepare(
+                "write",
+                json!({ "path": "src/new.rs", "contents": "hello\n" }),
+            )
+            .expect("the parent directory exists, so the target resolves");
+
+        assert_eq!(
+            call.ops,
+            vec![Op::Write {
+                path: CanonPath::new(ws.root.join("src/new.rs")),
+                change: Change::Whole(b"hello\n".to_vec()),
+            }]
+        );
+    }
+
+    #[test]
+    fn write_outside_the_workspace_is_refused_by_policy_and_named() {
+        let ws = writable();
+        let outside = Workspace::new();
+        outside.file("target.txt", "not yours");
+
+        let call = ws
+            .prepare(
+                "write",
+                json!({
+                    "path": outside.root.join("target.txt").display().to_string(),
+                    "contents": "pwned",
+                }),
+            )
+            .expect("the path resolves; whether it may be written is policy's question");
+        let denied = ws.authorize(call).expect_err("it is outside the workspace");
+
+        assert!(matches!(
+            denied,
+            PolicyDenied::OutsideWorkspace {
+                op: OpName::Write,
+                ..
+            }
+        ));
+        assert!(
+            denied.to_string().contains("may not write"),
+            "the refusal has to say what was refused: {denied}"
+        );
+        assert_eq!(
+            fs::read_to_string(outside.root.join("target.txt")).unwrap(),
+            "not yours",
+            "a refused write leaves the bytes it was refused"
+        );
+    }
+
+    #[test]
+    fn write_into_a_directory_that_does_not_exist_is_refused_and_creates_nothing() {
+        // A write is not a `mkdir -p`. Creating the directories on the way
+        // would be an effect the call did not describe and the permit was
+        // never shown — `Op::Write` names one path and carries its bytes, and
+        // nothing in it says "and three directories".
+        let ws = writable();
+
+        let err = ws
+            .prepare(
+                "write",
+                json!({ "path": "src/nowhere/deep/new.rs", "contents": "hi\n" }),
+            )
+            .expect_err("the parent directory is not there");
+
+        assert!(
+            matches!(
+                err,
+                ToolError::Fs(ego_core::permit::FsError::NotFound { .. })
+            ),
+            "expected Fs(NotFound), got {err:?}"
+        );
+        assert!(
+            !ws.root.join("src/nowhere").exists(),
+            "a refused write invents no directories"
+        );
+    }
+
+    #[test]
+    fn write_over_a_directory_is_a_typed_error_rather_than_a_silent_nothing() {
+        let ws = writable();
+
+        let err = ws
+            .call("write", json!({ "path": "src", "contents": "hi\n" }))
+            .expect_err("a directory is not a file to replace");
+
+        assert!(
+            matches!(err, ToolError::Fs(_)),
+            "expected an Fs error, got {err:?}"
+        );
+        assert!(
+            ws.root.join("src/main.rs").exists(),
+            "and the directory keeps what was in it"
+        );
+    }
+
+    #[test]
+    fn the_default_mode_asks_before_a_write_and_settles_a_read_without_asking() {
+        // The first observable difference between two modes in this
+        // workspace. `Default` reviews unresolved *sensitive* actions
+        // (`ARCHITECTURE.md:242`), and until a mutating op existed there were
+        // none to review, so `default` and `edits` were the same run.
+        let ws = Workspace::in_mode(Mode::Default);
+        ws.file("src/main.rs", "fn main() {}\n");
+
+        let write = ws
+            .prepare(
+                "write",
+                json!({ "path": "src/main.rs", "contents": "changed\n" }),
+            )
+            .unwrap();
+        let pending = ws.asks(write);
+
+        assert!(
+            matches!(
+                pending.request().why(),
+                Escalation::ModeAsks {
+                    mode: Mode::Default,
+                    op: OpName::Write,
+                    ..
+                }
+            ),
+            "the question has to name the mode that asked it: {}",
+            pending.request()
+        );
+        assert_eq!(
+            fs::read_to_string(ws.root.join("src/main.rs")).unwrap(),
+            "fn main() {}\n",
+            "nothing is written while the question is open"
+        );
+
+        // The control: the same workspace, the same mode, a read. If this
+        // asked too, the assertion above would be about prompt fatigue rather
+        // than about sensitivity.
+        ws.call("read", json!({ "path": "src/main.rs" }))
+            .expect("a workspace read is what the default mode exists to allow");
+    }
+
+    #[test]
+    fn plan_mode_refuses_a_write_at_the_floor_and_never_asks() {
+        // Not an escalation: `plan`'s floor is step 2, before any party is
+        // consulted, so this is a denial and not an open question.
+        let ws = Workspace::in_mode(Mode::Plan);
+        ws.file("src/main.rs", "fn main() {}\n");
+
+        let call = ws
+            .prepare(
+                "write",
+                json!({ "path": "src/main.rs", "contents": "changed\n" }),
+            )
+            .unwrap();
+        let denied = ws.authorize(call).expect_err("plan mode does not mutate");
+
+        assert!(
+            denied.to_string().contains("write"),
+            "the refusal has to name the operation: {denied}"
+        );
+        assert_eq!(
+            fs::read_to_string(ws.root.join("src/main.rs")).unwrap(),
+            "fn main() {}\n"
+        );
+    }
+}
+
+/// `edit`: the first tool that needs two authorities for one call.
+///
+/// `write` replaces a file with bytes the model already holds. `edit` cannot:
+/// the bytes that land are a function of the bytes already there, which
+/// `prepare` may not look at — reading before a permit exists is the thing the
+/// guarded seam is for. So the operation it prepares says *what to change*
+/// rather than *what to leave*, and it prepares a `Read` beside the `Write`
+/// because it genuinely performs both.
+mod edit {
+    use super::*;
+
+    fn editable() -> Workspace {
+        let ws = Workspace::in_mode(Mode::Edits);
+        ws.file("src/main.rs", "fn main() {\n    todo!()\n}\n");
+        ws
+    }
+
+    /// A rule for each head named, from the layer an operator would write it
+    /// in.
+    fn allowing(heads: &[&str]) -> Ruleset {
+        Ruleset::from_layer(
+            PermCfg {
+                allow: heads
+                    .iter()
+                    .map(|raw| Rule::load(raw).expect("a rule this build enforces"))
+                    .collect(),
+                deny: Vec::new(),
+            },
+            Source::Project,
+        )
+    }
+
+    #[test]
+    fn edit_replaces_the_text_it_names_and_leaves_the_rest_of_the_file() {
+        let ws = editable();
+
+        ws.call(
+            "edit",
+            json!({
+                "path": "src/main.rs",
+                "old_string": "    todo!()\n",
+                "new_string": "    println!(\"done\");\n",
+            }),
+        )
+        .expect("one occurrence, inside the workspace");
+
+        assert_eq!(
+            fs::read_to_string(ws.root.join("src/main.rs")).unwrap(),
+            "fn main() {\n    println!(\"done\");\n}\n",
+            "the lines around the edit are the ones that were there"
+        );
+    }
+
+    #[test]
+    fn edit_refuses_text_that_is_not_in_the_file_and_changes_nothing() {
+        // The whole reason `edit` is not `write`: it may only land where the
+        // text it was computed against still is. A miss that fell through to
+        // "append", or to "write the new text anyway", would make the tool a
+        // clobber with extra steps.
+        let ws = editable();
+
+        let err = ws
+            .call(
+                "edit",
+                json!({
+                    "path": "src/main.rs",
+                    "old_string": "    unreachable!()\n",
+                    "new_string": "    ok()\n",
+                }),
+            )
+            .expect_err("that text is not in the file");
+
+        assert!(
+            err.to_string().contains("src/main.rs"),
+            "the refusal has to name the file it looked in: {err}"
+        );
+        assert_eq!(
+            fs::read_to_string(ws.root.join("src/main.rs")).unwrap(),
+            "fn main() {\n    todo!()\n}\n",
+            "a refused edit leaves the file it was refused"
+        );
+    }
+
+    #[test]
+    fn edit_refuses_text_that_appears_more_than_once_and_says_how_many() {
+        // Not a policy question — policy authorised the file. It is that the
+        // call does not name one place, so there is no edit to perform that
+        // the model asked for. Picking the first would be picking for it.
+        let ws = Workspace::in_mode(Mode::Edits);
+        ws.file("src/main.rs", "let a = 1;\nlet b = 1;\nlet c = 1;\n");
+
+        let err = ws
+            .call(
+                "edit",
+                json!({ "path": "src/main.rs", "old_string": "= 1;", "new_string": "= 2;" }),
+            )
+            .expect_err("three occurrences is not one place");
+
+        assert!(
+            err.to_string().contains('3'),
+            "a model that is told how many can widen the text it names: {err}"
+        );
+        assert_eq!(
+            fs::read_to_string(ws.root.join("src/main.rs")).unwrap(),
+            "let a = 1;\nlet b = 1;\nlet c = 1;\n"
+        );
+    }
+
+    #[test]
+    fn edit_prepares_a_read_and_a_write_of_the_file_it_names() {
+        // `docs/13-effect-tools.md` Step C, first invariant. The operation
+        // carries the substitution rather than the resulting bytes, because
+        // the resulting bytes are not knowable here — and because "replace
+        // this text with that text in this file" is the reviewable sentence
+        // the `PreparedCall` exists to be.
+        let ws = editable();
+
+        let call = ws
+            .prepare(
+                "edit",
+                json!({ "path": "src/main.rs", "old_string": "todo!()", "new_string": "ok()" }),
+            )
+            .expect("the file resolves");
+        let path = CanonPath::new(ws.root.join("src/main.rs"));
+
+        assert_eq!(
+            call.ops,
+            vec![
+                Op::Read { path: path.clone() },
+                Op::Write {
+                    path,
+                    change: Change::Replace {
+                        old_string: "todo!()".to_string(),
+                        new_string: "ok()".to_string(),
+                    },
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn an_edit_is_not_authorised_by_a_write_rule_alone() {
+        // `docs/13-effect-tools.md` Step C, second invariant, and the first
+        // time the four separate path lists pay for themselves outside the
+        // glob case. `edits` is the mode that approves everything at step 5,
+        // so what is under test here is step 3 and nothing else: a rule that
+        // covers the write leaves the read uncovered, and an uncovered
+        // operation stops the call however permissive the mode is.
+        let ws = Workspace::with_rules(Mode::Edits, allowing(&["write(src/**)"]));
+        ws.file("src/main.rs", "fn main() {\n    todo!()\n}\n");
+
+        let call = ws
+            .prepare(
+                "edit",
+                json!({ "path": "src/main.rs", "old_string": "todo!()", "new_string": "ok()" }),
+            )
+            .unwrap();
+
+        let Classification::Ask(pending) = ws.policy.classify(call) else {
+            panic!("a write rule covered an operation that is not a write");
+        };
+        assert!(
+            matches!(
+                pending.request().why(),
+                Escalation::NoRuleCovers {
+                    op: OpName::Read,
+                    ..
+                }
+            ),
+            "the question has to be about the half the rule did not cover: {}",
+            pending.request()
+        );
+    }
+
+    #[test]
+    fn an_edit_is_authorised_by_a_read_rule_and_a_write_rule_together() {
+        // The control for the test above. Without it, that one passes for a
+        // build in which `edit` is unauthorisable by any ruleset at all.
+        let ws = Workspace::with_rules(Mode::Edits, allowing(&["read(src/**)", "write(src/**)"]));
+        ws.file("src/main.rs", "fn main() {\n    todo!()\n}\n");
+
+        let call = ws
+            .prepare(
+                "edit",
+                json!({ "path": "src/main.rs", "old_string": "todo!()", "new_string": "ok()" }),
+            )
+            .unwrap();
+
+        let granted = ws
+            .authorize(call)
+            .expect("both halves are covered by a rule");
+        let Authority::Rules { rules } = granted.by() else {
+            panic!("the rules settled it, so the rules are the authority");
+        };
+        assert_eq!(
+            rules.len(),
+            2,
+            "an allow is a conjunction, so both rules that covered an op are recorded"
+        );
+    }
+
+    #[test]
+    fn edit_of_bytes_that_are_not_text_is_refused_rather_than_mangled() {
+        // `old_string` is a string, so the file has to be one too. Replacing
+        // inside arbitrary bytes with a lossy decode would write back a file
+        // that differs everywhere the decode guessed.
+        let ws = Workspace::in_mode(Mode::Edits);
+        let at = ws.root.join("src/blob.bin");
+        fs::create_dir_all(at.parent().unwrap()).unwrap();
+        fs::write(&at, [0xff, 0xfe, 0x00, 0x01]).unwrap();
+
+        let err = ws
+            .call(
+                "edit",
+                json!({ "path": "src/blob.bin", "old_string": "a", "new_string": "b" }),
+            )
+            .expect_err("those bytes are not text");
+
+        assert_eq!(
+            fs::read(&at).unwrap(),
+            [0xff, 0xfe, 0x00, 0x01],
+            "a refused edit leaves every byte: {err}"
+        );
+    }
+
+    #[test]
+    fn edit_with_empty_old_text_is_refused_as_a_parameter_error() {
+        // The empty string is in every file, at every position. An edit that
+        // accepted it would name no place at all.
+        let ws = editable();
+
+        let err = ws
+            .call(
+                "edit",
+                json!({ "path": "src/main.rs", "old_string": "", "new_string": "x" }),
+            )
+            .expect_err("the empty string names no place");
+
+        assert!(
+            matches!(err, ToolError::InvalidParams(_)),
+            "expected InvalidParams, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn edit_that_replaces_text_with_itself_is_refused_rather_than_reported_as_done() {
+        // It would succeed, and the file afterwards would be identical. A
+        // model told "edited" learns that its change landed, and the next
+        // thing it does is built on a file that never changed.
+        let ws = editable();
+
+        let err = ws
+            .call(
+                "edit",
+                json!({ "path": "src/main.rs", "old_string": "todo!()", "new_string": "todo!()" }),
+            )
+            .expect_err("replacing text with itself changes nothing");
+
+        assert!(
+            matches!(err, ToolError::InvalidParams(_)),
+            "expected InvalidParams, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn edit_outside_the_workspace_is_refused_by_policy_and_named() {
+        let ws = editable();
+        let outside = Workspace::new();
+        outside.file("target.txt", "not yours");
+
+        let call = ws
+            .prepare(
+                "edit",
+                json!({
+                    "path": outside.root.join("target.txt").display().to_string(),
+                    "old_string": "not yours",
+                    "new_string": "mine",
+                }),
+            )
+            .expect("the path resolves; whether it may be touched is policy's question");
+        let denied = ws.authorize(call).expect_err("it is outside the workspace");
+
+        assert!(matches!(
+            denied,
+            PolicyDenied::OutsideWorkspace {
+                op: OpName::Read,
+                ..
+            }
+        ));
+        assert_eq!(
+            fs::read_to_string(outside.root.join("target.txt")).unwrap(),
+            "not yours"
+        );
+    }
+
+    #[test]
+    fn plan_mode_refuses_an_edit_at_the_floor_and_never_asks() {
+        let ws = Workspace::in_mode(Mode::Plan);
+        ws.file("src/main.rs", "fn main() {\n    todo!()\n}\n");
+
+        let call = ws
+            .prepare(
+                "edit",
+                json!({ "path": "src/main.rs", "old_string": "todo!()", "new_string": "ok()" }),
+            )
+            .unwrap();
+        let denied = ws.authorize(call).expect_err("plan mode does not mutate");
+
+        assert!(
+            denied.to_string().contains("write"),
+            "the refusal has to name the operation refused: {denied}"
+        );
+        assert_eq!(
+            fs::read_to_string(ws.root.join("src/main.rs")).unwrap(),
+            "fn main() {\n    todo!()\n}\n"
+        );
+    }
+
+    #[test]
+    fn edit_of_a_file_that_is_not_there_is_refused_and_creates_nothing() {
+        // `write` resolves a missing target through its parent, because
+        // creating a file is most of what a write is for. An edit has nothing
+        // to substitute into, so the same leniency would only defer the
+        // failure to a read that cannot succeed.
+        let ws = editable();
+
+        let err = ws
+            .call(
+                "edit",
+                json!({ "path": "src/absent.rs", "old_string": "a", "new_string": "b" }),
+            )
+            .expect_err("there is no file to edit");
+
+        assert!(
+            !ws.root.join("src/absent.rs").exists(),
+            "a refused edit creates nothing: {err}"
         );
     }
 }

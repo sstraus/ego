@@ -129,7 +129,7 @@ pub enum OccupancyProvenance {
 /// ```text
 /// UserPrompt | AssistantDelta | AssistantMessage | ReasoningDelta |
 /// ToolCallStarted | ToolCallDelta | ToolCallCompleted | PermissionRequested |
-/// PermissionDecided | UsageUpdated | ContextWindowUpdated | TurnCompleted |
+/// PermissionAmended | PermissionDecided | UsageUpdated | ContextWindowUpdated | TurnCompleted |
 /// Compacted | Forked | HookFired | SubagentSpawned | SubagentReturned | Error
 /// ```
 ///
@@ -213,12 +213,18 @@ pub enum EventKind {
     /// what is wanted, so nothing is lost by keeping the fields.
     PermissionRequested {
         /// The tool whose call raised the question. Not the whole
-        /// `PreparedCall`: `Op::Write` carries the bytes to be written, and a
+        /// `PreparedCall`: an `Op::Write` carries what will land — the whole
+        /// file for a `write`, the replacement text for an `edit` — and a
         /// durable audit record is the last place file contents belong.
         tool: String,
         /// Which step asked, about which operation.
         escalation: Escalation,
     },
+    /// A human replaced the proposed tool parameters before any permit was
+    /// minted. Raw parameters are intentionally absent: they may contain file
+    /// contents. The following prepare result or decision records what the
+    /// replacement became.
+    PermissionAmended { tool: String },
     /// A permission decision was made, and who made it.
     PermissionDecided {
         allowed: bool,
@@ -348,6 +354,7 @@ impl EventKind {
             EventKind::ToolCallDelta { .. } => "tool_call_delta",
             EventKind::ToolCallCompleted { .. } => "tool_call_completed",
             EventKind::PermissionRequested { .. } => "permission_requested",
+            EventKind::PermissionAmended { .. } => "permission_amended",
             EventKind::PermissionDecided { .. } => "permission_decided",
             EventKind::GenerationStarted { .. } => "generation_started",
             EventKind::AttemptSettled { .. } => "attempt_settled",

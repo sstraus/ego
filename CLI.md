@@ -72,7 +72,8 @@ still offers it.
 
 A word that is **not** on this list stays a prompt: §2's first line is
 `ego [PROMPT]`, so `ego "explain this failing test"` is the interactive form
-and gets the interactive answer. `ego -- resume` likewise prompts the word.
+and opens a session with that as its first turn. `ego -- resume` likewise
+prompts the word rather than running the command.
 
 **The reason in each cell below is the string the binary prints**, not a
 paraphrase of it, and a test asserts that character for character (modulo
@@ -86,8 +87,8 @@ omitted when empty: two states, identical bytes.
 | Command | M0b | Waiting on |
 |---|---|---|
 | `ego run` | **yes** | the scripting workhorse; the whole of §4 is about it |
-| `ego [PROMPT]` | no | the terminal surface itself — a line editor for the prompt, and the dialog that renders a `PermissionRequest` and reads a person's answer. The `Approver` port that dialog would occupy is built and the mode already answers through it (**M1**); what is missing is the human seat and the screen it draws on |
-| `ego resume` | **yes** | continues a session that already exists, never creating one. `[ID]` is optional: without it the most recently updated session of this workspace is taken |
+| `ego [PROMPT]` | **yes** | asks once whether to trust project files before ambient reads, then runs the line-oriented session. Permission questions accept `allow`, `deny`, or `amend`; amended raw JSON parameters are prepared and classified again from the beginning |
+| `ego resume` | **yes** | continues a session that already exists, never creating one. `[ID]` is optional: without it the most recently updated session of this workspace is taken. Without a prompt source it enters the interactive driver; with a prompt or `-` it remains headless |
 | `ego ls` | **yes** | this workspace by default, `--all` for the whole store; `--output json\|jsonl` per §4.6 |
 | `ego fork` | no | session forking (**M3**), which needs the branch point to be nameable in the log rather than just a file copy |
 | `ego export` | no | replay and export with `--sanitize` (**M3**). The projection exists; the redaction contract that makes an exported session safe to hand over does not |
@@ -101,13 +102,10 @@ omitted when empty: two states, identical bytes.
 | `ego acp` | **yes** | the Agent Client Protocol on stdio, v1. A host's `session/new` mints an ordinary ego session and its `session/prompt` runs an ordinary turn, so what it opens is listed by `ego ls` and continued by `ego resume`. v1 and not the v2 draft: see `docs/decisions/2026-08-21-the-version-an-agent-answers-with.md` §6.2 |
 | `ego doctor` | no | most of what it would diagnose: the credential store, the MCP client and the sandbox backend are each waiting on their own milestone, and a report on three absent subsystems is not a diagnosis |
 
-**One of M0b's four exit criteria is a command that does not exist yet**
-(`ARCHITECTURE.md` §8: interactive, `ego run … | jq`, `kill → ego resume`, and
-the same session over ACP). Three of the four ship; the interactive surface does
-not, because it waits on an approver that can mint a `Permit`. That is the fact
-this table exists to stop being invisible, and the count is part of it — it read
-"three of four" until `ego resume` landed and "two of four" until `ego acp`
-did.
+All four M0b demonstrations now have an entry point (`ARCHITECTURE.md` §8): an
+interactive session, `ego run … | jq`, `kill → ego resume`, and the same
+session over ACP. This is availability, not a release boundary; later
+milestones remain dependencies of the final product.
 
 ## 3. Flags (the argument grammar)
 
@@ -208,11 +206,20 @@ you can actually run. Checked against the clap definitions in
 `crates/ego-cli/src/cli.rs`, not against intent, on 2026-08-21.
 
 A flag marked **no** is **refused by name**, with the subsystem it waits on —
-not swallowed, and not reported as an unknown argument. That mechanism already
-exists: `UNAVAILABLE` in `crates/ego-cli/src/cli.rs:67-94`, checked before
-clap sees the tokens, and it covers every "no" below. This table is the
-document half of it; the code is the source of truth, and the two were compared
-flag by flag against the built binary to write this.
+not swallowed, and not reported as an unknown argument. That mechanism is
+`UNAVAILABLE` in `crates/ego-cli/src/cli.rs`, checked before clap sees the
+tokens, and it covers every "no" below. This table is the document half of it;
+the code is the source of truth, and the two were compared flag by flag against
+the built binary to write this.
+
+A row marked **partly** is a flag that ships and a *value* of it that does not.
+Those cannot use `UNAVAILABLE`, which matches spellings and would have to
+inspect arguments to see a value — and would still miss the config file, since
+every mode and every rule reaches the same layers whether it was typed or
+written down. They are refused where the layers are read
+(`crates/ego-core/src/config/layer.rs`) instead, which is one refusal covering
+the flag, the file, the profile table and `-c`, and which arrives with the file
+and line that said it.
 
 | Flag | M0b | Note |
 |---|---|---|
@@ -231,15 +238,16 @@ flag by flag against the built binary to write this.
 | `--max-turns`, `--timeout` | **yes** | |
 | `--tools`, `--no-tools` | **yes** | |
 | `-C`, `-c/--set`, `--profile` | **yes** | |
-| `-q`, `-v`, `--no-color` | **yes** | |
-| `--mode`, `--plan`, `--yolo`, `--allow`, `--deny` | **yes** | `--plan`/`--yolo` are spellings of `--mode`; two at once is a usage error. **Four of the seven rule heads run**: `read`, `write`, `list`, `search`. `exec`, `net` and `tool` parse and get stable IDs, and are then **refused by name at load** — no tool in this build produces those operations, so a rule naming one would enforce nothing. So `--allow 'exec(git *)'` (§3's example, which is design) is exit 2 here, as is `--allow 'bash(git *)'` with §3's teaching message. Both refuse **before** the run starts |
+| `-q`, `--no-color` | **yes** | `--no-color` was marked **yes** here on 2026-08-21 while being parsed and read by nothing — the same silently vacuous flag §4.4 refuses elsewhere. It decides for real from 2026-08-22: it is the highest-precedence input to the one capability gate (`crates/ego-cli/src/render/caps.rs`), above `NO_COLOR`, above `TERM`/`COLORTERM`, above `isatty`. See `docs/decisions/2026-08-22-two-axes-and-a-terminal-that-answers.md` §1 |
+| `--mode`, `--plan`, `--yolo`, `--allow`, `--deny` | **partly** | `--plan`/`--yolo` are spellings of `--mode`; two at once is a usage error. **Four of the five modes run**: `plan`, `default`, `edits`, `yolo`. `auto` is **refused by name**, because the whole of what it means is that a judge model decides and there is no judge in this build (**M1**) — it was accepted and silently behaved as `default` until 2026-08-22, which is the accepted-and-ignored flag §4.5 forbids, wearing a value rather than a spelling. **Four of the seven rule heads run**: `read`, `write`, `list`, `search`. `exec`, `net` and `tool` parse and get stable IDs, and are then **refused by name at load** — no tool in this build produces those operations, so a rule naming one would enforce nothing. `write` spent 2026-08-23 on the refused side and has come back, which is the mechanism working rather than churn: `Op::Write` had a matcher and a scope arm while no builtin ever constructed one, so `--deny 'write(**)'` loaded, took an ID, and matched nothing — the vacuous boundary this whole mechanism exists to prevent, and the one an operator cannot tell apart from a boundary that works. `write` the *tool* now constructs one, so the head enforces again, on the same rule IDs. The five tools are read, glob, grep, write and edit. `edit` adds no head: it prepares a `Read` **and** a `Write` of the same file, so `--allow 'write(src/**)'` on its own does not authorise it — the read is uncovered and the call stops there. So `--allow 'exec(git *)'` (§3's example, which is design) is exit 2 here, as is `--allow 'bash(git *)'` with §3's teaching message. All of them refuse **before** the run starts |
 | `--sandbox` | no | waiting on a sandbox backend (**M1**). No process is spawned anywhere in this build, so there is nothing yet to confine |
 | `-f`, `--file`, `--var` | no | waiting on executable agent files (**M4**). §5 is a design, not a feature: the shebang form runs nothing today |
 | `--attach` | no | waiting on a non-text content block — the conversation model carries text, tool calls and tool results, so an image has nothing to be sent in |
 | `--mcp` | no | waiting on the MCP client (**M2**). `mcp_errors` exists on `session.started`, but no flag attaches a server |
 | `--retry`, `--fallback` | no | waiting on a retry seam. Delivery certainty is implemented and enforced; a generation owns its reservation for its whole life, so re-issuing one changes the attempt contract rather than adding a loop |
+| `-v`, `--verbose` | no | waiting on a **decision**, not a subsystem — the only such entry. §4.7 says exactly what `-q` suppresses and nothing anywhere says what `-v` adds. It was marked **yes** beside `--no-color` until 2026-08-23 while being parsed and read by nothing, which is `--no-color`'s own defect sitting in `--no-color`'s own row. The obvious answer, turning up `tracing`, is not obvious: this build installs no subscriber at all, so every `tracing::warn!` in the workspace already goes nowhere, and adding one puts a second writer on the stream §4.7's marks and notification own (R12) |
 
-**Eight documented flag spellings do not ship.** That is the gap this table
+**Ten documented flag spellings do not ship.** That is the gap this table
 exists to stop being invisible, and it is not a defect list — every one of them
 refuses by name and says what it is waiting on. The defect would be §3 reading,
 to someone who has not run the binary, as though all of it worked.
@@ -422,6 +430,46 @@ Default `--output text` is a table for the person who typed it: id, updated,
 model, title, and a `WORKSPACE` column only under `--all` — without `--all`
 every row would carry the same path.
 
+### 4.7 `--output text` (the default): two renderings, one gate
+
+§4.1, §4.2 and §4.6 are contracts with a *program*. This one is a contract with
+a **screen or a file**, and they are not the same contract with escapes
+removed. Full argument in
+`docs/decisions/2026-08-22-two-axes-and-a-terminal-that-answers.md`.
+
+**Redirected — a pipe, a file, `TERM=dumb`, `--output json|jsonl`.** stdout
+carries the model's own markdown, byte for byte: nothing wrapped, nothing
+re-flowed, no escape sequence of any kind, in-band or out. `ego run "…" >
+answer.md` produces a markdown file, and it is the *same* file from any
+terminal — the wrap column of a redirected run comes from a constant, never
+from the window that happened to launch it. Everything that is *about* the run
+rather than *of* it stays on stderr, as before.
+
+**On a screen.** The markdown is rendered: headings, emphasis, inline and
+fenced code, lists, block quotes, links, and tables drawn in box-drawing
+characters and measured in display cells. Rendering is **block-wise as blocks
+close** — a paragraph is drawn when the blank line after it arrives, a table
+when its last row does — so the output is live without a half-built table ever
+reaching the screen. Colour depth is whatever the gate found: 24-bit, 256, 16,
+or none.
+
+**One gate decides, once** (`crates/ego-cli/src/render/caps.rs`). In precedence
+order: `--no-color`, then `NO_COLOR` (presence, not value), then whether stdout
+is a terminal, then `TERM`, then `COLORTERM`, then `TERM_PROGRAM`. No other
+code in the workspace reads one of those variables or formats an escape by
+hand. `--no-color` on a real terminal removes the *colour*, not the layout: the
+person asked for no colour, not for a file.
+
+**Out of band**, on a screen only: OSC 133 C/D around the run (so a host
+segments the output into a command block instead of pattern-matching tool
+headers), OSC 9;4 for the progress indicator — cleared on every exit path,
+including failure — the window title, a desktop notification for a run that
+took longer than a minute (suppressed by `-q`), and OSC 7770 `state`/`intent`
+under TUICommander, which is proven by `TUIC_SOCKET` and not by `TERM_PROGRAM`.
+Every payload is stripped of control characters before it goes into a sequence:
+a tool name, an error message and an intent line all come from somewhere that
+is not ego.
+
 ## 5. Agent files — the scripting language
 
 An **executable agent file** is YAML frontmatter + prompt body. Same format
@@ -455,9 +503,54 @@ templates are not executables).
 
 Slash commands: `/help /model /thinking /mode /plan /yolo /permissions /mcp
 /sessions /fork /compact /clear /usage /export /doctor /quit`. History,
-completion and multiline via reedline. The permission prompt is fx's proven
-dialog: number keys choose, **Tab amends the proposed command**, Enter
-confirms, Esc cancels.
+completion and multiline via reedline.
+The permission prompt has a plain representation that works in every terminal
+and scripted transcript: `allow`, `deny`, or `amend`. Amend reads a complete
+JSON object of replacement tool parameters, then re-runs prepare and policy
+from the beginning. Invalid answers re-prompt; Ctrl-C and EOF deny.
+
+### 6.1 Paste
+
+The input line runs in **bracketed paste** mode (`ESC[?2004h`, off on exit).
+Every terminal in the compliance matrix implements it, and without it a pasted
+newline submits the first line of a paste as a whole prompt — the failure that
+makes pasting a stack trace impossible. A paste arrives as one edit, never as
+keystrokes, so it is never interpreted as a slash command or a control
+sequence.
+
+**Ctrl+V asks for an image first and text second.** The image cannot come
+through the terminal: bracketed paste carries what the emulator decided to
+send, which is text, and OSC 52's read form is disabled by default on every
+host in the matrix — it lets anything on the far end of a PTY exfiltrate the
+clipboard, so a host that answered it would be the bug. It comes from the
+platform pasteboard, read directly. An image found there becomes a temporary
+file and then the same content block `--attach` produces; anything else is
+pasted as text.
+
+That works where ego runs on the machine that owns the pasteboard. Over SSH
+there is usually no pasteboard to read, and Ctrl+V falls through to text — the
+image is attached by naming it instead (`--attach PATH|URL`, §3). Stated here
+because it is a limit of where the clipboard lives, not a limit ego can lift:
+no CLI on the far end of a PTY can reach the pasteboard in front of the person
+typing.
+
+### 6.2 Availability — what ships today
+
+Same discipline as §2.1 and §3.1. The reader, trust question and permission
+answer path ship. `ego` with no subcommand opens a session: it reads lines,
+runs a turn for each and renders it through §4. The editor and the renderer are
+never live at the same time, which is how §4's "exactly one writer" survives a
+second writer existing at all: each read ends before a turn renders.
+
+| Surface | M0b | Note |
+|---|---|---|
+| Input line, history, multiline | **yes** | reedline. `Ctrl+C` abandons the line and keeps the session; `Ctrl+D` ends it |
+| Bracketed paste | **yes** | on for every read, off on exit. A pasted stack trace is one prompt, not its first line |
+| Ctrl+V | **refused by name** | it asks for a pasteboard *image* first (§6.1), and there is nowhere to put one — the same gap that refuses `--attach`. It refuses rather than silently pasting text, because only one of those two can be discovered |
+| Permission dialog | **yes** | plain `allow`, `deny`, or `amend`; amend then reads replacement JSON parameters. Invalid answers re-prompt; Ctrl-C and EOF deny. The engine keeps the configured mode first and re-prepares/re-classifies every amendment |
+| Slash commands | no | waiting on the subsystems they would drive; §2.1 already refuses each by name |
+| `--attach` | no | §3.1's row: waiting on a non-text content block |
+| OSC 133 A (prompt mark), OSC 7 (cwd) | no | deliberately: both are owned by the surface rather than by a run, and their exact terminal contract is not implemented. `ego run` emits 133 C/D, OSC 9;4 and — under TUICommander — 7770 |
 
 ## 7. Configuration
 

@@ -474,6 +474,10 @@ pub fn project_public(ev: &DomainEvent) -> Option<PublicEvent> {
             name: Some(tool.clone()),
             text: Some(escalation.to_string()),
         }),
+        // Durable audit evidence only. The replacement is prepared and
+        // classified as a fresh call; projecting this as a completed
+        // permission item would falsely make an amendment look like a denial.
+        EventKind::PermissionAmended { .. } => None,
         // `by` is likewise not projected, and this module's own governing
         // line is the whole reason: *a new internal event never becomes
         // public automatically*. Nothing reads an authority out of

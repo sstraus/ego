@@ -25,27 +25,55 @@ use super::path::CanonPath;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Op {
     /// One named file's contents.
-    Read {
-        path: CanonPath,
-    },
+    Read { path: CanonPath },
     /// The names under `root` matching `pattern`, and nothing else about
     /// them.
-    List {
-        root: CanonPath,
-        pattern: String,
-    },
+    List { root: CanonPath, pattern: String },
     /// The lines under `root` matching `query`.
     ///
     /// The query is part of the operation, so a permit minted for one search
     /// authorises *that* search: a tool approved to look for `TODO` cannot
     /// then go looking for private keys.
-    Search {
-        root: CanonPath,
-        query: String,
-    },
-    Write {
-        path: CanonPath,
-        contents: Vec<u8>,
+    Search { root: CanonPath, query: String },
+    /// A named file, after [`Change`] is applied to it.
+    Write { path: CanonPath, change: Change },
+}
+
+/// What a [`Op::Write`] does to the file it names.
+///
+/// The variation is here, in the payload, and **not** in a sibling top-level
+/// `Op` variant. Two variants both meaning "write to this path" would need
+/// [`Op::name`], [`Op::mutates`], `Rule::matches` and `scope_of` — four places
+/// — to independently agree they are the same authority, with nothing holding
+/// them to it. One `Op::Write` has one arm in each of the four.
+///
+/// That is the same test [`Op::List`] and [`Op::Search`] pass and these two
+/// fail: those are separate variants because they are separate *authorities*
+/// (see `2026-08-21-reading-without-reading-everything.md` §1–2). Replacing a
+/// whole file and replacing a string inside it are one authority applied two
+/// ways.
+///
+/// **[`Change::Replace`] does not determine the resulting bytes** and
+/// [`Change::Whole`] does. That is a real difference in what a party
+/// authorising this call is being shown, and it is unavoidable: the bytes an
+/// edit produces are a function of the bytes already there, and the only
+/// moment that could compute them is `prepare` — which has no read authority,
+/// because it runs before a `Permit` exists. See
+/// `docs/decisions/2026-08-23-an-edit-is-two-authorities-and-a-conditional-write.md`.
+/// What is *not* weakened is the authority granted: both reach exactly the one
+/// path the op names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Change {
+    /// Every byte of the file, replaced.
+    Whole(Vec<u8>),
+    /// The one occurrence of `old_string`, replaced by `new_string`.
+    ///
+    /// One, not the first: a tool preparing this must refuse a call whose
+    /// `old_string` is not in the file exactly once. Choosing among several
+    /// would be choosing a place the call never named.
+    Replace {
+        old_string: String,
+        new_string: String,
     },
 }
 

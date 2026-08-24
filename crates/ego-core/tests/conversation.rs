@@ -9,8 +9,9 @@
 //! providers disagree and a core-level answer would be wrong for one of them.
 
 use ego_core::event::domain::{DomainEvent, Envelope, EventKind};
-use ego_core::event::id::{EventId, ItemId, Producer, Seq, TurnId};
+use ego_core::event::id::{EventId, GenerationId, ItemId, Producer, Seq, TurnId};
 use ego_core::event::time::Timestamp;
+use ego_core::generator::attempt::AttemptRef;
 use ego_core::generator::history::{Repair, conversation_from};
 use ego_core::generator::types::{
     ContentBlock, Conversation, HistoryError, Message, ReasoningState, Role,
@@ -258,24 +259,54 @@ mod rebuild {
         }
 
         fn push(&mut self, item: Option<ItemId>, kind: EventKind) -> &mut Self {
+            self.append(item, None, kind);
+            self
+        }
+
+        /// Append one event and hand back the id a later one can name.
+        fn append(
+            &mut self,
+            item: Option<ItemId>,
+            parent: Option<EventId>,
+            kind: EventKind,
+        ) -> EventId {
+            let id = EventId::new();
             self.state.apply(&DomainEvent {
                 env: Envelope {
                     seq: self.seq.next(),
-                    id: EventId::new(),
+                    id,
                     turn: self.turn,
                     item,
-                    parent: None,
+                    parent,
                     ts: Timestamp::from_millis(1_000),
                     producer: Producer::Main,
                 },
                 kind,
             });
-            self
+            id
         }
 
         fn item(&mut self, kind: EventKind) -> ItemId {
             let item = ItemId::new();
             self.push(Some(item), kind);
+            item
+        }
+
+        /// Open a generation, returning the event id its items name as parent.
+        fn generation(&mut self) -> EventId {
+            self.append(
+                None,
+                None,
+                EventKind::GenerationStarted {
+                    attempt: AttemptRef::first(GenerationId::new()),
+                },
+            )
+        }
+
+        /// An item the log says `generation` produced.
+        fn item_under(&mut self, generation: EventId, kind: EventKind) -> ItemId {
+            let item = ItemId::new();
+            self.append(Some(item), Some(generation), kind);
             item
         }
     }
@@ -412,6 +443,55 @@ mod rebuild {
             conversation.messages().len(),
             3,
             "the prompt and the assistant turn that made the call both survive"
+        );
+    }
+
+    /// `POTENTIALS.md` P21, answered at the only cost worth paying.
+    ///
+    /// The synthesized answer is the harness talking to a model that is about
+    /// to decide whether to repeat a call nobody knows the outcome of, and
+    /// with `write` in the registry that call may have already landed bytes.
+    /// Saying only "it did not complete" invites the repeat, and for a plain
+    /// replace the target is now the old contents, the new contents, or a
+    /// truncated file — three states the model cannot distinguish without
+    /// looking.
+    ///
+    /// So the text says to look. That is the whole answer: **no
+    /// `safe_to_repeat` on `ToolDescriptor`, no per-dispatch delivery
+    /// certainty, no automatic replay and no automatic suppression** — the
+    /// generic machinery P21 sketches is built when something needs to make a
+    /// decision without a model in the loop, and here there is one. Pi
+    /// synthesizes "No result provided" and never replays; Hermes strips
+    /// dangling call tails on resume and forbids re-execution. Both leave the
+    /// judgement where this does.
+    ///
+    /// Pinned because it is a behavioural contract and not a string: a message
+    /// that stops telling the model to check is a message that has silently
+    /// changed what a resumed session does after a write.
+    #[test]
+    fn the_answer_to_a_torn_call_tells_the_model_to_look_before_repeating_it() {
+        let mut log = Log::new();
+        log.item(prompt("write it"));
+        log.item(started(Some("call_a")));
+
+        let (conversation, _) = conversation_from(&log.state).unwrap();
+        let [ContentBlock::ToolResult { output, .. }] =
+            &conversation.messages().last().unwrap().content[..]
+        else {
+            panic!("the synthesized answer is one tool result");
+        };
+
+        assert!(
+            output.contains("did not complete"),
+            "it still has to say what happened: {output}"
+        );
+        assert!(
+            output.contains("may already have"),
+            "a torn call may have taken effect, and the model has to be told: {output}"
+        );
+        assert!(
+            output.to_lowercase().contains("check"),
+            "and told what to do about it before repeating the call: {output}"
         );
     }
 
@@ -625,5 +705,122 @@ mod rebuild {
             }],
             "the blob, and nothing the model said while producing it"
         );
+    }
+
+    /// The shape of a turn is a claim about what the model did, and two calls
+    /// issued at once are one decision. Rebuilt one call at a time they become
+    /// five turns where three happened — a conversation in which the model saw
+    /// the first answer before choosing the second, which is not what it did
+    /// and invites a different continuation. See `POTENTIALS.md` P22.
+    #[test]
+    fn two_calls_from_one_generation_rebuild_as_the_single_turn_they_were() {
+        let mut log = Log::new();
+        log.item(prompt("read both files"));
+        let generation = log.generation();
+        let first = log.item_under(generation, started(Some("call_a")));
+        let second = log.item_under(generation, started(Some("call_b")));
+        for (call, output) in [(first, "a"), (second, "b")] {
+            log.push(
+                Some(call),
+                EventKind::ToolCallCompleted {
+                    ok: true,
+                    output: output.to_string(),
+                },
+            );
+        }
+
+        let (conversation, repairs) =
+            conversation_from(&log.state).expect("a repairable history rebuilds");
+        assert!(repairs.is_empty(), "nothing was torn");
+        assert_eq!(
+            shape(&conversation),
+            [(Role::User, 1), (Role::Assistant, 2), (Role::User, 2)],
+            "both uses belong to one assistant turn and both results to the \
+             user turn that answers it"
+        );
+    }
+
+    /// The converse, and the reason grouping cannot be done by adjacency:
+    /// sequential dispatch produces the identical item sequence, so a rebuild
+    /// that grouped neighbours would fabricate parallelism exactly as readily
+    /// as the old one fabricated sequence.
+    #[test]
+    fn two_calls_from_two_generations_rebuild_as_the_two_turns_they_were() {
+        let mut log = Log::new();
+        log.item(prompt("read one, then the other"));
+        for (call_id, output) in [("call_a", "a"), ("call_b", "b")] {
+            let generation = log.generation();
+            let call = log.item_under(generation, started(Some(call_id)));
+            log.push(
+                Some(call),
+                EventKind::ToolCallCompleted {
+                    ok: true,
+                    output: output.to_string(),
+                },
+            );
+        }
+
+        let (conversation, _) =
+            conversation_from(&log.state).expect("a repairable history rebuilds");
+        assert_eq!(
+            shape(&conversation),
+            [
+                (Role::User, 1),
+                (Role::Assistant, 1),
+                (Role::User, 1),
+                (Role::Assistant, 1),
+                (Role::User, 1),
+            ],
+            "the model did see the first answer before choosing the second"
+        );
+    }
+
+    /// Truncation cuts at the unidentifiable call, and grouping does not move
+    /// the cut. The call beside it in the same generation was sent, answered
+    /// and recorded, so it keeps the result it earned — a group is not an
+    /// all-or-nothing unit, and answering it with the torn-call text would
+    /// tell the model its tool said something it never said.
+    #[test]
+    fn an_unidentified_call_does_not_take_its_generations_answered_call_with_it() {
+        let mut log = Log::new();
+        log.item(prompt("read both"));
+        let generation = log.generation();
+        let answered = log.item_under(generation, started(Some("call_a")));
+        log.push(
+            Some(answered),
+            EventKind::ToolCallCompleted {
+                ok: true,
+                output: "contents".to_string(),
+            },
+        );
+        log.item_under(generation, started(None));
+
+        let (conversation, repairs) =
+            conversation_from(&log.state).expect("a repairable history rebuilds");
+        assert_eq!(repairs, vec![Repair::TruncatedUnidentifiedCall]);
+        assert_eq!(
+            shape(&conversation),
+            [(Role::User, 1), (Role::Assistant, 1), (Role::User, 1)],
+            "the identified call and its answer survive; the other is dropped"
+        );
+        assert_eq!(
+            conversation.messages()[2].content,
+            vec![ContentBlock::ToolResult {
+                call_id: "call_a".to_string(),
+                output: "contents".to_string(),
+                is_error: false,
+            }],
+            "the surviving call keeps the result the tool actually returned"
+        );
+    }
+
+    /// Every turn's author and how many blocks it carries — the whole of what
+    /// grouping changes, and nothing about the blocks themselves.
+    fn shape(conversation: &Conversation) -> Vec<(Role, usize)> {
+        conversation
+            .messages()
+            .iter()
+            .map(|message| (message.role, message.content.len()))
+            .collect()
     }
 }

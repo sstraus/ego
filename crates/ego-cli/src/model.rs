@@ -100,7 +100,8 @@ pub fn transport(offline: bool) -> Result<Arc<dyn Http>, ResolveError> {
 /// The API-key `xai` candidate remains absent. The distinct `xai-oauth` row
 /// is present because the Pi ∪ Hermes inclusion decision explicitly promotes
 /// that subscription contract without collapsing its metering into the API
-/// key row.
+/// key row. Gemini remains absent because this batch adds no current login or
+/// acceptance evidence for it.
 fn rows(
     auth: &std::collections::HashMap<String, ego_core::config::AuthProviderLayer>,
 ) -> Result<Vec<ProviderRow>, ResolveError> {
@@ -207,6 +208,14 @@ pub fn is_provider_failure(err: &ResolveError) -> bool {
 mod tests {
     use super::*;
 
+    fn selectable() -> Vec<String> {
+        rows(&Default::default())
+            .expect("the built-in bases parse")
+            .into_iter()
+            .map(|row| row.id)
+            .collect()
+    }
+
     #[test]
     fn codex_login_never_turns_into_a_chat_completions_row() {
         let row = ProviderRow::openai_codex_default();
@@ -228,18 +237,15 @@ mod tests {
     /// Responses mapping.
     #[test]
     fn a_candidate_provider_cannot_be_selected() {
-        let ids: Vec<String> = rows(&Default::default())
-            .expect("the built-in bases parse")
-            .into_iter()
-            .map(|row| row.id)
-            .collect();
+        let ids = selectable();
 
+        for candidate in ["xai", "gemini"] {
+            assert!(
+                !ids.contains(&candidate.to_string()),
+                "{candidate} has no selectable current row: {ids:?}"
+            );
+        }
         let candidate = "xai";
-        assert!(
-            !ids.contains(&candidate.to_string()),
-            "{candidate} has a row on the vendor-deprecated Chat Completions \
-             contract, so it must not be selectable: {ids:?}"
-        );
         let refusal = unavailable_mapping(candidate).expect("the legacy id is actionable");
         assert!(matches!(
             &refusal,
@@ -252,46 +258,26 @@ mod tests {
         );
     }
 
-    /// And the converse, so the test above is not satisfied by an empty table.
-    ///
-    /// **Named for what is true of both rows, which is that they are
-    /// selectable — not that they are measured.** An earlier version of this
-    /// test was called `the_measured_providers_are_selectable`, and only one
-    /// of the two it names is measured: `profiles::OLLAMA` is
-    /// `Provenance::Recorded` and `profiles::OPENAI` is
-    /// `Provenance::VendorSchemaDerived`. A test name is a claim like any
-    /// other, and that one was false.
-    ///
-    /// The gap it was papering over is real and is **maintainer's call, recorded in
-    /// §9's amendment**: §9 makes membership "passes all five checks" and check
-    /// 5 is a live call, so OpenAI being selectable on schema-derived evidence
-    /// is either a violation of §9 or a sign §9 overreaches. Codex reads it as
-    /// the former and would remove the row until its smoke runs; I read a check
-    /// *not run* and a check *failed* as different evidence, and note that the
-    /// stricter rule takes OpenAI out alongside the candidates. Either way the
-    /// name here should not have decided it silently.
+    /// The exact selectable set. Any accidental promotion or omission fails
+    /// and names the whole table.
     #[test]
     fn the_selectable_provider_table_includes_subscription_rows() {
-        let ids: Vec<String> = rows(&Default::default())
-            .expect("the built-in bases parse")
-            .into_iter()
-            .map(|row| row.id)
-            .collect();
-
-        assert!(ids.contains(&"ollama".to_string()), "{ids:?}");
-        assert!(ids.contains(&"openai".to_string()), "{ids:?}");
-        for subscription in [
-            "openai-codex",
-            "anthropic",
-            "github-copilot",
-            "xai-oauth",
-            "kimi-coding",
-            "qwen-oauth",
-            "minimax-oauth",
-            "nous",
-            "openrouter",
-        ] {
-            assert!(ids.contains(&subscription.to_string()), "{ids:?}");
-        }
+        assert_eq!(
+            selectable(),
+            [
+                "ollama",
+                "openai",
+                "openai-codex",
+                "anthropic",
+                "github-copilot",
+                "xai-oauth",
+                "kimi-coding",
+                "qwen-oauth",
+                "minimax-oauth",
+                "nous",
+                "openrouter",
+            ],
+            "the selectable provider table changed"
+        );
     }
 }

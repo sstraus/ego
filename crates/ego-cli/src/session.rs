@@ -129,7 +129,7 @@ pub fn id_for(
 /// the kernel when its file descriptor closes, so the lease is free anyway —
 /// this predicate only governs the *stale-but-locked* case, where refusing is
 /// the safe answer.
-fn assume_alive(_pid: u32) -> bool {
+pub(crate) fn assume_alive(_pid: u32) -> bool {
     true
 }
 

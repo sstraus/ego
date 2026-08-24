@@ -126,9 +126,13 @@ pub struct TurnConfig {
     pub system: Option<SystemPrompt>,
     pub thinking: ThinkingLevel,
     pub max_output_tokens: Option<u64>,
-    /// Whether the model may ask for several tools at once. The loop runs
-    /// them one after another either way — see `POTENTIALS.md` P22 for why
-    /// that is currently the *more* faithful choice.
+    /// Whether the model may ask for several tools at once.
+    ///
+    /// The loop runs them one after another either way, and that is now a
+    /// scheduling choice rather than a fidelity one: the calls of a single
+    /// generation are recorded as such and rebuild into one assistant turn
+    /// however they were executed. See
+    /// `docs/decisions/2026-08-22-the-generation-a-call-came-out-of.md`.
     pub parallel_tool_calls: bool,
 }
 
@@ -493,23 +497,19 @@ impl<'a> TurnLoop<'a> {
         // it (ADR §6).
         let (history, repairs) = match conversation_from(self.journal.state()) {
             Ok(rebuilt) => rebuilt,
+            // `Provider` is the exit even though the history on disk is what
+            // broke and no provider was asked: §4.3's exit 4 is "the run could
+            // not get a generation", and this run cannot.
             Err(malformed) => {
                 tracing::warn!(%malformed, "the stored history cannot be rebuilt into a request");
-                self.journal.append(
+                return self.refuse(
                     turn,
-                    None,
-                    None,
-                    EventKind::Error {
-                        message: format!(
-                            "this session's log cannot be sent to a provider and \
-                             cannot be repaired: {malformed}"
-                        ),
-                        // Ours: the history on disk is what broke, and no
-                        // provider was asked about it.
-                        kind: ErrorKind::Unclassified,
-                    },
-                )?;
-                return Ok(Generated::Ended(ExitReason::Provider));
+                    format!(
+                        "this session's log cannot be sent to a provider and \
+                         cannot be repaired: {malformed}"
+                    ),
+                    ExitReason::Provider,
+                );
             }
         };
         let conversation = self.with_system(history);
@@ -542,22 +542,14 @@ impl<'a> TurnLoop<'a> {
                 ?gaps,
                 "the model does not accept the request this run asks for"
             );
-            self.journal.append(
+            return self.refuse(
                 turn,
-                None,
-                None,
-                EventKind::Error {
-                    message: gaps
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect::<Vec<_>>()
-                        .join("; "),
-                    // The request is unsendable and this run decided so
-                    // before a socket existed; no provider classified it.
-                    kind: ErrorKind::Unclassified,
-                },
-            )?;
-            return Ok(Generated::Ended(ExitReason::Usage));
+                gaps.iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("; "),
+                ExitReason::Usage,
+            );
         }
 
         // Per generation, and before the gate: a fallback chain can switch
@@ -581,17 +573,7 @@ impl<'a> TurnLoop<'a> {
                 Ok(reservation) => reservation,
                 Err(denied) => {
                     tracing::warn!(%denied, "the budget gate refused a generation");
-                    self.journal.append(
-                        turn,
-                        None,
-                        None,
-                        EventKind::Error {
-                            message: denied.to_string(),
-                            // Ours, not the provider's: nothing was sent.
-                            kind: ErrorKind::Unclassified,
-                        },
-                    )?;
-                    return Ok(Generated::Ended(ExitReason::Budget));
+                    return self.refuse(turn, denied.to_string(), ExitReason::Budget);
                 }
             };
 
@@ -610,23 +592,16 @@ impl<'a> TurnLoop<'a> {
                 // authorise its own request is a defect in this loop, not a
                 // condition to work around.
                 tracing::error!(%denied, "a reservation did not authorise the request it was minted for");
-                self.journal.append(
-                    turn,
-                    None,
-                    None,
-                    EventKind::Error {
-                        message: denied.to_string(),
-                        // Ours, not the provider's: `ErrorKind` classifies
-                        // what a provider said, and nothing was sent.
-                        kind: ErrorKind::Unclassified,
-                    },
-                )?;
-                return Ok(Generated::Ended(ExitReason::Internal));
+                return self.refuse(turn, denied.to_string(), ExitReason::Internal);
             }
         };
 
         let reference = attempt.attempt();
-        self.journal.append(
+        // Kept, not discarded: this is the id every item from this generation
+        // names as its causal parent, and it is the only record of which
+        // generation produced which call. Without it a rebuilt history cannot
+        // tell two calls issued at once from two issued in turn.
+        let generation = self.journal.append(
             turn,
             None,
             None,
@@ -634,7 +609,7 @@ impl<'a> TurnLoop<'a> {
         )?;
 
         let stream = self.generator.generate(request, attempt);
-        let drained = self.drain(turn, stream).await;
+        let drained = self.drain(turn, generation, stream).await;
 
         // Settle before reporting anything, including a store failure: the
         // stream owns the reservation, and returning early would drop it.
@@ -642,19 +617,11 @@ impl<'a> TurnLoop<'a> {
             Ok(settlement) => settlement,
             Err(denied) => {
                 tracing::error!(%denied, "the gate refused to settle an attempt it minted");
+                // Before the refusal is written: a store that has already
+                // failed cannot record why the gate refused, and the store
+                // failure is the one that has to reach the caller.
                 drained.failure.map_or(Ok(()), Err)?;
-                self.journal.append(
-                    turn,
-                    None,
-                    None,
-                    EventKind::Error {
-                        message: denied.to_string(),
-                        // Ours, not the provider's: `ErrorKind` classifies
-                        // what a provider said, and nothing was sent.
-                        kind: ErrorKind::Unclassified,
-                    },
-                )?;
-                return Ok(Generated::Ended(ExitReason::Internal));
+                return self.refuse(turn, denied.to_string(), ExitReason::Internal);
             }
         };
         drained.failure.map_or(Ok(()), Err)?;
@@ -713,6 +680,38 @@ impl<'a> TurnLoop<'a> {
         })
     }
 
+    /// Write down why this loop stopped a generation, and end the turn on it.
+    ///
+    /// Every caller is a refusal *ego* made — a history that cannot be rebuilt,
+    /// a request the model does not accept, a gate that would not authorise, a
+    /// reservation that does not cover the request it was minted for, a
+    /// settlement the gate rejected. None of them is something a provider said,
+    /// and most happen before a socket exists, which is why the kind is
+    /// `Unclassified` here rather than chosen five times: `ErrorKind`
+    /// classifies a provider's own answer and there is none to classify.
+    ///
+    /// The `ExitReason` stays the caller's, because these refusals are four
+    /// different exit codes (`CLI.md` §4.3). What they share is the order — the
+    /// reason is in the log *before* the turn ends — so a session says why it
+    /// stopped and not only that it did.
+    fn refuse(
+        &mut self,
+        turn: TurnId,
+        reason: String,
+        exit: ExitReason,
+    ) -> Result<Generated, StoreError> {
+        self.journal.append(
+            turn,
+            None,
+            None,
+            EventKind::Error {
+                message: reason,
+                kind: ErrorKind::Unclassified,
+            },
+        )?;
+        Ok(Generated::Ended(exit))
+    }
+
     /// The rebuilt history with this turn's system prompt in front of it.
     ///
     /// Rebuilt through [`Conversation::new`] rather than pushed into: a
@@ -736,7 +735,12 @@ impl<'a> TurnLoop<'a> {
     /// Returns the stream so its caller can settle it. A store failure is
     /// carried back rather than propagated with `?` for the same reason:
     /// leaving here early would drop an unsettled attempt.
-    async fn drain(&mut self, turn: TurnId, mut stream: AttemptStream) -> Drained {
+    async fn drain(
+        &mut self,
+        turn: TurnId,
+        generation: EventId,
+        mut stream: AttemptStream,
+    ) -> Drained {
         let reference = stream.attempt();
         let mut pending = Vec::new();
         let mut message: Option<ItemId> = None;
@@ -852,7 +856,13 @@ impl<'a> TurnLoop<'a> {
                         .append(
                             turn,
                             Some(item),
-                            None,
+                            // The generation that issued it, named as the
+                            // causal parent the envelope already has room
+                            // for. This is what lets a rebuilt history put
+                            // the calls of one generation in one turn; a
+                            // second attribution field beside it would be a
+                            // second fact that could disagree with this one.
+                            Some(generation),
                             EventKind::ToolCallStarted {
                                 name: name.clone(),
                                 args: args.clone(),
@@ -1011,7 +1021,7 @@ impl<'a> TurnLoop<'a> {
         call: &PendingCall,
     ) -> Result<ToolOutcome, StoreError> {
         let answered = |ok, output| ToolOutcome::Answered { ok, output };
-        let (tool, prepared) = match self.tools.prepare(&call.name, &call.args) {
+        let (tool, mut prepared) = match self.tools.prepare(&call.name, &call.args) {
             Ok(prepared) => prepared,
             // Not a permission event. `prepare` refuses calls that never
             // reached the engine — an unknown tool, unparseable arguments —
@@ -1019,41 +1029,91 @@ impl<'a> TurnLoop<'a> {
             // never established.
             Err(refusal) => return Ok(answered(false, refusal)),
         };
-        let authorized = match self.tools.authorize(prepared) {
-            Classification::Settled(Ok(authorized)) => {
-                self.decided(turn, call, true, authorized.by().clone())?;
-                authorized
-            }
-            Classification::Settled(Err(denial)) => {
-                self.decided(turn, call, false, denial.authority())?;
-                return Ok(ToolOutcome::Refused { denial });
-            }
-            // The rules did not settle it, so ask the next party in §6's
-            // order. That is the mode at step 5 today; the judge and the human
-            // are steps 6 and 7 and have no producer yet, so a question the
-            // mode hands back has reached the end of the order. The honest
-            // terminal state is then the one `CLI.md` §4.4 already specifies
-            // for a headless run: end it, with the action named. Not a stub
-            // standing in for a feature — the feature adds parties to a
-            // consultation that already happens.
-            Classification::Ask(pending) => match self.tools.settle(pending).await {
-                Resolution::Settled(Ok(authorized)) => {
+        let authorized = loop {
+            match self.tools.authorize(prepared) {
+                Classification::Settled(Ok(authorized)) => {
                     self.decided(turn, call, true, authorized.by().clone())?;
-                    authorized
+                    break authorized;
                 }
-                Resolution::Settled(Err(denial)) => {
+                Classification::Settled(Err(denial)) => {
                     self.decided(turn, call, false, denial.authority())?;
                     return Ok(ToolOutcome::Refused { denial });
                 }
-                Resolution::Ask(pending) => {
-                    let kind = EventKind::PermissionRequested {
-                        tool: pending.request().tool().to_string(),
-                        escalation: pending.request().why().clone(),
-                    };
-                    self.permission(turn, call, kind)?;
-                    return Ok(ToolOutcome::Unanswerable { pending });
-                }
-            },
+                Classification::Ask(pending) => match self.tools.settle(pending).await {
+                    Resolution::Settled(Ok(authorized)) => {
+                        self.decided(turn, call, true, authorized.by().clone())?;
+                        break authorized;
+                    }
+                    Resolution::Settled(Err(denial)) => {
+                        self.decided(turn, call, false, denial.authority())?;
+                        return Ok(ToolOutcome::Refused { denial });
+                    }
+                    Resolution::Ask(pending) => {
+                        self.requested(turn, call, pending.request())?;
+                        match self.tools.decide(pending).await {
+                            Resolution::Ask(pending) => {
+                                return Ok(ToolOutcome::Unanswerable { pending });
+                            }
+                            Resolution::HumanSettled { result, .. } => match result {
+                                Ok(authorized) => {
+                                    self.decided(turn, call, true, authorized.by().clone())?;
+                                    break authorized;
+                                }
+                                Err(denial) => {
+                                    self.decided(turn, call, false, denial.authority())?;
+                                    return Ok(ToolOutcome::Refused { denial });
+                                }
+                            },
+                            Resolution::Reclassify { request, params } => {
+                                self.permission(
+                                    turn,
+                                    call,
+                                    EventKind::PermissionAmended {
+                                        tool: request.tool().to_string(),
+                                    },
+                                )?;
+                                prepared = match self.tools.prepare_amendment(tool, params) {
+                                    Ok(prepared) => prepared,
+                                    Err(refusal) => return Ok(answered(false, refusal)),
+                                };
+                            }
+                            Resolution::Settled(result) => match result {
+                                Ok(authorized) => {
+                                    self.decided(turn, call, true, authorized.by().clone())?;
+                                    break authorized;
+                                }
+                                Err(denial) => {
+                                    self.decided(turn, call, false, denial.authority())?;
+                                    return Ok(ToolOutcome::Refused { denial });
+                                }
+                            },
+                        }
+                    }
+                    Resolution::HumanSettled { result, .. } => match result {
+                        Ok(authorized) => {
+                            self.decided(turn, call, true, authorized.by().clone())?;
+                            break authorized;
+                        }
+                        Err(denial) => {
+                            self.decided(turn, call, false, denial.authority())?;
+                            return Ok(ToolOutcome::Refused { denial });
+                        }
+                    },
+                    Resolution::Reclassify { request, params } => {
+                        self.permission(
+                            turn,
+                            call,
+                            EventKind::PermissionAmended {
+                                tool: request.tool().to_string(),
+                            },
+                        )?;
+                        prepared = match self.tools.prepare_amendment(tool, params) {
+                            Ok(prepared) => prepared,
+                            Err(refusal) => return Ok(answered(false, refusal)),
+                        };
+                    }
+                },
+            }
         };
         Ok(match self.tools.execute(tool, authorized).await {
             Ok(output) => answered(true, output),
@@ -1061,15 +1121,29 @@ impl<'a> TurnLoop<'a> {
         })
     }
 
+    /// Record the canonical question that was actually presented.
+    fn requested(
+        &mut self,
+        turn: TurnId,
+        call: &PendingCall,
+        request: &crate::permit::PermissionRequest,
+    ) -> Result<(), StoreError> {
+        self.permission(
+            turn,
+            call,
+            EventKind::PermissionRequested {
+                tool: request.tool().to_string(),
+                escalation: request.why().clone(),
+            },
+        )
+    }
+
     /// §7: *every decision is appended, asked or not.*
     ///
     /// So this fires for a call the rules waved through as well as for one
-    /// they refused, and the asymmetry with the single `PermissionRequested`
-    /// above is the point rather than an oversight. §7 gives that event one
-    /// producer — `Resolution::Ask`, a question this run genuinely raised and
-    /// could not answer — while the question an audit asks of the decisions
-    /// is what the run did **without** being asked, which only the silent ones
-    /// answer.
+    /// they refused. `PermissionRequested` is appended when mode settlement
+    /// raises the canonical question, before either a human answer or the
+    /// headless unanswerable result.
     fn decided(
         &mut self,
         turn: TurnId,

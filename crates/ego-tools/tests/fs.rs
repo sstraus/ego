@@ -225,6 +225,200 @@ mod reading {
     }
 }
 
+/// `Fs::write` as a same-directory atomic and durable whole-file replacement.
+///
+/// The deterministic prepare/commit boundary is exercised beside its private
+/// implementation in `src/fs.rs`. These integration tests pin the observable
+/// filesystem contract: existing and new targets, target permissions, sibling
+/// ownership, symlink resolution, missing parents, and failure cleanup.
+mod replacing {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn mode_of(at: &Path) -> u32 {
+        fs::metadata(at).expect("it is there").permissions().mode() & 0o777
+    }
+
+    #[test]
+    fn a_replace_leaves_the_new_bytes_and_nothing_beside_them() {
+        // The scratch file is an implementation detail of atomicity and must
+        // not survive as one: a `write` that leaves `main.rs.tmp` in a source
+        // tree has added a file nobody asked for, to a directory the permit
+        // authorised one path in.
+        let tree = Tree::new();
+        let at = tree.file("src/main.rs", "old\n");
+        let os = OsFs;
+
+        os.write(&CanonPath::new(&at), b"new\n")
+            .expect("the file is writable");
+
+        assert_eq!(fs::read_to_string(&at).unwrap(), "new\n");
+        let mut left: Vec<String> = fs::read_dir(tree.path("src"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        assert_eq!(left, ["main.rs"], "the directory gained nothing");
+    }
+
+    #[test]
+    fn a_replace_does_not_disturb_a_sibling_whose_name_a_scratch_file_would_take() {
+        // The defect a deterministic `<target>.tmp` has, and the reason
+        // `StoreIo::replace_atomic` was not reused here: `a.txt.tmp` is a
+        // legitimate name a repository can contain, and the permit covers
+        // `a.txt` and nothing else. Truncating the sibling would be an effect
+        // on a path policy never saw.
+        let tree = Tree::new();
+        let target = tree.file("a.txt", "old\n");
+        let sibling = tree.file("a.txt.tmp", "somebody else's file\n");
+        let os = OsFs;
+
+        os.write(&CanonPath::new(&target), b"new\n")
+            .expect("the file is writable");
+
+        assert_eq!(fs::read_to_string(&target).unwrap(), "new\n");
+        assert_eq!(
+            fs::read_to_string(&sibling).unwrap(),
+            "somebody else's file\n",
+            "the scratch name may not be one a real file can hold"
+        );
+    }
+
+    #[test]
+    fn a_replace_keeps_the_mode_the_file_already_had() {
+        // An executable that stops being executable because it was edited is
+        // a broken build, and the model has no way to know it happened. A
+        // rename brings the *scratch* file's mode with it, so preserving this
+        // is work rather than the default.
+        let tree = Tree::new();
+        let at = tree.file("run.sh", "#!/bin/sh\necho old\n");
+        set_mode(&at, 0o755);
+        let os = OsFs;
+
+        os.write(&CanonPath::new(&at), b"#!/bin/sh\necho new\n")
+            .expect("the file is writable");
+
+        assert_eq!(mode_of(&at), 0o755, "the executable bit survived the edit");
+    }
+
+    #[test]
+    fn a_replace_of_a_canonicalized_symlink_target_keeps_the_link_and_updates_its_target() {
+        let tree = Tree::new();
+        let target = tree.file("real.txt", "old\n");
+        let link = tree.path("link.txt");
+        symlink(&target, &link);
+        let os = OsFs;
+        let resolved = os.canonicalize(&link).expect("the link resolves");
+
+        os.write(&resolved, b"new\n")
+            .expect("the canonical target is writable");
+
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the link itself is not the replacement target"
+        );
+        assert_eq!(fs::read_to_string(&target).unwrap(), "new\n");
+        assert_eq!(fs::read_to_string(&link).unwrap(), "new\n");
+    }
+
+    #[test]
+    fn a_created_file_is_readable_and_writable_by_its_owner() {
+        // Nothing to preserve, so this pins the floor rather than a
+        // preservation rule: a file the tool just created that the tool
+        // cannot read back is useless to the next call.
+        let tree = Tree::new();
+        let at = tree.path("fresh.txt");
+        let os = OsFs;
+
+        os.write(&CanonPath::new(&at), b"hello\n")
+            .expect("the parent exists");
+
+        assert_eq!(fs::read_to_string(&at).unwrap(), "hello\n");
+        assert_eq!(mode_of(&at) & 0o600, 0o600, "got {:o}", mode_of(&at));
+    }
+
+    #[test]
+    fn a_write_whose_parent_is_missing_fails_and_creates_no_directories() {
+        let tree = Tree::new();
+        let os = OsFs;
+
+        let err = os
+            .write(&CanonPath::new(tree.path("nowhere/deep/f.txt")), b"hi")
+            .expect_err("there is no directory to write into");
+
+        assert!(
+            matches!(err, FsError::NotFound { .. }),
+            "expected NotFound, got {err:?}"
+        );
+        assert!(
+            !tree.path("nowhere").exists(),
+            "a failed write invents no directories"
+        );
+    }
+
+    #[test]
+    fn a_failed_write_leaves_no_scratch_file_behind() {
+        // The cleanup path, reached by making the directory unwritable so the
+        // scratch file cannot be created in the first place. A tmp file left
+        // by every failure turns a read-only directory into one that slowly
+        // fills up.
+        let tree = Tree::new();
+        let dir = tree.dir("locked");
+        let at = dir.join("f.txt");
+        deny_all(&dir);
+        let os = OsFs;
+
+        let err = os
+            .write(&CanonPath::new(&at), b"hi")
+            .expect_err("no access");
+
+        allow_all(&dir);
+        assert!(matches!(err, FsError::Io { .. }), "got {err:?}");
+        assert_eq!(
+            fs::read_dir(&dir).unwrap().count(),
+            0,
+            "nothing was left in the directory"
+        );
+    }
+
+    #[test]
+    fn a_failed_persist_leaves_the_existing_target_and_no_scratch_file() {
+        // A regular file cannot atomically replace a directory. This reaches
+        // persistence after the scratch has been created, filled and synced,
+        // then forces rename to fail deterministically.
+        let tree = Tree::new();
+        let target = tree.dir("target");
+        tree.file("target/kept.txt", "old\n");
+        let os = OsFs;
+
+        let err = os
+            .write(&CanonPath::new(&target), b"new\n")
+            .expect_err("a file cannot replace a directory");
+
+        assert!(
+            matches!(
+                err,
+                FsError::NotAFile { .. } | FsError::NotADirectory { .. } | FsError::Io { .. }
+            ),
+            "got {err:?}"
+        );
+        assert!(target.is_dir(), "the old target remains a directory");
+        assert_eq!(
+            fs::read_to_string(target.join("kept.txt")).unwrap(),
+            "old\n"
+        );
+        let mut left: Vec<String> = fs::read_dir(&tree.root)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        assert_eq!(left, ["target"], "the failed persist left no scratch file");
+    }
+}
+
 mod walking {
     use super::*;
 

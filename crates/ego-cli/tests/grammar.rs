@@ -33,6 +33,9 @@ fn argv<const N: usize>(args: [&str; N]) -> Vec<String> {
 fn parsed<const N: usize>(args: [&str; N]) -> ego_cli::cli::Args {
     match cli::parse(argv(args)).expect("the command line parses") {
         Invocation::Run(args) | Invocation::Resume(args) => *args,
+        Invocation::Interactive(_) => {
+            panic!("that starts a session: use `converses` for it")
+        }
         Invocation::Ls(_) => panic!("`ls` takes no Args: use `listed` for it"),
         Invocation::Acp(_) => panic!("`acp` takes no Args: use `served` for it"),
         Invocation::Auth(_) => panic!("`auth` takes no Args: use the auth tests for it"),
@@ -67,6 +70,18 @@ fn served<const N: usize>(args: [&str; N]) -> ego_cli::cli::AcpArgs {
     }
 }
 
+/// The [`Args`](ego_cli::cli::Args) of an invocation that starts a session.
+///
+/// Separate from [`parsed`] on purpose: `ego hello` and `ego run hello` differ
+/// in exactly one way — who supplies the second prompt — and a helper that
+/// flattened them would let a regression swap one for the other unnoticed.
+fn converses<const N: usize>(args: [&str; N]) -> ego_cli::cli::Args {
+    match cli::parse(argv(args)).expect("the command line parses") {
+        Invocation::Interactive(args) => *args,
+        other => panic!("that does not start a session: {other:?}"),
+    }
+}
+
 fn refused<const N: usize>(args: [&str; N]) -> String {
     cli::parse(argv(args))
         .expect_err("the command line should have been refused")
@@ -84,76 +99,51 @@ fn usd() -> CurrencyCode {
 /// handling is per-subcommand and would have to decide `run` *is* the
 /// subcommand before it could apply.
 ///
-/// `ego -- run` is §4.5's own example, and its answer here is the *interactive*
-/// refusal rather than a headless run: the word after the separator is a prompt,
-/// so no subcommand was given. That is the half of the contract this build can
-/// state — and it is the load-bearing half, since the failure the rule exists
-/// to prevent is `run` being read as a command.
+/// `ego -- run` is §4.5's own example, and its answer here is a session whose
+/// first prompt is the word "run" rather than a headless run: the token after
+/// the separator is a prompt, so no subcommand was given. The whole contract is
+/// now statable — the prompt is readable rather than merely inferred from a
+/// refusal — and the load-bearing half is still that `run` is not read as a
+/// command.
 #[test]
 fn the_separator_stops_a_subcommand_name_from_being_one() {
-    assert!(refused(["--", "run"]).contains("interactive"));
+    assert_eq!(converses(["--", "run"]).prompt.as_deref(), Some("run"));
     assert_eq!(
         parsed(["run", "--", "--model"]).prompt.as_deref(),
         Some("--model")
     );
     // `run` alone cannot prove the rule: a separator check that had stopped
-    // working would still reach the interactive refusal for it by the ordinary
-    // route. A name with a *competing* meaning tells the two apart, and every
-    // name in either table has one — `fork` is refused by name and `resume` is
-    // a command that would have run, so the separator is the only thing that
-    // can be turning both into prompts.
+    // working would still start a session for it by the ordinary route. A name
+    // with a *competing* meaning tells the two apart, and every name in either
+    // table has one — `fork` is refused by name and `resume` is a command that
+    // would have run, so the separator is the only thing that can be turning
+    // both into prompts.
     for name in ["resume", "fork"] {
-        assert!(refused(["--", name]).contains("interactive"), "{name}");
+        assert_eq!(
+            converses(["--", name]).prompt.as_deref(),
+            Some(name),
+            "{name}"
+        );
     }
 }
 
-/// Without a subcommand the invocation is the interactive one, and this build
-/// says which surface is missing rather than printing a usage block.
+/// Without a subcommand the invocation is the interactive one, and it now
+/// starts instead of refusing.
 ///
-/// **The reason is asserted, not just the word "interactive", and that is a
-/// repair rather than thoroughness.** The refusal used to say the surface
-/// waited on "the permission dialog, which needs an approver that can mint a
-/// `Permit`". The `Approver` port landed; the sentence became false; this test
-/// stayed green, because it checked that a refusal *happened* and never what it
-/// claimed. A refusal is a factual assertion about the state of the build, and
-/// one nothing checks is one that decays into a confident falsehood — the same
-/// shape as an availability table nobody bound to its document.
-#[test]
-fn an_invocation_with_no_subcommand_names_the_surface_it_would_need() {
-    let refusal = refused(["hello"]);
-    assert!(refusal.contains("interactive"), "{refusal}");
-    assert!(refusal.contains("ego run"), "{refusal}");
-    assert!(
-        refusal.contains(cli::INTERACTIVE_WAITING_ON),
-        "the refusal must say what the surface waits on: {refusal}"
-    );
-}
-
-/// And the reason it gives is the one `CLI.md` §2.1 publishes.
+/// **This test has been through the decay it exists to catch, twice.** It first
+/// asserted only that a refusal *happened*; the refusal then claimed the
+/// surface waited on "an approver that can mint a `Permit`", the `Approver`
+/// port landed, the sentence became false and this stayed green. So it was
+/// changed to assert the reason character for character — and that is why it
+/// went red the moment the line editor shipped, which is the whole point.
 ///
-/// The companion to `every_unbuilt_subcommand_is_one_the_document_offers`, for
-/// the one row of that table `UNBUILT` does not cover: `ego [PROMPT]` is not a
-/// subcommand, so it has no entry there and had nothing holding it to the
-/// document. Which is exactly the row that went stale.
+/// What it guards now is the other direction: the surface starts, and the
+/// constant may no longer claim the editor is what is missing. A reason nothing
+/// checks is a reason that decays into a confident falsehood, and a reason that
+/// outlives the gap it names is the same defect wearing the opposite sign.
 #[test]
-fn the_interactive_refusal_says_what_the_document_says() {
-    let doc = include_str!("../../../CLI.md");
-    let availability = doc
-        .split("### 2.1 Availability")
-        .nth(1)
-        .expect("CLI.md has an availability section")
-        .split("## 3.")
-        .next()
-        .expect("the availability section ends");
-    // Whitespace-insensitive: the constant is a wrapped Rust string literal and
-    // the table row is one long line, so a literal `contains` would fail on the
-    // line breaks rather than on a disagreement about the reason.
-    let flatten = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
-    assert!(
-        flatten(availability).contains(&flatten(cli::INTERACTIVE_WAITING_ON)),
-        "CLI.md §2.1's `ego [PROMPT]` row and the refusal disagree about what \
-         the interactive surface waits on"
-    );
+fn an_invocation_with_no_subcommand_starts_the_surface_it_used_to_refuse() {
+    assert_eq!(converses(["hello"]).prompt.as_deref(), Some("hello"));
 }
 
 /// A flag whose subsystem does not exist is refused by name *before* clap sees
@@ -221,9 +211,7 @@ fn a_documented_subcommand_this_build_lacks_is_refused_by_its_own_name() {
 #[test]
 fn a_word_that_is_not_a_documented_command_is_still_a_prompt() {
     for word in ["hello", "resumee", "explain this failing test"] {
-        let refusal = refused([word]);
-        assert!(refusal.contains("interactive"), "{refusal}");
-        assert!(refusal.contains("no subcommand"), "{refusal}");
+        assert_eq!(converses([word]).prompt.as_deref(), Some(word), "{word}");
     }
 }
 
@@ -539,6 +527,43 @@ fn an_empty_pipe_beside_an_argument_adds_no_fence() {
     );
 }
 
+/// Interactive input has the same precedence as one-shot input, except that
+/// absence is itself a valid seed. In particular, a closed non-TTY stdin is
+/// absence rather than an explicit promise that a prompt exists.
+#[test]
+fn every_row_of_the_interactive_seed_table_lands_somewhere() {
+    let cases = [
+        (None, Stdin::Ambient, Piped(None), ""),
+        (None, Stdin::Ambient, Piped(Some("")), ""),
+        (
+            None,
+            Stdin::Ambient,
+            Piped(Some("from the pipe")),
+            "from the pipe",
+        ),
+        (Some("Ask"), Stdin::Ambient, Piped(None), "Ask"),
+        (Some("Ask"), Stdin::Ambient, Piped(Some("")), "Ask"),
+        (
+            Some("Ask"),
+            Stdin::Ambient,
+            Piped(Some("context")),
+            "Ask\n\n--- piped input ---\ncontext\n---",
+        ),
+    ];
+
+    for (argv, mode, stdin, expected) in cases {
+        assert_eq!(
+            prompt::seed(argv, mode, &stdin).expect("an interactive seed"),
+            expected
+        );
+    }
+
+    let refusal = prompt::seed(None, Stdin::IsThePrompt, &Piped(Some("")))
+        .expect_err("explicit `-` still promises a prompt")
+        .to_string();
+    assert!(refusal.contains("stdin was empty"), "{refusal}");
+}
+
 /// `-` with nothing on stdin is refused rather than run as the empty prompt:
 /// the caller said the prompt was there and it was not.
 #[test]
@@ -591,11 +616,17 @@ fn a_lone_positional_that_is_not_an_id_is_the_prompt() {
 }
 
 /// A lone positional that *is* an id is an id, not a prompt that happens to
-/// look like one — and then there is no prompt, which is the refusal below.
+/// look like one. With no prompt source, the existing interactive driver takes
+/// over that session.
 #[test]
 fn a_lone_positional_that_is_an_id_is_not_read_as_a_prompt() {
-    let refusal = refused(["resume", SOME_ID]);
-    assert!(refusal.contains("needs something to say"), "{refusal}");
+    let args = converses(["resume", SOME_ID]);
+    assert_eq!(
+        args.session,
+        SessionChoice::Resume(Some(SOME_ID.to_string()))
+    );
+    assert_eq!(args.prompt, None);
+    assert_eq!(args.stdin, Stdin::Ambient);
 }
 
 /// With a second positional the first was unambiguously meant as an id, so a
@@ -608,17 +639,14 @@ fn a_first_of_two_positionals_must_be_an_id() {
     assert!(refusal.contains("not a session id"), "{refusal}");
 }
 
-/// `resume` with nothing to say would open a session and do nothing to it.
-/// §2 spells the prompt optional because the interactive surface takes over
-/// when it is absent, and this build has no interactive surface.
+/// §2 spells both positionals optional because the interactive surface takes
+/// over the latest session when neither was given.
 #[test]
-fn resume_with_no_prompt_is_refused() {
-    let refusal = refused(["resume"]);
-    assert!(refusal.contains("needs something to say"), "{refusal}");
-    assert!(
-        !refusal.contains("interactive session"),
-        "a named command must not be answered with the interactive refusal: {refusal}"
-    );
+fn resume_with_no_prompt_enters_the_interactive_driver() {
+    let args = converses(["resume"]);
+    assert_eq!(args.session, SessionChoice::Resume(None));
+    assert_eq!(args.prompt, None);
+    assert_eq!(args.stdin, Stdin::Ambient);
 }
 
 /// `-` is the prompt from stdin here exactly as it is for `run`: one contract,
@@ -820,6 +848,27 @@ fn the_bare_help_lists_every_command_this_build_has() {
     }
 }
 
+#[test]
+fn top_help_and_readme_offer_the_same_runnable_ollama_quickstart() {
+    let help = answered(["--help"]);
+    let readme = include_str!("../../../README.md");
+
+    for fact in ["ollama/qwen3", "ollama pull qwen3"] {
+        assert!(help.contains(fact), "top help omits `{fact}`: {help}");
+        assert!(readme.contains(fact), "README omits `{fact}`");
+    }
+    for command in cli::BUILT {
+        assert!(
+            readme.contains(&format!("ego {command}")),
+            "README omits `ego {command}`"
+        );
+    }
+    assert!(
+        readme.contains("ego run") && readme.contains("--output json"),
+        "README has no headless scripting example"
+    );
+}
+
 /// And it offers nothing this build refuses.
 ///
 /// The complement, and the reason the overview reads `BUILT` rather than being
@@ -859,10 +908,10 @@ fn an_unknown_flag_is_still_refused_and_not_answered() {
 #[test]
 fn the_separator_still_stops_the_new_subcommand_names() {
     for name in ["resume", "ls", "acp"] {
-        let refusal = refused(["--", name]);
-        assert!(
-            refusal.contains("interactive"),
-            "`ego -- {name}` prompts the word: {refusal}"
+        assert_eq!(
+            converses(["--", name]).prompt.as_deref(),
+            Some(name),
+            "`ego -- {name}` must prompt the word, not run the command"
         );
     }
 }

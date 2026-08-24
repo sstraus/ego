@@ -84,6 +84,49 @@ fn a_run_that_finishes_writes_its_answer_to_stdout_and_exits_zero() {
     assert_eq!(finished.stdout.trim(), "It is done.");
 }
 
+/// The same run without the word `run` in it.
+///
+/// `ego "…"` is the conversational surface, and it is the surface `CLI.md`
+/// §2.1 describes rather than a spelling of `ego run`: the argument seeds the
+/// first turn and the loop then asks for another line. Here there is no
+/// terminal to ask, so the session ends after the turn it was seeded with —
+/// which is exactly the property that makes it testable without a pty, and the
+/// one that would otherwise leave a CI runner holding a prompt forever.
+#[test]
+fn a_session_seeded_from_argv_runs_its_turn_and_ends_when_nobody_is_there() {
+    let stub = Stub::start(Plan::default());
+    let finished = Ego::against(&stub)
+        .conversing()
+        .args(["--model", "ollama/qwen3", "--ephemeral", "Do the thing"])
+        .run();
+
+    assert_eq!(finished.code, Some(0), "stderr: {}", finished.stderr);
+    assert_eq!(finished.stdout.trim(), "It is done.");
+    assert_eq!(
+        stub.generations().len(),
+        1,
+        "the seed is a first thing to say and not a thing to say twice"
+    );
+}
+
+/// A piped prompt still seeds it.
+///
+/// `prompt::seed` only differs from `prompt::assemble` in the one row where
+/// there is nothing to ask *and* nobody to ask — every other row is the
+/// headless algorithm unchanged, and a pipe is one of them.
+#[test]
+fn a_session_can_be_seeded_from_a_pipe_the_way_a_run_is() {
+    let stub = Stub::start(Plan::default());
+    let finished = Ego::against(&stub)
+        .conversing()
+        .args(["--model", "ollama/qwen3", "--ephemeral"])
+        .stdin("Do the thing")
+        .run();
+
+    assert_eq!(finished.code, Some(0), "stderr: {}", finished.stderr);
+    assert_eq!(finished.stdout.trim(), "It is done.");
+}
+
 /// §4.1's object, field by field — and the rule §4.2 states about it: one error
 /// field. `ok` and `exit_reason` are read off the same `RunTermination`, so
 /// there is no second status to contradict the first the way Claude's
@@ -924,6 +967,60 @@ fn a_flag_rule_that_is_not_a_rule_is_refused_before_the_run() {
     );
 }
 
+/// The third instance of `--no-color`'s defect, found by auditing for it.
+///
+/// `-v` sits in the same `CLI.md` §3.1 row as `--no-color`, which spends four
+/// lines explaining that it was marked **yes** while being parsed and read by
+/// nothing. `-v` was beside it, still parsed and still read by nothing:
+/// `Args::verbose` has no reader anywhere in the workspace.
+///
+/// It is refused rather than implemented, and the distinction from `--sandbox`
+/// is worth having. `--sandbox` waits on a subsystem somebody has designed.
+/// `-v` waits on a **decision**: §4.7 says exactly what `-q` suppresses and
+/// nothing anywhere says what `-v` adds. The obvious candidate — turning up
+/// `tracing`, which the whole workspace is already instrumented for — is not
+/// obvious at all once R12 is read, because this build installs no subscriber
+/// and adding one puts a second writer on a stream `note` and `Announce`
+/// already own.
+#[test]
+fn the_flag_whose_meaning_was_never_decided_is_refused_by_name() {
+    for spelling in ["-v", "--verbose"] {
+        let finished = Ego::nowhere()
+            .args(["--model", "ollama/qwen3", "--ephemeral", spelling, "Ask"])
+            .run();
+
+        assert_eq!(
+            finished.code,
+            Some(2),
+            "`{spelling}` was accepted: {}",
+            finished.stderr
+        );
+        // The spelling the operator typed, not the canonical one: a refusal
+        // that renames the flag makes them go looking for something they did
+        // not write.
+        assert!(
+            finished.stderr.contains(spelling) && finished.stderr.contains("waiting on"),
+            "`{spelling}` must be refused by name and say what it waits on: {}",
+            finished.stderr
+        );
+    }
+}
+
+/// The control: `-q`, its neighbour in the same row, still works.
+///
+/// Without it the test above passes on a build that refuses both, and the
+/// refusal is proved to have been aimed at nothing in particular.
+#[test]
+fn the_neighbour_in_the_same_row_still_does_its_job() {
+    let stub = Stub::start(Plan::default());
+    let finished = Ego::against(&stub)
+        .args(["--model", "ollama/qwen3", "--ephemeral", "-q", "Ask"])
+        .run();
+
+    assert_eq!(finished.code, Some(0), "stderr: {}", finished.stderr);
+    assert_eq!(finished.stdout.trim(), "It is done.");
+}
+
 /// §6a: a head this build cannot enforce is refused **by name**, from a flag
 /// as from a file. Not a parse error and not a silent non-match — an
 /// `exec(...)` rule that parsed and never matched would be the same defect as
@@ -947,6 +1044,88 @@ fn a_flag_rule_this_build_cannot_enforce_is_refused_by_name() {
         "the refusal must name the head and what it waits on: {}",
         finished.stderr
     );
+}
+
+/// §6a's rule, applied to the one value that had escaped it.
+///
+/// `auto` is the mode whose entire content is "a judge model evaluates the
+/// call" (`CLI.md` §3). There is no judge in this build — `approver.rs:132`
+/// folds `Auto` into `Default` and says so — so an operator who selected it got
+/// `default` and was told nothing. That is the accepted-and-ignored flag `§4.5`
+/// forbids, wearing a value instead of a spelling: `--sandbox` is refused by
+/// name for exactly this reason while `--mode auto` was not, and the difference
+/// was that one is a flag and the other is one of its values.
+///
+/// It expires the way the `exec(...)` refusal will: when step 6 exists, this
+/// test inverts into "is accepted and consults a judge".
+#[test]
+fn the_mode_whose_judge_does_not_exist_is_refused_by_name() {
+    let finished = Ego::nowhere()
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--ephemeral",
+            "--mode",
+            "auto",
+            "Ask",
+        ])
+        .run();
+
+    assert_eq!(finished.code, Some(2), "stderr: {}", finished.stderr);
+    assert!(
+        finished.stderr.contains("auto") && finished.stderr.contains("judge"),
+        "the refusal must name the mode and what it waits on: {}",
+        finished.stderr
+    );
+}
+
+/// The same refusal from a file, because the flag is not the only way in.
+///
+/// `--mode auto` becomes `mode = "auto"` in the flags layer (`config.rs:133`),
+/// so a refusal written at the flag would leave the config file — and the
+/// profile table, and every layer — accepting a mode the flag rejects. Refusing
+/// where the layers are read is what makes one refusal cover all of them.
+#[test]
+fn the_mode_whose_judge_does_not_exist_is_refused_from_a_file_too() {
+    let ego = Ego::nowhere();
+    ego.home_file("config.toml", "mode = \"auto\"\n");
+    let finished = ego
+        .args(["--model", "ollama/qwen3", "--ephemeral", "Ask"])
+        .run();
+
+    assert_eq!(finished.code, Some(2), "stderr: {}", finished.stderr);
+    assert!(
+        finished.stderr.contains("auto") && finished.stderr.contains("judge"),
+        "the refusal must name the mode and what it waits on: {}",
+        finished.stderr
+    );
+}
+
+/// The control: the refusal is about `auto` and not about `--mode`.
+///
+/// Without it, the two tests above pass on a build that refuses every mode, and
+/// the value is proved to have done nothing.
+#[test]
+fn the_modes_whose_machinery_does_exist_are_accepted() {
+    let stub = Stub::start(Plan::default());
+    for mode in ["plan", "default", "edits", "yolo"] {
+        let finished = Ego::against(&stub)
+            .args([
+                "--model",
+                "ollama/qwen3",
+                "--ephemeral",
+                "--mode",
+                mode,
+                "Ask",
+            ])
+            .run();
+        assert_eq!(
+            finished.code,
+            Some(0),
+            "`--mode {mode}` was refused: {}",
+            finished.stderr
+        );
+    }
 }
 
 /// `--plan` and `--yolo` are spellings of `--mode`, so two of them together
@@ -1791,6 +1970,57 @@ fn a_models_file_that_does_not_parse_is_refused_by_name() {
     );
 }
 
+/// A transport this build cannot enact is refused where it is written, not
+/// accepted and then ignored.
+///
+/// `models.toml` deserializes [`ModelCapabilities`] directly
+/// (`crates/ego-cli/src/facts.rs:80`), which makes an operator's file a
+/// *producer* of every variant the enum admits. While `Transport` carried
+/// `WebSocket` and `Auto` — neither of which any code in this workspace can
+/// construct, select or read — a file could say `web_socket`, decode, and the
+/// run would still stream SSE over `Http`. That is worse than a dead variant:
+/// it is accepted configuration that misdescribes what happened, in the record
+/// ARCH §3.1 (I5) says is resolved per generation.
+///
+/// Both spellings in one test because they fail for one reason. `serde`'s
+/// unknown-variant message names the field and the variants that exist, so the
+/// assertion is on the file and the value, not on wording this test does not
+/// own.
+#[test]
+fn a_transport_no_row_can_speak_is_refused_where_it_is_written() {
+    for spelling in ["web_socket", "auto"] {
+        let stub = Stub::start(Plan::default());
+        let ego = Ego::against(&stub);
+        ego.home_file(
+            "models.toml",
+            &OPENAI_FACTS.replace(
+                r#"transport = "sse""#,
+                &format!("transport = \"{spelling}\""),
+            ),
+        );
+        let finished = ego
+            .env("OPENAI_API_KEY", "sk-test")
+            .args(["--model", "openai/gpt-5.1", "--ephemeral", "Ask"])
+            .run();
+
+        assert_eq!(
+            finished.code,
+            Some(2),
+            "`transport = \"{spelling}\"` was accepted. stderr: {}",
+            finished.stderr
+        );
+        assert!(
+            finished.stderr.contains("models.toml") && finished.stderr.contains(spelling),
+            "the refusal names neither the file nor the value: {}",
+            finished.stderr
+        );
+        assert!(
+            stub.generations().is_empty(),
+            "a model was asked to generate under a transport this build cannot speak"
+        );
+    }
+}
+
 // --- sessions ---
 
 /// A named session is created or attached, and attaching means the history is
@@ -2103,14 +2333,16 @@ fn resume_in_a_workspace_with_no_session_refuses_by_naming_it() {
     );
 }
 
-/// `resume` with nothing to say would open a session and do nothing to it, and
-/// this build has no interactive surface to hand it to.
+/// Promptless `resume` enters the interactive driver, but it still must not
+/// create a session when this workspace has none. EOF is the fail-closed trust
+/// answer in this non-TTY process; session selection then gives the same
+/// truthful catalogue refusal as every other resume spelling.
 #[test]
-fn resume_with_no_prompt_exits_two() {
+fn promptless_resume_with_no_session_still_exits_two_without_creating_one() {
     let refused = Ego::nowhere().subcommand("resume").run();
     assert_eq!(refused.code, Some(2), "stdout: {}", refused.stdout);
     assert!(
-        refused.stderr.contains("needs something to say"),
+        refused.stderr.contains("no session belongs"),
         "{}",
         refused.stderr
     );

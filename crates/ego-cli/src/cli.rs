@@ -44,6 +44,13 @@ pub enum Invocation {
     /// `ego acp` — serve the Agent Client Protocol on stdio, until the host
     /// closes it.
     Acp(Box<AcpArgs>),
+    /// `ego [PROMPT]`, or promptless `ego resume [ID]` — the interactive
+    /// session of `CLI.md` §6.
+    ///
+    /// One [`Args`] again, and for [`Invocation::Resume`]'s reason: a prompt
+    /// given on the command line is the first thing said, not a different
+    /// mode, and everything else a session needs to resolve is the same.
+    Interactive(Box<Args>),
     /// `--help` or `--version`: the question was answered, and there is
     /// nothing to run.
     ///
@@ -108,6 +115,17 @@ const UNAVAILABLE: &[Unavailable] = &[
     Unavailable {
         flags: &["--mcp"],
         waiting_on: "the MCP client",
+    },
+    Unavailable {
+        flags: &["-v", "--verbose"],
+        waiting_on: "a decision about what it shows. Every other entry here \
+                     waits on a subsystem; this one waits on a meaning. \
+                     `CLI.md` §4.7 says exactly what `-q` suppresses and \
+                     nothing says what `-v` adds — and the obvious answer, \
+                     turning up `tracing`, stops being obvious at R12: this \
+                     build installs no subscriber, and adding one puts a \
+                     second writer on the stream the marks and the \
+                     notification already own",
     },
     Unavailable {
         flags: &["--retry", "--fallback"],
@@ -202,23 +220,6 @@ pub const UNBUILT: &[(&str, &str)] = &[
     ),
 ];
 
-/// What `ego` with no subcommand is waiting on.
-///
-/// A named constant rather than a phrase inside the refusal, so the message and
-/// `CLI.md` §2.1's `ego [PROMPT]` row are held to one another by a test — the
-/// same binding [`UNBUILT`] gets, and for a reason this entry has already
-/// demonstrated. It used to say the surface was waiting on "the permission
-/// dialog, which needs an approver that can mint a `Permit`". The `Approver`
-/// port and its mode implementation landed, that sentence stopped being true,
-/// and the test on this refusal asserted only the word "interactive" — so
-/// nothing went red. A reason nothing checks is a reason that decays into a
-/// confident falsehood.
-pub const INTERACTIVE_WAITING_ON: &str = "the terminal surface itself — a \
-     line editor for the prompt, and the dialog that renders a \
-     `PermissionRequest` and reads a person's answer. The `Approver` port that dialog would \
-     occupy is built and the mode already answers through it (**M1**); what \
-     is missing is the human seat and the screen it draws on";
-
 /// A flag that was removed, and what replaced it.
 ///
 /// Empty, because nothing has been retired yet. It ships anyway, with its own
@@ -280,6 +281,18 @@ pub enum Output {
     Text,
     Json,
     Jsonl,
+}
+
+/// The spelling `--output` accepts, so a refusal can quote back something the
+/// operator can retype rather than a debug rendering they cannot.
+impl std::fmt::Display for Output {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Output::Text => "text",
+            Output::Json => "json",
+            Output::Jsonl => "jsonl",
+        })
+    }
 }
 
 /// Where a session is written, or that it is not (`CLI.md` §3, "Session").
@@ -374,7 +387,6 @@ pub struct Args {
     pub set: Vec<String>,
     pub profile: Option<String>,
     pub quiet: bool,
-    pub verbose: bool,
     pub no_color: bool,
 }
 
@@ -620,9 +632,6 @@ struct Flags {
     #[arg(short = 'q', long)]
     quiet: bool,
 
-    #[arg(short = 'v', long)]
-    verbose: bool,
-
     #[arg(long)]
     no_color: bool,
 }
@@ -714,12 +723,12 @@ fn clap_or_answer<T: Parser>(tokens: &[String]) -> Result<Parsed<T>, UsageError>
 /// `ego --help`: the command set, from the tables the refusals read.
 ///
 /// Deliberately short. It names what this build has and points at `CLI.md` §2
-/// for the rest rather than reprinting ten rows of "waiting on", because a
-/// caller who types one of those ten is told which subsystem it waits on by
+/// for the rest rather than reprinting every row of "waiting on", because a
+/// caller who types one of them is told which subsystem it waits on by
 /// the refusal itself — which is where that sentence is already maintained.
 fn overview(program: &str) -> String {
     let mut text = format!(
-        "ego {} — an agent you run from a terminal.\n\nUsage: {program} <COMMAND> [OPTIONS]\n\nCommands:\n",
+        "ego {} — an agent you run from a terminal.\n\nUsage:\n  {program} [OPTIONS] [PROMPT]\n  {program} <COMMAND> [OPTIONS]\n\nInteractive:\n  {program} -m ollama/qwen3\n\nCommands:\n",
         env!("CARGO_PKG_VERSION")
     );
     for name in BUILT {
@@ -736,7 +745,8 @@ fn overview(program: &str) -> String {
     text.push_str(&format!(
         "\n`{program} <COMMAND> --help` describes one of them. CLI.md §2 \
          documents the remaining commands; each is refused by name, with the subsystem it \
-         waits on.\n"
+         waits on. Start Ollama and run `ollama pull qwen3` before the local \
+         example above.\n"
     ));
     text
 }
@@ -790,16 +800,14 @@ pub fn parse(argv: Vec<String>) -> Result<Invocation, UsageError> {
         }
     }
 
+    // No subcommand is the interactive session of `CLI.md` §6, not an error.
+    // What is left is parsed by exactly the `run` grammar, because a session
+    // resolves a model, a workspace and a ruleset the same way a one-shot
+    // does — the difference is who supplies the prompts, and that is a
+    // difference in driver rather than in grammar.
     let subcommand = match head.first().map(String::as_str) {
-        Some(name) if BUILT.contains(&name) => name.to_string(),
-        _ => {
-            return Err(UsageError(format!(
-                "`{program}` with no subcommand starts an interactive session, \
-                 and the interactive surface is not in this build: it is \
-                 waiting on {INTERACTIVE_WAITING_ON}. Use `{program} run` for \
-                 a headless one-shot"
-            )));
-        }
+        Some(name) if BUILT.contains(&name) => Some(name.to_string()),
+        _ => None,
     };
 
     let mut tokens: Vec<String> = head;
@@ -810,7 +818,14 @@ pub fn parse(argv: Vec<String>) -> Result<Invocation, UsageError> {
     // `ego --all` has no subcommand, so it reaches the interactive refusal.
     // Every error clap renders for these structs names the command this way,
     // so it is one substitution rather than one per message.
-    tokens[0] = format!("{program} {subcommand}");
+    match &subcommand {
+        // Replaces the subcommand token, which has now been read.
+        Some(name) => tokens[0] = format!("{program} {name}"),
+        // Nothing to replace: the first token is already an argument. clap
+        // still needs an argv[0], so the program name is prepended rather
+        // than written over something a person typed.
+        None => tokens.insert(0, program.to_string()),
+    }
     // The separator and everything after it go back on the end, so clap sees
     // the prompt words as positionals it must not interpret.
     if !tail.is_empty() {
@@ -818,19 +833,30 @@ pub fn parse(argv: Vec<String>) -> Result<Invocation, UsageError> {
         tokens.extend(tail);
     }
 
-    match subcommand.as_str() {
-        "resume" => match clap_or_answer::<ResumeCommand>(&tokens)? {
+    match subcommand.as_deref() {
+        None => match clap_or_answer::<RunCommand>(&tokens)? {
             Parsed::Answered(text) => Ok(Invocation::Answered(text)),
-            Parsed::Command(parsed) => Ok(Invocation::Resume(Box::new(into_resume_args(parsed)?))),
+            Parsed::Command(parsed) => Ok(Invocation::Interactive(Box::new(into_args(parsed)?))),
         },
-        "acp" => match clap_or_answer::<AcpCommand>(&tokens)? {
+        Some("resume") => match clap_or_answer::<ResumeCommand>(&tokens)? {
+            Parsed::Answered(text) => Ok(Invocation::Answered(text)),
+            Parsed::Command(parsed) => {
+                let args = into_resume_args(parsed)?;
+                if args.prompt.is_none() && args.stdin == Stdin::Ambient {
+                    Ok(Invocation::Interactive(Box::new(args)))
+                } else {
+                    Ok(Invocation::Resume(Box::new(args)))
+                }
+            }
+        },
+        Some("acp") => match clap_or_answer::<AcpCommand>(&tokens)? {
             Parsed::Answered(text) => Ok(Invocation::Answered(text)),
             Parsed::Command(parsed) => Ok(Invocation::Acp(Box::new(AcpArgs {
                 session_dir: parsed.places.session_dir,
                 directory: parsed.places.directory,
             }))),
         },
-        "ls" => match clap_or_answer::<LsCommand>(&tokens)? {
+        Some("ls") => match clap_or_answer::<LsCommand>(&tokens)? {
             Parsed::Answered(text) => Ok(Invocation::Answered(text)),
             Parsed::Command(parsed) => Ok(Invocation::Ls(Box::new(LsArgs {
                 all: parsed.all,
@@ -839,7 +865,7 @@ pub fn parse(argv: Vec<String>) -> Result<Invocation, UsageError> {
                 output: parsed.common.output,
             }))),
         },
-        "auth" => match clap_or_answer::<AuthCommand>(&tokens)? {
+        Some("auth") => match clap_or_answer::<AuthCommand>(&tokens)? {
             Parsed::Answered(text) => Ok(Invocation::Answered(text)),
             Parsed::Command(parsed) => {
                 let (action, provider, device) = match parsed.action {
@@ -903,22 +929,7 @@ fn into_resume_args(command: ResumeCommand) -> Result<Args, UsageError> {
         )));
     }
 
-    // §2's second positional is what a resumed session is *for*. Without it
-    // there is nothing to say to the session, and this build has no
-    // interactive surface to hand it to — so opening one and stopping would be
-    // work with no product.
-    let Some(prompt) = prompt else {
-        return Err(UsageError(
-            "`resume` needs something to say to the session: pass a prompt, or \
-             `-` to read one from stdin"
-                .to_string(),
-        ));
-    };
-
-    let mut args = into_args(RunCommand {
-        prompt: Some(prompt),
-        flags,
-    })?;
+    let mut args = into_args(RunCommand { prompt, flags })?;
     args.session = SessionChoice::Resume(id);
     Ok(args)
 }
@@ -998,7 +1009,6 @@ fn into_args(command: RunCommand) -> Result<Args, UsageError> {
         set: flags.set,
         profile: flags.profile,
         quiet: flags.quiet,
-        verbose: flags.verbose,
         no_color: flags.no_color,
     })
 }

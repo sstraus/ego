@@ -6,6 +6,7 @@
 //! `ToolRunner` port: M1 has to append a permission request *between*
 //! authorising and executing, and a single future has no such between.
 
+use serde_json::Value;
 use std::sync::Arc;
 
 use crate::generator::types::ToolDescriptor as GenToolDescriptor;
@@ -75,14 +76,30 @@ impl<'a> Tools<'a> {
             .ok_or_else(|| format!("there is no tool named {name}"))?;
         let params = serde_json::from_str(args)
             .map_err(|err| format!("{name} was called with arguments that are not JSON: {err}"))?;
+        let call = self.prepare_params(tool.as_ref(), params)?;
+        Ok((tool.as_ref(), call))
+    }
+
+    /// Prepare raw parameters supplied by the human amendment path.
+    ///
+    /// The tool is fixed to the one that raised the question. Only its
+    /// parameters may change, and they cross the same typed preparation and
+    /// canonicalisation boundary as model-supplied parameters.
+    pub fn prepare_amendment(
+        &self,
+        tool: &'a dyn Tool,
+        params: Value,
+    ) -> Result<PreparedCall, String> {
+        self.prepare_params(tool, params)
+    }
+
+    fn prepare_params(&self, tool: &'a dyn Tool, params: Value) -> Result<PreparedCall, String> {
         let ctx = PrepareCtx {
             cwd: self.cwd.clone(),
             resolver: self.fs,
         };
-        let call = tool
-            .prepare(params, &ctx)
-            .map_err(|err: ToolError| err.to_string())?;
-        Ok((tool.as_ref(), call))
+        tool.prepare(params, &ctx)
+            .map_err(|err: ToolError| err.to_string())
     }
 
     /// Stage two: ask policy what this call may do.
@@ -115,6 +132,13 @@ impl<'a> Tools<'a> {
     /// nothing here to pass and nothing to substitute.
     pub async fn settle(&self, pending: Pending) -> Resolution {
         self.policy.settle(pending).await
+    }
+
+    /// Consult the final human party after the loop has made the request
+    /// durable. Keeping this separate from mode settlement is the journal's
+    /// crash boundary while a person is deciding.
+    pub async fn decide(&self, pending: Pending) -> Resolution {
+        self.policy.decide(pending).await
     }
 
     /// Stage three: run it, under the grant policy issued and through the

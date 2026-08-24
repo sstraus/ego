@@ -10,14 +10,15 @@
 //! `mint`, and the only way to reach *that* is
 //! [`PolicyEngine::classify`], which derives the scope from the call.
 
-use std::fmt;
+use std::fmt::{self, Write as _};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use super::approver::{Approver, ModeApprover, Verdict};
+use super::approver::{Approver, HumanApprover, ModeApprover, PermissionDecision, Verdict};
 use super::authority::{Authority, RuleAuthority};
 use super::path::CanonPath;
-use super::prepared_call::{Op, OpName, PreparedCall};
+use super::prepared_call::{Change, Op, OpName, PreparedCall};
 use super::rule::RuleId;
 use super::scope::Scope;
 use crate::config::{Mode, OriginSet, Ruleset, Source, SourcedRule};
@@ -736,7 +737,89 @@ impl PermissionRequest {
 
 impl fmt::Display for PermissionRequest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} needs permission: {}", self.tool, self.why)
+        let why = self.why.to_string();
+        write!(
+            f,
+            "{} needs permission: {}",
+            TerminalSafe(&self.tool),
+            TerminalSafe(&why)
+        )?;
+        for op in &self.ops {
+            match op {
+                Op::Read { path } => {
+                    write!(f, "\n- read {}", TerminalSafe(&path.to_string()))?;
+                }
+                Op::List { root, pattern } => {
+                    write!(
+                        f,
+                        "\n- list {} matching {}",
+                        TerminalSafe(&root.to_string()),
+                        TerminalSafe(pattern)
+                    )?;
+                }
+                Op::Search { root, query } => {
+                    write!(
+                        f,
+                        "\n- search {} for {}",
+                        TerminalSafe(&root.to_string()),
+                        TerminalSafe(query)
+                    )?;
+                }
+                Op::Write { path, change } => {
+                    write!(f, "\n- write {}", TerminalSafe(&path.to_string()))?;
+                    match change {
+                        Change::Whole(content) => write!(
+                            f,
+                            "\n  whole content ({} bytes): {}",
+                            content.len(),
+                            EscapedBytes(content)
+                        )?,
+                        Change::Replace {
+                            old_string,
+                            new_string,
+                        } => write!(
+                            f,
+                            "\n  replace old text: {}\n  with new text: {}\n  final content depends on the file at execution time",
+                            TerminalSafe(old_string),
+                            TerminalSafe(new_string)
+                        )?,
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Text shown on a terminal with every control represented, never executed.
+struct TerminalSafe<'a>(&'a str);
+
+impl fmt::Display for TerminalSafe<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for character in self.0.chars() {
+            if character.is_control() {
+                for escaped in character.escape_default() {
+                    f.write_char(escaped)?;
+                }
+            } else {
+                f.write_char(character)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// A lossless byte rendering for proposed whole-file content.
+struct EscapedBytes<'a>(&'a [u8]);
+
+impl fmt::Display for EscapedBytes<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for byte in self.0 {
+            for escaped in std::ascii::escape_default(*byte) {
+                f.write_char(char::from(escaped))?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -747,19 +830,10 @@ impl fmt::Display for PermissionRequest {
 /// into a [`Permit`] — [`PolicyEngine::classify`] remains the only path to
 /// one, so §5's separation is enforced by visibility rather than by a comment.
 ///
-/// **It does not carry the computed `Scope`, and §5 says it should.** With no
-/// approver in this build there is no `grant`, so a carried scope would be a
-/// field nothing reads. The scope is instead derived by one private function
-/// that `classify` calls and that `grant` will call, which keeps the single
-/// definition §5 wanted.
-///
-/// That is not a smaller version of §5's property. It is a larger one, and the
-/// difference is what each rests on: **a private field is hidden from the
-/// loop; an unreachable function cannot be named by it.** Hiding is a fact
-/// about visibility, which one `pub(crate)` erases. Unreachability is a fact
-/// about the call graph. The field version would also need a `dead_code`
-/// allow until `grant` exists, and an `allow` outlives the reason somebody
-/// wrote it.
+/// It deliberately carries no computed [`Scope`]. A mode or human approval
+/// decides whether the call proceeds; the engine derives the scope again from
+/// the still-sealed call when it mints. Thus neither the loop nor either party
+/// can nominate or widen the authority being approved.
 #[derive(Debug)]
 pub struct Pending {
     call: PreparedCall,
@@ -780,35 +854,39 @@ impl Pending {
 
 /// What [`PolicyEngine::classify`] concluded.
 ///
-/// Two arms because "the answer is no" and "nobody here can answer" are
-/// different facts. Both end a headless run at exit 3 today
-/// (`CLI.md` §4.4), and they say different things while doing it — which is
-/// the whole of what an operator has to go on.
+/// Two arms because "the answer is settled by rules" and "the next policy
+/// party must be consulted" are different facts.
 #[derive(Debug)]
 pub enum Classification {
     /// Decided, one way or the other, without asking anybody.
     Settled(Result<Authorized, PolicyDenied>),
-    /// Not ours to answer.
+    /// Continue through the ordered policy parties.
     Ask(Pending),
 }
 
-/// What [`PolicyEngine::settle`] concluded after consulting a party.
+/// What a [`PolicyEngine`] concluded after consulting one policy party.
 ///
-/// `Ask` again rather than a third "unanswerable" arm: the question is not
-/// finished, it is only finished *with this party*. §6 orders three of them
-/// and the engine — never the loop — decides who is next, because the engine
-/// is the only thing that may construct a [`Pending`] at all. With one party
-/// in this build, "next" is nobody, and a loop that gets `Ask` back from
-/// `settle` has exhausted the order: `CLI.md` §4.4, exit 3.
-///
-/// §5's `Reclassify` arm is not declared. It is the human's `Amend`, there is
-/// no human, and an arm nothing produces reads as a working feature.
+/// `Ask` means the current party escalated. The turn records that question
+/// before it asks the human seat, if one exists. `Reclassify` carries raw
+/// params and never a scope or prepared call.
 #[derive(Debug)]
 pub enum Resolution {
     /// Decided. The party allowed it, or refused it.
     Settled(Result<Authorized, PolicyDenied>),
     /// Still open, with the reason this party gave for not answering.
     Ask(Pending),
+    /// A human answered Allow or Deny. The request travels with the result so
+    /// later audit facts identify the exact canonical question answered.
+    HumanSettled {
+        request: PermissionRequest,
+        result: Result<Authorized, PolicyDenied>,
+    },
+    /// A human replaced the tool's raw parameters. No prepared call and no
+    /// scope crosses this seam: the turn must prepare and classify again.
+    Reclassify {
+        request: PermissionRequest,
+        params: serde_json::Value,
+    },
 }
 
 /// The sole minter of [`Permit`]s (`ARCHITECTURE.md` §3.2, §3.4).
@@ -946,6 +1024,9 @@ pub struct PolicyEngine {
     /// that takes one: a port that let its holder pick the implementation
     /// would have moved the mode out of the config and into the caller.
     approver: Box<dyn Approver>,
+    /// The final party, absent in headless runs. It is separate from
+    /// `approver` so no caller can replace the mode derived from config.
+    human: Option<Arc<dyn HumanApprover>>,
 }
 
 impl PolicyEngine {
@@ -958,6 +1039,24 @@ impl PolicyEngine {
             allow: permissions.allow,
             deny: permissions.deny,
             approver: Box::new(ModeApprover::new(mode)),
+            human: None,
+        }
+    }
+
+    /// A policy with a human final party after the mode ceiling.
+    ///
+    /// Named construction rather than a setter or generic approver list: the
+    /// order is policy, not host preference, and the mode remains the one
+    /// resolved from config.
+    pub fn with_human(
+        workspace: CanonPath,
+        mode: Mode,
+        permissions: Ruleset,
+        human: Arc<dyn HumanApprover>,
+    ) -> Self {
+        Self {
+            human: Some(human),
+            ..Self::new(workspace, mode, permissions)
         }
     }
 
@@ -1024,8 +1123,8 @@ impl PolicyEngine {
     /// approver derived from the mode had exactly one reachable answer. The
     /// port existed and the seat had no occupant.
     ///
-    /// Steps 6 and 7 — the judge and the human — still have no producer, so
-    /// the order ends by returning the question rather than answering it.
+    /// Step 6 (the judge) has no producer. Step 7 (the human) is optional, so
+    /// a headless engine still returns the question rather than answering it.
     /// **Two passes, and the order between them is the point.** Every
     /// operation is put through steps 0 to 2 before any of them is allowed to
     /// raise a question, because "first match wins, top down" is a claim about
@@ -1070,16 +1169,15 @@ impl PolicyEngine {
 
     /// Put the question to the next party in §6's order and act on the answer.
     ///
-    /// The one `await` in `permit`. What this module still owns, and does not
-    /// delegate, is *which* party is consulted and what their answer means: a
-    /// verdict is a party's opinion, and only this method turns one into a
+    /// The mode-party await. What this module still owns, and does not
+    /// delegate, is *which* party is consulted and what its answer means: a
+    /// verdict is a party's opinion, and only this engine turns one into a
     /// [`Permit`] — from a scope derived, as always, from the call.
     ///
-    /// `Escalate` hands the question back rather than ending it, carrying the
-    /// reason this party gave. In this build there is nobody after the mode,
-    /// so a caller that receives [`Resolution::Ask`] has exhausted the order
-    /// and `CLI.md` §4.4 applies. When the judge and the human arrive they are
-    /// consulted here, and no caller changes.
+    /// `Escalate` returns the mode's question. The turn must durably record it
+    /// before consulting the human decision step; keeping that append between
+    /// the two parties means a crash while the human is thinking cannot erase
+    /// the fact that the request was raised.
     pub async fn settle(&self, pending: Pending) -> Resolution {
         match self.approver.approve(&pending).await {
             Verdict::Allow { by } => {
@@ -1094,6 +1192,41 @@ impl PolicyEngine {
                 by,
             })),
             Verdict::Escalate { why } => Resolution::Ask(self.pending(pending.call, why)),
+        }
+    }
+
+    /// Ask the terminal party after the turn has recorded the request.
+    ///
+    /// Crate-private because only the turn loop owns the durable ordering
+    /// boundary. A headless engine preserves the pending question unchanged.
+    pub(crate) async fn decide(&self, pending: Pending) -> Resolution {
+        let Some(human) = &self.human else {
+            return Resolution::Ask(pending);
+        };
+        let request = pending.request().clone();
+        match human.decide(&request).await {
+            PermissionDecision::Allow => {
+                let call = pending.call;
+                let permit = self.mint(scope_of(&call));
+                Resolution::HumanSettled {
+                    request,
+                    result: Ok(Authorized {
+                        call,
+                        permit,
+                        by: Authority::Party,
+                    }),
+                }
+            }
+            PermissionDecision::Deny => Resolution::HumanSettled {
+                request,
+                result: Err(PolicyDenied::Refused {
+                    tool: pending.call.tool,
+                    op: pending.ask.why.op(),
+                    path: pending.ask.why.path().clone(),
+                    by: Authority::Party,
+                }),
+            },
+            PermissionDecision::Amend { params } => Resolution::Reclassify { request, params },
         }
     }
 
@@ -1240,7 +1373,7 @@ mod tests {
     use super::*;
     use crate::permit::fake::{FakeFs, FakeWriteTool};
     use crate::permit::{
-        Fs, GuardedFs, GuardedIo, IoDenied, Op, PrepareCtx, Tool, ToolError, Typed,
+        Change, Fs, GuardedFs, GuardedIo, IoDenied, Op, PrepareCtx, Tool, ToolError, Typed,
     };
 
     fn prepare_ctx<'a>(fs: &'a FakeFs) -> PrepareCtx<'a> {
@@ -1291,9 +1424,80 @@ mod tests {
             tool: "edit".to_string(),
             ops: vec![Op::Write {
                 path: CanonPath::new(path),
-                contents: b"whatever".to_vec(),
+                change: Change::Whole(b"whatever".to_vec()),
             }],
         }
+    }
+
+    #[test]
+    fn permission_request_renders_whole_content_exactly_and_safely() {
+        let request = PermissionRequest {
+            tool: "fake\u{1b}write".to_string(),
+            ops: vec![Op::Write {
+                path: CanonPath::new("/ws/out.txt"),
+                change: Change::Whole(b"hello\n\x1b".to_vec()),
+            }],
+            why: Escalation::ModeAsks {
+                mode: Mode::Default,
+                op: OpName::Write,
+                path: CanonPath::new("/ws/out.txt"),
+            },
+        };
+
+        assert_eq!(
+            request.to_string(),
+            concat!(
+                "fake\\u{1b}write needs permission: default mode does not approve write ",
+                "/ws/out.txt on its own\n",
+                "- write /ws/out.txt\n",
+                "  whole content (7 bytes): hello\\n\\x1b",
+            )
+        );
+    }
+
+    #[test]
+    fn permission_request_renders_every_operation_and_conditional_replacement_exactly() {
+        let request = PermissionRequest {
+            tool: "tools".to_string(),
+            ops: vec![
+                Op::Read {
+                    path: CanonPath::new("/ws/read.txt"),
+                },
+                Op::List {
+                    root: CanonPath::new("/ws/src"),
+                    pattern: "*.rs\n".to_string(),
+                },
+                Op::Search {
+                    root: CanonPath::new("/ws/src"),
+                    query: "unsafe\u{1b}".to_string(),
+                },
+                Op::Write {
+                    path: CanonPath::new("/ws/edit.txt"),
+                    change: Change::Replace {
+                        old_string: "old\n".to_string(),
+                        new_string: "new\t".to_string(),
+                    },
+                },
+            ],
+            why: Escalation::NoRuleCovers {
+                op: OpName::Read,
+                path: CanonPath::new("/ws/read.txt"),
+            },
+        };
+
+        assert_eq!(
+            request.to_string(),
+            concat!(
+                "tools needs permission: no rule covers read /ws/read.txt\n",
+                "- read /ws/read.txt\n",
+                "- list /ws/src matching *.rs\\n\n",
+                "- search /ws/src for unsafe\\u{1b}\n",
+                "- write /ws/edit.txt\n",
+                "  replace old text: old\\n\n",
+                "  with new text: new\\t\n",
+                "  final content depends on the file at execution time",
+            )
+        );
     }
 
     #[test]
@@ -1426,7 +1630,7 @@ mod tests {
             call.ops,
             vec![Op::Write {
                 path: CanonPath::new("/ws/allowed/file.txt"),
-                contents: b"hi".to_vec(),
+                change: Change::Whole(b"hi".to_vec()),
             }]
         );
 

@@ -29,8 +29,8 @@
 //! All seven heads parse, canonicalise and take an ID, because the grammar is
 //! published as one thing — `ARCHITECTURE.md:252` makes that a gate. Only
 //! four of them can currently *match*: `read`, `write`, `list` and `search`
-//! name operations that exist. `exec`, `net` and `tool` name operations no
-//! tool in this workspace produces yet.
+//! name operations some tool in this workspace produces. `exec`, `net` and
+//! `tool` name operations no tool produces yet.
 //!
 //! A rule with one of those three heads is well-formed, has a stable ID and
 //! renders in `rules ls` — and [`Rule::load`] **refuses it**, by name, saying
