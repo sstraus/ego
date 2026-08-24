@@ -19,25 +19,34 @@ State is a **reduction over an append-only event log** (pi's reducer,
 `docs/02-pi.md` §3, generalised):
 
 ```
-UserPrompt | AssistantDelta | AssistantMessage | ReasoningDelta |
-ToolCallStarted | ToolCallDelta | ToolCallCompleted | PermissionRequested |
+PromptQueued | PromptDeliveryExpedited | UserPrompt | AssistantDelta |
+AssistantMessage | ReasoningDelta | ReasoningState | ToolCallStarted |
+ToolCallDelta | ToolCallCompleted | PermissionRequested | PermissionAmended |
 PermissionDecided | GenerationStarted | AttemptSettled | UsageUpdated |
 UsageCorrected | ContextWindowUpdated | TurnCompleted | Compacted | Forked |
-HookFired | SubagentSpawned | SubagentReturned | Error
+CompactionSeeded | HookFired | SubagentSpawned | SubagentReturned | Error
 ```
 
-Twenty-one, and this list is exhaustive by contract — `EventKind`
-(`crates/ego-core/src/event/domain.rs`) is the source and the two are compared
-by hand at each milestone close. `GenerationStarted`, `AttemptSettled` and
-`UsageCorrected` were added by the attempt-lifecycle and metering work and were
-missing here until 2026-08-21; the list had said eighteen while the enum had
-twenty-one.
+Twenty-six in the final M1 schema, and this list is exhaustive by contract.
+The current `EventKind` (`crates/ego-core/src/event/domain.rs`) implements the
+other twenty-three; regression case adds the two queue-lifecycle variants and the
+optional `queued_prompt` consumption correlation on `UserPrompt`, while story
+regression_case adds the clean-session compaction seed. The enum and this list are
+compared by hand at each milestone close.
 
 - `SessionState::apply(&mut self, &Event)` is a **pure, sync** function.
-- Compaction and forking are events *in* the log, not operations *on* it.
+- Legacy in-place compaction, clean-session compaction lineage, and forking are
+  events *in* logs, not operations *on* them.
 - Every event carries a monotonic sequence number, stable event/turn/item IDs,
   a causal parent ID, a timestamp and a producer identity — required the
   moment hooks, subagents and concurrent tool calls exist.
+- Busy input is durable state, not terminal state. `PromptQueued { id, text }`
+  records acceptance; `PromptDeliveryExpedited { through }` records monotonic
+  `Esc` intent through one FIFO tail; and `UserPrompt.queued_prompt` is the sole
+  consumption record. Recovery replays queued IDs without that correlation and
+  preserves expedited intent, exactly once. FIFO comes from event sequence.
+  Acceptance, expedited intent, and correlated consumption each reach stable
+  storage before their UI, interruption, or next-request effect is exposed.
 
 **One semantic model, four serialisations** (R3 of the review: schema
 *identity* across surfaces does not survive contact with compatibility):
@@ -56,12 +65,16 @@ independently.
 
 ## 2. Crate layout (resolves §4.1)
 
-Six crates in one workspace. Dependency arrows point down only.
+The final layout has six crates in one workspace. The current workspace has
+the five implemented crates; M2 adds `ego-mcp` when its real client/server
+surface exists. Dependency arrows point down only. The diagram is the target
+layout, not authority to scaffold an empty sixth crate.
 
 ```
 ego          (bin)  CLI: interactive line UI, headless, subcommands, config
 ├── ego-acp         ACP server on agent-client-protocol 2.0
-├── ego-mcp         MCP client + `ego mcp-server` on rmcp 3.x
+├── ego-mcp         current MCP client + `ego mcp-server` on a release-gated
+│                   rmcp 3.x
 ├── ego-tools       builtin tools + execution backends (the OS lives here)
 ├── ego-ai          provider layer: wire formats, provider table, usage,
 │                   delivery certainty, model catalogues
@@ -88,9 +101,12 @@ Rules:
   transport trait for testability (§3.1).
 - `ego-tools` is where real I/O lives: filesystem tools, process spawning,
   sandbox backends. It implements `ego-core`'s traits.
-- `ego-mcp` adapts rmcp tools/resources/prompts into `ego-core::Tool` objects,
-  and owns what rmcp does not provide (`docs/04-crates.md` §1): access policy,
-  startup admission, health tracking, input validation posture.
+- `ego-mcp` adapts current rmcp tools/resources/prompts into
+  `ego-core::Tool` objects and owns what rmcp does not provide
+  (`docs/04-crates.md` §1): immutable admitted snapshots, access policy,
+  startup/reload admission, truthful health, input validation posture, and
+  foreign-domain egress integration. It selects MCP 2026-07-28 explicitly and
+  enters the workspace only after the accepted MCP ADR's SDK release gate.
 - `ego-acp` is a thin projection: core events → `session/update`, ACP requests
   → core operations. Target: same order of magnitude as pi's `protocol` +
   `server` (~3.5k lines TS), not fx's hand-rolled 8 files.
@@ -368,6 +384,13 @@ same registries" — no redesign, so deferring costs nothing.
     lease              # the writer lease: PID + heartbeat, advisory-locked
 ```
 
+Prompted compaction never rewrites one of these directories. Its accounted,
+tool-less generation is journalled in the source session; success creates a new
+directory whose first semantic event records the source ID, source sequence,
+prompt revision, and generated context checkpoint. The checkpoint is the sole
+conversation artifact carried from the source. The source log remains
+append-only and independently resumable.
+
 Rationale: the state is *already* an event log (§1) — an append-only JSONL file
 is its natural serialisation, portable and greppable, and replay is just
 re-reading it. But JSONL is a **format choice, not a transaction model** (R4):
@@ -399,19 +422,31 @@ ever slow, the fix is an index file. fx's manifest-acceptance rules (recent +
 
 ## 6. Terminal approach (resolves §4.6)
 
-**Line-oriented renderer + `reedline`. No ratatui in v1.** fx's bet, and the
-right one for a harness whose identity is scripting: output that scrolls like a
-shell, survives copy-paste, works over ssh and in CI logs. `reedline` provides
-history, completion and multiline editing for the interactive prompt. The
-renderer is one `Host` implementation; if a full-screen front-end is ever
-wanted, it is a new `Host` impl, not a core change — and tuicommander over ACP
-already *is* the GUI (`SPEC.md` §3).
+**Primary-buffer line renderer + `reedline`. No alternate screen, mouse
+capture, or ratatui in v1.** The terminal owns transcript scrolling, selection,
+and copy. Output therefore behaves like shell output, survives copy-paste, and
+works over ssh and in CI logs. Full capability is not traded for that
+simplicity: the interactive surface keeps a live multiline composer, native
+status line, keyboard menus, questions, model selection, a local LIFO draft
+stash, durable FIFO busy-turn steering, and an ordinary FIFO only for
+non-steerable or idle-transition cases.
 
-The renderer ships with an **ownership contract** (R12): exactly one component
-writes to the terminal; streamed deltas are coalesced into atomic render
-batches; the reedline prompt suspends and resumes rendering; every interactive
-state has a plain non-TTY representation; golden-transcript tests at narrow
-widths and under interleaved events.
+The interactive `Host` owns the terminal as one surface. Reedline's external
+printer accepts the renderer's bounded output batches while the editor remains
+live, then repaints the exact composer and ephemeral chrome below the appended
+transcript. The renderer never writes around it. Headless and protocol hosts
+continue to consume the same events without terminal chrome. A future
+full-screen front-end would still be a different `Host`, not a core change —
+and tuicommander over ACP already *is* the GUI (`SPEC.md` §3).
+
+The surface ships with an **ownership contract** (R12): exactly one component
+writes terminal bytes; transcript output is append-only; status, menus, and the
+composer are the only ephemeral rows; every redraw preserves the in-progress
+buffer; input and rendered events cross bounded channels with explicit
+backpressure; every interactive state has a plain non-TTY representation; and
+golden-transcript tests cover narrow widths, resize, wide graphemes, and
+interleaved input/output. `docs/decisions/2026-08-24-the-surface-keeps-the-seat-live.md`
+supersedes the earlier sequential-seat implementation decision.
 
 ## 7. ACP integration (resolves §4.7)
 
@@ -443,11 +478,11 @@ section) are M0a's exit criteria.
 | --- | --- | --- |
 | **M0a — contracts** | The four event representations with golden fixtures (§1); stable ID/ordering scheme; single-writer durable store passing fault-injection; crate DAG with `Generator` port and fakes for `Generator`/`GuardedIo`/`Host` (also the eval seam, U3); `ModelCapabilities` record; strict trusted-config loading; `tracing` spans throughout. | The seven docs/08 gates pass; `cargo test` proves replay, projection and crash-recovery on synthetic logs. |
 | **M0b — vertical slice** | `ego-ai`: openai-completions (**anthropic-messages deferred** — plan Open Question 4, answered 2026-08-21: one wire format proves the seam, and no Anthropic credential exists to verify a second end to end), streaming, usage, delivery certainty. Loop + reducer + resume. **Read-only tools** (read, grep, glob) via `GuardedIo`. AGENTS.md discovery (trust-gated, I2). Line UI + headless `--output json/jsonl` + exit codes. **ACP spike**: one prompt + updates driven from a host. | `ego "explain this failing test"` interactively; `ego run --output json … \| jq` in a script; kill → `ego resume`; the same session driven over ACP. |
-| **M1 — safety, writes, judge** | prepare/permit/execute in anger: write/edit/bash tools; permission grammar + canonical AST + stable-ID rules + `rules explain`; modes incl. `auto` (judge model) and plan; landlock + Seatbelt backends with per-operation capability accounting; egress policy at all four exits; truncation; **minimum viable compaction**; narrow taint (ask-only). | Fix-the-failing-test end to end: near-zero prompts under workspace sandbox with the judge on; same task on the null backend shows escalation; `--offline` verified at every exit. |
-| **M2 — MCP, both directions** | rmcp client: stdio + streamable HTTP, OAuth, tools/resources/prompts, elicitation; access policy, startup admission, health; foreign tools enter the same permit model as remote trust domains. **`ego mcp-server`** (I1): run/continue/cancel/status tools, sanitized resources. `ego mcp add/ls/rm/login`. | A real MCP server's tools run under the permission engine; Claude Code delegates a scoped run to ego over MCP. |
+| **M1 — safety, writes, judge, interactive control** | prepare/permit/execute in anger: write/edit/bash tools; permission grammar + canonical AST + stable-ID rules + `rules explain`; modes incl. `auto` (judge model) and plan; landlock + Seatbelt backends with per-operation capability accounting; egress policy at all four exits; truncation; **minimum viable compaction**; narrow taint (ask-only). Complete the final keyboard interaction contract directly: live composer over streaming output, status line, slash/action menus, model picker, `AskQuestion`, draft stash, durable pending steers, and phase-safe interruption. Bring forward the shared current-model catalogue: supplied hosted facts plus authoritative provider/local discovery feed resolution, `ego models`, `/model`, and `Option-P` through one projection. | Fix-the-failing-test end to end while the operator edits and queues multiple follow-ups: near-zero prompts under workspace sandbox with the judge on; `ego models --json` and the picker expose the same selectable rows; model and effort change from `Option-P`; busy input is delivered FIFO after the complete durable sibling tool batch, a no-tool final forces its follow-up, and `Esc` remains truthful through every active phase; same task on the null backend shows escalation; `--offline` verified at every exit. |
+| **M2 — MCP, both directions** | MCP 2026-07-28 only through a release-gated rmcp 3.x: stdio + stateless Streamable HTTP, explicit discovery/per-request metadata/standard headers, current CIMD OAuth, tools/resources/prompts, cache hints, tool-list subscriptions, and MRTR; immutable admitted snapshots refresh atomically from add/rm/login/reload/config/TTL/list changes; failed refresh retains last-good and truthful health; foreign and Speakeasy dynamic meta-tools enter the same permit and guarded-egress model. **`ego mcp-server`** (I1): stdio run/continue/cancel/status tools and sanitized resources. | A current static and dynamic Speakeasy server reloads without changing an active generation, every inner operation crosses permission/egress, a failed refresh retains last-good, and Claude Code delegates a scoped run to εgo; exact-Luna proves cancellation before and after the first HTTP event on a released SDK. |
 | **M3 — sessions in full** | Full compaction (intent, latest results, blockers, verification state survive), fork, replay/export (`--sanitize`), catalogue polish, budgets incl. judge budget line, run-manifest completeness, `[profile.ci]` contract (U1). | `--budget`, `ego fork`, compaction across a context-overflow task; a CI job consumes the sanitized run bundle. |
-| **M4 — subagents, skills, hooks** | Sub-loops with context isolation and RunController IDs/leases (U2); skills with triggers; shell + in-process hooks; executable agent files. | A hook blocks a forbidden commit; an executable `.ego` file runs as a shebang script; parallel subagents hold distinct leases. |
-| **M5 — ACP full + remaining shapes** | `ego-acp` complete (v1+v2, negotiated capabilities), tuicommander + Zed as hosts; openai-responses + google-generative-ai shapes; generated catalogues. | ego driven from Zed and tuicommander with session list, model switch, live cost. |
+| **M4 — subagents, skills, hooks** | Sub-loops with context isolation and RunController IDs/leases (U2); strict Agent Skills/Claude-compatible `SKILL.md` frontmatter, system/user/project admission, progressive disclosure, typed user/model invocation, `/skills` rescan, durable digest/rendered content, and fail-closed fork/hook fields; shell + in-process hooks remain their separately owned lifecycle; executable agent files remain top-level run inputs. | A model sees only admitted skill descriptors, invokes one through the typed Skill operation, and cannot widen tools/sandbox/offline/budget; user-only/model-only visibility, reload failure, resume/compaction, and fork ownership are proven; a hook blocks a forbidden commit, an executable `.ego` file runs as a shebang script, and parallel subagents hold distinct leases. |
+| **M5 — ACP full + remaining shapes** | `ego-acp` complete (v1+v2, negotiated capabilities), tuicommander + Zed as hosts; openai-responses + google-generative-ai shapes. New shapes register their final resolution sources in M1's existing model catalogue rather than introducing another catalogue. | ego driven from Zed and tuicommander with session list, model switch, live cost. |
 
 Order rationale: contracts before code that would freeze them; safety before
 the first write lands in anger; permissions before MCP because the permit

@@ -26,16 +26,19 @@ document remains proposed.
 ```
 ego [PROMPT]                  interactive session (prompt submitted if given)
 ego run [PROMPT]              headless one-shot; PROMPT from argv, -f FILE, or stdin
-ego resume [ID] [PROMPT]      continue a session; no ID = latest in this workspace
+ego resume [ID] [PROMPT]      continue a session; no ID = latest in this workspace;
+                              --answer QUESTION_ID=JSON answers pending input
 ego ls                        list sessions (this workspace; --all for every one)
 ego fork <ID>                 branch a session
 ego export <ID>               render a session (--format md|json|jsonl)
-ego mcp    add|rm|ls|login    MCP server management
+ego mcp    add|rm|ls|login|reload
+                              current MCP server management; every variation
+                              rebuilds and admits a complete candidate snapshot
 ego mcp-server                serve ego AS an MCP server on stdio: scoped
                               run/continue/cancel/status tools (delegation
                               surface for Claude, Codex, CI orchestrators)
 ego auth   login|logout|status [PROVIDER]
-ego models [--provider P] [--refresh]
+ego models [--provider P] [--refresh] [--json]
 ego config get|set|unset|ls|edit
 ego rules  ls|allow|deny|revoke|remember|explain   (permission rules,
                               stable IDs; `explain <tool> <args>` shows the
@@ -92,10 +95,10 @@ omitted when empty: two states, identical bytes.
 | `ego ls` | **yes** | this workspace by default, `--all` for the whole store; `--output json\|jsonl` per §4.6 |
 | `ego fork` | no | session forking (**M3**), which needs the branch point to be nameable in the log rather than just a file copy |
 | `ego export` | no | replay and export with `--sanitize` (**M3**). The projection exists; the redaction contract that makes an exported session safe to hand over does not |
-| `ego mcp` | no | the MCP client (**M2**). There is no server to add, remove or log in to |
+| `ego mcp` | no | the current MCP client (**M2**). There is no admitted snapshot to list, vary, authenticate, or reload; `docs/19-current-mcp-and-speakeasy.md` defines the final lifecycle |
 | `ego mcp-server` | no | ego's own MCP server surface (**M2**): the scoped run/continue/cancel/status tools it would expose |
 | `ego auth` | **yes** | `login\|logout\|status [PROVIDER]`; credentials live in one locked `$EGO_HOME/auth.json`, while TOML commands and discovered auth plugins can supply login tokens |
-| `ego models` | no | a catalogue to enumerate. Hosted facts are supplied and local ones are discovered per resolution (`docs/decisions/2026-08-21-what-a-model-resolves-to.md`), so this build resolves one model at a time and holds no list to print or refresh; generated catalogues are **M5** |
+| `ego models` | no | a catalogue to enumerate. Hosted facts are supplied and local ones are discovered per resolution (`docs/decisions/2026-08-21-what-a-model-resolves-to.md`), so this build resolves one model at a time and holds no list to print or refresh; regression case builds the shared resolution/listing/picker catalogue in **M1** |
 | `ego config` | no | a config writer. The loader is strict and read-only, and nothing in this build writes a config file — `-c/--set` overrides one run |
 | `ego rules` | no | somewhere to keep a rule. The grammar and its stable IDs are built and `--allow`/`--deny` already reach the engine through them, so `ls` and `explain` have their material; what `allow`, `deny`, `revoke` and `remember` have nowhere to write to is a rule store — the same read-only loader `config` waits on |
 | `ego usage` | no | a report across sessions, which needs both the workspace attribution `ls` waits on and the per-session cost line budgets add in **M3** |
@@ -165,6 +168,7 @@ ceilings come only from an administrator's `/etc/ego`.
     --session-id UUID   caller-SUPPLIED id — no capture-then-resume dance
     --ephemeral         no session written
     --session-dir DIR   override store location
+    --answer ID=JSON    repeatable; answer a pending AskQuestion while resuming
 ```
 
 **Scripting contract**
@@ -231,6 +235,7 @@ and line that said it.
 | `--bare` | **yes** | |
 | `--session`, `--session-id`, `--ephemeral` | **yes** | one mutually exclusive group, as §4.5 requires |
 | `--session-dir` | **yes** | |
+| `--answer` | no | regression case: the headless continuation of `AskQuestion`; the question event and accepted answer must exist before the flag can enforce anything |
 | `--output` | **yes** | `text\|json\|jsonl`. On `ego ls` the two machine forms are §4.6's, not §4.1/§4.2's — a listing is not a run |
 | `--all` | **yes** | `ego ls` only, and documented in §2 rather than here: §3 is the argument grammar of a *run*, and this widens a catalogue query |
 | `--schema`, `--schema-retries` | **yes** | `--schema-retries` ships as its own flag; §3 mentions it only inside `--schema`'s description |
@@ -247,7 +252,7 @@ and line that said it.
 | `--retry`, `--fallback` | no | waiting on a retry seam. Delivery certainty is implemented and enforced; a generation owns its reservation for its whole life, so re-issuing one changes the attempt contract rather than adding a loop |
 | `-v`, `--verbose` | no | waiting on a **decision**, not a subsystem — the only such entry. §4.7 says exactly what `-q` suppresses and nothing anywhere says what `-v` adds. It was marked **yes** beside `--no-color` until 2026-08-23 while being parsed and read by nothing, which is `--no-color`'s own defect sitting in `--no-color`'s own row. The obvious answer, turning up `tracing`, is not obvious: this build installs no subscriber at all, so every `tracing::warn!` in the workspace already goes nowhere, and adding one puts a second writer on the stream §4.7's marks and notification own (R12) |
 
-**Ten documented flag spellings do not ship.** That is the gap this table
+**Eleven documented flag spellings do not ship.** That is the gap this table
 exists to stop being invisible, and it is not a defect list — every one of them
 refuses by name and says what it is waiting on. The defect would be §3 reading,
 to someone who has not run the binary, as though all of it worked.
@@ -291,6 +296,13 @@ generation, and `{"state":"unknown","reason":…}` once any generation could not
 be priced: an unpriceable generation makes the session total unknown rather
 than silently under-reported.
 
+On exit 3, exactly one human-input payload is present. A permission boundary
+uses the existing `denied`/`denied_by` fields. An `AskQuestion` boundary uses a
+`question` object containing its stable ID, prompt, choice mode, options, and
+whether free text is accepted. A script answers it with
+`ego resume ID --answer QUESTION_ID=JSON`; a mismatched ID or value is exit 2,
+not an answer guessed against a different question.
+
 ### 4.2 `--output jsonl` (one event per line, live)
 
 
@@ -312,7 +324,7 @@ than silently under-reported.
 
 ```
 0 done        1 task failed (agent reports failure / schema never validated)
-2 usage error 3 permission needed in non-interactive and not granted
+2 usage error 3 human input needed in non-interactive mode
 4 provider/network error   5 budget or turn limit   124 timeout
 130 SIGINT    143 SIGTERM
 ```
@@ -326,9 +338,11 @@ silently: a retired flag errors **by name** with its replacement.
 
 ### 4.4 Non-interactive posture: untrusted by default
 
-Headless runs never hang on a prompt: an unresolvable permission ⇒ exit 3, with
-the denied action in the JSON result. Scripts opt in with `--allow` rules, a
-stronger `--sandbox`, or `--yolo` — never by answering prompts.
+Headless runs never hang on a prompt. An unresolvable permission is exit 3 with
+the denied action in the JSON result; scripts opt in with `--allow` rules, a
+stronger `--sandbox`, or `--yolo` rather than answering permission prompts. An
+`AskQuestion` is also exit 3, but carries the `question` object from §4.1 and
+continues only through `ego resume ID --answer QUESTION_ID=JSON`.
 
 Exit 3 has more than one cause, and the three opt-ins above are not
 interchangeable, so §4.1's object carries **who refused** beside what was
@@ -466,9 +480,10 @@ headers), OSC 9;4 for the progress indicator — cleared on every exit path,
 including failure — the window title, a desktop notification for a run that
 took longer than a minute (suppressed by `-q`), and OSC 7770 `state`/`intent`
 under TUICommander, which is proven by `TUIC_SOCKET` and not by `TERM_PROGRAM`.
-Every payload is stripped of control characters before it goes into a sequence:
-a tool name, an error message and an intent line all come from somewhere that
-is not ego.
+The human-facing product name is `εgo`, and every window title begins with the
+exact prefix `ɛ । `. Every payload is stripped of control characters before it
+goes into a sequence: a tool name, an error message and an intent line all come
+from somewhere that is not ego.
 
 ## 5. Agent files — the scripting language
 
@@ -499,11 +514,54 @@ command line plus a prompt. Nothing else examined has this as a first-class,
 executable unit (Claude Code's slash commands are REPL-only; pi's prompt
 templates are not executables).
 
-## 6. Interactive surface (kept deliberately small)
+### 5.1 Skills are in-session capabilities, not agent files
+
+A skill is a strict `SKILL.md` under `/etc/ego/skills`, `$EGO_HOME/skills`, or
+trusted `<workspace>/.ego/skills`. It uses current Agent Skills frontmatter and
+the supported current Claude extensions documented in `docs/20-agent-skills.md`.
+εgo does not scan `.claude/skills`: compatible metadata and bodies are portable,
+while storage aliases would create a second trust and precedence namespace.
+
+`/skills` lists, invokes, and explicitly rescans the one admitted catalogue;
+`/name [arguments]` invokes a user-visible skill. A model-visible skill is
+announced by bounded name/description/trigger metadata like an admitted MCP
+capability and is invoked through one typed `Skill` operation. Its full body
+and rooted read-only resources enter context only after invocation. A user-only
+skill is never announced to the model, and a model-only skill is hidden from
+slash completion and refuses direct user invocation.
+
+Skill frontmatter may narrow tools, model, effort, paths, and invocation
+visibility. It cannot relax system rules, trust, permission, sandbox, offline,
+budget, judge, or egress. Unsupported fork/agent/background/hook fields refuse
+by name until their final owner exists; `shell`, dynamic `!command` context,
+and Claude runtime variables are refused permanently. Invocation stores the
+rendered instruction and source digest durably so resume and compaction never
+silently reread a changed file.
+
+## 6. Interactive surface (complete, linear, keyboard-first)
+
+The surface stays in the terminal's primary buffer. The terminal owns
+transcript scrollback, selection, and copy; ego never enables alternate-screen
+mode or mouse capture. One interactive owner appends rendered transcript
+batches, then repaints only the ephemeral status, menu, and composer rows.
+History, completion, multiline editing, bracketed paste, and concurrent output
+use reedline. A smaller presentation may collapse detail by width, never remove
+a capability.
 
 Slash commands: `/help /model /thinking /mode /plan /yolo /permissions /mcp
-/sessions /fork /compact /clear /usage /export /doctor /quit`. History,
-completion and multiline via reedline.
+/sessions /fork /compact /clear /usage /statusline /export /doctor /quit /new
+/name /goal /tools /skills /version`. These 23 commands are the complete
+maintainer-selected surface; a missing implementation remains required work rather
+than an implicit de-selection. Typing `/` at the beginning of the composer
+opens a filterable menu; the menu, shortcut bindings, help, and enabled-state
+checks are projections of one action registry rather than parallel command
+implementations.
+
+That paragraph is the final contract. The current implementation has no slash
+parser or action registry: slash-looking composer input is submitted to the
+model like any other prompt. regression case introduces the registry and changes
+that behaviour.
+
 The permission prompt has a plain representation that works in every terminal
 and scripted transcript: `allow`, `deny`, or `amend`. Amend reads a complete
 JSON object of replacement tool parameters, then re-runs prepare and policy
@@ -536,11 +594,12 @@ typing.
 
 ### 6.2 Availability — what ships today
 
-Same discipline as §2.1 and §3.1. The reader, trust question and permission
-answer path ship. `ego` with no subcommand opens a session: it reads lines,
-runs a turn for each and renders it through §4. The editor and the renderer are
-never live at the same time, which is how §4's "exactly one writer" survives a
-second writer existing at all: each read ends before a turn renders.
+Same discipline as §2.1 and §3.1. This table records the implementation that
+ships today; §§6.3-6.5 are the final product contract and are not optional
+scope. The current reader, trust question, and permission answer path ship.
+`ego` with no subcommand opens a session, but today the editor still ends each
+read before the turn renders. regression case replaces that sequential ownership
+without relaxing the one-writer invariant.
 
 | Surface | M0b | Note |
 |---|---|---|
@@ -548,9 +607,149 @@ second writer existing at all: each read ends before a turn renders.
 | Bracketed paste | **yes** | on for every read, off on exit. A pasted stack trace is one prompt, not its first line |
 | Ctrl+V | **refused by name** | it asks for a pasteboard *image* first (§6.1), and there is nowhere to put one — the same gap that refuses `--attach`. It refuses rather than silently pasting text, because only one of those two can be discovered |
 | Permission dialog | **yes** | plain `allow`, `deny`, or `amend`; amend then reads replacement JSON parameters. Invalid answers re-prompt; Ctrl-C and EOF deny. The engine keeps the configured mode first and re-prepares/re-classifies every amendment |
-| Slash commands | no | waiting on the subsystems they would drive; §2.1 already refuses each by name |
+| Slash commands | no | there is no parser or registry yet; slash-looking composer input currently goes to the model. regression case introduces the final action surface |
+| Live composer during a turn | no | regression case; reedline's external printer is the selected output boundary |
+| Ctrl-S drafts, prompt queue, steering | no | regression case |
+| Model/question menus and status line | no | regression case |
 | `--attach` | no | §3.1's row: waiting on a non-text content block |
 | OSC 133 A (prompt mark), OSC 7 (cwd) | no | deliberately: both are owned by the surface rather than by a run, and their exact terminal contract is not implemented. `ego run` emits 133 C/D, OSC 9;4 and — under TUICommander — 7770 |
+
+### 6.3 Live composer, drafts, queue, and steering
+
+The composer remains editable while a provider streams, a tool runs, or the
+harness waits at an interactive boundary. Renderer output enters the
+interactive surface through a bounded channel; reedline's external printer
+appends it above the composer and restores the exact buffer and cursor. In
+interactive mode reedline is therefore the terminal writer. In headless modes
+the existing renderer remains the writer. There is never one of each writing
+the same terminal.
+
+`Ctrl-S` with a non-empty composer pushes the exact multiline buffer onto a
+session-local LIFO draft stash and clears the composer. `Ctrl-S` with an empty
+composer restores the newest stash. Stashes are not submitted, do not enter
+model history, and are not silently overwritten; exiting with stashes reports
+their count.
+
+`Enter` on non-empty input during a busy regular turn immediately and durably
+accepts a FIFO **PendingSteer**, opens a clean composer, and shows exactly:
+
+```text
+Messages to be submitted after next tool call (press esc to interrupt and send immediately)
+```
+
+Every additional busy submission joins the same FIFO. Normal delivery waits
+until the current provider sampling has settled and the complete sibling
+tool-call/result batch emitted by that assistant generation is durably closed,
+then appends each accepted prompt as a correlated user-prompt item before the
+next model request. Queue text is never inserted into a `ToolResult` and never
+appears between a call and its result. If the generation emits no tool or ends
+with a final response, pending input forces an immediate follow-up request
+instead of being stranded.
+
+`Esc` while pending steers exist first records an expedited prefix through the
+current FIFO tail, then requests phase-safe interruption. Sampling may stop
+cooperatively but its attempt still settles durably. A permission wait becomes
+an explicit denial. A running non-cancellable side-effecting tool finishes and
+its real outcome is recorded; every not-yet-run sibling call closes with an
+explicit interrupted result. Only after the complete batch and interrupted
+turn are durable are all unacknowledged steers replayed in FIFO order as one
+fresh user turn. Repeated `Esc` with the same tail is idempotent; a later tail
+can extend the durable expedited prefix. `Esc` with no pending input retains
+ordinary interrupt behaviour.
+
+The three input states do not overlap. A **Draft** is a local LIFO editor stash.
+A durable **PendingSteer** is FIFO input accepted during a busy regular turn. A
+durable ordinary **Queued** FIFO is reserved for non-steerable or
+idle-transition cases. One queue coordinator owns both durable forms and their
+exactly-once consumption; there is no steering inbox or action-registry-local
+queue. None of these paths bypasses budget, permission, sandbox, attempt
+settlement, usage, cost, or tool-result accounting.
+
+### 6.4 Menus, model selection, and questions
+
+`Option-P` on macOS and `Alt-P` elsewhere, normalised as terminal `Meta-P`,
+open the same action as `/model`. A terminal that does not expose Option as a
+modifier still has `/model` as the exact equivalent. The picker shows provider,
+model, context capability, and reasoning effort. Arrow keys navigate; `Enter`
+sets the default for new sessions, `s` applies only to this session, and `Esc`
+cancels. A selection made while a request is in flight applies at the next
+generation boundary, never by mutating an active request.
+
+The picker owns no rows. regression case brings the final shared catalogue into
+M1: supplied hosted rows and authoritative live provider/local discovery form
+one ordered projection consumed by generation-time resolution, `ego models`,
+`/model`, and `Meta-P`. `ego models --json` is its versioned non-interactive
+form. Selection resolves the chosen slug again at the generation boundary, so
+a stale listing cannot bypass changed credentials, capabilities, or
+availability. Missing facts remain explicit and never become UI defaults.
+
+Local control actions such as the model picker and status inspection execute
+immediately while the harness is busy. The action registry only declares
+whether an action is local or prompt-producing. Every prompt-producing spelling
+dispatches through regression case's sole coordinator and §6.3 semantics; the
+registry owns neither a queue nor an inbox. The same command therefore cannot
+execute immediately from a shortcut and queue from its slash spelling.
+
+`AskQuestion` uses the same keyboard selector for single choice, multiple
+choice, and free text. A question temporarily owns `Enter` and `Esc`; the
+underlying composer and queue remain intact and cannot accidentally submit.
+ACP maps the question to its negotiated elicitation shape. A non-interactive
+run emits the versioned `question` item and exits 3; `ego resume ID --answer
+QUESTION_ID=JSON` is its explicit continuation. It never hangs or invents an
+answer. On terminals without the cursor operations needed for the selector,
+the same question degrades to a numbered plain prompt.
+
+### 6.5 Native status line
+
+The status line is one width-aware row owned by the interactive surface, not a
+shell subprocess and not model output. It renders ordered segments from a
+snapshot; expensive producers such as Git update asynchronously and never
+block input. The built-in segment names are `model`, `effort`, `mode`,
+`context`, `cost`, `queue`, `drafts`, `interrupt`, `cwd`, and `git`. The queue
+snapshot distinguishes pending steers from ordinary queued prompts, and the
+interrupt segment remains visible while expedited or ordinary interruption is
+pending.
+
+Configuration stores one final resolved shape rather than a preset plus a
+second override language:
+
+```toml
+[ui.statusline]
+segments = ["model", "effort", "mode", "context", "queue", "drafts", "interrupt", "cwd", "git"]
+```
+
+`/statusline` offers named setup presets but writes that ordered list. An empty
+list disables the row. When width is insufficient, lower-priority segments
+disappear as units; semantic values are never truncated into ambiguity. Queue
+and draft counts, and interrupt-pending state, remain visible while active.
+
+### 6.6 Prompted compaction starts a clean session
+
+`/compact` is an idle-only session transition. It sends the complete active
+provider context to one tool-less generation with a versioned εgo-owned prompt
+that asks for a self-contained continuation checkpoint. That checkpoint keeps
+the active objective, binding constraints, completed evidence, current work,
+blockers, uncertainty, decisions, rationale, exact references, and ordered next
+steps. An earlier checkpoint is part of the input, so repeated compaction must
+preserve every still-relevant fact.
+
+A successful response creates a new durable session and switches the
+interactive surface to it. The new session resolves ordinary system, project,
+runtime, model, and tool context afresh. The only conversation material carried
+from the source is one distinct context-checkpoint block containing the
+compaction response: no old user, assistant, reasoning, tool-call, tool-result,
+or retained-tail item is replayed. The checkpoint is context, not a
+user-authored prompt or higher-authority instruction.
+
+The source session remains complete and resumable. The target records the
+source session and source sequence. A tool-use or truncated response, empty or
+invalid checkpoint, provider/budget/cancellation failure, target-fit failure,
+or target-store failure creates no usable target and leaves the operator in the
+source session. The source owns the compaction attempt's usage and cost. The
+action is disabled while a generation, permission, tool batch, or accepted
+prompt is active; saved drafts require confirmation and remain with the source.
+The complete decision and prompt contract are in
+`docs/decisions/2026-08-24-compaction-seeds-a-clean-session.md`.
 
 ## 7. Configuration
 
