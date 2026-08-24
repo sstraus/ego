@@ -156,6 +156,9 @@ fn flags_layer(args: &Args) -> Result<Sourced<ConfigLayer>, UsageError> {
     if let Some(mode) = args.mode {
         toml.push_str(&format!("mode = {}\n", quote(mode.as_str())));
     }
+    if let Some(sandbox) = args.sandbox {
+        toml.push_str(&format!("sandbox = {}\n", quote(&sandbox.to_string())));
+    }
     // Written as **dotted keys**, not a `[permissions]` table header. A header
     // captures every key after it, and `-c` overrides are appended below —
     // `-c max_turns=3` after a header would land inside `permissions` and be

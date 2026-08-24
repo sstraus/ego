@@ -6,6 +6,7 @@ use super::layer::{AuthProviderLayer, ConfigLayer, Mode, ModelRef};
 use super::ruleset::Ruleset;
 use super::source::{Source, Sourced, Trust};
 use crate::ceiling::{Ceilings, Clamped};
+use crate::permit::Confinement;
 use crate::permit::rule::Rule;
 
 /// Ambient-loading posture (`CLI.md` §4.5): whether project-local config,
@@ -22,7 +23,9 @@ pub enum Posture {
 pub struct Effective {
     pub model: Option<ModelRef>,
     pub mode: Option<Mode>,
+    pub sandbox: Option<Confinement>,
     pub permissions: Ruleset,
+    pub judge: Option<ModelRef>,
     pub posture: Posture,
     /// What this run may spend, after precedence and the system clamp.
     ///
@@ -111,7 +114,9 @@ pub fn resolve(
 
     let mut model = None;
     let mut mode = None;
+    let mut sandbox = None;
     let mut permissions = Ruleset::default();
+    let mut judge = None;
     let mut ceilings = Ceilings::default();
     let mut auth = std::collections::HashMap::new();
 
@@ -127,10 +132,17 @@ pub fn resolve(
         if let Some(m) = profile.and_then(|p| p.mode).or(sourced.value.mode) {
             mode = Some(m);
         }
+        if let Some(value) = profile
+            .and_then(|profile| profile.sandbox)
+            .or(sourced.value.sandbox)
+        {
+            sandbox = Some(value);
+        }
         if let Some(perm) = profile
             .and_then(|p| p.permissions.clone())
             .or_else(|| sourced.value.permissions.clone())
         {
+            judge = perm.judge.clone();
             // Still a replacement, not a merge: a layer that writes
             // `permissions` states the whole block. What changed is that the
             // rules now carry which layer stated them, so a later attribution
@@ -250,7 +262,9 @@ pub fn resolve(
     Ok(Effective {
         model,
         mode,
+        sandbox,
         permissions,
+        judge,
         posture,
         ceilings,
         clamped,

@@ -26,6 +26,7 @@ use clap::{ArgAction, Args as ClapArgs, Parser, Subcommand};
 use ego_core::config::Mode;
 use ego_core::event::id::SessionId;
 use ego_core::generator::types::ThinkingLevel;
+use ego_core::permit::Confinement;
 
 /// What the process was asked to do.
 #[derive(Debug, PartialEq, Eq)]
@@ -96,11 +97,6 @@ struct Unavailable {
 /// `ARCHITECTURE.md`'s milestone table (line 424 onwards) is the source for
 /// every `waiting_on` here: these are subsystems, and the sentence says which.
 const UNAVAILABLE: &[Unavailable] = &[
-    Unavailable {
-        flags: &["--sandbox"],
-        waiting_on: "a sandbox backend. No process is spawned anywhere in \
-                     this build, so there is nothing yet to confine",
-    },
     Unavailable {
         flags: &["-f", "--file", "--var"],
         waiting_on: "executable agent files (`CLI.md` §5): YAML frontmatter, \
@@ -356,6 +352,10 @@ pub struct Args {
     pub stdin: Stdin,
     pub model: Option<String>,
     pub offline: bool,
+    /// Filesystem confinement, orthogonal to the permission mode. `None`
+    /// leaves precedence resolution to config; the effective default is
+    /// `workspace`.
+    pub sandbox: Option<Confinement>,
     pub thinking: ThinkingLevel,
     pub system: Option<String>,
     pub append_system: Option<String>,
@@ -537,6 +537,10 @@ struct Flags {
     /// No non-loopback egress from ego's own HTTP transport.
     #[arg(long)]
     offline: bool,
+
+    /// Filesystem confinement: ro|workspace|off.
+    #[arg(long)]
+    sandbox: Option<Confinement>,
 
     /// off|minimal|low|medium|high|xhigh|max
     #[arg(long, value_parser = parse_thinking, default_value = "off")]
@@ -981,6 +985,7 @@ fn into_args(command: RunCommand) -> Result<Args, UsageError> {
         stdin,
         model: flags.model,
         offline: flags.offline,
+        sandbox: flags.sandbox,
         thinking: flags.thinking,
         system: flags.system,
         append_system: flags.append_system,

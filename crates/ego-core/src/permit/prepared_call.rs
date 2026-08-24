@@ -8,12 +8,14 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use super::path::CanonPath;
+use super::spawn::SpawnSpec;
+use crate::store::evidence::EvidenceRead;
 
 /// One canonical operation a `Tool::execute` intends to perform.
 ///
-/// M0a's [`GuardedIo`](super::GuardedIo) covers only the fs subset here;
-/// `Connect`/`Spawn` variants belong to the process/network confinement
-/// stories that build on this one (`ARCHITECTURE.md` §3.4 axis 4).
+/// [`GuardedIo`](super::GuardedIo) covers both the filesystem operations and
+/// exact argv-native process execution. Network operations remain owned by
+/// their transport seams (`ARCHITECTURE.md` §3.4 axis 4).
 ///
 /// [`Op::List`] and [`Op::Search`] exist so that a tool which walks a subtree
 /// does not have to be described as one that reads it. See
@@ -37,6 +39,10 @@ pub enum Op {
     Search { root: CanonPath, query: String },
     /// A named file, after [`Change`] is applied to it.
     Write { path: CanonPath, change: Change },
+    /// One exact argv-native process specification.
+    Spawn { spec: SpawnSpec },
+    /// Complete tool evidence addressed inside the current session.
+    ReadEvidence { request: EvidenceRead },
 }
 
 /// What a [`Op::Write`] does to the file it names.
@@ -82,7 +88,7 @@ pub enum Change {
 /// A closed vocabulary rather than the `&'static str` this used to be. Two
 /// reasons, and the second is the one that forced it:
 ///
-/// - It is closed in fact — there are exactly four [`Op`] variants — so a
+/// - It is closed in fact — there are exactly six [`Op`] variants — so a
 ///   type that admits any string admits values the rest of the system cannot
 ///   act on.
 /// - It is recorded in a durable event (`EventKind::PermissionRequested`),
@@ -100,6 +106,8 @@ pub enum OpName {
     List,
     Search,
     Write,
+    Spawn,
+    ReadEvidence,
 }
 
 impl fmt::Display for OpName {
@@ -109,6 +117,8 @@ impl fmt::Display for OpName {
             OpName::List => "list",
             OpName::Search => "search",
             OpName::Write => "write",
+            OpName::Spawn => "spawn",
+            OpName::ReadEvidence => "read_evidence",
         };
         write!(f, "{name}")
     }
@@ -122,6 +132,8 @@ impl Op {
             Op::List { .. } => OpName::List,
             Op::Search { .. } => OpName::Search,
             Op::Write { .. } => OpName::Write,
+            Op::Spawn { .. } => OpName::Spawn,
+            Op::ReadEvidence { .. } => OpName::ReadEvidence,
         }
     }
 
@@ -139,17 +151,38 @@ impl Op {
     /// write mutates in every build there will ever be.
     pub fn mutates(&self) -> bool {
         match self {
-            Op::Read { .. } | Op::List { .. } | Op::Search { .. } => false,
-            Op::Write { .. } => true,
+            Op::Read { .. }
+            | Op::List { .. }
+            | Op::Search { .. }
+            | Op::ReadEvidence { .. } => false,
+            Op::Write { .. } | Op::Spawn { .. } => true,
         }
     }
 
-    /// The path this operation is judged against: the file for a read or a
-    /// write, the root for a traversal.
-    pub fn path(&self) -> &CanonPath {
+    /// The path this operation names: the file for a read or write, the root
+    /// for a traversal, or a spawn's explicit cwd. A spawn may omit its cwd.
+    pub fn path(&self) -> Option<&CanonPath> {
         match self {
-            Op::Read { path } | Op::Write { path, .. } => path,
-            Op::List { root, .. } | Op::Search { root, .. } => root,
+            Op::Read { path } | Op::Write { path, .. } => Some(path),
+            Op::List { root, .. } | Op::Search { root, .. } => Some(root),
+            Op::Spawn { spec } => spec.cwd(),
+            Op::ReadEvidence { .. } => None,
+        }
+    }
+
+    /// The path used in permission diagnostics for an operation.
+    ///
+    /// A spawn with no explicit cwd runs at the run workspace, so that is its
+    /// diagnostic subject. This does not turn the cwd into a filesystem grant:
+    /// process reach is enforced independently by `RunConfinement`.
+    pub(crate) fn subject_path<'a>(
+        &'a self,
+        workspace: &'a CanonPath,
+    ) -> Option<&'a CanonPath> {
+        match self {
+            Op::Spawn { spec } => Some(spec.cwd().unwrap_or(workspace)),
+            Op::ReadEvidence { .. } => None,
+            _ => self.path(),
         }
     }
 }

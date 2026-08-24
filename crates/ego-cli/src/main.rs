@@ -14,8 +14,27 @@ use ego_cli::run::{self, Ended};
 use ego_core::run::RunTermination;
 use ego_core::turn::CancelToken;
 
+fn main() -> std::process::ExitCode {
+    // Behavioural network probes are hidden child modes, not CLI commands.
+    // Dispatch them before clap or any provider/configuration work.
+    #[cfg(target_os = "macos")]
+    if let Some(exit) = ego_tools::exec::dispatch_network_probe(std::env::args_os()) {
+        return exit;
+    }
+
+    // Landlock restricts the calling thread. Dispatch before constructing the
+    // multithreaded Tokio runtime so the private helper has exactly one thread
+    // to confine before it replaces itself with the authorised process.
+    #[cfg(target_os = "linux")]
+    if let Some(exit) = ego_tools::exec::dispatch_landlock_helper(std::env::args_os()) {
+        return exit;
+    }
+
+    ordinary_main()
+}
+
 #[tokio::main]
-async fn main() -> std::process::ExitCode {
+async fn ordinary_main() -> std::process::ExitCode {
     let cancel = CancelToken::new();
     let out = Stdout::new(cancel.clone());
 

@@ -5,12 +5,18 @@
 use futures::future::BoxFuture;
 use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::fs::{FsError, GuardedIo, IoDenied, PathResolver};
 use super::grant::PermitDenied;
 use super::path::CanonPath;
 use super::prepared_call::PreparedCall;
+use super::spawn::ProcessError;
+use crate::store::evidence::{EvidenceError, EvidencePage, EvidenceRef};
+
+/// Maximum UTF-8 bytes exposed for one failed-tool diagnostic.
+pub const MAX_TOOL_ERROR_DIAGNOSTIC_BYTES: usize = 4 * 1024;
 
 /// A tool's identity and parameter schema, as shown to the model.
 #[derive(Debug, Clone)]
@@ -45,6 +51,12 @@ pub enum ToolError {
     /// read-only tool does, and a missing file fails there, before there is
     /// anything to authorise.
     Fs(FsError),
+    /// Complete output could not be stored or verified. This is never
+    /// downgraded to a successful preview: a prefix is not evidence of the
+    /// output a tool actually produced.
+    Evidence(EvidenceError),
+    /// The admitted process did not complete successfully.
+    Process(ProcessError),
 }
 
 impl std::fmt::Display for ToolError {
@@ -53,11 +65,33 @@ impl std::fmt::Display for ToolError {
             ToolError::InvalidParams(msg) => write!(f, "invalid params: {msg}"),
             ToolError::Denied(denied) => write!(f, "{denied}"),
             ToolError::Fs(err) => write!(f, "{err}"),
+            ToolError::Evidence(err) => write!(f, "{err}"),
+            ToolError::Process(err) => write!(f, "{err}"),
         }
     }
 }
 
 impl std::error::Error for ToolError {}
+
+impl ToolError {
+    pub fn into_failed_result(self) -> ToolResult {
+        match self {
+            Self::Process(error) => error.into_failed_result(),
+            error => ToolResult::builtin(bounded_diagnostic(&error.to_string())),
+        }
+    }
+}
+
+pub(super) fn bounded_diagnostic(message: &str) -> String {
+    if message.len() <= MAX_TOOL_ERROR_DIAGNOSTIC_BYTES {
+        return message.to_string();
+    }
+    let mut end = MAX_TOOL_ERROR_DIAGNOSTIC_BYTES;
+    while !message.is_char_boundary(end) {
+        end -= 1;
+    }
+    message[..end].to_string()
+}
 
 impl From<PermitDenied> for ToolError {
     fn from(denied: PermitDenied) -> Self {
@@ -80,16 +114,344 @@ impl From<IoDenied> for ToolError {
     }
 }
 
-/// A tool's output.
-///
-/// `ARCHITECTURE.md` §3.2 calls out `ToolResult` as evidence-plus-provenance,
-/// not a bare string — that full shape (content blocks, provenance, a
-/// stored full-output reference with `read_tool_result` truncation) is a
-/// later story; M0a needs just enough to prove `execute` ran under a
-/// checked `Permit`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+impl From<EvidenceError> for ToolError {
+    fn from(error: EvidenceError) -> Self {
+        Self::Evidence(error)
+    }
+}
+
+impl From<ProcessError> for ToolError {
+    fn from(error: ProcessError) -> Self {
+        Self::Process(error)
+    }
+}
+
+/// Which backend-owned pipe produced a block of process evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StreamProvenance {
+    Stdout,
+    Stderr,
+}
+
+/// Encoding used to render arbitrary stored bytes into model-visible text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ToolOutputEncoding {
+    Utf8,
+    Base64,
+}
+
+impl std::fmt::Display for StreamProvenance {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Stdout => "stdout",
+            Self::Stderr => "stderr",
+        })
+    }
+}
+
+/// How the text in one result block was obtained.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "source", rename_all = "snake_case")]
+pub enum ToolOutputProvenance {
+    /// A builtin produced the complete text directly.
+    Builtin,
+    /// A backend-owned process pipe was drained completely. `truncated`
+    /// describes only the preview; the referenced bytes remain complete.
+    Process {
+        stream: StreamProvenance,
+        encoding: ToolOutputEncoding,
+        truncated: bool,
+        omitted_bytes: u64,
+    },
+    /// One fixed-size verified page from a session evidence object.
+    EvidencePage {
+        encoding: ToolOutputEncoding,
+        offset: u64,
+        total: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        next: Option<u64>,
+        eof: bool,
+    },
+}
+
+impl ToolOutputProvenance {
+    pub fn head_tail(&self) -> bool {
+        matches!(
+            self,
+            Self::Process {
+                truncated: true,
+                ..
+            }
+        )
+    }
+}
+
+/// One ordered, model-visible text block and the complete evidence behind it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolContentBlock {
+    pub text: String,
+    pub provenance: ToolOutputProvenance,
+    /// Always present for a process pipe, including an empty or small one.
+    /// Builtins that already returned their complete text need no blob.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub full_output: Option<EvidenceRef>,
+}
+
+impl ToolContentBlock {
+    pub fn builtin(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            provenance: ToolOutputProvenance::Builtin,
+            full_output: None,
+        }
+    }
+
+    pub fn process(
+        stream: StreamProvenance,
+        bytes: &[u8],
+        preview_bytes: usize,
+        full_output: EvidenceRef,
+    ) -> Self {
+        let (text, omitted_bytes, encoding) =
+            head_tail_preview(bytes, preview_bytes, &full_output);
+        Self {
+            text,
+            provenance: ToolOutputProvenance::Process {
+                stream,
+                encoding,
+                truncated: omitted_bytes != 0,
+                omitted_bytes,
+            },
+            full_output: Some(full_output),
+        }
+    }
+
+    /// Build a process block from the bounded head and tail retained while a
+    /// stream was drained. `full_output.bytes` remains the complete length.
+    pub fn process_preview(
+        stream: StreamProvenance,
+        head: &[u8],
+        tail: &[u8],
+        full_output: EvidenceRef,
+    ) -> Self {
+        let retained = head.len().saturating_add(tail.len()) as u64;
+        let omitted_bytes = full_output.bytes.saturating_sub(retained);
+        let mut preview = Vec::with_capacity(head.len().saturating_add(tail.len()));
+        preview.extend_from_slice(head);
+        preview.extend_from_slice(tail);
+        let encoding = if std::str::from_utf8(head).is_ok() && std::str::from_utf8(tail).is_ok() {
+            ToolOutputEncoding::Utf8
+        } else {
+            ToolOutputEncoding::Base64
+        };
+        let text = if omitted_bytes == 0 {
+            render_bytes(&preview, encoding)
+        } else if encoding == ToolOutputEncoding::Base64 {
+            format!(
+                "[base64 head+tail preview; {omitted_bytes} bytes omitted between retained segments]\n{}\n[read_tool_result {full_output}]",
+                base64(&preview)
+            )
+        } else {
+            format!(
+                "{}\n\n[... {omitted_bytes} bytes omitted; read_tool_result {full_output} ...]\n\n{}",
+                render_bytes(head, encoding),
+                render_bytes(tail, encoding)
+            )
+        };
+        Self {
+            text,
+            provenance: ToolOutputProvenance::Process {
+                stream,
+                encoding,
+                truncated: omitted_bytes != 0,
+                omitted_bytes,
+            },
+            full_output: Some(full_output),
+        }
+    }
+
+    /// Render one bounded evidence page without lossy byte conversion.
+    pub fn evidence_page(page: EvidencePage) -> Self {
+        let encoding = encoding_of(&page.bytes);
+        let text = render_bytes(&page.bytes, encoding);
+        let eof = page.next_offset.is_none();
+        Self {
+            text,
+            provenance: ToolOutputProvenance::EvidencePage {
+                encoding,
+                offset: page.offset,
+                total: page.reference.bytes,
+                next: page.next_offset,
+                eof,
+            },
+            full_output: Some(page.reference),
+        }
+    }
+
+    pub fn is_bounded(&self) -> bool {
+        true
+    }
+
+    pub fn backend_owned_pipe(&self) -> bool {
+        matches!(self.provenance, ToolOutputProvenance::Process { .. })
+    }
+
+    pub fn provenance(&self) -> &ToolOutputProvenance {
+        &self.provenance
+    }
+
+    pub fn evidence_reference(&self) -> Option<&EvidenceRef> {
+        self.full_output.as_ref()
+    }
+
+    pub fn is_truncated(&self) -> bool {
+        self.provenance.head_tail()
+    }
+
+    pub fn preview_is_head_and_tail(&self) -> bool {
+        self.provenance.head_tail()
+    }
+}
+
+/// A tool's ordered evidence blocks.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolResult {
-    pub content: String,
+    pub content: Vec<ToolContentBlock>,
+}
+
+impl ToolResult {
+    pub fn builtin(text: impl Into<String>) -> Self {
+        Self {
+            content: vec![ToolContentBlock::builtin(text)],
+        }
+    }
+
+    pub fn new(content: Vec<ToolContentBlock>) -> Self {
+        Self { content }
+    }
+
+    /// The single textual answer provider protocols accept for a tool call.
+    /// Provenance stays explicit when several process streams are projected
+    /// into that one protocol field.
+    pub fn model_text(&self) -> String {
+        let one_builtin = self.content.as_slice();
+        if let [ToolContentBlock {
+            text,
+            provenance: ToolOutputProvenance::Builtin,
+            ..
+        }] = one_builtin
+        {
+            return text.clone();
+        }
+
+        self.content
+            .iter()
+            .map(|block| match &block.provenance {
+                ToolOutputProvenance::Builtin => block.text.clone(),
+                ToolOutputProvenance::Process { stream, .. } => {
+                    format!("[{stream}]\n{}", block.text)
+                }
+                ToolOutputProvenance::EvidencePage { .. } => block.text.clone(),
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    }
+}
+
+fn head_tail_preview(
+    bytes: &[u8],
+    budget: usize,
+    reference: &EvidenceRef,
+) -> (String, u64, ToolOutputEncoding) {
+    if bytes.len() <= budget {
+        let encoding = encoding_of(bytes);
+        return (render_bytes(bytes, encoding), 0, encoding);
+    }
+
+    let requested_head = budget / 2;
+    let requested_tail = budget.saturating_sub(requested_head);
+    let (head_len, tail_start) = match std::str::from_utf8(bytes) {
+        Ok(text) => {
+            let mut head = requested_head;
+            while head > 0 && !text.is_char_boundary(head) {
+                head -= 1;
+            }
+            let mut tail = bytes.len().saturating_sub(requested_tail);
+            while tail < bytes.len() && !text.is_char_boundary(tail) {
+                tail += 1;
+            }
+            (head, tail.max(head))
+        }
+        Err(_) => (
+            requested_head,
+            bytes.len().saturating_sub(requested_tail),
+        ),
+    };
+    let omitted = tail_start.saturating_sub(head_len) as u64;
+    let retained = [&bytes[..head_len], &bytes[tail_start..]].concat();
+    let encoding = encoding_of(&retained);
+    if encoding == ToolOutputEncoding::Base64 {
+        return (
+            format!(
+                "[base64 head+tail preview; {omitted} bytes omitted between retained segments]\n{}\n[read_tool_result {reference}]",
+                base64(&retained)
+            ),
+            omitted,
+            encoding,
+        );
+    }
+    (
+        format!(
+            "{}\n\n[... {omitted} bytes omitted; read_tool_result {reference} ...]\n\n{}",
+            render_bytes(&bytes[..head_len], encoding),
+            render_bytes(&bytes[tail_start..], encoding)
+        ),
+        omitted,
+        encoding,
+    )
+}
+
+fn encoding_of(bytes: &[u8]) -> ToolOutputEncoding {
+    if std::str::from_utf8(bytes).is_ok() {
+        ToolOutputEncoding::Utf8
+    } else {
+        ToolOutputEncoding::Base64
+    }
+}
+
+fn render_bytes(bytes: &[u8], encoding: ToolOutputEncoding) -> String {
+    match encoding {
+        ToolOutputEncoding::Utf8 => {
+            std::str::from_utf8(bytes).expect("encoding was checked").to_string()
+        }
+        ToolOutputEncoding::Base64 => format!("[base64]\n{}", base64(bytes)),
+    }
+}
+
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut output = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let word = (u32::from(chunk[0]) << 16)
+            | (u32::from(*chunk.get(1).unwrap_or(&0)) << 8)
+            | u32::from(*chunk.get(2).unwrap_or(&0));
+        output.push(ALPHABET[((word >> 18) & 0x3f) as usize] as char);
+        output.push(ALPHABET[((word >> 12) & 0x3f) as usize] as char);
+        output.push(if chunk.len() > 1 {
+            ALPHABET[((word >> 6) & 0x3f) as usize] as char
+        } else {
+            '='
+        });
+        output.push(if chunk.len() > 2 {
+            ALPHABET[(word & 0x3f) as usize] as char
+        } else {
+            '='
+        });
+    }
+    output
 }
 
 /// One tool, dynamically dispatched (`ARCHITECTURE.md` §3.2): MCP tools are

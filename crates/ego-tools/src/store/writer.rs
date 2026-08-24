@@ -22,6 +22,7 @@
 //! repaired would destroy the evidence the port exists to expose.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use ego_core::event::domain::DomainEvent;
@@ -29,11 +30,13 @@ use ego_core::event::id::SessionId;
 use ego_core::event::time::Timestamp;
 use ego_core::state::SessionState;
 use ego_core::store::session_store::{SessionMeta, SessionStore, StoreError};
+use ego_core::store::evidence::EvidenceError;
 use futures::stream::BoxStream;
 
 use super::jsonl_store::{JsonlStore, Repair};
 use super::lease::{Lease, LeaseError};
 use super::snapshot::SnapshotRejection;
+use super::SessionEvidenceStore;
 
 /// The facts `Lease::acquire` needs and the store must not invent.
 ///
@@ -125,13 +128,26 @@ pub struct SessionWriter<'a> {
     store: &'a JsonlStore,
     id: SessionId,
     /// Released on drop, which is the whole point. Never read.
-    _lease: Lease,
+    _lease: Arc<Lease>,
 }
 
 impl SessionWriter<'_> {
     /// The session this writer holds the lease for.
     pub fn id(&self) -> SessionId {
         self.id
+    }
+
+    /// Bind complete tool evidence to this lease-held session.
+    pub fn evidence_store(
+        &self,
+        hard_cap: u64,
+    ) -> Result<SessionEvidenceStore, EvidenceError> {
+        SessionEvidenceStore::with_io(
+            self.store.session_dir(&self.id),
+            hard_cap,
+            Arc::clone(&self.store.io),
+            Some(Arc::clone(&self._lease)),
+        )
     }
 
     fn check(&self, asked: &SessionId) -> Result<(), StoreError> {
@@ -223,7 +239,7 @@ impl JsonlStore {
             writer: SessionWriter {
                 store: self,
                 id: *id,
-                _lease: held,
+                _lease: Arc::new(held),
             },
         })
     }

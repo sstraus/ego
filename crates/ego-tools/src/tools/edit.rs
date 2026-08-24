@@ -136,9 +136,9 @@ impl TypedTool for EditTool {
 
             let after = before.replace(&old_string, &new_string);
             io.write(&path, after.as_bytes())?;
-            Ok(ToolResult {
-                content: format!("replaced 1 occurrence in {path}"),
-            })
+            Ok(ToolResult::builtin(format!(
+                "replaced 1 occurrence in {path}"
+            )))
         })
     }
 }

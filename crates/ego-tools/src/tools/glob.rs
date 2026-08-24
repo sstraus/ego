@@ -85,7 +85,7 @@ impl TypedTool for GlobTool {
                 names.join("\n")
             };
             note_truncation(&mut content, scan.truncated);
-            Ok(ToolResult { content })
+            Ok(ToolResult::builtin(content))
         })
     }
 }

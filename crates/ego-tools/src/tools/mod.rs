@@ -1,4 +1,5 @@
-//! The builtins: `read`, `glob`, `grep`, `write` and `edit`.
+//! The builtins: `read`, `glob`, `grep`, `write`, `edit`, `exec`, and
+//! `read_tool_result`.
 //!
 //! See `docs/decisions/2026-08-21-reading-without-reading-everything.md` and
 //! `docs/decisions/2026-08-21-three-tools-on-a-real-filesystem.md`. Each
@@ -20,19 +21,25 @@
 //! ops as a conjunction. Both were written that way for it and neither had ever
 //! been exercised.
 //!
-//! None of them holds an `Fs`. They receive a `GuardedIo`, which re-resolves
-//! and re-checks every path before touching it.
+//! None of the filesystem tools holds an `Fs`. They receive a `GuardedIo`,
+//! which re-resolves and re-checks every path before touching it. `exec` and
+//! `read_tool_result` cross their own guarded ports instead: `GuardedExec` and
+//! the session evidence store.
 
 mod edit;
+mod exec;
 mod glob;
 mod grep;
 mod read;
+mod read_tool_result;
 mod write;
 
 pub use edit::{EditParams, EditTool};
+pub use exec::{ExecParams, ExecTool};
 pub use glob::{GlobParams, GlobTool};
 pub use grep::{GrepParams, GrepTool};
 pub use read::{ReadParams, ReadTool};
+pub use read_tool_result::{ReadToolResult, ReadToolResultParams};
 pub use write::{WriteParams, WriteTool};
 
 use std::path::{Path, PathBuf};
@@ -49,7 +56,7 @@ use ego_core::permit::{
 /// never consulted when deciding whether something is in scope.
 pub const SKIP_DIRS: [&str; 3] = [".git", "target", "node_modules"];
 
-/// The five, ready to hand to `Tools::new`.
+/// The seven, ready to hand to `Tools::new`.
 pub fn builtins() -> Vec<Arc<dyn Tool>> {
     vec![
         Arc::new(Typed(ReadTool)),
@@ -57,6 +64,8 @@ pub fn builtins() -> Vec<Arc<dyn Tool>> {
         Arc::new(Typed(GrepTool)),
         Arc::new(Typed(WriteTool)),
         Arc::new(Typed(EditTool)),
+        Arc::new(Typed(ExecTool)),
+        Arc::new(Typed(ReadToolResult)),
     ]
 }
 

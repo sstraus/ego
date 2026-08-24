@@ -9,11 +9,13 @@ mod authority;
 pub mod fake;
 mod fs;
 mod grant;
+pub mod judge;
 mod path;
 mod prepared_call;
 pub mod rule;
 mod scan;
 mod scope;
+mod spawn;
 mod tool;
 
 /// `ModeApprover` is deliberately not re-exported: §6 step 5's implementation
@@ -21,7 +23,7 @@ mod tool;
 /// caller could name is one step from a caller that supplies one.
 pub use approver::{Approver, HumanApprover, PermissionDecision, Verdict};
 pub use authority::{Authority, RuleAuthority};
-pub use fs::{Fs, FsError, GuardedFs, GuardedIo, IoDenied, PathResolver};
+pub use fs::{Fs, FsError, GuardedEffects, GuardedIo, IoDenied, PathResolver};
 pub use grant::{
     Authorized, Classification, Escalation, Pending, PermissionRequest, Permit, PermitDenied,
     PolicyDenied, PolicyEngine, Resolution,
@@ -30,4 +32,14 @@ pub use path::CanonPath;
 pub use prepared_call::{Change, Op, OpName, PreparedCall};
 pub use scan::{Entry, EntryKind, Found, LineMatcher, Match, Scan, ScanLimits, ScanRequest};
 pub use scope::Scope;
-pub use tool::{PrepareCtx, Tool, ToolDescriptor, ToolError, ToolResult, Typed, TypedTool};
+pub use spawn::{
+    BackendIdentity, Confinement, ConfinementParseError, EnvName, EnvNameError, EnvPolicy,
+    ExecCaps, ExecObservation, ExecRequirements, MissingExecCaps, PolicyDigest,
+    PolicyDigestError, ProcessError, ProcessExecutor, RunConfinement, RunConfinementError,
+    SpawnSpec, SpawnSpecError,
+};
+pub use tool::{
+    MAX_TOOL_ERROR_DIAGNOSTIC_BYTES, PrepareCtx, StreamProvenance, Tool, ToolContentBlock,
+    ToolDescriptor, ToolError, ToolOutputEncoding, ToolOutputProvenance, ToolResult, Typed,
+    TypedTool,
+};

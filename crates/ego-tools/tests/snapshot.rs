@@ -243,8 +243,9 @@ mod snapshot {
             turn1,
             Some(item_tool),
             EventKind::PermissionDecided {
-                allowed: false,
+                allowed: Some(false),
                 by: Some(Authority::Boundary),
+                reason: None,
             },
             None,
             EventId::new(),

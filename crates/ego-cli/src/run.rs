@@ -19,18 +19,23 @@ use ego_core::event::domain::CancelCause;
 use ego_core::event::id::SessionId;
 use ego_core::generator::capabilities::ModelCapabilities;
 use ego_core::permit::{
-    CanonPath, HumanApprover, PermissionDecision, PermissionRequest, PolicyEngine, Tool,
+    CanonPath, Change, Escalation, ExecCaps, ExecObservation, HumanApprover, Op, OpName,
+    PermissionDecision, PermissionRequest, PolicyEngine, PreparedCall, RunConfinement, Tool,
 };
+use ego_core::permit::judge::{JudgeConfig, JudgeInput};
 use ego_core::public::{PUBLIC_EVENT_VERSION, PublicEvent};
 use ego_core::run::{DeniedBy, RunTermination, Signal};
 use ego_core::sink::EventSink;
 use ego_core::state::{ItemKind, SessionState};
 use ego_core::store::session_store::{SessionMeta, SessionStore};
-use ego_core::turn::{CancelToken, Model, Session, Tools, TurnConfig, TurnLoop, TurnOutcome};
+use ego_core::turn::{
+    CancelToken, JudgeModel, Model, Session, Tools, TurnConfig, TurnLoop, TurnOutcome,
+};
 use ego_tools::clock::SystemClock;
+use ego_tools::exec::{ExecLimits, ExecRunConfig, GuardedExec, ProcessError};
 use ego_tools::fs::OsFs;
 use ego_tools::instructions::OsInstructionIo;
-use ego_tools::store::JsonlStore;
+use ego_tools::store::{JsonlStore, SessionEvidenceStore};
 use ego_tools::tools::builtins;
 use serde_json::Value;
 
@@ -58,6 +63,11 @@ const SETTLEMENT: &str = "USD";
 /// at all would abandon an unsettled attempt, which is what `AttemptStream`
 /// exists to prevent. A bounded wait is the only honest third answer.
 const GRACE: Duration = Duration::from_secs(5);
+
+/// Complete stdout or stderr beyond this per-stream bound fails the tool and
+/// terminates its process tree. Preview memory is bounded separately by
+/// [`ExecLimits`].
+const EVIDENCE_CAP: u64 = 64 * 1024 * 1024;
 
 /// What the run produced, beyond how it ended.
 pub struct Ended {
@@ -591,6 +601,9 @@ struct Settings {
     /// directory — and two fields because they answer two questions.
     root: PathBuf,
     cwd: PathBuf,
+    /// The effective runtime boundary, resolved independently of permission
+    /// mode and fixed for the whole run.
+    confinement: RunConfinement,
     effective: Effective,
 }
 
@@ -633,11 +646,19 @@ fn settings(args: &Args, trust_for: impl FnOnce(&Path) -> Trust) -> Result<Setti
         ));
     }
 
+    let confinement = RunConfinement::new(
+        effective.sandbox.unwrap_or_default(),
+        args.offline,
+        CanonPath::new(&root),
+    )
+    .map_err(|err| UsageError(err.to_string()))?;
+
     Ok(Settings {
         started,
         timeout,
         root,
         cwd,
+        confinement,
         effective,
     })
 }
@@ -734,6 +755,63 @@ struct Provider {
     credential: ego_ai::provider::ResolvedCredential,
 }
 
+struct ResolvedJudge {
+    generator: ego_ai::generator::WireGenerator,
+    resolved: ego_ai::catalogue::ResolvedModel,
+    config: JudgeConfig,
+}
+
+/// Prove the fixed judge generation envelope before a session exists.
+///
+/// Dynamic authority facts occupy one user-text block and cannot change the
+/// request's tool, thinking, parallelism or output-ceiling requirements. A
+/// canonical write-shaped input therefore exercises the same provider-facing
+/// shape without sending a generation or pretending that the provider was
+/// contacted. The exact in-turn request is checked again by `TurnLoop`.
+fn preflight_judge(
+    judge: &ResolvedJudge,
+    confinement: &RunConfinement,
+    exec_caps: ExecCaps,
+) -> Result<(), RunTermination> {
+    let path = confinement.workspace().clone();
+    let call = PreparedCall {
+        tool: "write".to_string(),
+        ops: vec![Op::Write {
+            path: path.clone(),
+            change: Change::Whole(Vec::new()),
+        }],
+    };
+    let escalation = Escalation::ModeAsks {
+        mode: Mode::Auto,
+        op: OpName::Write,
+        path,
+    };
+    let request = JudgeInput::new(&call, confinement, exec_caps, &escalation)
+        .request(&judge.config);
+    let gaps = judge.resolved.capabilities.request_gaps(&request);
+    if !gaps.is_empty() {
+        return Err(RunTermination::UsageError {
+            message: format!(
+                "judge model `{}` is incompatible with the fixed judge request: {}",
+                judge.config.identity.0.as_str(),
+                gaps.iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ),
+        });
+    }
+    judge
+        .generator
+        .ensure_expressible(&request)
+        .map_err(|error| RunTermination::UsageError {
+            message: format!(
+                "judge model `{}` cannot encode the fixed judge request: {error}",
+                judge.config.identity.0.as_str()
+            ),
+        })
+}
+
 /// A transport, the catalogue row `--model` names, and the credential that
 /// will sign for it.
 ///
@@ -793,6 +871,44 @@ async fn provider(
     })
 }
 
+/// Build the process boundary for one cancellation scope.
+///
+/// A backend that cannot demonstrate a requested guarantee is a startup usage
+/// refusal (exit 2), not an internal error and never a silent downgrade.
+async fn guarded_exec(
+    confinement: &RunConfinement,
+    evidence: &SessionEvidenceStore,
+    cancel: &CancelToken,
+) -> Result<(Arc<GuardedExec>, ExecObservation), RunTermination> {
+    let config = ExecRunConfig::new(
+        confinement.clone(),
+        evidence.clone(),
+        cancel.clone(),
+        ExecLimits::default(),
+    );
+    GuardedExec::for_run(config)
+        .await
+        .map_err(|err| match &err {
+            ProcessError::MissingCapabilities(_) | ProcessError::Backend(_) => {
+                RunTermination::UsageError {
+                    message: err.to_string(),
+                }
+            }
+            ProcessError::Cancelled => cancelled_termination(cancel),
+            _ => RunTermination::Failed {
+                message: err.to_string(),
+            },
+        })
+}
+
+fn cancelled_termination(cancel: &CancelToken) -> RunTermination {
+    match cancel.cause() {
+        Some(CancelCause::Timeout) => RunTermination::TimedOut,
+        Some(CancelCause::User) => RunTermination::Signalled(Signal::Int),
+        _ => RunTermination::Signalled(Signal::Term),
+    }
+}
+
 /// Everything before the first turn.
 ///
 /// What is left here after the four steps above is the *order* they happen in,
@@ -835,14 +951,70 @@ async fn execute<S: EventSink>(
         timeout,
         root,
         cwd,
+        confinement,
         effective,
     } = settings;
+
+    // Capability proof is a startup gate, so it runs before provider
+    // resolution and before the durable session is opened. Its evidence lives
+    // in a disposable session-bound store. The actual turn executor below is
+    // rebuilt with the turn's latching cancellation token and the real
+    // session evidence facade.
+    let proof_directory = tempfile::tempdir().map_err(|err| RunTermination::Failed {
+        message: format!("could not create the sandbox proof store: {err}"),
+    })?;
+    let proof_evidence = SessionEvidenceStore::open(
+        proof_directory.path(),
+        session_id,
+        EVIDENCE_CAP,
+    )
+    .map_err(|err| RunTermination::Failed {
+        message: format!("could not open the sandbox proof store: {err}"),
+    })?;
+    let (proof, proof_observation) = guarded_exec(
+        &confinement,
+        &proof_evidence,
+        &cancel,
+    )
+    .await?;
+    drop(proof);
 
     let Provider {
         http,
         resolved,
         credential,
     } = provider(&slug, &effective, args.offline).await?;
+
+    let mode = effective.mode.unwrap_or(Mode::Default);
+    let judge = if mode == Mode::Auto {
+        let identity = effective.judge.clone().ok_or_else(|| RunTermination::UsageError {
+            message: "`auto` mode requires `[permissions] judge = \"provider/model\"`"
+                .to_string(),
+        })?;
+        let Provider {
+            http,
+            resolved,
+            credential,
+        } = provider(&identity.0, &effective, args.offline).await?;
+        let config = JudgeConfig {
+            identity,
+            request_model: resolved.model.clone(),
+            max_output_tokens: output_ceiling(&resolved.capabilities),
+        };
+        let judge = ResolvedJudge {
+            generator: ego_ai::generator::WireGenerator::new(
+                resolved.row.clone(),
+                http,
+                credential,
+            ),
+            resolved,
+            config,
+        };
+        preflight_judge(&judge, &confinement, proof_observation.capabilities())?;
+        Some(judge)
+    } else {
+        None
+    };
 
     let currency = CurrencyCode::new(SETTLEMENT).expect("a constant this file controls");
     let clock = SystemClock;
@@ -857,6 +1029,26 @@ async fn execute<S: EventSink>(
     if let Some(note_text) = opened.repair_note() {
         note(&note_text);
     }
+
+    // Declared before `evidence`, and therefore dropped after it. The
+    // ephemeral store names files inside this owner; durable stores instead
+    // retain the session writer's lease and need no temporary owner.
+    let _ephemeral_evidence_owner;
+    let evidence = match &opened {
+        Opened::Durable(open) => {
+            drop(proof_directory);
+            _ephemeral_evidence_owner = None;
+            open.writer
+                .evidence_store(EVIDENCE_CAP)
+                .map_err(|err| RunTermination::Failed {
+                    message: format!("could not open this session's tool evidence: {err}"),
+                })?
+        }
+        Opened::Ephemeral(_) => {
+            _ephemeral_evidence_owner = Some(proof_directory);
+            proof_evidence
+        }
+    };
 
     // Everything that can refuse has refused. From here the run has a session,
     // and every ending is a `RunTermination` with a log behind it.
@@ -887,7 +1079,6 @@ async fn execute<S: EventSink>(
         ego_ai::generator::WireGenerator::new(resolved.row.clone(), Arc::clone(&http), credential);
     // An untrusted workspace resolves to `Mode::Default`; a trusted
     // interactive run may obtain its mode from the admitted config layers.
-    let mode = effective.mode.unwrap_or(Mode::Default);
     let policy = match &driver {
         Driver::Once => {
             PolicyEngine::new(CanonPath::new(&root), mode, effective.permissions.clone())
@@ -935,17 +1126,16 @@ async fn execute<S: EventSink>(
     // A macro and not a closure: the loop borrows from this function's locals,
     // and a closure cannot name the lifetime of a `TurnLoop<'_>` it returns.
     macro_rules! build {
-        ($state:expr, $cancel:expr) => {
-            TurnLoop::new(
-                Session {
+        ($state:expr, $cancel:expr, $process:expr, $observation:expr) => {{
+            let session = Session {
                     id: session_id,
                     state: $state,
                     store: opened.store(),
                     clock: &clock,
                     sink,
                     cancel: $cancel.clone(),
-                },
-                Model {
+                };
+            let model = Model {
                     generator: &generator,
                     gate: &mut gate,
                     metering: resolved.metering.clone(),
@@ -953,15 +1143,41 @@ async fn execute<S: EventSink>(
                     token_ceiling: effective.ceilings.tokens,
                     caps: resolved.capabilities.clone(),
                     config: config.clone(),
-                },
-                Tools::new(&registry, &policy, &fs, CanonPath::new(&cwd)),
-            )
-        };
+                };
+            let tools = Tools::new(
+                    &registry,
+                    &policy,
+                    &fs,
+                    $process.as_ref(),
+                    &evidence,
+                    CanonPath::new(&cwd),
+                );
+            let loop_ = if let Some(judge) = judge.as_ref() {
+                TurnLoop::with_judge(
+                    session,
+                    model,
+                    tools,
+                    JudgeModel {
+                        generator: &judge.generator,
+                        metering: judge.resolved.metering.clone(),
+                        rates: judge.resolved.rates.clone(),
+                        caps: judge.resolved.capabilities.clone(),
+                        config: judge.config.clone(),
+                        confinement: confinement.clone(),
+                        exec_caps: $observation.capabilities(),
+                    },
+                )
+            } else {
+                TurnLoop::new(session, model, tools)
+            };
+            loop_.with_execution_observation($observation)
+        }};
     }
 
     match driver {
         Driver::Once => {
-            let mut loop_ = build!(opening, &cancel);
+            let (process, observation) = guarded_exec(&confinement, &evidence, &cancel).await?;
+            let mut loop_ = build!(opening, &cancel, process, observation);
             let (termination, result) = turns.drive(&mut loop_, &text, &cancel).await;
 
             Ok(Ended {
@@ -1010,7 +1226,9 @@ async fn execute<S: EventSink>(
 
                 // Per turn, for the reason `build` documents.
                 let turn_cancel = CancelToken::new();
-                let mut loop_ = build!(state, &turn_cancel);
+                let (process, observation) =
+                    guarded_exec(&confinement, &evidence, &turn_cancel).await?;
+                let mut loop_ = build!(state, &turn_cancel, process, observation);
                 let (termination, result) = turns.drive(&mut loop_, &asked, &turn_cancel).await;
                 state = loop_.into_state();
                 between();

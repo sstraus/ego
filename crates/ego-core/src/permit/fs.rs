@@ -11,9 +11,14 @@
 use std::fmt;
 use std::path::Path;
 
+use futures::future::{self, BoxFuture};
+
 use super::grant::{Permit, PermitDenied};
 use super::path::CanonPath;
 use super::scan::{Entry, EntryKind, Found, LineMatcher, Match, Scan, ScanRequest};
+use super::spawn::{ProcessError, ProcessExecutor, SpawnSpec};
+use super::tool::{ToolError, ToolResult};
+use crate::store::evidence::{EvidencePage, EvidenceRead, EvidenceStore};
 
 /// Why a filesystem operation failed, as opposed to being *denied*.
 ///
@@ -93,7 +98,7 @@ pub trait PathResolver: Send + Sync {
 
 /// The raw filesystem seam. Unchecked: nothing here consults a `Permit`.
 /// Tools never hold this directly (`ARCHITECTURE.md` §3.2); it is held by
-/// the loop and wrapped in [`GuardedFs`] before a tool ever sees it.
+/// the loop and wrapped in [`GuardedEffects`] before a tool ever sees it.
 pub trait Fs: PathResolver {
     fn read(&self, path: &CanonPath) -> Result<Vec<u8>, FsError>;
 
@@ -144,6 +149,18 @@ pub trait GuardedIo: Send + Sync {
     /// holding read authority over the subtree
     /// (`docs/decisions/2026-08-21-reading-without-reading-everything.md` §2).
     fn search(&self, req: &ScanRequest, matcher: &dyn LineMatcher) -> Result<Found, IoDenied>;
+
+    /// Execute the exact process specification admitted by this permit.
+    fn exec<'a>(
+        &'a self,
+        spec: &'a SpawnSpec,
+    ) -> BoxFuture<'a, Result<ToolResult, ProcessError>>;
+
+    /// Read the exact bounded evidence request admitted inside this session.
+    fn read_evidence<'a>(
+        &'a self,
+        request: &'a EvidenceRead,
+    ) -> BoxFuture<'a, Result<EvidencePage, ToolError>>;
 }
 
 /// Why a guarded operation did not produce what was asked for: the permit
@@ -182,10 +199,10 @@ impl From<FsError> for IoDenied {
 }
 
 /// The only implementation of [`GuardedIo`] in this crate: a [`Permit`]
-/// paired with the raw [`Fs`] it governs.
+/// paired with the raw effect ports it governs.
 ///
 /// **Owns the permit rather than borrowing it.** The seam that enforces a
-/// grant is where the grant should end up: once a `GuardedFs` exists the
+/// grant is where the grant should end up: once a `GuardedEffects` exists the
 /// permit is inside it, unreachable, and it dies with the seam. A borrowed
 /// permit meant somebody upstream still held one for the duration of the
 /// call, and that somebody was the only remaining place a permit and a
@@ -193,17 +210,29 @@ impl From<FsError> for IoDenied {
 ///
 /// It is also the only shape that compiles. With `permit: &'a Permit`, a
 /// caller cannot both hand an [`Authorized`](super::Authorized) to
-/// `Tool::execute` by value and keep a `GuardedFs` built from that same
+/// `Tool::execute` by value and keep a `GuardedEffects` built from that same
 /// permit — `E0505`, move out of a borrowed value, whose suggested fix is
 /// `Clone` on `Authorized`. That is the one thing Invariant W forbids.
-pub struct GuardedFs<'a> {
+pub struct GuardedEffects<'a> {
     permit: Permit,
     fs: &'a dyn Fs,
+    process: &'a dyn ProcessExecutor,
+    evidence: &'a dyn EvidenceStore,
 }
 
-impl<'a> GuardedFs<'a> {
-    pub fn new(permit: Permit, fs: &'a dyn Fs) -> Self {
-        Self { permit, fs }
+impl<'a> GuardedEffects<'a> {
+    pub fn new(
+        permit: Permit,
+        fs: &'a dyn Fs,
+        process: &'a dyn ProcessExecutor,
+        evidence: &'a dyn EvidenceStore,
+    ) -> Self {
+        Self {
+            permit,
+            fs,
+            process,
+            evidence,
+        }
     }
 
     /// Re-resolve `root`, check it against the permit with `allows`, and hand
@@ -287,7 +316,7 @@ impl<'a> GuardedFs<'a> {
     }
 }
 
-impl GuardedIo for GuardedFs<'_> {
+impl GuardedIo for GuardedEffects<'_> {
     fn write(&self, path: &CanonPath, bytes: &[u8]) -> Result<(), IoDenied> {
         // Re-resolve now, at use time, rather than trusting `path` — see
         // the trait doc comment. `write_target` and not `canonicalize`,
@@ -361,5 +390,27 @@ impl GuardedIo for GuardedFs<'_> {
         }
 
         Ok(Found { matches, truncated })
+    }
+
+    fn exec<'a>(
+        &'a self,
+        spec: &'a SpawnSpec,
+    ) -> BoxFuture<'a, Result<ToolResult, ProcessError>> {
+        if let Err(denied) = self.permit.allows_spawn(spec) {
+            return Box::pin(future::ready(Err(ProcessError::Invariant(
+                denied.to_string(),
+            ))));
+        }
+        self.process.execute(spec)
+    }
+
+    fn read_evidence<'a>(
+        &'a self,
+        request: &'a EvidenceRead,
+    ) -> BoxFuture<'a, Result<EvidencePage, ToolError>> {
+        if let Err(denied) = self.permit.allows_evidence(request) {
+            return Box::pin(future::ready(Err(denied.into())));
+        }
+        Box::pin(async move { self.evidence.read_page(request).await.map_err(Into::into) })
     }
 }

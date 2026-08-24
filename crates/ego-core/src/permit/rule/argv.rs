@@ -6,16 +6,12 @@
 //! canonical argv. A pattern is never re-rendered into a shell string, for
 //! any purpose — `ego rules ls` renders the token vector.
 //!
-//! **This half is only worth anything if the argv is the real argv.** §6's
-//! other half is a requirement on whatever tool spawns processes: its
-//! `prepare` must decompose a command into one canonical operation per stage,
-//! as a recogniser rather than an interpreter, and anything outside the
-//! subset it recognises must become an operation no `exec(...)` rule can
-//! match. Nothing in this workspace spawns anything yet, so that half has
-//! nothing to attach to and is not implemented here. Until it exists, an
-//! `exec` rule parses, canonicalises and gets an ID, and matches no call —
-//! because no call carries an argv.
+//! **This half is only worth anything if the argv is the real argv.** The
+//! argv-native exec producer supplies that other half: it constructs one
+//! [`SpawnSpec`](crate::permit::SpawnSpec), and matching reads its exact token
+//! vector without rendering or reparsing it.
 
+use std::ffi::OsString;
 use std::fmt;
 
 use super::glob::{Elem, Glob, GlobBuilder, matches_sequence};
@@ -155,6 +151,22 @@ impl ArgvPattern {
             .collect();
         let target: Vec<&str> = argv.iter().map(String::as_str).collect();
         matches_sequence(&elements, &target)
+    }
+
+    /// Match a host-native argv without repairing non-Unicode arguments.
+    ///
+    /// The rule grammar is Unicode text. An argument outside that grammar is
+    /// therefore not covered by an `exec(...)` rule; lossy conversion here
+    /// would silently authorize a different value from the one executed.
+    pub fn matches_os(&self, argv: &[OsString]) -> bool {
+        let Some(argv) = argv
+            .iter()
+            .map(|argument| argument.to_str().map(str::to_owned))
+            .collect::<Option<Vec<_>>>()
+        else {
+            return false;
+        };
+        self.matches(&argv)
     }
 
     /// The canonical bytes this pattern contributes to a rule's ID.

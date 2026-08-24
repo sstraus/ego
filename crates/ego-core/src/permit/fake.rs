@@ -268,9 +268,10 @@ impl TypedTool for FakeWriteTool {
                 ));
             };
             io.write(&path, &contents)?;
-            Ok(ToolResult {
-                content: format!("wrote {} bytes to {path}", contents.len()),
-            })
+            Ok(ToolResult::builtin(format!(
+                "wrote {} bytes to {path}",
+                contents.len()
+            )))
         })
     }
 }

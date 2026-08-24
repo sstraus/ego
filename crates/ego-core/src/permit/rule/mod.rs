@@ -27,12 +27,11 @@
 //! ## What is here and what is waiting
 //!
 //! All seven heads parse, canonicalise and take an ID, because the grammar is
-//! published as one thing — `ARCHITECTURE.md:252` makes that a gate. Only
-//! four of them can currently *match*: `read`, `write`, `list` and `search`
-//! name operations some tool in this workspace produces. `exec`, `net` and
-//! `tool` name operations no tool produces yet.
+//! published as one thing — `ARCHITECTURE.md:252` makes that a gate. Five can
+//! currently match: `read`, `write`, `list`, `search`, and `exec`. `net` and
+//! `tool` still name operations no tool produces.
 //!
-//! A rule with one of those three heads is well-formed, has a stable ID and
+//! A rule with one of those two heads is well-formed, has a stable ID and
 //! renders in `rules ls` — and [`Rule::load`] **refuses it**, by name, saying
 //! that no tool in this build produces operations of that shape. Not a parse
 //! error, which would lie about the grammar and churn the ID later; and not a
@@ -169,10 +168,9 @@ impl Rule {
             (Rule::Search(pattern), Op::Search { root: at, .. }) => {
                 pattern.matches(at.as_path(), root)
             }
-            // `exec`, `net` and `tool` are not missing arms — there is no
-            // operation of any of those shapes in this workspace. See the
-            // module comment: they gain arms when the operations do, and the
-            // rules that exist today do not change when they do.
+            (Rule::Exec(pattern), Op::Spawn { spec }) => pattern.matches_os(spec.argv()),
+            // `net` and `tool` are not missing arms — there is no operation
+            // of either shape in this workspace. See the module comment.
             _ => false,
         }
     }

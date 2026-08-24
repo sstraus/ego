@@ -8,11 +8,13 @@ use ego_core::config::{Mode, OriginSet, PermCfg, Ruleset, Source};
 use ego_core::permit::rule::Rule;
 use ego_core::permit::{
     Authority, Authorized, CanonPath, Change, Classification, Entry, EntryKind, Escalation, Fs,
-    FsError, GuardedFs, GuardedIo, IoDenied, Op, OpName, PathResolver, Pending, PermitDenied,
-    PolicyDenied, PolicyEngine, PrepareCtx, PreparedCall, Resolution, Scan, ScanLimits,
-    ScanRequest, Tool, ToolError, Typed,
+    FsError, GuardedEffects, GuardedIo, IoDenied, Op, OpName, PathResolver, Pending, PermitDenied,
+    PolicyDenied, PolicyEngine, PrepareCtx, PreparedCall, ProcessError, ProcessExecutor,
+    Resolution, Scan, ScanLimits, ScanRequest, Tool, ToolError, ToolResult, Typed,
 };
+use ego_core::store::evidence::{EvidenceError, EvidencePage, EvidenceRead, EvidenceStore, EvidenceWriter};
 use futures::executor::block_on;
+use futures::future::{self, BoxFuture};
 use serde_json::json;
 
 // Wrapped in a module named `permit` so `cargo test -p ego-core permit` (the
@@ -24,6 +26,44 @@ mod common;
 mod permit {
     use super::*;
     use ego_core::permit::fake::{FakeFs, FakeWriteTool};
+
+    struct NoProcess;
+
+    impl ProcessExecutor for NoProcess {
+        fn execute<'a>(
+            &'a self,
+            _spec: &'a ego_core::permit::SpawnSpec,
+        ) -> BoxFuture<'a, Result<ToolResult, ProcessError>> {
+            Box::pin(future::ready(Err(ProcessError::Invariant(
+                "process execution is not used by filesystem tests".to_string(),
+            ))))
+        }
+    }
+
+    struct NoEvidence;
+
+    impl EvidenceStore for NoEvidence {
+        fn begin(&self) -> Result<Box<dyn EvidenceWriter>, EvidenceError> {
+            Err(EvidenceError::Limit { limit: 0 })
+        }
+
+        fn read_page<'a>(
+            &'a self,
+            request: &'a EvidenceRead,
+        ) -> BoxFuture<'a, Result<EvidencePage, EvidenceError>> {
+            Box::pin(future::ready(Err(EvidenceError::NotFound {
+                reference: request.reference.id.clone(),
+            })))
+        }
+    }
+
+    static NO_PROCESS: NoProcess = NoProcess;
+    static NO_EVIDENCE: NoEvidence = NoEvidence;
+
+    fn guarded<'a>(granted: Authorized, fs: &'a dyn Fs) -> GuardedEffects<'a> {
+        let (_, permit) = granted.into_parts();
+        GuardedEffects::new(permit, fs, &NO_PROCESS, &NO_EVIDENCE)
+    }
 
     fn prepare_ctx<'a>(fs: &'a FakeFs) -> PrepareCtx<'a> {
         PrepareCtx {
@@ -244,6 +284,7 @@ mod permit {
             // belongs, against `resolve`, in `tests/config.rs`.
             Ruleset::from_layer(
                 PermCfg {
+                    judge: None,
                     allow: load(allow),
                     deny: load(deny),
                 },
@@ -437,9 +478,9 @@ mod permit {
         let cases = [
             (Mode::Plan, Answer::Refused),
             (Mode::Default, Answer::Asked),
-            // No judge in this build, so `auto` has nothing to consult and
-            // falls through to the same question `default` asks. When step
-            // 6 exists this row changes and no other one does.
+            // PolicyEngine owns only the mode ceiling. TurnLoop inserts a
+            // separately resolved judge after this question and before the
+            // human seat, so the policy seam itself remains an Ask here.
             (Mode::Auto, Answer::Asked),
             (Mode::Edits, Answer::Authorized),
             (Mode::Yolo, Answer::Authorized),
@@ -625,6 +666,7 @@ mod permit {
         let (first, rest) = origins.split_first().expect("at least one origin");
         let mut ruleset = Ruleset::from_layer(
             PermCfg {
+                judge: None,
                 allow: vec![rule("read(**)")],
                 deny: vec![rule(raw)],
             },
@@ -876,7 +918,7 @@ mod permit {
         let fs = workspace();
         let engine = in_default_mode("/ws");
         let granted = engine.classify_settled(list_call("/ws/src", "**")).unwrap();
-        let guarded = GuardedFs::new(granted.into_parts().1, &fs);
+        let guarded = guarded(granted, &fs);
 
         let scan = guarded
             .list(&ScanRequest::new(CanonPath::new("/ws/src")))
@@ -909,7 +951,7 @@ mod permit {
         let fs = workspace();
         let engine = in_default_mode("/ws");
         let granted = engine.classify_settled(list_call("/ws/src", "**")).unwrap();
-        let guarded = GuardedFs::new(granted.into_parts().1, &fs);
+        let guarded = guarded(granted, &fs);
 
         let denied = guarded
             .list(&ScanRequest::new(CanonPath::new("/ws")))
@@ -932,7 +974,7 @@ mod permit {
         fs.symlink("/ws/src/innocent.rs", "/etc/passwd");
         let engine = in_default_mode("/ws");
         let granted = engine.classify_settled(list_call("/ws/src", "**")).unwrap();
-        let guarded = GuardedFs::new(granted.into_parts().1, &fs);
+        let guarded = guarded(granted, &fs);
 
         let denied = guarded
             .list(&ScanRequest::new(CanonPath::new("/ws/src")))
@@ -953,7 +995,7 @@ mod permit {
         fs.symlink("/ws/src/out", "/elsewhere");
         let engine = in_default_mode("/ws");
         let granted = engine.classify_settled(list_call("/ws/src", "**")).unwrap();
-        let guarded = GuardedFs::new(granted.into_parts().1, &fs);
+        let guarded = guarded(granted, &fs);
 
         let scan = guarded
             .list(&ScanRequest::new(CanonPath::new("/ws/src")))
@@ -976,7 +1018,7 @@ mod permit {
         let fs = workspace();
         let engine = in_default_mode("/ws");
         let granted = engine.classify_settled(list_call("/ws/src", "**")).unwrap();
-        let guarded = GuardedFs::new(granted.into_parts().1, &fs);
+        let guarded = guarded(granted, &fs);
 
         let capped = ScanRequest {
             root: CanonPath::new("/ws/src"),
@@ -997,7 +1039,7 @@ mod permit {
         let fs = workspace();
         let engine = in_default_mode("/ws");
         let granted = engine.classify_settled(list_call("/ws/src", "**")).unwrap();
-        let guarded = GuardedFs::new(granted.into_parts().1, &fs);
+        let guarded = guarded(granted, &fs);
 
         let shallow = ScanRequest {
             root: CanonPath::new("/ws/src"),
@@ -1029,7 +1071,7 @@ mod permit {
         fs.file("/ws/src/target/build.rs", "generated");
         let engine = in_default_mode("/ws");
         let granted = engine.classify_settled(list_call("/ws/src", "**")).unwrap();
-        let guarded = GuardedFs::new(granted.into_parts().1, &fs);
+        let guarded = guarded(granted, &fs);
 
         let skipping = ScanRequest {
             root: CanonPath::new("/ws/src"),
@@ -1067,7 +1109,7 @@ mod permit {
         let granted = engine
             .classify_settled(search_call("/ws/src", "TODO"))
             .unwrap();
-        let guarded = GuardedFs::new(granted.into_parts().1, &fs);
+        let guarded = guarded(granted, &fs);
 
         let found = guarded
             .search(
@@ -1152,7 +1194,7 @@ mod permit {
         let granted = engine
             .classify_settled(search_call("/ws/src", "SECRET"))
             .unwrap();
-        let guarded = GuardedFs::new(granted.into_parts().1, &fs);
+        let guarded = guarded(granted, &fs);
 
         let denied = guarded
             .search(
@@ -1181,7 +1223,7 @@ mod permit {
         let fs = workspace();
         let engine = in_default_mode("/ws");
         let granted = engine.classify_settled(read_call("/ws/src")).unwrap();
-        let guarded = GuardedFs::new(granted.into_parts().1, &fs);
+        let guarded = guarded(granted, &fs);
 
         // Authorised, but there is nothing there.
         assert!(matches!(
@@ -1206,7 +1248,7 @@ mod permit {
         let granted = engine
             .classify_settled(search_call("/ws/src", "fn"))
             .unwrap();
-        let guarded = GuardedFs::new(granted.into_parts().1, &fs);
+        let guarded = guarded(granted, &fs);
 
         let starved = ScanRequest {
             root: CanonPath::new("/ws/src"),
@@ -1234,7 +1276,7 @@ mod permit {
         let granted = engine
             .classify_settled(search_call("/ws/src", "SECRET"))
             .unwrap();
-        let guarded = GuardedFs::new(granted.into_parts().1, &fs);
+        let guarded = guarded(granted, &fs);
 
         let denied = guarded
             .search(&ScanRequest::new(CanonPath::new("/ws")), &|line: &str| {

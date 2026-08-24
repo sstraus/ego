@@ -13,6 +13,7 @@ use crate::event::domain::{DomainEvent, EventKind, ExitReason, OccupancyProvenan
 use crate::event::id::{AttemptId, EventId, GenerationId, ItemId, Seq, SessionId, TurnId};
 use crate::generator::attempt::{AttemptRef, Outcome, UsageReport};
 use crate::generator::types::ReasoningState;
+use crate::permit::ToolResult;
 
 /// Token counts, split by the categories providers price separately.
 ///
@@ -263,8 +264,11 @@ pub struct ItemState {
     /// call could no longer say what it had been called with — which is
     /// exactly what a rebuilt history needs from it.
     pub args: String,
-    /// Message and reasoning text, and a tool call's output.
+    /// Message and reasoning text, plus any still-streaming tool delta. A
+    /// completed tool's semantic result lives in [`Self::tool_result`].
     pub text: String,
+    /// The final evidence returned by a completed tool call.
+    pub tool_result: Option<ToolResult>,
     /// A reasoning item's opaque continuation state, once its block closed.
     ///
     /// Its own field and not [`Self::text`]: the two are different values on
@@ -306,6 +310,7 @@ impl ItemState {
             tool_name: None,
             args: String::new(),
             text: String::new(),
+            tool_result: None,
             reasoning_state: None,
             completed: false,
             ok: None,
@@ -619,9 +624,10 @@ impl SessionState {
                     item.text.push_str(text);
                 }
             }
-            EventKind::ToolCallCompleted { ok, output } => {
+            EventKind::ToolCallCompleted { ok, result } => {
                 if let Some(item) = self.item_mut(ev, ItemKind::ToolCall) {
-                    item.text = output.clone();
+                    item.text.clear();
+                    item.tool_result = Some(result.clone());
                     item.completed = true;
                     item.ok = Some(*ok);
                 }
@@ -644,12 +650,15 @@ impl SessionState {
             // `permissions` to ask. Keeping it here would put an `Authority`
             // inside the snapshot for no consumer.
             EventKind::PermissionDecided { allowed, .. } => {
-                self.permissions.push(PermissionEvent::Decided {
-                    item: ev.env.item,
-                    allowed: *allowed,
-                });
+                if let Some(allowed) = allowed {
+                    self.permissions.push(PermissionEvent::Decided {
+                        item: ev.env.item,
+                        allowed: *allowed,
+                    });
+                }
             }
-            EventKind::GenerationStarted { attempt } => self.start(ev, attempt),
+            EventKind::GenerationStarted { attempt, .. } => self.start(ev, attempt),
+            EventKind::ExecutionObserved { .. } => {}
             EventKind::AttemptSettled { attempt, outcome } => self.settle(ev, attempt, outcome),
             EventKind::UsageUpdated {
                 usage,

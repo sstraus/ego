@@ -38,8 +38,53 @@ pub fn tmp_path_for(path: &Path) -> PathBuf {
     PathBuf::from(name)
 }
 
-/// The filesystem operations `JsonlStore` needs, and nothing else.
+/// The filesystem operations the durable session adapters need, and nothing else.
 pub trait StoreIo: Send + Sync {
+    /// Create a new private staging file, refusing an existing name.
+    fn create_new(&self, _path: &Path) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "incremental evidence creation is not implemented",
+        ))
+    }
+
+    /// Append arbitrary bytes exactly, without record framing.
+    fn append_bytes(&self, _path: &Path, _bytes: &[u8]) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "incremental evidence append is not implemented",
+        ))
+    }
+
+    /// Visit a file in bounded chunks, or report that it is absent.
+    fn visit_file(
+        &self,
+        _path: &Path,
+        _visitor: &mut dyn FnMut(&[u8]) -> io::Result<()>,
+    ) -> io::Result<bool> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "incremental evidence read is not implemented",
+        ))
+    }
+
+    /// Publish a staging inode without replacing an existing immutable blob.
+    /// Returns `false` when the destination already exists.
+    fn publish_new(&self, _staging: &Path, _target: &Path) -> io::Result<bool> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "incremental evidence publish is not implemented",
+        ))
+    }
+
+    /// List immediate regular files, or an empty list for an absent path.
+    fn list_files(&self, _path: &Path) -> io::Result<Vec<PathBuf>> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "incremental evidence listing is not implemented",
+        ))
+    }
+
     /// Append `line` (no trailing newline) plus a newline to the file at
     /// `path`, creating the file and any missing parent directories if
     /// `path` does not exist yet.
@@ -174,12 +219,119 @@ fn truncate_with(path: &Path, len: u64, barrier: Barrier) -> io::Result<()> {
     barrier.apply(&file)
 }
 
+fn create_new(path: &Path) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::OpenOptions::new().write(true).create_new(true).open(path)?;
+    Ok(())
+}
+
+fn append_bytes(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    use io::Write as _;
+    fs::OpenOptions::new().append(true).open(path)?.write_all(bytes)
+}
+
+fn visit_file(
+    path: &Path,
+    visitor: &mut dyn FnMut(&[u8]) -> io::Result<()>,
+) -> io::Result<bool> {
+    use io::Read as _;
+    let mut file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    let mut chunk = [0_u8; 32 * 1024];
+    loop {
+        let read = file.read(&mut chunk)?;
+        if read == 0 {
+            return Ok(true);
+        }
+        visitor(&chunk[..read])?;
+    }
+}
+
+fn publish_new_with(staging: &Path, target: &Path, barrier: Barrier) -> io::Result<bool> {
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    match fs::hard_link(staging, target) {
+        Ok(()) => {
+            let durable: io::Result<()> = (|| {
+                barrier.apply(&fs::File::open(target)?)?;
+                if let Some(parent) = target.parent() {
+                    barrier.apply(&fs::File::open(parent)?)?;
+                }
+                Ok(())
+            })();
+            if let Err(error) = durable {
+                let _ = fs::remove_file(target);
+                return Err(error);
+            }
+            fs::remove_file(staging)?;
+            if let Some(parent) = staging.parent() {
+                if let Err(error) = barrier.apply(&fs::File::open(parent)?) {
+                    let _ = fs::remove_file(target);
+                    if let Ok(directory) = fs::File::open(parent) {
+                        let _ = barrier.apply(&directory);
+                    }
+                    return Err(error);
+                }
+            }
+            Ok(true)
+        }
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+fn list_files(path: &Path) -> io::Result<Vec<PathBuf>> {
+    let entries = match fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    let mut files = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        if entry.file_type()?.is_file() {
+            files.push(entry.path());
+        }
+    }
+    Ok(files)
+}
+
 /// The real, `std::fs`-backed [`StoreIo`]. The only one anything outside a
 /// test should ever construct.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct OsIo;
 
 impl StoreIo for OsIo {
+    fn create_new(&self, path: &Path) -> io::Result<()> {
+        create_new(path)
+    }
+
+    fn append_bytes(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+        append_bytes(path, bytes)
+    }
+
+    fn visit_file(
+        &self,
+        path: &Path,
+        visitor: &mut dyn FnMut(&[u8]) -> io::Result<()>,
+    ) -> io::Result<bool> {
+        visit_file(path, visitor)
+    }
+
+    fn publish_new(&self, staging: &Path, target: &Path) -> io::Result<bool> {
+        publish_new_with(staging, target, Barrier::Fsync)
+    }
+
+    fn list_files(&self, path: &Path) -> io::Result<Vec<PathBuf>> {
+        list_files(path)
+    }
+
     fn append_line(&self, path: &Path, line: &[u8]) -> io::Result<()> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
@@ -282,6 +434,30 @@ pub struct NonDurableOsIo;
 
 #[cfg(feature = "test-support")]
 impl StoreIo for NonDurableOsIo {
+    fn create_new(&self, path: &Path) -> io::Result<()> {
+        create_new(path)
+    }
+
+    fn append_bytes(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+        append_bytes(path, bytes)
+    }
+
+    fn visit_file(
+        &self,
+        path: &Path,
+        visitor: &mut dyn FnMut(&[u8]) -> io::Result<()>,
+    ) -> io::Result<bool> {
+        visit_file(path, visitor)
+    }
+
+    fn publish_new(&self, staging: &Path, target: &Path) -> io::Result<bool> {
+        publish_new_with(staging, target, Barrier::Elided)
+    }
+
+    fn list_files(&self, path: &Path) -> io::Result<Vec<PathBuf>> {
+        list_files(path)
+    }
+
     fn append_line(&self, path: &Path, line: &[u8]) -> io::Result<()> {
         OsIo.append_line(path, line)
     }

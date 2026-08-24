@@ -66,9 +66,9 @@ unicode-segmentation = "1.13.3"
 terminal_size = "0.4.4"
 pulldown-cmark = { version = "0.13.4", default-features = false }
 similar = { version = "3.2.0", default-features = false, features = ["text", "inline", "unicode"] }
+tempfile = "3.27.0"
 
 [dev-dependencies]
-tempfile = "3.27.0"
 # A test that stands in for the transport has to build an `HttpResponse`, whose
 # body is a stream of `bytes::Bytes` — the type `ego-ai` chose so a chunk can be
 # handed on without being copied. Dev-only: nothing in this crate's own code

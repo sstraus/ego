@@ -66,6 +66,30 @@ impl WireGenerator {
     pub fn provider(&self) -> &str {
         &self.row.id
     }
+
+    /// Prove locally that this resolved provider can encode the exact request.
+    ///
+    /// This deliberately performs no transport I/O. Some provider rows have
+    /// authoritative control-plane resolution and some do not; request
+    /// expressibility is the one permanent fact every wire mapping can prove
+    /// before a generation attempt exists.
+    pub fn ensure_expressible(&self, req: &GenRequest) -> Result<(), wire::RequestRefused> {
+        self.build_request(req).map(drop)
+    }
+
+    fn build_request(
+        &self,
+        req: &GenRequest,
+    ) -> Result<crate::http::HttpRequest, wire::RequestRefused> {
+        let mut headers = self.credential.headers();
+        for (name, value) in &self.row.extra_headers {
+            headers.retain(|(existing, _)| !existing.eq_ignore_ascii_case(name));
+            headers.push((name.clone(), value.clone()));
+        }
+        let base = self.credential.base_override().unwrap_or(&self.row.base);
+        let target = wire::RequestTarget::new(base, &headers);
+        self.row.wire.build_request(&target, req)
+    }
 }
 
 impl Generator for WireGenerator {
@@ -77,14 +101,7 @@ impl Generator for WireGenerator {
         // refusal re-derived per generation, for a condition that could not
         // have changed since — and it re-read the environment to do it, so a
         // rotated variable silently changed a running turn.
-        let mut headers = self.credential.headers();
-        for (name, value) in &self.row.extra_headers {
-            headers.retain(|(existing, _)| !existing.eq_ignore_ascii_case(name));
-            headers.push((name.clone(), value.clone()));
-        }
-        let base = self.credential.base_override().unwrap_or(&self.row.base);
-        let target = wire::RequestTarget::new(base, &headers);
-        let request = match self.row.wire.build_request(&target, &req) {
+        let request = match self.build_request(&req) {
             Ok(request) => request,
             // Refused before a socket exists. `DefinitelyUnsent` is honest
             // here for the same reason `HttpError::refused_before_sending` is

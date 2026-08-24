@@ -111,6 +111,7 @@ impl Host {
             stdin: Stdin::Ambient,
             model: None,
             offline: false,
+            sandbox: None,
             thinking: ThinkingLevel::Off,
             system: None,
             append_system: None,

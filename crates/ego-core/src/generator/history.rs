@@ -141,13 +141,13 @@ pub fn conversation_from(
                     );
                 }
                 for (call, call_id) in sendable {
-                    if call.completed {
+                    if call.completed && let Some(result) = &call.tool_result {
                         push(
                             &mut messages,
                             Role::User,
                             ContentBlock::ToolResult {
                                 call_id,
-                                output: call.text.clone(),
+                                output: result.model_text(),
                                 // `ok` is absent only on a record that says a
                                 // call completed without saying how, which is
                                 // not a success anyone observed.

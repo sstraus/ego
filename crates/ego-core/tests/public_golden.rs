@@ -11,7 +11,9 @@ use ego_core::cost::{
     Amount, CostAttribution, CostDelta, CurrencyCode, MeteringRevision, Money, PricingRevision,
     ProviderCostRevision, RateSource, UnknownCost,
 };
-use ego_core::event::domain::{DomainEvent, Envelope, EventKind, ExitReason, OccupancyProvenance};
+use ego_core::event::domain::{
+    DomainEvent, Envelope, EventKind, ExitReason, GenerationRole, OccupancyProvenance,
+};
 use ego_core::event::id::{EventId, ItemId, Producer, Seq, SessionId, TurnId};
 use ego_core::event::time::Timestamp;
 use ego_core::generator::types::{ErrorKind, ReasoningState};
@@ -201,8 +203,9 @@ mod public_golden {
                 turn1,
                 Some(item_perm_1),
                 EventKind::PermissionDecided {
-                    allowed: false,
+                    allowed: Some(false),
                     by: Some(Authority::Boundary),
+                    reason: None,
                 },
             ),
             ev(
@@ -827,7 +830,10 @@ mod public_golden {
         let generation = ego_core::event::id::GenerationId::new();
         let attempt = ego_core::generator::attempt::AttemptRef::first(generation);
         for kind in [
-            EventKind::GenerationStarted { attempt },
+            EventKind::GenerationStarted {
+                attempt,
+                role: GenerationRole::Main,
+            },
             EventKind::AttemptSettled {
                 attempt,
                 outcome: ego_core::generator::attempt::Outcome::new(

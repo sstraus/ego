@@ -79,9 +79,10 @@ impl TypedTool for WriteTool {
             // The bytes come out of the authorised call, never out of the
             // params — see `prepare_typed`.
             io.write(&path, &contents)?;
-            Ok(ToolResult {
-                content: format!("wrote {} bytes to {path}", contents.len()),
-            })
+            Ok(ToolResult::builtin(format!(
+                "wrote {} bytes to {path}",
+                contents.len()
+            )))
         })
     }
 }

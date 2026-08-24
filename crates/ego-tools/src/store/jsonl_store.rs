@@ -3,15 +3,17 @@
 //!
 //! ```text
 //! <root>/<session-id>/
-//!     manifest.json      # SessionMeta, replaced atomically
+//!     manifest.json      # private RunManifest, replaced atomically
 //!     events.jsonl        # the log; first line is a versioned header record
 //! ```
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use ego_core::event::domain::{DomainEvent, EventKind};
 use ego_core::event::id::{Seq, SessionId};
 use ego_core::event::time::Timestamp;
+use ego_core::permit::ExecObservation;
 use ego_core::state::SessionState;
 use ego_core::store::codec::{
     CODEC_VERSION, CodecError, Header, StoreLine, decode_line, encode_header, encode_record,
@@ -21,6 +23,23 @@ use futures::stream::{self, BoxStream};
 
 use super::io::{StoreIo, tmp_path_for};
 use super::snapshot::{SNAPSHOT_VERSION, Snapshot, SnapshotRejection, validate};
+
+/// Filesystem-private catalogue projection. The public store port exposes
+/// only [`SessionMeta`]; execution evidence remains an internal log fact.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct RunManifest {
+    #[serde(flatten)]
+    meta: SessionMeta,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    execution: Option<ExecObservation>,
+}
+
+struct LogManifestFacts {
+    created: Timestamp,
+    workspace_root: PathBuf,
+    last_ts: Option<Timestamp>,
+    execution: Option<ExecObservation>,
+}
 
 /// What [`JsonlStore::recover`] actually had to repair.
 ///
@@ -154,29 +173,38 @@ fn split_lines(bytes: &[u8]) -> Vec<&[u8]> {
     lines
 }
 
-/// A valid log's `created` (from its header) and the timestamp of its last
-/// record, or `None` if it has no header or no records.
+/// The manifest facts derived from a valid log prefix.
 ///
 /// Only ever called on a prefix [`valid_prefix`] has already accepted, so
 /// every line here is known to decode; a line that somehow does not is
 /// skipped rather than failing recovery, since refusing to rebuild a
 /// manifest is a worse outcome than rebuilding it from one event less.
-fn log_bounds(log: &[u8]) -> Option<(Timestamp, PathBuf, Timestamp)> {
+fn log_manifest_facts(log: &[u8]) -> Option<LogManifestFacts> {
     let mut lines = split_lines(log).into_iter();
     let (created, workspace_root) = match decode_line(lines.next()?) {
         Ok(StoreLine::Header(header)) => (header.created, header.workspace_root),
         _ => return None,
     };
-    let last_ts = lines
-        .filter_map(|line| match decode_line(line) {
+    let mut last_ts = None;
+    let mut execution = None;
+    for event in lines.filter_map(|line| match decode_line(line) {
             Ok(StoreLine::Record(record)) => {
                 serde_json::from_str::<DomainEvent>(record.payload.get()).ok()
             }
             _ => None,
         })
-        .map(|ev| ev.env.ts)
-        .next_back()?;
-    Some((created, workspace_root, last_ts))
+    {
+        last_ts = Some(event.env.ts);
+        if let EventKind::ExecutionObserved { observation } = event.kind {
+            execution = Some(observation);
+        }
+    }
+    Some(LogManifestFacts {
+        created,
+        workspace_root,
+        last_ts,
+        execution,
+    })
 }
 
 /// The filesystem `SessionStore`. Real I/O goes through the injected
@@ -185,7 +213,7 @@ fn log_bounds(log: &[u8]) -> Option<(Timestamp, PathBuf, Timestamp)> {
 pub struct JsonlStore {
     root: PathBuf,
     workspace: PathBuf,
-    io: Box<dyn StoreIo>,
+    pub(super) io: Arc<dyn StoreIo>,
 }
 
 impl JsonlStore {
@@ -217,7 +245,7 @@ impl JsonlStore {
         Self {
             root: root.into(),
             workspace: workspace.into(),
-            io,
+            io: Arc::from(io),
         }
     }
 
@@ -234,12 +262,12 @@ impl JsonlStore {
     }
 
     /// Read and parse `id`'s manifest, or `None` if it does not exist yet.
-    fn read_manifest(&self, id: &SessionId) -> Result<Option<SessionMeta>, StoreError> {
+    fn read_manifest(&self, id: &SessionId) -> Result<Option<RunManifest>, StoreError> {
         match self.io.read(&self.manifest_path(id))? {
             None => Ok(None),
             Some(bytes) => {
-                let meta = serde_json::from_slice(&bytes).map_err(StoreError::Manifest)?;
-                Ok(Some(meta))
+                let manifest = serde_json::from_slice(&bytes).map_err(StoreError::Manifest)?;
+                Ok(Some(manifest))
             }
         }
     }
@@ -379,11 +407,11 @@ impl JsonlStore {
     ///    so a later manifest rebuild cannot trip over a stale one.
     /// 2. **Torn tail** — the log is truncated to its last complete, valid,
     ///    checksummed line (see [`valid_prefix`]).
-    /// 3. **Stale or unreadable manifest** — rebuilt from the log when the
-    ///    log is ahead of it, which is exactly the "missing fsync window"
-    ///    case: `append` only rewrites the manifest on a turn boundary, so
-    ///    every event since the last one is in the log but not the manifest.
-    ///    The log is the authority; the manifest is a derived cache.
+    /// 3. **Stale or unreadable manifest** — projected from the valid log
+    ///    prefix. This repairs both the ordinary "missing fsync window" and
+    ///    an execution observation cached in the manifest whose log event was
+    ///    removed with a damaged tail. The log is the authority; the manifest
+    ///    is a derived cache.
     ///
     /// Note the deliberate absence of a fourth: an orphaned *lease* needs no
     /// repair here. The advisory lock behind `Lease` is owned by the open
@@ -430,21 +458,19 @@ impl JsonlStore {
             self.io.truncate(&log_path, valid_len as u64)?;
         }
 
-        if self.rebuild_manifest_if_stale(id, &bytes[..valid_len])? {
+        if self.rebuild_manifest_from_log(id, &bytes[..valid_len])? {
             repair.manifest_rebuilt = true;
         }
 
         Ok(repair)
     }
 
-    /// Rewrite `id`'s manifest from `log` when the manifest is missing,
-    /// unreadable, or older than the log's last event. Returns whether it
-    /// wrote anything.
-    fn rebuild_manifest_if_stale(&self, id: &SessionId, log: &[u8]) -> Result<bool, StoreError> {
-        let Some((created, workspace_root, last_ts)) = log_bounds(log) else {
-            // A log with a header but no surviving records has no `updated`
-            // to offer, so it cannot make an existing manifest more
-            // accurate than it already is.
+    /// Project the authoritative valid log prefix back into the private
+    /// manifest. The comparison covers the observation as well as metadata:
+    /// repair may remove an `ExecutionObserved` event without changing the
+    /// surviving last event's timestamp relative to the cached manifest.
+    fn rebuild_manifest_from_log(&self, id: &SessionId, log: &[u8]) -> Result<bool, StoreError> {
+        let Some(facts) = log_manifest_facts(log) else {
             return Ok(false);
         };
 
@@ -452,22 +478,20 @@ impl JsonlStore {
         // one — it is a derived cache, and the log can regenerate it — but
         // an I/O error is propagated, because "cannot read this path" is
         // not evidence about the manifest's contents.
-        let previous = match self.read_manifest(id) {
-            Ok(previous) => previous,
-            Err(StoreError::Manifest(_)) => None,
+        let (previous, manifest_unreadable) = match self.read_manifest(id) {
+            Ok(previous) => (previous, false),
+            Err(StoreError::Manifest(_)) => (None, true),
             Err(e) => return Err(e),
         };
 
-        if let Some(meta) = &previous
-            && meta.updated >= last_ts
-        {
+        let Some(last_ts) = facts.last_ts else {
+            if previous.is_some() || manifest_unreadable {
+                self.io.remove_file(&self.manifest_path(id))?;
+                return Ok(true);
+            }
             return Ok(false);
-        }
+        };
 
-        tracing::warn!(
-            session = %session_dir_name(id),
-            "rebuilding a session manifest that is missing, unreadable or behind its log"
-        );
         let meta = SessionMeta {
             id: *id,
             // From the log header, for exactly the reason `created` is —
@@ -477,8 +501,8 @@ impl JsonlStore {
             // workspace and silently left the one it belonged to. The
             // recovery path that loses the manifest is the one directly
             // above.
-            workspace_root,
-            model: previous.as_ref().and_then(|m| m.model.clone()),
+            workspace_root: facts.workspace_root,
+            model: previous.as_ref().and_then(|m| m.meta.model.clone()),
             // `created` comes from the log header rather than the old
             // manifest: the header is written once, at session creation, and
             // never rewritten, whereas this manifest is a derived cache that
@@ -492,11 +516,23 @@ impl JsonlStore {
             // file. The conclusion survives on the write-once clause alone;
             // the deleted clause was never checked. ADR §2 of
             // `docs/decisions/2026-08-21-a-header-the-repair-must-not-delete.md`.
-            created,
+            created: facts.created,
             updated: last_ts,
-            title: previous.as_ref().and_then(|m| m.title.clone()),
+            title: previous.as_ref().and_then(|m| m.meta.title.clone()),
         };
-        let bytes = serde_json::to_vec(&meta).expect("SessionMeta always serialises");
+        let manifest = RunManifest {
+            meta,
+            execution: facts.execution,
+        };
+        if previous.as_ref() == Some(&manifest) {
+            return Ok(false);
+        }
+
+        tracing::warn!(
+            session = %session_dir_name(id),
+            "rebuilding a session manifest from its authoritative log"
+        );
+        let bytes = serde_json::to_vec(&manifest).expect("RunManifest always serialises");
         self.io.replace_atomic(&self.manifest_path(id), &bytes)?;
         Ok(true)
     }
@@ -514,12 +550,17 @@ impl JsonlStore {
             // one the header carries. Reading the header back to confirm
             // would be an I/O round trip to learn a value already in hand.
             workspace_root: self.workspace.clone(),
-            model: previous.as_ref().and_then(|m| m.model.clone()),
-            created: previous.as_ref().map_or(ev.env.ts, |m| m.created),
+            model: previous.as_ref().and_then(|m| m.meta.model.clone()),
+            created: previous.as_ref().map_or(ev.env.ts, |m| m.meta.created),
             updated: ev.env.ts,
-            title: previous.as_ref().and_then(|m| m.title.clone()),
+            title: previous.as_ref().and_then(|m| m.meta.title.clone()),
         };
-        let bytes = serde_json::to_vec(&meta).expect("SessionMeta always serialises");
+        let execution = match &ev.kind {
+            EventKind::ExecutionObserved { observation } => Some(observation.clone()),
+            _ => previous.and_then(|manifest| manifest.execution),
+        };
+        let manifest = RunManifest { meta, execution };
+        let bytes = serde_json::to_vec(&manifest).expect("RunManifest always serialises");
         self.io.replace_atomic(&self.manifest_path(id), &bytes)?;
         Ok(())
     }
@@ -542,7 +583,8 @@ impl SessionStore for JsonlStore {
         // here, from `ev.kind` directly — see `SessionStore::append`'s doc
         // comment on why this predicate does not live on `DomainEvent`.
         let is_turn_boundary = matches!(ev.kind, EventKind::TurnCompleted { .. });
-        if is_turn_boundary {
+        let is_execution_observation = matches!(ev.kind, EventKind::ExecutionObserved { .. });
+        if is_turn_boundary || is_execution_observation {
             self.io.fsync(&log_path)?;
         }
 
@@ -553,7 +595,7 @@ impl SessionStore for JsonlStore {
         // would make the manifest the append path's bottleneck for no
         // benefit `list()` needs, since nothing reads `updated` at
         // sub-turn granularity.
-        if is_new_session || is_turn_boundary {
+        if is_new_session || is_turn_boundary || is_execution_observation {
             self.write_manifest(id, ev)?;
         }
 
@@ -634,8 +676,8 @@ impl SessionStore for JsonlStore {
                     continue;
                 }
             };
-            let meta = match serde_json::from_slice::<SessionMeta>(&bytes) {
-                Ok(meta) => meta,
+            let manifest = match serde_json::from_slice::<RunManifest>(&bytes) {
+                Ok(manifest) => manifest,
                 Err(error) => {
                     tracing::warn!(
                         dir = %dir.display(),
@@ -663,16 +705,16 @@ impl SessionStore for JsonlStore {
             // here.
             if dir
                 .file_name()
-                .is_none_or(|name| name != &*session_dir_name(&meta.id))
+                .is_none_or(|name| name != &*session_dir_name(&manifest.meta.id))
             {
                 tracing::warn!(
                     dir = %dir.display(),
-                    manifest_id = %session_dir_name(&meta.id),
+                    manifest_id = %session_dir_name(&manifest.meta.id),
                     "skipping session whose manifest names a different id than its directory"
                 );
                 continue;
             }
-            metas.push(meta);
+            metas.push(manifest.meta);
         }
         Ok(metas)
     }

@@ -738,12 +738,11 @@ fn a_command_line_that_cannot_be_honoured_exits_two_saying_why() {
 
 /// §4.5's applicability matrix: a flag `CLI.md` §3 documents whose subsystem
 /// this build does not have is refused **by name**, naming what it waits on.
-/// Silently ignoring `--sandbox` would be worse than any of them — a run would
-/// look confined and not be.
+/// Sandbox is implemented and has its own parsing, precedence, and enforcement
+/// contract; this matrix therefore covers only the still-unavailable flags.
 #[test]
 fn a_documented_flag_without_its_subsystem_is_refused_by_name() {
     for (flag, value) in [
-        ("--sandbox", Some("workspace")),
         ("--attach", Some("diagram.png")),
         ("--mcp", Some("github")),
         ("--retry", Some("3")),
@@ -975,7 +974,8 @@ fn a_flag_rule_that_is_not_a_rule_is_refused_before_the_run() {
 /// `Args::verbose` has no reader anywhere in the workspace.
 ///
 /// It is refused rather than implemented, and the distinction from `--sandbox`
-/// is worth having. `--sandbox` waits on a subsystem somebody has designed.
+/// is worth having. `--sandbox` now has a complete runtime/configuration
+/// contract; `-v` still waits on a separate decision.
 /// `-v` waits on a **decision**: §4.7 says exactly what `-q` suppresses and
 /// nothing anywhere says what `-v` adds. The obvious candidate — turning up
 /// `tracing`, which the whole workspace is already instrumented for — is not
@@ -1021,46 +1021,47 @@ fn the_neighbour_in_the_same_row_still_does_its_job() {
     assert_eq!(finished.stdout.trim(), "It is done.");
 }
 
-/// §6a: a head this build cannot enforce is refused **by name**, from a flag
-/// as from a file. Not a parse error and not a silent non-match — an
-/// `exec(...)` rule that parsed and never matched would be the same defect as
-/// the accepted-and-ignored flag this whole section replaced.
+/// §6a: an `exec(...)` rule reaches the real process producer. A configured
+/// argv-native execution path must either
+/// execute under its admitted policy or fail closed before the provider/tool
+/// event, never parse and silently ignore the rule.
 #[test]
-fn a_flag_rule_this_build_cannot_enforce_is_refused_by_name() {
-    let finished = Ego::nowhere()
+fn an_exec_rule_reaches_the_real_process_path() {
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(tool_call("exec-contract", "exec", r#"{"argv":["/bin/echo","exec rule"],"cwd":null,"timeout_ms":1000}"#)),
+            Reply::Sse(text("done")),
+        ],
+        ..Plan::default()
+    });
+    let finished = Ego::against(&stub)
         .args([
             "--model",
             "ollama/qwen3",
             "--ephemeral",
-            "--deny",
-            "exec(rm *)",
+            "--allow",
+            "exec(/bin/echo *)",
             "Ask",
         ])
         .run();
 
-    assert_eq!(finished.code, Some(2), "stderr: {}", finished.stderr);
-    assert!(
-        finished.stderr.contains("exec") && finished.stderr.contains("shell"),
-        "the refusal must name the head and what it waits on: {}",
+    assert_eq!(
+        finished.code,
+        Some(0),
+        "exec was not admitted and executed: {}",
         finished.stderr
     );
 }
 
-/// §6a's rule, applied to the one value that had escaped it.
-///
 /// `auto` is the mode whose entire content is "a judge model evaluates the
-/// call" (`CLI.md` §3). There is no judge in this build — `approver.rs:132`
-/// folds `Auto` into `Default` and says so — so an operator who selected it got
-/// `default` and was told nothing. That is the accepted-and-ignored flag `§4.5`
-/// forbids, wearing a value instead of a spelling: `--sandbox` is refused by
-/// name for exactly this reason while `--mode auto` was not, and the difference
-/// was that one is a flag and the other is one of its values.
-///
-/// It expires the way the `exec(...)` refusal will: when step 6 exists, this
-/// test inverts into "is accepted and consults a judge".
+/// call". Its startup contract is now a separate judge resolution, not the
+/// old unavailable-mode refusal.
 #[test]
-fn the_mode_whose_judge_does_not_exist_is_refused_by_name() {
-    let finished = Ego::nowhere()
+fn auto_mode_requires_and_accepts_a_separately_configured_judge() {
+    let stub = Stub::start(Plan::default());
+    let ego = Ego::against(&stub);
+    ego.home_file("config.toml", "[permissions]\njudge = \"ollama/qwen3\"\n");
+    let finished = ego
         .args([
             "--model",
             "ollama/qwen3",
@@ -1071,32 +1072,29 @@ fn the_mode_whose_judge_does_not_exist_is_refused_by_name() {
         ])
         .run();
 
-    assert_eq!(finished.code, Some(2), "stderr: {}", finished.stderr);
-    assert!(
-        finished.stderr.contains("auto") && finished.stderr.contains("judge"),
-        "the refusal must name the mode and what it waits on: {}",
+    assert_eq!(
+        finished.code,
+        Some(0),
+        "auto with a configured judge did not start: {}",
         finished.stderr
     );
 }
 
-/// The same refusal from a file, because the flag is not the only way in.
-///
-/// `--mode auto` becomes `mode = "auto"` in the flags layer (`config.rs:133`),
-/// so a refusal written at the flag would leave the config file — and the
-/// profile table, and every layer — accepting a mode the flag rejects. Refusing
-/// where the layers are read is what makes one refusal cover all of them.
+/// The configured judge path is available from a file layer as well as the
+/// command line, so a profile/config route cannot retain the old refusal.
 #[test]
-fn the_mode_whose_judge_does_not_exist_is_refused_from_a_file_too() {
-    let ego = Ego::nowhere();
-    ego.home_file("config.toml", "mode = \"auto\"\n");
+fn auto_mode_from_a_file_layer_starts_the_real_judge_path() {
+    let stub = Stub::start(Plan::default());
+    let ego = Ego::against(&stub);
+    ego.home_file("config.toml", "mode = \"auto\"\n[permissions]\njudge = \"ollama/qwen3\"\n");
     let finished = ego
         .args(["--model", "ollama/qwen3", "--ephemeral", "Ask"])
         .run();
 
-    assert_eq!(finished.code, Some(2), "stderr: {}", finished.stderr);
-    assert!(
-        finished.stderr.contains("auto") && finished.stderr.contains("judge"),
-        "the refusal must name the mode and what it waits on: {}",
+    assert_eq!(
+        finished.code,
+        Some(0),
+        "file-provided auto did not start: {}",
         finished.stderr
     );
 }

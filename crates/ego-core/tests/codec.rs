@@ -4,7 +4,7 @@
 //! See `ARCHITECTURE.md` §1/§5 and `plans/m0a-contracts.md` Step 3.
 
 use ego_core::cost::{Amount, CostAttribution, CostDelta, CurrencyCode, Money, PricingRevision};
-use ego_core::event::domain::{DomainEvent, Envelope, EventKind};
+use ego_core::event::domain::{DomainEvent, Envelope, EventKind, GenerationRole};
 use ego_core::event::id::{Producer, Seq, SessionId};
 use ego_core::event::time::Timestamp;
 use ego_core::generator::attempt::{AttemptRef, DeliveryCertainty, Outcome, UsageReport};
@@ -505,6 +505,7 @@ mod codec {
                 env: envelope(GOLDEN_EVENT_3, Some(GOLDEN_EVENT_2)),
                 kind: EventKind::GenerationStarted {
                     attempt: golden_attempt(),
+                    role: GenerationRole::Main,
                 },
             },
             // The attributed twin of the record above: same money shape, now

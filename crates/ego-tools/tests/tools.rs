@@ -32,13 +32,15 @@ use ego_core::generator::port::AiEvent;
 use ego_core::generator::types::{StopReason, ThinkingLevel};
 use ego_core::permit::rule::{Head, Rule};
 use ego_core::permit::{
-    Authority, Authorized, CanonPath, Change, Classification, Escalation, GuardedFs, GuardedIo, Op,
-    OpName, Pending, PermitDenied, PolicyDenied, PolicyEngine, PrepareCtx, PreparedCall,
-    Resolution, ScanRequest, Tool, ToolError, ToolResult, Typed, TypedTool,
+    Authority, Authorized, CanonPath, Change, Classification, Escalation, GuardedEffects,
+    GuardedIo, Op, OpName, Pending, PermitDenied, PolicyDenied, PolicyEngine, PrepareCtx,
+    PreparedCall, ProcessError, ProcessExecutor, Resolution, ScanRequest, Tool, ToolError,
+    ToolResult, Typed, TypedTool,
 };
 use ego_core::run::DeniedBy;
 use ego_core::sink::CollectingSink;
 use ego_core::state::SessionState;
+use ego_core::store::evidence::{EvidenceError, EvidencePage, EvidenceRead, EvidenceStore, EvidenceWriter};
 use ego_core::turn::{CancelToken, Model, Session, Tools, TurnConfig, TurnLoop};
 use ego_tools::clock::SystemClock;
 use ego_tools::fs::OsFs;
@@ -51,6 +53,36 @@ use serde::Deserialize;
 use serde_json::json;
 use tempfile::TempDir;
 
+struct NoProcess;
+
+impl ProcessExecutor for NoProcess {
+    fn execute<'a>(
+        &'a self,
+        _spec: &'a ego_core::permit::SpawnSpec,
+    ) -> BoxFuture<'a, Result<ToolResult, ProcessError>> {
+        Box::pin(futures::future::ready(Err(ProcessError::Invariant(
+            "process execution is not used by builtin filesystem tests".to_string(),
+        ))))
+    }
+}
+
+struct NoEvidence;
+
+impl EvidenceStore for NoEvidence {
+    fn begin(&self) -> Result<Box<dyn EvidenceWriter>, EvidenceError> {
+        Err(EvidenceError::Limit { limit: 0 })
+    }
+
+    fn read_page<'a>(
+        &'a self,
+        request: &'a EvidenceRead,
+    ) -> BoxFuture<'a, Result<EvidencePage, EvidenceError>> {
+        Box::pin(futures::future::ready(Err(EvidenceError::NotFound {
+            reference: request.reference.id.clone(),
+        })))
+    }
+}
+
 /// A workspace on disk, its policy engine, and the three tools.
 ///
 /// Everything real except the model: a real `OsFs`, a real `PolicyEngine`
@@ -60,6 +92,8 @@ struct Workspace {
     _dir: TempDir,
     root: PathBuf,
     fs: OsFs,
+    process: NoProcess,
+    evidence: NoEvidence,
     policy: PolicyEngine,
     registry: Vec<Arc<dyn Tool>>,
 }
@@ -101,6 +135,8 @@ impl Workspace {
             _dir: dir,
             root,
             fs: OsFs,
+            process: NoProcess,
+            evidence: NoEvidence,
             policy,
             registry: builtins(),
         }
@@ -141,8 +177,8 @@ impl Workspace {
         let call = tool.prepare(params, &self.ctx())?;
         let granted = self.authorize(call).expect("policy admits this");
         let (call, permit) = granted.into_parts();
-        let guarded = GuardedFs::new(permit, &self.fs);
-        block_on(tool.execute(call, &guarded)).map(|result: ToolResult| result.content)
+        let guarded = GuardedEffects::new(permit, &self.fs, &self.process, &self.evidence);
+        block_on(tool.execute(call, &guarded)).map(|result: ToolResult| result.model_text())
     }
 
     /// What policy concludes about a call, for a call the run settles without
@@ -233,7 +269,10 @@ mod registration {
             .collect();
         names.sort();
 
-        assert_eq!(names, ["edit", "glob", "grep", "read", "write"]);
+        assert_eq!(
+            names,
+            ["edit", "exec", "glob", "grep", "read", "read_tool_result", "write"]
+        );
     }
 
     #[test]
@@ -269,15 +308,11 @@ mod registration {
     /// nothing, which the table's own doc calls the failure it is there to
     /// prevent: they "cannot tell that apart from a boundary that works".
     ///
-    /// **The table could not be wrong about `exec` and was wrong about
-    /// `write`**, and the reason is structural rather than careless. `exec`
-    /// waits on a tool nobody has written, so the entry and the absence were
-    /// authored together. `write` was declared to have operations because
-    /// `Op::Write` exists as a *variant* — and it does, with a matcher, a
-    /// scope arm and a `mutates()` arm — while no tool in the registry ever
-    /// constructs one. Nothing connected the two facts, because they live in
-    /// different crates: the table is in `ego-core` and the registry is in
-    /// `ego-tools`, which is the only place that can see both.
+    /// `exec` and `write` are now reachable through registered producers, so
+    /// their effect heads must stay coupled to the operations those tools
+    /// prepare. `read_tool_result` is also registered, but its
+    /// session-evidence operation is intentionally not an operator rule head:
+    /// its exact reference authority is intrinsic to the session.
     ///
     /// So this test is here rather than beside the table, and it derives the
     /// answer instead of restating it: every builtin is prepared with a call
@@ -286,12 +321,9 @@ mod registration {
     /// fails, and so does the reverse.
     ///
     /// **The sample list is checked against the registry first**, and that
-    /// check is not ceremony — it is the half this test was missing. Written
-    /// with the three read-only builtins hardcoded, it went on passing when
-    /// `write` was registered: the new tool was never prepared, so the op it
-    /// produces never appeared, so the table's `write` entry still agreed with
-    /// a survey that had not looked. A derivation that silently stops covering
-    /// its subject is worse than no derivation, because it reports agreement.
+    /// check is not ceremony: every registered producer must contribute a
+    /// prepared sample, or the table could silently agree with a survey that
+    /// skipped a new tool.
     #[test]
     fn the_heads_this_build_says_it_enforces_are_the_ones_its_tools_ask_for() {
         let ws = populated();
@@ -307,6 +339,20 @@ mod registration {
             (
                 "edit",
                 json!({ "path": "src/main.rs", "old_string": "hello", "new_string": "goodbye" }),
+            ),
+            (
+                "exec",
+                json!({ "argv": ["/bin/true"], "cwd": null, "timeout_ms": 1000 }),
+            ),
+            (
+                "read_tool_result",
+                json!({
+                    "reference": format!(
+                        "{}:0",
+                        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    ),
+                    "offset": 0,
+                }),
             ),
         ];
 
@@ -335,11 +381,17 @@ mod registration {
             })
             .collect();
 
+        assert!(
+            produced.contains(&OpName::ReadEvidence),
+            "read_tool_result must produce the session-evidence operation"
+        );
+
         for (head, op) in [
             (Head::Read, OpName::Read),
             (Head::List, OpName::List),
             (Head::Search, OpName::Search),
             (Head::Write, OpName::Write),
+            (Head::Exec, OpName::Spawn),
         ] {
             let asked_for = produced.contains(&op);
             let table_says_available = head.awaiting().is_none();
@@ -710,6 +762,7 @@ mod edit {
     fn allowing(heads: &[&str]) -> Ruleset {
         Ruleset::from_layer(
             PermCfg {
+                judge: None,
                 allow: heads
                     .iter()
                     .map(|raw| Rule::load(raw).expect("a rule this build enforces"))
@@ -1446,7 +1499,7 @@ mod rogue {
                         format!("{} matches", found.matches.len())
                     }
                 };
-                Ok(ToolResult { content })
+                Ok(ToolResult::builtin(content))
             })
         }
     }
@@ -1577,7 +1630,14 @@ mod end_to_end {
                     caps: caps(),
                     config: config(),
                 },
-                Tools::new(&ws.registry, &ws.policy, &ws.fs, ws.cwd()),
+                Tools::new(
+                    &ws.registry,
+                    &ws.policy,
+                    &ws.fs,
+                    &ws.process,
+                    &ws.evidence,
+                    ws.cwd(),
+                ),
             );
             block_on(loop_.run("what does main.rs print?")).expect("the log is writable")
         };
@@ -1595,7 +1655,7 @@ mod end_to_end {
 
         // ...and the second request carries the file's real contents back,
         // which is only possible if the whole chain ran: prepare resolved the
-        // path on disk, policy minted a permit for it, and `GuardedFs` opened
+        // path on disk, policy minted a permit for it, and `GuardedEffects` opened
         // it.
         let history = format!("{:?}", generator.calls()[1].messages);
         assert!(
@@ -1663,7 +1723,14 @@ mod end_to_end {
                     caps: caps(),
                     config: config(),
                 },
-                Tools::new(&ws.registry, &ws.policy, &ws.fs, ws.cwd()),
+                Tools::new(
+                    &ws.registry,
+                    &ws.policy,
+                    &ws.fs,
+                    &ws.process,
+                    &ws.evidence,
+                    ws.cwd(),
+                ),
             );
             block_on(loop_.run("read that file")).expect("the log is writable")
         };

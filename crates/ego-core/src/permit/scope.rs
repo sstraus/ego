@@ -1,15 +1,17 @@
 //! `Scope`: what a minted [`Permit`](super::Permit) allows, expressed over
-//! canonical structure — paths, network endpoints and argv — never over
+//! canonical structure — paths, network endpoints and process specs — never over
 //! rendered shell strings (`ARCHITECTURE.md` §3.4 axis 2).
 
 use super::path::CanonPath;
+use super::spawn::SpawnSpec;
+use crate::store::evidence::EvidenceRead;
 
 /// The boundaries a [`Permit`](super::Permit) enforces.
 ///
-/// Every list is a set of allowed *prefixes*: a path is in scope if it is,
-/// or is a descendant of, one of the path lists; an argv is in scope if it
-/// starts with one of `argv`'s patterns; an endpoint is in scope if it
-/// exactly matches one of `endpoints`.
+/// Every path list is a set of allowed prefixes: a path is in scope if it is,
+/// or is a descendant of, one of them. An endpoint must exactly match one of
+/// `endpoints`; a process must exactly equal `spawn`; session evidence must
+/// exactly equal `evidence`.
 ///
 /// The four path lists are scoped separately and do not imply one another. A
 /// permit that can write somewhere is not thereby allowed to read it back;
@@ -41,7 +43,8 @@ pub struct Scope {
     /// the permit was minted for, never arbitrary content.
     pub(super) search_paths: Vec<CanonPath>,
     pub(super) endpoints: Vec<String>,
-    pub(super) argv: Vec<Vec<String>>,
+    pub(super) spawn: Option<SpawnSpec>,
+    pub(super) evidence: Option<EvidenceRead>,
 }
 
 impl Scope {
@@ -70,8 +73,13 @@ impl Scope {
         &self.endpoints
     }
 
-    /// Every argv prefix this scope may spawn.
-    pub fn argv(&self) -> &[Vec<String>] {
-        &self.argv
+    /// The exact process specification this scope may spawn.
+    pub fn spawn(&self) -> Option<&SpawnSpec> {
+        self.spawn.as_ref()
+    }
+
+    /// The exact session evidence object this scope may read.
+    pub fn evidence(&self) -> Option<&EvidenceRead> {
+        self.evidence.as_ref()
     }
 }

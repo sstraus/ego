@@ -11,18 +11,21 @@ use std::sync::Arc;
 
 use crate::generator::types::ToolDescriptor as GenToolDescriptor;
 use crate::permit::{
-    Authorized, CanonPath, Classification, Fs, GuardedFs, Pending, PolicyEngine, PrepareCtx,
-    PreparedCall, Resolution, Tool, ToolError,
+    Authorized, CanonPath, Classification, Fs, GuardedEffects, Pending, PolicyEngine,
+    PrepareCtx, PreparedCall, ProcessExecutor, Resolution, Tool, ToolError,
 };
+use crate::store::evidence::EvidenceStore;
 
 /// Everything the loop needs to turn a model's tool call into an effect.
 pub struct Tools<'a> {
     registry: &'a [Arc<dyn Tool>],
     policy: &'a PolicyEngine,
-    /// The *raw* filesystem. [`GuardedFs`] binds one permit to one `Fs` at
-    /// construction (`permit/fs.rs:51`), so a fresh facade is built per
+    /// The *raw* filesystem. [`GuardedEffects`] binds one permit to the raw
+    /// effect ports at construction, so a fresh facade is built per
     /// authorised call; there is no permit to swap into a shared one.
     fs: &'a dyn Fs,
+    process: &'a dyn ProcessExecutor,
+    evidence: &'a dyn EvidenceStore,
     cwd: CanonPath,
 }
 
@@ -31,12 +34,16 @@ impl<'a> Tools<'a> {
         registry: &'a [Arc<dyn Tool>],
         policy: &'a PolicyEngine,
         fs: &'a dyn Fs,
+        process: &'a dyn ProcessExecutor,
+        evidence: &'a dyn EvidenceStore,
         cwd: CanonPath,
     ) -> Self {
         Self {
             registry,
             policy,
             fs,
+            process,
+            evidence,
             cwd,
         }
     }
@@ -134,6 +141,15 @@ impl<'a> Tools<'a> {
         self.policy.settle(pending).await
     }
 
+    pub(crate) fn settle_judge(
+        &self,
+        pending: Pending,
+        outcome: &crate::permit::judge::JudgeOutcome,
+        by: crate::permit::Authority,
+    ) -> Resolution {
+        self.policy.settle_judge(pending, outcome, by)
+    }
+
     /// Consult the final human party after the loop has made the request
     /// durable. Keeping this separate from mode settlement is the journal's
     /// crash boundary while a person is deciding.
@@ -152,12 +168,9 @@ impl<'a> Tools<'a> {
         &self,
         tool: &'a dyn Tool,
         authorized: Authorized,
-    ) -> Result<String, String> {
+    ) -> Result<crate::permit::ToolResult, ToolError> {
         let (call, permit) = authorized.into_parts();
-        let guarded = GuardedFs::new(permit, self.fs);
-        tool.execute(call, &guarded)
-            .await
-            .map(|result| result.content)
-            .map_err(|err| err.to_string())
+        let guarded = GuardedEffects::new(permit, self.fs, self.process, self.evidence);
+        tool.execute(call, &guarded).await
     }
 }

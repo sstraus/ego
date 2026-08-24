@@ -4,6 +4,7 @@
 //! where the real I/O behind `ego-core`'s `SessionStore` port lives, because
 //! `ego-core` opens no files.
 
+mod evidence;
 mod io;
 mod jsonl_store;
 mod lease;
@@ -12,6 +13,7 @@ mod writer;
 
 #[cfg(feature = "test-support")]
 pub use io::NonDurableOsIo;
+pub use evidence::SessionEvidenceStore;
 pub use io::{OsIo, StoreIo, tmp_path_for};
 pub use jsonl_store::{JsonlStore, Repair};
 pub use lease::{Lease, LeaseError};

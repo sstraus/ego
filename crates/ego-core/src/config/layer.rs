@@ -8,10 +8,11 @@ use serde::{Deserialize, Serialize};
 use super::error::ConfigError;
 use super::source::{Source, Sourced};
 use crate::ceiling::Budget;
+use crate::permit::Confinement;
 use crate::permit::rule::Rule;
 
 /// A model reference in `provider/name` form, e.g. `anthropic/claude-sonnet-5`.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ModelRef(pub String);
 
@@ -46,36 +47,12 @@ impl std::fmt::Display for Mode {
     }
 }
 
-/// A mode this build cannot honour, refused where the layers are read.
-///
-/// The same rule [`rules`] applies to a rule head, applied to a mode: `auto`'s
-/// entire content is that a judge model decides
-/// (`docs/decisions/2026-08-21-a-second-model-inside-one-turn.md`), and there is
-/// no judge here — `permit/approver.rs` folds `Auto` into `Default` and says
-/// so. Accepting it would hand an operator who asked for a model's judgement
-/// the mode that asks *them*, silently, which is the accepted-and-ignored flag
-/// `CLI.md` §4.5 forbids.
-///
-/// **Here rather than at the flag**, because `--mode auto` becomes `mode =
-/// "auto"` in the flags layer (`ego-cli/src/config.rs`) and travels the same
-/// road as a config file's. One refusal, every layer — and serde attaches the
-/// file and line, so an operator learns *which* of their files said it.
-///
-/// It expires when step 6 lands: this function loses its arm, `Auto` stops
-/// being special, and the tests that pin the refusal invert into tests that
-/// pin the judge.
+/// Deserialize the optional mode through one path for every config layer.
 fn mode<'de, D>(deserializer: D) -> Result<Option<Mode>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
     let mode = Option::<Mode>::deserialize(deserializer)?;
-    if mode == Some(Mode::Auto) {
-        return Err(serde::de::Error::custom(
-            "`auto` is not available in this build: it is the mode that asks a \
-             judge model, and nothing here generates for a permission decision. \
-             Use `default`, which asks you, until the judge exists",
-        ));
-    }
     Ok(mode)
 }
 
@@ -95,6 +72,7 @@ where
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PermCfg {
+    pub judge: Option<ModelRef>,
     #[serde(default, deserialize_with = "rules")]
     pub allow: Vec<Rule>,
     #[serde(default, deserialize_with = "rules")]
@@ -125,6 +103,7 @@ pub struct ProfileLayer {
     pub model: Option<ModelRef>,
     #[serde(default, deserialize_with = "mode")]
     pub mode: Option<Mode>,
+    pub sandbox: Option<Confinement>,
     pub permissions: Option<PermCfg>,
     /// A spend ceiling, in the same grammar `--budget` takes
     /// (`crate::ceiling::Budget`).
@@ -176,6 +155,7 @@ pub struct ConfigLayer {
     pub model: Option<ModelRef>,
     #[serde(default, deserialize_with = "mode")]
     pub mode: Option<Mode>,
+    pub sandbox: Option<Confinement>,
     pub permissions: Option<PermCfg>,
     /// A spend ceiling, in the same grammar `--budget` takes
     /// (`crate::ceiling::Budget`).

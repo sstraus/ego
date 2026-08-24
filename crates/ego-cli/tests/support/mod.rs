@@ -13,6 +13,12 @@
 //! process: an exit status is not observable from inside the program that
 //! produces it, and neither is "stdout carried this and stderr carried that".
 
+// This module is compiled independently into each integration-test binary.
+// Some helpers are intentionally used only by another test target; report
+// those as harness sharing rather than as production dead code under `-D
+// warnings`.
+#![allow(dead_code)]
+
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -349,6 +355,8 @@ pub struct Finished {
     pub code: Option<i32>,
     pub stdout: String,
     pub stderr: String,
+    /// Keep test-owned homes and workspaces alive for post-run assertions.
+    _keep: Vec<tempfile::TempDir>,
 }
 
 impl Finished {
@@ -531,6 +539,7 @@ impl Ego {
             code: output.status.code(),
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            _keep: self.keep,
         }
     }
 
@@ -575,6 +584,7 @@ impl Running {
             code: status.code(),
             stdout: String::new(),
             stderr,
+            _keep: self._keep,
         }
     }
 }

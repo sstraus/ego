@@ -53,12 +53,12 @@ impl TypedTool for ReadTool {
             // against the permit here, so a symlink swapped in since `prepare`
             // is judged as it stands now.
             let bytes = io.read(&path)?;
-            Ok(ToolResult {
-                // Lossy: a file with a stray byte in it is still worth showing
-                // a model, and failing the call over one would tell it the
-                // file is unreadable when it is merely not UTF-8.
-                content: String::from_utf8_lossy(&bytes).into_owned(),
-            })
+            // Lossy: a file with a stray byte in it is still worth showing a
+            // model, and failing the call over one would tell it the file is
+            // unreadable when it is merely not UTF-8.
+            Ok(ToolResult::builtin(
+                String::from_utf8_lossy(&bytes).into_owned(),
+            ))
         })
     }
 }

@@ -8,7 +8,9 @@ use ego_core::cost::{
     Amount, CostAttribution, CostDelta, CumulativeCost, CurrencyCode, FxQuote, Money,
     PricingRevision,
 };
-use ego_core::event::domain::{DomainEvent, Envelope, EventKind, ExitReason, OccupancyProvenance};
+use ego_core::event::domain::{
+    DomainEvent, Envelope, EventKind, ExitReason, GenerationRole, OccupancyProvenance,
+};
 use ego_core::event::id::{AttemptId, GenerationId};
 use ego_core::event::id::{EventId, ItemId, Producer, Seq, SessionId, TurnId};
 use ego_core::event::time::Timestamp;
@@ -158,8 +160,9 @@ mod reducer {
         push!(
             Some(tool_item),
             EventKind::PermissionDecided {
-                allowed: true,
+                allowed: Some(true),
                 by: Some(Authority::Mode { mode: Mode::Edits }),
+                reason: None,
             }
         );
         push!(
@@ -466,8 +469,9 @@ mod reducer {
             (
                 "permission_decided",
                 EventKind::PermissionDecided {
-                    allowed: false,
+                    allowed: Some(false),
                     by: None,
+                    reason: None,
                 },
             ),
             (
@@ -551,6 +555,7 @@ mod reducer {
                 "generation_started",
                 EventKind::GenerationStarted {
                     attempt: AttemptRef::first(GenerationId::new()),
+                    role: GenerationRole::Main,
                 },
             ),
             (
@@ -858,8 +863,9 @@ mod reducer {
             Some(item),
             None,
             EventKind::PermissionDecided {
-                allowed: true,
+                allowed: Some(true),
                 by: Some(Authority::Mode { mode: Mode::Edits }),
+                reason: None,
             },
         ));
 
@@ -1124,7 +1130,10 @@ mod reducer {
         }
 
         fn start(&mut self, attempt: AttemptRef) {
-            self.apply(EventKind::GenerationStarted { attempt });
+            self.apply(EventKind::GenerationStarted {
+                attempt,
+                role: GenerationRole::Main,
+            });
         }
 
         fn book(&mut self, attempt: Option<AttemptRef>, usage: Usage, cost: CostDelta) {
@@ -1584,7 +1593,10 @@ mod reducer {
         let attempt = AttemptRef::first(GenerationId::new());
         let other = AttemptRef::first(GenerationId::new());
         let log: Vec<DomainEvent> = vec![
-            EventKind::GenerationStarted { attempt },
+            EventKind::GenerationStarted {
+                attempt,
+                role: GenerationRole::Main,
+            },
             EventKind::UsageUpdated {
                 usage: tokens(10, 1),
                 cost_delta: priced("0.01"),
@@ -1598,7 +1610,10 @@ mod reducer {
                     UsageReport::Reported(tokens(10, 1)),
                 ),
             },
-            EventKind::GenerationStarted { attempt: other },
+            EventKind::GenerationStarted {
+                attempt: other,
+                role: GenerationRole::Main,
+            },
             EventKind::UsageUpdated {
                 usage: tokens(20, 2),
                 cost_delta: priced("0.02"),

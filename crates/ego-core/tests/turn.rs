@@ -34,12 +34,14 @@ use ego_core::generator::types::{
 use ego_core::permit::rule::Rule;
 use ego_core::permit::{
     Authority, CanonPath, Fs, GuardedIo, HumanApprover, Op, PermissionDecision, PermissionRequest,
-    PolicyEngine, PrepareCtx, PreparedCall, ToolError, ToolResult, Typed, TypedTool,
+    PolicyEngine, PrepareCtx, PreparedCall, ProcessError, ProcessExecutor, ToolError, ToolResult,
+    Typed, TypedTool,
 };
 use ego_core::public::PublicEvent;
 use ego_core::run::RunTermination;
 use ego_core::sink::{CollectingSink, EventSink};
 use ego_core::state::{ItemKind, SessionState, Usage};
+use ego_core::store::evidence::{EvidenceError, EvidencePage, EvidenceRead, EvidenceStore, EvidenceWriter};
 use ego_core::store::session_store::{SessionMeta, SessionStore, StoreError};
 use ego_core::turn::{CancelToken, Model, Session, Tools, TurnConfig, TurnLoop};
 use futures::StreamExt;
@@ -264,9 +266,9 @@ mod turn {
                     return Err(ToolError::InvalidParams("expected one Read op".into()));
                 };
                 let bytes = io.read(&path)?;
-                Ok(ToolResult {
-                    content: String::from_utf8_lossy(&bytes).into_owned(),
-                })
+                Ok(ToolResult::builtin(
+                    String::from_utf8_lossy(&bytes).into_owned(),
+                ))
             })
         }
     }
@@ -330,6 +332,36 @@ mod turn {
         BudgetGate::new(usd("1000"))
     }
 
+    struct NoProcess;
+
+    impl ProcessExecutor for NoProcess {
+        fn execute<'a>(
+            &'a self,
+            _spec: &'a ego_core::permit::SpawnSpec,
+        ) -> BoxFuture<'a, Result<ToolResult, ProcessError>> {
+            Box::pin(futures::future::ready(Err(ProcessError::Invariant(
+                "process execution is not used by core turn tests".to_string(),
+            ))))
+        }
+    }
+
+    struct NoEvidence;
+
+    impl EvidenceStore for NoEvidence {
+        fn begin(&self) -> Result<Box<dyn EvidenceWriter>, EvidenceError> {
+            Err(EvidenceError::Limit { limit: 0 })
+        }
+
+        fn read_page<'a>(
+            &'a self,
+            request: &'a EvidenceRead,
+        ) -> BoxFuture<'a, Result<EvidencePage, EvidenceError>> {
+            Box::pin(futures::future::ready(Err(EvidenceError::NotFound {
+                reference: request.reference.id.clone(),
+            })))
+        }
+    }
+
     /// Everything a `TurnLoop` borrows, kept alive in one place so a test can
     /// build a loop in one line without fighting the borrow checker.
     struct Fixture {
@@ -338,6 +370,8 @@ mod turn {
         generator: FakeGenerator,
         policy: PolicyEngine,
         fs: FakeFs,
+        process: NoProcess,
+        evidence: NoEvidence,
         registry: Vec<std::sync::Arc<dyn ego_core::permit::Tool>>,
         gate: RefCell<BudgetGate>,
         /// Where the public projection goes. Collecting rather than null, so
@@ -354,6 +388,8 @@ mod turn {
                 generator: FakeGenerator::new(script),
                 policy: PolicyEngine::new(CanonPath::new("/ws"), Mode::Default, Ruleset::default()),
                 fs: FakeFs::default(),
+                process: NoProcess,
+                evidence: NoEvidence,
                 registry: Vec::new(),
                 gate: RefCell::new(gate()),
                 sink: CollectingSink::new(),
@@ -387,6 +423,7 @@ mod turn {
                 Mode::Default,
                 Ruleset::from_layer(
                     PermCfg {
+                        judge: None,
                         allow: load(allow),
                         deny: load(deny),
                     },
@@ -432,6 +469,7 @@ mod turn {
                 Mode::Default,
                 Ruleset::from_layer(
                     PermCfg {
+                        judge: None,
                         allow: Vec::new(),
                         deny: denied,
                     },
@@ -499,6 +537,13 @@ mod turn {
         run_with(fx, state, prompt, metering(), Some(rates()), None, config())
     }
 
+    fn tool_result_text(call: &ego_core::state::ItemState) -> String {
+        call.tool_result
+            .as_ref()
+            .expect("a completed tool call has a semantic result")
+            .model_text()
+    }
+
     /// The same, under a metering of the caller's choosing.
     fn run_metered(
         fx: &Fixture,
@@ -521,7 +566,14 @@ mod turn {
         config: TurnConfig,
     ) -> (ExitReason, bool, SessionState) {
         let mut gate = fx.gate.borrow_mut();
-        let tools = Tools::new(&fx.registry, &fx.policy, &fx.fs, CanonPath::new("/ws"));
+        let tools = Tools::new(
+            &fx.registry,
+            &fx.policy,
+            &fx.fs,
+            &fx.process,
+            &fx.evidence,
+            CanonPath::new("/ws"),
+        );
         let mut turn = TurnLoop::new(
             session(state, &fx.store, &fx.clock, &fx.sink, CancelToken::new()),
             model_with(
@@ -682,7 +734,7 @@ mod turn {
             .expect("the tool call became an item");
         assert_eq!(call.call_id.as_deref(), Some("call_abc"));
         assert_eq!(call.args, r#"{"path":"/ws/note.txt"}"#);
-        assert_eq!(call.text, "hello from the file");
+        assert_eq!(tool_result_text(call), "hello from the file");
         assert_eq!(call.ok, Some(true));
 
         // And the second generation was handed a history containing both
@@ -747,15 +799,16 @@ mod turn {
         // declined too. The last party to decline is the one whose reason an
         // operator can act on — it is what tells them `--yolo` and `--allow`
         // are both available, where "no rule covers" names only the second.
+        let result = tool_result_text(call);
         assert!(
-            call.text.contains("needs permission") && call.text.contains("does not approve"),
+            result.contains("needs permission") && result.contains("does not approve"),
             "an unanswerable call must read as a question: {}",
-            call.text
+            result
         );
         assert!(
-            call.text.contains("/ws/note.txt"),
+            result.contains("/ws/note.txt"),
             "and must name what it is a question about: {}",
-            call.text
+            result
         );
 
         assert_eq!(
@@ -886,10 +939,11 @@ mod turn {
             .find(|item| item.kind == ItemKind::ToolCall)
             .expect("the call was logged even though nothing could run it");
         assert_eq!(call.ok, Some(false));
+        let result = tool_result_text(call);
         assert!(
-            call.text.contains("delete_everything"),
+            result.contains("delete_everything"),
             "the refusal must name the tool: {}",
-            call.text
+            result
         );
     }
 
@@ -917,10 +971,11 @@ mod turn {
             .find(|item| item.kind == ItemKind::ToolCall)
             .expect("the call was logged");
         assert_eq!(call.ok, Some(false));
+        let result = tool_result_text(call);
         assert!(
-            call.text.contains("not JSON"),
+            result.contains("not JSON"),
             "the model has to learn its arguments were malformed: {}",
-            call.text
+            result
         );
     }
 
@@ -948,15 +1003,16 @@ mod turn {
             .find(|item| item.kind == ItemKind::ToolCall)
             .expect("the call was logged");
         assert_eq!(call.ok, Some(false));
+        let result = tool_result_text(call);
         assert!(
-            call.text.contains("/etc/passwd") && call.text.contains("outside the workspace"),
+            result.contains("/etc/passwd") && result.contains("outside the workspace"),
             "a denial must name what it denied: {}",
-            call.text
+            result
         );
         assert!(
-            !call.text.contains("root:x"),
+            !result.contains("root:x"),
             "the file must not have been read at all: {}",
-            call.text
+            result
         );
     }
 
@@ -1009,10 +1065,10 @@ mod turn {
         assert_eq!(reason, ExitReason::Completed, "the read was allowed");
 
         let recorded = permission_events(&fx);
-        let [EventKind::PermissionDecided { allowed, by }] = recorded.as_slice() else {
+        let [EventKind::PermissionDecided { allowed, by, .. }] = recorded.as_slice() else {
             panic!("one decision, and no question: {recorded:?}");
         };
-        assert!(allowed);
+        assert_eq!(*allowed, Some(true));
         let Some(Authority::Rules { rules }) = by else {
             panic!("a rule settled it at step 3, not the mode at step 5: {by:?}");
         };
@@ -1037,10 +1093,10 @@ mod turn {
         run(&fx, SessionState::default(), "read the notes");
 
         let recorded = permission_events(&fx);
-        let [EventKind::PermissionDecided { allowed, by }] = recorded.as_slice() else {
+        let [EventKind::PermissionDecided { allowed, by, .. }] = recorded.as_slice() else {
             panic!("one decision, and no question: {recorded:?}");
         };
-        assert!(allowed);
+        assert_eq!(*allowed, Some(true));
         assert_eq!(
             by.as_ref(),
             Some(&Authority::Mode {
@@ -1062,10 +1118,10 @@ mod turn {
         assert_eq!(reason, ExitReason::PermissionRequired);
 
         let recorded = permission_events(&fx);
-        let [EventKind::PermissionDecided { allowed, by }] = recorded.as_slice() else {
+        let [EventKind::PermissionDecided { allowed, by, .. }] = recorded.as_slice() else {
             panic!("one decision, and no question: {recorded:?}");
         };
-        assert!(!allowed);
+        assert_eq!(*allowed, Some(false));
         assert_eq!(by.as_ref(), Some(&Authority::Boundary));
     }
 
@@ -1136,8 +1192,9 @@ mod turn {
             [
                 EventKind::PermissionRequested { .. },
                 EventKind::PermissionDecided {
-                    allowed: true,
-                    by: Some(Authority::Party)
+                    allowed: Some(true),
+                    by: Some(Authority::Party),
+                    ..
                 }
             ]
         ));
@@ -1158,8 +1215,9 @@ mod turn {
             [
                 EventKind::PermissionRequested { .. },
                 EventKind::PermissionDecided {
-                    allowed: true,
-                    by: Some(Authority::Party)
+                    allowed: Some(true),
+                    by: Some(Authority::Party),
+                    ..
                 }
             ]
         ));
@@ -1182,8 +1240,9 @@ mod turn {
             [
                 EventKind::PermissionRequested { .. },
                 EventKind::PermissionDecided {
-                    allowed: false,
-                    by: Some(Authority::Party)
+                    allowed: Some(false),
+                    by: Some(Authority::Party),
+                    ..
                 }
             ]
         ));
@@ -1210,8 +1269,9 @@ mod turn {
                 EventKind::PermissionRequested { .. },
                 EventKind::PermissionAmended { .. },
                 EventKind::PermissionDecided {
-                    allowed: false,
-                    by: Some(Authority::Boundary)
+                    allowed: Some(false),
+                    by: Some(Authority::Boundary),
+                    ..
                 }
             ]
         ));
@@ -1241,8 +1301,9 @@ mod turn {
                 EventKind::PermissionRequested { .. },
                 EventKind::PermissionAmended { .. },
                 EventKind::PermissionDecided {
-                    allowed: false,
-                    by: Some(Authority::Rules { .. })
+                    allowed: Some(false),
+                    by: Some(Authority::Rules { .. }),
+                    ..
                 }
             ]
         ));
@@ -1266,7 +1327,8 @@ mod turn {
             .find(|item| item.kind == ItemKind::ToolCall)
             .expect("the amended call still completes its tool item");
         assert_eq!(call.ok, Some(false));
-        assert!(call.text.contains("contents"), "{}", call.text);
+        let result = tool_result_text(call);
+        assert!(result.contains("contents"), "{}", result);
         assert!(matches!(
             permission_events(&fx).as_slice(),
             [
@@ -1339,7 +1401,14 @@ mod turn {
         };
 
         let mut gate = fx.gate.borrow_mut();
-        let tools = Tools::new(&fx.registry, &fx.policy, &fx.fs, CanonPath::new("/ws"));
+        let tools = Tools::new(
+            &fx.registry,
+            &fx.policy,
+            &fx.fs,
+            &fx.process,
+            &fx.evidence,
+            CanonPath::new("/ws"),
+        );
         let mut turn = TurnLoop::new(
             session(
                 SessionState::default(),
@@ -1442,7 +1511,14 @@ mod turn {
         };
 
         let mut gate = fx.gate.borrow_mut();
-        let tools = Tools::new(&fx.registry, &fx.policy, &fx.fs, CanonPath::new("/ws"));
+        let tools = Tools::new(
+            &fx.registry,
+            &fx.policy,
+            &fx.fs,
+            &fx.process,
+            &fx.evidence,
+            CanonPath::new("/ws"),
+        );
         let mut turn = TurnLoop::new(
             session(
                 SessionState::default(),
@@ -1487,7 +1563,14 @@ mod turn {
         let fx = Fixture::new(vec![vec![AiEvent::Stop(StopReason::Stop)]]);
         // A gate too small to admit the upper bound of any request.
         let mut gate = BudgetGate::new(usd("0.0000001"));
-        let tools = Tools::new(&fx.registry, &fx.policy, &fx.fs, CanonPath::new("/ws"));
+        let tools = Tools::new(
+            &fx.registry,
+            &fx.policy,
+            &fx.fs,
+            &fx.process,
+            &fx.evidence,
+            CanonPath::new("/ws"),
+        );
         let mut turn = TurnLoop::new(
             session(
                 SessionState::default(),
@@ -1885,7 +1968,14 @@ mod turn {
         fx.store.fail_at(3);
 
         let mut gate = fx.gate.borrow_mut();
-        let tools = Tools::new(&fx.registry, &fx.policy, &fx.fs, CanonPath::new("/ws"));
+        let tools = Tools::new(
+            &fx.registry,
+            &fx.policy,
+            &fx.fs,
+            &fx.process,
+            &fx.evidence,
+            CanonPath::new("/ws"),
+        );
         let mut turn = TurnLoop::new(
             session(
                 SessionState::default(),
@@ -1928,7 +2018,14 @@ mod turn {
         ]]);
 
         let mut gate = fx.gate.borrow_mut();
-        let tools = Tools::new(&fx.registry, &fx.policy, &fx.fs, CanonPath::new("/ws"));
+        let tools = Tools::new(
+            &fx.registry,
+            &fx.policy,
+            &fx.fs,
+            &fx.process,
+            &fx.evidence,
+            CanonPath::new("/ws"),
+        );
         let mut refusing = model(&fx.generator, &mut gate);
         // The model accepts three levels; `config()` asks for `Off`.
         refusing.caps.reasoning_efforts = ReasoningEffortSupport::Only(BTreeSet::from([
@@ -1972,7 +2069,14 @@ mod turn {
         let fx = Fixture::new(vec![vec![AiEvent::Stop(StopReason::Stop)]]);
 
         let mut gate = fx.gate.borrow_mut();
-        let tools = Tools::new(&fx.registry, &fx.policy, &fx.fs, CanonPath::new("/ws"));
+        let tools = Tools::new(
+            &fx.registry,
+            &fx.policy,
+            &fx.fs,
+            &fx.process,
+            &fx.evidence,
+            CanonPath::new("/ws"),
+        );
         let mut refusing = model(&fx.generator, &mut gate);
         refusing.caps.reasoning_efforts =
             ReasoningEffortSupport::Only(BTreeSet::from([ThinkingLevel::High]));
@@ -2017,7 +2121,14 @@ mod turn {
         let fx = Fixture::new(vec![vec![AiEvent::Stop(StopReason::Stop)]]);
 
         let mut gate = fx.gate.borrow_mut();
-        let tools = Tools::new(&fx.registry, &fx.policy, &fx.fs, CanonPath::new("/ws"));
+        let tools = Tools::new(
+            &fx.registry,
+            &fx.policy,
+            &fx.fs,
+            &fx.process,
+            &fx.evidence,
+            CanonPath::new("/ws"),
+        );
         let mut silent = model(&fx.generator, &mut gate);
         silent.caps.reasoning_efforts = ReasoningEffortSupport::Unknown;
         let mut turn = TurnLoop::new(
@@ -2049,7 +2160,14 @@ mod turn {
         ]]);
 
         let mut gate = fx.gate.borrow_mut();
-        let tools = Tools::new(&fx.registry, &fx.policy, &fx.fs, CanonPath::new("/ws"));
+        let tools = Tools::new(
+            &fx.registry,
+            &fx.policy,
+            &fx.fs,
+            &fx.process,
+            &fx.evidence,
+            CanonPath::new("/ws"),
+        );
         let mut turn = TurnLoop::new(
             session(
                 SessionState::default(),
@@ -2114,7 +2232,14 @@ mod turn {
             }]),
         };
         let mut gate = fx.gate.borrow_mut();
-        let tools = Tools::new(&fx.registry, &fx.policy, &fx.fs, CanonPath::new("/ws"));
+        let tools = Tools::new(
+            &fx.registry,
+            &fx.policy,
+            &fx.fs,
+            &fx.process,
+            &fx.evidence,
+            CanonPath::new("/ws"),
+        );
         let mut turn = TurnLoop::new(
             session(
                 SessionState::default(),
@@ -2185,7 +2310,14 @@ mod turn {
         fx.store.fail_at(1);
 
         let mut gate = fx.gate.borrow_mut();
-        let tools = Tools::new(&fx.registry, &fx.policy, &fx.fs, CanonPath::new("/ws"));
+        let tools = Tools::new(
+            &fx.registry,
+            &fx.policy,
+            &fx.fs,
+            &fx.process,
+            &fx.evidence,
+            CanonPath::new("/ws"),
+        );
         let mut turn = TurnLoop::new(
             session(
                 SessionState::default(),

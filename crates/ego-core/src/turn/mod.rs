@@ -23,7 +23,9 @@ use crate::budget::{BudgetGate, Metering, PricingQuote, ResolvedRates, Settlemen
 use crate::ceiling::tokens_reached;
 use crate::config::SystemPrompt;
 use crate::cost::{Money, RateSource};
-use crate::event::domain::{CancelCause, EventKind, ExitReason, OccupancyProvenance};
+use crate::event::domain::{
+    CancelCause, EventKind, ExitReason, GenerationRole, OccupancyProvenance,
+};
 use crate::event::id::{EventId, GenerationId, ItemId, Producer, SessionId, TurnId};
 use crate::event::time::Clock;
 use crate::generator::attempt::{AttemptStream, GenerationAttempt, UsageReport, settled_cost};
@@ -33,7 +35,9 @@ use crate::generator::port::{AiEvent, Generator};
 use crate::generator::types::{
     Conversation, ErrorKind, GenRequest, Message, Role, StopReason, ThinkingLevel,
 };
-use crate::permit::{Authority, Classification, Pending, PolicyDenied, Resolution};
+use crate::permit::{Authority, Classification, Pending, PolicyDenied, Resolution, ToolResult};
+use crate::permit::ExecObservation;
+use crate::permit::judge::{JudgeConfig, JudgeDecoder, JudgeInput, JudgeOutcome};
 use crate::public::PublicEvent;
 use crate::run::{Denial, DeniedBy};
 use crate::sink::EventSink;
@@ -225,6 +229,17 @@ pub struct Model<'a> {
     pub config: TurnConfig,
 }
 
+/// The separately resolved model and host facts used by auto-mode judging.
+pub struct JudgeModel<'a> {
+    pub generator: &'a dyn Generator,
+    pub metering: Metering,
+    pub rates: Option<ResolvedRates>,
+    pub caps: ModelCapabilities,
+    pub config: JudgeConfig,
+    pub confinement: crate::permit::RunConfinement,
+    pub exec_caps: crate::permit::ExecCaps,
+}
+
 /// Runs turns against one session.
 ///
 /// Holds the session's whole world: what generates, what it costs, what it may
@@ -239,6 +254,8 @@ pub struct TurnLoop<'a> {
     token_ceiling: Option<u64>,
     caps: ModelCapabilities,
     config: TurnConfig,
+    judge: Option<JudgeModel<'a>>,
+    execution_observation: Option<ExecObservation>,
     tools: Tools<'a>,
     cancel: CancelToken,
 }
@@ -266,9 +283,29 @@ impl<'a> TurnLoop<'a> {
             token_ceiling: model.token_ceiling,
             caps: model.caps,
             config: model.config,
+            judge: None,
+            execution_observation: None,
             tools,
             cancel: session.cancel,
         }
+    }
+
+    /// Open an auto-capable loop with its independently resolved judge.
+    pub fn with_judge(
+        session: Session<'a>,
+        model: Model<'a>,
+        tools: Tools<'a>,
+        judge: JudgeModel<'a>,
+    ) -> Self {
+        let mut loop_ = Self::new(session, model, tools);
+        loop_.judge = Some(judge);
+        loop_
+    }
+
+    /// Attach one run observation, consumed before the first public turn event.
+    pub fn with_execution_observation(mut self, observation: ExecObservation) -> Self {
+        self.execution_observation = Some(observation);
+        self
     }
 
     /// The session so far.
@@ -285,6 +322,16 @@ impl<'a> TurnLoop<'a> {
     /// the tool calls in between.
     pub async fn run(&mut self, prompt: &str) -> Result<TurnOutcome, TurnAbandoned> {
         let turn = TurnId::new();
+        if let Some(observation) = self.execution_observation.take()
+            && let Err(cause) = self.journal.append(
+                turn,
+                None,
+                None,
+                EventKind::ExecutionObserved { observation },
+            )
+        {
+            return Err(self.abandon(turn, cause));
+        }
         // `turn.started` of `CLI.md` §4.2. Published rather than appended:
         // `EventKind` has no counterpart, because the start of a turn is not
         // something the reducer establishes — it is what the loop knows the
@@ -451,12 +498,12 @@ impl<'a> TurnLoop<'a> {
                 // configured on purpose. `DeniedBy` is what carries that
                 // difference past the prose and into §4.1's object.
                 let denial = match self.run_tool(turn, &call).await? {
-                    ToolOutcome::Answered { ok, output } => {
+                    ToolOutcome::Answered { ok, result } => {
                         self.journal.append(
                             turn,
                             Some(call.item),
                             Some(call.started),
-                            EventKind::ToolCallCompleted { ok, output },
+                            EventKind::ToolCallCompleted { ok, result },
                         )?;
                         continue;
                     }
@@ -472,6 +519,7 @@ impl<'a> TurnLoop<'a> {
                         action: pending.request().to_string(),
                         by: DeniedBy::Nobody,
                     },
+                    ToolOutcome::Ended(reason) => return Ok((reason, None)),
                 };
                 self.journal.append(
                     turn,
@@ -479,7 +527,7 @@ impl<'a> TurnLoop<'a> {
                     Some(call.started),
                     EventKind::ToolCallCompleted {
                         ok: false,
-                        output: denial.action.clone(),
+                        result: ToolResult::builtin(denial.action.clone()),
                     },
                 )?;
                 return Ok((ExitReason::PermissionRequired, Some(denial)));
@@ -605,7 +653,10 @@ impl<'a> TurnLoop<'a> {
             turn,
             None,
             None,
-            EventKind::GenerationStarted { attempt: reference },
+            EventKind::GenerationStarted {
+                attempt: reference,
+                role: GenerationRole::Main,
+            },
         )?;
 
         let stream = self.generator.generate(request, attempt);
@@ -1004,6 +1055,132 @@ impl<'a> TurnLoop<'a> {
         }
     }
 
+    /// Run the one paid, tool-less opinion allowed for this pending call.
+    async fn judge_pending(
+        &mut self,
+        turn: TurnId,
+        pending: &Pending,
+    ) -> Result<JudgeRun, StoreError> {
+        let Some(judge) = self.judge.as_ref() else {
+            return Ok(JudgeRun::Unavailable);
+        };
+        let generator = judge.generator;
+        let metering = judge.metering.clone();
+        let rates = judge.rates.clone();
+        let caps = judge.caps.clone();
+        let config = judge.config.clone();
+        let input = JudgeInput::new(
+            pending.call(),
+            &judge.confinement,
+            judge.exec_caps,
+            pending.request().why(),
+        );
+        let request = input.request(&config);
+
+        if !caps.request_gaps(&request).is_empty() {
+            return Ok(JudgeRun::Unavailable);
+        }
+        let quote = rates.as_ref().map(|rates| &rates.quote);
+        let reservation = match self.gate.reserve(&metering, quote, &request, &caps) {
+            Ok(reservation) => reservation,
+            Err(denied) => {
+                tracing::warn!(%denied, "the budget gate refused the judge generation");
+                return Ok(JudgeRun::Ended(ExitReason::Budget));
+            }
+        };
+        let attempt = match GenerationAttempt::new(
+            GenerationId::new(),
+            reservation,
+            &metering,
+            quote,
+            &request,
+            &caps,
+        ) {
+            Ok(attempt) => attempt,
+            Err(denied) => {
+                tracing::error!(%denied, "the judge reservation did not authorise its request");
+                return Ok(JudgeRun::Ended(ExitReason::Internal));
+            }
+        };
+        let reference = attempt.attempt();
+        self.journal.append(
+            turn,
+            None,
+            None,
+            EventKind::GenerationStarted {
+                attempt: reference,
+                role: GenerationRole::Judge,
+            },
+        )?;
+
+        let mut stream = generator.generate(request, attempt);
+        let mut decoder = JudgeDecoder::new();
+        let mut usage: Option<Usage> = None;
+        let mut provider_cost: Option<Money> = None;
+        while let Some(event) = stream.next().await {
+            decoder.observe(&event);
+            match &event {
+                AiEvent::Usage(delta) => {
+                    let mut total = usage.unwrap_or(Usage::IDENTITY);
+                    total.add(delta);
+                    usage = Some(total);
+                }
+                AiEvent::ProviderCost { cost } => provider_cost = Some(*cost),
+                _ => {}
+            }
+        }
+
+        let mut failure = None;
+        if usage.is_some() || provider_cost.is_some() {
+            let observed = usage.unwrap_or(Usage::IDENTITY);
+            let cost_delta = settled_cost(
+                &metering,
+                quote,
+                usage.map_or(UsageReport::Missing, UsageReport::Reported),
+                provider_cost,
+                self.gate.currency(),
+            );
+            if let Err(cause) = self.journal.append(
+                turn,
+                None,
+                None,
+                EventKind::UsageUpdated {
+                    usage: observed,
+                    cost_delta,
+                    attempt: Some(reference),
+                },
+            ) {
+                failure = Some(cause);
+            }
+        }
+
+        let settlement = match stream.settle(self.gate) {
+            Ok(settlement) => settlement,
+            Err(denied) => {
+                failure.map_or(Ok(()), Err)?;
+                tracing::error!(%denied, "the gate refused to settle its judge attempt");
+                return Ok(JudgeRun::Ended(ExitReason::Internal));
+            }
+        };
+        failure.map_or(Ok(()), Err)?;
+        self.journal.append(
+            turn,
+            None,
+            None,
+            EventKind::AttemptSettled {
+                attempt: settlement.attempt,
+                outcome: settlement.outcome,
+            },
+        )?;
+
+        let outcome = decoder.finish();
+        let by = Authority::Judge {
+            model: config.identity,
+            attempt: reference,
+        };
+        Ok(JudgeRun::Decided { outcome, by })
+    }
+
     /// Look up, authorise and run one call the model asked for.
     ///
     /// A *failure* comes back as `Answered { ok: false, .. }` and is logged as
@@ -1020,7 +1197,10 @@ impl<'a> TurnLoop<'a> {
         turn: TurnId,
         call: &PendingCall,
     ) -> Result<ToolOutcome, StoreError> {
-        let answered = |ok, output| ToolOutcome::Answered { ok, output };
+        let answered = |ok, text: String| ToolOutcome::Answered {
+            ok,
+            result: ToolResult::builtin(text),
+        };
         let (tool, mut prepared) = match self.tools.prepare(&call.name, &call.args) {
             Ok(prepared) => prepared,
             // Not a permission event. `prepare` refuses calls that never
@@ -1049,6 +1229,24 @@ impl<'a> TurnLoop<'a> {
                         return Ok(ToolOutcome::Refused { denial });
                     }
                     Resolution::Ask(pending) => {
+                        let pending = match self.judge_pending(turn, &pending).await? {
+                            JudgeRun::Unavailable => pending,
+                            JudgeRun::Ended(reason) => return Ok(ToolOutcome::Ended(reason)),
+                            JudgeRun::Decided { outcome, by } => {
+                                self.judge_decided(turn, call, &outcome, by.clone())?;
+                                match self.tools.settle_judge(pending, &outcome, by) {
+                                    Resolution::Settled(Ok(authorized)) => break authorized,
+                                    Resolution::Settled(Err(denial)) => {
+                                        return Ok(ToolOutcome::Refused { denial });
+                                    }
+                                    Resolution::Ask(pending) => pending,
+                                    Resolution::HumanSettled { .. }
+                                    | Resolution::Reclassify { .. } => {
+                                        unreachable!("a judge cannot produce a human resolution")
+                                    }
+                                }
+                            }
+                        };
                         self.requested(turn, call, pending.request())?;
                         match self.tools.decide(pending).await {
                             Resolution::Ask(pending) => {
@@ -1116,8 +1314,11 @@ impl<'a> TurnLoop<'a> {
             }
         };
         Ok(match self.tools.execute(tool, authorized).await {
-            Ok(output) => answered(true, output),
-            Err(failure) => answered(false, failure),
+            Ok(result) => ToolOutcome::Answered { ok: true, result },
+            Err(failure) => ToolOutcome::Answered {
+                ok: false,
+                result: failure.into_failed_result(),
+            },
         })
     }
 
@@ -1155,8 +1356,32 @@ impl<'a> TurnLoop<'a> {
             turn,
             call,
             EventKind::PermissionDecided {
+                allowed: Some(allowed),
+                by: Some(by),
+                reason: None,
+            },
+        )
+    }
+
+    fn judge_decided(
+        &mut self,
+        turn: TurnId,
+        call: &PendingCall,
+        outcome: &JudgeOutcome,
+        by: Authority,
+    ) -> Result<(), StoreError> {
+        let allowed = match outcome {
+            JudgeOutcome::Allow { .. } => Some(true),
+            JudgeOutcome::Deny { .. } => Some(false),
+            JudgeOutcome::Escalate { .. } => None,
+        };
+        self.permission(
+            turn,
+            call,
+            EventKind::PermissionDecided {
                 allowed,
                 by: Some(by),
+                reason: Some(outcome.reason().to_owned()),
             },
         )
     }
@@ -1185,13 +1410,21 @@ impl<'a> TurnLoop<'a> {
 /// What running one tool call produced.
 enum ToolOutcome {
     /// It ran, or it failed in a way the model should read and adapt to.
-    Answered { ok: bool, output: String },
+    Answered { ok: bool, result: ToolResult },
     /// Policy refused it. A settled answer, and still not one for the model:
     /// telling it "denied" invites it to try a variant, which is a prompt loop
     /// run against a boundary.
     Refused { denial: PolicyDenied },
     /// Policy could not settle it and there is nobody here to ask.
     Unanswerable { pending: Pending },
+    /// Judge admission failed for a cause that ends the whole turn.
+    Ended(ExitReason),
+}
+
+enum JudgeRun {
+    Unavailable,
+    Ended(ExitReason),
+    Decided { outcome: JudgeOutcome, by: Authority },
 }
 
 /// What one generation did.

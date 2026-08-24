@@ -23,6 +23,7 @@ use ego_ai::http::{Http, HttpError, HttpRequest, HttpResponse, Method};
 use ego_ai::provider::{CredentialStrategy, ProviderRow, ResolvedCredential};
 use ego_ai::resolver::Supplied;
 use ego_ai::wire::openai_completions::{OpenAiCompletions, request_body};
+use ego_ai::wire::{RequestTarget, WireFormat};
 use ego_core::budget::{BudgetGate, Metering, PricingQuote, SettlementSource};
 use ego_core::cost::{Amount, CurrencyCode, Money, PricingRevision};
 use ego_core::event::id::GenerationId;
@@ -50,6 +51,7 @@ const TEXT_TRANSCRIPT: &str = include_str!("goldens/profile/openai/stream/text.s
 /// below assert that the first appears where the second must not.
 const KEY_VAR: &str = "EGO_TEST_API_KEY";
 const KEY: &str = "sk-not-a-real-key";
+const COPILOT_TOKEN: &str = "tid=1;proxy-ep=proxy.enterprise.example;exp=1800003600";
 
 // --- fixtures ---
 
@@ -164,6 +166,22 @@ fn credential(creds: &dyn ego_ai::provider::Credentials) -> ResolvedCredential {
         .expect("the fixture row's variable is set on this machine")
 }
 
+fn row_with_credential_base_override() -> ProviderRow {
+    let mut row = row();
+    row.base = Url::parse("https://row.example/v1/").expect("a row base");
+    row.extra_headers = vec![("originator".to_string(), "ego-test".to_string())];
+    row.credential = CredentialStrategy::OAuth {
+        provider: "github-copilot".to_string(),
+    };
+    row
+}
+
+fn credential_with_base_override(row: &ProviderRow) -> ResolvedCredential {
+    row.credential
+        .resolve(&FakeCredentials::holding(COPILOT_TOKEN))
+        .expect("the copilot fixture has a proxy endpoint")
+}
+
 /// Mints a real attempt through the only door there is.
 ///
 /// `Reservation`'s constructor is sealed in `ego_core::budget`, so this has to
@@ -276,6 +294,45 @@ async fn the_transport_is_handed_exactly_what_the_wire_format_would_send() {
         "the provider row's credential reaches the request: {:?}",
         sent.headers.iter().map(|(n, _)| n).collect::<Vec<_>>()
     );
+}
+
+#[tokio::test]
+async fn ensure_expressible_and_generate_share_headers_base_and_wire_body() {
+    let http = StubHttp::responding(200, TEXT_TRANSCRIPT);
+    let profile = row_with_credential_base_override();
+    let resolved = credential_with_base_override(&profile);
+    let req = request();
+    let mut headers = resolved.headers();
+    for (name, value) in &profile.extra_headers {
+        headers.retain(|(existing, _)| !existing.eq_ignore_ascii_case(name));
+        headers.push((name.clone(), value.clone()));
+    }
+    let target = RequestTarget::new(
+        resolved.base_override().unwrap_or(&profile.base),
+        &headers,
+    );
+    let expected = profile
+        .wire
+        .build_request(&target, &req)
+        .expect("the fixture request is expressible");
+    let generator = WireGenerator::new(profile, Arc::clone(&http) as Arc<dyn Http>, resolved);
+
+    assert!(
+        generator.ensure_expressible(&req).is_ok(),
+        "the fixed request envelope must be locally expressible"
+    );
+    assert_eq!(http.calls(), 0, "expressibility is checked without HTTP");
+
+    let mut gate = BudgetGate::new(usd("10"));
+    let attempt = attempt_for(&mut gate, &req);
+    let _: Vec<AiEvent> = generator.generate(req, attempt).collect().await;
+
+    let seen = http.seen.lock().expect("not poisoned");
+    let sent = seen.first().expect("generation sent one request");
+    assert_eq!(sent.url, expected.url, "credential base override was preserved");
+    assert_eq!(sent.method, expected.method);
+    assert_eq!(sent.headers, expected.headers);
+    assert_eq!(sent.body, expected.body, "the wire body was preserved");
 }
 
 /// The identity is stamped by `ego-core` and carried by `ego-ai`, never

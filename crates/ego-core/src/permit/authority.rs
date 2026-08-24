@@ -2,13 +2,15 @@
 //! without asking me".
 //!
 //! `docs/decisions/2026-08-21-a-permit-nobody-can-widen.md` §7. The arms are
-//! the ones with producers in this build; the judge and the human arrive with
-//! §6 steps 6 and 7.
+//! the ones with producers in this build, including the judge and human seats
+//! at §6 steps 6 and 7.
 
 use serde::{Deserialize, Serialize};
 
 use super::rule::RuleId;
 use crate::config::{Mode, OriginSet, Source, SourcedRule};
+use crate::config::ModelRef;
+use crate::generator::attempt::AttemptRef;
 
 /// One rule that contributed to a decision, and where it came from.
 ///
@@ -83,4 +85,12 @@ pub enum Authority {
     /// `--allow` cannot widen it and no mode lifts it, so there is no ID to
     /// record and nothing to revoke.
     Boundary,
+    /// The run's session-bound evidence store intrinsically admitted one
+    /// exact evidence reference.
+    SessionEvidence,
+    /// One paid judge attempt decided the exact pending call.
+    Judge {
+        model: ModelRef,
+        attempt: AttemptRef,
+    },
 }

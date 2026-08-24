@@ -50,7 +50,12 @@ use serde::{Deserialize, Serialize};
 /// (`docs/decisions/2026-08-21-tool-use-history.md`). They are required
 /// fields — an item with no author or no position is not a fact anything can
 /// default — so a v2 snapshot cannot be read, and does not need to be.
-pub const SNAPSHOT_VERSION: u32 = 3;
+///
+/// v4: completed tool items carry a structured `ToolResult` rather than
+/// flattening their evidence into `ItemState.text`. The event log is the
+/// authority, so older snapshots are discarded and rebuilt rather than
+/// migrated.
+pub const SNAPSHOT_VERSION: u32 = 4;
 
 /// A reduced [`SessionState`] plus the point in the log it reduces.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

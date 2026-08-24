@@ -9,7 +9,7 @@ use super::time::Timestamp;
 use crate::cost::CostDelta;
 use crate::generator::attempt::{AttemptRef, Outcome};
 use crate::generator::types::{ErrorKind, ReasoningState};
-use crate::permit::{Authority, Escalation};
+use crate::permit::{Authority, Escalation, ExecObservation, ToolResult};
 use crate::state::Usage;
 
 /// The full envelope every `DomainEvent` carries, per ARCH §1: a monotonic
@@ -33,6 +33,15 @@ pub struct Envelope {
     pub ts: Timestamp,
     /// What produced this event.
     pub producer: Producer,
+}
+
+/// Which of the two current generation lifecycles opened an attempt.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GenerationRole {
+    #[default]
+    Main,
+    Judge,
 }
 
 /// Who stopped a turn that did not finish on its own.
@@ -202,8 +211,10 @@ pub enum EventKind {
     },
     /// A streamed increment of a tool call's output.
     ToolCallDelta { text: String },
-    /// A tool call finished, with its outcome and final output.
-    ToolCallCompleted { ok: bool, output: String },
+    /// A tool call finished, with its outcome and final evidence. This is a
+    /// codec-v6 shape: replacing the old string is deliberately not decoded
+    /// as a compatibility spelling.
+    ToolCallCompleted { ok: bool, result: ToolResult },
     /// A sensitive action needs a permission decision.
     ///
     /// Structured rather than a rendered `description`, because the question
@@ -227,7 +238,9 @@ pub enum EventKind {
     PermissionAmended { tool: String },
     /// A permission decision was made, and who made it.
     PermissionDecided {
-        allowed: bool,
+        /// `None` is the judge's durable escalation, not a denial.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        allowed: Option<bool>,
         /// The rules, the mode, the boundary or the party that decided —
         /// `docs/decisions/2026-08-21-a-permit-nobody-can-widen.md` §7.
         ///
@@ -237,13 +250,21 @@ pub enum EventKind {
         /// the attribution, not that nobody decided.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         by: Option<Authority>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
     },
     /// One generation was admitted and is on its way to the provider.
     ///
     /// Opens the attempt's lifecycle in the log, which is what makes a
     /// resumed session able to say that a request was in flight — and, once
     /// `AttemptSettled` arrives, whether it may safely be sent again.
-    GenerationStarted { attempt: AttemptRef },
+    GenerationStarted {
+        attempt: AttemptRef,
+        #[serde(default)]
+        role: GenerationRole,
+    },
+    /// The process backend evidence captured before any turn action.
+    ExecutionObserved { observation: ExecObservation },
     /// One attempt reached a terminal state.
     ///
     /// Carries no money. `UsageUpdated` is the single accounting fact
@@ -357,6 +378,7 @@ impl EventKind {
             EventKind::PermissionAmended { .. } => "permission_amended",
             EventKind::PermissionDecided { .. } => "permission_decided",
             EventKind::GenerationStarted { .. } => "generation_started",
+            EventKind::ExecutionObserved { .. } => "execution_observed",
             EventKind::AttemptSettled { .. } => "attempt_settled",
             EventKind::UsageUpdated { .. } => "usage_updated",
             EventKind::UsageCorrected { .. } => "usage_corrected",

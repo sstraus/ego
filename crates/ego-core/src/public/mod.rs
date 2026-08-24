@@ -452,12 +452,12 @@ pub fn project_public(ev: &DomainEvent) -> Option<PublicEvent> {
             kind: ItemKind::Tool,
             text: text.clone(),
         }),
-        EventKind::ToolCallCompleted { ok, output } => Some(PublicEvent::ItemCompleted {
+        EventKind::ToolCallCompleted { ok, result } => Some(PublicEvent::ItemCompleted {
             turn,
             item: item?,
             kind: ItemKind::Tool,
             ok: *ok,
-            text: Some(output.clone()),
+            text: Some(result.model_text()),
         }),
         // `name` carries the tool, as it does for `ToolCallStarted`. It used
         // to be `None` because the internal event had no tool to give, not
@@ -513,12 +513,14 @@ pub fn project_public(ev: &DomainEvent) -> Option<PublicEvent> {
         // not withhold configuration. Reasoning from privacy here would send
         // the next reader to strip a `RuleId` out of a refusal, where it is
         // the one thing that tells them what to revoke.
-        EventKind::PermissionDecided { allowed, .. } => Some(PublicEvent::ItemCompleted {
-            turn,
-            item: item?,
-            kind: ItemKind::Permission,
-            ok: *allowed,
-            text: None,
+        EventKind::PermissionDecided { allowed, .. } => allowed.and_then(|allowed| {
+            item.map(|item| PublicEvent::ItemCompleted {
+                turn,
+                item,
+                kind: ItemKind::Permission,
+                ok: allowed,
+                text: None,
+            })
         }),
         // `attempt` is deliberately not projected: the public schema is
         // compatibility-governed and v1 has no field for it, so surfacing an
@@ -591,6 +593,7 @@ pub fn project_public(ev: &DomainEvent) -> Option<PublicEvent> {
         // `ContextWindowUpdated` already carries.
         EventKind::GenerationStarted { .. }
         | EventKind::AttemptSettled { .. }
-        | EventKind::UsageCorrected { .. } => None,
+        | EventKind::UsageCorrected { .. }
+        | EventKind::ExecutionObserved { .. } => None,
     }
 }

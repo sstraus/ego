@@ -8,7 +8,7 @@
 //! stay in the wire formats and are not tested here, because the two
 //! providers disagree and a core-level answer would be wrong for one of them.
 
-use ego_core::event::domain::{DomainEvent, Envelope, EventKind};
+use ego_core::event::domain::{DomainEvent, Envelope, EventKind, GenerationRole};
 use ego_core::event::id::{EventId, GenerationId, ItemId, Producer, Seq, TurnId};
 use ego_core::event::time::Timestamp;
 use ego_core::generator::attempt::AttemptRef;
@@ -299,6 +299,7 @@ mod rebuild {
                 None,
                 EventKind::GenerationStarted {
                     attempt: AttemptRef::first(GenerationId::new()),
+                    role: GenerationRole::Main,
                 },
             )
         }

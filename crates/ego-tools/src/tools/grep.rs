@@ -91,7 +91,7 @@ impl TypedTool for GrepTool {
                 lines.join("\n")
             };
             note_truncation(&mut content, found.truncated);
-            Ok(ToolResult { content })
+            Ok(ToolResult::builtin(content))
         })
     }
 }

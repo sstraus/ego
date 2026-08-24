@@ -43,6 +43,25 @@ fn parsed<const N: usize>(args: [&str; N]) -> ego_cli::cli::Args {
     }
 }
 
+fn parsed_slice(args: &[&str]) -> ego_cli::cli::Args {
+    match cli::parse(argv_slice(args)).expect("the command line parses") {
+        Invocation::Run(args) | Invocation::Resume(args) => *args,
+        Invocation::Interactive(_) => {
+            panic!("that starts a session: use `converses` for it")
+        }
+        Invocation::Ls(_) => panic!("`ls` takes no Args: use `listed` for it"),
+        Invocation::Acp(_) => panic!("`acp` takes no Args: use `served` for it"),
+        Invocation::Auth(_) => panic!("`auth` takes no Args: use the auth tests for it"),
+        Invocation::Answered(_) => panic!("that answered a question: use `answered` for it"),
+    }
+}
+
+fn argv_slice(args: &[&str]) -> Vec<String> {
+    std::iter::once("ego".to_string())
+        .chain(args.iter().map(|arg| arg.to_string()))
+        .collect()
+}
+
 /// The text `--help` or `--version` produced.
 ///
 /// A separate helper from [`refused`] on purpose, and the separation is the
@@ -146,16 +165,27 @@ fn an_invocation_with_no_subcommand_starts_the_surface_it_used_to_refuse() {
     assert_eq!(converses(["hello"]).prompt.as_deref(), Some("hello"));
 }
 
-/// A flag whose subsystem does not exist is refused by name *before* clap sees
-/// it, so the answer is a sentence about that flag rather than clap's
-/// "unexpected argument". `--budget=2.5$` and `--budget 2.5$` are the same flag
-/// and the split has to see that.
+/// The sandbox flag is a real run policy, not a retired spelling. Both
+/// `--sandbox=value` and the split form must produce the same exact value for
+/// the later config merge; neither form may be swallowed by the availability
+/// table.
 #[test]
-fn an_unavailable_flag_is_named_however_it_was_spelled() {
-    for spelling in ["--sandbox=workspace", "--sandbox"] {
-        let refusal = refused(["run", spelling, "Ask"]);
-        assert!(refusal.contains("--sandbox"), "{refusal}");
-        assert!(refusal.contains("sandbox backend"), "{refusal}");
+fn the_sandbox_flag_is_parsed_in_both_clap_spellings() {
+    for (args, expected) in [
+        (
+            &["run", "--sandbox=workspace", "Ask"][..],
+            Some(ego_core::permit::Confinement::Workspace),
+        ),
+        (
+            &["run", "--sandbox", "ro", "Ask"][..],
+            Some(ego_core::permit::Confinement::Ro),
+        ),
+        (
+            &["run", "--sandbox=off", "Ask"][..],
+            Some(ego_core::permit::Confinement::Off),
+        ),
+    ] {
+        assert_eq!(parsed_slice(args).sandbox, expected);
     }
 }
 

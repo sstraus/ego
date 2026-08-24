@@ -1,0 +1,188 @@
+//! macOS Seatbelt mechanism adapter.
+//!
+//! This module supplies a private profile and the fixed launch prefix. It
+//! deliberately does not turn either fact into capability evidence: the
+//! common executor grants capabilities only after its paired behavioural and
+//! production-path probes succeed.
+
+use std::collections::BTreeSet;
+use std::ffi::OsString;
+use std::fs;
+use std::io::Write as _;
+use std::os::unix::fs::PermissionsExt as _;
+use std::path::{Path, PathBuf};
+
+use ego_core::permit::{
+    BackendIdentity, CanonPath, ExecCaps, ProcessError, RunConfinement,
+};
+use tempfile::{Builder, NamedTempFile};
+
+use super::backend::LaunchPrefix;
+use super::profile::{self, ProfileInput};
+
+const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
+const BACKEND_REVISION: &str = "seatbelt-private-profile-v1";
+
+/// The profile file is retained for at least as long as any command prefix
+/// that names it. Dropping the backend removes the private file.
+pub(crate) struct SeatbeltBackend {
+    profile: NamedTempFile,
+    maximum_caps: ExecCaps,
+}
+
+impl SeatbeltBackend {
+    /// Prepare one fixed profile for the exact effective run policy.
+    pub(crate) fn prepare(
+        policy: &RunConfinement,
+        private_scratch: &CanonPath,
+        derived_runtime_roots: &[CanonPath],
+    ) -> Result<Self, ProcessError> {
+        prerequisite()?;
+        validate_private_scratch(private_scratch.as_path())?;
+
+        let runtime_roots = derived_runtime_roots
+            .iter()
+            .map(CanonPath::as_path)
+            .collect::<Vec<_>>();
+        let rendered = profile::render(&ProfileInput {
+            level: policy.level(),
+            offline: policy.offline(),
+            workspace: policy.workspace().as_path(),
+            private_scratch: private_scratch.as_path(),
+            runtime_roots: &runtime_roots,
+        })
+        .map_err(|error| ProcessError::Backend(error.to_string()))?;
+
+        let mut profile = Builder::new()
+            .prefix(".ego-seatbelt-")
+            .suffix(".sb")
+            // The child may write its scratch root. Keep the policy file in a
+            // different exclusive host-owned file so one spawn cannot alter
+            // the profile used by a later spawn in the same run.
+            .tempfile()
+            .map_err(|error| {
+                ProcessError::Backend(format!("cannot create private Seatbelt profile: {error}"))
+            })?;
+        profile.write_all(rendered.as_bytes()).map_err(|error| {
+            ProcessError::Backend(format!("cannot write private Seatbelt profile: {error}"))
+        })?;
+        profile.flush().map_err(|error| {
+            ProcessError::Backend(format!("cannot flush private Seatbelt profile: {error}"))
+        })?;
+
+        Ok(Self {
+            profile,
+            maximum_caps: policy.requirements().required(),
+        })
+    }
+
+    pub(crate) const fn name(&self) -> &'static str {
+        "seatbelt"
+    }
+
+    pub(crate) const fn revision(&self) -> &'static str {
+        BACKEND_REVISION
+    }
+
+    pub(crate) fn identity(&self) -> BackendIdentity {
+        BackendIdentity::new(self.name(), self.revision())
+    }
+
+    pub(crate) fn prerequisite(
+        &self,
+        _policy: &RunConfinement,
+    ) -> Result<(), ProcessError> {
+        prerequisite()
+    }
+
+    /// Bits the mechanism is eligible to prove for this profile.
+    ///
+    /// This is an upper bound, never an observation. The common executor must
+    /// intersect it with complete paired runtime evidence before publishing a
+    /// capability.
+    pub(crate) const fn maximum_demonstrable_caps(&self) -> ExecCaps {
+        self.maximum_caps
+    }
+
+    pub(crate) fn launch_prefix(&self) -> LaunchPrefix {
+        LaunchPrefix {
+            program: Some(OsString::from(SANDBOX_EXEC)),
+            args_before_target: vec![
+                OsString::from("-f"),
+                self.profile.path().as_os_str().to_owned(),
+            ],
+        }
+    }
+
+}
+
+fn prerequisite() -> Result<(), ProcessError> {
+    let metadata = fs::metadata(SANDBOX_EXEC).map_err(|error| {
+        ProcessError::Backend(format!("Seatbelt launcher {SANDBOX_EXEC} is unavailable: {error}"))
+    })?;
+    if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
+        return Err(ProcessError::Backend(format!(
+            "Seatbelt launcher {SANDBOX_EXEC} is not an executable file"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_private_scratch(path: &Path) -> Result<(), ProcessError> {
+    if !path.is_absolute() {
+        return Err(ProcessError::Backend(format!(
+            "Seatbelt private scratch is not absolute: {}",
+            path.display()
+        )));
+    }
+    let metadata = fs::metadata(path).map_err(|error| {
+        ProcessError::Backend(format!(
+            "Seatbelt private scratch {} is unavailable: {error}",
+            path.display()
+        ))
+    })?;
+    if !metadata.is_dir() {
+        return Err(ProcessError::Backend(format!(
+            "Seatbelt private scratch is not a directory: {}",
+            path.display()
+        )));
+    }
+    if metadata.permissions().mode() & 0o077 != 0 {
+        return Err(ProcessError::Backend(format!(
+            "Seatbelt private scratch is not private: {}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+/// Fixed runtime roots required by Apple's installed command-line runtime.
+///
+/// The list is backend-owned input. It is intentionally conservative: paired
+/// read probes, rather than this table, decide whether scoped read capability
+/// can be reported on the current host.
+pub(crate) fn derived_runtime_roots() -> Result<Vec<CanonPath>, ProcessError> {
+    [
+        "/System",
+        "/Library/Apple",
+        "/usr/bin",
+        "/usr/lib",
+        "/usr/libexec",
+        "/usr/sbin",
+        "/usr/share",
+        "/bin",
+        "/sbin",
+    ]
+    .into_iter()
+    .map(PathBuf::from)
+    .map(|root| {
+        fs::canonicalize(&root).map_err(|error| {
+            ProcessError::Backend(format!(
+                "Seatbelt runtime root {} is unavailable: {error}",
+                root.display()
+            ))
+        })
+    })
+    .collect::<Result<BTreeSet<_>, _>>()
+    .map(|roots| roots.into_iter().map(CanonPath::new).collect())
+}

@@ -21,7 +21,9 @@ use super::path::CanonPath;
 use super::prepared_call::{Change, Op, OpName, PreparedCall};
 use super::rule::RuleId;
 use super::scope::Scope;
+use super::spawn::SpawnSpec;
 use crate::config::{Mode, OriginSet, Ruleset, Source, SourcedRule};
+use crate::store::evidence::EvidenceRead;
 
 /// A capability token whose constructor only this module can reach. Its
 /// only job is to make [`Permit`]'s constructor equally unreachable from
@@ -122,7 +124,7 @@ struct Sealed(());
 /// let engine = PolicyEngine::new(
 ///     CanonPath::new("/ws"),
 ///     Mode::Default,
-///     Ruleset::from_layer(PermCfg { allow, deny: Vec::new() }, Source::Project),
+///     Ruleset::from_layer(PermCfg { judge: None, allow, deny: Vec::new() }, Source::Project),
 /// );
 /// let call = PreparedCall {
 ///     tool: "read".to_string(),
@@ -144,7 +146,7 @@ struct Sealed(());
 /// let engine = PolicyEngine::new(
 ///     CanonPath::new("/ws"),
 ///     Mode::Default,
-///     Ruleset::from_layer(PermCfg { allow, deny: Vec::new() }, Source::Project),
+///     Ruleset::from_layer(PermCfg { judge: None, allow, deny: Vec::new() }, Source::Project),
 /// );
 /// let call = PreparedCall {
 ///     tool: "read".to_string(),
@@ -175,7 +177,8 @@ pub enum PermitDenied {
     List { path: CanonPath },
     Search { path: CanonPath },
     Connect { endpoint: String },
-    Argv { argv: Vec<String> },
+    Spawn { spec: SpawnSpec },
+    Evidence { request: EvidenceRead },
 }
 
 impl fmt::Display for PermitDenied {
@@ -199,10 +202,17 @@ impl fmt::Display for PermitDenied {
                     "connect denied: {endpoint} is outside the permit's scope"
                 )
             }
-            PermitDenied::Argv { argv } => {
+            PermitDenied::Spawn { spec } => {
                 write!(
                     f,
-                    "spawn denied: argv {argv:?} is outside the permit's scope"
+                    "spawn denied: specification {spec:?} is outside the permit's scope"
+                )
+            }
+            PermitDenied::Evidence { request } => {
+                write!(
+                    f,
+                    "evidence read denied: {} at byte {} is outside the permit's scope",
+                    request.reference, request.offset
                 )
             }
         }
@@ -281,18 +291,24 @@ impl Permit {
         }
     }
 
-    /// Checks a spawned command's argv against [`Scope::argv`]'s patterns.
-    pub fn allows_argv(&self, argv: &[String]) -> Result<(), PermitDenied> {
-        if self
-            .scope
-            .argv
-            .iter()
-            .any(|pattern| argv.starts_with(pattern))
-        {
+    /// Checks the whole process specification against the one policy admitted.
+    pub fn allows_spawn(&self, spec: &SpawnSpec) -> Result<(), PermitDenied> {
+        if self.scope.spawn.as_ref() == Some(spec) {
             Ok(())
         } else {
-            Err(PermitDenied::Argv {
-                argv: argv.to_vec(),
+            Err(PermitDenied::Spawn {
+                spec: spec.clone(),
+            })
+        }
+    }
+
+    /// Checks one exact session evidence reference and byte offset.
+    pub fn allows_evidence(&self, request: &EvidenceRead) -> Result<(), PermitDenied> {
+        if self.scope.evidence.as_ref() == Some(request) {
+            Ok(())
+        } else {
+            Err(PermitDenied::Evidence {
+                request: request.clone(),
             })
         }
     }
@@ -325,7 +341,7 @@ impl Permit {
 /// let engine = PolicyEngine::new(
 ///     CanonPath::new("/ws"),
 ///     Mode::Default,
-///     Ruleset::from_layer(PermCfg { allow, deny: Vec::new() }, Source::Project),
+///     Ruleset::from_layer(PermCfg { judge: None, allow, deny: Vec::new() }, Source::Project),
 /// );
 /// let call = PreparedCall {
 ///     tool: "read".to_string(),
@@ -347,7 +363,7 @@ impl Permit {
 /// let engine = PolicyEngine::new(
 ///     CanonPath::new("/ws"),
 ///     Mode::Default,
-///     Ruleset::from_layer(PermCfg { allow, deny: Vec::new() }, Source::Project),
+///     Ruleset::from_layer(PermCfg { judge: None, allow, deny: Vec::new() }, Source::Project),
 /// );
 /// let call = PreparedCall {
 ///     tool: "read".to_string(),
@@ -375,7 +391,7 @@ impl Permit {
 /// let engine = PolicyEngine::new(
 ///     CanonPath::new("/ws"),
 ///     Mode::Default,
-///     Ruleset::from_layer(PermCfg { allow, deny: Vec::new() }, Source::Project),
+///     Ruleset::from_layer(PermCfg { judge: None, allow, deny: Vec::new() }, Source::Project),
 /// );
 /// let split = |path: &str| {
 ///     let call = PreparedCall {
@@ -403,7 +419,7 @@ impl Permit {
 /// let engine = PolicyEngine::new(
 ///     CanonPath::new("/ws"),
 ///     Mode::Default,
-///     Ruleset::from_layer(PermCfg { allow, deny: Vec::new() }, Source::Project),
+///     Ruleset::from_layer(PermCfg { judge: None, allow, deny: Vec::new() }, Source::Project),
 /// );
 /// let split = |path: &str| {
 ///     let call = PreparedCall {
@@ -422,7 +438,7 @@ impl Permit {
 /// `ego-core`, where the literal *does* compile, pairing call `b` with permit
 /// `a` hands the tool `b`'s operations under `a`'s authority — and `a`'s
 /// authority is the ceiling. Every path `b` names that `a` did not is refused
-/// by [`GuardedFs`](super::GuardedFs) at use time. Mispairing can lose
+/// by [`GuardedEffects`](super::GuardedEffects) at use time. Mispairing can lose
 /// authority; it cannot gain any. Invariant W is about what `mint` was told,
 /// and `into_parts` does not mint.
 ///
@@ -456,8 +472,8 @@ impl Authorized {
     ///
     /// A borrow is not a widening: it cannot be cloned, cannot be minted
     /// from, and cannot outlive the `Authorized` that owns it. What it is
-    /// for is [`GuardedFs`](super::GuardedFs), which binds one permit to one
-    /// `Fs` at construction and rechecks every path against it at use time.
+    /// for is [`GuardedEffects`](super::GuardedEffects), which binds one permit
+    /// to the raw effect ports and rechecks every operation at use time.
     pub fn permit(&self) -> &Permit {
         &self.permit
     }
@@ -544,6 +560,8 @@ pub enum PolicyDenied {
         path: CanonPath,
         by: Authority,
     },
+    /// Session evidence authority is valid only as the call's sole operation.
+    EvidenceMustStandAlone { tool: String },
 }
 
 impl PolicyDenied {
@@ -565,6 +583,7 @@ impl PolicyDenied {
             PolicyDenied::ModeForbids { mode, .. } => Authority::Mode { mode: *mode },
             PolicyDenied::OutsideWorkspace { .. } => Authority::Boundary,
             PolicyDenied::Refused { by, .. } => by.clone(),
+            PolicyDenied::EvidenceMustStandAlone { .. } => Authority::SessionEvidence,
         }
     }
 }
@@ -635,6 +654,10 @@ impl fmt::Display for PolicyDenied {
             PolicyDenied::Refused { tool, op, path, .. } => {
                 write!(f, "{tool} may not {op} {path}: permission was refused")
             }
+            PolicyDenied::EvidenceMustStandAlone { tool } => write!(
+                f,
+                "{tool} may not combine session evidence with another operation"
+            ),
         }
     }
 }
@@ -649,8 +672,7 @@ impl std::error::Error for PolicyDenied {}
 ///
 /// **Two arms, not four.** `2026-08-21-a-permit-nobody-can-widen.md` §4 also
 /// names "the judge was unavailable" and "the judge was uncertain". There is
-/// no judge in this build, so those have no producer and are not declared —
-/// the same rule that keeps `Op::Spawn` out of the `Op` enum.
+/// no judge in this build, so those have no producer and are not declared.
 ///
 /// The two that *are* declared are the two steps that can decline: the rules,
 /// and then the mode. They are chained rather than alternative — a question
@@ -784,6 +806,16 @@ impl fmt::Display for PermissionRequest {
                             TerminalSafe(new_string)
                         )?,
                     }
+                }
+                Op::Spawn { spec } => {
+                    write!(f, "\n- spawn {:?}", spec.argv())?;
+                }
+                Op::ReadEvidence { request } => {
+                    write!(
+                        f,
+                        "\n- read session evidence {} at byte {}",
+                        request.reference, request.offset
+                    )?;
                 }
             }
         }
@@ -1034,11 +1066,11 @@ impl PolicyEngine {
     /// `workspace`.
     pub fn new(workspace: CanonPath, mode: Mode, permissions: Ruleset) -> Self {
         Self {
+            approver: Box::new(ModeApprover::new(mode, workspace.clone())),
             workspace,
             mode,
             allow: permissions.allow,
             deny: permissions.deny,
-            approver: Box::new(ModeApprover::new(mode)),
             human: None,
         }
     }
@@ -1135,6 +1167,23 @@ impl PolicyEngine {
     /// authorise the whole call, boundary included. A refusal anywhere refuses
     /// the call.
     pub fn classify(&self, call: PreparedCall) -> Classification {
+        if matches!(call.ops.as_slice(), [Op::ReadEvidence { .. }]) {
+            let permit = self.mint(scope_of(&call));
+            return Classification::Settled(Ok(Authorized {
+                call,
+                permit,
+                by: Authority::SessionEvidence,
+            }));
+        }
+        if call
+            .ops
+            .iter()
+            .any(|op| matches!(op, Op::ReadEvidence { .. }))
+        {
+            return Classification::Settled(Err(PolicyDenied::EvidenceMustStandAlone {
+                tool: call.tool,
+            }));
+        }
         for op in &call.ops {
             if let Err(denied) = self.judge(&call, op) {
                 return Classification::Settled(Err(denied));
@@ -1150,7 +1199,10 @@ impl PolicyEngine {
             let Some(entry) = self.matching(&self.allow, op) else {
                 let why = Escalation::NoRuleCovers {
                     op: op.name(),
-                    path: op.path().clone(),
+                    path: op
+                        .subject_path(&self.workspace)
+                        .expect("session evidence is settled before rule matching")
+                        .clone(),
                 };
                 return Classification::Ask(self.pending(call, why));
             };
@@ -1192,6 +1244,32 @@ impl PolicyEngine {
                 by,
             })),
             Verdict::Escalate { why } => Resolution::Ask(self.pending(pending.call, why)),
+        }
+    }
+
+    /// Apply one judge opinion without exposing a new policy resolution shape.
+    /// The sealed pending call remains the sole source of the minted scope.
+    pub(crate) fn settle_judge(
+        &self,
+        pending: Pending,
+        outcome: &super::judge::JudgeOutcome,
+        by: Authority,
+    ) -> Resolution {
+        match outcome {
+            super::judge::JudgeOutcome::Allow { .. } => {
+                let call = pending.call;
+                let permit = self.mint(scope_of(&call));
+                Resolution::Settled(Ok(Authorized { call, permit, by }))
+            }
+            super::judge::JudgeOutcome::Deny { .. } => {
+                Resolution::Settled(Err(PolicyDenied::Refused {
+                    tool: pending.call.tool,
+                    op: pending.ask.why.op(),
+                    path: pending.ask.why.path().clone(),
+                    by,
+                }))
+            }
+            super::judge::JudgeOutcome::Escalate { .. } => Resolution::Ask(pending),
         }
     }
 
@@ -1248,14 +1326,16 @@ impl PolicyEngine {
 
     /// Steps 0 to 2: everything that can refuse an operation outright.
     fn judge(&self, call: &PreparedCall, op: &Op) -> Result<(), PolicyDenied> {
-        let path = op.path();
+        let path = op
+            .subject_path(&self.workspace)
+            .expect("session evidence is settled before ordinary policy");
 
         // 0. The workspace boundary. Evaluated before the rules because it is
         //    not one of them: no operator wrote it, `--allow` cannot widen it,
         //    and `yolo` does not lift it. `yolo` bypasses *asking*; the
         //    sandbox (`ARCHITECTURE.md` §3.4 axis 4) is the axis that widens
         //    or narrows where ego may reach, and it is a separate control.
-        if !path.is_or_under(&self.workspace) {
+        if !matches!(op, Op::Spawn { .. }) && !path.is_or_under(&self.workspace) {
             return Err(PolicyDenied::OutsideWorkspace {
                 tool: call.tool.clone(),
                 op: op.name(),
@@ -1340,16 +1420,17 @@ impl PolicyEngine {
 fn scope_of(call: &PreparedCall) -> Scope {
     let mut scope = Scope::default();
     for op in &call.ops {
-        let path = op.path().clone();
         // Each op widens only its own authority. A call that lists a
         // directory gets `list_paths` and no `read_paths`, so the tool learns
         // names and cannot then read what it found — the whole reason these
         // are separate lists.
         match op {
-            Op::Read { .. } => scope.read_paths.push(path),
-            Op::List { .. } => scope.list_paths.push(path),
-            Op::Search { .. } => scope.search_paths.push(path),
-            Op::Write { .. } => scope.write_paths.push(path),
+            Op::Read { path } => scope.read_paths.push(path.clone()),
+            Op::List { root, .. } => scope.list_paths.push(root.clone()),
+            Op::Search { root, .. } => scope.search_paths.push(root.clone()),
+            Op::Write { path, .. } => scope.write_paths.push(path.clone()),
+            Op::Spawn { spec } => scope.spawn = Some(spec.clone()),
+            Op::ReadEvidence { request } => scope.evidence = Some(request.clone()),
         }
     }
     scope

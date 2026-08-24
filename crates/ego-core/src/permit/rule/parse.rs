@@ -92,7 +92,7 @@ const OPERATIONS: &[(Head, Option<&str>)] = &[
     (Head::Write, None),
     (Head::List, None),
     (Head::Search, None),
-    (Head::Exec, Some("a shell tool")),
+    (Head::Exec, None),
     (Head::Net, Some("a tool that reaches the network")),
     (Head::Tool, Some("an MCP client")),
 ];

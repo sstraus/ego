@@ -19,6 +19,8 @@ use std::fmt;
 
 use super::authority::Authority;
 use super::grant::{Escalation, Pending, PermissionRequest};
+use super::path::CanonPath;
+use super::prepared_call::Op;
 use crate::config::Mode;
 
 /// What a party answered about a [`Pending`].
@@ -122,11 +124,12 @@ pub trait HumanApprover: fmt::Debug + Send + Sync {
 #[derive(Debug)]
 pub(super) struct ModeApprover {
     mode: Mode,
+    workspace: CanonPath,
 }
 
 impl ModeApprover {
-    pub(super) fn new(mode: Mode) -> Self {
-        Self { mode }
+    pub(super) fn new(mode: Mode, workspace: CanonPath) -> Self {
+        Self { mode, workspace }
     }
 
     /// The whole of step 5, and it is sync because a mode is a value the run
@@ -141,17 +144,16 @@ impl ModeApprover {
                 // Auto-approves workspace writes. `classify`'s step 0 already
                 // established that every path in this call is in the
                 // workspace.
-                Mode::Edits => true,
+                Mode::Edits => !matches!(op, Op::Spawn { .. }),
                 // `ARCHITECTURE.md:242` — these review unresolved
                 // **sensitive** actions, not every action. A read inside the
                 // workspace that stopped the run to ask would be the prompt
                 // fatigue `ARCHITECTURE.md:238` counts as a security bug.
                 //
                 // `Plan` never arrives here with a mutating op: the floor at
-                // step 2 already refused it. `Auto` behaves as `Default`
-                // because step 6's judge does not exist; when it does, `Auto`
-                // consults it rather than declining, and `Default` is
-                // unchanged.
+                // step 2 already refused it. `Auto` deliberately declines at
+                // this seat so TurnLoop can insert the paid judge before the
+                // human; `Default` proceeds directly to the human.
                 Mode::Plan | Mode::Default | Mode::Auto => !op.mutates(),
             };
             if !approved {
@@ -159,7 +161,10 @@ impl ModeApprover {
                     why: Escalation::ModeAsks {
                         mode: self.mode,
                         op: op.name(),
-                        path: op.path().clone(),
+                        path: op
+                            .subject_path(&self.workspace)
+                            .expect("session evidence is settled before mode approval")
+                            .clone(),
                     },
                 };
             }
