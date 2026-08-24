@@ -34,9 +34,8 @@ pub use scan::{Entry, EntryKind, Found, LineMatcher, Match, Scan, ScanLimits, Sc
 pub use scope::Scope;
 pub use spawn::{
     BackendIdentity, Confinement, ConfinementParseError, EnvName, EnvNameError, EnvPolicy,
-    ExecCaps, ExecObservation, ExecRequirements, MissingExecCaps, PolicyDigest,
-    PolicyDigestError, ProcessError, ProcessExecutor, RunConfinement, RunConfinementError,
-    SpawnSpec, SpawnSpecError,
+    ExecCaps, ExecObservation, ExecRequirements, MissingExecCaps, PolicyDigest, PolicyDigestError,
+    ProcessError, ProcessExecutor, RunConfinement, RunConfinementError, SpawnSpec, SpawnSpecError,
 };
 pub use tool::{
     MAX_TOOL_ERROR_DIAGNOSTIC_BYTES, PrepareCtx, StreamProvenance, Tool, ToolContentBlock,

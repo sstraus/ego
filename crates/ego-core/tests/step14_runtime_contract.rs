@@ -11,19 +11,18 @@
 
 use std::{ffi::OsString, time::Duration};
 
+use ego_core::config::{Mode, PermCfg, Ruleset, Source};
 use ego_core::event::domain::{DomainEvent, Envelope, EventKind};
 use ego_core::event::id::{EventId, Producer, Seq, TurnId};
 use ego_core::event::time::Timestamp;
 use ego_core::permit::{
     Authority, BackendIdentity, CanonPath, Classification, Confinement, EnvName, EnvPolicy,
-    ExecCaps, ExecObservation, PolicyDigest, PolicyDenied, PolicyEngine, RunConfinement,
-    SpawnSpec,
+    ExecCaps, ExecObservation, PolicyDenied, PolicyDigest, PolicyEngine, RunConfinement, SpawnSpec,
 };
-use ego_core::config::{Mode, PermCfg, Ruleset, Source};
 use ego_core::permit::{Op, PreparedCall};
 use ego_core::public::project_public;
-use ego_core::store::evidence::{EvidenceId, EvidenceRead, EvidenceRef};
 use ego_core::state::SessionState;
+use ego_core::store::evidence::{EvidenceId, EvidenceRead, EvidenceRef};
 
 fn workspace() -> CanonPath {
     CanonPath::new(std::fs::canonicalize(std::env::current_dir().unwrap()).unwrap())
@@ -42,10 +41,7 @@ fn spec(argv: &[&str], env: EnvPolicy) -> SpawnSpec {
 #[test]
 fn spawn_spec_is_nonempty_argv_native_and_canonical() {
     let prepared = spec(&["/usr/bin/printf", "hello"], EnvPolicy::Inherited);
-    let expected_argv = vec![
-        OsString::from("/usr/bin/printf"),
-        OsString::from("hello"),
-    ];
+    let expected_argv = vec![OsString::from("/usr/bin/printf"), OsString::from("hello")];
 
     assert_eq!(prepared.argv(), expected_argv.as_slice());
     assert!(prepared.cwd().unwrap().as_path().is_absolute());
@@ -54,34 +50,34 @@ fn spawn_spec_is_nonempty_argv_native_and_canonical() {
 
 #[test]
 fn spawn_spec_rejects_empty_argv_and_non_absolute_cwd() {
-    assert!(SpawnSpec::new(
-        Vec::<OsString>::new(),
-        None,
-        None,
-        EnvPolicy::Inherited,
-    )
-    .is_err());
-    assert!(SpawnSpec::new(
-        vec![OsString::from("/usr/bin/printf")],
-        Some(CanonPath::new("relative")),
-        None,
-        EnvPolicy::Inherited,
-    )
-    .is_err());
-    assert!(SpawnSpec::new(
-        vec![OsString::from("/usr/bin/printf\0bad")],
-        None,
-        None,
-        EnvPolicy::Inherited,
-    )
-    .is_err());
-    assert!(SpawnSpec::new(
-        vec![OsString::from("/usr/bin/printf")],
-        None,
-        Some(Duration::ZERO),
-        EnvPolicy::Inherited,
-    )
-    .is_err());
+    assert!(SpawnSpec::new(Vec::<OsString>::new(), None, None, EnvPolicy::Inherited,).is_err());
+    assert!(
+        SpawnSpec::new(
+            vec![OsString::from("/usr/bin/printf")],
+            Some(CanonPath::new("relative")),
+            None,
+            EnvPolicy::Inherited,
+        )
+        .is_err()
+    );
+    assert!(
+        SpawnSpec::new(
+            vec![OsString::from("/usr/bin/printf\0bad")],
+            None,
+            None,
+            EnvPolicy::Inherited,
+        )
+        .is_err()
+    );
+    assert!(
+        SpawnSpec::new(
+            vec![OsString::from("/usr/bin/printf")],
+            None,
+            Some(Duration::ZERO),
+            EnvPolicy::Inherited,
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -130,7 +126,10 @@ fn environment_debug_identity_contains_names_but_never_materialized_values() {
     assert!(debug.contains("EGO_CONTRACT_SECRET"));
     assert!(!debug.contains("EGO_CONTRACT_SECRET=value"));
     if let Ok(path) = std::env::var("PATH") {
-        assert!(!debug.contains(&path), "materialized PATH leaked into identity");
+        assert!(
+            !debug.contains(&path),
+            "materialized PATH leaked into identity"
+        );
     }
 }
 
@@ -190,23 +189,17 @@ fn read_tool_result_is_an_intrinsic_exact_session_capability() {
         }]
     );
     assert_eq!(authorized.call().ops.len(), 1);
-    assert!(authorized
-        .permit()
-        .allows_evidence(&request)
-        .is_ok());
-    assert!(authorized
-        .permit()
-        .allows_evidence(&evidence_request('b', 128, 64))
-        .is_err());
+    assert!(authorized.permit().allows_evidence(&request).is_ok());
+    assert!(
+        authorized
+            .permit()
+            .allows_evidence(&evidence_request('b', 128, 64))
+            .is_err()
+    );
 
     let combined = PreparedCall {
         tool: "read_tool_result".to_string(),
-        ops: vec![
-            Op::ReadEvidence { request },
-            Op::Read {
-                path: workspace(),
-            },
-        ],
+        ops: vec![Op::ReadEvidence { request }, Op::Read { path: workspace() }],
     };
     assert!(matches!(
         policy.classify(combined),
@@ -233,17 +226,20 @@ fn run_confinement_maps_levels_to_explicit_requirements() {
     assert_eq!(ro.level(), Confinement::Ro);
     assert!(!ro.offline());
     assert_eq!(ro.workspace(), &root);
-    assert!(ro
-        .requirements()
-        .check(ExecCaps::READ_SCOPED.union(ExecCaps::WRITE_DENIED))
-        .is_ok());
+    assert!(
+        ro.requirements()
+            .check(ExecCaps::READ_SCOPED.union(ExecCaps::WRITE_DENIED))
+            .is_ok()
+    );
     assert!(ro.requirements().check(ExecCaps::WRITE_SCOPED).is_err());
 
     let scoped = RunConfinement::new(Confinement::Workspace, false, root.clone()).unwrap();
-    assert!(scoped
-        .requirements()
-        .check(ExecCaps::READ_SCOPED.union(ExecCaps::WRITE_SCOPED))
-        .is_ok());
+    assert!(
+        scoped
+            .requirements()
+            .check(ExecCaps::READ_SCOPED.union(ExecCaps::WRITE_SCOPED))
+            .is_ok()
+    );
     assert!(scoped.requirements().check(ExecCaps::WRITE_DENIED).is_err());
 
     let off = RunConfinement::new(Confinement::Off, false, root.clone()).unwrap();
@@ -255,12 +251,9 @@ fn run_confinement_maps_levels_to_explicit_requirements() {
 
 #[test]
 fn run_confinement_requires_an_absolute_workspace() {
-    assert!(RunConfinement::new(
-        Confinement::Workspace,
-        false,
-        CanonPath::new("relative"),
-    )
-    .is_err());
+    assert!(
+        RunConfinement::new(Confinement::Workspace, false, CanonPath::new("relative"),).is_err()
+    );
 }
 
 #[test]
@@ -308,18 +301,21 @@ fn exec_caps_serde_uses_stable_semantic_names_and_rejects_unknown_values() {
         serde_json::json!(["read_scoped", "write_scoped", "no_ip_network"])
     );
     for name in ["read_scoped", "write_scoped", "no_ip_network"] {
-        assert!(encoded.contains(name), "capability name missing from {encoded}");
+        assert!(
+            encoded.contains(name),
+            "capability name missing from {encoded}"
+        );
     }
     assert_eq!(serde_json::from_str::<ExecCaps>(&encoded).unwrap(), caps);
     assert!(serde_json::from_value::<ExecCaps>(serde_json::json!("future_capability")).is_err());
-    assert!(serde_json::from_value::<ExecCaps>(
-        serde_json::json!(["read_scoped", "future_capability"])
-    )
-    .is_err());
-    assert!(serde_json::from_value::<ExecCaps>(
-        serde_json::json!(["read_scoped", "read_scoped"])
-    )
-    .is_err());
+    assert!(
+        serde_json::from_value::<ExecCaps>(serde_json::json!(["read_scoped", "future_capability"]))
+            .is_err()
+    );
+    assert!(
+        serde_json::from_value::<ExecCaps>(serde_json::json!(["read_scoped", "read_scoped"]))
+            .is_err()
+    );
 }
 
 #[test]
@@ -337,7 +333,10 @@ fn execution_observation_and_backend_identity_are_serde_values_without_authority
         digest.try_into().expect("valid policy digest"),
     );
     assert_eq!(observation.backend().name(), "landlock");
-    assert_eq!(observation.backend().revision(), "landlock-safe-reexec-v1-abi9");
+    assert_eq!(
+        observation.backend().revision(),
+        "landlock-safe-reexec-v1-abi9"
+    );
     assert!(observation.capabilities().contains(ExecCaps::READ_SCOPED));
     assert!(observation.capabilities().contains(ExecCaps::WRITE_SCOPED));
     assert_eq!(
@@ -348,14 +347,19 @@ fn execution_observation_and_backend_identity_are_serde_values_without_authority
     let roundtrip: ExecObservation =
         serde_json::from_value(serde_json::to_value(&observation).unwrap()).unwrap();
     assert_eq!(roundtrip.backend().name(), "landlock");
-    assert_eq!(roundtrip.backend().revision(), "landlock-safe-reexec-v1-abi9");
-    assert!(serde_json::from_value::<ExecObservation>(serde_json::json!({
-        "backend": {"name": "null", "revision": "test"},
-        "capabilities": [],
-        "policy_digest": digest,
-        "unknown": true,
-    }))
-    .is_err());
+    assert_eq!(
+        roundtrip.backend().revision(),
+        "landlock-safe-reexec-v1-abi9"
+    );
+    assert!(
+        serde_json::from_value::<ExecObservation>(serde_json::json!({
+            "backend": {"name": "null", "revision": "test"},
+            "capabilities": [],
+            "policy_digest": digest,
+            "unknown": true,
+        }))
+        .is_err()
+    );
 }
 
 #[test]
@@ -443,10 +447,16 @@ mod turn_execution_observation {
     }
 
     impl SessionStore for MemoryStore {
-        fn append(&self, _id: &ego_core::event::id::SessionId, event: &DomainEvent) -> Result<(), StoreError> {
+        fn append(
+            &self,
+            _id: &ego_core::event::id::SessionId,
+            event: &DomainEvent,
+        ) -> Result<(), StoreError> {
             let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
             if call == self.fail_at.load(Ordering::SeqCst) {
-                return Err(StoreError::Io(std::io::Error::other("observation append failed")));
+                return Err(StoreError::Io(std::io::Error::other(
+                    "observation append failed",
+                )));
             }
             self.events.lock().unwrap().push(event.clone());
             Ok(())
@@ -496,7 +506,9 @@ mod turn_execution_observation {
             &'a self,
             _request: &'a EvidenceRead,
         ) -> BoxFuture<'a, Result<EvidencePage, EvidenceError>> {
-            Box::pin(futures::future::ready(Err(EvidenceError::Limit { limit: 0 })))
+            Box::pin(futures::future::ready(Err(EvidenceError::Limit {
+                limit: 0,
+            })))
         }
     }
 
@@ -524,11 +536,7 @@ mod turn_execution_observation {
                     "1000".parse::<Amount>().unwrap(),
                     CurrencyCode::new("USD").unwrap(),
                 )),
-                policy: PolicyEngine::new(
-                    CanonPath::new("/ws"),
-                    Mode::Default,
-                    Ruleset::default(),
-                ),
+                policy: PolicyEngine::new(CanonPath::new("/ws"), Mode::Default, Ruleset::default()),
                 fs: FakeFs::default(),
                 process: NoProcess,
                 evidence: NoEvidence,
@@ -600,7 +608,10 @@ mod turn_execution_observation {
 
     #[test]
     fn observation_is_appended_before_public_turn_and_consumed_once_per_loop() {
-        let mut fixture = Fixture::new(vec![vec![AiEvent::Stop(StopReason::Stop)], vec![AiEvent::Stop(StopReason::Stop)]]);
+        let mut fixture = Fixture::new(vec![
+            vec![AiEvent::Stop(StopReason::Stop)],
+            vec![AiEvent::Stop(StopReason::Stop)],
+        ]);
         let mut loop_ = fixture.loop_().with_execution_observation(observation());
         futures::executor::block_on(loop_.run("first")).expect("first turn");
         futures::executor::block_on(loop_.run("second")).expect("second turn");
@@ -617,10 +628,16 @@ mod turn_execution_observation {
         assert!(observation_at < prompt_at);
         let observation_turn = events[observation_at].env.turn;
         let prompt_turn = events[prompt_at].env.turn;
-        assert_eq!(observation_turn, prompt_turn, "observation and prompt share one minted turn");
+        assert_eq!(
+            observation_turn, prompt_turn,
+            "observation and prompt share one minted turn"
+        );
         match fixture.sink.events().first() {
             Some(ego_core::public::PublicEvent::TurnStarted { turn }) => {
-                assert_eq!(*turn, observation_turn, "public turn uses the same minted identity")
+                assert_eq!(
+                    *turn, observation_turn,
+                    "public turn uses the same minted identity"
+                )
             }
             other => panic!("turn start was not published first: {other:?}"),
         }
@@ -643,7 +660,10 @@ mod turn_execution_observation {
             .expect_err("observation append must be fatal before the turn");
         assert!(fixture.store.events().is_empty());
         assert!(fixture.sink.events().is_empty());
-        assert!(fixture.generator.calls().is_empty(), "abandoned observation reached generation");
+        assert!(
+            fixture.generator.calls().is_empty(),
+            "abandoned observation reached generation"
+        );
         assert!(abandoned.state.last_seq == Seq::default());
     }
 
@@ -653,11 +673,13 @@ mod turn_execution_observation {
         let mut loop_ = fixture.loop_();
         futures::executor::block_on(loop_.run("without observation")).expect("turn completes");
 
-        assert!(fixture
-            .store
-            .events()
-            .iter()
-            .all(|event| !matches!(event.kind, EventKind::ExecutionObserved { .. })));
+        assert!(
+            fixture
+                .store
+                .events()
+                .iter()
+                .all(|event| !matches!(event.kind, EventKind::ExecutionObserved { .. }))
+        );
         assert!(matches!(
             fixture.sink.events().first(),
             Some(ego_core::public::PublicEvent::TurnStarted { .. })

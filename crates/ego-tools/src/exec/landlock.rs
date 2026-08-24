@@ -306,9 +306,7 @@ fn ensure_no_ambient_descriptors() -> Result<(), HelperError> {
             .to_str()
             .and_then(|name| name.parse::<u32>().ok())
             .ok_or_else(|| {
-                HelperError::Descriptors(format!(
-                    "unexpected /proc/self/fd entry {name:?}"
-                ))
+                HelperError::Descriptors(format!("unexpected /proc/self/fd entry {name:?}"))
             })?;
         if descriptor > 2 {
             candidates.insert(descriptor);
@@ -378,10 +376,7 @@ fn add_read_rule(ruleset: RulesetCreated, root: &Path) -> Result<RulesetCreated,
     Ok(ruleset.add_rule(rule)?)
 }
 
-fn add_write_rules(
-    ruleset: RulesetCreated,
-    root: &Path,
-) -> Result<RulesetCreated, HelperError> {
+fn add_write_rules(ruleset: RulesetCreated, root: &Path) -> Result<RulesetCreated, HelperError> {
     let required = PathBeneath::new(PathFd::new(root)?, required_v3_access())
         .set_compatibility(CompatLevel::HardRequirement);
     let ruleset = ruleset.add_rule(required)?;
@@ -477,11 +472,17 @@ fn validate_absolute_existing(name: &str, path: &Path) -> Result<(), HelperError
 pub(crate) enum HelperError {
     Protocol(String),
     Descriptors(String),
-    Root { path: PathBuf, reason: String },
+    Root {
+        path: PathBuf,
+        reason: String,
+    },
     PathFd(PathFdError),
     Landlock(RulesetError),
     Enforcement(String),
-    Exec { executable: OsString, reason: String },
+    Exec {
+        executable: OsString,
+        reason: String,
+    },
 }
 
 impl fmt::Display for HelperError {
@@ -495,10 +496,9 @@ impl fmt::Display for HelperError {
             Self::PathFd(error) => write!(f, "could not open a Landlock root: {error}"),
             Self::Landlock(error) => write!(f, "Landlock setup failed: {error}"),
             Self::Enforcement(reason) => write!(f, "Landlock was not enforced: {reason}"),
-            Self::Exec {
-                executable,
-                reason,
-            } => write!(f, "could not execute {executable:?}: {reason}"),
+            Self::Exec { executable, reason } => {
+                write!(f, "could not execute {executable:?}: {reason}")
+            }
         }
     }
 }

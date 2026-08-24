@@ -296,9 +296,7 @@ impl Permit {
         if self.scope.spawn.as_ref() == Some(spec) {
             Ok(())
         } else {
-            Err(PermitDenied::Spawn {
-                spec: spec.clone(),
-            })
+            Err(PermitDenied::Spawn { spec: spec.clone() })
         }
     }
 

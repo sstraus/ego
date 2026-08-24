@@ -123,7 +123,9 @@ fn admitted_name(name: &OsStr, policy: &EnvPolicy) -> bool {
 }
 
 fn contains_name(names: &[ego_core::permit::EnvName], candidate: &OsStr) -> bool {
-    names.iter().any(|name| env_name_eq(name.as_os_str(), candidate))
+    names
+        .iter()
+        .any(|name| env_name_eq(name.as_os_str(), candidate))
 }
 
 #[cfg(windows)]

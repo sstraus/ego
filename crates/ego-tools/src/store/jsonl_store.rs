@@ -188,12 +188,11 @@ fn log_manifest_facts(log: &[u8]) -> Option<LogManifestFacts> {
     let mut last_ts = None;
     let mut execution = None;
     for event in lines.filter_map(|line| match decode_line(line) {
-            Ok(StoreLine::Record(record)) => {
-                serde_json::from_str::<DomainEvent>(record.payload.get()).ok()
-            }
-            _ => None,
-        })
-    {
+        Ok(StoreLine::Record(record)) => {
+            serde_json::from_str::<DomainEvent>(record.payload.get()).ok()
+        }
+        _ => None,
+    }) {
         last_ts = Some(event.env.ts);
         if let EventKind::ExecutionObserved { observation } = event.kind {
             execution = Some(observation);

@@ -18,20 +18,17 @@ use std::process::Command;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use ego_core::config::{Mode, PermCfg, Ruleset, Source};
 use ego_core::event::domain::CancelCause;
 use ego_core::event::id::SessionId;
-use ego_core::config::{Mode, PermCfg, Ruleset, Source};
 use ego_core::permit::{
-    CanonPath, Classification, Confinement, EnvPolicy, ExecCaps, ExecObservation, Op,
-    PolicyDenied, ProcessExecutor, RunConfinement, SpawnSpec, StreamProvenance,
-    ToolOutputProvenance, ToolResult,
+    CanonPath, Classification, Confinement, EnvPolicy, ExecCaps, ExecObservation, Op, PolicyDenied,
+    ProcessExecutor, RunConfinement, SpawnSpec, StreamProvenance, ToolOutputProvenance, ToolResult,
 };
 use ego_core::store::evidence::{EvidenceRef, EvidenceStore as _};
 use ego_core::turn::CancelToken;
 use ego_core::turn::Tools as TurnTools;
-use ego_tools::exec::{
-    ExecLimits, ExecRunConfig, GuardedExec, ProcessError, SessionEvidenceStore,
-};
+use ego_tools::exec::{ExecLimits, ExecRunConfig, GuardedExec, ProcessError, SessionEvidenceStore};
 use ego_tools::fs::OsFs;
 use ego_tools::tools::builtins;
 
@@ -97,12 +94,8 @@ fn open_run(
     preview: usize,
 ) -> Result<Run, ProcessError> {
     let evidence_root = tempfile::tempdir().expect("evidence root");
-    let evidence = SessionEvidenceStore::open(
-        evidence_root.path(),
-        SessionId::new(),
-        hard_cap,
-    )
-    .map_err(ProcessError::Evidence)?;
+    let evidence = SessionEvidenceStore::open(evidence_root.path(), SessionId::new(), hard_cap)
+        .map_err(ProcessError::Evidence)?;
     let cancel = CancelToken::new();
     let limits = ExecLimits::new(preview, Duration::from_millis(250))?;
     let policy = run_confinement(level, offline, workspace);
@@ -172,10 +165,7 @@ fn assert_two_process_streams_with_full_output(result: &ToolResult) {
     );
 }
 
-fn read_evidence_pages(
-    evidence: &SessionEvidenceStore,
-    reference: &EvidenceRef,
-) -> Vec<u8> {
+fn read_evidence_pages(evidence: &SessionEvidenceStore, reference: &EvidenceRef) -> Vec<u8> {
     let mut offset = 0_u64;
     let mut bytes = Vec::new();
     loop {
@@ -274,8 +264,12 @@ fn exec_contract_fixture_emits_both_streams() {
 #[test]
 #[ignore]
 fn exec_contract_fixture_emits_binary_streams() {
-    std::io::stdout().write_all(&[0xff, 0xfe, 0x00, b'o', b'u', b't']).unwrap();
-    std::io::stderr().write_all(&[0x80, 0x81, 0x00, b'e', b'r', b'r']).unwrap();
+    std::io::stdout()
+        .write_all(&[0xff, 0xfe, 0x00, b'o', b'u', b't'])
+        .unwrap();
+    std::io::stderr()
+        .write_all(&[0x80, 0x81, 0x00, b'e', b'r', b'r'])
+        .unwrap();
 }
 
 #[test]
@@ -318,7 +312,9 @@ fn exec_contract_fixture_emits_both_streams_and_signals() {
     stdout.flush().unwrap();
     stderr.flush().unwrap();
     let pid = std::process::id().to_string();
-    let _ = Command::new("/bin/kill").args(["-TERM", pid.as_str()]).status();
+    let _ = Command::new("/bin/kill")
+        .args(["-TERM", pid.as_str()])
+        .status();
     unreachable!("SIGTERM terminates this fixture");
 }
 
@@ -408,7 +404,9 @@ fn exec_contract_fixture_exits_nonzero() {
 #[ignore]
 fn exec_contract_fixture_terminates_by_signal() {
     let pid = std::process::id().to_string();
-    let _ = Command::new("/bin/kill").args(["-TERM", pid.as_str()]).status();
+    let _ = Command::new("/bin/kill")
+        .args(["-TERM", pid.as_str()])
+        .status();
     unreachable!("the signal fixture must not return normally");
 }
 
@@ -483,9 +481,8 @@ fn exec_tool_preparation_policy_authorization_and_guarded_execution_preserve_ide
     let root = cwd();
     let executable = std::env::current_exe().unwrap();
     let executable_text = executable.to_str().expect("test executable is UTF-8");
-    let allow = vec![
-        ego_core::permit::rule::Rule::load(&format!("exec({executable_text} *)")).unwrap(),
-    ];
+    let allow =
+        vec![ego_core::permit::rule::Rule::load(&format!("exec({executable_text} *)")).unwrap()];
     let policy = ego_core::permit::PolicyEngine::new(
         root.clone(),
         Mode::Yolo,
@@ -524,7 +521,10 @@ fn exec_tool_preparation_policy_authorization_and_guarded_execution_preserve_ide
     });
     let (tool, call) = tools.prepare("exec", &params.to_string()).unwrap();
     let expected_call = call.clone();
-    let Op::Spawn { spec: prepared_spec } = &call.ops[0] else {
+    let Op::Spawn {
+        spec: prepared_spec,
+    } = &call.ops[0]
+    else {
         panic!("ExecTool must prepare exactly one Spawn operation");
     };
     assert_eq!(prepared_spec.argv()[0], OsString::from(executable_text));
@@ -622,7 +622,10 @@ fn environment_policy_materializes_names_without_values_in_identity() {
 
     let out = block_on(run.executor.execute(&fixture_arg_spec_with_env(
         "exec_contract_fixture_reports_environment_presence_without_values",
-        [OsString::from("PATH"), OsString::from(unique_absent.clone())],
+        [
+            OsString::from("PATH"),
+            OsString::from(unique_absent.clone()),
+        ],
         None,
         cwd(),
         allow,
@@ -708,7 +711,14 @@ fn real_process_output_keeps_stream_provenance_and_full_evidence_reference() {
 #[test]
 fn concurrent_stdout_and_stderr_draining_preserves_both_streams() {
     let workspace = cwd();
-    let run = open_run(Confinement::Off, false, workspace.clone(), 1024 * 1024, 1024).unwrap();
+    let run = open_run(
+        Confinement::Off,
+        false,
+        workspace.clone(),
+        1024 * 1024,
+        1024,
+    )
+    .unwrap();
     let out = block_on(run.executor.execute(&fixture_spec(
         "exec_contract_fixture_emits_both_streams",
         &[],
@@ -723,7 +733,14 @@ fn concurrent_stdout_and_stderr_draining_preserves_both_streams() {
 #[test]
 fn binary_process_output_uses_explicit_base64_without_replacement_characters() {
     let workspace = cwd();
-    let run = open_run(Confinement::Off, false, workspace.clone(), 1024 * 1024, 1024).unwrap();
+    let run = open_run(
+        Confinement::Off,
+        false,
+        workspace.clone(),
+        1024 * 1024,
+        1024,
+    )
+    .unwrap();
     let out = block_on(run.executor.execute(&fixture_spec(
         "exec_contract_fixture_emits_binary_streams",
         &[],
@@ -783,23 +800,39 @@ fn finite_large_output_succeeds_with_head_tail_preview_and_reference() {
         .iter()
         .filter(|block| matches!(&block.provenance, ToolOutputProvenance::Process { .. }))
         .collect::<Vec<_>>();
-    assert_eq!(bounded_streams.len(), 2, "stdout and stderr each retain evidence");
+    assert_eq!(
+        bounded_streams.len(),
+        2,
+        "stdout and stderr each retain evidence"
+    );
     for block in bounded_streams {
         assert!(block.is_truncated());
         assert!(block.preview_is_head_and_tail());
-        let reference = block.evidence_reference().expect("complete stream evidence");
+        let reference = block
+            .evidence_reference()
+            .expect("complete stream evidence");
         let stored = read_evidence_pages(&run.evidence, reference);
         assert_eq!(stored.len() as u64, reference.bytes);
-        assert!(reference.bytes > 64, "preview must not be the stored evidence");
+        assert!(
+            reference.bytes > 64,
+            "preview must not be the stored evidence"
+        );
         let ToolOutputProvenance::Process { omitted_bytes, .. } = block.provenance() else {
             panic!("stream evidence must retain process provenance");
         };
-        assert!(*omitted_bytes > 0, "large output must report omitted preview bytes");
+        assert!(
+            *omitted_bytes > 0,
+            "large output must report omitted preview bytes"
+        );
     }
 }
 
 fn assert_committed_stream_result(run: &Run, result: &ego_core::permit::ToolResult) {
-    assert_eq!(result.content.len(), 2, "stdout and stderr both drain before status");
+    assert_eq!(
+        result.content.len(),
+        2,
+        "stdout and stderr both drain before status"
+    );
     for block in &result.content {
         let reference = block
             .evidence_reference()
@@ -836,21 +869,19 @@ fn hard_evidence_cap_fails_and_cleans_up_infinite_output() {
     while descendant_is_alive(pid.trim()) && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(50));
     }
-    assert!(!descendant_is_alive(pid.trim()), "evidence cap left descendant alive");
+    assert!(
+        !descendant_is_alive(pid.trim()),
+        "evidence cap left descendant alive"
+    );
 }
 
 #[test]
 fn hard_evidence_cap_is_distinct_from_preview_truncation() {
     let workspace = cwd();
-    let run = open_run(Confinement::Off,  false, workspace, 4096, 64).unwrap();
+    let run = open_run(Confinement::Off, false, workspace, 4096, 64).unwrap();
     let err = execute(
         &run,
-        fixture_arg_spec(
-            "exec_contract_fixture_emits_until_killed",
-            [],
-            None,
-            cwd(),
-        ),
+        fixture_arg_spec("exec_contract_fixture_emits_until_killed", [], None, cwd()),
     )
     .unwrap_err();
 
@@ -865,7 +896,11 @@ fn nonzero_exit_is_a_typed_process_failure() {
         fixture_arg_spec("exec_contract_fixture_exits_nonzero", [], None, cwd()),
     )
     .unwrap_err();
-    let ProcessError::Exit { code: Some(17), result } = err else {
+    let ProcessError::Exit {
+        code: Some(17),
+        result,
+    } = err
+    else {
         panic!("non-zero process must carry typed completed evidence");
     };
     assert_committed_stream_result(&run, &result);
@@ -881,7 +916,11 @@ fn nonzero_exit_drains_both_streams_before_carrying_failed_result() {
         cwd(),
     )))
     .unwrap_err();
-    let ProcessError::Exit { code: Some(17), result } = err else {
+    let ProcessError::Exit {
+        code: Some(17),
+        result,
+    } = err
+    else {
         panic!("non-zero process must carry both drained streams");
     };
     assert_committed_stream_result(&run, &result);
@@ -893,7 +932,12 @@ fn signal_termination_is_a_typed_process_failure() {
     let run = open_run(Confinement::Off, false, cwd(), 1024 * 1024, 1024).unwrap();
     let err = execute(
         &run,
-        fixture_arg_spec("exec_contract_fixture_terminates_by_signal", [], None, cwd()),
+        fixture_arg_spec(
+            "exec_contract_fixture_terminates_by_signal",
+            [],
+            None,
+            cwd(),
+        ),
     )
     .unwrap_err();
     let ProcessError::Signal {
@@ -952,7 +996,13 @@ fn missing_executable_is_a_launch_failure_not_a_capability_refusal() {
 #[test]
 fn linux_target_argv_must_name_an_exact_executable_file() {
     let root = cwd();
-    let run = match open_run(Confinement::Workspace, false, root.clone(), 1024 * 1024, 1024) {
+    let run = match open_run(
+        Confinement::Workspace,
+        false,
+        root.clone(),
+        1024 * 1024,
+        1024,
+    ) {
         Ok(run) => run,
         Err(ProcessError::MissingCapabilities(missing)) => {
             // The helper/backend prerequisite is itself fail-closed when
@@ -993,13 +1043,25 @@ fn filesystem_confinement_matrix_is_enforced_by_real_processes() {
     let inside = workspace_dir.path().join("inside");
     let outside_target = outside.path().join("outside");
 
-    let run = open_run(Confinement::Workspace, false, root.clone(), 1024 * 1024, 1024);
+    let run = open_run(
+        Confinement::Workspace,
+        false,
+        root.clone(),
+        1024 * 1024,
+        1024,
+    );
     match run {
         Ok(run) => {
             execute(&run, mutation_spec("create", &[&inside], root.clone()))
                 .expect("workspace allows inside write");
             assert!(inside.exists());
-            assert!(execute(&run, mutation_spec("create", &[&outside_target], root.clone())).is_err());
+            assert!(
+                execute(
+                    &run,
+                    mutation_spec("create", &[&outside_target], root.clone())
+                )
+                .is_err()
+            );
             assert!(!outside_target.exists());
         }
         Err(ProcessError::MissingCapabilities(missing)) => assert_eq!(
@@ -1027,8 +1089,11 @@ fn filesystem_confinement_matrix_is_enforced_by_real_processes() {
     }
 
     let run = open_run(Confinement::Off, false, root.clone(), 1024 * 1024, 1024).unwrap();
-    execute(&run, mutation_spec("create", &[&outside_target], root.clone()))
-        .expect("off allows outside write");
+    execute(
+        &run,
+        mutation_spec("create", &[&outside_target], root.clone()),
+    )
+    .expect("off allows outside write");
     assert!(outside_target.exists());
 }
 
@@ -1057,7 +1122,13 @@ fn filesystem_read_matrix_covers_inside_and_outside_for_each_level() {
         execute(run, spec)
     };
 
-    match open_run(Confinement::Workspace, false, root.clone(), 1024 * 1024, 1024) {
+    match open_run(
+        Confinement::Workspace,
+        false,
+        root.clone(),
+        1024 * 1024,
+        1024,
+    ) {
         Ok(run) => {
             read(&run, &inside).expect("workspace allows an inside read");
             assert!(read(&run, &outside_target).is_err());
@@ -1091,7 +1162,13 @@ fn workspace_confinement_covers_required_mutations_inside_and_outside() {
     let workspace = tempfile::tempdir().expect("workspace fixture directory");
     let outside = tempfile::tempdir().expect("outside fixture directory");
     let root = CanonPath::new(std::fs::canonicalize(workspace.path()).unwrap());
-    let run = match open_run(Confinement::Workspace, false, root.clone(), 1024 * 1024, 1024) {
+    let run = match open_run(
+        Confinement::Workspace,
+        false,
+        root.clone(),
+        1024 * 1024,
+        1024,
+    ) {
         Ok(run) => run,
         Err(ProcessError::MissingCapabilities(missing)) => {
             assert_eq!(
@@ -1104,8 +1181,11 @@ fn workspace_confinement_covers_required_mutations_inside_and_outside() {
     };
 
     let inside_create = workspace.path().join("create");
-    execute(&run, mutation_spec("create", &[&inside_create], root.clone()))
-        .expect("create inside workspace");
+    execute(
+        &run,
+        mutation_spec("create", &[&inside_create], root.clone()),
+    )
+    .expect("create inside workspace");
 
     let inside_overwrite = workspace.path().join("overwrite");
     std::fs::write(&inside_overwrite, "before").unwrap();
@@ -1127,8 +1207,11 @@ fn workspace_confinement_covers_required_mutations_inside_and_outside() {
 
     let inside_remove = workspace.path().join("remove");
     std::fs::write(&inside_remove, "remove").unwrap();
-    execute(&run, mutation_spec("remove", &[&inside_remove], root.clone()))
-        .expect("remove inside workspace");
+    execute(
+        &run,
+        mutation_spec("remove", &[&inside_remove], root.clone()),
+    )
+    .expect("remove inside workspace");
     assert!(!inside_remove.exists());
 
     let inside_rename_source = workspace.path().join("rename-source");
@@ -1172,9 +1255,21 @@ fn workspace_confinement_covers_required_mutations_inside_and_outside() {
     std::fs::write(&outside_rename_source, "rename").unwrap();
     std::fs::write(&outside_link_source, "link").unwrap();
     let denied = |spawn: SpawnSpec| execute(&run, spawn).is_err();
-    assert!(denied(mutation_spec("create", &[&outside_create], root.clone())));
-    assert!(denied(mutation_spec("truncate", &[&outside_truncate], root.clone())));
-    assert!(denied(mutation_spec("remove", &[&outside_remove], root.clone())));
+    assert!(denied(mutation_spec(
+        "create",
+        &[&outside_create],
+        root.clone()
+    )));
+    assert!(denied(mutation_spec(
+        "truncate",
+        &[&outside_truncate],
+        root.clone()
+    )));
+    assert!(denied(mutation_spec(
+        "remove",
+        &[&outside_remove],
+        root.clone()
+    )));
     assert!(denied(mutation_spec(
         "rename",
         &[&outside_rename_source, &outside_rename_destination],
@@ -1186,7 +1281,10 @@ fn workspace_confinement_covers_required_mutations_inside_and_outside() {
         root.clone(),
     )));
     assert!(!outside_create.exists());
-    assert_eq!(std::fs::read_to_string(&outside_truncate).unwrap(), "truncate");
+    assert_eq!(
+        std::fs::read_to_string(&outside_truncate).unwrap(),
+        "truncate"
+    );
     assert!(outside_remove.exists());
     assert!(outside_rename_source.exists());
     assert!(!outside_rename_destination.exists());
@@ -1210,9 +1308,11 @@ fn read_only_confinement_denies_every_required_mutation_inside_the_root() {
     let run = match open_run(Confinement::Ro, false, root.clone(), 1024 * 1024, 1024) {
         Ok(run) => run,
         Err(ProcessError::MissingCapabilities(missing)) => {
-            assert!(missing
-                .missing()
-                .contains(ExecCaps::READ_SCOPED.union(ExecCaps::WRITE_DENIED)));
+            assert!(
+                missing
+                    .missing()
+                    .contains(ExecCaps::READ_SCOPED.union(ExecCaps::WRITE_DENIED))
+            );
             return;
         }
         Err(err) => panic!("ro failed without a precise capability refusal: {err:?}"),
@@ -1224,7 +1324,13 @@ fn read_only_confinement_denies_every_required_mutation_inside_the_root() {
 
     let overwrite = workspace.path().join("ro-overwrite");
     std::fs::write(&overwrite, "before").unwrap();
-    assert!(execute(&run, mutation_spec("overwrite", &[&overwrite], root.clone())).is_err());
+    assert!(
+        execute(
+            &run,
+            mutation_spec("overwrite", &[&overwrite], root.clone())
+        )
+        .is_err()
+    );
     assert_eq!(std::fs::read_to_string(&overwrite).unwrap(), "before");
 
     let truncate = workspace.path().join("ro-truncate");
@@ -1240,22 +1346,30 @@ fn read_only_confinement_denies_every_required_mutation_inside_the_root() {
     let rename_source = workspace.path().join("ro-rename-source");
     let rename_destination = workspace.path().join("ro-rename-destination");
     std::fs::write(&rename_source, "rename").unwrap();
-    assert!(execute(
-        &run,
-        mutation_spec("rename", &[&rename_source, &rename_destination], root.clone()),
-    )
-    .is_err());
+    assert!(
+        execute(
+            &run,
+            mutation_spec(
+                "rename",
+                &[&rename_source, &rename_destination],
+                root.clone()
+            ),
+        )
+        .is_err()
+    );
     assert!(rename_source.exists());
     assert!(!rename_destination.exists());
 
     let link_source = workspace.path().join("ro-link-source");
     let link_destination = workspace.path().join("ro-link-destination");
     std::fs::write(&link_source, "link").unwrap();
-    assert!(execute(
-        &run,
-        mutation_spec("link", &[&link_source, &link_destination], root),
-    )
-    .is_err());
+    assert!(
+        execute(
+            &run,
+            mutation_spec("link", &[&link_source, &link_destination], root),
+        )
+        .is_err()
+    );
     assert!(!link_destination.exists());
 }
 
@@ -1281,7 +1395,13 @@ fn macos_seatbelt_profile_path_fixture_is_data_not_profile_injection() {
     let hostile = parent.path().join(r#"quote");(deny file-read*)"#);
     std::fs::create_dir(&hostile).expect("hostile path fixture");
     let root = CanonPath::new(std::fs::canonicalize(&hostile).unwrap());
-    let run = match open_run(Confinement::Workspace, false, root.clone(), 1024 * 1024, 1024) {
+    let run = match open_run(
+        Confinement::Workspace,
+        false,
+        root.clone(),
+        1024 * 1024,
+        1024,
+    ) {
         Ok(run) => run,
         Err(ProcessError::MissingCapabilities(missing)) => {
             assert_eq!(
@@ -1344,16 +1464,30 @@ fn linux_landlock_abi_status_and_workspace_rights_are_fail_closed() {
     let run = match open_run(Confinement::Workspace, false, root, 1024 * 1024, 1024) {
         Ok(run) => run,
         Err(ProcessError::MissingCapabilities(missing)) => {
-            assert!(missing
-                .missing()
-                .contains(ExecCaps::READ_SCOPED.union(ExecCaps::WRITE_SCOPED)));
+            assert!(
+                missing
+                    .missing()
+                    .contains(ExecCaps::READ_SCOPED.union(ExecCaps::WRITE_SCOPED))
+            );
             return;
         }
         Err(err) => panic!("workspace failed without a precise capability refusal: {err:?}"),
     };
-    assert!(run.observation.capabilities().contains(ExecCaps::READ_SCOPED));
-    assert!(run.observation.capabilities().contains(ExecCaps::WRITE_SCOPED));
-    assert!(!run.observation.capabilities().contains(ExecCaps::NO_IP_NETWORK));
+    assert!(
+        run.observation
+            .capabilities()
+            .contains(ExecCaps::READ_SCOPED)
+    );
+    assert!(
+        run.observation
+            .capabilities()
+            .contains(ExecCaps::WRITE_SCOPED)
+    );
+    assert!(
+        !run.observation
+            .capabilities()
+            .contains(ExecCaps::NO_IP_NETWORK)
+    );
 
     // The helper path is an implementation detail, but the target remains a
     // public exact-argv contract: a confined launch must execute the same
@@ -1388,15 +1522,25 @@ fn linux_landlock_workspace_requires_refer_truncate_and_known_rights() {
     let run = match open_run(Confinement::Workspace, false, root, 1024 * 1024, 1024) {
         Ok(run) => run,
         Err(ProcessError::MissingCapabilities(missing)) => {
-            assert!(missing
-                .missing()
-                .contains(ExecCaps::READ_SCOPED.union(ExecCaps::WRITE_SCOPED)));
+            assert!(
+                missing
+                    .missing()
+                    .contains(ExecCaps::READ_SCOPED.union(ExecCaps::WRITE_SCOPED))
+            );
             return;
         }
         Err(error) => panic!("workspace rights refused without capability evidence: {error:?}"),
     };
-    assert!(run.observation.capabilities().contains(ExecCaps::WRITE_SCOPED));
-    assert!(run.observation.capabilities().contains(ExecCaps::READ_SCOPED));
+    assert!(
+        run.observation
+            .capabilities()
+            .contains(ExecCaps::WRITE_SCOPED)
+    );
+    assert!(
+        run.observation
+            .capabilities()
+            .contains(ExecCaps::READ_SCOPED)
+    );
 }
 
 #[cfg(target_os = "linux")]
@@ -1416,14 +1560,22 @@ fn linux_offline_for_run_refuses_unconditionally_without_no_ip_network_proof() {
 #[test]
 fn null_backend_refuses_confinement_but_off_online_executes() {
     let root = cwd();
-    let missing = match open_run(Confinement::Workspace, false, root.clone(), 1024 * 1024, 1024) {
+    let missing = match open_run(
+        Confinement::Workspace,
+        false,
+        root.clone(),
+        1024 * 1024,
+        1024,
+    ) {
         Err(ProcessError::MissingCapabilities(missing)) => missing,
         Err(err) => panic!("workspace failed without a precise capability refusal: {err:?}"),
         Ok(_) => panic!("null backend claimed workspace confinement"),
     };
-    assert!(missing
-        .missing()
-        .contains(ExecCaps::READ_SCOPED.union(ExecCaps::WRITE_SCOPED)));
+    assert!(
+        missing
+            .missing()
+            .contains(ExecCaps::READ_SCOPED.union(ExecCaps::WRITE_SCOPED))
+    );
     let missing = match open_run(Confinement::Off, true, root.clone(), 1024 * 1024, 1024) {
         Err(ProcessError::MissingCapabilities(missing)) => missing,
         Err(err) => panic!("offline failed without a precise capability refusal: {err:?}"),
@@ -1446,17 +1598,19 @@ fn null_backend_refuses_confinement_but_off_online_executes() {
 #[test]
 fn cancellation_uses_the_caller_token_and_returns_cancelled() {
     let root = cwd();
-    let run = open_run(Confinement::Off, false, root.clone(), 64 * 1024 * 1024, 1024).unwrap();
+    let run = open_run(
+        Confinement::Off,
+        false,
+        root.clone(),
+        64 * 1024 * 1024,
+        1024,
+    )
+    .unwrap();
     let cancel = run.cancel.clone();
     let handle = std::thread::spawn(move || {
         execute(
             &run,
-            fixture_arg_spec(
-                "exec_contract_fixture_emits_until_killed",
-                [],
-                None,
-                cwd(),
-            ),
+            fixture_arg_spec("exec_contract_fixture_emits_until_killed", [], None, cwd()),
         )
     });
     std::thread::sleep(Duration::from_millis(100));
@@ -1470,7 +1624,14 @@ fn cancellation_kills_a_descendant_process_group_not_only_the_direct_child() {
     let dir = tempfile::tempdir().expect("process fixture directory");
     let pid_path = dir.path().join("cancel-descendant.pid");
     let root = cwd();
-    let run = open_run(Confinement::Off, false, root.clone(), 64 * 1024 * 1024, 1024).unwrap();
+    let run = open_run(
+        Confinement::Off,
+        false,
+        root.clone(),
+        64 * 1024 * 1024,
+        1024,
+    )
+    .unwrap();
     let cancel = run.cancel.clone();
     let child_pid_path = pid_path.clone();
     let handle = std::thread::spawn(move || {
@@ -1489,7 +1650,10 @@ fn cancellation_kills_a_descendant_process_group_not_only_the_direct_child() {
     while !pid_path.exists() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(10));
     }
-    assert!(pid_path.exists(), "descendant fixture never reached its pid handoff");
+    assert!(
+        pid_path.exists(),
+        "descendant fixture never reached its pid handoff"
+    );
     cancel.cancel(CancelCause::User);
     let result = handle.join().expect("executor thread");
     assert!(matches!(result, Err(ProcessError::Cancelled)));
@@ -1499,7 +1663,10 @@ fn cancellation_kills_a_descendant_process_group_not_only_the_direct_child() {
     while descendant_is_alive(pid.trim()) && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(50));
     }
-    assert!(!descendant_is_alive(pid.trim()), "descendant process survived cancellation cleanup");
+    assert!(
+        !descendant_is_alive(pid.trim()),
+        "descendant process survived cancellation cleanup"
+    );
 }
 
 #[test]
@@ -1507,7 +1674,14 @@ fn timeout_kills_a_descendant_process_group_not_only_the_direct_child() {
     let dir = tempfile::tempdir().expect("process fixture directory");
     let pid_path = dir.path().join("descendant.pid");
     let root = cwd();
-    let run = open_run(Confinement::Off, false, root.clone(), 64 * 1024 * 1024, 1024).unwrap();
+    let run = open_run(
+        Confinement::Off,
+        false,
+        root.clone(),
+        64 * 1024 * 1024,
+        1024,
+    )
+    .unwrap();
     let process = fixture_spec(
         "exec_contract_fixture_holds_a_descendant",
         &[pid_path.as_path()],
@@ -1522,7 +1696,10 @@ fn timeout_kills_a_descendant_process_group_not_only_the_direct_child() {
     while descendant_is_alive(pid.trim()) && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(50));
     }
-    assert!(!descendant_is_alive(pid.trim()), "descendant process survived timeout cleanup");
+    assert!(
+        !descendant_is_alive(pid.trim()),
+        "descendant process survived timeout cleanup"
+    );
 }
 
 #[cfg(unix)]
@@ -1601,8 +1778,14 @@ fn assert_offline_requires_tcp_and_udp_loopback_and_nonloopback_controls() {
 
     for (protocol, (endpoint, control)) in endpoints {
         let workspace = root.clone();
-        let baseline = open_run(Confinement::Off, false, workspace.clone(), 1024 * 1024, 1024)
-            .unwrap();
+        let baseline = open_run(
+            Confinement::Off,
+            false,
+            workspace.clone(),
+            1024 * 1024,
+            1024,
+        )
+        .unwrap();
         let network_spec = fixture_arg_spec(
             "exec_contract_fixture_connects",
             [OsString::from(protocol), OsString::from(endpoint)],

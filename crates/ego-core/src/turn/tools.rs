@@ -11,8 +11,8 @@ use std::sync::Arc;
 
 use crate::generator::types::ToolDescriptor as GenToolDescriptor;
 use crate::permit::{
-    Authorized, CanonPath, Classification, Fs, GuardedEffects, Pending, PolicyEngine,
-    PrepareCtx, PreparedCall, ProcessExecutor, Resolution, Tool, ToolError,
+    Authorized, CanonPath, Classification, Fs, GuardedEffects, Pending, PolicyEngine, PrepareCtx,
+    PreparedCall, ProcessExecutor, Resolution, Tool, ToolError,
 };
 use crate::store::evidence::EvidenceStore;
 

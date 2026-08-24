@@ -307,10 +307,7 @@ async fn ensure_expressible_and_generate_share_headers_base_and_wire_body() {
         headers.retain(|(existing, _)| !existing.eq_ignore_ascii_case(name));
         headers.push((name.clone(), value.clone()));
     }
-    let target = RequestTarget::new(
-        resolved.base_override().unwrap_or(&profile.base),
-        &headers,
-    );
+    let target = RequestTarget::new(resolved.base_override().unwrap_or(&profile.base), &headers);
     let expected = profile
         .wire
         .build_request(&target, &req)
@@ -329,7 +326,10 @@ async fn ensure_expressible_and_generate_share_headers_base_and_wire_body() {
 
     let seen = http.seen.lock().expect("not poisoned");
     let sent = seen.first().expect("generation sent one request");
-    assert_eq!(sent.url, expected.url, "credential base override was preserved");
+    assert_eq!(
+        sent.url, expected.url,
+        "credential base override was preserved"
+    );
     assert_eq!(sent.method, expected.method);
     assert_eq!(sent.headers, expected.headers);
     assert_eq!(sent.body, expected.body, "the wire body was preserved");

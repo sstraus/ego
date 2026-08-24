@@ -151,10 +151,9 @@ impl Op {
     /// write mutates in every build there will ever be.
     pub fn mutates(&self) -> bool {
         match self {
-            Op::Read { .. }
-            | Op::List { .. }
-            | Op::Search { .. }
-            | Op::ReadEvidence { .. } => false,
+            Op::Read { .. } | Op::List { .. } | Op::Search { .. } | Op::ReadEvidence { .. } => {
+                false
+            }
             Op::Write { .. } | Op::Spawn { .. } => true,
         }
     }
@@ -175,10 +174,7 @@ impl Op {
     /// A spawn with no explicit cwd runs at the run workspace, so that is its
     /// diagnostic subject. This does not turn the cwd into a filesystem grant:
     /// process reach is enforced independently by `RunConfinement`.
-    pub(crate) fn subject_path<'a>(
-        &'a self,
-        workspace: &'a CanonPath,
-    ) -> Option<&'a CanonPath> {
+    pub(crate) fn subject_path<'a>(&'a self, workspace: &'a CanonPath) -> Option<&'a CanonPath> {
         match self {
             Op::Spawn { spec } => Some(spec.cwd().unwrap_or(workspace)),
             Op::ReadEvidence { .. } => None,

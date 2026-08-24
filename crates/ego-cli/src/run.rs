@@ -18,11 +18,11 @@ use ego_core::cost::CurrencyCode;
 use ego_core::event::domain::CancelCause;
 use ego_core::event::id::SessionId;
 use ego_core::generator::capabilities::ModelCapabilities;
+use ego_core::permit::judge::{JudgeConfig, JudgeInput};
 use ego_core::permit::{
     CanonPath, Change, Escalation, ExecCaps, ExecObservation, HumanApprover, Op, OpName,
     PermissionDecision, PermissionRequest, PolicyEngine, PreparedCall, RunConfinement, Tool,
 };
-use ego_core::permit::judge::{JudgeConfig, JudgeInput};
 use ego_core::public::{PUBLIC_EVENT_VERSION, PublicEvent};
 use ego_core::run::{DeniedBy, RunTermination, Signal};
 use ego_core::sink::EventSink;
@@ -786,8 +786,8 @@ fn preflight_judge(
         op: OpName::Write,
         path,
     };
-    let request = JudgeInput::new(&call, confinement, exec_caps, &escalation)
-        .request(&judge.config);
+    let request =
+        JudgeInput::new(&call, confinement, exec_caps, &escalation).request(&judge.config);
     let gaps = judge.resolved.capabilities.request_gaps(&request);
     if !gaps.is_empty() {
         return Err(RunTermination::UsageError {
@@ -963,20 +963,13 @@ async fn execute<S: EventSink>(
     let proof_directory = tempfile::tempdir().map_err(|err| RunTermination::Failed {
         message: format!("could not create the sandbox proof store: {err}"),
     })?;
-    let proof_evidence = SessionEvidenceStore::open(
-        proof_directory.path(),
-        session_id,
-        EVIDENCE_CAP,
-    )
-    .map_err(|err| RunTermination::Failed {
-        message: format!("could not open the sandbox proof store: {err}"),
-    })?;
-    let (proof, proof_observation) = guarded_exec(
-        &confinement,
-        &proof_evidence,
-        &cancel,
-    )
-    .await?;
+    let proof_evidence =
+        SessionEvidenceStore::open(proof_directory.path(), session_id, EVIDENCE_CAP).map_err(
+            |err| RunTermination::Failed {
+                message: format!("could not open the sandbox proof store: {err}"),
+            },
+        )?;
+    let (proof, proof_observation) = guarded_exec(&confinement, &proof_evidence, &cancel).await?;
     drop(proof);
 
     let Provider {
@@ -987,10 +980,13 @@ async fn execute<S: EventSink>(
 
     let mode = effective.mode.unwrap_or(Mode::Default);
     let judge = if mode == Mode::Auto {
-        let identity = effective.judge.clone().ok_or_else(|| RunTermination::UsageError {
-            message: "`auto` mode requires `[permissions] judge = \"provider/model\"`"
-                .to_string(),
-        })?;
+        let identity = effective
+            .judge
+            .clone()
+            .ok_or_else(|| RunTermination::UsageError {
+                message: "`auto` mode requires `[permissions] judge = \"provider/model\"`"
+                    .to_string(),
+            })?;
         let Provider {
             http,
             resolved,
@@ -1128,30 +1124,30 @@ async fn execute<S: EventSink>(
     macro_rules! build {
         ($state:expr, $cancel:expr, $process:expr, $observation:expr) => {{
             let session = Session {
-                    id: session_id,
-                    state: $state,
-                    store: opened.store(),
-                    clock: &clock,
-                    sink,
-                    cancel: $cancel.clone(),
-                };
+                id: session_id,
+                state: $state,
+                store: opened.store(),
+                clock: &clock,
+                sink,
+                cancel: $cancel.clone(),
+            };
             let model = Model {
-                    generator: &generator,
-                    gate: &mut gate,
-                    metering: resolved.metering.clone(),
-                    rates: resolved.rates.clone(),
-                    token_ceiling: effective.ceilings.tokens,
-                    caps: resolved.capabilities.clone(),
-                    config: config.clone(),
-                };
+                generator: &generator,
+                gate: &mut gate,
+                metering: resolved.metering.clone(),
+                rates: resolved.rates.clone(),
+                token_ceiling: effective.ceilings.tokens,
+                caps: resolved.capabilities.clone(),
+                config: config.clone(),
+            };
             let tools = Tools::new(
-                    &registry,
-                    &policy,
-                    &fs,
-                    $process.as_ref(),
-                    &evidence,
-                    CanonPath::new(&cwd),
-                );
+                &registry,
+                &policy,
+                &fs,
+                $process.as_ref(),
+                &evidence,
+                CanonPath::new(&cwd),
+            );
             let loop_ = if let Some(judge) = judge.as_ref() {
                 TurnLoop::with_judge(
                     session,

@@ -11,8 +11,8 @@ use ego_core::config::{Mode, ModelRef};
 use ego_core::generator::port::AiEvent;
 use ego_core::generator::types::{ContentBlock, ErrorKind, GenRequest, StopReason, ThinkingLevel};
 use ego_core::permit::judge::{
-    JudgeConfig, JudgeDecoder, JudgeInput, JudgeOutcome, JUDGE_REASON_MAX_BYTES,
-    JUDGE_RESPONSE_MAX_BYTES,
+    JUDGE_REASON_MAX_BYTES, JUDGE_RESPONSE_MAX_BYTES, JudgeConfig, JudgeDecoder, JudgeInput,
+    JudgeOutcome,
 };
 use ego_core::permit::{
     CanonPath, Confinement, EnvPolicy, Escalation, ExecCaps, Op, OpName, PreparedCall,
@@ -128,7 +128,10 @@ fn judge_request_is_toolless_and_contains_only_canonical_authority_facts() {
     let encoded = serde_json::to_string(&request).expect("judge request serializes");
 
     assert_eq!(request.model, "ollama/qwen3");
-    assert!(request.tools.is_empty(), "judge inherited model tools: {encoded}");
+    assert!(
+        request.tools.is_empty(),
+        "judge inherited model tools: {encoded}"
+    );
     assert!(!request.parallel_tool_calls);
     assert_eq!(request.thinking, ThinkingLevel::Off);
     assert_eq!(request.max_output_tokens, Some(512));
@@ -144,10 +147,19 @@ fn judge_request_is_toolless_and_contains_only_canonical_authority_facts() {
     assert!(!encoded.contains("Ask"));
 
     let canonical = canonical_json(&request);
-    let object = canonical.as_object().expect("canonical facts are an object");
-    assert_eq!(object.len(), 4, "judge received a non-canonical fact: {canonical}");
+    let object = canonical
+        .as_object()
+        .expect("canonical facts are an object");
+    assert_eq!(
+        object.len(),
+        4,
+        "judge received a non-canonical fact: {canonical}"
+    );
     for key in ["call", "confinement", "exec_caps", "escalation"] {
-        assert!(object.contains_key(key), "canonical facts omitted {key}: {canonical}");
+        assert!(
+            object.contains_key(key),
+            "canonical facts omitted {key}: {canonical}"
+        );
     }
 
     let confinement = object

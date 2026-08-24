@@ -4,9 +4,7 @@ use std::process::{ExitStatus, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use ego_core::permit::{
-    ProcessError, SpawnSpec, StreamProvenance, ToolContentBlock, ToolResult,
-};
+use ego_core::permit::{ProcessError, SpawnSpec, StreamProvenance, ToolContentBlock, ToolResult};
 use ego_core::store::evidence::{EvidenceError, EvidenceStore as _, EvidenceWriter};
 use ego_core::turn::CancelToken;
 use tokio::io::{AsyncRead, AsyncReadExt as _};
@@ -16,8 +14,8 @@ use tokio::task::JoinHandle;
 
 use crate::store::SessionEvidenceStore;
 
-use super::backend::{Backend, executable, prefixed_command};
 use super::ExecLimits;
+use super::backend::{Backend, executable, prefixed_command};
 
 const PIPE_CHUNK_BYTES: usize = 16 * 1024;
 const PIPE_CHANNEL_CHUNKS: usize = 4;
@@ -148,10 +146,7 @@ pub(crate) async fn execute(
             cleanup_descendants(tree_id, limits.termination_grace()).await;
             descendants_cleaned = true;
         }
-        if stdout_task
-            .as_ref()
-            .is_some_and(DrainHandle::is_finished)
-        {
+        if stdout_task.as_ref().is_some_and(DrainHandle::is_finished) {
             match join_drain(stdout_task.take().expect("present")).await {
                 Ok(pending) => stdout_pending = Some(pending),
                 Err(error) => {
@@ -168,10 +163,7 @@ pub(crate) async fn execute(
                 }
             }
         }
-        if stderr_task
-            .as_ref()
-            .is_some_and(DrainHandle::is_finished)
-        {
+        if stderr_task.as_ref().is_some_and(DrainHandle::is_finished) {
             match join_drain(stderr_task.take().expect("present")).await {
                 Ok(pending) => stderr_pending = Some(pending),
                 Err(error) => {
@@ -265,9 +257,8 @@ async fn drain(
     mut cancelled: oneshot::Receiver<()>,
 ) -> Result<PendingStream, DrainFailure> {
     let (sender, receiver) = mpsc::channel(PIPE_CHANNEL_CHUNKS);
-    let mut worker = tokio::task::spawn_blocking(move || {
-        write_stream(receiver, stream, writer, preview_bytes)
-    });
+    let mut worker =
+        tokio::task::spawn_blocking(move || write_stream(receiver, stream, writer, preview_bytes));
     let mut chunk = [0_u8; PIPE_CHUNK_BYTES];
     loop {
         let read = tokio::select! {
@@ -320,9 +311,7 @@ async fn drain(
     }
 }
 
-async fn join_drain(
-    handle: DrainHandle,
-) -> Result<PendingStream, ProcessError> {
+async fn join_drain(handle: DrainHandle) -> Result<PendingStream, ProcessError> {
     match handle.task.await {
         Ok(Ok(pending)) => Ok(pending),
         Ok(Err(DrainFailure::Process(error))) => Err(error),
@@ -424,14 +413,14 @@ async fn abort_outputs(
 }
 
 fn record_error(slot: &mut Option<ProcessError>, result: Result<(), ProcessError>) {
-    if slot.is_none() && let Err(error) = result {
+    if slot.is_none()
+        && let Err(error) = result
+    {
         *slot = Some(error);
     }
 }
 
-async fn abort_writers(
-    writers: [Box<dyn EvidenceWriter>; 2],
-) -> Result<(), ProcessError> {
+async fn abort_writers(writers: [Box<dyn EvidenceWriter>; 2]) -> Result<(), ProcessError> {
     let mut first_error = None;
     for writer in writers {
         record_error(&mut first_error, abort_writer(writer).await);
@@ -514,9 +503,7 @@ impl BoundedPreview {
 
     fn append_large(&mut self, bytes: &[u8]) {
         let head_budget = self.budget / 2;
-        let head_bytes = head_budget
-            .saturating_sub(self.head.len())
-            .min(bytes.len());
+        let head_bytes = head_budget.saturating_sub(self.head.len()).min(bytes.len());
         self.head.extend_from_slice(&bytes[..head_bytes]);
         self.append_tail(&bytes[head_bytes..]);
     }

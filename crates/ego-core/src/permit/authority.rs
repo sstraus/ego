@@ -8,8 +8,8 @@
 use serde::{Deserialize, Serialize};
 
 use super::rule::RuleId;
-use crate::config::{Mode, OriginSet, Source, SourcedRule};
 use crate::config::ModelRef;
+use crate::config::{Mode, OriginSet, Source, SourcedRule};
 use crate::generator::attempt::AttemptRef;
 
 /// One rule that contributed to a decision, and where it came from.

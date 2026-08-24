@@ -12,9 +12,7 @@ use std::io::Write as _;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 
-use ego_core::permit::{
-    BackendIdentity, CanonPath, ExecCaps, ProcessError, RunConfinement,
-};
+use ego_core::permit::{BackendIdentity, CanonPath, ExecCaps, ProcessError, RunConfinement};
 use tempfile::{Builder, NamedTempFile};
 
 use super::backend::LaunchPrefix;
@@ -88,10 +86,7 @@ impl SeatbeltBackend {
         BackendIdentity::new(self.name(), self.revision())
     }
 
-    pub(crate) fn prerequisite(
-        &self,
-        _policy: &RunConfinement,
-    ) -> Result<(), ProcessError> {
+    pub(crate) fn prerequisite(&self, _policy: &RunConfinement) -> Result<(), ProcessError> {
         prerequisite()
     }
 
@@ -113,12 +108,13 @@ impl SeatbeltBackend {
             ],
         }
     }
-
 }
 
 fn prerequisite() -> Result<(), ProcessError> {
     let metadata = fs::metadata(SANDBOX_EXEC).map_err(|error| {
-        ProcessError::Backend(format!("Seatbelt launcher {SANDBOX_EXEC} is unavailable: {error}"))
+        ProcessError::Backend(format!(
+            "Seatbelt launcher {SANDBOX_EXEC} is unavailable: {error}"
+        ))
     })?;
     if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
         return Err(ProcessError::Backend(format!(

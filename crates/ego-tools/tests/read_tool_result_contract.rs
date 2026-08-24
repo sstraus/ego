@@ -8,11 +8,11 @@ use std::time::Duration;
 
 use ego_core::config::{Mode, PermCfg, Ruleset, Source};
 use ego_core::permit::{
-    Authority, CanonPath, Classification, Confinement, Op, PolicyEngine, RunConfinement,
-    ToolError, ToolOutputProvenance,
+    Authority, CanonPath, Classification, Confinement, Op, PolicyEngine, RunConfinement, ToolError,
+    ToolOutputProvenance,
 };
 use ego_core::store::evidence::{
-    EvidenceError, EvidenceId, EvidenceRead, EvidenceRef, EvidenceStore as _, EVIDENCE_PAGE_BYTES,
+    EVIDENCE_PAGE_BYTES, EvidenceError, EvidenceId, EvidenceRead, EvidenceRef, EvidenceStore as _,
 };
 use ego_core::turn::{CancelToken, Tools as TurnTools};
 use ego_tools::exec::{ExecLimits, ExecRunConfig, GuardedExec, ProcessError, SessionEvidenceStore};
@@ -169,7 +169,11 @@ fn read_tool_result_prepares_exact_reference_and_session_authority() {
     );
     let result = block_on(tools.execute(tool, authorized)).expect("read evidence");
     assert_eq!(result.model_text(), "complete evidence bytes");
-    assert_eq!(result.content.len(), 1, "one request yields one bounded page");
+    assert_eq!(
+        result.content.len(),
+        1,
+        "one request yields one bounded page"
+    );
     let block = &result.content[0];
     assert!(block.is_bounded());
     assert!(block.text.len() <= EVIDENCE_PAGE_BYTES);
@@ -276,7 +280,10 @@ fn read_tool_result_rejects_forged_length_and_hash_references() {
     let error = block_on(tools.execute(tool, authorized)).unwrap_err();
     let rendered = error.to_string();
     assert!(
-        matches!(error, ToolError::Evidence(EvidenceError::WrongLength { .. })),
+        matches!(
+            error,
+            ToolError::Evidence(EvidenceError::WrongLength { .. })
+        ),
         "forged length must be rejected by the typed evidence verifier: {rendered}"
     );
 
@@ -291,9 +298,7 @@ fn read_tool_result_rejects_forged_length_and_hash_references() {
     assert!(
         matches!(
             error,
-            ToolError::Evidence(
-                EvidenceError::NotFound { .. } | EvidenceError::Corrupt { .. }
-            )
+            ToolError::Evidence(EvidenceError::NotFound { .. } | EvidenceError::Corrupt { .. })
         ),
         "forged hash must be rejected by the typed evidence verifier: {rendered}"
     );

@@ -97,8 +97,7 @@ impl JudgeDecoder {
             AiEvent::TextDelta { text } if self.uncertain.is_none() => {
                 if self.terminal.is_some() {
                     self.uncertain = Some("judge emitted content after its terminal event");
-                } else if self.response.len().saturating_add(text.len())
-                    > JUDGE_RESPONSE_MAX_BYTES
+                } else if self.response.len().saturating_add(text.len()) > JUDGE_RESPONSE_MAX_BYTES
                 {
                     self.response.clear();
                     self.uncertain = Some("judge response exceeded 16384 bytes");
@@ -212,23 +211,41 @@ impl From<&PreparedCall> for CanonicalCall {
 #[derive(Serialize)]
 #[serde(tag = "operation", rename_all = "snake_case")]
 enum CanonicalOp {
-    Read { path: String },
-    List { root: String, pattern_bytes: usize, pattern_sha256: String },
-    Search { root: String, query_bytes: usize, query_sha256: String },
-    Write { path: String, change: CanonicalChange },
+    Read {
+        path: String,
+    },
+    List {
+        root: String,
+        pattern_bytes: usize,
+        pattern_sha256: String,
+    },
+    Search {
+        root: String,
+        query_bytes: usize,
+        query_sha256: String,
+    },
+    Write {
+        path: String,
+        change: CanonicalChange,
+    },
     Spawn {
         argv: Vec<String>,
         cwd: Option<String>,
         timeout_ms: Option<u128>,
         environment: CanonicalEnvironment,
     },
-    ReadEvidence { reference: String, offset: u64 },
+    ReadEvidence {
+        reference: String,
+        offset: u64,
+    },
 }
 
 impl From<&Op> for CanonicalOp {
     fn from(op: &Op) -> Self {
         match op {
-            Op::Read { path } => Self::Read { path: path.to_string() },
+            Op::Read { path } => Self::Read {
+                path: path.to_string(),
+            },
             Op::List { root, pattern } => Self::List {
                 root: root.to_string(),
                 pattern_bytes: pattern.len(),
@@ -264,7 +281,10 @@ impl From<&Op> for CanonicalOp {
 #[derive(Serialize)]
 #[serde(tag = "shape", rename_all = "snake_case")]
 enum CanonicalChange {
-    Whole { bytes: usize, sha256: String },
+    Whole {
+        bytes: usize,
+        sha256: String,
+    },
     Replace {
         old_bytes: usize,
         old_sha256: String,
@@ -280,7 +300,10 @@ impl From<&Change> for CanonicalChange {
                 bytes: bytes.len(),
                 sha256: digest(bytes),
             },
-            Change::Replace { old_string, new_string } => Self::Replace {
+            Change::Replace {
+                old_string,
+                new_string,
+            } => Self::Replace {
                 old_bytes: old_string.len(),
                 old_sha256: digest(old_string.as_bytes()),
                 new_bytes: new_string.len(),

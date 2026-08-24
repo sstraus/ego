@@ -40,7 +40,9 @@ use ego_core::permit::{
 use ego_core::run::DeniedBy;
 use ego_core::sink::CollectingSink;
 use ego_core::state::SessionState;
-use ego_core::store::evidence::{EvidenceError, EvidencePage, EvidenceRead, EvidenceStore, EvidenceWriter};
+use ego_core::store::evidence::{
+    EvidenceError, EvidencePage, EvidenceRead, EvidenceStore, EvidenceWriter,
+};
 use ego_core::turn::{CancelToken, Model, Session, Tools, TurnConfig, TurnLoop};
 use ego_tools::clock::SystemClock;
 use ego_tools::fs::OsFs;
@@ -271,7 +273,15 @@ mod registration {
 
         assert_eq!(
             names,
-            ["edit", "exec", "glob", "grep", "read", "read_tool_result", "write"]
+            [
+                "edit",
+                "exec",
+                "glob",
+                "grep",
+                "read",
+                "read_tool_result",
+                "write"
+            ]
         );
     }
 

@@ -9,10 +9,10 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use ego_core::event::time::Timestamp;
 use ego_core::event::id::SessionId;
+use ego_core::event::time::Timestamp;
 use ego_core::store::evidence::{
-    EvidenceError, EvidenceRead, EvidenceRef, EvidenceStore, EVIDENCE_PAGE_BYTES,
+    EVIDENCE_PAGE_BYTES, EvidenceError, EvidenceRead, EvidenceRef, EvidenceStore,
 };
 use ego_tools::store::{JsonlStore, LeaseInputs, OsIo, SessionEvidenceStore, StoreIo};
 use futures::executor::block_on;
@@ -100,8 +100,8 @@ impl Fixture {
     fn new(cap: u64) -> Self {
         let root = tempdir().expect("evidence root");
         let session = SessionId::new();
-        let store = SessionEvidenceStore::open(root.path(), session, cap)
-            .expect("session evidence store");
+        let store =
+            SessionEvidenceStore::open(root.path(), session, cap).expect("session evidence store");
         Self {
             root,
             session,
@@ -115,10 +115,7 @@ impl Fixture {
         let store = Box::leak(Box::new(JsonlStore::new(
             root.path(),
             workspace,
-            Box::new(FaultIo {
-                inner: OsIo,
-                point,
-            }),
+            Box::new(FaultIo { inner: OsIo, point }),
         )));
         let id = SessionId::new();
         const ALIVE: &dyn Fn(u32) -> bool = &|_| true;
@@ -207,8 +204,12 @@ fn evidence_page_contract_covers_zero_middle_and_eof_offsets() {
     let bytes = vec![b'x'; EVIDENCE_PAGE_BYTES * 2 + 17];
     let reference = fixture.append(&[&bytes]).expect("large evidence commit");
 
-    let first = block_on(fixture.store.read_page(&EvidenceRead::new(reference.clone(), 0).unwrap()))
-        .expect("page zero");
+    let first = block_on(
+        fixture
+            .store
+            .read_page(&EvidenceRead::new(reference.clone(), 0).unwrap()),
+    )
+    .expect("page zero");
     assert_eq!(first.offset, 0);
     assert_eq!(first.bytes.len(), EVIDENCE_PAGE_BYTES);
     assert_eq!(first.next_offset, Some(EVIDENCE_PAGE_BYTES as u64));
@@ -238,13 +239,19 @@ fn evidence_page_contract_covers_zero_middle_and_eof_offsets() {
 #[test]
 fn evidence_cap_accepts_exact_limit_and_rejects_cap_plus_one_before_publish() {
     let fixture = Fixture::new(8);
-    let exact = fixture.append(&[b"1234", b"5678"]).expect("exact cap is valid");
+    let exact = fixture
+        .append(&[b"1234", b"5678"])
+        .expect("exact cap is valid");
     assert_eq!(exact.bytes, 8);
     let before = files_under(fixture.root.path());
 
     let mut writer = fixture.store.begin().expect("second writer");
-    writer.append(b"12345678").expect("writer accepts exact bytes");
-    let error = writer.append(b"!").expect_err("cap plus one is rejected live");
+    writer
+        .append(b"12345678")
+        .expect("writer accepts exact bytes");
+    let error = writer
+        .append(b"!")
+        .expect_err("cap plus one is rejected live");
     assert!(matches!(error, EvidenceError::Limit { limit: 8 }));
     let _ = writer.abort();
 
@@ -281,12 +288,8 @@ fn abort_drop_and_restart_sweep_leave_no_retrievable_partial_evidence() {
         "an incomplete writer must not publish a blob"
     );
 
-    let reopened = SessionEvidenceStore::open(
-        fixture.root.path(),
-        fixture.session,
-        1024,
-    )
-    .expect("reopen performs stale staging sweep");
+    let reopened = SessionEvidenceStore::open(fixture.root.path(), fixture.session, 1024)
+        .expect("reopen performs stale staging sweep");
     let files = files_under(fixture.root.path());
     assert!(files.iter().all(|path| {
         path.extension()
@@ -329,10 +332,8 @@ fn evidence_reference_is_session_bound_and_forged_offsets_never_cross_sessions()
         writer.append(b"private session bytes").unwrap();
         writer.commit().unwrap()
     };
-    let error = block_on(
-        target.read_page(&EvidenceRead::new(reference.clone(), 0).unwrap()),
-    )
-    .expect_err("reference from another session is not a global capability");
+    let error = block_on(target.read_page(&EvidenceRead::new(reference.clone(), 0).unwrap()))
+        .expect_err("reference from another session is not a global capability");
     assert!(matches!(error, EvidenceError::NotFound { .. }));
     assert!(EvidenceRead::new(reference, u64::MAX).is_err());
 }

@@ -35,9 +35,9 @@ use crate::generator::port::{AiEvent, Generator};
 use crate::generator::types::{
     Conversation, ErrorKind, GenRequest, Message, Role, StopReason, ThinkingLevel,
 };
-use crate::permit::{Authority, Classification, Pending, PolicyDenied, Resolution, ToolResult};
 use crate::permit::ExecObservation;
 use crate::permit::judge::{JudgeConfig, JudgeDecoder, JudgeInput, JudgeOutcome};
+use crate::permit::{Authority, Classification, Pending, PolicyDenied, Resolution, ToolResult};
 use crate::public::PublicEvent;
 use crate::run::{Denial, DeniedBy};
 use crate::sink::EventSink;
@@ -1424,7 +1424,10 @@ enum ToolOutcome {
 enum JudgeRun {
     Unavailable,
     Ended(ExitReason),
-    Decided { outcome: JudgeOutcome, by: Authority },
+    Decided {
+        outcome: JudgeOutcome,
+        by: Authority,
+    },
 }
 
 /// What one generation did.

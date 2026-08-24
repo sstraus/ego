@@ -223,19 +223,22 @@ fn create_new(path: &Path) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::OpenOptions::new().write(true).create_new(true).open(path)?;
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
     Ok(())
 }
 
 fn append_bytes(path: &Path, bytes: &[u8]) -> io::Result<()> {
     use io::Write as _;
-    fs::OpenOptions::new().append(true).open(path)?.write_all(bytes)
+    fs::OpenOptions::new()
+        .append(true)
+        .open(path)?
+        .write_all(bytes)
 }
 
-fn visit_file(
-    path: &Path,
-    visitor: &mut dyn FnMut(&[u8]) -> io::Result<()>,
-) -> io::Result<bool> {
+fn visit_file(path: &Path, visitor: &mut dyn FnMut(&[u8]) -> io::Result<()>) -> io::Result<bool> {
     use io::Read as _;
     let mut file = match fs::File::open(path) {
         Ok(file) => file,

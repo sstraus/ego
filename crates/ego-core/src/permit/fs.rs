@@ -151,10 +151,7 @@ pub trait GuardedIo: Send + Sync {
     fn search(&self, req: &ScanRequest, matcher: &dyn LineMatcher) -> Result<Found, IoDenied>;
 
     /// Execute the exact process specification admitted by this permit.
-    fn exec<'a>(
-        &'a self,
-        spec: &'a SpawnSpec,
-    ) -> BoxFuture<'a, Result<ToolResult, ProcessError>>;
+    fn exec<'a>(&'a self, spec: &'a SpawnSpec) -> BoxFuture<'a, Result<ToolResult, ProcessError>>;
 
     /// Read the exact bounded evidence request admitted inside this session.
     fn read_evidence<'a>(
@@ -392,10 +389,7 @@ impl GuardedIo for GuardedEffects<'_> {
         Ok(Found { matches, truncated })
     }
 
-    fn exec<'a>(
-        &'a self,
-        spec: &'a SpawnSpec,
-    ) -> BoxFuture<'a, Result<ToolResult, ProcessError>> {
+    fn exec<'a>(&'a self, spec: &'a SpawnSpec) -> BoxFuture<'a, Result<ToolResult, ProcessError>> {
         if let Err(denied) = self.permit.allows_spawn(spec) {
             return Box::pin(future::ready(Err(ProcessError::Invariant(
                 denied.to_string(),

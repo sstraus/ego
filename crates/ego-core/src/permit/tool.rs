@@ -214,8 +214,7 @@ impl ToolContentBlock {
         preview_bytes: usize,
         full_output: EvidenceRef,
     ) -> Self {
-        let (text, omitted_bytes, encoding) =
-            head_tail_preview(bytes, preview_bytes, &full_output);
+        let (text, omitted_bytes, encoding) = head_tail_preview(bytes, preview_bytes, &full_output);
         Self {
             text,
             provenance: ToolOutputProvenance::Process {
@@ -337,11 +336,13 @@ impl ToolResult {
     /// into that one protocol field.
     pub fn model_text(&self) -> String {
         let one_builtin = self.content.as_slice();
-        if let [ToolContentBlock {
-            text,
-            provenance: ToolOutputProvenance::Builtin,
-            ..
-        }] = one_builtin
+        if let [
+            ToolContentBlock {
+                text,
+                provenance: ToolOutputProvenance::Builtin,
+                ..
+            },
+        ] = one_builtin
         {
             return text.clone();
         }
@@ -384,10 +385,7 @@ fn head_tail_preview(
             }
             (head, tail.max(head))
         }
-        Err(_) => (
-            requested_head,
-            bytes.len().saturating_sub(requested_tail),
-        ),
+        Err(_) => (requested_head, bytes.len().saturating_sub(requested_tail)),
     };
     let omitted = tail_start.saturating_sub(head_len) as u64;
     let retained = [&bytes[..head_len], &bytes[tail_start..]].concat();
@@ -423,16 +421,15 @@ fn encoding_of(bytes: &[u8]) -> ToolOutputEncoding {
 
 fn render_bytes(bytes: &[u8], encoding: ToolOutputEncoding) -> String {
     match encoding {
-        ToolOutputEncoding::Utf8 => {
-            std::str::from_utf8(bytes).expect("encoding was checked").to_string()
-        }
+        ToolOutputEncoding::Utf8 => std::str::from_utf8(bytes)
+            .expect("encoding was checked")
+            .to_string(),
         ToolOutputEncoding::Base64 => format!("[base64]\n{}", base64(bytes)),
     }
 }
 
 fn base64(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut output = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
         let word = (u32::from(chunk[0]) << 16)

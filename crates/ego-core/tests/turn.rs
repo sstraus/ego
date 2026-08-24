@@ -41,7 +41,9 @@ use ego_core::public::PublicEvent;
 use ego_core::run::RunTermination;
 use ego_core::sink::{CollectingSink, EventSink};
 use ego_core::state::{ItemKind, SessionState, Usage};
-use ego_core::store::evidence::{EvidenceError, EvidencePage, EvidenceRead, EvidenceStore, EvidenceWriter};
+use ego_core::store::evidence::{
+    EvidenceError, EvidencePage, EvidenceRead, EvidenceStore, EvidenceWriter,
+};
 use ego_core::store::session_store::{SessionMeta, SessionStore, StoreError};
 use ego_core::turn::{CancelToken, Model, Session, Tools, TurnConfig, TurnLoop};
 use futures::StreamExt;

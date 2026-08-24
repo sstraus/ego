@@ -27,9 +27,7 @@ impl EvidenceId {
                 .bytes()
                 .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         {
-            return Err(EvidenceError::InvalidReference {
-                reference: value,
-            });
+            return Err(EvidenceError::InvalidReference { reference: value });
         }
         Ok(Self(value))
     }
@@ -121,11 +119,7 @@ pub struct EvidencePage {
 }
 
 impl EvidencePage {
-    pub fn new(
-        reference: EvidenceRef,
-        offset: u64,
-        bytes: Vec<u8>,
-    ) -> Result<Self, EvidenceError> {
+    pub fn new(reference: EvidenceRef, offset: u64, bytes: Vec<u8>) -> Result<Self, EvidenceError> {
         validate_page(&reference, offset, &bytes)?;
         let end = page_end(offset, bytes.len(), reference.bytes)?;
         let total = reference.bytes;
@@ -172,11 +166,7 @@ impl<'de> Deserialize<'de> for EvidencePage {
     }
 }
 
-fn validate_page(
-    reference: &EvidenceRef,
-    offset: u64,
-    bytes: &[u8],
-) -> Result<(), EvidenceError> {
+fn validate_page(reference: &EvidenceRef, offset: u64, bytes: &[u8]) -> Result<(), EvidenceError> {
     if offset > reference.bytes {
         return Err(EvidenceError::InvalidOffset {
             offset,
@@ -184,19 +174,21 @@ fn validate_page(
         });
     }
     if bytes.len() > EVIDENCE_PAGE_BYTES {
-        return Err(EvidenceError::PageTooLarge {
-            bytes: bytes.len(),
-        });
+        return Err(EvidenceError::PageTooLarge { bytes: bytes.len() });
     }
     page_end(offset, bytes.len(), reference.bytes)?;
     Ok(())
 }
 
 fn page_end(offset: u64, length: usize, total: u64) -> Result<u64, EvidenceError> {
-    let length = u64::try_from(length).map_err(|_| EvidenceError::PageTooLarge { bytes: length })?;
+    let length =
+        u64::try_from(length).map_err(|_| EvidenceError::PageTooLarge { bytes: length })?;
     let found = offset
         .checked_add(length)
-        .ok_or(EvidenceError::InvalidOffset { offset, bytes: total })?;
+        .ok_or(EvidenceError::InvalidOffset {
+            offset,
+            bytes: total,
+        })?;
     if found > total {
         return Err(EvidenceError::WrongLength {
             expected: total,
@@ -260,17 +252,33 @@ impl From<EvidenceRef> for String {
 /// Why complete tool evidence could not be stored or retrieved.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EvidenceError {
-    InvalidReference { reference: String },
-    NotFound { reference: EvidenceId },
+    InvalidReference {
+        reference: String,
+    },
+    NotFound {
+        reference: EvidenceId,
+    },
     Corrupt {
         expected: EvidenceId,
         found: EvidenceId,
     },
-    WrongLength { expected: u64, found: u64 },
-    InvalidOffset { offset: u64, bytes: u64 },
-    PageTooLarge { bytes: usize },
-    Limit { limit: u64 },
-    Io { message: String },
+    WrongLength {
+        expected: u64,
+        found: u64,
+    },
+    InvalidOffset {
+        offset: u64,
+        bytes: u64,
+    },
+    PageTooLarge {
+        bytes: usize,
+    },
+    Limit {
+        limit: u64,
+    },
+    Io {
+        message: String,
+    },
 }
 
 impl std::fmt::Display for EvidenceError {
@@ -280,7 +288,10 @@ impl std::fmt::Display for EvidenceError {
                 write!(f, "invalid tool evidence reference {reference:?}")
             }
             Self::NotFound { reference } => {
-                write!(f, "tool evidence {reference} is not present in this session")
+                write!(
+                    f,
+                    "tool evidence {reference} is not present in this session"
+                )
             }
             Self::Corrupt { expected, found } => write!(
                 f,

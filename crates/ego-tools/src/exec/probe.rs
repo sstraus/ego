@@ -38,14 +38,15 @@ pub(crate) async fn landlock(
             .expect_err("offline always requires no-IP-network capability");
         return Err(ProcessError::MissingCapabilities(missing));
     }
-    let scratch = tempfile::tempdir()
-        .map_err(|error| ProcessError::Backend(format!("cannot create process scratch: {error}")))?;
-    fs::set_permissions(scratch.path(), fs::Permissions::from_mode(0o700))
-        .map_err(|error| ProcessError::Backend(format!("cannot secure process scratch: {error}")))?;
-    let scratch_path = CanonPath::new(
-        fs::canonicalize(scratch.path())
-            .map_err(|error| ProcessError::Backend(format!("cannot resolve process scratch: {error}")))?,
-    );
+    let scratch = tempfile::tempdir().map_err(|error| {
+        ProcessError::Backend(format!("cannot create process scratch: {error}"))
+    })?;
+    fs::set_permissions(scratch.path(), fs::Permissions::from_mode(0o700)).map_err(|error| {
+        ProcessError::Backend(format!("cannot secure process scratch: {error}"))
+    })?;
+    let scratch_path = CanonPath::new(fs::canonicalize(scratch.path()).map_err(|error| {
+        ProcessError::Backend(format!("cannot resolve process scratch: {error}"))
+    })?);
     let runtime_roots = derived_runtime_roots()?;
     let backend = Arc::new(LandlockBackend::prepare(
         policy,
@@ -60,12 +61,9 @@ pub(crate) async fn landlock(
             let evidence_root = tempfile::tempdir().map_err(|error| {
                 ProcessError::Backend(format!("cannot create probe evidence root: {error}"))
             })?;
-            let evidence = SessionEvidenceStore::open(
-                evidence_root.path(),
-                SessionId::new(),
-                1024 * 1024,
-            )
-            .map_err(ProcessError::Evidence)?;
+            let evidence =
+                SessionEvidenceStore::open(evidence_root.path(), SessionId::new(), 1024 * 1024)
+                    .map_err(ProcessError::Evidence)?;
             let capabilities = measure(
                 backend.clone(),
                 maximum,
@@ -84,11 +82,7 @@ pub(crate) async fn landlock(
             Ok(capabilities)
         })
         .await?;
-    let selected = Arc::new(MeasuredBackend::new(
-        backend,
-        capabilities,
-        Some(scratch),
-    )?);
+    let selected = Arc::new(MeasuredBackend::new(backend, capabilities, Some(scratch))?);
     policy
         .requirements()
         .check(selected.maximum_demonstrable_caps())
@@ -119,12 +113,9 @@ pub(crate) async fn seatbelt(
             let evidence_root = tempfile::tempdir().map_err(|error| {
                 ProcessError::Backend(format!("cannot create probe evidence root: {error}"))
             })?;
-            let evidence = SessionEvidenceStore::open(
-                evidence_root.path(),
-                SessionId::new(),
-                1024 * 1024,
-            )
-            .map_err(ProcessError::Evidence)?;
+            let evidence =
+                SessionEvidenceStore::open(evidence_root.path(), SessionId::new(), 1024 * 1024)
+                    .map_err(ProcessError::Evidence)?;
             let mut capabilities = measure(
                 backend.clone(),
                 maximum,
@@ -155,11 +146,7 @@ pub(crate) async fn seatbelt(
             Ok(capabilities)
         })
         .await?;
-    let selected = Arc::new(MeasuredBackend::new(
-        backend,
-        capabilities,
-        Some(scratch),
-    )?);
+    let selected = Arc::new(MeasuredBackend::new(backend, capabilities, Some(scratch))?);
     policy
         .requirements()
         .check(selected.maximum_demonstrable_caps())
@@ -184,9 +171,8 @@ type CachedCapabilities = tokio::sync::OnceCell<ExecCaps>;
 ///
 /// The cell makes a typed key single-flight while leaving every caller to
 /// prepare and retain its own backend, profile and private scratch.
-fn capability_cache() -> &'static Mutex<
-    std::collections::HashMap<CapabilityCacheKey, Arc<CachedCapabilities>>,
-> {
+fn capability_cache()
+-> &'static Mutex<std::collections::HashMap<CapabilityCacheKey, Arc<CachedCapabilities>>> {
     static CACHE: OnceLock<
         Mutex<std::collections::HashMap<CapabilityCacheKey, Arc<CachedCapabilities>>>,
     > = OnceLock::new();
@@ -216,8 +202,8 @@ fn cache_key(
         ProcessError::Backend(format!("cannot read Linux build identity: {error}"))
     })?;
     #[cfg(target_os = "macos")]
-    let build_identity = fs::read("/System/Library/CoreServices/SystemVersion.plist")
-        .map_err(|error| {
+    let build_identity =
+        fs::read("/System/Library/CoreServices/SystemVersion.plist").map_err(|error| {
             ProcessError::Backend(format!("cannot read macOS build identity: {error}"))
         })?;
     Ok(CapabilityCacheKey {
@@ -232,17 +218,19 @@ fn cache_key(
 }
 
 fn private_scratch() -> Result<tempfile::TempDir, ProcessError> {
-    let scratch = tempfile::tempdir()
-        .map_err(|error| ProcessError::Backend(format!("cannot create process scratch: {error}")))?;
-    fs::set_permissions(scratch.path(), fs::Permissions::from_mode(0o700))
-        .map_err(|error| ProcessError::Backend(format!("cannot secure process scratch: {error}")))?;
+    let scratch = tempfile::tempdir().map_err(|error| {
+        ProcessError::Backend(format!("cannot create process scratch: {error}"))
+    })?;
+    fs::set_permissions(scratch.path(), fs::Permissions::from_mode(0o700)).map_err(|error| {
+        ProcessError::Backend(format!("cannot secure process scratch: {error}"))
+    })?;
     Ok(scratch)
 }
 
 fn clear_scratch(path: &std::path::Path) -> Result<(), ProcessError> {
-    for entry in fs::read_dir(path)
-        .map_err(|error| ProcessError::Backend(format!("cannot inspect process scratch: {error}")))?
-    {
+    for entry in fs::read_dir(path).map_err(|error| {
+        ProcessError::Backend(format!("cannot inspect process scratch: {error}"))
+    })? {
         let entry = entry.map_err(|error| {
             ProcessError::Backend(format!("cannot inspect process scratch entry: {error}"))
         })?;
@@ -683,10 +671,7 @@ async fn probe_reads(
             cancel.clone(),
             limits,
             &fixture.cwd,
-            vec![
-                "/bin/ls".into(),
-                root.as_path().as_os_str().to_owned(),
-            ],
+            vec!["/bin/ls".into(), root.as_path().as_os_str().to_owned()],
         )
         .await
         {
@@ -801,8 +786,7 @@ async fn mutation_suite(
 
     let overwrite_source = root.join("overwrite-source");
     let overwrite = root.join("overwrite-destination");
-    if fs::write(&overwrite_source, b"after").is_err()
-        || fs::write(&overwrite, b"before").is_err()
+    if fs::write(&overwrite_source, b"after").is_err() || fs::write(&overwrite, b"before").is_err()
     {
         return false;
     }
@@ -949,14 +933,7 @@ async fn probe(
     let executor = GuardedExec::provisional(backend, evidence.clone(), cancel, limits);
     let fs = crate::fs::OsFs;
     let registry: Vec<Arc<dyn Tool>> = vec![Arc::new(Typed(crate::tools::ExecTool))];
-    let tools = Tools::new(
-        &registry,
-        &policy,
-        &fs,
-        &executor,
-        &evidence,
-        cwd.clone(),
-    );
+    let tools = Tools::new(&registry, &policy, &fs, &executor, &evidence, cwd.clone());
     let Ok(arguments) = serde_json::to_string(&serde_json::json!({
         "argv": argv,
         "cwd": cwd.to_string(),
@@ -976,14 +953,14 @@ async fn probe(
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use ego_core::permit::{BackendIdentity, CanonPath, Confinement, ExecCaps, RunConfinement};
 
     use crate::exec::backend::{Backend, LaunchPrefix};
 
-    use super::{cache_key, cached_capabilities, CapabilityCacheKey, CachedCapabilities};
+    use super::{CachedCapabilities, CapabilityCacheKey, cache_key, cached_capabilities};
 
     struct CacheBackend {
         identity: BackendIdentity,
@@ -1146,8 +1123,14 @@ mod tests {
         };
 
         let (first, second) = tokio::join!(first, second);
-        assert_eq!(first.expect("first caller initializes the fact"), ExecCaps::READ_SCOPED);
-        assert_eq!(second.expect("second caller observes the fact"), ExecCaps::READ_SCOPED);
+        assert_eq!(
+            first.expect("first caller initializes the fact"),
+            ExecCaps::READ_SCOPED
+        );
+        assert_eq!(
+            second.expect("second caller observes the fact"),
+            ExecCaps::READ_SCOPED
+        );
         assert_eq!(initializers.load(Ordering::SeqCst), 1);
         assert_eq!(cached_fact(cell.as_ref()), Some(ExecCaps::READ_SCOPED));
     }

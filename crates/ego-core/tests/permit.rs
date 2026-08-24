@@ -12,7 +12,9 @@ use ego_core::permit::{
     PolicyDenied, PolicyEngine, PrepareCtx, PreparedCall, ProcessError, ProcessExecutor,
     Resolution, Scan, ScanLimits, ScanRequest, Tool, ToolError, ToolResult, Typed,
 };
-use ego_core::store::evidence::{EvidenceError, EvidencePage, EvidenceRead, EvidenceStore, EvidenceWriter};
+use ego_core::store::evidence::{
+    EvidenceError, EvidencePage, EvidenceRead, EvidenceStore, EvidenceWriter,
+};
 use futures::executor::block_on;
 use futures::future::{self, BoxFuture};
 use serde_json::json;

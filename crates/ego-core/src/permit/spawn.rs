@@ -351,12 +351,17 @@ impl<'de> Deserialize<'de> for ExecCaps {
                 "write_denied" => Self::WRITE_DENIED,
                 "write_scoped" => Self::WRITE_SCOPED,
                 "no_ip_network" => Self::NO_IP_NETWORK,
-                _ => return Err(serde::de::Error::unknown_variant(&name, &[
-                    "read_scoped",
-                    "write_denied",
-                    "write_scoped",
-                    "no_ip_network",
-                ])),
+                _ => {
+                    return Err(serde::de::Error::unknown_variant(
+                        &name,
+                        &[
+                            "read_scoped",
+                            "write_denied",
+                            "write_scoped",
+                            "no_ip_network",
+                        ],
+                    ));
+                }
             };
             if capabilities.contains(capability) {
                 return Err(serde::de::Error::custom(format!(

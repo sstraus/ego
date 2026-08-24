@@ -1029,7 +1029,11 @@ fn the_neighbour_in_the_same_row_still_does_its_job() {
 fn an_exec_rule_reaches_the_real_process_path() {
     let stub = Stub::start(Plan {
         completions: vec![
-            Reply::Sse(tool_call("exec-contract", "exec", r#"{"argv":["/bin/echo","exec rule"],"cwd":null,"timeout_ms":1000}"#)),
+            Reply::Sse(tool_call(
+                "exec-contract",
+                "exec",
+                r#"{"argv":["/bin/echo","exec rule"],"cwd":null,"timeout_ms":1000}"#,
+            )),
             Reply::Sse(text("done")),
         ],
         ..Plan::default()
@@ -1086,7 +1090,10 @@ fn auto_mode_requires_and_accepts_a_separately_configured_judge() {
 fn auto_mode_from_a_file_layer_starts_the_real_judge_path() {
     let stub = Stub::start(Plan::default());
     let ego = Ego::against(&stub);
-    ego.home_file("config.toml", "mode = \"auto\"\n[permissions]\njudge = \"ollama/qwen3\"\n");
+    ego.home_file(
+        "config.toml",
+        "mode = \"auto\"\n[permissions]\njudge = \"ollama/qwen3\"\n",
+    );
     let finished = ego
         .args(["--model", "ollama/qwen3", "--ephemeral", "Ask"])
         .run();

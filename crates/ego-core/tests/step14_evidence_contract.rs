@@ -13,20 +13,18 @@ use ego_core::permit::{
     Authority, CanonPath, Classification, EnvPolicy, Op, PolicyEngine, ProcessError,
     StreamProvenance, ToolContentBlock, ToolError, ToolOutputProvenance, ToolResult,
 };
-use ego_core::public::{project_public, PublicEvent, PUBLIC_EVENT_VERSION};
+use ego_core::public::{PUBLIC_EVENT_VERSION, PublicEvent, project_public};
 use ego_core::state::{ItemKind, SessionState};
-use ego_core::store::codec::{decode_line, encode_record, StoreLine, CODEC_VERSION};
+use ego_core::store::codec::{CODEC_VERSION, StoreLine, decode_line, encode_record};
 use ego_core::store::evidence::{
-    EvidenceError, EvidenceId, EvidencePage, EvidenceRead, EvidenceRef, EVIDENCE_PAGE_BYTES,
+    EVIDENCE_PAGE_BYTES, EvidenceError, EvidenceId, EvidencePage, EvidenceRead, EvidenceRef,
 };
 use serde_json::json;
 
 fn reference(bytes: u64) -> EvidenceRef {
     EvidenceRef::new(
-        EvidenceId::parse(
-            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-        )
-        .unwrap(),
+        EvidenceId::parse("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+            .unwrap(),
         bytes,
     )
 }
@@ -37,18 +35,8 @@ fn max_reference() -> EvidenceRef {
 
 fn process_result() -> ToolResult {
     ToolResult::new(vec![
-        ToolContentBlock::process(
-            StreamProvenance::Stdout,
-            b"stdout bytes",
-            64,
-            reference(12),
-        ),
-        ToolContentBlock::process(
-            StreamProvenance::Stderr,
-            b"stderr bytes",
-            64,
-            reference(12),
-        ),
+        ToolContentBlock::process(StreamProvenance::Stdout, b"stdout bytes", 64, reference(12)),
+        ToolContentBlock::process(StreamProvenance::Stderr, b"stderr bytes", 64, reference(12)),
     ])
 }
 
@@ -64,7 +52,10 @@ fn evidence_ref_has_one_canonical_string_wire_and_schema() {
 
     let schema = schemars::schema_for!(EvidenceRef).to_value();
     assert_eq!(schema["type"], "string");
-    assert!(schema.get("properties").is_none(), "reference schema became an object");
+    assert!(
+        schema.get("properties").is_none(),
+        "reference schema became an object"
+    );
 
     let hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     for malformed in [
@@ -91,23 +82,32 @@ fn evidence_read_is_strict_offset_bounded_and_eof_inclusive() {
     assert_eq!(wire["reference"], json!(reference.to_string()));
     assert_eq!(wire["offset"], 4);
 
-    assert!(serde_json::from_value::<EvidenceRead>(json!({
-        "reference": reference.to_string()
-    }))
-    .is_err(), "offset is required");
-    assert!(serde_json::from_value::<EvidenceRead>(json!({
-        "reference": reference.to_string(),
-        "offset": 4,
-        "unknown": true
-    }))
-    .is_err(), "unknown request fields must not be accepted");
+    assert!(
+        serde_json::from_value::<EvidenceRead>(json!({
+            "reference": reference.to_string()
+        }))
+        .is_err(),
+        "offset is required"
+    );
+    assert!(
+        serde_json::from_value::<EvidenceRead>(json!({
+            "reference": reference.to_string(),
+            "offset": 4,
+            "unknown": true
+        }))
+        .is_err(),
+        "unknown request fields must not be accepted"
+    );
     assert!(EvidenceRead::new(reference.clone(), 10).is_err());
     assert!(EvidenceRead::new(reference.clone(), reference.bytes).is_ok());
-    assert!(serde_json::from_value::<EvidenceRead>(json!({
-        "reference": reference.to_string(),
-        "offset": 10
-    }))
-    .is_err(), "wire decoding must apply the same bound as the constructor");
+    assert!(
+        serde_json::from_value::<EvidenceRead>(json!({
+            "reference": reference.to_string(),
+            "offset": 10
+        }))
+        .is_err(),
+        "wire decoding must apply the same bound as the constructor"
+    );
 }
 
 #[test]
@@ -130,20 +130,26 @@ fn evidence_page_has_fixed_size_and_truthful_interval_metadata() {
     assert!(wire["next_offset"].is_null());
 
     let incomplete_reference = reference((EVIDENCE_PAGE_BYTES as u64) + 4);
-    assert!(serde_json::from_value::<EvidencePage>(json!({
-        "reference": incomplete_reference.to_string(),
-        "offset": EVIDENCE_PAGE_BYTES as u64 - 2,
-        "bytes": [1, 2, 3, 4, 5],
-        "next_offset": null
-    }))
-    .is_err(), "a non-final page must carry its next offset");
-    assert!(serde_json::from_value::<EvidencePage>(json!({
-        "reference": final_reference.to_string(),
-        "offset": EVIDENCE_PAGE_BYTES as u64 - 2,
-        "bytes": [1, 2, 3, 4, 5],
-        "next_offset": final_reference.bytes
-    }))
-    .is_err(), "an EOF page must not carry a next offset");
+    assert!(
+        serde_json::from_value::<EvidencePage>(json!({
+            "reference": incomplete_reference.to_string(),
+            "offset": EVIDENCE_PAGE_BYTES as u64 - 2,
+            "bytes": [1, 2, 3, 4, 5],
+            "next_offset": null
+        }))
+        .is_err(),
+        "a non-final page must carry its next offset"
+    );
+    assert!(
+        serde_json::from_value::<EvidencePage>(json!({
+            "reference": final_reference.to_string(),
+            "offset": EVIDENCE_PAGE_BYTES as u64 - 2,
+            "bytes": [1, 2, 3, 4, 5],
+            "next_offset": final_reference.bytes
+        }))
+        .is_err(),
+        "an EOF page must not carry a next offset"
+    );
 
     let oversized = serde_json::from_value::<EvidencePage>(json!({
         "reference": final_reference.to_string(),
@@ -178,14 +184,13 @@ fn read_evidence_authority_covers_the_exact_reference_and_offset_only() {
             request: admitted.clone(),
         }
     );
-    assert!(authorized
-        .permit()
-        .allows_evidence(&admitted)
-        .is_ok());
-    assert!(authorized
-        .permit()
-        .allows_evidence(&EvidenceRead::new(reference(33), 0).unwrap())
-        .is_err());
+    assert!(authorized.permit().allows_evidence(&admitted).is_ok());
+    assert!(
+        authorized
+            .permit()
+            .allows_evidence(&EvidenceRead::new(reference(33), 0).unwrap())
+            .is_err()
+    );
 }
 
 #[test]
@@ -210,7 +215,10 @@ fn process_provenance_names_encoding_and_never_lossily_replaces_binary() {
     let wire = serde_json::to_value(&block).expect("binary process block serialises");
     assert_eq!(wire["provenance"]["source"], "process");
     assert_eq!(wire["provenance"]["encoding"], "base64");
-    assert_eq!(wire["full_output"], reference(binary.len() as u64).to_string());
+    assert_eq!(
+        wire["full_output"],
+        reference(binary.len() as u64).to_string()
+    );
 
     let utf8 = ToolContentBlock::process(
         StreamProvenance::Stdout,
@@ -250,12 +258,8 @@ fn binary_process_head_tail_preview_has_one_labelled_payload_and_retrieval_ref()
     let head = [0xff, 0x00, 0xfe];
     let tail = [0x80, 0x41, 0x81];
     let complete = reference(64);
-    let block = ToolContentBlock::process_preview(
-        StreamProvenance::Stdout,
-        &head,
-        &tail,
-        complete.clone(),
-    );
+    let block =
+        ToolContentBlock::process_preview(StreamProvenance::Stdout, &head, &tail, complete.clone());
 
     assert!(!block.text.contains('\u{fffd}'));
     assert_eq!(
@@ -263,11 +267,18 @@ fn binary_process_head_tail_preview_has_one_labelled_payload_and_retrieval_ref()
         Some("[base64 head+tail preview; 58 bytes omitted between retained segments]")
     );
     assert_eq!(block.text.matches("/wD+gEGB").count(), 1);
-    assert!(block.text.contains(&format!("[read_tool_result {complete}]")));
+    assert!(
+        block
+            .text
+            .contains(&format!("[read_tool_result {complete}]"))
+    );
     let model_text = ToolResult::new(vec![block.clone()]).model_text();
     assert!(!model_text.contains('\u{fffd}'));
     assert_eq!(model_text.matches("/wD+gEGB").count(), 1);
-    assert!(model_text.contains("[base64 head+tail preview; 58 bytes omitted between retained segments]"));
+    assert!(
+        model_text
+            .contains("[base64 head+tail preview; 58 bytes omitted between retained segments]")
+    );
     assert!(matches!(
         block.provenance,
         ToolOutputProvenance::Process {
@@ -347,7 +358,10 @@ fn failed_process_diagnostic_is_one_bounded_utf8_builtin_after_streams() {
     });
     let failed = error.into_failed_result();
     let diagnostic = failed.content.last().expect("diagnostic block");
-    assert!(matches!(&diagnostic.provenance, ToolOutputProvenance::Builtin));
+    assert!(matches!(
+        &diagnostic.provenance,
+        ToolOutputProvenance::Builtin
+    ));
     assert!(diagnostic.text.is_char_boundary(diagnostic.text.len()));
     assert!(diagnostic.text.len() <= MAX_TOOL_ERROR_DIAGNOSTIC_BYTES);
     assert_eq!(

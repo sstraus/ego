@@ -6,11 +6,11 @@ mod landlock;
 mod null;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod probe;
+mod process;
 #[cfg(target_os = "macos")]
 mod profile;
 #[cfg(target_os = "macos")]
 mod seatbelt;
-mod process;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -25,8 +25,8 @@ use sha2::{Digest as _, Sha256};
 use backend::{Backend, MeasuredBackend};
 use null::NullBackend;
 
-pub use ego_core::permit::{ProcessError, ProcessExecutor};
 pub use crate::store::SessionEvidenceStore;
+pub use ego_core::permit::{ProcessError, ProcessExecutor};
 #[cfg(target_os = "linux")]
 pub use landlock::dispatch_helper as dispatch_landlock_helper;
 #[cfg(target_os = "macos")]
@@ -40,10 +40,7 @@ pub struct ExecLimits {
 }
 
 impl ExecLimits {
-    pub fn new(
-        preview_bytes: usize,
-        termination_grace: Duration,
-    ) -> Result<Self, ProcessError> {
+    pub fn new(preview_bytes: usize, termination_grace: Duration) -> Result<Self, ProcessError> {
         if preview_bytes == 0 {
             return Err(ProcessError::Invariant(
                 "process preview budget must be greater than zero".into(),
@@ -129,12 +126,8 @@ impl GuardedExec {
     pub async fn for_run(
         config: ExecRunConfig,
     ) -> Result<(Arc<Self>, ExecObservation), ProcessError> {
-        let (selected, runtime_roots) = select_backend(
-            &config.policy,
-            config.cancel.clone(),
-            config.limits,
-        )
-        .await?;
+        let (selected, runtime_roots) =
+            select_backend(&config.policy, config.cancel.clone(), config.limits).await?;
         selected.prerequisite(&config.policy)?;
         let capabilities = selected.capabilities();
         config
@@ -145,11 +138,7 @@ impl GuardedExec {
         let observation = ExecObservation::new(
             selected.identity(),
             capabilities,
-            policy_digest_with_runtime_roots(
-                &config.policy,
-                selected.as_ref(),
-                &runtime_roots,
-            )?,
+            policy_digest_with_runtime_roots(&config.policy, selected.as_ref(), &runtime_roots)?,
         );
         let backend: Arc<dyn Backend> = selected;
         let executor = Arc::new(Self {
@@ -182,22 +171,14 @@ async fn select_backend(
     limits: ExecLimits,
 ) -> Result<(Arc<MeasuredBackend>, Vec<CanonPath>), ProcessError> {
     if policy.level() == ego_core::permit::Confinement::Off {
-        return MeasuredBackend::new(
-            Arc::new(NullBackend),
-            ExecCaps::empty(),
-            None,
-        )
-        .map(|backend| (Arc::new(backend), Vec::new()));
+        return MeasuredBackend::new(Arc::new(NullBackend), ExecCaps::empty(), None)
+            .map(|backend| (Arc::new(backend), Vec::new()));
     }
     match probe::landlock(policy, cancel, limits).await {
         Ok(backend) => Ok(backend),
         Err(ProcessError::Cancelled) => Err(ProcessError::Cancelled),
-        Err(_) => MeasuredBackend::new(
-            Arc::new(NullBackend),
-            ExecCaps::empty(),
-            None,
-        )
-        .map(|backend| (Arc::new(backend), Vec::new())),
+        Err(_) => MeasuredBackend::new(Arc::new(NullBackend), ExecCaps::empty(), None)
+            .map(|backend| (Arc::new(backend), Vec::new())),
     }
 }
 
@@ -211,23 +192,15 @@ async fn select_backend(
         return match probe::seatbelt(policy, cancel, limits).await {
             Ok(backend) => Ok(backend),
             Err(ProcessError::Cancelled) => Err(ProcessError::Cancelled),
-            Err(_) => MeasuredBackend::new(
-                Arc::new(NullBackend),
-                ExecCaps::empty(),
-                None,
-            )
-            .map(|backend| (Arc::new(backend), Vec::new())),
+            Err(_) => MeasuredBackend::new(Arc::new(NullBackend), ExecCaps::empty(), None)
+                .map(|backend| (Arc::new(backend), Vec::new())),
         };
     }
     // Restricted platform backends plug into this private selection point.
     // The null backend is permanent and truthful: its empty capability set
     // admits only online `off`, and every stronger request fails above.
-    MeasuredBackend::new(
-        Arc::new(NullBackend),
-        ExecCaps::empty(),
-        None,
-    )
-    .map(|backend| (Arc::new(backend), Vec::new()))
+    MeasuredBackend::new(Arc::new(NullBackend), ExecCaps::empty(), None)
+        .map(|backend| (Arc::new(backend), Vec::new()))
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -236,12 +209,8 @@ async fn select_backend(
     _cancel: CancelToken,
     _limits: ExecLimits,
 ) -> Result<(Arc<MeasuredBackend>, Vec<CanonPath>), ProcessError> {
-    MeasuredBackend::new(
-        Arc::new(NullBackend),
-        ExecCaps::empty(),
-        None,
-    )
-    .map(|backend| (Arc::new(backend), Vec::new()))
+    MeasuredBackend::new(Arc::new(NullBackend), ExecCaps::empty(), None)
+        .map(|backend| (Arc::new(backend), Vec::new()))
 }
 
 #[cfg(test)]
@@ -258,18 +227,10 @@ fn policy_digest_with_runtime_roots(
     runtime_roots: &[CanonPath],
 ) -> Result<PolicyDigest, ProcessError> {
     let mut hash = Sha256::new();
-    update_digest_field(
-        &mut hash,
-        b"domain",
-        b"ego.exec.policy-digest.v1",
-    )?;
+    update_digest_field(&mut hash, b"domain", b"ego.exec.policy-digest.v1")?;
     let level = policy.level().to_string();
     update_digest_field(&mut hash, b"level", level.as_bytes())?;
-    update_digest_field(
-        &mut hash,
-        b"offline",
-        &[u8::from(policy.offline())],
-    )?;
+    update_digest_field(&mut hash, b"offline", &[u8::from(policy.offline())])?;
     update_path_field(
         &mut hash,
         b"workspace",
@@ -283,11 +244,7 @@ fn policy_digest_with_runtime_roots(
             .to_be_bytes(),
     )?;
     for root in runtime_roots {
-        update_path_field(
-            &mut hash,
-            b"runtime_root",
-            root.as_path().as_os_str(),
-        )?;
+        update_path_field(&mut hash, b"runtime_root", root.as_path().as_os_str())?;
     }
     let identity = backend.identity();
     update_digest_field(&mut hash, b"backend.name", identity.name().as_bytes())?;
@@ -309,11 +266,7 @@ fn policy_digest_with_runtime_roots(
     })
 }
 
-fn update_digest_field(
-    hash: &mut Sha256,
-    tag: &[u8],
-    bytes: &[u8],
-) -> Result<(), ProcessError> {
+fn update_digest_field(hash: &mut Sha256, tag: &[u8], bytes: &[u8]) -> Result<(), ProcessError> {
     update_digest_field_prefix(hash, tag, bytes.len())?;
     hash.update(bytes);
     Ok(())
@@ -427,10 +380,12 @@ mod tests {
             "typed backend identity fields must not collapse at delimiter boundaries"
         );
         assert_eq!(first_digest.as_str().len(), 64);
-        assert!(first_digest
-            .as_str()
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
+        assert!(
+            first_digest
+                .as_str()
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        );
     }
 
     #[test]
@@ -461,12 +416,9 @@ mod tests {
         let policy = policy("/workspace");
         let empty = policy_digest_with_runtime_roots(&policy, &backend, &[])
             .expect("empty runtime-root vector");
-        let one = policy_digest_with_runtime_roots(
-            &policy,
-            &backend,
-            &[CanonPath::new("/runtime/a")],
-        )
-        .expect("one runtime root");
+        let one =
+            policy_digest_with_runtime_roots(&policy, &backend, &[CanonPath::new("/runtime/a")])
+                .expect("one runtime root");
         let ordered = policy_digest_with_runtime_roots(
             &policy,
             &backend,

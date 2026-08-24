@@ -29,14 +29,14 @@ use ego_core::event::domain::DomainEvent;
 use ego_core::event::id::SessionId;
 use ego_core::event::time::Timestamp;
 use ego_core::state::SessionState;
-use ego_core::store::session_store::{SessionMeta, SessionStore, StoreError};
 use ego_core::store::evidence::EvidenceError;
+use ego_core::store::session_store::{SessionMeta, SessionStore, StoreError};
 use futures::stream::BoxStream;
 
+use super::SessionEvidenceStore;
 use super::jsonl_store::{JsonlStore, Repair};
 use super::lease::{Lease, LeaseError};
 use super::snapshot::SnapshotRejection;
-use super::SessionEvidenceStore;
 
 /// The facts `Lease::acquire` needs and the store must not invent.
 ///
@@ -138,10 +138,7 @@ impl SessionWriter<'_> {
     }
 
     /// Bind complete tool evidence to this lease-held session.
-    pub fn evidence_store(
-        &self,
-        hard_cap: u64,
-    ) -> Result<SessionEvidenceStore, EvidenceError> {
+    pub fn evidence_store(&self, hard_cap: u64) -> Result<SessionEvidenceStore, EvidenceError> {
         SessionEvidenceStore::with_io(
             self.store.session_dir(&self.id),
             hard_cap,

@@ -53,7 +53,10 @@ impl SessionEvidenceStore {
         }
         let directory = session_directory.join("evidence");
         for path in io.list_files(&directory)? {
-            if path.extension().is_some_and(|extension| extension == "staging") {
+            if path
+                .extension()
+                .is_some_and(|extension| extension == "staging")
+            {
                 io.remove_file(&path)?;
             }
         }
@@ -95,9 +98,9 @@ impl SessionEvidenceStore {
         let page_end = page_start
             .saturating_add(EVIDENCE_PAGE_BYTES as u64)
             .min(request.reference.bytes);
-        let found = self.io.visit_file(
-            &self.blob_path(&request.reference.id),
-            &mut |chunk| {
+        let found = self
+            .io
+            .visit_file(&self.blob_path(&request.reference.id), &mut |chunk| {
                 digest.update(chunk);
                 let chunk_start = length;
                 length = length.saturating_add(chunk.len() as u64);
@@ -112,8 +115,7 @@ impl SessionEvidenceStore {
                     page.extend_from_slice(&chunk[from..to]);
                 }
                 Ok(())
-            },
-        )?;
+            })?;
         if !found {
             return Err(EvidenceError::NotFound {
                 reference: request.reference.id.clone(),

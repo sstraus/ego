@@ -141,7 +141,9 @@ pub fn conversation_from(
                     );
                 }
                 for (call, call_id) in sendable {
-                    if call.completed && let Some(result) = &call.tool_result {
+                    if call.completed
+                        && let Some(result) = &call.tool_result
+                    {
                         push(
                             &mut messages,
                             Role::User,

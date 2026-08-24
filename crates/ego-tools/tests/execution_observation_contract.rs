@@ -131,8 +131,14 @@ fn execution_observation_fsyncs_the_log_before_replacing_the_manifest() {
     let fsync = calls.iter().position(|call| *call == "fsync");
     let replace = calls.iter().position(|call| *call == "replace");
     assert!(fsync.is_some(), "ExecutionObserved must force the log");
-    assert!(replace.is_some(), "ExecutionObserved must update the manifest");
-    assert!(fsync < replace, "log fsync must precede manifest replacement: {calls:?}");
+    assert!(
+        replace.is_some(),
+        "ExecutionObserved must update the manifest"
+    );
+    assert!(
+        fsync < replace,
+        "log fsync must precede manifest replacement: {calls:?}"
+    );
 }
 
 #[test]
@@ -185,14 +191,21 @@ fn normal_manifest_cadence_preserves_the_latest_execution_observation() {
 
     let manifest = serde_json::from_slice::<serde_json::Value>(&manifest_bytes(root.path(), &id))
         .expect("manifest JSON");
-    assert!(manifest.get("meta").is_none(), "SessionMeta must be flattened");
+    assert!(
+        manifest.get("meta").is_none(),
+        "SessionMeta must be flattened"
+    );
     assert_eq!(manifest["execution"]["backend"]["name"], "landlock");
     assert_eq!(manifest["execution"]["backend"]["revision"], "v1");
     assert_eq!(
         manifest["execution"]["policy_digest"],
         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
     );
-    assert_eq!(store.list().unwrap().len(), 1, "catalogue remains SessionMeta-only");
+    assert_eq!(
+        store.list().unwrap().len(),
+        1,
+        "catalogue remains SessionMeta-only"
+    );
 }
 
 #[test]
@@ -231,10 +244,16 @@ fn recovery_clears_a_stale_manifest_observation_when_the_event_is_not_in_valid_l
         .unwrap();
 
     let mut lines = event_log_lines(root.path(), &id);
-    assert!(lines.len() >= 3, "header, observation, and turn boundary are required");
+    assert!(
+        lines.len() >= 3,
+        "header, observation, and turn boundary are required"
+    );
     lines.remove(1);
-    std::fs::write(session_dir(root.path(), &id).join("events.jsonl"), lines.join("\n") + "\n")
-        .unwrap();
+    std::fs::write(
+        session_dir(root.path(), &id).join("events.jsonl"),
+        lines.join("\n") + "\n",
+    )
+    .unwrap();
 
     store.recover(&id).expect("recovery");
     let manifest = String::from_utf8(manifest_bytes(root.path(), &id)).unwrap();
@@ -281,8 +300,14 @@ fn recovery_rebuilds_the_latest_observation_from_a_valid_log_when_manifest_is_mi
     store.recover(&id).expect("recovery rebuilds manifest");
 
     let manifest = String::from_utf8(manifest_bytes(root.path(), &id)).unwrap();
-    assert!(manifest.contains("seatbelt"), "latest valid observation was not rebuilt");
-    assert!(manifest.contains("v2"), "latest observation revision was not rebuilt");
+    assert!(
+        manifest.contains("seatbelt"),
+        "latest valid observation was not rebuilt"
+    );
+    assert!(
+        manifest.contains("v2"),
+        "latest observation revision was not rebuilt"
+    );
 }
 
 #[test]

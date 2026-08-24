@@ -99,18 +99,11 @@ fn shell_write_case(
     if let Some(level) = cli_sandbox {
         invocation = invocation.args(["--sandbox", level]);
     }
-    let finished = invocation
-        .args(["--allow", "exec(/bin/sh *)", "Ask"])
-        .run();
+    let finished = invocation.args(["--allow", "exec(/bin/sh *)", "Ask"]).run();
     (finished, outside, target, stub)
 }
 
-fn assert_sandbox_denied(
-    finished: &support::Finished,
-    target: &Path,
-    stub: &Stub,
-    label: &str,
-) {
+fn assert_sandbox_denied(finished: &support::Finished, target: &Path, stub: &Stub, label: &str) {
     assert!(!target.exists(), "{label} wrote outside its confinement");
     match maybe_completed_tool_event(finished) {
         Some(event) => assert_eq!(
@@ -150,11 +143,14 @@ fn durable_payloads(home: &Path) -> Vec<serde_json::Value> {
         .map(|entry| entry.path().join("events.jsonl"))
         .filter_map(|path| std::fs::read_to_string(path).ok())
         .flat_map(|contents| {
-            contents.lines().filter_map(|line| {
-                serde_json::from_str::<serde_json::Value>(line)
-                    .ok()
-                    .and_then(|record| record.get("payload").cloned())
-            }).collect::<Vec<_>>()
+            contents
+                .lines()
+                .filter_map(|line| {
+                    serde_json::from_str::<serde_json::Value>(line)
+                        .ok()
+                        .and_then(|record| record.get("payload").cloned())
+                })
+                .collect::<Vec<_>>()
         })
         .collect()
 }
@@ -172,7 +168,11 @@ fn sandbox_accepts_exactly_ro_workspace_and_off() {
         let args = run_args(["run", "--sandbox", value, "Ask"]);
         assert_eq!(
             args.sandbox,
-            Some(value.parse::<Confinement>().expect("known sandbox spelling")),
+            Some(
+                value
+                    .parse::<Confinement>()
+                    .expect("known sandbox spelling")
+            ),
             "valid sandbox value rejected: {value}"
         );
     }
@@ -181,13 +181,7 @@ fn sandbox_accepts_exactly_ro_workspace_and_off() {
 #[test]
 fn invalid_sandbox_spelling_is_a_usage_error_before_provider_or_spawn() {
     let finished = Ego::nowhere()
-        .args([
-            "--model",
-            "ollama/qwen3",
-            "--sandbox",
-            "bogus",
-            "Ask",
-        ])
+        .args(["--model", "ollama/qwen3", "--sandbox", "bogus", "Ask"])
         .run();
 
     assert_eq!(finished.code, Some(2));
@@ -244,8 +238,8 @@ fn explicit_cli_sandbox_is_an_override_and_absence_defaults_only_at_the_end() {
             ..ConfigLayer::default()
         },
     };
-    let overridden = resolve(&[user, project, flags], Trust::Trusted, Some("ci"))
-        .expect("layers resolve");
+    let overridden =
+        resolve(&[user, project, flags], Trust::Trusted, Some("ci")).expect("layers resolve");
     assert_eq!(
         overridden.sandbox,
         Some(Confinement::Workspace),
@@ -266,7 +260,10 @@ fn sandbox_optionality_survives_empty_layers_and_defaults_only_after_resolution(
     let effective = resolve(&[profile_only], Trust::Trusted, Some("ci"))
         .expect("profile without sandbox resolves");
     assert_eq!(effective.sandbox, None);
-    assert_eq!(effective.sandbox.unwrap_or_default(), Confinement::Workspace);
+    assert_eq!(
+        effective.sandbox.unwrap_or_default(),
+        Confinement::Workspace
+    );
 
     let absent = resolve(&[], Trust::Trusted, None).expect("empty layers resolve");
     assert_eq!(absent.sandbox, None);
@@ -294,7 +291,12 @@ fn cli_off_keeps_permission_and_exec_lifecycle_enforced() {
     assert_eq!(finished.code, Some(0), "stderr: {}", finished.stderr);
     let event = completed_tool_event(&finished);
     assert_eq!(event["ok"], true);
-    assert!(event["text"].as_str().unwrap_or_default().contains("cli exact argv"));
+    assert!(
+        event["text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("cli exact argv")
+    );
     assert_eq!(stub.generations().len(), 2);
 }
 
@@ -338,7 +340,11 @@ fn cli_confinement_uses_the_configured_level_without_degrading_to_off() {
                 );
             }
             None => {
-                assert_eq!(finished.code, Some(2), "startup refusal must be usage exit 2");
+                assert_eq!(
+                    finished.code,
+                    Some(2),
+                    "startup refusal must be usage exit 2"
+                );
                 let all_output = format!("{}\n{}", finished.stdout, finished.stderr);
                 assert!(
                     all_output.contains("missing"),
@@ -370,7 +376,10 @@ fn cli_real_enforcement_matrix_covers_omission_override_and_final_workspace_defa
         maybe_completed_tool_event(&finished).map(|event| event["ok"].clone()),
         Some(serde_json::Value::Bool(true))
     );
-    assert!(target.exists(), "omitted CLI lost the configured user sandbox off");
+    assert!(
+        target.exists(),
+        "omitted CLI lost the configured user sandbox off"
+    );
 
     // An explicit CLI value is a real flags-layer override, not a parser-only
     // value.  It must deny the same outside write even when the user layer
@@ -391,7 +400,10 @@ fn cli_real_enforcement_matrix_covers_omission_override_and_final_workspace_defa
         maybe_completed_tool_event(&finished).map(|event| event["ok"].clone()),
         Some(serde_json::Value::Bool(true))
     );
-    assert!(target.exists(), "explicit off did not reach the null backend");
+    assert!(
+        target.exists(),
+        "explicit off did not reach the null backend"
+    );
 
     for level in ["ro", "workspace"] {
         let (finished, _outside, target, stub) = shell_write_case(None, Some(level));
@@ -430,19 +442,40 @@ fn linux_landlock_hidden_current_exe_helper_runs_before_clap_and_provider() {
 
     match maybe_completed_tool_event(&finished) {
         Some(event) => {
-            assert_eq!(finished.code, Some(0), "helper launch failed: {}", finished.stderr);
+            assert_eq!(
+                finished.code,
+                Some(0),
+                "helper launch failed: {}",
+                finished.stderr
+            );
             assert_eq!(event["ok"], true);
-            assert!(event["text"].as_str().unwrap_or_default().contains("cli exact argv"));
+            assert!(
+                event["text"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("cli exact argv")
+            );
             assert_eq!(stub.generations().len(), 2);
         }
         None => {
             // A host without a demonstrable Landlock prerequisite may refuse
             // before provider contact, but it may never degrade to sandbox
             // off or pass the private helper marker to clap.
-            assert_eq!(finished.code, Some(2), "unexpected helper failure: {}", finished.stderr);
+            assert_eq!(
+                finished.code,
+                Some(2),
+                "unexpected helper failure: {}",
+                finished.stderr
+            );
             let all_output = format!("{}\n{}", finished.stdout, finished.stderr);
-            assert!(all_output.contains("missing"), "refusal lacked capability evidence: {all_output}");
-            assert!(stub.generations().is_empty(), "provider was reached after helper refusal");
+            assert!(
+                all_output.contains("missing"),
+                "refusal lacked capability evidence: {all_output}"
+            );
+            assert!(
+                stub.generations().is_empty(),
+                "provider was reached after helper refusal"
+            );
         }
     }
 }
@@ -468,7 +501,12 @@ fn cli_offline_refuses_even_when_filesystem_sandbox_is_off() {
 
     match maybe_completed_tool_event(&finished) {
         Some(event) if event["ok"] == true => {
-            assert_eq!(finished.code, Some(0), "successful offline run: {}", finished.stderr);
+            assert_eq!(
+                finished.code,
+                Some(0),
+                "successful offline run: {}",
+                finished.stderr
+            );
             assert!(
                 event["text"]
                     .as_str()
@@ -477,13 +515,25 @@ fn cli_offline_refuses_even_when_filesystem_sandbox_is_off() {
             );
         }
         Some(event) => {
-            panic!("a missing offline capability must refuse before the provider/tool event: {event}");
+            panic!(
+                "a missing offline capability must refuse before the provider/tool event: {event}"
+            );
         }
         None => {
-            assert_eq!(finished.code, Some(2), "startup refusal must be usage exit 2");
+            assert_eq!(
+                finished.code,
+                Some(2),
+                "startup refusal must be usage exit 2"
+            );
             let all_output = format!("{}\n{}", finished.stdout, finished.stderr);
-            assert!(all_output.contains("missing"), "startup refusal was not surfaced: {all_output}");
-            assert!(stub.generations().is_empty(), "provider was reached after startup refusal");
+            assert!(
+                all_output.contains("missing"),
+                "startup refusal was not surfaced: {all_output}"
+            );
+            assert!(
+                stub.generations().is_empty(),
+                "provider was reached after startup refusal"
+            );
         }
     }
 }
@@ -497,7 +547,10 @@ fn disposable_startup_capability_proof_never_reaches_the_durable_event_log() {
     let stub = Stub::start(Plan::default());
     let ego = Ego::against(&stub);
     let marker = ego.home_file("marker", "");
-    let home = marker.parent().expect("marker has a home directory").to_path_buf();
+    let home = marker
+        .parent()
+        .expect("marker has a home directory")
+        .to_path_buf();
     let finished = ego
         .args([
             "--model",
@@ -510,7 +563,11 @@ fn disposable_startup_capability_proof_never_reaches_the_durable_event_log() {
         ])
         .run();
 
-    assert_eq!(finished.code, Some(5), "max-turns 0 stops before the first turn");
+    assert_eq!(
+        finished.code,
+        Some(5),
+        "max-turns 0 stops before the first turn"
+    );
     assert_eq!(execution_observation_count(&home), 0);
 }
 
@@ -519,7 +576,10 @@ fn actual_once_executor_appends_exactly_one_execution_observed_fact() {
     let stub = Stub::start(exec_plan());
     let ego = Ego::against(&stub);
     let marker = ego.home_file("marker", "");
-    let home = marker.parent().expect("marker has a home directory").to_path_buf();
+    let home = marker
+        .parent()
+        .expect("marker has a home directory")
+        .to_path_buf();
     let finished = ego
         .args([
             "--model",
@@ -546,14 +606,21 @@ fn interactive_piped_seed_executor_appends_one_observation() {
     });
     let ego = Ego::against(&stub).conversing();
     let marker = ego.home_file("marker", "");
-    let home = marker.parent().expect("marker has a home directory").to_path_buf();
+    let home = marker
+        .parent()
+        .expect("marker has a home directory")
+        .to_path_buf();
     let finished = ego
         .args(["--model", "ollama/qwen3", "--sandbox", "off"])
         .stdin("first prompt\n")
         .run();
 
     assert_eq!(finished.code, Some(0), "stderr: {}", finished.stderr);
-    assert_eq!(stub.generations().len(), 1, "the piped stdin is one interactive seed");
+    assert_eq!(
+        stub.generations().len(),
+        1,
+        "the piped stdin is one interactive seed"
+    );
     assert_eq!(execution_observation_count(&home), 1);
 }
 
@@ -562,7 +629,10 @@ fn ephemeral_actual_executor_creates_no_manifest_or_synthetic_observation() {
     let stub = Stub::start(exec_plan());
     let ego = Ego::against(&stub);
     let marker = ego.home_file("marker", "");
-    let home = marker.parent().expect("marker has a home directory").to_path_buf();
+    let home = marker
+        .parent()
+        .expect("marker has a home directory")
+        .to_path_buf();
     let finished = ego
         .args([
             "--model",
@@ -577,6 +647,9 @@ fn ephemeral_actual_executor_creates_no_manifest_or_synthetic_observation() {
         .run();
 
     assert_eq!(finished.code, Some(0), "stderr: {}", finished.stderr);
-    assert!(!home.join("sessions").exists(), "ephemeral run wrote a manifest");
+    assert!(
+        !home.join("sessions").exists(),
+        "ephemeral run wrote a manifest"
+    );
     assert_eq!(execution_observation_count(&home), 0);
 }
