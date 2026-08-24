@@ -1,18 +1,13 @@
-//! The reading half of the terminal surface.
+//! The interactive terminal surface.
 //!
-//! The writing half is [`crate::render`]. They are never live at the same
-//! time, and that is the point rather than an implementation detail:
-//! `ARCHITECTURE.md` R12 says exactly one component writes to the terminal,
-//! and a line editor is a writer — it paints a prompt, redraws on every
-//! keystroke and clears what it drew. The editor lock is held for one read and
-//! released before the turn renders; a permission read likewise begins only
-//! after the renderer's current write. See
-//! `docs/decisions/2026-08-22-the-seat-reads-before-the-screen-writes.md` §2.
+//! One dedicated thread owns Reedline for the lifetime of a terminal session.
+//! Rendered rows enter through Reedline's bounded external printer, so editing
+//! and transcript output stay live without creating a second terminal writer.
 
 mod keys;
 mod seat;
 
-pub use seat::Seat;
+pub use seat::{EditPhase, Seat, SurfaceEditMode, SurfaceOutput, SurfacePhase};
 
 use reedline::Signal;
 
@@ -51,23 +46,27 @@ pub enum Line {
     Ended,
     /// A key bound to something this build does not have, named.
     Refused(&'static str),
+    /// An editor event addressed to the host, never submitted as prompt text.
+    HostCommand(String),
+    /// A host lifecycle wake carrying the exact composer buffer.
+    ExternalBreak(String),
 }
 
 impl Line {
     /// Read the editor's answer as one of ours.
     ///
-    /// [`Line::Refused`] is not produced here, and deliberately cannot be.
-    /// reedline 0.44's `ExecuteHostCommand` exits as `Signal::Success(text)`
-    /// — the same arm a person typing that exact text produces — so a
-    /// sentinel string would be a key that a prompt could impersonate. The
-    /// refusal travels on its own channel instead ([`keys::Intercept`]), and
-    /// the reader consults that before this.
+    /// [`Line::Refused`] is produced by the key interception path before this
+    /// conversion. Host and lifecycle signals retain distinct owned variants,
+    /// so neither can be mistaken for submitted input.
     pub fn of(signal: Signal) -> Self {
         match signal {
             Signal::Success(text) if text.trim().is_empty() => Self::Blank,
             Signal::Success(text) => Self::Submitted(text),
             Signal::CtrlC => Self::Interrupted,
             Signal::CtrlD => Self::Ended,
+            Signal::HostCommand(command) => Self::HostCommand(command),
+            Signal::ExternalBreak(buffer) => Self::ExternalBreak(buffer),
+            _ => Self::Ended,
         }
     }
 }
@@ -190,5 +189,87 @@ mod tests {
                 "{typed:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod live_surface_red {
+    use super::*;
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    use reedline::{EditMode, Emacs, ReedlineEvent, ReedlineRawEvent};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    #[test]
+    fn host_lifecycle_signals_have_owned_line_variants() {
+        assert!(matches!(
+            Line::of(Signal::HostCommand("permission".into())),
+            Line::HostCommand(_)
+        ));
+        assert!(matches!(
+            Line::of(Signal::ExternalBreak("draft".into())),
+            Line::ExternalBreak(_)
+        ));
+    }
+
+    #[test]
+    fn edit_mode_reads_shared_busy_phase_and_delegates_idle_and_characters() {
+        let phase = SurfacePhase::new(EditPhase::Busy);
+        let mut mode = SurfaceEditMode::new(Emacs::default(), phase.clone());
+        let enter = ReedlineRawEvent::try_from(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )))
+        .unwrap();
+        assert!(matches!(mode.parse_event(enter), ReedlineEvent::None));
+        phase.set(EditPhase::Idle);
+        let enter = ReedlineRawEvent::try_from(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        )))
+        .unwrap();
+        assert!(matches!(mode.parse_event(enter), ReedlineEvent::Enter));
+        let character = ReedlineRawEvent::try_from(Event::Key(KeyEvent::new(
+            KeyCode::Char('x'),
+            KeyModifiers::NONE,
+        )))
+        .unwrap();
+        assert!(!matches!(mode.parse_event(character), ReedlineEvent::None));
+    }
+
+    #[test]
+    fn surface_output_frames_rows_and_blocks_on_capacity_until_drained() {
+        let (sender, receiver) = crossbeam::channel::bounded(1);
+        let cancel = ego_core::turn::CancelToken::new();
+        let output = SurfaceOutput::new(sender, cancel.clone());
+        let (done_tx, done_rx) = mpsc::sync_channel(0);
+        std::thread::scope(|scope| {
+            let (started_tx, started_rx) = mpsc::sync_channel(0);
+            scope.spawn(move || {
+                let mut producer = output;
+                started_tx.send(()).unwrap();
+                producer.write("first\nsecond").unwrap();
+                producer.write("\nthird").unwrap();
+                producer.finish().unwrap();
+                done_tx.send(()).unwrap();
+            });
+            started_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("producer did not start");
+            assert!(done_rx.recv_timeout(Duration::from_millis(50)).is_err());
+            assert_eq!(receiver.recv().unwrap(), "first\n");
+            assert_eq!(receiver.recv().unwrap(), "second\n");
+            assert_eq!(receiver.recv().unwrap(), "third");
+            assert!(done_rx.recv_timeout(Duration::from_secs(1)).is_ok());
+        });
+        drop(receiver);
+        let (sender, receiver) = crossbeam::channel::bounded(1);
+        let mut disconnected = SurfaceOutput::new(sender, cancel.clone());
+        drop(receiver);
+        assert!(disconnected.write("after disconnect\n").is_err());
+        assert_eq!(
+            cancel.cause(),
+            Some(ego_core::event::domain::CancelCause::Host)
+        );
     }
 }

@@ -6,6 +6,7 @@ members = [
     "crates/ego-acp",
     "crates/ego-cli",
 ]
+exclude = ["vendor/reedline"]
 resolver = "3"
 
 [workspace.package]
@@ -27,7 +28,11 @@ edition = "2024"
 # `crates/ego-cli/src/cli.rs` and `src/config.rs`. Stabilised in the same
 # release, so it costs nothing on top, but it means the floor cannot drop back
 # to 1.86 by removing the dependency alone.
-rust-version = "1.88"
+#
+# 1.95 for Reedline 0.51.0, whose host-break and repaint handles are the final
+# live-surface control boundary. The repository-local copy preserves that
+# authoritative floor; see the 2026-08-25 live-surface dependency ADR.
+rust-version = "1.95"
 license = "MIT"
 publish = false
 

@@ -22,6 +22,29 @@ use serde::Serialize;
 
 use crate::DISPLAY_NAME;
 use crate::render::{Answer, Capabilities};
+use crate::repl::SurfaceOutput;
+
+/// The CLI-owned output boundary used by text rendering and diagnostics.
+/// Headless output keeps stdout/stderr split; an interactive implementation
+/// frames both through Reedline's sole terminal writer.
+pub trait Diagnostics: Send + Sync {
+    fn note(&self, message: &str);
+}
+
+pub trait TextOutput: Diagnostics {
+    fn write(&self, text: &str);
+    fn line(&self, text: &str);
+    fn finish(&self) {}
+}
+
+/// The unchanged diagnostic adapter for non-interactive callers.
+pub struct Stderr;
+
+impl Diagnostics for Stderr {
+    fn note(&self, message: &str) {
+        note(message);
+    }
+}
 
 /// The exclusive owner of the process's standard output.
 ///
@@ -118,6 +141,57 @@ impl Stdout {
     }
 }
 
+impl Diagnostics for Stdout {
+    fn note(&self, message: &str) {
+        note(message);
+    }
+}
+
+impl TextOutput for Stdout {
+    fn write(&self, text: &str) {
+        Stdout::write(self, text);
+    }
+
+    fn line(&self, text: &str) {
+        Stdout::line(self, text);
+    }
+}
+
+/// Interactive text and diagnostics serialized into complete logical rows.
+pub struct InteractiveOutput {
+    inner: Mutex<SurfaceOutput>,
+}
+
+impl InteractiveOutput {
+    pub fn new(output: SurfaceOutput) -> Self {
+        Self {
+            inner: Mutex::new(output),
+        }
+    }
+}
+
+impl Diagnostics for InteractiveOutput {
+    fn note(&self, message: &str) {
+        self.line(&format!("{DISPLAY_NAME}: {message}"));
+    }
+}
+
+impl TextOutput for InteractiveOutput {
+    fn write(&self, text: &str) {
+        let _ = self.inner.lock().expect("surface output lock").write(text);
+    }
+
+    fn line(&self, text: &str) {
+        let mut output = self.inner.lock().expect("surface output lock");
+        let _ = output.write(text);
+        let _ = output.write("\n");
+    }
+
+    fn finish(&self) {
+        let _ = self.inner.lock().expect("surface output lock").finish();
+    }
+}
+
 /// A diagnostic. Always stderr, in every mode, with no exception — which is
 /// why it does not take a [`Stdout`] and could not use one if it wanted to.
 pub fn note(message: &str) {
@@ -167,7 +241,7 @@ impl EventSink for JsonlSink<'_> {
 /// that is *about* the run rather than *of* it — tool calls, errors — goes to
 /// stderr, for the same reason a progress bar does.
 pub struct TextSink<'a> {
-    out: &'a Stdout,
+    out: &'a dyn TextOutput,
     quiet: bool,
     /// The answer being written, and whether it has left a partial line
     /// outstanding so the run can close it before anything else is printed.
@@ -190,7 +264,7 @@ struct Streaming {
 }
 
 impl<'a> TextSink<'a> {
-    pub fn new(out: &'a Stdout, quiet: bool, capabilities: Capabilities) -> Self {
+    pub fn new(out: &'a dyn TextOutput, quiet: bool, capabilities: Capabilities) -> Self {
         TextSink {
             out,
             quiet,
@@ -308,7 +382,7 @@ impl EventSink for TextSink<'_> {
             } if !self.quiet => {
                 self.finish();
                 let args = text.as_deref().unwrap_or("");
-                note(&format!("{name} {args}"));
+                self.out.note(&format!("{name} {args}"));
             }
             // Deliberately **not** gated on `quiet`. `-q` is presentation —
             // CLI.md §1.3 pairs it with `--no-color` and calls it "quiet
@@ -334,12 +408,12 @@ impl EventSink for TextSink<'_> {
                 drop(last);
                 if let Some(message) = message {
                     self.finish();
-                    note(&message);
+                    self.out.note(&message);
                 }
             }
             PublicEvent::Error { message, .. } => {
                 self.finish();
-                note(message);
+                self.out.note(message);
             }
             _ => {}
         }

@@ -27,6 +27,10 @@ clap = { version = "4.6.6", features = ["derive"] }
 # and the types match; if reedline bumps its major, this fails to compile —
 # loudly, which is the point of pinning it here rather than guessing.
 crossterm = "0.29.0"
+# The live surface retains only this sender half of Reedline's bounded external
+# printer. Naming the direct dependency is deliberate: keeping an
+# `ExternalPrinter` clone would also keep a receiver alive and hide disconnect.
+crossbeam = "0.8.2"
 futures = "0.3.34"
 fd-lock = "4.0.4"
 jsonschema = "0.49.9"
@@ -60,7 +64,7 @@ uuid = { version = "1.24.1", features = ["v4", "v5"] }
 # `system_clipboard` is *not* a default either, so plain `Ctrl+V` arrives
 # unbound and there is no binding to displace — see
 # `docs/decisions/2026-08-22-the-seat-reads-before-the-screen-writes.md` §3.
-reedline = { version = "0.44.0", default-features = false }
+reedline = { path = "../../vendor/reedline", version = "0.51.0", default-features = false, features = ["external_printer"] }
 unicode-width = "0.2.2"
 unicode-segmentation = "1.13.3"
 terminal_size = "0.4.4"
@@ -74,6 +78,7 @@ tempfile = "3.27.0"
 # handed on without being copied. Dev-only: nothing in this crate's own code
 # constructs a response.
 bytes = "1.10"
+portable-pty = "0.9.0"
 
 [lints]
 workspace = true

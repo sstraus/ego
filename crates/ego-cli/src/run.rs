@@ -41,7 +41,9 @@ use serde_json::Value;
 
 use crate::budget;
 use crate::cli::{Args, Output, SessionChoice, UsageError};
-use crate::output::{JsonlSink, Report, Stdout, TextSink, note};
+use crate::output::{
+    Diagnostics, InteractiveOutput, JsonlSink, Report, Stderr, Stdout, TextOutput, TextSink, note,
+};
 use crate::render::caps::{Capabilities, Environment, Terminal};
 use crate::render::osc::{Osc, Progress, State};
 use crate::session::{self, Opened};
@@ -154,22 +156,58 @@ pub async fn interactive(args: Args, out: &Stdout, cancel: CancelToken) -> Ended
     let quiet = args.quiet;
     let environment = Environment::read();
     let capabilities = Capabilities::of(&Terminal::from_process(args.no_color, &environment));
-    let text_sink = TextSink::new(out, quiet, capabilities);
+    let (seat, surface) = match repl::Seat::new(cancel.clone()) {
+        Ok(built) => built,
+        Err(err) => {
+            return Ended::refused(RunTermination::Failed {
+                message: format!("could not start the terminal owner: {err}"),
+            });
+        }
+    };
+    let seat = Arc::new(seat);
 
-    let seat: Arc<dyn InteractiveSeat> = Arc::new(repl::Seat::new());
-    let announce = Announce::new(out, capabilities, quiet);
+    if let Some(surface) = surface {
+        let output = InteractiveOutput::new(surface);
+        let ended = interactive_through(
+            args,
+            cancel,
+            Arc::clone(&seat),
+            capabilities,
+            quiet,
+            &output,
+        )
+        .await;
+        output.finish();
+        seat.shutdown();
+        drop(output);
+        seat.join();
+        ended
+    } else {
+        interactive_through(args, cancel, Arc::clone(&seat), capabilities, quiet, out).await
+    }
+}
 
+async fn interactive_through(
+    args: Args,
+    cancel: CancelToken,
+    seat: Arc<repl::Seat>,
+    capabilities: Capabilities,
+    quiet: bool,
+    output: &dyn TextOutput,
+) -> Ended {
+    let text_sink = TextSink::new(output, quiet, capabilities);
+    let announce = Announce::new(output, capabilities, quiet);
+    let interactive_seat: Arc<dyn InteractiveSeat> = seat;
     let ended = converse(
         args,
         |_| &text_sink as &dyn EventSink,
         cancel,
-        seat,
-        // Between turns: draw the block the renderer was holding back, and
-        // close the line, so the next prompt starts on a row of its own.
+        interactive_seat,
+        output,
         &|| text_sink.finish(),
     )
     .await;
-
+    text_sink.finish();
     announce.closing(&ended.termination);
     ended
 }
@@ -195,7 +233,7 @@ pub async fn interactive(args: Args, out: &Stdout, cancel: CancelToken) -> Ended
 /// returns from the moment ego exits. They belong to the REPL, which is also
 /// where a prompt to mark exists at all.
 struct Announce<'a> {
-    out: &'a Stdout,
+    out: &'a dyn TextOutput,
     osc: Osc,
     quiet: bool,
     started: std::time::Instant,
@@ -211,7 +249,7 @@ struct Announce<'a> {
 const NOTIFY_AFTER: Duration = Duration::from_secs(60);
 
 impl<'a> Announce<'a> {
-    fn new(out: &'a Stdout, capabilities: Capabilities, quiet: bool) -> Self {
+    fn new(out: &'a dyn TextOutput, capabilities: Capabilities, quiet: bool) -> Self {
         Announce {
             out,
             osc: Osc::new(capabilities),
@@ -343,7 +381,7 @@ pub async fn run_with<S: EventSink>(
     destination: impl FnOnce(&ModelCapabilities) -> S,
     cancel: CancelToken,
 ) -> Ended {
-    match execute(args, destination, cancel, Driver::Once).await {
+    match execute(args, destination, cancel, Driver::Once, &Stderr).await {
         Ok(ended) => ended,
         Err(refusal) => Ended::refused(refusal),
     }
@@ -360,6 +398,7 @@ pub async fn converse<S: EventSink>(
     destination: impl FnOnce(&ModelCapabilities) -> S,
     cancel: CancelToken,
     seat: Arc<dyn InteractiveSeat>,
+    diagnostics: &dyn Diagnostics,
     between: &(dyn Fn() + Send + Sync),
 ) -> Ended {
     match execute(
@@ -367,6 +406,7 @@ pub async fn converse<S: EventSink>(
         destination,
         cancel,
         Driver::Interactive { seat, between },
+        diagnostics,
     )
     .await
     {
@@ -475,6 +515,7 @@ fn instructions(
     args: &Args,
     root: &Path,
     cwd: &Path,
+    diagnostics: &dyn Diagnostics,
 ) -> Result<Option<SystemPrompt>, UsageError> {
     if let Some(text) = &args.system {
         // `--system` replaces the prompt outright (`CLI.md` §3), so no file
@@ -497,7 +538,7 @@ fn instructions(
         .map_err(|err| UsageError(err.to_string()))?;
 
     for skipped in &set.skipped {
-        note(&format!(
+        diagnostics.note(&format!(
             "{} was not used: {}",
             skipped.path.display(),
             skipped.reason
@@ -608,7 +649,11 @@ struct Settings {
 }
 
 /// The command line and the config layers, resolved into one answer.
-fn settings(args: &Args, trust_for: impl FnOnce(&Path) -> Trust) -> Result<Settings, UsageError> {
+fn settings(
+    args: &Args,
+    trust_for: impl FnOnce(&Path) -> Trust,
+    diagnostics: &dyn Diagnostics,
+) -> Result<Settings, UsageError> {
     let started = std::time::Instant::now();
     let timeout = match args.timeout.as_deref() {
         Some(spec) => Some(deadline(spec)?),
@@ -637,7 +682,7 @@ fn settings(args: &Args, trust_for: impl FnOnce(&Path) -> Trust) -> Result<Setti
     // travels into the gate, which publishes it on every `MeteringSelected`;
     // the token half has no such carrier, so it is said here.
     if let Some(asked) = effective.clamped.tokens {
-        note(&format!(
+        diagnostics.note(&format!(
             "the token ceiling of {asked} was reduced to {} by a system ceiling",
             effective
                 .ceilings
@@ -678,12 +723,23 @@ struct Materials {
 /// Gathered before a store is chosen and before a model is resolved, so a run
 /// naming a schema that will not compile or a tool this build does not have
 /// refuses without creating a session or reaching a network.
-fn materials(settings: &Settings, args: &Args, seeded: bool) -> Result<Materials, UsageError> {
+fn materials(
+    settings: &Settings,
+    args: &Args,
+    seeded: bool,
+    diagnostics: &dyn Diagnostics,
+) -> Result<Materials, UsageError> {
     let compiled = match args.schema.as_deref() {
         Some(spec) => Some(schema::Schema::compile(&prompt::at_file(spec)?)?),
         None => None,
     };
-    let system = instructions(&settings.effective, args, &settings.root, &settings.cwd)?;
+    let system = instructions(
+        &settings.effective,
+        args,
+        &settings.root,
+        &settings.cwd,
+        diagnostics,
+    )?;
     let registry = tools(args.tools.as_ref())?;
     // An interactive session may start with nothing to ask; a one-shot may
     // not. Same table otherwise.
@@ -923,12 +979,14 @@ async fn execute<S: EventSink>(
     destination: impl FnOnce(&ModelCapabilities) -> S,
     cancel: CancelToken,
     driver: Driver<'_>,
+    diagnostics: &dyn Diagnostics,
 ) -> Result<Ended, RunTermination> {
     let usage = |err: UsageError| RunTermination::UsageError {
         message: err.to_string(),
     };
 
-    let settings = settings(&args, |root| run_trust(&args, &driver, root)).map_err(usage)?;
+    let settings =
+        settings(&args, |root| run_trust(&args, &driver, root), diagnostics).map_err(usage)?;
     let Chosen {
         store: jsonl_store,
         id: session_id,
@@ -943,8 +1001,14 @@ async fn execute<S: EventSink>(
         &settings,
         &args,
         matches!(&driver, Driver::Interactive { .. }),
+        diagnostics,
     )
     .map_err(usage)?;
+    if !text.trim().is_empty()
+        && let Driver::Interactive { seat, .. } = &driver
+    {
+        seat.busy();
+    }
 
     let Settings {
         started,
@@ -1023,7 +1087,7 @@ async fn execute<S: EventSink>(
         None => Opened::Ephemeral(session::NullStore),
     };
     if let Some(note_text) = opened.repair_note() {
-        note(&note_text);
+        diagnostics.note(&note_text);
     }
 
     // Declared before `evidence`, and therefore dropped after it. The
@@ -1174,7 +1238,7 @@ async fn execute<S: EventSink>(
         Driver::Once => {
             let (process, observation) = guarded_exec(&confinement, &evidence, &cancel).await?;
             let mut loop_ = build!(opening, &cancel, process, observation);
-            let (termination, result) = turns.drive(&mut loop_, &text, &cancel).await;
+            let (termination, result) = turns.drive(&mut loop_, &text, &cancel, diagnostics).await;
 
             Ok(Ended {
                 termination,
@@ -1198,9 +1262,9 @@ async fn execute<S: EventSink>(
             let mut seeded = (!text.trim().is_empty()).then(|| text.clone());
 
             loop {
-                // The editor is the only writer while it reads, and no read
-                // remains active while the turn renders. R12, held by
-                // construction rather than by care.
+                // The terminal owner keeps its next read active while this
+                // coordinator drives the turn; output returns through that
+                // same owner's bounded painter channel.
                 let line = match seeded.take() {
                     Some(first) => repl::Line::Submitted(first),
                     None => seat.read(),
@@ -1215,9 +1279,11 @@ async fn execute<S: EventSink>(
                     repl::Line::Interrupted => continue,
                     repl::Line::Ended => break,
                     repl::Line::Refused(why) => {
-                        note(why);
+                        diagnostics.note(why);
                         continue;
                     }
+                    repl::Line::HostCommand(_) => continue,
+                    repl::Line::ExternalBreak(_) => break,
                 };
 
                 // Per turn, for the reason `build` documents.
@@ -1225,7 +1291,9 @@ async fn execute<S: EventSink>(
                 let (process, observation) =
                     guarded_exec(&confinement, &evidence, &turn_cancel).await?;
                 let mut loop_ = build!(state, &turn_cancel, process, observation);
-                let (termination, result) = turns.drive(&mut loop_, &asked, &turn_cancel).await;
+                let (termination, result) = turns
+                    .drive(&mut loop_, &asked, &turn_cancel, diagnostics)
+                    .await;
                 state = loop_.into_state();
                 between();
 
@@ -1287,6 +1355,7 @@ pub trait Reads {
 /// The two explicit decisions only a human-driven run may make.
 pub trait InteractiveSeat: Reads + std::fmt::Debug + Send + Sync {
     fn has_human(&self) -> bool;
+    fn busy(&self) {}
     fn trust(&self, workspace: &Path) -> Trust;
     fn permission(&self, request: &PermissionRequest) -> PermissionDecision;
 }
@@ -1324,6 +1393,7 @@ impl Turns<'_> {
         loop_: &mut TurnLoop<'_>,
         first: &str,
         cancel: &CancelToken,
+        diagnostics: &dyn Diagnostics,
     ) -> (RunTermination, Value) {
         let mut prompt = first.to_string();
         let mut taken: u32 = 0;
@@ -1352,7 +1422,7 @@ impl Turns<'_> {
             match schema.check(&answer) {
                 Ok(document) => return (RunTermination::Done, document),
                 Err(invalid) => {
-                    note(&format!("the answer did not validate: {invalid}"));
+                    diagnostics.note(&format!("the answer did not validate: {invalid}"));
                     if left == 0 {
                         return (RunTermination::TaskFailed, Value::String(answer));
                     }

@@ -1,0 +1,21 @@
+# εgo's Reedline source pin
+
+This directory is the published `reedline` 0.51.0 crate from tag `v0.51.0`,
+VCS revision `1a9a8d5512ba59b75a5f55e6322f3c2a2abb640e`. The upstream MIT license is
+preserved in `LICENSE`.
+
+The source is carried locally because regression case depends on the current public
+host-break, repaint, and bounded external-printer APIs, while the published
+external-printer painter still reconstructs its pre-print cursor movement from
+UTF-8 byte counts. That corrupts narrow layouts containing combining or wide
+graphemes and can divide by a transient zero terminal width.
+
+The permitted local delta is intentionally narrow:
+
+- position external output from the painter's tracked prompt anchor instead of
+  estimating rows from buffer bytes or display-width division;
+- add regression coverage for narrow, combining, wide, and zero-width cases.
+
+Do not add εgo policy, DTOs, input handling, or rendering to this crate. The
+decision and replacement condition are recorded in
+`docs/decisions/2026-08-25-the-live-surface-pins-a-corrected-reedline.md`.

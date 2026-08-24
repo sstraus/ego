@@ -118,6 +118,17 @@ pub fn paced(content: &str, pause: Duration) -> Reply {
     }
 }
 
+/// A paced assistant delta followed by one complete write call.
+pub fn paced_tool_call(id: &str, name: &str, arguments: &str, pause: Duration) -> Reply {
+    Reply::Paced {
+        head: "data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"finish_reason\":null}]}\n\n\
+                data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"STREAMED-BEFORE-TOOL\"},\"finish_reason\":null}]}\n\n"
+            .to_string(),
+        tail: tool_call(id, name, arguments),
+        pause,
+    }
+}
+
 /// An SSE transcript asking for one tool call and stopping.
 pub fn tool_call(id: &str, name: &str, arguments: &str) -> String {
     let arguments = serde_json::to_string(arguments).expect("a string is serialisable");
@@ -393,6 +404,25 @@ impl Finished {
 }
 
 impl Ego {
+    /// Build the real binary command for a PTY test, preserving the same
+    /// cleared environment and temporary-directory ownership as `run`.
+    pub fn pty_command(&self) -> portable_pty::CommandBuilder {
+        let mut command = portable_pty::CommandBuilder::new(env!("CARGO_BIN_EXE_ego"));
+        command.env_clear();
+        command.env("HOME", &self.home);
+        command.env("EGO_HOME", &self.home);
+        command.env("PATH", "/usr/bin:/bin");
+        for (key, value) in &self.env {
+            command.env(key, value);
+        }
+        command.cwd(&self.workspace);
+        if !self.subcommand.is_empty() {
+            command.arg(&self.subcommand);
+        }
+        command.args(&self.args);
+        command
+    }
+
     /// A run against `stub`, in an empty workspace, with an empty home.
     pub fn against(stub: &Stub) -> Self {
         let home = tempfile::tempdir().expect("a temp dir");
