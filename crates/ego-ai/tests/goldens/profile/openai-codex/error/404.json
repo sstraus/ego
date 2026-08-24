@@ -1,0 +1,6 @@
+{
+  "error": {
+    "message": "openai-codex: model not found",
+    "type": "not_found_error"
+  }
+}

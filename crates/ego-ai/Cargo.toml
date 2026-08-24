@@ -10,6 +10,8 @@ publish.workspace = true
 ego-core.workspace = true
 futures = "0.3.34"
 bytes = "1.10"
+base64 = "0.22.1"
+sha2 = "0.10.9"
 serde = { version = "1.0.229", features = ["derive"] }
 # `raw_value` is declared here rather than relied on through another crate's
 # feature unification: `wire/` and `pricing/` both hold a `RawValue` to keep

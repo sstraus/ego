@@ -51,17 +51,25 @@
 //! an inert field. `docs/15-provider-contract-audit.md` §3 is where that
 //! argument lives in full.
 
-use ego_ai::wire::{ollama, openai_completions};
+use ego_ai::provider::XAI_BASE;
+use ego_ai::wire::{
+    RequestTarget, WireFormat, ollama, openai_codex_responses, openai_completions, xai_responses,
+};
 use ego_core::generator::types::{
     ContentBlock, Conversation, GenRequest, Message, Role, ThinkingLevel, ToolDescriptor,
 };
+use url::Url;
 
-/// The two mappings this build serialises a request with, named by module.
+/// The mappings this build serialises a request with, named by module.
 ///
-/// `openai-completions` is what the OpenAI, xAI and OpenRouter rows send;
-/// `ollama` is the daemon's own. There is no third, and
-/// [`the_table_names_only_mappings_this_build_has`] keeps that true.
+/// `openai-completions` is what the OpenAI and OpenRouter rows send and what
+/// the API-key xAI candidate is tested against; `ollama` is the daemon's own;
+/// `openai-codex-responses` and `xai-responses` are distinct current
+/// subscription contracts with distinct paths.
+/// [`the_table_names_only_mappings_this_build_has`] keeps the table aligned.
 const OPENAI_COMPLETIONS: &str = "wire::openai_completions";
+const OPENAI_CODEX_RESPONSES: &str = "wire::openai_codex_responses";
+const XAI_RESPONSES: &str = "wire::xai_responses";
 const OLLAMA: &str = "wire::ollama";
 
 /// One spelling a vendor has retired, and the mapping forbidden to send it.
@@ -110,6 +118,51 @@ const RETIRED: &[Retired] = &[
         key: "seed",
         mapping: OPENAI_COMPLETIONS,
         why: "marked `deprecated: true` with no replacement named",
+    },
+    Retired {
+        key: "max_tokens",
+        mapping: OPENAI_CODEX_RESPONSES,
+        why: "Codex Responses takes `max_output_tokens`; `max_tokens` is the \
+              Chat Completions spelling this mapping must not inherit",
+    },
+    Retired {
+        key: "functions",
+        mapping: OPENAI_CODEX_RESPONSES,
+        why: "Codex Responses takes `tools`; `functions` is the retired Chat \
+              Completions spelling",
+    },
+    Retired {
+        key: "function_call",
+        mapping: OPENAI_CODEX_RESPONSES,
+        why: "a request-body *key* named `function_call` is the retired Chat \
+              Completions tool-choice spelling; the Responses input item uses \
+              `type: \"function_call\"`, which is a value, not this key",
+    },
+    Retired {
+        key: "messages",
+        mapping: OPENAI_CODEX_RESPONSES,
+        why: "Codex Responses takes `input` and `instructions`; `messages` is \
+              the Chat Completions conversation field",
+    },
+    Retired {
+        key: "max_tokens",
+        mapping: XAI_RESPONSES,
+        why: "xAI Responses takes `max_output_tokens`; `max_tokens` is the retired Chat Completions spelling",
+    },
+    Retired {
+        key: "functions",
+        mapping: XAI_RESPONSES,
+        why: "xAI Responses takes `tools`; `functions` is the retired Chat Completions spelling",
+    },
+    Retired {
+        key: "function_call",
+        mapping: XAI_RESPONSES,
+        why: "xAI Responses represents calls as typed input items; a `function_call` request key is the retired Chat Completions spelling",
+    },
+    Retired {
+        key: "messages",
+        mapping: XAI_RESPONSES,
+        why: "xAI Responses takes `input`; `messages` is the deprecated Chat Completions conversation field",
     },
 ];
 
@@ -171,6 +224,8 @@ fn bodies() -> Vec<(&'static str, serde_json::Value)> {
     let req = widest_request();
     let openai = openai_completions::request_body(&req).expect("expressible on this mapping");
     let ollama = ollama::request_body(&req).expect("expressible on this mapping");
+    let codex = openai_codex_responses::request_body(&req).expect("expressible on this mapping");
+    let xai = xai_responses::request_body(&req).expect("high effort is current on grok-4.6");
     vec![
         (
             OPENAI_COMPLETIONS,
@@ -179,6 +234,14 @@ fn bodies() -> Vec<(&'static str, serde_json::Value)> {
         (
             OLLAMA,
             serde_json::from_slice(&ollama).expect("the body is valid JSON"),
+        ),
+        (
+            OPENAI_CODEX_RESPONSES,
+            serde_json::from_slice(&codex).expect("the body is valid JSON"),
+        ),
+        (
+            XAI_RESPONSES,
+            serde_json::from_slice(&xai).expect("the body is valid JSON"),
         ),
     ]
 }
@@ -321,10 +384,42 @@ fn the_table_names_only_mappings_this_build_has() {
 #[test]
 fn the_current_usage_precondition_survives_a_members_deprecation_of_it() {
     for (mapping, body) in bodies() {
+        if mapping == OPENAI_CODEX_RESPONSES || mapping == XAI_RESPONSES {
+            assert!(
+                body.get("stream_options").is_none(),
+                "{mapping} is Responses, which reports usage on \
+                 response.completed and does not take stream_options"
+            );
+            continue;
+        }
         assert_eq!(
             body["stream_options"],
             serde_json::json!({ "include_usage": true }),
             "{mapping} must still ask for the usage chunk"
         );
     }
+}
+
+/// Endpoint and request guards for the OAuth row xAI now serves through its
+/// current Responses contract. A future change back to Chat Completions or to
+/// Codex's private backend must fail here even if its body happens to decode.
+#[test]
+fn xai_oauth_cannot_regress_to_a_legacy_or_codex_endpoint() {
+    assert_eq!(XAI_BASE, "https://api.x.ai/v1/");
+    assert_eq!(xai_responses::PATH, "responses");
+    let base = Url::parse(XAI_BASE).expect("the built-in xAI base parses");
+    let headers = vec![("authorization".to_string(), "Bearer test".to_string())];
+    let target = RequestTarget::new(&base, &headers);
+    let built = xai_responses::XaiResponses
+        .build_request(&target, &widest_request())
+        .expect("the widest current request is expressible");
+    assert_eq!(built.url.as_str(), "https://api.x.ai/v1/responses");
+    assert!(!built.url.as_str().contains("chat/completions"));
+    assert!(!built.url.as_str().contains("codex"));
+    assert!(
+        !built
+            .headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("openai-beta"))
+    );
 }

@@ -1,0 +1,24 @@
+{
+  "body": {
+    "model": "grok-4.6",
+    "stream": true,
+    "store": false,
+    "input": [
+      {
+        "role": "user",
+        "content": "Reply with the single word: ok"
+      }
+    ],
+    "reasoning": {
+      "effort": "low"
+    },
+    "max_output_tokens": 16
+  },
+  "header_names": [
+    "content-type",
+    "accept",
+    "authorization"
+  ],
+  "method": "Post",
+  "url": "https://api.x.ai/v1/responses"
+}

@@ -1,0 +1,9 @@
+: captured-client-derived from earendil-works/pi@4af9d21d3b4d664e4a29fcabfec85171077248e3 (read 2026-08-24)
+: provider github-copilot, ego 0.1.0
+data: {"id":"chatcmpl-github-copilot-text","object":"chat.completion.chunk","model":"gpt-4.1","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":null}],"usage":null}
+
+data: {"id":"chatcmpl-github-copilot-text","object":"chat.completion.chunk","model":"gpt-4.1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":null}
+
+data: {"id":"chatcmpl-github-copilot-text","object":"chat.completion.chunk","model":"gpt-4.1","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12,"prompt_tokens_details":{"cached_tokens":3},"completion_tokens_details":{"reasoning_tokens":0}}}
+
+data: [DONE]

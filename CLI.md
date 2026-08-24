@@ -62,7 +62,7 @@ Notes:
 ### 2.1 Availability — what ships today
 
 The same discipline as §3.1, and it was missing here until 2026-08-21. §2 lists
-fourteen commands; this build implements **four**. The other ten used to
+fourteen commands; this build implements **five**. The other nine used to
 reach the *interactive* refusal, so `ego resume` was answered with a sentence
 about the permission dialog — true, and about a surface the caller had not
 asked for. They are now refused **by name**, each naming what it waits on, from
@@ -93,7 +93,7 @@ omitted when empty: two states, identical bytes.
 | `ego export` | no | replay and export with `--sanitize` (**M3**). The projection exists; the redaction contract that makes an exported session safe to hand over does not |
 | `ego mcp` | no | the MCP client (**M2**). There is no server to add, remove or log in to |
 | `ego mcp-server` | no | ego's own MCP server surface (**M2**): the scoped run/continue/cancel/status tools it would expose |
-| `ego auth` | no | a credential store. Every provider names one environment variable (`CredentialStrategy::BearerFromEnv`), so there is nowhere for a login to put anything and nothing for a logout to remove |
+| `ego auth` | **yes** | `login\|logout\|status [PROVIDER]`; credentials live in one locked `$EGO_HOME/auth.json`, while TOML commands and discovered auth plugins can supply login tokens |
 | `ego models` | no | a catalogue to enumerate. Hosted facts are supplied and local ones are discovered per resolution (`docs/decisions/2026-08-21-what-a-model-resolves-to.md`), so this build resolves one model at a time and holds no list to print or refresh; generated catalogues are **M5** |
 | `ego config` | no | a config writer. The loader is strict and read-only, and nothing in this build writes a config file — `-c/--set` overrides one run |
 | `ego rules` | no | somewhere to keep a rule. The grammar and its stable IDs are built and `--allow`/`--deny` already reach the engine through them, so `ls` and `explain` have their material; what `allow`, `deny`, `revoke` and `remember` have nowhere to write to is a rule store — the same read-only loader `config` waits on |

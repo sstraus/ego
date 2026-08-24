@@ -17,10 +17,15 @@
 
 pub mod anthropic_messages;
 pub mod gemini_interactions;
+pub mod github_copilot_completions;
+pub mod nous_portal;
 pub mod ollama;
+pub mod openai_codex_responses;
 pub mod openai_completions;
 pub mod provider_cost;
+pub mod qwen_portal;
 pub mod sse;
+pub mod xai_responses;
 
 use std::fmt;
 use std::sync::Arc;
@@ -41,9 +46,9 @@ use provider_cost::ProviderCost;
 /// Two methods and no third, because the ADR's §2 split leaves a mapping with
 /// exactly two jobs. Everything a request needs that is *not* a fact about the
 /// shape — the address, the credential, whether this provider states a
-/// monetary total — arrives as a parameter from the profile. That is what
-/// makes OpenAI, OpenRouter, xAI and Ollama four profiles over one value of
-/// this trait rather than four branches inside it.
+/// monetary total — arrives as a parameter from the profile. Providers whose
+/// current bytes agree reuse one value; a real request or event difference is
+/// represented by a distinct value rather than a provider branch inside it.
 ///
 /// `Debug` because a [`ProviderRow`](crate::provider::ProviderRow) is
 /// `Debug` and a row worth logging must not lose which shape it speaks.

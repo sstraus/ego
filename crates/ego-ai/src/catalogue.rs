@@ -149,6 +149,10 @@ pub enum ResolveError {
         provider: String,
         known: Vec<String>,
     },
+    /// Authentication exists, but the provider's required wire mapping does
+    /// not. Kept distinct so callers cannot mistake login success for a
+    /// license to substitute a superficially similar protocol.
+    ProviderMappingUnavailable { provider: String, mapping: String },
     /// A hosted model with no supplied **capabilities**.
     ///
     /// Narrowed from "no pricing or capabilities" by
@@ -193,6 +197,10 @@ impl fmt::Display for ResolveError {
                 f,
                 "no provider `{provider}` is configured; known: {}",
                 known.join(", ")
+            ),
+            ResolveError::ProviderMappingUnavailable { provider, mapping } => write!(
+                f,
+                "provider `{provider}` is authenticated but cannot generate in this build: mapping `{mapping}` is not implemented"
             ),
             ResolveError::HostedModelNotConfigured { slug } => write!(
                 f,

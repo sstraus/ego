@@ -11,7 +11,9 @@
 
 use std::path::{Path, PathBuf};
 
-use ego_core::config::{ConfigError, ConfigLayer, Source, Sourced, Trust};
+use ego_core::config::{
+    AuthProviderLayer, ConfigError, ConfigLayer, Source, Sourced, Trust, resolve,
+};
 
 use crate::cli::{Args, UsageError};
 
@@ -30,6 +32,27 @@ pub fn ego_home() -> Option<PathBuf> {
         return Some(PathBuf::from(home));
     }
     std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".ego"))
+}
+
+/// Authentication configuration for `ego auth`.
+///
+/// The command has no workspace/trust flags, so only the system and user
+/// layers are eligible. Parsing and precedence are nevertheless exactly the
+/// same [`ConfigLayer`] and [`resolve`] path generation uses; authentication
+/// must not grow a second interpretation of `config.toml`.
+pub fn auth() -> Result<std::collections::HashMap<String, AuthProviderLayer>, UsageError> {
+    let mut found = Vec::new();
+    if let Some(system) = layer(Source::System, Path::new(SYSTEM_CONFIG))? {
+        found.push(system);
+    }
+    if let Some(home) = ego_home()
+        && let Some(user) = layer(Source::User, &home.join("config.toml"))?
+    {
+        found.push(user);
+    }
+    resolve(&found, Trust::Untrusted, None)
+        .map(|effective| effective.auth)
+        .map_err(|err| UsageError(err.to_string()))
 }
 
 /// Read one layer, or nothing if the file is not there.

@@ -1,0 +1,9 @@
+: captured-client-derived from NousResearch/hermes-agent@a0ca7c19204e514f9590ce3b812e029b315ab9e9 (read 2026-08-24)
+: provider qwen-oauth, ego 0.1.0
+data: {"id":"chatcmpl-qwen-oauth-text","object":"chat.completion.chunk","model":"qwen3-coder-plus","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":null}],"usage":null}
+
+data: {"id":"chatcmpl-qwen-oauth-text","object":"chat.completion.chunk","model":"qwen3-coder-plus","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":null}
+
+data: {"id":"chatcmpl-qwen-oauth-text","object":"chat.completion.chunk","model":"qwen3-coder-plus","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12,"prompt_tokens_details":{"cached_tokens":3},"completion_tokens_details":{"reasoning_tokens":0}}}
+
+data: [DONE]

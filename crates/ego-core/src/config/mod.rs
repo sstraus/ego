@@ -15,7 +15,7 @@ pub use discovery::{
     Refusal, Selection, Skipped, SystemPrompt, load, plan, system_prompt,
 };
 pub use error::ConfigError;
-pub use layer::{ConfigLayer, Mode, ModelRef, PermCfg, ProfileLayer};
+pub use layer::{AuthProviderLayer, ConfigLayer, Mode, ModelRef, PermCfg, ProfileLayer};
 pub use resolve::{Effective, Posture, resolve};
 pub use ruleset::{OriginSet, Ruleset, SourcedRule};
 pub use source::{Source, Sourced, Trust};

@@ -20,13 +20,20 @@ use std::sync::Arc;
 
 use url::Url;
 
-use crate::resolver::{ModelResolver, OllamaDaemon, Supplied, XaiLanguageModels};
+use crate::resolver::{
+    ModelResolver, OllamaDaemon, SubscriptionSupplied, Supplied, XaiLanguageModels,
+};
 use crate::wire::WireFormat;
 use crate::wire::anthropic_messages::AnthropicMessages;
 use crate::wire::gemini_interactions::GeminiInteractions;
+use crate::wire::github_copilot_completions::GithubCopilotCompletions;
+use crate::wire::nous_portal::NousPortal;
 use crate::wire::ollama::Ollama;
+use crate::wire::openai_codex_responses::OpenAiCodexResponses;
 use crate::wire::openai_completions::OpenAiCompletions;
 use crate::wire::provider_cost::{OpenRouterUsd, ProviderCost, XaiUsdTicks};
+use crate::wire::qwen_portal::QwenPortal;
+use crate::wire::xai_responses::XaiResponses;
 
 /// A credential. Prints as `<redacted>`, in every formatter, forever.
 ///
@@ -93,6 +100,17 @@ pub enum CredentialStrategy {
     /// first, because "which header" and "which scheme" are one fact per
     /// provider and a mapping never sees either.
     HeaderFromEnv { header: String, var: String },
+    /// A rotating credential in the caller-owned subscription store.
+    OAuth { provider: String },
+    /// A permanent key minted through OAuth, with an environment fallback.
+    OAuthOrEnv { provider: String, var: String },
+    /// Anthropic's API key and Claude subscription token are two wire
+    /// presentations selected by the credential prefix.
+    Anthropic {
+        provider: String,
+        api_key_var: String,
+        oauth_var: String,
+    },
 }
 
 impl CredentialStrategy {
@@ -113,22 +131,80 @@ impl CredentialStrategy {
         &self,
         creds: &dyn Credentials,
     ) -> Result<ResolvedCredential, MissingCredential> {
-        let header = match self {
+        let (headers, base_override) = match self {
             // Not an error and not an empty header: a provider that
             // authenticates nothing is a different fact from a key that is
             // missing, and collapsing them would make a misconfigured hosted
             // row look like a local daemon.
-            CredentialStrategy::None => None,
-            CredentialStrategy::BearerFromEnv { var } => Some((
-                "authorization".to_string(),
-                Secret::from(format!("Bearer {}", creds.secret(var)?.expose())),
-            )),
+            CredentialStrategy::None => (Vec::new(), None),
+            CredentialStrategy::BearerFromEnv { var } => (
+                vec![(
+                    "authorization".to_string(),
+                    Secret::from(format!("Bearer {}", creds.secret(var)?.expose())),
+                )],
+                None,
+            ),
             CredentialStrategy::HeaderFromEnv { header, var } => {
-                Some((header.clone(), creds.secret(var)?))
+                (vec![(header.clone(), creds.secret(var)?)], None)
+            }
+            CredentialStrategy::OAuth { provider } => {
+                let secret =
+                    creds
+                        .secret(&format!("oauth:{provider}"))
+                        .map_err(|_| MissingCredential {
+                            var: format!("ego auth login {provider}"),
+                        })?;
+                let base_override = crate::oauth::provider_base(provider, secret.expose())
+                    .map_err(|_| MissingCredential {
+                        var: format!("ego auth login {provider}"),
+                    })?;
+                (oauth_headers(provider, &secret)?, base_override)
+            }
+            CredentialStrategy::OAuthOrEnv { provider, var } => {
+                let secret = creds
+                    .secret(&format!("oauth:{provider}"))
+                    .or_else(|_| creds.secret(var))
+                    .map_err(|_| MissingCredential {
+                        var: format!("ego auth login {provider}"),
+                    })?;
+                (oauth_headers(provider, &secret)?, None)
+            }
+            CredentialStrategy::Anthropic {
+                provider,
+                api_key_var,
+                oauth_var,
+            } => {
+                let secret = creds
+                    .secret(&format!("oauth:{provider}"))
+                    .or_else(|_| creds.secret(oauth_var))
+                    .or_else(|_| creds.secret(api_key_var))
+                    .map_err(|_| MissingCredential {
+                        var: format!("ego auth login {provider}"),
+                    })?;
+                (oauth_headers("anthropic", &secret)?, None)
             }
         };
-        Ok(ResolvedCredential { header })
+        Ok(ResolvedCredential {
+            headers,
+            base_override,
+        })
     }
+}
+
+fn oauth_headers(
+    provider: &str,
+    secret: &Secret,
+) -> Result<Vec<(String, Secret)>, MissingCredential> {
+    crate::oauth::provider_auth(provider, secret.expose())
+        .map_err(|_| MissingCredential {
+            var: format!("ego auth login {provider}"),
+        })
+        .map(|auth| {
+            auth.headers()
+                .into_iter()
+                .map(|(name, value)| (name, Secret::from(value)))
+                .collect()
+        })
 }
 
 /// One provider's credential, resolved: the header it becomes, or nothing.
@@ -144,7 +220,8 @@ impl CredentialStrategy {
 /// structural.
 #[derive(Debug, Clone)]
 pub struct ResolvedCredential {
-    header: Option<(String, Secret)>,
+    headers: Vec<(String, Secret)>,
+    base_override: Option<Url>,
 }
 
 impl ResolvedCredential {
@@ -158,10 +235,14 @@ impl ResolvedCredential {
     /// This is the one place the secret is exposed, and it is exposed into a
     /// value the caller is about to put in a header.
     pub fn headers(&self) -> Vec<(String, String)> {
-        match &self.header {
-            None => Vec::new(),
-            Some((name, secret)) => vec![(name.clone(), secret.expose().to_string())],
-        }
+        self.headers
+            .iter()
+            .map(|(name, secret)| (name.clone(), secret.expose().to_string()))
+            .collect()
+    }
+
+    pub fn base_override(&self) -> Option<&Url> {
+        self.base_override.as_ref()
     }
 }
 
@@ -209,6 +290,9 @@ pub struct MissingCredential {
 
 impl fmt::Display for MissingCredential {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.var.starts_with("ego auth login ") {
+            return write!(f, "no stored subscription credential: run `{}`", self.var);
+        }
         write!(
             f,
             "no credential in {}: set it to the provider's API key",
@@ -249,6 +333,9 @@ pub struct ProviderRow {
     /// — a silently wrong address for a deployment shape that really exists.
     pub base: Url,
     pub credential: CredentialStrategy,
+    /// Non-secret identity headers declared by this profile. Credential and
+    /// wire-format headers are excluded and validated at configuration load.
+    pub extra_headers: Vec<(String, String)>,
     /// Which API shape this provider speaks.
     ///
     /// A `&'static dyn` and not an `Arc<dyn>` like [`cost`](Self::cost),
@@ -299,6 +386,8 @@ pub struct ProviderRow {
 
 /// The base OpenAI serves its API under.
 pub const OPENAI_BASE: &str = "https://api.openai.com/v1/";
+/// Codex subscription backend (Pi's `openai-codex` base, path joined by the mapping).
+pub const OPENAI_CODEX_BASE: &str = "https://chatgpt.com/backend-api/";
 /// The environment variable OpenAI's credential is read from.
 pub const OPENAI_KEY_VAR: &str = "OPENAI_API_KEY";
 /// The base a default Ollama install serves its openai-compatible API under.
@@ -315,6 +404,11 @@ pub const OPENROUTER_KEY_VAR: &str = "OPENROUTER_API_KEY";
 pub const ANTHROPIC_BASE: &str = "https://api.anthropic.com/v1/";
 /// The environment variable Anthropic's credential is read from.
 pub const ANTHROPIC_KEY_VAR: &str = "ANTHROPIC_API_KEY";
+pub const GITHUB_COPILOT_BASE: &str = "https://api.individual.githubcopilot.com/";
+pub const KIMI_CODING_BASE: &str = "https://api.kimi.com/coding/v1/";
+pub const QWEN_OAUTH_BASE: &str = "https://portal.qwen.ai/v1/";
+pub const MINIMAX_OAUTH_BASE: &str = "https://api.minimax.io/anthropic/v1/";
+pub const NOUS_BASE: &str = "https://inference-api.nousresearch.com/v1/";
 /// The base Google serves the Gemini developer API under.
 pub const GEMINI_BASE: &str = "https://generativelanguage.googleapis.com/v1beta/";
 /// The environment variable Gemini's credential is read from.
@@ -328,6 +422,22 @@ pub const GEMINI_KEY_VAR: &str = "GEMINI_API_KEY";
 /// attributing it to a version number neither provider publishes would be
 /// worse than attributing it to the day somebody looked.
 const READ_ON: &str = "2026-08-21";
+const XAI_RESPONSES_READ_ON: &str = "2026-08-24";
+
+static OPENAI_CODEX_SUBSCRIPTION: SubscriptionSupplied =
+    SubscriptionSupplied::new("ego/builtin/openai-codex-subscription/v1");
+static GITHUB_COPILOT_SUBSCRIPTION: SubscriptionSupplied =
+    SubscriptionSupplied::new("ego/builtin/github-copilot-subscription/v1");
+static XAI_OAUTH_SUBSCRIPTION: SubscriptionSupplied =
+    SubscriptionSupplied::new("ego/builtin/xai-oauth-subscription/v1");
+static KIMI_CODING_SUBSCRIPTION: SubscriptionSupplied =
+    SubscriptionSupplied::new("ego/builtin/kimi-coding-subscription/v1");
+static QWEN_OAUTH_SUBSCRIPTION: SubscriptionSupplied =
+    SubscriptionSupplied::new("ego/builtin/qwen-oauth-subscription/v1");
+static MINIMAX_OAUTH_SUBSCRIPTION: SubscriptionSupplied =
+    SubscriptionSupplied::new("ego/builtin/minimax-oauth-subscription/v1");
+static NOUS_SUBSCRIPTION: SubscriptionSupplied =
+    SubscriptionSupplied::new("ego/builtin/nous-subscription/v1");
 
 /// A URL made safe to [`Url::join`] a mapping's path onto.
 ///
@@ -367,6 +477,7 @@ impl ProviderRow {
         ProviderRow {
             id: "openai".to_string(),
             base: as_base(base),
+            extra_headers: Vec::new(),
             wire: &OpenAiCompletions,
             resolver: &Supplied,
             credential: CredentialStrategy::BearerFromEnv {
@@ -416,6 +527,7 @@ impl ProviderRow {
         ProviderRow {
             id: "ollama".to_string(),
             base: as_base(base),
+            extra_headers: Vec::new(),
             wire: &Ollama,
             resolver: &OllamaDaemon,
             credential: CredentialStrategy::None,
@@ -430,19 +542,17 @@ impl ProviderRow {
         Self::ollama(Url::parse(OLLAMA_BASE).expect("a constant this file controls"))
     }
 
-    /// The xAI row: the family's mapping, and a price asked rather than
-    /// written down.
+    /// The old API-key xAI candidate: legacy Chat Completions, never selectable.
     ///
     /// **A candidate, not a member.**
     /// `docs/decisions/2026-08-21-a-shared-shape-is-not-a-shared-contract.md`
-    /// §7 puts xAI on `openai-completions` from its published schema, and §9
-    /// is explicit that a provider whose conformance is read rather than
-    /// measured is not runnable: this row is deliberately absent from the
-    /// table `crates/ego-cli/src/model.rs` builds, so `--model xai/...` does
-    /// not resolve. It exists so the offline evidence — a schema-derived
-    /// conformance profile, and the price decoder's tests — has something to
-    /// be evidence *about*, and it becomes selectable when a live recording
-    /// exists.
+    /// §7 records that xAI has since deprecated this endpoint. This constructor
+    /// remains solely for the historical candidate audit and price-decoder
+    /// evidence. It is deliberately absent from the table
+    /// `crates/ego-cli/src/model.rs` builds, so `--model xai/...` does not
+    /// resolve; a live recording cannot promote a deprecated contract. The
+    /// selectable `xai-oauth` row below owns the current Responses mapping and
+    /// this constructor is not its fallback.
     ///
     /// [`XaiLanguageModels`] is what makes this row different from every other
     /// family member: alone among the six, xAI publishes what it will charge
@@ -451,6 +561,7 @@ impl ProviderRow {
         ProviderRow {
             id: "xai".to_string(),
             base: as_base(base),
+            extra_headers: Vec::new(),
             wire: &OpenAiCompletions,
             resolver: &XaiLanguageModels,
             credential: CredentialStrategy::BearerFromEnv {
@@ -465,9 +576,128 @@ impl ProviderRow {
         Self::xai(Url::parse(XAI_BASE).expect("a constant this file controls"))
     }
 
+    pub fn openai_codex_default() -> Self {
+        ProviderRow {
+            id: "openai-codex".to_string(),
+            base: as_base(Url::parse(OPENAI_CODEX_BASE).expect("a constant this file controls")),
+            extra_headers: vec![
+                ("originator".to_string(), "ego".to_string()),
+                ("user-agent".to_string(), "ego".to_string()),
+            ],
+            wire: &OpenAiCodexResponses,
+            resolver: &OPENAI_CODEX_SUBSCRIPTION,
+            credential: CredentialStrategy::OAuth {
+                provider: "openai-codex".to_string(),
+            },
+            cost: None,
+        }
+    }
+
+    pub fn github_copilot_default() -> Self {
+        ProviderRow {
+            id: "github-copilot".to_string(),
+            base: as_base(Url::parse(GITHUB_COPILOT_BASE).expect("a constant this file controls")),
+            extra_headers: vec![
+                (
+                    "user-agent".to_string(),
+                    "GitHubCopilotChat/0.35.0".to_string(),
+                ),
+                ("editor-version".to_string(), "vscode/1.107.0".to_string()),
+                (
+                    "editor-plugin-version".to_string(),
+                    "copilot-chat/0.35.0".to_string(),
+                ),
+                (
+                    "copilot-integration-id".to_string(),
+                    "vscode-chat".to_string(),
+                ),
+            ],
+            wire: &GithubCopilotCompletions,
+            resolver: &GITHUB_COPILOT_SUBSCRIPTION,
+            credential: CredentialStrategy::OAuth {
+                provider: "github-copilot".to_string(),
+            },
+            cost: None,
+        }
+    }
+
+    pub fn xai_oauth_default() -> Self {
+        ProviderRow {
+            id: "xai-oauth".to_string(),
+            base: as_base(Url::parse(XAI_BASE).expect("a constant this file controls")),
+            extra_headers: Vec::new(),
+            wire: &XaiResponses,
+            resolver: &XAI_OAUTH_SUBSCRIPTION,
+            credential: CredentialStrategy::OAuth {
+                provider: "xai-oauth".to_string(),
+            },
+            // Telemetry from the current Responses usage object. Resolution
+            // still installs subscription metering, so this never invents or
+            // settles a monetary subscription price.
+            cost: Some(Arc::new(XaiUsdTicks::new(XAI_RESPONSES_READ_ON))),
+        }
+    }
+
+    pub fn kimi_coding_default() -> Self {
+        ProviderRow {
+            id: "kimi-coding".to_string(),
+            base: as_base(Url::parse(KIMI_CODING_BASE).expect("a constant this file controls")),
+            extra_headers: Vec::new(),
+            wire: &AnthropicMessages,
+            resolver: &KIMI_CODING_SUBSCRIPTION,
+            credential: CredentialStrategy::OAuth {
+                provider: "kimi-coding".to_string(),
+            },
+            cost: None,
+        }
+    }
+
+    pub fn qwen_oauth_default() -> Self {
+        ProviderRow {
+            id: "qwen-oauth".to_string(),
+            base: as_base(Url::parse(QWEN_OAUTH_BASE).expect("a constant this file controls")),
+            extra_headers: Vec::new(),
+            wire: &QwenPortal,
+            resolver: &QWEN_OAUTH_SUBSCRIPTION,
+            credential: CredentialStrategy::OAuth {
+                provider: "qwen-oauth".to_string(),
+            },
+            cost: None,
+        }
+    }
+
+    pub fn minimax_oauth_default() -> Self {
+        ProviderRow {
+            id: "minimax-oauth".to_string(),
+            base: as_base(Url::parse(MINIMAX_OAUTH_BASE).expect("a constant this file controls")),
+            extra_headers: Vec::new(),
+            wire: &AnthropicMessages,
+            resolver: &MINIMAX_OAUTH_SUBSCRIPTION,
+            credential: CredentialStrategy::OAuth {
+                provider: "minimax-oauth".to_string(),
+            },
+            cost: None,
+        }
+    }
+
+    pub fn nous_default() -> Self {
+        ProviderRow {
+            id: "nous".to_string(),
+            base: as_base(Url::parse(NOUS_BASE).expect("a constant this file controls")),
+            extra_headers: Vec::new(),
+            wire: &NousPortal,
+            resolver: &NOUS_SUBSCRIPTION,
+            credential: CredentialStrategy::OAuth {
+                provider: "nous".to_string(),
+            },
+            cost: None,
+        }
+    }
+
     /// The OpenRouter row: the family's mapping, and a charge it states itself.
     ///
-    /// **A candidate, and the question that made it a sharp one is answered.**
+    /// The subscription-login decision promotes this row for both an
+    /// environment key and a key minted by built-in PKCE.
     /// The ADR's §7 flagged an open question about conformance check 1 that xAI
     /// does not raise: whether `usage.cost` arrives automatically or requires
     /// `usage: {include: true}` in the request body — because if it requires
@@ -480,11 +710,6 @@ impl ProviderRow {
     /// stays — it is current on the contract the mapping is derived from
     /// (`docs/15-provider-contract-audit.md` §3).
     ///
-    /// That is a document read, which is what `SchemaDerived` means, so the
-    /// row is still built, tested offline and unreachable from `--model`. What
-    /// changed is which gap remains: the ordinary schema-derived one every
-    /// candidate has, rather than a question about membership.
-    ///
     /// [`Supplied`] and not a discovering resolver: OpenRouter's models
     /// endpoint publishes a *public* table rather than what this key is
     /// charged, which is the property that earned xAI a resolver. A public
@@ -494,9 +719,11 @@ impl ProviderRow {
         ProviderRow {
             id: "openrouter".to_string(),
             base: as_base(base),
+            extra_headers: Vec::new(),
             wire: &OpenAiCompletions,
             resolver: &Supplied,
-            credential: CredentialStrategy::BearerFromEnv {
+            credential: CredentialStrategy::OAuthOrEnv {
+                provider: "openrouter".to_string(),
                 var: OPENROUTER_KEY_VAR.to_string(),
             },
             cost: Some(Arc::new(OpenRouterUsd::new(READ_ON))),
@@ -510,23 +737,15 @@ impl ProviderRow {
 
     /// The Anthropic row: its own mapping, and a header rather than a scheme.
     ///
-    /// **A candidate, not a member.** Like xAI and OpenRouter, this row is
-    /// absent from the table `crates/ego-cli/src/model.rs` builds, so
-    /// `--model anthropic/…` does not resolve. §9 of
-    /// `docs/decisions/2026-08-21-a-shared-shape-is-not-a-shared-contract.md`
-    /// is the reason: its conformance is read from the published contract
-    /// rather than measured against a live server, and a provider whose
-    /// evidence is schema-derived is not runnable. It becomes selectable when
-    /// a recording exists.
+    /// Selectable for both API keys and Claude subscription tokens. The
+    /// credential prefix chooses their different wire presentations.
     ///
     /// The first row on a wire format that is not the family's, which is what
     /// it was added to prove: `anthropic-messages` and `openai-completions`
     /// share no request field, and the seam carries the difference without a
     /// per-provider branch on either side of it.
     ///
-    /// [`CredentialStrategy::HeaderFromEnv`] rather than `BearerFromEnv`
-    /// because Anthropic reads `x-api-key` and does not accept a scheme in
-    /// front of the key. `anthropic-version` is **not** here: it is a fact
+    /// `anthropic-version` is **not** here: it is a fact
     /// about the mapping's contract, not about this row's address or its
     /// credential, and [`wire::anthropic_messages`](crate::wire::anthropic_messages)
     /// owns it.
@@ -534,11 +753,13 @@ impl ProviderRow {
         ProviderRow {
             id: "anthropic".to_string(),
             base: as_base(base),
+            extra_headers: Vec::new(),
             wire: &AnthropicMessages,
             resolver: &Supplied,
-            credential: CredentialStrategy::HeaderFromEnv {
-                header: "x-api-key".to_string(),
-                var: ANTHROPIC_KEY_VAR.to_string(),
+            credential: CredentialStrategy::Anthropic {
+                provider: "anthropic".to_string(),
+                api_key_var: ANTHROPIC_KEY_VAR.to_string(),
+                oauth_var: "CLAUDE_CODE_OAUTH_TOKEN".to_string(),
             },
             // Anthropic reports the billing dimensions — four token
             // categories, including the cache-write split this row is the
@@ -572,6 +793,7 @@ impl ProviderRow {
         ProviderRow {
             id: "gemini".to_string(),
             base: as_base(base),
+            extra_headers: Vec::new(),
             wire: &GeminiInteractions,
             resolver: &Supplied,
             credential: CredentialStrategy::HeaderFromEnv {

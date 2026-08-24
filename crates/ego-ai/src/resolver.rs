@@ -123,6 +123,33 @@ impl ModelResolver for Supplied {
     }
 }
 
+/// Operator-supplied capabilities under a provider subscription policy.
+/// Rates in `models.toml` cannot turn a flat-fee row back into currency.
+#[derive(Debug)]
+pub struct SubscriptionSupplied {
+    revision: &'static str,
+}
+
+impl SubscriptionSupplied {
+    pub const fn new(revision: &'static str) -> Self {
+        Self { revision }
+    }
+}
+
+impl ModelResolver for SubscriptionSupplied {
+    fn resolve<'a>(
+        &'a self,
+        at: &'a Resolution<'a>,
+    ) -> BoxFuture<'a, Result<ResolvedModel, ResolveError>> {
+        Box::pin(async move {
+            let mut resolved = at.catalogue.resolve_hosted(at.slug)?;
+            resolved.metering = crate::catalogue::subscription(self.revision);
+            resolved.rates = None;
+            Ok(resolved)
+        })
+    }
+}
+
 /// Resolved by asking the local daemon what it actually serves.
 ///
 /// `crate::ollama`'s module documentation is the argument: the daemon reports

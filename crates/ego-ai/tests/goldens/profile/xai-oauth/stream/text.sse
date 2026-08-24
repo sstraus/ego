@@ -1,0 +1,9 @@
+: schema-derived from docs.x.ai Responses, streaming, function-calling, reasoning and cost-tracking (read 2026-08-24)
+: provider xai-oauth, ego 0.1.0
+data: {"type":"response.reasoning_text.delta","delta":"check"}
+
+data: {"type":"response.output_text.delta","delta":"ok"}
+
+data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":10,"input_tokens_details":{"cached_tokens":3},"output_tokens":3,"output_tokens_details":{"reasoning_tokens":1},"num_sources_used":0,"num_server_side_tools_used":0,"cost_in_usd_ticks":12345678}}}
+
+data: [DONE]

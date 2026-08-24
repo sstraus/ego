@@ -14,6 +14,7 @@ use ego_ai::http::{EgressPolicy, Http, ReqwestHttp};
 use ego_ai::provider::{Credentials, OLLAMA_BASE, OPENAI_BASE, ProviderRow, ResolvedCredential};
 use url::Url;
 
+use crate::auth::overlay_headers;
 use crate::facts;
 
 /// The environment variable Ollama's own client reads to find the daemon.
@@ -96,24 +97,42 @@ pub fn transport(offline: bool) -> Result<Arc<dyn Http>, ResolveError> {
 /// That made a missing credential indistinguishable from an unknown provider
 /// and forced [`resolve`] to name one provider by hand to say the true thing.
 ///
-/// # What is deliberately missing
-///
-/// `ego_ai::provider` also builds an `xai` row and an `openrouter` row, and
-/// neither is here. They are **candidates**:
-/// `docs/decisions/2026-08-21-a-shared-shape-is-not-a-shared-contract.md` §9
-/// puts both on the family's mapping from a published document rather than
-/// from a live recording, and rules that a provider whose conformance is read
-/// rather than measured is not runnable — *no row, so `--model` cannot select
-/// it*. The rows exist so the offline evidence has a subject
-/// (`crates/ego-ai/tests/goldens/profile/`); this list is what makes them
-/// unreachable until a recording exists.
-///
-/// The test below is what keeps that true, because nothing else would notice.
-fn rows() -> Result<Vec<ProviderRow>, ResolveError> {
-    Ok(vec![
+/// The API-key `xai` candidate remains absent. The distinct `xai-oauth` row
+/// is present because the Pi ∪ Hermes inclusion decision explicitly promotes
+/// that subscription contract without collapsing its metering into the API
+/// key row.
+fn rows(
+    auth: &std::collections::HashMap<String, ego_core::config::AuthProviderLayer>,
+) -> Result<Vec<ProviderRow>, ResolveError> {
+    let mut rows = vec![
         ProviderRow::ollama(base(OLLAMA_HOST, OLLAMA_BASE)?),
         ProviderRow::openai_at(base(OPENAI_BASE_URL, OPENAI_BASE)?),
-    ])
+        ProviderRow::openai_codex_default(),
+        ProviderRow::anthropic_default(),
+        ProviderRow::github_copilot_default(),
+        ProviderRow::xai_oauth_default(),
+        ProviderRow::kimi_coding_default(),
+        ProviderRow::qwen_oauth_default(),
+        ProviderRow::minimax_oauth_default(),
+        ProviderRow::nous_default(),
+        ProviderRow::openrouter_default(),
+    ];
+    for row in &mut rows {
+        if let Some(config) = auth.get(&row.id) {
+            let overlay = config
+                .headers
+                .iter()
+                .map(|(name, value)| (name.clone(), value.clone()))
+                .collect();
+            row.extra_headers = overlay_headers(&row.extra_headers, &overlay).map_err(|err| {
+                ResolveError::EndpointUnreachable {
+                    endpoint: format!("auth.{}.headers", row.id),
+                    message: err.to_string(),
+                }
+            })?;
+        }
+    }
+    Ok(rows)
 }
 
 /// Resolve `slug` against the daemon or against what was supplied.
@@ -139,9 +158,10 @@ pub async fn resolve(
     hosted: Vec<(String, facts::Hosted)>,
     http: &Arc<dyn Http>,
     creds: &dyn Credentials,
+    auth: &std::collections::HashMap<String, ego_core::config::AuthProviderLayer>,
 ) -> Result<(ResolvedModel, ResolvedCredential), ResolveError> {
     let slug = ModelSlug::parse(slug)?;
-    let mut catalogue = Catalogue::new(rows()?);
+    let mut catalogue = Catalogue::new(rows(auth)?);
     for (supplied, model) in hosted {
         catalogue = catalogue.with_hosted(&supplied, model);
     }
@@ -158,6 +178,21 @@ pub async fn resolve(
     Ok((model, credential))
 }
 
+fn unavailable_mapping(provider: &str) -> Option<ResolveError> {
+    match provider {
+        "xai" => Some(ResolveError::ProviderMappingUnavailable {
+            provider: provider.to_string(),
+            mapping: "xai-responses for API-key credentials; use `xai-oauth/<model>` after `ego auth login xai-oauth`"
+                .to_string(),
+        }),
+        _ => None,
+    }
+}
+
+pub(crate) fn ensure_provider_mapping(provider: &str) -> Result<(), ResolveError> {
+    unavailable_mapping(provider).map_or(Ok(()), Err)
+}
+
 /// Whether a resolution failure is the network's fault or the caller's.
 ///
 /// `CLI.md` §4.3 gives them different exit codes on purpose — a script retries
@@ -172,40 +207,49 @@ pub fn is_provider_failure(err: &ResolveError) -> bool {
 mod tests {
     use super::*;
 
-    /// A candidate is not runnable, and this is what enforces it.
+    #[test]
+    fn codex_login_never_turns_into_a_chat_completions_row() {
+        let row = ProviderRow::openai_codex_default();
+        assert_eq!(row.id, "openai-codex");
+        assert_eq!(format!("{:?}", row.wire), "OpenAiCodexResponses");
+        assert_ne!(format!("{:?}", row.wire), "OpenAiCompletions");
+        assert!(unavailable_mapping("openai-codex").is_none());
+    }
+
+    /// The API-key candidate is still not runnable.
     ///
     /// `docs/decisions/2026-08-21-a-shared-shape-is-not-a-shared-contract.md`
     /// §9 draws the line at selectability: a provider assembled from a
     /// published document has offline evidence and no acceptance evidence, and
-    /// until a live recording exists `--model` must refuse it the way it
-    /// refuses a name nobody has heard of. Adding a candidate to [`rows`] is
-    /// one line and looks like progress, so the rule needs a test rather than
-    /// a comment.
-    ///
-    /// It fails in the right direction. When xAI's smoke has run and the row is
-    /// promoted deliberately, this test fails and names the provider — which is
-    /// the moment to check that the recording is committed, not a nuisance.
+    /// its legacy endpoint is now vendor-deprecated. Adding that candidate to
+    /// [`rows`] is one line and looks like progress, so the current-contract
+    /// rule needs a test rather than a comment. A live recording cannot promote
+    /// the retired mapping; an API-key row would first need the current
+    /// Responses mapping.
     #[test]
     fn a_candidate_provider_cannot_be_selected() {
-        let ids: Vec<String> = rows()
+        let ids: Vec<String> = rows(&Default::default())
             .expect("the built-in bases parse")
             .into_iter()
             .map(|row| row.id)
             .collect();
 
-        for candidate in ["xai", "openrouter"] {
-            assert!(
-                !ids.contains(&candidate.to_string()),
-                "{candidate} has a row and no live recording, so it must not be \
-                 selectable: {ids:?}\n\
-                 If you are promoting it deliberately: check the recording is \
-                 committed, and for xai read POTENTIALS.md P28 first. \
-                 `facts.rs` strips operator rates on a run with no money \
-                 ceiling, `xai::price` reads that absence as permission to ask \
-                 the provider, and promoting the row makes an unbudgeted run \
-                 open a connection and report a price it was told not to fetch."
-            );
-        }
+        let candidate = "xai";
+        assert!(
+            !ids.contains(&candidate.to_string()),
+            "{candidate} has a row on the vendor-deprecated Chat Completions \
+             contract, so it must not be selectable: {ids:?}"
+        );
+        let refusal = unavailable_mapping(candidate).expect("the legacy id is actionable");
+        assert!(matches!(
+            &refusal,
+            ResolveError::ProviderMappingUnavailable { provider, mapping }
+                if provider == candidate && mapping.contains("xai-responses")
+        ));
+        assert!(
+            refusal.to_string().contains("xai-oauth"),
+            "the refusal must name the selectable current alternative: {refusal}"
+        );
     }
 
     /// And the converse, so the test above is not satisfied by an empty table.
@@ -215,8 +259,8 @@ mod tests {
     /// test was called `the_measured_providers_are_selectable`, and only one
     /// of the two it names is measured: `profiles::OLLAMA` is
     /// `Provenance::Recorded` and `profiles::OPENAI` is
-    /// `Provenance::SchemaDerived`. A test name is a claim like any other, and
-    /// that one was false.
+    /// `Provenance::VendorSchemaDerived`. A test name is a claim like any
+    /// other, and that one was false.
     ///
     /// The gap it was papering over is real and is **maintainer's call, recorded in
     /// §9's amendment**: §9 makes membership "passes all five checks" and check
@@ -227,8 +271,8 @@ mod tests {
     /// stricter rule takes OpenAI out alongside the candidates. Either way the
     /// name here should not have decided it silently.
     #[test]
-    fn the_selectable_providers_are_the_two_this_build_ships() {
-        let ids: Vec<String> = rows()
+    fn the_selectable_provider_table_includes_subscription_rows() {
+        let ids: Vec<String> = rows(&Default::default())
             .expect("the built-in bases parse")
             .into_iter()
             .map(|row| row.id)
@@ -236,5 +280,18 @@ mod tests {
 
         assert!(ids.contains(&"ollama".to_string()), "{ids:?}");
         assert!(ids.contains(&"openai".to_string()), "{ids:?}");
+        for subscription in [
+            "openai-codex",
+            "anthropic",
+            "github-copilot",
+            "xai-oauth",
+            "kimi-coding",
+            "qwen-oauth",
+            "minimax-oauth",
+            "nous",
+            "openrouter",
+        ] {
+            assert!(ids.contains(&subscription.to_string()), "{ids:?}");
+        }
     }
 }

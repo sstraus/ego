@@ -1,0 +1,1055 @@
+//! Built-in OAuth protocol contracts for subscription-backed providers.
+//!
+//! This module owns vendor request shapes and response classification. It
+//! owns no browser, TTY, clock, sleep or credential file; `ego-cli` supplies
+//! those process concerns and executes these requests through the ordinary
+//! HTTP seam.
+
+use std::fmt;
+
+use base64::Engine;
+use futures::StreamExt;
+use serde_json::Value;
+use sha2::{Digest, Sha256};
+use url::Url;
+
+use crate::http::{Http, HttpRequest, Method};
+
+const CODEX_CLIENT: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
+const ANTHROPIC_CLIENT: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
+const COPILOT_CLIENT: &str = "Iv1.b507a08c87ecfe98";
+const XAI_CLIENT: &str = "b1a00492-073a-47ea-816f-4c329264a828";
+const KIMI_CLIENT: &str = "17e5f671-d194-4dfb-9706-5516cb48c098";
+const QWEN_CLIENT: &str = "f0304373b74a44d2b584a3fb70ca9e56";
+const MINIMAX_CLIENT: &str = "78257093-7e40-4613-99e0-527b14b39113";
+// Nous publishes the Hermes CLI id for its portal and no ego-specific client
+// registration path. This is the one declared foreign client identity.
+const NOUS_CLIENT: &str = "hermes-cli";
+const DEVICE_GRANT: &str = "urn:ietf:params:oauth:grant-type:device_code";
+const USER_CODE_GRANT: &str = "urn:ietf:params:oauth:grant-type:user_code";
+
+/// The built-in flow table. The enum is closed deliberately: adding a row is
+/// adding a client identity ego ships, not registering an arbitrary protocol.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltInFlow {
+    OpenAiCodex,
+    Anthropic,
+    GitHubCopilot,
+    Xai,
+    KimiCoding,
+    Qwen,
+    MiniMax,
+    Nous,
+    OpenRouter,
+}
+
+const FLOWS: &[BuiltInFlow] = &[
+    BuiltInFlow::OpenAiCodex,
+    BuiltInFlow::Anthropic,
+    BuiltInFlow::GitHubCopilot,
+    BuiltInFlow::Xai,
+    BuiltInFlow::KimiCoding,
+    BuiltInFlow::Qwen,
+    BuiltInFlow::MiniMax,
+    BuiltInFlow::Nous,
+    BuiltInFlow::OpenRouter,
+];
+
+impl BuiltInFlow {
+    pub fn all() -> &'static [Self] {
+        FLOWS
+    }
+
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::OpenAiCodex => "openai-codex",
+            Self::Anthropic => "anthropic",
+            Self::GitHubCopilot => "github-copilot",
+            Self::Xai => "xai-oauth",
+            Self::KimiCoding => "kimi-coding",
+            Self::Qwen => "qwen-oauth",
+            Self::MiniMax => "minimax-oauth",
+            Self::Nous => "nous",
+            Self::OpenRouter => "openrouter",
+        }
+    }
+
+    fn client_id(self) -> Option<&'static str> {
+        match self {
+            Self::OpenAiCodex => Some(CODEX_CLIENT),
+            Self::Anthropic => Some(ANTHROPIC_CLIENT),
+            Self::GitHubCopilot => Some(COPILOT_CLIENT),
+            Self::Xai => Some(XAI_CLIENT),
+            Self::KimiCoding => Some(KIMI_CLIENT),
+            Self::Qwen => Some(QWEN_CLIENT),
+            Self::MiniMax => Some(MINIMAX_CLIENT),
+            Self::Nous => Some(NOUS_CLIENT),
+            Self::OpenRouter => None,
+        }
+    }
+
+    fn token_url(self) -> &'static str {
+        match self {
+            Self::OpenAiCodex => "https://auth.openai.com/oauth/token",
+            Self::Anthropic => "https://platform.claude.com/v1/oauth/token",
+            Self::GitHubCopilot => "https://github.com/login/oauth/access_token",
+            Self::Xai => "https://auth.x.ai/oauth2/token",
+            Self::KimiCoding => "https://auth.kimi.com/api/oauth/token",
+            Self::Qwen => "https://chat.qwen.ai/api/v1/oauth2/token",
+            Self::MiniMax => "https://api.minimax.io/oauth/token",
+            Self::Nous => "https://portal.nousresearch.com/api/oauth/token",
+            Self::OpenRouter => "https://openrouter.ai/api/v1/auth/keys",
+        }
+    }
+
+    pub fn device_authorization_request(self) -> Result<HttpRequest, FlowError> {
+        match self {
+            Self::OpenAiCodex => json_request(
+                "https://auth.openai.com/api/accounts/deviceauth/usercode",
+                serde_json::json!({ "client_id": CODEX_CLIENT }),
+            ),
+            Self::GitHubCopilot => form_request(
+                "https://github.com/login/device/code",
+                &[("client_id", COPILOT_CLIENT), ("scope", "read:user")],
+            ),
+            Self::Xai => form_request(
+                "https://auth.x.ai/oauth2/device/code",
+                &[
+                    ("client_id", XAI_CLIENT),
+                    (
+                        "scope",
+                        "openid profile email offline_access grok-cli:access api:access",
+                    ),
+                    ("referrer", "ego"),
+                ],
+            ),
+            Self::KimiCoding => form_request(
+                "https://auth.kimi.com/api/oauth/device_authorization",
+                &[("client_id", KIMI_CLIENT)],
+            ),
+            Self::Nous => form_request(
+                "https://portal.nousresearch.com/api/oauth/device/code",
+                &[("client_id", NOUS_CLIENT), ("scope", "inference:invoke")],
+            ),
+            Self::Qwen => Err(FlowError::UnsupportedGrant {
+                provider: self.id().to_string(),
+                grant: "device code without PKCE challenge".to_string(),
+            }),
+            _ => Err(FlowError::UnsupportedGrant {
+                provider: self.id().to_string(),
+                grant: "device code".to_string(),
+            }),
+        }
+    }
+
+    pub fn device_authorization_request_with_pkce(
+        self,
+        challenge: &str,
+    ) -> Result<HttpRequest, FlowError> {
+        if self != Self::Qwen {
+            return self.device_authorization_request();
+        }
+        form_request(
+            "https://chat.qwen.ai/api/v1/oauth2/device/code",
+            &[
+                ("client_id", QWEN_CLIENT),
+                ("scope", "openid profile email model.completion"),
+                ("code_challenge", challenge),
+                ("code_challenge_method", "S256"),
+            ],
+        )
+    }
+
+    pub fn authorization_url(
+        self,
+        redirect_uri: &str,
+        challenge: &str,
+        state: &str,
+    ) -> Result<Url, FlowError> {
+        let (base, fields): (&str, Vec<(&str, &str)>) = match self {
+            Self::OpenAiCodex => (
+                "https://auth.openai.com/oauth/authorize",
+                vec![
+                    ("response_type", "code"),
+                    ("client_id", CODEX_CLIENT),
+                    ("redirect_uri", redirect_uri),
+                    ("scope", "openid profile email offline_access"),
+                    ("code_challenge", challenge),
+                    ("code_challenge_method", "S256"),
+                    ("state", state),
+                    ("id_token_add_organizations", "true"),
+                    ("codex_cli_simplified_flow", "true"),
+                    ("originator", "ego"),
+                ],
+            ),
+            Self::Anthropic => (
+                "https://claude.ai/oauth/authorize",
+                vec![
+                    ("code", "true"),
+                    ("client_id", ANTHROPIC_CLIENT),
+                    ("response_type", "code"),
+                    ("redirect_uri", redirect_uri),
+                    (
+                        "scope",
+                        "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload",
+                    ),
+                    ("code_challenge", challenge),
+                    ("code_challenge_method", "S256"),
+                    ("state", state),
+                ],
+            ),
+            Self::OpenRouter => (
+                "https://openrouter.ai/auth",
+                vec![
+                    ("callback_url", redirect_uri),
+                    ("code_challenge", challenge),
+                    ("code_challenge_method", "S256"),
+                ],
+            ),
+            _ => {
+                return Err(FlowError::UnsupportedGrant {
+                    provider: self.id().to_string(),
+                    grant: "browser PKCE".to_string(),
+                });
+            }
+        };
+        let mut url = parse(base)?;
+        url.query_pairs_mut().extend_pairs(fields);
+        Ok(url)
+    }
+
+    pub fn minimax_user_code_request(
+        self,
+        challenge: &str,
+        state: &str,
+    ) -> Result<HttpRequest, FlowError> {
+        if self != Self::MiniMax {
+            return Err(FlowError::UnsupportedGrant {
+                provider: self.id().to_string(),
+                grant: "MiniMax user code".to_string(),
+            });
+        }
+        form_request(
+            "https://api.minimax.io/oauth/code",
+            &[
+                ("response_type", "code"),
+                ("client_id", MINIMAX_CLIENT),
+                ("scope", "group_id profile model.completion"),
+                ("code_challenge", challenge),
+                ("code_challenge_method", "S256"),
+                ("state", state),
+            ],
+        )
+    }
+
+    pub fn read_minimax_user_code(
+        self,
+        response: TokenStatus,
+        expected_state: &str,
+    ) -> Result<MiniMaxUserCode, FlowError> {
+        if self != Self::MiniMax {
+            return Err(FlowError::UnsupportedGrant {
+                provider: self.id().to_string(),
+                grant: "MiniMax user code".to_string(),
+            });
+        }
+        if !(200..300).contains(&response.status) {
+            return self.response_error(response);
+        }
+        let body: Value =
+            serde_json::from_slice(&response.body).map_err(|err| FlowError::InvalidResponse {
+                provider: self.id().to_string(),
+                message: err.to_string(),
+            })?;
+        if body.get("state").and_then(Value::as_str) != Some(expected_state) {
+            return Err(FlowError::InvalidResponse {
+                provider: self.id().to_string(),
+                message: "state mismatch".to_string(),
+            });
+        }
+        Ok(MiniMaxUserCode {
+            user_code: required(&body, "user_code", self)?,
+            verification_uri: required(&body, "verification_uri", self)?,
+            expires_in: body
+                .get("expired_in")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| missing_field(self, "expired_in"))?,
+            interval_ms: body.get("interval").and_then(Value::as_u64).unwrap_or(2000),
+        })
+    }
+
+    pub fn device_poll_request(
+        self,
+        device_code: &str,
+        user_code: Option<&str>,
+    ) -> Result<HttpRequest, FlowError> {
+        if self == Self::OpenAiCodex {
+            return json_request(
+                "https://auth.openai.com/api/accounts/deviceauth/token",
+                serde_json::json!({
+                    "device_auth_id": device_code,
+                    "user_code": user_code.ok_or_else(|| FlowError::InvalidResponse {
+                        provider: self.id().to_string(),
+                        message: "device poll needs user_code".to_string(),
+                    })?,
+                }),
+            );
+        }
+        form_request(
+            self.token_url(),
+            &[
+                ("grant_type", DEVICE_GRANT),
+                (
+                    "client_id",
+                    self.client_id()
+                        .ok_or_else(|| FlowError::UnsupportedGrant {
+                            provider: self.id().to_string(),
+                            grant: "device code".to_string(),
+                        })?,
+                ),
+                ("device_code", device_code),
+            ],
+        )
+    }
+
+    pub fn device_poll_request_with_pkce(
+        self,
+        device_code: &str,
+        verifier: &str,
+    ) -> Result<HttpRequest, FlowError> {
+        if self != Self::Qwen {
+            return self.device_poll_request(device_code, None);
+        }
+        form_request(
+            self.token_url(),
+            &[
+                ("grant_type", DEVICE_GRANT),
+                ("client_id", QWEN_CLIENT),
+                ("device_code", device_code),
+                ("code_verifier", verifier),
+            ],
+        )
+    }
+
+    pub fn login_request(self, grant: LoginGrant<'_>) -> Result<HttpRequest, FlowError> {
+        match (self, grant) {
+            (Self::OpenRouter, LoginGrant::AuthorizationCode { code, verifier, .. }) => {
+                json_request(
+                    self.token_url(),
+                    serde_json::json!({
+                        "code": code,
+                        "code_verifier": verifier,
+                        "code_challenge_method": "S256",
+                    }),
+                )
+            }
+            (
+                Self::Anthropic,
+                LoginGrant::AuthorizationCode {
+                    code,
+                    verifier,
+                    redirect_uri,
+                    state,
+                },
+            ) => json_request(
+                self.token_url(),
+                serde_json::json!({
+                    "grant_type": "authorization_code",
+                    "client_id": ANTHROPIC_CLIENT,
+                    "code": code,
+                    "state": state.unwrap_or(verifier),
+                    "redirect_uri": redirect_uri,
+                    "code_verifier": verifier,
+                }),
+            ),
+            (
+                Self::MiniMax,
+                LoginGrant::UserCode {
+                    user_code,
+                    verifier,
+                },
+            ) => form_request(
+                self.token_url(),
+                &[
+                    ("grant_type", USER_CODE_GRANT),
+                    ("client_id", MINIMAX_CLIENT),
+                    ("user_code", user_code),
+                    ("code_verifier", verifier),
+                ],
+            ),
+            (
+                flow,
+                LoginGrant::AuthorizationCode {
+                    code,
+                    verifier,
+                    redirect_uri,
+                    ..
+                },
+            ) if flow == Self::OpenAiCodex => form_request(
+                flow.token_url(),
+                &[
+                    ("grant_type", "authorization_code"),
+                    (
+                        "client_id",
+                        flow.client_id().expect("these flows have clients"),
+                    ),
+                    ("code", code),
+                    ("code_verifier", verifier),
+                    ("redirect_uri", redirect_uri),
+                ],
+            ),
+            (flow, grant) => Err(FlowError::UnsupportedGrant {
+                provider: flow.id().to_string(),
+                grant: grant.name().to_string(),
+            }),
+        }
+    }
+
+    pub fn refresh_request(self, refresh_token: &str) -> Result<HttpRequest, FlowError> {
+        if matches!(self, Self::OpenRouter | Self::GitHubCopilot) {
+            return Err(FlowError::UnsupportedGrant {
+                provider: self.id().to_string(),
+                grant: "refresh token".to_string(),
+            });
+        }
+        let fields = [
+            ("grant_type", "refresh_token"),
+            (
+                "client_id",
+                self.client_id().expect("rotating flows have clients"),
+            ),
+            ("refresh_token", refresh_token),
+        ];
+        if self == Self::Anthropic {
+            json_request(
+                self.token_url(),
+                serde_json::json!({
+                    "grant_type": "refresh_token",
+                    "client_id": ANTHROPIC_CLIENT,
+                    "refresh_token": refresh_token,
+                }),
+            )
+        } else {
+            form_request(self.token_url(), &fields)
+        }
+    }
+
+    pub fn copilot_exchange_request(self, github_token: &str) -> Result<HttpRequest, FlowError> {
+        if self != Self::GitHubCopilot {
+            return Err(FlowError::UnsupportedGrant {
+                provider: self.id().to_string(),
+                grant: "Copilot token exchange".to_string(),
+            });
+        }
+        Ok(HttpRequest {
+            url: parse("https://api.github.com/copilot_internal/v2/token")?,
+            method: Method::Get,
+            headers: vec![
+                ("accept".to_string(), "application/json".to_string()),
+                (
+                    "authorization".to_string(),
+                    format!("Bearer {github_token}"),
+                ),
+                (
+                    "user-agent".to_string(),
+                    "GitHubCopilotChat/0.35.0".to_string(),
+                ),
+                ("editor-version".to_string(), "vscode/1.107.0".to_string()),
+                (
+                    "editor-plugin-version".to_string(),
+                    "copilot-chat/0.35.0".to_string(),
+                ),
+                (
+                    "copilot-integration-id".to_string(),
+                    "vscode-chat".to_string(),
+                ),
+            ],
+            body: None,
+        })
+    }
+
+    pub fn read_token(
+        self,
+        response: TokenStatus,
+        now_ms: u64,
+        previous_refresh: Option<&str>,
+    ) -> Result<OAuthToken, FlowError> {
+        let body_text = String::from_utf8_lossy(&response.body);
+        if response.status == 429 {
+            return Err(FlowError::Temporary {
+                provider: self.id().to_string(),
+                status: response.status,
+                message: body_text.into_owned(),
+            });
+        }
+        if response.status == 401
+            || [
+                "invalid_grant",
+                "invalid_token",
+                "refresh_token_reused",
+                "invalid_refresh_token",
+            ]
+            .iter()
+            .any(|marker| body_text.contains(marker))
+        {
+            return Err(FlowError::ReloginRequired {
+                provider: self.id().to_string(),
+                message: body_text.into_owned(),
+            });
+        }
+        if !(200..300).contains(&response.status) {
+            return Err(FlowError::Protocol {
+                provider: self.id().to_string(),
+                status: response.status,
+                message: body_text.into_owned(),
+            });
+        }
+        let body: Value =
+            serde_json::from_slice(&response.body).map_err(|err| FlowError::InvalidResponse {
+                provider: self.id().to_string(),
+                message: err.to_string(),
+            })?;
+        if self == Self::OpenRouter {
+            let key = required(&body, "key", self)?;
+            return Ok(OAuthToken::ApiKey { key });
+        }
+        if self == Self::GitHubCopilot && body.get("token").is_some() {
+            let access = required(&body, "token", self)?;
+            let expires = body
+                .get("expires_at")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| missing_field(self, "expires_at"))?
+                .saturating_mul(1000);
+            return Ok(OAuthToken::OAuth {
+                access,
+                refresh: previous_refresh.map(str::to_string),
+                expires: Some(expires),
+            });
+        }
+        let access = required(&body, "access_token", self)?;
+        let refresh = body
+            .get("refresh_token")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .or_else(|| previous_refresh.map(str::to_string));
+        if refresh.is_none() {
+            return Err(missing_field(self, "refresh_token"));
+        }
+        let expiry_value = body
+            .get("expires_in")
+            .or_else(|| body.get("expired_in"))
+            .and_then(Value::as_u64);
+        let expires = expiry_value.map(|raw| {
+            if self == Self::MiniMax && raw > now_ms / 2 {
+                raw
+            } else {
+                now_ms.saturating_add(raw.saturating_mul(1000))
+            }
+        });
+        Ok(OAuthToken::OAuth {
+            access,
+            refresh,
+            expires,
+        })
+    }
+
+    pub fn read_device_authorization(
+        self,
+        response: TokenStatus,
+    ) -> Result<DeviceAuthorization, FlowError> {
+        if !(200..300).contains(&response.status) {
+            return self.response_error(response);
+        }
+        let body: Value =
+            serde_json::from_slice(&response.body).map_err(|err| FlowError::InvalidResponse {
+                provider: self.id().to_string(),
+                message: err.to_string(),
+            })?;
+        let device_code = if self == Self::OpenAiCodex {
+            required(&body, "device_auth_id", self)?
+        } else {
+            required(&body, "device_code", self)?
+        };
+        let verification_uri = if self == Self::OpenAiCodex {
+            body.get("verification_uri")
+                .and_then(Value::as_str)
+                .unwrap_or("https://auth.openai.com/codex/device")
+                .to_string()
+        } else {
+            required(&body, "verification_uri", self)?
+        };
+        Ok(DeviceAuthorization {
+            device_code,
+            user_code: required(&body, "user_code", self)?,
+            verification_uri,
+            interval_seconds: body.get("interval").and_then(Value::as_u64).unwrap_or(5),
+            expires_in: body
+                .get("expires_in")
+                .and_then(Value::as_u64)
+                .unwrap_or(900),
+        })
+    }
+
+    pub fn read_poll(
+        self,
+        response: TokenStatus,
+        now_ms: u64,
+        previous_refresh: Option<&str>,
+    ) -> Result<PollOutcome, FlowError> {
+        let value: Value = serde_json::from_slice(&response.body).unwrap_or(Value::Null);
+        let error = value.get("error").and_then(Value::as_str);
+        if response.status == 429
+            || matches!(
+                error,
+                Some(
+                    "invalid_grant"
+                        | "invalid_token"
+                        | "refresh_token_reused"
+                        | "invalid_refresh_token"
+                )
+            )
+        {
+            return self
+                .read_token(response, now_ms, previous_refresh)
+                .map(PollOutcome::Token);
+        }
+        if error == Some("authorization_pending")
+            || error == Some("deviceauth_authorization_pending")
+            || (self == Self::OpenAiCodex && matches!(response.status, 403 | 404))
+        {
+            return Ok(PollOutcome::Pending);
+        }
+        if error == Some("slow_down") {
+            return Ok(PollOutcome::SlowDown);
+        }
+        if self == Self::MiniMax && value.get("status").and_then(Value::as_str) != Some("success") {
+            return Ok(PollOutcome::Pending);
+        }
+        if self == Self::OpenAiCodex && response.status == 200 {
+            return Ok(PollOutcome::CodexAuthorization {
+                code: required(&value, "authorization_code", self)?,
+                verifier: required(&value, "code_verifier", self)?,
+            });
+        }
+        if self == Self::GitHubCopilot && response.status == 200 {
+            return Ok(PollOutcome::GitHubToken(required(
+                &value,
+                "access_token",
+                self,
+            )?));
+        }
+        self.read_token(response, now_ms, previous_refresh)
+            .map(PollOutcome::Token)
+    }
+
+    fn response_error<T>(self, response: TokenStatus) -> Result<T, FlowError> {
+        let text = String::from_utf8_lossy(&response.body).into_owned();
+        if response.status == 429 {
+            Err(FlowError::Temporary {
+                provider: self.id().to_string(),
+                status: response.status,
+                message: text,
+            })
+        } else if response.status == 401 || text.contains("invalid_grant") {
+            Err(FlowError::ReloginRequired {
+                provider: self.id().to_string(),
+                message: text,
+            })
+        } else {
+            Err(FlowError::Protocol {
+                provider: self.id().to_string(),
+                status: response.status,
+                message: text,
+            })
+        }
+    }
+}
+
+pub fn built_in(id: &str) -> Option<BuiltInFlow> {
+    FLOWS.iter().copied().find(|flow| flow.id() == id)
+}
+
+#[derive(Debug, Clone)]
+pub enum LoginGrant<'a> {
+    AuthorizationCode {
+        code: &'a str,
+        verifier: &'a str,
+        redirect_uri: &'a str,
+        state: Option<&'a str>,
+    },
+    UserCode {
+        user_code: &'a str,
+        verifier: &'a str,
+    },
+}
+
+impl LoginGrant<'_> {
+    fn name(&self) -> &'static str {
+        match self {
+            Self::AuthorizationCode { .. } => "authorization code",
+            Self::UserCode { .. } => "user code",
+        }
+    }
+}
+
+pub struct TokenStatus {
+    status: u16,
+    body: Vec<u8>,
+}
+
+impl TokenStatus {
+    pub fn new(status: u16, body: &[u8]) -> Self {
+        Self {
+            status,
+            body: body.to_vec(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceAuthorization {
+    pub device_code: String,
+    pub user_code: String,
+    pub verification_uri: String,
+    pub interval_seconds: u64,
+    pub expires_in: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MiniMaxUserCode {
+    pub user_code: String,
+    pub verification_uri: String,
+    pub expires_in: u64,
+    pub interval_ms: u64,
+}
+
+#[derive(Debug)]
+pub enum PollOutcome {
+    Pending,
+    SlowDown,
+    CodexAuthorization { code: String, verifier: String },
+    GitHubToken(String),
+    Token(OAuthToken),
+}
+
+pub fn pkce_challenge(verifier: &str) -> String {
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()))
+}
+
+/// Execute one OAuth request through the injected transport and buffer only
+/// the small token response. Generation bodies remain streamed elsewhere.
+pub async fn execute(http: &dyn Http, request: HttpRequest) -> Result<TokenStatus, FlowError> {
+    let response = http
+        .execute(request)
+        .await
+        .map_err(|err| FlowError::Temporary {
+            provider: "OAuth transport".to_string(),
+            status: 0,
+            message: err.to_string(),
+        })?;
+    let status = response.status;
+    let chunks: Vec<_> = response.body.collect().await;
+    let mut body = Vec::new();
+    for chunk in chunks {
+        body.extend_from_slice(&chunk.map_err(|err| FlowError::Temporary {
+            provider: "OAuth transport".to_string(),
+            status,
+            message: err.to_string(),
+        })?);
+    }
+    Ok(TokenStatus { status, body })
+}
+
+/// A parsed credential. Formatters redact; `into_values` is the deliberate
+/// transfer into the locked CLI store.
+pub enum OAuthToken {
+    OAuth {
+        access: String,
+        refresh: Option<String>,
+        expires: Option<u64>,
+    },
+    ApiKey {
+        key: String,
+    },
+}
+
+impl fmt::Debug for OAuthToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::OAuth {
+                expires, refresh, ..
+            } => f
+                .debug_struct("OAuthToken")
+                .field("access", &"<redacted>")
+                .field("refresh", &refresh.as_ref().map(|_| "<redacted>"))
+                .field("expires", expires)
+                .finish(),
+            Self::ApiKey { .. } => f
+                .debug_struct("ApiKeyToken")
+                .field("key", &"<redacted>")
+                .finish(),
+        }
+    }
+}
+
+pub struct OAuthValues {
+    pub access: String,
+    pub refresh: Option<String>,
+    pub expires: Option<u64>,
+    pub api_key: bool,
+}
+
+impl fmt::Debug for OAuthValues {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OAuthValues")
+            .field("access", &"<redacted>")
+            .field("refresh", &self.refresh.as_ref().map(|_| "<redacted>"))
+            .field("expires", &self.expires)
+            .field("api_key", &self.api_key)
+            .finish()
+    }
+}
+
+impl OAuthToken {
+    pub fn into_values(self) -> OAuthValues {
+        match self {
+            Self::OAuth {
+                access,
+                refresh,
+                expires,
+            } => OAuthValues {
+                access,
+                refresh,
+                expires,
+                api_key: false,
+            },
+            Self::ApiKey { key } => OAuthValues {
+                access: key,
+                refresh: None,
+                expires: None,
+                api_key: true,
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FlowError {
+    UnsupportedGrant {
+        provider: String,
+        grant: String,
+    },
+    ReloginRequired {
+        provider: String,
+        message: String,
+    },
+    Temporary {
+        provider: String,
+        status: u16,
+        message: String,
+    },
+    Protocol {
+        provider: String,
+        status: u16,
+        message: String,
+    },
+    InvalidResponse {
+        provider: String,
+        message: String,
+    },
+    MissingAccountId,
+}
+
+impl fmt::Display for FlowError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnsupportedGrant { provider, grant } => {
+                write!(f, "{provider} does not support {grant}")
+            }
+            Self::ReloginRequired { provider, message } => write!(
+                f,
+                "{provider} login expired; run `ego auth login {provider}`: {message}"
+            ),
+            Self::Temporary {
+                provider,
+                status,
+                message,
+            } => write!(
+                f,
+                "{provider} token endpoint temporarily failed ({status}): {message}"
+            ),
+            Self::Protocol {
+                provider,
+                status,
+                message,
+            } => write!(f, "{provider} token endpoint failed ({status}): {message}"),
+            Self::InvalidResponse { provider, message } => write!(
+                f,
+                "{provider} returned an invalid token response: {message}"
+            ),
+            Self::MissingAccountId => {
+                f.write_str("OpenAI Codex access token has no chatgpt_account_id claim")
+            }
+        }
+    }
+}
+
+impl std::error::Error for FlowError {}
+
+pub enum ProviderAuth {
+    Headers(Vec<(String, String)>),
+}
+
+impl fmt::Debug for ProviderAuth {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Headers(headers) => f
+                .debug_tuple("Headers")
+                .field(&headers.iter().map(|(name, _)| name).collect::<Vec<_>>())
+                .finish(),
+        }
+    }
+}
+
+impl ProviderAuth {
+    pub fn headers(self) -> Vec<(String, String)> {
+        match self {
+            Self::Headers(headers) => headers,
+        }
+    }
+}
+
+pub fn provider_auth(provider: &str, credential: &str) -> Result<ProviderAuth, FlowError> {
+    if provider == "openai-codex" {
+        return Ok(ProviderAuth::Headers(vec![
+            ("authorization".to_string(), format!("Bearer {credential}")),
+            (
+                "chatgpt-account-id".to_string(),
+                codex_account_id(credential)?,
+            ),
+            (
+                "openai-beta".to_string(),
+                "responses=experimental".to_string(),
+            ),
+        ]));
+    }
+    if provider == "anthropic" {
+        if credential.starts_with("sk-ant-oat") {
+            return Ok(ProviderAuth::Headers(vec![
+                ("authorization".to_string(), format!("Bearer {credential}")),
+                ("user-agent".to_string(), "claude-cli/2.1.212".to_string()),
+                ("x-app".to_string(), "cli".to_string()),
+                (
+                    "anthropic-beta".to_string(),
+                    "claude-code-20250219,oauth-2025-04-20".to_string(),
+                ),
+            ]));
+        }
+        return Ok(ProviderAuth::Headers(vec![(
+            "x-api-key".to_string(),
+            credential.to_string(),
+        )]));
+    }
+    Ok(ProviderAuth::Headers(vec![(
+        "authorization".to_string(),
+        format!("Bearer {credential}"),
+    )]))
+}
+
+/// The account-specific API address carried by a credential, if any.
+pub fn provider_base(provider: &str, credential: &str) -> Result<Option<Url>, FlowError> {
+    if provider != "github-copilot" {
+        return Ok(None);
+    }
+    let proxy = credential
+        .split(';')
+        .find_map(|part| part.strip_prefix("proxy-ep="))
+        .ok_or_else(|| FlowError::InvalidResponse {
+            provider: provider.to_string(),
+            message: "Copilot token is missing `proxy-ep`".to_string(),
+        })?;
+    let suffix = proxy
+        .strip_prefix("proxy.")
+        .ok_or_else(|| FlowError::InvalidResponse {
+            provider: provider.to_string(),
+            message: "Copilot `proxy-ep` is not a proxy host".to_string(),
+        })?;
+    parse(&format!("https://api.{suffix}/")).map(Some)
+}
+
+pub fn codex_account_id(access_token: &str) -> Result<String, FlowError> {
+    let payload = access_token
+        .split('.')
+        .nth(1)
+        .ok_or(FlowError::MissingAccountId)?;
+    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .map_err(|_| FlowError::MissingAccountId)?;
+    let value: Value = serde_json::from_slice(&decoded).map_err(|_| FlowError::MissingAccountId)?;
+    value
+        .get("https://api.openai.com/auth")
+        .and_then(|auth| auth.get("chatgpt_account_id"))
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+        .ok_or(FlowError::MissingAccountId)
+}
+
+fn parse(raw: &str) -> Result<Url, FlowError> {
+    Url::parse(raw).map_err(|err| FlowError::InvalidResponse {
+        provider: "built-in OAuth table".to_string(),
+        message: err.to_string(),
+    })
+}
+
+fn form_request(url: &str, fields: &[(&str, &str)]) -> Result<HttpRequest, FlowError> {
+    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+    serializer.extend_pairs(fields.iter().copied());
+    Ok(HttpRequest {
+        url: parse(url)?,
+        method: Method::Post,
+        headers: vec![
+            ("accept".to_string(), "application/json".to_string()),
+            (
+                "content-type".to_string(),
+                "application/x-www-form-urlencoded".to_string(),
+            ),
+            (
+                "user-agent".to_string(),
+                concat!("ego/", env!("CARGO_PKG_VERSION")).to_string(),
+            ),
+        ],
+        body: Some(serializer.finish().into_bytes()),
+    })
+}
+
+fn json_request(url: &str, body: Value) -> Result<HttpRequest, FlowError> {
+    Ok(HttpRequest {
+        url: parse(url)?,
+        method: Method::Post,
+        headers: vec![
+            ("accept".to_string(), "application/json".to_string()),
+            ("content-type".to_string(), "application/json".to_string()),
+            (
+                "user-agent".to_string(),
+                concat!("ego/", env!("CARGO_PKG_VERSION")).to_string(),
+            ),
+        ],
+        body: Some(serde_json::to_vec(&body).expect("a JSON value serialises")),
+    })
+}
+
+fn required(body: &Value, field: &str, flow: BuiltInFlow) -> Result<String, FlowError> {
+    body.get(field)
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| missing_field(flow, field))
+}
+
+fn missing_field(flow: BuiltInFlow, field: &str) -> FlowError {
+    FlowError::InvalidResponse {
+        provider: flow.id().to_string(),
+        message: format!("missing `{field}`"),
+    }
+}

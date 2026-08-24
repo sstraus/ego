@@ -1,0 +1,29 @@
+{
+  "body": {
+    "max_tokens": 16,
+    "messages": [
+      {
+        "content": [
+          {
+            "text": "Reply with the single word: ok",
+            "type": "text"
+          }
+        ],
+        "role": "user"
+      }
+    ],
+    "model": "kimi-for-coding",
+    "stream": true,
+    "thinking": {
+      "type": "disabled"
+    }
+  },
+  "header_names": [
+    "content-type",
+    "accept",
+    "authorization",
+    "anthropic-version"
+  ],
+  "method": "Post",
+  "url": "https://api.kimi.com/coding/v1/messages"
+}

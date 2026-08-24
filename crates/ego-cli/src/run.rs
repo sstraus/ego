@@ -11,7 +11,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use ego_ai::provider::{Credentials, EnvCredentials};
 use ego_core::config::{
     Effective, Limits, Mode, Posture, Selection, SystemPrompt, Trust, resolve, system_prompt,
 };
@@ -443,27 +442,42 @@ async fn execute<S: EventSink>(
     )
     .map_err(usage)?;
 
+    let provider_id = slug
+        .split_once('/')
+        .map(|(provider, _)| provider)
+        .unwrap_or(&slug);
+    model::ensure_provider_mapping(provider_id)
+        .map_err(|err| usage(UsageError(err.to_string())))?;
     let http = model::transport(args.offline).map_err(|err| RunTermination::Provider {
         message: err.to_string(),
     })?;
     let hosted = facts::supplied(&effective.ceilings).map_err(usage)?;
-    // One credential source for the whole run: the check `resolve` makes and
-    // the header the generator builds read the same place, so they cannot
-    // disagree about whether a key exists.
-    let creds: Arc<dyn Credentials> = Arc::new(EnvCredentials);
-    let (resolved, credential) = model::resolve(&slug, hosted, &http, creds.as_ref())
-        .await
-        .map_err(|err| {
-            if model::is_provider_failure(&err) {
-                RunTermination::Provider {
-                    message: err.to_string(),
+    // One credential source for the whole request: refresh, resolution and
+    // header assembly share the locked auth store selected by `ego auth`.
+    let creds = crate::auth::request_credentials(
+        provider_id,
+        effective
+            .auth
+            .get(provider_id)
+            .and_then(|auth| auth.credential_command.as_deref()),
+        args.offline,
+    )
+    .await
+    .map_err(|err| usage(UsageError(err.to_string())))?;
+    let (resolved, credential) =
+        model::resolve(&slug, hosted, &http, creds.as_ref(), &effective.auth)
+            .await
+            .map_err(|err| {
+                if model::is_provider_failure(&err) {
+                    RunTermination::Provider {
+                        message: err.to_string(),
+                    }
+                } else {
+                    RunTermination::UsageError {
+                        message: err.to_string(),
+                    }
                 }
-            } else {
-                RunTermination::UsageError {
-                    message: err.to_string(),
-                }
-            }
-        })?;
+            })?;
 
     let opened = match &jsonl_store {
         Some(store) => Opened::Durable(Box::new(

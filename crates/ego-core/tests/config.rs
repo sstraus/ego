@@ -5,8 +5,8 @@
 
 use ego_core::ceiling::{Budget, Ceilings};
 use ego_core::config::{
-    ConfigError, ConfigLayer, Mode, ModelRef, PermCfg, Posture, ProfileLayer, Source, Sourced,
-    SourcedRule, Trust, resolve,
+    AuthProviderLayer, ConfigError, ConfigLayer, Mode, ModelRef, PermCfg, Posture, ProfileLayer,
+    Source, Sourced, SourcedRule, Trust, resolve,
 };
 use ego_core::cost::{Amount, CurrencyCode, Money};
 use ego_core::permit::rule::Rule;
@@ -119,6 +119,78 @@ fn config_known_keys_parse_cleanly() {
             allow: vec![rule("read(src/**)")],
             deny: vec![],
         })
+    );
+}
+
+#[test]
+fn auth_uses_the_same_strict_layer_parser_as_generation_config() {
+    let sourced = ConfigLayer::parse(
+        Source::User,
+        "model = \"openai/gpt-5\"\n[auth.openai-codex]\ncredential_command = \"mint-codex\"\n[auth.openai-codex.headers]\noriginator = \"operator\"\n",
+    )
+    .unwrap();
+    let effective = resolve(&[sourced], Trust::Untrusted, None).unwrap();
+
+    let auth = effective.auth.get("openai-codex").unwrap();
+    assert_eq!(auth.credential_command.as_deref(), Some("mint-codex"));
+    assert_eq!(
+        auth.headers.get("originator").map(String::as_str),
+        Some("operator")
+    );
+}
+
+#[test]
+fn auth_precedence_merges_command_and_headers_per_field_and_name() {
+    let layers = [
+        layer(
+            Source::System,
+            ConfigLayer {
+                auth: std::collections::HashMap::from([(
+                    "openai-codex".to_string(),
+                    AuthProviderLayer {
+                        credential_command: Some("system-mint".to_string()),
+                        headers: std::collections::HashMap::from([
+                            ("Originator".to_string(), "system".to_string()),
+                            ("user-agent".to_string(), "system-agent".to_string()),
+                        ]),
+                    },
+                )]),
+                ..Default::default()
+            },
+        ),
+        layer(
+            Source::User,
+            ConfigLayer {
+                auth: std::collections::HashMap::from([(
+                    "openai-codex".to_string(),
+                    AuthProviderLayer {
+                        credential_command: None,
+                        headers: std::collections::HashMap::from([
+                            ("originator".to_string(), "operator".to_string()),
+                            ("x-client".to_string(), "ego".to_string()),
+                        ]),
+                    },
+                )]),
+                ..Default::default()
+            },
+        ),
+    ];
+
+    let effective = resolve(&layers, Trust::Untrusted, None).unwrap();
+    let auth = effective.auth.get("openai-codex").unwrap();
+    assert_eq!(auth.credential_command.as_deref(), Some("system-mint"));
+    assert_eq!(auth.headers.len(), 3, "{:#?}", auth.headers);
+    assert_eq!(
+        auth.headers.get("originator").map(String::as_str),
+        Some("operator")
+    );
+    assert_eq!(
+        auth.headers.get("user-agent").map(String::as_str),
+        Some("system-agent")
+    );
+    assert_eq!(
+        auth.headers.get("x-client").map(String::as_str),
+        Some("ego")
     );
 }
 

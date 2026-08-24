@@ -22,7 +22,8 @@
 //! streaming reference, read 2026-08-22 — `[D]+[S]` in `docs/14`'s evidence
 //! classes, never `[R]`. No `ANTHROPIC_API_KEY` exists in this repository, so
 //! nothing here has been observed against a live server. They pin the
-//! *contract*; `tests/smoke.rs` is where a recording would replace them.
+//! *contract*; `crates/ego-cli/tests/smoke.rs` is where a recording would
+//! replace them.
 //!
 //! Fields this mapping ignores are present in the transcripts on purpose
 //! (`service_tier`, `inference_geo`, `ping`, `stop_sequence`), so that

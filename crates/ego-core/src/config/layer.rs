@@ -97,6 +97,42 @@ pub struct ProfileLayer {
     pub budget: Option<Budget>,
 }
 
+/// Non-secret authentication overrides for one provider.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthProviderLayer {
+    /// Program invoked with `login` or `refresh`; its stdout is the secret.
+    pub credential_command: Option<String>,
+    /// Profile identity headers. Credential and wire headers are forbidden.
+    #[serde(default, deserialize_with = "auth_headers")]
+    pub headers: HashMap<String, String>,
+}
+
+fn auth_headers<'de, D>(deserializer: D) -> Result<HashMap<String, String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let headers = HashMap::<String, String>::deserialize(deserializer)?;
+    for name in headers.keys() {
+        if [
+            "authorization",
+            "x-api-key",
+            "content-type",
+            "accept",
+            "openai-beta",
+            "chatgpt-account-id",
+        ]
+        .iter()
+        .any(|forbidden| name.eq_ignore_ascii_case(forbidden))
+        {
+            return Err(serde::de::Error::custom(format!(
+                "forbidden authentication header `{name}`"
+            )));
+        }
+    }
+    Ok(headers)
+}
+
 /// One config layer: a file, an env-derived table, or the flags table.
 /// `resolve` merges a slice of these, tagged by [`Source`], into an
 /// [`Effective`](super::Effective) config.
@@ -121,6 +157,9 @@ pub struct ConfigLayer {
     /// `EGO_PROFILE` (`CLI.md` §7). Keyed by profile name.
     #[serde(default)]
     pub profile: HashMap<String, ProfileLayer>,
+    /// Provider login commands and non-secret identity-header overlays.
+    #[serde(default)]
+    pub auth: HashMap<String, AuthProviderLayer>,
 }
 
 impl ConfigLayer {

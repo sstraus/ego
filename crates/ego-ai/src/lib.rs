@@ -7,6 +7,7 @@
 pub mod catalogue;
 pub mod generator;
 pub mod http;
+pub mod oauth;
 pub mod ollama;
 pub mod pricing;
 pub mod provider;

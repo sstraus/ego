@@ -22,7 +22,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 
 use clap::error::ErrorKind;
-use clap::{ArgAction, Args as ClapArgs, Parser};
+use clap::{ArgAction, Args as ClapArgs, Parser, Subcommand};
 use ego_core::config::Mode;
 use ego_core::event::id::SessionId;
 use ego_core::generator::types::ThinkingLevel;
@@ -30,6 +30,8 @@ use ego_core::generator::types::ThinkingLevel;
 /// What the process was asked to do.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Invocation {
+    /// `ego auth login|logout|status [PROVIDER]`.
+    Auth(Box<AuthArgs>),
     /// `ego run [PROMPT]` — the headless one-shot of `CLI.md` §2.
     Run(Box<Args>),
     /// `ego resume [ID] [PROMPT]` — the same run against a session that
@@ -126,7 +128,7 @@ const UNAVAILABLE: &[Unavailable] = &[
 /// exist. That is `every_waiting_on_reason_is_the_one_the_document_prints`'s
 /// defect moved one link along the chain — two surfaces agreeing perfectly
 /// about something that has stopped being true.
-pub const BUILT: &[&str] = &["run", "resume", "ls", "acp"];
+pub const BUILT: &[&str] = &["run", "resume", "ls", "acp", "auth"];
 
 /// A command `CLI.md` §2 documents that this build does not implement, and the
 /// subsystem it is waiting on.
@@ -165,12 +167,6 @@ pub const UNBUILT: &[(&str, &str)] = &[
         "mcp-server",
         "ego's own MCP server surface (**M2**): the scoped run/continue/cancel/\
          status tools it would expose",
-    ),
-    (
-        "auth",
-        "a credential store. Every provider names one environment variable \
-         (`CredentialStrategy::BearerFromEnv`), so there is nowhere for a login to put \
-         anything and nothing for a logout to remove",
     ),
     (
         "models",
@@ -446,6 +442,43 @@ struct AcpCommand {
     places: Places,
 }
 
+/// Arguments shared by the three auth operations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthArgs {
+    pub action: AuthAction,
+    pub provider: Option<String>,
+    pub device: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthAction {
+    Login,
+    Logout,
+    Status,
+}
+
+#[derive(Debug, Parser)]
+#[command(name = "ego auth", about = "Manage subscription credentials.")]
+struct AuthCommand {
+    #[command(subcommand)]
+    action: AuthSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum AuthSubcommand {
+    /// Authenticate and store a provider credential.
+    Login {
+        provider: Option<String>,
+        /// Prefer device-code login when the provider offers it.
+        #[arg(long)]
+        device: bool,
+    },
+    /// Remove a stored provider credential.
+    Logout { provider: Option<String> },
+    /// Show credential type and expiry, never token values.
+    Status { provider: Option<String> },
+}
+
 /// The three flags every subcommand takes, declared once.
 ///
 /// `ls` starts no turn, so it shares almost nothing with `run` — but these
@@ -695,13 +728,14 @@ fn overview(program: &str) -> String {
             "resume" => "Continue a session; no ID = latest in this workspace",
             "ls" => "List sessions (this workspace; --all for every one)",
             "acp" => "Serve the Agent Client Protocol on stdio",
+            "auth" => "Manage subscription credentials",
             other => other,
         };
         text.push_str(&format!("  {name:<8}{about}\n"));
     }
     text.push_str(&format!(
         "\n`{program} <COMMAND> --help` describes one of them. CLI.md §2 \
-         documents ten more; each is refused by name, with the subsystem it \
+         documents the remaining commands; each is refused by name, with the subsystem it \
          waits on.\n"
     ));
     text
@@ -804,6 +838,23 @@ pub fn parse(argv: Vec<String>) -> Result<Invocation, UsageError> {
                 directory: parsed.common.places.directory,
                 output: parsed.common.output,
             }))),
+        },
+        "auth" => match clap_or_answer::<AuthCommand>(&tokens)? {
+            Parsed::Answered(text) => Ok(Invocation::Answered(text)),
+            Parsed::Command(parsed) => {
+                let (action, provider, device) = match parsed.action {
+                    AuthSubcommand::Login { provider, device } => {
+                        (AuthAction::Login, provider, device)
+                    }
+                    AuthSubcommand::Logout { provider } => (AuthAction::Logout, provider, false),
+                    AuthSubcommand::Status { provider } => (AuthAction::Status, provider, false),
+                };
+                Ok(Invocation::Auth(Box::new(AuthArgs {
+                    action,
+                    provider,
+                    device,
+                })))
+            }
         },
         _ => match clap_or_answer::<RunCommand>(&tokens)? {
             Parsed::Answered(text) => Ok(Invocation::Answered(text)),

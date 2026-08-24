@@ -2,7 +2,7 @@
 //!
 //! `docs/decisions/2026-08-21-a-shared-shape-is-not-a-shared-contract.md` §9
 //! splits "the same contract" into five checks. Four are offline and live in
-//! `tests/conformance.rs`, which replays committed transcripts. The fifth
+//! `crates/ego-ai/tests/conformance.rs`, which replays committed transcripts. The fifth
 //! cannot be made offline **at all**, and that asymmetry is the honest core of
 //! the design: a transcript is a recording of a provider that already agreed,
 //! so it can prove what the decoder does with a provider's bytes and can never
@@ -20,9 +20,9 @@
 //!
 //! The opt-in is a variable that exists for no other purpose. Gating on
 //! `OPENAI_API_KEY` would be the accidental-spend case itself: that variable is
-//! exported on a developer's machine precisely because `EnvCredentials` reads
-//! it, so a key-presence gate would spend money on `cargo test --workspace` for
-//! anyone configured to use the product.
+//! exported on a developer's machine precisely because the normal credential
+//! source reads it for API-key rows, so a key-presence gate would spend money
+//! on `cargo test --workspace` for anyone configured to use the product.
 //!
 //! # What bounds the spend
 //!
@@ -39,14 +39,14 @@
 //! With it set, each profile's four fixture families are rewritten from what
 //! this run saw, with a provenance header and with the credential header's
 //! *value* stripped at the point of capture rather than afterwards. That is
-//! where `tests/goldens/profile/<provider>/` comes from, and it is why the
-//! offline suite and the live check cannot drift: one writes what the other
-//! reads.
+//! where `crates/ego-ai/tests/goldens/profile/<provider>/` comes from, and it
+//! is why the offline suite and the live check cannot drift: one writes what
+//! the other reads.
 
 use std::sync::Arc;
 
 use ego_ai::http::{EgressPolicy, Http, HttpRequest, HttpResponse, ReqwestHttp};
-use ego_ai::provider::{Credentials, EnvCredentials, ProviderRow};
+use ego_ai::provider::{Credentials, ProviderRow};
 use ego_ai::wire::RequestTarget;
 use ego_core::budget::{BudgetGate, Metering, PricingQuote};
 use ego_core::cost::{Amount, CurrencyCode, Money, PricingRevision};
@@ -58,9 +58,12 @@ use ego_core::generator::port::AiEvent;
 use ego_core::generator::types::{GenRequest, StopReason};
 use futures::StreamExt;
 
+#[path = "../../ego-ai/tests/profiles/mod.rs"]
 mod profiles;
 use profiles::{
-    OLLAMA, OPENAI, Profile, TOOL_CEILING, canonical, request_fixture, tool_calling, write,
+    ANTHROPIC, GITHUB_COPILOT, KIMI_CODING, MINIMAX_OAUTH, NOUS, OLLAMA, OPENAI, OPENAI_CODEX,
+    OPENROUTER, Profile, QWEN_OAUTH, TOOL_CEILING, XAI_OAUTH, canonical, request_fixture,
+    tool_calling, write,
 };
 
 /// The variable that turns any of this on, and the only thing it is for.
@@ -152,8 +155,12 @@ fn built(row: &ProviderRow, creds: &dyn Credentials, req: &GenRequest) -> HttpRe
         .credential
         .resolve(creds)
         .unwrap_or_else(|err| panic!("{} was asked for by name: {err}", row.id));
-    let headers = credential.headers();
-    let target = RequestTarget::new(&row.base, &headers);
+    let mut headers = credential.headers();
+    for (name, value) in &row.extra_headers {
+        headers.retain(|(present, _)| !present.eq_ignore_ascii_case(name));
+        headers.push((name.clone(), value.clone()));
+    }
+    let target = RequestTarget::new(credential.base_override().unwrap_or(&row.base), &headers);
     row.wire
         .build_request(&target, req)
         .unwrap_or_else(|refused| panic!("{}: {refused}", row.id))
@@ -242,13 +249,20 @@ async fn smoke(profile: &Profile, when: &str) {
         return;
     }
     let row = (profile.row)();
-    let creds = EnvCredentials;
+    let auth = ego_cli::config::auth()
+        .unwrap_or_else(|err| panic!("could not load the auth configuration: {err}"));
+    let command = auth
+        .get(profile.id)
+        .and_then(|provider| provider.credential_command.as_deref());
+    let creds = ego_cli::auth::request_credentials(profile.id, command, false)
+        .await
+        .unwrap_or_else(|err| panic!("{} credential preparation failed: {err}", profile.id));
     let http = transport();
 
     // --- check 5, for the canonical body ---
     let req = canonical(profile);
     bounded(&req, &profile.metering());
-    let request = built(&row, &creds, &req);
+    let request = built(&row, creds.as_ref(), &req);
     // The fixture is taken from the request before it is sent, because an
     // `HttpRequest` is not `Clone` — and it must not become one: a request
     // carries a credential, and a type that can be duplicated is a credential
@@ -299,7 +313,7 @@ async fn smoke(profile: &Profile, when: &str) {
     // --- the tool-calling transcript ---
     let tools = tool_calling(profile);
     bounded(&tools, &profile.metering());
-    let (status, tool_transcript) = send(http.as_ref(), built(&row, &creds, &tools)).await;
+    let (status, tool_transcript) = send(http.as_ref(), built(&row, creds.as_ref(), &tools)).await;
     assert_eq!(status, 200, "{}: {tool_transcript}", profile.id);
     write(
         profile,
@@ -317,7 +331,7 @@ async fn smoke(profile: &Profile, when: &str) {
         model: "this-model-does-not-exist".to_string(),
         ..canonical(profile)
     };
-    let (status, error_body) = send(http.as_ref(), built(&row, &creds, &absent)).await;
+    let (status, error_body) = send(http.as_ref(), built(&row, creds.as_ref(), &absent)).await;
     assert_ne!(
         status, 200,
         "{} answered 200 for a model that does not exist",
@@ -350,18 +364,26 @@ async fn smoke(profile: &Profile, when: &str) {
     }
 }
 
-/// Every chunk in `transcript` that carries a usage report.
+/// Every raw event in `transcript` that carries a usage report.
 ///
 /// More than one is legal — the port says so — so this collects rather than
 /// finding, and a profile that reports twice gets two files instead of one
-/// silently chosen.
+/// silently chosen. Both documented wire locations are recognised by shape:
+/// Chat Completions and Messages carry `usage` at the event root, while
+/// Responses carries it under `response`. The full event is retained so a
+/// Responses fixture is never rewritten to look like a Chat fixture.
 fn usage_frames(transcript: &str) -> Vec<String> {
     transcript
         .lines()
         .filter_map(|line| line.strip_prefix("data: "))
         .filter(|line| *line != "[DONE]")
         .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-        .filter(|chunk| !chunk["usage"].is_null())
+        .filter(|chunk| {
+            !chunk["usage"].is_null()
+                || chunk
+                    .pointer("/response/usage")
+                    .is_some_and(|usage| !usage.is_null())
+        })
         .map(|chunk| serde_json::to_string_pretty(&chunk).expect("a value that was just parsed"))
         .collect()
 }
@@ -425,6 +447,60 @@ async fn ollama_accepts_the_body_this_build_sends() {
 #[ignore = "sends a real, billable request; set EGO_SMOKE=openai"]
 async fn openai_accepts_the_body_this_build_sends() {
     smoke(&OPENAI, &today()).await;
+}
+
+#[tokio::test]
+#[ignore = "sends a real subscription request; set EGO_SMOKE=openai-codex"]
+async fn openai_codex_accepts_the_body_this_build_sends() {
+    smoke(&OPENAI_CODEX, &today()).await;
+}
+
+#[tokio::test]
+#[ignore = "sends a real subscription request; set EGO_SMOKE=anthropic"]
+async fn anthropic_accepts_the_body_this_build_sends() {
+    smoke(&ANTHROPIC, &today()).await;
+}
+
+#[tokio::test]
+#[ignore = "sends a real subscription request; set EGO_SMOKE=github-copilot"]
+async fn github_copilot_accepts_the_body_this_build_sends() {
+    smoke(&GITHUB_COPILOT, &today()).await;
+}
+
+#[tokio::test]
+#[ignore = "sends a real subscription request; set EGO_SMOKE=xai-oauth"]
+async fn xai_oauth_accepts_the_body_this_build_sends() {
+    smoke(&XAI_OAUTH, &today()).await;
+}
+
+#[tokio::test]
+#[ignore = "sends a real subscription request; set EGO_SMOKE=kimi-coding"]
+async fn kimi_coding_accepts_the_body_this_build_sends() {
+    smoke(&KIMI_CODING, &today()).await;
+}
+
+#[tokio::test]
+#[ignore = "sends a real subscription request; set EGO_SMOKE=qwen-oauth"]
+async fn qwen_oauth_accepts_the_body_this_build_sends() {
+    smoke(&QWEN_OAUTH, &today()).await;
+}
+
+#[tokio::test]
+#[ignore = "sends a real subscription request; set EGO_SMOKE=minimax-oauth"]
+async fn minimax_oauth_accepts_the_body_this_build_sends() {
+    smoke(&MINIMAX_OAUTH, &today()).await;
+}
+
+#[tokio::test]
+#[ignore = "sends a real subscription request; set EGO_SMOKE=nous"]
+async fn nous_accepts_the_body_this_build_sends() {
+    smoke(&NOUS, &today()).await;
+}
+
+#[tokio::test]
+#[ignore = "sends a real subscription request; set EGO_SMOKE=openrouter"]
+async fn openrouter_accepts_the_body_this_build_sends() {
+    smoke(&OPENROUTER, &today()).await;
 }
 
 /// The gate itself, which is the one thing here that must run offline.

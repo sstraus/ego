@@ -17,18 +17,20 @@
 //! replaced, which is the same wrong address by a different route.
 
 use ego_ai::provider::ProviderRow;
-use ego_ai::wire::{RequestTarget, ollama, openai_completions};
+use ego_ai::wire::{RequestTarget, ollama, openai_codex_responses, openai_completions};
 use url::Url;
 
 fn parse(url: &str) -> Url {
     Url::parse(url).expect("a constant this file controls")
 }
 
-/// The default rows address the two providers this build ships.
+/// The default rows address the endpoints their providers serve.
 ///
 /// Written as whole URLs rather than as "base plus path", so the assertion is
 /// about the address a request actually goes to and not about the arithmetic
-/// that produced it.
+/// that produced it. Codex is here because joining `codex/responses` onto
+/// `chatgpt.com/backend-api/` is the whole difference from Platform
+/// completions, and `set_path` would send it to the wrong host path.
 #[test]
 fn the_shipped_rows_address_the_endpoints_their_providers_serve() {
     let openai = ProviderRow::openai();
@@ -41,6 +43,12 @@ fn the_shipped_rows_address_the_endpoints_their_providers_serve() {
     assert_eq!(
         RequestTarget::new(&ollama.base, &[]).url(ollama::PATH),
         parse("http://localhost:11434/v1/chat/completions")
+    );
+
+    let codex = ProviderRow::openai_codex_default();
+    assert_eq!(
+        RequestTarget::new(&codex.base, &[]).url(openai_codex_responses::PATH),
+        parse("https://chatgpt.com/backend-api/codex/responses")
     );
 }
 

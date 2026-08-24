@@ -133,6 +133,7 @@ fn row() -> ProviderRow {
         resolver: &Supplied,
         id: "stub".to_string(),
         base: Url::parse("https://api.example/v1/").expect("a valid url"),
+        extra_headers: Vec::new(),
         wire: &OpenAiCompletions,
         credential: CredentialStrategy::BearerFromEnv {
             var: KEY_VAR.to_string(),
@@ -598,6 +599,38 @@ async fn the_resolved_credential_is_what_the_request_carries() {
         vec![&("authorization".to_string(), format!("Bearer {KEY}"))],
         "one authorization header, carrying the resolved credential: {:?}",
         sent.headers
+    );
+}
+
+/// Profile identity is data beside the credential, and survives unchanged to
+/// the request. The mapping remains unaware of what either header means.
+#[tokio::test]
+async fn profile_extra_headers_reach_the_request_without_becoming_credentials() {
+    let http = StubHttp::responding(200, TEXT_TRANSCRIPT);
+    let mut gate = BudgetGate::new(usd("10"));
+    let mut profile = row();
+    profile.extra_headers = vec![
+        ("originator".to_string(), "ego".to_string()),
+        ("user-agent".to_string(), "ego-test".to_string()),
+    ];
+    let generator = WireGenerator::new(
+        profile,
+        Arc::clone(&http) as Arc<dyn Http>,
+        credential(&FakeCredentials::holding(KEY)),
+    );
+
+    let attempt = attempt_for(&mut gate, &request());
+    let _: Vec<AiEvent> = generator.generate(request(), attempt).collect().await;
+
+    let seen = http.seen.lock().expect("not poisoned");
+    let sent = seen.first().expect("the transport was called once");
+    assert!(
+        sent.headers
+            .contains(&("originator".to_string(), "ego".to_string()))
+    );
+    assert!(
+        sent.headers
+            .contains(&("user-agent".to_string(), "ego-test".to_string()))
     );
 }
 

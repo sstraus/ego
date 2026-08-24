@@ -35,6 +35,7 @@ fn parsed<const N: usize>(args: [&str; N]) -> ego_cli::cli::Args {
         Invocation::Run(args) | Invocation::Resume(args) => *args,
         Invocation::Ls(_) => panic!("`ls` takes no Args: use `listed` for it"),
         Invocation::Acp(_) => panic!("`acp` takes no Args: use `served` for it"),
+        Invocation::Auth(_) => panic!("`auth` takes no Args: use the auth tests for it"),
         Invocation::Answered(_) => panic!("that answered a question: use `answered` for it"),
     }
 }

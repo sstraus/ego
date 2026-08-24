@@ -2,7 +2,7 @@
 //! sources — no file I/O (`plans/m0a-contracts.md` Step 12).
 
 use super::error::ConfigError;
-use super::layer::{ConfigLayer, Mode, ModelRef};
+use super::layer::{AuthProviderLayer, ConfigLayer, Mode, ModelRef};
 use super::ruleset::Ruleset;
 use super::source::{Source, Sourced, Trust};
 use crate::ceiling::{Ceilings, Clamped};
@@ -35,6 +35,9 @@ pub struct Effective {
     /// and what was asked for are two numbers, and a single field would have
     /// to be one of them.
     pub clamped: Clamped,
+    /// Provider login-command and identity-header configuration, after layer
+    /// precedence. Values are non-secret.
+    pub auth: std::collections::HashMap<String, AuthProviderLayer>,
 }
 
 /// Resolves layered config into one [`Effective`] value.
@@ -110,6 +113,7 @@ pub fn resolve(
     let mut mode = None;
     let mut permissions = Ruleset::default();
     let mut ceilings = Ceilings::default();
+    let mut auth = std::collections::HashMap::new();
 
     for sourced in &eligible {
         let profile = active_profile.and_then(|name| sourced.value.profile.get(name));
@@ -145,6 +149,20 @@ pub fn resolve(
             // every metering class — and merging them into one slot would
             // make naming either a way to drop the other.
             ceilings.apply(budget);
+        }
+        for (id, provider) in &sourced.value.auth {
+            let resolved = auth
+                .entry(id.clone())
+                .or_insert_with(AuthProviderLayer::default);
+            if provider.credential_command.is_some() {
+                resolved.credential_command = provider.credential_command.clone();
+            }
+            for (name, value) in &provider.headers {
+                resolved
+                    .headers
+                    .retain(|existing, _| !existing.eq_ignore_ascii_case(name));
+                resolved.headers.insert(name.clone(), value.clone());
+            }
         }
     }
 
@@ -236,5 +254,6 @@ pub fn resolve(
         posture,
         ceilings,
         clamped,
+        auth,
     })
 }

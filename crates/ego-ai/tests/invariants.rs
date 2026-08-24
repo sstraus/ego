@@ -316,6 +316,7 @@ async fn a_provider_on_a_supported_dialect_is_configuration_and_nothing_else() {
         resolver: &Supplied,
         id: "acme".to_string(),
         base: Url::parse("https://api.acme.example/v1/").expect("a valid url"),
+        extra_headers: Vec::new(),
         credential: CredentialStrategy::BearerFromEnv {
             var: KEY_VAR.to_string(),
         },
@@ -553,6 +554,7 @@ fn beacon_row() -> ProviderRow {
         resolver: &Supplied,
         id: "beacon".to_string(),
         base: Url::parse("https://beacon.example/").expect("a valid url"),
+        extra_headers: Vec::new(),
         credential: CredentialStrategy::None,
         wire: &Beacon,
         cost: None,

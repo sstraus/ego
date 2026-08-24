@@ -1,7 +1,8 @@
 //! The `openai-completions` wire format: `POST /chat/completions`, streamed.
 //!
 //! The shape behind OpenAI, OpenRouter, Groq, Together, Fireworks, DeepSeek,
-//! xAI and every local daemon that advertises an "OpenAI-compatible" endpoint
+//! the API-key xAI candidate, and local daemons that advertise an
+//! "OpenAI-compatible" endpoint
 //! (`ARCHITECTURE.md` §3.1). Every field name, enum spelling and nullability
 //! below was read from `openai/openai-openapi` rather than recalled — the
 //! constraint `plans/m0b-vertical-slice.md` Step 9 puts on this step, because
@@ -414,6 +415,27 @@ pub fn request_body(req: &GenRequest) -> Result<Vec<u8>, Inexpressible> {
     Ok(serde_json::to_vec(&wire).expect("WireRequest has no non-string map keys and no NaN"))
 }
 
+/// The captured Pi/Hermes client projection for compatible endpoints.
+///
+/// Copilot, Qwen Portal, and Nous Portal agree on two omissions: they do not
+/// send a reasoning field when thinking is off, and their pinned clients do
+/// not send `parallel_tool_calls`. Keeping those omissions in one helper pins
+/// the shared bytes without claiming that any provider was recorded live.
+/// Their mapping values still own the request differences that do not agree.
+pub(crate) fn captured_client_request_body(req: &GenRequest) -> Result<Vec<u8>, Inexpressible> {
+    let bytes = request_body(req)?;
+    let mut body: serde_json::Value =
+        serde_json::from_slice(&bytes).expect("WireRequest serialises JSON");
+    let object = body
+        .as_object_mut()
+        .expect("WireRequest serialises an object");
+    if req.thinking == ThinkingLevel::Off {
+        object.remove("reasoning_effort");
+    }
+    object.remove("parallel_tool_calls");
+    Ok(serde_json::to_vec(&body).expect("a JSON value serialises"))
+}
+
 /// The part of the body every member of this family shares.
 ///
 /// The refusal lives here rather than in either caller: a request carrying
@@ -487,6 +509,17 @@ struct Chunk {
     /// `ego-core`'s money contract exists to prevent.
     #[serde(default)]
     usage: Option<Box<RawValue>>,
+    /// Some compatible providers report a post-200 failure as an SSE data
+    /// object with the ordinary OpenAI error envelope.
+    #[serde(default)]
+    error: Option<WireError>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WireError {
+    message: String,
+    #[serde(default, rename = "type")]
+    kind: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -685,9 +718,10 @@ pub struct StreamDecoder {
     /// How this provider states the money it will charge, when it states it.
     ///
     /// Carried by the provider row, not chosen here: this format is spoken by
-    /// OpenAI, xAI, OpenRouter, Groq and every local daemon, and only two of
-    /// them report a cost. A `match` on the provider id in this file would be
-    /// exactly the special case the metering ADR §8 forbids.
+    /// OpenAI, OpenRouter, the unselectable API-key xAI candidate, Groq and
+    /// local daemons, and only some report a cost. A `match` on the provider id
+    /// in this file would be exactly the special case the metering ADR §8
+    /// forbids.
     cost: Option<Arc<dyn ProviderCost>>,
     /// The last figure the cost decoder read, held rather than forwarded, for
     /// the same reason `usage` below is: a stated cost is a total for the
@@ -712,6 +746,9 @@ pub struct StreamDecoder {
     /// A usage object whose parts did not fit its total. Held so it can be
     /// reported once, at the end, beside everything else that went wrong.
     usage_incoherent: bool,
+    /// An explicit provider error carried after the response status was
+    /// already 200. It outranks any finish reason in the same stream.
+    provider_error: Option<(String, ErrorKind)>,
 }
 
 impl super::StreamSink for StreamDecoder {
@@ -773,6 +810,12 @@ impl StreamDecoder {
                     .to_string(),
                 kind: ErrorKind::Unclassified,
             });
+        }
+        if let Some((message, kind)) = self.provider_error.take() {
+            self.calls.clear();
+            out.push(AiEvent::Error { message, kind });
+            out.push(AiEvent::Stop(StopReason::Error));
+            return out;
         }
         // Before the usage frame, deliberately. The two are one observation
         // as far as the log is concerned, and a reader that folds them in
@@ -886,6 +929,18 @@ impl StreamDecoder {
                 return;
             }
         };
+        if let Some(error) = chunk.error {
+            let kind = match error.kind.as_deref() {
+                Some("authentication_error" | "permission_error" | "billing_error") => {
+                    ErrorKind::Refused
+                }
+                Some("invalid_request_error" | "not_found_error") => ErrorKind::Invalid,
+                Some("rate_limit_error" | "overloaded_error" | "api_error") => ErrorKind::Transient,
+                _ => ErrorKind::Unclassified,
+            };
+            self.provider_error = Some((error.message, kind));
+            return;
+        }
         for choice in &chunk.choices {
             if choice.index != 0 {
                 // `n` is never sent, so a second choice is a completion nobody

@@ -1,0 +1,6 @@
+{
+  "error": {
+    "message": "xai-oauth: model not found",
+    "type": "not_found_error"
+  }
+}

@@ -109,7 +109,7 @@ pub struct XaiUsdTicks {
 
 impl XaiUsdTicks {
     /// A decoder that attributes what it reads to `schema_revision` of xAI's
-    /// chat-completions response schema.
+    /// current Responses usage schema.
     ///
     /// The schema revision is supplied rather than baked in: it names *which
     /// version of the provider's contract* was decoded, and this repository

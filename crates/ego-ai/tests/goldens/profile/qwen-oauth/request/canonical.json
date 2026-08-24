@@ -1,0 +1,29 @@
+{
+  "body": {
+    "max_completion_tokens": 16,
+    "messages": [
+      {
+        "content": [
+          {
+            "type": "text",
+            "text": "Reply with the single word: ok"
+          }
+        ],
+        "role": "user"
+      }
+    ],
+    "model": "qwen3-coder-plus",
+    "stream": true,
+    "stream_options": {
+      "include_usage": true
+    },
+    "vl_high_resolution_images": true
+  },
+  "header_names": [
+    "content-type",
+    "accept",
+    "authorization"
+  ],
+  "method": "Post",
+  "url": "https://portal.qwen.ai/v1/chat/completions"
+}

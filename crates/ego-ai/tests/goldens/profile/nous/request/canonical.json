@@ -1,0 +1,23 @@
+{
+  "body": {
+    "max_completion_tokens": 16,
+    "messages": [
+      {
+        "content": "Reply with the single word: ok",
+        "role": "user"
+      }
+    ],
+    "model": "hermes-3-70b",
+    "stream": true,
+    "stream_options": {
+      "include_usage": true
+    }
+  },
+  "header_names": [
+    "content-type",
+    "accept",
+    "authorization"
+  ],
+  "method": "Post",
+  "url": "https://inference-api.nousresearch.com/v1/chat/completions"
+}

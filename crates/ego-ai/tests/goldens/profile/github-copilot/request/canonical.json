@@ -1,0 +1,29 @@
+{
+  "body": {
+    "max_completion_tokens": 16,
+    "messages": [
+      {
+        "content": "Reply with the single word: ok",
+        "role": "user"
+      }
+    ],
+    "model": "gpt-4.1",
+    "stream": true,
+    "stream_options": {
+      "include_usage": true
+    }
+  },
+  "header_names": [
+    "content-type",
+    "accept",
+    "authorization",
+    "user-agent",
+    "editor-version",
+    "editor-plugin-version",
+    "copilot-integration-id",
+    "x-initiator",
+    "openai-intent"
+  ],
+  "method": "Post",
+  "url": "https://api.individual.githubcopilot.com/chat/completions"
+}

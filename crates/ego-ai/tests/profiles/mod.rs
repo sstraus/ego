@@ -5,9 +5,9 @@
 //! its own fixtures even where several select the same adapter. That is what
 //! makes the fixtures non-redundant rather than copies of one test — a fixture
 //! is evidence about a provider's bytes, not about ego's code — and it is why
-//! this table exists at all: `tests/conformance.rs` and `tests/smoke.rs` must
-//! agree, item for item, about what a profile *is*. One reads the fixtures the
-//! other writes.
+//! this table exists at all: `tests/conformance.rs` and
+//! `crates/ego-cli/tests/smoke.rs` must agree, item for item, about what a
+//! profile *is*. One reads the fixtures the other writes.
 
 // Each integration test compiles this module separately, so an item only one
 // binary needs is dead code in the other.
@@ -17,7 +17,9 @@ use std::path::PathBuf;
 
 use ego_ai::http::HttpRequest;
 use ego_ai::provider::{
-    ANTHROPIC_BASE, GEMINI_BASE, OLLAMA_BASE, OPENAI_BASE, OPENROUTER_BASE, ProviderRow, XAI_BASE,
+    ANTHROPIC_BASE, GEMINI_BASE, GITHUB_COPILOT_BASE, KIMI_CODING_BASE, MINIMAX_OAUTH_BASE,
+    NOUS_BASE, OLLAMA_BASE, OPENAI_BASE, OPENAI_CODEX_BASE, OPENROUTER_BASE, ProviderRow,
+    QWEN_OAUTH_BASE, XAI_BASE,
 };
 use ego_core::budget::{Metering, SettlementSource};
 use ego_core::generator::types::{
@@ -26,18 +28,23 @@ use ego_core::generator::types::{
 
 /// Where a fixture came from, stated rather than assumed.
 ///
-/// The two kinds prove different things and the difference is not cosmetic:
+/// The three kinds prove different things and the difference is not cosmetic:
 /// a **recorded** fixture proves the decoder against a provider's *behaviour*,
 /// and a **schema-derived** one proves it against the published *contract*. A
-/// suite that mixed them silently would let a hand-assembled guess stand in
-/// for evidence about a live server.
+/// **captured-client-derived** fixture proves what a pinned client builds or
+/// accepts. A suite that mixed them silently would let either offline source
+/// stand in for evidence about a live server.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Provenance {
-    /// Captured live, by `tests/smoke.rs` under `EGO_SMOKE_RECORD=1`.
+    /// Captured live, by `crates/ego-cli/tests/smoke.rs` under
+    /// `EGO_SMOKE_RECORD=1`.
     Recorded,
     /// Hand-assembled from the published specification. Honest about what it
     /// is: a claim about the contract, not about a server.
-    SchemaDerived,
+    VendorSchemaDerived,
+    /// Derived from a pinned client implementation or captured client bytes,
+    /// but never represented as a live recording from the provider itself.
+    CapturedClientDerived,
 }
 
 /// One provider, and everything both suites need to know about it.
@@ -53,6 +60,12 @@ pub struct Profile {
     pub row: fn() -> ProviderRow,
     /// Where this profile's fixtures came from.
     pub provenance: Provenance,
+    /// The exact schema, recording, or pinned client revision behind the
+    /// profile. Captured-client profiles include a full commit SHA and date.
+    pub source: &'static str,
+    /// Subscription settlement is flat-plan quota even when the wire reports
+    /// cost telemetry, so a smoke must not turn it back into currency.
+    pub subscription: bool,
     /// Where in this provider's error body the sentence it wants read lives.
     ///
     /// A path and not a shared parser, because the envelope is **not** shared:
@@ -89,6 +102,9 @@ const NESTED: &[&str] = &["error", "message"];
 impl Profile {
     /// How this profile is metered, which is what bounds a smoke's spend.
     pub fn metering(&self) -> Metering {
+        if self.subscription {
+            return ego_ai::catalogue::subscription("ego/test/subscription-profile/v1");
+        }
         match self.provenance {
             // A daemon serving its own weights charges nothing and states
             // nothing. Keyed off the row rather than off the provenance would
@@ -114,6 +130,8 @@ pub const OLLAMA: Profile = Profile {
     model: "gemma4:12b-mlx",
     row: ProviderRow::ollama_default,
     provenance: Provenance::Recorded,
+    source: OLLAMA_BASE,
+    subscription: false,
     error_message_at: NESTED,
 };
 
@@ -122,15 +140,18 @@ pub const OLLAMA: Profile = Profile {
 /// This repository holds no key for it, so nothing here has been observed
 /// against a live server. The fixtures are assembled from the published
 /// specification and prove what the decoder does with that contract — which is
-/// worth having and is *not* the acceptance check. `tests/smoke.rs` is where
-/// that gap closes, on a machine that has a key and asks for it by name.
+/// worth having and is *not* the acceptance check.
+/// `crates/ego-cli/tests/smoke.rs` is where that gap closes, on a machine that
+/// has a key and asks for it by name.
 pub const OPENAI: Profile = Profile {
     id: "openai",
     thinking: ThinkingLevel::Off,
     base: OPENAI_BASE,
     model: "gpt-5.1",
     row: ProviderRow::openai,
-    provenance: Provenance::SchemaDerived,
+    provenance: Provenance::VendorSchemaDerived,
+    source: "the OpenAI Chat Completions streaming specification",
+    subscription: false,
     error_message_at: NESTED,
 };
 
@@ -154,14 +175,16 @@ pub const XAI: Profile = Profile {
     base: XAI_BASE,
     model: "grok-4",
     row: ProviderRow::xai_default,
-    provenance: Provenance::SchemaDerived,
+    provenance: Provenance::VendorSchemaDerived,
+    source: "the xAI Chat Completions streaming specification",
+    subscription: false,
     // Flat, and demonstrably not the family's. The mapping relays a body it
     // could not parse verbatim, so the sentence survives anyway — which is the
     // difference between a decode *difference* and a decode *failure*.
     error_message_at: &["error"],
 };
 
-/// OpenRouter: schema-derived, and a candidate for a sharper reason.
+/// OpenRouter: schema-derived, selectable, and still lacking live acceptance.
 ///
 /// The ADR's §7 left an open question about conformance check 1 here that xAI
 /// does not raise: whether `usage.cost` needs `usage: {include: true}` in the
@@ -171,8 +194,9 @@ pub const XAI: Profile = Profile {
 /// have no effect. Full usage details are now always included automatically" —
 /// so the projection is compatible and, incidentally, so is the
 /// `stream_options` it *does* send. That is a reading of a document, which is
-/// what `SchemaDerived` means; it is not a recording, so the row stays out of
-/// the table.
+/// what `VendorSchemaDerived` means; it is not a recording. The later
+/// subscription-login decision nevertheless makes the row selectable and its
+/// opt-in smoke keeps that live gap explicit.
 ///
 /// The model carries a slash on purpose. `CLI.md` spells `--model` as `P/M`
 /// and OpenRouter's ids are themselves `vendor/model`, so this profile is the
@@ -183,12 +207,14 @@ pub const OPENROUTER: Profile = Profile {
     base: OPENROUTER_BASE,
     model: "z-ai/glm-4.7",
     row: ProviderRow::openrouter_default,
-    provenance: Provenance::SchemaDerived,
+    provenance: Provenance::VendorSchemaDerived,
+    source: "the OpenRouter Chat Completions streaming specification",
+    subscription: false,
     error_message_at: NESTED,
 };
 
-/// Anthropic: schema-derived, a candidate, and the first profile that is not
-/// on the family's mapping.
+/// Anthropic: schema-derived, selectable, and the first profile that is not on
+/// the family's mapping.
 ///
 /// The other four differ from each other in a base, a resolver, a credential
 /// and an error envelope, and agree on every request field. This one shares no
@@ -208,7 +234,9 @@ pub const ANTHROPIC: Profile = Profile {
     base: ANTHROPIC_BASE,
     model: "claude-opus-5",
     row: ProviderRow::anthropic_default,
-    provenance: Provenance::SchemaDerived,
+    provenance: Provenance::VendorSchemaDerived,
+    source: "the Anthropic Messages API streaming specification",
+    subscription: false,
     error_message_at: NESTED,
 };
 
@@ -229,24 +257,136 @@ pub const GEMINI: Profile = Profile {
     base: GEMINI_BASE,
     model: "gemini-3.7-flash",
     row: ProviderRow::gemini_default,
-    provenance: Provenance::SchemaDerived,
+    provenance: Provenance::VendorSchemaDerived,
+    source: "the Gemini Interactions API streaming specification",
+    subscription: false,
     error_message_at: NESTED,
 };
 
-/// Every profile this build ships a row for.
-///
-/// Four of the six are candidates: a row exists, so there is something to
-/// build a request from and decode an answer with, and it is not in the
-/// catalogue a run assembles. That is the shape §9 asks for — the evidence is
-/// gathered before the provider is selectable, not after.
-pub const ALL: &[&Profile] = &[&OLLAMA, &OPENAI, &XAI, &OPENROUTER, &ANTHROPIC, &GEMINI];
+/// Exact pinned client sources for the subscription profiles below.
+const PI_SOURCE: &str =
+    "earendil-works/pi@4af9d21d3b4d664e4a29fcabfec85171077248e3 (read 2026-08-24)";
+const HERMES_SOURCE: &str =
+    "NousResearch/hermes-agent@a0ca7c19204e514f9590ce3b812e029b315ab9e9 (read 2026-08-24)";
+
+pub const OPENAI_CODEX: Profile = Profile {
+    id: "openai-codex",
+    thinking: ThinkingLevel::Medium,
+    base: OPENAI_CODEX_BASE,
+    model: "gpt-5.6-sol",
+    row: ProviderRow::openai_codex_default,
+    provenance: Provenance::CapturedClientDerived,
+    source: PI_SOURCE,
+    subscription: true,
+    error_message_at: NESTED,
+};
+
+pub const GITHUB_COPILOT: Profile = Profile {
+    id: "github-copilot",
+    thinking: ThinkingLevel::Off,
+    base: GITHUB_COPILOT_BASE,
+    model: "gpt-4.1",
+    row: ProviderRow::github_copilot_default,
+    provenance: Provenance::CapturedClientDerived,
+    source: PI_SOURCE,
+    subscription: true,
+    error_message_at: NESTED,
+};
+
+pub const XAI_OAUTH: Profile = Profile {
+    id: "xai-oauth",
+    thinking: ThinkingLevel::Low,
+    base: XAI_BASE,
+    model: "grok-4.6",
+    row: ProviderRow::xai_oauth_default,
+    provenance: Provenance::VendorSchemaDerived,
+    source: "docs.x.ai Responses, streaming, function-calling, reasoning and cost-tracking (read 2026-08-24)",
+    subscription: true,
+    error_message_at: NESTED,
+};
+
+pub const KIMI_CODING: Profile = Profile {
+    id: "kimi-coding",
+    thinking: ThinkingLevel::Off,
+    base: KIMI_CODING_BASE,
+    model: "kimi-for-coding",
+    row: ProviderRow::kimi_coding_default,
+    provenance: Provenance::CapturedClientDerived,
+    source: PI_SOURCE,
+    subscription: true,
+    error_message_at: NESTED,
+};
+
+pub const QWEN_OAUTH: Profile = Profile {
+    id: "qwen-oauth",
+    thinking: ThinkingLevel::Off,
+    base: QWEN_OAUTH_BASE,
+    model: "qwen3-coder-plus",
+    row: ProviderRow::qwen_oauth_default,
+    provenance: Provenance::CapturedClientDerived,
+    source: HERMES_SOURCE,
+    subscription: true,
+    error_message_at: NESTED,
+};
+
+pub const MINIMAX_OAUTH: Profile = Profile {
+    id: "minimax-oauth",
+    thinking: ThinkingLevel::Off,
+    base: MINIMAX_OAUTH_BASE,
+    model: "MiniMax-M2.7",
+    row: ProviderRow::minimax_oauth_default,
+    provenance: Provenance::CapturedClientDerived,
+    source: HERMES_SOURCE,
+    subscription: true,
+    error_message_at: NESTED,
+};
+
+pub const NOUS: Profile = Profile {
+    id: "nous",
+    thinking: ThinkingLevel::Off,
+    base: NOUS_BASE,
+    model: "hermes-3-70b",
+    row: ProviderRow::nous_default,
+    provenance: Provenance::CapturedClientDerived,
+    source: HERMES_SOURCE,
+    subscription: true,
+    error_message_at: NESTED,
+};
+
+pub const SUBSCRIPTION: &[&Profile] = &[
+    &OPENAI_CODEX,
+    &GITHUB_COPILOT,
+    &XAI_OAUTH,
+    &KIMI_CODING,
+    &QWEN_OAUTH,
+    &MINIMAX_OAUTH,
+    &NOUS,
+];
+
+pub const ALL: &[&Profile] = &[
+    &OLLAMA,
+    &OPENAI,
+    &XAI,
+    &OPENROUTER,
+    &ANTHROPIC,
+    &GEMINI,
+    &OPENAI_CODEX,
+    &GITHUB_COPILOT,
+    &XAI_OAUTH,
+    &KIMI_CODING,
+    &QWEN_OAUTH,
+    &MINIMAX_OAUTH,
+    &NOUS,
+];
 
 // --- fixtures ---
 
 /// Where this profile's four fixture families live.
 pub fn fixture_dir(profile: &Profile) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/goldens/profile")
+        .parent()
+        .expect("workspace crates have a parent directory")
+        .join("ego-ai/tests/goldens/profile")
         .join(profile.id)
 }
 
@@ -256,7 +396,7 @@ pub fn read(profile: &Profile, family: &str, name: &str) -> String {
     std::fs::read_to_string(&path).unwrap_or_else(|err| {
         panic!(
             "{}: {err}\nRecord it: EGO_SMOKE={} EGO_SMOKE_RECORD=1 \
-             cargo test -p ego-ai --test smoke -- --ignored",
+             cargo test -p ego-cli --test smoke -- --ignored",
             path.display(),
             profile.id
         )

@@ -681,6 +681,32 @@ fn a_subscription_hosted_row_resolves_to_the_subscription_that_was_supplied() {
     );
 }
 
+#[test]
+fn a_built_in_subscription_row_cannot_be_repriced_as_currency() {
+    let catalogue = Catalogue::new([ProviderRow::xai_oauth_default()]).with_hosted(
+        "xai-oauth/grok-code-fast-1",
+        HostedModel {
+            capabilities: hosted_caps(),
+            metering: tabulated(),
+            rates: Some(operator_rates(hosted_quote())),
+        },
+    );
+    let (http, server) = unasked();
+    let resolved = block_on(catalogue.resolve(
+        &ModelSlug::parse("xai-oauth/grok-code-fast-1").unwrap(),
+        &http,
+        &credential(),
+    ))
+    .expect("subscription capabilities were supplied");
+
+    assert_eq!(
+        resolved.metering,
+        subscription("ego/builtin/xai-oauth-subscription/v1")
+    );
+    assert_eq!(resolved.rates, None);
+    assert!(server.asked().is_empty());
+}
+
 /// The other half of that: a subscription still needs the model's shape.
 /// A row nobody meters per token is not thereby a row whose ceilings may go
 /// unstated — the binding has to say what was authorised, and "against a

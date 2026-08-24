@@ -11,14 +11,14 @@ use ego_core::state::Usage;
 use futures::StreamExt;
 
 mod profiles;
-use profiles::{ALL, Profile, Provenance, canonical, read, request_fixture, write};
+use profiles::{ALL, Profile, Provenance, SUBSCRIPTION, canonical, read, request_fixture, write};
 
 /// Rewrites the request fixtures from what the mappings build.
 ///
 /// Check 1 needs no provider — the body is a pure function of the request —
 /// so its fixture can be regenerated offline, and a profile with no live
 /// server is not stuck without one. The other three families come off a wire
-/// and only `tests/smoke.rs` can write them.
+/// and only `crates/ego-cli/tests/smoke.rs` can write them.
 const RECORD: &str = "EGO_CONFORMANCE_RECORD";
 
 /// A credential that is set, whatever the row asks for.
@@ -32,9 +32,13 @@ struct Configured;
 impl ego_ai::provider::Credentials for Configured {
     fn secret(
         &self,
-        _var: &str,
+        var: &str,
     ) -> Result<ego_ai::provider::Secret, ego_ai::provider::MissingCredential> {
-        Ok(SECRET.into())
+        Ok(match var {
+            "oauth:openai-codex" => "head.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdF8xIn19.sig".into(),
+            "oauth:github-copilot" => "token;proxy-ep=proxy.individual.githubcopilot.com".into(),
+            _ => SECRET.into(),
+        })
     }
 }
 
@@ -89,6 +93,25 @@ fn usages(events: &[AiEvent]) -> Vec<Usage> {
         .collect()
 }
 
+/// The provider's usage object, whether its terminal event carries usage at
+/// the event root or inside a Responses `response` object.
+///
+/// This is a wire-shape distinction, not a provider distinction: Chat
+/// Completions and Messages use the first location, while Responses uses the
+/// second. Keeping both spellings here lets usage fixtures remain raw events
+/// instead of translating Responses into a compatibility-shaped Chat chunk.
+fn stated_usage(document: &serde_json::Value) -> &serde_json::Value {
+    document
+        .get("usage")
+        .filter(|usage| !usage.is_null())
+        .or_else(|| {
+            document
+                .pointer("/response/usage")
+                .filter(|usage| !usage.is_null())
+        })
+        .unwrap_or_else(|| panic!("a usage fixture carries no usage object: {document}"))
+}
+
 // --- check 1: request ---
 
 /// The request each profile builds is the one its fixture pins, and it carries
@@ -107,8 +130,12 @@ async fn check_1_the_request_each_profile_builds_is_the_one_it_committed() {
             .credential
             .resolve(&Configured)
             .expect("Configured answers every variable");
-        let headers = credential.headers();
-        let target = RequestTarget::new(&row.base, &headers);
+        let mut headers = credential.headers();
+        for (name, value) in &row.extra_headers {
+            headers.retain(|(present, _)| !present.eq_ignore_ascii_case(name));
+            headers.push((name.clone(), value.clone()));
+        }
+        let target = RequestTarget::new(credential.base_override().unwrap_or(&row.base), &headers);
         let built = row
             .wire
             .build_request(&target, &req)
@@ -145,6 +172,10 @@ async fn check_1_the_request_each_profile_builds_is_the_one_it_committed() {
             CredentialStrategy::None => None,
             CredentialStrategy::BearerFromEnv { .. } => Some("authorization"),
             CredentialStrategy::HeaderFromEnv { header, .. } => Some(header.as_str()),
+            CredentialStrategy::OAuth { .. } | CredentialStrategy::OAuthOrEnv { .. } => {
+                Some("authorization")
+            }
+            CredentialStrategy::Anthropic { .. } => Some("x-api-key"),
         };
         if let Some(header) = names {
             assert!(
@@ -159,6 +190,38 @@ async fn check_1_the_request_each_profile_builds_is_the_one_it_committed() {
             "{}'s request fixture contains a credential value",
             profile.id
         );
+    }
+}
+
+/// Subscription profiles carry both forms of a streamed failure: an explicit
+/// in-band error envelope and a terminal provider event. Both must finish once
+/// as an error, after preserving an error event.
+#[tokio::test]
+async fn check_3_subscription_stream_errors_are_terminal_once() {
+    for profile in SUBSCRIPTION {
+        let row = (profile.row)();
+        for name in ["in_band.sse", "terminal.sse"] {
+            let transcript = read(profile, "stream-error", name);
+            let events = decode(&row, 200, &transcript, "text/event-stream").await;
+            assert!(
+                events
+                    .iter()
+                    .any(|event| matches!(event, AiEvent::Error { .. })),
+                "{} produced no error for {name}: {events:?}",
+                profile.id
+            );
+            assert_eq!(
+                stops(&events),
+                vec![StopReason::Error],
+                "{} did not terminate {name} exactly once as an error: {events:?}",
+                profile.id
+            );
+            assert!(
+                matches!(events.last(), Some(AiEvent::Stop(StopReason::Error))),
+                "{} put something after {name}'s terminal error: {events:?}",
+                profile.id
+            );
+        }
     }
 }
 
@@ -364,13 +427,15 @@ async fn check_4_usage_is_reported_once_and_partitions_the_total() {
             let total = read(profile, "usage", &usage_fixture_name(name));
             let stated: serde_json::Value =
                 serde_json::from_str(&total).expect("a usage fixture is JSON");
-            let stated = &stated["usage"];
+            let stated = stated_usage(&stated);
 
             let prompt = stated["prompt_tokens"]
                 .as_u64()
+                .or_else(|| stated["input_tokens"].as_u64())
                 .unwrap_or_else(|| panic!("{}: {name} states no prompt total", profile.id));
             let completion = stated["completion_tokens"]
                 .as_u64()
+                .or_else(|| stated["output_tokens"].as_u64())
                 .unwrap_or_else(|| panic!("{}: {name} states no completion total", profile.id));
 
             assert_eq!(
@@ -393,8 +458,9 @@ async fn check_4_usage_is_reported_once_and_partitions_the_total() {
 
 /// The usage fixture belonging to one transcript.
 ///
-/// `text.sse` → `text.0.json`, which is `tests/smoke.rs`'s naming: the family
-/// is indexed because more than one report per stream is legal.
+/// `text.sse` → `text.0.json`, which is
+/// `crates/ego-cli/tests/smoke.rs`'s naming: the family is indexed because more
+/// than one report per stream is legal.
 fn usage_fixture_name(transcript: &str) -> String {
     format!("{}.0.json", transcript.trim_end_matches(".sse"))
 }
@@ -442,9 +508,10 @@ async fn a_rows_cost_claim_is_what_its_transcripts_carry() {
             let stated: serde_json::Value =
                 serde_json::from_str(&read(profile, "usage", &usage_fixture_name(name)))
                     .expect("a usage fixture is JSON");
+            let usage = stated_usage(&stated);
             let carried: Vec<&str> = cost_fields()
                 .into_iter()
-                .filter(|field| !stated["usage"][field].is_null())
+                .filter(|field| !usage[field].is_null())
                 .collect();
 
             let events = stream_events(profile, name).await;
@@ -535,17 +602,45 @@ fn every_profile_has_all_four_families() {
             profile.id
         );
     }
+
+    let ids: Vec<&str> = SUBSCRIPTION.iter().map(|profile| profile.id).collect();
+    assert_eq!(
+        ids,
+        [
+            "openai-codex",
+            "github-copilot",
+            "xai-oauth",
+            "kimi-coding",
+            "qwen-oauth",
+            "minimax-oauth",
+            "nous",
+        ],
+        "the seven advertised subscription rows and their conformance profiles drifted"
+    );
+    for profile in SUBSCRIPTION {
+        let errors: Vec<String> = profiles::family(profile, "stream-error")
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        assert_eq!(
+            errors,
+            ["in_band.sse", "terminal.sse"],
+            "{} does not carry the complete streamed-error matrix",
+            profile.id
+        );
+    }
 }
 
 /// Every transcript states where it came from, and states the same thing its
 /// profile does.
 ///
-/// The distinction the suite rests on is `Recorded` versus `SchemaDerived`,
-/// and until here it lived only in the table: a hand-assembled transcript
-/// dropped into a recorded profile's directory would be read as evidence about
-/// a live server by every check above, silently. SSE reserves a line beginning
-/// `:` for comments, so the claim travels inside the evidence and moves with
-/// the file — which a README beside it would not.
+/// The distinction the suite rests on is live `Recorded` evidence versus
+/// `VendorSchemaDerived` or `CapturedClientDerived` offline evidence, and until
+/// here it lived only in the table: a hand-assembled transcript dropped into a
+/// recorded profile's directory would be read as evidence about a live server
+/// by every check above, silently. SSE reserves a line beginning `:` for
+/// comments, so the claim travels inside the evidence and moves with the file
+/// — which a README beside it would not.
 ///
 /// Only the stream family, because only SSE has a comment syntax. JSON has
 /// none, so a request, error or usage fixture's provenance is the profile's
@@ -555,17 +650,30 @@ fn every_transcript_says_where_it_came_from() {
     for profile in ALL {
         let expected = match profile.provenance {
             Provenance::Recorded => ": recorded from ",
-            Provenance::SchemaDerived => ": schema-derived from ",
+            Provenance::VendorSchemaDerived => ": schema-derived from ",
+            Provenance::CapturedClientDerived => ": captured-client-derived from ",
         };
-        for (name, body) in profiles::family(profile, "stream") {
-            let first = body.lines().next().unwrap_or_default();
-            assert!(
-                first.starts_with(expected),
-                "{}/{name} is declared {:?} and opens {first:?}; a transcript must \
-                 state its provenance in its first line",
-                profile.id,
-                profile.provenance
-            );
+        for family in ["stream", "stream-error"] {
+            if family == "stream-error" && !profile.subscription {
+                continue;
+            }
+            for (name, body) in profiles::family(profile, family) {
+                let first = body.lines().next().unwrap_or_default();
+                assert!(
+                    first.starts_with(expected),
+                    "{}/{family}/{name} is declared {:?} and opens {first:?}; a transcript must \
+                     state its provenance in its first line",
+                    profile.id,
+                    profile.provenance
+                );
+                if profile.provenance == Provenance::CapturedClientDerived {
+                    assert!(
+                        first.contains(profile.source),
+                        "{}/{family}/{name} does not pin its source SHA/date: {first:?}",
+                        profile.id
+                    );
+                }
+            }
         }
     }
 }
