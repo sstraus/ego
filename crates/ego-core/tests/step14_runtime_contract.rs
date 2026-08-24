@@ -148,7 +148,7 @@ fn invalid_environment_names_fail_closed_instead_of_being_repaired() {
 }
 
 fn evidence_reference(digit: char, bytes: u64) -> EvidenceRef {
-    let id = EvidenceId::parse(std::iter::repeat(digit).take(64).collect::<String>()).unwrap();
+    let id = EvidenceId::parse(std::iter::repeat_n(digit, 64).collect::<String>()).unwrap();
     EvidenceRef::new(id, bytes)
 }
 
