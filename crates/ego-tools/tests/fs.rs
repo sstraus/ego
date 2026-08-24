@@ -225,32 +225,12 @@ mod reading {
     }
 }
 
-/// `Fs::write`, and the reason it is still a plain in-place replace.
+/// `Fs::write` as a same-directory atomic and durable whole-file replacement.
 ///
-/// **Every test here passes against `fs::write` and was written expecting not
-/// to.** They were the red half of a change that was going to make this a
-/// same-directory tmp-then-rename, which is what Hermes does
-/// (`docs/13-effect-tools.md` Step B) and what a reviewer recommended. They
-/// went green immediately, and that is the finding rather than a wasted
-/// afternoon.
-///
-/// The property an atomic replace buys — a concurrent reader never observes a
-/// half-written file — cannot be tested here: winning that race needs a reader
-/// scheduled against the writer, and a test that wins it by luck fails on a
-/// loaded machine. Everything that *is* observable already holds, and holds
-/// for free: truncating in place keeps the inode, so the mode survives with no
-/// code to preserve it; there is no scratch file, so none can be left behind
-/// or collide with a real sibling; and a failure creates nothing. A rename
-/// would have to re-earn all three, and would have three new ways to lose
-/// them — which is what the reviewer's own list of failure modes was.
-///
-/// So this module is a **guard rather than a specification**. It pins what
-/// this build does today so that anyone who does introduce a scratch file has
-/// to keep it: not leave one behind, not take a name a repository can already
-/// contain (`a.txt.tmp` is a legitimate file, and the permit covers `a.txt`),
-/// and not hand the target the scratch file's mode. Until then the honest
-/// statement of the bound is in Step B: a torn write leaves a truncated file,
-/// which is also what Codex's `apply_patch` does and admits in its own source.
+/// The deterministic prepare/commit boundary is exercised beside its private
+/// implementation in `src/fs.rs`. These integration tests pin the observable
+/// filesystem contract: existing and new targets, target permissions, sibling
+/// ownership, symlink resolution, missing parents, and failure cleanup.
 mod replacing {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
@@ -322,6 +302,29 @@ mod replacing {
     }
 
     #[test]
+    fn a_replace_of_a_canonicalized_symlink_target_keeps_the_link_and_updates_its_target() {
+        let tree = Tree::new();
+        let target = tree.file("real.txt", "old\n");
+        let link = tree.path("link.txt");
+        symlink(&target, &link);
+        let os = OsFs;
+        let resolved = os.canonicalize(&link).expect("the link resolves");
+
+        os.write(&resolved, b"new\n")
+            .expect("the canonical target is writable");
+
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the link itself is not the replacement target"
+        );
+        assert_eq!(fs::read_to_string(&target).unwrap(), "new\n");
+        assert_eq!(fs::read_to_string(&link).unwrap(), "new\n");
+    }
+
+    #[test]
     fn a_created_file_is_readable_and_writable_by_its_owner() {
         // Nothing to preserve, so this pins the floor rather than a
         // preservation rule: a file the tool just created that the tool
@@ -379,6 +382,40 @@ mod replacing {
             0,
             "nothing was left in the directory"
         );
+    }
+
+    #[test]
+    fn a_failed_persist_leaves_the_existing_target_and_no_scratch_file() {
+        // A regular file cannot atomically replace a directory. This reaches
+        // persistence after the scratch has been created, filled and synced,
+        // then forces rename to fail deterministically.
+        let tree = Tree::new();
+        let target = tree.dir("target");
+        tree.file("target/kept.txt", "old\n");
+        let os = OsFs;
+
+        let err = os
+            .write(&CanonPath::new(&target), b"new\n")
+            .expect_err("a file cannot replace a directory");
+
+        assert!(
+            matches!(
+                err,
+                FsError::NotAFile { .. } | FsError::NotADirectory { .. } | FsError::Io { .. }
+            ),
+            "got {err:?}"
+        );
+        assert!(target.is_dir(), "the old target remains a directory");
+        assert_eq!(
+            fs::read_to_string(target.join("kept.txt")).unwrap(),
+            "old\n"
+        );
+        let mut left: Vec<String> = fs::read_dir(&tree.root)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        assert_eq!(left, ["target"], "the failed persist left no scratch file");
     }
 }
 

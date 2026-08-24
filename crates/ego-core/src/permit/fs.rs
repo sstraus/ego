@@ -97,6 +97,12 @@ pub trait PathResolver: Send + Sync {
 pub trait Fs: PathResolver {
     fn read(&self, path: &CanonPath) -> Result<Vec<u8>, FsError>;
 
+    /// Replace the whole file at `path` with `bytes`.
+    ///
+    /// A persistent implementation publishes the replacement atomically and
+    /// makes both its contents and directory entry durable before returning
+    /// success. An in-memory test double has no durability boundary, but must
+    /// still make the replacement visible as one operation.
     fn write(&self, path: &CanonPath, bytes: &[u8]) -> Result<(), FsError>;
 
     /// Walk the subtree `req` names, honouring its skips and limits.
@@ -123,6 +129,7 @@ pub trait Fs: PathResolver {
 /// is resolved a second time and is not re-checked. Closing that needs
 /// handle-relative, no-follow opens, which is `POTENTIALS.md` P23.
 pub trait GuardedIo: Send + Sync {
+    /// Atomically and durably replace one permit-checked whole file.
     fn write(&self, path: &CanonPath, bytes: &[u8]) -> Result<(), IoDenied>;
 
     fn read(&self, path: &CanonPath) -> Result<Vec<u8>, IoDenied>;
@@ -313,11 +320,24 @@ impl GuardedIo for GuardedFs<'_> {
         let mut truncated = scan.truncated;
 
         for entry in scan.entries.iter().filter(|e| e.kind == EntryKind::File) {
+            // The scan's path was true when the directory entry was visited,
+            // not necessarily now. Resolve it again immediately before the
+            // read and cash the search authority against that fresh target.
+            // A swapped symlink that leaves the grant is a denial of the
+            // whole search; bytes from the escaped target are never opened.
+            let fresh = match self.fs.canonicalize(entry.path.as_path()) {
+                Ok(fresh) => fresh,
+                // Preserve the traversal contract below: a file that
+                // disappears or becomes unreadable mid-search is skipped.
+                Err(_) => continue,
+            };
+            self.permit.allows_search(&fresh)?;
+
             // A file the OS refuses mid-traversal is skipped, not fatal: one
             // unreadable file in a tree is a fact about that file, and
             // abandoning the whole search over it would make grep unusable in
             // any directory containing a socket or a root-owned log.
-            let Ok(bytes) = self.fs.read(&entry.path) else {
+            let Ok(bytes) = self.fs.read(&fresh) else {
                 continue;
             };
             if bytes.len() as u64 > budget {
@@ -332,7 +352,7 @@ impl GuardedIo for GuardedFs<'_> {
             for (index, line) in String::from_utf8_lossy(&bytes).lines().enumerate() {
                 if matcher.matches(line) {
                     matches.push(Match {
-                        path: entry.path.clone(),
+                        path: fresh.clone(),
                         line: index + 1,
                         text: line.to_string(),
                     });

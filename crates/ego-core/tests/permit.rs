@@ -7,9 +7,10 @@ use std::path::Path;
 use ego_core::config::{Mode, OriginSet, PermCfg, Ruleset, Source};
 use ego_core::permit::rule::Rule;
 use ego_core::permit::{
-    Authority, Authorized, CanonPath, Change, Classification, EntryKind, Escalation, FsError,
-    GuardedFs, GuardedIo, IoDenied, Op, OpName, Pending, PermitDenied, PolicyDenied, PolicyEngine,
-    PrepareCtx, PreparedCall, Resolution, ScanLimits, ScanRequest, Tool, ToolError, Typed,
+    Authority, Authorized, CanonPath, Change, Classification, Entry, EntryKind, Escalation, Fs,
+    FsError, GuardedFs, GuardedIo, IoDenied, Op, OpName, PathResolver, Pending, PermitDenied,
+    PolicyDenied, PolicyEngine, PrepareCtx, PreparedCall, Resolution, Scan, ScanLimits,
+    ScanRequest, Tool, ToolError, Typed,
 };
 use futures::executor::block_on;
 use serde_json::json;
@@ -101,6 +102,9 @@ mod permit {
             match block_on(self.settle(pending)) {
                 Resolution::Settled(answer) => answer,
                 Resolution::Ask(pending) => unanswered(&pending),
+                Resolution::HumanSettled { .. } | Resolution::Reclassify { .. } => {
+                    unreachable!("this engine has no human seat")
+                }
             }
         }
     }
@@ -450,6 +454,9 @@ mod permit {
                     Resolution::Settled(Ok(_)) => Answer::Authorized,
                     Resolution::Settled(Err(_)) => Answer::Refused,
                     Resolution::Ask(_) => Answer::Asked,
+                    Resolution::HumanSettled { .. } | Resolution::Reclassify { .. } => {
+                        unreachable!("this engine has no human seat")
+                    }
                 },
             };
             assert_eq!(answer, expected, "{mode} mode, writing inside /ws");
@@ -1076,6 +1083,96 @@ mod permit {
         assert!(!found.truncated);
     }
 
+    /// A filesystem that performs the exact mutation behind regression case:
+    /// the scan observes an ordinary in-scope file, then that name becomes a
+    /// symlink to an out-of-scope secret before search opens it.
+    struct ScanThenEscapeFs {
+        escaped: std::sync::atomic::AtomicBool,
+        reads: std::sync::atomic::AtomicUsize,
+    }
+
+    impl ScanThenEscapeFs {
+        fn new() -> Self {
+            Self {
+                escaped: std::sync::atomic::AtomicBool::new(false),
+                reads: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+
+        fn reads(&self) -> usize {
+            self.reads.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl PathResolver for ScanThenEscapeFs {
+        fn canonicalize(&self, path: &Path) -> Result<CanonPath, FsError> {
+            if path == Path::new("/ws/src/innocent.rs")
+                && self.escaped.load(std::sync::atomic::Ordering::SeqCst)
+            {
+                Ok(CanonPath::new("/outside/secret.txt"))
+            } else {
+                Ok(CanonPath::new(path))
+            }
+        }
+    }
+
+    impl Fs for ScanThenEscapeFs {
+        fn read(&self, path: &CanonPath) -> Result<Vec<u8>, FsError> {
+            self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if path == &CanonPath::new("/outside/secret.txt") {
+                Ok(b"SECRET=not-yours".to_vec())
+            } else {
+                Ok(b"harmless".to_vec())
+            }
+        }
+
+        fn write(&self, _path: &CanonPath, _bytes: &[u8]) -> Result<(), FsError> {
+            unreachable!("this filesystem exists only to exercise search")
+        }
+
+        fn scan(&self, _req: &ScanRequest) -> Result<Scan, FsError> {
+            let scan = Scan::new(
+                vec![Entry {
+                    relative: "innocent.rs".into(),
+                    path: CanonPath::new("/ws/src/innocent.rs"),
+                    kind: EntryKind::File,
+                }],
+                false,
+            );
+            self.escaped
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(scan)
+        }
+    }
+
+    #[test]
+    fn permit_search_revalidates_each_file_after_scan_before_reading_it() {
+        let fs = ScanThenEscapeFs::new();
+        let engine = in_default_mode("/ws");
+        let granted = engine
+            .classify_settled(search_call("/ws/src", "SECRET"))
+            .unwrap();
+        let guarded = GuardedFs::new(granted.into_parts().1, &fs);
+
+        let denied = guarded
+            .search(
+                &ScanRequest::new(CanonPath::new("/ws/src")),
+                &|line: &str| line.contains("SECRET"),
+            )
+            .expect_err("the scanned file escaped before its contents were opened");
+
+        assert!(matches!(
+            denied,
+            IoDenied::Permit(PermitDenied::Search { ref path })
+                if path == &CanonPath::new("/outside/secret.txt")
+        ));
+        assert_eq!(
+            fs.reads(),
+            0,
+            "the fresh permit check must happen before the escaped file is read"
+        );
+    }
+
     #[test]
     fn permit_guarded_read_tells_a_missing_file_apart_from_a_refused_one() {
         // Criterion 2's whole point. A model told "denied" should stop asking;
@@ -1327,10 +1424,9 @@ mod permit {
     /// is a re-tag, which `event::domain::EventKind`'s codec rule prices at a
     /// `CODEC_VERSION` bump and a migration.
     ///
-    /// `party` is in the list deliberately. Nothing in a release build writes
-    /// it, so no real log contains it and no golden covers it; without this
-    /// assertion the one arm whose spelling nothing else exercises would be
-    /// the one arm free to drift.
+    /// `party` is in the list deliberately. Interactive human decisions write
+    /// it; this assertion pins the durable spelling independently of a whole
+    /// turn fixture.
     #[test]
     fn permit_the_authority_wire_form_is_a_durable_contract() {
         let cases = [

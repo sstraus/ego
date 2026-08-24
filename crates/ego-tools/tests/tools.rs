@@ -171,6 +171,9 @@ impl Workspace {
         match block_on(self.policy.settle(pending)) {
             Resolution::Settled(answer) => answer,
             Resolution::Ask(pending) => unanswered(&pending),
+            Resolution::HumanSettled { .. } | Resolution::Reclassify { .. } => {
+                unreachable!("this engine has no human seat")
+            }
         }
     }
 
@@ -189,6 +192,9 @@ impl Workspace {
         match block_on(self.policy.settle(pending)) {
             Resolution::Ask(pending) => pending,
             Resolution::Settled(_) => panic!("the mode answered a call that should have asked"),
+            Resolution::HumanSettled { .. } | Resolution::Reclassify { .. } => {
+                unreachable!("this engine has no human seat")
+            }
         }
     }
 
