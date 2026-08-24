@@ -1,12 +1,44 @@
 # εgo
 
-A compact, line-oriented coding agent harness written in Rust.
+**Give any model a body. Keep the authority.**
+
+εgo is a compact, provider-agnostic coding agent harness written in Rust.
+Models can reason and propose. Real work also requires tools, memory,
+boundaries, and evidence. εgo supplies that operational layer while keeping the
+model replaceable and authority in the operator's hands.
+
+> **The agent is not the model. The agent is the harness.**
+
+```text
+prompt → prepare → permit → execute → evidence
+```
+
+Scripting-first and Unix-native, εgo turns model output into governed action:
+prompts enter, structured events leave, and the same durable session can move
+between an interactive terminal, a pipeline, and an ACP host.
+
+## Why εgo
+
+- **Any model, one operational contract.** Provider differences stay at the
+  edge instead of owning the workflow.
+- **Actions earn authority.** Tools prepare canonical operations before policy
+  permits them; execution cannot quietly widen what was approved.
+- **Confinement is demonstrated.** A guarantee is exposed only when the current
+  host and production path prove it.
+- **Work leaves evidence.** Sessions, decisions, and tool results are durable,
+  observable, and replayable.
+- **Small enough for the Unix toolbox.** Use εgo interactively or compose it in
+  scripts without adopting an IDE-sized platform.
+
+## What works today
 
 The working binary provides interactive sessions, headless runs, durable
 resume/listing, subscription login and an ACP server. Ollama and OpenAI remain
 selectable directly; current subscription profiles use `ego auth`. Commands
 whose subsystem has not landed are refused by name instead of being advertised
 as working.
+
+## Quickstart
 
 Available entry points are `ego [PROMPT]`, `ego run`, `ego resume`, `ego ls`
 and `ego acp`, plus `ego auth` for subscription credentials. Promptless
@@ -20,7 +52,7 @@ ego auth login openai-codex
 ego -m openai-codex/gpt-5.3-codex
 ```
 
-## Ollama quickstart
+### Ollama
 
 Start Ollama, install a model, then open an interactive εgo session:
 
@@ -48,7 +80,23 @@ this checkout.
 
 ## Name
 
-maintainer's alter ego. Availability verified on 2026-08-19:
+The name carries three ideas at once:
+
+- **ε — the smallest explicit bound.** A compact layer with boundaries that
+  are measured instead of assumed.
+- **ego — the mediator.** The harness stands between model intent, policy, and
+  the reality of the host.
+- **go — from language to action.** εgo is built to do the work, not merely
+  talk about it.
+
+> **Minimum layer. Maximum agency. Explicit control.**
+
+The complete positioning, manifesto, and voice live in
+[`docs/22-brand-narrative.md`](docs/22-brand-narrative.md).
+
+### Naming and distribution
+
+Name availability was verified on 2026-08-19:
 
 | Channel | State |
 | --- | --- |
