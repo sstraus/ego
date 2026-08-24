@@ -22,14 +22,16 @@ State is a **reduction over an append-only event log** (pi's reducer,
 PromptQueued | PromptDeliveryExpedited | UserPrompt | AssistantDelta |
 AssistantMessage | ReasoningDelta | ReasoningState | ToolCallStarted |
 ToolCallDelta | ToolCallCompleted | PermissionRequested | PermissionAmended |
-PermissionDecided | GenerationStarted | AttemptSettled | UsageUpdated |
-UsageCorrected | ContextWindowUpdated | TurnCompleted | Compacted | Forked |
-CompactionSeeded | HookFired | SubagentSpawned | SubagentReturned | Error
+PermissionDecided | GenerationStarted | ExecutionObserved | AttemptSettled |
+UsageUpdated | UsageCorrected | ContextWindowUpdated | TurnCompleted |
+Compacted | Forked | CompactionSeeded | HookCatalogueAdmitted |
+HookInvocationStarted | HookInvocationSettled | SubagentSpawned |
+SubagentReturned | Error
 ```
 
-Twenty-six in the final M1 schema, and this list is exhaustive by contract.
+Twenty-nine in the final M1 schema, and this list is exhaustive by contract.
 The current `EventKind` (`crates/ego-core/src/event/domain.rs`) implements the
-other twenty-three; regression case adds the two queue-lifecycle variants and the
+other twenty-six; regression case adds the two queue-lifecycle variants and the
 optional `queued_prompt` consumption correlation on `UserPrompt`, while story
 regression_case adds the clean-session compaction seed. The enum and this list are
 compared by hand at each milestone close.
@@ -323,15 +325,42 @@ Amend-before-approve is in the `PermissionDecision` enum from day one.
 
 ### 3.5 Subagents, skills, hooks (`ego-core`)
 
-
+- **Subagents**: isolated sub-loops over the same core; the child's final
+  message is a return value by contract. Parent/child communication is events
+  in both logs (fx's stored-projection idea, simplified — full per-child
+  authority registries only if v1 usage proves the need).
+- **Skills**: strict `SKILL.md` instructions from system, user, or trusted
+  project roots. Bounded model-visible descriptors are announced like admitted
+  MCP metadata; bodies and rooted read-only resources load only on a typed
+  user/model invocation. One immutable catalogue, source-tagged authority, the
+  canonical permission engine, and durable rendered-content digests prevent a
+  skill from self-granting or changing underneath resume. Current Agent Skills
+  and Claude frontmatter is implemented or refused by field name; shell
+  injection is never a skill capability. See `docs/20-agent-skills.md` and the
+  accepted skills ADR. Executable agent files (`CLI.md` §5) reuse configuration
+  and permission mechanisms but remain top-level run inputs, not skills.
+- **Hooks**: one asynchronous `Hook` port owns the current stable
+  Claude-compatible subset of lifecycle points that εgo actually produces.
+  Configured `command`, `http`, `mcp_tool`, and `prompt` handlers are adapters
+  over that port and reuse, respectively, `GuardedExec` plus confinement,
+  guarded HTTP plus egress, the admitted MCP snapshot plus foreign-tool path,
+  and the ordinary generator plus its accounting. A hook may veto, request the
+  ordinary escalation path, or attach bounded source-tagged feedback; it cannot
+  grant a permit or relax system rules, sandbox, offline, budget, judge, MCP
+  admission, or egress. Unsupported lifecycle owners and deprecated or
+  experimental fields and handlers fail admission explicitly. M1 finalizes
+  stable identity, source/digest, and typed start/settlement evidence only; M4
+  builds the strict catalogue, runner, four adapters, and inspection surfaces.
+  See `docs/21-claude-hook-parity.md` and the accepted hook ADR.
 
 ### 3.6 Extensibility posture (plugins without a plugin system)
 
 maintainer's constraint: plugins are desirable but must not complicate the core.
 Resolution — v1 ships **four out-of-process extension surfaces** that already
 exist in the design: MCP servers (tools/resources/prompts — this *is* the tool
-plugin API, with an ecosystem attached), shell hooks (lifecycle, can block),
-skills (behaviour), and executable agent files (`CLI.md` §5). In-process
+plugin API, with an ecosystem attached), configured hooks (lifecycle,
+subtractive and able to block), skills (behaviour), and executable agent files
+(`CLI.md` §5). In-process
 extension is the **library API itself**: every port `ego-core` owns is a trait
 an embedder implements (`Tool`, `Hook`, `Generator`, `Host`, `Env`,
 `ExecutionBackend`; `WireFormat` and `ModelResolver` live in `ego-ai`), so
@@ -478,10 +507,10 @@ section) are M0a's exit criteria.
 | --- | --- | --- |
 | **M0a — contracts** | The four event representations with golden fixtures (§1); stable ID/ordering scheme; single-writer durable store passing fault-injection; crate DAG with `Generator` port and fakes for `Generator`/`GuardedIo`/`Host` (also the eval seam, U3); `ModelCapabilities` record; strict trusted-config loading; `tracing` spans throughout. | The seven docs/08 gates pass; `cargo test` proves replay, projection and crash-recovery on synthetic logs. |
 | **M0b — vertical slice** | `ego-ai`: openai-completions (**anthropic-messages deferred** — plan Open Question 4, answered 2026-08-21: one wire format proves the seam, and no Anthropic credential exists to verify a second end to end), streaming, usage, delivery certainty. Loop + reducer + resume. **Read-only tools** (read, grep, glob) via `GuardedIo`. AGENTS.md discovery (trust-gated, I2). Line UI + headless `--output json/jsonl` + exit codes. **ACP spike**: one prompt + updates driven from a host. | `ego "explain this failing test"` interactively; `ego run --output json … \| jq` in a script; kill → `ego resume`; the same session driven over ACP. |
-| **M1 — safety, writes, judge, interactive control** | prepare/permit/execute in anger: write/edit/bash tools; permission grammar + canonical AST + stable-ID rules + `rules explain`; modes incl. `auto` (judge model) and plan; landlock + Seatbelt backends with per-operation capability accounting; egress policy at all four exits; truncation; **minimum viable compaction**; narrow taint (ask-only). Complete the final keyboard interaction contract directly: live composer over streaming output, status line, slash/action menus, model picker, `AskQuestion`, draft stash, durable pending steers, and phase-safe interruption. Bring forward the shared current-model catalogue: supplied hosted facts plus authoritative provider/local discovery feed resolution, `ego models`, `/model`, and `Option-P` through one projection. | Fix-the-failing-test end to end while the operator edits and queues multiple follow-ups: near-zero prompts under workspace sandbox with the judge on; `ego models --json` and the picker expose the same selectable rows; model and effort change from `Option-P`; busy input is delivered FIFO after the complete durable sibling tool batch, a no-tool final forces its follow-up, and `Esc` remains truthful through every active phase; same task on the null backend shows escalation; `--offline` verified at every exit. |
+| **M1 — safety, writes, judge, interactive control** | prepare/permit/execute in anger: write/edit/bash tools; permission grammar + canonical AST + stable-ID rules + `rules explain`; modes incl. `auto` (judge model) and plan; landlock + Seatbelt backends with per-operation capability accounting; egress policy at all four exits; truncation; **minimum viable compaction**; narrow taint (ask-only). Finalize durable hook identity, admitted source/digest, typed invocation start/settlement, feedback reference, and crash uncertainty without building a partial loader or handler. Complete the final keyboard interaction contract directly: live composer over streaming output, status line, slash/action menus, model picker, `AskQuestion`, draft stash, durable pending steers, and phase-safe interruption. Bring forward the shared current-model catalogue: supplied hosted facts plus authoritative provider/local discovery feed resolution, `ego models`, `/model`, and `Option-P` through one projection. | Fix-the-failing-test end to end while the operator edits and queues multiple follow-ups: hook evidence replays with exact identity and uncertain external settlement fails according to its pre-effect or observer boundary; near-zero prompts under workspace sandbox with the judge on; `ego models --json` and the picker expose the same selectable rows; model and effort change from `Option-P`; busy input is delivered FIFO after the complete durable sibling tool batch, a no-tool final forces its follow-up, and `Esc` remains truthful through every active phase; same task on the null backend shows escalation; `--offline` verified at every exit. |
 | **M2 — MCP, both directions** | MCP 2026-07-28 only through a release-gated rmcp 3.x: stdio + stateless Streamable HTTP, explicit discovery/per-request metadata/standard headers, current CIMD OAuth, tools/resources/prompts, cache hints, tool-list subscriptions, and MRTR; immutable admitted snapshots refresh atomically from add/rm/login/reload/config/TTL/list changes; failed refresh retains last-good and truthful health; foreign and Speakeasy dynamic meta-tools enter the same permit and guarded-egress model. **`ego mcp-server`** (I1): stdio run/continue/cancel/status tools and sanitized resources. | A current static and dynamic Speakeasy server reloads without changing an active generation, every inner operation crosses permission/egress, a failed refresh retains last-good, and Claude Code delegates a scoped run to εgo; exact-Luna proves cancellation before and after the first HTTP event on a released SDK. |
 | **M3 — sessions in full** | Full compaction (intent, latest results, blockers, verification state survive), fork, replay/export (`--sanitize`), catalogue polish, budgets incl. judge budget line, run-manifest completeness, `[profile.ci]` contract (U1). | `--budget`, `ego fork`, compaction across a context-overflow task; a CI job consumes the sanitized run bundle. |
-| **M4 — subagents, skills, hooks** | Sub-loops with context isolation and RunController IDs/leases (U2); strict Agent Skills/Claude-compatible `SKILL.md` frontmatter, system/user/project admission, progressive disclosure, typed user/model invocation, `/skills` rescan, durable digest/rendered content, and fail-closed fork/hook fields; shell + in-process hooks remain their separately owned lifecycle; executable agent files remain top-level run inputs. | A model sees only admitted skill descriptors, invokes one through the typed Skill operation, and cannot widen tools/sandbox/offline/budget; user-only/model-only visibility, reload failure, resume/compaction, and fork ownership are proven; a hook blocks a forbidden commit, an executable `.ego` file runs as a shebang script, and parallel subagents hold distinct leases. |
+| **M4 — subagents, skills, hooks** | Sub-loops with context isolation and RunController IDs/leases (U2); strict Agent Skills/Claude-compatible `SKILL.md` frontmatter, system/user/project admission, progressive disclosure, typed user/model invocation, `/skills` rescan, durable digest/rendered content, and fail-closed fork/hook fields; one strict source-bound hook catalogue and deterministic runner over the `Hook` port; stable `command`, `http`, `mcp_tool`, and `prompt` adapters through their real safety owners; `/hooks` and read-only `ego hooks ls`; executable agent files remain top-level run inputs. | A model sees only admitted skill descriptors, invokes one through the typed Skill operation, and cannot widen tools/sandbox/offline/budget; user-only/model-only visibility, reload failure, resume/compaction, and fork ownership are proven; `/hooks` and `ego hooks ls --json` project the same immutable catalogue, unsupported/deprecated/experimental hook inputs fail by exact name, a pre-effect hook blocks a forbidden commit without granting authority, adapter settlement is durable, an executable `.ego` file runs as a shebang script, and parallel subagents hold distinct leases. |
 | **M5 — ACP full + remaining shapes** | `ego-acp` complete (v1+v2, negotiated capabilities), tuicommander + Zed as hosts; openai-responses + google-generative-ai shapes. New shapes register their final resolution sources in M1's existing model catalogue rather than introducing another catalogue. | ego driven from Zed and tuicommander with session list, model switch, live cost. |
 
 Order rationale: contracts before code that would freeze them; safety before
