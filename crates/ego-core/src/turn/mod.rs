@@ -679,7 +679,7 @@ impl<'a> TurnLoop<'a> {
                 // needed an answer — reading like a refusal somebody
                 // configured on purpose. `DeniedBy` is what carries that
                 // difference past the prose and into §4.1's object.
-                let denial = match self.run_tool(turn, &call).await? {
+                let denial = match self.run_tool(turn, call).await? {
                     ToolOutcome::Answered { ok, result } => {
                         self.journal.append(
                             turn,

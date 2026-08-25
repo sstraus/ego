@@ -37,6 +37,21 @@ struct SurfaceStatus {
 
 type SharedStatus = Arc<Mutex<SurfaceStatus>>;
 
+struct ModalSurface<'a> {
+    status: &'a SharedStatus,
+    asked_for_image: &'a AtomicBool,
+    ingress: &'a InteractiveIngress,
+    drafts: &'a mut Vec<(String, usize)>,
+}
+
+struct TerminalOwner {
+    phase: SurfacePhase,
+    status: SharedStatus,
+    asked_for_image: Arc<AtomicBool>,
+    ingress: InteractiveIngress,
+    cancel: CancelToken,
+}
+
 /// Local and durable input that still exists when the session exits.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ExitCounts {
@@ -223,11 +238,13 @@ impl Seat {
                         .with_break_signal(owner_break),
                     input_sender,
                     control_receiver,
-                    owner_phase,
-                    owner_status,
-                    asked_for_image,
-                    ingress,
-                    cancel,
+                    TerminalOwner {
+                        phase: owner_phase,
+                        status: owner_status,
+                        asked_for_image,
+                        ingress,
+                        cancel,
+                    },
                 );
             })?;
 
@@ -399,23 +416,29 @@ fn own_terminal(
     mut editor: Reedline,
     input: Sender<Line>,
     control: Receiver<Control>,
-    phase: SurfacePhase,
-    status: SharedStatus,
-    asked_for_image: Arc<AtomicBool>,
-    ingress: InteractiveIngress,
-    cancel: CancelToken,
+    owner: TerminalOwner,
 ) {
+    let TerminalOwner {
+        phase,
+        status,
+        asked_for_image,
+        ingress,
+        cancel,
+    } = owner;
     let mut pending_control = None;
     let mut drafts = Vec::new();
     loop {
         if let Some(request) = pending_control.take() {
+            let mut surface = ModalSurface {
+                status: &status,
+                asked_for_image: &asked_for_image,
+                ingress: &ingress,
+                drafts: &mut drafts,
+            };
             if !answer_control(
                 &mut editor,
                 &phase,
-                &status,
-                &asked_for_image,
-                &ingress,
-                &mut drafts,
+                &mut surface,
                 &control,
                 &mut pending_control,
                 request,
@@ -440,13 +463,16 @@ fn own_terminal(
             Line::ExternalBreak(_) => match control.recv() {
                 Ok(Control::Shutdown) | Err(_) => break,
                 Ok(request) => {
+                    let mut surface = ModalSurface {
+                        status: &status,
+                        asked_for_image: &asked_for_image,
+                        ingress: &ingress,
+                        drafts: &mut drafts,
+                    };
                     if !answer_control(
                         &mut editor,
                         &phase,
-                        &status,
-                        &asked_for_image,
-                        &ingress,
-                        &mut drafts,
+                        &mut surface,
                         &control,
                         &mut pending_control,
                         request,
@@ -551,10 +577,7 @@ fn surface_line(
 fn answer_control(
     editor: &mut Reedline,
     phase: &SurfacePhase,
-    status: &SharedStatus,
-    asked_for_image: &AtomicBool,
-    ingress: &InteractiveIngress,
-    drafts: &mut Vec<(String, usize)>,
+    surface: &mut ModalSurface<'_>,
     controls: &Receiver<Control>,
     pending_control: &mut Option<Control>,
     control: Control,
@@ -573,10 +596,10 @@ fn answer_control(
         Control::Trust { workspace, reply } => {
             let prompt = Question::new(
                 format!("Trust project files in {workspace}? [y/N] "),
-                Arc::clone(status),
+                Arc::clone(surface.status),
             );
             let trust = loop {
-                match modal_line(editor, status, asked_for_image, ingress, drafts, &prompt) {
+                match modal_line(editor, surface, &prompt) {
                     Line::Submitted(answer) => match parse_trust(&answer) {
                         Some(trust) => break trust,
                         None => continue,
@@ -595,15 +618,15 @@ fn answer_control(
         Control::Permission { request, reply } => {
             let prompt = Question::new(
                 format!("{request}. [allow/deny/amend] "),
-                Arc::clone(status),
+                Arc::clone(surface.status),
             );
             let decision = loop {
-                match modal_line(editor, status, asked_for_image, ingress, drafts, &prompt) {
+                match modal_line(editor, surface, &prompt) {
                     Line::Submitted(answer) => match parse_permission(&answer) {
                         Some(PermissionWord::Allow) => break PermissionDecision::Allow,
                         Some(PermissionWord::Deny) => break PermissionDecision::Deny,
                         Some(PermissionWord::Amend) => {
-                            break amendment(editor, status, asked_for_image, ingress, drafts);
+                            break amendment(editor, surface);
                         }
                         None => continue,
                     },
@@ -647,27 +670,25 @@ fn answer_control(
     keep_running
 }
 
-fn modal_line(
-    editor: &mut Reedline,
-    status: &SharedStatus,
-    asked_for_image: &AtomicBool,
-    ingress: &InteractiveIngress,
-    drafts: &mut Vec<(String, usize)>,
-    prompt: &dyn Prompt,
-) -> Line {
-    surface_line(editor, prompt, status, asked_for_image, ingress, drafts).0
+fn modal_line(editor: &mut Reedline, surface: &mut ModalSurface<'_>, prompt: &dyn Prompt) -> Line {
+    surface_line(
+        editor,
+        prompt,
+        surface.status,
+        surface.asked_for_image,
+        surface.ingress,
+        surface.drafts,
+    )
+    .0
 }
 
-fn amendment(
-    editor: &mut Reedline,
-    status: &SharedStatus,
-    asked_for_image: &AtomicBool,
-    ingress: &InteractiveIngress,
-    drafts: &mut Vec<(String, usize)>,
-) -> PermissionDecision {
-    let prompt = Question::new("New JSON parameters: ".to_string(), Arc::clone(status));
+fn amendment(editor: &mut Reedline, surface: &mut ModalSurface<'_>) -> PermissionDecision {
+    let prompt = Question::new(
+        "New JSON parameters: ".to_string(),
+        Arc::clone(surface.status),
+    );
     loop {
-        match modal_line(editor, status, asked_for_image, ingress, drafts, &prompt) {
+        match modal_line(editor, surface, &prompt) {
             Line::Submitted(raw) => match serde_json::from_str(&raw) {
                 Ok(params) => return PermissionDecision::Amend { params },
                 Err(_) => continue,
