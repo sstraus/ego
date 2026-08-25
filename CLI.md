@@ -747,12 +747,16 @@ user-authored prompt or higher-authority instruction.
 
 The source session remains complete and resumable. The target records the
 source session and source sequence. A tool-use or truncated response, empty or
-invalid checkpoint, provider/budget/cancellation failure, target-fit failure,
-or target-store failure creates no usable target and leaves the operator in the
-source session. The source owns the compaction attempt's usage and cost. The
-action is disabled while a generation, permission, tool batch, or accepted
-prompt is active; saved drafts require confirmation and remain with the source.
-The complete decision and prompt contract are in
+invalid checkpoint, provider/budget/cancellation failure, target-baseline
+capability or encoding failure, or pre-publication target-store failure creates
+no usable target and leaves the operator in the source session. At compaction
+time εgo resolves and locally validates the exact checkpoint-only baseline; it
+does not claim token-level fit for that baseline or for a future human prompt.
+A later provider context-limit error remains explicit. The source owns the
+compaction attempt's usage and cost. The action is disabled while a generation,
+permission, tool batch, or accepted prompt is active; saved drafts require
+confirmation and remain with the source. The complete decision and prompt
+contract are in
 `docs/decisions/2026-08-24-compaction-seeds-a-clean-session.md`.
 
 ## 7. Configuration
