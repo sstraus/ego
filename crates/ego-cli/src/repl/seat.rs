@@ -1298,8 +1298,7 @@ fn execute_action_and_modal(
                 .expect("surface status lock")
                 .surface_effect
                 .clone();
-            let effect = effects.lock().expect("surface action effect lock").take();
-            effect
+            effects.lock().expect("surface action effect lock").take()
         };
         if let Some(line) =
             effect.and_then(|effect| apply_surface_effect(editor, phase, status, effect, busy))

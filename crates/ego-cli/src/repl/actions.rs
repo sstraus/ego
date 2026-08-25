@@ -545,17 +545,14 @@ impl ActionRegistry {
         }
     }
     pub fn classify(&self, submission: Submission) -> Dispatch {
-        if submission.origin == InputOrigin::Typed {
-            if let Some(name) = submission.text.strip_prefix('/') {
-                if !name.contains(char::is_whitespace) {
-                    if let Some(id) = self
-                        .resolve_slash(name)
-                        .or_else(|| self.resolve_alias(name))
-                    {
-                        return Dispatch::Action(id);
-                    }
-                }
-            }
+        if submission.origin == InputOrigin::Typed
+            && let Some(name) = submission.text.strip_prefix('/')
+            && !name.contains(char::is_whitespace)
+            && let Some(id) = self
+                .resolve_slash(name)
+                .or_else(|| self.resolve_alias(name))
+        {
+            return Dispatch::Action(id);
         }
         Dispatch::Prompt
     }

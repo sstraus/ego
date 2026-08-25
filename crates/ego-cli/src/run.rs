@@ -301,17 +301,24 @@ async fn interactive_through(
         native: human && capabilities.osc != OscProfile::None,
         picker: None,
     };
-    let ended = converse_with_status(
+    let between = || text_sink.finish();
+    let ended = match execute(
         args,
         |_| &text_sink as &dyn EventSink,
         cancel,
-        interactive_seat,
+        Driver::Interactive {
+            seat: interactive_seat,
+            between: &between,
+        },
         Some(elicitor),
-        status,
+        Some(status),
         output,
-        &|| text_sink.finish(),
     )
-    .await;
+    .await
+    {
+        Ok(ended) => ended,
+        Err(refusal) => Ended::refused(refusal),
+    };
     text_sink.finish();
     let counts = seat.exit_counts();
     output.note(&format!(
@@ -551,32 +558,6 @@ pub async fn converse<S: EventSink>(
         Driver::Interactive { seat, between },
         elicitor,
         None,
-        diagnostics,
-    )
-    .await
-    {
-        Ok(ended) => ended,
-        Err(refusal) => Ended::refused(refusal),
-    }
-}
-
-async fn converse_with_status<S: EventSink>(
-    args: Args,
-    destination: impl FnOnce(&ModelCapabilities) -> S,
-    cancel: CancelToken,
-    seat: Arc<dyn InteractiveSeat>,
-    elicitor: Option<Arc<dyn Elicitor>>,
-    status: InteractiveStatus,
-    diagnostics: &dyn Diagnostics,
-    between: &(dyn Fn() + Send + Sync),
-) -> Ended {
-    match execute(
-        args,
-        destination,
-        cancel,
-        Driver::Interactive { seat, between },
-        elicitor,
-        Some(status),
         diagnostics,
     )
     .await
