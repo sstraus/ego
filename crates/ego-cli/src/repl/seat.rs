@@ -2634,4 +2634,40 @@ mod tests {
         assert_eq!(seat.read(), Line::Submitted("initial".to_string()));
         assert_eq!(phase.get(), EditPhase::Busy);
     }
+
+    #[test]
+    fn source_target_source_activation_restores_source_drafts_in_lifo_order() {
+        let source = SessionId::new();
+        let target = SessionId::new();
+        let mut drafts = DraftStash::new(source);
+        drafts.push_active(ComposerDraft {
+            text: "source-first".to_string(),
+            cursor: 12,
+            origin: InputOrigin::Typed,
+        });
+        drafts.push_active(ComposerDraft {
+            text: "source-second".to_string(),
+            cursor: 13,
+            origin: InputOrigin::Typed,
+        });
+
+        drafts.activate(target);
+        assert_eq!(drafts.active(), target);
+        assert_eq!(drafts.active_count(), 0);
+        assert_eq!(drafts.count(source), 2);
+        assert_eq!(drafts.count(target), 0);
+        drafts.push_active(ComposerDraft {
+            text: "target-only".to_string(),
+            cursor: 11,
+            origin: InputOrigin::Typed,
+        });
+        assert_eq!(drafts.pop_active().unwrap().text, "target-only");
+
+        drafts.activate(source);
+        assert_eq!(drafts.active(), source);
+        assert_eq!(drafts.active_count(), 2);
+        assert_eq!(drafts.pop_active().unwrap().text, "source-second");
+        assert_eq!(drafts.pop_active().unwrap().text, "source-first");
+        assert_eq!(drafts.active_count(), 0);
+    }
 }

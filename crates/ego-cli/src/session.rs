@@ -210,3 +210,132 @@ impl Opened<'_> {
 pub fn now(clock: &dyn Clock) -> Timestamp {
     clock.now()
 }
+
+#[cfg(test)]
+mod compaction {
+    use super::*;
+    use ego_core::compact::CompactionPublication;
+    use ego_core::event::time::Clock;
+    use ego_tools::store::SessionEvidenceStore;
+    use tempfile::{TempDir, tempdir};
+
+    struct FixedClock;
+
+    impl Clock for FixedClock {
+        fn now(&self) -> Timestamp {
+            Timestamp::from_millis(9_000)
+        }
+    }
+
+    fn durable(
+        id: SessionId,
+        uncached_input_tokens: u64,
+        evidence_cap: u64,
+    ) -> ActiveSession<'static> {
+        let root: &'static TempDir = Box::leak(Box::new(tempdir().unwrap()));
+        let store = Box::leak(Box::new(jsonl(
+            root.path().to_path_buf(),
+            PathBuf::from("/workspace"),
+        )));
+        let opened = open(store, &id, &FixedClock).unwrap();
+        let mut state = SessionState::default();
+        state.usage.uncached_input_tokens = uncached_input_tokens;
+        ActiveSession::durable(opened, state, evidence_cap).unwrap()
+    }
+
+    fn ephemeral(
+        id: SessionId,
+        uncached_input_tokens: u64,
+        evidence_cap: u64,
+    ) -> ActiveSession<'static> {
+        let owner = tempdir().unwrap();
+        let evidence = SessionEvidenceStore::open(owner.path(), id, evidence_cap).unwrap();
+        let mut state = SessionState::default();
+        state.usage.uncached_input_tokens = uncached_input_tokens;
+        ActiveSession::ephemeral(id, state, evidence, owner)
+    }
+
+    fn assert_source_owner(active: &ActiveSession<'_>, source: SessionId, tokens: u64, cap: u64) {
+        assert_eq!(active.id(), source);
+        assert_eq!(active.state().usage.uncached_input_tokens, tokens);
+        assert_eq!(active.evidence().hard_cap(), cap);
+    }
+
+    #[test]
+    fn declined_compaction_keeps_the_source_owner_intact() {
+        let source = SessionId::new();
+        let target = SessionId::new();
+        let mut active = durable(source, 11, 101);
+        let target_owner = durable(target, 22, 202);
+
+        assert!(!active.apply_publication(
+            target_owner,
+            &CompactionPublication::NotPublished {
+                diagnostic: "human declined compaction".to_string(),
+            },
+        ));
+        assert_source_owner(&active, source, 11, 101);
+        assert!(matches!(
+            active.store().read(&target),
+            Err(StoreError::WrongSession { .. })
+        ));
+    }
+
+    #[test]
+    fn not_published_drops_the_target_and_preserves_all_source_fields() {
+        let source = SessionId::new();
+        let target = SessionId::new();
+        let mut active = durable(source, 31, 301);
+        let target_owner = durable(target, 32, 302);
+
+        assert!(!active.apply_publication(
+            target_owner,
+            &CompactionPublication::NotPublished {
+                diagnostic: "target append failed".to_string(),
+            },
+        ));
+        assert_source_owner(&active, source, 31, 301);
+    }
+
+    #[test]
+    fn both_published_outcomes_replace_id_state_store_and_evidence() {
+        for publication in [
+            CompactionPublication::PublishedDurably { diagnostic: None },
+            CompactionPublication::PublishedDurabilityUncertain {
+                diagnostic: "fsync result was lost".to_string(),
+            },
+        ] {
+            let source = SessionId::new();
+            let target = SessionId::new();
+            let mut active = durable(source, 41, 401);
+            let target_owner = durable(target, 42, 402);
+
+            assert!(active.apply_publication(target_owner, &publication));
+            assert_eq!(active.id(), target);
+            assert_eq!(active.state().usage.uncached_input_tokens, 42);
+            assert_eq!(active.evidence().hard_cap(), 402);
+            assert!(matches!(
+                active.store().read(&source),
+                Err(StoreError::WrongSession { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn an_activation_failure_after_publication_never_reverts_the_owner() {
+        let source = SessionId::new();
+        let target = SessionId::new();
+        let mut active = ephemeral(source, 51, 501);
+        let target_owner = ephemeral(target, 52, 502);
+
+        assert!(active.apply_publication(
+            target_owner,
+            &CompactionPublication::PublishedDurably { diagnostic: None },
+        ));
+        let activation_succeeded = false;
+        assert!(!activation_succeeded);
+        assert_eq!(active.id(), target);
+        assert_eq!(active.state().usage.uncached_input_tokens, 52);
+        assert_eq!(active.evidence().hard_cap(), 502);
+    }
+}

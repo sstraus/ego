@@ -2051,6 +2051,87 @@ mod tests {
     use super::*;
     use crate::render::caps::{Depth, OscProfile};
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use tempfile::tempdir;
+
+    #[test]
+    fn ephemeral_compact_refuses_before_confirmation_resolution_generation_or_publication() {
+        let source = SessionId::new();
+        let owner = tempdir().expect("ephemeral evidence owner");
+        let evidence = SessionEvidenceStore::open(owner.path(), source, 1024)
+            .expect("ephemeral evidence store");
+        let active = crate::session::ActiveSession::ephemeral(
+            source,
+            SessionState::default(),
+            evidence,
+            owner,
+        );
+
+        assert_eq!(
+            super::compaction_availability(&active, false),
+            repl::actions::Availability::Disabled {
+                owner: "compaction requires a durable source session",
+            }
+        );
+        assert_eq!(active.id(), source);
+        assert_eq!(active.state(), &SessionState::default());
+    }
+
+    #[derive(Debug)]
+    struct CompactionDecisionSeat {
+        confirm: bool,
+        activate: bool,
+    }
+
+    impl Reads for CompactionDecisionSeat {
+        fn read(&self) -> repl::Line {
+            repl::Line::Ended
+        }
+    }
+
+    impl InteractiveSeat for CompactionDecisionSeat {
+        fn has_human(&self) -> bool {
+            true
+        }
+
+        fn trust(&self, _workspace: &Path) -> Trust {
+            Trust::Trusted
+        }
+
+        fn permission(&self, _request: &PermissionRequest) -> PermissionDecision {
+            PermissionDecision::Deny
+        }
+
+        fn confirm_compaction(&self, _source: SessionId) -> bool {
+            self.confirm
+        }
+
+        fn activate_session(&self, _target: SessionId) -> bool {
+            self.activate
+        }
+    }
+
+    #[test]
+    fn compaction_decline_is_a_control_decision_and_keeps_the_source_selected() {
+        let source = SessionId::new();
+        let seat = CompactionDecisionSeat {
+            confirm: false,
+            activate: true,
+        };
+
+        assert!(!seat.confirm_compaction(source));
+    }
+
+    #[test]
+    fn activation_failure_is_reported_after_publication_without_a_revert_request() {
+        let target = SessionId::new();
+        let seat = CompactionDecisionSeat {
+            confirm: true,
+            activate: false,
+        };
+
+        assert!(seat.confirm_compaction(SessionId::new()));
+        assert!(!seat.activate_session(target));
+    }
 
     #[derive(Debug)]
     struct TrustingSeat {

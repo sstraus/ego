@@ -729,9 +729,12 @@ drafts, and the surface emits one overflow diagnostic.
 
 ### 6.6 Prompted compaction starts a clean session
 
-`/compact` is an idle-only session transition. It sends the complete active
-provider context to one tool-less generation with a versioned εgo-owned prompt
-that asks for a self-contained continuation checkpoint. That checkpoint keeps
+`/compact` is an idle-only session transition. It is unavailable in an
+`--ephemeral` session: compaction requires a durable, independently resumable
+source and never changes the invocation's persistence choice. It sends the
+complete active provider context to one tool-less generation with a versioned
+εgo-owned prompt that asks for a self-contained continuation checkpoint. That
+checkpoint keeps
 the active objective, binding constraints, completed evidence, current work,
 blockers, uncertainty, decisions, rationale, exact references, and ordered next
 steps. An earlier checkpoint is part of the input, so repeated compaction must
