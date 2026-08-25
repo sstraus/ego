@@ -233,4 +233,31 @@ transport = "{transport}"
             );
         }
     }
+
+    #[test]
+    fn user_layer_wins_same_slug_facts_and_authority_without_filesystem_io() {
+        let layer = |context: u64| {
+            toml::from_str::<Facts>(&format!(
+                r#"
+[model."openai/gpt-5.6".capabilities]
+schema_version = 2
+max_context_tokens = {context}
+max_output_tokens = 128000
+max_tools = 128
+supports_parallel_tool_calls = true
+reasoning_carryover = "same_provider_only"
+reasoning_efforts = "any"
+cancel = "cooperative"
+cache = "long"
+"#
+            ))
+            .unwrap()
+        };
+        let system = layer(200000);
+        let user = layer(400000);
+        let merged = merge_layers(system.model, user.model);
+        let (authority, supplied) = &merged["openai/gpt-5.6"];
+        assert_eq!(*authority, ego_ai::catalogue::SuppliedAuthority::User);
+        assert_eq!(supplied.capabilities.max_context_tokens, Some(400000));
+    }
 }

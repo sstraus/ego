@@ -36,7 +36,8 @@ use ego_core::generator::types::{
 };
 use ego_core::permit::rule::Rule;
 use ego_core::permit::{
-    Authority, CanonPath, EnvPolicy, Fs, GuardedIo, HumanApprover, Op, PermissionDecision,
+    Authority, CanonPath, Confinement, EnvPolicy, ExecCaps, Fs, GuardedIo, HumanApprover, Op,
+    PermissionDecision, RunConfinement,
     PermissionRequest, PolicyEngine, PrepareCtx, PreparedCall, ProcessError, ProcessExecutor,
     SpawnSpec, ToolError, ToolResult, Typed, TypedTool,
 };
@@ -48,7 +49,10 @@ use ego_core::store::evidence::{
     EvidenceError, EvidencePage, EvidenceRead, EvidenceStore, EvidenceWriter,
 };
 use ego_core::store::session_store::{SessionMeta, SessionStore, StoreError};
-use ego_core::turn::{CancelToken, ControlError, Model, Session, Tools, TurnConfig, TurnLoop};
+use ego_core::turn::{
+    CancelToken, ControlError, GenerationRuntime, JudgeContext, Session, Tools,
+    TurnConfig, TurnLoop,
+};
 use futures::StreamExt;
 use futures::executor::block_on;
 use futures::future::BoxFuture;
@@ -560,13 +564,23 @@ mod turn {
         }
     }
 
-    fn config() -> TurnConfig {
-        TurnConfig {
+    struct TestGenerationSettings {
+        model: String,
+        thinking: ThinkingLevel,
+        max_output_tokens: Option<u64>,
+        parallel_tool_calls: bool,
+        system: Option<SystemPrompt>,
+        reasoning_efforts: ReasoningEffortSupport,
+    }
+
+    fn config() -> TestGenerationSettings {
+        TestGenerationSettings {
             model: "test-model".to_string(),
             thinking: ThinkingLevel::Off,
             max_output_tokens: Some(1_024),
             parallel_tool_calls: false,
             system: None,
+            reasoning_efforts: ReasoningEffortSupport::Any,
         }
     }
 
@@ -609,7 +623,7 @@ mod turn {
     struct Fixture {
         store: MemStore,
         clock: FixedClock,
-        generator: FakeGenerator,
+        generator: Arc<FakeGenerator>,
         policy: PolicyEngine,
         fs: FakeFs,
         process: Arc<dyn ProcessExecutor>,
@@ -627,7 +641,7 @@ mod turn {
             Self {
                 store: MemStore::default(),
                 clock: FixedClock(1_787_000_000_000),
-                generator: FakeGenerator::new(script),
+                generator: Arc::new(FakeGenerator::new(script)),
                 policy: PolicyEngine::new(CanonPath::new("/ws"), Mode::Default, Ruleset::default()),
                 fs: FakeFs::default(),
                 process: Arc::new(NoProcess),
@@ -793,26 +807,70 @@ mod turn {
         }
     }
 
-    fn model<'a>(generator: &'a dyn Generator, gate: &'a mut BudgetGate) -> Model<'a> {
+    struct FixedGenerationSource {
+        generator: Arc<dyn Generator>,
+        settings: TestGenerationSettings,
+        metering: Metering,
+        rates: Option<ResolvedRates>,
+    }
+
+    impl ego_core::generation_model_source::GenerationModelSource for FixedGenerationSource {
+        fn resolve<'a>(
+            &'a self,
+            _role: ego_core::generation_model_source::GenerationRole,
+        ) -> BoxFuture<'a, Result<ego_core::generation_model_source::GenerationProfile, ego_core::generation_model_source::GenerationModelError>> {
+            let mut capabilities = caps();
+            capabilities.max_output_tokens = self.settings.max_output_tokens;
+            capabilities.supports_parallel_tool_calls = self.settings.parallel_tool_calls;
+            capabilities.reasoning_efforts = self.settings.reasoning_efforts.clone();
+            Box::pin(futures::future::ready(Ok(ego_core::generation_model_source::GenerationProfile {
+                identity: ego_core::config::ModelRef(self.settings.model.clone()),
+                request_model: self.settings.model.clone(),
+                thinking: self.settings.thinking,
+                generator: self.generator.clone(),
+                capabilities,
+                metering: self.metering.clone(),
+                rates: self.rates.clone(),
+            })))
+        }
+    }
+
+    fn model<G: Generator + 'static>(generator: &Arc<G>, gate: &mut BudgetGate) -> GenerationRuntime<'_> {
         model_with(generator, gate, metering(), Some(rates()), None, config())
     }
 
-    fn model_with<'a>(
-        generator: &'a dyn Generator,
-        gate: &'a mut BudgetGate,
+    fn model_with_reasoning<G: Generator + 'static>(
+        generator: &Arc<G>,
+        gate: &mut BudgetGate,
+        reasoning_efforts: ReasoningEffortSupport,
+    ) -> GenerationRuntime<'_> {
+        let mut settings = config();
+        settings.reasoning_efforts = reasoning_efforts;
+        model_with(generator, gate, metering(), Some(rates()), None, settings)
+    }
+
+    fn model_with<G: Generator + 'static>(
+        generator: &Arc<G>,
+        gate: &mut BudgetGate,
         metering: Metering,
         rates: Option<ResolvedRates>,
         token_ceiling: Option<u64>,
-        config: TurnConfig,
-    ) -> Model<'a> {
-        Model {
-            generator,
-            gate,
+        settings: TestGenerationSettings,
+    ) -> GenerationRuntime<'_> {
+        let system = settings.system.clone();
+        let source = FixedGenerationSource {
+            generator: generator.clone(),
+            settings,
             metering,
             rates,
-            token_ceiling,
-            caps: caps(),
-            config,
+        };
+        GenerationRuntime {
+            source: Arc::new(source),
+            gate,
+            config: TurnConfig {
+                system,
+                token_ceiling,
+            },
         }
     }
 
@@ -848,7 +906,7 @@ mod turn {
         metering: Metering,
         rates: Option<ResolvedRates>,
         token_ceiling: Option<u64>,
-        config: TurnConfig,
+        config: TestGenerationSettings,
     ) -> (ExitReason, bool, SessionState) {
         let mut gate = fx.gate.borrow_mut();
         let tools = Tools::new(
@@ -1715,11 +1773,11 @@ mod turn {
     fn busy_ingress_is_durable_before_ack_and_projects_pending_steer() {
         let (ingress, mut control) = ego_core::turn::interactive_control();
         let fx = Fixture::new(vec![]);
-        let generator = StallingGenerator {
+        let generator = Arc::new(StallingGenerator {
             events: Mutex::new(vec![AiEvent::TextDelta {
                 text: "streaming".to_owned(),
             }]),
-        };
+        });
         let mut budget = gate();
         let sink = CollectingSink::new();
         let policy = PolicyEngine::new(CanonPath::new("/ws"), Mode::Default, Ruleset::default());
@@ -1770,7 +1828,7 @@ mod turn {
     fn a_ready_provider_stream_cannot_starve_a_durable_control_intent() {
         let (ingress, mut control) = ego_core::turn::interactive_control();
         let fx = Fixture::new(vec![]);
-        let generator = ContinuouslyReadyGenerator;
+        let generator = Arc::new(ContinuouslyReadyGenerator);
         let mut budget = gate();
         let tools = Tools::new(
             &fx.registry,
@@ -1836,11 +1894,11 @@ mod turn {
         );
 
         let fx = Fixture::new(vec![]);
-        let generator = StallingGenerator {
+        let generator = Arc::new(StallingGenerator {
             events: Mutex::new(vec![AiEvent::TextDelta {
                 text: "coordinator consumes one intent at a time".to_owned(),
             }]),
-        };
+        });
         let mut budget = gate();
         let tools = Tools::new(
             &fx.registry,
@@ -1926,11 +1984,11 @@ mod turn {
         assert_eq!(state.unacknowledged_prompts()[0].id(), first);
         assert_eq!(state.expedited_through(), Some(second));
 
-        let generator = StallingGenerator {
+        let generator = Arc::new(StallingGenerator {
             events: Mutex::new(vec![AiEvent::TextDelta {
                 text: "busy after adversarial ack".to_owned(),
             }]),
-        };
+        });
         let mut budget = gate();
         let tools = Tools::new(
             &fx.registry,
@@ -1984,9 +2042,9 @@ mod turn {
         // coordinator appends PromptQueued. Fail that event by kind so this
         // test cannot accidentally target an unrelated lifecycle append.
         fx.store.fail_prompt_queued();
-        let generator = StallingGenerator {
+        let generator = Arc::new(StallingGenerator {
             events: Mutex::new(Vec::new()),
-        };
+        });
         let mut budget = gate();
         let sink = CollectingSink::new();
         let policy = PolicyEngine::new(CanonPath::new("/ws"), Mode::Default, Ruleset::default());
@@ -3150,7 +3208,7 @@ mod turn {
     fn a_cancelled_turn_still_settles_its_attempt() {
         let fx = Fixture::new(vec![]);
         let token = CancelToken::new();
-        let generator = CancellingGenerator {
+        let generator = Arc::new(CancellingGenerator {
             events: Mutex::new(vec![
                 AiEvent::TextDelta {
                     text: "I have started".to_string(),
@@ -3162,7 +3220,7 @@ mod turn {
             ]),
             after: 1,
             token: token.clone(),
-        };
+        });
 
         let mut gate = fx.gate.borrow_mut();
         let tools = Tools::new(
@@ -3261,7 +3319,7 @@ mod turn {
         let fx = Fixture::new(vec![]).with_read_tool();
         fx.fs.file("/ws/note.txt", "hello from the file");
         let token = CancelToken::new();
-        let generator = CancellingGenerator {
+        let generator = Arc::new(CancellingGenerator {
             events: Mutex::new(vec![
                 AiEvent::ToolCall {
                     call_id: "call_abc".to_string(),
@@ -3272,7 +3330,7 @@ mod turn {
             ]),
             after: 2,
             token: token.clone(),
-        };
+        });
 
         let mut gate = fx.gate.borrow_mut();
         let tools = Tools::new(
@@ -3804,13 +3862,11 @@ mod turn {
             &fx.evidence,
             CanonPath::new("/ws"),
         );
-        let mut refusing = model(&fx.generator, &mut gate);
-        // The model accepts three levels; `config()` asks for `Off`.
-        refusing.caps.reasoning_efforts = ReasoningEffortSupport::Only(BTreeSet::from([
+        let refusing = model_with_reasoning(&fx.generator, &mut gate, ReasoningEffortSupport::Only(BTreeSet::from([
             ThinkingLevel::Low,
             ThinkingLevel::Medium,
             ThinkingLevel::High,
-        ]));
+        ])));
         let mut turn = TurnLoop::new(
             session(
                 SessionState::default(),
@@ -3855,9 +3911,11 @@ mod turn {
             &fx.evidence,
             CanonPath::new("/ws"),
         );
-        let mut refusing = model(&fx.generator, &mut gate);
-        refusing.caps.reasoning_efforts =
-            ReasoningEffortSupport::Only(BTreeSet::from([ThinkingLevel::High]));
+        let refusing = model_with_reasoning(
+            &fx.generator,
+            &mut gate,
+            ReasoningEffortSupport::Only(BTreeSet::from([ThinkingLevel::High])),
+        );
         let mut turn = TurnLoop::new(
             session(
                 SessionState::default(),
@@ -3907,8 +3965,7 @@ mod turn {
             &fx.evidence,
             CanonPath::new("/ws"),
         );
-        let mut silent = model(&fx.generator, &mut gate);
-        silent.caps.reasoning_efforts = ReasoningEffortSupport::Unknown;
+        let silent = model_with_reasoning(&fx.generator, &mut gate, ReasoningEffortSupport::Unknown);
         let mut turn = TurnLoop::new(
             session(
                 SessionState::default(),
@@ -4004,11 +4061,11 @@ mod turn {
         // `CLI.md` §4.2: "one event per line, **live**". The turn below never
         // ends, so anything the sink holds got there while it was running.
         let fx = Fixture::new(Vec::new());
-        let generator = StallingGenerator {
+        let generator = Arc::new(StallingGenerator {
             events: Mutex::new(vec![AiEvent::TextDelta {
                 text: "thinking out loud".to_string(),
             }]),
-        };
+        });
         let mut gate = fx.gate.borrow_mut();
         let tools = Tools::new(
             &fx.registry,
@@ -4603,5 +4660,563 @@ mod turn {
             Some(&usd("0.76536")),
             "an unknown cost charges the bound, never zero"
         );
+    }
+
+    mod generation_boundary {
+        use super::*;
+        use ego_core::generation_model_source::{
+            GenerationModelError, GenerationModelErrorClass, GenerationModelSource,
+            GenerationProfile, GenerationRole,
+        };
+
+        enum ResolutionStep {
+            Ready(Result<GenerationProfile, GenerationModelError>),
+            Pending,
+        }
+
+        struct ScriptedGenerationSource {
+            steps: Mutex<VecDeque<ResolutionStep>>,
+            resolved: Mutex<Vec<GenerationRole>>,
+            ready: Option<Mutex<Option<futures::channel::oneshot::Sender<()>>>>,
+            trace: Option<GenerationTrace>,
+        }
+
+        #[derive(Clone, Default)]
+        struct GenerationTrace {
+            requests: Arc<Mutex<Vec<GenRequest>>>,
+            steps: Arc<Mutex<Vec<String>>>,
+        }
+
+        struct RecordingGenerator {
+            inner: FakeGenerator,
+            trace: GenerationTrace,
+        }
+
+        impl Generator for RecordingGenerator {
+            fn generate(&self, request: GenRequest, attempt: GenerationAttempt) -> AttemptStream {
+                self.trace.requests.lock().unwrap().push(request.clone());
+                self.trace.steps.lock().unwrap().push(format!("generate:{}", request.model));
+                self.inner.generate(request, attempt)
+            }
+        }
+
+        impl ScriptedGenerationSource {
+            fn new(
+                profiles: impl IntoIterator<Item = Result<GenerationProfile, GenerationModelError>>,
+            ) -> Self {
+                Self {
+                    steps: Mutex::new(
+                        profiles.into_iter().map(ResolutionStep::Ready).collect(),
+                    ),
+                    resolved: Mutex::new(Vec::new()),
+                    ready: None,
+                    trace: None,
+                }
+            }
+
+            fn pending_with_signal_at(mut self, index: usize) -> (Self, futures::channel::oneshot::Receiver<()>) {
+                let (sender, receiver) = futures::channel::oneshot::channel();
+                let mut steps = self.steps.lock().unwrap();
+                assert!(index <= steps.len());
+                steps.insert(index, ResolutionStep::Pending);
+                drop(steps);
+                self.ready = Some(Mutex::new(Some(sender)));
+                (self, receiver)
+            }
+
+            fn pending_with_signal(self) -> (Self, futures::channel::oneshot::Receiver<()>) {
+                self.pending_with_signal_at(0)
+            }
+
+            fn with_trace(mut self, trace: GenerationTrace) -> Self {
+                self.trace = Some(trace);
+                self
+            }
+
+            fn roles(&self) -> Vec<GenerationRole> {
+                self.resolved.lock().unwrap().clone()
+            }
+        }
+
+        fn profile_with_settings(
+            slug: &str,
+            script: Vec<AiEvent>,
+            trace: &GenerationTrace,
+            output_ceiling: Option<u64>,
+            context_ceiling: Option<u64>,
+            thinking: ThinkingLevel,
+            parallel_tool_calls: bool,
+        ) -> GenerationProfile {
+            let mut capabilities = caps();
+            capabilities.max_context_tokens = context_ceiling;
+            capabilities.max_output_tokens = output_ceiling;
+            capabilities.supports_parallel_tool_calls = parallel_tool_calls;
+            let profile = GenerationProfile {
+                identity: ego_core::config::ModelRef(slug.to_string()),
+                request_model: slug.split_once('/').unwrap().1.to_string(),
+                thinking,
+                generator: Arc::new(RecordingGenerator {
+                    inner: FakeGenerator::new(vec![script]),
+                    trace: trace.clone(),
+                }),
+                capabilities,
+                metering: metering(),
+                rates: Some(rates()),
+            };
+            assert_eq!(
+                profile.output_ceiling(),
+                output_ceiling.or(context_ceiling)
+            );
+            profile
+        }
+
+        fn profile(
+            slug: &str,
+            judge: bool,
+            script: Vec<AiEvent>,
+            trace: &GenerationTrace,
+            output_ceiling: Option<u64>,
+        ) -> GenerationProfile {
+            profile_with_settings(
+                slug,
+                script,
+                trace,
+                output_ceiling,
+                Some(8_192),
+                if judge || output_ceiling == Some(1_024) { ThinkingLevel::Off } else { ThinkingLevel::High },
+                output_ceiling == Some(2_048),
+            )
+        }
+
+        fn judge_context() -> JudgeContext {
+            JudgeContext {
+                confinement: RunConfinement::new(
+                    Confinement::Workspace, false, CanonPath::new("/ws"),
+                ).unwrap(),
+                exec_caps: ExecCaps::READ_SCOPED.union(ExecCaps::WRITE_SCOPED),
+            }
+        }
+
+        impl GenerationModelSource for ScriptedGenerationSource {
+            fn resolve<'a>(
+                &'a self,
+                role: GenerationRole,
+            ) -> BoxFuture<'a, Result<GenerationProfile, GenerationModelError>> {
+                self.resolved.lock().unwrap().push(role);
+                if let Some(trace) = &self.trace {
+                    trace.steps.lock().unwrap().push(format!("resolve:{role:?}"));
+                }
+                let step = self.steps.lock().unwrap().pop_front()
+                    .expect("the scripted source has one step per boundary");
+                if matches!(step, ResolutionStep::Pending) {
+                    if let Some(ready) = &self.ready {
+                        if let Some(sender) = ready.lock().unwrap().take() {
+                            let _ = sender.send(());
+                        }
+                    }
+                    return Box::pin(futures::future::pending());
+                }
+                let ResolutionStep::Ready(result) = step else {
+                    unreachable!("pending steps return above");
+                };
+                Box::pin(futures::future::ready(result))
+            }
+        }
+
+        #[test]
+        fn main_read_tool_main_resolves_fresh_profiles_with_current_caps() {
+            let mut fx = Fixture::new(vec![
+                vec![
+                    AiEvent::TextDelta("before".into()),
+                    AiEvent::ToolCall {
+                        call_id: "call-1".into(),
+                        name: "read".into(),
+                        args: r#"{"path":"/ws/notes.md"}"#.into(),
+                    },
+                    AiEvent::Stop(StopReason::ToolUse),
+                ],
+                vec![AiEvent::TextDelta("after".into()), AiEvent::Stop(StopReason::Stop)],
+            ]).with_read_tool();
+            fx.fs.file("/ws/notes.md", "seeded notes");
+            let trace = GenerationTrace::default();
+            let source = Arc::new(ScriptedGenerationSource::new([
+                Ok(profile("openai/first", false, vec![
+                    AiEvent::TextDelta("before".into()),
+                    AiEvent::ToolCall {
+                        call_id: "call-1".into(),
+                        name: "read".into(),
+                        args: r#"{"path":"/ws/notes.md"}"#.into(),
+                    },
+                    AiEvent::Stop(StopReason::ToolUse),
+                ], &trace, Some(2_048))),
+                Ok(profile_with_settings("openai/second", vec![
+                    AiEvent::TextDelta("after".into()), AiEvent::Stop(StopReason::Stop),
+                ], &trace, None, Some(4_096), ThinkingLevel::Off, false)),
+            ]).with_trace(trace.clone()));
+            let mut gate = fx.gate.borrow_mut();
+            let tools = Tools::new(
+                &fx.registry, &fx.policy, &fx.fs, fx.process.as_ref(), &fx.evidence,
+                CanonPath::new("/ws"),
+            );
+            let mut turn = TurnLoop::new(
+                session(SessionState::default(), &fx.store, &fx.clock, &fx.sink,
+                    CancelToken::new()),
+                GenerationRuntime {
+                    source: source.clone(),
+                    gate: &mut gate,
+                    config: TurnConfig { system: None, token_ceiling: None },
+                },
+                tools,
+            );
+            block_on(turn.run("read this")).expect("the scripted turn succeeds");
+            let names = fx.store.kinds();
+            assert_eq!(names.iter().filter(|name| *name == "generation_started").count(), 2);
+            assert_eq!(fx.sink.events().iter().filter(|event| matches!(
+                event, PublicEvent::MeteringSelected { .. }
+            )).count(), 2);
+            assert_eq!(source.roles(), vec![
+                GenerationRole::Main, GenerationRole::Main
+            ]);
+            let requests = trace.requests.lock().unwrap();
+            assert_eq!(requests.iter().map(|request| request.model.as_str()).collect::<Vec<_>>(),
+                ["first", "second"]);
+            assert_eq!(requests.iter().map(|request| request.max_output_tokens).collect::<Vec<_>>(),
+                [Some(2_048), Some(4_096)]);
+            assert_eq!(requests.iter().map(|request| request.thinking).collect::<Vec<_>>(),
+                [ThinkingLevel::High, ThinkingLevel::Off]);
+            assert_eq!(requests.iter().map(|request| request.parallel_tool_calls).collect::<Vec<_>>(),
+                [true, false]);
+            assert_eq!(trace.steps.lock().unwrap().as_slice(), [
+                "resolve:Main", "generate:first", "resolve:Main", "generate:second"
+            ]);
+        }
+
+        #[test]
+        fn auto_write_judge_allow_resolves_fresh_judge_and_executes_the_prepared_write() {
+            let mut fx = Fixture::new(vec![]).with_write_tool();
+            fx.policy = PolicyEngine::new(
+                CanonPath::new("/ws"),
+                Mode::Auto,
+                Ruleset::default(),
+            );
+            let trace = GenerationTrace::default();
+            let source = Arc::new(ScriptedGenerationSource::new([
+                Ok(profile("openai/main", false, vec![
+                    AiEvent::ToolCall {
+                        call_id: "call-write".into(),
+                        name: "fake_write".into(),
+                        args: r#"{"path":"/ws/out","contents":"ok"}"#.into(),
+                    },
+                    AiEvent::Stop(StopReason::ToolUse),
+                ], &trace, Some(2_048))),
+                Ok(profile("openai/judge", true, vec![
+                    AiEvent::TextDelta(r#"{"verdict":"allow","reason":"bounded"}"#.into()),
+                    AiEvent::Stop(StopReason::Stop),
+                ], &trace, None)),
+                Ok(profile("openai/main", false, vec![
+                    AiEvent::Stop(StopReason::Stop),
+                ], &trace, Some(1_024))),
+            ]).with_trace(trace.clone()));
+            let confinement = RunConfinement::new(
+                Confinement::Workspace, false, CanonPath::new("/ws"),
+            ).unwrap();
+            let context = JudgeContext {
+                confinement,
+                exec_caps: ExecCaps::READ_SCOPED.union(ExecCaps::WRITE_SCOPED),
+            };
+            let mut gate = fx.gate.borrow_mut();
+            let tools = Tools::new(
+                &fx.registry, &fx.policy, &fx.fs, fx.process.as_ref(), &fx.evidence,
+                CanonPath::new("/ws"),
+            );
+            let mut turn = TurnLoop::new(
+                session(SessionState::default(), &fx.store, &fx.clock, &fx.sink,
+                    CancelToken::new()),
+                GenerationRuntime {
+                    source: source.clone(),
+                    gate: &mut gate,
+                    config: TurnConfig { system: None, token_ceiling: None },
+                },
+                tools,
+            ).with_judge(context);
+            block_on(turn.run("write this")).expect("auto judge allow completes the call");
+            assert_eq!(source.roles(), vec![
+                GenerationRole::Main, GenerationRole::Judge, GenerationRole::Main
+            ]);
+            assert_eq!(fx.store.kinds().iter().filter(|kind| *kind == "generation_started").count(), 3);
+            assert_eq!(fx.sink.events().iter().filter(|event| matches!(
+                event, PublicEvent::MeteringSelected { .. }
+            )).count(), 3);
+            let requests = trace.requests.lock().unwrap();
+            assert_eq!(requests[1].model, "judge");
+            assert_eq!(requests[1].thinking, ThinkingLevel::Off);
+            assert!(requests[1].tools.is_empty());
+            assert!(!requests[1].parallel_tool_calls);
+            assert_eq!(requests[1].max_output_tokens, Some(8_192));
+            assert_eq!(trace.steps.lock().unwrap().as_slice(), [
+                "resolve:Main", "generate:main", "resolve:Judge", "generate:judge",
+                "resolve:Main", "generate:main",
+            ]);
+            assert_eq!(fx.fs.read(&CanonPath::new("/ws/out")).unwrap(), b"ok");
+            let events = fx.store.events();
+            let judge_attempt = events.iter().find_map(|event| match &event.kind {
+                EventKind::GenerationStarted { attempt, role: GenerationRole::Judge } => Some(attempt.clone()),
+                _ => None,
+            }).expect("Judge generation is durable");
+            assert!(events.iter().any(|event| matches!(
+                &event.kind,
+                EventKind::PermissionDecided {
+                    allowed: Some(true),
+                    by: Some(Authority::Judge { model, attempt }),
+                    ..
+                } if model == &ego_core::config::ModelRef("openai/judge".into()) && attempt == &judge_attempt
+            )));
+            assert!(fx.store.kinds().iter().any(|kind| kind.contains("tool")));
+        }
+
+        #[test]
+        fn judge_context_without_unresolved_call_does_not_resolve_or_reserve() {
+            let fx = Fixture::new(vec![vec![
+                AiEvent::TextDelta("done".into()),
+                AiEvent::Stop(StopReason::Stop),
+            ]]);
+            let trace = GenerationTrace::default();
+            let source = Arc::new(ScriptedGenerationSource::new([
+                Ok(profile("openai/main", false, vec![
+                    AiEvent::TextDelta("done".into()), AiEvent::Stop(StopReason::Stop),
+                ], &trace, Some(2_048))),
+            ]));
+            let tools = Tools::new(
+                &fx.registry, &fx.policy, &fx.fs, fx.process.as_ref(), &fx.evidence,
+                CanonPath::new("/ws"),
+            );
+            let mut gate = fx.gate.borrow_mut();
+            let mut turn = TurnLoop::new(
+                session(SessionState::default(), &fx.store, &fx.clock, &fx.sink,
+                    CancelToken::new()),
+                GenerationRuntime {
+                    source: source.clone(),
+                    gate: &mut gate,
+                    config: TurnConfig { system: None, token_ceiling: None },
+                },
+                tools,
+            ).with_judge(judge_context());
+            block_on(turn.run("hello")).expect("the scripted turn succeeds");
+            drop(turn);
+            assert_eq!(source.roles(), vec![GenerationRole::Main]);
+            assert!(!fx.store.kinds().iter().any(|kind| kind == "judge_resolved"));
+            assert!(!fx.store.events().iter().any(|event| matches!(
+                event.kind,
+                EventKind::PermissionDecided { by: Some(Authority::Judge { .. }), .. }
+            )));
+        }
+
+        #[test]
+        fn main_resolution_classes_refuse_without_start_or_reservation() {
+            for (class, expected) in [
+                (GenerationModelErrorClass::Usage, ExitReason::Usage),
+                (GenerationModelErrorClass::Provider, ExitReason::Provider),
+                (GenerationModelErrorClass::Internal, ExitReason::Internal),
+            ] {
+                let fx = Fixture::new(vec![]);
+                let source = Arc::new(ScriptedGenerationSource::new([
+                    Err(GenerationModelError::new(class, "resolution failed")),
+                ]));
+                let tools = Tools::new(
+                    &fx.registry, &fx.policy, &fx.fs, fx.process.as_ref(), &fx.evidence,
+                    CanonPath::new("/ws"),
+                );
+                let mut gate = fx.gate.borrow_mut();
+                let mut turn = TurnLoop::new(
+                    session(SessionState::default(), &fx.store, &fx.clock, &fx.sink,
+                        CancelToken::new()),
+                    GenerationRuntime {
+                        source: source.clone(),
+                        gate: &mut gate,
+                        config: TurnConfig { system: None, token_ceiling: None },
+                    },
+                    tools,
+                );
+                let outcome = block_on(turn.run("hello")).expect("refusal is durable");
+                assert_eq!(outcome.exit_reason, expected);
+                assert!(!fx.store.kinds().iter().any(|kind| kind == "generation_started"));
+                assert!(fx.store.kinds().iter().any(|kind| kind == "error"));
+                assert_eq!(gate.outstanding(), None);
+                assert_eq!(gate.committed(), None);
+            }
+        }
+
+        #[test]
+        fn controlled_cancellation_before_resolution_creates_no_attempt() {
+            let fx = Fixture::new(vec![]);
+            let trace = GenerationTrace::default();
+            let (source, ready) = ScriptedGenerationSource::new([
+                Ok(profile("openai/main", false, Vec::new(), &trace, Some(2_048))),
+            ]).pending_with_signal();
+            let source = Arc::new(source);
+            let (ingress, mut control) = ego_core::turn::interactive_control();
+            let cancel = CancelToken::new();
+            let tools = Tools::new(
+                &fx.registry, &fx.policy, &fx.fs, fx.process.as_ref(), &fx.evidence,
+                CanonPath::new("/ws"),
+            );
+            let mut gate = fx.gate.borrow_mut();
+            let mut turn = TurnLoop::new(
+                session(SessionState::default(), &fx.store, &fx.clock, &fx.sink, cancel),
+                GenerationRuntime {
+                    source: source.clone(),
+                    gate: &mut gate,
+                    config: TurnConfig { system: None, token_ceiling: None },
+                },
+                tools,
+            ).with_interactive_control(&mut control);
+            let active = turn.run("hello");
+            let drive = async move {
+                ready.await.expect("resolution reached the controlled wait");
+                ingress.interrupt().await.expect("interrupt is accepted");
+            };
+            let _ = block_on(async { futures::join!(active, drive) });
+            drop(turn);
+            assert!(!fx.store.kinds().iter().any(|kind| kind == "generation_started"));
+            assert_eq!(gate.outstanding(), None);
+            assert_eq!(gate.committed(), None);
+        }
+
+        #[test]
+        fn unresolved_write_without_judge_context_is_headless_and_does_not_resolve_judge() {
+            let mut fx = Fixture::new(vec![]).with_write_tool();
+            let trace = GenerationTrace::default();
+            let source = Arc::new(ScriptedGenerationSource::new([Ok(profile(
+                "openai/main", false, vec![
+                    AiEvent::ToolCall { call_id: "write".into(), name: "fake_write".into(), args: r#"{"path":"/ws/out","contents":"ok"}"#.into() },
+                    AiEvent::Stop(StopReason::ToolUse),
+                ], &trace, Some(2_048),
+            ))]).with_trace(trace));
+            let mut gate = fx.gate.borrow_mut();
+            let tools = Tools::new(&fx.registry, &fx.policy, &fx.fs, fx.process.as_ref(), &fx.evidence, CanonPath::new("/ws"));
+            let mut turn = TurnLoop::new(session(SessionState::default(), &fx.store, &fx.clock, &fx.sink, CancelToken::new()), GenerationRuntime { source: source.clone(), gate: &mut gate, config: TurnConfig { system: None, token_ceiling: None } }, tools);
+            let outcome = block_on(turn.run("write")).expect("headless denial is durable");
+            assert_eq!(outcome.exit_reason, ExitReason::PermissionRequired);
+            assert_eq!(source.roles(), vec![GenerationRole::Main]);
+            assert_eq!(fx.store.kinds().iter().filter(|kind| *kind == "generation_started").count(), 1);
+        }
+
+        #[test]
+        fn explicitly_denied_write_skips_judge_even_with_context() {
+            let mut fx = Fixture::new(vec![]).with_write_tool().with_rules(&[], &["write(**)"]);
+            let trace = GenerationTrace::default();
+            let source = Arc::new(ScriptedGenerationSource::new([Ok(profile(
+                "openai/main", false, vec![
+                    AiEvent::ToolCall { call_id: "write".into(), name: "fake_write".into(), args: r#"{"path":"/ws/out","contents":"ok"}"#.into() },
+                    AiEvent::Stop(StopReason::ToolUse),
+                ], &trace, Some(2_048),
+            ))]));
+            let mut gate = fx.gate.borrow_mut();
+            let tools = Tools::new(&fx.registry, &fx.policy, &fx.fs, fx.process.as_ref(), &fx.evidence, CanonPath::new("/ws"));
+            let mut turn = TurnLoop::new(session(SessionState::default(), &fx.store, &fx.clock, &fx.sink, CancelToken::new()), GenerationRuntime { source: source.clone(), gate: &mut gate, config: TurnConfig { system: None, token_ceiling: None } }, tools).with_judge(judge_context());
+            let outcome = block_on(turn.run("write")).expect("denial is durable");
+            assert_eq!(outcome.exit_reason, ExitReason::PermissionRequired);
+            assert_eq!(source.roles(), vec![GenerationRole::Main]);
+            assert_eq!(fx.store.kinds().iter().filter(|kind| *kind == "generation_started").count(), 1);
+        }
+
+        #[test]
+        fn judge_resolution_errors_are_headless_without_judge_attempt() {
+            for class in [
+                GenerationModelErrorClass::Usage,
+                GenerationModelErrorClass::Provider,
+                GenerationModelErrorClass::Internal,
+            ] {
+                let mut fx = Fixture::new(vec![]).with_write_tool();
+                let trace = GenerationTrace::default();
+                let source = Arc::new(ScriptedGenerationSource::new([
+                    Ok(profile("openai/main", false, vec![
+                        AiEvent::ToolCall { call_id: "write".into(), name: "fake_write".into(), args: r#"{"path":"/ws/out","contents":"ok"}"#.into() },
+                        AiEvent::Stop(StopReason::ToolUse),
+                    ], &trace, Some(2_048))),
+                    Err(GenerationModelError::new(class, "judge unavailable")),
+                ]).with_trace(trace.clone()));
+                let mut gate = fx.gate.borrow_mut();
+                let tools = Tools::new(&fx.registry, &fx.policy, &fx.fs, fx.process.as_ref(), &fx.evidence, CanonPath::new("/ws"));
+                let mut turn = TurnLoop::new(session(SessionState::default(), &fx.store, &fx.clock, &fx.sink, CancelToken::new()), GenerationRuntime { source: source.clone(), gate: &mut gate, config: TurnConfig { system: None, token_ceiling: None } }, tools).with_judge(judge_context());
+                let outcome = block_on(turn.run("write")).expect("judge error is durable");
+                assert_eq!(outcome.exit_reason, ExitReason::PermissionRequired);
+                assert_eq!(source.roles(), vec![GenerationRole::Main, GenerationRole::Judge]);
+                assert_eq!(fx.store.kinds().iter().filter(|kind| *kind == "generation_started").count(), 1);
+                assert_eq!(fx.sink.events().iter().filter(|event| matches!(event, PublicEvent::MeteringSelected { .. })).count(), 1);
+                assert!(fx.store.kinds().iter().any(|kind| kind == "error"));
+                assert_eq!(trace.steps.lock().unwrap().as_slice(), [
+                    "resolve:Main", "generate:main", "resolve:Judge",
+                ]);
+                assert!(!fx.store.events().iter().any(|event| matches!(
+                    event.kind,
+                    EventKind::PermissionDecided { by: Some(Authority::Judge { .. }), .. }
+                )));
+                drop(turn);
+                assert_eq!(gate.outstanding(), None);
+            }
+        }
+
+        #[test]
+        fn judge_pending_cancellation_has_no_judge_attempt_or_reservation() {
+            let mut fx = Fixture::new(vec![]).with_write_tool();
+            let trace = GenerationTrace::default();
+            let (source, ready) = ScriptedGenerationSource::new([Ok(profile("openai/main", false, vec![
+                AiEvent::ToolCall { call_id: "write".into(), name: "fake_write".into(), args: r#"{"path":"/ws/out","contents":"ok"}"#.into() },
+                AiEvent::Stop(StopReason::ToolUse),
+            ], &trace, Some(2_048))), Ok(profile("openai/judge", true, vec![], &trace, None))]).pending_with_signal_at(1);
+            let source = Arc::new(source);
+            let (ingress, mut control) = ego_core::turn::interactive_control();
+            let cancel = CancelToken::new();
+            let mut gate = fx.gate.borrow_mut();
+            let tools = Tools::new(&fx.registry, &fx.policy, &fx.fs, fx.process.as_ref(), &fx.evidence, CanonPath::new("/ws"));
+            let mut turn = TurnLoop::new(session(SessionState::default(), &fx.store, &fx.clock, &fx.sink, cancel), GenerationRuntime { source: source.clone(), gate: &mut gate, config: TurnConfig { system: None, token_ceiling: None } }, tools).with_judge(judge_context()).with_interactive_control(&mut control);
+            let active = turn.run("write");
+            let drive = async move { ready.await.expect("Judge resolution reached pending"); ingress.interrupt().await.expect("interrupt accepted"); };
+            let (outcome, ()) = block_on(async { futures::join!(active, drive) });
+            assert_eq!(outcome.expect("cancellation is durable").exit_reason, ExitReason::Cancelled(CancelCause::User));
+            drop(turn);
+            assert_eq!(fx.store.kinds().iter().filter(|kind| *kind == "generation_started").count(), 1);
+            assert_eq!(fx.sink.events().iter().filter(|event| matches!(event, PublicEvent::MeteringSelected { .. })).count(), 1);
+            assert!(!fx.store.kinds().iter().any(|kind| kind == "error"));
+            assert!(!fx.store.events().iter().any(|event| matches!(
+                event.kind,
+                EventKind::PermissionDecided { by: Some(Authority::Judge { .. }), .. }
+            )));
+            assert_eq!(gate.outstanding(), None);
+        }
+
+        #[test]
+        fn judge_capability_gap_is_headless_without_judge_attempt() {
+            let mut fx = Fixture::new(vec![]).with_write_tool();
+            let trace = GenerationTrace::default();
+            let mut judge = profile_with_settings("openai/judge", vec![], &trace, Some(8_192), Some(8_192), ThinkingLevel::Off, false);
+            judge.capabilities.reasoning_efforts = ReasoningEffortSupport::Only(BTreeSet::from([ThinkingLevel::High]));
+            let source = Arc::new(ScriptedGenerationSource::new([
+                Ok(profile("openai/main", false, vec![
+                    AiEvent::ToolCall { call_id: "write".into(), name: "fake_write".into(), args: r#"{"path":"/ws/out","contents":"ok"}"#.into() },
+                    AiEvent::Stop(StopReason::ToolUse),
+                ], &trace, Some(2_048))),
+                Ok(judge),
+            ]));
+            let mut gate = fx.gate.borrow_mut();
+            let tools = Tools::new(&fx.registry, &fx.policy, &fx.fs, fx.process.as_ref(), &fx.evidence, CanonPath::new("/ws"));
+            let mut turn = TurnLoop::new(session(SessionState::default(), &fx.store, &fx.clock, &fx.sink, CancelToken::new()), GenerationRuntime { source: source.clone(), gate: &mut gate, config: TurnConfig { system: None, token_ceiling: None } }, tools).with_judge(judge_context());
+            let outcome = block_on(turn.run("write")).expect("capability gap is durable");
+            assert_eq!(outcome.exit_reason, ExitReason::PermissionRequired);
+            assert_eq!(source.roles(), vec![GenerationRole::Main, GenerationRole::Judge]);
+            assert_eq!(fx.store.kinds().iter().filter(|kind| *kind == "generation_started").count(), 1);
+            assert_eq!(fx.sink.events().iter().filter(|event| matches!(event, PublicEvent::MeteringSelected { .. })).count(), 1);
+            assert!(fx.store.kinds().iter().any(|kind| kind == "error"));
+            assert_eq!(trace.steps.lock().unwrap().as_slice(), [
+                "resolve:Main", "generate:main", "resolve:Judge",
+            ]);
+            assert!(!fx.store.events().iter().any(|event| matches!(
+                event.kind,
+                EventKind::PermissionDecided { by: Some(Authority::Judge { .. }), .. }
+            )));
+            drop(turn);
+            assert_eq!(gate.outstanding(), None);
+        }
     }
 }

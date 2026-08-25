@@ -29,6 +29,7 @@ use ego_core::generator::capabilities::{
 };
 use ego_core::generator::fake::FakeGenerator;
 use ego_core::generator::port::AiEvent;
+use ego_core::generation_model_source::{GenerationModelError, GenerationModelSource, GenerationProfile, GenerationRole};
 use ego_core::generator::types::{StopReason, ThinkingLevel};
 use ego_core::permit::rule::{Head, Rule};
 use ego_core::permit::{
@@ -43,7 +44,7 @@ use ego_core::state::SessionState;
 use ego_core::store::evidence::{
     EvidenceError, EvidencePage, EvidenceRead, EvidenceStore, EvidenceWriter,
 };
-use ego_core::turn::{CancelToken, Model, Session, Tools, TurnConfig, TurnLoop};
+use ego_core::turn::{CancelToken, GenerationRuntime, Session, Tools, TurnConfig, TurnLoop};
 use ego_tools::clock::SystemClock;
 use ego_tools::fs::OsFs;
 use ego_tools::store::{JsonlStore, OsIo};
@@ -1590,6 +1591,27 @@ mod rogue {
 mod end_to_end {
     use super::*;
 
+    struct FixedSource {
+        generator: Arc<FakeGenerator>,
+    }
+
+    impl GenerationModelSource for FixedSource {
+        fn resolve<'a>(
+            &'a self,
+            _role: GenerationRole,
+        ) -> BoxFuture<'a, Result<GenerationProfile, GenerationModelError>> {
+            Box::pin(futures::future::ready(Ok(GenerationProfile {
+                identity: ego_core::config::ModelRef("test-model".into()),
+                request_model: "test-model".into(),
+                thinking: ThinkingLevel::Off,
+                generator: self.generator.clone(),
+                capabilities: caps(),
+                metering: metering(),
+                rates: Some(ResolvedRates { quote: quote(), source: RateSource::Operator }),
+            })))
+        }
+    }
+
     /// A whole turn, with only the model faked: a real `OsFs`, the real
     /// builtins, a real `PolicyEngine`, a real `SystemClock` and a real
     /// `JsonlStore` writing to disk.
@@ -1599,7 +1621,7 @@ mod end_to_end {
         let store_dir = TempDir::new().expect("a temp directory");
         let store = JsonlStore::new(store_dir.path(), "/ws", Box::new(OsIo));
         let clock = SystemClock;
-        let generator = FakeGenerator::new([
+        let generator = Arc::new(FakeGenerator::new([
             vec![
                 AiEvent::ToolCall {
                     call_id: "call_1".to_string(),
@@ -1614,7 +1636,7 @@ mod end_to_end {
                 },
                 AiEvent::Stop(StopReason::Stop),
             ],
-        ]);
+        ]));
         let sink = CollectingSink::new();
         let mut gate = BudgetGate::new(usd("1000"));
 
@@ -1628,17 +1650,10 @@ mod end_to_end {
                     sink: &sink,
                     cancel: CancelToken::new(),
                 },
-                Model {
-                    generator: &generator,
+                GenerationRuntime {
+                    source: Arc::new(FixedSource { generator: Arc::clone(&generator) }),
                     gate: &mut gate,
-                    metering: metering(),
-                    rates: Some(ResolvedRates {
-                        quote: quote(),
-                        source: RateSource::Operator,
-                    }),
-                    token_ceiling: None,
-                    caps: caps(),
-                    config: config(),
+                    config: TurnConfig { system: None, token_ceiling: None },
                 },
                 Tools::new(
                     &ws.registry,
@@ -1692,7 +1707,7 @@ mod end_to_end {
         let store_dir = TempDir::new().expect("a temp directory");
         let store = JsonlStore::new(store_dir.path(), "/ws", Box::new(OsIo));
         let clock = SystemClock;
-        let generator = FakeGenerator::new([
+        let generator = Arc::new(FakeGenerator::new([
             vec![
                 AiEvent::ToolCall {
                     call_id: "call_1".to_string(),
@@ -1707,7 +1722,7 @@ mod end_to_end {
                 },
                 AiEvent::Stop(StopReason::Stop),
             ],
-        ]);
+        ]));
         let sink = CollectingSink::new();
         let mut gate = BudgetGate::new(usd("1000"));
 
@@ -1721,17 +1736,10 @@ mod end_to_end {
                     sink: &sink,
                     cancel: CancelToken::new(),
                 },
-                Model {
-                    generator: &generator,
+                GenerationRuntime {
+                    source: Arc::new(FixedSource { generator: Arc::clone(&generator) }),
                     gate: &mut gate,
-                    metering: metering(),
-                    rates: Some(ResolvedRates {
-                        quote: quote(),
-                        source: RateSource::Operator,
-                    }),
-                    token_ceiling: None,
-                    caps: caps(),
-                    config: config(),
+                    config: TurnConfig { system: None, token_ceiling: None },
                 },
                 Tools::new(
                     &ws.registry,
@@ -1826,13 +1834,4 @@ mod end_to_end {
         }
     }
 
-    fn config() -> TurnConfig {
-        TurnConfig {
-            model: "test-model".to_string(),
-            thinking: ThinkingLevel::Off,
-            max_output_tokens: Some(1_024),
-            parallel_tool_calls: false,
-            system: None,
-        }
-    }
 }

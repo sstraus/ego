@@ -15,6 +15,7 @@ use ego_core::config::{Mode, PermCfg, Ruleset, Source};
 use ego_core::event::domain::{DomainEvent, Envelope, EventKind};
 use ego_core::event::id::{EventId, Producer, Seq, TurnId};
 use ego_core::event::time::Timestamp;
+use ego_core::generation_model_source::{GenerationModelError, GenerationModelSource, GenerationProfile, GenerationRole};
 use ego_core::permit::{
     Authority, BackendIdentity, CanonPath, Classification, Confinement, EnvName, EnvPolicy,
     ExecCaps, ExecObservation, PolicyDenied, PolicyDigest, PolicyEngine, RunConfinement, SpawnSpec,
@@ -423,7 +424,7 @@ mod turn_execution_observation {
         EvidenceError, EvidencePage, EvidenceRead, EvidenceStore, EvidenceWriter,
     };
     use ego_core::store::session_store::{SessionMeta, SessionStore, StoreError};
-    use ego_core::turn::{CancelToken, Model, Session, Tools, TurnConfig, TurnLoop};
+use ego_core::turn::{CancelToken, GenerationRuntime, Session, Tools, TurnConfig, TurnLoop};
     use futures::future::BoxFuture;
     use futures::stream::BoxStream;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -515,7 +516,7 @@ mod turn_execution_observation {
     struct Fixture {
         store: MemoryStore,
         clock: FixedClock,
-        generator: FakeGenerator,
+        generator: Arc<FakeGenerator>,
         sink: CollectingSink,
         gate: BudgetGate,
         policy: PolicyEngine,
@@ -530,7 +531,7 @@ mod turn_execution_observation {
             Self {
                 store: MemoryStore::default(),
                 clock: FixedClock,
-                generator: FakeGenerator::new(scripts),
+                generator: Arc::new(FakeGenerator::new(scripts)),
                 sink: CollectingSink::new(),
                 gate: BudgetGate::new(Money::new(
                     "1000".parse::<Amount>().unwrap(),
@@ -562,15 +563,36 @@ mod turn_execution_observation {
                     sink: &self.sink,
                     cancel: CancelToken::new(),
                 },
-                Model {
-                    generator: &self.generator,
+                GenerationRuntime {
+                    source: Arc::new(FixedSource {
+                        generator: self.generator.clone(),
+                    }),
                     gate: &mut self.gate,
-                    metering: Metering::Unmetered {
-                        revision: MeteringRevision(String::from("test")),
+                    config: TurnConfig {
+                        system: None,
+                        token_ceiling: None,
                     },
-                    rates: None,
-                    token_ceiling: None,
-                    caps: ModelCapabilities {
+                },
+                tools,
+            )
+        }
+    }
+
+    struct FixedSource {
+        generator: Arc<FakeGenerator>,
+    }
+
+    impl GenerationModelSource for FixedSource {
+        fn resolve<'a>(
+            &'a self,
+            _role: GenerationRole,
+        ) -> BoxFuture<'a, Result<GenerationProfile, GenerationModelError>> {
+            Box::pin(futures::future::ready(Ok(GenerationProfile {
+                identity: ego_core::config::ModelRef("test-model".into()),
+                request_model: "test-model".into(),
+                thinking: ThinkingLevel::Off,
+                generator: self.generator.clone(),
+                capabilities: ModelCapabilities {
                         schema_version: 1,
                         max_context_tokens: Some(10_000),
                         max_output_tokens: Some(1_000),
@@ -583,16 +605,11 @@ mod turn_execution_observation {
                         cache: CacheRetention::Short,
                         transport: Transport::Sse,
                     },
-                    config: TurnConfig {
-                        model: "test-model".into(),
-                        system: None,
-                        thinking: ThinkingLevel::Off,
-                        max_output_tokens: Some(1_000),
-                        parallel_tool_calls: false,
-                    },
+                metering: Metering::Unmetered {
+                    revision: MeteringRevision(String::from("test")),
                 },
-                tools,
-            )
+                rates: None,
+            })))
         }
     }
 

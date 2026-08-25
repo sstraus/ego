@@ -59,6 +59,7 @@ use ego_core::generator::capabilities::{
     Transport,
 };
 use ego_core::generator::port::AiEvent;
+use ego_core::generation_model_source::{GenerationModelError, GenerationModelSource, GenerationProfile, GenerationRole};
 use ego_core::generator::types::{ErrorKind, GenRequest, StopReason, ThinkingLevel};
 use ego_core::permit::fake::FakeFs;
 use ego_core::permit::{
@@ -70,7 +71,7 @@ use ego_core::store::evidence::{
     EvidenceError, EvidencePage, EvidenceRead, EvidenceStore, EvidenceWriter,
 };
 use ego_core::store::session_store::{SessionMeta, SessionStore, StoreError};
-use ego_core::turn::{CancelToken, Model, Session, Tools, TurnConfig, TurnLoop};
+use ego_core::turn::{CancelToken, GenerationRuntime, Session, Tools, TurnConfig, TurnLoop};
 use futures::StreamExt;
 use futures::future::{self, BoxFuture};
 use futures::stream::BoxStream;
@@ -186,6 +187,28 @@ impl ProcessExecutor for NoProcess {
 
 struct NoEvidence;
 
+struct SingleGenerationSource {
+    profile: GenerationProfile,
+}
+
+impl GenerationModelSource for SingleGenerationSource {
+    fn resolve<'a>(
+        &'a self,
+        _role: GenerationRole,
+    ) -> BoxFuture<'a, Result<GenerationProfile, GenerationModelError>> {
+        let profile = GenerationProfile {
+            identity: self.profile.identity.clone(),
+            request_model: self.profile.request_model.clone(),
+            thinking: self.profile.thinking,
+            generator: self.profile.generator.clone(),
+            capabilities: self.profile.capabilities.clone(),
+            metering: self.profile.metering.clone(),
+            rates: self.profile.rates.clone(),
+        };
+        Box::pin(future::ready(Ok(profile)))
+    }
+}
+
 impl EvidenceStore for NoEvidence {
     fn begin(&self) -> Result<Box<dyn EvidenceWriter>, EvidenceError> {
         Err(EvidenceError::Limit { limit: 0 })
@@ -268,7 +291,7 @@ async fn one_turn(
         .expect("every variable is set on this fake machine");
 
     let http: Arc<dyn Http> = StubHttp::replaying(transcript);
-    let generator = WireGenerator::new(resolved.row.clone(), http, credential);
+    let generator = Arc::new(WireGenerator::new(resolved.row.clone(), http, credential));
     let store = MemStore::default();
     let clock = FixedClock;
     let policy = PolicyEngine::new(CanonPath::new("/ws"), Mode::Default, Ruleset::default());
@@ -287,20 +310,20 @@ async fn one_turn(
             sink: &NullSink,
             cancel: CancelToken::new(),
         },
-        Model {
-            generator: &generator,
+        GenerationRuntime {
+            source: Arc::new(SingleGenerationSource {
+                profile: GenerationProfile {
+                    identity: ego_core::config::ModelRef(slug.to_string()),
+                    request_model: resolved.model.clone(),
+                    thinking: ThinkingLevel::Off,
+                    generator,
+                    capabilities: resolved.capabilities.clone(),
+                    metering: resolved.metering.clone(),
+                    rates: resolved.rates.clone(),
+                },
+            }),
             gate: &mut gate,
-            metering: resolved.metering.clone(),
-            rates: resolved.rates.clone(),
-            token_ceiling: None,
-            caps: resolved.capabilities.clone(),
-            config: TurnConfig {
-                model: resolved.model.clone(),
-                system: None,
-                thinking: ThinkingLevel::Off,
-                max_output_tokens: Some(1_024),
-                parallel_tool_calls: false,
-            },
+            config: TurnConfig { system: None, token_ceiling: None },
         },
         Tools::new(
             &registry,
