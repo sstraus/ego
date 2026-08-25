@@ -31,12 +31,15 @@ ego resume [ID] [PROMPT]      continue a session; no ID = latest in this workspa
 ego ls                        list sessions (this workspace; --all for every one)
 ego fork <ID>                 branch a session
 ego export <ID>               render a session (--format md|json|jsonl)
-ego mcp    add|rm|ls|login|reload
+ego mcp add NAME --stdio [--cwd DIR] [--inherit-env NAME]... -- COMMAND [ARG]...
+ego mcp add NAME --http URL [--auth none|oauth]
+ego mcp rm NAME | ls [--json] | login NAME | reload [NAME]
                               current MCP server management; every variation
-                              rebuilds and admits a complete candidate snapshot
+                              enters one complete reconciliation path
 ego mcp-server                serve ego AS an MCP server on stdio: scoped
                               run/continue/cancel/status tools (delegation
-                              surface for Claude, Codex, CI orchestrators)
+                              surface for Claude, Codex, CI orchestrators) plus
+                              sanitized resources; no MCP Tasks or prompts
 ego auth   login|logout|status [PROVIDER]
 ego models [--provider P] [--refresh] [--json]
 ego config get|set|unset|ls|edit
@@ -122,12 +125,13 @@ Grouped; all long flags, short forms only for the hot five
                         openrouter/z-ai/glm-4.7, ollama/qwen3 …
                         local daemons (ollama, lmstudio, vllm, llamacpp) are
                         first-class providers, catalogued live from the daemon
-    --offline           no non-loopback egress from ego's own HTTP transport:
+    --offline           no non-loopback egress from any owned exit:
                         loopback addresses and `localhost` only, no DNS, no
-                        proxy, and every redirect hop re-checked. It does not
-                        confine spawned commands, hooks or MCP transports, and
-                        it cannot stop an admitted local daemon from relaying
-                        upstream itself (see `crates/ego-ai/src/http.rs`)
+                        proxy, and every redirect hop re-checked. Provider HTTP,
+                        MCP, hooks, and spawned commands use their guarded
+                        transport or demonstrated no-IP confinement. It cannot
+                        stop an admitted local daemon from relaying upstream
+                        itself
     --thinking L        off|minimal|low|medium|high|xhigh|max   (pi's scale)
     --system TEXT|@file          replace system prompt
     --append-system TEXT|@file   append to it
@@ -199,7 +203,8 @@ ceilings come only from an administrator's `/etc/ego`.
 ```
     --attach PATH|URL   repeatable; files, images, URLs as context
     --tools LIST        restrict builtin tools;  --no-tools for pure generation
-    --mcp NAME|@cfg.json  attach MCP server for this invocation (repeatable)
+    --mcp NAME|@cfg.json  attach a named effective or strict explicitly named
+                          JSON MCP server for this invocation (repeatable)
 ```
 
 ### 3.1 Availability — what ships today
