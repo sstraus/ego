@@ -835,28 +835,28 @@ mod turn {
         }
     }
 
-    fn model<G: Generator + 'static>(generator: &Arc<G>, gate: &mut BudgetGate) -> GenerationRuntime<'_> {
+    fn model<'a, G: Generator + 'static>(generator: &Arc<G>, gate: &'a mut BudgetGate) -> GenerationRuntime<'a> {
         model_with(generator, gate, metering(), Some(rates()), None, config())
     }
 
-    fn model_with_reasoning<G: Generator + 'static>(
+    fn model_with_reasoning<'a, G: Generator + 'static>(
         generator: &Arc<G>,
-        gate: &mut BudgetGate,
+        gate: &'a mut BudgetGate,
         reasoning_efforts: ReasoningEffortSupport,
-    ) -> GenerationRuntime<'_> {
+    ) -> GenerationRuntime<'a> {
         let mut settings = config();
         settings.reasoning_efforts = reasoning_efforts;
         model_with(generator, gate, metering(), Some(rates()), None, settings)
     }
 
-    fn model_with<G: Generator + 'static>(
+    fn model_with<'a, G: Generator + 'static>(
         generator: &Arc<G>,
-        gate: &mut BudgetGate,
+        gate: &'a mut BudgetGate,
         metering: Metering,
         rates: Option<ResolvedRates>,
         token_ceiling: Option<u64>,
         settings: TestGenerationSettings,
-    ) -> GenerationRuntime<'_> {
+    ) -> GenerationRuntime<'a> {
         let system = settings.system.clone();
         let source = FixedGenerationSource {
             generator: generator.clone(),
@@ -4827,7 +4827,7 @@ mod turn {
         fn main_read_tool_main_resolves_fresh_profiles_with_current_caps() {
             let mut fx = Fixture::new(vec![
                 vec![
-                    AiEvent::TextDelta("before".into()),
+                    AiEvent::TextDelta { text: "before".into() },
                     AiEvent::ToolCall {
                         call_id: "call-1".into(),
                         name: "read".into(),
@@ -4835,13 +4835,13 @@ mod turn {
                     },
                     AiEvent::Stop(StopReason::ToolUse),
                 ],
-                vec![AiEvent::TextDelta("after".into()), AiEvent::Stop(StopReason::Stop)],
+                vec![AiEvent::TextDelta { text: "after".into() }, AiEvent::Stop(StopReason::Stop)],
             ]).with_read_tool();
             fx.fs.file("/ws/notes.md", "seeded notes");
             let trace = GenerationTrace::default();
             let source = Arc::new(ScriptedGenerationSource::new([
                 Ok(profile("openai/first", false, vec![
-                    AiEvent::TextDelta("before".into()),
+                    AiEvent::TextDelta { text: "before".into() },
                     AiEvent::ToolCall {
                         call_id: "call-1".into(),
                         name: "read".into(),
@@ -4850,7 +4850,7 @@ mod turn {
                     AiEvent::Stop(StopReason::ToolUse),
                 ], &trace, Some(2_048))),
                 Ok(profile_with_settings("openai/second", vec![
-                    AiEvent::TextDelta("after".into()), AiEvent::Stop(StopReason::Stop),
+                    AiEvent::TextDelta { text: "after".into() }, AiEvent::Stop(StopReason::Stop),
                 ], &trace, None, Some(4_096), ThinkingLevel::Off, false)),
             ]).with_trace(trace.clone()));
             let mut gate = fx.gate.borrow_mut();
@@ -4910,7 +4910,7 @@ mod turn {
                     AiEvent::Stop(StopReason::ToolUse),
                 ], &trace, Some(2_048))),
                 Ok(profile("openai/judge", true, vec![
-                    AiEvent::TextDelta(r#"{"verdict":"allow","reason":"bounded"}"#.into()),
+                    AiEvent::TextDelta { text: r#"{"verdict":"allow","reason":"bounded"}"#.into() },
                     AiEvent::Stop(StopReason::Stop),
                 ], &trace, None)),
                 Ok(profile("openai/main", false, vec![
@@ -4977,15 +4977,15 @@ mod turn {
         #[test]
         fn judge_context_without_unresolved_call_does_not_resolve_or_reserve() {
             let fx = Fixture::new(vec![vec![
-                AiEvent::TextDelta("done".into()),
+                AiEvent::TextDelta { text: "done".into() },
                 AiEvent::Stop(StopReason::Stop),
             ]]);
             let trace = GenerationTrace::default();
             let source = Arc::new(ScriptedGenerationSource::new([
                 Ok(profile("openai/main", false, vec![
-                    AiEvent::TextDelta("done".into()), AiEvent::Stop(StopReason::Stop),
+                    AiEvent::TextDelta { text: "done".into() }, AiEvent::Stop(StopReason::Stop),
                 ], &trace, Some(2_048))),
-            ]));
+            ]).with_trace(trace.clone()));
             let tools = Tools::new(
                 &fx.registry, &fx.policy, &fx.fs, fx.process.as_ref(), &fx.evidence,
                 CanonPath::new("/ws"),
@@ -5041,8 +5041,8 @@ mod turn {
                 assert_eq!(outcome.exit_reason, expected);
                 assert!(!fx.store.kinds().iter().any(|kind| kind == "generation_started"));
                 assert!(fx.store.kinds().iter().any(|kind| kind == "error"));
-                assert_eq!(gate.outstanding(), None);
-                assert_eq!(gate.committed(), None);
+                assert_eq!(gate.outstanding(), Some(&usd("0")));
+                assert_eq!(gate.committed(), Some(&usd("0")));
             }
         }
 
@@ -5078,13 +5078,13 @@ mod turn {
             let _ = block_on(async { futures::join!(active, drive) });
             drop(turn);
             assert!(!fx.store.kinds().iter().any(|kind| kind == "generation_started"));
-            assert_eq!(gate.outstanding(), None);
-            assert_eq!(gate.committed(), None);
+            assert_eq!(gate.outstanding(), Some(&usd("0")));
+            assert_eq!(gate.committed(), Some(&usd("0")));
         }
 
         #[test]
         fn unresolved_write_without_judge_context_is_headless_and_does_not_resolve_judge() {
-            let mut fx = Fixture::new(vec![]).with_write_tool();
+            let fx = Fixture::new(vec![]).with_write_tool();
             let trace = GenerationTrace::default();
             let source = Arc::new(ScriptedGenerationSource::new([Ok(profile(
                 "openai/main", false, vec![
@@ -5103,7 +5103,7 @@ mod turn {
 
         #[test]
         fn explicitly_denied_write_skips_judge_even_with_context() {
-            let mut fx = Fixture::new(vec![]).with_write_tool().with_rules(&[], &["write(**)"]);
+            let fx = Fixture::new(vec![]).with_write_tool().with_rules(&[], &["write(**)"]);
             let trace = GenerationTrace::default();
             let source = Arc::new(ScriptedGenerationSource::new([Ok(profile(
                 "openai/main", false, vec![
@@ -5127,7 +5127,7 @@ mod turn {
                 GenerationModelErrorClass::Provider,
                 GenerationModelErrorClass::Internal,
             ] {
-                let mut fx = Fixture::new(vec![]).with_write_tool();
+                let fx = Fixture::new(vec![]).with_write_tool();
                 let trace = GenerationTrace::default();
                 let source = Arc::new(ScriptedGenerationSource::new([
                     Ok(profile("openai/main", false, vec![
@@ -5153,13 +5153,14 @@ mod turn {
                     EventKind::PermissionDecided { by: Some(Authority::Judge { .. }), .. }
                 )));
                 drop(turn);
-                assert_eq!(gate.outstanding(), None);
+                assert_eq!(gate.outstanding(), Some(&usd("0")));
+                assert_eq!(gate.committed(), Some(&usd("0.06144")));
             }
         }
 
         #[test]
         fn judge_pending_cancellation_has_no_judge_attempt_or_reservation() {
-            let mut fx = Fixture::new(vec![]).with_write_tool();
+            let fx = Fixture::new(vec![]).with_write_tool();
             let trace = GenerationTrace::default();
             let (source, ready) = ScriptedGenerationSource::new([Ok(profile("openai/main", false, vec![
                 AiEvent::ToolCall { call_id: "write".into(), name: "fake_write".into(), args: r#"{"path":"/ws/out","contents":"ok"}"#.into() },
@@ -5183,12 +5184,14 @@ mod turn {
                 event.kind,
                 EventKind::PermissionDecided { by: Some(Authority::Judge { .. }), .. }
             )));
-            assert_eq!(gate.outstanding(), None);
+            assert_eq!(gate.outstanding(), Some(&usd("0")));
+            assert_eq!(gate.committed(), Some(&usd("0.06144")));
         }
 
         #[test]
         fn judge_capability_gap_is_headless_without_judge_attempt() {
             let mut fx = Fixture::new(vec![]).with_write_tool();
+            fx.policy = PolicyEngine::new(CanonPath::new("/ws"), Mode::Auto, Ruleset::default());
             let trace = GenerationTrace::default();
             let mut judge = profile_with_settings("openai/judge", vec![], &trace, Some(8_192), Some(8_192), ThinkingLevel::Off, false);
             judge.capabilities.reasoning_efforts = ReasoningEffortSupport::Only(BTreeSet::from([ThinkingLevel::High]));
@@ -5198,7 +5201,7 @@ mod turn {
                     AiEvent::Stop(StopReason::ToolUse),
                 ], &trace, Some(2_048))),
                 Ok(judge),
-            ]));
+            ]).with_trace(trace.clone()));
             let mut gate = fx.gate.borrow_mut();
             let tools = Tools::new(&fx.registry, &fx.policy, &fx.fs, fx.process.as_ref(), &fx.evidence, CanonPath::new("/ws"));
             let mut turn = TurnLoop::new(session(SessionState::default(), &fx.store, &fx.clock, &fx.sink, CancelToken::new()), GenerationRuntime { source: source.clone(), gate: &mut gate, config: TurnConfig { system: None, token_ceiling: None } }, tools).with_judge(judge_context());
@@ -5216,7 +5219,8 @@ mod turn {
                 EventKind::PermissionDecided { by: Some(Authority::Judge { .. }), .. }
             )));
             drop(turn);
-            assert_eq!(gate.outstanding(), None);
+            assert_eq!(gate.outstanding(), Some(&usd("0")));
+            assert_eq!(gate.committed(), Some(&usd("0.06144")));
         }
     }
 }

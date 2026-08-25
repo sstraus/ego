@@ -14,6 +14,7 @@ pub mod config;
 pub mod cost;
 pub mod digest;
 pub mod event;
+pub mod generation_model_source;
 pub mod generator;
 pub mod permit;
 pub mod public;

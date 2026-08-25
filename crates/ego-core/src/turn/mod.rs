@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use futures::StreamExt;
 use futures::future::{Either, select};
 
-use crate::budget::{BudgetGate, Metering, PricingQuote, ResolvedRates, SettlementSource};
+use crate::budget::{BudgetGate, Metering, PricingQuote, SettlementSource};
 use crate::ceiling::tokens_reached;
 use crate::config::SystemPrompt;
 use crate::cost::{Money, RateSource};
@@ -34,11 +34,13 @@ use crate::event::id::{
 };
 use crate::event::time::Clock;
 use crate::generator::attempt::{AttemptStream, GenerationAttempt, UsageReport, settled_cost};
-use crate::generator::capabilities::ModelCapabilities;
 use crate::generator::history::conversation_from;
-use crate::generator::port::{AiEvent, Generator};
+use crate::generator::port::AiEvent;
 use crate::generator::types::{
-    Conversation, ErrorKind, GenRequest, Message, Role, StopReason, ThinkingLevel,
+    Conversation, ErrorKind, GenRequest, Message, Role, StopReason,
+};
+use crate::generation_model_source::{
+    GenerationModelErrorClass, GenerationModelSource,
 };
 use crate::permit::ExecObservation;
 use crate::permit::judge::{JudgeConfig, JudgeDecoder, JudgeInput, JudgeOutcome};
@@ -122,7 +124,6 @@ impl CancelToken {
 /// The generation settings a turn does not derive from its history.
 #[derive(Debug, Clone)]
 pub struct TurnConfig {
-    pub model: String,
     /// The system prompt, prepended to every generation's conversation.
     ///
     /// Here and not in the log, because it is not something that *happened*:
@@ -137,16 +138,8 @@ pub struct TurnConfig {
     /// with one origin. A bare string would let a harness send one thing and
     /// publish the digest of another, and nothing could check it.
     pub system: Option<SystemPrompt>,
-    pub thinking: ThinkingLevel,
-    pub max_output_tokens: Option<u64>,
-    /// Whether the model may ask for several tools at once.
-    ///
-    /// The loop runs them one after another either way, and that is now a
-    /// scheduling choice rather than a fidelity one: the calls of a single
-    /// generation are recorded as such and rebuild into one assistant turn
-    /// however they were executed. See
-    /// `docs/decisions/2026-08-22-the-generation-a-call-came-out-of.md`.
-    pub parallel_tool_calls: bool,
+    /// A ceiling on this session's cumulative billed tokens.
+    pub token_ceiling: Option<u64>,
 }
 
 /// What ended a turn.
@@ -338,36 +331,16 @@ pub struct Session<'a> {
     pub cancel: CancelToken,
 }
 
-/// What generates, and what a generation is allowed to cost.
-pub struct Model<'a> {
-    pub generator: &'a dyn Generator,
+/// The run-owned inputs needed at every fresh generation boundary.
+pub struct GenerationRuntime<'a> {
+    pub source: Arc<dyn GenerationModelSource>,
     pub gate: &'a mut BudgetGate,
-    pub metering: Metering,
-    /// The rates this row was resolved with, and where they came from, when
-    /// a ceiling made anybody look them up. `None` is the ordinary case for a
-    /// run with no `--budget`: `2026-08-21-a-run-with-no-ceiling.md` §1
-    /// consults no rate source at all unless a ceiling was configured.
-    pub rates: Option<ResolvedRates>,
-    /// A ceiling on this session's cumulative billed tokens, when one was
-    /// configured.
-    ///
-    /// Beside the gate rather than inside it, because it is not money:
-    /// `2026-08-21-a-run-with-no-ceiling.md` §9 — it needs no rates, no fetch
-    /// and no network, and it binds on every metering class including the two
-    /// a monetary ceiling cannot touch. It is what an air-gapped operator, or
-    /// one who does not care to trust a third-party price table, reaches for.
-    pub token_ceiling: Option<u64>,
-    pub caps: ModelCapabilities,
     pub config: TurnConfig,
 }
 
-/// The separately resolved model and host facts used by auto-mode judging.
-pub struct JudgeModel<'a> {
-    pub generator: &'a dyn Generator,
-    pub metering: Metering,
-    pub rates: Option<ResolvedRates>,
-    pub caps: ModelCapabilities,
-    pub config: JudgeConfig,
+/// Stable host facts used only after policy reaches the optional judge seat.
+#[derive(Clone)]
+pub struct JudgeContext {
     pub confinement: crate::permit::RunConfinement,
     pub exec_caps: crate::permit::ExecCaps,
 }
@@ -379,14 +352,10 @@ pub struct JudgeModel<'a> {
 /// over between them.
 pub struct TurnLoop<'a> {
     journal: Journal<'a>,
-    generator: &'a dyn Generator,
+    source: Arc<dyn GenerationModelSource>,
     gate: &'a mut BudgetGate,
-    metering: Metering,
-    rates: Option<ResolvedRates>,
-    token_ceiling: Option<u64>,
-    caps: ModelCapabilities,
     config: TurnConfig,
-    judge: Option<JudgeModel<'a>>,
+    judge: Option<JudgeContext>,
     execution_observation: Option<ExecObservation>,
     tools: Tools<'a>,
     cancel: CancelToken,
@@ -399,7 +368,7 @@ impl<'a> TurnLoop<'a> {
     /// Three arguments rather than ten loose ones: a turn is a session, a
     /// model and a set of tools, and at ten positional parameters — four of
     /// which were `&dyn` — a call site said nothing about which was which.
-    pub fn new(session: Session<'a>, model: Model<'a>, tools: Tools<'a>) -> Self {
+    pub fn new(session: Session<'a>, runtime: GenerationRuntime<'a>, tools: Tools<'a>) -> Self {
         Self {
             journal: Journal::new(
                 session.id,
@@ -409,13 +378,9 @@ impl<'a> TurnLoop<'a> {
                 Producer::Main,
                 session.state,
             ),
-            generator: model.generator,
-            gate: model.gate,
-            metering: model.metering,
-            rates: model.rates,
-            token_ceiling: model.token_ceiling,
-            caps: model.caps,
-            config: model.config,
+            source: runtime.source,
+            gate: runtime.gate,
+            config: runtime.config,
             judge: None,
             execution_observation: None,
             tools,
@@ -424,16 +389,10 @@ impl<'a> TurnLoop<'a> {
         }
     }
 
-    /// Open an auto-capable loop with its independently resolved judge.
-    pub fn with_judge(
-        session: Session<'a>,
-        model: Model<'a>,
-        tools: Tools<'a>,
-        judge: JudgeModel<'a>,
-    ) -> Self {
-        let mut loop_ = Self::new(session, model, tools);
-        loop_.judge = Some(judge);
-        loop_
+    /// Attach the stable host facts for the optional judge seat.
+    pub fn with_judge(mut self, judge: JudgeContext) -> Self {
+        self.judge = Some(judge);
+        self
     }
 
     /// Attach one run observation, consumed before the first public turn event.
@@ -546,20 +505,6 @@ impl<'a> TurnLoop<'a> {
         }
     }
 
-    /// The rates themselves, without their provenance — what the arithmetic
-    /// takes. Where a rate came from must not change what it computes.
-    fn quote(&self) -> Option<&PricingQuote> {
-        self.rates.as_ref().map(|rates| &rates.quote)
-    }
-
-    /// Where the rates came from, or [`RateSource::None`] when nobody looked
-    /// any up. Published, never used to price anything.
-    fn rate_source(&self) -> &RateSource {
-        self.rates
-            .as_ref()
-            .map_or(&RateSource::None, |rates| &rates.source)
-    }
-
     /// Everything between the prompt and `TurnCompleted`.
     ///
     /// Returns the reason and, when that reason is
@@ -599,7 +544,7 @@ impl<'a> TurnLoop<'a> {
             // on an unmetered or subscription row no charge is raised at all.
             // `CLI.md:128` spells it the same way: "exit 5 when hit", not
             // "when it would be hit".
-            if tokens_reached(self.token_ceiling, &self.journal.state().usage) {
+            if tokens_reached(self.config.token_ceiling, &self.journal.state().usage) {
                 return Ok((ExitReason::Budget, None));
             }
 
@@ -845,20 +790,49 @@ impl<'a> TurnLoop<'a> {
             );
         }
 
+        let source = Arc::clone(&self.source);
+        let profile = match await_controlled(
+            &mut self.journal,
+            &self.cancel,
+            &mut self.control,
+            turn,
+            source.resolve(GenerationRole::Main),
+            InterruptDisposition::Return,
+        )
+        .await
+        {
+            Controlled::Completed(Ok(profile)) => profile,
+            Controlled::Completed(Err(error)) => {
+                let exit = match error.class {
+                    GenerationModelErrorClass::Usage => ExitReason::Usage,
+                    GenerationModelErrorClass::Provider => ExitReason::Provider,
+                    GenerationModelErrorClass::Internal => ExitReason::Internal,
+                };
+                return self.refuse(turn, error.message, exit);
+            }
+            Controlled::Interrupted => {
+                return Ok(Generated::Cancelled {
+                    cause: self.cancel.cause().unwrap_or(CancelCause::User),
+                    pending: Vec::new(),
+                });
+            }
+            Controlled::Failed(cause) => return Err(cause),
+        };
+
         let request = GenRequest {
-            model: self.config.model.clone(),
+            model: profile.request_model.clone(),
             messages: conversation,
             tools: self.tools.descriptors(),
-            thinking: self.config.thinking,
-            max_output_tokens: self.config.max_output_tokens,
-            parallel_tool_calls: self.config.parallel_tool_calls,
+            thinking: profile.thinking,
+            max_output_tokens: profile.output_ceiling(),
+            parallel_tool_calls: profile.capabilities.supports_parallel_tool_calls,
         };
 
         // Before the gate, deliberately: a reservation taken for a request
         // the model will reject has authorised spending on something that was
         // never going to be sent
         // (`docs/decisions/2026-08-21-a-request-the-model-will-not-take.md`).
-        let gaps = self.caps.request_gaps(&request);
+        let gaps = profile.capabilities.request_gaps(&request);
         if !gaps.is_empty() {
             tracing::warn!(
                 ?gaps,
@@ -881,16 +855,24 @@ impl<'a> TurnLoop<'a> {
         // than discovering it from a limit that never fired.
         self.journal.publish(&PublicEvent::metering_selected(
             turn,
-            &self.metering,
+            &profile.metering,
             self.gate.ledger(),
-            self.rate_source(),
+            profile
+                .rates
+                .as_ref()
+                .map_or(&RateSource::None, |rates| &rates.source),
         ));
 
-        let quote = self.rates.as_ref().map(|rates| rates.quote.clone());
+        let quote = profile.rates.as_ref().map(|rates| rates.quote.clone());
         let reservation =
             match self
                 .gate
-                .reserve(&self.metering, quote.as_ref(), &request, &self.caps)
+                .reserve(
+                    &profile.metering,
+                    quote.as_ref(),
+                    &request,
+                    &profile.capabilities,
+                )
             {
                 Ok(reservation) => reservation,
                 Err(denied) => {
@@ -902,10 +884,10 @@ impl<'a> TurnLoop<'a> {
         let attempt = match GenerationAttempt::new(
             GenerationId::new(),
             reservation,
-            &self.metering,
-            self.quote(),
+            &profile.metering,
+            quote.as_ref(),
             &request,
-            &self.caps,
+            &profile.capabilities,
         ) {
             Ok(attempt) => attempt,
             Err(denied) => {
@@ -933,8 +915,10 @@ impl<'a> TurnLoop<'a> {
             },
         )?;
 
-        let stream = self.generator.generate(request, attempt);
-        let drained = self.drain(turn, generation, stream).await;
+        let stream = profile.generator.generate(request, attempt);
+        let drained = self
+            .drain(turn, generation, stream, &profile.metering, quote.as_ref())
+            .await;
 
         // Settle before reporting anything, including a store failure: the
         // stream owns the reservation, and returning early would drop it.
@@ -1066,6 +1050,8 @@ impl<'a> TurnLoop<'a> {
         turn: TurnId,
         generation: EventId,
         mut stream: AttemptStream,
+        metering: &Metering,
+        quote: Option<&PricingQuote>,
     ) -> Drained {
         let reference = stream.attempt();
         let mut pending = Vec::new();
@@ -1095,7 +1081,7 @@ impl<'a> TurnLoop<'a> {
         // booked once, when the stream is done — which also removes any
         // dependence on the order a decoder chose to emit them in.
         let held = matches!(
-            self.metering,
+            metering,
             Metering::Currency {
                 settlement: SettlementSource::ProviderReported { .. },
                 ..
@@ -1249,8 +1235,8 @@ impl<'a> TurnLoop<'a> {
                             // log computed differently from the gate is a
                             // cost the two can disagree about.
                             cost_delta: settled_cost(
-                                &self.metering,
-                                self.quote(),
+                                metering,
+                                quote,
                                 UsageReport::Reported(usage),
                                 None,
                                 settlement_currency,
@@ -1297,8 +1283,8 @@ impl<'a> TurnLoop<'a> {
         if failure.is_none() && held && (held_usage.is_some() || stated_cost.is_some()) {
             let usage = held_usage.unwrap_or(Usage::IDENTITY);
             let cost_delta = settled_cost(
-                &self.metering,
-                self.quote(),
+                metering,
+                quote,
                 held_usage.map_or(UsageReport::Missing, UsageReport::Reported),
                 stated_cost,
                 settlement_currency,
@@ -1360,24 +1346,85 @@ impl<'a> TurnLoop<'a> {
         let Some(judge) = self.judge.as_ref() else {
             return Ok(JudgeRun::Unavailable);
         };
-        let generator = judge.generator;
-        let metering = judge.metering.clone();
-        let rates = judge.rates.clone();
-        let caps = judge.caps.clone();
-        let config = judge.config.clone();
+        let confinement = judge.confinement.clone();
+        let exec_caps = judge.exec_caps;
+        let source = Arc::clone(&self.source);
+        let profile = match await_controlled(
+            &mut self.journal,
+            &self.cancel,
+            &mut self.control,
+            turn,
+            source.resolve(GenerationRole::Judge),
+            InterruptDisposition::Return,
+        )
+        .await
+        {
+            Controlled::Completed(Ok(profile)) => profile,
+            Controlled::Completed(Err(error)) => {
+                self.journal.append(
+                    turn,
+                    None,
+                    None,
+                    EventKind::Error {
+                        message: error.message,
+                        kind: ErrorKind::Unclassified,
+                    },
+                )?;
+                return Ok(JudgeRun::Unavailable);
+            }
+            Controlled::Interrupted => {
+                return Ok(JudgeRun::Ended(ExitReason::Cancelled(
+                    self.cancel.cause().unwrap_or(CancelCause::User),
+                )));
+            }
+            Controlled::Failed(cause) => return Err(cause),
+        };
+        let config = JudgeConfig {
+            identity: profile.identity.clone(),
+            request_model: profile.request_model.clone(),
+            max_output_tokens: profile.output_ceiling(),
+        };
         let input = JudgeInput::new(
             pending.call(),
-            &judge.confinement,
-            judge.exec_caps,
+            &confinement,
+            exec_caps,
             pending.request().why(),
         );
         let request = input.request(&config);
 
-        if !caps.request_gaps(&request).is_empty() {
+        let gaps = profile.capabilities.request_gaps(&request);
+        if !gaps.is_empty() {
+            self.journal.append(
+                turn,
+                None,
+                None,
+                EventKind::Error {
+                    message: gaps
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join("; "),
+                    kind: ErrorKind::Unclassified,
+                },
+            )?;
             return Ok(JudgeRun::Unavailable);
         }
-        let quote = rates.as_ref().map(|rates| &rates.quote);
-        let reservation = match self.gate.reserve(&metering, quote, &request, &caps) {
+        self.journal.publish(&PublicEvent::metering_selected(
+            turn,
+            &profile.metering,
+            self.gate.ledger(),
+            profile
+                .rates
+                .as_ref()
+                .map_or(&RateSource::None, |rates| &rates.source),
+        ));
+        let quote = profile.rates.as_ref().map(|rates| &rates.quote);
+        let reservation = match self.gate.reserve(
+            &profile.metering,
+            quote,
+            &request,
+            &profile.capabilities,
+        ) {
             Ok(reservation) => reservation,
             Err(denied) => {
                 tracing::warn!(%denied, "the budget gate refused the judge generation");
@@ -1387,10 +1434,10 @@ impl<'a> TurnLoop<'a> {
         let attempt = match GenerationAttempt::new(
             GenerationId::new(),
             reservation,
-            &metering,
+            &profile.metering,
             quote,
             &request,
-            &caps,
+            &profile.capabilities,
         ) {
             Ok(attempt) => attempt,
             Err(denied) => {
@@ -1409,7 +1456,7 @@ impl<'a> TurnLoop<'a> {
             },
         )?;
 
-        let mut stream = generator.generate(request, attempt);
+        let mut stream = profile.generator.generate(request, attempt);
         let mut decoder = JudgeDecoder::new();
         let mut usage: Option<Usage> = None;
         let mut provider_cost: Option<Money> = None;
@@ -1452,7 +1499,7 @@ impl<'a> TurnLoop<'a> {
         if failure.is_none() && (usage.is_some() || provider_cost.is_some()) {
             let observed = usage.unwrap_or(Usage::IDENTITY);
             let cost_delta = settled_cost(
-                &metering,
+                &profile.metering,
                 quote,
                 usage.map_or(UsageReport::Missing, UsageReport::Reported),
                 provider_cost,
