@@ -22,7 +22,7 @@
 //! (`2026-08-21-a-shared-shape-is-not-a-shared-contract.md` §9).
 
 use ego_ai::catalogue::{
-    Catalogue, HostedModel, ModelSlug, ResolveError, operator_rates, tabulated,
+    Catalogue, HostedModel, ModelSlug, ResolveError, SuppliedAuthority, operator_rates, tabulated,
 };
 use ego_ai::provider::ProviderRow;
 use ego_core::budget::{PricingQuote, ResolvedRates};
@@ -166,6 +166,7 @@ fn supplied(max_context_tokens: Option<u64>, rates: Option<ResolvedRates>) -> Ca
     Catalogue::new([row()]).with_hosted(
         SLUG,
         HostedModel {
+            authority: SuppliedAuthority::System,
             capabilities: caps(max_context_tokens),
             metering: tabulated(),
             rates,

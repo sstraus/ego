@@ -39,7 +39,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use ego_ai::catalogue::{self, Catalogue, HostedModel, ModelSlug};
+use ego_ai::catalogue::{self, Catalogue, HostedModel, ModelSlug, SuppliedAuthority};
 use ego_ai::generator::WireGenerator;
 use ego_ai::http::{Http, HttpError, HttpRequest, HttpResponse};
 use ego_ai::provider::{CredentialStrategy, ProviderRow};
@@ -134,6 +134,7 @@ fn caps() -> ModelCapabilities {
 /// that makes a turn settle at a *number*, which is what both tests assert on.
 fn hosted() -> HostedModel {
     HostedModel {
+        authority: SuppliedAuthority::System,
         capabilities: caps(),
         metering: catalogue::tabulated(),
         rates: Some(catalogue::operator_rates(quote())),

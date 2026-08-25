@@ -16,13 +16,16 @@
 //! Nothing here guesses. A fact the daemon does not state stays unstated and
 //! the budget gate refuses, naming what was missing.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use ego_core::budget::{Metering, PricingQuote, ResolvedRates, SettlementSource};
 use ego_core::cost::{MeteringRevision, RateSource};
 use ego_core::generator::capabilities::ModelCapabilities;
+use ego_core::public::MeteringKind;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use url::Url;
 
 use crate::http::Http;
@@ -88,6 +91,8 @@ pub struct ResolvedModel {
 #[derive(Debug, Clone)]
 pub struct HostedModel {
     pub capabilities: ModelCapabilities,
+    /// The configuration layer whose winning row supplied these facts.
+    pub authority: SuppliedAuthority,
     /// How the row is metered — currency, or a flat fee with no per-token
     /// price at all. This is the slot every operator-supplied metering enters
     /// through, and the reason `Metering::Subscription` has a producer.
@@ -107,7 +112,7 @@ pub struct HostedModel {
 /// `CLI.md` spells `--model` as `P/M`, and the model half may itself contain
 /// slashes (`openrouter/z-ai/glm-4.7`), so the split is on the *first*
 /// separator only.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ModelSlug {
     pub provider: String,
     pub model: String,
@@ -131,6 +136,458 @@ impl ModelSlug {
 impl fmt::Display for ModelSlug {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}/{}", self.provider, self.model)
+    }
+}
+
+impl Serialize for ModelSlug {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for ModelSlug {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let slug = String::deserialize(deserializer)?;
+        Self::parse(&slug).map_err(serde::de::Error::custom)
+    }
+}
+
+/// The only configuration layers allowed to author hosted catalogue facts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SuppliedAuthority {
+    System,
+    User,
+}
+
+/// Who authoritatively stated that a model is present in the catalogue.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "source", rename_all = "snake_case")]
+pub enum ModelFactProvenance {
+    Supplied { authority: SuppliedAuthority },
+    Discovered { provider: String },
+}
+
+impl ModelFactProvenance {
+    pub fn supplied(authority: SuppliedAuthority) -> Self {
+        Self::Supplied { authority }
+    }
+
+    pub fn discovered(provider: impl Into<String>) -> Self {
+        Self::Discovered {
+            provider: provider.into(),
+        }
+    }
+}
+
+/// Whether this invocation observed a fact or retained a prior observation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FactFreshness {
+    Current,
+    Cached,
+}
+
+/// A closed, machine-readable reason why a row cannot currently be selected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelAvailabilityCause {
+    MissingCredential,
+    SourceUnreachable,
+    SourceMalformed,
+    IncompleteFacts,
+    MappingUnavailable,
+}
+
+impl FromStr for ModelAvailabilityCause {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "missing_credential" => Ok(Self::MissingCredential),
+            "source_unreachable" => Ok(Self::SourceUnreachable),
+            "source_malformed" => Ok(Self::SourceMalformed),
+            "incomplete_facts" => Ok(Self::IncompleteFacts),
+            "mapping_unavailable" => Ok(Self::MappingUnavailable),
+            _ => Err(format!("unknown model availability cause `{value}`")),
+        }
+    }
+}
+
+/// Whether a known catalogue row may currently be selected.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ModelAvailability {
+    Available,
+    Unavailable {
+        cause: ModelAvailabilityCause,
+        message: String,
+    },
+}
+
+/// One stable, public row shared by every catalogue consumer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelCatalogueEntry {
+    pub slug: ModelSlug,
+    pub capabilities: ModelCapabilities,
+    pub metering: MeteringKind,
+    pub provenance: ModelFactProvenance,
+    pub freshness: FactFreshness,
+    pub availability: ModelAvailability,
+}
+
+/// The latest observation status for one model source.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelCatalogueSourceStatus {
+    pub provider: String,
+    pub provenance: ModelFactProvenance,
+    pub freshness: FactFreshness,
+    pub availability: ModelAvailability,
+}
+
+impl ModelCatalogueSourceStatus {
+    pub fn unavailable(
+        provider: impl Into<String>,
+        provenance: ModelFactProvenance,
+        freshness: FactFreshness,
+        cause: &str,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            provider: provider.into(),
+            provenance,
+            freshness,
+            availability: ModelAvailability::Unavailable {
+                cause: cause
+                    .parse()
+                    .expect("catalogue source status uses a closed cause"),
+                message: message.into(),
+            },
+        }
+    }
+}
+
+/// Version 1 of the ordered public catalogue projection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelCatalogueSnapshot {
+    pub v: u32,
+    pub models: Vec<ModelCatalogueEntry>,
+    pub sources: Vec<ModelCatalogueSourceStatus>,
+}
+
+impl ModelCatalogueSnapshot {
+    pub fn from_entries_and_sources(
+        mut models: Vec<ModelCatalogueEntry>,
+        mut sources: Vec<ModelCatalogueSourceStatus>,
+    ) -> Self {
+        models.sort_by(|left, right| left.slug.cmp(&right.slug));
+        sources.sort_by(|left, right| left.provider.cmp(&right.provider));
+        Self {
+            v: 1,
+            models,
+            sources,
+        }
+    }
+}
+
+/// One successfully enumerated row before freshness and availability overlay.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelDiscoveryEntry {
+    pub slug: ModelSlug,
+    pub capabilities: ModelCapabilities,
+    pub metering: MeteringKind,
+    pub provenance: ModelFactProvenance,
+}
+
+/// The subset of availability causes an enumerator itself can establish.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelDiscoveryFailureCause {
+    SourceUnreachable,
+    SourceMalformed,
+    IncompleteFacts,
+}
+
+impl FromStr for ModelDiscoveryFailureCause {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "source_unreachable" => Ok(Self::SourceUnreachable),
+            "source_malformed" => Ok(Self::SourceMalformed),
+            "incomplete_facts" => Ok(Self::IncompleteFacts),
+            _ => Err(format!("unknown model discovery failure cause `{value}`")),
+        }
+    }
+}
+
+/// A failed row decode, or an unnamed failure of the source as a whole.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelDiscoveryFailure {
+    pub model: Option<String>,
+    pub cause: ModelDiscoveryFailureCause,
+    pub message: String,
+}
+
+impl ModelDiscoveryFailure {
+    pub fn named(model: impl Into<String>, cause: &str, message: impl Into<String>) -> Self {
+        Self {
+            model: Some(model.into()),
+            cause: cause
+                .parse()
+                .expect("named discovery failure uses a closed cause"),
+            message: message.into(),
+        }
+    }
+
+    pub fn source(cause: &str, message: impl Into<String>) -> Self {
+        Self {
+            model: None,
+            cause: cause
+                .parse()
+                .expect("source discovery failure uses a closed cause"),
+            message: message.into(),
+        }
+    }
+}
+
+/// A validated enumeration result. Private fields preserve its completeness invariant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelDiscoveryReport {
+    models: Vec<ModelDiscoveryEntry>,
+    failures: Vec<ModelDiscoveryFailure>,
+    complete: bool,
+}
+
+impl ModelDiscoveryReport {
+    pub fn try_new(
+        mut models: Vec<ModelDiscoveryEntry>,
+        failures: Vec<ModelDiscoveryFailure>,
+        complete: bool,
+    ) -> Result<Self, String> {
+        if !complete && !failures.iter().any(|failure| failure.model.is_none()) {
+            return Err("an incomplete discovery report requires an unnamed source failure".into());
+        }
+        if complete && failures.iter().any(|failure| failure.model.is_none()) {
+            return Err("a complete discovery report cannot carry an unnamed source failure".into());
+        }
+        if failures.iter().any(|failure| {
+            failure
+                .model
+                .as_deref()
+                .is_some_and(|model| model.is_empty())
+        }) {
+            return Err("a named discovery failure requires a non-empty model name".into());
+        }
+        models.sort_by(|left, right| left.slug.cmp(&right.slug));
+        let mut seen = BTreeSet::new();
+        if models
+            .iter()
+            .any(|entry| !seen.insert(entry.slug.clone()))
+        {
+            return Err("a discovery report cannot contain duplicate model slugs".into());
+        }
+        Ok(Self {
+            models,
+            failures,
+            complete,
+        })
+    }
+
+    pub fn models(&self) -> &[ModelDiscoveryEntry] {
+        &self.models
+    }
+
+    pub fn failures(&self) -> &[ModelDiscoveryFailure] {
+        &self.failures
+    }
+
+    pub fn is_complete(&self) -> bool {
+        self.complete
+    }
+}
+
+/// One cached discovered row and any failure attached to that retained fact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CachedDiscoveryModel {
+    pub entry: ModelDiscoveryEntry,
+    pub failure: Option<ModelDiscoveryFailure>,
+}
+
+/// The last coherent discovery state for one provider.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CachedDiscoverySlice {
+    pub models: Vec<CachedDiscoveryModel>,
+    pub source_failure: Option<ModelDiscoveryFailure>,
+}
+
+impl CachedDiscoverySlice {
+    pub fn merge(self, report: ModelDiscoveryReport) -> Self {
+        let source_failure = report
+            .failures
+            .iter()
+            .find(|failure| failure.model.is_none())
+            .cloned();
+
+        let mut current: BTreeMap<ModelSlug, CachedDiscoveryModel> = report
+            .models
+            .into_iter()
+            .filter(|entry| {
+                matches!(
+                    &entry.provenance,
+                    ModelFactProvenance::Discovered { .. }
+                )
+            })
+            .map(|entry| {
+                (
+                    entry.slug.clone(),
+                    CachedDiscoveryModel {
+                        entry,
+                        failure: None,
+                    },
+                )
+            })
+            .collect();
+
+        let named: BTreeMap<&str, &ModelDiscoveryFailure> = report
+            .failures
+            .iter()
+            .filter_map(|failure| failure.model.as_deref().map(|model| (model, failure)))
+            .collect();
+        for cached in self.models {
+            if current.contains_key(&cached.entry.slug) {
+                continue;
+            }
+            let named_failure = named
+                .get(cached.entry.slug.model.as_str())
+                .map(|failure| (*failure).clone());
+            if named_failure.is_some() || !report.complete {
+                let failure = named_failure.or_else(|| source_failure.clone());
+                current.insert(
+                    cached.entry.slug.clone(),
+                    CachedDiscoveryModel {
+                        entry: cached.entry,
+                        failure,
+                    },
+                );
+            }
+        }
+
+        Self {
+            models: current.into_values().collect(),
+            source_failure: if report.complete {
+                None
+            } else {
+                source_failure
+            },
+        }
+    }
+
+    fn validate(&self, provider: &str) -> Result<(), String> {
+        if self
+            .source_failure
+            .as_ref()
+            .is_some_and(|failure| failure.model.is_some())
+        {
+            return Err(format!("cached source failure for `{provider}` names a model"));
+        }
+        let mut seen = BTreeSet::new();
+        for model in &self.models {
+            if model.entry.slug.provider != provider {
+                return Err(format!(
+                    "cached provider `{provider}` contains `{}`",
+                    model.entry.slug
+                ));
+            }
+            match &model.entry.provenance {
+                ModelFactProvenance::Discovered { provider: discovered }
+                    if discovered == provider => {}
+                _ => return Err(format!("cached row `{}` is not discovered by `{provider}`", model.entry.slug)),
+            }
+            if !seen.insert(model.entry.slug.clone()) {
+                return Err(format!("cached provider `{provider}` contains a duplicate row"));
+            }
+            if let Some(failure) = &model.failure {
+                if let Some(name) = &failure.model {
+                    if name != &model.entry.slug.model {
+                        return Err(format!("cached row failure does not belong to `{}`", model.entry.slug));
+                    }
+                } else if self.source_failure.as_ref() != Some(failure) {
+                    return Err(format!(
+                        "cached row `{}` carries an unnamed failure other than its source failure",
+                        model.entry.slug
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Private, durable version 1 discovery cache document.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiscoveryCacheV1 {
+    pub v: u32,
+    pub providers: BTreeMap<String, CachedDiscoverySlice>,
+}
+
+impl Default for DiscoveryCacheV1 {
+    fn default() -> Self {
+        Self {
+            v: 1,
+            providers: BTreeMap::new(),
+        }
+    }
+}
+
+impl DiscoveryCacheV1 {
+    pub fn encode(&self) -> Result<Vec<u8>, String> {
+        self.validate()?;
+        serde_json::to_vec(self).map_err(|error| error.to_string())
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, String> {
+        let cache: Self = serde_json::from_slice(bytes).map_err(|error| error.to_string())?;
+        cache.validate()?;
+        Ok(cache)
+    }
+
+    pub fn merge_provider(
+        &mut self,
+        provider: &str,
+        report: ModelDiscoveryReport,
+    ) -> Result<(), String> {
+        for entry in report.models() {
+            match &entry.provenance {
+                ModelFactProvenance::Discovered { provider: discovered }
+                    if discovered == provider && entry.slug.provider == provider => {}
+                _ => return Err(format!("discovery row `{}` does not belong in provider cache `{provider}`", entry.slug)),
+            }
+        }
+        let baseline = self.providers.get(provider).cloned().unwrap_or_default();
+        let merged = baseline.merge(report);
+        merged.validate(provider)?;
+        self.providers.insert(provider.to_string(), merged);
+        Ok(())
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        if self.v != 1 {
+            return Err(format!("unsupported discovery cache version {}", self.v));
+        }
+        for (provider, slice) in &self.providers {
+            if provider.is_empty() {
+                return Err("a cached provider id cannot be empty".into());
+            }
+            slice.validate(provider)?;
+        }
+        Ok(())
     }
 }
 
@@ -299,6 +756,15 @@ pub fn tabulated() -> Metering {
     }
 }
 
+/// The public, price-free class of a resolved metering policy.
+pub(crate) fn metering_kind(metering: &Metering) -> MeteringKind {
+    match metering {
+        Metering::Currency { .. } => MeteringKind::Currency,
+        Metering::Subscription { .. } => MeteringKind::Subscription,
+        Metering::Unmetered { .. } => MeteringKind::Unmetered,
+    }
+}
+
 /// Rates an operator wrote down, the first of §5's three sources.
 ///
 /// Named rather than constructed inline so the provenance and the quote are
@@ -459,6 +925,30 @@ impl Catalogue {
             metering: hosted.metering.clone(),
             rates: hosted.rates.clone(),
         })
+    }
+
+    /// Current supplied rows owned by `provider`, without rates or credentials.
+    pub(crate) fn enumerate_hosted(
+        &self,
+        provider: &str,
+        metering: Option<MeteringKind>,
+    ) -> Result<ModelDiscoveryReport, String> {
+        let prefix = format!("{provider}/");
+        let models = self
+            .hosted
+            .iter()
+            .filter(|(slug, _)| slug.starts_with(&prefix))
+            .map(|(slug, hosted)| {
+                let slug = ModelSlug::parse(slug).map_err(|error| error.to_string())?;
+                Ok(ModelDiscoveryEntry {
+                    slug,
+                    capabilities: hosted.capabilities.clone(),
+                    metering: metering.unwrap_or_else(|| metering_kind(&hosted.metering)),
+                    provenance: ModelFactProvenance::supplied(hosted.authority),
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        ModelDiscoveryReport::try_new(models, Vec::new(), true)
     }
 }
 

@@ -42,9 +42,13 @@ use ego_core::generator::capabilities::{
 use ego_core::generator::types::ThinkingLevel;
 use serde::Deserialize;
 
-use crate::catalogue::{ResolveError, ResolvedModel, control_plane, is_locally_served, unmetered};
+use crate::catalogue::{
+    ModelDiscoveryEntry, ModelDiscoveryFailure, ModelDiscoveryReport, ModelFactProvenance,
+    ModelSlug, ResolveError, ResolvedModel, control_plane, is_locally_served, unmetered,
+};
 use crate::http::{Http, HttpRequest, Method, fetch};
 use crate::provider::ProviderRow;
+use ego_core::public::MeteringKind;
 
 /// One entry of `GET /api/tags`.
 #[derive(Debug, Deserialize)]
@@ -99,13 +103,118 @@ pub async fn resolve(
     Ok(ResolvedModel {
         model: model.to_string(),
         row: row.clone(),
-        capabilities: capabilities_from(&tag, context),
+        capabilities: capabilities_from(&tag, Some(context)),
         metering: unmetered(),
         // Nobody publishes a price for weights the daemon serves itself, and
         // `Unmetered` already says the charge is zero. A quote here would be
         // a price list for something that has no prices.
         rates: None,
     })
+}
+
+/// Enumerate installed local models without loading any of them.
+///
+/// `/api/tags` does not state served context or output ceilings, so both stay
+/// unknown. Transport and document failures are represented in the report so
+/// a caller can merge them with the last coherent cache slice.
+pub async fn enumerate(
+    row: &ProviderRow,
+    http: &Arc<dyn Http>,
+) -> Result<ModelDiscoveryReport, String> {
+    let url = control_plane(row, "/api/tags").map_err(|error| error.to_string())?;
+    let body = match fetch(
+        http,
+        HttpRequest {
+            url: url.clone(),
+            method: Method::Get,
+            headers: vec![("accept".to_string(), "application/json".to_string())],
+            body: None,
+        },
+    )
+    .await
+    {
+        Ok(body) => body,
+        Err(message) => {
+            return ModelDiscoveryReport::try_new(
+                Vec::new(),
+                vec![ModelDiscoveryFailure::source(
+                    "source_unreachable",
+                    format!("{url} did not answer: {message}"),
+                )],
+                false,
+            );
+        }
+    };
+
+    let document: serde_json::Value = match serde_json::from_slice(&body) {
+        Ok(document) => document,
+        Err(error) => {
+            return ModelDiscoveryReport::try_new(
+                Vec::new(),
+                vec![ModelDiscoveryFailure::source(
+                    "source_malformed",
+                    format!("{url} returned an invalid model list: {error}"),
+                )],
+                false,
+            );
+        }
+    };
+    let Some(items) = document.get("models").and_then(serde_json::Value::as_array) else {
+        return ModelDiscoveryReport::try_new(
+            Vec::new(),
+            vec![ModelDiscoveryFailure::source(
+                "source_malformed",
+                format!("{url} returned no model array"),
+            )],
+            false,
+        );
+    };
+
+    let mut models = Vec::new();
+    let mut failures = Vec::new();
+    let mut complete = true;
+    for item in items {
+        let stated_name = item
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
+        let tag = match serde_json::from_value::<Tag>(item.clone()) {
+            Ok(tag) => tag,
+            Err(error) => {
+                let message = format!("invalid model facts: {error}");
+                if let Some(name) = stated_name {
+                    failures.push(ModelDiscoveryFailure::named(
+                        name,
+                        "source_malformed",
+                        message,
+                    ));
+                } else {
+                    failures.push(ModelDiscoveryFailure::source("source_malformed", message));
+                    complete = false;
+                }
+                continue;
+            }
+        };
+        if !is_locally_served(&tag.name) {
+            failures.push(ModelDiscoveryFailure::named(
+                tag.name,
+                "incomplete_facts",
+                "the daemon relays this model upstream, so local unmetered facts do not apply",
+            ));
+            continue;
+        }
+        models.push(ModelDiscoveryEntry {
+            slug: ModelSlug {
+                provider: row.id.clone(),
+                model: tag.name.clone(),
+            },
+            capabilities: capabilities_from(&tag, None),
+            metering: MeteringKind::Unmetered,
+            provenance: ModelFactProvenance::discovered(row.id.clone()),
+        });
+    }
+
+    ModelDiscoveryReport::try_new(models, failures, complete)
 }
 
 /// The daemon's own entry for `model`, or the list it does serve.
@@ -257,11 +366,11 @@ async fn load(row: &ProviderRow, model: &str, http: &Arc<dyn Http>) -> Result<()
 /// gate's `UnstatedCeiling { Output }` therefore still forces a request to
 /// name one — which is now the thing that binds rather than the only thing
 /// that happens.
-fn capabilities_from(tag: &Tag, served_context: u64) -> ModelCapabilities {
+fn capabilities_from(tag: &Tag, served_context: Option<u64>) -> ModelCapabilities {
     let thinks = tag.capabilities.iter().any(|cap| cap == "thinking");
     ModelCapabilities {
         schema_version: ModelCapabilities::SCHEMA_VERSION,
-        max_context_tokens: Some(served_context),
+        max_context_tokens: served_context,
         max_output_tokens: None,
         max_tools: None,
         supports_parallel_tool_calls: false,

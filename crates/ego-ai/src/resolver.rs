@@ -44,9 +44,12 @@ use std::sync::Arc;
 
 use futures::future::BoxFuture;
 
-use crate::catalogue::{Catalogue, ModelSlug, ResolveError, ResolvedModel};
+use crate::catalogue::{
+    Catalogue, ModelDiscoveryReport, ModelSlug, ResolveError, ResolvedModel,
+};
 use crate::http::Http;
 use crate::provider::{ProviderRow, ResolvedCredential};
+use ego_core::public::MeteringKind;
 
 /// Everything a resolver may look at, and nothing else.
 ///
@@ -92,6 +95,13 @@ pub struct Resolution<'a> {
     pub credential: &'a ResolvedCredential,
 }
 
+/// Inputs shared by resolver-selected model enumeration.
+pub struct Enumeration<'a> {
+    pub catalogue: &'a Catalogue,
+    pub row: &'a ProviderRow,
+    pub http: &'a Arc<dyn Http>,
+}
+
 /// How a provider's models are turned into the facts a turn needs.
 ///
 /// Dyn-compatible, so a row can hold one, which means the future is boxed
@@ -102,6 +112,11 @@ pub trait ModelResolver: Send + Sync + fmt::Debug {
         &'a self,
         at: &'a Resolution<'a>,
     ) -> BoxFuture<'a, Result<ResolvedModel, ResolveError>>;
+
+    fn enumerate<'a>(
+        &'a self,
+        at: &'a Enumeration<'a>,
+    ) -> BoxFuture<'a, Result<ModelDiscoveryReport, String>>;
 }
 
 /// Resolved from what an operator supplied, keyed by full slug.
@@ -120,6 +135,16 @@ impl ModelResolver for Supplied {
         // Ready rather than an `async` block: this opens nothing and waits for
         // nothing, and a future that is already done says so.
         Box::pin(std::future::ready(at.catalogue.resolve_hosted(at.slug)))
+    }
+
+
+    fn enumerate<'a>(
+        &'a self,
+        at: &'a Enumeration<'a>,
+    ) -> BoxFuture<'a, Result<ModelDiscoveryReport, String>> {
+        Box::pin(std::future::ready(
+            at.catalogue.enumerate_hosted(&at.row.id, None),
+        ))
     }
 }
 
@@ -148,6 +173,17 @@ impl ModelResolver for SubscriptionSupplied {
             Ok(resolved)
         })
     }
+
+
+    fn enumerate<'a>(
+        &'a self,
+        at: &'a Enumeration<'a>,
+    ) -> BoxFuture<'a, Result<ModelDiscoveryReport, String>> {
+        Box::pin(std::future::ready(at.catalogue.enumerate_hosted(
+            &at.row.id,
+            Some(MeteringKind::Subscription),
+        )))
+    }
 }
 
 /// Resolved by asking the local daemon what it actually serves.
@@ -164,6 +200,14 @@ impl ModelResolver for OllamaDaemon {
         at: &'a Resolution<'a>,
     ) -> BoxFuture<'a, Result<ResolvedModel, ResolveError>> {
         Box::pin(crate::ollama::resolve(at.row, &at.slug.model, at.http))
+    }
+
+
+    fn enumerate<'a>(
+        &'a self,
+        at: &'a Enumeration<'a>,
+    ) -> BoxFuture<'a, Result<ModelDiscoveryReport, String>> {
+        Box::pin(crate::ollama::enumerate(at.row, at.http))
     }
 }
 
@@ -189,5 +233,16 @@ impl ModelResolver for XaiLanguageModels {
             let supplied = at.catalogue.resolve_hosted(at.slug)?;
             crate::xai::price(supplied, at.http, at.credential).await
         })
+    }
+
+
+    fn enumerate<'a>(
+        &'a self,
+        at: &'a Enumeration<'a>,
+    ) -> BoxFuture<'a, Result<ModelDiscoveryReport, String>> {
+        Box::pin(std::future::ready(at.catalogue.enumerate_hosted(
+            &at.row.id,
+            Some(MeteringKind::Currency),
+        )))
     }
 }

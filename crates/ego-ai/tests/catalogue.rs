@@ -14,7 +14,7 @@
 use std::collections::BTreeSet;
 
 use ego_ai::catalogue::{
-    Catalogue, HostedModel, LOCAL_UNMETERED, ModelSlug, ResolveError, operator_rates, subscription,
+    Catalogue, HostedModel, LOCAL_UNMETERED, ModelSlug, ResolveError, SuppliedAuthority, operator_rates, subscription,
     tabulated, unmetered,
 };
 use ego_ai::ollama;
@@ -185,6 +185,7 @@ fn a_supplied_hosted_model_resolves_to_exactly_what_was_supplied() {
     let catalogue = Catalogue::new([hosted_row()]).with_hosted(
         "openai/gpt-5.6",
         HostedModel {
+            authority: SuppliedAuthority::System,
             capabilities: hosted_caps(),
             metering: tabulated(),
             rates: Some(hosted_rates()),
@@ -214,6 +215,7 @@ fn a_hosted_row_with_capabilities_and_no_rates_resolves() {
     let catalogue = Catalogue::new([hosted_row()]).with_hosted(
         "openai/gpt-5.6",
         HostedModel {
+            authority: SuppliedAuthority::System,
             capabilities: hosted_caps(),
             metering: tabulated(),
             rates: None,
@@ -247,6 +249,7 @@ fn a_hosted_model_is_not_quietly_free() {
     let catalogue = Catalogue::new([hosted_row()]).with_hosted(
         "openai/gpt-5.6",
         HostedModel {
+            authority: SuppliedAuthority::System,
             capabilities: hosted_caps(),
             metering: tabulated(),
             rates: Some(hosted_rates()),
@@ -655,6 +658,7 @@ fn a_subscription_hosted_row_resolves_to_the_subscription_that_was_supplied() {
     let catalogue = Catalogue::new([hosted_row()]).with_hosted(
         "openai/gpt-5.6",
         HostedModel {
+            authority: SuppliedAuthority::System,
             capabilities: hosted_caps(),
             metering: subscription("acme/pro-plan/2026-08"),
             rates: None,
@@ -686,6 +690,7 @@ fn a_built_in_subscription_row_cannot_be_repriced_as_currency() {
     let catalogue = Catalogue::new([ProviderRow::xai_oauth_default()]).with_hosted(
         "xai-oauth/grok-code-fast-1",
         HostedModel {
+            authority: SuppliedAuthority::System,
             capabilities: hosted_caps(),
             metering: tabulated(),
             rates: Some(operator_rates(hosted_quote())),
@@ -749,6 +754,7 @@ fn a_provider_reported_row_still_carries_the_table_that_bounds_it() {
     let catalogue = Catalogue::new([hosted_row()]).with_hosted(
         "openai/gpt-5.6",
         HostedModel {
+            authority: SuppliedAuthority::System,
             capabilities: hosted_caps(),
             metering: metering.clone(),
             rates: Some(hosted_rates()),
@@ -785,6 +791,7 @@ fn a_provider_reported_row_with_no_rates_has_no_bound_and_is_not_an_error() {
     let catalogue = Catalogue::new([hosted_row()]).with_hosted(
         "openai/gpt-5.6",
         HostedModel {
+            authority: SuppliedAuthority::System,
             capabilities: hosted_caps(),
             metering: ego_ai::catalogue::provider_reported(&decoder),
             rates: None,
@@ -823,6 +830,7 @@ fn a_hosted_slug_resolves_from_the_table_and_asks_nothing() {
     let catalogue = Catalogue::new([hosted_row()]).with_hosted(
         "openai/gpt-5.6",
         HostedModel {
+            authority: SuppliedAuthority::System,
             capabilities: hosted_caps(),
             metering: tabulated(),
             rates: Some(hosted_rates()),
@@ -914,6 +922,7 @@ fn a_row_called_ollama_that_names_the_supplied_resolver_asks_nothing() {
     let catalogue = Catalogue::new([supplied_locally]).with_hosted(
         "ollama/gemma4:e4b-mlx",
         HostedModel {
+            authority: SuppliedAuthority::System,
             capabilities: hosted_caps(),
             metering: unmetered(),
             rates: None,
