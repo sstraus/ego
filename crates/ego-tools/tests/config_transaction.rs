@@ -5,22 +5,28 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Barrier};
 use std::thread;
 
-use ego_core::config::{ConfigLayer, Source, UserConfigMutation, UserConfigStore};
+use ego_core::config::{
+    ConfigLayer, Source, UserConfigMutation, UserConfigPublication, UserConfigStore,
+};
 use ego_core::generator::types::ThinkingLevel;
 use ego_tools::config::OsUserConfigStore;
-use ego_tools::store::{OsIo, SNAPSHOT_VERSION, StoreIo};
+use ego_tools::store::{
+    AtomicReplacePublication, OsIo, SNAPSHOT_VERSION, StoreIo,
+};
 use tempfile::TempDir;
 
 struct FaultIo {
     inner: OsIo,
-    fail_replace: Arc<std::sync::atomic::AtomicBool>,
+    fail_before_publish: Arc<std::sync::atomic::AtomicBool>,
+    uncertain_after_publish: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl FaultIo {
     fn new() -> Self {
         Self {
             inner: OsIo,
-            fail_replace: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            fail_before_publish: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            uncertain_after_publish: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 }
@@ -43,13 +49,30 @@ impl StoreIo for FaultIo {
     }
 
     fn replace_atomic(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+        self.inner.replace_atomic(path, bytes)
+    }
+
+    fn replace_atomic_publication(
+        &self,
+        path: &Path,
+        bytes: &[u8],
+    ) -> io::Result<AtomicReplacePublication> {
         if self
-            .fail_replace
+            .fail_before_publish
             .load(std::sync::atomic::Ordering::SeqCst)
         {
-            return Err(io::Error::other("injected replace failure"));
+            return Err(io::Error::other("injected pre-publish failure"));
         }
-        self.inner.replace_atomic(path, bytes)
+        self.inner.replace_atomic(path, bytes)?;
+        if self
+            .uncertain_after_publish
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Ok(AtomicReplacePublication::PublishedDurabilityUncertain {
+                diagnostic: "injected post-publish durability uncertainty".into(),
+            });
+        }
+        Ok(AtomicReplacePublication::PublishedDurably)
     }
 
     fn truncate(&self, path: &Path, len: u64) -> io::Result<()> {
@@ -82,12 +105,12 @@ fn transaction_locks_read_edit_strict_reparse_replace_and_unlocks_after_replace(
     let io = FaultIo::new();
     let store = OsUserConfigStore::new(&io, &path);
 
-    store
+    assert_eq!(store
         .mutate(UserConfigMutation::ModelAndThinking {
             model: "openai/new".into(),
             thinking: ThinkingLevel::High,
         })
-        .unwrap();
+        .unwrap(), UserConfigPublication::PublishedDurably);
     let text = std::fs::read_to_string(&path).unwrap();
     assert!(text.contains("# keep this comment"));
     assert!(text.contains("model = 'openai/new'"));
@@ -142,7 +165,7 @@ fn replace_failure_preserves_disk_authority() {
     let io = FaultIo::new();
     let store = OsUserConfigStore::new(&io, &path);
     let before = std::fs::read_to_string(&path).unwrap();
-    io.fail_replace
+    io.fail_before_publish
         .store(true, std::sync::atomic::Ordering::SeqCst);
 
     assert!(store
@@ -152,6 +175,31 @@ fn replace_failure_preserves_disk_authority() {
         })
         .is_err());
     assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+}
+
+#[test]
+fn post_publish_barrier_failure_reports_uncertainty_and_keeps_new_disk_authority() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = config_file(&dir);
+    let io = FaultIo::new();
+    let store = OsUserConfigStore::new(&io, &path);
+    io.uncertain_after_publish
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+
+    assert_eq!(
+        store
+            .mutate(UserConfigMutation::ModelAndThinking {
+                model: "openai/new".into(),
+                thinking: ThinkingLevel::High,
+            })
+            .unwrap(),
+        UserConfigPublication::PublishedDurabilityUncertain {
+            diagnostic: "injected post-publish durability uncertainty".into(),
+        }
+    );
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains("model = 'openai/new'"));
+    assert!(text.contains("thinking = 'high'"));
 }
 
 #[test]

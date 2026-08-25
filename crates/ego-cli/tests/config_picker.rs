@@ -8,7 +8,8 @@ use ego_ai::catalogue::{
     SuppliedAuthority,
 };
 use ego_core::config::{
-    ConfigLayer, ModelRef, Source, UserConfigError, UserConfigMutation, UserConfigStore,
+    ConfigLayer, ModelRef, Source, UserConfigError, UserConfigMutation, UserConfigPublication,
+    UserConfigStore,
 };
 use ego_core::generator::capabilities::{
     CacheRetention, CancelSemantics, ModelCapabilities, ReasoningCarryover,
@@ -82,14 +83,14 @@ fn catalogue() -> Arc<ModelCatalogueSnapshot> {
 #[derive(Clone)]
 struct RecordingUserConfigStore {
     mutations: Arc<Mutex<Vec<UserConfigMutation>>>,
-    fail: bool,
+    publication: Result<UserConfigPublication, UserConfigError>,
 }
 
 impl RecordingUserConfigStore {
-    fn new(fail: bool) -> Self {
+    fn new(publication: Result<UserConfigPublication, UserConfigError>) -> Self {
         Self {
             mutations: Arc::new(Mutex::new(Vec::new())),
-            fail,
+            publication,
         }
     }
 
@@ -99,13 +100,12 @@ impl RecordingUserConfigStore {
 }
 
 impl UserConfigStore for RecordingUserConfigStore {
-    fn mutate(&self, mutation: UserConfigMutation) -> Result<(), UserConfigError> {
+    fn mutate(
+        &self,
+        mutation: UserConfigMutation,
+    ) -> Result<UserConfigPublication, UserConfigError> {
         self.mutations.lock().unwrap().push(mutation);
-        if self.fail {
-            Err(UserConfigError::new("injected user-config replace failure"))
-        } else {
-            Ok(())
-        }
+        self.publication.clone()
     }
 }
 
@@ -161,14 +161,14 @@ fn absent_thinking_flag_preserves_file_value_and_unknown_keys_fail_strictly() {
 
 #[test]
 fn escape_and_session_only_record_no_user_config_mutation() {
-    let store = RecordingUserConfigStore::new(false);
+    let store = RecordingUserConfigStore::new(Ok(UserConfigPublication::PublishedDurably));
     let selection = selection();
     let mut picker = ModelPicker::for_selection(catalogue(), Arc::clone(&selection), Arc::new(store.clone()));
     assert_eq!(picker.key(PickerKey::Escape).unwrap(), PickerOutcome::Cancelled);
     assert!(store.mutations().is_empty());
     assert_eq!(picker.selection(), ("openai/gpt-5.6", ThinkingLevel::Medium));
 
-    let store = RecordingUserConfigStore::new(false);
+    let store = RecordingUserConfigStore::new(Ok(UserConfigPublication::PublishedDurably));
     let selection = selection();
     let mut picker = ModelPicker::for_selection(catalogue(), Arc::clone(&selection), Arc::new(store.clone()));
     picker.choose("openai/gpt-5.6", ThinkingLevel::High).unwrap();
@@ -179,11 +179,14 @@ fn escape_and_session_only_record_no_user_config_mutation() {
 
 #[test]
 fn enter_records_one_typed_mutation_then_installs_memory() {
-    let store = RecordingUserConfigStore::new(false);
+    let store = RecordingUserConfigStore::new(Ok(UserConfigPublication::PublishedDurably));
     let selection = selection();
     let mut picker = ModelPicker::for_selection(catalogue(), Arc::clone(&selection), Arc::new(store.clone()));
     picker.choose("openai/gpt-5.6", ThinkingLevel::High).unwrap();
-    assert_eq!(picker.key(PickerKey::Enter).unwrap(), PickerOutcome::Persisted);
+    assert_eq!(
+        picker.key(PickerKey::Enter).unwrap(),
+        PickerOutcome::Persisted(UserConfigPublication::PublishedDurably)
+    );
     assert_eq!(store.mutations(), vec![UserConfigMutation::ModelAndThinking {
         model: "openai/gpt-5.6".into(),
         thinking: ThinkingLevel::High,
@@ -193,7 +196,9 @@ fn enter_records_one_typed_mutation_then_installs_memory() {
 
 #[test]
 fn failed_enter_records_the_typed_mutation_but_keeps_memory_unchanged() {
-    let store = RecordingUserConfigStore::new(true);
+    let store = RecordingUserConfigStore::new(Err(UserConfigError::new(
+        "injected pre-publish failure",
+    )));
     let selection = selection();
     let mut picker = ModelPicker::for_selection(catalogue(), Arc::clone(&selection), Arc::new(store.clone()));
     picker.choose("openai/gpt-5.6", ThinkingLevel::High).unwrap();
@@ -206,6 +211,31 @@ fn failed_enter_records_the_typed_mutation_but_keeps_memory_unchanged() {
 }
 
 #[test]
+fn uncertain_publication_installs_memory_and_preserves_diagnostic() {
+    let diagnostic = "directory barrier did not complete";
+    let store = RecordingUserConfigStore::new(Ok(
+        UserConfigPublication::PublishedDurabilityUncertain {
+            diagnostic: diagnostic.into(),
+        },
+    ));
+    let selection = selection();
+    let mut picker = ModelPicker::for_selection(
+        catalogue(),
+        Arc::clone(&selection),
+        Arc::new(store.clone()),
+    );
+    picker.choose("openai/gpt-5.6", ThinkingLevel::High).unwrap();
+
+    assert_eq!(
+        picker.key(PickerKey::Enter).unwrap(),
+        PickerOutcome::Persisted(UserConfigPublication::PublishedDurabilityUncertain {
+            diagnostic: diagnostic.into(),
+        })
+    );
+    assert_eq!(picker.selection(), ("openai/gpt-5.6", ThinkingLevel::High));
+}
+
+#[test]
 fn replacing_the_snapshot_updates_picker_availability_without_a_second_catalogue() {
     let selection = Arc::new(GenerationSelection::new(
         ModelRef("ollama/qwen3".into()),
@@ -214,7 +244,9 @@ fn replacing_the_snapshot_updates_picker_availability_without_a_second_catalogue
     let mut picker = ModelPicker::for_selection(
         catalogue(),
         selection,
-        Arc::new(RecordingUserConfigStore::new(false)),
+        Arc::new(RecordingUserConfigStore::new(Ok(
+            UserConfigPublication::PublishedDurably,
+        ))),
     );
     let mut unavailable = (*catalogue()).clone();
     unavailable
