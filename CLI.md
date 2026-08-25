@@ -266,7 +266,7 @@ them; the flags with none are waiting on a subsystem that table does not place.
 
 ```json
 {
-  "v": 7,
+  "v": 8,
   "session": "s_9f2k…",
   "result": "…final assistant text or --schema-validated object…",
   "exit_reason": "done|budget|max_turns|timeout|permission|error",
@@ -407,7 +407,7 @@ those two bent to fit. Same `--output` flag and the same three values.
 
 ```json
 {
-  "v": 1,
+  "v": 2,
   "sessions": [
     {
       "id": "0192f3a1-…-8c41",

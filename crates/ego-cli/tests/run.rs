@@ -9,6 +9,7 @@ mod support;
 use std::io::BufRead;
 use std::time::Duration;
 
+use ego_cli::catalogue::CATALOGUE_VERSION;
 use ego_core::public::PUBLIC_EVENT_VERSION;
 use support::{
     Ego as HarnessEgo, Places as HarnessPlaces, Plan, Reply, Stub, costing, paced, text, tool_call,
@@ -2266,7 +2267,7 @@ fn ls_finds_the_session_a_run_just_wrote() {
     assert_eq!(listed.code, Some(0), "stderr: {}", listed.stderr);
 
     let value = listed.report();
-    assert_eq!(value["v"], 1);
+    assert_eq!(value["v"], CATALOGUE_VERSION);
     let sessions = value["sessions"].as_array().expect("an array");
     assert_eq!(sessions.len(), 1, "{value}");
     assert!(
@@ -2276,7 +2277,7 @@ fn ls_finds_the_session_a_run_just_wrote() {
     assert!(sessions[0]["created"].is_number(), "{value}");
 }
 
-/// An empty store is `{"v":1,"sessions":[]}` and exit 0, not silence. A script
+/// An empty store is `{"v":2,"sessions":[]}` and exit 0, not silence. A script
 /// that gets no output cannot tell an empty store from a command that failed
 /// to run.
 #[test]
@@ -2288,7 +2289,7 @@ fn ls_on_an_empty_store_is_an_empty_list_and_not_a_failure() {
     assert_eq!(listed.code, Some(0), "stderr: {}", listed.stderr);
     assert_eq!(
         listed.report(),
-        serde_json::json!({"v": 1, "sessions": []}),
+        serde_json::json!({"v": CATALOGUE_VERSION, "sessions": []}),
         "stdout: {}",
         listed.stdout
     );
