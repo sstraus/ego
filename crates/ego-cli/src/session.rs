@@ -13,8 +13,10 @@ use ego_core::event::id::SessionId;
 use ego_core::event::time::{Clock, Timestamp};
 use ego_core::state::SessionState;
 use ego_core::store::session_store::{SessionMeta, SessionStore, StoreError};
+use ego_tools::store::SessionEvidenceStore;
 use ego_tools::store::{JsonlStore, LeaseInputs, OpenSession, OsIo};
 use futures::stream::BoxStream;
+use tempfile::TempDir;
 
 use crate::cli::{SessionChoice, UsageError};
 
@@ -175,6 +177,12 @@ pub enum Opened<'a> {
     Ephemeral(NullStore),
 }
 
+impl<'a> From<OpenSession<'a>> for Opened<'a> {
+    fn from(opened: OpenSession<'a>) -> Self {
+        Self::Durable(Box::new(opened))
+    }
+}
+
 impl Opened<'_> {
     pub fn store(&self) -> &dyn SessionStore {
         match self {
@@ -201,6 +209,115 @@ impl Opened<'_> {
                 open.repair.truncated_bytes, open.repair.dropped_lines
             )),
             _ => None,
+        }
+    }
+}
+
+/// The complete replaceable owner of one interactive session.
+///
+/// Keeping these fields behind one value makes activation an ordinary
+/// whole-value move. A published target cannot leave the old writer paired
+/// with the new id, or the old evidence namespace paired with the new state.
+pub struct ActiveSession<'a> {
+    id: SessionId,
+    state: SessionState,
+    opened: Opened<'a>,
+    evidence: SessionEvidenceStore,
+    _ephemeral_owner: Option<TempDir>,
+}
+
+impl<'a> ActiveSession<'a> {
+    pub fn durable(
+        opened: impl Into<Opened<'a>>,
+        state: SessionState,
+        evidence_cap: u64,
+    ) -> Result<Self, String> {
+        let opened = opened.into();
+        let Opened::Durable(open) = &opened else {
+            return Err("a durable active session requires a durable opened session".to_string());
+        };
+        let id = open.writer.id();
+        let evidence = open
+            .writer
+            .evidence_store(evidence_cap)
+            .map_err(|error| error.to_string())?;
+        Ok(Self {
+            id,
+            state,
+            opened,
+            evidence,
+            _ephemeral_owner: None,
+        })
+    }
+
+    pub fn ephemeral(
+        id: SessionId,
+        state: SessionState,
+        evidence: SessionEvidenceStore,
+        owner: TempDir,
+    ) -> Self {
+        Self {
+            id,
+            state,
+            opened: Opened::Ephemeral(NullStore),
+            evidence,
+            _ephemeral_owner: Some(owner),
+        }
+    }
+
+    pub fn id(&self) -> SessionId {
+        self.id
+    }
+
+    pub fn state(&self) -> &SessionState {
+        &self.state
+    }
+
+    pub fn replace_state(&mut self, state: SessionState) {
+        self.state = state;
+    }
+
+    pub fn store(&self) -> &dyn SessionStore {
+        self.opened.store()
+    }
+
+    pub fn evidence(&self) -> &SessionEvidenceStore {
+        &self.evidence
+    }
+
+    pub fn publish_compaction_seed(
+        &self,
+        seed: &DomainEvent,
+    ) -> ego_core::compact::CompactionPublication {
+        use ego_core::compact::CompactionTargetStore;
+
+        match &self.opened {
+            Opened::Durable(open) => open.writer.publish_compaction_seed(seed),
+            Opened::Ephemeral(_) => ego_core::compact::CompactionPublication::NotPublished {
+                diagnostic: "compaction target is not durable".to_string(),
+            },
+        }
+    }
+
+    pub fn is_durable(&self) -> bool {
+        matches!(self.opened, Opened::Durable(_))
+    }
+
+    /// Apply the target only after the store has established publication
+    /// authority. Both published outcomes select the target; uncertainty is
+    /// about durability, not whether the atomic publication became visible.
+    pub fn apply_publication(
+        &mut self,
+        target: ActiveSession<'a>,
+        publication: &ego_core::compact::CompactionPublication,
+    ) -> bool {
+        match publication {
+            ego_core::compact::CompactionPublication::NotPublished { .. } => false,
+            ego_core::compact::CompactionPublication::PublishedDurably { .. }
+            | ego_core::compact::CompactionPublication::PublishedDurabilityUncertain { .. } => {
+                *self = target;
+                true
+            }
         }
     }
 }

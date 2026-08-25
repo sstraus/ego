@@ -1,6 +1,7 @@
 //! The seat: one lifetime owner for the interactive terminal.
 
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
@@ -17,7 +18,7 @@ use reedline::{
 };
 
 use super::actions::{
-    ActionDispatch, ActionId, ActionRegistry, ActionSink, CompositeActionSink,
+    ActionDispatch, ActionId, ActionRegistry, ActionSink, Availability, CompositeActionSink,
     CompositeActionSinkError, Dispatch, InputOrigin, LocalAction, LocalActionOutcome,
     SharedActionSink,
 };
@@ -28,7 +29,7 @@ use super::status::{
     SurfaceSnapshot,
 };
 use super::surface::InteractivePainter;
-use super::{BUSY_SUBMIT_COMMAND, DRAFT_COMMAND, INTERRUPT_COMMAND, Line, answer};
+use super::{BUSY_SUBMIT_COMMAND, DRAFT_COMMAND, HostCommand, INTERRUPT_COMMAND, Line, answer};
 use crate::model::{GenerationSelection, GenerationSelectionSnapshot};
 use crate::model_picker::{
     ModelPicker, ModelPickerView, PickerFocus, PickerInput, PickerInputOutcome, PickerOutcome,
@@ -47,11 +48,11 @@ use ego_core::turn::{
 };
 
 const CHANNEL_CAPACITY: usize = 1;
-const ACTION_COMMAND: &str = "ego:action:";
+pub(super) const ACTION_COMMAND: &str = "ego:action:";
 const ACTION_MENU: &str = "ego_action_menu";
-const MODEL_PICKER_COMMAND: &str = "ego:model-picker:";
-const QUESTION_SELECTOR_COMMAND: &str = "ego:question-selector:";
-const MODAL_ESCAPE_COMMAND: &str = "ego:modal-escape";
+pub(super) const MODEL_PICKER_COMMAND: &str = "ego:model-picker:";
+pub(super) const QUESTION_SELECTOR_COMMAND: &str = "ego:question-selector:";
+pub(super) const MODAL_ESCAPE_COMMAND: &str = "ego:modal-escape";
 const QUEUE_LABEL: &str =
     "Messages to be submitted after next tool call (press esc to interrupt and send immediately)";
 
@@ -71,6 +72,7 @@ struct Actions {
 
 #[derive(Debug, Clone, Copy)]
 enum SurfaceActionEffect {
+    Compact,
     Help,
     Clear,
     Statusline,
@@ -85,6 +87,7 @@ struct SurfaceActionSink {
 impl ActionSink for SurfaceActionSink {
     fn invoke(&mut self, action: LocalAction) -> LocalActionOutcome {
         let effect = match action.id {
+            ActionId::Compact => SurfaceActionEffect::Compact,
             ActionId::Help => SurfaceActionEffect::Help,
             ActionId::Clear => SurfaceActionEffect::Clear,
             ActionId::Statusline => SurfaceActionEffect::Statusline,
@@ -127,11 +130,14 @@ impl Completer for ActionCompleter {
             .map(|registration| Suggestion {
                 value: format!("/{}", registration.name()),
                 display_override: Some(format!("/{}", registration.name())),
-                description: Some(match registration.disabled_reason() {
-                    Some(owner) => {
+                description: Some(match self.registry.availability(registration.id()) {
+                    Availability::Disabled { owner } => {
                         format!("{} — unavailable: {owner}", registration.description_text())
                     }
-                    None => registration.description_text().to_string(),
+                    Availability::Busy => {
+                        format!("{} — busy", registration.description_text())
+                    }
+                    Availability::Enabled => registration.description_text().to_string(),
                 }),
                 span: Span::new(0, position),
                 append_whitespace: false,
@@ -243,7 +249,7 @@ struct ModalSurface<'a> {
     status: &'a SharedStatus,
     asked_for_image: &'a AtomicBool,
     ingress: &'a InteractiveIngress,
-    drafts: &'a mut Vec<ComposerDraft>,
+    drafts: &'a mut DraftStash,
 }
 
 struct TerminalOwner {
@@ -258,6 +264,49 @@ struct ComposerDraft {
     text: String,
     cursor: usize,
     origin: InputOrigin,
+}
+
+/// Composer drafts partitioned by the session that owns them.
+///
+/// Each partition is a stack: activating another session changes only the
+/// selected namespace, and returning to a source restores its drafts in LIFO
+/// order without copying them into the target.
+pub struct DraftStash {
+    active: SessionId,
+    by_session: HashMap<SessionId, Vec<ComposerDraft>>,
+}
+
+impl DraftStash {
+    pub fn new(active: SessionId) -> Self {
+        Self {
+            active,
+            by_session: HashMap::new(),
+        }
+    }
+
+    pub fn active(&self) -> SessionId {
+        self.active
+    }
+
+    pub fn activate(&mut self, session: SessionId) {
+        self.active = session;
+    }
+
+    pub fn active_count(&self) -> usize {
+        self.count(self.active)
+    }
+
+    pub fn count(&self, session: SessionId) -> usize {
+        self.by_session.get(&session).map_or(0, Vec::len)
+    }
+
+    fn push_active(&mut self, draft: ComposerDraft) {
+        self.by_session.entry(self.active).or_default().push(draft);
+    }
+
+    fn pop_active(&mut self) -> Option<ComposerDraft> {
+        self.by_session.get_mut(&self.active).and_then(Vec::pop)
+    }
 }
 
 struct SavedComposer {
@@ -375,7 +424,17 @@ impl SurfaceOutput {
 }
 
 enum Control {
-    Activate,
+    Activate {
+        session: SessionId,
+    },
+    ConfirmCompaction {
+        source: SessionId,
+        reply: Sender<bool>,
+    },
+    ActivateSession {
+        target: SessionId,
+        reply: Sender<bool>,
+    },
     Trust {
         workspace: String,
         reply: Sender<Trust>,
@@ -578,7 +637,15 @@ impl Seat {
         if let SeatKind::Live(live) = &self.kind
             && !live.activated.swap(true, Ordering::AcqRel)
         {
-            let _ = live.control.send(Control::Activate);
+            let session = live
+                .status
+                .lock()
+                .expect("surface status lock")
+                .status_base
+                .as_ref()
+                .map(|base| base.session)
+                .expect("status is configured before input activation");
+            let _ = live.control.send(Control::Activate { session });
         }
     }
 
@@ -643,6 +710,7 @@ impl Seat {
             pending: Arc::clone(&surface_effect),
         }));
         for action in [
+            ActionId::Compact,
             ActionId::Help,
             ActionId::Clear,
             ActionId::Statusline,
@@ -676,6 +744,15 @@ impl Seat {
     /// Share the exact registry instance used by completion and dispatch.
     pub fn action_registry(&self) -> Arc<ActionRegistry> {
         Arc::clone(&self.registry)
+    }
+
+    /// Publish the coordinator-owned compaction guard to every action view.
+    pub fn set_compaction_availability(&self, availability: Availability) {
+        self.registry
+            .set_availability(ActionId::Compact, availability);
+        if let SeatKind::Live(live) = &self.kind {
+            repaint_status(&live.status);
+        }
     }
 
     /// Activate native status after session, selection and config are known.
@@ -838,6 +915,8 @@ impl crate::run::InteractiveSeat for Seat {
     }
 
     fn busy(&self) {
+        self.registry
+            .set_availability(ActionId::Compact, Availability::Busy);
         if let SeatKind::Live(live) = &self.kind {
             live.phase.set(EditPhase::Busy);
         }
@@ -867,6 +946,18 @@ impl crate::run::InteractiveSeat for Seat {
             drop(status);
             repaint_status(&live.status);
         }
+    }
+
+    fn set_compaction_availability(&self, availability: Availability) {
+        Seat::set_compaction_availability(self, availability);
+    }
+
+    fn confirm_compaction(&self, source: SessionId) -> bool {
+        self.request(|reply| Control::ConfirmCompaction { source, reply }, false)
+    }
+
+    fn activate_session(&self, target: SessionId) -> bool {
+        self.request(|reply| Control::ActivateSession { target, reply }, false)
     }
 
     fn trust(&self, workspace: &Path) -> Trust {
@@ -959,16 +1050,20 @@ fn own_terminal(
     } = owner;
     let mut pending_control = None;
     let mut active = false;
-    let mut drafts: Vec<ComposerDraft> = Vec::new();
+    let mut drafts = DraftStash::new(SessionId::new());
     loop {
-        if matches!(pending_control.as_ref(), Some(Control::Activate)) {
-            pending_control.take();
+        if matches!(pending_control.as_ref(), Some(Control::Activate { .. })) {
+            let Some(Control::Activate { session }) = pending_control.take() else {
+                unreachable!("the pending activation was just matched");
+            };
+            drafts.activate(session);
             active = true;
             continue;
         }
         if !active && pending_control.is_none() {
             match control.recv() {
-                Ok(Control::Activate) => {
+                Ok(Control::Activate { session }) => {
+                    drafts.activate(session);
                     active = true;
                     continue;
                 }
@@ -1012,7 +1107,10 @@ fn own_terminal(
         match line {
             Line::ExternalBreak(_) => match control.recv() {
                 Ok(Control::Shutdown) | Err(_) => break,
-                Ok(Control::Activate) => continue,
+                Ok(Control::Activate { session }) => {
+                    drafts.activate(session);
+                    continue;
+                }
                 Ok(request) => {
                     let mut surface = ModalSurface {
                         phase: &phase,
@@ -1033,7 +1131,7 @@ fn own_terminal(
                     }
                 }
             },
-            Line::HostCommand(command) if command == INTERRUPT_COMMAND => continue,
+            Line::HostCommand(HostCommand::Interrupt) => continue,
             Line::Submitted(_)
             | Line::Blank
             | Line::Interrupted
@@ -1059,7 +1157,7 @@ fn surface_line(
     status: &SharedStatus,
     asked_for_image: &AtomicBool,
     ingress: &InteractiveIngress,
-    drafts: &mut Vec<ComposerDraft>,
+    drafts: &mut DraftStash,
 ) -> (Line, bool) {
     loop {
         let signal = editor.read_line(prompt);
@@ -1106,34 +1204,26 @@ fn surface_line(
             return (line, failed);
         };
 
-        if let Some(name) = command.strip_prefix(ACTION_COMMAND) {
-            let action = status
-                .lock()
-                .expect("surface status lock")
-                .actions
-                .as_ref()
-                .and_then(|actions| actions.registry.resolve_slash(name));
-            if let Some(action) = action {
-                let (_, interrupted) = execute_action_and_modal(
-                    editor,
-                    phase,
-                    status,
-                    ingress,
-                    action,
-                    phase.get() == EditPhase::Busy,
-                );
-                if let Some(interrupted) = interrupted {
-                    return (interrupted, false);
-                }
+        if let HostCommand::Action(action) = &command {
+            let (_, interrupted) = execute_action_and_modal(
+                editor,
+                phase,
+                status,
+                ingress,
+                *action,
+                phase.get() == EditPhase::Busy,
+            );
+            if let Some(interrupted) = interrupted {
+                return (interrupted, false);
             }
             continue;
         }
 
-        match command.as_str() {
-            DRAFT_COMMAND => {
+        match command {
+            HostCommand::Draft => {
                 let buffer = editor.current_buffer_contents().to_string();
                 if buffer.is_empty() {
-                    if let Some(saved) = drafts.pop() {
+                    if let Some(saved) = drafts.pop_active() {
                         editor.run_edit_commands(&[
                             EditCommand::InsertString(saved.text),
                             EditCommand::MoveToPosition {
@@ -1145,7 +1235,7 @@ fn surface_line(
                     }
                 } else {
                     let origin = status.lock().expect("surface status lock").origin;
-                    drafts.push(ComposerDraft {
+                    drafts.push_active(ComposerDraft {
                         text: buffer,
                         cursor: editor.current_insertion_point(),
                         origin,
@@ -1154,7 +1244,7 @@ fn surface_line(
                     status.lock().expect("surface status lock").origin = InputOrigin::Typed;
                 }
                 let mut current = status.lock().expect("surface status lock");
-                current.drafts = drafts.len();
+                current.drafts = drafts.active_count();
                 let draft_count = current.drafts;
                 if let Some(snapshot) = current.snapshot.as_mut() {
                     snapshot.set_drafts(draft_count);
@@ -1163,7 +1253,7 @@ fn surface_line(
                 drop(current);
                 repaint_status(status);
             }
-            BUSY_SUBMIT_COMMAND => {
+            HostCommand::BusySubmit => {
                 let buffer = editor.current_buffer_contents().to_string();
                 if buffer.trim().is_empty() {
                     continue;
@@ -1211,7 +1301,7 @@ fn surface_line(
                     }
                 }
             }
-            INTERRUPT_COMMAND => match futures::executor::block_on(ingress.interrupt()) {
+            HostCommand::Interrupt => match futures::executor::block_on(ingress.interrupt()) {
                 Ok(queue) => {
                     let mut current = status.lock().expect("surface status lock");
                     current.queue = queue;
@@ -1221,13 +1311,13 @@ fn surface_line(
                     current.notice = None;
                     drop(current);
                     repaint_status(status);
-                    return (Line::HostCommand(command), false);
+                    return (Line::HostCommand(HostCommand::Interrupt), false);
                 }
                 Err(error) => {
                     status.lock().expect("surface status lock").notice = Some(error.to_string());
                 }
             },
-            _ => return (Line::HostCommand(command), failed),
+            command => return (Line::HostCommand(command), failed),
         }
 
         // A suspended read retains the exact buffer and cursor. Starting it
@@ -1348,6 +1438,9 @@ fn apply_surface_effect(
     busy: bool,
 ) -> Option<Line> {
     match effect {
+        SurfaceActionEffect::Compact => {
+            return Some(Line::HostCommand(HostCommand::Action(ActionId::Compact)));
+        }
         SurfaceActionEffect::Help => {
             let help = {
                 let current = status.lock().expect("surface status lock");
@@ -1361,15 +1454,20 @@ fn apply_surface_effect(
                                 .first()
                                 .map(|shortcut| format!(" [Meta-{shortcut}]"))
                                 .unwrap_or_default();
-                            match action.disabled_reason() {
-                                Some(owner) => {
+                            match actions.registry.availability(action.id()) {
+                                Availability::Disabled { owner } => {
                                     format!(
                                         "/{}{shortcut} — {} [unavailable: {owner}]",
                                         action.name(),
                                         action.description_text()
                                     )
                                 }
-                                None => format!(
+                                Availability::Busy => format!(
+                                    "/{}{shortcut} — {} [busy]",
+                                    action.name(),
+                                    action.description_text()
+                                ),
+                                Availability::Enabled => format!(
                                     "/{}{shortcut} — {}",
                                     action.name(),
                                     action.description_text()
@@ -1474,7 +1572,7 @@ fn confirm_surface_action(
                 Some(Trust::Untrusted) => break Confirmation::Declined,
                 None => continue,
             },
-            Line::HostCommand(command) if command == MODAL_ESCAPE_COMMAND => {
+            Line::HostCommand(HostCommand::ModalEscape) => {
                 break Confirmation::Declined;
             }
             Line::Interrupted | Line::Blank => break Confirmation::Declined,
@@ -1549,7 +1647,7 @@ fn choose_statusline_preset(
             Arc::clone(status),
         );
         match answer(false, editor.read_line(&prompt)) {
-            Line::HostCommand(command) => {
+            Line::HostCommand(HostCommand::QuestionSelector(command)) => {
                 let Some(key) = question_selector_key(&command) else {
                     continue;
                 };
@@ -1597,10 +1695,13 @@ fn choose_statusline_preset(
                 break StatuslineChoice::Selected(segments);
             }
             Line::Interrupted | Line::Blank => break StatuslineChoice::Cancelled,
+            Line::HostCommand(HostCommand::Interrupt | HostCommand::ModalEscape) => {
+                break StatuslineChoice::Cancelled;
+            }
             line @ (Line::Ended | Line::ExternalBreak(_)) => {
                 break StatuslineChoice::Propagate(line);
             }
-            Line::Submitted(_) | Line::Refused(_) => {}
+            Line::Submitted(_) | Line::Refused(_) | Line::HostCommand(_) => {}
         }
     };
     status
@@ -1680,7 +1781,8 @@ fn run_model_picker(
         let prompt = Question::new(model_picker_prompt(&view), Arc::clone(status));
         let line = answer(false, editor.read_line(&prompt));
         let input = match &line {
-            Line::HostCommand(command) => model_picker_input(command),
+            Line::HostCommand(HostCommand::ModelPicker(command)) => model_picker_input(command),
+            Line::HostCommand(_) => None,
             Line::Interrupted | Line::Ended | Line::ExternalBreak(_) => Some(PickerInput::Escape),
             Line::Blank | Line::Submitted(_) | Line::Refused(_) => None,
         };
@@ -1728,7 +1830,6 @@ fn refresh_picker_selection(status: &SharedStatus, selection: &GenerationSelecti
 }
 
 fn model_picker_input(command: &str) -> Option<PickerInput> {
-    let command = command.strip_prefix(MODEL_PICKER_COMMAND)?;
     match command {
         "up" => Some(PickerInput::Up),
         "down" => Some(PickerInput::Down),
@@ -1851,18 +1952,75 @@ fn answer_control(
     pending_control: &mut Option<Control>,
     control: Control,
 ) -> bool {
-    if matches!(&control, Control::Activate) {
+    let control = match control {
+        Control::ActivateSession { target, reply } => {
+            surface.drafts.activate(target);
+            {
+                let mut current = surface.status.lock().expect("surface status lock");
+                if let Some(base) = current.status_base.as_mut() {
+                    base.session = target;
+                }
+                current.drafts = surface.drafts.active_count();
+                let draft_count = current.drafts;
+                if let Some(snapshot) = current.snapshot.as_mut() {
+                    snapshot.set_drafts(draft_count);
+                }
+                current.notice = None;
+            }
+            repaint_status(surface.status);
+            let _ = reply.send(true);
+            return true;
+        }
+        control => control,
+    };
+    if matches!(&control, Control::Activate { .. }) {
         return true;
     }
     let saved = enter_modal(editor, phase, surface.status);
 
     enum Reply {
+        Compaction(Sender<bool>, bool),
         Trust(Sender<Trust>, Trust),
         Permission(oneshot::Sender<PermissionDecision>, PermissionDecision),
         Question(oneshot::Sender<QuestionOutcome>, QuestionOutcome),
     }
 
     let (reply, after, mut keep_running) = match control {
+        Control::ConfirmCompaction { source, reply } => {
+            let confirmed = if surface.drafts.active() != source {
+                false
+            } else {
+                let drafts = surface.drafts.active_count();
+                if drafts == 0 {
+                    true
+                } else {
+                    let prompt = Question::new(
+                        format!(
+                            "Compact session {source} into a new clean durable session while retaining {drafts} source-owned drafts? [y/N] "
+                        ),
+                        Arc::clone(surface.status),
+                    );
+                    loop {
+                        match modal_line(editor, surface, &prompt) {
+                            Line::Submitted(answer) => match parse_trust(&answer) {
+                                Some(Trust::Trusted) => break true,
+                                Some(Trust::Untrusted) => break false,
+                                None => continue,
+                            },
+                            Line::Interrupted
+                            | Line::Blank
+                            | Line::Ended
+                            | Line::ExternalBreak(_)
+                            | Line::HostCommand(
+                                HostCommand::Interrupt | HostCommand::ModalEscape,
+                            ) => break false,
+                            Line::Refused(_) | Line::HostCommand(_) => continue,
+                        }
+                    }
+                }
+            };
+            (Reply::Compaction(reply, confirmed), EditPhase::Idle, true)
+        }
         Control::Trust { workspace, reply } => {
             let prompt = Question::new(
                 format!("Trust project files in {workspace}? [y/N] "),
@@ -1877,9 +2035,7 @@ fn answer_control(
                     Line::Blank | Line::Interrupted | Line::Ended | Line::ExternalBreak(_) => {
                         break Trust::Untrusted;
                     }
-                    Line::HostCommand(command)
-                        if command == INTERRUPT_COMMAND || command == MODAL_ESCAPE_COMMAND =>
-                    {
+                    Line::HostCommand(HostCommand::Interrupt | HostCommand::ModalEscape) => {
                         break Trust::Untrusted;
                     }
                     Line::Refused(_) | Line::HostCommand(_) => continue,
@@ -1905,9 +2061,7 @@ fn answer_control(
                     Line::Interrupted | Line::Ended | Line::ExternalBreak(_) => {
                         break PermissionDecision::Deny;
                     }
-                    Line::HostCommand(command)
-                        if command == INTERRUPT_COMMAND || command == MODAL_ESCAPE_COMMAND =>
-                    {
+                    Line::HostCommand(HostCommand::Interrupt | HostCommand::ModalEscape) => {
                         break PermissionDecision::Deny;
                     }
                     Line::Blank | Line::Refused(_) | Line::HostCommand(_) => continue,
@@ -1924,7 +2078,8 @@ fn answer_control(
             (Reply::Question(reply, outcome), EditPhase::Busy, true)
         }
         Control::Shutdown => return false,
-        Control::Activate => unreachable!("activation is handled before modal entry"),
+        Control::ActivateSession { .. } => unreachable!("activation is handled before modal entry"),
+        Control::Activate { .. } => unreachable!("activation is handled before modal entry"),
     };
     match controls.try_recv() {
         Ok(Control::Shutdown) => keep_running = false,
@@ -1935,6 +2090,9 @@ fn answer_control(
 
     leave_modal(editor, phase, surface.status, saved, after);
     match reply {
+        Reply::Compaction(sender, confirmed) => {
+            let _ = sender.send(confirmed);
+        }
         Reply::Trust(sender, trust) => {
             let _ = sender.send(trust);
         }
@@ -1971,7 +2129,7 @@ fn answer_question(
                         Some(error.to_string());
                 }
             },
-            Line::HostCommand(command) if command == MODAL_ESCAPE_COMMAND => {
+            Line::HostCommand(HostCommand::ModalEscape) => {
                 return QuestionOutcome::Cancelled;
             }
             Line::Interrupted | Line::Blank => return QuestionOutcome::Declined,
@@ -2011,7 +2169,7 @@ fn answer_question_selector(
             Arc::clone(surface.status),
         );
         match modal_line(editor, surface, &prompt) {
-            Line::HostCommand(command) => {
+            Line::HostCommand(HostCommand::QuestionSelector(command)) => {
                 let Some(key) = question_selector_key(&command) else {
                     continue;
                 };
@@ -2043,7 +2201,7 @@ fn answer_question_selector(
             }
             Line::Interrupted | Line::Blank => break QuestionOutcome::Declined,
             Line::Ended | Line::ExternalBreak(_) => break QuestionOutcome::Unavailable,
-            Line::Submitted(_) | Line::Refused(_) => {}
+            Line::Submitted(_) | Line::Refused(_) | Line::HostCommand(_) => {}
         }
     };
     surface
@@ -2056,7 +2214,6 @@ fn answer_question_selector(
 }
 
 fn question_selector_key(command: &str) -> Option<SelectorKey> {
-    let command = command.strip_prefix(QUESTION_SELECTOR_COMMAND)?;
     match command {
         "up" => Some(SelectorKey::Up),
         "down" => Some(SelectorKey::Down),
@@ -2216,9 +2373,7 @@ fn amendment(editor: &mut Reedline, surface: &mut ModalSurface<'_>) -> Permissio
             Line::Interrupted | Line::Ended | Line::ExternalBreak(_) => {
                 return PermissionDecision::Deny;
             }
-            Line::HostCommand(command)
-                if command == INTERRUPT_COMMAND || command == MODAL_ESCAPE_COMMAND =>
-            {
+            Line::HostCommand(HostCommand::Interrupt | HostCommand::ModalEscape) => {
                 return PermissionDecision::Deny;
             }
             Line::Blank | Line::Refused(_) | Line::HostCommand(_) => continue,

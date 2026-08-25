@@ -9,13 +9,14 @@ use futures::stream::BoxStream;
 use serde::{Deserialize, Serialize};
 
 use super::codec::CodecError;
+use crate::compact::CompactionLineage;
 use crate::event::domain::DomainEvent;
 use crate::event::id::SessionId;
 use crate::event::time::Timestamp;
 
 /// The catalogue entry for one session (`ARCHITECTURE.md` §5's
 /// `manifest.json` fields: `id, workspace_root, model, created, updated,
-/// title`).
+/// title, lineage`).
 ///
 /// This is the port-level shape: every `SessionStore` implementation
 /// reports `list()` results through it, regardless of how it durably
@@ -47,6 +48,8 @@ pub struct SessionMeta {
     pub created: Timestamp,
     pub updated: Timestamp,
     pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lineage: Option<CompactionLineage>,
 }
 
 /// A `SessionStore` failure.

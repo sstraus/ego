@@ -167,6 +167,9 @@
 //! - **Question items** — questions travel over unstable form elicitation, a
 //!   request/response RPC pair with the stable question item as its scope, not
 //!   as transcript chunks or tool-call updates.
+//! - **Context checkpoints** — ACP has no checkpoint-author role or standard
+//!   session-transition update. Omitting one preserves its low-authority
+//!   context semantics instead of misreporting it as human or agent speech.
 //! - **`Subagent` items** — no ACP 1.5.0 protocol concept.
 //! - **`Error`** — a mid-turn error surfaces as the JSON-RPC error response to
 //!   the `session/prompt` call, a different message shape (a response's error
@@ -412,7 +415,8 @@ pub fn project_v1(event: &PublicEvent) -> Option<v1::SessionUpdate> {
             | ItemKind::AgentMessage
             | ItemKind::Reasoning
             | ItemKind::Permission
-            | ItemKind::Subagent => None,
+            | ItemKind::Subagent
+            | ItemKind::ContextCheckpoint => None,
             ItemKind::Question => None,
         },
 
@@ -432,7 +436,10 @@ pub fn project_v1(event: &PublicEvent) -> Option<v1::SessionUpdate> {
             // cannot be represented without the accumulated content so far,
             // which a stateless per-event projection does not have.
             ItemKind::Tool => None,
-            ItemKind::UserMessage | ItemKind::Permission | ItemKind::Subagent => None,
+            ItemKind::UserMessage
+            | ItemKind::Permission
+            | ItemKind::Subagent
+            | ItemKind::ContextCheckpoint => None,
             ItemKind::Question => None,
         },
 
@@ -466,7 +473,10 @@ pub fn project_v1(event: &PublicEvent) -> Option<v1::SessionUpdate> {
                         text.clone().unwrap_or_default(),
                     )]),
             ))),
-            ItemKind::Reasoning | ItemKind::Permission | ItemKind::Subagent => None,
+            ItemKind::Reasoning
+            | ItemKind::Permission
+            | ItemKind::Subagent
+            | ItemKind::ContextCheckpoint => None,
             ItemKind::Question => None,
         },
 
@@ -505,7 +515,8 @@ pub fn project_v2(event: &PublicEvent) -> Option<v2::SessionUpdate> {
             | ItemKind::AgentMessage
             | ItemKind::Reasoning
             | ItemKind::Permission
-            | ItemKind::Subagent => None,
+            | ItemKind::Subagent
+            | ItemKind::ContextCheckpoint => None,
             ItemKind::Question => None,
         },
 
@@ -526,7 +537,10 @@ pub fn project_v2(event: &PublicEvent) -> Option<v2::SessionUpdate> {
             ItemKind::Tool => Some(v2::SessionUpdate::ToolCallContentChunk(
                 v2::ToolCallContentChunk::new(item_id_string(*item), text.clone()),
             )),
-            ItemKind::UserMessage | ItemKind::Permission | ItemKind::Subagent => None,
+            ItemKind::UserMessage
+            | ItemKind::Permission
+            | ItemKind::Subagent
+            | ItemKind::ContextCheckpoint => None,
             ItemKind::Question => None,
         },
 
@@ -555,7 +569,10 @@ pub fn project_v2(event: &PublicEvent) -> Option<v2::SessionUpdate> {
                     .status(tool_status_v2(*ok))
                     .content(vec![text.clone().unwrap_or_default().into()]),
             )),
-            ItemKind::Reasoning | ItemKind::Permission | ItemKind::Subagent => None,
+            ItemKind::Reasoning
+            | ItemKind::Permission
+            | ItemKind::Subagent
+            | ItemKind::ContextCheckpoint => None,
             ItemKind::Question => None,
         },
 

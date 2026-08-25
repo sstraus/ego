@@ -293,7 +293,7 @@ impl CliGenerationModelSource {
         role: GenerationRole,
     ) -> Result<GenerationProfile, GenerationModelError> {
         let (identity, thinking) = match role {
-            GenerationRole::Main => {
+            GenerationRole::Main | GenerationRole::Compaction => {
                 let selection = self.selection.read()?;
                 (selection.identity.clone(), selection.thinking)
             }

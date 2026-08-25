@@ -76,6 +76,13 @@ pub fn conversation_from(
     while let Some(item) = items.get(next).copied() {
         next += 1;
         match item.kind {
+            ItemKind::ContextCheckpoint => {
+                push(
+                    &mut messages,
+                    Role::User,
+                    text_block(&crate::compact::checkpoint_frame(&item.text)),
+                );
+            }
             // Replayed if — and only if — the provider sealed the block with
             // continuation state.
             //

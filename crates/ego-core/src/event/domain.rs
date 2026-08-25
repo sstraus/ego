@@ -39,13 +39,14 @@ pub struct Envelope {
     pub producer: Producer,
 }
 
-/// Which of the two current generation lifecycles opened an attempt.
+/// Which generation lifecycle opened an attempt.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GenerationRole {
     #[default]
     Main,
     Judge,
+    Compaction,
 }
 
 /// Who stopped a turn that did not finish on its own.
@@ -352,6 +353,13 @@ pub enum EventKind {
     },
     /// A turn finished.
     TurnCompleted { ok: bool, exit_reason: ExitReason },
+    /// The first semantic fact in a clean checkpoint-seeded session.
+    CompactionSeeded {
+        source: SessionId,
+        source_seq: Seq,
+        prompt_revision: u32,
+        checkpoint: String,
+    },
     /// The session log was compacted; `summary` replaces the compacted span.
     Compacted { summary: String },
     /// This session was forked from `source` at `at_seq`.
@@ -424,6 +432,7 @@ impl EventKind {
             EventKind::UsageCorrected { .. } => "usage_corrected",
             EventKind::ContextWindowUpdated { .. } => "context_window_updated",
             EventKind::TurnCompleted { .. } => "turn_completed",
+            EventKind::CompactionSeeded { .. } => "compaction_seeded",
             EventKind::Compacted { .. } => "compacted",
             EventKind::Forked { .. } => "forked",
             EventKind::HookCatalogueAdmitted { .. } => "hook_catalogue_admitted",

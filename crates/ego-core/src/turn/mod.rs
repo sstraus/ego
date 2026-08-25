@@ -24,6 +24,10 @@ use futures::future::{Either, select};
 
 use crate::budget::{BudgetGate, Metering, PricingQuote, SettlementSource};
 use crate::ceiling::tokens_reached;
+use crate::compact::{
+    COMPACTION_PROMPT, Checkpoint, CompactionBusy, CompactionError, PreparedCompaction,
+    checkpoint_frame,
+};
 use crate::config::SystemPrompt;
 use crate::cost::{Money, RateSource};
 use crate::event::domain::{
@@ -37,7 +41,9 @@ use crate::generation_model_source::{GenerationModelErrorClass, GenerationModelS
 use crate::generator::attempt::{AttemptStream, GenerationAttempt, UsageReport, settled_cost};
 use crate::generator::history::conversation_from;
 use crate::generator::port::AiEvent;
-use crate::generator::types::{Conversation, ErrorKind, GenRequest, Message, Role, StopReason};
+use crate::generator::types::{
+    Conversation, ErrorKind, GenRequest, Message, Role, StopReason, ToolDescriptor,
+};
 use crate::permit::ExecObservation;
 use crate::permit::judge::{JudgeConfig, JudgeDecoder, JudgeInput, JudgeOutcome};
 use crate::permit::{Authority, Classification, Pending, PolicyDenied, Resolution, ToolResult};
@@ -402,6 +408,7 @@ pub struct JudgeContext {
 /// call, and where the log goes. One `run` call is one turn; the state carries
 /// over between them.
 pub struct TurnLoop<'a> {
+    session_id: SessionId,
     journal: Journal<'a>,
     source: Arc<dyn GenerationModelSource>,
     gate: &'a mut BudgetGate,
@@ -422,6 +429,7 @@ impl<'a> TurnLoop<'a> {
     /// which were `&dyn` — a call site said nothing about which was which.
     pub fn new(session: Session<'a>, runtime: GenerationRuntime<'a>, tools: Tools<'a>) -> Self {
         Self {
+            session_id: session.id,
             journal: Journal::new(
                 session.id,
                 session.store,
@@ -476,6 +484,275 @@ impl<'a> TurnLoop<'a> {
     /// Take the session state back, to resume with a different loop.
     pub fn into_state(self) -> SessionState {
         self.journal.into_state()
+    }
+
+    /// Produce and validate one clean-session checkpoint without publishing a target.
+    pub async fn prepare_compaction(
+        &mut self,
+        target_system: Option<SystemPrompt>,
+        target_tools: Vec<ToolDescriptor>,
+    ) -> Result<PreparedCompaction, CompactionError> {
+        if !self.journal.state().unacknowledged_prompts().is_empty() {
+            return Err(CompactionError::NotIdle(CompactionBusy::AcceptedPrompt));
+        }
+        if self.journal.state().pending_question().is_some() {
+            return Err(CompactionError::NotIdle(CompactionBusy::PendingQuestion));
+        }
+        if !self.journal.state().live_attempts.is_empty() {
+            return Err(CompactionError::NotIdle(CompactionBusy::LiveAttempt));
+        }
+        if let Some(cause) = self.cancel.cause() {
+            return Err(CompactionError::Cancelled(cause));
+        }
+
+        let source_seq = self.journal.state().last_seq;
+        let turn = TurnId::new();
+        self.journal.publish(&PublicEvent::TurnStarted { turn });
+        let result = self
+            .prepare_compaction_inner(turn, source_seq, target_system, target_tools)
+            .await;
+        let (ok, exit_reason) = match &result {
+            Ok(_) => (true, ExitReason::Completed),
+            Err(CompactionError::Cancelled(cause)) => (false, ExitReason::Cancelled(*cause)),
+            Err(CompactionError::Budget(_)) => (false, ExitReason::Budget),
+            Err(CompactionError::Resolution { error, .. }) => (
+                false,
+                match error.class {
+                    GenerationModelErrorClass::Usage => ExitReason::Usage,
+                    GenerationModelErrorClass::Provider => ExitReason::Provider,
+                    GenerationModelErrorClass::Internal => ExitReason::Internal,
+                },
+            ),
+            Err(CompactionError::Capability { .. } | CompactionError::Expressibility { .. }) => {
+                (false, ExitReason::Usage)
+            }
+            Err(
+                CompactionError::History(_)
+                | CompactionError::UnexpectedStop(_)
+                | CompactionError::EmptyCheckpoint
+                | CompactionError::InvalidCheckpoint(_),
+            ) => (false, ExitReason::Provider),
+            Err(CompactionError::Store(_) | CompactionError::Internal(_)) => {
+                (false, ExitReason::Internal)
+            }
+            Err(CompactionError::NotIdle(_)) => {
+                unreachable!("idle was checked before the operation")
+            }
+        };
+        self.journal
+            .append(
+                turn,
+                None,
+                None,
+                EventKind::TurnCompleted { ok, exit_reason },
+            )
+            .map_err(CompactionError::Store)?;
+        result
+    }
+
+    async fn prepare_compaction_inner(
+        &mut self,
+        turn: TurnId,
+        source_seq: crate::event::id::Seq,
+        target_system: Option<SystemPrompt>,
+        target_tools: Vec<ToolDescriptor>,
+    ) -> Result<PreparedCompaction, CompactionError> {
+        let (history, repairs) =
+            conversation_from(self.journal.state()).map_err(CompactionError::History)?;
+        if !repairs.is_empty() {
+            tracing::warn!(?repairs, "source history was repaired for compaction");
+        }
+        let mut source_messages: Vec<Message> = self.with_system(history).into();
+        source_messages.push(Message::text(Role::System, COMPACTION_PROMPT));
+        let source_messages =
+            Conversation::new(source_messages).map_err(CompactionError::History)?;
+
+        let source = Arc::clone(&self.source);
+        let profile = source
+            .resolve(GenerationRole::Compaction)
+            .await
+            .map_err(|error| CompactionError::Resolution {
+                role: GenerationRole::Compaction,
+                error,
+            })?;
+        let request = GenRequest {
+            model: profile.request_model.clone(),
+            messages: source_messages,
+            tools: Vec::new(),
+            thinking: profile.thinking,
+            max_output_tokens: profile.output_ceiling(),
+            parallel_tool_calls: false,
+        };
+        let gaps = profile.capabilities.request_gaps(&request);
+        if !gaps.is_empty() {
+            return Err(CompactionError::Capability {
+                role: GenerationRole::Compaction,
+                gaps,
+            });
+        }
+        profile
+            .generator
+            .ensure_expressible(&request)
+            .map_err(|error| CompactionError::Expressibility {
+                role: GenerationRole::Compaction,
+                error,
+            })?;
+
+        self.journal.publish(&PublicEvent::metering_selected(
+            turn,
+            &profile.metering,
+            self.gate.ledger(),
+            profile
+                .rates
+                .as_ref()
+                .map_or(&RateSource::None, |rates| &rates.source),
+        ));
+
+        let quote = profile.rates.as_ref().map(|rates| rates.quote.clone());
+        let reservation = self
+            .gate
+            .reserve(
+                &profile.metering,
+                quote.as_ref(),
+                &request,
+                &profile.capabilities,
+            )
+            .map_err(CompactionError::Budget)?;
+        let attempt = GenerationAttempt::new(
+            GenerationId::new(),
+            reservation,
+            &profile.metering,
+            quote.as_ref(),
+            &request,
+            &profile.capabilities,
+        )
+        .map_err(CompactionError::Budget)?;
+        let reference = attempt.attempt();
+        let generation = self.journal.append(
+            turn,
+            None,
+            None,
+            EventKind::GenerationStarted {
+                attempt: reference,
+                role: GenerationRole::Compaction,
+            },
+        )?;
+
+        let stream = profile.generator.generate(request, attempt);
+        let drained = self
+            .drain(
+                turn,
+                generation,
+                stream,
+                &profile.metering,
+                quote.as_ref(),
+                GenerationVisibility::CompactionPrivate,
+            )
+            .await;
+
+        let settlement = drained
+            .stream
+            .settle(self.gate)
+            .map_err(|error| CompactionError::Internal(error.to_string()))?;
+        if let Some(error) = drained.failure {
+            return Err(CompactionError::Store(error));
+        }
+        if !drained.accounting_booked {
+            self.journal.append(
+                turn,
+                None,
+                None,
+                EventKind::UsageUpdated {
+                    usage: Usage::IDENTITY,
+                    cost_delta: settled_cost(
+                        &profile.metering,
+                        quote.as_ref(),
+                        UsageReport::Missing,
+                        None,
+                        self.gate.currency(),
+                    ),
+                    attempt: Some(reference),
+                },
+            )?;
+        }
+        self.journal.append(
+            turn,
+            None,
+            None,
+            EventKind::AttemptSettled {
+                attempt: settlement.attempt,
+                outcome: settlement.outcome,
+            },
+        )?;
+        if drained.cancelled {
+            return Err(CompactionError::Cancelled(
+                self.cancel.cause().unwrap_or(CancelCause::User),
+            ));
+        }
+        if drained.private_tool_use
+            || drained.error_kind.is_some()
+            || settlement.outcome.stop() != StopReason::Stop
+        {
+            return Err(CompactionError::UnexpectedStop(
+                if drained.private_tool_use {
+                    StopReason::ToolUse
+                } else if drained.error_kind.is_some() {
+                    StopReason::Error
+                } else {
+                    settlement.outcome.stop()
+                },
+            ));
+        }
+        let checkpoint_text = drained.private_text;
+        if checkpoint_text.trim().is_empty() {
+            return Err(CompactionError::EmptyCheckpoint);
+        }
+        let checkpoint =
+            Checkpoint::parse(checkpoint_text).map_err(CompactionError::InvalidCheckpoint)?;
+
+        let main = Arc::clone(&self.source)
+            .resolve(GenerationRole::Main)
+            .await
+            .map_err(|error| CompactionError::Resolution {
+                role: GenerationRole::Main,
+                error,
+            })?;
+        let mut target_messages = Vec::new();
+        if let Some(system) = target_system {
+            target_messages.push(Message::text(Role::System, system.text));
+        }
+        target_messages.push(Message::text(
+            Role::User,
+            checkpoint_frame(checkpoint.text()),
+        ));
+        let baseline = GenRequest {
+            model: main.request_model.clone(),
+            messages: Conversation::new(target_messages).map_err(CompactionError::History)?,
+            tools: target_tools,
+            thinking: main.thinking,
+            max_output_tokens: main.output_ceiling(),
+            parallel_tool_calls: main.capabilities.supports_parallel_tool_calls,
+        };
+        let gaps = main.capabilities.request_gaps(&baseline);
+        if !gaps.is_empty() {
+            return Err(CompactionError::Capability {
+                role: GenerationRole::Main,
+                gaps,
+            });
+        }
+        main.generator
+            .ensure_expressible(&baseline)
+            .map_err(|error| CompactionError::Expressibility {
+                role: GenerationRole::Main,
+                error,
+            })?;
+
+        Ok(PreparedCompaction {
+            source: self.session_id,
+            source_seq,
+            checkpoint,
+            baseline,
+        })
     }
 
     /// Run one turn: the prompt, every generation it takes to answer it, and
@@ -1149,7 +1426,14 @@ impl<'a> TurnLoop<'a> {
 
         let stream = profile.generator.generate(request, attempt);
         let drained = self
-            .drain(turn, generation, stream, &profile.metering, quote.as_ref())
+            .drain(
+                turn,
+                generation,
+                stream,
+                &profile.metering,
+                quote.as_ref(),
+                GenerationVisibility::Conversation,
+            )
             .await;
 
         // Settle before reporting anything, including a store failure: the
@@ -1284,6 +1568,7 @@ impl<'a> TurnLoop<'a> {
         mut stream: AttemptStream,
         metering: &Metering,
         quote: Option<&PricingQuote>,
+        visibility: GenerationVisibility,
     ) -> Drained {
         let reference = stream.attempt();
         let mut pending = Vec::new();
@@ -1321,6 +1606,8 @@ impl<'a> TurnLoop<'a> {
         );
         let mut held_usage: Option<Usage> = None;
         let mut stated_cost: Option<Money> = None;
+        let mut accounting_booked = false;
+        let mut private_tool_use = false;
         let settlement_currency = self.gate.currency();
 
         loop {
@@ -1347,23 +1634,34 @@ impl<'a> TurnLoop<'a> {
             };
             let appended = match event {
                 AiEvent::TextDelta { text } => {
-                    let item = *message.get_or_insert_with(ItemId::new);
                     assembled.push_str(&text);
-                    self.journal
-                        .append(turn, Some(item), None, EventKind::AssistantDelta { text })
-                        .map(|_| ())
+                    if visibility == GenerationVisibility::CompactionPrivate {
+                        Ok(())
+                    } else {
+                        let item = *message.get_or_insert_with(ItemId::new);
+                        self.journal
+                            .append(turn, Some(item), None, EventKind::AssistantDelta { text })
+                            .map(|_| ())
+                    }
                 }
                 AiEvent::ReasoningDelta { text } => {
-                    let item = *reasoning.get_or_insert_with(ItemId::new);
-                    self.journal
-                        .append(turn, Some(item), None, EventKind::ReasoningDelta { text })
-                        .map(|_| ())
+                    if visibility == GenerationVisibility::CompactionPrivate {
+                        Ok(())
+                    } else {
+                        let item = *reasoning.get_or_insert_with(ItemId::new);
+                        self.journal
+                            .append(turn, Some(item), None, EventKind::ReasoningDelta { text })
+                            .map(|_| ())
+                    }
                 }
                 // A reused id ends the generation before anything runs (ADR
                 // §6). Not appended, because a `ToolCallStarted` the loop has
                 // already decided not to dispatch is a call the log says was
                 // made and no result will ever answer.
-                AiEvent::ToolCall { call_id, .. } if seen.contains(&call_id) => {
+                AiEvent::ToolCall { call_id, .. }
+                    if visibility == GenerationVisibility::Conversation
+                        && seen.contains(&call_id) =>
+                {
                     corrupt = Some(call_id.clone());
                     self.journal
                         .append(
@@ -1403,49 +1701,58 @@ impl<'a> TurnLoop<'a> {
                 // `400` names explicitly, so an item is exactly what must
                 // exist for it.
                 AiEvent::ReasoningState(state) => {
-                    // `unwrap_or_default` mints a fresh id here, not a nil
-                    // one: `ItemId`'s `Default` is written as `new()`.
-                    let item = reasoning.take().unwrap_or_default();
-                    self.journal
-                        .append(turn, Some(item), None, EventKind::ReasoningState { state })
-                        .map(|_| ())
+                    if visibility == GenerationVisibility::CompactionPrivate {
+                        Ok(())
+                    } else {
+                        // `unwrap_or_default` mints a fresh id here, not a nil
+                        // one: `ItemId`'s `Default` is written as `new()`.
+                        let item = reasoning.take().unwrap_or_default();
+                        self.journal
+                            .append(turn, Some(item), None, EventKind::ReasoningState { state })
+                            .map(|_| ())
+                    }
                 }
                 AiEvent::ToolCall {
                     call_id,
                     name,
                     args,
                 } => {
-                    let item = ItemId::new();
-                    seen.insert(call_id.clone());
-                    self.journal
-                        .append(
-                            turn,
-                            Some(item),
-                            // The generation that issued it, named as the
-                            // causal parent the envelope already has room
-                            // for. This is what lets a rebuilt history put
-                            // the calls of one generation in one turn; a
-                            // second attribution field beside it would be a
-                            // second fact that could disagree with this one.
-                            Some(generation),
-                            EventKind::ToolCallStarted {
-                                name: name.clone(),
-                                args: args.clone(),
-                                // Carried, never dropped: nothing local can
-                                // stand in for a provider-issued id, and
-                                // without it the next request cannot say
-                                // which call a result answers.
-                                call_id: Some(call_id),
-                            },
-                        )
-                        .map(|started| {
-                            pending.push(PendingCall {
-                                item,
-                                started,
-                                name,
-                                args,
-                            });
-                        })
+                    if visibility == GenerationVisibility::CompactionPrivate {
+                        private_tool_use = true;
+                        Ok(())
+                    } else {
+                        let item = ItemId::new();
+                        seen.insert(call_id.clone());
+                        self.journal
+                            .append(
+                                turn,
+                                Some(item),
+                                // The generation that issued it, named as the
+                                // causal parent the envelope already has room
+                                // for. This is what lets a rebuilt history put
+                                // the calls of one generation in one turn; a
+                                // second attribution field beside it would be a
+                                // second fact that could disagree with this one.
+                                Some(generation),
+                                EventKind::ToolCallStarted {
+                                    name: name.clone(),
+                                    args: args.clone(),
+                                    // Carried, never dropped: nothing local can
+                                    // stand in for a provider-issued id, and
+                                    // without it the next request cannot say
+                                    // which call a result answers.
+                                    call_id: Some(call_id),
+                                },
+                            )
+                            .map(|started| {
+                                pending.push(PendingCall {
+                                    item,
+                                    started,
+                                    name,
+                                    args,
+                                });
+                            })
+                    }
                 }
                 AiEvent::Usage(usage) if held => {
                     let mut total = held_usage.unwrap_or(Usage::IDENTITY);
@@ -1476,7 +1783,9 @@ impl<'a> TurnLoop<'a> {
                             attempt: Some(reference),
                         },
                     )
-                    .map(|_| ()),
+                    .map(|_| {
+                        accounting_booked = true;
+                    }),
                 // A total for the request, so the last statement replaces
                 // the previous one rather than adding to it — the rule
                 // `AttemptStream` folds it under.
@@ -1532,19 +1841,24 @@ impl<'a> TurnLoop<'a> {
                 },
             ) {
                 failure = Some(cause);
+            } else {
+                accounting_booked = true;
             }
         }
 
         // The assembled message closes the item the deltas opened: the
         // reducer replaces rather than appends, so this is the same text, and
         // it is what tells a host the item finished.
-        if failure.is_none()
+        if visibility == GenerationVisibility::Conversation
+            && failure.is_none()
             && let Some(item) = message
             && let Err(cause) = self.journal.append(
                 turn,
                 Some(item),
                 None,
-                EventKind::AssistantMessage { text: assembled },
+                EventKind::AssistantMessage {
+                    text: assembled.clone(),
+                },
             )
         {
             failure = Some(cause);
@@ -1566,6 +1880,9 @@ impl<'a> TurnLoop<'a> {
             cancelled,
             corrupt,
             error_kind,
+            private_text: assembled,
+            private_tool_use,
+            accounting_booked,
         }
     }
 
@@ -2240,6 +2557,12 @@ enum Generated {
 }
 
 /// A drained stream, handed back so it can be settled.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GenerationVisibility {
+    Conversation,
+    CompactionPrivate,
+}
+
 struct Drained {
     stream: AttemptStream,
     pending: Vec<PendingCall>,
@@ -2262,4 +2585,10 @@ struct Drained {
     /// the exit of a stream that went on to end some other way, and is never
     /// consulted, because this is only read when the stop reason is `Error`.
     error_kind: Option<ErrorKind>,
+    /// Text retained for a private generation and never projected as an item.
+    private_text: String,
+    /// Whether a private, tool-less generation nevertheless emitted a call.
+    private_tool_use: bool,
+    /// Whether this drain appended at least one charge for the attempt.
+    accounting_booked: bool,
 }

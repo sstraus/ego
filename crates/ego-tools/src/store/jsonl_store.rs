@@ -10,9 +10,10 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use ego_core::compact::{CompactionLineage, CompactionPublication};
 use ego_core::event::domain::{DomainEvent, EventKind};
 use ego_core::event::hook::HookCatalogueEvidence;
-use ego_core::event::id::{Seq, SessionId};
+use ego_core::event::id::{Producer, Seq, SessionId};
 use ego_core::event::time::Timestamp;
 use ego_core::permit::ExecObservation;
 use ego_core::state::SessionState;
@@ -42,6 +43,7 @@ struct LogManifestFacts {
     created: Timestamp,
     workspace_root: PathBuf,
     last_ts: Option<Timestamp>,
+    lineage: Option<CompactionLineage>,
     execution: Option<ExecObservation>,
     hooks: HookCatalogueEvidence,
 }
@@ -191,6 +193,7 @@ fn log_manifest_facts(log: &[u8]) -> Option<LogManifestFacts> {
         _ => return None,
     };
     let mut last_ts = None;
+    let mut lineage = None;
     let mut execution = None;
     let mut hooks = HookCatalogueEvidence::default();
     for event in lines.filter_map(|line| match decode_line(line) {
@@ -201,6 +204,18 @@ fn log_manifest_facts(log: &[u8]) -> Option<LogManifestFacts> {
     }) {
         last_ts = Some(event.env.ts);
         match event.kind {
+            EventKind::CompactionSeeded {
+                source,
+                source_seq,
+                prompt_revision,
+                ..
+            } => {
+                lineage = Some(CompactionLineage {
+                    source,
+                    source_seq,
+                    prompt_revision,
+                })
+            }
             EventKind::ExecutionObserved { observation } => execution = Some(observation),
             EventKind::HookCatalogueAdmitted { descriptors } => hooks = descriptors,
             _ => {}
@@ -210,6 +225,7 @@ fn log_manifest_facts(log: &[u8]) -> Option<LogManifestFacts> {
         created,
         workspace_root,
         last_ts,
+        lineage,
         execution,
         hooks,
     })
@@ -267,6 +283,89 @@ impl JsonlStore {
 
     fn manifest_path(&self, id: &SessionId) -> PathBuf {
         self.session_dir(id).join("manifest.json")
+    }
+
+    /// Publish the complete first log image for a clean compaction target.
+    ///
+    /// The phase-aware replace is the authority boundary: before rename the
+    /// source may remain active and retry; after rename the target is visible
+    /// and must be selected even when the directory durability barrier or the
+    /// derived manifest cache reports a failure.
+    pub(super) fn publish_compaction_seed(
+        &self,
+        id: &SessionId,
+        seed: &DomainEvent,
+    ) -> CompactionPublication {
+        let mut first = Seq::ZERO;
+        first.next();
+        let valid_seed = seed.env.seq == first
+            && seed.env.item.is_some()
+            && seed.env.parent.is_none()
+            && seed.env.producer == Producer::Main
+            && matches!(seed.kind, EventKind::CompactionSeeded { .. });
+        if !valid_seed {
+            return CompactionPublication::NotPublished {
+                diagnostic: "a compaction target requires one canonical sequence-1 seed event"
+                    .to_string(),
+            };
+        }
+
+        let log_path = self.log_path(id);
+        match self.io.exists(&log_path) {
+            Ok(false) => {}
+            Ok(true) => {
+                return CompactionPublication::NotPublished {
+                    diagnostic: "the compaction target already has an event log".to_string(),
+                };
+            }
+            Err(error) => {
+                return CompactionPublication::NotPublished {
+                    diagnostic: format!("the compaction target could not be inspected: {error}"),
+                };
+            }
+        }
+
+        let header = Header::new(*id, seed.env.ts, self.workspace.clone());
+        let mut log = encode_header(&header);
+        log.push(b'\n');
+        let record = match encode_record(seed.env.seq, seed) {
+            Ok(record) => record,
+            Err(error) => {
+                return CompactionPublication::NotPublished {
+                    diagnostic: format!("the compaction seed could not be encoded: {error}"),
+                };
+            }
+        };
+        log.extend_from_slice(&record);
+        log.push(b'\n');
+
+        let publication = match self.io.replace_atomic_publication(&log_path, &log) {
+            Ok(publication) => publication,
+            Err(error) => {
+                return CompactionPublication::NotPublished {
+                    diagnostic: format!("the compaction target was not published: {error}"),
+                };
+            }
+        };
+
+        let manifest_diagnostic = self
+            .write_manifest(id, seed, true)
+            .err()
+            .map(|error| format!("manifest cache update failed: {error}"));
+        match publication {
+            super::io::AtomicReplacePublication::PublishedDurably => {
+                CompactionPublication::PublishedDurably {
+                    diagnostic: manifest_diagnostic,
+                }
+            }
+            super::io::AtomicReplacePublication::PublishedDurabilityUncertain { diagnostic } => {
+                let diagnostic = match manifest_diagnostic {
+                    Some(manifest) => format!("{diagnostic}; {manifest}"),
+                    None => diagnostic,
+                };
+                CompactionPublication::PublishedDurabilityUncertain { diagnostic }
+            }
+        }
     }
 
     /// Read and parse `id`'s manifest, or `None` if it does not exist yet.
@@ -527,6 +626,7 @@ impl JsonlStore {
             created: facts.created,
             updated: last_ts,
             title: previous.as_ref().and_then(|m| m.meta.title.clone()),
+            lineage: facts.lineage,
         };
         let manifest = RunManifest {
             meta,
@@ -585,6 +685,22 @@ impl JsonlStore {
                 .unwrap_or(ev.env.ts),
             updated: ev.env.ts,
             title: previous.as_ref().and_then(|m| m.meta.title.clone()),
+            lineage: match &ev.kind {
+                EventKind::CompactionSeeded {
+                    source,
+                    source_seq,
+                    prompt_revision,
+                    ..
+                } => Some(CompactionLineage {
+                    source: *source,
+                    source_seq: *source_seq,
+                    prompt_revision: *prompt_revision,
+                }),
+                _ => previous
+                    .as_ref()
+                    .and_then(|manifest| manifest.meta.lineage.clone())
+                    .or_else(|| log_facts.as_ref().and_then(|facts| facts.lineage.clone())),
+            },
         };
         let execution = match &ev.kind {
             EventKind::ExecutionObserved { observation } => Some(observation.clone()),

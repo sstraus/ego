@@ -4,26 +4,26 @@
 //! pin the core-owned grammar, durable event, reducer/history boundary and
 //! public projection that every host must share.
 
-use ego_core::compact::{
-    Checkpoint, CompactionBusy, CompactionError, PreparedCompaction, COMPACTION_PROMPT,
-    COMPACTION_PROMPT_REVISION,
-};
 use ego_core::budget::{BudgetGate, Metering};
+use ego_core::compact::{
+    COMPACTION_PROMPT, COMPACTION_PROMPT_REVISION, Checkpoint, CompactionBusy, CompactionError,
+    PreparedCompaction,
+};
 use ego_core::config::{Mode, ModelRef, Ruleset, SystemPrompt};
 use ego_core::cost::{Amount, CurrencyCode, MeteringRevision, Money};
+use ego_core::cost::{CostDelta, UnknownCost};
 use ego_core::event::domain::{CancelCause, DomainEvent, Envelope, EventKind, GenerationRole};
 use ego_core::event::id::{EventId, GenerationId, ItemId, Producer, Seq, SessionId, TurnId};
 use ego_core::event::time::Timestamp;
 use ego_core::generation_model_source::{
     GenerationModelError, GenerationModelErrorClass, GenerationModelSource, GenerationProfile,
 };
-use ego_core::cost::{CostDelta, UnknownCost};
 use ego_core::generator::attempt::{
     AttemptRef, AttemptStream, DeliveryCertainty, GenerationAttempt, Outcome, UsageReport,
 };
 use ego_core::generator::capabilities::{
-    CacheRetention, CancelSemantics, ModelCapabilities, ReasoningCarryover,
-    ReasoningEffortSupport, Transport,
+    CacheRetention, CancelSemantics, ModelCapabilities, ReasoningCarryover, ReasoningEffortSupport,
+    Transport,
 };
 use ego_core::generator::fake::FakeGenerator;
 use ego_core::generator::history::conversation_from;
@@ -32,8 +32,12 @@ use ego_core::generator::types::{
     Conversation, ErrorKind, GenRequest, Message, Role, StopReason, ThinkingLevel, ToolDescriptor,
 };
 use ego_core::permit::fake::FakeFs;
-use ego_core::permit::{CanonPath, PolicyEngine, ProcessError, ProcessExecutor, SpawnSpec, ToolResult};
-use ego_core::public::{project_public, ItemKind as PublicItemKind, PublicEvent, PUBLIC_EVENT_VERSION};
+use ego_core::permit::{
+    CanonPath, PolicyEngine, ProcessError, ProcessExecutor, SpawnSpec, ToolResult,
+};
+use ego_core::public::{
+    ItemKind as PublicItemKind, PUBLIC_EVENT_VERSION, PublicEvent, project_public,
+};
 use ego_core::question::{QuestionMode, QuestionOption, QuestionRequest};
 use ego_core::sink::CollectingSink;
 use ego_core::state::{ItemKind, SessionState, Usage};
@@ -69,6 +73,15 @@ fn checkpoint() -> String {
         "docs/decisions/2026-08-24-compaction-seeds-a-clean-session.md",
     ]
     .join("\n")
+}
+
+fn context_checkpoint_frame(text: &str) -> String {
+    serde_json::json!({
+        "kind": "context_checkpoint",
+        "revision": COMPACTION_PROMPT_REVISION,
+        "text": text,
+    })
+    .to_string()
 }
 
 #[test]
@@ -122,6 +135,12 @@ fn event(kind: EventKind) -> DomainEvent {
     }
 }
 
+fn seeded_event(kind: EventKind) -> DomainEvent {
+    let mut event = event(kind);
+    event.env.item = Some(ItemId::new());
+    event
+}
+
 #[test]
 fn canonical_prompt_is_versioned_and_contains_the_eight_ratified_headings() {
     assert_eq!(COMPACTION_PROMPT_REVISION, 1);
@@ -152,7 +171,10 @@ fn checkpoint_parser_accepts_only_the_exact_ordered_eight_heading_grammar() {
     assert!(Checkpoint::parse(duplicate).is_err());
 
     let mut unknown = checkpoint();
-    unknown = unknown.replace("# Critical references", "# Unknown heading\ntext\n# Critical references");
+    unknown = unknown.replace(
+        "# Critical references",
+        "# Unknown heading\ntext\n# Critical references",
+    );
     assert!(Checkpoint::parse(unknown).is_err());
 
     let mut prefix = String::from("operator prose\n");
@@ -160,7 +182,8 @@ fn checkpoint_parser_accepts_only_the_exact_ordered_eight_heading_grammar() {
     assert!(Checkpoint::parse(prefix).is_err());
 
     let mut empty_objective = checkpoint();
-    empty_objective = empty_objective.replace("# Objective\nContinue the release task.", "# Objective\n");
+    empty_objective =
+        empty_objective.replace("# Objective\nContinue the release task.", "# Objective\n");
     assert!(Checkpoint::parse(empty_objective).is_err());
 
     let padded = format!("\n  {}  \n", checkpoint());
@@ -178,9 +201,9 @@ fn compaction_role_is_durable_and_distinct_from_main_and_judge() {
 
 #[test]
 fn compaction_seed_event_carries_exact_source_lineage_revision_and_checkpoint() {
-    let source: SessionId = serde_json::from_str(&format!("\"{SOURCE}\""))
-        .expect("fixture source id");
-    let seeded = event(EventKind::CompactionSeeded {
+    let source: SessionId =
+        serde_json::from_str(&format!("\"{SOURCE}\"")).expect("fixture source id");
+    let seeded = seeded_event(EventKind::CompactionSeeded {
         source,
         source_seq: Seq::default(),
         prompt_revision: COMPACTION_PROMPT_REVISION,
@@ -199,9 +222,9 @@ fn compaction_seed_event_carries_exact_source_lineage_revision_and_checkpoint() 
 
 #[test]
 fn reducer_creates_one_context_checkpoint_and_history_carries_no_source_turn() {
-    let source: SessionId = serde_json::from_str(&format!("\"{SOURCE}\""))
-        .expect("fixture source id");
-    let seeded = event(EventKind::CompactionSeeded {
+    let source: SessionId =
+        serde_json::from_str(&format!("\"{SOURCE}\"")).expect("fixture source id");
+    let seeded = seeded_event(EventKind::CompactionSeeded {
         source,
         source_seq: Seq::default(),
         prompt_revision: COMPACTION_PROMPT_REVISION,
@@ -218,15 +241,19 @@ fn reducer_creates_one_context_checkpoint_and_history_carries_no_source_turn() {
 
     let (history, repairs) = conversation_from(&state).expect("checkpoint history is sendable");
     assert!(repairs.is_empty());
-    assert_eq!(history.messages().len(), 1, "the checkpoint is the sole block");
+    assert_eq!(
+        history.messages().len(),
+        1,
+        "the checkpoint is the sole block"
+    );
     assert_eq!(history.messages()[0].content.len(), 1);
     let serialized = serde_json::to_value(history.messages()).expect("history is serialisable");
     assert_eq!(serialized[0]["role"], "user");
     let framed = serialized[0]["content"][0]["text"]
         .as_str()
         .expect("checkpoint text");
-    let frame: serde_json::Value = serde_json::from_str(framed)
-        .expect("provider checkpoint block is canonical JSON");
+    let frame: serde_json::Value =
+        serde_json::from_str(framed).expect("provider checkpoint block is canonical JSON");
     assert_eq!(frame["kind"], "context_checkpoint");
     assert_eq!(frame["revision"], COMPACTION_PROMPT_REVISION);
     assert_eq!(frame["text"], checkpoint());
@@ -235,9 +262,9 @@ fn reducer_creates_one_context_checkpoint_and_history_carries_no_source_turn() {
 #[test]
 fn public_projection_distinguishes_checkpoint_from_human_prompt_and_keeps_authority_low() {
     assert_eq!(PUBLIC_EVENT_VERSION, 8);
-    let source: SessionId = serde_json::from_str(&format!("\"{SOURCE}\""))
-        .expect("fixture source id");
-    let seeded = event(EventKind::CompactionSeeded {
+    let source: SessionId =
+        serde_json::from_str(&format!("\"{SOURCE}\"")).expect("fixture source id");
+    let seeded = seeded_event(EventKind::CompactionSeeded {
         source,
         source_seq: Seq::default(),
         prompt_revision: COMPACTION_PROMPT_REVISION,
@@ -255,10 +282,9 @@ fn public_projection_distinguishes_checkpoint_from_human_prompt_and_keeps_author
     let json = serde_json::to_value(projected).expect("public checkpoint is JSON");
     assert_eq!(json["kind"], "context_checkpoint");
     assert_ne!(json["kind"], "user_message");
-    let golden: serde_json::Value = serde_json::from_str(include_str!(
-        "golden/compaction_seeded.jsonl"
-    ))
-    .expect("checkpoint golden is JSONL");
+    let golden: serde_json::Value =
+        serde_json::from_str(include_str!("golden/compaction_seeded.jsonl"))
+            .expect("checkpoint golden is JSONL");
     assert_eq!(golden["kind"], "context_checkpoint");
     assert_eq!(golden["text"], checkpoint());
 }
@@ -271,24 +297,27 @@ fn prompt_injection_inside_checkpoint_remains_context_text_not_system_authority(
     );
     let parsed = Checkpoint::parse(injected.clone()).expect("injection does not change grammar");
     assert_eq!(parsed.text(), injected);
-    let source: SessionId = serde_json::from_str(&format!("\"{SOURCE}\""))
-        .expect("fixture source id");
-    let state = SessionState::replay([event(EventKind::CompactionSeeded {
+    let source: SessionId =
+        serde_json::from_str(&format!("\"{SOURCE}\"")).expect("fixture source id");
+    let state = SessionState::replay([seeded_event(EventKind::CompactionSeeded {
         source,
         source_seq: Seq::default(),
         prompt_revision: COMPACTION_PROMPT_REVISION,
         checkpoint: injected,
     })]);
     let (history, _) = conversation_from(&state).expect("injected checkpoint remains sendable");
-    assert_eq!(history.messages()[0].role, ego_core::generator::types::Role::User);
+    assert_eq!(
+        history.messages()[0].role,
+        ego_core::generator::types::Role::User
+    );
 }
 
 #[test]
 fn repeated_compaction_carries_only_the_latest_checkpoint_and_exact_lineage() {
-    let first_source: SessionId = serde_json::from_str(&format!("\"{SOURCE}\""))
-        .expect("fixture source id");
+    let first_source: SessionId =
+        serde_json::from_str(&format!("\"{SOURCE}\"")).expect("fixture source id");
     let first_target = SessionId::new();
-    let first = event(EventKind::CompactionSeeded {
+    let first = seeded_event(EventKind::CompactionSeeded {
         source: first_source,
         source_seq: seq(12),
         prompt_revision: COMPACTION_PROMPT_REVISION,
@@ -298,7 +327,7 @@ fn repeated_compaction_carries_only_the_latest_checkpoint_and_exact_lineage() {
         "Continue the release task.",
         "Continue the release task from the first checkpoint.",
     );
-    let second = event(EventKind::CompactionSeeded {
+    let second = seeded_event(EventKind::CompactionSeeded {
         source: first_target,
         source_seq: seq(3),
         prompt_revision: COMPACTION_PROMPT_REVISION,
@@ -346,12 +375,24 @@ fn compaction_attempts_settle_in_the_source_ledger_for_every_terminal_boundary()
         }));
         state.apply(&event(EventKind::AttemptSettled {
             attempt,
-            outcome: Outcome::new(stop, DeliveryCertainty::PossiblySent, UsageReport::Reported(usage)),
+            outcome: Outcome::new(
+                stop,
+                DeliveryCertainty::PossiblySent,
+                UsageReport::Reported(usage),
+            ),
         }));
         assert!(state.live_attempts.is_empty(), "{stop:?} must settle");
         assert_eq!(state.charges.len(), 1, "{stop:?} remains source-accounted");
-        assert_eq!(state.usage, usage, "{stop:?} usage remains in source totals");
-        assert!(state.items.values().all(|item| item.kind != ItemKind::UserPrompt));
+        assert_eq!(
+            state.usage, usage,
+            "{stop:?} usage remains in source totals"
+        );
+        assert!(
+            state
+                .items
+                .values()
+                .all(|item| item.kind != ItemKind::UserPrompt)
+        );
     }
 }
 
@@ -404,10 +445,11 @@ fn canonical_checkpoints_are_exercised_across_a_practical_size_sweep() {
         );
         let parsed = Checkpoint::parse(candidate).expect("canonical size-sweep fixture");
         assert!(parsed.text().len() >= checkpoint().len());
+        let frame = context_checkpoint_frame(parsed.text());
 
         let request = GenRequest {
             model: "main-model".to_string(),
-            messages: Conversation::new(vec![Message::text(Role::User, parsed.text())])
+            messages: Conversation::new(vec![Message::text(Role::User, frame)])
                 .expect("size-sweep request history"),
             tools: Vec::new(),
             thinking: ThinkingLevel::Low,
@@ -425,16 +467,14 @@ fn canonical_checkpoints_are_exercised_across_a_practical_size_sweep() {
 
 #[test]
 fn compaction_output_stays_private_from_the_source_conversation() {
-    let source: SessionId = serde_json::from_str(&format!("\"{SOURCE}\""))
-        .expect("fixture source id");
+    let source: SessionId =
+        serde_json::from_str(&format!("\"{SOURCE}\"")).expect("fixture source id");
     let state = SessionState::replay([
         event(EventKind::GenerationStarted {
             attempt: AttemptRef::first(GenerationId::new()),
             role: GenerationRole::Compaction,
         }),
-        event(EventKind::AssistantMessage {
-            text: checkpoint(),
-        }),
+        event(EventKind::AssistantMessage { text: checkpoint() }),
         event(EventKind::CompactionSeeded {
             source,
             source_seq: seq(12),
@@ -445,10 +485,7 @@ fn compaction_output_stays_private_from_the_source_conversation() {
     assert!(state.items.values().all(|item| {
         !matches!(
             item.kind,
-            ItemKind::UserPrompt
-                | ItemKind::Assistant
-                | ItemKind::Reasoning
-                | ItemKind::ToolCall
+            ItemKind::UserPrompt | ItemKind::Assistant | ItemKind::Reasoning | ItemKind::ToolCall
         )
     }));
 }
@@ -486,9 +523,7 @@ impl SessionStore for CompactionMemoryStore {
         _id: &SessionId,
     ) -> Result<BoxStream<'static, Result<DomainEvent, StoreError>>, StoreError> {
         let events = self.events();
-        Ok(Box::pin(futures::stream::iter(
-            events.into_iter().map(Ok),
-        )))
+        Ok(Box::pin(futures::stream::iter(events.into_iter().map(Ok))))
     }
 
     fn list(&self) -> Result<Vec<SessionMeta>, StoreError> {
@@ -535,13 +570,23 @@ impl EvidenceStore for CompactionNoEvidence {
 }
 
 struct CompactionSource {
-    steps: Mutex<VecDeque<(GenerationRole, Result<GenerationProfile, GenerationModelError>)>>,
+    steps: Mutex<
+        VecDeque<(
+            GenerationRole,
+            Result<GenerationProfile, GenerationModelError>,
+        )>,
+    >,
     roles: Mutex<Vec<GenerationRole>>,
 }
 
 impl CompactionSource {
     fn new(
-        steps: impl IntoIterator<Item = (GenerationRole, Result<GenerationProfile, GenerationModelError>)>,
+        steps: impl IntoIterator<
+            Item = (
+                GenerationRole,
+                Result<GenerationProfile, GenerationModelError>,
+            ),
+        >,
     ) -> Arc<Self> {
         Arc::new(Self {
             steps: Mutex::new(steps.into_iter().collect()),
@@ -616,10 +661,7 @@ fn compaction_profile(
 struct RejectingCompactionGenerator;
 
 impl Generator for RejectingCompactionGenerator {
-    fn ensure_expressible(
-        &self,
-        _request: &GenRequest,
-    ) -> Result<(), RequestExpressibilityError> {
+    fn ensure_expressible(&self, _request: &GenRequest) -> Result<(), RequestExpressibilityError> {
         Err(RequestExpressibilityError::new(
             "target wire cannot encode the exact checkpoint baseline",
         ))
@@ -633,7 +675,11 @@ impl Generator for RejectingCompactionGenerator {
 fn compaction_turn_with_state(
     source: Arc<CompactionSource>,
     state: SessionState,
-) -> (TurnLoop<'static>, &'static CompactionMemoryStore, CancelToken) {
+) -> (
+    TurnLoop<'static>,
+    &'static CompactionMemoryStore,
+    CancelToken,
+) {
     let store = Box::leak(Box::new(CompactionMemoryStore::default()));
     let clock = Box::leak(Box::new(CompactionClock));
     let sink = Box::leak(Box::new(CollectingSink::new()));
@@ -683,7 +729,11 @@ fn compaction_turn_with_state(
 
 fn compaction_turn(
     source: Arc<CompactionSource>,
-) -> (TurnLoop<'static>, &'static CompactionMemoryStore, CancelToken) {
+) -> (
+    TurnLoop<'static>,
+    &'static CompactionMemoryStore,
+    CancelToken,
+) {
     compaction_turn_with_state(source, SessionState::default())
 }
 
@@ -782,16 +832,22 @@ fn prepare_compaction_captures_prefix_and_keeps_compaction_text_private() {
         Some(SystemPrompt::verbatim("fresh target system")),
         target_tools(),
     ))
-        .expect("valid compaction prepares");
+    .expect("valid compaction prepares");
 
     assert_eq!(prepared.source_seq(), Seq::ZERO);
     assert_ne!(prepared.source(), SessionId::default());
     assert_eq!(prepared.prompt_revision(), COMPACTION_PROMPT_REVISION);
     assert_eq!(prepared.checkpoint().text(), checkpoint());
-    assert_eq!(source.roles(), vec![GenerationRole::Compaction, GenerationRole::Main]);
+    assert_eq!(
+        source.roles(),
+        vec![GenerationRole::Compaction, GenerationRole::Main]
+    );
     assert_eq!(compaction_generator.calls().len(), 1);
     assert!(compaction_generator.calls()[0].tools.is_empty());
-    assert!(main_generator.calls().is_empty(), "baseline must not generate");
+    assert!(
+        main_generator.calls().is_empty(),
+        "baseline must not generate"
+    );
     assert!(store.events().iter().all(|event| {
         !matches!(
             event.kind,
@@ -884,14 +940,8 @@ fn main_baseline_gap_or_expressibility_refusal_happens_before_target_work() {
             AiEvent::Stop(StopReason::Stop),
         ],
     );
-    let (mut too_small_main, too_small_generator) = compaction_profile(
-        "main-model",
-        ThinkingLevel::Low,
-        1,
-        1,
-        false,
-        Vec::new(),
-    );
+    let (mut too_small_main, too_small_generator) =
+        compaction_profile("main-model", ThinkingLevel::Low, 1, 1, false, Vec::new());
     too_small_main.capabilities.max_tools = Some(0);
     let source = CompactionSource::new([
         (GenerationRole::Compaction, Ok(compact_profile)),
@@ -899,7 +949,7 @@ fn main_baseline_gap_or_expressibility_refusal_happens_before_target_work() {
     ]);
     let (mut turn, _store, _cancel) = compaction_turn(source);
     assert!(matches!(
-        futures::executor::block_on(turn.prepare_compaction(None, Vec::new())),
+        futures::executor::block_on(turn.prepare_compaction(None, target_tools())),
         Err(CompactionError::Capability {
             role: GenerationRole::Main,
             gaps
@@ -968,10 +1018,7 @@ fn compaction_error_boundaries_are_typed_and_provider_reached_work_is_settled() 
             ],
             "tool",
         ),
-        (
-            vec![AiEvent::Stop(StopReason::Stop)],
-            "empty",
-        ),
+        (vec![AiEvent::Stop(StopReason::Stop)], "empty"),
         (
             vec![
                 AiEvent::TextDelta {
@@ -1016,12 +1063,23 @@ fn compaction_error_boundaries_are_typed_and_provider_reached_work_is_settled() 
         let (mut turn, store, _cancel) = compaction_turn(source);
         let result = futures::executor::block_on(turn.prepare_compaction(None, Vec::new()));
         assert!(result.is_err(), "{expected} must refuse compaction");
-        assert!(store.events().iter().any(|event| {
-            matches!(event.kind, EventKind::AttemptSettled { .. })
-        }), "{expected} provider-reached attempt must settle");
+        assert!(
+            store
+                .events()
+                .iter()
+                .any(|event| { matches!(event.kind, EventKind::AttemptSettled { .. }) }),
+            "{expected} provider-reached attempt must settle"
+        );
         let source_state = SessionState::replay(store.events());
-        assert!(source_state.live_attempts.is_empty(), "{expected} leaves no live attempt");
-        assert_eq!(source_state.charges.len(), 1, "{expected} remains source-accounted");
+        assert!(
+            source_state.live_attempts.is_empty(),
+            "{expected} leaves no live attempt"
+        );
+        assert_eq!(
+            source_state.charges.len(),
+            1,
+            "{expected} remains source-accounted"
+        );
     }
 }
 
@@ -1086,5 +1144,8 @@ fn compaction_busy_states_and_cancellation_are_not_silently_admitted() {
         futures::executor::block_on(turn.prepare_compaction(None, Vec::new())),
         Err(CompactionError::Cancelled(CancelCause::User))
     ));
-    assert!(store.events().is_empty(), "cancelled before provider must not reserve");
+    assert!(
+        store.events().is_empty(),
+        "cancelled before provider must not reserve"
+    );
 }

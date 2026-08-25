@@ -8,6 +8,7 @@ use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
+use crate::compact::CompactionLineage;
 use crate::cost::{CostDelta, CumulativeCost};
 use crate::event::domain::{DomainEvent, EventKind, ExitReason, OccupancyProvenance};
 use crate::event::hook::{
@@ -243,6 +244,7 @@ pub struct TurnState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ItemKind {
+    ContextCheckpoint,
     UserPrompt,
     Assistant,
     Reasoning,
@@ -725,6 +727,9 @@ pub struct SessionState {
     /// the caller's replay order and never reorders, clamps or rejects on
     /// this value — see `Seq`'s and `Timestamp`'s doc comments.
     pub last_seq: Seq,
+    /// The source boundary that created this clean checkpoint-seeded session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lineage: Option<CompactionLineage>,
     /// Per-turn state, keyed by turn id.
     pub turns: HashMap<TurnId, TurnState>,
     /// Per-item state, keyed by item id.
@@ -840,6 +845,7 @@ impl Default for SessionState {
         Self {
             usage: Usage::IDENTITY,
             last_seq: Seq::default(),
+            lineage: None,
             turns: HashMap::default(),
             items: HashMap::default(),
             known_events: HashSet::default(),
@@ -1365,6 +1371,23 @@ impl SessionState {
                 turn.completed = true;
                 turn.ok = *ok;
                 turn.exit_reason = Some(*exit_reason);
+            }
+            EventKind::CompactionSeeded {
+                source,
+                source_seq,
+                prompt_revision,
+                checkpoint,
+            } => {
+                self.lineage = Some(CompactionLineage {
+                    source: *source,
+                    source_seq: *source_seq,
+                    prompt_revision: *prompt_revision,
+                });
+                if let Some(item) = self.item_mut(ev, ItemKind::ContextCheckpoint) {
+                    item.text = checkpoint.clone();
+                    item.completed = true;
+                    item.ok = Some(true);
+                }
             }
             EventKind::Compacted { summary } => self.compactions.push(summary.clone()),
             EventKind::Forked { source, at_seq } => self.forks.push(ForkRecord {

@@ -305,6 +305,7 @@ pub struct RegistryError(&'static str);
 #[derive(Debug, Clone)]
 pub struct ActionRegistry {
     registrations: Vec<ActionRegistration>,
+    live_availability: Arc<Mutex<HashMap<ActionId, Availability>>>,
 }
 
 impl<const N: usize> TryFrom<[ActionRegistration; N]> for ActionRegistry {
@@ -338,6 +339,7 @@ impl<const N: usize> TryFrom<[ActionRegistration; N]> for ActionRegistry {
         }
         Ok(Self {
             registrations: value.into(),
+            live_availability: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 }
@@ -449,7 +451,12 @@ impl ActionRegistry {
         self.registration(id)
     }
     pub fn availability(&self, id: ActionId) -> Availability {
-        self.registration(id).availability
+        self.live_availability
+            .lock()
+            .expect("action availability lock")
+            .get(&id)
+            .copied()
+            .unwrap_or_else(|| self.registration(id).availability)
     }
     pub fn kind(&self, id: ActionId) -> ActionKind {
         self.registration(id).kind
@@ -459,7 +466,10 @@ impl ActionRegistry {
     }
     pub fn snapshot(&self) -> SurfaceSnapshot {
         SurfaceSnapshot {
-            availability: self.iter().map(|a| (a.id, a.availability)).collect(),
+            availability: self
+                .iter()
+                .map(|a| (a.id, self.availability(a.id)))
+                .collect(),
         }
     }
     pub fn select(&self, id: ActionId, displayed: &SurfaceSnapshot) -> Option<ActionSelection> {
@@ -480,6 +490,14 @@ impl ActionRegistry {
             .expect("registered action id");
         action.availability = availability;
         self
+    }
+    /// Change a live action without replacing the registry shared by the
+    /// editor, completer, menu and dispatcher.
+    pub fn set_availability(&self, id: ActionId, availability: Availability) {
+        self.live_availability
+            .lock()
+            .expect("action availability lock")
+            .insert(id, availability);
     }
     pub fn dispatch(&self, id: ActionId, displayed: &SurfaceSnapshot) -> Dispatch {
         let current = self.availability(id);
@@ -511,7 +529,7 @@ impl ActionRegistry {
         };
         let registration = self.registration(selection.id);
         if selection.displayed != current_availability
-            || current_availability != registration.availability
+            || current_availability != self.availability(selection.id)
         {
             return ActionDispatch::Refused {
                 reason: "action is no longer available",

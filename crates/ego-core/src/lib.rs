@@ -10,6 +10,7 @@
 
 pub mod budget;
 pub mod ceiling;
+pub mod compact;
 pub mod config;
 pub mod cost;
 pub mod digest;

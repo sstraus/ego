@@ -3,10 +3,8 @@
 //! `/compact` is a host-owned session command.  It must not enter the normal
 //! prompt ingress, which owns ordinary user turns and their queue.
 
-use ego_cli::repl::actions::{
-    ActionId, ActionRegistry, Availability,
-};
 use ego_cli::catalogue::CATALOGUE_VERSION;
+use ego_cli::repl::actions::{ActionId, ActionRegistry, Availability};
 use ego_cli::repl::{DraftStash, HostCommand, Line};
 use ego_core::event::id::SessionId;
 
@@ -41,10 +39,8 @@ fn typed_host_commands_cover_the_non_prompt_control_variants() {
 
 #[test]
 fn compact_availability_remains_disabled_until_pending_work_is_consumed() {
-    let registry = ActionRegistry::final_surface().with_availability(
-        ActionId::Compact,
-        Availability::Busy,
-    );
+    let registry =
+        ActionRegistry::final_surface().with_availability(ActionId::Compact, Availability::Busy);
     assert_eq!(registry.availability(ActionId::Compact), Availability::Busy);
 }
 

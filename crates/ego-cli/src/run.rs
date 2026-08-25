@@ -25,12 +25,13 @@ use ego_core::generation_model_source::{
 };
 use ego_core::generator::capabilities::ModelCapabilities;
 use ego_core::generator::types::ThinkingLevel;
+use ego_core::generator::types::ToolDescriptor;
 use ego_core::permit::judge::{JudgeConfig, JudgeInput};
 use ego_core::permit::{
     CanonPath, Change, Escalation, ExecCaps, ExecObservation, HumanApprover, Op, OpName,
     PermissionDecision, PermissionRequest, PolicyEngine, PreparedCall, RunConfinement,
 };
-use ego_core::public::{PUBLIC_EVENT_VERSION, PublicEvent, QuestionReport};
+use ego_core::public::{PUBLIC_EVENT_VERSION, PublicEvent, QuestionReport, project_public};
 use ego_core::question::{AskQuestionTool, Elicitor, QuestionOutcome};
 use ego_core::run::{DeniedBy, RunTermination, Signal};
 use ego_core::sink::{EventSink, NullSink};
@@ -58,7 +59,7 @@ use crate::output::{
 };
 use crate::render::caps::{Capabilities, Environment, OscProfile, Terminal};
 use crate::render::osc::{Osc, Progress, State};
-use crate::session::{self, Opened};
+use crate::session::{self, ActiveSession, Opened};
 use crate::{config, model, prompt, repl, schema};
 
 /// The currency a session settles in.
@@ -1045,6 +1046,22 @@ fn cancelled_termination(cancel: &CancelToken) -> RunTermination {
     }
 }
 
+/// The exact interactive guard for the clean-session transition.
+fn compaction_availability(
+    active: &ActiveSession<'_>,
+    pending_work: bool,
+) -> repl::actions::Availability {
+    if !active.is_durable() {
+        repl::actions::Availability::Disabled {
+            owner: "compaction requires a durable source session",
+        }
+    } else if pending_work {
+        repl::actions::Availability::Busy
+    } else {
+        repl::actions::Availability::Enabled
+    }
+}
+
 /// Everything before the first turn.
 ///
 /// What is left here after the four steps above is the *order* they happen in,
@@ -1094,7 +1111,7 @@ async fn execute<S: EventSink>(
     };
     let Materials {
         system,
-        registry,
+        mut registry,
         compiled,
         text,
         slug,
@@ -1237,24 +1254,16 @@ async fn execute<S: EventSink>(
         diagnostics.note(&note_text);
     }
 
-    // Declared before `evidence`, and therefore dropped after it. The
-    // ephemeral store names files inside this owner; durable stores instead
-    // retain the session writer's lease and need no temporary owner.
-    let _ephemeral_evidence_owner;
-    let evidence = match &opened {
-        Opened::Durable(open) => {
-            drop(proof_directory);
-            _ephemeral_evidence_owner = None;
-            open.writer
-                .evidence_store(EVIDENCE_CAP)
-                .map_err(|err| RunTermination::Failed {
-                    message: format!("could not open this session's tool evidence: {err}"),
-                })?
-        }
-        Opened::Ephemeral(_) => {
-            _ephemeral_evidence_owner = Some(proof_directory);
-            proof_evidence
-        }
+    let opening = opened.state();
+    let mut active = if matches!(&opened, Opened::Durable(_)) {
+        drop(proof_directory);
+        ActiveSession::durable(opened, opening.clone(), EVIDENCE_CAP).map_err(|err| {
+            RunTermination::Failed {
+                message: format!("could not open this session's tool evidence: {err}"),
+            }
+        })?
+    } else {
+        ActiveSession::ephemeral(session_id, opening.clone(), proof_evidence, proof_directory)
     };
 
     // Every startup gate has passed. From here the run has a session; a later
@@ -1267,13 +1276,12 @@ async fn execute<S: EventSink>(
     // published against and what the loop then folds into, so reading it twice
     // would let the announcement and the turn disagree about where the session
     // began.
-    let opening = opened.state();
     if let Some(status) = status.as_ref()
         && status.human
     {
         match selection.snapshot() {
             Ok(selected) => status.seat.configure_status(repl::StatusSetup {
-                session: session_id,
+                session: active.id(),
                 state: opening.clone(),
                 selection: selected,
                 mode,
@@ -1296,7 +1304,7 @@ async fn execute<S: EventSink>(
     sink.publish(
         &PublicEvent::SessionStarted {
             v: PUBLIC_EVENT_VERSION,
-            session: session_id,
+            session: active.id(),
             capabilities: capabilities(&registry, system.is_some(), compiled.is_some()),
             mcp_errors: Vec::new(),
             hook_errors: Vec::new(),
@@ -1329,7 +1337,7 @@ async fn execute<S: EventSink>(
     let fs = OsFs;
     let mut gate = budget::gate(&effective.ceilings, effective.clamped.money, currency);
 
-    let config = TurnConfig {
+    let mut config = TurnConfig {
         system,
         token_ceiling: effective.ceilings.tokens,
     };
@@ -1355,11 +1363,11 @@ async fn execute<S: EventSink>(
     // A macro and not a closure: the loop borrows from this function's locals,
     // and a closure cannot name the lifetime of a `TurnLoop<'_>` it returns.
     macro_rules! build {
-        ($state:expr, $cancel:expr, $process:expr, $observation:expr) => {{
+        ($active:expr, $state:expr, $cancel:expr, $process:expr, $observation:expr) => {{
             let session = Session {
-                id: session_id,
+                id: $active.id(),
                 state: $state,
-                store: opened.store(),
+                store: $active.store(),
                 clock: &clock,
                 sink,
                 cancel: $cancel.clone(),
@@ -1374,7 +1382,7 @@ async fn execute<S: EventSink>(
                 &policy,
                 &fs,
                 $process.as_ref(),
-                &evidence,
+                $active.evidence(),
                 CanonPath::new(&cwd),
             );
             let loop_ = TurnLoop::new(session, runtime, tools);
@@ -1402,8 +1410,9 @@ async fn execute<S: EventSink>(
 
     match driver {
         Driver::Once => {
-            let (process, observation) = guarded_exec(&confinement, &evidence, &cancel).await?;
-            let mut loop_ = build!(opening, &cancel, process, observation);
+            let (process, observation) =
+                guarded_exec(&confinement, active.evidence(), &cancel).await?;
+            let mut loop_ = build!(active, opening, &cancel, process, observation);
             let (termination, result) = match resume.as_ref() {
                 Some(continuation) => {
                     turns
@@ -1413,10 +1422,12 @@ async fn execute<S: EventSink>(
                 None => turns.drive(&mut loop_, &text, &cancel, diagnostics).await,
             };
 
+            let state = loop_.into_state();
+            active.replace_state(state.clone());
             Ok(Ended {
                 termination,
-                session: session_id,
-                state: loop_.into_state(),
+                session: active.id(),
+                state,
                 result,
             })
         }
@@ -1425,7 +1436,7 @@ async fn execute<S: EventSink>(
             let mut state = opening;
             let mut last = Ended {
                 termination: RunTermination::Done,
-                session: session_id,
+                session: active.id(),
                 state: state.clone(),
                 result: Value::String(String::new()),
             };
@@ -1442,6 +1453,17 @@ async fn execute<S: EventSink>(
                 let asked = if resumed_turn.is_some() || queued {
                     None
                 } else {
+                    let queue = control.status();
+                    let pending_work = queue.pending_steers > 0
+                        || queue.queued > 0
+                        || queue.interrupt_pending
+                        || !state.unacknowledged_prompts().is_empty()
+                        || state.pending_question().is_some()
+                        || !state.live_attempts.is_empty();
+                    seat.set_compaction_availability(compaction_availability(
+                        &active,
+                        pending_work,
+                    ));
                     // The terminal owner keeps its next read active while this
                     // coordinator drives the turn; output returns through that
                     // same owner's bounded painter channel.
@@ -1465,6 +1487,182 @@ async fn execute<S: EventSink>(
                             diagnostics.note(why);
                             continue;
                         }
+                        repl::Line::HostCommand(repl::HostCommand::Action(
+                            repl::actions::ActionId::Compact,
+                        )) => {
+                            if compaction_availability(&active, pending_work)
+                                != repl::actions::Availability::Enabled
+                            {
+                                continue;
+                            }
+                            if !seat.confirm_compaction(active.id()) {
+                                continue;
+                            }
+                            seat.busy();
+
+                            let target_system = match instructions(
+                                &effective,
+                                &args,
+                                &root,
+                                &cwd,
+                                diagnostics,
+                            ) {
+                                Ok(system) => system,
+                                Err(error) => {
+                                    diagnostics.note(&format!(
+                                        "compaction target instructions could not be rebuilt: {error}"
+                                    ));
+                                    continue;
+                                }
+                            };
+                            let target_registry = match tools(args.tools.as_ref()) {
+                                Ok(registry) => registry,
+                                Err(error) => {
+                                    diagnostics.note(&format!(
+                                        "compaction target tools could not be rebuilt: {error}"
+                                    ));
+                                    continue;
+                                }
+                            };
+                            let target_tools: Vec<ToolDescriptor> = target_registry
+                                .iter()
+                                .map(|tool| tool.descriptor())
+                                .collect();
+
+                            let compaction_cancel = CancelToken::new();
+                            let (process, observation) =
+                                guarded_exec(&confinement, active.evidence(), &compaction_cancel)
+                                    .await?;
+                            let mut compaction =
+                                build!(active, state, &compaction_cancel, process, observation)
+                                    .with_interactive_control(&mut control);
+                            let prepared = compaction
+                                .prepare_compaction(target_system.clone(), target_tools)
+                                .await;
+                            state = compaction.into_state();
+                            active.replace_state(state.clone());
+                            seat.refresh_queue(control.status());
+                            let prepared = match prepared {
+                                Ok(prepared) => prepared,
+                                Err(error) => {
+                                    diagnostics.note(&format!("compaction failed: {error}"));
+                                    if let Some(status) = status.as_ref()
+                                        && status.human
+                                        && let Ok(selected) = selection.snapshot()
+                                    {
+                                        status.seat.refresh_status(&state, selected);
+                                    }
+                                    continue;
+                                }
+                            };
+
+                            if !state.unacknowledged_prompts().is_empty()
+                                || state.pending_question().is_some()
+                                || !state.live_attempts.is_empty()
+                            {
+                                diagnostics.note(
+                                    "compaction stopped before target creation because new source work became pending",
+                                );
+                                continue;
+                            }
+
+                            let Some(store) = jsonl_store.as_ref() else {
+                                unreachable!(
+                                    "ephemeral compaction was refused before confirmation"
+                                );
+                            };
+                            let target = SessionId::new();
+                            let target_opened = match session::open(store, &target, &clock) {
+                                Ok(opened) => Opened::Durable(Box::new(opened)),
+                                Err(error) => {
+                                    diagnostics.note(&format!(
+                                        "compaction target could not be opened: {error}"
+                                    ));
+                                    continue;
+                                }
+                            };
+                            let seed = prepared.seed_event(session::now(&clock));
+                            let target_state = SessionState::replay([seed.clone()]);
+                            let target_owner = match ActiveSession::durable(
+                                target_opened,
+                                target_state,
+                                EVIDENCE_CAP,
+                            ) {
+                                Ok(owner) => owner,
+                                Err(error) => {
+                                    diagnostics.note(&format!(
+                                        "compaction target evidence could not be opened: {error}"
+                                    ));
+                                    continue;
+                                }
+                            };
+                            let publication = target_owner.publish_compaction_seed(&seed);
+                            let diagnostic = publication.diagnostic().map(str::to_string);
+                            if !active.apply_publication(target_owner, &publication) {
+                                if let Some(diagnostic) = diagnostic {
+                                    diagnostics.note(&format!(
+                                        "compaction target was not published: {diagnostic}"
+                                    ));
+                                }
+                                continue;
+                            }
+
+                            registry = target_registry;
+                            config.system = target_system;
+                            state = active.state().clone();
+                            if let Some(diagnostic) = diagnostic {
+                                diagnostics.note(&format!(
+                                    "compaction target is authoritative with a durability warning: {diagnostic}"
+                                ));
+                            }
+                            sink.publish(
+                                &PublicEvent::SessionStarted {
+                                    v: PUBLIC_EVENT_VERSION,
+                                    session: active.id(),
+                                    capabilities: capabilities(
+                                        &registry,
+                                        config.system.is_some(),
+                                        compiled.is_some(),
+                                    ),
+                                    mcp_errors: Vec::new(),
+                                    hook_errors: Vec::new(),
+                                    instructions: config
+                                        .system
+                                        .as_ref()
+                                        .map(|prompt| prompt.sources.clone())
+                                        .unwrap_or_default(),
+                                },
+                                &state,
+                            );
+                            if let Some(event) = project_public(&seed) {
+                                sink.publish(&event, &state);
+                            }
+                            if !seat.activate_session(active.id()) {
+                                last = Ended {
+                                    termination: RunTermination::Failed {
+                                        message: format!(
+                                            "session {} was published but the terminal could not activate it",
+                                            active.id()
+                                        ),
+                                    },
+                                    session: active.id(),
+                                    state: state.clone(),
+                                    result: Value::String(String::new()),
+                                };
+                                break;
+                            }
+                            if let Some(status) = status.as_ref()
+                                && status.human
+                            {
+                                match selection.snapshot() {
+                                    Ok(selected) => status.seat.refresh_status(&state, selected),
+                                    Err(error) => diagnostics.note(&format!(
+                                        "the compacted session status selection could not be refreshed: {error}"
+                                    )),
+                                }
+                            }
+                            continue;
+                        }
                         repl::Line::HostCommand(_) => continue,
                         repl::Line::ExternalBreak(_) => break,
                     }
@@ -1474,8 +1672,8 @@ async fn execute<S: EventSink>(
                 seat.busy();
                 let turn_cancel = CancelToken::new();
                 let (process, observation) =
-                    guarded_exec(&confinement, &evidence, &turn_cancel).await?;
-                let mut loop_ = build!(state, &turn_cancel, process, observation)
+                    guarded_exec(&confinement, active.evidence(), &turn_cancel).await?;
+                let mut loop_ = build!(active, state, &turn_cancel, process, observation)
                     .with_interactive_control(&mut control);
                 let driven = match resumed_turn {
                     Some(turn) => {
@@ -1528,6 +1726,7 @@ async fn execute<S: EventSink>(
                     },
                 };
                 state = loop_.into_state();
+                active.replace_state(state.clone());
                 if let Some(status) = status.as_ref()
                     && status.human
                 {
@@ -1547,7 +1746,7 @@ async fn execute<S: EventSink>(
                 let queue_abandoned = matches!(&termination, RunTermination::Failed { .. });
                 last = Ended {
                     termination,
-                    session: session_id,
+                    session: active.id(),
                     state: state.clone(),
                     result,
                 };
@@ -1624,6 +1823,16 @@ pub trait InteractiveSeat: Reads + std::fmt::Debug + Send + Sync {
     }
     /// Publish the coordinator's authoritative durable queue projection.
     fn refresh_queue(&self, _queue: QueueStatus) {}
+    /// Publish the coordinator-owned compaction guard to the interactive surface.
+    fn set_compaction_availability(&self, _availability: repl::actions::Availability) {}
+    /// Confirm a source-owned clean-session transition.
+    fn confirm_compaction(&self, _source: SessionId) -> bool {
+        false
+    }
+    /// Switch the terminal and its draft namespace after publication.
+    fn activate_session(&self, _target: SessionId) -> bool {
+        false
+    }
     fn trust(&self, workspace: &Path) -> Trust;
     fn permission(&self, request: &PermissionRequest) -> PermissionDecision;
     /// Await a modal decision without blocking the core's intent polling.

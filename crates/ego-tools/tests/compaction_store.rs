@@ -1,20 +1,18 @@
 //! RED contract for regression case's target-session durability boundary.
 
-use ego_core::compact::{CompactionPublication, CompactionTargetStore, COMPACTION_PROMPT_REVISION};
+use ego_core::compact::{COMPACTION_PROMPT_REVISION, CompactionPublication, CompactionTargetStore};
 use ego_core::cost::{CostDelta, UnknownCost};
 use ego_core::event::domain::{DomainEvent, Envelope, EventKind};
 use ego_core::event::id::{EventId, ItemId, Producer, Seq, SessionId, TurnId};
 use ego_core::event::time::Timestamp;
 use ego_core::state::Usage;
 use ego_core::store::session_store::SessionStore;
-use ego_tools::store::{
-    AtomicReplacePublication, JsonlStore, OsIo, StoreIo,
-};
+use ego_tools::store::{AtomicReplacePublication, JsonlStore, OsIo, StoreIo};
+use futures::StreamExt;
+use futures::executor::block_on;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use futures::executor::block_on;
-use futures::StreamExt;
 use tempfile::tempdir;
 
 const CHECKPOINT: &str = "# Objective\nContinue.\n# Binding constraints and preferences\nKeep safety.\n# Completed work and evidence\nTests exist.\n# Work in progress\nCompaction.\n# Decisions and rationale\nNew id.\n# Blockers and uncertainty\nNone known.\n# Ordered next steps\nValidate.\n# Critical references\nSPEC.md";
@@ -31,10 +29,15 @@ fn lease_inputs() -> ego_tools::store::LeaseInputs<'static> {
 }
 
 fn read_all(store: &JsonlStore, id: &SessionId) -> Vec<DomainEvent> {
-    block_on(store.read(id).expect("target log exists").collect::<Vec<_>>())
-        .into_iter()
-        .collect::<Result<Vec<_>, _>>()
-        .expect("target log is durable and decodable")
+    block_on(
+        store
+            .read(id)
+            .expect("target log exists")
+            .collect::<Vec<_>>(),
+    )
+    .into_iter()
+    .collect::<Result<Vec<_>, _>>()
+    .expect("target log is durable and decodable")
 }
 
 fn seq(value: u64) -> Seq {
@@ -239,16 +242,18 @@ fn target_seed_is_durable_before_publication_and_carries_one_checkpoint_only() {
     let open = store
         .open_writer(&target, lease_inputs())
         .expect("target writer lease");
-    let publication = open
-        .writer
-        .publish_compaction_seed(&seed(source, seq(7)));
+    let publication = open.writer.publish_compaction_seed(&seed(source, seq(7)));
     assert_eq!(
         publication,
         CompactionPublication::PublishedDurably { diagnostic: None }
     );
 
     let events = read_all(&store, &target);
-    assert_eq!(events.len(), 1, "the seed is the target's first semantic event");
+    assert_eq!(
+        events.len(),
+        1,
+        "the seed is the target's first semantic event"
+    );
     assert_eq!(events[0].env.seq, seq(1));
     assert!(events[0].env.item.is_some());
     assert_eq!(events[0].env.parent, None);
@@ -281,11 +286,22 @@ fn reopening_after_target_seed_recovers_lineage_without_source_history_or_totals
 
     let resumed = store.resume(&target).expect("target resumes");
     assert_eq!(resumed.0.items.len(), 1);
-    assert_eq!(resumed.0.usage.total_tokens(), 0, "target starts fresh totals");
-    assert!(resumed.0.compactions.is_empty(), "legacy in-place compaction is absent");
+    assert_eq!(
+        resumed.0.usage.total_tokens(),
+        0,
+        "target starts fresh totals"
+    );
+    assert!(
+        resumed.0.compactions.is_empty(),
+        "legacy in-place compaction is absent"
+    );
     assert!(resumed.0.forks.is_empty(), "a seed is not a fork");
     assert_lineage_fields(
-        resumed.0.lineage.as_ref().expect("resume exposes typed lineage"),
+        resumed
+            .0
+            .lineage
+            .as_ref()
+            .expect("resume exposes typed lineage"),
         source,
         seq(41),
         COMPACTION_PROMPT_REVISION,
@@ -315,12 +331,12 @@ fn malformed_seed_and_existing_target_are_refused_without_publication() {
     let malformed = store
         .open_writer(&malformed_target, lease_inputs())
         .expect("malformed target writer lease");
-    let publication = malformed.writer.publish_compaction_seed(&event(
-        EventKind::UserPrompt {
+    let publication = malformed
+        .writer
+        .publish_compaction_seed(&event(EventKind::UserPrompt {
             text: "not a checkpoint seed".to_string(),
             queued_prompt: None,
-        },
-    ));
+        }));
     assert!(matches!(
         publication,
         CompactionPublication::NotPublished { .. }
@@ -342,10 +358,12 @@ fn malformed_seed_and_existing_target_are_refused_without_publication() {
     let first = store
         .open_writer(&target, lease_inputs())
         .expect("target writer lease");
-    assert!(first
-        .writer
-        .publish_compaction_seed(&seed(SessionId::new(), seq(3)))
-        .switch_target());
+    assert!(
+        first
+            .writer
+            .publish_compaction_seed(&seed(SessionId::new(), seq(3)))
+            .switch_target()
+    );
     drop(first);
     let existing = store
         .open_writer(&target, lease_inputs())
@@ -402,7 +420,9 @@ fn prepublication_target_failure_is_not_published_and_is_retry_safe() {
         .open_writer(&target, lease_inputs())
         .expect("target writer lease");
 
-    let publication = open.writer.publish_compaction_seed(&seed(SessionId::new(), seq(5)));
+    let publication = open
+        .writer
+        .publish_compaction_seed(&seed(SessionId::new(), seq(5)));
     assert!(matches!(
         publication,
         CompactionPublication::NotPublished { .. }
@@ -424,13 +444,19 @@ fn post_rename_durability_uncertainty_publishes_target_and_forbids_retry() {
         .publish_compaction_seed(&seed(SessionId::new(), seq(8)));
     assert!(matches!(
         publication,
-        CompactionPublication::PublishedDurabilityUncertain { diagnostic }
+        CompactionPublication::PublishedDurabilityUncertain {
+            diagnostic: ref diagnostic,
+        }
             if diagnostic.contains("parent directory barrier failed")
     ));
     assert!(publication.switch_target());
     assert!(!publication.retry_safe());
     drop(open);
-    assert_eq!(read_all(&store, &target).len(), 1, "visible target is authoritative");
+    assert_eq!(
+        read_all(&store, &target).len(),
+        1,
+        "visible target is authoritative"
+    );
 }
 
 #[test]
@@ -447,13 +473,17 @@ fn authoritative_log_survives_manifest_cache_failure_with_diagnostic() {
     assert!(matches!(
         publication,
         CompactionPublication::PublishedDurably {
-            diagnostic: Some(diagnostic)
+            diagnostic: Some(ref diagnostic)
         } if diagnostic.contains("manifest")
     ));
     assert!(publication.switch_target());
     assert!(!publication.retry_safe());
     drop(open);
-    assert_eq!(read_all(&store, &target).len(), 1, "log publication is authoritative");
+    assert_eq!(
+        read_all(&store, &target).len(),
+        1,
+        "log publication is authoritative"
+    );
 }
 
 #[test]
@@ -465,8 +495,7 @@ fn crash_before_the_seed_line_is_recovered_as_an_unusable_target() {
         .open_writer(&target, lease_inputs())
         .expect("target writer lease");
     assert_eq!(
-        open
-            .writer
+        open.writer
             .publish_compaction_seed(&seed(SessionId::new(), seq(2))),
         CompactionPublication::PublishedDurably { diagnostic: None }
     );
@@ -481,7 +510,9 @@ fn crash_before_the_seed_line_is_recovered_as_an_unusable_target() {
     std::fs::write(&log, &bytes[..bytes.len() - 1]).expect("tear the final newline");
     let repair = store.recover(&target).expect("crash recovery runs");
     assert!(!repair.is_clean());
-    let resumed = store.resume(&target).expect("recovery leaves a readable target");
+    let resumed = store
+        .resume(&target)
+        .expect("recovery leaves a readable target");
     assert!(resumed.0.items.is_empty(), "no seed means no usable target");
 }
 

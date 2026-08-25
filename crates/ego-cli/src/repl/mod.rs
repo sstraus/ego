@@ -12,7 +12,11 @@ pub mod selector;
 pub mod status;
 pub mod surface;
 
-pub use seat::{EditPhase, Seat, StatusSetup, SurfaceEditMode, SurfaceOutput, SurfacePhase};
+pub use seat::{
+    DraftStash, EditPhase, Seat, StatusSetup, SurfaceEditMode, SurfaceOutput, SurfacePhase,
+};
+
+use actions::ActionId;
 
 use reedline::Signal;
 
@@ -36,6 +40,53 @@ pub(super) const DRAFT_COMMAND: &str = "ego:draft";
 pub(super) const BUSY_SUBMIT_COMMAND: &str = "ego:busy-submit";
 pub(super) const INTERRUPT_COMMAND: &str = "ego:interrupt";
 
+/// A non-prompt editor event addressed to the interactive host.
+///
+/// Reedline's extension point carries strings, so the terminal adapter parses
+/// that foreign representation exactly once. Everything beyond this boundary
+/// receives this owned vocabulary and cannot mistake a control for user text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostCommand {
+    Action(ActionId),
+    Draft,
+    BusySubmit,
+    Interrupt,
+    ModalEscape,
+    ModelPicker(String),
+    QuestionSelector(String),
+}
+
+impl HostCommand {
+    fn from_editor(command: String) -> Option<Self> {
+        if command == DRAFT_COMMAND {
+            return Some(Self::Draft);
+        }
+        if command == BUSY_SUBMIT_COMMAND {
+            return Some(Self::BusySubmit);
+        }
+        if command == INTERRUPT_COMMAND {
+            return Some(Self::Interrupt);
+        }
+        if command == "permission" {
+            return Some(Self::Action(ActionId::Permissions));
+        }
+        if command == seat::MODAL_ESCAPE_COMMAND {
+            return Some(Self::ModalEscape);
+        }
+        if let Some(name) = command.strip_prefix(seat::ACTION_COMMAND) {
+            return actions::ActionRegistry::final_surface()
+                .resolve_slash(name)
+                .map(Self::Action);
+        }
+        if let Some(input) = command.strip_prefix(seat::MODEL_PICKER_COMMAND) {
+            return Some(Self::ModelPicker(input.to_string()));
+        }
+        command
+            .strip_prefix(seat::QUESTION_SELECTOR_COMMAND)
+            .map(|input| Self::QuestionSelector(input.to_string()))
+    }
+}
+
 /// What one read of the input line produced.
 ///
 /// The editor's own vocabulary is turned into this before anything else looks
@@ -56,7 +107,7 @@ pub enum Line {
     /// A key bound to something this build does not have, named.
     Refused(&'static str),
     /// An editor event addressed to the host, never submitted as prompt text.
-    HostCommand(String),
+    HostCommand(HostCommand),
     /// A host lifecycle wake carrying the exact composer buffer.
     ExternalBreak(String),
 }
@@ -73,7 +124,9 @@ impl Line {
             Signal::Success(text) => Self::Submitted(text),
             Signal::CtrlC => Self::Interrupted,
             Signal::CtrlD => Self::Ended,
-            Signal::HostCommand(command) => Self::HostCommand(command),
+            Signal::HostCommand(command) => HostCommand::from_editor(command)
+                .map(Self::HostCommand)
+                .unwrap_or(Self::Ended),
             Signal::ExternalBreak(buffer) => Self::ExternalBreak(buffer),
             _ => Self::Ended,
         }

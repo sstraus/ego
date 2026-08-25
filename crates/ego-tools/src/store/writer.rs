@@ -25,6 +25,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use ego_core::compact::{CompactionPublication, CompactionTargetStore};
 use ego_core::event::domain::DomainEvent;
 use ego_core::event::id::SessionId;
 use ego_core::event::time::Timestamp;
@@ -175,6 +176,12 @@ impl SessionStore for SessionWriter<'_> {
 
     fn list(&self) -> Result<Vec<SessionMeta>, StoreError> {
         self.store.list()
+    }
+}
+
+impl CompactionTargetStore for SessionWriter<'_> {
+    fn publish_compaction_seed(&self, seed: &DomainEvent) -> CompactionPublication {
+        self.store.publish_compaction_seed(&self.id, seed)
     }
 }
 

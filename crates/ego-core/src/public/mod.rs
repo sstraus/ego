@@ -37,7 +37,7 @@ use crate::state::Usage;
 /// measurement of the merged tree. At merge: read the constant on the merge
 /// base and add one. A value that is not what you expect means another branch
 /// moved it too, and is a reason to stop and look rather than to overwrite.
-pub const PUBLIC_EVENT_VERSION: u32 = 7;
+pub const PUBLIC_EVENT_VERSION: u32 = 8;
 
 /// The structured question payload shared by JSON completion and public
 /// event projections. `id` is the `QuestionRequested` envelope item.
@@ -112,6 +112,8 @@ pub struct InstructionDescriptor {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ItemKind {
+    /// A canonical context seed created by prompted compaction.
+    ContextCheckpoint,
     /// A message the person running the command sent.
     ///
     /// Split from [`AgentMessage`](Self::AgentMessage), which used to share a
@@ -438,6 +440,13 @@ pub fn project_public(ev: &DomainEvent) -> Option<PublicEvent> {
     let item = ev.env.item;
 
     match &ev.kind {
+        EventKind::CompactionSeeded { checkpoint, .. } => Some(PublicEvent::ItemCompleted {
+            turn,
+            item: item?,
+            kind: ItemKind::ContextCheckpoint,
+            ok: true,
+            text: Some(checkpoint.clone()),
+        }),
         EventKind::UserPrompt { text, .. } => Some(PublicEvent::ItemCompleted {
             turn,
             item: item?,
