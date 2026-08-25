@@ -167,7 +167,7 @@ fn read_tool_result_prepares_exact_reference_and_session_authority() {
             request: EvidenceRead::new(reference.clone(), 0).unwrap(),
         }]
     );
-    let result = block_on(tools.execute(tool, authorized)).expect("read evidence");
+    let result = block_on(tools.execute(tool.as_ref(), authorized)).expect("read evidence");
     assert_eq!(result.model_text(), "complete evidence bytes");
     assert_eq!(
         result.content.len(),
@@ -203,7 +203,7 @@ fn read_tool_result_uses_original_byte_offsets_and_allows_inclusive_eof() {
     let Classification::Settled(Ok(authorized)) = tools.authorize(call) else {
         panic!("session evidence must settle intrinsically");
     };
-    let result = block_on(tools.execute(tool, authorized)).expect("offset evidence");
+    let result = block_on(tools.execute(tool.as_ref(), authorized)).expect("offset evidence");
     assert_eq!(result.model_text(), "evidence bytes");
     assert!(matches!(
         &result.content[0].provenance,
@@ -222,7 +222,7 @@ fn read_tool_result_uses_original_byte_offsets_and_allows_inclusive_eof() {
     let Classification::Settled(Ok(authorized)) = tools.authorize(call) else {
         panic!("session evidence EOF must settle intrinsically");
     };
-    let result = block_on(tools.execute(tool, authorized)).expect("EOF evidence");
+    let result = block_on(tools.execute(tool.as_ref(), authorized)).expect("EOF evidence");
     assert_eq!(result.content.len(), 1);
     assert_eq!(result.model_text(), "");
     assert!(matches!(
@@ -250,7 +250,7 @@ fn read_tool_result_cross_session_reference_is_not_found() {
     let Classification::Settled(Ok(authorized)) = tools.authorize(call) else {
         panic!("session evidence must settle before store lookup");
     };
-    let error = block_on(tools.execute(tool, authorized)).unwrap_err();
+    let error = block_on(tools.execute(tool.as_ref(), authorized)).unwrap_err();
     let rendered = error.to_string();
     assert!(
         matches!(error, ToolError::Evidence(EvidenceError::NotFound { .. })),
@@ -277,7 +277,7 @@ fn read_tool_result_rejects_forged_length_and_hash_references() {
     let Classification::Settled(Ok(authorized)) = tools.authorize(call) else {
         panic!("integrity checks happen at the session evidence reader");
     };
-    let error = block_on(tools.execute(tool, authorized)).unwrap_err();
+    let error = block_on(tools.execute(tool.as_ref(), authorized)).unwrap_err();
     let rendered = error.to_string();
     assert!(
         matches!(
@@ -293,7 +293,7 @@ fn read_tool_result_rejects_forged_length_and_hash_references() {
     let Classification::Settled(Ok(authorized)) = tools.authorize(call) else {
         panic!("integrity checks happen at the session evidence reader");
     };
-    let error = block_on(tools.execute(tool, authorized)).unwrap_err();
+    let error = block_on(tools.execute(tool.as_ref(), authorized)).unwrap_err();
     let rendered = error.to_string();
     assert!(
         matches!(
@@ -330,6 +330,6 @@ fn read_tool_result_has_no_filesystem_or_rule_authority() {
             request: EvidenceRead::new(reference, 0).unwrap(),
         }]
     );
-    let result = block_on(tools.execute(tool, authorized)).expect("read evidence");
+    let result = block_on(tools.execute(tool.as_ref(), authorized)).expect("read evidence");
     assert_eq!(result.model_text(), "session-only evidence");
 }
