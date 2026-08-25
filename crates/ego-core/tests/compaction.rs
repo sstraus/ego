@@ -457,11 +457,13 @@ fn canonical_checkpoints_are_exercised_across_a_practical_size_sweep() {
             parallel_tool_calls: false,
         };
         let gaps = capabilities.request_gaps(&request);
-        if gaps.is_empty() {
-            FakeGenerator::new(Vec::<Vec<_>>::new())
-                .ensure_expressible(&request)
-                .expect("admitted checkpoint remains wire-expressible");
-        }
+        assert!(
+            gaps.is_empty(),
+            "size-sweep request was not admitted: {gaps:?}"
+        );
+        FakeGenerator::new(Vec::<Vec<_>>::new())
+            .ensure_expressible(&request)
+            .expect("admitted checkpoint remains wire-expressible");
     }
 }
 
