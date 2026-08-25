@@ -163,7 +163,9 @@ pub async fn build_catalogue_snapshot(
         );
     }
 
-    Ok(ModelCatalogueSnapshot::from_entries_and_sources(models, sources))
+    Ok(ModelCatalogueSnapshot::from_entries_and_sources(
+        models, sources,
+    ))
 }
 
 fn unsupported_supplied_sources(

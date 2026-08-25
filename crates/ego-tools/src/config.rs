@@ -55,8 +55,9 @@ where
 
         let bytes = self.io.read(&self.path).map_err(transaction_error)?;
         let text = match bytes {
-            Some(bytes) => String::from_utf8(bytes)
-                .map_err(|error| UserConfigError::new(format!("user config is not UTF-8: {error}")))?,
+            Some(bytes) => String::from_utf8(bytes).map_err(|error| {
+                UserConfigError::new(format!("user config is not UTF-8: {error}"))
+            })?,
             None => String::new(),
         };
         let mut document = text
@@ -66,16 +67,16 @@ where
         apply(&mut document, mutation)?;
         let published = document.to_string();
         ConfigLayer::parse(Source::User, &published).map_err(|error| {
-            UserConfigError::new(format!("mutated user config failed strict validation: {error}"))
+            UserConfigError::new(format!(
+                "mutated user config failed strict validation: {error}"
+            ))
         })?;
         let publication = self
             .io
             .replace_atomic_publication(&self.path, published.as_bytes())
             .map_err(transaction_error)?;
         Ok(match publication {
-            AtomicReplacePublication::PublishedDurably => {
-                UserConfigPublication::PublishedDurably
-            }
+            AtomicReplacePublication::PublishedDurably => UserConfigPublication::PublishedDurably,
             AtomicReplacePublication::PublishedDurabilityUncertain { diagnostic } => {
                 UserConfigPublication::PublishedDurabilityUncertain { diagnostic }
             }
@@ -83,10 +84,7 @@ where
     }
 }
 
-fn apply(
-    document: &mut DocumentMut,
-    mutation: UserConfigMutation,
-) -> Result<(), UserConfigError> {
+fn apply(document: &mut DocumentMut, mutation: UserConfigMutation) -> Result<(), UserConfigError> {
     match mutation {
         UserConfigMutation::ModelAndThinking { model, thinking } => {
             let root = document.as_table_mut();
@@ -101,14 +99,9 @@ fn apply(
             for segment in segments {
                 array.push(segment);
             }
-            let ui = document
-                .as_table_mut()
-                .entry("ui")
-                .or_insert(Item::None);
+            let ui = document.as_table_mut().entry("ui").or_insert(Item::None);
             let statusline = ui.get_mut("statusline").ok_or_else(|| {
-                UserConfigError::new(
-                    "user config `ui.statusline` cannot contain the segment list",
-                )
+                UserConfigError::new("user config `ui.statusline` cannot contain the segment list")
             })?;
             let target = statusline.get_mut("segments").ok_or_else(|| {
                 UserConfigError::new(

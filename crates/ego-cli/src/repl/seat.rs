@@ -33,9 +33,7 @@ use crate::model::{GenerationSelection, GenerationSelectionSnapshot};
 use crate::model_picker::{
     ModelPicker, ModelPickerView, PickerFocus, PickerInput, PickerInputOutcome, PickerOutcome,
 };
-use ego_core::config::{
-    Mode, Trust, UserConfigMutation, UserConfigPublication, UserConfigStore,
-};
+use ego_core::config::{Mode, Trust, UserConfigMutation, UserConfigPublication, UserConfigStore};
 use ego_core::event::domain::CancelCause;
 use ego_core::event::id::{ItemId, SessionId};
 use ego_core::permit::{PermissionDecision, PermissionRequest};
@@ -130,7 +128,9 @@ impl Completer for ActionCompleter {
                 value: format!("/{}", registration.name()),
                 display_override: Some(format!("/{}", registration.name())),
                 description: Some(match registration.disabled_reason() {
-                    Some(owner) => format!("{} — unavailable: {owner}", registration.description_text()),
+                    Some(owner) => {
+                        format!("{} — unavailable: {owner}", registration.description_text())
+                    }
                     None => registration.description_text().to_string(),
                 }),
                 span: Span::new(0, position),
@@ -585,12 +585,7 @@ impl Seat {
     /// Publish the lifecycle reason before waking Reedline out of its read.
     pub fn shutdown(&self) {
         if let SeatKind::Live(live) = &self.kind {
-            if let Some(worker) = live
-                .git_worker
-                .lock()
-                .expect("Git worker lock")
-                .as_ref()
-            {
+            if let Some(worker) = live.git_worker.lock().expect("Git worker lock").as_ref() {
                 let _ = worker.sender.try_send(GitWork::Shutdown);
             }
             let _ = live.control.send(Control::Shutdown);
@@ -606,12 +601,7 @@ impl Seat {
         if let Some(owner) = live.owner.lock().expect("terminal owner lock").take() {
             let _ = owner.join();
         }
-        if let Some(worker) = live
-            .git_worker
-            .lock()
-            .expect("Git worker lock")
-            .take()
-        {
+        if let Some(worker) = live.git_worker.lock().expect("Git worker lock").take() {
             drop(worker.sender);
             let _ = worker.owner.join();
         }
@@ -720,7 +710,12 @@ impl Seat {
                 cwd,
                 git: None,
             });
-            rebuild_snapshot(&mut status, &state, selection, live.phase.get() == EditPhase::Modal);
+            rebuild_snapshot(
+                &mut status,
+                &state,
+                selection,
+                live.phase.get() == EditPhase::Modal,
+            );
         }
         repaint_status(&live.status);
 
@@ -801,12 +796,7 @@ impl Seat {
             );
         }
         repaint_status(&live.status);
-        if let Some(worker) = live
-            .git_worker
-            .lock()
-            .expect("Git worker lock")
-            .as_ref()
-        {
+        if let Some(worker) = live.git_worker.lock().expect("Git worker lock").as_ref() {
             let _ = worker.sender.try_send(GitWork::Refresh);
         }
     }
@@ -1191,14 +1181,8 @@ fn surface_line(
                     })
                 };
                 if let Some(action) = action {
-                    let (handled, interrupted) = execute_action_and_modal(
-                        editor,
-                        phase,
-                        status,
-                        ingress,
-                        action,
-                        true,
-                    );
+                    let (handled, interrupted) =
+                        execute_action_and_modal(editor, phase, status, ingress, action, true);
                     if let Some(interrupted) = interrupted {
                         return (interrupted, false);
                     }
@@ -1257,12 +1241,7 @@ fn execute_action(
     action: ActionId,
     busy: bool,
 ) -> (bool, bool) {
-    let Some(actions) = status
-        .lock()
-        .expect("surface status lock")
-        .actions
-        .clone()
-    else {
+    let Some(actions) = status.lock().expect("surface status lock").actions.clone() else {
         return (false, false);
     };
     let displayed = actions.registry.snapshot();
@@ -1322,9 +1301,9 @@ fn execute_action_and_modal(
             let effect = effects.lock().expect("surface action effect lock").take();
             effect
         };
-        if let Some(line) = effect.and_then(|effect| {
-            apply_surface_effect(editor, phase, status, effect, busy)
-        }) {
+        if let Some(line) =
+            effect.and_then(|effect| apply_surface_effect(editor, phase, status, effect, busy))
+        {
             return (true, Some(line));
         }
     }
@@ -1511,7 +1490,11 @@ fn confirm_surface_action(
         phase,
         status,
         saved,
-        if busy { EditPhase::Busy } else { EditPhase::Idle },
+        if busy {
+            EditPhase::Busy
+        } else {
+            EditPhase::Idle
+        },
     );
     answer
 }
@@ -1630,15 +1613,16 @@ fn choose_statusline_preset(
         phase,
         status,
         saved,
-        if busy { EditPhase::Busy } else { EditPhase::Idle },
+        if busy {
+            EditPhase::Busy
+        } else {
+            EditPhase::Idle
+        },
     );
     choice
 }
 
-fn configure_statusline(
-    status: &SharedStatus,
-    segments: Vec<ego_core::config::StatusSegmentName>,
-) {
+fn configure_statusline(status: &SharedStatus, segments: Vec<ego_core::config::StatusSegmentName>) {
     let store = status
         .lock()
         .expect("surface status lock")
@@ -1686,7 +1670,11 @@ fn run_model_picker(
     selection: Option<Arc<GenerationSelection>>,
     busy: bool,
 ) -> Option<Line> {
-    let after = if busy { EditPhase::Busy } else { EditPhase::Idle };
+    let after = if busy {
+        EditPhase::Busy
+    } else {
+        EditPhase::Idle
+    };
     let saved = enter_modal(editor, phase, status);
     let interrupted = loop {
         let view = picker.lock().expect("model picker lock").view();
@@ -1785,21 +1773,18 @@ fn model_picker_prompt(view: &ModelPickerView) -> String {
         PickerFocus::Reasoning => {
             rows.push(format!(
                 "Select reasoning for {}",
-                view.selected_model.as_deref().unwrap_or("the selected model")
+                view.selected_model
+                    .as_deref()
+                    .unwrap_or("the selected model")
             ));
-            rows.extend(
-                view.reasoning
-                    .iter()
-                    .enumerate()
-                    .map(|(index, reasoning)| {
-                        let marker = if view.current_id.as_deref() == Some(reasoning.as_str()) {
-                            ">"
-                        } else {
-                            " "
-                        };
-                        format!("{marker} {}. {reasoning:?}", index + 1)
-                    }),
-            );
+            rows.extend(view.reasoning.iter().enumerate().map(|(index, reasoning)| {
+                let marker = if view.current_id.as_deref() == Some(reasoning.as_str()) {
+                    ">"
+                } else {
+                    " "
+                };
+                format!("{marker} {}. {reasoning:?}", index + 1)
+            }));
             rows.push(
                 "Up/Down or number selects; Enter saves defaults; s uses this session; Esc cancels. "
                     .to_string(),
@@ -1974,9 +1959,7 @@ fn answer_question(
         .lock()
         .expect("surface status lock")
         .cursor_selectors;
-    if cursor_selectors
-        && matches!(request.mode, QuestionMode::Single | QuestionMode::Multiple)
-    {
+    if cursor_selectors && matches!(request.mode, QuestionMode::Single | QuestionMode::Multiple) {
         return answer_question_selector(editor, surface, request);
     }
     let prompt = Question::new(question_prompt(request), Arc::clone(surface.status));
@@ -2453,14 +2436,11 @@ impl EditMode for SurfaceEditMode {
                     KeyCode::Enter => picker_command("enter"),
                     KeyCode::Esc => picker_command("escape"),
                     KeyCode::Char('s') => picker_command("session"),
-                    KeyCode::Char(digit @ '1'..='9') => {
-                        picker_command(&format!("number:{digit}"))
-                    }
+                    KeyCode::Char(digit @ '1'..='9') => picker_command(&format!("number:{digit}")),
                     _ => ReedlineEvent::None,
                 },
                 Event::Key(key)
-                    if key.code == KeyCode::Char('c')
-                        && key.modifiers == KeyModifiers::CONTROL =>
+                    if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL =>
                 {
                     picker_command("escape")
                 }
@@ -2483,8 +2463,7 @@ impl EditMode for SurfaceEditMode {
                     _ => ReedlineEvent::None,
                 },
                 Event::Key(key)
-                    if key.code == KeyCode::Char('c')
-                        && key.modifiers == KeyModifiers::CONTROL =>
+                    if key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL =>
                 {
                     question_selector_command("escape")
                 }

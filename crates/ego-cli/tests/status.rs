@@ -93,9 +93,12 @@ fn inactive_and_optional_segments_collapse_as_whole_segments() {
     assert!(!rendered.text().contains("queue=2"));
     assert!(!rendered.text().contains("drafts=3"));
     assert!(rendered.text().contains("interrupt="));
-    assert!(rendered.text().split_whitespace().all(|segment| {
-        !segment.contains("dra") && !segment.contains("que")
-    }));
+    assert!(
+        rendered
+            .text()
+            .split_whitespace()
+            .all(|segment| { !segment.contains("dra") && !segment.contains("que") })
+    );
     assert!(rendered.width() <= 35);
 }
 
@@ -144,7 +147,9 @@ fn impossible_critical_width_retains_interrupt_then_queue_then_drafts() {
     let rendered = StatusLine::render(&surface, &configured, 8);
     assert!(!rendered.text().contains("drafts="));
     assert!(!rendered.text().contains("queue="));
-    assert!(rendered.text().contains("interrupt=") || rendered.omitted(StatusSegmentName::Interrupt));
+    assert!(
+        rendered.text().contains("interrupt=") || rendered.omitted(StatusSegmentName::Interrupt)
+    );
     assert_eq!(rendered.overflow_diagnostics(), 1);
     assert!(rendered.width() <= 8);
 }
@@ -208,10 +213,11 @@ fn asynchronous_git_failure_omits_only_git_and_adds_one_diagnostic_without_block
     let initial = source.collect();
     assert!(initial.is_err());
     let surface = snapshot().without_git();
-    let line = StatusLine::render(&surface, &[
-        StatusSegmentName::Model,
-        StatusSegmentName::Git,
-    ], 120);
+    let line = StatusLine::render(
+        &surface,
+        &[StatusSegmentName::Model, StatusSegmentName::Git],
+        120,
+    );
     assert!(line.text().contains("model="));
     assert!(!line.text().contains("git="));
     assert_eq!(line.diagnostics().len(), 1);
@@ -231,10 +237,14 @@ fn git_adapter_never_executes_shell_or_user_configuration() {
         ])
     }));
     assert!(command.arguments().windows(2).any(|args| {
-        args.iter().map(String::as_str).eq(["-c", "core.hooksPath=/dev/null"])
+        args.iter()
+            .map(String::as_str)
+            .eq(["-c", "core.hooksPath=/dev/null"])
     }));
     assert!(command.arguments().windows(2).any(|args| {
-        args.iter().map(String::as_str).eq(["-c", "core.fsmonitor=false"])
+        args.iter()
+            .map(String::as_str)
+            .eq(["-c", "core.fsmonitor=false"])
     }));
     assert!(command.arguments().iter().any(|arg| arg == "--no-pager"));
     assert_eq!(command.env("GIT_OPTIONAL_LOCKS"), Some("0"));

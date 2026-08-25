@@ -8,7 +8,7 @@
 use std::sync::{Arc, Mutex};
 
 use ego_core::budget::{BudgetGate, Metering};
-use ego_core::config::{Mode, Ruleset, ModelRef};
+use ego_core::config::{Mode, ModelRef, Ruleset};
 use ego_core::cost::{Amount, CurrencyCode, MeteringRevision, Money};
 use ego_core::event::domain::{DomainEvent, EventKind, ExitReason};
 use ego_core::event::id::ItemId;
@@ -17,25 +17,27 @@ use ego_core::generation_model_source::{
     GenerationModelError, GenerationModelSource, GenerationProfile, GenerationRole,
 };
 use ego_core::generator::capabilities::{
-    CacheRetention, CancelSemantics, ModelCapabilities, ReasoningCarryover,
-    ReasoningEffortSupport, Transport,
+    CacheRetention, CancelSemantics, ModelCapabilities, ReasoningCarryover, ReasoningEffortSupport,
+    Transport,
 };
 use ego_core::generator::fake::FakeGenerator;
 use ego_core::generator::port::AiEvent;
 use ego_core::generator::types::StopReason;
 use ego_core::permit::fake::{FakeFs, FakeWriteTool};
-use ego_core::permit::{
-    CanonPath, ProcessError, ProcessExecutor, SpawnSpec, ToolResult, Typed,
-};
+use ego_core::permit::{CanonPath, ProcessError, ProcessExecutor, SpawnSpec, ToolResult, Typed};
 use ego_core::question::{
     AskQuestionTool, Elicitor, ElicitorError, QuestionAnswer, QuestionMode, QuestionOption,
     QuestionOutcome, QuestionRequest,
 };
 use ego_core::sink::CollectingSink;
 use ego_core::state::{ItemKind, SessionState};
-use ego_core::store::evidence::{EvidenceError, EvidencePage, EvidenceRead, EvidenceStore, EvidenceWriter};
+use ego_core::store::evidence::{
+    EvidenceError, EvidencePage, EvidenceRead, EvidenceStore, EvidenceWriter,
+};
 use ego_core::store::session_store::{SessionMeta, SessionStore, StoreError};
-use ego_core::turn::{CancelToken, GenerationRuntime, RegisteredTool, Session, Tools, TurnConfig, TurnLoop};
+use ego_core::turn::{
+    CancelToken, GenerationRuntime, RegisteredTool, Session, Tools, TurnConfig, TurnLoop,
+};
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 
@@ -60,7 +62,10 @@ impl Elicitor for RecordingElicitor {
         question: ItemId,
         request: QuestionRequest,
     ) -> BoxFuture<'a, Result<QuestionOutcome, ElicitorError>> {
-        self.calls.lock().expect("elicitor calls").push((question, request));
+        self.calls
+            .lock()
+            .expect("elicitor calls")
+            .push((question, request));
         let outcome = self
             .outcome
             .lock()
@@ -85,7 +90,10 @@ fn elicitor_receives_the_persisted_question_item_and_returns_a_typed_outcome() {
     let outcome = futures::executor::block_on(elicitor.elicit(question, request.clone()))
         .expect("scripted answer");
     assert!(matches!(outcome, QuestionOutcome::Answered(_)));
-    assert_eq!(elicitor.calls.lock().unwrap().as_slice(), &[(question, request)]);
+    assert_eq!(
+        elicitor.calls.lock().unwrap().as_slice(),
+        &[(question, request)]
+    );
 }
 
 // Keep the attachment itself explicit as a narrow compile contract; the
@@ -110,8 +118,15 @@ impl MemoryStore {
 }
 
 impl SessionStore for MemoryStore {
-    fn append(&self, _id: &ego_core::event::id::SessionId, event: &DomainEvent) -> Result<(), StoreError> {
-        self.events.lock().expect("memory store events").push(event.clone());
+    fn append(
+        &self,
+        _id: &ego_core::event::id::SessionId,
+        event: &DomainEvent,
+    ) -> Result<(), StoreError> {
+        self.events
+            .lock()
+            .expect("memory store events")
+            .push(event.clone());
         Ok(())
     }
 
@@ -323,9 +338,7 @@ fn unavailable_elicitor_persists_question_closes_unstarted_siblings_and_leaves_t
         .expect("QuestionRequested is durable before elicitor access");
     let sibling_close = events
         .iter()
-        .position(|event| {
-            matches!(event.kind, EventKind::ToolCallCompleted { ok: false, .. })
-        })
+        .position(|event| matches!(event.kind, EventKind::ToolCallCompleted { ok: false, .. }))
         .expect("not-started sibling closure is durable");
     assert!(question < sibling_close);
     let sibling_started = events

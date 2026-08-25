@@ -85,9 +85,7 @@ impl QuestionRequest {
             QuestionMode::FreeText if !self.options.is_empty() => {
                 Err(QuestionError::FreeTextHasOptions)
             }
-            QuestionMode::FreeText if !self.free_text => {
-                Err(QuestionError::FreeTextDisabled)
-            }
+            QuestionMode::FreeText if !self.free_text => Err(QuestionError::FreeTextDisabled),
             _ => Ok(()),
         }
     }
@@ -160,9 +158,7 @@ impl QuestionAnswer {
         request.validate()?;
         match (request.mode, self) {
             (QuestionMode::Single, Self::Single(value))
-            | (QuestionMode::FreeText, Self::FreeText(value)) => {
-                validate_value(request, value)
-            }
+            | (QuestionMode::FreeText, Self::FreeText(value)) => validate_value(request, value),
             (QuestionMode::Multiple, Self::Multiple(values)) => {
                 if values.is_empty() {
                     return Err(QuestionError::EmptyAnswer);

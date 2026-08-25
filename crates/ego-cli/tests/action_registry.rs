@@ -1,11 +1,11 @@
 //! RED contract for the single, final interactive action registry.
 
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ego_cli::repl::actions::{
-    ActionDispatch, ActionId, ActionKind, ActionRegistry, ActionRegistration, ActionSink,
+    ActionDispatch, ActionId, ActionKind, ActionRegistration, ActionRegistry, ActionSink,
     Availability, Dispatch, InputOrigin, LocalAction, LocalActionOutcome,
 };
 use ego_cli::repl::selector::{Selector, SelectorKey, SelectorKind};
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 const NAMES: [&str; 24] = [
     "help",
@@ -113,9 +113,12 @@ fn menu_display_is_not_authorization_and_dispatch_rechecks_current_snapshot() {
 
     let stale = registry.snapshot();
     let current = registry.with_availability(ActionId::Model, Availability::Busy);
-    assert_eq!(current.dispatch(ActionId::Model, &stale), Dispatch::Refused {
-        reason: "action is no longer available",
-    });
+    assert_eq!(
+        current.dispatch(ActionId::Model, &stale),
+        Dispatch::Refused {
+            reason: "action is no longer available",
+        }
+    );
 }
 
 #[test]
@@ -148,7 +151,13 @@ fn dispatch_reaches_the_injected_local_sink_and_prompt_ingress_without_handler_p
         registry.dispatch_to(selection, &displayed, true, &mut sink),
         ActionDispatch::Local(LocalActionOutcome::Completed)
     );
-    assert_eq!(sink.calls, vec![LocalAction { id: ActionId::Model, busy: true }]);
+    assert_eq!(
+        sink.calls,
+        vec![LocalAction {
+            id: ActionId::Model,
+            busy: true
+        }]
+    );
 
     let changed = registry.with_availability(ActionId::Model, Availability::Busy);
     assert_eq!(
@@ -170,7 +179,9 @@ fn dispatch_reaches_the_injected_local_sink_and_prompt_ingress_without_handler_p
         .expect("displayed prompt action is selectable");
     assert_eq!(
         prompt_registry.dispatch_to(prompt_selection, &prompt_snapshot, true, &mut sink),
-        ActionDispatch::Prompt(ego_cli::repl::actions::PromptPayload { id: ActionId::Version })
+        ActionDispatch::Prompt(ego_cli::repl::actions::PromptPayload {
+            id: ActionId::Version
+        })
     );
 }
 
@@ -190,7 +201,10 @@ fn typed_and_bracketed_paste_origins_are_distinct_even_with_identical_text() {
 fn one_selector_supports_single_multi_free_and_numbered_fallback() {
     for kind in [SelectorKind::Single, SelectorKind::Multiple] {
         let mut selector = Selector::new(kind, ["alpha", "beta"]);
-        assert_eq!(selector.key(SelectorKey::Number(2)).selected(), Some("beta"));
+        assert_eq!(
+            selector.key(SelectorKey::Number(2)).selected(),
+            Some("beta")
+        );
         assert!(selector.key(SelectorKey::Enter).consumed());
         assert!(selector.key(SelectorKey::Escape).consumed());
     }
@@ -218,8 +232,10 @@ fn meta_p_and_model_slash_are_the_same_action() {
     assert_eq!(registry.resolve_key(meta_p), Some(ActionId::Model));
     assert_eq!(registry.resolve_key(alt_p), Some(ActionId::Model));
     assert_eq!(registry.resolve_slash("model"), Some(ActionId::Model));
-    assert_ne!(registry.resolve_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE)),
-        Some(ActionId::Model));
+    assert_ne!(
+        registry.resolve_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE)),
+        Some(ActionId::Model)
+    );
     assert_ne!(
         registry.resolve_key(KeyEvent::new(
             KeyCode::Char('p'),
@@ -245,22 +261,31 @@ fn resume_accepts_repeatable_answer_flags_without_splitting_json_values() {
         panic!("repeatable --answer belongs to resume");
     };
     assert_eq!(args.answers.len(), 2);
-    assert_eq!(args.answers[0].id.to_string(), "0192f3a1-0000-7000-8000-000000000002");
+    assert_eq!(
+        args.answers[0].id.to_string(),
+        "0192f3a1-0000-7000-8000-000000000002"
+    );
     assert_eq!(args.answers[0].json, r#""yes""#);
     assert_eq!(args.answers[1].json, r#"["a","b"]"#);
 
-    assert!(ego_cli::cli::parse(vec![
-        "ego".into(),
-        "resume".into(),
-        "0192f3a1-0000-7000-8000-000000000001".into(),
-        "--answer".into(),
-        "not-an-item=\"yes\"".into(),
-    ]).is_err());
-    assert!(ego_cli::cli::parse(vec![
-        "ego".into(),
-        "resume".into(),
-        "0192f3a1-0000-7000-8000-000000000001".into(),
-        "--answer".into(),
-        "0192f3a1-0000-7000-8000-000000000002=not-json".into(),
-    ]).is_err());
+    assert!(
+        ego_cli::cli::parse(vec![
+            "ego".into(),
+            "resume".into(),
+            "0192f3a1-0000-7000-8000-000000000001".into(),
+            "--answer".into(),
+            "not-an-item=\"yes\"".into(),
+        ])
+        .is_err()
+    );
+    assert!(
+        ego_cli::cli::parse(vec![
+            "ego".into(),
+            "resume".into(),
+            "0192f3a1-0000-7000-8000-000000000001".into(),
+            "--answer".into(),
+            "0192f3a1-0000-7000-8000-000000000002=not-json".into(),
+        ])
+        .is_err()
+    );
 }

@@ -31,14 +31,14 @@ use ego_core::permit::{
     PermissionDecision, PermissionRequest, PolicyEngine, PreparedCall, RunConfinement,
 };
 use ego_core::public::{PUBLIC_EVENT_VERSION, PublicEvent, QuestionReport};
-use ego_core::run::{DeniedBy, RunTermination, Signal};
 use ego_core::question::{AskQuestionTool, Elicitor, QuestionOutcome};
+use ego_core::run::{DeniedBy, RunTermination, Signal};
 use ego_core::sink::{EventSink, NullSink};
 use ego_core::state::{ItemKind, QuestionContinuation, SessionState};
 use ego_core::store::session_store::{SessionMeta, SessionStore};
 use ego_core::turn::{
-    CancelToken, GenerationRuntime, InteractiveControl, JudgeContext, QueueStatus, Session, Tools,
-    Journal, RegisteredTool, TurnConfig, TurnLoop, TurnOutcome, interactive_control,
+    CancelToken, GenerationRuntime, InteractiveControl, Journal, JudgeContext, QueueStatus,
+    RegisteredTool, Session, Tools, TurnConfig, TurnLoop, TurnOutcome, interactive_control,
 };
 use ego_tools::clock::SystemClock;
 use ego_tools::config::OsUserConfigStore;
@@ -84,7 +84,9 @@ pub fn apply_resume_answers_once(
         .map(|answer| answer.id)
         .collect::<std::collections::HashSet<_>>();
     if distinct.len() != answers.len() {
-        return Err(usage("a question answer was supplied more than once".to_string()));
+        return Err(usage(
+            "a question answer was supplied more than once".to_string(),
+        ));
     }
     if answers.len() != 1 {
         return Err(usage(
@@ -736,10 +738,7 @@ fn instructions(
 /// silently offered fewer tools than it was told to is a run whose failure has
 /// no visible cause.
 fn tools(selected: Option<&Vec<String>>) -> Result<Vec<RegisteredTool>, UsageError> {
-    let mut all: Vec<_> = builtins()
-        .into_iter()
-        .map(RegisteredTool::Effect)
-        .collect();
+    let mut all: Vec<_> = builtins().into_iter().map(RegisteredTool::Effect).collect();
     all.push(RegisteredTool::HumanInput(Arc::new(AskQuestionTool)));
     let Some(names) = selected else {
         return Ok(all);
@@ -749,10 +748,7 @@ fn tools(selected: Option<&Vec<String>>) -> Result<Vec<RegisteredTool>, UsageErr
             .iter()
             .any(|tool| tool.descriptor().name == name.as_str())
         {
-            let known: Vec<String> = all
-                .iter()
-                .map(|tool| tool.descriptor().name)
-                .collect();
+            let known: Vec<String> = all.iter().map(|tool| tool.descriptor().name).collect();
             return Err(UsageError(format!(
                 "--tools {name}: there is no such builtin; this build has {}",
                 known.join(", ")
@@ -1196,8 +1192,7 @@ async fn execute<S: EventSink>(
             .await?,
         );
         let home = config::ego_home().ok_or_else(|| RunTermination::Failed {
-            message: "the model picker needs EGO_HOME or HOME for user configuration"
-                .to_string(),
+            message: "the model picker needs EGO_HOME or HOME for user configuration".to_string(),
         })?;
         let config_store: Arc<dyn UserConfigStore> = Arc::new(OsUserConfigStore::new(
             Arc::new(OsIo),
@@ -1222,7 +1217,10 @@ async fn execute<S: EventSink>(
                 message: format!("interactive actions could not be installed: {error}"),
             })?;
         status.picker = Some(picker);
-        debug_assert!(status.picker.is_some(), "the run retains the installed picker");
+        debug_assert!(
+            status.picker.is_some(),
+            "the run retains the installed picker"
+        );
     }
     let source: Arc<dyn GenerationModelSource> = Arc::new(source);
     let main_preflight = source
@@ -1428,12 +1426,7 @@ async fn execute<S: EventSink>(
             let (termination, result) = match resume.as_ref() {
                 Some(continuation) => {
                     turns
-                        .drive_resumed(
-                            &mut loop_,
-                            continuation.turn,
-                            &cancel,
-                            diagnostics,
-                        )
+                        .drive_resumed(&mut loop_, continuation.turn, &cancel, diagnostics)
                         .await
                 }
                 None => turns.drive(&mut loop_, &text, &cancel, diagnostics).await,
@@ -1696,7 +1689,8 @@ impl Turns<'_> {
         cancel: &CancelToken,
         diagnostics: &dyn Diagnostics,
     ) -> (RunTermination, Value) {
-        self.drive_from(loop_, first, None, cancel, diagnostics).await
+        self.drive_from(loop_, first, None, cancel, diagnostics)
+            .await
     }
 
     async fn drive_resumed(

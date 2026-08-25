@@ -311,11 +311,13 @@ fn v1_agent<T: Turns>(turns: T) -> impl agent_client_protocol::ConnectTo<Client>
                     // happen to be right — and would stop being right the moment a
                     // second arm is configured. See `negotiate`'s module doc.
                     let Some(answer) = negotiate(request.protocol_version) else {
-                        return responder.respond_with_error(Error::invalid_request().data(format!(
-                            "this agent speaks ACP protocol version {SERVED}, and \
+                        return responder.respond_with_error(Error::invalid_request().data(
+                            format!(
+                                "this agent speaks ACP protocol version {SERVED}, and \
                              {} is below it",
-                            request.protocol_version
-                        )));
+                                request.protocol_version
+                            ),
+                        ));
                     };
                     client_capabilities
                         .lock()

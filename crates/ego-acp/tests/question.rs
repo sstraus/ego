@@ -4,16 +4,15 @@
 //! v1 has form modes and property schemas; it does not have fictional
 //! `Select`, `MultiSelect`, or `Input` enum variants.
 
-use std::collections::BTreeMap;
 use futures::executor::block_on;
+use std::collections::BTreeMap;
 
 use agent_client_protocol_schema::v1::{
     ClientCapabilities, CreateElicitationRequest, CreateElicitationResponse,
-    ElicitationAcceptAction,
-    ElicitationAction, ElicitationContentValue, ElicitationFormMode, ElicitationMode,
-    ElicitationCapabilities, ElicitationFormCapabilities,
-    ElicitationPropertySchema, ElicitationRequestScope, ElicitationSchema,
-    MultiSelectPropertySchema, RequestId, StringPropertySchema,
+    ElicitationAcceptAction, ElicitationAction, ElicitationCapabilities, ElicitationContentValue,
+    ElicitationFormCapabilities, ElicitationFormMode, ElicitationMode, ElicitationPropertySchema,
+    ElicitationRequestScope, ElicitationSchema, MultiSelectPropertySchema, RequestId,
+    StringPropertySchema,
 };
 use ego_acp::question::{
     AcpQuestionAdapter, CapabilityCapture, QuestionMappingError, QuestionRequest,
@@ -25,7 +24,10 @@ fn single_request() -> QuestionRequest {
     QuestionRequest::new(
         "Choose a colour",
         QuestionMode::Single,
-        vec![QuestionOption::new("red", "Red"), QuestionOption::new("blue", "Blue")],
+        vec![
+            QuestionOption::new("red", "Red"),
+            QuestionOption::new("blue", "Blue"),
+        ],
         false,
     )
 }
@@ -34,7 +36,10 @@ fn multiple_request() -> QuestionRequest {
     QuestionRequest::new(
         "Choose colours",
         QuestionMode::Multiple,
-        vec![QuestionOption::new("red", "Red"), QuestionOption::new("blue", "Blue")],
+        vec![
+            QuestionOption::new("red", "Red"),
+            QuestionOption::new("blue", "Blue"),
+        ],
         false,
     )
 }
@@ -51,7 +56,10 @@ fn scope() -> ElicitationRequestScope {
 fn single_maps_to_a_v1_form_string_enum() {
     let request = AcpQuestionAdapter::form_request(ItemId::new(), &single_request()).unwrap();
     let CreateElicitationRequest {
-        mode: ElicitationMode::Form(ElicitationFormMode { requested_schema, .. }),
+        mode:
+            ElicitationMode::Form(ElicitationFormMode {
+                requested_schema, ..
+            }),
         ..
     } = request
     else {
@@ -73,7 +81,9 @@ fn multiple_maps_to_a_v1_form_multi_select_array() {
     };
     assert!(matches!(
         form.requested_schema.properties.get("answers"),
-        Some(ElicitationPropertySchema::Array(MultiSelectPropertySchema { .. }))
+        Some(ElicitationPropertySchema::Array(
+            MultiSelectPropertySchema { .. }
+        ))
     ));
 }
 
@@ -98,9 +108,8 @@ fn adapter_captures_initialize_form_capability_and_uses_the_real_scope_shape() {
     let mut capabilities = CapabilityCapture::default();
     assert!(!capabilities.form_available());
     let mut initialize = ClientCapabilities::default();
-    initialize.elicitation = Some(
-        ElicitationCapabilities::new().form(ElicitationFormCapabilities::new()),
-    );
+    initialize.elicitation =
+        Some(ElicitationCapabilities::new().form(ElicitationFormCapabilities::new()));
     capabilities.capture_initialize(&initialize);
     assert!(capabilities.form_available());
 
@@ -169,12 +178,12 @@ fn decline_and_cancel_are_distinct_failed_settlements() {
     let question = ItemId::new();
     for action in [ElicitationAction::Decline, ElicitationAction::Cancel] {
         let response = CreateElicitationResponse::new(action);
-        let result = AcpQuestionAdapter::validate_response(
-            question,
-            &free_text_request(),
-            &response,
-        )
-        .unwrap();
-        assert!(matches!(result, QuestionOutcome::Declined | QuestionOutcome::Cancelled));
+        let result =
+            AcpQuestionAdapter::validate_response(question, &free_text_request(), &response)
+                .unwrap();
+        assert!(matches!(
+            result,
+            QuestionOutcome::Declined | QuestionOutcome::Cancelled
+        ));
     }
 }

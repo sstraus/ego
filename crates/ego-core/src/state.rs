@@ -986,7 +986,8 @@ impl SessionState {
                 seq: seq.next(),
             })
             .collect();
-        self.question_sibling_closures.insert(turn, closures.clone());
+        self.question_sibling_closures
+            .insert(turn, closures.clone());
         Ok(QuestionSuspension { siblings, closures })
     }
 
@@ -1009,13 +1010,14 @@ impl SessionState {
     /// Incomplete effect calls excluding the pure call intentionally waiting
     /// on the pending question.
     pub fn torn_tool_errors(&self) -> Vec<ItemId> {
-        let pending_call = self.pending_question.as_ref().map(|pending| pending.tool_call);
+        let pending_call = self
+            .pending_question
+            .as_ref()
+            .map(|pending| pending.tool_call);
         self.items
             .iter()
             .filter_map(|(id, item)| {
-                (item.kind == ItemKind::ToolCall
-                    && !item.completed
-                    && Some(*id) != pending_call)
+                (item.kind == ItemKind::ToolCall && !item.completed && Some(*id) != pending_call)
                     .then_some(*id)
             })
             .collect()

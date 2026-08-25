@@ -14,9 +14,7 @@ use ego_core::generator::types::ThinkingLevel;
 
 use crate::model::GenerationSelection;
 use crate::repl::actions::{ActionId, ActionSink, LocalAction, LocalActionOutcome};
-use crate::repl::selector::{
-    Selector, SelectorKey, SelectorKind, SelectorOption, SelectorValue,
-};
+use crate::repl::selector::{Selector, SelectorKey, SelectorKind, SelectorOption, SelectorValue};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PickerOutcome {
@@ -69,13 +67,17 @@ pub struct ModelPickerRow {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PickerError {
     Closed,
-    UnknownModel { slug: String },
+    UnknownModel {
+        slug: String,
+    },
     Unavailable {
         slug: String,
         cause: ModelAvailabilityCause,
         message: String,
     },
-    UnknownReasoningSupport { slug: String },
+    UnknownReasoningSupport {
+        slug: String,
+    },
     UnsupportedReasoning {
         slug: String,
         thinking: ThinkingLevel,
@@ -108,7 +110,10 @@ impl std::fmt::Display for PickerError {
             Self::NoSelection => f.write_str("no model selection was made"),
             Self::NoSession => f.write_str("the model picker has no active session"),
             Self::SelectionRead(message) => {
-                write!(f, "the current model selection could not be read: {message}")
+                write!(
+                    f,
+                    "the current model selection could not be read: {message}"
+                )
             }
             Self::Persistence(error) => write!(f, "user defaults were not persisted: {error}"),
             Self::SessionInstall(message) => {
@@ -188,7 +193,11 @@ impl ModelPicker {
     }
 
     pub fn slugs(&self) -> Vec<ModelSlug> {
-        self.snapshot.models.iter().map(|row| row.slug.clone()).collect()
+        self.snapshot
+            .models
+            .iter()
+            .map(|row| row.slug.clone())
+            .collect()
     }
 
     pub fn reasoning_efforts(&self) -> Vec<ReasoningEffortSupport> {
@@ -216,12 +225,9 @@ impl ModelPicker {
 
     pub fn view(&self) -> ModelPickerView {
         let (focus, selector, selected_model, reasoning) = match &self.modal {
-            Some(ModalState::Model(selector)) => (
-                PickerFocus::Model,
-                Some(selector),
-                None,
-                Vec::new(),
-            ),
+            Some(ModalState::Model(selector)) => {
+                (PickerFocus::Model, Some(selector), None, Vec::new())
+            }
             Some(ModalState::Reasoning { model, selector }) => (
                 PickerFocus::Reasoning,
                 Some(selector),
@@ -308,8 +314,7 @@ impl ModelPicker {
                 let key = selector_key(input).ok_or(PickerError::NoSelection)?;
                 selector.key(key);
                 if let Some(commit) = commit {
-                    let Some(thinking) = selected_id(&selector)
-                        .and_then(|id| parse_thinking(&id))
+                    let Some(thinking) = selected_id(&selector).and_then(|id| parse_thinking(&id))
                     else {
                         self.modal = Some(ModalState::Reasoning { model, selector });
                         return Err(PickerError::NoSelection);
@@ -386,15 +391,15 @@ impl ModelPicker {
         let model = current.identity.0;
         let reasoning = self.reasoning_levels(&model)?;
         let mut selector = reasoning_selector(&reasoning);
-        if let Some(index) = reasoning.iter().position(|level| *level == current.thinking) {
+        if let Some(index) = reasoning
+            .iter()
+            .position(|level| *level == current.thinking)
+        {
             selector.key(SelectorKey::Number(index + 1));
         }
         self.open = true;
         self.chosen = None;
-        self.modal = Some(ModalState::Reasoning {
-            model,
-            selector,
-        });
+        self.modal = Some(ModalState::Reasoning { model, selector });
         self.diagnostic = None;
         Ok(())
     }

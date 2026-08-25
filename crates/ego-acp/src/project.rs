@@ -432,9 +432,7 @@ pub fn project_v1(event: &PublicEvent) -> Option<v1::SessionUpdate> {
             // cannot be represented without the accumulated content so far,
             // which a stateless per-event projection does not have.
             ItemKind::Tool => None,
-            ItemKind::UserMessage
-            | ItemKind::Permission
-            | ItemKind::Subagent => None,
+            ItemKind::UserMessage | ItemKind::Permission | ItemKind::Subagent => None,
             ItemKind::Question => None,
         },
 
@@ -468,9 +466,7 @@ pub fn project_v1(event: &PublicEvent) -> Option<v1::SessionUpdate> {
                         text.clone().unwrap_or_default(),
                     )]),
             ))),
-            ItemKind::Reasoning
-            | ItemKind::Permission
-            | ItemKind::Subagent => None,
+            ItemKind::Reasoning | ItemKind::Permission | ItemKind::Subagent => None,
             ItemKind::Question => None,
         },
 
@@ -530,9 +526,7 @@ pub fn project_v2(event: &PublicEvent) -> Option<v2::SessionUpdate> {
             ItemKind::Tool => Some(v2::SessionUpdate::ToolCallContentChunk(
                 v2::ToolCallContentChunk::new(item_id_string(*item), text.clone()),
             )),
-            ItemKind::UserMessage
-            | ItemKind::Permission
-            | ItemKind::Subagent => None,
+            ItemKind::UserMessage | ItemKind::Permission | ItemKind::Subagent => None,
             ItemKind::Question => None,
         },
 
@@ -561,9 +555,7 @@ pub fn project_v2(event: &PublicEvent) -> Option<v2::SessionUpdate> {
                     .status(tool_status_v2(*ok))
                     .content(vec![text.clone().unwrap_or_default().into()]),
             )),
-            ItemKind::Reasoning
-            | ItemKind::Permission
-            | ItemKind::Subagent => None,
+            ItemKind::Reasoning | ItemKind::Permission | ItemKind::Subagent => None,
             ItemKind::Question => None,
         },
 

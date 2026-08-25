@@ -394,11 +394,13 @@ impl SurfaceSnapshot {
                 self.queue.pending_steers, self.queue.queued
             ))),
             StatusSegmentName::Drafts => Some(SegmentValue::text(self.drafts.to_string())),
-            StatusSegmentName::Interrupt => Some(SegmentValue::text(if self.queue.interrupt_pending {
-                "yes"
-            } else {
-                "no"
-            })),
+            StatusSegmentName::Interrupt => {
+                Some(SegmentValue::text(if self.queue.interrupt_pending {
+                    "yes"
+                } else {
+                    "no"
+                }))
+            }
             StatusSegmentName::Cwd => Some(SegmentValue::text(&self.cwd)),
             StatusSegmentName::Git => self
                 .git

@@ -7,13 +7,13 @@
 use ego_core::event::domain::{DomainEvent, Envelope, EventKind};
 use ego_core::event::id::{EventId, ItemId, Producer, Seq, TurnId};
 use ego_core::event::time::Timestamp;
-use ego_core::public::{project_public, ItemKind, PublicEvent, PUBLIC_EVENT_VERSION};
-use ego_core::run::RunTermination;
-use ego_core::state::SessionState;
-use ego_core::store::codec::CODEC_VERSION;
+use ego_core::public::{ItemKind, PUBLIC_EVENT_VERSION, PublicEvent, project_public};
 use ego_core::question::{
     QuestionAnswer, QuestionMode, QuestionOption, QuestionOutcome, QuestionRequest,
 };
+use ego_core::run::RunTermination;
+use ego_core::state::SessionState;
+use ego_core::store::codec::CODEC_VERSION;
 
 fn request(mode: QuestionMode, options: &[(&str, &str)], free_text: bool) -> QuestionRequest {
     QuestionRequest::new(
@@ -54,11 +54,21 @@ fn event(
 
 #[test]
 fn request_validation_covers_modes_options_ids_and_free_text() {
-    assert!(request(QuestionMode::Single, &[("yes", "Yes")], false).validate().is_ok());
-    assert!(request(QuestionMode::Multiple, &[("a", "A"), ("b", "B")], false)
-        .validate()
-        .is_ok());
-    assert!(request(QuestionMode::FreeText, &[], true).validate().is_ok());
+    assert!(
+        request(QuestionMode::Single, &[("yes", "Yes")], false)
+            .validate()
+            .is_ok()
+    );
+    assert!(
+        request(QuestionMode::Multiple, &[("a", "A"), ("b", "B")], false)
+            .validate()
+            .is_ok()
+    );
+    assert!(
+        request(QuestionMode::FreeText, &[], true)
+            .validate()
+            .is_ok()
+    );
 
     for invalid in [
         QuestionRequest::new("", QuestionMode::Single, vec![], false),
@@ -66,7 +76,10 @@ fn request_validation_covers_modes_options_ids_and_free_text() {
         QuestionRequest::new(
             "prompt",
             QuestionMode::Single,
-            vec![QuestionOption::new("same", "one"), QuestionOption::new("same", "two")],
+            vec![
+                QuestionOption::new("same", "one"),
+                QuestionOption::new("same", "two"),
+            ],
             false,
         ),
         QuestionRequest::new(
@@ -226,7 +239,10 @@ fn requested_unsettled_recovery_stays_pending_and_is_not_torn_history() {
     let mut state = SessionState::default();
     state.apply(&requested);
     let rebuilt = SessionState::replay([requested]);
-    assert_eq!(rebuilt.pending_question().map(|q| q.item_id()), Some(question));
+    assert_eq!(
+        rebuilt.pending_question().map(|q| q.item_id()),
+        Some(question)
+    );
     assert!(rebuilt.torn_tool_errors().is_empty());
     assert!(rebuilt.refuse_new_prompt(turn).is_err());
     assert!(state.pending_question().is_some());
@@ -248,8 +264,7 @@ fn valid_resume_settles_the_same_turn_and_completes_the_pure_tool_result() {
             tool_call: ItemId::new(),
         },
     ));
-    let answer = QuestionAnswer::from_json(&request, r#""yes""#)
-        .expect("canonical answer grammar");
+    let answer = QuestionAnswer::from_json(&request, r#""yes""#).expect("canonical answer grammar");
     let continuation = state
         .resume_question(question, answer)
         .expect("pending question is resumable");
@@ -307,11 +322,11 @@ fn public_question_item_and_headless_report_are_structured_and_versioned() {
 
 #[test]
 fn question_tool_is_human_input_not_an_effect_and_has_no_permission_op() {
-    use std::sync::Arc;
     use ego_core::question::{Elicitor, ElicitorError, HumanInputTool};
     use ego_core::turn::RegisteredTool;
     use futures::future::BoxFuture;
     use serde_json::Value;
+    use std::sync::Arc;
 
     struct FakeHumanInput;
     impl HumanInputTool for FakeHumanInput {
@@ -320,7 +335,8 @@ fn question_tool_is_human_input_not_an_effect_and_has_no_permission_op() {
         }
 
         fn parse(&self, raw: Value) -> Result<QuestionRequest, String> {
-            let request: QuestionRequest = serde_json::from_value(raw).map_err(|err| err.to_string())?;
+            let request: QuestionRequest =
+                serde_json::from_value(raw).map_err(|err| err.to_string())?;
             request.validate().map_err(|err| err.to_string())?;
             Ok(request)
         }
@@ -360,7 +376,16 @@ fn question_tool_is_human_input_not_an_effect_and_has_no_permission_op() {
 
 #[test]
 fn question_outcomes_are_explicit_and_unavailable_never_infers_an_answer() {
-    assert!(matches!(QuestionOutcome::Declined, QuestionOutcome::Declined));
-    assert!(matches!(QuestionOutcome::Cancelled, QuestionOutcome::Cancelled));
-    assert!(matches!(QuestionOutcome::Unavailable, QuestionOutcome::Unavailable));
+    assert!(matches!(
+        QuestionOutcome::Declined,
+        QuestionOutcome::Declined
+    ));
+    assert!(matches!(
+        QuestionOutcome::Cancelled,
+        QuestionOutcome::Cancelled
+    ));
+    assert!(matches!(
+        QuestionOutcome::Unavailable,
+        QuestionOutcome::Unavailable
+    ));
 }

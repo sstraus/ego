@@ -7,9 +7,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use support::{
-    Ego, Plan, Reply, Stub, gated_paced_tool_call_line, paced, text, tool_call,
-};
+use support::{Ego, Plan, Reply, Stub, gated_paced_tool_call_line, paced, text, tool_call};
 
 // portable-pty transports bytes but does not emulate a terminal. Keep the
 // reported cursor inside both 80x24 and 12x8; painter geometry is proven by
@@ -251,11 +249,7 @@ fn until_normalized_or_generation(
     }
 }
 
-fn until_post_trust_prompt(
-    receiver: &mpsc::Receiver<Vec<u8>>,
-    output: &mut Vec<u8>,
-    start: usize,
-) {
+fn until_post_trust_prompt(receiver: &mpsc::Receiver<Vec<u8>>, output: &mut Vec<u8>, start: usize) {
     loop {
         let suffix = &output[start..];
         let Some(query) = suffix
@@ -788,7 +782,10 @@ fn live_surface_meta_p_and_model_slash_share_one_modal_and_paste_stays_prompt() 
     input.flush().expect("bare slash flush");
     until_normalized(&reader, &mut output, menu_start, "help");
     let menu = normalized(&output[menu_start..]);
-    assert!(menu.contains("help"), "bare typed slash opens the action menu");
+    assert!(
+        menu.contains("help"),
+        "bare typed slash opens the action menu"
+    );
     let menu_close_start = output.len();
     input.write_all(b"\x1b").expect("close slash menu");
     input.flush().expect("close slash menu flush");
@@ -799,12 +796,7 @@ fn live_surface_meta_p_and_model_slash_share_one_modal_and_paste_stays_prompt() 
         .write_all(b"\x1b[200~/model\x1b[201~\r")
         .expect("pasted slash");
     input.flush().expect("pasted slash flush");
-    until_normalized(
-        &reader,
-        &mut output,
-        pasted_start,
-        "PASTED-SLASH-PROMPT",
-    );
+    until_normalized(&reader, &mut output, pasted_start, "PASTED-SLASH-PROMPT");
     assert!(
         !normalized(&output[pasted_start..]).contains("Select model"),
         "pasted slash text stays a prompt instead of opening the picker"
@@ -817,11 +809,14 @@ fn live_surface_meta_p_and_model_slash_share_one_modal_and_paste_stays_prompt() 
         .write_all(b"draft restored after picker")
         .expect("type modal draft");
     input.flush().expect("type modal draft flush");
-    until_from(&reader, &mut output, draft_start, b"draft restored after picker");
+    until_from(
+        &reader,
+        &mut output,
+        draft_start,
+        b"draft restored after picker",
+    );
     let draft_modal_start = output.len();
-    input
-        .write_all(b"\x1b[112;33u")
-        .expect("Meta-P with draft");
+    input.write_all(b"\x1b[112;33u").expect("Meta-P with draft");
     input.flush().expect("Meta-P with draft flush");
     until_normalized(&reader, &mut output, draft_modal_start, "Select model");
     let draft_close_start = output.len();
@@ -939,7 +934,9 @@ fn live_surface_native_questions_cover_single_multiple_and_free_text() {
     let idle_start = output.len();
     until_from(&reader, &mut output, idle_start, b"> ");
 
-    input.write_all(b"ask questions\r").expect("question prompt");
+    input
+        .write_all(b"ask questions\r")
+        .expect("question prompt");
     input.flush().expect("question prompt flush");
     until_normalized(&reader, &mut output, idle_start, "Single question");
     let single_choice_start = output.len();
@@ -958,12 +955,7 @@ fn live_surface_native_questions_cover_single_multiple_and_free_text() {
     let multiple_first_start = output.len();
     input.write_all(b"1").expect("multiple first selection");
     input.flush().expect("multiple first selection flush");
-    until_from(
-        &reader,
-        &mut output,
-        multiple_first_start,
-        b"> [x] 1. Red",
-    );
+    until_from(&reader, &mut output, multiple_first_start, b"> [x] 1. Red");
     let multiple_second_start = output.len();
     input.write_all(b"2").expect("multiple second selection");
     input.flush().expect("multiple second selection flush");
@@ -987,7 +979,11 @@ fn live_surface_native_questions_cover_single_multiple_and_free_text() {
     until_normalized(&reader, &mut output, idle_start, "QUESTIONS-DONE");
 
     let generations = stub.generations();
-    assert_eq!(generations.len(), 4, "each answer resumes the same live turn");
+    assert_eq!(
+        generations.len(),
+        4,
+        "each answer resumes the same live turn"
+    );
     assert!(
         generations
             .iter()

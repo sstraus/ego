@@ -53,8 +53,8 @@ pub use control::{
     ControlError, InteractiveControl, InteractiveIngress, QueueStatus, interactive_control,
 };
 pub use journal::Journal;
-pub use tools::Tools;
 use tools::PreparedToolCall;
+pub use tools::Tools;
 
 /// The final model-visible registry. Only `Effect` enters preparation,
 /// permission policy, and guarded I/O; human input crosses its own typed port.
@@ -529,11 +529,7 @@ impl<'a> TurnLoop<'a> {
                 continuation
             }
             Err(crate::question::QuestionError::AlreadySettled) => {
-                let continuation = match self
-                    .journal
-                    .state()
-                    .complete_settled_question(question)
-                {
+                let continuation = match self.journal.state().complete_settled_question(question) {
                     Ok(continuation) => continuation,
                     Err(error) => {
                         let turn = self
@@ -575,10 +571,7 @@ impl<'a> TurnLoop<'a> {
                         .state()
                         .pending_question()
                         .map_or_else(TurnId::new, |pending| pending.turn()),
-                    StoreError::Io(std::io::Error::new(
-                        std::io::ErrorKind::InvalidInput,
-                        error,
-                    )),
+                    StoreError::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, error)),
                 ));
             }
         };
@@ -856,20 +849,14 @@ impl<'a> TurnLoop<'a> {
                         )?;
                         if let Some(cause) = self.cancel.cause() {
                             self.close_unstarted_siblings(turn, &pending[index + 1..])?;
-                            return Ok(DriveOutcome::Ended(
-                                ExitReason::Cancelled(cause),
-                                None,
-                            ));
+                            return Ok(DriveOutcome::Ended(ExitReason::Cancelled(cause), None));
                         }
                         continue;
                     }
                     ToolOutcome::Recorded => {
                         if let Some(cause) = self.cancel.cause() {
                             self.close_unstarted_siblings(turn, &pending[index + 1..])?;
-                            return Ok(DriveOutcome::Ended(
-                                ExitReason::Cancelled(cause),
-                                None,
-                            ));
+                            return Ok(DriveOutcome::Ended(ExitReason::Cancelled(cause), None));
                         }
                         continue;
                     }
@@ -1950,13 +1937,11 @@ impl<'a> TurnLoop<'a> {
                                             tool: request.tool().to_string(),
                                         },
                                     )?;
-                                    prepared = match self
-                                        .tools
-                                        .prepare_amendment(tool.as_ref(), params)
-                                    {
-                                        Ok(prepared) => prepared,
-                                        Err(refusal) => return Ok(answered(false, refusal)),
-                                    };
+                                    prepared =
+                                        match self.tools.prepare_amendment(tool.as_ref(), params) {
+                                            Ok(prepared) => prepared,
+                                            Err(refusal) => return Ok(answered(false, refusal)),
+                                        };
                                 }
                                 Resolution::Settled(result) => match result {
                                     Ok(authorized) => {
@@ -1988,10 +1973,7 @@ impl<'a> TurnLoop<'a> {
                                     tool: request.tool().to_string(),
                                 },
                             )?;
-                            prepared = match self
-                                .tools
-                                .prepare_amendment(tool.as_ref(), params)
-                            {
+                            prepared = match self.tools.prepare_amendment(tool.as_ref(), params) {
                                 Ok(prepared) => prepared,
                                 Err(refusal) => return Ok(answered(false, refusal)),
                             };

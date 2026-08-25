@@ -6,10 +6,9 @@ use std::sync::Arc;
 
 use agent_client_protocol::{Client, ConnectionTo};
 use agent_client_protocol_schema::v1::{
-    ClientCapabilities, CreateElicitationRequest, CreateElicitationResponse,
-    ElicitationAction, ElicitationContentValue, ElicitationFormMode,
-    ElicitationRequestScope, ElicitationSchema, MultiSelectPropertySchema, RequestId,
-    StringPropertySchema,
+    ClientCapabilities, CreateElicitationRequest, CreateElicitationResponse, ElicitationAction,
+    ElicitationContentValue, ElicitationFormMode, ElicitationRequestScope, ElicitationSchema,
+    MultiSelectPropertySchema, RequestId, StringPropertySchema,
 };
 use ego_core::event::id::ItemId;
 use ego_core::question::{
@@ -103,24 +102,29 @@ impl AcpQuestionAdapter {
         question: ItemId,
         request: &QuestionRequest,
     ) -> Result<CreateElicitationRequest, QuestionMappingError> {
-        request.validate().map_err(|error| invalid_request(question, error))?;
+        request
+            .validate()
+            .map_err(|error| invalid_request(question, error))?;
         let schema = match request.mode {
             QuestionMode::Single => ElicitationSchema::new().property(
                 "answer",
-                StringPropertySchema::new()
-                    .enum_values(
-                        request
-                            .options
-                            .iter()
-                            .map(|option| option.id.clone())
-                            .collect::<Vec<_>>(),
-                    ),
+                StringPropertySchema::new().enum_values(
+                    request
+                        .options
+                        .iter()
+                        .map(|option| option.id.clone())
+                        .collect::<Vec<_>>(),
+                ),
                 true,
             ),
             QuestionMode::Multiple => ElicitationSchema::new().property(
                 "answers",
                 MultiSelectPropertySchema::new(
-                    request.options.iter().map(|option| option.id.clone()).collect(),
+                    request
+                        .options
+                        .iter()
+                        .map(|option| option.id.clone())
+                        .collect(),
                 ),
                 true,
             ),
@@ -140,10 +144,9 @@ impl AcpQuestionAdapter {
     ) -> Result<QuestionOutcome, QuestionMappingError> {
         let outcome = match &response.action {
             ElicitationAction::Accept(accepted) => {
-                let content = accepted.content.as_ref().ok_or_else(|| invalid_answer(
-                    question,
-                    "accepted elicitation has no content",
-                ))?;
+                let content = accepted.content.as_ref().ok_or_else(|| {
+                    invalid_answer(question, "accepted elicitation has no content")
+                })?;
                 let answer = match request.mode {
                     QuestionMode::Single => match content.get("answer") {
                         Some(ElicitationContentValue::String(value)) => {
@@ -159,7 +162,7 @@ impl AcpQuestionAdapter {
                             return Err(invalid_answer(
                                 question,
                                 "`answers` must be an array of strings",
-                            ))
+                            ));
                         }
                     },
                     QuestionMode::FreeText => match content.get("answer") {
@@ -177,13 +180,13 @@ impl AcpQuestionAdapter {
             ElicitationAction::Decline => QuestionOutcome::Declined,
             ElicitationAction::Cancel => QuestionOutcome::Cancelled,
             ElicitationAction::Other(_) => {
-                return Err(invalid_answer(question, "unsupported elicitation action"))
+                return Err(invalid_answer(question, "unsupported elicitation action"));
             }
             _ => {
                 return Err(invalid_answer(
                     question,
                     "elicitation action is not supported by the pinned ACP contract",
-                ))
+                ));
             }
         };
         Ok(outcome)

@@ -7,21 +7,21 @@ use ego_ai::catalogue::{
     ModelCatalogueSnapshot, ModelCatalogueSourceStatus, ModelFactProvenance, ModelSlug,
     SuppliedAuthority,
 };
-use ego_core::config::{
-    ConfigLayer, ModelRef, Source, UserConfigError, UserConfigMutation, UserConfigPublication,
-    UserConfigStore,
-};
-use ego_core::generator::capabilities::{
-    CacheRetention, CancelSemantics, ModelCapabilities, ReasoningCarryover,
-    ReasoningEffortSupport, Transport,
-};
-use ego_core::generator::types::ThinkingLevel;
-use ego_core::public::MeteringKind;
 use ego_cli::model::GenerationSelection;
 use ego_cli::model_picker::{
     ModelPicker, PickerError, PickerFocus, PickerInput, PickerInputOutcome, PickerOutcome,
 };
 use ego_cli::repl::actions::{ActionId, ActionSink, LocalAction, LocalActionOutcome};
+use ego_core::config::{
+    ConfigLayer, ModelRef, Source, UserConfigError, UserConfigMutation, UserConfigPublication,
+    UserConfigStore,
+};
+use ego_core::generator::capabilities::{
+    CacheRetention, CancelSemantics, ModelCapabilities, ReasoningCarryover, ReasoningEffortSupport,
+    Transport,
+};
+use ego_core::generator::types::ThinkingLevel;
+use ego_core::public::MeteringKind;
 
 fn capabilities() -> ModelCapabilities {
     ModelCapabilities {
@@ -73,8 +73,18 @@ fn catalogue() -> Arc<ModelCatalogueSnapshot> {
     let ollama = ModelFactProvenance::discovered("ollama");
     Arc::new(ModelCatalogueSnapshot::from_entries_and_sources(
         vec![
-            entry("openai/gpt-5.6", openai.clone(), MeteringKind::Currency, ModelAvailability::Available),
-            entry("ollama/qwen3", ollama.clone(), MeteringKind::Unmetered, ModelAvailability::Available),
+            entry(
+                "openai/gpt-5.6",
+                openai.clone(),
+                MeteringKind::Currency,
+                ModelAvailability::Available,
+            ),
+            entry(
+                "ollama/qwen3",
+                ollama.clone(),
+                MeteringKind::Unmetered,
+                ModelAvailability::Available,
+            ),
         ],
         vec![
             source("openai", openai, ModelAvailability::Available),
@@ -119,11 +129,7 @@ fn selection() -> Arc<GenerationSelection> {
     ))
 }
 
-fn assert_selection(
-    selection: &GenerationSelection,
-    model: &str,
-    thinking: ThinkingLevel,
-) {
+fn assert_selection(selection: &GenerationSelection, model: &str, thinking: ThinkingLevel) {
     let snapshot = selection
         .snapshot()
         .expect("the shared generation selection is readable");
@@ -190,11 +196,19 @@ fn picker_and_models_use_one_snapshot_identity_order_and_availability() {
     assert_eq!(picker.sources(), snapshot.sources.as_slice());
     assert_eq!(snapshot.v, 1);
     assert_eq!(
-        snapshot.models.iter().map(|row| row.slug.to_string()).collect::<Vec<_>>(),
+        snapshot
+            .models
+            .iter()
+            .map(|row| row.slug.to_string())
+            .collect::<Vec<_>>(),
         ["ollama/qwen3", "openai/gpt-5.6"],
     );
     assert_eq!(
-        snapshot.sources.iter().map(|source| source.provider.as_str()).collect::<Vec<_>>(),
+        snapshot
+            .sources
+            .iter()
+            .map(|source| source.provider.as_str())
+            .collect::<Vec<_>>(),
         ["ollama", "openai"],
     );
     assert!(snapshot.models.iter().all(|row| match row.availability {
@@ -208,18 +222,39 @@ fn picker_does_not_define_a_second_model_row_or_reorder_shared_entries() {
     let snapshot = catalogue();
     let picker = ModelPicker::new(Arc::clone(&snapshot));
     assert_eq!(picker.row_count(), snapshot.models.len());
-    assert_eq!(picker.slugs(), snapshot.models.iter().map(|row| row.slug.clone()).collect::<Vec<_>>());
-    assert_eq!(picker.reasoning_efforts(), snapshot.models.iter().map(|row| row.capabilities.reasoning_efforts.clone()).collect::<Vec<_>>());
+    assert_eq!(
+        picker.slugs(),
+        snapshot
+            .models
+            .iter()
+            .map(|row| row.slug.clone())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        picker.reasoning_efforts(),
+        snapshot
+            .models
+            .iter()
+            .map(|row| row.capabilities.reasoning_efforts.clone())
+            .collect::<Vec<_>>()
+    );
 }
 
 #[test]
 fn absent_thinking_flag_preserves_file_value_and_unknown_keys_fail_strictly() {
-    let file = ConfigLayer::parse(Source::User, "model = 'openai/gpt-5.6'\nthinking = 'high'\n").unwrap();
+    let file = ConfigLayer::parse(
+        Source::User,
+        "model = 'openai/gpt-5.6'\nthinking = 'high'\n",
+    )
+    .unwrap();
     let no_flag = ego_cli::config::flags_layer(None, None);
-    let effective = ego_core::config::resolve(&[file, no_flag], ego_core::config::Trust::Untrusted, None).unwrap();
+    let effective =
+        ego_core::config::resolve(&[file, no_flag], ego_core::config::Trust::Untrusted, None)
+            .unwrap();
     assert_eq!(effective.thinking, Some(ThinkingLevel::High));
 
-    let unknown = ConfigLayer::parse(Source::User, "model = 'openai/gpt-5.6'\nunknown = true\n").unwrap_err();
+    let unknown =
+        ConfigLayer::parse(Source::User, "model = 'openai/gpt-5.6'\nunknown = true\n").unwrap_err();
     assert!(unknown.to_string().contains("unknown"));
 }
 
@@ -260,7 +295,8 @@ fn escape_and_session_only_record_no_user_config_mutation() {
 fn enter_records_one_typed_mutation_then_installs_memory() {
     let store = RecordingUserConfigStore::new(Ok(UserConfigPublication::PublishedDurably));
     let selection = selection();
-    let mut picker = ModelPicker::for_selection(catalogue(), Arc::clone(&selection), Arc::new(store.clone()));
+    let mut picker =
+        ModelPicker::for_selection(catalogue(), Arc::clone(&selection), Arc::new(store.clone()));
     choose_openai_high(&mut picker);
     assert_eq!(
         picker.input(PickerInput::Enter).unwrap(),
@@ -268,43 +304,45 @@ fn enter_records_one_typed_mutation_then_installs_memory() {
             UserConfigPublication::PublishedDurably,
         ))
     );
-    assert_eq!(store.mutations(), vec![UserConfigMutation::ModelAndThinking {
-        model: "openai/gpt-5.6".into(),
-        thinking: ThinkingLevel::High,
-    }]);
+    assert_eq!(
+        store.mutations(),
+        vec![UserConfigMutation::ModelAndThinking {
+            model: "openai/gpt-5.6".into(),
+            thinking: ThinkingLevel::High,
+        }]
+    );
     assert_selection(&selection, "openai/gpt-5.6", ThinkingLevel::High);
 }
 
 #[test]
 fn failed_enter_records_the_typed_mutation_but_keeps_memory_unchanged() {
-    let store = RecordingUserConfigStore::new(Err(UserConfigError::new(
-        "injected pre-publish failure",
-    )));
+    let store =
+        RecordingUserConfigStore::new(Err(UserConfigError::new("injected pre-publish failure")));
     let selection = selection();
-    let mut picker = ModelPicker::for_selection(catalogue(), Arc::clone(&selection), Arc::new(store.clone()));
+    let mut picker =
+        ModelPicker::for_selection(catalogue(), Arc::clone(&selection), Arc::new(store.clone()));
     choose_openai_high(&mut picker);
     let _error = picker.input(PickerInput::Enter).unwrap_err();
-    assert_eq!(store.mutations(), vec![UserConfigMutation::ModelAndThinking {
-        model: "openai/gpt-5.6".into(),
-        thinking: ThinkingLevel::High,
-    }]);
+    assert_eq!(
+        store.mutations(),
+        vec![UserConfigMutation::ModelAndThinking {
+            model: "openai/gpt-5.6".into(),
+            thinking: ThinkingLevel::High,
+        }]
+    );
     assert_selection(&selection, "openai/gpt-5.6", ThinkingLevel::Medium);
 }
 
 #[test]
 fn uncertain_publication_installs_memory_and_preserves_diagnostic() {
     let diagnostic = "directory barrier did not complete";
-    let store = RecordingUserConfigStore::new(Ok(
-        UserConfigPublication::PublishedDurabilityUncertain {
+    let store =
+        RecordingUserConfigStore::new(Ok(UserConfigPublication::PublishedDurabilityUncertain {
             diagnostic: diagnostic.into(),
-        },
-    ));
+        }));
     let selection = selection();
-    let mut picker = ModelPicker::for_selection(
-        catalogue(),
-        Arc::clone(&selection),
-        Arc::new(store.clone()),
-    );
+    let mut picker =
+        ModelPicker::for_selection(catalogue(), Arc::clone(&selection), Arc::new(store.clone()));
     choose_openai_high(&mut picker);
 
     assert_eq!(
@@ -351,11 +389,8 @@ fn action_sink_opener_is_single_flight_and_reopens_after_escape() {
 fn thinking_action_opens_current_model_and_current_effort() {
     let store = RecordingUserConfigStore::new(Ok(UserConfigPublication::PublishedDurably));
     let selection = selection();
-    let mut picker = ModelPicker::for_selection(
-        catalogue(),
-        Arc::clone(&selection),
-        Arc::new(store.clone()),
-    );
+    let mut picker =
+        ModelPicker::for_selection(catalogue(), Arc::clone(&selection), Arc::new(store.clone()));
     assert_eq!(
         ActionSink::invoke(
             &mut picker,
@@ -402,10 +437,7 @@ fn repeated_model_and_thinking_actions_are_in_flight_while_picker_is_open() {
     );
     for id in [ActionId::Model, ActionId::Thinking] {
         assert_eq!(
-            ActionSink::invoke(
-                &mut picker,
-                LocalAction { id, busy: false },
-            ),
+            ActionSink::invoke(&mut picker, LocalAction { id, busy: false },),
             LocalActionOutcome::InFlight
         );
     }
@@ -454,7 +486,10 @@ fn thinking_refuses_closed_with_typed_unavailable_diagnostic() {
 fn thinking_refuses_closed_with_typed_unknown_effort_diagnostic() {
     let selection = selection();
     let mut picker = ModelPicker::for_selection(
-        catalogue_with_openai(ModelAvailability::Available, ReasoningEffortSupport::Unknown),
+        catalogue_with_openai(
+            ModelAvailability::Available,
+            ReasoningEffortSupport::Unknown,
+        ),
         selection,
         Arc::new(RecordingUserConfigStore::new(Ok(
             UserConfigPublication::PublishedDurably,

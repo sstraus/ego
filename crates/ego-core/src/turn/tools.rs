@@ -133,8 +133,9 @@ impl<'a> Tools<'a> {
             .iter()
             .find(|registered| registered.descriptor().name == name)
             .ok_or_else(|| format!("there is no tool named {name}"))?;
-        let params = serde_json::from_str(args)
-            .map_err(|error| format!("{name} was called with arguments that are not JSON: {error}"))?;
+        let params = serde_json::from_str(args).map_err(|error| {
+            format!("{name} was called with arguments that are not JSON: {error}")
+        })?;
         match registered {
             RegisteredTool::Effect(tool) => Ok(PreparedToolCall::Effect {
                 tool: std::sync::Arc::clone(tool),
