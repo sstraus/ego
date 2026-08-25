@@ -444,9 +444,7 @@ fn post_rename_durability_uncertainty_publishes_target_and_forbids_retry() {
         .publish_compaction_seed(&seed(SessionId::new(), seq(8)));
     assert!(matches!(
         publication,
-        CompactionPublication::PublishedDurabilityUncertain {
-            diagnostic: ref diagnostic,
-        }
+        CompactionPublication::PublishedDurabilityUncertain { ref diagnostic }
             if diagnostic.contains("parent directory barrier failed")
     ));
     assert!(publication.switch_target());

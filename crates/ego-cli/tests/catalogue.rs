@@ -82,6 +82,7 @@ fn meta(last: u8, workspace: &str, updated: u64) -> SessionMeta {
         created: Timestamp::from_millis(1_000),
         updated: Timestamp::from_millis(updated),
         title: None,
+        lineage: None,
     }
 }
 
