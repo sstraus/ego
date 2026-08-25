@@ -9,7 +9,7 @@
 use std::io::{ErrorKind, Write};
 use std::sync::Mutex;
 
-use ego_core::cost::CumulativeCost;
+use ego_core::cost::{CumulativeCost, RateSource};
 use ego_core::event::domain::{CancelCause, OccupancyProvenance};
 use ego_core::event::id::SessionId;
 use ego_core::permit::Authority;
@@ -250,11 +250,13 @@ pub struct TextSink<'a> {
     /// decides whether a newline is owed, and two locks would let a tool note
     /// interleave between the write and the bookkeeping about it.
     text: Mutex<Streaming>,
-    /// The last ceiling effect this sink announced, so a per-generation event
-    /// does not repeat one warning per generation. See [`ceiling_note`].
+    /// The last ceiling and rate source this sink considered, so a
+    /// per-generation event does not repeat one warning per generation while
+    /// a change in the evidence behind the ceiling remains visible. See
+    /// [`ceiling_note`].
     ///
     /// [`ceiling_note`]: TextSink::ceiling_note
-    ceiling: Mutex<Option<CeilingEffect>>,
+    ceiling: Mutex<Option<(CeilingEffect, RateSource)>>,
 }
 
 /// The state of the answer currently being written.
@@ -290,19 +292,33 @@ impl<'a> TextSink<'a> {
     ///
     /// Money is rendered `{amount}{currency}` — the spelling `--budget` itself
     /// accepts — so the figure quoted back can be retyped.
-    fn ceiling_note(effect: &CeilingEffect) -> Option<String> {
+    fn ceiling_note(effect: &CeilingEffect, rates: &RateSource) -> Option<String> {
+        let table_risk = match (effect, rates) {
+            (CeilingEffect::Binds { .. }, RateSource::Table { revision }) => Some(format!(
+                "this budget is enforced using a cached third-party pricing table ({revision}); \
+                 stale rates can make the ceiling too low or let the real provider charge exceed it",
+                revision = revision.0
+            )),
+            _ => None,
+        };
         match effect {
             CeilingEffect::None => None,
             CeilingEffect::Binds {
                 clamped_from: None, ..
-            } => None,
+            } => table_risk,
             CeilingEffect::Binds {
                 limit,
                 clamped_from: Some(asked),
-            } => Some(format!(
-                "the budget of {}{} was reduced to {}{} by a system ceiling",
-                asked.amount, asked.currency, limit.amount, limit.currency
-            )),
+            } => {
+                let clamp = format!(
+                    "the budget of {}{} was reduced to {}{} by a system ceiling",
+                    asked.amount, asked.currency, limit.amount, limit.currency
+                );
+                Some(match table_risk {
+                    Some(risk) => format!("{clamp}; {risk}"),
+                    None => clamp,
+                })
+            }
             // A token budget is unaffected and constrains such a row exactly as
             // it constrains any other, which is what the operator should reach
             // for — so the note says so rather than only reporting the loss.
@@ -389,7 +405,7 @@ impl EventSink for TextSink<'_> {
             // progress" — and a guarantee the operator asked for and did not
             // get is not progress. Suppressing it would put the flag's silence
             // back exactly where this arm removes it from.
-            PublicEvent::MeteringSelected { ceiling, .. } => {
+            PublicEvent::MeteringSelected { ceiling, rates, .. } => {
                 let mut last = self
                     .ceiling
                     .lock()
@@ -400,11 +416,11 @@ impl EventSink for TextSink<'_> {
                 // the budget binds. Repeating the identical warning for every
                 // generation of a long run would be noise; dropping the second
                 // one when it says something new would be the original bug.
-                if last.as_ref() == Some(ceiling) {
+                if last.as_ref() == Some(&(ceiling.clone(), rates.clone())) {
                     return;
                 }
-                let message = Self::ceiling_note(ceiling);
-                *last = Some(ceiling.clone());
+                let message = Self::ceiling_note(ceiling, rates);
+                *last = Some((ceiling.clone(), rates.clone()));
                 drop(last);
                 if let Some(message) = message {
                     self.finish();
