@@ -530,7 +530,7 @@ fn exec_tool_preparation_policy_authorization_and_guarded_execution_preserve_ide
     assert_eq!(authorized.call().tool, "exec");
     assert_eq!(authorized.call().ops.len(), 1);
     assert!(format!("{:?}", authorized.call()).contains("composite literal * ; $(false)"));
-    let result = block_on(tools.execute(tool, authorized)).unwrap();
+    let result = block_on(tools.execute(tool.as_ref(), authorized)).unwrap();
     let debug = format!("{result:?}");
     assert!(debug.contains("composite literal * ; $(false)"));
 }
