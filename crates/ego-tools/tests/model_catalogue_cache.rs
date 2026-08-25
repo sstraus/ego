@@ -45,6 +45,28 @@ fn lease_serializes_refresh_and_is_held_across_baseline_read_and_publish() {
 }
 
 #[test]
+fn a_lease_from_another_cache_path_cannot_publish() {
+    let io = MemoryIo::default();
+    let home_a = tempfile::tempdir().unwrap();
+    let home_b = tempfile::tempdir().unwrap();
+    let cache_a = ModelCatalogueCache::new(&io, home_a.path());
+    let cache_b = ModelCatalogueCache::new(&io, home_b.path());
+    let lease_a = cache_a
+        .lease(
+            Timestamp::from_millis(1),
+            std::process::id(),
+            &|pid| pid == std::process::id(),
+        )
+        .unwrap();
+
+    let error = cache_b
+        .publish_under_lease(&lease_a, b"must-not-publish")
+        .unwrap_err();
+    assert!(matches!(error, CacheError::WrongLease { .. }));
+    assert_eq!(cache_b.read_bytes().unwrap(), None);
+}
+
+#[test]
 fn failed_atomic_publish_preserves_the_previous_opaque_bytes() {
     let io = MemoryIo::default();
     let home = tempfile::tempdir().unwrap();

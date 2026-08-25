@@ -8,6 +8,7 @@ pub mod clock;
 pub mod exec;
 pub mod fs;
 pub mod instructions;
+pub mod model_catalogue_cache;
 pub mod pricing;
 pub mod store;
 pub mod tools;
