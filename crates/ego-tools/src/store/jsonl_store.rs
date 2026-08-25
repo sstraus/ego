@@ -698,8 +698,8 @@ impl JsonlStore {
                 }),
                 _ => previous
                     .as_ref()
-                    .and_then(|manifest| manifest.meta.lineage.clone())
-                    .or_else(|| log_facts.as_ref().and_then(|facts| facts.lineage.clone())),
+                    .and_then(|manifest| manifest.meta.lineage)
+                    .or_else(|| log_facts.as_ref().and_then(|facts| facts.lineage)),
             },
         };
         let execution = match &ev.kind {
