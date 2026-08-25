@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use ego_ai::catalogue::{FactFreshness, ModelAvailability};
+use ego_ai::catalogue::{FactFreshness, ModelAvailability, ModelAvailabilityCause};
 use ego_core::config::{ConfigLayer, ModelRef, Source};
 use ego_core::generator::types::ThinkingLevel;
 use ego_cli::model::GenerationSelection;
@@ -111,10 +111,11 @@ fn every_generation_reresolves_selected_slug_against_current_catalogue_authority
     unavailable
         .models
         .iter_mut()
-        .find(|row| row.slug == "ollama/qwen3")
+        .find(|row| row.slug.to_string() == "ollama/qwen3")
         .expect("catalogue fixture includes ollama/qwen3")
         .availability = ModelAvailability::Unavailable {
-        reason: "provider unavailable".into(),
+        cause: ModelAvailabilityCause::SourceUnreachable,
+        message: "provider unavailable".into(),
     };
     picker.replace_snapshot(unavailable);
     let second = picker.generation_boundary_resolution();
