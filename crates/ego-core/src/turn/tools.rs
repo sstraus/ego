@@ -17,6 +17,16 @@ use crate::store::evidence::EvidenceStore;
 
 use super::RegisteredTool;
 
+/// A model call after the mixed registry has selected its typed boundary.
+/// Human input never acquires an effect tool or enters permission policy.
+pub(crate) enum PreparedToolCall {
+    Effect {
+        tool: std::sync::Arc<dyn Tool>,
+        call: PreparedCall,
+    },
+    HumanInput(crate::question::QuestionRequest),
+}
+
 /// Everything the loop needs to turn a model's tool call into an effect.
 pub struct Tools<'a> {
     registry: Vec<RegisteredTool>,
@@ -111,23 +121,29 @@ impl<'a> Tools<'a> {
         Ok((tool, call))
     }
 
-    /// Parse a human-input call without admitting it to effect preparation or
-    /// permission policy.
-    pub fn parse_human_input(
+    /// Select and parse one call through the variant registered for its
+    /// descriptor. This is the sole mixed-registry dispatch point.
+    pub(crate) fn prepare_registered(
         &self,
         name: &str,
         args: &str,
-    ) -> Result<crate::question::QuestionRequest, String> {
-        let tool = self
+    ) -> Result<PreparedToolCall, String> {
+        let registered = self
             .registry
             .iter()
-            .filter_map(RegisteredTool::as_human_input)
-            .find(|tool| tool.descriptor().name == name)
-            .ok_or_else(|| format!("there is no human-input tool named {name}"))?;
-        let params = serde_json::from_str(args).map_err(|error| {
-            format!("{name} was called with arguments that are not JSON: {error}")
-        })?;
-        tool.parse(params)
+            .find(|registered| registered.descriptor().name == name)
+            .ok_or_else(|| format!("there is no tool named {name}"))?;
+        let params = serde_json::from_str(args)
+            .map_err(|error| format!("{name} was called with arguments that are not JSON: {error}"))?;
+        match registered {
+            RegisteredTool::Effect(tool) => Ok(PreparedToolCall::Effect {
+                tool: std::sync::Arc::clone(tool),
+                call: self.prepare_params(tool.as_ref(), params)?,
+            }),
+            RegisteredTool::HumanInput(tool) => {
+                tool.parse(params).map(PreparedToolCall::HumanInput)
+            }
+        }
     }
 
     /// Prepare raw parameters supplied by the human amendment path.

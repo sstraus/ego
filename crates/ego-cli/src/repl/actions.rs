@@ -1,6 +1,7 @@
 //! The single source of truth for interactive actions.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -41,6 +42,159 @@ pub enum Dispatch {
     Refused { reason: &'static str },
 }
 
+/// The action selected from one displayed registry snapshot.
+///
+/// Keeping the displayed availability with the identity prevents a menu that
+/// has gone stale from silently authorising a different current action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ActionSelection {
+    id: ActionId,
+    displayed: Availability,
+}
+
+impl ActionSelection {
+    pub fn id(&self) -> ActionId { self.id }
+    pub fn displayed_availability(&self) -> Availability { self.displayed }
+}
+
+/// Everything a local handler needs from the routing layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LocalAction {
+    pub id: ActionId,
+    pub busy: bool,
+}
+
+/// A local action is single-flight: a second request observes the first one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalActionOutcome {
+    Completed,
+    InFlight,
+    Refused { reason: &'static str },
+}
+
+/// The only callable boundary owned by the registry.
+pub trait ActionSink {
+    fn invoke(&mut self, action: LocalAction) -> LocalActionOutcome;
+}
+
+/// An adapter that lets a controller retain its identity while the composite
+/// owns the callable action port.
+pub struct SharedActionSink<T> {
+    inner: Arc<Mutex<T>>,
+}
+
+impl<T> SharedActionSink<T> {
+    pub fn new(inner: Arc<Mutex<T>>) -> Self {
+        Self { inner }
+    }
+
+    pub fn inner(&self) -> Arc<Mutex<T>> {
+        Arc::clone(&self.inner)
+    }
+}
+
+impl<T: ActionSink> ActionSink for SharedActionSink<T> {
+    fn invoke(&mut self, action: LocalAction) -> LocalActionOutcome {
+        self.inner
+            .lock()
+            .expect("shared action sink lock")
+            .invoke(action)
+    }
+}
+
+/// The one process-local dispatcher for independently owned local actions.
+///
+/// Each stable action ID has at most one handler. Missing routes refuse by
+/// name instead of silently treating an enabled registration as completed.
+pub struct CompositeActionSink {
+    routes: HashMap<ActionId, Box<dyn ActionSink + Send>>,
+}
+
+impl CompositeActionSink {
+    pub fn new() -> Self {
+        Self {
+            routes: HashMap::new(),
+        }
+    }
+
+    pub fn register(
+        &mut self,
+        id: ActionId,
+        sink: Box<dyn ActionSink + Send>,
+    ) -> Result<(), CompositeActionSinkError> {
+        if self.routes.contains_key(&id) {
+            return Err(CompositeActionSinkError::Duplicate(id));
+        }
+        self.routes.insert(id, sink);
+        Ok(())
+    }
+
+    pub fn handles(&self, id: ActionId) -> bool {
+        self.routes.contains_key(&id)
+    }
+
+    pub fn validate_for(
+        &self,
+        registry: &ActionRegistry,
+    ) -> Result<(), CompositeActionSinkError> {
+        for registration in registry.iter() {
+            if registry.availability(registration.id()) == Availability::Enabled
+                && registry.kind(registration.id()) == ActionKind::Local
+                && !self.handles(registration.id())
+            {
+                return Err(CompositeActionSinkError::Missing(registration.id()));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Default for CompositeActionSink {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ActionSink for CompositeActionSink {
+    fn invoke(&mut self, action: LocalAction) -> LocalActionOutcome {
+        match self.routes.get_mut(&action.id) {
+            Some(sink) => sink.invoke(action),
+            None => LocalActionOutcome::Refused {
+                reason: "the local action handler is not installed",
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompositeActionSinkError {
+    Duplicate(ActionId),
+    Missing(ActionId),
+}
+
+impl std::fmt::Display for CompositeActionSinkError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Duplicate(id) => write!(formatter, "action handler for {id:?} is duplicated"),
+            Self::Missing(id) => write!(formatter, "action handler for {id:?} is missing"),
+        }
+    }
+}
+
+impl std::error::Error for CompositeActionSinkError {}
+
+/// A prompt-producing action is data for the existing interactive ingress.
+/// It is deliberately not a queue and cannot acknowledge durability itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PromptPayload { pub id: ActionId }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActionDispatch {
+    Local(LocalActionOutcome),
+    Prompt(PromptPayload),
+    Refused { reason: &'static str },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActionRegistration {
     id: ActionId,
@@ -50,20 +204,18 @@ pub struct ActionRegistration {
     shortcuts: Vec<char>,
     kind: ActionKind,
     availability: Availability,
-    handler: bool,
 }
 
 impl ActionRegistration {
     pub fn new(id: ActionId, name: &'static str, kind: ActionKind) -> Self {
         Self { id, name, description: "", aliases: Vec::new(), shortcuts: Vec::new(), kind,
-            availability: Availability::Enabled, handler: true }
+            availability: Availability::Enabled }
     }
     pub fn alias(mut self, alias: &'static str) -> Self { self.aliases.push(alias); self }
     pub fn shortcut(mut self, shortcut: char) -> Self { self.shortcuts.push(shortcut); self }
     pub fn description(mut self, description: &'static str) -> Self { self.description = description; self }
     pub fn unavailable(mut self, owner: &'static str) -> Self {
         self.availability = Availability::Disabled { owner };
-        self.handler = false;
         self
     }
     pub fn id(&self) -> ActionId { self.id }
@@ -165,7 +317,11 @@ impl ActionRegistry {
     }
     pub fn resolve_key(&self, key: KeyEvent) -> Option<ActionId> {
         match (key.code, key.modifiers) {
-            (KeyCode::Char(character), modifiers) if modifiers == KeyModifiers::META => self.resolve_shortcut(character),
+            (KeyCode::Char(character), modifiers)
+                if modifiers == KeyModifiers::ALT || modifiers == KeyModifiers::META =>
+            {
+                self.resolve_shortcut(character)
+            }
             _ => None,
         }
     }
@@ -177,12 +333,17 @@ impl ActionRegistry {
     pub fn dispatch_projection(&self, id: ActionId) -> &ActionRegistration { self.registration(id) }
     pub fn availability(&self, id: ActionId) -> Availability { self.registration(id).availability }
     pub fn kind(&self, id: ActionId) -> ActionKind { self.registration(id).kind }
-    pub fn handler(&self, id: ActionId) -> Option<ActionId> { self.registration(id).handler.then_some(id) }
     pub fn menu(&self, filter: &str) -> Vec<&ActionRegistration> {
         self.iter().filter(|a| a.name.starts_with(filter)).collect()
     }
     pub fn snapshot(&self) -> SurfaceSnapshot {
         SurfaceSnapshot { availability: self.iter().map(|a| (a.id, a.availability)).collect() }
+    }
+    pub fn select(&self, id: ActionId, displayed: &SurfaceSnapshot) -> Option<ActionSelection> {
+        displayed.availability.get(&id).copied().map(|availability| ActionSelection {
+            id,
+            displayed: availability,
+        })
     }
     pub fn with_availability(mut self, id: ActionId, availability: Availability) -> Self {
         let action = self.registrations.iter_mut().find(|a| a.id == id).expect("registered action id");
@@ -191,12 +352,47 @@ impl ActionRegistry {
     }
     pub fn dispatch(&self, id: ActionId, displayed: &SurfaceSnapshot) -> Dispatch {
         let current = self.availability(id);
-        if displayed.availability.get(&id) != Some(&current) || current != Availability::Enabled || self.handler(id).is_none() {
+        if displayed.availability.get(&id) != Some(&current) || current != Availability::Enabled {
             Dispatch::Refused { reason: "action is no longer available" }
         } else { self.route(id, false) }
     }
     pub fn route(&self, id: ActionId, _busy: bool) -> Dispatch {
         match self.kind(id) { ActionKind::Local => Dispatch::Immediate, ActionKind::PromptProducing => Dispatch::InteractiveIngress }
+    }
+    pub fn dispatch_to(
+        &self,
+        selection: ActionSelection,
+        current: &SurfaceSnapshot,
+        busy: bool,
+        sink: &mut dyn ActionSink,
+    ) -> ActionDispatch {
+        let Some(current_availability) = current.availability.get(&selection.id).copied() else {
+            return ActionDispatch::Refused { reason: "action is no longer available" };
+        };
+        let registration = self.registration(selection.id);
+        if selection.displayed != current_availability
+            || current_availability != registration.availability
+        {
+            return ActionDispatch::Refused { reason: "action is no longer available" };
+        }
+        match current_availability {
+            Availability::Disabled { owner } => {
+                return ActionDispatch::Refused { reason: owner };
+            }
+            Availability::Busy => {
+                return ActionDispatch::Refused { reason: "action is no longer available" };
+            }
+            Availability::Enabled => {}
+        }
+        match registration.kind {
+            ActionKind::Local => ActionDispatch::Local(sink.invoke(LocalAction {
+                id: selection.id,
+                busy,
+            })),
+            ActionKind::PromptProducing => {
+                ActionDispatch::Prompt(PromptPayload { id: selection.id })
+            }
+        }
     }
     pub fn submit(&self, text: impl Into<String>, origin: InputOrigin) -> Submission { Submission { text: text.into(), origin } }
     pub fn classify(&self, submission: Submission) -> Dispatch {

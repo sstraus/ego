@@ -1,8 +1,8 @@
 //! RED contract for the single, final interactive action registry.
 
 use ego_cli::repl::actions::{
-    ActionId, ActionKind, ActionRegistry, ActionRegistration, Availability, Dispatch,
-    InputOrigin,
+    ActionDispatch, ActionId, ActionKind, ActionRegistry, ActionRegistration, ActionSink,
+    Availability, Dispatch, InputOrigin, LocalAction, LocalActionOutcome,
 };
 use ego_cli::repl::selector::{Selector, SelectorKey, SelectorKind};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -93,7 +93,7 @@ fn construction_rejects_duplicate_ids_names_aliases_and_shortcuts() {
 }
 
 #[test]
-fn unavailable_actions_name_the_exact_missing_owner_and_have_no_handler() {
+fn unavailable_actions_name_the_exact_missing_owner() {
     let registry = ActionRegistry::final_surface();
     let unavailable = registry.availability(ActionId::Mcp);
     assert_eq!(
@@ -102,7 +102,6 @@ fn unavailable_actions_name_the_exact_missing_owner_and_have_no_handler() {
             owner: "the MCP client",
         }
     );
-    assert_eq!(registry.handler(ActionId::Mcp), None);
     assert!(registry.help(ActionId::Mcp).disabled_reason().is_some());
 }
 
@@ -124,18 +123,55 @@ fn busy_routing_keeps_local_controls_immediate_and_prompt_actions_on_ingress() {
     let registry = ActionRegistry::final_surface();
     assert_eq!(registry.kind(ActionId::Model), ActionKind::Local);
     assert_eq!(registry.kind(ActionId::Statusline), ActionKind::Local);
-    assert_eq!(registry.route(ActionId::Model, true), Dispatch::Immediate);
+}
 
-    let constructed = ActionRegistry::try_from([
-        ActionRegistration::new(ActionId::Model, "model", ActionKind::Local),
-        ActionRegistration::new(
-            ActionId::Name,
-            "prompt-producing-test",
-            ActionKind::PromptProducing,
-        ),
-    ])
+struct RecordingSink {
+    calls: Vec<LocalAction>,
+}
+
+impl ActionSink for RecordingSink {
+    fn invoke(&mut self, action: LocalAction) -> LocalActionOutcome {
+        self.calls.push(action);
+        LocalActionOutcome::Completed
+    }
+}
+
+#[test]
+fn dispatch_reaches_the_injected_local_sink_and_prompt_ingress_without_handler_presence() {
+    let registry = ActionRegistry::final_surface();
+    let displayed = registry.snapshot();
+    let selection = registry
+        .select(ActionId::Model, &displayed)
+        .expect("displayed model is selectable");
+    let mut sink = RecordingSink { calls: Vec::new() };
+    assert_eq!(
+        registry.dispatch_to(selection, &displayed, true, &mut sink),
+        ActionDispatch::Local(LocalActionOutcome::Completed)
+    );
+    assert_eq!(sink.calls, vec![LocalAction { id: ActionId::Model, busy: true }]);
+
+    let changed = registry.with_availability(ActionId::Model, Availability::Busy);
+    assert_eq!(
+        changed.dispatch_to(selection, &changed.snapshot(), false, &mut sink),
+        ActionDispatch::Refused {
+            reason: "action is no longer available",
+        }
+    );
+
+    let prompt_registry = ActionRegistry::try_from([ActionRegistration::new(
+        ActionId::Version,
+        "prompt-producing-test",
+        ActionKind::PromptProducing,
+    )])
     .unwrap();
-    assert_eq!(constructed.route(ActionId::Name, true), Dispatch::InteractiveIngress);
+    let prompt_snapshot = prompt_registry.snapshot();
+    let prompt_selection = prompt_registry
+        .select(ActionId::Version, &prompt_snapshot)
+        .expect("displayed prompt action is selectable");
+    assert_eq!(
+        prompt_registry.dispatch_to(prompt_selection, &prompt_snapshot, true, &mut sink),
+        ActionDispatch::Prompt(ego_cli::repl::actions::PromptPayload { id: ActionId::Version })
+    );
 }
 
 #[test]
@@ -178,10 +214,19 @@ fn modal_enter_and_escape_are_exclusive_and_restore_exact_buffer_and_cursor() {
 fn meta_p_and_model_slash_are_the_same_action() {
     let registry = ActionRegistry::final_surface();
     let meta_p = KeyEvent::new(KeyCode::Char('p'), KeyModifiers::META);
+    let alt_p = KeyEvent::new(KeyCode::Char('p'), KeyModifiers::ALT);
     assert_eq!(registry.resolve_key(meta_p), Some(ActionId::Model));
+    assert_eq!(registry.resolve_key(alt_p), Some(ActionId::Model));
     assert_eq!(registry.resolve_slash("model"), Some(ActionId::Model));
     assert_ne!(registry.resolve_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE)),
         Some(ActionId::Model));
+    assert_ne!(
+        registry.resolve_key(KeyEvent::new(
+            KeyCode::Char('p'),
+            KeyModifiers::ALT | KeyModifiers::CONTROL,
+        )),
+        Some(ActionId::Model)
+    );
 }
 
 #[test]

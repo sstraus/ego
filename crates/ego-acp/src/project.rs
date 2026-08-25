@@ -167,7 +167,7 @@
 //! - **Question items** — questions travel over unstable form elicitation, a
 //!   request/response RPC pair with the stable question item as its scope, not
 //!   as transcript chunks or tool-call updates.
-//! - **`Subagent` items** — no ACP 1.6.0 protocol concept.
+//! - **`Subagent` items** — no ACP 1.5.0 protocol concept.
 //! - **`Error`** — a mid-turn error surfaces as the JSON-RPC error response to
 //!   the `session/prompt` call, a different message shape (a response's error
 //!   field, not a notification). Rendering it as an `AgentMessageChunk` would

@@ -26,14 +26,15 @@
 //! projection.
 //!
 //! The fixture is a representative session, **not** an exhaustive tour of
-//! the domain's 26 event kinds: its 22 events cover 20 distinct kinds
+//! the domain's 30 event kinds: its 22 events cover 20 distinct kinds
 //! (`UserPrompt`, `AssistantDelta`, `AssistantMessage` and `TurnCompleted`
 //! each appear more than once) and omit `ReasoningDelta`,
-//! `GenerationStarted`, `AttemptSettled` and `UsageCorrected` entirely.
+//! `GenerationStarted`, `AttemptSettled`, `UsageCorrected`, both prompt-queue
+//! events, and both question events entirely.
 //! Exhaustiveness is the job of the per-kind tests below —
 //! `reasoning_delta_projects_to_a_thought_chunk_in_both_versions` and
 //! `events_with_no_counterpart_in_either_version_project_to_none` cover the
-//! four kinds the fixture omits — not of this log.
+//! omitted kinds — not of this log.
 use agent_client_protocol_schema::{v1, v2};
 use ego_acp::project::{project_acp_v1, project_acp_v2, project_v1, project_v2};
 use ego_core::cost::{
@@ -46,7 +47,9 @@ use ego_core::event::hook::{
     HookCatalogueEvidence, HookDecision, HookDescriptorEvidence, HookInvocationId, HookOutcome,
     HookSourceAuthority, HookSourceLocation,
 };
-use ego_core::event::id::{EventId, GenerationId, ItemId, Producer, Seq, SessionId, TurnId};
+use ego_core::event::id::{
+    EventId, GenerationId, ItemId, Producer, QueuedPromptId, Seq, SessionId, TurnId,
+};
 use ego_core::event::time::Timestamp;
 use ego_core::generator::attempt::{AttemptRef, DeliveryCertainty, Outcome, UsageReport};
 use ego_core::generator::capabilities::{
@@ -56,6 +59,7 @@ use ego_core::generator::capabilities::{
 use ego_core::generator::types::{ErrorKind, ReasoningState, StopReason};
 use ego_core::permit::{Authority, CanonPath, Escalation, OpName, ToolResult};
 use ego_core::public::project_public;
+use ego_core::question::{QuestionMode, QuestionOption, QuestionOutcome, QuestionRequest};
 use ego_core::state::{SessionState, Usage};
 
 // Wrapped in a module named `acp_golden` so `cargo test -p ego-acp
@@ -359,7 +363,7 @@ mod acp_golden {
         ]
     }
 
-    /// Every event kind in the domain's 26-variant set, once each.
+    /// Every event kind in the domain's 30-variant set, once each.
     ///
     /// This is the *source* the `None`-set test selects from by name, so
     /// that a kind renamed or removed upstream breaks a test instead of
@@ -367,15 +371,18 @@ mod acp_golden {
     /// every kind is covered — the test below filters it to the kinds it
     /// names, and the rest are covered by the dedicated tests further down.
     ///
-    /// **It catches removal and not addition**, and that hole has now been
-    /// stood in twice. The list said seventeen while the domain had
-    /// twenty-one, so `GenerationStarted`, `AttemptSettled` and
-    /// `UsageCorrected` were absent from every test in this file; and it
-    /// silently missed `ReasoningState` when that variant was added. A `Vec`
-    /// literal has no relationship to the enum, so nothing but a reader
-    /// counting notices. `POTENTIALS.md` P27.
+    /// **It catches removal and not addition**. The explicit length assertion
+    /// below keeps this fixture tied to the current enum; a newly added
+    /// variant still requires one deliberately constructed value here.
     fn one_of_each_kind() -> Vec<EventKind> {
         vec![
+            EventKind::PromptQueued {
+                id: QueuedPromptId::new(),
+                text: String::new(),
+            },
+            EventKind::PromptDeliveryExpedited {
+                through: QueuedPromptId::new(),
+            },
             EventKind::UserPrompt {
                 text: String::new(),
                 queued_prompt: None,
@@ -406,6 +413,18 @@ mod acp_golden {
             EventKind::ToolCallCompleted {
                 ok: true,
                 result: ToolResult::builtin(String::new()),
+            },
+            EventKind::QuestionRequested {
+                request: QuestionRequest::new(
+                    "Choose",
+                    QuestionMode::Single,
+                    vec![QuestionOption::new("yes", "Yes")],
+                    false,
+                ),
+                tool_call: ItemId::new(),
+            },
+            EventKind::QuestionSettled {
+                outcome: QuestionOutcome::Unavailable,
             },
             EventKind::PermissionRequested {
                 tool: String::new(),
@@ -672,12 +691,17 @@ mod acp_golden {
     fn events_with_no_counterpart_in_either_version_project_to_none() {
         assert_eq!(
             one_of_each_kind().len(),
-            26,
+            30,
             "the current internal event set is exhaustive"
         );
         let none_in_both = [
+            "prompt_queued",
+            "prompt_delivery_expedited",
             "permission_requested",
+            "permission_amended",
             "permission_decided",
+            "question_requested",
+            "question_settled",
             "usage_updated",
             "compacted",
             "forked",
@@ -690,6 +714,7 @@ mod acp_golden {
             "generation_started",
             "attempt_settled",
             "usage_corrected",
+            "execution_observed",
             // The blob is provider-private and opaque, and ACP describes
             // what the agent did rather than what it must replay.
             "reasoning_state",

@@ -8,15 +8,17 @@
 //! signal, and notice a deadline.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ego_core::config::{
-    Effective, Limits, Mode, Posture, Selection, SystemPrompt, Trust, resolve, system_prompt,
+    Effective, Limits, Mode, Posture, Selection, SystemPrompt, Trust, UserConfigStore, resolve,
+    system_prompt,
 };
 use ego_core::cost::CurrencyCode;
 use ego_core::event::domain::CancelCause;
-use ego_core::event::id::SessionId;
+use ego_core::event::domain::EventKind;
+use ego_core::event::id::{Producer, SessionId};
 use ego_core::generation_model_source::{
     GenerationModelError, GenerationModelErrorClass, GenerationModelSource, GenerationProfile,
     GenerationRole,
@@ -26,31 +28,35 @@ use ego_core::generator::types::ThinkingLevel;
 use ego_core::permit::judge::{JudgeConfig, JudgeInput};
 use ego_core::permit::{
     CanonPath, Change, Escalation, ExecCaps, ExecObservation, HumanApprover, Op, OpName,
-    PermissionDecision, PermissionRequest, PolicyEngine, PreparedCall, RunConfinement, Tool,
+    PermissionDecision, PermissionRequest, PolicyEngine, PreparedCall, RunConfinement,
 };
-use ego_core::public::{PUBLIC_EVENT_VERSION, PublicEvent};
+use ego_core::public::{PUBLIC_EVENT_VERSION, PublicEvent, QuestionReport};
 use ego_core::run::{DeniedBy, RunTermination, Signal};
-use ego_core::sink::EventSink;
-use ego_core::state::{ItemKind, SessionState};
+use ego_core::question::{AskQuestionTool, Elicitor, QuestionOutcome};
+use ego_core::sink::{EventSink, NullSink};
+use ego_core::state::{ItemKind, QuestionContinuation, SessionState};
 use ego_core::store::session_store::{SessionMeta, SessionStore};
 use ego_core::turn::{
     CancelToken, GenerationRuntime, InteractiveControl, JudgeContext, QueueStatus, Session, Tools,
-    TurnConfig, TurnLoop, TurnOutcome, interactive_control,
+    Journal, RegisteredTool, TurnConfig, TurnLoop, TurnOutcome, interactive_control,
 };
 use ego_tools::clock::SystemClock;
+use ego_tools::config::OsUserConfigStore;
 use ego_tools::exec::{ExecLimits, ExecRunConfig, GuardedExec, ProcessError};
 use ego_tools::fs::OsFs;
 use ego_tools::instructions::OsInstructionIo;
-use ego_tools::store::{JsonlStore, SessionEvidenceStore};
+use ego_tools::store::{JsonlStore, OsIo, SessionEvidenceStore};
 use ego_tools::tools::builtins;
 use serde_json::Value;
 
 use crate::budget;
-use crate::cli::{Args, Output, SessionChoice, UsageError};
+use crate::cli::{Args, ModelsArgs, Output, ResumeAnswer, SessionChoice, UsageError};
+use crate::model_picker::ModelPicker;
+use crate::models;
 use crate::output::{
     Diagnostics, InteractiveOutput, JsonlSink, Report, Stderr, Stdout, TextOutput, TextSink, note,
 };
-use crate::render::caps::{Capabilities, Environment, Terminal};
+use crate::render::caps::{Capabilities, Environment, OscProfile, Terminal};
 use crate::render::osc::{Osc, Progress, State};
 use crate::session::{self, Opened};
 use crate::{config, model, prompt, repl, schema};
@@ -62,6 +68,86 @@ use crate::{config, model, prompt, repl, schema};
 /// build can produce is either zero (a local daemon) or supplied alongside its
 /// own currency.
 const SETTLEMENT: &str = "USD";
+
+/// Validate and apply the sole answer batch against one already-opened
+/// durable session. Validation is complete before the first journal append.
+pub fn apply_resume_answers_once(
+    opened: &mut Opened<'_>,
+    answers: &[ResumeAnswer],
+) -> Result<QuestionContinuation, RunTermination> {
+    let usage = |message: String| RunTermination::UsageError { message };
+    if answers.is_empty() {
+        return Err(usage("resume answer batch is empty".to_string()));
+    }
+    let distinct = answers
+        .iter()
+        .map(|answer| answer.id)
+        .collect::<std::collections::HashSet<_>>();
+    if distinct.len() != answers.len() {
+        return Err(usage("a question answer was supplied more than once".to_string()));
+    }
+    if answers.len() != 1 {
+        return Err(usage(
+            "exactly one answer is accepted for the pending question".to_string(),
+        ));
+    }
+
+    let state = opened.state();
+    let supplied = &answers[0];
+    let answer = state
+        .answer_pending(supplied.id, &supplied.json)
+        .map_err(|error| usage(error.to_string()))?;
+    let continuation = state
+        .resume_question(supplied.id, answer.clone())
+        .map_err(|error| usage(error.to_string()))?;
+    let pending = state
+        .pending_question()
+        .expect("answer validation found the pending question");
+    let request_event = pending.request_event();
+
+    let Opened::Durable(open) = opened else {
+        return Err(usage(
+            "question answers require a durable resumed session".to_string(),
+        ));
+    };
+    let clock = SystemClock;
+    let sink = NullSink;
+    let mut journal = Journal::new(
+        open.writer.id(),
+        &open.writer,
+        &clock,
+        &sink,
+        Producer::Main,
+        state,
+    );
+    let settlement = journal
+        .append(
+            continuation.turn,
+            Some(supplied.id),
+            Some(request_event),
+            EventKind::QuestionSettled {
+                outcome: QuestionOutcome::Answered(answer),
+            },
+        )
+        .map_err(|error| RunTermination::Failed {
+            message: error.to_string(),
+        })?;
+    journal
+        .append(
+            continuation.turn,
+            Some(continuation.tool_call),
+            Some(settlement),
+            EventKind::ToolCallCompleted {
+                ok: continuation.ok(),
+                result: continuation.tool_result.clone(),
+            },
+        )
+        .map_err(|error| RunTermination::Failed {
+            message: error.to_string(),
+        })?;
+    open.state = journal.into_state();
+    Ok(continuation)
+}
 
 /// How long a cancelled turn is given to unwind before the run stops waiting.
 ///
@@ -204,11 +290,22 @@ async fn interactive_through(
     let text_sink = TextSink::new(output, quiet, capabilities);
     let announce = Announce::new(output, capabilities, quiet);
     let interactive_seat: Arc<dyn InteractiveSeat> = seat.clone();
-    let ended = converse(
+    let elicitor: Arc<dyn Elicitor> = seat.clone();
+    let human = interactive_seat.has_human();
+    let status = InteractiveStatus {
+        seat: Arc::clone(&seat),
+        width: capabilities.width,
+        human,
+        native: human && capabilities.osc != OscProfile::None,
+        picker: None,
+    };
+    let ended = converse_with_status(
         args,
         |_| &text_sink as &dyn EventSink,
         cancel,
         interactive_seat,
+        Some(elicitor),
+        status,
         output,
         &|| text_sink.finish(),
     )
@@ -403,7 +500,28 @@ pub async fn run_with<S: EventSink>(
     destination: impl FnOnce(&ModelCapabilities) -> S,
     cancel: CancelToken,
 ) -> Ended {
-    match execute(args, destination, cancel, Driver::Once, &Stderr).await {
+    run_with_elicitor(args, destination, cancel, None).await
+}
+
+/// A headless/hosted run with its optional implementation of core's sole
+/// human-input port. ACP uses this seam; ordinary headless CLI passes none.
+pub async fn run_with_elicitor<S: EventSink>(
+    args: Args,
+    destination: impl FnOnce(&ModelCapabilities) -> S,
+    cancel: CancelToken,
+    elicitor: Option<Arc<dyn Elicitor>>,
+) -> Ended {
+    match execute(
+        args,
+        destination,
+        cancel,
+        Driver::Once,
+        elicitor,
+        None,
+        &Stderr,
+    )
+    .await
+    {
         Ok(ended) => ended,
         Err(refusal) => Ended::refused(refusal),
     }
@@ -420,6 +538,7 @@ pub async fn converse<S: EventSink>(
     destination: impl FnOnce(&ModelCapabilities) -> S,
     cancel: CancelToken,
     seat: Arc<dyn InteractiveSeat>,
+    elicitor: Option<Arc<dyn Elicitor>>,
     diagnostics: &dyn Diagnostics,
     between: &(dyn Fn() + Send + Sync),
 ) -> Ended {
@@ -428,6 +547,34 @@ pub async fn converse<S: EventSink>(
         destination,
         cancel,
         Driver::Interactive { seat, between },
+        elicitor,
+        None,
+        diagnostics,
+    )
+    .await
+    {
+        Ok(ended) => ended,
+        Err(refusal) => Ended::refused(refusal),
+    }
+}
+
+async fn converse_with_status<S: EventSink>(
+    args: Args,
+    destination: impl FnOnce(&ModelCapabilities) -> S,
+    cancel: CancelToken,
+    seat: Arc<dyn InteractiveSeat>,
+    elicitor: Option<Arc<dyn Elicitor>>,
+    status: InteractiveStatus,
+    diagnostics: &dyn Diagnostics,
+    between: &(dyn Fn() + Send + Sync),
+) -> Ended {
+    match execute(
+        args,
+        destination,
+        cancel,
+        Driver::Interactive { seat, between },
+        elicitor,
+        Some(status),
         diagnostics,
     )
     .await
@@ -588,8 +735,12 @@ fn instructions(
 /// is not a builtin is refused rather than ignored, because a run that
 /// silently offered fewer tools than it was told to is a run whose failure has
 /// no visible cause.
-fn tools(selected: Option<&Vec<String>>) -> Result<Vec<Arc<dyn Tool>>, UsageError> {
-    let all = builtins();
+fn tools(selected: Option<&Vec<String>>) -> Result<Vec<RegisteredTool>, UsageError> {
+    let mut all: Vec<_> = builtins()
+        .into_iter()
+        .map(RegisteredTool::Effect)
+        .collect();
+    all.push(RegisteredTool::HumanInput(Arc::new(AskQuestionTool)));
     let Some(names) = selected else {
         return Ok(all);
     };
@@ -598,7 +749,10 @@ fn tools(selected: Option<&Vec<String>>) -> Result<Vec<Arc<dyn Tool>>, UsageErro
             .iter()
             .any(|tool| tool.descriptor().name == name.as_str())
         {
-            let known: Vec<String> = all.iter().map(|tool| tool.descriptor().name).collect();
+            let known: Vec<String> = all
+                .iter()
+                .map(|tool| tool.descriptor().name)
+                .collect();
             return Err(UsageError(format!(
                 "--tools {name}: there is no such builtin; this build has {}",
                 known.join(", ")
@@ -617,7 +771,7 @@ fn tools(selected: Option<&Vec<String>>) -> Result<Vec<Arc<dyn Tool>>, UsageErro
 /// version — and by *observation*, not by a hand-written list: a capability
 /// this build does not have must not be advertised, and the cheapest way to
 /// keep that true is to derive each one from the thing that provides it.
-fn capabilities(tools: &[Arc<dyn Tool>], instructions: bool, schema: bool) -> Vec<String> {
+fn capabilities(tools: &[RegisteredTool], instructions: bool, schema: bool) -> Vec<String> {
     let mut names = Vec::new();
     if !tools.is_empty() {
         names.push("tools".to_string());
@@ -715,7 +869,7 @@ fn settings(
 /// the schema the answer must satisfy, and the name of the model to ask.
 struct Materials {
     system: Option<SystemPrompt>,
-    registry: Vec<Arc<dyn Tool>>,
+    registry: Vec<RegisteredTool>,
     compiled: Option<schema::Schema>,
     text: String,
     slug: String,
@@ -928,6 +1082,8 @@ async fn execute<S: EventSink>(
     destination: impl FnOnce(&ModelCapabilities) -> S,
     cancel: CancelToken,
     driver: Driver<'_>,
+    elicitor: Option<Arc<dyn Elicitor>>,
+    mut status: Option<InteractiveStatus>,
     diagnostics: &dyn Diagnostics,
 ) -> Result<Ended, RunTermination> {
     let usage = |err: UsageError| RunTermination::UsageError {
@@ -940,6 +1096,25 @@ async fn execute<S: EventSink>(
         store: jsonl_store,
         id: session_id,
     } = chosen(&args, &settings.root).map_err(usage)?;
+    let clock = SystemClock;
+    let mut early_opened = if args.answers.is_empty() {
+        None
+    } else {
+        Some(match &jsonl_store {
+            Some(store) => Opened::Durable(Box::new(
+                session::open(store, &session_id, &clock).map_err(|err| {
+                    RunTermination::Failed {
+                        message: err.to_string(),
+                    }
+                })?,
+            )),
+            None => Opened::Ephemeral(session::NullStore),
+        })
+    };
+    let resume = match early_opened.as_mut() {
+        Some(opened) => Some(apply_resume_answers_once(opened, &args.answers)?),
+        None => None,
+    };
     let Materials {
         system,
         registry,
@@ -1010,6 +1185,45 @@ async fn execute<S: EventSink>(
     .map_err(|error| RunTermination::Provider {
         message: error.to_string(),
     })?;
+    let selection = source.selection();
+    if status.as_ref().is_some_and(|status| status.human) {
+        let catalogue_snapshot = Arc::new(
+            models::build_catalogue_snapshot(&ModelsArgs {
+                provider: None,
+                refresh: false,
+                json: false,
+            })
+            .await?,
+        );
+        let home = config::ego_home().ok_or_else(|| RunTermination::Failed {
+            message: "the model picker needs EGO_HOME or HOME for user configuration"
+                .to_string(),
+        })?;
+        let config_store: Arc<dyn UserConfigStore> = Arc::new(OsUserConfigStore::new(
+            Arc::new(OsIo),
+            home.join("config.toml"),
+        ));
+        let picker = Arc::new(Mutex::new(ModelPicker::for_selection(
+            Arc::clone(&catalogue_snapshot),
+            Arc::clone(&selection),
+            Arc::clone(&config_store),
+        )));
+        let status = status
+            .as_mut()
+            .expect("a human interactive status was checked above");
+        status
+            .seat
+            .install_model_picker(
+                Arc::clone(&picker),
+                Arc::clone(&selection),
+                Arc::clone(&config_store),
+            )
+            .map_err(|error| RunTermination::Failed {
+                message: format!("interactive actions could not be installed: {error}"),
+            })?;
+        status.picker = Some(picker);
+        debug_assert!(status.picker.is_some(), "the run retains the installed picker");
+    }
     let source: Arc<dyn GenerationModelSource> = Arc::new(source);
     let main_preflight = source
         .resolve(GenerationRole::Main)
@@ -1027,14 +1241,18 @@ async fn execute<S: EventSink>(
     }
 
     let currency = CurrencyCode::new(SETTLEMENT).expect("a constant this file controls");
-    let clock = SystemClock;
-    let opened = match &jsonl_store {
-        Some(store) => Opened::Durable(Box::new(
-            session::open(store, &session_id, &clock).map_err(|err| RunTermination::Failed {
-                message: err.to_string(),
-            })?,
-        )),
-        None => Opened::Ephemeral(session::NullStore),
+    let opened = match early_opened {
+        Some(opened) => opened,
+        None => match &jsonl_store {
+            Some(store) => Opened::Durable(Box::new(
+                session::open(store, &session_id, &clock).map_err(|err| {
+                    RunTermination::Failed {
+                        message: err.to_string(),
+                    }
+                })?,
+            )),
+            None => Opened::Ephemeral(session::NullStore),
+        },
     };
     if let Some(note_text) = opened.repair_note() {
         diagnostics.note(&note_text);
@@ -1071,6 +1289,31 @@ async fn execute<S: EventSink>(
     // would let the announcement and the turn disagree about where the session
     // began.
     let opening = opened.state();
+    if let Some(status) = status.as_ref()
+        && status.human
+    {
+        match selection.snapshot() {
+            Ok(selected) => status.seat.configure_status(repl::StatusSetup {
+                session: session_id,
+                state: opening.clone(),
+                selection: selected,
+                mode,
+                cwd: cwd.clone(),
+                segments: effective
+                    .ui
+                    .statusline
+                    .as_ref()
+                    .and_then(|statusline| statusline.segments.clone())
+                    .unwrap_or_default(),
+                width: status.width,
+                native: status.native,
+                git: Some(Arc::new(repl::status::GitCommand::status(&cwd))),
+            }),
+            Err(error) => diagnostics.note(&format!(
+                "the native status selection could not be read: {error}"
+            )),
+        }
+    }
     sink.publish(
         &PublicEvent::SessionStarted {
             v: PUBLIC_EVENT_VERSION,
@@ -1147,7 +1390,7 @@ async fn execute<S: EventSink>(
                 gate: &mut gate,
                 config: config.clone(),
             };
-            let tools = Tools::new(
+            let tools = Tools::from_registry(
                 &registry,
                 &policy,
                 &fs,
@@ -1156,6 +1399,10 @@ async fn execute<S: EventSink>(
                 CanonPath::new(&cwd),
             );
             let loop_ = TurnLoop::new(session, runtime, tools);
+            let loop_ = match elicitor.as_ref() {
+                Some(elicitor) => loop_.with_elicitor(Arc::clone(elicitor)),
+                None => loop_,
+            };
             let loop_ = if judge_enabled {
                 loop_.with_judge(JudgeContext {
                     confinement: confinement.clone(),
@@ -1168,11 +1415,29 @@ async fn execute<S: EventSink>(
         }};
     }
 
+    if let Some(status) = status.as_ref()
+        && status.human
+    {
+        status.seat.activate();
+    }
+
     match driver {
         Driver::Once => {
             let (process, observation) = guarded_exec(&confinement, &evidence, &cancel).await?;
             let mut loop_ = build!(opening, &cancel, process, observation);
-            let (termination, result) = turns.drive(&mut loop_, &text, &cancel, diagnostics).await;
+            let (termination, result) = match resume.as_ref() {
+                Some(continuation) => {
+                    turns
+                        .drive_resumed(
+                            &mut loop_,
+                            continuation.turn,
+                            &cancel,
+                            diagnostics,
+                        )
+                        .await
+                }
+                None => turns.drive(&mut loop_, &text, &cancel, diagnostics).await,
+            };
 
             Ok(Ended {
                 termination,
@@ -1195,10 +1460,12 @@ async fn execute<S: EventSink>(
             // alone starts at the prompt. Both are one session — the argument
             // is a first thing to say, not a different mode.
             let mut seeded = (!text.trim().is_empty()).then(|| text.clone());
+            let mut resumed = resume.as_ref().map(|continuation| continuation.turn);
 
             loop {
+                let resumed_turn = resumed.take();
                 let queued = !state.unacknowledged_prompts().is_empty();
-                let asked = if queued {
+                let asked = if resumed_turn.is_some() || queued {
                     None
                 } else {
                     // The terminal owner keeps its next read active while this
@@ -1236,32 +1503,67 @@ async fn execute<S: EventSink>(
                     guarded_exec(&confinement, &evidence, &turn_cancel).await?;
                 let mut loop_ = build!(state, &turn_cancel, process, observation)
                     .with_interactive_control(&mut control);
-                let driven = match asked {
-                    Some(asked) => {
+                let driven = match resumed_turn {
+                    Some(turn) => {
                         let (termination, result) = turns
-                            .drive(&mut loop_, &asked, &turn_cancel, diagnostics)
+                            .drive_resumed(&mut loop_, turn, &turn_cancel, diagnostics)
                             .await;
                         Some((termination, result))
                     }
-                    None => match loop_.run_queued_turn().await {
-                        Ok(Some(outcome)) => Some((
-                            RunTermination::after_turn(outcome.exit_reason, outcome.denied)
-                                .unwrap_or(RunTermination::Done),
-                            Value::String(last_assistant_message(loop_.state())),
-                        )),
-                        Ok(None) => None,
-                        Err(abandoned) => Some((
-                            RunTermination::Failed {
-                                message: format!(
-                                    "the session log could not be written: {}",
-                                    abandoned.cause
-                                ),
-                            },
-                            Value::String(last_assistant_message(loop_.state())),
-                        )),
+                    None => match asked {
+                        Some(asked) => {
+                            let (termination, result) = turns
+                                .drive(&mut loop_, &asked, &turn_cancel, diagnostics)
+                                .await;
+                            Some((termination, result))
+                        }
+                        None => match loop_.run_queued_turn().await {
+                            Ok(Some(outcome)) => {
+                                let termination = loop_
+                                    .state()
+                                    .pending_question()
+                                    .map(|pending| RunTermination::QuestionRequired {
+                                        question: QuestionReport::from_request(
+                                            pending.item_id(),
+                                            pending.request(),
+                                        ),
+                                    })
+                                    .or_else(|| {
+                                        RunTermination::after_turn(
+                                            outcome.exit_reason,
+                                            outcome.denied,
+                                        )
+                                    })
+                                    .unwrap_or(RunTermination::Done);
+                                Some((
+                                    termination,
+                                    Value::String(last_assistant_message(loop_.state())),
+                                ))
+                            }
+                            Ok(None) => None,
+                            Err(abandoned) => Some((
+                                RunTermination::Failed {
+                                    message: format!(
+                                        "the session log could not be written: {}",
+                                        abandoned.cause
+                                    ),
+                                },
+                                Value::String(last_assistant_message(loop_.state())),
+                            )),
+                        },
                     },
                 };
                 state = loop_.into_state();
+                if let Some(status) = status.as_ref()
+                    && status.human
+                {
+                    match selection.snapshot() {
+                        Ok(selected) => status.seat.refresh_status(&state, selected),
+                        Err(error) => diagnostics.note(&format!(
+                            "the native status selection could not be refreshed: {error}"
+                        )),
+                    }
+                }
                 seat.refresh_queue(control.status());
                 let Some((termination, result)) = driven else {
                     continue;
@@ -1307,6 +1609,15 @@ enum Driver<'a> {
         /// knows no more is coming, and between turns is when it knows.
         between: &'a (dyn Fn() + Send + Sync),
     },
+}
+
+struct InteractiveStatus {
+    seat: Arc<repl::Seat>,
+    width: usize,
+    human: bool,
+    native: bool,
+    /// The run owns the same picker instance installed into the terminal seat.
+    picker: Option<Arc<Mutex<ModelPicker>>>,
 }
 
 fn run_trust(args: &Args, driver: &Driver<'_>, root: &Path) -> Trust {
@@ -1385,6 +1696,28 @@ impl Turns<'_> {
         cancel: &CancelToken,
         diagnostics: &dyn Diagnostics,
     ) -> (RunTermination, Value) {
+        self.drive_from(loop_, first, None, cancel, diagnostics).await
+    }
+
+    async fn drive_resumed(
+        &self,
+        loop_: &mut TurnLoop<'_>,
+        turn: ego_core::event::id::TurnId,
+        cancel: &CancelToken,
+        diagnostics: &dyn Diagnostics,
+    ) -> (RunTermination, Value) {
+        self.drive_from(loop_, "", Some(turn), cancel, diagnostics)
+            .await
+    }
+
+    async fn drive_from(
+        &self,
+        loop_: &mut TurnLoop<'_>,
+        first: &str,
+        mut resumed: Option<ego_core::event::id::TurnId>,
+        cancel: &CancelToken,
+        diagnostics: &dyn Diagnostics,
+    ) -> (RunTermination, Value) {
         let mut prompt = first.to_string();
         let mut taken: u32 = 0;
         let mut left = self.retries;
@@ -1393,11 +1726,27 @@ impl Turns<'_> {
             if self.max_turns.is_some_and(|max| taken >= max) {
                 return (RunTermination::MaxTurns, self.answer(loop_.state()));
             }
-            let outcome = match self.one(loop_, &prompt, cancel).await {
+            let outcome = match resumed.take() {
+                Some(turn) => self.one_resumed(loop_, turn, cancel).await,
+                None => self.one(loop_, &prompt, cancel).await,
+            };
+            let outcome = match outcome {
                 Ok(outcome) => outcome,
                 Err(termination) => return (termination, self.answer(loop_.state())),
             };
             taken += 1;
+
+            if let Some(pending) = loop_.state().pending_question() {
+                return (
+                    RunTermination::QuestionRequired {
+                        question: QuestionReport::from_request(
+                            pending.item_id(),
+                            pending.request(),
+                        ),
+                    },
+                    self.answer(loop_.state()),
+                );
+            }
 
             if let Some(termination) =
                 RunTermination::after_turn(outcome.exit_reason, outcome.denied)
@@ -1483,6 +1832,43 @@ impl Turns<'_> {
                 Some(CancelCause::User) => RunTermination::Signalled(Signal::Int),
                 _ => RunTermination::Signalled(Signal::Term),
             }),
+        }
+    }
+
+    async fn one_resumed(
+        &self,
+        loop_: &mut TurnLoop<'_>,
+        turn: ego_core::event::id::TurnId,
+        cancel: &CancelToken,
+    ) -> Result<TurnOutcome, RunTermination> {
+        let remaining = self
+            .timeout
+            .map(|budget| budget.saturating_sub(self.started.elapsed()));
+        let outcome = {
+            let mut running = Box::pin(loop_.resume_turn(turn));
+            let mut stopped = false;
+            loop {
+                if stopped {
+                    tokio::select! {
+                        done = &mut running => break Some(done),
+                        () = tokio::time::sleep(GRACE) => break None,
+                    }
+                }
+                tokio::select! {
+                    done = &mut running => break Some(done),
+                    cause = stop_signal(remaining) => {
+                        cancel.cancel(cause);
+                        stopped = true;
+                    }
+                }
+            }
+        };
+        match outcome {
+            Some(Ok(outcome)) => Ok(outcome),
+            Some(Err(abandoned)) => Err(RunTermination::Failed {
+                message: format!("the session log could not be written: {}", abandoned.cause),
+            }),
+            None => Err(cancelled_termination(cancel)),
         }
     }
 

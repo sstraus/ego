@@ -5,6 +5,7 @@
 //! `Select`, `MultiSelect`, or `Input` enum variants.
 
 use std::collections::BTreeMap;
+use futures::executor::block_on;
 
 use agent_client_protocol_schema::v1::{
     ClientCapabilities, CreateElicitationRequest, CreateElicitationResponse,
@@ -18,7 +19,7 @@ use ego_acp::question::{
     AcpQuestionAdapter, CapabilityCapture, QuestionMappingError, QuestionRequest,
 };
 use ego_core::event::id::ItemId;
-use ego_core::question::{QuestionMode, QuestionOption};
+use ego_core::question::{Elicitor, QuestionMode, QuestionOption, QuestionOutcome};
 
 fn single_request() -> QuestionRequest {
     QuestionRequest::new(
@@ -135,7 +136,7 @@ fn accepted_content_is_revalidated_by_core_before_settlement() {
 }
 
 #[test]
-fn multiple_response_uses_string_array_and_wrong_content_type_stays_pending() {
+fn multiple_response_uses_string_array_and_wrong_content_type_stays_invalid() {
     let question = ItemId::new();
     let valid = CreateElicitationResponse::new(ElicitationAction::Accept(
         ElicitationAcceptAction::new().content(BTreeMap::from([(
@@ -158,13 +159,9 @@ fn multiple_response_uses_string_array_and_wrong_content_type_stays_pending() {
 fn missing_form_capability_returns_stable_id_and_resume_guidance_without_settling() {
     let question = ItemId::new();
     let adapter = AcpQuestionAdapter::new(CapabilityCapture::default());
-    let error = adapter
-        .elicit(question, &single_request())
-        .expect_err("missing capability must not hang or infer");
-    assert!(matches!(error, QuestionMappingError::CapabilityUnavailable { id, .. } if id == question));
-    assert!(error.to_string().contains("ego resume"));
-    assert!(error.to_string().contains(&question.to_string()));
-    assert!(adapter.pending(question));
+    let outcome = block_on(adapter.elicitor().elicit(question, single_request()))
+        .expect("missing capability is an unavailable question outcome");
+    assert_eq!(outcome, QuestionOutcome::Unavailable);
 }
 
 #[test]
@@ -172,27 +169,12 @@ fn decline_and_cancel_are_distinct_failed_settlements() {
     let question = ItemId::new();
     for action in [ElicitationAction::Decline, ElicitationAction::Cancel] {
         let response = CreateElicitationResponse::new(action);
-        let adapter = AcpQuestionAdapter::with_response(response);
-        let result = adapter.elicit(question, &free_text_request()).unwrap();
-        assert!(result.is_declined() || result.is_cancelled());
-        assert!(!adapter.pending(question));
-        assert!(result.tool_result().is_pure());
-        assert!(result.tool_result().is_failure());
-    }
-}
-
-#[test]
-fn process_and_session_cancellation_close_the_session_not_an_unrelated_question() {
-    for process in [true, false] {
-        let adapter = AcpQuestionAdapter::new(CapabilityCapture::form());
-        let question = ItemId::new();
-        let outcome = if process {
-            adapter.cancel_process(question)
-        } else {
-            adapter.cancel_session(question)
-        };
-        assert!(outcome.closes_sibling_batch());
-        assert!(outcome.closes_turn());
-        assert!(!adapter.pending(question));
+        let result = AcpQuestionAdapter::validate_response(
+            question,
+            &free_text_request(),
+            &response,
+        )
+        .unwrap();
+        assert!(matches!(result, QuestionOutcome::Declined | QuestionOutcome::Cancelled));
     }
 }

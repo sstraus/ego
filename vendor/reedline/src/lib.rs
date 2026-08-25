@@ -266,7 +266,7 @@ mod painting;
 pub use painting::{Painter, StyledText};
 
 mod engine;
-pub use engine::{MouseClickMode, Reedline};
+pub use engine::{MouseClickMode, Reedline, RepaintSignal};
 
 mod result;
 pub use result::{ReedlineError, ReedlineErrorVariants, Result};

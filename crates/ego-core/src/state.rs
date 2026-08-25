@@ -483,6 +483,10 @@ impl SettledQuestion {
         self.pending.tool_call
     }
 
+    pub fn turn(&self) -> TurnId {
+        self.pending.turn
+    }
+
     pub fn outcome(&self) -> &QuestionOutcome {
         &self.outcome
     }
@@ -885,10 +889,14 @@ impl SessionState {
         self.pending_question.as_ref()
     }
 
+    pub fn settled_question(&self, question: ItemId) -> Option<&SettledQuestion> {
+        self.settled_questions.get(&question)
+    }
+
     /// Parse a resume value against the pending request without changing
     /// state. The caller persists `QuestionSettled` before applying anything.
     pub fn answer_pending(
-        &mut self,
+        &self,
         question: ItemId,
         json: &str,
     ) -> Result<QuestionAnswer, QuestionError> {
@@ -899,7 +907,7 @@ impl SessionState {
     /// Validate an already parsed answer and prepare the pure tool result for
     /// the original turn. Durable events remain the only mutation authority.
     pub fn resume_question(
-        &mut self,
+        &self,
         question: ItemId,
         answer: QuestionAnswer,
     ) -> Result<QuestionContinuation, QuestionError> {

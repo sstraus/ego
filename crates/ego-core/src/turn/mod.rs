@@ -42,6 +42,7 @@ use crate::permit::ExecObservation;
 use crate::permit::judge::{JudgeConfig, JudgeDecoder, JudgeInput, JudgeOutcome};
 use crate::permit::{Authority, Classification, Pending, PolicyDenied, Resolution, ToolResult};
 use crate::public::PublicEvent;
+use crate::question::{Elicitor, QuestionAnswer, QuestionOutcome};
 use crate::run::{Denial, DeniedBy};
 use crate::sink::EventSink;
 use crate::state::{SessionState, Usage};
@@ -53,6 +54,7 @@ pub use control::{
 };
 pub use journal::Journal;
 pub use tools::Tools;
+use tools::PreparedToolCall;
 
 /// The final model-visible registry. Only `Effect` enters preparation,
 /// permission policy, and guarded I/O; human input crosses its own typed port.
@@ -409,6 +411,7 @@ pub struct TurnLoop<'a> {
     tools: Tools<'a>,
     cancel: CancelToken,
     control: Option<&'a mut InteractiveControl>,
+    elicitor: Option<Arc<dyn Elicitor>>,
 }
 
 impl<'a> TurnLoop<'a> {
@@ -435,6 +438,7 @@ impl<'a> TurnLoop<'a> {
             tools,
             cancel: session.cancel,
             control: None,
+            elicitor: None,
         }
     }
 
@@ -458,6 +462,12 @@ impl<'a> TurnLoop<'a> {
         self
     }
 
+    /// Attach the session's sole human-input adapter.
+    pub fn with_elicitor(mut self, elicitor: Arc<dyn Elicitor>) -> Self {
+        self.elicitor = Some(elicitor);
+        self
+    }
+
     /// The session so far.
     pub fn state(&self) -> &SessionState {
         self.journal.state()
@@ -472,6 +482,156 @@ impl<'a> TurnLoop<'a> {
     /// the tool calls in between.
     pub async fn run(&mut self, prompt: &str) -> Result<TurnOutcome, TurnAbandoned> {
         self.run_prompts(vec![(prompt.to_string(), None)]).await
+    }
+
+    /// Settle one durable pending question and continue its original turn.
+    /// No new turn or user prompt is minted.
+    pub async fn resume_question(
+        &mut self,
+        question: ItemId,
+        answer: QuestionAnswer,
+    ) -> Result<TurnOutcome, TurnAbandoned> {
+        let prepared = self
+            .journal
+            .state()
+            .resume_question(question, answer.clone());
+        let continuation = match prepared {
+            Ok(continuation) => {
+                let pending = self
+                    .journal
+                    .state()
+                    .pending_question()
+                    .expect("resume validation found the pending question");
+                let parent = pending.request_event();
+                let turn = pending.turn();
+                let settlement = match self.journal.append(
+                    turn,
+                    Some(question),
+                    Some(parent),
+                    EventKind::QuestionSettled {
+                        outcome: QuestionOutcome::Answered(answer),
+                    },
+                ) {
+                    Ok(event) => event,
+                    Err(cause) => return Err(self.abandon(turn, cause)),
+                };
+                if let Err(cause) = self.journal.append(
+                    turn,
+                    Some(continuation.tool_call),
+                    Some(settlement),
+                    EventKind::ToolCallCompleted {
+                        ok: continuation.ok(),
+                        result: continuation.tool_result.clone(),
+                    },
+                ) {
+                    return Err(self.abandon(turn, cause));
+                }
+                continuation
+            }
+            Err(crate::question::QuestionError::AlreadySettled) => {
+                let continuation = match self
+                    .journal
+                    .state()
+                    .complete_settled_question(question)
+                {
+                    Ok(continuation) => continuation,
+                    Err(error) => {
+                        let turn = self
+                            .journal
+                            .state()
+                            .settled_question(question)
+                            .map_or_else(TurnId::new, |settled| settled.turn());
+                        return Err(self.abandon(
+                            turn,
+                            StoreError::Io(std::io::Error::new(
+                                std::io::ErrorKind::InvalidInput,
+                                error,
+                            )),
+                        ));
+                    }
+                };
+                let parent = self
+                    .journal
+                    .state()
+                    .settled_question(question)
+                    .expect("the settlement used for recovery exists")
+                    .settlement_event();
+                if let Err(cause) = self.journal.append(
+                    continuation.turn,
+                    Some(continuation.tool_call),
+                    Some(parent),
+                    EventKind::ToolCallCompleted {
+                        ok: continuation.ok(),
+                        result: continuation.tool_result.clone(),
+                    },
+                ) {
+                    return Err(self.abandon(continuation.turn, cause));
+                }
+                continuation
+            }
+            Err(error) => {
+                return Err(self.abandon(
+                    self.journal
+                        .state()
+                        .pending_question()
+                        .map_or_else(TurnId::new, |pending| pending.turn()),
+                    StoreError::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        error,
+                    )),
+                ));
+            }
+        };
+        self.resume_turn(continuation.turn).await
+    }
+
+    /// Continue an already-settled pure question result on its original turn.
+    pub async fn resume_turn(&mut self, turn: TurnId) -> Result<TurnOutcome, TurnAbandoned> {
+        if let Some(observation) = self.execution_observation.take()
+            && let Err(cause) = self.journal.append(
+                turn,
+                None,
+                None,
+                EventKind::ExecutionObserved { observation },
+            )
+        {
+            return Err(self.abandon(turn, cause));
+        }
+        let driven = match self.drive(turn, &[]).await {
+            Ok(driven) => driven,
+            Err(cause) => return Err(self.abandon(turn, cause)),
+        };
+        let (exit_reason, denied) = match driven {
+            DriveOutcome::Ended(reason, denied) => (reason, denied),
+            DriveOutcome::QuestionRequired => {
+                self.close_control();
+                return Ok(TurnOutcome {
+                    turn,
+                    ok: false,
+                    exit_reason: ExitReason::PermissionRequired,
+                    denied: None,
+                });
+            }
+        };
+        let ok = exit_reason == ExitReason::Completed;
+        if let Err(cause) = self.journal.append(
+            turn,
+            None,
+            None,
+            EventKind::TurnCompleted { ok, exit_reason },
+        ) {
+            return Err(self.abandon(turn, cause));
+        }
+        if let Err(cause) = self.close_and_drain_controls(turn).await {
+            return Err(self.abandon(turn, cause));
+        }
+        self.refresh_control_status();
+        Ok(TurnOutcome {
+            turn,
+            ok,
+            exit_reason,
+            denied,
+        })
     }
 
     /// Consume every accepted prompt that lacks a correlated `UserPrompt` as
@@ -513,9 +673,22 @@ impl<'a> TurnLoop<'a> {
         // could emit it at all.
         self.journal.publish(&PublicEvent::TurnStarted { turn });
 
-        let (exit_reason, denied) = match self.drive(turn, &prompts).await {
+        let driven = match self.drive(turn, &prompts).await {
             Ok(ended) => ended,
             Err(cause) => return Err(self.abandon(turn, cause)),
+        };
+        let (exit_reason, denied) = match driven {
+            DriveOutcome::Ended(exit_reason, denied) => (exit_reason, denied),
+            DriveOutcome::QuestionRequired => {
+                self.close_control();
+                self.refresh_control_status();
+                return Ok(TurnOutcome {
+                    turn,
+                    ok: false,
+                    exit_reason: ExitReason::PermissionRequired,
+                    denied: None,
+                });
+            }
         };
         let ok = matches!(exit_reason, ExitReason::Completed);
 
@@ -562,7 +735,7 @@ impl<'a> TurnLoop<'a> {
         &mut self,
         turn: TurnId,
         prompts: &[(String, Option<crate::event::id::QueuedPromptId>)],
-    ) -> Result<(ExitReason, Option<Denial>), StoreError> {
+    ) -> Result<DriveOutcome, StoreError> {
         for (text, queued_prompt) in prompts {
             self.journal.append(
                 turn,
@@ -580,7 +753,7 @@ impl<'a> TurnLoop<'a> {
 
         loop {
             if let Some(cause) = self.cancel.cause() {
-                return Ok((ExitReason::Cancelled(cause), None));
+                return Ok(DriveOutcome::Ended(ExitReason::Cancelled(cause), None));
             }
             // Beside the cancel check and for the same reason: this is the
             // boundary between generations, the only place a turn can be
@@ -594,14 +767,14 @@ impl<'a> TurnLoop<'a> {
             // `CLI.md:128` spells it the same way: "exit 5 when hit", not
             // "when it would be hit".
             if tokens_reached(self.config.token_ceiling, &self.journal.state().usage) {
-                return Ok((ExitReason::Budget, None));
+                return Ok(DriveOutcome::Ended(ExitReason::Budget, None));
             }
 
             let (reason, pending, error_kind) = match self.generate(turn).await? {
-                Generated::Ended(reason) => return Ok((reason, None)),
+                Generated::Ended(reason) => return Ok(DriveOutcome::Ended(reason, None)),
                 Generated::Cancelled { cause, pending } => {
                     self.close_unstarted_siblings(turn, &pending)?;
-                    return Ok((ExitReason::Cancelled(cause), None));
+                    return Ok(DriveOutcome::Ended(ExitReason::Cancelled(cause), None));
                 }
                 Generated::Stopped {
                     reason,
@@ -655,7 +828,7 @@ impl<'a> TurnLoop<'a> {
                 if exit == ExitReason::Completed && self.deliver_pending(turn)? {
                     continue;
                 }
-                return Ok((exit, None));
+                return Ok(DriveOutcome::Ended(exit, None));
             }
 
             for (index, call) in pending.iter().enumerate() {
@@ -683,9 +856,26 @@ impl<'a> TurnLoop<'a> {
                         )?;
                         if let Some(cause) = self.cancel.cause() {
                             self.close_unstarted_siblings(turn, &pending[index + 1..])?;
-                            return Ok((ExitReason::Cancelled(cause), None));
+                            return Ok(DriveOutcome::Ended(
+                                ExitReason::Cancelled(cause),
+                                None,
+                            ));
                         }
                         continue;
+                    }
+                    ToolOutcome::Recorded => {
+                        if let Some(cause) = self.cancel.cause() {
+                            self.close_unstarted_siblings(turn, &pending[index + 1..])?;
+                            return Ok(DriveOutcome::Ended(
+                                ExitReason::Cancelled(cause),
+                                None,
+                            ));
+                        }
+                        continue;
+                    }
+                    ToolOutcome::QuestionRequired => {
+                        self.close_unstarted_siblings(turn, &pending[index + 1..])?;
+                        return Ok(DriveOutcome::QuestionRequired);
                     }
                     ToolOutcome::Refused { denial } => Denial {
                         action: denial.to_string(),
@@ -699,7 +889,10 @@ impl<'a> TurnLoop<'a> {
                         action: pending.request().to_string(),
                         by: DeniedBy::Nobody,
                     },
-                    ToolOutcome::Ended(reason) => return Ok((reason, None)),
+                    ToolOutcome::Ended(reason) => {
+                        self.close_unstarted_siblings(turn, &pending[index + 1..])?;
+                        return Ok(DriveOutcome::Ended(reason, None));
+                    }
                 };
                 self.journal.append(
                     turn,
@@ -710,7 +903,10 @@ impl<'a> TurnLoop<'a> {
                         result: ToolResult::builtin(denial.action.clone()),
                     },
                 )?;
-                return Ok((ExitReason::PermissionRequired, Some(denial)));
+                return Ok(DriveOutcome::Ended(
+                    ExitReason::PermissionRequired,
+                    Some(denial),
+                ));
             }
             self.deliver_pending(turn)?;
         }
@@ -1632,13 +1828,19 @@ impl<'a> TurnLoop<'a> {
             ok,
             result: ToolResult::builtin(text),
         };
-        let (tool, mut prepared) = match self.tools.prepare(&call.name, &call.args) {
+        let prepared = match self.tools.prepare_registered(&call.name, &call.args) {
             Ok(prepared) => prepared,
             // Not a permission event. `prepare` refuses calls that never
             // reached the engine — an unknown tool, unparseable arguments —
             // and appending a decision here would record a fact the policy
             // never established.
             Err(refusal) => return Ok(answered(false, refusal)),
+        };
+        let (tool, mut prepared) = match prepared {
+            PreparedToolCall::Effect { tool, call } => (tool, call),
+            PreparedToolCall::HumanInput(request) => {
+                return self.run_question(turn, call, request).await;
+            }
         };
         let authorized = loop {
             match self.tools.authorize(prepared) {
@@ -1821,6 +2023,102 @@ impl<'a> TurnLoop<'a> {
         })
     }
 
+    async fn run_question(
+        &mut self,
+        turn: TurnId,
+        call: &PendingCall,
+        request: crate::question::QuestionRequest,
+    ) -> Result<ToolOutcome, StoreError> {
+        let question = ItemId::new();
+        let request_event = self.journal.append(
+            turn,
+            Some(question),
+            Some(call.started),
+            EventKind::QuestionRequested {
+                request: request.clone(),
+                tool_call: call.item,
+            },
+        )?;
+
+        let outcome = match self.elicitor.as_ref().map(Arc::clone) {
+            Some(elicitor) => {
+                let elicited = await_controlled(
+                    &mut self.journal,
+                    &self.cancel,
+                    &mut self.control,
+                    turn,
+                    elicitor.elicit(question, request.clone()),
+                    InterruptDisposition::Return,
+                )
+                .await;
+                match elicited {
+                    Controlled::Completed(Ok(outcome)) => outcome,
+                    Controlled::Completed(Err(error)) => {
+                        tracing::error!(%error, %question, "question elicitation failed");
+                        self.journal.append(
+                            turn,
+                            None,
+                            Some(request_event),
+                            EventKind::Error {
+                                message: error.to_string(),
+                                kind: ErrorKind::Unclassified,
+                            },
+                        )?;
+                        return Ok(ToolOutcome::Ended(ExitReason::Internal));
+                    }
+                    Controlled::Interrupted => {
+                        return Ok(ToolOutcome::Ended(ExitReason::Cancelled(
+                            self.cancel.cause().unwrap_or(CancelCause::User),
+                        )));
+                    }
+                    Controlled::Failed(cause) => return Err(cause),
+                }
+            }
+            None => QuestionOutcome::Unavailable,
+        };
+
+        if outcome == QuestionOutcome::Unavailable {
+            return Ok(ToolOutcome::QuestionRequired);
+        }
+        if let QuestionOutcome::Answered(answer) = &outcome
+            && let Err(error) = answer.validate_for(&request)
+        {
+            tracing::error!(%error, %question, "elicitor returned an invalid answer");
+            self.journal.append(
+                turn,
+                None,
+                Some(request_event),
+                EventKind::Error {
+                    message: error.to_string(),
+                    kind: ErrorKind::Unclassified,
+                },
+            )?;
+            return Ok(ToolOutcome::Ended(ExitReason::Internal));
+        }
+
+        let settlement = self.journal.append(
+            turn,
+            Some(question),
+            Some(request_event),
+            EventKind::QuestionSettled { outcome },
+        )?;
+        let continuation = self
+            .journal
+            .state()
+            .complete_settled_question(question)
+            .expect("a just-persisted valid settlement has a pure continuation");
+        self.journal.append(
+            turn,
+            Some(continuation.tool_call),
+            Some(settlement),
+            EventKind::ToolCallCompleted {
+                ok: continuation.ok(),
+                result: continuation.tool_result,
+            },
+        )?;
+        Ok(ToolOutcome::Recorded)
+    }
+
     /// Record the canonical question that was actually presented.
     fn requested(
         &mut self,
@@ -1910,6 +2208,11 @@ impl<'a> TurnLoop<'a> {
 enum ToolOutcome {
     /// It ran, or it failed in a way the model should read and adapt to.
     Answered { ok: bool, result: ToolResult },
+    /// The pure human-input result was already journalled with its settlement
+    /// as causal parent.
+    Recorded,
+    /// The durable request remains pending and the turn is suspended.
+    QuestionRequired,
     /// Policy refused it. A settled answer, and still not one for the model:
     /// telling it "denied" invites it to try a variant, which is a prompt loop
     /// run against a boundary.
@@ -1918,6 +2221,11 @@ enum ToolOutcome {
     Unanswerable { pending: Pending },
     /// Judge admission failed for a cause that ends the whole turn.
     Ended(ExitReason),
+}
+
+enum DriveOutcome {
+    Ended(ExitReason, Option<Denial>),
+    QuestionRequired,
 }
 
 enum JudgeRun {

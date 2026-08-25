@@ -143,7 +143,7 @@ fn snapshot_version_is_six_and_validation_exposes_exact_rejection_set() {
     let state = fixture.full_replay();
     assert_eq!(state.hook_settlements().len(), 1);
     let snapshot = Snapshot::new(fixture.id, fixture.events[2].env.seq, state.clone());
-    assert_eq!(snapshot.v, 5);
+    assert_eq!(snapshot.v, 6);
     assert_eq!(
         validate(
             &snapshot,

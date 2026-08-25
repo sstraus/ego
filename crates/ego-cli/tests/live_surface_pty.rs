@@ -7,7 +7,9 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use support::{Ego, Plan, Reply, Stub, gated_paced_tool_call_line, paced, text};
+use support::{
+    Ego, Plan, Reply, Stub, gated_paced_tool_call_line, paced, text, tool_call,
+};
 
 // portable-pty transports bytes but does not emulate a terminal. Keep the
 // reported cursor inside both 80x24 and 12x8; painter geometry is proven by
@@ -215,6 +217,67 @@ fn until_normalized(
                 );
             }
         };
+        output.extend(chunk);
+    }
+}
+
+fn until_normalized_or_generation(
+    receiver: &mpsc::Receiver<Vec<u8>>,
+    output: &mut Vec<u8>,
+    start: usize,
+    needle: &str,
+    stub: &Stub,
+) {
+    while !normalized(&output[start..]).contains(needle) {
+        let generations = stub.generations();
+        if !generations.is_empty() {
+            drain(receiver, output);
+            panic!(
+                "PTY input fell through to provider while waiting for {needle:?}; generations: {generations:?}; output: {:?}",
+                normalized(&output[start..]),
+            );
+        }
+        let chunk = receiver
+            .recv_timeout(Duration::from_secs(8))
+            .unwrap_or_else(|error| {
+                drain(receiver, output);
+                panic!(
+                    "PTY wait failed for {needle:?}: {error}; generations: {:?}; output: {:?}",
+                    stub.generations(),
+                    normalized(&output[start..]),
+                )
+            });
+        output.extend(chunk);
+    }
+}
+
+fn until_post_trust_prompt(
+    receiver: &mpsc::Receiver<Vec<u8>>,
+    output: &mut Vec<u8>,
+    start: usize,
+) {
+    loop {
+        let suffix = &output[start..];
+        let Some(query) = suffix
+            .windows(DSR_QUERY.len())
+            .position(|window| window == DSR_QUERY)
+        else {
+            let chunk = receiver
+                .recv_timeout(Duration::from_secs(8))
+                .expect("post-trust DSR query did not arrive");
+            output.extend(chunk);
+            continue;
+        };
+        let prompt_start = query + DSR_QUERY.len();
+        if suffix[prompt_start..]
+            .windows(2)
+            .any(|window| window == b"> ")
+        {
+            return;
+        }
+        let chunk = receiver
+            .recv_timeout(Duration::from_secs(8))
+            .expect("idle prompt did not follow the post-trust DSR query");
         output.extend(chunk);
     }
 }
@@ -637,4 +700,336 @@ fn live_surface_esc_expedites_sampling_once_and_reports_interrupt_state() {
     assert!(!output.windows(8).any(|window| window == b"\x1b[?1049h"));
     assert!(!output.windows(8).any(|window| window == b"\x1b[?1000h"));
     assert!(!output.windows(8).any(|window| window == b"\x1b[?1006h"));
+}
+
+#[test]
+fn live_surface_meta_p_and_model_slash_share_one_modal_and_paste_stays_prompt() {
+    let stub = Stub::start(Plan {
+        completions: vec![Reply::Sse(text("PASTED-SLASH-PROMPT"))],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub).conversing().args([
+        "--model",
+        "ollama/qwen3",
+        "--ephemeral",
+        "--sandbox",
+        "off",
+    ]);
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("pty");
+    let mut child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
+    let (input, dsr_responder, writer_join) =
+        writer_owner(pair.master.take_writer().expect("writer"));
+    let (reader, reader_join) = stream(
+        pair.master.try_clone_reader().expect("reader"),
+        dsr_responder,
+    );
+    let mut input = input;
+    let mut output = Vec::new();
+
+    until(&reader, &mut output, b"Trust project files");
+    drain(&reader, &mut output);
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust answer flush");
+    let startup_start = output.len();
+    until_post_trust_prompt(&reader, &mut output, startup_start);
+    assert!(
+        !String::from_utf8_lossy(&output[startup_start..])
+            .contains("the local action handler is not installed"),
+        "activation must complete before the first live prompt"
+    );
+
+    let slash_start = output.len();
+    // The first Enter accepts the active completion; the second submits the
+    // now-complete slash command through the live action ingress.
+    input.write_all(b"/").expect("slash prefix");
+    input.flush().expect("slash prefix flush");
+    until_normalized_or_generation(&reader, &mut output, slash_start, "model", &stub);
+    let suffix_start = output.len();
+    input.write_all(b"model").expect("model slash suffix");
+    input.flush().expect("model slash suffix flush");
+    until_normalized(&reader, &mut output, suffix_start, "/model");
+    input.write_all(b"\r\r").expect("model slash submit");
+    input.flush().expect("model slash flush");
+    until_normalized_or_generation(&reader, &mut output, slash_start, "Select model", &stub);
+    let slash_modal = normalized(&output[slash_start..]);
+    assert!(slash_modal.contains("Select model"));
+    let slash_close_start = output.len();
+    input.write_all(b"\x1b").expect("close slash modal");
+    input.flush().expect("close slash modal flush");
+    until_from(&reader, &mut output, slash_close_start, b"> ");
+
+    let meta_start = output.len();
+    // The PTY uses the parser-stable CSI-u wire spelling for Meta-P. It
+    // yields the same crossterm KeyEvent as a terminal's Option-P/Alt-P,
+    // without the ESC-prefix timing ambiguity of a raw `ESC p` pair.
+    input.write_all(b"\x1b[112;33u").expect("Meta-P");
+    input.flush().expect("Meta-P flush");
+    until_normalized(&reader, &mut output, meta_start, "Select model");
+    let meta_modal = normalized(&output[meta_start..]);
+    assert_eq!(
+        meta_modal.matches("Select model").count(),
+        slash_modal.matches("Select model").count(),
+        "Meta-P and /model must enter one live picker modal"
+    );
+    let meta_close_start = output.len();
+    input.write_all(b"\x1b").expect("close Meta-P modal");
+    input.flush().expect("close Meta-P modal flush");
+    until_from(&reader, &mut output, meta_close_start, b"> ");
+
+    let menu_start = output.len();
+    input.write_all(b"/").expect("bare slash");
+    input.flush().expect("bare slash flush");
+    until_normalized(&reader, &mut output, menu_start, "help");
+    let menu = normalized(&output[menu_start..]);
+    assert!(menu.contains("help"), "bare typed slash opens the action menu");
+    let menu_close_start = output.len();
+    input.write_all(b"\x1b").expect("close slash menu");
+    input.flush().expect("close slash menu flush");
+    until_from(&reader, &mut output, menu_close_start, b"> ");
+
+    let pasted_start = output.len();
+    input
+        .write_all(b"\x1b[200~/model\x1b[201~\r")
+        .expect("pasted slash");
+    input.flush().expect("pasted slash flush");
+    until_normalized(
+        &reader,
+        &mut output,
+        pasted_start,
+        "PASTED-SLASH-PROMPT",
+    );
+    assert!(
+        !normalized(&output[pasted_start..]).contains("Select model"),
+        "pasted slash text stays a prompt instead of opening the picker"
+    );
+    assert_eq!(stub.generations().len(), 1);
+    assert!(stub.generations()[0].to_string().contains("/model"));
+
+    let draft_start = output.len();
+    input
+        .write_all(b"draft restored after picker")
+        .expect("type modal draft");
+    input.flush().expect("type modal draft flush");
+    until_from(&reader, &mut output, draft_start, b"draft restored after picker");
+    let draft_modal_start = output.len();
+    input
+        .write_all(b"\x1b[112;33u")
+        .expect("Meta-P with draft");
+    input.flush().expect("Meta-P with draft flush");
+    until_normalized(&reader, &mut output, draft_modal_start, "Select model");
+    let draft_close_start = output.len();
+    input.write_all(b"\x1b").expect("close draft modal");
+    input.flush().expect("close draft modal flush");
+    until_from(&reader, &mut output, draft_close_start, b"> ");
+    assert!(
+        normalized(&output[draft_close_start..]).contains("draft restored after picker"),
+        "the modal restores the exact composer text"
+    );
+
+    let cleanup_start = output.len();
+    input.write_all(b"\x03").expect("clear restored draft");
+    input.flush().expect("clear restored draft flush");
+    until_from(&reader, &mut output, cleanup_start, b"> ");
+    input.write_all(b"\x04").expect("EOF");
+    input.flush().expect("EOF flush");
+    drop(input);
+    drop(pair);
+    let mut killer = child.clone_killer();
+    let (status_sender, status_receiver) = mpsc::channel();
+    let waiter = thread::spawn(move || {
+        let status = child.wait();
+        status_sender.send(status).expect("status receiver dropped");
+    });
+    let deadline = Instant::now() + Duration::from_secs(8);
+    let status = loop {
+        drain(&reader, &mut output);
+        match status_receiver.recv_timeout(Duration::from_millis(50)) {
+            Ok(Ok(status)) => break status,
+            Ok(Err(error)) => panic!("wait failed: {error}"),
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("child waiter disconnected")
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) if Instant::now() >= deadline => {
+                drain(&reader, &mut output);
+                killer.kill().expect("kill timed out child");
+                match status_receiver
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("killed child did not exit")
+                {
+                    Ok(status) => break status,
+                    Err(error) => panic!("wait after kill failed: {error}"),
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+        }
+    };
+    assert!(status.success(), "interactive process failed: {status:?}");
+    waiter.join().expect("waiter thread panicked");
+    reader_join.join().expect("reader thread panicked");
+    writer_join.join().expect("writer thread panicked");
+}
+
+#[test]
+fn live_surface_native_questions_cover_single_multiple_and_free_text() {
+    let single = serde_json::json!({
+        "prompt": "Single question",
+        "mode": "single",
+        "options": [{"id": "yes", "label": "Yes"}, {"id": "no", "label": "No"}],
+        "free_text": false,
+    })
+    .to_string();
+    let multiple = serde_json::json!({
+        "prompt": "Multiple question",
+        "mode": "multiple",
+        "options": [{"id": "red", "label": "Red"}, {"id": "blue", "label": "Blue"}],
+        "free_text": false,
+    })
+    .to_string();
+    let free_text = serde_json::json!({
+        "prompt": "Free question",
+        "mode": "free_text",
+        "options": [],
+        "free_text": true,
+    })
+    .to_string();
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(tool_call("question-single", "ask_question", &single)),
+            Reply::Sse(tool_call("question-multiple", "ask_question", &multiple)),
+            Reply::Sse(tool_call("question-free", "ask_question", &free_text)),
+            Reply::Sse(text("QUESTIONS-DONE")),
+        ],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub).conversing().args([
+        "--model",
+        "ollama/qwen3",
+        "--ephemeral",
+        "--sandbox",
+        "off",
+    ]);
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("pty");
+    let mut child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
+    let (input, dsr_responder, writer_join) =
+        writer_owner(pair.master.take_writer().expect("writer"));
+    let (reader, reader_join) = stream(
+        pair.master.try_clone_reader().expect("reader"),
+        dsr_responder,
+    );
+    let mut input = input;
+    let mut output = Vec::new();
+
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust answer flush");
+    let idle_start = output.len();
+    until_from(&reader, &mut output, idle_start, b"> ");
+
+    input.write_all(b"ask questions\r").expect("question prompt");
+    input.flush().expect("question prompt flush");
+    until_normalized(&reader, &mut output, idle_start, "Single question");
+    let single_choice_start = output.len();
+    input.write_all(b"2").expect("single selection");
+    input.flush().expect("single selection flush");
+    until_from(&reader, &mut output, single_choice_start, b"> 2. No");
+    let single_submit_start = output.len();
+    input.write_all(b"\r").expect("single answer");
+    input.flush().expect("single answer flush");
+    until_from(
+        &reader,
+        &mut output,
+        single_submit_start,
+        b"Multiple question",
+    );
+    let multiple_first_start = output.len();
+    input.write_all(b"1").expect("multiple first selection");
+    input.flush().expect("multiple first selection flush");
+    until_from(
+        &reader,
+        &mut output,
+        multiple_first_start,
+        b"> [x] 1. Red",
+    );
+    let multiple_second_start = output.len();
+    input.write_all(b"2").expect("multiple second selection");
+    input.flush().expect("multiple second selection flush");
+    until_from(
+        &reader,
+        &mut output,
+        multiple_second_start,
+        b"> [x] 2. Blue",
+    );
+    let multiple_submit_start = output.len();
+    input.write_all(b"\r").expect("multiple answer");
+    input.flush().expect("multiple answer flush");
+    until_from(
+        &reader,
+        &mut output,
+        multiple_submit_start,
+        b"Free question",
+    );
+    input.write_all(b"free answer\r").expect("free-text answer");
+    input.flush().expect("free-text answer flush");
+    until_normalized(&reader, &mut output, idle_start, "QUESTIONS-DONE");
+
+    let generations = stub.generations();
+    assert_eq!(generations.len(), 4, "each answer resumes the same live turn");
+    assert!(
+        generations
+            .iter()
+            .any(|generation| generation.to_string().contains("free answer")),
+        "the free-text answer reaches the model using the canonical answer value"
+    );
+
+    input.write_all(b"\x04").expect("EOF");
+    input.flush().expect("EOF flush");
+    drop(input);
+    drop(pair);
+    let mut killer = child.clone_killer();
+    let (status_sender, status_receiver) = mpsc::channel();
+    let waiter = thread::spawn(move || {
+        let status = child.wait();
+        status_sender.send(status).expect("status receiver dropped");
+    });
+    let deadline = Instant::now() + Duration::from_secs(8);
+    let status = loop {
+        drain(&reader, &mut output);
+        match status_receiver.recv_timeout(Duration::from_millis(50)) {
+            Ok(Ok(status)) => break status,
+            Ok(Err(error)) => panic!("wait failed: {error}"),
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("child waiter disconnected")
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) if Instant::now() >= deadline => {
+                drain(&reader, &mut output);
+                killer.kill().expect("kill timed out child");
+                match status_receiver
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("killed child did not exit")
+                {
+                    Ok(status) => break status,
+                    Err(error) => panic!("wait after kill failed: {error}"),
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+        }
+    };
+    assert!(status.success(), "interactive process failed: {status:?}");
+    waiter.join().expect("waiter thread panicked");
+    reader_join.join().expect("reader thread panicked");
+    writer_join.join().expect("writer thread panicked");
 }

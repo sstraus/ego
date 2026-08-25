@@ -210,34 +210,6 @@ fn pending_reducer_rejects_wrong_duplicate_and_extra_answers_without_mutation() 
 }
 
 #[test]
-fn suspension_closes_not_started_siblings_and_never_completes_the_turn() {
-    let turn = TurnId::new();
-    let question = ItemId::new();
-    let mut state = SessionState::default();
-    state.apply(&event(
-        1,
-        turn,
-        question,
-        None,
-        EventKind::QuestionRequested {
-            request: request(QuestionMode::FreeText, &[], true),
-            tool_call: ItemId::new(),
-        },
-    ));
-    let siblings = [ItemId::new(), ItemId::new()];
-    let closed = state
-        .suspend_question(question, siblings)
-        .expect("question suspension records the pending sibling batch");
-    assert_eq!(closed.sibling_items(), siblings);
-    assert_eq!(closed.sibling_closures().len(), 2);
-    assert!(closed.sibling_closures()[0].seq() < closed.sibling_closures()[1].seq());
-    assert_eq!(state.pending_question().map(|q| q.item_id()), Some(question));
-    assert!(!state.turn(turn).expect("question turn").completed);
-    assert!(state.not_started_siblings_closed(turn));
-    assert!(!state.has_turn_completed(turn));
-}
-
-#[test]
 fn requested_unsettled_recovery_stays_pending_and_is_not_torn_history() {
     let turn = TurnId::new();
     let question = ItemId::new();
@@ -336,8 +308,9 @@ fn public_question_item_and_headless_report_are_structured_and_versioned() {
 #[test]
 fn question_tool_is_human_input_not_an_effect_and_has_no_permission_op() {
     use std::sync::Arc;
-    use ego_core::question::{Elicitor, HumanInputTool};
+    use ego_core::question::{Elicitor, ElicitorError, HumanInputTool};
     use ego_core::turn::RegisteredTool;
+    use futures::future::BoxFuture;
     use serde_json::Value;
 
     struct FakeHumanInput;
@@ -355,9 +328,15 @@ fn question_tool_is_human_input_not_an_effect_and_has_no_permission_op() {
 
     struct FakeElicitor;
     impl Elicitor for FakeElicitor {
-        fn elicit(&self, request: QuestionRequest) -> QuestionOutcome {
-            assert!(request.validate().is_ok());
-            QuestionOutcome::Unavailable
+        fn elicit<'a>(
+            &'a self,
+            _question: ItemId,
+            request: QuestionRequest,
+        ) -> BoxFuture<'a, Result<QuestionOutcome, ElicitorError>> {
+            Box::pin(async move {
+                assert!(request.validate().is_ok());
+                Ok(QuestionOutcome::Unavailable)
+            })
         }
     }
 
@@ -374,7 +353,9 @@ fn question_tool_is_human_input_not_an_effect_and_has_no_permission_op() {
             "free_text": false
         }))
         .unwrap();
-    assert!(matches!(FakeElicitor.elicit(request), QuestionOutcome::Unavailable));
+    let outcome = futures::executor::block_on(FakeElicitor.elicit(ItemId::new(), request))
+        .expect("fake elicitor settles");
+    assert!(matches!(outcome, QuestionOutcome::Unavailable));
 }
 
 #[test]

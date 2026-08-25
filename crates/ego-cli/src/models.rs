@@ -24,6 +24,21 @@ use crate::{config, facts, model};
 
 /// Build and render the one snapshot consumed by every model-listing surface.
 pub async fn execute(args: &ModelsArgs) -> Result<String, RunTermination> {
+    let snapshot = build_catalogue_snapshot(args).await?;
+    if args.json {
+        serde_json::to_string(&snapshot).map_err(|error| RunTermination::Failed {
+            message: format!("the model catalogue could not be rendered: {error}"),
+        })
+    } else {
+        Ok(render_text(&snapshot).join("\n"))
+    }
+}
+
+/// Resolve the shared catalogue authority consumed by every interactive and
+/// non-interactive model surface.
+pub async fn build_catalogue_snapshot(
+    args: &ModelsArgs,
+) -> Result<ModelCatalogueSnapshot, RunTermination> {
     let auth = config::auth().map_err(usage)?;
     let rows = model::rows(&auth).map_err(|error| usage_message(error.to_string()))?;
     let admitted = rows
@@ -148,14 +163,7 @@ pub async fn execute(args: &ModelsArgs) -> Result<String, RunTermination> {
         );
     }
 
-    let snapshot = ModelCatalogueSnapshot::from_entries_and_sources(models, sources);
-    if args.json {
-        serde_json::to_string(&snapshot).map_err(|error| RunTermination::Failed {
-            message: format!("the model catalogue could not be rendered: {error}"),
-        })
-    } else {
-        Ok(render_text(&snapshot).join("\n"))
-    }
+    Ok(ModelCatalogueSnapshot::from_entries_and_sources(models, sources))
 }
 
 fn unsupported_supplied_sources(

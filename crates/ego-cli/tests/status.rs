@@ -187,6 +187,22 @@ fn selection_and_interruption_facts_share_the_same_surface_snapshot() {
 }
 
 #[test]
+fn interactive_painter_is_the_sole_writer_and_preserves_transcript_interleaving() {
+    let painter = ego_cli::repl::surface::InteractivePainter::new();
+    painter.paint_transcript("assistant row\n");
+    painter.paint_status(StatusLine::render(
+        &snapshot(),
+        &[StatusSegmentName::Model],
+        120,
+    ));
+    assert_eq!(painter.writer_count(), 1);
+    assert_eq!(painter.transcript(), "assistant row\n");
+    assert!(painter.status_is_ephemeral());
+    assert!(!painter.uses_alternate_screen());
+    assert!(!painter.captures_mouse());
+}
+
+#[test]
 fn asynchronous_git_failure_omits_only_git_and_adds_one_diagnostic_without_blocking() {
     let source = FailingGit;
     let initial = source.collect();
@@ -226,16 +242,4 @@ fn git_adapter_never_executes_shell_or_user_configuration() {
     assert_eq!(command.env("GIT_CONFIG_GLOBAL"), Some("/dev/null"));
     assert_eq!(command.env("GIT_CONFIG_SYSTEM"), Some("/dev/null"));
     assert!(!command.uses_shell());
-}
-
-#[test]
-fn interactive_painter_is_the_sole_writer_and_preserves_transcript_interleaving() {
-    let painter = ego_cli::repl::surface::InteractivePainter::new();
-    painter.paint_transcript("assistant row\n");
-    painter.paint_status(StatusLine::render(&snapshot(), &[StatusSegmentName::Model], 120));
-    assert_eq!(painter.writer_count(), 1);
-    assert_eq!(painter.transcript(), "assistant row\n");
-    assert!(painter.status_is_ephemeral());
-    assert!(!painter.uses_alternate_screen());
-    assert!(!painter.captures_mouse());
 }

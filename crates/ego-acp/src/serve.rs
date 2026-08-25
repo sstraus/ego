@@ -56,9 +56,11 @@ use agent_client_protocol::{
 use agent_client_protocol_schema::v1;
 use ego_core::event::domain::CancelCause;
 use ego_core::event::id::SessionId;
+use ego_core::question::Elicitor;
 use ego_core::turn::CancelToken;
 
 use crate::negotiate::{SERVED, negotiate};
+use crate::question::{AcpQuestionAdapter, CapabilityCapture};
 
 /// One `session/prompt`, everything a host needs to run it.
 pub struct Turn {
@@ -74,6 +76,8 @@ pub struct Turn {
     pub updates: Updates,
     /// Set by `session/cancel` for this session, and by nothing else.
     pub cancel: CancelToken,
+    /// The connection-backed human-input boundary for this turn.
+    pub elicitor: Arc<dyn Elicitor>,
 }
 
 /// The client end of one session, for building the sink a turn publishes into.
@@ -294,30 +298,38 @@ pub fn agent<T: Turns>(turns: T) -> AgentProtocolRouter {
 
 fn v1_agent<T: Turns>(turns: T) -> impl agent_client_protocol::ConnectTo<Client> {
     let sessions = Sessions::default();
+    let client_capabilities = Arc::new(Mutex::new(CapabilityCapture::default()));
     Agent
         .builder()
         .name("ego")
         .on_receive_request(
-            async move |request: v1::InitializeRequest, responder, _cx| {
-                // Not `request.protocol_version`. The router has already
-                // narrowed the input to the arm it selected, so echoing would
-                // happen to be right — and would stop being right the moment a
-                // second arm is configured. See `negotiate`'s module doc.
-                let Some(answer) = negotiate(request.protocol_version) else {
-                    return responder.respond_with_error(Error::invalid_request().data(format!(
-                        "this agent speaks ACP protocol version {SERVED}, and \
+            {
+                let client_capabilities = Arc::clone(&client_capabilities);
+                async move |request: v1::InitializeRequest, responder, _cx| {
+                    // Not `request.protocol_version`. The router has already
+                    // narrowed the input to the arm it selected, so echoing would
+                    // happen to be right — and would stop being right the moment a
+                    // second arm is configured. See `negotiate`'s module doc.
+                    let Some(answer) = negotiate(request.protocol_version) else {
+                        return responder.respond_with_error(Error::invalid_request().data(format!(
+                            "this agent speaks ACP protocol version {SERVED}, and \
                              {} is below it",
-                        request.protocol_version
-                    )));
-                };
-                responder.respond(
-                    v1::InitializeResponse::new(answer)
-                        .agent_capabilities(capabilities())
-                        .agent_info(Some(v1::Implementation::new(
-                            "ego",
-                            env!("CARGO_PKG_VERSION"),
-                        ))),
-                )
+                            request.protocol_version
+                        )));
+                    };
+                    client_capabilities
+                        .lock()
+                        .expect("initialize capability lock poisoned")
+                        .capture_initialize(&request.client_capabilities);
+                    responder.respond(
+                        v1::InitializeResponse::new(answer)
+                            .agent_capabilities(capabilities())
+                            .agent_info(Some(v1::Implementation::new(
+                                "ego",
+                                env!("CARGO_PKG_VERSION"),
+                            ))),
+                    )
+                }
             },
             on_receive_request!(),
         )
@@ -355,6 +367,7 @@ fn v1_agent<T: Turns>(turns: T) -> impl agent_client_protocol::ConnectTo<Client>
         .on_receive_request(
             {
                 let sessions = sessions.clone();
+                let client_capabilities = Arc::clone(&client_capabilities);
                 async move |request: v1::PromptRequest, responder, cx: ConnectionTo<Client>| {
                     let id = request.session_id.clone();
                     let (session, cwd, cancel) = match sessions.begin(&id) {
@@ -398,6 +411,10 @@ fn v1_agent<T: Turns>(turns: T) -> impl agent_client_protocol::ConnectTo<Client>
                         connection: cx.clone(),
                         session: id.clone(),
                     };
+                    let capabilities = *client_capabilities
+                        .lock()
+                        .expect("initialize capability lock poisoned");
+                    let elicitor = AcpQuestionAdapter::live(capabilities, cx.clone()).elicitor();
                     // Off the dispatch loop — see the module doc. The responder
                     // travels with the work, so the response is sent when the
                     // turn actually ends rather than when it was accepted.
@@ -409,6 +426,7 @@ fn v1_agent<T: Turns>(turns: T) -> impl agent_client_protocol::ConnectTo<Client>
                                 text,
                                 updates,
                                 cancel,
+                                elicitor,
                             })
                             .await;
                         // Before the response, and on both arms: the client is

@@ -142,6 +142,41 @@ fn a_session_seeded_from_argv_runs_its_turn_and_ends_when_nobody_is_there() {
     );
 }
 
+#[test]
+fn noninteractive_question_suspends_with_a_structured_question_exit() {
+    let request = serde_json::json!({
+        "prompt": "Choose a continuation",
+        "mode": "single",
+        "options": [{"id": "continue", "label": "Continue"}],
+        "free_text": false,
+    })
+    .to_string();
+    let stub = Stub::start(Plan {
+        completions: vec![Reply::Sse(tool_call(
+            "question-noninteractive",
+            "ask_question",
+            &request,
+        ))],
+        ..Plan::default()
+    });
+    let finished = Ego::against(&stub)
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--ephemeral",
+            "--output",
+            "json",
+            "Ask",
+        ])
+        .run();
+
+    assert_eq!(finished.code, Some(3), "stderr: {}", finished.stderr);
+    let report = finished.report();
+    assert_eq!(report["exit_reason"], "question");
+    assert_eq!(report["ok"], false);
+    assert_eq!(stub.generations().len(), 1);
+}
+
 /// A piped prompt still seeds it.
 ///
 /// `prompt::seed` only differs from `prompt::assemble` in the one row where

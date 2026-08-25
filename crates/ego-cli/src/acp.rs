@@ -84,10 +84,11 @@ impl Turns for Host {
     async fn run(&self, turn: Turn) -> Result<v1::StopReason, String> {
         let _serialised = self.one_at_a_time.lock().await;
 
-        let ended = run::run_with(
+        let ended = run::run_with_elicitor(
             self.args(&turn),
             |caps| turn.updates.sink(caps.clone()),
             turn.cancel.clone(),
+            Some(Arc::clone(&turn.elicitor)),
         )
         .await;
         stop_reason_v1(&ended.termination)

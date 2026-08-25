@@ -12,7 +12,7 @@ pub mod selector;
 pub mod status;
 pub mod surface;
 
-pub use seat::{EditPhase, Seat, SurfaceEditMode, SurfaceOutput, SurfacePhase};
+pub use seat::{EditPhase, Seat, StatusSetup, SurfaceEditMode, SurfaceOutput, SurfacePhase};
 
 use reedline::Signal;
 

@@ -1,8 +1,10 @@
 //! ACP v1 form elicitation adapter for core-owned human-input questions.
 
-use std::collections::HashSet;
-use std::sync::Mutex;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
 
+use agent_client_protocol::{Client, ConnectionTo};
 use agent_client_protocol_schema::v1::{
     ClientCapabilities, CreateElicitationRequest, CreateElicitationResponse,
     ElicitationAction, ElicitationContentValue, ElicitationFormMode,
@@ -10,7 +12,9 @@ use agent_client_protocol_schema::v1::{
     StringPropertySchema,
 };
 use ego_core::event::id::ItemId;
-use ego_core::question::{QuestionAnswer, QuestionError, QuestionMode, QuestionOutcome};
+use ego_core::question::{
+    Elicitor, ElicitorError, QuestionAnswer, QuestionError, QuestionMode, QuestionOutcome,
+};
 
 pub use ego_core::question::QuestionRequest;
 
@@ -38,83 +42,10 @@ impl CapabilityCapture {
     }
 }
 
-/// A protocol response supplied by the ACP host, including its settlement
-/// semantics for the suspended core turn.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct QuestionSettlement {
-    outcome: QuestionOutcome,
-    closes_sibling_batch: bool,
-    closes_turn: bool,
-}
-
-impl QuestionSettlement {
-    fn question(outcome: QuestionOutcome) -> Self {
-        Self {
-            outcome,
-            closes_sibling_batch: false,
-            closes_turn: false,
-        }
-    }
-
-    fn cancellation() -> Self {
-        Self {
-            outcome: QuestionOutcome::Cancelled,
-            closes_sibling_batch: true,
-            closes_turn: true,
-        }
-    }
-
-    pub fn is_declined(&self) -> bool {
-        matches!(self.outcome, QuestionOutcome::Declined)
-    }
-
-    pub fn is_cancelled(&self) -> bool {
-        matches!(self.outcome, QuestionOutcome::Cancelled)
-    }
-
-    pub fn closes_sibling_batch(&self) -> bool {
-        self.closes_sibling_batch
-    }
-
-    pub fn closes_turn(&self) -> bool {
-        self.closes_turn
-    }
-
-    pub fn tool_result(&self) -> QuestionToolResult {
-        QuestionToolResult {
-            failure: matches!(
-                self.outcome,
-                QuestionOutcome::Declined | QuestionOutcome::Cancelled
-            ),
-        }
-    }
-
-    pub fn outcome(&self) -> &QuestionOutcome {
-        &self.outcome
-    }
-}
-
-/// The two properties of the core tool result relevant to ACP settlement.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct QuestionToolResult {
-    failure: bool,
-}
-
-impl QuestionToolResult {
-    pub fn is_pure(self) -> bool {
-        true
-    }
-
-    pub fn is_failure(self) -> bool {
-        self.failure
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QuestionMappingError {
     InvalidRequest { id: ItemId, reason: String },
     InvalidAnswer { id: ItemId, reason: String },
-    CapabilityUnavailable { id: ItemId, guidance: String },
 }
 
 impl std::fmt::Display for QuestionMappingError {
@@ -126,37 +57,46 @@ impl std::fmt::Display for QuestionMappingError {
             Self::InvalidAnswer { id, reason } => {
                 write!(f, "answer for question {id} is invalid: {reason}")
             }
-            Self::CapabilityUnavailable { guidance, .. } => f.write_str(guidance),
         }
     }
 }
 
 impl std::error::Error for QuestionMappingError {}
 
-/// Stateful ACP boundary. Pending identity is retained when the client cannot
-/// elicit a form and removed only by settlement or enclosing cancellation.
-#[derive(Debug)]
+/// One connection's ACP elicitation boundary. Durable pending state and
+/// cancellation remain core-owned.
+#[derive(Clone)]
 pub struct AcpQuestionAdapter {
     capabilities: CapabilityCapture,
-    response: Option<CreateElicitationResponse>,
-    pending: Mutex<HashSet<ItemId>>,
+    connection: Option<ConnectionTo<Client>>,
+}
+
+impl std::fmt::Debug for AcpQuestionAdapter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AcpQuestionAdapter")
+            .field("capabilities", &self.capabilities)
+            .field("connected", &self.connection.is_some())
+            .finish()
+    }
 }
 
 impl AcpQuestionAdapter {
     pub fn new(capabilities: CapabilityCapture) -> Self {
         Self {
             capabilities,
-            response: None,
-            pending: Mutex::new(HashSet::new()),
+            connection: None,
         }
     }
 
-    pub fn with_response(response: CreateElicitationResponse) -> Self {
+    pub fn live(capabilities: CapabilityCapture, connection: ConnectionTo<Client>) -> Self {
         Self {
-            capabilities: CapabilityCapture::form(),
-            response: Some(response),
-            pending: Mutex::new(HashSet::new()),
+            capabilities,
+            connection: Some(connection),
         }
+    }
+
+    pub fn elicitor(&self) -> Arc<dyn Elicitor> {
+        Arc::new(self.clone())
     }
 
     pub fn form_request(
@@ -249,47 +189,38 @@ impl AcpQuestionAdapter {
         Ok(outcome)
     }
 
-    pub fn elicit(
+    async fn elicit_live(
         &self,
         question: ItemId,
-        request: &QuestionRequest,
-    ) -> Result<QuestionSettlement, QuestionMappingError> {
-        self.pending.lock().expect("pending lock poisoned").insert(question);
+        request: QuestionRequest,
+    ) -> Result<QuestionOutcome, ElicitorError> {
         if !self.capabilities.form_available() {
-            return Err(QuestionMappingError::CapabilityUnavailable {
-                id: question,
-                guidance: format!(
-                    "ACP form elicitation is unavailable; answer the pending question with `ego resume --answer {question}=JSON`"
-                ),
-            });
+            return Ok(QuestionOutcome::Unavailable);
         }
-        let Some(response) = &self.response else {
-            return Err(QuestionMappingError::CapabilityUnavailable {
-                id: question,
-                guidance: format!(
-                    "ACP elicitation has no response; answer the pending question with `ego resume --answer {question}=JSON`"
-                ),
-            });
-        };
-        let outcome = Self::validate_response(question, request, response)?;
-        self.pending.lock().expect("pending lock poisoned").remove(&question);
-        Ok(QuestionSettlement::question(outcome))
+        let connection = self.connection.as_ref().ok_or_else(|| {
+            ElicitorError::new(format!(
+                "question {question} advertised ACP form elicitation without a live connection"
+            ))
+        })?;
+        let wire = Self::form_request(question, &request)
+            .map_err(|error| ElicitorError::new(error.to_string()))?;
+        let response = connection
+            .send_request(wire)
+            .block_task()
+            .await
+            .map_err(|error| ElicitorError::new(error.to_string()))?;
+        Self::validate_response(question, &request, &response)
+            .map_err(|error| ElicitorError::new(error.to_string()))
     }
+}
 
-    pub fn pending(&self, question: ItemId) -> bool {
-        self.pending
-            .lock()
-            .expect("pending lock poisoned")
-            .contains(&question)
-    }
-
-    pub fn cancel_process(&self, question: ItemId) -> QuestionSettlement {
-        self.pending.lock().expect("pending lock poisoned").remove(&question);
-        QuestionSettlement::cancellation()
-    }
-
-    pub fn cancel_session(&self, question: ItemId) -> QuestionSettlement {
-        self.cancel_process(question)
+impl Elicitor for AcpQuestionAdapter {
+    fn elicit<'a>(
+        &'a self,
+        question: ItemId,
+        request: QuestionRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<QuestionOutcome, ElicitorError>> + Send + 'a>> {
+        Box::pin(self.elicit_live(question, request))
     }
 }
 

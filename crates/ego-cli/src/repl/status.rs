@@ -94,6 +94,23 @@ impl GitFacts {
     }
 }
 
+impl From<ego_core::config::StatusSegmentName> for StatusSegmentName {
+    fn from(name: ego_core::config::StatusSegmentName) -> Self {
+        match name {
+            ego_core::config::StatusSegmentName::Model => Self::Model,
+            ego_core::config::StatusSegmentName::Effort => Self::Effort,
+            ego_core::config::StatusSegmentName::Mode => Self::Mode,
+            ego_core::config::StatusSegmentName::Context => Self::Context,
+            ego_core::config::StatusSegmentName::Cost => Self::Cost,
+            ego_core::config::StatusSegmentName::Queue => Self::Queue,
+            ego_core::config::StatusSegmentName::Drafts => Self::Drafts,
+            ego_core::config::StatusSegmentName::Interrupt => Self::Interrupt,
+            ego_core::config::StatusSegmentName::Cwd => Self::Cwd,
+            ego_core::config::StatusSegmentName::Git => Self::Git,
+        }
+    }
+}
+
 /// Consumer-owned port for refreshing Git facts away from the input thread.
 pub trait GitFactsSource: Send + Sync {
     /// Collect one complete replacement value.
@@ -278,9 +295,32 @@ impl SurfaceSnapshot {
         self.drafts = drafts;
     }
 
+    /// Replace the live generation choice without re-deriving session facts.
+    pub fn set_selection(&mut self, model: ModelRef, effort: ThinkingLevel) {
+        self.model = model.0;
+        self.effort = effort.as_str().to_owned();
+    }
+
+    /// Replace selector focus before publishing a new surface projection.
+    pub fn set_modal(&mut self, modal: bool) {
+        self.modal = modal;
+    }
+
     /// Replace the working directory before publishing a new snapshot.
     pub fn set_cwd(&mut self, cwd: impl Into<String>) {
         self.cwd = cwd.into();
+    }
+
+    /// Install the latest successful asynchronous Git projection.
+    pub fn set_git(&mut self, git: GitFacts) {
+        self.git = Some(git);
+        self.git_failed = false;
+    }
+
+    /// Record a failed asynchronous Git projection without moving other facts.
+    pub fn set_git_failed(&mut self) {
+        self.git = None;
+        self.git_failed = true;
     }
 
     /// Return a replacement snapshot recording a failed Git refresh.

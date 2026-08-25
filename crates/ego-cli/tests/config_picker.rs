@@ -18,7 +18,10 @@ use ego_core::generator::capabilities::{
 use ego_core::generator::types::ThinkingLevel;
 use ego_core::public::MeteringKind;
 use ego_cli::model::GenerationSelection;
-use ego_cli::model_picker::{ModelPicker, PickerKey, PickerOutcome};
+use ego_cli::model_picker::{
+    ModelPicker, PickerError, PickerFocus, PickerInput, PickerInputOutcome, PickerOutcome,
+};
+use ego_cli::repl::actions::{ActionId, ActionSink, LocalAction, LocalActionOutcome};
 
 fn capabilities() -> ModelCapabilities {
     ModelCapabilities {
@@ -128,6 +131,55 @@ fn assert_selection(
     assert_eq!(snapshot.thinking, thinking);
 }
 
+fn open_model_picker(picker: &mut ModelPicker) {
+    assert_eq!(
+        ActionSink::invoke(
+            picker,
+            LocalAction {
+                id: ActionId::Model,
+                busy: false,
+            },
+        ),
+        LocalActionOutcome::Completed
+    );
+}
+
+fn choose_openai_high(picker: &mut ModelPicker) {
+    open_model_picker(picker);
+    assert_eq!(
+        picker.input(PickerInput::Number(2)).unwrap(),
+        PickerInputOutcome::Consumed
+    );
+    assert_eq!(
+        picker.view().current_id.as_deref(),
+        Some("openai/gpt-5.6"),
+        "highlight must expose the selected model identity"
+    );
+    assert_eq!(
+        picker.input(PickerInput::Enter).unwrap(),
+        PickerInputOutcome::FocusChanged(PickerFocus::Reasoning)
+    );
+    assert_eq!(
+        picker.input(PickerInput::Number(5)).unwrap(),
+        PickerInputOutcome::Consumed
+    );
+}
+
+fn catalogue_with_openai(
+    availability: ModelAvailability,
+    reasoning: ReasoningEffortSupport,
+) -> Arc<ModelCatalogueSnapshot> {
+    let mut snapshot = (*catalogue()).clone();
+    let row = snapshot
+        .models
+        .iter_mut()
+        .find(|row| row.slug.to_string() == "openai/gpt-5.6")
+        .expect("catalogue fixture includes openai/gpt-5.6");
+    row.availability = availability;
+    row.capabilities.reasoning_efforts = reasoning;
+    Arc::new(snapshot)
+}
+
 #[test]
 fn picker_and_models_use_one_snapshot_identity_order_and_availability() {
     let snapshot = catalogue();
@@ -180,7 +232,11 @@ fn escape_and_session_only_record_no_user_config_mutation() {
         Arc::clone(&escape_selection),
         Arc::new(store.clone()),
     );
-    assert_eq!(picker.key(PickerKey::Escape).unwrap(), PickerOutcome::Cancelled);
+    open_model_picker(&mut picker);
+    assert_eq!(
+        picker.input(PickerInput::Escape).unwrap(),
+        PickerInputOutcome::Closed(PickerOutcome::Cancelled)
+    );
     assert!(store.mutations().is_empty());
     assert_selection(&escape_selection, "openai/gpt-5.6", ThinkingLevel::Medium);
 
@@ -191,8 +247,11 @@ fn escape_and_session_only_record_no_user_config_mutation() {
         Arc::clone(&session_selection),
         Arc::new(store.clone()),
     );
-    picker.choose("openai/gpt-5.6", ThinkingLevel::High).unwrap();
-    assert_eq!(picker.key(PickerKey::SessionOnly).unwrap(), PickerOutcome::SessionInstalled);
+    choose_openai_high(&mut picker);
+    assert_eq!(
+        picker.input(PickerInput::SessionOnly).unwrap(),
+        PickerInputOutcome::Closed(PickerOutcome::SessionInstalled)
+    );
     assert!(store.mutations().is_empty());
     assert_selection(&session_selection, "openai/gpt-5.6", ThinkingLevel::High);
 }
@@ -202,10 +261,12 @@ fn enter_records_one_typed_mutation_then_installs_memory() {
     let store = RecordingUserConfigStore::new(Ok(UserConfigPublication::PublishedDurably));
     let selection = selection();
     let mut picker = ModelPicker::for_selection(catalogue(), Arc::clone(&selection), Arc::new(store.clone()));
-    picker.choose("openai/gpt-5.6", ThinkingLevel::High).unwrap();
+    choose_openai_high(&mut picker);
     assert_eq!(
-        picker.key(PickerKey::Enter).unwrap(),
-        PickerOutcome::Persisted(UserConfigPublication::PublishedDurably)
+        picker.input(PickerInput::Enter).unwrap(),
+        PickerInputOutcome::Closed(PickerOutcome::Persisted(
+            UserConfigPublication::PublishedDurably,
+        ))
     );
     assert_eq!(store.mutations(), vec![UserConfigMutation::ModelAndThinking {
         model: "openai/gpt-5.6".into(),
@@ -221,8 +282,8 @@ fn failed_enter_records_the_typed_mutation_but_keeps_memory_unchanged() {
     )));
     let selection = selection();
     let mut picker = ModelPicker::for_selection(catalogue(), Arc::clone(&selection), Arc::new(store.clone()));
-    picker.choose("openai/gpt-5.6", ThinkingLevel::High).unwrap();
-    let _error = picker.key(PickerKey::Enter).unwrap_err();
+    choose_openai_high(&mut picker);
+    let _error = picker.input(PickerInput::Enter).unwrap_err();
     assert_eq!(store.mutations(), vec![UserConfigMutation::ModelAndThinking {
         model: "openai/gpt-5.6".into(),
         thinking: ThinkingLevel::High,
@@ -244,15 +305,206 @@ fn uncertain_publication_installs_memory_and_preserves_diagnostic() {
         Arc::clone(&selection),
         Arc::new(store.clone()),
     );
-    picker.choose("openai/gpt-5.6", ThinkingLevel::High).unwrap();
+    choose_openai_high(&mut picker);
 
     assert_eq!(
-        picker.key(PickerKey::Enter).unwrap(),
-        PickerOutcome::Persisted(UserConfigPublication::PublishedDurabilityUncertain {
-            diagnostic: diagnostic.into(),
-        })
+        picker.input(PickerInput::Enter).unwrap(),
+        PickerInputOutcome::Closed(PickerOutcome::Persisted(
+            UserConfigPublication::PublishedDurabilityUncertain {
+                diagnostic: diagnostic.into(),
+            },
+        ))
     );
     assert_selection(&selection, "openai/gpt-5.6", ThinkingLevel::High);
+}
+
+#[test]
+fn action_sink_opener_is_single_flight_and_reopens_after_escape() {
+    let selection = selection();
+    let mut picker = ModelPicker::for_selection(
+        catalogue(),
+        selection,
+        Arc::new(RecordingUserConfigStore::new(Ok(
+            UserConfigPublication::PublishedDurably,
+        ))),
+    );
+    open_model_picker(&mut picker);
+    assert_eq!(
+        ActionSink::invoke(
+            &mut picker,
+            LocalAction {
+                id: ActionId::Model,
+                busy: false,
+            },
+        ),
+        LocalActionOutcome::InFlight
+    );
+    assert_eq!(
+        picker.input(PickerInput::Escape).unwrap(),
+        PickerInputOutcome::Closed(PickerOutcome::Cancelled)
+    );
+    open_model_picker(&mut picker);
+    assert!(picker.is_open());
+}
+
+#[test]
+fn thinking_action_opens_current_model_and_current_effort() {
+    let store = RecordingUserConfigStore::new(Ok(UserConfigPublication::PublishedDurably));
+    let selection = selection();
+    let mut picker = ModelPicker::for_selection(
+        catalogue(),
+        Arc::clone(&selection),
+        Arc::new(store.clone()),
+    );
+    assert_eq!(
+        ActionSink::invoke(
+            &mut picker,
+            LocalAction {
+                id: ActionId::Thinking,
+                busy: false,
+            },
+        ),
+        LocalActionOutcome::Completed
+    );
+    assert_eq!(picker.view().focus, PickerFocus::Reasoning);
+    assert_eq!(
+        picker.view().selected_model.as_deref(),
+        Some("openai/gpt-5.6")
+    );
+    assert_eq!(picker.view().current_id.as_deref(), Some("medium"));
+    assert_eq!(
+        picker.input(PickerInput::SessionOnly).unwrap(),
+        PickerInputOutcome::Closed(PickerOutcome::SessionInstalled)
+    );
+    assert!(store.mutations().is_empty());
+    assert_selection(&selection, "openai/gpt-5.6", ThinkingLevel::Medium);
+}
+
+#[test]
+fn repeated_model_and_thinking_actions_are_in_flight_while_picker_is_open() {
+    let selection = selection();
+    let mut picker = ModelPicker::for_selection(
+        catalogue(),
+        selection,
+        Arc::new(RecordingUserConfigStore::new(Ok(
+            UserConfigPublication::PublishedDurably,
+        ))),
+    );
+    assert_eq!(
+        ActionSink::invoke(
+            &mut picker,
+            LocalAction {
+                id: ActionId::Thinking,
+                busy: false,
+            },
+        ),
+        LocalActionOutcome::Completed
+    );
+    for id in [ActionId::Model, ActionId::Thinking] {
+        assert_eq!(
+            ActionSink::invoke(
+                &mut picker,
+                LocalAction { id, busy: false },
+            ),
+            LocalActionOutcome::InFlight
+        );
+    }
+    assert_eq!(
+        picker.input(PickerInput::Escape).unwrap(),
+        PickerInputOutcome::Closed(PickerOutcome::Cancelled)
+    );
+}
+
+#[test]
+fn thinking_refuses_closed_with_typed_unavailable_diagnostic() {
+    let selection = selection();
+    let mut picker = ModelPicker::for_selection(
+        catalogue_with_openai(
+            ModelAvailability::Unavailable {
+                cause: ModelAvailabilityCause::SourceUnreachable,
+                message: "provider unavailable".into(),
+            },
+            ReasoningEffortSupport::Any,
+        ),
+        selection,
+        Arc::new(RecordingUserConfigStore::new(Ok(
+            UserConfigPublication::PublishedDurably,
+        ))),
+    );
+    assert_eq!(
+        ActionSink::invoke(
+            &mut picker,
+            LocalAction {
+                id: ActionId::Thinking,
+                busy: false,
+            },
+        ),
+        LocalActionOutcome::Refused {
+            reason: "the current model has no selectable reasoning authority",
+        }
+    );
+    assert!(!picker.is_open());
+    assert!(matches!(
+        picker.diagnostic(),
+        Some(PickerError::Unavailable { slug, .. }) if slug == "openai/gpt-5.6"
+    ));
+}
+
+#[test]
+fn thinking_refuses_closed_with_typed_unknown_effort_diagnostic() {
+    let selection = selection();
+    let mut picker = ModelPicker::for_selection(
+        catalogue_with_openai(ModelAvailability::Available, ReasoningEffortSupport::Unknown),
+        selection,
+        Arc::new(RecordingUserConfigStore::new(Ok(
+            UserConfigPublication::PublishedDurably,
+        ))),
+    );
+    assert!(matches!(
+        ActionSink::invoke(
+            &mut picker,
+            LocalAction {
+                id: ActionId::Thinking,
+                busy: false,
+            },
+        ),
+        LocalActionOutcome::Refused { .. }
+    ));
+    assert!(!picker.is_open());
+    assert!(matches!(
+        picker.diagnostic(),
+        Some(PickerError::UnknownReasoningSupport { slug }) if slug == "openai/gpt-5.6"
+    ));
+}
+
+#[test]
+fn thinking_refuses_closed_with_typed_absent_model_diagnostic() {
+    let selection = Arc::new(GenerationSelection::new(
+        ModelRef("missing/model".into()),
+        ThinkingLevel::Medium,
+    ));
+    let mut picker = ModelPicker::for_selection(
+        catalogue(),
+        selection,
+        Arc::new(RecordingUserConfigStore::new(Ok(
+            UserConfigPublication::PublishedDurably,
+        ))),
+    );
+    assert!(matches!(
+        ActionSink::invoke(
+            &mut picker,
+            LocalAction {
+                id: ActionId::Thinking,
+                busy: false,
+            },
+        ),
+        LocalActionOutcome::Refused { .. }
+    ));
+    assert!(!picker.is_open());
+    assert!(matches!(
+        picker.diagnostic(),
+        Some(PickerError::UnknownModel { slug }) if slug == "missing/model"
+    ));
 }
 
 #[test]
@@ -279,7 +531,10 @@ fn replacing_the_snapshot_updates_picker_availability_without_a_second_catalogue
         message: "provider unavailable".into(),
     };
     let unavailable = Arc::new(unavailable);
-    picker.replace_snapshot(Arc::clone(&unavailable));
+    assert_eq!(
+        picker.replace_snapshot(Arc::clone(&unavailable)),
+        LocalActionOutcome::Completed
+    );
     assert!(Arc::ptr_eq(picker.snapshot(), &unavailable));
     assert!(!picker.can_select(&ModelSlug::parse("ollama/qwen3").unwrap()));
 }

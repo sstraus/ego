@@ -14,13 +14,13 @@ use toml_edit::{Array, DocumentMut, Item, Value, value};
 use crate::store::{AtomicReplacePublication, StoreIo};
 
 /// The real filesystem adapter for one user `config.toml` authority.
-pub struct OsUserConfigStore<'io, I> {
-    io: &'io I,
+pub struct OsUserConfigStore<I> {
+    io: I,
     path: PathBuf,
 }
 
-impl<'io, I> OsUserConfigStore<'io, I> {
-    pub fn new(io: &'io I, path: impl AsRef<Path>) -> Self {
+impl<I> OsUserConfigStore<I> {
+    pub fn new(io: I, path: impl AsRef<Path>) -> Self {
         Self {
             io,
             path: path.as_ref().to_path_buf(),
@@ -28,7 +28,11 @@ impl<'io, I> OsUserConfigStore<'io, I> {
     }
 }
 
-impl<I: StoreIo> UserConfigStore for OsUserConfigStore<'_, I> {
+impl<I> UserConfigStore for OsUserConfigStore<I>
+where
+    I: std::ops::Deref + Send + Sync,
+    I::Target: StoreIo,
+{
     fn mutate(
         &self,
         mutation: UserConfigMutation,

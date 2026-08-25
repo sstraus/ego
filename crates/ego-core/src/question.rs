@@ -3,6 +3,7 @@
 
 use std::collections::HashSet;
 
+use futures::future::BoxFuture;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -299,7 +300,54 @@ pub fn ask_question_descriptor() -> ToolDescriptor {
     }
 }
 
+/// A failure of the host adapter or its transport while eliciting an answer.
+///
+/// This is deliberately distinct from [`QuestionOutcome::Unavailable`]: an
+/// unavailable capability is a successful host answer that suspends the turn,
+/// while this value terminates the active run and leaves the durable request
+/// pending for recovery.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ElicitorError {
+    message: String,
+}
+
+impl ElicitorError {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+impl std::fmt::Display for ElicitorError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ElicitorError {}
+
+impl From<String> for ElicitorError {
+    fn from(message: String) -> Self {
+        Self::new(message)
+    }
+}
+
+impl From<&str> for ElicitorError {
+    fn from(message: &str) -> Self {
+        Self::new(message)
+    }
+}
+
 /// Core's narrow human-input port. Terminal and ACP crates own its adapters.
 pub trait Elicitor: Send + Sync {
-    fn elicit(&self, request: QuestionRequest) -> QuestionOutcome;
+    fn elicit<'a>(
+        &'a self,
+        question: crate::event::id::ItemId,
+        request: QuestionRequest,
+    ) -> BoxFuture<'a, Result<QuestionOutcome, ElicitorError>>;
 }

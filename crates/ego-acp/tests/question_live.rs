@@ -1,6 +1,7 @@
 //! RED contract for ACP live elicitation integration.
 
 use std::sync::Arc;
+use futures::executor::block_on;
 
 use ego_acp::question::{AcpQuestionAdapter, CapabilityCapture};
 use ego_core::event::id::ItemId;
@@ -24,11 +25,12 @@ fn outgoing_live_request_uses_the_durable_question_item_as_its_scope() {
 }
 
 #[test]
-fn capability_absence_is_detected_before_a_request_and_keeps_stable_resume_guidance() {
+fn capability_absence_becomes_an_unavailable_question_outcome() {
     let adapter = AcpQuestionAdapter::new(CapabilityCapture::default());
     let id = ItemId::new();
-    let error = adapter.elicit(id, &request()).unwrap_err();
-    assert!(error.to_string().contains(&id.to_string()));
+    let outcome = block_on(adapter.elicitor().elicit(id, request()))
+        .expect("missing capability is represented as unavailable");
+    assert!(matches!(outcome, ego_core::question::QuestionOutcome::Unavailable));
 }
 
 // ACP must be the host implementation of core's one async/id-aware port;
