@@ -17,6 +17,12 @@ pub(super) enum Intercept {
     Editor,
     /// The pasteboard image this build has nowhere to put.
     ClipboardImage,
+    /// Save or restore one exact composer draft.
+    Draft,
+    /// Submit the live composer through the durable coordinator.
+    SubmitBusy,
+    /// Expedite the durable pending-steer prefix.
+    Interrupt,
 }
 
 /// Decide a key.
@@ -34,8 +40,16 @@ pub(super) fn intercept(code: KeyCode, modifiers: KeyModifiers) -> Intercept {
     // Shift is allowed through; every other modifier must be absent.
     let only_control = modifiers.difference(KeyModifiers::SHIFT) == KeyModifiers::CONTROL;
 
+    let pressed_s = matches!(code, KeyCode::Char(key) if key.eq_ignore_ascii_case(&'s'));
+
     if pressed_v && only_control {
         Intercept::ClipboardImage
+    } else if pressed_s && only_control {
+        Intercept::Draft
+    } else if code == KeyCode::Enter && modifiers.is_empty() {
+        Intercept::SubmitBusy
+    } else if code == KeyCode::Esc && modifiers.is_empty() {
+        Intercept::Interrupt
     } else {
         Intercept::Editor
     }
@@ -72,6 +86,22 @@ mod tests {
         assert_eq!(
             intercept(KeyCode::Char('v'), KeyModifiers::NONE),
             Intercept::Editor
+        );
+    }
+
+    #[test]
+    fn durable_surface_actions_are_named_before_the_editor_sees_them() {
+        assert_eq!(
+            intercept(KeyCode::Char('s'), KeyModifiers::CONTROL),
+            Intercept::Draft
+        );
+        assert_eq!(
+            intercept(KeyCode::Enter, KeyModifiers::NONE),
+            Intercept::SubmitBusy
+        );
+        assert_eq!(
+            intercept(KeyCode::Esc, KeyModifiers::NONE),
+            Intercept::Interrupt
         );
     }
 

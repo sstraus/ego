@@ -1646,6 +1646,40 @@ fn stdout_carries_the_protocol_and_stderr_carries_the_diagnostics() {
     );
 }
 
+#[test]
+fn headless_json_and_jsonl_never_instantiate_the_interactive_queue_surface() {
+    const QUEUE_LABEL: &str = "Messages to be submitted after next tool call (press esc to interrupt and send immediately)";
+
+    for output in ["json", "jsonl"] {
+        let stub = Stub::start(Plan::default());
+        let finished = Ego::against(&stub)
+            .args([
+                "--model",
+                "ollama/qwen3",
+                "--ephemeral",
+                "--output",
+                output,
+                "Answer once",
+            ])
+            .run();
+
+        assert_eq!(
+            finished.code,
+            Some(0),
+            "output={output}: {}",
+            finished.stderr
+        );
+        assert!(
+            !finished.stdout.contains(QUEUE_LABEL),
+            "output={output} leaked interactive queue chrome"
+        );
+        assert!(
+            !finished.stdout.contains('\x1b'),
+            "output={output} emitted terminal control bytes"
+        );
+    }
+}
+
 /// `-q` silences the line UI's tool reports without silencing the answer: the
 /// answer is what the run produced, and a quiet run still produces it.
 #[test]

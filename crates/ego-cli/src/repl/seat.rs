@@ -8,19 +8,43 @@ use std::sync::{Arc, Mutex};
 
 use crossbeam::channel::{Receiver, SendError, Sender, bounded};
 use crossterm::event::Event;
+use futures::channel::oneshot;
+use futures::future::BoxFuture;
 use reedline::{
     EditCommand, EditMode, Emacs, ExternalPrinter, Prompt, PromptEditMode, PromptHistorySearch,
     Reedline, ReedlineEvent, ReedlineRawEvent, default_emacs_keybindings,
 };
 
 use super::keys::{Intercept, intercept};
-use super::{Line, answer};
+use super::{BUSY_SUBMIT_COMMAND, DRAFT_COMMAND, INTERRUPT_COMMAND, Line, answer};
 use ego_core::config::Trust;
 use ego_core::event::domain::CancelCause;
 use ego_core::permit::{PermissionDecision, PermissionRequest};
-use ego_core::turn::CancelToken;
+use ego_core::turn::{
+    CancelToken, InteractiveControl, InteractiveIngress, QueueStatus, interactive_control,
+};
 
 const CHANNEL_CAPACITY: usize = 1;
+const QUEUE_LABEL: &str =
+    "Messages to be submitted after next tool call (press esc to interrupt and send immediately)";
+
+#[derive(Debug, Default)]
+struct SurfaceStatus {
+    queue: QueueStatus,
+    drafts: usize,
+    notice: Option<String>,
+}
+
+type SharedStatus = Arc<Mutex<SurfaceStatus>>;
+
+/// Local and durable input that still exists when the session exits.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ExitCounts {
+    /// Composer buffers explicitly saved in the session-local stash.
+    pub drafts: usize,
+    /// Durable prompts that have not yet been consumed into conversation.
+    pub accepted: usize,
+}
 
 /// Whether plain Enter may submit the composer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,11 +102,17 @@ impl SurfaceOutput {
     }
 
     pub fn finish(&mut self) -> Result<(), SendError<String>> {
-        if self.pending.is_empty() {
-            return Ok(());
+        if !self.pending.is_empty() {
+            let row = std::mem::take(&mut self.pending);
+            self.send(row)?;
         }
-        let row = std::mem::take(&mut self.pending);
-        self.send(row)
+
+        // `finish` is the barrier before the terminal owner's shutdown. The
+        // capacity-one queue makes this empty sentinel wait until Reedline has
+        // taken the preceding row. Reedline drains the queue in one loop and
+        // an empty string has no visible lines, so the sole owner is committed
+        // to painting prior output without introducing another terminal writer.
+        self.send(String::new())
     }
 
     fn send(&self, row: String) -> Result<(), SendError<String>> {
@@ -99,7 +129,7 @@ enum Control {
     },
     Permission {
         request: PermissionRequest,
-        reply: Sender<PermissionDecision>,
+        reply: oneshot::Sender<PermissionDecision>,
     },
     Shutdown,
 }
@@ -109,6 +139,7 @@ struct LiveSeat {
     control: Sender<Control>,
     break_signal: Arc<AtomicBool>,
     phase: SurfacePhase,
+    status: SharedStatus,
     owner: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
@@ -127,6 +158,7 @@ enum SeatKind {
 pub struct Seat {
     kind: SeatKind,
     terminal: bool,
+    coordinator: Mutex<Option<InteractiveControl>>,
 }
 
 impl std::fmt::Debug for Seat {
@@ -142,13 +174,19 @@ impl Seat {
     /// submits its first line as a whole prompt, which is the failure that
     /// makes pasting one impossible. `CLI.md` §6.1.
     pub fn new(cancel: CancelToken) -> std::io::Result<(Self, Option<SurfaceOutput>)> {
+        let (ingress, control) = interactive_control();
         let terminal = std::io::stdin().is_terminal();
         let phase = SurfacePhase::new(if terminal {
             EditPhase::Busy
         } else {
             EditPhase::Idle
         });
-        let mode = SurfaceEditMode::new(Emacs::new(default_emacs_keybindings()), phase.clone());
+        let status = Arc::new(Mutex::new(SurfaceStatus::default()));
+        let mode = SurfaceEditMode::with_status(
+            Emacs::new(default_emacs_keybindings()),
+            phase.clone(),
+            Arc::clone(&status),
+        );
         let asked_for_image = mode.asked_for_image();
         let editor = Reedline::create()
             .with_edit_mode(Box::new(mode))
@@ -162,6 +200,7 @@ impl Seat {
                         asked_for_image,
                     })),
                     terminal,
+                    coordinator: Mutex::new(Some(control)),
                 },
                 None,
             ));
@@ -171,9 +210,10 @@ impl Seat {
         let output = SurfaceOutput::new(printer.sender(), cancel.clone());
         let break_signal = Arc::new(AtomicBool::new(false));
         let (input_sender, input) = bounded(CHANNEL_CAPACITY);
-        let (control, control_receiver) = bounded(CHANNEL_CAPACITY);
+        let (seat_control, control_receiver) = bounded(CHANNEL_CAPACITY);
         let owner_break = Arc::clone(&break_signal);
         let owner_phase = phase.clone();
+        let owner_status = Arc::clone(&status);
         let owner = std::thread::Builder::new()
             .name("ego-reedline".to_string())
             .spawn(move || {
@@ -184,7 +224,9 @@ impl Seat {
                     input_sender,
                     control_receiver,
                     owner_phase,
+                    owner_status,
                     asked_for_image,
+                    ingress,
                     cancel,
                 );
             })?;
@@ -193,12 +235,14 @@ impl Seat {
             Self {
                 kind: SeatKind::Live(LiveSeat {
                     input,
-                    control,
+                    control: seat_control,
                     break_signal,
                     phase,
+                    status,
                     owner: Mutex::new(Some(owner)),
                 }),
                 terminal,
+                coordinator: Mutex::new(Some(control)),
             },
             Some(output),
         ))
@@ -208,10 +252,17 @@ impl Seat {
     pub fn read(&self) -> Line {
         match &self.kind {
             SeatKind::Live(live) => {
-                live.phase.set(EditPhase::Idle);
-                live.input.recv().unwrap_or(Line::Ended)
+                let line = live.input.recv().unwrap_or(Line::Ended);
+                if matches!(line, Line::Submitted(_)) {
+                    live.phase.set(EditPhase::Busy);
+                }
+                line
             }
-            SeatKind::Sequential(seat) => read_with(&seat.editor, &seat.asked_for_image, &Waiting),
+            SeatKind::Sequential(seat) => read_with(
+                &seat.editor,
+                &seat.asked_for_image,
+                &Waiting::new(Arc::new(Mutex::new(SurfaceStatus::default()))),
+            ),
         }
     }
 
@@ -230,6 +281,18 @@ impl Seat {
         };
         if let Some(owner) = live.owner.lock().expect("terminal owner lock").take() {
             let _ = owner.join();
+        }
+    }
+
+    /// Snapshot the exact local-draft and durable-input remainder.
+    pub fn exit_counts(&self) -> ExitCounts {
+        let SeatKind::Live(live) = &self.kind else {
+            return ExitCounts::default();
+        };
+        let status = live.status.lock().expect("surface status lock");
+        ExitCounts {
+            drafts: status.drafts,
+            accepted: status.queue.pending_steers + status.queue.queued,
         }
     }
 
@@ -269,6 +332,26 @@ impl crate::run::InteractiveSeat for Seat {
         }
     }
 
+    fn idle(&self) {
+        if let SeatKind::Live(live) = &self.kind {
+            live.phase.set(EditPhase::Idle);
+        }
+    }
+
+    fn take_control(&self) -> InteractiveControl {
+        self.coordinator
+            .lock()
+            .expect("interactive coordinator lock")
+            .take()
+            .expect("the session takes its interactive coordinator once")
+    }
+
+    fn refresh_queue(&self, queue: QueueStatus) {
+        if let SeatKind::Live(live) = &self.kind {
+            live.status.lock().expect("surface status lock").queue = queue;
+        }
+    }
+
     fn trust(&self, workspace: &Path) -> Trust {
         // Piped stdin may itself be the first prompt. Consuming it as a trust
         // answer would turn user content into authority. With no terminal
@@ -285,17 +368,30 @@ impl crate::run::InteractiveSeat for Seat {
         )
     }
 
-    fn permission(&self, request: &PermissionRequest) -> PermissionDecision {
-        if !self.terminal {
-            return PermissionDecision::Deny;
-        }
-        self.request(
-            |reply| Control::Permission {
+    fn permission(&self, _request: &PermissionRequest) -> PermissionDecision {
+        PermissionDecision::Deny
+    }
+
+    fn permission_future<'a>(
+        &'a self,
+        request: &'a PermissionRequest,
+    ) -> BoxFuture<'a, PermissionDecision> {
+        let SeatKind::Live(live) = &self.kind else {
+            return Box::pin(futures::future::ready(PermissionDecision::Deny));
+        };
+        let (reply, answer) = oneshot::channel();
+        if live
+            .control
+            .send(Control::Permission {
                 request: request.clone(),
                 reply,
-            },
-            PermissionDecision::Deny,
-        )
+            })
+            .is_err()
+        {
+            return Box::pin(futures::future::ready(PermissionDecision::Deny));
+        }
+        live.break_signal.store(true, Ordering::Release);
+        Box::pin(async move { answer.await.unwrap_or(PermissionDecision::Deny) })
     }
 }
 
@@ -304,16 +400,22 @@ fn own_terminal(
     input: Sender<Line>,
     control: Receiver<Control>,
     phase: SurfacePhase,
+    status: SharedStatus,
     asked_for_image: Arc<AtomicBool>,
+    ingress: InteractiveIngress,
     cancel: CancelToken,
 ) {
     let mut pending_control = None;
+    let mut drafts = Vec::new();
     loop {
         if let Some(request) = pending_control.take() {
             if !answer_control(
                 &mut editor,
                 &phase,
+                &status,
                 &asked_for_image,
+                &ingress,
+                &mut drafts,
                 &control,
                 &mut pending_control,
                 request,
@@ -323,12 +425,17 @@ fn own_terminal(
             continue;
         }
 
-        let signal = editor.read_line(&Waiting);
-        let failed = signal.is_err();
+        let (line, failed) = surface_line(
+            &mut editor,
+            &Waiting::new(Arc::clone(&status)),
+            &status,
+            &asked_for_image,
+            &ingress,
+            &mut drafts,
+        );
         if failed {
             cancel.cancel(CancelCause::Host);
         }
-        let line = answer(asked_for_image.swap(false, Ordering::Relaxed), signal);
         match line {
             Line::ExternalBreak(_) => match control.recv() {
                 Ok(Control::Shutdown) | Err(_) => break,
@@ -336,7 +443,10 @@ fn own_terminal(
                     if !answer_control(
                         &mut editor,
                         &phase,
+                        &status,
                         &asked_for_image,
+                        &ingress,
+                        &mut drafts,
                         &control,
                         &mut pending_control,
                         request,
@@ -345,6 +455,7 @@ fn own_terminal(
                     }
                 }
             },
+            Line::HostCommand(command) if command == INTERRUPT_COMMAND => continue,
             Line::Submitted(_)
             | Line::Blank
             | Line::Interrupted
@@ -363,10 +474,87 @@ fn own_terminal(
     }
 }
 
+fn surface_line(
+    editor: &mut Reedline,
+    prompt: &dyn Prompt,
+    status: &SharedStatus,
+    asked_for_image: &AtomicBool,
+    ingress: &InteractiveIngress,
+    drafts: &mut Vec<(String, usize)>,
+) -> (Line, bool) {
+    loop {
+        let signal = editor.read_line(prompt);
+        let failed = signal.is_err();
+        let line = answer(asked_for_image.swap(false, Ordering::Relaxed), signal);
+        let Line::HostCommand(command) = line else {
+            return (line, failed);
+        };
+
+        match command.as_str() {
+            DRAFT_COMMAND => {
+                let buffer = editor.current_buffer_contents().to_string();
+                if buffer.is_empty() {
+                    if let Some((saved, cursor)) = drafts.pop() {
+                        editor.run_edit_commands(&[
+                            EditCommand::InsertString(saved),
+                            EditCommand::MoveToPosition {
+                                position: cursor,
+                                select: false,
+                            },
+                        ]);
+                    }
+                } else {
+                    drafts.push((buffer, editor.current_insertion_point()));
+                    editor.run_edit_commands(&[EditCommand::Clear]);
+                }
+                let mut status = status.lock().expect("surface status lock");
+                status.drafts = drafts.len();
+                status.notice = None;
+            }
+            BUSY_SUBMIT_COMMAND => {
+                let buffer = editor.current_buffer_contents().to_string();
+                if buffer.trim().is_empty() {
+                    continue;
+                }
+                match futures::executor::block_on(ingress.submit(buffer)) {
+                    Ok(queue) => {
+                        editor.run_edit_commands(&[EditCommand::Clear]);
+                        let mut status = status.lock().expect("surface status lock");
+                        status.queue = queue;
+                        status.notice = None;
+                    }
+                    Err(error) => {
+                        status.lock().expect("surface status lock").notice =
+                            Some(error.to_string());
+                    }
+                }
+            }
+            INTERRUPT_COMMAND => match futures::executor::block_on(ingress.interrupt()) {
+                Ok(queue) => {
+                    let mut status = status.lock().expect("surface status lock");
+                    status.queue = queue;
+                    status.notice = None;
+                    return (Line::HostCommand(command), false);
+                }
+                Err(error) => {
+                    status.lock().expect("surface status lock").notice = Some(error.to_string());
+                }
+            },
+            _ => return (Line::HostCommand(command), failed),
+        }
+
+        // A suspended read retains the exact buffer and cursor. Starting it
+        // again repaints the state changed by the local action above.
+    }
+}
+
 fn answer_control(
     editor: &mut Reedline,
     phase: &SurfacePhase,
+    status: &SharedStatus,
     asked_for_image: &AtomicBool,
+    ingress: &InteractiveIngress,
+    drafts: &mut Vec<(String, usize)>,
     controls: &Receiver<Control>,
     pending_control: &mut Option<Control>,
     control: Control,
@@ -378,19 +566,25 @@ fn answer_control(
 
     enum Reply {
         Trust(Sender<Trust>, Trust),
-        Permission(Sender<PermissionDecision>, PermissionDecision),
+        Permission(oneshot::Sender<PermissionDecision>, PermissionDecision),
     }
 
     let (reply, after, mut keep_running) = match control {
         Control::Trust { workspace, reply } => {
-            let prompt = Question(format!("Trust project files in {workspace}? [y/N] "));
+            let prompt = Question::new(
+                format!("Trust project files in {workspace}? [y/N] "),
+                Arc::clone(status),
+            );
             let trust = loop {
-                match modal_line(editor, asked_for_image, &prompt) {
+                match modal_line(editor, status, asked_for_image, ingress, drafts, &prompt) {
                     Line::Submitted(answer) => match parse_trust(&answer) {
                         Some(trust) => break trust,
                         None => continue,
                     },
                     Line::Blank | Line::Interrupted | Line::Ended | Line::ExternalBreak(_) => {
+                        break Trust::Untrusted;
+                    }
+                    Line::HostCommand(command) if command == INTERRUPT_COMMAND => {
                         break Trust::Untrusted;
                     }
                     Line::Refused(_) | Line::HostCommand(_) => continue,
@@ -399,16 +593,24 @@ fn answer_control(
             (Reply::Trust(reply, trust), EditPhase::Idle, true)
         }
         Control::Permission { request, reply } => {
-            let prompt = Question(format!("{request}. [allow/deny/amend] "));
+            let prompt = Question::new(
+                format!("{request}. [allow/deny/amend] "),
+                Arc::clone(status),
+            );
             let decision = loop {
-                match modal_line(editor, asked_for_image, &prompt) {
+                match modal_line(editor, status, asked_for_image, ingress, drafts, &prompt) {
                     Line::Submitted(answer) => match parse_permission(&answer) {
                         Some(PermissionWord::Allow) => break PermissionDecision::Allow,
                         Some(PermissionWord::Deny) => break PermissionDecision::Deny,
-                        Some(PermissionWord::Amend) => break amendment(editor, asked_for_image),
+                        Some(PermissionWord::Amend) => {
+                            break amendment(editor, status, asked_for_image, ingress, drafts);
+                        }
                         None => continue,
                     },
                     Line::Interrupted | Line::Ended | Line::ExternalBreak(_) => {
+                        break PermissionDecision::Deny;
+                    }
+                    Line::HostCommand(command) if command == INTERRUPT_COMMAND => {
                         break PermissionDecision::Deny;
                     }
                     Line::Blank | Line::Refused(_) | Line::HostCommand(_) => continue,
@@ -445,22 +647,35 @@ fn answer_control(
     keep_running
 }
 
-fn modal_line(editor: &mut Reedline, asked_for_image: &AtomicBool, prompt: &dyn Prompt) -> Line {
-    answer(
-        asked_for_image.swap(false, Ordering::Relaxed),
-        editor.read_line(prompt),
-    )
+fn modal_line(
+    editor: &mut Reedline,
+    status: &SharedStatus,
+    asked_for_image: &AtomicBool,
+    ingress: &InteractiveIngress,
+    drafts: &mut Vec<(String, usize)>,
+    prompt: &dyn Prompt,
+) -> Line {
+    surface_line(editor, prompt, status, asked_for_image, ingress, drafts).0
 }
 
-fn amendment(editor: &mut Reedline, asked_for_image: &AtomicBool) -> PermissionDecision {
-    let prompt = Question("New JSON parameters: ".to_string());
+fn amendment(
+    editor: &mut Reedline,
+    status: &SharedStatus,
+    asked_for_image: &AtomicBool,
+    ingress: &InteractiveIngress,
+    drafts: &mut Vec<(String, usize)>,
+) -> PermissionDecision {
+    let prompt = Question::new("New JSON parameters: ".to_string(), Arc::clone(status));
     loop {
-        match modal_line(editor, asked_for_image, &prompt) {
+        match modal_line(editor, status, asked_for_image, ingress, drafts, &prompt) {
             Line::Submitted(raw) => match serde_json::from_str(&raw) {
                 Ok(params) => return PermissionDecision::Amend { params },
                 Err(_) => continue,
             },
             Line::Interrupted | Line::Ended | Line::ExternalBreak(_) => {
+                return PermissionDecision::Deny;
+            }
+            Line::HostCommand(command) if command == INTERRUPT_COMMAND => {
                 return PermissionDecision::Deny;
             }
             Line::Blank | Line::Refused(_) | Line::HostCommand(_) => continue,
@@ -498,7 +713,34 @@ fn parse_permission(answer: &str) -> Option<PermissionWord> {
 /// is either already on the screen or answerable by asking, and a prompt that
 /// redraws a changing right-hand side is a second writer competing with the
 /// renderer for the same row.
-struct Waiting;
+struct Waiting {
+    status: SharedStatus,
+}
+
+impl Waiting {
+    fn new(status: SharedStatus) -> Self {
+        Self { status }
+    }
+}
+
+fn status_prefix(status: &SharedStatus) -> String {
+    let status = status.lock().expect("surface status lock");
+    let mut rows = Vec::new();
+    if status.queue.pending_steers > 0 {
+        rows.push(QUEUE_LABEL.to_string());
+    }
+    if status.queue.interrupt_pending {
+        rows.push("interrupt pending".to_string());
+    }
+    if let Some(notice) = status.notice.as_ref() {
+        rows.push(notice.clone());
+    }
+    if rows.is_empty() {
+        String::new()
+    } else {
+        format!("{} | ", rows.join(" | "))
+    }
+}
 
 impl Prompt for Waiting {
     fn render_prompt_left(&self) -> Cow<'_, str> {
@@ -510,7 +752,7 @@ impl Prompt for Waiting {
     }
 
     fn render_prompt_indicator(&self, _mode: PromptEditMode) -> Cow<'_, str> {
-        Cow::Borrowed("> ")
+        Cow::Owned(format!("{}> ", status_prefix(&self.status)))
     }
 
     /// Alt+Enter and a bracketed paste both put a real newline in the buffer,
@@ -529,7 +771,16 @@ impl Prompt for Waiting {
 /// one-line question can therefore be measured off-screen and then sliced to
 /// empty. The indicator uses the post-prompt offset and preserves the complete
 /// canonical request and answer vocabulary at narrow widths.
-struct Question(String);
+struct Question {
+    text: String,
+    status: SharedStatus,
+}
+
+impl Question {
+    fn new(text: String, status: SharedStatus) -> Self {
+        Self { text, status }
+    }
+}
 
 impl Prompt for Question {
     fn render_prompt_left(&self) -> Cow<'_, str> {
@@ -541,7 +792,7 @@ impl Prompt for Question {
     }
 
     fn render_prompt_indicator(&self, _mode: PromptEditMode) -> Cow<'_, str> {
-        Cow::Borrowed(&self.0)
+        Cow::Owned(format!("{}{}", status_prefix(&self.status), self.text))
     }
 
     fn render_prompt_multiline_indicator(&self) -> Cow<'_, str> {
@@ -557,14 +808,24 @@ impl Prompt for Question {
 pub struct SurfaceEditMode {
     editor: Emacs,
     phase: SurfacePhase,
+    status: SharedStatus,
     asked_for_image: Arc<AtomicBool>,
 }
 
 impl SurfaceEditMode {
     pub fn new(editor: Emacs, phase: SurfacePhase) -> Self {
+        Self::with_status(
+            editor,
+            phase,
+            Arc::new(Mutex::new(SurfaceStatus::default())),
+        )
+    }
+
+    fn with_status(editor: Emacs, phase: SurfacePhase, status: SharedStatus) -> Self {
         Self {
             editor,
             phase,
+            status,
             asked_for_image: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -579,15 +840,29 @@ impl EditMode for SurfaceEditMode {
         let raw: Event = event.into();
 
         if let Event::Key(key) = raw {
-            if intercept(key.code, key.modifiers) == Intercept::ClipboardImage {
-                self.asked_for_image.store(true, Ordering::Relaxed);
-                return ReedlineEvent::ExecuteHostCommand(String::new());
-            }
-            if key.code == reedline::KeyCode::Enter
-                && key.modifiers.is_empty()
-                && self.phase.get() == EditPhase::Busy
-            {
-                return ReedlineEvent::None;
+            match intercept(key.code, key.modifiers) {
+                Intercept::ClipboardImage => {
+                    self.asked_for_image.store(true, Ordering::Relaxed);
+                    return ReedlineEvent::ExecuteHostCommand(String::new());
+                }
+                Intercept::Draft => {
+                    return ReedlineEvent::ExecuteHostCommand(DRAFT_COMMAND.to_string());
+                }
+                Intercept::SubmitBusy if self.phase.get() == EditPhase::Busy => {
+                    return ReedlineEvent::ExecuteHostCommand(BUSY_SUBMIT_COMMAND.to_string());
+                }
+                Intercept::Interrupt
+                    if self
+                        .status
+                        .lock()
+                        .expect("surface status lock")
+                        .queue
+                        .pending_steers
+                        > 0 =>
+                {
+                    return ReedlineEvent::ExecuteHostCommand(INTERRUPT_COMMAND.to_string());
+                }
+                Intercept::Editor | Intercept::SubmitBusy | Intercept::Interrupt => {}
             }
         }
 
@@ -637,5 +912,49 @@ mod tests {
         for invalid in ["", "yes", "no", "approve", "cancel"] {
             assert_eq!(parse_permission(invalid), None, "{invalid:?}");
         }
+    }
+
+    #[test]
+    fn long_queue_status_uses_the_unsliced_indicator_path() {
+        let status = Arc::new(Mutex::new(SurfaceStatus {
+            queue: QueueStatus {
+                pending_steers: 1,
+                queued: 0,
+                interrupt_pending: false,
+            },
+            drafts: 0,
+            notice: None,
+        }));
+        let waiting = Waiting::new(status);
+
+        assert_eq!(waiting.render_prompt_left().as_ref(), "");
+        let indicator = waiting.render_prompt_indicator(PromptEditMode::Emacs);
+        assert_eq!(indicator.as_ref(), format!("{QUEUE_LABEL} | > ").as_str());
+    }
+
+    #[test]
+    fn reading_a_prebuffered_submission_settles_busy_after_idle() {
+        let phase = SurfacePhase::new(EditPhase::Idle);
+        let (input_sender, input) = bounded(CHANNEL_CAPACITY);
+        input_sender
+            .send(Line::Submitted("initial".to_string()))
+            .unwrap();
+        let (seat_control, _seat_control_receiver) = bounded(CHANNEL_CAPACITY);
+        let (_ingress, coordinator) = interactive_control();
+        let seat = Seat {
+            kind: SeatKind::Live(LiveSeat {
+                input,
+                control: seat_control,
+                break_signal: Arc::new(AtomicBool::new(false)),
+                phase: phase.clone(),
+                status: Arc::new(Mutex::new(SurfaceStatus::default())),
+                owner: Mutex::new(None),
+            }),
+            terminal: true,
+            coordinator: Mutex::new(Some(coordinator)),
+        };
+
+        assert_eq!(seat.read(), Line::Submitted("initial".to_string()));
+        assert_eq!(phase.get(), EditPhase::Busy);
     }
 }

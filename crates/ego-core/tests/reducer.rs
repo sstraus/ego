@@ -114,7 +114,8 @@ mod reducer {
         push!(
             Some(msg_item),
             EventKind::UserPrompt {
-                text: "list the files".to_string()
+                text: "list the files".to_string(),
+                queued_prompt: None,
             }
         );
         push!(
@@ -350,6 +351,7 @@ mod reducer {
             None,
             EventKind::UserPrompt {
                 text: "hi".to_string(),
+                queued_prompt: None,
             },
         );
         assert!(state.known_events.is_empty());
@@ -434,6 +436,7 @@ mod reducer {
             None,
             EventKind::UserPrompt {
                 text: "primer".to_string(),
+                queued_prompt: None,
             },
         );
         let primer_id = primer.env.id;
@@ -450,6 +453,7 @@ mod reducer {
                 "user_prompt",
                 EventKind::UserPrompt {
                     text: String::new(),
+                    queued_prompt: None,
                 },
             ),
             (

@@ -117,6 +117,7 @@ mod faults {
             (
                 EventKind::UserPrompt {
                     text: "list the files".to_string(),
+                    queued_prompt: None,
                 },
                 1_000,
             ),
@@ -435,6 +436,7 @@ mod faults {
                     turn,
                     EventKind::UserPrompt {
                         text: "and again".to_string(),
+                        queued_prompt: None,
                     },
                     9_000,
                 ),

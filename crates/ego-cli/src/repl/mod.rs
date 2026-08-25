@@ -27,6 +27,10 @@ pub const CLIPBOARD_IMAGE_WAITING_ON: &str = "a non-text content block — the \
      representation to be sent in. Name the file instead, once `--attach` \
      lands";
 
+pub(super) const DRAFT_COMMAND: &str = "ego:draft";
+pub(super) const BUSY_SUBMIT_COMMAND: &str = "ego:busy-submit";
+pub(super) const INTERRUPT_COMMAND: &str = "ego:interrupt";
+
 /// What one read of the input line produced.
 ///
 /// The editor's own vocabulary is turned into this before anything else looks
@@ -213,7 +217,7 @@ mod live_surface_red {
     }
 
     #[test]
-    fn edit_mode_reads_shared_busy_phase_and_delegates_idle_and_characters() {
+    fn edit_mode_submits_busy_input_to_the_host_and_delegates_idle_and_characters() {
         let phase = SurfacePhase::new(EditPhase::Busy);
         let mut mode = SurfaceEditMode::new(Emacs::default(), phase.clone());
         let enter = ReedlineRawEvent::try_from(Event::Key(KeyEvent::new(
@@ -221,7 +225,10 @@ mod live_surface_red {
             KeyModifiers::NONE,
         )))
         .unwrap();
-        assert!(matches!(mode.parse_event(enter), ReedlineEvent::None));
+        assert_eq!(
+            mode.parse_event(enter),
+            ReedlineEvent::ExecuteHostCommand(BUSY_SUBMIT_COMMAND.to_string())
+        );
         phase.set(EditPhase::Idle);
         let enter = ReedlineRawEvent::try_from(Event::Key(KeyEvent::new(
             KeyCode::Enter,

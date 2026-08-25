@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use ego_core::event::domain::{DomainEvent, Envelope, EventKind, ExitReason};
-use ego_core::event::id::{EventId, Producer, Seq, SessionId, TurnId};
+use ego_core::event::id::{EventId, Producer, QueuedPromptId, Seq, SessionId, TurnId};
 use ego_core::event::time::Timestamp;
 use ego_core::store::codec::{CODEC_VERSION, CodecError, StoreLine, decode_line, encode_record};
 use ego_core::store::session_store::{SessionStore, StoreError};
@@ -206,6 +206,54 @@ mod store {
         }
     }
 
+    /// A store I/O adapter that writes a record and then fails its requested
+    /// durability barrier.  The queue contract treats that as rejection: the
+    /// caller must not clear the composer, request interruption, or begin a
+    /// provider request after this error.
+    struct FailingFsyncIo {
+        inner: CountingIo,
+        fail_on: usize,
+    }
+
+    impl StoreIo for FailingFsyncIo {
+        fn append_line(&self, path: &std::path::Path, line: &[u8]) -> std::io::Result<()> {
+            self.inner.append_line(path, line)
+        }
+
+        fn fsync(&self, path: &std::path::Path) -> std::io::Result<()> {
+            let call = self.inner.fsyncs.fetch_add(1, Ordering::SeqCst) + 1;
+            if call == self.fail_on {
+                Err(std::io::Error::other("simulated durability failure"))
+            } else {
+                self.inner.inner.fsync(path)
+            }
+        }
+
+        fn read(&self, path: &std::path::Path) -> std::io::Result<Option<Vec<u8>>> {
+            self.inner.read(path)
+        }
+
+        fn exists(&self, path: &std::path::Path) -> std::io::Result<bool> {
+            self.inner.exists(path)
+        }
+
+        fn replace_atomic(&self, path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+            self.inner.replace_atomic(path, bytes)
+        }
+
+        fn truncate(&self, path: &std::path::Path, len: u64) -> std::io::Result<()> {
+            self.inner.truncate(path, len)
+        }
+
+        fn remove_file(&self, path: &std::path::Path) -> std::io::Result<()> {
+            self.inner.remove_file(path)
+        }
+
+        fn list_dirs(&self, path: &std::path::Path) -> std::io::Result<Vec<PathBuf>> {
+            self.inner.list_dirs(path)
+        }
+    }
+
     // -- StoreIo (OsIo) --------------------------------------------------
 
     #[test]
@@ -296,6 +344,7 @@ mod store {
             turn,
             EventKind::UserPrompt {
                 text: "hi".to_string(),
+                queued_prompt: None,
             },
         );
         let e2 = ev(
@@ -328,6 +377,7 @@ mod store {
             turn,
             EventKind::UserPrompt {
                 text: "hi".to_string(),
+                queued_prompt: None,
             },
             5_000,
         );
@@ -362,6 +412,7 @@ mod store {
                         turn,
                         EventKind::UserPrompt {
                             text: text.to_string(),
+                            queued_prompt: None,
                         },
                     ),
                 )
@@ -429,6 +480,7 @@ mod store {
                         turn,
                         EventKind::UserPrompt {
                             text: marker.to_string(),
+                            queued_prompt: None,
                         },
                     ),
                 )
@@ -453,7 +505,8 @@ mod store {
             Ok(e) => assert_eq!(
                 e.kind,
                 EventKind::UserPrompt {
-                    text: "first-event-marker".to_string()
+                    text: "first-event-marker".to_string(),
+                    queued_prompt: None,
                 }
             ),
             other => panic!("expected the first line to decode cleanly, got {other:?}"),
@@ -470,7 +523,8 @@ mod store {
             Ok(e) => assert_eq!(
                 e.kind,
                 EventKind::UserPrompt {
-                    text: "third-event-marker".to_string()
+                    text: "third-event-marker".to_string(),
+                    queued_prompt: None,
                 }
             ),
             other => {
@@ -482,7 +536,7 @@ mod store {
     // -- fsync policy ------------------------------------------------------
 
     #[test]
-    fn store_append_fsyncs_only_on_turn_completed() {
+    fn store_append_fsyncs_queue_acceptance_expedition_and_consumption_before_turn_end() {
         let dir = tempdir().unwrap();
         let fsyncs = Arc::new(AtomicUsize::new(0));
         let io = CountingIo {
@@ -502,6 +556,7 @@ mod store {
                     turn,
                     EventKind::UserPrompt {
                         text: "hi".to_string(),
+                        queued_prompt: None,
                     },
                 ),
             )
@@ -521,7 +576,62 @@ mod store {
         assert_eq!(
             fsyncs.load(Ordering::SeqCst),
             0,
-            "no fsync before a turn boundary"
+            "ordinary non-boundary events do not force a barrier"
+        );
+
+        let queued = QueuedPromptId::new();
+        store
+            .append(
+                &id,
+                &ev(
+                    seq.next(),
+                    turn,
+                    EventKind::PromptQueued {
+                        id: queued,
+                        text: "follow up".to_owned(),
+                    },
+                ),
+            )
+            .unwrap();
+        assert_eq!(
+            fsyncs.load(Ordering::SeqCst),
+            1,
+            "acceptance must be durable before the composer is cleared"
+        );
+
+        store
+            .append(
+                &id,
+                &ev(
+                    seq.next(),
+                    turn,
+                    EventKind::PromptDeliveryExpedited { through: queued },
+                ),
+            )
+            .unwrap();
+        assert_eq!(
+            fsyncs.load(Ordering::SeqCst),
+            2,
+            "expedited intent must be durable before interruption"
+        );
+
+        store
+            .append(
+                &id,
+                &ev(
+                    seq.next(),
+                    turn,
+                    EventKind::UserPrompt {
+                        text: "follow up".to_owned(),
+                        queued_prompt: Some(queued),
+                    },
+                ),
+            )
+            .unwrap();
+        assert_eq!(
+            fsyncs.load(Ordering::SeqCst),
+            3,
+            "correlated consumption must be durable before the next request"
         );
 
         store
@@ -539,9 +649,49 @@ mod store {
             .unwrap();
         assert_eq!(
             fsyncs.load(Ordering::SeqCst),
-            1,
-            "fsync exactly once, at the turn boundary"
+            4,
+            "the turn boundary adds its own barrier after queue barriers"
         );
+    }
+
+    #[test]
+    fn queue_durability_failure_rejects_each_stable_storage_gate() {
+        for kind in [
+            EventKind::PromptQueued {
+                id: QueuedPromptId::new(),
+                text: "accepted only after fsync".to_owned(),
+            },
+            EventKind::PromptDeliveryExpedited {
+                through: QueuedPromptId::new(),
+            },
+            EventKind::UserPrompt {
+                text: "consumed only after fsync".to_owned(),
+                queued_prompt: Some(QueuedPromptId::new()),
+            },
+        ] {
+            let dir = tempdir().unwrap();
+            let fsyncs = Arc::new(AtomicUsize::new(0));
+            let store = JsonlStore::new(
+                dir.path(),
+                "/ws",
+                Box::new(FailingFsyncIo {
+                    inner: CountingIo {
+                        inner: OsIo,
+                        fsyncs,
+                    },
+                    fail_on: 1,
+                }),
+            );
+            let id = SessionId::new();
+            let turn = TurnId::new();
+            let mut seq = Seq::default();
+
+            let failure = store.append(&id, &ev(seq.next(), turn, kind.clone()));
+            assert!(
+                failure.is_err(),
+                "{kind:?} cannot be acknowledged without fsync"
+            );
+        }
     }
 
     // -- append cost ---------------------------------------------------------
@@ -620,6 +770,7 @@ mod store {
                     turn,
                     EventKind::UserPrompt {
                         text: "hi".to_string(),
+                        queued_prompt: None,
                     },
                     1_000,
                 ),
@@ -700,6 +851,7 @@ mod store {
                     turn,
                     EventKind::UserPrompt {
                         text: "hi".to_string(),
+                        queued_prompt: None,
                     },
                 ),
             )
@@ -739,6 +891,7 @@ mod store {
                         turn,
                         EventKind::UserPrompt {
                             text: "hi".to_string(),
+                            queued_prompt: None,
                         },
                     ),
                 )
@@ -793,6 +946,7 @@ mod store {
                     turn,
                     EventKind::UserPrompt {
                         text: "hi".to_string(),
+                        queued_prompt: None,
                     },
                 ),
             )

@@ -316,6 +316,7 @@ mod rebuild {
     fn prompt(text: &str) -> EventKind {
         EventKind::UserPrompt {
             text: text.to_string(),
+            queued_prompt: None,
         }
     }
 

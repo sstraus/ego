@@ -634,7 +634,21 @@ impl SessionStore for JsonlStore {
             ev.kind,
             EventKind::HookInvocationStarted { .. } | EventKind::HookInvocationSettled { .. }
         );
-        if is_turn_boundary || is_execution_observation || is_hook_admission || is_hook_invocation {
+        let is_queue_boundary = matches!(
+            ev.kind,
+            EventKind::PromptQueued { .. }
+                | EventKind::PromptDeliveryExpedited { .. }
+                | EventKind::UserPrompt {
+                    queued_prompt: Some(_),
+                    ..
+                }
+        );
+        if is_turn_boundary
+            || is_execution_observation
+            || is_hook_admission
+            || is_hook_invocation
+            || is_queue_boundary
+        {
             self.io.fsync(&log_path)?;
         }
 

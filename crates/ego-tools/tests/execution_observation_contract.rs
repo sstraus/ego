@@ -170,6 +170,7 @@ fn normal_manifest_cadence_preserves_the_latest_execution_observation() {
                 2,
                 EventKind::UserPrompt {
                     text: "prompt".to_string(),
+                    queued_prompt: None,
                 },
             ),
         )
@@ -326,6 +327,7 @@ fn historical_log_without_execution_observed_reconstructs_without_observation() 
                 1,
                 EventKind::UserPrompt {
                     text: "old".to_string(),
+                    queued_prompt: None,
                 },
             ),
         )

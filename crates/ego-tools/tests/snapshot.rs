@@ -145,6 +145,7 @@ mod snapshot {
             Some(item_msg),
             EventKind::UserPrompt {
                 text: "list the files".to_string(),
+                queued_prompt: None,
             },
             None,
             first_id,

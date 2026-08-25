@@ -10,14 +10,17 @@
 //! anything. `ARCHITECTURE.md` §4: this is thin async orchestration, and every
 //! decision inside it is a pure function it calls.
 
+mod control;
 mod journal;
 mod tools;
 
 use std::collections::BTreeSet;
+use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 
 use futures::StreamExt;
+use futures::future::{Either, select};
 
 use crate::budget::{BudgetGate, Metering, PricingQuote, ResolvedRates, SettlementSource};
 use crate::ceiling::tokens_reached;
@@ -26,7 +29,9 @@ use crate::cost::{Money, RateSource};
 use crate::event::domain::{
     CancelCause, EventKind, ExitReason, GenerationRole, OccupancyProvenance,
 };
-use crate::event::id::{EventId, GenerationId, ItemId, Producer, SessionId, TurnId};
+use crate::event::id::{
+    EventId, GenerationId, ItemId, Producer, QueuedPromptId, SessionId, TurnId,
+};
 use crate::event::time::Clock;
 use crate::generator::attempt::{AttemptStream, GenerationAttempt, UsageReport, settled_cost};
 use crate::generator::capabilities::ModelCapabilities;
@@ -44,6 +49,10 @@ use crate::sink::EventSink;
 use crate::state::{SessionState, Usage};
 use crate::store::session_store::{SessionStore, StoreError};
 
+use control::{BoundaryIntent, ControlIntent};
+pub use control::{
+    ControlError, InteractiveControl, InteractiveIngress, QueueStatus, interactive_control,
+};
 pub use journal::Journal;
 pub use tools::Tools;
 
@@ -188,6 +197,129 @@ struct PendingCall {
     args: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InterruptDisposition {
+    Return,
+    AwaitEffect,
+}
+
+enum Controlled<T> {
+    Completed(T),
+    Interrupted,
+    Failed(StoreError),
+}
+
+enum ControlRace<T> {
+    Work(T),
+    Intent(Option<ControlIntent>),
+}
+
+async fn receive_intent(control: &mut Option<&mut InteractiveControl>) -> Option<ControlIntent> {
+    match control.as_deref_mut() {
+        Some(control) => control.next().await,
+        None => std::future::pending().await,
+    }
+}
+
+fn apply_intent(
+    journal: &mut Journal<'_>,
+    cancel: &CancelToken,
+    control: &mut InteractiveControl,
+    turn: TurnId,
+    intent: ControlIntent,
+) -> Result<bool, StoreError> {
+    match intent {
+        ControlIntent::Submit { text, reply } => {
+            let id = QueuedPromptId::new();
+            match journal.append(turn, None, None, EventKind::PromptQueued { id, text }) {
+                Ok(_) => {
+                    control.refresh(journal.state().queue_status());
+                    let _ = reply.send(Ok(control.status()));
+                    Ok(false)
+                }
+                Err(cause) => {
+                    let _ = reply.send(Err(ControlError::Store(cause.to_string())));
+                    Err(cause)
+                }
+            }
+        }
+        ControlIntent::Interrupt { reply } => {
+            let through = journal
+                .state()
+                .unacknowledged_prompts()
+                .last()
+                .map(|prompt| prompt.id());
+            if let Some(through) = through
+                && journal.state().can_expedite_prompt(through)
+                && let Err(cause) = journal.append(
+                    turn,
+                    None,
+                    None,
+                    EventKind::PromptDeliveryExpedited { through },
+                )
+            {
+                let _ = reply.send(Err(ControlError::Store(cause.to_string())));
+                return Err(cause);
+            }
+            control.refresh(journal.state().queue_status());
+            cancel.cancel(CancelCause::User);
+            let _ = reply.send(Ok(control.status()));
+            Ok(true)
+        }
+    }
+}
+
+async fn await_controlled<F, T>(
+    journal: &mut Journal<'_>,
+    cancel: &CancelToken,
+    control: &mut Option<&mut InteractiveControl>,
+    turn: TurnId,
+    work: F,
+    disposition: InterruptDisposition,
+) -> Controlled<T>
+where
+    F: Future<Output = T>,
+{
+    let mut work = Box::pin(work);
+    loop {
+        if control.is_none() {
+            return Controlled::Completed(work.await);
+        }
+        let raced = {
+            let intent = Box::pin(receive_intent(control));
+            match select(intent, work.as_mut()).await {
+                Either::Left((intent, _)) => ControlRace::Intent(intent),
+                Either::Right((result, _)) => ControlRace::Work(result),
+            }
+        };
+        match raced {
+            ControlRace::Work(result) => return Controlled::Completed(result),
+            ControlRace::Intent(None) => {
+                *control = None;
+            }
+            ControlRace::Intent(Some(intent)) => {
+                let applied = {
+                    let coordinator = control
+                        .as_deref_mut()
+                        .expect("an intent came from an attached coordinator");
+                    apply_intent(journal, cancel, coordinator, turn, intent)
+                };
+                match applied {
+                    Ok(true) if disposition == InterruptDisposition::Return => {
+                        return Controlled::Interrupted;
+                    }
+                    Ok(_) => {}
+                    Err(cause) if disposition == InterruptDisposition::AwaitEffect => {
+                        let _ = work.await;
+                        return Controlled::Failed(cause);
+                    }
+                    Err(cause) => return Controlled::Failed(cause),
+                }
+            }
+        }
+    }
+}
+
 /// Where a session's events go, and who can stop it.
 pub struct Session<'a> {
     pub id: SessionId,
@@ -258,6 +390,7 @@ pub struct TurnLoop<'a> {
     execution_observation: Option<ExecObservation>,
     tools: Tools<'a>,
     cancel: CancelToken,
+    control: Option<&'a mut InteractiveControl>,
 }
 
 impl<'a> TurnLoop<'a> {
@@ -287,6 +420,7 @@ impl<'a> TurnLoop<'a> {
             execution_observation: None,
             tools,
             cancel: session.cancel,
+            control: None,
         }
     }
 
@@ -308,6 +442,14 @@ impl<'a> TurnLoop<'a> {
         self
     }
 
+    /// Attach the session's sole bounded interactive-intent receiver.
+    pub fn with_interactive_control(mut self, control: &'a mut InteractiveControl) -> Self {
+        control.refresh(self.journal.state().queue_status());
+        control.open();
+        self.control = Some(control);
+        self
+    }
+
     /// The session so far.
     pub fn state(&self) -> &SessionState {
         self.journal.state()
@@ -321,6 +463,30 @@ impl<'a> TurnLoop<'a> {
     /// Run one turn: the prompt, every generation it takes to answer it, and
     /// the tool calls in between.
     pub async fn run(&mut self, prompt: &str) -> Result<TurnOutcome, TurnAbandoned> {
+        self.run_prompts(vec![(prompt.to_string(), None)]).await
+    }
+
+    /// Consume every accepted prompt that lacks a correlated `UserPrompt` as
+    /// one fresh user turn. Empty recovery is not a turn and spends nothing.
+    pub async fn run_queued_turn(&mut self) -> Result<Option<TurnOutcome>, TurnAbandoned> {
+        let prompts: Vec<_> = self
+            .journal
+            .state()
+            .unacknowledged_prompts()
+            .into_iter()
+            .map(|prompt| (prompt.text().to_string(), Some(prompt.id())))
+            .collect();
+        if prompts.is_empty() {
+            self.close_control();
+            return Ok(None);
+        }
+        self.run_prompts(prompts).await.map(Some)
+    }
+
+    async fn run_prompts(
+        &mut self,
+        prompts: Vec<(String, Option<crate::event::id::QueuedPromptId>)>,
+    ) -> Result<TurnOutcome, TurnAbandoned> {
         let turn = TurnId::new();
         if let Some(observation) = self.execution_observation.take()
             && let Err(cause) = self.journal.append(
@@ -339,7 +505,7 @@ impl<'a> TurnLoop<'a> {
         // could emit it at all.
         self.journal.publish(&PublicEvent::TurnStarted { turn });
 
-        let (exit_reason, denied) = match self.drive(turn, prompt).await {
+        let (exit_reason, denied) = match self.drive(turn, &prompts).await {
             Ok(ended) => ended,
             Err(cause) => return Err(self.abandon(turn, cause)),
         };
@@ -353,6 +519,10 @@ impl<'a> TurnLoop<'a> {
         ) {
             return Err(self.abandon(turn, cause));
         }
+        if let Err(cause) = self.close_and_drain_controls(turn).await {
+            return Err(self.abandon(turn, cause));
+        }
+        self.refresh_control_status();
 
         Ok(TurnOutcome {
             turn,
@@ -366,7 +536,8 @@ impl<'a> TurnLoop<'a> {
     ///
     /// Takes the state by clone rather than by move: `run` borrows `self`, and
     /// a caller holding a `TurnLoop` is entitled to look at what survived.
-    fn abandon(&self, turn: TurnId, cause: StoreError) -> TurnAbandoned {
+    fn abandon(&mut self, turn: TurnId, cause: StoreError) -> TurnAbandoned {
+        self.close_control();
         tracing::error!(?turn, %cause, "turn abandoned: its log could not be written");
         TurnAbandoned {
             turn,
@@ -396,16 +567,22 @@ impl<'a> TurnLoop<'a> {
     async fn drive(
         &mut self,
         turn: TurnId,
-        prompt: &str,
+        prompts: &[(String, Option<crate::event::id::QueuedPromptId>)],
     ) -> Result<(ExitReason, Option<Denial>), StoreError> {
-        self.journal.append(
-            turn,
-            Some(ItemId::new()),
-            None,
-            EventKind::UserPrompt {
-                text: prompt.to_string(),
-            },
-        )?;
+        for (text, queued_prompt) in prompts {
+            self.journal.append(
+                turn,
+                Some(ItemId::new()),
+                None,
+                EventKind::UserPrompt {
+                    text: text.clone(),
+                    queued_prompt: *queued_prompt,
+                },
+            )?;
+            if queued_prompt.is_some() {
+                self.refresh_control_status();
+            }
+        }
 
         loop {
             if let Some(cause) = self.cancel.cause() {
@@ -428,6 +605,10 @@ impl<'a> TurnLoop<'a> {
 
             let (reason, pending, error_kind) = match self.generate(turn).await? {
                 Generated::Ended(reason) => return Ok((reason, None)),
+                Generated::Cancelled { cause, pending } => {
+                    self.close_unstarted_siblings(turn, &pending)?;
+                    return Ok((ExitReason::Cancelled(cause), None));
+                }
                 Generated::Stopped {
                     reason,
                     pending,
@@ -439,50 +620,51 @@ impl<'a> TurnLoop<'a> {
             // has nothing to answer. Generating again on that evidence loops
             // forever against a provider that keeps saying it.
             if reason != StopReason::ToolUse || pending.is_empty() {
-                return Ok((
-                    match reason {
-                        StopReason::Stop | StopReason::ToolUse => ExitReason::Completed,
-                        StopReason::Length => ExitReason::Budget,
-                        // Not `Cancelled`: our own cancellation was already
-                        // answered above and at `drained.cancelled`, so an
-                        // `Aborted` reaching here is a stream that ended with no
-                        // terminal frame — a provider that went silent.
-                        StopReason::Aborted => ExitReason::Provider,
-                        // `Deferred` is upstream choosing a delivery mode this
-                        // wire format does not consume. Not our defect, so not
-                        // `Internal`; the provider decided it, so it reads as an
-                        // upstream condition like any other.
-                        StopReason::Deferred => ExitReason::Provider,
-                        // The one place a provider's classification changes
-                        // where the run lands. An `Invalid` is a request that
-                        // will be wrong again — schema, context length, an
-                        // unsupported parameter — so it is exit 2 and not
-                        // exit 4: `CLI.md:215` tells a script to retry on 4,
-                        // and a request that cannot succeed is precisely what
-                        // it must not retry.
-                        //
-                        // Everything else is exit 4. `Unclassified` lands
-                        // there by failing closed — nothing was read that
-                        // says otherwise, and one wasted attempt is cheaper
-                        // than a wrong exit code.
-                        //
-                        // `Refused` is knowingly imperfect: a `401` or an
-                        // exhausted credit balance will not succeed on retry
-                        // either, but `ExitReason` has no value for "the
-                        // credential, not the request", and inventing one is
-                        // a change to `CLI.md`'s published exit codes rather
-                        // than to this mapping. Recorded here so the next
-                        // reader knows it was seen and not missed.
-                        StopReason::Error => match error_kind {
-                            Some(ErrorKind::Invalid) => ExitReason::Usage,
-                            _ => ExitReason::Provider,
-                        },
+                let exit = match reason {
+                    StopReason::Stop | StopReason::ToolUse => ExitReason::Completed,
+                    StopReason::Length => ExitReason::Budget,
+                    // Not `Cancelled`: our own cancellation was already
+                    // answered above and at `drained.cancelled`, so an
+                    // `Aborted` reaching here is a stream that ended with no
+                    // terminal frame — a provider that went silent.
+                    StopReason::Aborted => ExitReason::Provider,
+                    // `Deferred` is upstream choosing a delivery mode this
+                    // wire format does not consume. Not our defect, so not
+                    // `Internal`; the provider decided it, so it reads as an
+                    // upstream condition like any other.
+                    StopReason::Deferred => ExitReason::Provider,
+                    // The one place a provider's classification changes
+                    // where the run lands. An `Invalid` is a request that
+                    // will be wrong again — schema, context length, an
+                    // unsupported parameter — so it is exit 2 and not
+                    // exit 4: `CLI.md:215` tells a script to retry on 4,
+                    // and a request that cannot succeed is precisely what
+                    // it must not retry.
+                    //
+                    // Everything else is exit 4. `Unclassified` lands
+                    // there by failing closed — nothing was read that
+                    // says otherwise, and one wasted attempt is cheaper
+                    // than a wrong exit code.
+                    //
+                    // `Refused` is knowingly imperfect: a `401` or an
+                    // exhausted credit balance will not succeed on retry
+                    // either, but `ExitReason` has no value for "the
+                    // credential, not the request", and inventing one is
+                    // a change to `CLI.md`'s published exit codes rather
+                    // than to this mapping. Recorded here so the next
+                    // reader knows it was seen and not missed.
+                    StopReason::Error => match error_kind {
+                        Some(ErrorKind::Invalid) => ExitReason::Usage,
+                        _ => ExitReason::Provider,
                     },
-                    None,
-                ));
+                };
+                if exit == ExitReason::Completed && self.deliver_pending(turn)? {
+                    continue;
+                }
+                return Ok((exit, None));
             }
 
-            for call in pending {
+            for (index, call) in pending.iter().enumerate() {
                 // `CLI.md` §4.4: a run with nobody to ask does not answer a
                 // permission question on the model's behalf. The denial is
                 // still logged against the call — the model's audience
@@ -505,6 +687,10 @@ impl<'a> TurnLoop<'a> {
                             Some(call.started),
                             EventKind::ToolCallCompleted { ok, result },
                         )?;
+                        if let Some(cause) = self.cancel.cause() {
+                            self.close_unstarted_siblings(turn, &pending[index + 1..])?;
+                            return Ok((ExitReason::Cancelled(cause), None));
+                        }
                         continue;
                     }
                     ToolOutcome::Refused { denial } => Denial {
@@ -532,7 +718,95 @@ impl<'a> TurnLoop<'a> {
                 )?;
                 return Ok((ExitReason::PermissionRequired, Some(denial)));
             }
+            self.deliver_pending(turn)?;
         }
+    }
+
+    fn refresh_control_status(&mut self) {
+        if let Some(control) = self.control.as_mut() {
+            control.refresh(self.journal.state().queue_status());
+        }
+    }
+
+    fn close_control(&mut self) {
+        let status = self.journal.state().queue_status();
+        if let Some(control) = self.control.as_deref_mut() {
+            control.refresh(status);
+            control.close();
+        }
+    }
+
+    /// Close busy admission at the idle transition and durably accept every
+    /// intent ordered before that barrier.
+    async fn close_and_drain_controls(&mut self, turn: TurnId) -> Result<(), StoreError> {
+        loop {
+            let boundary = match self.control.as_deref_mut() {
+                Some(control) => control.next_or_close().await,
+                None => return Ok(()),
+            };
+            match boundary {
+                BoundaryIntent::Intent(intent) => {
+                    let control = self
+                        .control
+                        .as_deref_mut()
+                        .expect("the boundary intent came from this coordinator");
+                    let _ = apply_intent(&mut self.journal, &self.cancel, control, turn, intent)?;
+                }
+                BoundaryIntent::Closed => {
+                    self.control = None;
+                    return Ok(());
+                }
+                BoundaryIntent::Quiescent => return Ok(()),
+            }
+        }
+    }
+
+    /// Correlate input accepted by this turn only at a generation-safe
+    /// boundary. Interrupted turns leave every queued id for a fresh turn.
+    fn deliver_pending(&mut self, turn: TurnId) -> Result<bool, StoreError> {
+        if self.cancel.is_cancelled() {
+            return Ok(false);
+        }
+        let pending: Vec<_> = self
+            .journal
+            .state()
+            .unacknowledged_prompts()
+            .into_iter()
+            .filter(|prompt| prompt.turn() == turn)
+            .map(|prompt| (prompt.id(), prompt.text().to_string()))
+            .collect();
+        for (id, text) in &pending {
+            self.journal.append(
+                turn,
+                Some(ItemId::new()),
+                None,
+                EventKind::UserPrompt {
+                    text: text.clone(),
+                    queued_prompt: Some(*id),
+                },
+            )?;
+            self.refresh_control_status();
+        }
+        Ok(!pending.is_empty())
+    }
+
+    fn close_unstarted_siblings(
+        &mut self,
+        turn: TurnId,
+        siblings: &[PendingCall],
+    ) -> Result<(), StoreError> {
+        for call in siblings {
+            self.journal.append(
+                turn,
+                Some(call.item),
+                Some(call.started),
+                EventKind::ToolCallCompleted {
+                    ok: false,
+                    result: ToolResult::builtin("interrupted: not run"),
+                },
+            )?;
+        }
+        Ok(())
     }
 
     /// One generation: reserve, stream it into the log, settle.
@@ -711,9 +985,10 @@ impl<'a> TurnLoop<'a> {
         }
 
         if drained.cancelled {
-            return Ok(Generated::Ended(ExitReason::Cancelled(
-                self.cancel.cause().unwrap_or(CancelCause::User),
-            )));
+            return Ok(Generated::Cancelled {
+                cause: self.cancel.cause().unwrap_or(CancelCause::User),
+                pending: drained.pending,
+            });
         }
         // After the settlement and after cancellation: the attempt is paid for
         // either way, and someone who asked to stop gets that answer rather
@@ -830,7 +1105,28 @@ impl<'a> TurnLoop<'a> {
         let mut stated_cost: Option<Money> = None;
         let settlement_currency = self.gate.currency();
 
-        while let Some(event) = stream.next().await {
+        loop {
+            let event = match await_controlled(
+                &mut self.journal,
+                &self.cancel,
+                &mut self.control,
+                turn,
+                stream.next(),
+                InterruptDisposition::Return,
+            )
+            .await
+            {
+                Controlled::Completed(Some(event)) => event,
+                Controlled::Completed(None) => break,
+                Controlled::Interrupted => {
+                    cancelled = true;
+                    break;
+                }
+                Controlled::Failed(cause) => {
+                    failure = Some(cause);
+                    break;
+                }
+            };
             let appended = match event {
                 AiEvent::TextDelta { text } => {
                     let item = *message.get_or_insert_with(ItemId::new);
@@ -1117,7 +1413,30 @@ impl<'a> TurnLoop<'a> {
         let mut decoder = JudgeDecoder::new();
         let mut usage: Option<Usage> = None;
         let mut provider_cost: Option<Money> = None;
-        while let Some(event) = stream.next().await {
+        let mut interrupted = false;
+        let mut failure = None;
+        loop {
+            let event = match await_controlled(
+                &mut self.journal,
+                &self.cancel,
+                &mut self.control,
+                turn,
+                stream.next(),
+                InterruptDisposition::Return,
+            )
+            .await
+            {
+                Controlled::Completed(Some(event)) => event,
+                Controlled::Completed(None) => break,
+                Controlled::Interrupted => {
+                    interrupted = true;
+                    break;
+                }
+                Controlled::Failed(cause) => {
+                    failure = Some(cause);
+                    break;
+                }
+            };
             decoder.observe(&event);
             match &event {
                 AiEvent::Usage(delta) => {
@@ -1130,8 +1449,7 @@ impl<'a> TurnLoop<'a> {
             }
         }
 
-        let mut failure = None;
-        if usage.is_some() || provider_cost.is_some() {
+        if failure.is_none() && (usage.is_some() || provider_cost.is_some()) {
             let observed = usage.unwrap_or(Usage::IDENTITY);
             let cost_delta = settled_cost(
                 &metering,
@@ -1172,6 +1490,12 @@ impl<'a> TurnLoop<'a> {
                 outcome: settlement.outcome,
             },
         )?;
+
+        if interrupted {
+            return Ok(JudgeRun::Ended(ExitReason::Cancelled(
+                self.cancel.cause().unwrap_or(CancelCause::User),
+            )));
+        }
 
         let outcome = decoder.finish();
         let by = Authority::Judge {
@@ -1219,101 +1543,163 @@ impl<'a> TurnLoop<'a> {
                     self.decided(turn, call, false, denial.authority())?;
                     return Ok(ToolOutcome::Refused { denial });
                 }
-                Classification::Ask(pending) => match self.tools.settle(pending).await {
-                    Resolution::Settled(Ok(authorized)) => {
-                        self.decided(turn, call, true, authorized.by().clone())?;
-                        break authorized;
-                    }
-                    Resolution::Settled(Err(denial)) => {
-                        self.decided(turn, call, false, denial.authority())?;
-                        return Ok(ToolOutcome::Refused { denial });
-                    }
-                    Resolution::Ask(pending) => {
-                        let pending = match self.judge_pending(turn, &pending).await? {
-                            JudgeRun::Unavailable => pending,
-                            JudgeRun::Ended(reason) => return Ok(ToolOutcome::Ended(reason)),
-                            JudgeRun::Decided { outcome, by } => {
-                                self.judge_decided(turn, call, &outcome, by.clone())?;
-                                match self.tools.settle_judge(pending, &outcome, by) {
-                                    Resolution::Settled(Ok(authorized)) => break authorized,
-                                    Resolution::Settled(Err(denial)) => {
-                                        return Ok(ToolOutcome::Refused { denial });
-                                    }
-                                    Resolution::Ask(pending) => pending,
-                                    Resolution::HumanSettled { .. }
-                                    | Resolution::Reclassify { .. } => {
-                                        unreachable!("a judge cannot produce a human resolution")
-                                    }
-                                }
-                            }
-                        };
-                        self.requested(turn, call, pending.request())?;
-                        match self.tools.decide(pending).await {
-                            Resolution::Ask(pending) => {
-                                return Ok(ToolOutcome::Unanswerable { pending });
-                            }
-                            Resolution::HumanSettled { result, .. } => match result {
-                                Ok(authorized) => {
-                                    self.decided(turn, call, true, authorized.by().clone())?;
-                                    break authorized;
-                                }
-                                Err(denial) => {
-                                    self.decided(turn, call, false, denial.authority())?;
-                                    return Ok(ToolOutcome::Refused { denial });
-                                }
-                            },
-                            Resolution::Reclassify { request, params } => {
-                                self.permission(
-                                    turn,
-                                    call,
-                                    EventKind::PermissionAmended {
-                                        tool: request.tool().to_string(),
-                                    },
-                                )?;
-                                prepared = match self.tools.prepare_amendment(tool, params) {
-                                    Ok(prepared) => prepared,
-                                    Err(refusal) => return Ok(answered(false, refusal)),
-                                };
-                            }
-                            Resolution::Settled(result) => match result {
-                                Ok(authorized) => {
-                                    self.decided(turn, call, true, authorized.by().clone())?;
-                                    break authorized;
-                                }
-                                Err(denial) => {
-                                    self.decided(turn, call, false, denial.authority())?;
-                                    return Ok(ToolOutcome::Refused { denial });
-                                }
-                            },
+                Classification::Ask(pending) => {
+                    let resolution = await_controlled(
+                        &mut self.journal,
+                        &self.cancel,
+                        &mut self.control,
+                        turn,
+                        self.tools.settle(pending),
+                        InterruptDisposition::Return,
+                    )
+                    .await;
+                    let resolution = match resolution {
+                        Controlled::Completed(resolution) => resolution,
+                        Controlled::Interrupted => {
+                            self.decided(turn, call, false, Authority::Party)?;
+                            return Ok(answered(false, "interrupted: permission denied".into()));
                         }
-                    }
-                    Resolution::HumanSettled { result, .. } => match result {
-                        Ok(authorized) => {
+                        Controlled::Failed(cause) => return Err(cause),
+                    };
+                    match resolution {
+                        Resolution::Settled(Ok(authorized)) => {
                             self.decided(turn, call, true, authorized.by().clone())?;
                             break authorized;
                         }
-                        Err(denial) => {
+                        Resolution::Settled(Err(denial)) => {
                             self.decided(turn, call, false, denial.authority())?;
                             return Ok(ToolOutcome::Refused { denial });
                         }
-                    },
-                    Resolution::Reclassify { request, params } => {
-                        self.permission(
-                            turn,
-                            call,
-                            EventKind::PermissionAmended {
-                                tool: request.tool().to_string(),
-                            },
-                        )?;
-                        prepared = match self.tools.prepare_amendment(tool, params) {
-                            Ok(prepared) => prepared,
-                            Err(refusal) => return Ok(answered(false, refusal)),
-                        };
+                        Resolution::Ask(pending) => {
+                            let pending = match self.judge_pending(turn, &pending).await? {
+                                JudgeRun::Unavailable => pending,
+                                JudgeRun::Ended(ExitReason::Cancelled(_)) => {
+                                    self.decided(turn, call, false, Authority::Party)?;
+                                    return Ok(answered(
+                                        false,
+                                        "interrupted: permission denied".into(),
+                                    ));
+                                }
+                                JudgeRun::Ended(reason) => return Ok(ToolOutcome::Ended(reason)),
+                                JudgeRun::Decided { outcome, by } => {
+                                    self.judge_decided(turn, call, &outcome, by.clone())?;
+                                    match self.tools.settle_judge(pending, &outcome, by) {
+                                        Resolution::Settled(Ok(authorized)) => break authorized,
+                                        Resolution::Settled(Err(denial)) => {
+                                            return Ok(ToolOutcome::Refused { denial });
+                                        }
+                                        Resolution::Ask(pending) => pending,
+                                        Resolution::HumanSettled { .. }
+                                        | Resolution::Reclassify { .. } => {
+                                            unreachable!(
+                                                "a judge cannot produce a human resolution"
+                                            )
+                                        }
+                                    }
+                                }
+                            };
+                            self.requested(turn, call, pending.request())?;
+                            let decision = await_controlled(
+                                &mut self.journal,
+                                &self.cancel,
+                                &mut self.control,
+                                turn,
+                                self.tools.decide(pending),
+                                InterruptDisposition::Return,
+                            )
+                            .await;
+                            let decision = match decision {
+                                Controlled::Completed(decision) => decision,
+                                Controlled::Interrupted => {
+                                    self.decided(turn, call, false, Authority::Party)?;
+                                    return Ok(answered(
+                                        false,
+                                        "interrupted: permission denied".into(),
+                                    ));
+                                }
+                                Controlled::Failed(cause) => return Err(cause),
+                            };
+                            match decision {
+                                Resolution::Ask(pending) => {
+                                    return Ok(ToolOutcome::Unanswerable { pending });
+                                }
+                                Resolution::HumanSettled { result, .. } => match result {
+                                    Ok(authorized) => {
+                                        self.decided(turn, call, true, authorized.by().clone())?;
+                                        break authorized;
+                                    }
+                                    Err(denial) => {
+                                        self.decided(turn, call, false, denial.authority())?;
+                                        return Ok(ToolOutcome::Refused { denial });
+                                    }
+                                },
+                                Resolution::Reclassify { request, params } => {
+                                    self.permission(
+                                        turn,
+                                        call,
+                                        EventKind::PermissionAmended {
+                                            tool: request.tool().to_string(),
+                                        },
+                                    )?;
+                                    prepared = match self.tools.prepare_amendment(tool, params) {
+                                        Ok(prepared) => prepared,
+                                        Err(refusal) => return Ok(answered(false, refusal)),
+                                    };
+                                }
+                                Resolution::Settled(result) => match result {
+                                    Ok(authorized) => {
+                                        self.decided(turn, call, true, authorized.by().clone())?;
+                                        break authorized;
+                                    }
+                                    Err(denial) => {
+                                        self.decided(turn, call, false, denial.authority())?;
+                                        return Ok(ToolOutcome::Refused { denial });
+                                    }
+                                },
+                            }
+                        }
+                        Resolution::HumanSettled { result, .. } => match result {
+                            Ok(authorized) => {
+                                self.decided(turn, call, true, authorized.by().clone())?;
+                                break authorized;
+                            }
+                            Err(denial) => {
+                                self.decided(turn, call, false, denial.authority())?;
+                                return Ok(ToolOutcome::Refused { denial });
+                            }
+                        },
+                        Resolution::Reclassify { request, params } => {
+                            self.permission(
+                                turn,
+                                call,
+                                EventKind::PermissionAmended {
+                                    tool: request.tool().to_string(),
+                                },
+                            )?;
+                            prepared = match self.tools.prepare_amendment(tool, params) {
+                                Ok(prepared) => prepared,
+                                Err(refusal) => return Ok(answered(false, refusal)),
+                            };
+                        }
                     }
-                },
+                }
             }
         };
-        Ok(match self.tools.execute(tool, authorized).await {
+        let execution = await_controlled(
+            &mut self.journal,
+            &self.cancel,
+            &mut self.control,
+            turn,
+            self.tools.execute(tool, authorized),
+            InterruptDisposition::AwaitEffect,
+        )
+        .await;
+        let execution = match execution {
+            Controlled::Completed(execution) => execution,
+            Controlled::Interrupted => unreachable!("effect waits are never dropped"),
+            Controlled::Failed(cause) => return Err(cause),
+        };
+        Ok(match execution {
             Ok(result) => ToolOutcome::Answered { ok: true, result },
             Err(failure) => ToolOutcome::Answered {
                 ok: false,
@@ -1434,6 +1820,12 @@ enum JudgeRun {
 enum Generated {
     /// The turn is over, for a reason that is not the model's stop reason.
     Ended(ExitReason),
+    /// Sampling was interrupted after any calls already observed were
+    /// journalled. None has run, so the caller must close all of them.
+    Cancelled {
+        cause: CancelCause,
+        pending: Vec<PendingCall>,
+    },
     /// The generation finished. `pending` is what it asked to call.
     Stopped {
         reason: StopReason,

@@ -58,6 +58,7 @@ impl Fixture {
             (
                 EventKind::UserPrompt {
                     text: "list the files".to_string(),
+                    queued_prompt: None,
                 },
                 1_000,
             ),
@@ -139,7 +140,7 @@ impl Fixture {
             .unwrap_or_default()
             .iter()
             .filter_map(|ev| match &ev.kind {
-                EventKind::UserPrompt { text } | EventKind::AssistantMessage { text } => {
+                EventKind::UserPrompt { text, .. } | EventKind::AssistantMessage { text } => {
                     Some(text.clone())
                 }
                 _ => None,
@@ -178,6 +179,7 @@ fn appending_to_an_unrepaired_tear_silently_loses_every_later_event() {
     fx.append(
         EventKind::UserPrompt {
             text: "and now the tests".to_string(),
+            queued_prompt: None,
         },
         2_000,
     );
@@ -273,6 +275,7 @@ fn appends_through_an_opened_writer_survive_the_next_recovery() {
             (
                 EventKind::UserPrompt {
                     text: "and now the tests".to_string(),
+                    queued_prompt: None,
                 },
                 2_000,
             ),
@@ -402,6 +405,7 @@ fn the_writer_refuses_a_session_it_does_not_hold() {
         },
         kind: EventKind::UserPrompt {
             text: "not your session".to_string(),
+            queued_prompt: None,
         },
     };
 

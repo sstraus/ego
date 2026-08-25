@@ -29,7 +29,8 @@ use ego_core::sink::EventSink;
 use ego_core::state::{ItemKind, SessionState};
 use ego_core::store::session_store::{SessionMeta, SessionStore};
 use ego_core::turn::{
-    CancelToken, JudgeModel, Model, Session, Tools, TurnConfig, TurnLoop, TurnOutcome,
+    CancelToken, InteractiveControl, JudgeModel, Model, QueueStatus, Session, Tools, TurnConfig,
+    TurnLoop, TurnOutcome, interactive_control,
 };
 use ego_tools::clock::SystemClock;
 use ego_tools::exec::{ExecLimits, ExecRunConfig, GuardedExec, ProcessError};
@@ -197,7 +198,7 @@ async fn interactive_through(
 ) -> Ended {
     let text_sink = TextSink::new(output, quiet, capabilities);
     let announce = Announce::new(output, capabilities, quiet);
-    let interactive_seat: Arc<dyn InteractiveSeat> = seat;
+    let interactive_seat: Arc<dyn InteractiveSeat> = seat.clone();
     let ended = converse(
         args,
         |_| &text_sink as &dyn EventSink,
@@ -208,6 +209,22 @@ async fn interactive_through(
     )
     .await;
     text_sink.finish();
+    let counts = seat.exit_counts();
+    output.note(&format!(
+        "{} unsent {}, {} accepted {}",
+        counts.drafts,
+        if counts.drafts == 1 {
+            "draft"
+        } else {
+            "drafts"
+        },
+        counts.accepted,
+        if counts.accepted == 1 {
+            "input"
+        } else {
+            "inputs"
+        },
+    ));
     announce.closing(&ended.termination);
     ended
 }
@@ -1248,6 +1265,7 @@ async fn execute<S: EventSink>(
             })
         }
         Driver::Interactive { seat, between } => {
+            let mut control = seat.take_control();
             let mut state = opening;
             let mut last = Ended {
                 termination: RunTermination::Done,
@@ -1262,41 +1280,78 @@ async fn execute<S: EventSink>(
             let mut seeded = (!text.trim().is_empty()).then(|| text.clone());
 
             loop {
-                // The terminal owner keeps its next read active while this
-                // coordinator drives the turn; output returns through that
-                // same owner's bounded painter channel.
-                let line = match seeded.take() {
-                    Some(first) => repl::Line::Submitted(first),
-                    None => seat.read(),
-                };
+                let queued = !state.unacknowledged_prompts().is_empty();
+                let asked = if queued {
+                    None
+                } else {
+                    // The terminal owner keeps its next read active while this
+                    // coordinator drives the turn; output returns through that
+                    // same owner's bounded painter channel.
+                    let line = match seeded.take() {
+                        Some(first) => repl::Line::Submitted(first),
+                        None => {
+                            seat.idle();
+                            seat.read()
+                        }
+                    };
 
-                let asked = match line {
-                    repl::Line::Submitted(text) => text,
-                    repl::Line::Blank => continue,
-                    // Ctrl+C at an idle prompt drops the line and nothing
-                    // else. Someone who pressed it to stop a turn must not
-                    // lose the session by pressing it once more.
-                    repl::Line::Interrupted => continue,
-                    repl::Line::Ended => break,
-                    repl::Line::Refused(why) => {
-                        diagnostics.note(why);
-                        continue;
+                    match line {
+                        repl::Line::Submitted(text) => Some(text),
+                        repl::Line::Blank => continue,
+                        // Ctrl+C at an idle prompt drops the line and nothing
+                        // else. Someone who pressed it to stop a turn must not
+                        // lose the session by pressing it once more.
+                        repl::Line::Interrupted => continue,
+                        repl::Line::Ended => break,
+                        repl::Line::Refused(why) => {
+                            diagnostics.note(why);
+                            continue;
+                        }
+                        repl::Line::HostCommand(_) => continue,
+                        repl::Line::ExternalBreak(_) => break,
                     }
-                    repl::Line::HostCommand(_) => continue,
-                    repl::Line::ExternalBreak(_) => break,
                 };
 
                 // Per turn, for the reason `build` documents.
+                seat.busy();
                 let turn_cancel = CancelToken::new();
                 let (process, observation) =
                     guarded_exec(&confinement, &evidence, &turn_cancel).await?;
-                let mut loop_ = build!(state, &turn_cancel, process, observation);
-                let (termination, result) = turns
-                    .drive(&mut loop_, &asked, &turn_cancel, diagnostics)
-                    .await;
+                let mut loop_ = build!(state, &turn_cancel, process, observation)
+                    .with_interactive_control(&mut control);
+                let driven = match asked {
+                    Some(asked) => {
+                        let (termination, result) = turns
+                            .drive(&mut loop_, &asked, &turn_cancel, diagnostics)
+                            .await;
+                        Some((termination, result))
+                    }
+                    None => match loop_.run_queued_turn().await {
+                        Ok(Some(outcome)) => Some((
+                            RunTermination::after_turn(outcome.exit_reason, outcome.denied)
+                                .unwrap_or(RunTermination::Done),
+                            Value::String(last_assistant_message(loop_.state())),
+                        )),
+                        Ok(None) => None,
+                        Err(abandoned) => Some((
+                            RunTermination::Failed {
+                                message: format!(
+                                    "the session log could not be written: {}",
+                                    abandoned.cause
+                                ),
+                            },
+                            Value::String(last_assistant_message(loop_.state())),
+                        )),
+                    },
+                };
                 state = loop_.into_state();
+                seat.refresh_queue(control.status());
+                let Some((termination, result)) = driven else {
+                    continue;
+                };
                 between();
 
+                let queue_abandoned = matches!(&termination, RunTermination::Failed { .. });
                 last = Ended {
                     termination,
                     session: session_id,
@@ -1308,6 +1363,9 @@ async fn execute<S: EventSink>(
                 // the process. A broken stdout or a SIGTERM is not a turn to
                 // return to a prompt from.
                 if cancel.is_cancelled() {
+                    break;
+                }
+                if queue_abandoned {
                     break;
                 }
             }
@@ -1356,8 +1414,23 @@ pub trait Reads {
 pub trait InteractiveSeat: Reads + std::fmt::Debug + Send + Sync {
     fn has_human(&self) -> bool;
     fn busy(&self) {}
+    fn idle(&self) {}
+    /// Hand the session-long core control endpoint to the turn coordinator.
+    fn take_control(&self) -> InteractiveControl {
+        let (_ingress, control) = interactive_control();
+        control
+    }
+    /// Publish the coordinator's authoritative durable queue projection.
+    fn refresh_queue(&self, _queue: QueueStatus) {}
     fn trust(&self, workspace: &Path) -> Trust;
     fn permission(&self, request: &PermissionRequest) -> PermissionDecision;
+    /// Await a modal decision without blocking the core's intent polling.
+    fn permission_future<'a>(
+        &'a self,
+        request: &'a PermissionRequest,
+    ) -> futures::future::BoxFuture<'a, PermissionDecision> {
+        Box::pin(futures::future::ready(self.permission(request)))
+    }
 }
 
 #[derive(Debug)]
@@ -1370,7 +1443,7 @@ impl HumanApprover for SeatApprover {
         &'a self,
         request: &'a PermissionRequest,
     ) -> futures::future::BoxFuture<'a, PermissionDecision> {
-        Box::pin(futures::future::ready(self.seat.permission(request)))
+        self.seat.permission_future(request)
     }
 }
 
@@ -1413,6 +1486,14 @@ impl Turns<'_> {
                 RunTermination::after_turn(outcome.exit_reason, outcome.denied)
             {
                 return (termination, self.answer(loop_.state()));
+            }
+
+            // Durable steering owns the next provider request. A schema
+            // repair is another user turn, so it must wait until the outer
+            // interactive coordinator has replayed the accepted FIFO through
+            // a fresh TurnLoop and cancellation token.
+            if !loop_.state().unacknowledged_prompts().is_empty() {
+                return (RunTermination::Done, self.answer(loop_.state()));
             }
 
             let answer = last_assistant_message(loop_.state());

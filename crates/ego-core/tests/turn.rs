@@ -6,9 +6,12 @@
 
 use std::cell::RefCell;
 use std::collections::{BTreeSet, VecDeque};
+use std::ffi::OsString;
+use std::future::Future;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::task::Poll;
 
 use ego_core::budget::{BudgetGate, Metering, PricingQuote, ResolvedRates, SettlementSource};
 use ego_core::config::{Mode, PermCfg, Ruleset, Source, SystemPrompt};
@@ -16,8 +19,8 @@ use ego_core::cost::{
     Amount, CostAttribution, CostDelta, CurrencyCode, MeteringRevision, Money, PricingRevision,
     ProviderCostRevision, RateSource, UnknownCost,
 };
-use ego_core::event::domain::{CancelCause, DomainEvent, EventKind, ExitReason};
-use ego_core::event::id::{Seq, SessionId};
+use ego_core::event::domain::{CancelCause, DomainEvent, Envelope, EventKind, ExitReason};
+use ego_core::event::id::{EventId, Producer, QueuedPromptId, Seq, SessionId, TurnId};
 use ego_core::event::time::{Clock, Timestamp};
 use ego_core::generator::attempt::{AttemptStream, GenerationAttempt};
 use ego_core::generator::capabilities::{
@@ -33,9 +36,9 @@ use ego_core::generator::types::{
 };
 use ego_core::permit::rule::Rule;
 use ego_core::permit::{
-    Authority, CanonPath, Fs, GuardedIo, HumanApprover, Op, PermissionDecision, PermissionRequest,
-    PolicyEngine, PrepareCtx, PreparedCall, ProcessError, ProcessExecutor, ToolError, ToolResult,
-    Typed, TypedTool,
+    Authority, CanonPath, EnvPolicy, Fs, GuardedIo, HumanApprover, Op, PermissionDecision,
+    PermissionRequest, PolicyEngine, PrepareCtx, PreparedCall, ProcessError, ProcessExecutor,
+    SpawnSpec, ToolError, ToolResult, Typed, TypedTool,
 };
 use ego_core::public::PublicEvent;
 use ego_core::run::RunTermination;
@@ -45,7 +48,7 @@ use ego_core::store::evidence::{
     EvidenceError, EvidencePage, EvidenceRead, EvidenceStore, EvidenceWriter,
 };
 use ego_core::store::session_store::{SessionMeta, SessionStore, StoreError};
-use ego_core::turn::{CancelToken, Model, Session, Tools, TurnConfig, TurnLoop};
+use ego_core::turn::{CancelToken, ControlError, Model, Session, Tools, TurnConfig, TurnLoop};
 use futures::StreamExt;
 use futures::executor::block_on;
 use futures::future::BoxFuture;
@@ -69,12 +72,17 @@ mod turn {
         appends: AtomicUsize,
         /// Fail the append with this 1-based index. `0` never fails.
         fail_at: AtomicUsize,
+        fail_prompt_queued: AtomicBool,
         permission_requested: Arc<AtomicBool>,
     }
 
     impl MemStore {
         fn fail_at(&self, nth: usize) {
             self.fail_at.store(nth, Ordering::SeqCst);
+        }
+
+        fn fail_prompt_queued(&self) {
+            self.fail_prompt_queued.store(true, Ordering::SeqCst);
         }
 
         fn kinds(&self) -> Vec<String> {
@@ -94,7 +102,10 @@ mod turn {
     impl SessionStore for MemStore {
         fn append(&self, _id: &SessionId, ev: &DomainEvent) -> Result<(), StoreError> {
             let nth = self.appends.fetch_add(1, Ordering::SeqCst) + 1;
-            if nth == self.fail_at.load(Ordering::SeqCst) {
+            if nth == self.fail_at.load(Ordering::SeqCst)
+                || (self.fail_prompt_queued.load(Ordering::SeqCst)
+                    && matches!(ev.kind, EventKind::PromptQueued { .. }))
+            {
                 return Err(StoreError::Io(std::io::Error::other("the disk said no")));
             }
             self.events.lock().unwrap().push(ev.clone());
@@ -167,6 +178,18 @@ mod turn {
         }
     }
 
+    #[derive(Debug)]
+    struct PendingHuman;
+
+    impl HumanApprover for PendingHuman {
+        fn decide<'a>(
+            &'a self,
+            _request: &'a PermissionRequest,
+        ) -> BoxFuture<'a, PermissionDecision> {
+            Box::pin(futures::future::pending())
+        }
+    }
+
     impl ScriptedHuman {
         fn new(answers: impl IntoIterator<Item = PermissionDecision>) -> Self {
             Self {
@@ -225,6 +248,22 @@ mod turn {
         }
     }
 
+    struct ContinuouslyReadyGenerator;
+
+    impl Generator for ContinuouslyReadyGenerator {
+        fn generate(&self, _req: GenRequest, attempt: GenerationAttempt) -> AttemptStream {
+            AttemptStream::new(
+                attempt,
+                Box::pin(
+                    futures::stream::repeat(AiEvent::TextDelta {
+                        text: "ready delta".to_owned(),
+                    })
+                    .take(32),
+                ),
+            )
+        }
+    }
+
     #[derive(Debug, Deserialize, JsonSchema)]
     struct ReadParams {
         path: String,
@@ -268,6 +307,207 @@ mod turn {
                     return Err(ToolError::InvalidParams("expected one Read op".into()));
                 };
                 let bytes = io.read(&path)?;
+                Ok(ToolResult::builtin(
+                    String::from_utf8_lossy(&bytes).into_owned(),
+                ))
+            })
+        }
+    }
+
+    #[derive(Debug, Deserialize, JsonSchema)]
+    struct ExecParams {
+        argv: Vec<String>,
+    }
+
+    struct FakeExecTool;
+
+    impl TypedTool for FakeExecTool {
+        type Params = ExecParams;
+
+        fn name(&self) -> &str {
+            "exec"
+        }
+
+        fn description(&self) -> &str {
+            "executes a process"
+        }
+
+        fn prepare_typed(
+            &self,
+            params: ExecParams,
+            _ctx: &PrepareCtx<'_>,
+        ) -> Result<PreparedCall, ToolError> {
+            let spec = SpawnSpec::new(
+                params.argv.into_iter().map(OsString::from).collect(),
+                None,
+                None,
+                EnvPolicy::Inherited,
+            )
+            .map_err(|err| ToolError::InvalidParams(err.to_string()))?;
+            Ok(PreparedCall {
+                tool: self.name().to_string(),
+                ops: vec![Op::Spawn { spec }],
+            })
+        }
+
+        fn execute<'a>(
+            &'a self,
+            call: PreparedCall,
+            io: &'a dyn GuardedIo,
+        ) -> BoxFuture<'a, Result<ToolResult, ToolError>> {
+            Box::pin(async move {
+                let Some(Op::Spawn { spec }) = call.ops.into_iter().next() else {
+                    return Err(ToolError::InvalidParams("expected one Spawn op".into()));
+                };
+                io.exec(&spec).await.map_err(ToolError::from)
+            })
+        }
+    }
+
+    struct GatedCancellableProcess {
+        calls: Arc<AtomicUsize>,
+        released: Arc<AtomicBool>,
+        release_seen: Arc<AtomicBool>,
+    }
+
+    impl ProcessExecutor for GatedCancellableProcess {
+        fn execute<'a>(
+            &'a self,
+            _spec: &'a ego_core::permit::SpawnSpec,
+        ) -> BoxFuture<'a, Result<ToolResult, ProcessError>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let released = Arc::clone(&self.released);
+            let release_seen = Arc::clone(&self.release_seen);
+            Box::pin(async move {
+                futures::future::poll_fn(move |cx| {
+                    if released.load(Ordering::SeqCst) && release_seen.swap(true, Ordering::SeqCst)
+                    {
+                        Poll::Ready(())
+                    } else {
+                        cx.waker().wake_by_ref();
+                        Poll::Pending
+                    }
+                })
+                .await;
+                Err(ProcessError::Cancelled)
+            })
+        }
+    }
+
+    struct GatedReadTool {
+        released: Arc<AtomicBool>,
+        release_seen: Arc<AtomicBool>,
+    }
+
+    impl TypedTool for GatedReadTool {
+        type Params = ReadParams;
+
+        fn name(&self) -> &str {
+            "builtin_read"
+        }
+
+        fn description(&self) -> &str {
+            "reads through a non-cancellable builtin"
+        }
+
+        fn prepare_typed(
+            &self,
+            params: ReadParams,
+            ctx: &PrepareCtx<'_>,
+        ) -> Result<PreparedCall, ToolError> {
+            Ok(PreparedCall {
+                tool: self.name().to_string(),
+                ops: vec![Op::Read {
+                    path: ctx.resolver.canonicalize(Path::new(&params.path))?,
+                }],
+            })
+        }
+
+        fn execute<'a>(
+            &'a self,
+            call: PreparedCall,
+            io: &'a dyn GuardedIo,
+        ) -> BoxFuture<'a, Result<ToolResult, ToolError>> {
+            let released = Arc::clone(&self.released);
+            let release_seen = Arc::clone(&self.release_seen);
+            Box::pin(async move {
+                futures::future::poll_fn(move |cx| {
+                    if released.load(Ordering::SeqCst) && release_seen.swap(true, Ordering::SeqCst)
+                    {
+                        Poll::Ready(())
+                    } else {
+                        cx.waker().wake_by_ref();
+                        Poll::Pending
+                    }
+                })
+                .await;
+                let Some(Op::Read { path }) = call.ops.into_iter().next() else {
+                    return Err(ToolError::InvalidParams("expected one Read op".into()));
+                };
+                let bytes = io.read(&path)?;
+                Ok(ToolResult::builtin(
+                    String::from_utf8_lossy(&bytes).into_owned(),
+                ))
+            })
+        }
+    }
+
+    struct CancellingReadTool {
+        started: Arc<AtomicUsize>,
+        calls: Arc<AtomicUsize>,
+        released: Arc<AtomicBool>,
+        release_seen: Arc<AtomicBool>,
+    }
+
+    impl TypedTool for CancellingReadTool {
+        type Params = ReadParams;
+
+        fn name(&self) -> &str {
+            "cancel_after_read"
+        }
+
+        fn description(&self) -> &str {
+            "reads once and interrupts the remaining batch"
+        }
+
+        fn prepare_typed(
+            &self,
+            params: ReadParams,
+            ctx: &PrepareCtx<'_>,
+        ) -> Result<PreparedCall, ToolError> {
+            Ok(PreparedCall {
+                tool: self.name().to_string(),
+                ops: vec![Op::Read {
+                    path: ctx.resolver.canonicalize(Path::new(&params.path))?,
+                }],
+            })
+        }
+
+        fn execute<'a>(
+            &'a self,
+            call: PreparedCall,
+            io: &'a dyn GuardedIo,
+        ) -> BoxFuture<'a, Result<ToolResult, ToolError>> {
+            self.started.fetch_add(1, Ordering::SeqCst);
+            let calls = Arc::clone(&self.calls);
+            let released = Arc::clone(&self.released);
+            let release_seen = Arc::clone(&self.release_seen);
+            Box::pin(async move {
+                futures::future::poll_fn(move |cx| {
+                    if released.load(Ordering::SeqCst) && release_seen.swap(true, Ordering::SeqCst)
+                    {
+                        Poll::Ready(())
+                    } else {
+                        cx.waker().wake_by_ref();
+                        Poll::Pending
+                    }
+                })
+                .await;
+                let Some(Op::Read { path }) = call.ops.into_iter().next() else {
+                    return Err(ToolError::InvalidParams("expected one Read op".into()));
+                };
+                let bytes = io.read(&path)?;
+                calls.fetch_add(1, Ordering::SeqCst);
                 Ok(ToolResult::builtin(
                     String::from_utf8_lossy(&bytes).into_owned(),
                 ))
@@ -372,7 +612,7 @@ mod turn {
         generator: FakeGenerator,
         policy: PolicyEngine,
         fs: FakeFs,
-        process: NoProcess,
+        process: Arc<dyn ProcessExecutor>,
         evidence: NoEvidence,
         registry: Vec<std::sync::Arc<dyn ego_core::permit::Tool>>,
         gate: RefCell<BudgetGate>,
@@ -390,7 +630,7 @@ mod turn {
                 generator: FakeGenerator::new(script),
                 policy: PolicyEngine::new(CanonPath::new("/ws"), Mode::Default, Ruleset::default()),
                 fs: FakeFs::default(),
-                process: NoProcess,
+                process: Arc::new(NoProcess),
                 evidence: NoEvidence,
                 registry: Vec::new(),
                 gate: RefCell::new(gate()),
@@ -401,6 +641,39 @@ mod turn {
         fn with_read_tool(mut self) -> Self {
             self.registry = vec![std::sync::Arc::new(Typed(FakeReadTool))];
             self
+        }
+
+        fn with_exec_tool(mut self) -> Self {
+            self.registry = vec![std::sync::Arc::new(Typed(FakeExecTool))];
+            self
+        }
+
+        fn with_gated_read_tool(&mut self, released: Arc<AtomicBool>) -> Arc<AtomicBool> {
+            let release_seen = Arc::new(AtomicBool::new(false));
+            self.registry = vec![std::sync::Arc::new(Typed(GatedReadTool {
+                released,
+                release_seen: Arc::clone(&release_seen),
+            }))];
+            release_seen
+        }
+
+        fn with_cancelling_read_tool(
+            &mut self,
+            calls: Arc<AtomicUsize>,
+            released: Arc<AtomicBool>,
+        ) -> Arc<AtomicUsize> {
+            let started = Arc::new(AtomicUsize::new(0));
+            self.registry = vec![std::sync::Arc::new(Typed(CancellingReadTool {
+                started: Arc::clone(&started),
+                calls,
+                released,
+                release_seen: Arc::new(AtomicBool::new(false)),
+            }))];
+            started
+        }
+
+        fn with_process(&mut self, process: Arc<dyn ProcessExecutor>) {
+            self.process = process;
         }
 
         /// A tool that mutates, which is what it takes to reach the third
@@ -453,6 +726,16 @@ mod turn {
                 Arc::new(RequestObservingHuman {
                     permission_requested: Arc::clone(&self.store.permission_requested),
                 }),
+            );
+            self
+        }
+
+        fn with_pending_human(mut self) -> Self {
+            self.policy = PolicyEngine::with_human(
+                CanonPath::new("/ws"),
+                Mode::Default,
+                Ruleset::default(),
+                Arc::new(PendingHuman),
             );
             self
         }
@@ -572,7 +855,7 @@ mod turn {
             &fx.registry,
             &fx.policy,
             &fx.fs,
-            &fx.process,
+            fx.process.as_ref(),
             &fx.evidence,
             CanonPath::new("/ws"),
         );
@@ -757,6 +1040,1459 @@ mod turn {
             ContentBlock::ToolResult { call_id, output, is_error }
                 if call_id == "call_abc" && output == "hello from the file" && !is_error
         )));
+    }
+
+    #[test]
+    fn a_queued_prompt_forces_a_follow_up_after_a_no_tool_final() {
+        let (ingress, mut control) = ego_core::turn::interactive_control();
+        let fx = Fixture::new(vec![
+            vec![
+                AiEvent::TextDelta {
+                    text: "the final answer".to_owned(),
+                },
+                AiEvent::Stop(StopReason::Stop),
+            ],
+            vec![
+                AiEvent::TextDelta {
+                    text: "the queued follow-up".to_owned(),
+                },
+                AiEvent::Stop(StopReason::Stop),
+            ],
+        ]);
+        let mut budget = fx.gate.borrow_mut();
+        let tools = Tools::new(
+            &fx.registry,
+            &fx.policy,
+            &fx.fs,
+            fx.process.as_ref(),
+            &fx.evidence,
+            CanonPath::new("/ws"),
+        );
+        let mut turn = TurnLoop::new(
+            session(
+                SessionState::default(),
+                &fx.store,
+                &fx.clock,
+                &fx.sink,
+                CancelToken::new(),
+            ),
+            model(&fx.generator, &mut budget),
+            tools,
+        )
+        .with_interactive_control(&mut control);
+        let mut submit = Box::pin(ingress.submit("deliver this after the final".to_owned()));
+        let waker = futures::task::noop_waker();
+        let mut cx = std::task::Context::from_waker(&waker);
+        assert!(matches!(submit.as_mut().poll(&mut cx), Poll::Pending));
+        let (outcome, accepted) =
+            block_on(async { futures::join!(turn.run("initial prompt"), submit) });
+        let outcome = outcome.expect("the first no-tool turn closes normally");
+        let accepted = accepted.expect("the queue acceptance is durable before acknowledgement");
+        assert_eq!(accepted.pending_steers, 1);
+        assert_eq!(accepted.queued, 0);
+        assert!(!accepted.interrupt_pending);
+        let events = fx.store.events();
+        let first_assistant = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    &event.kind,
+                    EventKind::AssistantMessage { text } if text == "the final answer"
+                )
+            })
+            .expect("the active turn records its first final answer");
+        assert_eq!(fx.generator.calls().len(), 2);
+        let correlated = events
+            .iter()
+            .enumerate()
+            .find_map(|(index, event)| match &event.kind {
+                EventKind::UserPrompt {
+                    text,
+                    queued_prompt: Some(_),
+                    ..
+                } if text == "deliver this after the final" => Some(index),
+                _ => None,
+            })
+            .expect("the normal steer is durably correlated in this turn");
+        let second_assistant = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    &event.kind,
+                    EventKind::AssistantMessage { text } if text == "the queued follow-up"
+                )
+            })
+            .expect("the correlated follow-up is generated in this turn");
+        let completed = events
+            .iter()
+            .filter(|event| matches!(event.kind, EventKind::TurnCompleted { .. }))
+            .collect::<Vec<_>>();
+        assert_eq!(completed.len(), 1, "normal delivery remains one turn");
+        let completed_index = events
+            .iter()
+            .position(|event| matches!(event.kind, EventKind::TurnCompleted { .. }))
+            .expect("the same turn closes after the follow-up");
+        assert!(first_assistant < correlated);
+        assert!(correlated < second_assistant);
+        assert!(second_assistant < completed_index);
+        assert_eq!(events[completed_index].env.turn, outcome.turn);
+        let generations = fx.generator.calls();
+        let blocks: Vec<&ContentBlock> = generations[1]
+            .messages
+            .messages()
+            .iter()
+            .flat_map(|message| message.content.iter())
+            .collect();
+        assert!(blocks.iter().any(|block| matches!(
+            block,
+            ContentBlock::Text { text } if text == "deliver this after the final"
+        )));
+    }
+
+    #[test]
+    fn an_ordinary_sibling_batch_delivers_a_pending_steer_at_the_safe_boundary() {
+        let (ingress, mut control) = ego_core::turn::interactive_control();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let released = Arc::new(AtomicBool::new(false));
+        let mut fx = Fixture::new(vec![
+            vec![
+                AiEvent::ToolCall {
+                    call_id: "ordinary-first".to_owned(),
+                    name: "cancel_after_read".to_owned(),
+                    args: r#"{"path":"/ws/first.txt"}"#.to_owned(),
+                },
+                AiEvent::ToolCall {
+                    call_id: "ordinary-second".to_owned(),
+                    name: "cancel_after_read".to_owned(),
+                    args: r#"{"path":"/ws/second.txt"}"#.to_owned(),
+                },
+                AiEvent::Stop(StopReason::ToolUse),
+            ],
+            vec![
+                AiEvent::TextDelta {
+                    text: "ordinary sibling follow-up".to_owned(),
+                },
+                AiEvent::Stop(StopReason::Stop),
+            ],
+        ])
+        .with_rules(&["read(**)"], &[]);
+        let started = fx.with_cancelling_read_tool(Arc::clone(&calls), Arc::clone(&released));
+        fx.fs.file("/ws/first.txt", "first");
+        fx.fs.file("/ws/second.txt", "second");
+
+        let mut turn_config = config();
+        turn_config.parallel_tool_calls = true;
+        let mut budget = fx.gate.borrow_mut();
+        let tools = Tools::new(
+            &fx.registry,
+            &fx.policy,
+            &fx.fs,
+            fx.process.as_ref(),
+            &fx.evidence,
+            CanonPath::new("/ws"),
+        );
+        let mut turn = TurnLoop::new(
+            session(
+                SessionState::default(),
+                &fx.store,
+                &fx.clock,
+                &fx.sink,
+                CancelToken::new(),
+            ),
+            model_with(
+                &fx.generator,
+                &mut budget,
+                metering(),
+                Some(rates()),
+                None,
+                turn_config,
+            ),
+            tools,
+        )
+        .with_interactive_control(&mut control);
+        let active = turn.run("run ordinary siblings");
+        let drive = async {
+            futures::future::poll_fn(|cx| {
+                if started.load(Ordering::SeqCst) >= 1 {
+                    Poll::Ready(())
+                } else {
+                    cx.waker().wake_by_ref();
+                    Poll::Pending
+                }
+            })
+            .await;
+            let accepted = ingress
+                .submit("ordinary sibling follow-up".to_owned())
+                .await
+                .expect("the ordinary steer is durably accepted while the first sibling runs");
+            assert_eq!(accepted.pending_steers, 1);
+            assert_eq!(accepted.queued, 0);
+            assert!(!accepted.interrupt_pending);
+            released.store(true, Ordering::SeqCst);
+        };
+        let (outcome, ()) = block_on(async { futures::join!(active, drive) });
+        let outcome = outcome.expect("ordinary sibling delivery completes");
+        assert_eq!(outcome.exit_reason, ExitReason::Completed);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(fx.generator.calls().len(), 2);
+        let events = fx.store.events();
+        let completions: Vec<usize> = events
+            .iter()
+            .enumerate()
+            .filter_map(|(index, event)| {
+                matches!(event.kind, EventKind::ToolCallCompleted { .. }).then_some(index)
+            })
+            .collect();
+        assert_eq!(completions.len(), 2, "both sibling calls complete");
+        let correlated = events
+            .iter()
+            .enumerate()
+            .find_map(|(index, event)| match &event.kind {
+                EventKind::UserPrompt {
+                    text,
+                    queued_prompt: Some(_),
+                    ..
+                } if text == "ordinary sibling follow-up" => Some(index),
+                _ => None,
+            })
+            .expect("the ordinary follow-up is correlated at the safe boundary");
+        assert!(completions.into_iter().all(|index| index < correlated));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event.kind, EventKind::TurnCompleted { .. }))
+                .count(),
+            1,
+            "ordinary delivery stays in one turn"
+        );
+        let generations = fx.generator.calls();
+        let blocks: Vec<&ContentBlock> = generations[1]
+            .messages
+            .messages()
+            .iter()
+            .flat_map(|message| message.content.iter())
+            .collect();
+        assert!(blocks.iter().any(|block| matches!(
+            block,
+            ContentBlock::Text { text } if text == "ordinary sibling follow-up"
+        )));
+    }
+
+    #[test]
+    fn partial_correlated_delivery_refreshes_status_after_each_durable_append() {
+        let (first, second) = (QueuedPromptId::new(), QueuedPromptId::new());
+        let seeded_turn = TurnId::new();
+        let mut seq = Seq::default();
+        let mut seeded = |kind| DomainEvent {
+            env: Envelope {
+                seq: seq.next(),
+                id: EventId::new(),
+                turn: seeded_turn,
+                item: None,
+                parent: None,
+                ts: Timestamp::from_millis(1_787_000_000_000),
+                producer: Producer::Main,
+            },
+            kind,
+        };
+        let durable = vec![
+            seeded(EventKind::PromptQueued {
+                id: first,
+                text: "first recovery prompt".to_owned(),
+            }),
+            seeded(EventKind::PromptQueued {
+                id: second,
+                text: "second recovery prompt".to_owned(),
+            }),
+        ];
+        let fx = Fixture::new(vec![]);
+        fx.store
+            .events
+            .lock()
+            .unwrap()
+            .extend(durable.iter().cloned());
+        fx.store.fail_at(2);
+        let mut state = SessionState::default();
+        for event in &durable {
+            state.apply(event);
+        }
+        let (ingress, mut control) = ego_core::turn::interactive_control();
+        let mut budget = fx.gate.borrow_mut();
+        let tools = Tools::new(
+            &fx.registry,
+            &fx.policy,
+            &fx.fs,
+            fx.process.as_ref(),
+            &fx.evidence,
+            CanonPath::new("/ws"),
+        );
+        let mut turn = TurnLoop::new(
+            session(state, &fx.store, &fx.clock, &fx.sink, CancelToken::new()),
+            model(&fx.generator, &mut budget),
+            tools,
+        )
+        .with_interactive_control(&mut control);
+
+        let abandoned = block_on(turn.run_queued_turn())
+            .expect_err("the second correlated UserPrompt append fails");
+        drop(turn);
+        assert_eq!(abandoned.state.queue_status().pending_steers, 0);
+        assert_eq!(abandoned.state.queue_status().queued, 1);
+        assert!(
+            fx.store.events().iter().any(|event| matches!(
+                event.kind,
+                EventKind::UserPrompt {
+                    queued_prompt: Some(id),
+                    ..
+                } if id == first
+            )),
+            "the first correlation remains durable before the second append fails"
+        );
+        assert!(!fx.store.events().iter().any(|event| matches!(
+            event.kind,
+            EventKind::UserPrompt {
+                queued_prompt: Some(id),
+                ..
+            } if id == second
+        )));
+        let mut closed_submit = Box::pin(ingress.submit("after partial failure".to_owned()));
+        let waker = futures::task::noop_waker();
+        let mut cx = std::task::Context::from_waker(&waker);
+        assert!(matches!(
+            closed_submit.as_mut().poll(&mut cx),
+            Poll::Ready(Err(ControlError::Closed))
+        ));
+    }
+
+    #[test]
+    fn an_attached_empty_queue_run_closes_admission_without_leaking_a_pending_submit() {
+        let (ingress, mut control) = ego_core::turn::interactive_control();
+        let fx = Fixture::new(vec![]);
+        let mut budget = fx.gate.borrow_mut();
+        let tools = Tools::new(
+            &fx.registry,
+            &fx.policy,
+            &fx.fs,
+            fx.process.as_ref(),
+            &fx.evidence,
+            CanonPath::new("/ws"),
+        );
+        let mut turn = TurnLoop::new(
+            session(
+                SessionState::default(),
+                &fx.store,
+                &fx.clock,
+                &fx.sink,
+                CancelToken::new(),
+            ),
+            model(&fx.generator, &mut budget),
+            tools,
+        )
+        .with_interactive_control(&mut control);
+        assert!(
+            block_on(turn.run_queued_turn())
+                .expect("empty queue run is not a store failure")
+                .is_none()
+        );
+        let _state = turn.into_state();
+        drop(budget);
+
+        let mut closed_submit = Box::pin(ingress.submit("after empty queue run".to_owned()));
+        let waker = futures::task::noop_waker();
+        let mut cx = std::task::Context::from_waker(&waker);
+        assert!(matches!(
+            closed_submit.as_mut().poll(&mut cx),
+            Poll::Ready(Err(ControlError::Closed))
+        ));
+    }
+
+    #[test]
+    fn admission_barrier_keeps_prompts_submitted_before_and_after_turn_completion() {
+        let (ingress, mut control) = ego_core::turn::interactive_control();
+        let fx = Fixture::new(vec![
+            vec![
+                AiEvent::TextDelta {
+                    text: "first final".to_owned(),
+                },
+                AiEvent::Stop(StopReason::Stop),
+            ],
+            vec![
+                AiEvent::TextDelta {
+                    text: "first follow-up".to_owned(),
+                },
+                AiEvent::Stop(StopReason::Stop),
+            ],
+            vec![
+                AiEvent::TextDelta {
+                    text: "reopened final".to_owned(),
+                },
+                AiEvent::Stop(StopReason::Stop),
+            ],
+            vec![
+                AiEvent::TextDelta {
+                    text: "reopened follow-up".to_owned(),
+                },
+                AiEvent::Stop(StopReason::Stop),
+            ],
+        ]);
+        let mut submit_before = Box::pin(ingress.submit("before completion".to_owned()));
+        let waker = futures::task::noop_waker();
+        let mut cx = std::task::Context::from_waker(&waker);
+        assert!(matches!(
+            submit_before.as_mut().poll(&mut cx),
+            Poll::Pending
+        ));
+
+        let state = {
+            let mut budget = fx.gate.borrow_mut();
+            let tools = Tools::new(
+                &fx.registry,
+                &fx.policy,
+                &fx.fs,
+                fx.process.as_ref(),
+                &fx.evidence,
+                CanonPath::new("/ws"),
+            );
+            let mut turn = TurnLoop::new(
+                session(
+                    SessionState::default(),
+                    &fx.store,
+                    &fx.clock,
+                    &fx.sink,
+                    CancelToken::new(),
+                ),
+                model(&fx.generator, &mut budget),
+                tools,
+            )
+            .with_interactive_control(&mut control);
+            let (outcome, accepted) =
+                block_on(async { futures::join!(turn.run("initial prompt"), submit_before) });
+            assert_eq!(
+                outcome
+                    .expect("the before-boundary prompt does not interrupt the turn")
+                    .exit_reason,
+                ExitReason::Completed
+            );
+            assert_eq!(
+                accepted
+                    .expect("the before-boundary prompt is durably admitted")
+                    .pending_steers,
+                1
+            );
+            let state = turn.into_state();
+            assert_eq!(state.queue_status().queued, 0);
+            state
+        };
+
+        let mut closed_submit = Box::pin(ingress.submit("after close".to_owned()));
+        assert!(matches!(
+            closed_submit.as_mut().poll(&mut cx),
+            Poll::Ready(Err(ControlError::Closed))
+        ));
+        let (outcome, accepted) = {
+            let mut budget = fx.gate.borrow_mut();
+            let tools = Tools::new(
+                &fx.registry,
+                &fx.policy,
+                &fx.fs,
+                fx.process.as_ref(),
+                &fx.evidence,
+                CanonPath::new("/ws"),
+            );
+            let mut turn = TurnLoop::new(
+                session(state, &fx.store, &fx.clock, &fx.sink, CancelToken::new()),
+                model(&fx.generator, &mut budget),
+                tools,
+            )
+            .with_interactive_control(&mut control);
+            let mut reopened_submit = Box::pin(ingress.submit("after reopen".to_owned()));
+            assert!(matches!(
+                reopened_submit.as_mut().poll(&mut cx),
+                Poll::Pending
+            ));
+            block_on(async { futures::join!(turn.run("reopened prompt"), reopened_submit) })
+        };
+        let outcome = outcome.expect("the reopened prompt does not interrupt the turn");
+        let accepted = accepted.expect("the reopened prompt is durably admitted");
+        assert_eq!(accepted.pending_steers, 1);
+        assert_eq!(fx.generator.calls().len(), 4);
+        assert_eq!(outcome.exit_reason, ExitReason::Completed);
+        let events = fx.store.events();
+        for text in [
+            "before completion",
+            "first follow-up",
+            "after reopen",
+            "reopened follow-up",
+        ] {
+            assert!(
+                events.iter().any(|event| matches!(
+                    &event.kind,
+                    EventKind::UserPrompt { text: actual, .. } if actual == text
+                ) || matches!(
+                    &event.kind,
+                    EventKind::AssistantMessage { text: actual } if actual == text
+                )),
+                "the admission barrier lost {text:?}"
+            );
+        }
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event.kind, EventKind::TurnCompleted { .. }))
+                .count(),
+            2,
+            "before and after admissions remain two safe-boundary turns"
+        );
+    }
+
+    #[test]
+    fn all_sibling_tool_results_close_before_the_queued_follow_up() {
+        let (ingress, mut control) = ego_core::turn::interactive_control();
+        let cancel = CancelToken::new();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let released = Arc::new(AtomicBool::new(false));
+        let mut fx = Fixture::new(vec![
+            vec![
+                AiEvent::ToolCall {
+                    call_id: "call-first".to_owned(),
+                    name: "cancel_after_read".to_owned(),
+                    args: r#"{"path":"/ws/first.txt"}"#.to_owned(),
+                },
+                AiEvent::ToolCall {
+                    call_id: "call-second".to_owned(),
+                    name: "cancel_after_read".to_owned(),
+                    args: r#"{"path":"/ws/second.txt"}"#.to_owned(),
+                },
+                AiEvent::Stop(StopReason::ToolUse),
+            ],
+            vec![
+                AiEvent::TextDelta {
+                    text: "queued follow-up".to_owned(),
+                },
+                AiEvent::Stop(StopReason::Stop),
+            ],
+        ])
+        .with_rules(&["read(**)"], &[]);
+        fx.with_cancelling_read_tool(Arc::clone(&calls), Arc::clone(&released));
+        fx.fs.file("/ws/first.txt", "first");
+        fx.fs.file("/ws/second.txt", "second");
+
+        let mut turn_config = config();
+        turn_config.parallel_tool_calls = true;
+        let mut budget = fx.gate.borrow_mut();
+        let tools = Tools::new(
+            &fx.registry,
+            &fx.policy,
+            &fx.fs,
+            fx.process.as_ref(),
+            &fx.evidence,
+            CanonPath::new("/ws"),
+        );
+        let mut turn = TurnLoop::new(
+            session(
+                SessionState::default(),
+                &fx.store,
+                &fx.clock,
+                &fx.sink,
+                cancel,
+            ),
+            model_with(
+                &fx.generator,
+                &mut budget,
+                metering(),
+                Some(rates()),
+                None,
+                turn_config,
+            ),
+            tools,
+        )
+        .with_interactive_control(&mut control);
+        let active = turn.run("run both reads");
+        let drive = async {
+            let accepted = ingress
+                .submit("after both siblings".to_owned())
+                .await
+                .expect("sibling follow-up acceptance is durable before acknowledgement");
+            assert_eq!(accepted.pending_steers, 1);
+            let expedited = ingress
+                .interrupt()
+                .await
+                .expect("sibling follow-up interruption is durable");
+            assert_eq!(expedited.pending_steers, 1);
+            assert_eq!(expedited.queued, 0);
+            assert!(expedited.interrupt_pending);
+            released.store(true, Ordering::SeqCst);
+        };
+        let (outcome, ()) = block_on(async { futures::join!(active, drive) });
+        let outcome = outcome.expect("sibling results were durably closed");
+        assert_eq!(
+            outcome.exit_reason,
+            ExitReason::Cancelled(CancelCause::User)
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let events = fx.store.events();
+        let completed: Vec<usize> = events
+            .iter()
+            .enumerate()
+            .filter_map(|(index, event)| {
+                matches!(event.kind, EventKind::ToolCallCompleted { .. }).then_some(index)
+            })
+            .collect();
+        assert_eq!(completed.len(), 2, "both sibling calls must close");
+        assert_live_interrupt_order(&fx, |kind| {
+            matches!(kind, EventKind::ToolCallCompleted { .. })
+        });
+        let first_completed = events
+            .iter()
+            .position(|event| {
+                event.env.turn == outcome.turn
+                    && matches!(event.kind, EventKind::TurnCompleted { .. })
+            })
+            .expect("the active sibling batch closes before queue delivery");
+        assert!(!events[..first_completed].iter().any(|event| {
+            matches!(
+                event.kind,
+                EventKind::UserPrompt {
+                    queued_prompt: Some(_),
+                    ..
+                }
+            )
+        }));
+        let state = turn.into_state();
+        drop(budget);
+        let mut recovery_budget = fx.gate.borrow_mut();
+        let recovery_tools = Tools::new(
+            &fx.registry,
+            &fx.policy,
+            &fx.fs,
+            fx.process.as_ref(),
+            &fx.evidence,
+            CanonPath::new("/ws"),
+        );
+        let mut recovery = TurnLoop::new(
+            session(state, &fx.store, &fx.clock, &fx.sink, CancelToken::new()),
+            model(&fx.generator, &mut recovery_budget),
+            recovery_tools,
+        );
+        let recovered = block_on(recovery.run_queued_turn())
+            .expect("the sibling follow-up remains replayable")
+            .expect("the sibling follow-up runs on a fresh turn");
+        assert_ne!(recovered.turn, outcome.turn);
+        let events = fx.store.events();
+        let correlated = events
+            .iter()
+            .enumerate()
+            .find_map(|(index, event)| {
+                matches!(
+                    event.kind,
+                    EventKind::UserPrompt {
+                        queued_prompt: Some(_),
+                        ..
+                    }
+                )
+                .then_some(index)
+            })
+            .expect("the follow-up is correlated");
+        assert!(first_completed < correlated);
+        let calls = fx.generator.calls();
+        let blocks: Vec<&ContentBlock> = calls[1]
+            .messages
+            .messages()
+            .iter()
+            .flat_map(|message| message.content.iter())
+            .collect();
+        assert!(blocks.iter().any(|block| matches!(
+            block,
+            ContentBlock::Text { text } if text == "after both siblings"
+        )));
+        assert!(
+            completed.into_iter().all(|index| index < correlated),
+            "queue delivery must not split the sibling call/result batch"
+        );
+    }
+
+    #[test]
+    fn busy_ingress_is_durable_before_ack_and_projects_pending_steer() {
+        let (ingress, mut control) = ego_core::turn::interactive_control();
+        let fx = Fixture::new(vec![]);
+        let generator = StallingGenerator {
+            events: Mutex::new(vec![AiEvent::TextDelta {
+                text: "streaming".to_owned(),
+            }]),
+        };
+        let mut budget = gate();
+        let sink = CollectingSink::new();
+        let policy = PolicyEngine::new(CanonPath::new("/ws"), Mode::Default, Ruleset::default());
+        let fs = FakeFs::default();
+        let process = NoProcess;
+        let evidence = NoEvidence;
+        let cancel = CancelToken::new();
+        let mut turn = TurnLoop::new(
+            session(SessionState::default(), &fx.store, &fx.clock, &sink, cancel),
+            model(&generator, &mut budget),
+            Tools::new(
+                &[],
+                &policy,
+                &fs,
+                &process,
+                &evidence,
+                CanonPath::new("/ws"),
+            ),
+        )
+        .with_interactive_control(&mut control);
+
+        let active = turn.run("initial prompt");
+        let drive = async {
+            let accepted = ingress
+                .submit("durably accepted while the model is busy".to_owned())
+                .await
+                .expect("acknowledgement follows PromptQueued durability");
+            assert_eq!(accepted.pending_steers, 1);
+            assert_eq!(accepted.queued, 0);
+            assert!(!accepted.interrupt_pending);
+            let expedited = ingress
+                .interrupt()
+                .await
+                .expect("expedited intent is durable before interruption");
+            assert_eq!(expedited.pending_steers, 1);
+            assert_eq!(expedited.queued, 0);
+            assert!(expedited.interrupt_pending);
+        };
+        let (outcome, ()) = block_on(async { futures::join!(active, drive) });
+        let outcome = outcome.expect("interruption settles the active turn");
+        assert_eq!(
+            outcome.exit_reason,
+            ExitReason::Cancelled(CancelCause::User)
+        );
+    }
+
+    #[test]
+    fn a_ready_provider_stream_cannot_starve_a_durable_control_intent() {
+        let (ingress, mut control) = ego_core::turn::interactive_control();
+        let fx = Fixture::new(vec![]);
+        let generator = ContinuouslyReadyGenerator;
+        let mut budget = gate();
+        let tools = Tools::new(
+            &fx.registry,
+            &fx.policy,
+            &fx.fs,
+            fx.process.as_ref(),
+            &fx.evidence,
+            CanonPath::new("/ws"),
+        );
+        let mut turn = TurnLoop::new(
+            session(
+                SessionState::default(),
+                &fx.store,
+                &fx.clock,
+                &fx.sink,
+                CancelToken::new(),
+            ),
+            model(&generator, &mut budget),
+            tools,
+        )
+        .with_interactive_control(&mut control);
+
+        let mut submit = Box::pin(ingress.submit("ready-stream steer".to_owned()));
+        let waker = futures::task::noop_waker();
+        let mut cx = std::task::Context::from_waker(&waker);
+        assert!(matches!(submit.as_mut().poll(&mut cx), Poll::Pending));
+        let active = turn.run("initial prompt");
+        let (outcome, accepted) = block_on(async { futures::join!(active, submit) });
+        let outcome = outcome.expect("ready-stream control remains durably settled");
+        let accepted = accepted.expect("a ready provider must still acknowledge control");
+        assert_eq!(accepted.pending_steers, 1);
+        let events = fx.store.events();
+        let queued = events
+            .iter()
+            .position(|event| matches!(event.kind, EventKind::PromptQueued { .. }))
+            .expect("the ready-stream steer was persisted");
+        let delta = events
+            .iter()
+            .position(|event| matches!(event.kind, EventKind::AssistantDelta { .. }))
+            .expect("the ready-stream delta is persisted");
+        let completed = events
+            .iter()
+            .position(|event| matches!(event.kind, EventKind::TurnCompleted { .. }))
+            .expect("the ready-stream turn closes");
+        assert!(queued < delta, "the ack precedes the ready stream");
+        assert!(queued < completed, "the ack precedes turn completion");
+        assert_eq!(outcome.turn, events[completed].env.turn);
+    }
+
+    #[test]
+    fn concurrent_ingress_submits_share_global_capacity() {
+        let (ingress, mut control) = ego_core::turn::interactive_control();
+        let first_ingress = ingress.clone();
+        let second_ingress = ingress.clone();
+        let mut first = Box::pin(first_ingress.submit("first concurrent steer".to_owned()));
+        let mut second = Box::pin(second_ingress.submit("second concurrent steer".to_owned()));
+        let waker = futures::task::noop_waker();
+        let mut cx = std::task::Context::from_waker(&waker);
+        assert!(matches!(first.as_mut().poll(&mut cx), Poll::Pending));
+        assert!(
+            matches!(second.as_mut().poll(&mut cx), Poll::Pending),
+            "the second clone must remain pending while the sole slot is occupied"
+        );
+
+        let fx = Fixture::new(vec![]);
+        let generator = StallingGenerator {
+            events: Mutex::new(vec![AiEvent::TextDelta {
+                text: "coordinator consumes one intent at a time".to_owned(),
+            }]),
+        };
+        let mut budget = gate();
+        let tools = Tools::new(
+            &fx.registry,
+            &fx.policy,
+            &fx.fs,
+            fx.process.as_ref(),
+            &fx.evidence,
+            CanonPath::new("/ws"),
+        );
+        let mut turn = TurnLoop::new(
+            session(
+                SessionState::default(),
+                &fx.store,
+                &fx.clock,
+                &fx.sink,
+                CancelToken::new(),
+            ),
+            model(&generator, &mut budget),
+            tools,
+        )
+        .with_interactive_control(&mut control);
+        let active = turn.run("initial prompt");
+        let drive = async {
+            let first_status = first.await.expect("the first submit is acknowledged");
+            assert_eq!(first_status.pending_steers, 1);
+            let second_status = second.await.expect("the second submit follows the first");
+            assert_eq!(second_status.pending_steers, 2);
+            ingress
+                .interrupt()
+                .await
+                .expect("the shared coordinator accepts the final interrupt");
+        };
+        let (outcome, ()) = block_on(async { futures::join!(active, drive) });
+        assert_eq!(
+            outcome
+                .expect("the shared coordinator remains live")
+                .exit_reason,
+            ExitReason::Cancelled(CancelCause::User)
+        );
+    }
+
+    #[test]
+    fn interrupt_does_not_append_a_receding_marker_after_an_adversarial_ack() {
+        let (ingress, mut control) = ego_core::turn::interactive_control();
+        let first = QueuedPromptId::new();
+        let second = QueuedPromptId::new();
+        let seeded_turn = TurnId::new();
+        let mut seq = Seq::default();
+        let mut seeded = |kind| DomainEvent {
+            env: Envelope {
+                seq: seq.next(),
+                id: EventId::new(),
+                turn: seeded_turn,
+                item: None,
+                parent: None,
+                ts: Timestamp::from_millis(1_787_000_000_000),
+                producer: Producer::Main,
+            },
+            kind,
+        };
+        let durable = vec![
+            seeded(EventKind::PromptQueued {
+                id: first,
+                text: "first remains pending".to_owned(),
+            }),
+            seeded(EventKind::PromptQueued {
+                id: second,
+                text: "second was delivered".to_owned(),
+            }),
+            seeded(EventKind::PromptDeliveryExpedited { through: second }),
+            seeded(EventKind::UserPrompt {
+                text: "second was delivered".to_owned(),
+                queued_prompt: Some(second),
+            }),
+        ];
+        let fx = Fixture::new(vec![]);
+        fx.store.events.lock().unwrap().extend(durable.clone());
+        let mut state = SessionState::default();
+        for event in &durable {
+            state.apply(event);
+        }
+        assert_eq!(state.unacknowledged_prompts().len(), 1);
+        assert_eq!(state.unacknowledged_prompts()[0].id(), first);
+        assert_eq!(state.expedited_through(), Some(second));
+
+        let generator = StallingGenerator {
+            events: Mutex::new(vec![AiEvent::TextDelta {
+                text: "busy after adversarial ack".to_owned(),
+            }]),
+        };
+        let mut budget = gate();
+        let tools = Tools::new(
+            &fx.registry,
+            &fx.policy,
+            &fx.fs,
+            fx.process.as_ref(),
+            &fx.evidence,
+            CanonPath::new("/ws"),
+        );
+        let mut turn = TurnLoop::new(
+            session(state, &fx.store, &fx.clock, &fx.sink, CancelToken::new()),
+            model(&generator, &mut budget),
+            tools,
+        )
+        .with_interactive_control(&mut control);
+        let active = turn.run("resume the live turn");
+        let interrupt = async {
+            ingress
+                .interrupt()
+                .await
+                .expect("the receding interrupt is still acknowledged durably");
+        };
+        let (outcome, _) = block_on(async { futures::join!(active, interrupt) });
+        assert_eq!(
+            outcome
+                .expect("the seeded durable state remains writable")
+                .exit_reason,
+            ExitReason::Cancelled(CancelCause::User)
+        );
+        let markers: Vec<_> = fx
+            .store
+            .events()
+            .into_iter()
+            .filter_map(|event| match event.kind {
+                EventKind::PromptDeliveryExpedited { through } => Some(through),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            markers,
+            vec![second],
+            "interrupt must not append through first"
+        );
+    }
+
+    #[test]
+    fn store_failure_before_ack_returns_control_error_and_leaves_queue_unchanged() {
+        let (ingress, mut control) = ego_core::turn::interactive_control();
+        let fx = Fixture::new(vec![]);
+        // The stalled provider leaves the ingress window open before the
+        // coordinator appends PromptQueued. Fail that event by kind so this
+        // test cannot accidentally target an unrelated lifecycle append.
+        fx.store.fail_prompt_queued();
+        let generator = StallingGenerator {
+            events: Mutex::new(Vec::new()),
+        };
+        let mut budget = gate();
+        let sink = CollectingSink::new();
+        let policy = PolicyEngine::new(CanonPath::new("/ws"), Mode::Default, Ruleset::default());
+        let fs = FakeFs::default();
+        let process = NoProcess;
+        let evidence = NoEvidence;
+        let cancel = CancelToken::new();
+        let mut turn = TurnLoop::new(
+            session(SessionState::default(), &fx.store, &fx.clock, &sink, cancel),
+            model(&generator, &mut budget),
+            Tools::new(
+                &[],
+                &policy,
+                &fs,
+                &process,
+                &evidence,
+                CanonPath::new("/ws"),
+            ),
+        )
+        .with_interactive_control(&mut control);
+
+        let active = turn.run("initial prompt");
+        let submit = ingress.submit("must not be acknowledged".to_owned());
+        let (outcome, result) = block_on(async { futures::join!(active, submit) });
+        let abandoned = outcome.expect_err("a failed queue append abandons the turn");
+        assert_eq!(abandoned.state.queue_status().pending_steers, 0);
+        assert_eq!(abandoned.state.queue_status().queued, 0);
+        let Err(ControlError::Store(message)) = result else {
+            panic!("failed queue append must return ControlError::Store: {result:?}");
+        };
+        assert!(
+            !message.is_empty(),
+            "the terminal receives the store failure"
+        );
+        assert!(
+            fx.store
+                .events()
+                .iter()
+                .all(|event| !matches!(event.kind, EventKind::PromptQueued { .. }))
+        );
+        drop(turn);
+    }
+
+    #[test]
+    fn pending_human_approval_interrupt_decides_false_and_never_executes() {
+        let (ingress, mut control) = ego_core::turn::interactive_control();
+        let fx = Fixture::new(vec![
+            vec![
+                AiEvent::ToolCall {
+                    call_id: "permission-interrupt".to_owned(),
+                    name: "fake_write".to_owned(),
+                    args: r#"{"path":"/ws/out.txt","contents":"must not land"}"#.to_owned(),
+                },
+                AiEvent::Stop(StopReason::ToolUse),
+            ],
+            vec![
+                AiEvent::TextDelta {
+                    text: "queued recovery".to_owned(),
+                },
+                AiEvent::Stop(StopReason::Stop),
+            ],
+        ])
+        .with_write_tool()
+        .with_pending_human();
+        fx.fs.file("/ws/out.txt", "original");
+        let mut budget = fx.gate.borrow_mut();
+        let tools = Tools::new(
+            &fx.registry,
+            &fx.policy,
+            &fx.fs,
+            fx.process.as_ref(),
+            &fx.evidence,
+            CanonPath::new("/ws"),
+        );
+        let mut turn = TurnLoop::new(
+            session(
+                SessionState::default(),
+                &fx.store,
+                &fx.clock,
+                &fx.sink,
+                CancelToken::new(),
+            ),
+            model(&fx.generator, &mut budget),
+            tools,
+        )
+        .with_interactive_control(&mut control);
+
+        let active = turn.run("write it");
+        let drive = async {
+            let accepted = ingress
+                .submit("permission follow-up".to_owned())
+                .await
+                .expect("the permission-phase prompt is durable before acknowledgement");
+            assert_eq!(accepted.pending_steers, 1);
+            let expedited = ingress
+                .interrupt()
+                .await
+                .expect("the permission-phase interruption is durable");
+            assert_eq!(expedited.pending_steers, 1);
+            assert_eq!(expedited.queued, 0);
+            assert!(expedited.interrupt_pending);
+        };
+        let (outcome, ()) = block_on(async { futures::join!(active, drive) });
+        let outcome = outcome.expect("the store accepted the cancellation ledger");
+        assert_eq!(
+            outcome.exit_reason,
+            ExitReason::Cancelled(CancelCause::User)
+        );
+        assert_eq!(
+            fx.fs.read(&CanonPath::new("/ws/out.txt")).unwrap(),
+            b"original"
+        );
+        assert!(fx.store.events().iter().any(|event| {
+            matches!(
+                event.kind,
+                EventKind::PermissionDecided {
+                    allowed: Some(false),
+                    ..
+                }
+            )
+        }));
+        let call = turn
+            .state()
+            .items
+            .values()
+            .find(|item| item.kind == ItemKind::ToolCall)
+            .expect("the pending call remains visible");
+        assert_eq!(call.ok, Some(false));
+        assert_live_interrupt_order(&fx, |kind| {
+            matches!(
+                kind,
+                EventKind::PermissionDecided {
+                    allowed: Some(false),
+                    ..
+                } | EventKind::ToolCallCompleted { ok: false, .. }
+            )
+        });
+        let state = turn.into_state();
+        drop(budget);
+        let mut recovery_budget = fx.gate.borrow_mut();
+        let recovery_tools = Tools::new(
+            &fx.registry,
+            &fx.policy,
+            &fx.fs,
+            fx.process.as_ref(),
+            &fx.evidence,
+            CanonPath::new("/ws"),
+        );
+        let mut recovery = TurnLoop::new(
+            session(state, &fx.store, &fx.clock, &fx.sink, CancelToken::new()),
+            model(&fx.generator, &mut recovery_budget),
+            recovery_tools,
+        );
+        let queued = block_on(recovery.run_queued_turn())
+            .expect("queued recovery is durable")
+            .expect("the accepted permission follow-up runs");
+        assert_ne!(queued.turn, outcome.turn);
+    }
+
+    #[test]
+    fn running_cancellable_process_records_actual_failed_cancellation_result() {
+        let (ingress, mut control) = ego_core::turn::interactive_control();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let released = Arc::new(AtomicBool::new(false));
+        let mut fx = Fixture::new(vec![
+            vec![
+                AiEvent::ToolCall {
+                    call_id: "exec-cancel".to_owned(),
+                    name: "exec".to_owned(),
+                    args: r#"{"argv":["long-running"]}"#.to_owned(),
+                },
+                AiEvent::Stop(StopReason::ToolUse),
+            ],
+            vec![
+                AiEvent::TextDelta {
+                    text: "queued process recovery".to_owned(),
+                },
+                AiEvent::Stop(StopReason::Stop),
+            ],
+        ])
+        .with_exec_tool()
+        .with_rules(&["exec(*)"], &[]);
+        fx.with_process(Arc::new(GatedCancellableProcess {
+            calls: Arc::clone(&calls),
+            released: Arc::clone(&released),
+            release_seen: Arc::new(AtomicBool::new(false)),
+        }));
+
+        let mut budget = fx.gate.borrow_mut();
+        let tools = Tools::new(
+            &fx.registry,
+            &fx.policy,
+            &fx.fs,
+            fx.process.as_ref(),
+            &fx.evidence,
+            CanonPath::new("/ws"),
+        );
+        let mut turn = TurnLoop::new(
+            session(
+                SessionState::default(),
+                &fx.store,
+                &fx.clock,
+                &fx.sink,
+                CancelToken::new(),
+            ),
+            model(&fx.generator, &mut budget),
+            tools,
+        )
+        .with_interactive_control(&mut control);
+        let active = turn.run("run it");
+        let drive = async {
+            let accepted = ingress
+                .submit("process follow-up".to_owned())
+                .await
+                .expect("process-phase acceptance is durable before acknowledgement");
+            assert_eq!(accepted.pending_steers, 1);
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                1,
+                "the steer was admitted while the process was running"
+            );
+            let expedited = ingress
+                .interrupt()
+                .await
+                .expect("process-phase interruption is durable");
+            assert_eq!(expedited.pending_steers, 1);
+            assert_eq!(expedited.queued, 0);
+            assert!(expedited.interrupt_pending);
+            released.store(true, Ordering::SeqCst);
+        };
+        let (outcome, ()) = block_on(async { futures::join!(active, drive) });
+        let outcome = outcome.expect("the store accepted the process cancellation ledger");
+        assert_eq!(
+            outcome.exit_reason,
+            ExitReason::Cancelled(CancelCause::User)
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let call = turn
+            .state()
+            .items
+            .values()
+            .find(|item| item.kind == ItemKind::ToolCall)
+            .expect("the process call remains visible");
+        assert_eq!(call.ok, Some(false));
+        assert!(tool_result_text(call).contains("process was cancelled"));
+        assert_live_interrupt_order(&fx, |kind| {
+            matches!(kind, EventKind::ToolCallCompleted { ok: false, .. })
+        });
+        let state = turn.into_state();
+        drop(budget);
+        let mut recovery_budget = fx.gate.borrow_mut();
+        let recovery_tools = Tools::new(
+            &fx.registry,
+            &fx.policy,
+            &fx.fs,
+            fx.process.as_ref(),
+            &fx.evidence,
+            CanonPath::new("/ws"),
+        );
+        let mut recovery = TurnLoop::new(
+            session(state, &fx.store, &fx.clock, &fx.sink, CancelToken::new()),
+            model(&fx.generator, &mut recovery_budget),
+            recovery_tools,
+        );
+        let recovered = block_on(recovery.run_queued_turn())
+            .expect("the process follow-up remains replayable")
+            .expect("the process follow-up runs on a fresh turn");
+        assert_ne!(recovered.turn, outcome.turn);
+    }
+
+    #[test]
+    fn non_cancellable_builtin_waits_for_release_then_records_actual_success() {
+        let (ingress, mut control) = ego_core::turn::interactive_control();
+        let released = Arc::new(AtomicBool::new(false));
+        let mut fx = Fixture::new(vec![
+            vec![
+                AiEvent::ToolCall {
+                    call_id: "builtin-read".to_owned(),
+                    name: "builtin_read".to_owned(),
+                    args: r#"{"path":"/ws/note.txt"}"#.to_owned(),
+                },
+                AiEvent::Stop(StopReason::ToolUse),
+            ],
+            vec![
+                AiEvent::TextDelta {
+                    text: "queued builtin recovery".to_owned(),
+                },
+                AiEvent::Stop(StopReason::Stop),
+            ],
+        ])
+        .with_rules(&["read(**)"], &[]);
+        let release_seen = fx.with_gated_read_tool(Arc::clone(&released));
+        fx.fs.file("/ws/note.txt", "builtin succeeded");
+        let mut budget = fx.gate.borrow_mut();
+        let tools = Tools::new(
+            &fx.registry,
+            &fx.policy,
+            &fx.fs,
+            fx.process.as_ref(),
+            &fx.evidence,
+            CanonPath::new("/ws"),
+        );
+        let mut turn = TurnLoop::new(
+            session(
+                SessionState::default(),
+                &fx.store,
+                &fx.clock,
+                &fx.sink,
+                CancelToken::new(),
+            ),
+            model(&fx.generator, &mut budget),
+            tools,
+        )
+        .with_interactive_control(&mut control);
+        let active = turn.run("read it");
+        let drive = async {
+            let accepted = ingress
+                .submit("builtin follow-up".to_owned())
+                .await
+                .expect("builtin-phase acceptance is durable before acknowledgement");
+            assert_eq!(accepted.pending_steers, 1);
+            let expedited = ingress
+                .interrupt()
+                .await
+                .expect("builtin-phase interruption is durable");
+            assert_eq!(expedited.pending_steers, 1);
+            assert_eq!(expedited.queued, 0);
+            assert!(expedited.interrupt_pending);
+            assert!(
+                !fx.store
+                    .events()
+                    .iter()
+                    .any(|event| { matches!(event.kind, EventKind::ToolCallCompleted { .. }) }),
+                "the active builtin remains incomplete until its owner releases it"
+            );
+            assert!(
+                !release_seen.load(Ordering::SeqCst),
+                "the non-cancellable effect remains active until its owner releases it"
+            );
+            released.store(true, Ordering::SeqCst);
+        };
+        let (outcome, ()) = block_on(async { futures::join!(active, drive) });
+        let outcome = outcome.expect("the released builtin completes");
+        assert_eq!(
+            outcome.exit_reason,
+            ExitReason::Cancelled(CancelCause::User)
+        );
+        let call = turn
+            .state()
+            .items
+            .values()
+            .find(|item| item.kind == ItemKind::ToolCall)
+            .expect("the builtin call remains visible");
+        assert_eq!(call.ok, Some(true));
+        assert!(tool_result_text(call).contains("builtin succeeded"));
+        assert_live_interrupt_order(&fx, |kind| {
+            matches!(kind, EventKind::ToolCallCompleted { ok: true, .. })
+        });
+        let state = turn.into_state();
+        drop(budget);
+        let mut recovery_budget = fx.gate.borrow_mut();
+        let recovery_tools = Tools::new(
+            &fx.registry,
+            &fx.policy,
+            &fx.fs,
+            fx.process.as_ref(),
+            &fx.evidence,
+            CanonPath::new("/ws"),
+        );
+        let mut recovery = TurnLoop::new(
+            session(state, &fx.store, &fx.clock, &fx.sink, CancelToken::new()),
+            model(&fx.generator, &mut recovery_budget),
+            recovery_tools,
+        );
+        let recovered = block_on(recovery.run_queued_turn())
+            .expect("the builtin follow-up remains replayable")
+            .expect("the builtin follow-up runs on a fresh turn");
+        assert_ne!(recovered.turn, outcome.turn);
+    }
+
+    #[test]
+    fn three_siblings_keep_current_result_and_close_unstarted_calls_explicitly() {
+        let (ingress, mut control) = ego_core::turn::interactive_control();
+        let cancel = CancelToken::new();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let released = Arc::new(AtomicBool::new(false));
+        let mut fx = Fixture::new(vec![
+            vec![
+                AiEvent::ToolCall {
+                    call_id: "sibling-1".to_owned(),
+                    name: "cancel_after_read".to_owned(),
+                    args: r#"{"path":"/ws/one.txt"}"#.to_owned(),
+                },
+                AiEvent::ToolCall {
+                    call_id: "sibling-2".to_owned(),
+                    name: "cancel_after_read".to_owned(),
+                    args: r#"{"path":"/ws/two.txt"}"#.to_owned(),
+                },
+                AiEvent::ToolCall {
+                    call_id: "sibling-3".to_owned(),
+                    name: "cancel_after_read".to_owned(),
+                    args: r#"{"path":"/ws/three.txt"}"#.to_owned(),
+                },
+                AiEvent::Stop(StopReason::ToolUse),
+            ],
+            vec![
+                AiEvent::TextDelta {
+                    text: "queued sibling recovery".to_owned(),
+                },
+                AiEvent::Stop(StopReason::Stop),
+            ],
+        ])
+        .with_rules(&["read(**)"], &[]);
+        fx.with_cancelling_read_tool(Arc::clone(&calls), Arc::clone(&released));
+        fx.fs.file("/ws/one.txt", "one");
+        fx.fs.file("/ws/two.txt", "two");
+        fx.fs.file("/ws/three.txt", "three");
+        let mut turn_config = config();
+        turn_config.parallel_tool_calls = true;
+        let mut budget = fx.gate.borrow_mut();
+        let tools = Tools::new(
+            &fx.registry,
+            &fx.policy,
+            &fx.fs,
+            fx.process.as_ref(),
+            &fx.evidence,
+            CanonPath::new("/ws"),
+        );
+        let mut turn = TurnLoop::new(
+            session(
+                SessionState::default(),
+                &fx.store,
+                &fx.clock,
+                &fx.sink,
+                cancel,
+            ),
+            model_with(
+                &fx.generator,
+                &mut budget,
+                metering(),
+                Some(rates()),
+                None,
+                turn_config,
+            ),
+            tools,
+        )
+        .with_interactive_control(&mut control);
+        let active = turn.run("run siblings");
+        let drive = async {
+            let accepted = ingress
+                .submit("sibling follow-up".to_owned())
+                .await
+                .expect("sibling-batch acceptance is durable before acknowledgement");
+            assert_eq!(accepted.pending_steers, 1);
+            let expedited = ingress
+                .interrupt()
+                .await
+                .expect("sibling-batch interruption is durable");
+            assert_eq!(expedited.pending_steers, 1);
+            assert_eq!(expedited.queued, 0);
+            assert!(expedited.interrupt_pending);
+            released.store(true, Ordering::SeqCst);
+        };
+        let (outcome, ()) = block_on(async { futures::join!(active, drive) });
+        let outcome = outcome.expect("the store accepted sibling closure");
+        assert_eq!(
+            outcome.exit_reason,
+            ExitReason::Cancelled(CancelCause::User)
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let mut calls: Vec<_> = turn
+            .state()
+            .items
+            .values()
+            .filter(|item| item.kind == ItemKind::ToolCall)
+            .collect();
+        calls.sort_by_key(|item| item.call_id.clone());
+        assert_eq!(calls.len(), 3);
+        assert_eq!(calls[0].ok, Some(true));
+        assert_eq!(calls[1].ok, Some(false));
+        assert_eq!(calls[2].ok, Some(false));
+        assert!(tool_result_text(calls[1]).contains("interrupted"));
+        assert!(tool_result_text(calls[2]).contains("interrupted"));
+        assert_live_interrupt_order(&fx, |kind| {
+            matches!(kind, EventKind::ToolCallCompleted { .. })
+        });
+        let state = turn.into_state();
+        drop(budget);
+        let mut recovery_budget = fx.gate.borrow_mut();
+        let recovery_tools = Tools::new(
+            &fx.registry,
+            &fx.policy,
+            &fx.fs,
+            fx.process.as_ref(),
+            &fx.evidence,
+            CanonPath::new("/ws"),
+        );
+        let mut recovery = TurnLoop::new(
+            session(state, &fx.store, &fx.clock, &fx.sink, CancelToken::new()),
+            model(&fx.generator, &mut recovery_budget),
+            recovery_tools,
+        );
+        let recovered = block_on(recovery.run_queued_turn())
+            .expect("the sibling follow-up remains replayable")
+            .expect("the sibling follow-up runs on a fresh turn");
+        assert_ne!(recovered.turn, outcome.turn);
     }
 
     /// A call nobody in this run can answer ends the run, and says so in the
@@ -1033,6 +2769,32 @@ mod turn {
                 )
             })
             .collect()
+    }
+
+    fn assert_live_interrupt_order(fx: &Fixture, terminal: impl Fn(&EventKind) -> bool) {
+        let events = fx.store.events();
+        let queued = events
+            .iter()
+            .position(|event| matches!(event.kind, EventKind::PromptQueued { .. }))
+            .expect("live submit is durable");
+        let expedited = events
+            .iter()
+            .position(|event| matches!(event.kind, EventKind::PromptDeliveryExpedited { .. }))
+            .expect("live interrupt is durable");
+        let truthful = events
+            .iter()
+            .position(|event| terminal(&event.kind))
+            .expect("the interrupted phase has a truthful terminal event");
+        let completed = events
+            .iter()
+            .position(|event| matches!(event.kind, EventKind::TurnCompleted { .. }))
+            .expect("the interrupted turn closes durably");
+        assert!(queued < expedited, "acceptance precedes expedition");
+        assert!(expedited < truthful, "expedition precedes truthful closure");
+        assert!(
+            truthful < completed,
+            "truthful closure precedes turn closure"
+        );
     }
 
     fn reading(path: &str) -> Vec<Vec<AiEvent>> {
@@ -1407,7 +3169,7 @@ mod turn {
             &fx.registry,
             &fx.policy,
             &fx.fs,
-            &fx.process,
+            fx.process.as_ref(),
             &fx.evidence,
             CanonPath::new("/ws"),
         );
@@ -1517,7 +3279,7 @@ mod turn {
             &fx.registry,
             &fx.policy,
             &fx.fs,
-            &fx.process,
+            fx.process.as_ref(),
             &fx.evidence,
             CanonPath::new("/ws"),
         );
@@ -1541,8 +3303,8 @@ mod turn {
         );
         let kinds = fx.store.kinds();
         assert!(
-            !kinds.contains(&"tool_call_completed".to_string()),
-            "a cancelled turn must not run the call it had queued: {kinds:?}"
+            kinds.contains(&"tool_call_completed".to_string()),
+            "a cancelled turn must close the queued call explicitly: {kinds:?}"
         );
         assert!(
             kinds.contains(&"attempt_settled".to_string()),
@@ -1555,8 +3317,22 @@ mod turn {
             .find(|item| item.kind == ItemKind::ToolCall)
             .expect("the call the model asked for was still logged");
         assert_eq!(
-            call.ok, None,
-            "the call was neither run nor answered — it was abandoned, and the log says so"
+            call.ok,
+            Some(false),
+            "the call was not run and was explicitly answered as interrupted"
+        );
+        assert!(
+            tool_result_text(call).contains("interrupted"),
+            "the failed sibling result must say it was interrupted before execution"
+        );
+        assert_eq!(
+            fx.store
+                .events()
+                .iter()
+                .filter(|event| matches!(event.kind, EventKind::ToolCallCompleted { .. }))
+                .count(),
+            1,
+            "the queued call receives exactly one explicit completion"
         );
     }
 
@@ -1569,7 +3345,7 @@ mod turn {
             &fx.registry,
             &fx.policy,
             &fx.fs,
-            &fx.process,
+            fx.process.as_ref(),
             &fx.evidence,
             CanonPath::new("/ws"),
         );
@@ -1974,7 +3750,7 @@ mod turn {
             &fx.registry,
             &fx.policy,
             &fx.fs,
-            &fx.process,
+            fx.process.as_ref(),
             &fx.evidence,
             CanonPath::new("/ws"),
         );
@@ -2024,7 +3800,7 @@ mod turn {
             &fx.registry,
             &fx.policy,
             &fx.fs,
-            &fx.process,
+            fx.process.as_ref(),
             &fx.evidence,
             CanonPath::new("/ws"),
         );
@@ -2075,7 +3851,7 @@ mod turn {
             &fx.registry,
             &fx.policy,
             &fx.fs,
-            &fx.process,
+            fx.process.as_ref(),
             &fx.evidence,
             CanonPath::new("/ws"),
         );
@@ -2127,7 +3903,7 @@ mod turn {
             &fx.registry,
             &fx.policy,
             &fx.fs,
-            &fx.process,
+            fx.process.as_ref(),
             &fx.evidence,
             CanonPath::new("/ws"),
         );
@@ -2166,7 +3942,7 @@ mod turn {
             &fx.registry,
             &fx.policy,
             &fx.fs,
-            &fx.process,
+            fx.process.as_ref(),
             &fx.evidence,
             CanonPath::new("/ws"),
         );
@@ -2238,7 +4014,7 @@ mod turn {
             &fx.registry,
             &fx.policy,
             &fx.fs,
-            &fx.process,
+            fx.process.as_ref(),
             &fx.evidence,
             CanonPath::new("/ws"),
         );
@@ -2316,7 +4092,7 @@ mod turn {
             &fx.registry,
             &fx.policy,
             &fx.fs,
-            &fx.process,
+            fx.process.as_ref(),
             &fx.evidence,
             CanonPath::new("/ws"),
         );

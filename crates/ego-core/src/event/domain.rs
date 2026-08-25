@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use super::hook::{
     HookCatalogueEvidence, HookId, HookInvocationId, HookLifecycle, HookResult, HookSubject,
 };
-use super::id::{EventId, ItemId, Producer, Seq, SessionId, TurnId};
+use super::id::{EventId, ItemId, Producer, QueuedPromptId, Seq, SessionId, TurnId};
 use super::time::Timestamp;
 use crate::cost::CostDelta;
 use crate::generator::attempt::{AttemptRef, Outcome};
@@ -139,11 +139,12 @@ pub enum OccupancyProvenance {
 /// The exhaustive set of internal reducer inputs, per ARCH §1:
 ///
 /// ```text
-/// UserPrompt | AssistantDelta | AssistantMessage | ReasoningDelta |
-/// ReasoningState | ToolCallStarted | ToolCallDelta | ToolCallCompleted |
-/// PermissionRequested | PermissionAmended | PermissionDecided |
-/// GenerationStarted | ExecutionObserved | AttemptSettled | UsageUpdated |
-/// UsageCorrected | ContextWindowUpdated | TurnCompleted | Compacted | Forked |
+/// PromptQueued | PromptDeliveryExpedited | UserPrompt | AssistantDelta |
+/// AssistantMessage | ReasoningDelta | ReasoningState | ToolCallStarted |
+/// ToolCallDelta | ToolCallCompleted | PermissionRequested |
+/// PermissionAmended | PermissionDecided | GenerationStarted |
+/// ExecutionObserved | AttemptSettled | UsageUpdated | UsageCorrected |
+/// ContextWindowUpdated | TurnCompleted | Compacted | Forked |
 /// HookCatalogueAdmitted | HookInvocationStarted | HookInvocationSettled |
 /// SubagentSpawned | SubagentReturned | Error
 /// ```
@@ -167,8 +168,20 @@ pub enum OccupancyProvenance {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum EventKind {
+    /// Input accepted for later delivery. Its envelope turn determines on
+    /// replay whether it was accepted as a busy-turn steer or at an ordinary
+    /// queue boundary.
+    PromptQueued { id: QueuedPromptId, text: String },
+    /// A durable request to expedite the FIFO prefix ending at `through`.
+    PromptDeliveryExpedited { through: QueuedPromptId },
     /// The user submitted a prompt.
-    UserPrompt { text: String },
+    UserPrompt {
+        text: String,
+        /// The queue acceptance this conversation item consumes. Absent on
+        /// ordinary direct prompts and on records written before queues.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        queued_prompt: Option<QueuedPromptId>,
+    },
     /// A streamed increment of the assistant's message.
     AssistantDelta { text: String },
     /// The assistant's final, assembled message.
@@ -378,6 +391,8 @@ impl EventKind {
     /// large) payload.
     pub fn name(&self) -> &'static str {
         match self {
+            EventKind::PromptQueued { .. } => "prompt_queued",
+            EventKind::PromptDeliveryExpedited { .. } => "prompt_delivery_expedited",
             EventKind::UserPrompt { .. } => "user_prompt",
             EventKind::AssistantDelta { .. } => "assistant_delta",
             EventKind::AssistantMessage { .. } => "assistant_message",

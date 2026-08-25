@@ -167,6 +167,7 @@ mod acp_golden {
                 Some(item_user_1),
                 EventKind::UserPrompt {
                     text: "list the files".to_string(),
+                    queued_prompt: None,
                 },
             ),
             ev(
@@ -335,6 +336,7 @@ mod acp_golden {
                 Some(item_user_2),
                 EventKind::UserPrompt {
                     text: "thanks".to_string(),
+                    queued_prompt: None,
                 },
             ),
             ev(
@@ -376,6 +378,7 @@ mod acp_golden {
         vec![
             EventKind::UserPrompt {
                 text: String::new(),
+                queued_prompt: None,
             },
             EventKind::AssistantDelta {
                 text: String::new(),
@@ -943,6 +946,7 @@ mod acp_golden {
         let kinds = [
             EventKind::UserPrompt {
                 text: "orphaned".to_string(),
+                queued_prompt: None,
             },
             EventKind::AssistantDelta {
                 text: "orphaned".to_string(),
@@ -978,6 +982,7 @@ mod acp_golden {
         let kinds = [
             EventKind::UserPrompt {
                 text: "orphaned".to_string(),
+                queued_prompt: None,
             },
             EventKind::AssistantDelta {
                 text: "orphaned".to_string(),

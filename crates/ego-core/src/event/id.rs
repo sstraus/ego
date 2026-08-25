@@ -93,6 +93,27 @@ impl Default for ItemId {
     }
 }
 
+/// Stable identity for one durably accepted prompt (UUIDv7).
+///
+/// Queue order never comes from this UUID. [`Seq`] is the authoritative
+/// order; the identity correlates acceptance with its eventual
+/// `UserPrompt` consumption across replay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct QueuedPromptId(Uuid);
+
+impl QueuedPromptId {
+    /// Mint a new queue correlation identity.
+    pub fn new() -> Self {
+        Self(Uuid::now_v7())
+    }
+}
+
+impl Default for QueuedPromptId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Stable, sortable event identity (UUIDv7).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct EventId(Uuid);

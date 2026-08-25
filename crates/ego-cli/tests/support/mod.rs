@@ -24,7 +24,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 /// What the stub answers a `/v1/chat/completions` request with.
@@ -43,8 +43,43 @@ pub enum Reply {
         tail: String,
         pause: Duration,
     },
+    /// An SSE body whose tail is held until the test observes the live
+    /// surface event that must precede it.
+    GatedPaced {
+        head: String,
+        tail: String,
+        gate: Arc<ReleaseGate>,
+    },
     /// An HTTP failure, for the provider-error paths.
     Status(u16),
+}
+
+/// A deterministic hand-off between the PTY observer and the fake provider.
+#[derive(Debug)]
+pub struct ReleaseGate {
+    released: Mutex<bool>,
+    wake: Condvar,
+}
+
+impl ReleaseGate {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            released: Mutex::new(false),
+            wake: Condvar::new(),
+        })
+    }
+
+    pub fn release(&self) {
+        *self.released.lock().expect("release gate lock") = true;
+        self.wake.notify_all();
+    }
+
+    fn wait(&self) {
+        let mut released = self.released.lock().expect("release gate lock");
+        while !*released {
+            released = self.wake.wait(released).expect("release gate wait");
+        }
+    }
 }
 
 /// What the fake daemon knows.
@@ -127,6 +162,37 @@ pub fn paced_tool_call(id: &str, name: &str, arguments: &str, pause: Duration) -
         tail: tool_call(id, name, arguments),
         pause,
     }
+}
+
+/// A line-framed tool call whose provider tail waits for an explicit test
+/// release. The head remains observable, so PTY tests can synchronize on the
+/// real UI event instead of racing a wall-clock pause.
+pub fn gated_paced_tool_call_line(
+    id: &str,
+    name: &str,
+    arguments: &str,
+) -> (Reply, Arc<ReleaseGate>) {
+    let Reply::Paced { mut head, tail, .. } = paced_tool_call(id, name, arguments, Duration::ZERO)
+    else {
+        unreachable!("paced_tool_call always returns a paced reply");
+    };
+    let encoded =
+        serde_json::to_string("STREAMED-BEFORE-TOOL").expect("the marker is serialisable");
+    let framed = serde_json::to_string("STREAMED-BEFORE-TOOL\n")
+        .expect("the line-framed marker is serialisable");
+    head = head.replace(
+        &format!("\"content\":{encoded}"),
+        &format!("\"content\":{framed}"),
+    );
+    let gate = ReleaseGate::new();
+    (
+        Reply::GatedPaced {
+            head,
+            tail,
+            gate: Arc::clone(&gate),
+        },
+        gate,
+    )
 }
 
 /// An SSE transcript asking for one tool call and stopping.
@@ -315,6 +381,16 @@ fn sse(stream: &mut TcpStream, reply: Reply) -> std::io::Result<()> {
             )?;
             stream.flush()?;
             std::thread::sleep(pause);
+            write!(stream, "{tail}")?;
+            stream.flush()
+        }
+        Reply::GatedPaced { head, tail, gate } => {
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n{head}"
+            )?;
+            stream.flush()?;
+            gate.wait();
             write!(stream, "{tail}")?;
             stream.flush()
         }

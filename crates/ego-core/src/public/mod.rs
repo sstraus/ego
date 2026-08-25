@@ -409,7 +409,7 @@ pub fn project_public(ev: &DomainEvent) -> Option<PublicEvent> {
     let item = ev.env.item;
 
     match &ev.kind {
-        EventKind::UserPrompt { text } => Some(PublicEvent::ItemCompleted {
+        EventKind::UserPrompt { text, .. } => Some(PublicEvent::ItemCompleted {
             turn,
             item: item?,
             kind: ItemKind::UserMessage,
@@ -555,6 +555,7 @@ pub fn project_public(ev: &DomainEvent) -> Option<PublicEvent> {
         // the continuation token, and `CLI.md` §4.2's rule is that a new
         // internal event never becomes public automatically.
         EventKind::ReasoningState { .. } => None,
+        EventKind::PromptQueued { .. } | EventKind::PromptDeliveryExpedited { .. } => None,
         EventKind::Compacted { .. } => None,
         EventKind::Forked { .. } => None,
         EventKind::HookCatalogueAdmitted { .. }

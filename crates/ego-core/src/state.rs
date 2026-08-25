@@ -15,7 +15,7 @@ use crate::event::hook::{
     HookSubject,
 };
 use crate::event::id::{
-    AttemptId, EventId, GenerationId, ItemId, Producer, Seq, SessionId, TurnId,
+    AttemptId, EventId, GenerationId, ItemId, Producer, QueuedPromptId, Seq, SessionId, TurnId,
 };
 use crate::generator::attempt::{AttemptRef, DeliveryCertainty, Outcome, UsageReport};
 use crate::generator::types::ReasoningState;
@@ -556,6 +556,45 @@ pub struct Refusal {
     pub reason: RefusalReason,
 }
 
+/// One prompt accepted into the durable queue ledger.
+///
+/// Its class is deliberately not stored. The event's turn supplies the
+/// durable context from which [`SessionState::pending_steers`] and
+/// [`SessionState::queued_prompts`] project it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueuedPrompt {
+    id: QueuedPromptId,
+    text: String,
+    turn: TurnId,
+    seq: Seq,
+}
+
+/// Durable queue facts projected from the session event log.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct QueueStatus {
+    pub pending_steers: usize,
+    pub queued: usize,
+    pub interrupt_pending: bool,
+}
+
+impl QueuedPrompt {
+    pub fn id(&self) -> QueuedPromptId {
+        self.id
+    }
+
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    pub fn turn(&self) -> TurnId {
+        self.turn
+    }
+
+    pub fn seq(&self) -> Seq {
+        self.seq
+    }
+}
+
 /// The reduction of a `DomainEvent` log: the harness's entire semantic
 /// state. Built exclusively by `apply`, which is pure and sync (ARCH §1, §4).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -643,6 +682,16 @@ pub struct SessionState {
     pub compactions: Vec<String>,
     /// Fork records, in application order.
     pub forks: Vec<ForkRecord>,
+    /// Every unique queue acceptance, retained in authoritative event order.
+    #[serde(default)]
+    queued_prompt_ledger: Vec<QueuedPrompt>,
+    /// Queue ids consumed by their first correlated `UserPrompt`, in
+    /// consumption order. Duplicate correlations do not add another entry.
+    #[serde(default)]
+    consumed_prompts: Vec<QueuedPromptId>,
+    /// Greatest accepted FIFO tail through which delivery was expedited.
+    #[serde(default)]
+    expedited_prompt_through: Option<QueuedPromptId>,
 }
 
 /// A session that has observed nothing.
@@ -680,11 +729,147 @@ impl Default for SessionState {
             errors: Vec::default(),
             compactions: Vec::default(),
             forks: Vec::default(),
+            queued_prompt_ledger: Vec::default(),
+            consumed_prompts: Vec::default(),
+            expedited_prompt_through: None,
         }
     }
 }
 
 impl SessionState {
+    /// The terminal-facing queue projection. The reducer remains its sole
+    /// owner; interactive control carries intents, not a second copy.
+    pub fn queue_status(&self) -> QueueStatus {
+        QueueStatus {
+            pending_steers: self.pending_steers().len(),
+            queued: self.queued_prompts().len(),
+            interrupt_pending: self.interrupt_pending(),
+        }
+    }
+
+    /// Accepted prompts without a correlated consumption, in FIFO order.
+    pub fn unacknowledged_prompts(&self) -> Vec<&QueuedPrompt> {
+        self.queued_prompt_ledger
+            .iter()
+            .filter(|prompt| !self.consumed_prompts.contains(&prompt.id))
+            .collect()
+    }
+
+    /// Unacknowledged input accepted while its regular turn was active.
+    pub fn pending_steers(&self) -> Vec<&QueuedPrompt> {
+        self.unacknowledged_prompts()
+            .into_iter()
+            .filter(|prompt| self.is_pending_steer(prompt))
+            .collect()
+    }
+
+    /// Unacknowledged input accepted outside a steerable regular turn.
+    pub fn queued_prompts(&self) -> Vec<&QueuedPrompt> {
+        self.unacknowledged_prompts()
+            .into_iter()
+            .filter(|prompt| !self.is_pending_steer(prompt))
+            .collect()
+    }
+
+    /// The greatest durable expedited FIFO tail accepted by this session.
+    pub fn expedited_through(&self) -> Option<QueuedPromptId> {
+        self.expedited_prompt_through
+    }
+
+    /// Whether an expedited prefix still contains unconsumed input.
+    pub fn interrupt_pending(&self) -> bool {
+        let Some(through) = self.expedited_prompt_through else {
+            return false;
+        };
+        let Some(last) = self
+            .queued_prompt_ledger
+            .iter()
+            .position(|prompt| prompt.id == through)
+        else {
+            return false;
+        };
+        self.queued_prompt_ledger[..=last]
+            .iter()
+            .any(|prompt| !self.consumed_prompts.contains(&prompt.id))
+    }
+
+    /// Whether `id` has one accepted consumption correlation.
+    pub fn consumed_prompt_count(&self, id: QueuedPromptId) -> usize {
+        usize::from(self.consumed_prompts.contains(&id))
+    }
+
+    /// Queue ids in the order their first consumption was observed.
+    pub fn consumed_prompt_ids(&self) -> Vec<QueuedPromptId> {
+        self.consumed_prompts.clone()
+    }
+
+    fn is_pending_steer(&self, prompt: &QueuedPrompt) -> bool {
+        let has_user_prompt = self
+            .items
+            .values()
+            .any(|item| item.turn == prompt.turn && item.kind == ItemKind::UserPrompt);
+        let completed = self
+            .turns
+            .get(&prompt.turn)
+            .is_some_and(|turn| turn.completed);
+        has_user_prompt && !completed
+    }
+
+    fn accept_prompt(&mut self, ev: &DomainEvent, id: QueuedPromptId, text: &str) {
+        if self
+            .queued_prompt_ledger
+            .iter()
+            .any(|prompt| prompt.id == id)
+        {
+            return;
+        }
+        self.queued_prompt_ledger.push(QueuedPrompt {
+            id,
+            text: text.to_string(),
+            turn: ev.env.turn,
+            seq: ev.env.seq,
+        });
+    }
+
+    pub(crate) fn can_expedite_prompt(&self, through: QueuedPromptId) -> bool {
+        let Some(candidate) = self
+            .queued_prompt_ledger
+            .iter()
+            .position(|prompt| prompt.id == through)
+        else {
+            return false;
+        };
+        let latest_unacknowledged = self
+            .queued_prompt_ledger
+            .iter()
+            .rposition(|prompt| !self.consumed_prompts.contains(&prompt.id));
+        if latest_unacknowledged != Some(candidate) {
+            return false;
+        }
+        let current = self.expedited_prompt_through.and_then(|id| {
+            self.queued_prompt_ledger
+                .iter()
+                .position(|prompt| prompt.id == id)
+        });
+        current.is_none_or(|current| candidate > current)
+    }
+
+    fn expedite_prompt(&mut self, through: QueuedPromptId) {
+        if self.can_expedite_prompt(through) {
+            self.expedited_prompt_through = Some(through);
+        }
+    }
+
+    fn consume_prompt(&mut self, id: QueuedPromptId) {
+        let accepted = self
+            .queued_prompt_ledger
+            .iter()
+            .any(|prompt| prompt.id == id);
+        if accepted && !self.consumed_prompts.contains(&id) {
+            self.consumed_prompts.push(id);
+        }
+    }
+
     pub fn hook_catalogue(&self) -> &HookCatalogueEvidence {
         &self.hook_catalogue
     }
@@ -725,7 +910,15 @@ impl SessionState {
         self.known_events.insert(ev.env.id);
 
         match &ev.kind {
-            EventKind::UserPrompt { text } => {
+            EventKind::PromptQueued { id, text } => self.accept_prompt(ev, *id, text),
+            EventKind::PromptDeliveryExpedited { through } => self.expedite_prompt(*through),
+            EventKind::UserPrompt {
+                text,
+                queued_prompt,
+            } => {
+                if let Some(id) = queued_prompt {
+                    self.consume_prompt(*id);
+                }
                 if let Some(item) = self.item_mut(ev, ItemKind::UserPrompt) {
                     item.text = text.clone();
                 }
