@@ -22,17 +22,16 @@ State is a **reduction over an append-only event log** (pi's reducer,
 PromptQueued | PromptDeliveryExpedited | UserPrompt | AssistantDelta |
 AssistantMessage | ReasoningDelta | ReasoningState | ToolCallStarted |
 ToolCallDelta | ToolCallCompleted | PermissionRequested | PermissionAmended |
-PermissionDecided | GenerationStarted | ExecutionObserved | AttemptSettled |
-UsageUpdated | UsageCorrected | ContextWindowUpdated | TurnCompleted |
-Compacted | Forked | CompactionSeeded | HookCatalogueAdmitted |
-HookInvocationStarted | HookInvocationSettled | SubagentSpawned |
-SubagentReturned | Error
+PermissionDecided | QuestionRequested | QuestionSettled | GenerationStarted |
+ExecutionObserved | AttemptSettled | UsageUpdated | UsageCorrected |
+ContextWindowUpdated | TurnCompleted | Compacted | Forked |
+CompactionSeeded | HookCatalogueAdmitted | HookInvocationStarted |
+HookInvocationSettled | SubagentSpawned | SubagentReturned | Error
 ```
 
-Twenty-nine in the final M1 schema, and this list is exhaustive by contract.
-The current `EventKind` (`crates/ego-core/src/event/domain.rs`) implements the
-other twenty-six; regression case adds the two queue-lifecycle variants and the
-optional `queued_prompt` consumption correlation on `UserPrompt`, while story
+Thirty-one in the final M1 schema, and this list is exhaustive by contract.
+The current `EventKind` (`crates/ego-core/src/event/domain.rs`) implements
+twenty-eight. regression case adds the two question-lifecycle variants; story
 regression_case adds the clean-session compaction seed. The enum and this list are
 compared by hand at each milestone close.
 
@@ -260,7 +259,7 @@ trait SessionStore: Send + Sync {
     fn list(&self) -> Result<Vec<SessionMeta>>;
 }
 
-trait Host: Send + Sync {         // the UI seam — CLI, ACP, tests all impl this
+trait Host: Send + Sync {         // the conceptual UI boundary
     fn request_permission(&self, req: PermissionRequest)
         -> BoxFuture<'_, PermissionDecision>;   // includes Amend(command)
     fn deliver(&self, batch: &[Event]);         // coalesced, docs/03 §2.3
@@ -270,6 +269,9 @@ trait Host: Send + Sync {         // the UI seam — CLI, ACP, tests all impl th
 
 Event delivery to hosts is **batched/coalesced** in core (tuicommander's
 `batched_conversation_stream` lesson) so no host reimplements it.
+Implementations use narrow consumer-owned ports for these methods. Story
+regression_case realizes `elicit` as the typed `Elicitor` port; it does not add a
+second human-input boundary.
 
 ### 3.4 Permissions and sandbox (`ego-core` policy, `ego-tools` enforcement; resolves §4.4)
 

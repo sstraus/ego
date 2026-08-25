@@ -721,7 +721,11 @@ segments = ["model", "effort", "mode", "context", "queue", "drafts", "interrupt"
 `/statusline` offers named setup presets but writes that ordered list. An empty
 list disables the row. When width is insufficient, lower-priority segments
 disappear as units; semantic values are never truncated into ambiguity. Queue
-and draft counts, and interrupt-pending state, remain visible while active.
+and draft counts, and interrupt-pending state, remain visible while active
+whenever the terminal can represent their combined whole segments. If physical
+width cannot represent that critical set, whole segments degrade in the order
+drafts, queue, interrupt; the retained priority is interrupt, then queue, then
+drafts, and the surface emits one overflow diagnostic.
 
 ### 6.6 Prompted compaction starts a clean session
 
