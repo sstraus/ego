@@ -1,6 +1,6 @@
 .codex/**
+!.codex/hooks.json
 .mdkb/**
 .claude/**
 .wiz/**
 /target
-
