@@ -4,7 +4,7 @@ use ego_ai::catalogue::{
     CachedDiscoveryModel, CachedDiscoverySlice, DiscoveryCacheV1, FactFreshness,
     ModelAvailability, ModelCatalogueEntry, ModelCatalogueSnapshot,
     ModelCatalogueSourceStatus, ModelDiscoveryEntry, ModelDiscoveryFailure,
-    ModelDiscoveryReport, ModelFactProvenance, ModelSlug,
+    ModelDiscoveryReport, ModelDiscoverySource, ModelFactProvenance, ModelSlug,
     SuppliedAuthority,
 };
 use ego_core::generator::capabilities::{
@@ -121,6 +121,7 @@ fn provenance_freshness_and_availability_are_independent_and_unknown_facts_stay_
 #[test]
 fn discovery_report_can_be_partial_with_named_and_unnamed_failures() {
     let report = ModelDiscoveryReport::try_new(
+        ModelDiscoverySource::Discovered { provider: "ollama".into() },
         vec![],
         vec![
             ModelDiscoveryFailure::named("broken", "source_malformed", "invalid model facts"),
@@ -138,6 +139,7 @@ fn discovery_report_can_be_partial_with_named_and_unnamed_failures() {
 #[test]
 fn incomplete_discovery_with_only_named_failures_is_rejected() {
     assert!(ModelDiscoveryReport::try_new(
+        ModelDiscoverySource::Discovered { provider: "ollama".into() },
         vec![],
         vec![ModelDiscoveryFailure::named(
             "broken", "source_malformed", "invalid model facts",
@@ -174,6 +176,7 @@ fn cache_codec_is_private_v1_and_round_trips_discovery_entries_only() {
 fn complete_merge_replaces_rows_clears_failures_and_removes_absent_models() {
     let baseline = slice(&["ollama/old", "ollama/removed"], None);
     let report = ModelDiscoveryReport::try_new(
+        ModelDiscoverySource::Discovered { provider: "ollama".into() },
         vec![discovered_entry("ollama/new")], Vec::new(), true,
     ).unwrap();
     let merged = baseline.merge(report);
@@ -187,6 +190,7 @@ fn complete_merge_replaces_rows_clears_failures_and_removes_absent_models() {
 fn partial_merge_keeps_named_failed_rows_and_marks_unobserved_rows_with_source_failure() {
     let baseline = slice(&["ollama/good", "ollama/broken", "ollama/unobserved"], None);
     let report = ModelDiscoveryReport::try_new(
+        ModelDiscoverySource::Discovered { provider: "ollama".into() },
         vec![discovered_entry("ollama/good")], vec![
         ModelDiscoveryFailure::named("broken", "source_malformed", "bad facts"),
         ModelDiscoveryFailure::source("source_unreachable", "daemon unavailable"),
@@ -205,11 +209,45 @@ fn partial_merge_keeps_named_failed_rows_and_marks_unobserved_rows_with_source_f
 fn total_failure_retains_last_known_rows_and_carries_the_unnamed_failure_per_row() {
     let baseline = slice(&["ollama/gemma4:12b"], None);
     let failure = ModelDiscoveryFailure::source("source_unreachable", "connection refused");
-    let report = ModelDiscoveryReport::try_new(Vec::new(), vec![failure.clone()], false).unwrap();
+    let report = ModelDiscoveryReport::try_new(
+        ModelDiscoverySource::Discovered { provider: "ollama".into() },
+        Vec::new(), vec![failure.clone()], false,
+    ).unwrap();
     let merged = baseline.merge(report);
     assert_eq!(merged.models.len(), 1);
     assert_eq!(merged.models[0].failure.as_ref().unwrap().cause, failure.cause);
     assert_eq!(merged.source_failure.as_ref().unwrap().cause, failure.cause);
+}
+
+#[test]
+fn complete_empty_discovery_is_an_authoritative_cached_empty_slice() {
+    let mut cache = DiscoveryCacheV1::default();
+    let report = ModelDiscoveryReport::try_new(
+        ModelDiscoverySource::Discovered { provider: "ollama".into() },
+        Vec::new(), Vec::new(), true,
+    ).unwrap();
+    cache.merge_provider("ollama", report).unwrap();
+    let slice = cache.providers.get("ollama").unwrap();
+    assert!(slice.models.is_empty());
+    assert!(slice.source_failure.is_none());
+}
+
+#[test]
+fn cache_rejects_wrong_discovered_provider_and_supplied_source() {
+    let mut cache = DiscoveryCacheV1::default();
+    let wrong_provider = ModelDiscoveryReport::try_new(
+        ModelDiscoverySource::Discovered { provider: "openai".into() },
+        Vec::new(), Vec::new(), true,
+    ).unwrap();
+    assert!(cache.merge_provider("ollama", wrong_provider).is_err());
+    assert!(!cache.providers.contains_key("ollama"));
+
+    let supplied = ModelDiscoveryReport::try_new(
+        ModelDiscoverySource::Supplied,
+        Vec::new(), Vec::new(), true,
+    ).unwrap();
+    assert!(cache.merge_provider("ollama", supplied).is_err());
+    assert!(!cache.providers.contains_key("ollama"));
 }
 
 #[test]

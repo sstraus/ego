@@ -75,6 +75,35 @@ fn provider_filter_is_applied_before_transport_and_refresh_is_filter_scoped() {
 }
 
 #[test]
+fn empty_ollama_refresh_is_available_and_cache_first_reuses_empty_slice() {
+    let stub = Stub::start(Plan { installed: Vec::new(), ..Plan::default() });
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+
+    let first = Ego::at(home.path(), workspace.path(), Some(&stub))
+        .subcommand("models")
+        .args(["--provider", "ollama", "--refresh", "--json"])
+        .run();
+    assert_eq!(first.code, Some(0));
+    assert!(first.stderr.is_empty());
+    let first_json: serde_json::Value = serde_json::from_str(&first.stdout).unwrap();
+    assert!(first_json["models"].as_array().unwrap().is_empty());
+    assert_eq!(first_json["sources"].as_array().unwrap().len(), 1);
+    assert_eq!(first_json["sources"][0]["provider"], "ollama");
+    assert_eq!(first_json["sources"][0]["availability"]["status"], "available");
+
+    let second = Ego::at(home.path(), workspace.path(), Some(&stub))
+        .subcommand("models")
+        .args(["--provider", "ollama", "--json"])
+        .run();
+    assert_eq!(second.code, Some(0));
+    assert!(second.stderr.is_empty());
+    let second_json: serde_json::Value = serde_json::from_str(&second.stdout).unwrap();
+    assert!(second_json["models"].as_array().unwrap().is_empty());
+    assert_eq!(stub.requests().iter().map(|request| request.path.as_str()).collect::<Vec<_>>(), ["/api/tags"]);
+}
+
+#[test]
 fn unknown_provider_exits_two_before_any_transport() {
     for provider in ["not-admitted", "xai", "gemini"] {
         let stub = Stub::start(Plan {
