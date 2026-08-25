@@ -4697,7 +4697,7 @@ mod turn {
         };
 
         enum ResolutionStep {
-            Ready(Result<GenerationProfile, GenerationModelError>),
+            Ready(Box<Result<GenerationProfile, GenerationModelError>>),
             Pending,
         }
 
@@ -4725,10 +4725,10 @@ mod turn {
                 &self,
                 _request: &GenRequest,
             ) -> Result<(), RequestExpressibilityError> {
-                self.expressibility
-                    .as_ref()
-                    .map(|()| ())
-                    .map_err(|message| RequestExpressibilityError::new(message.clone()))
+                match &self.expressibility {
+                    Ok(()) => Ok(()),
+                    Err(message) => Err(RequestExpressibilityError::new(message.clone())),
+                }
             }
 
             fn generate(&self, request: GenRequest, attempt: GenerationAttempt) -> AttemptStream {
@@ -4747,7 +4747,12 @@ mod turn {
                 profiles: impl IntoIterator<Item = Result<GenerationProfile, GenerationModelError>>,
             ) -> Self {
                 Self {
-                    steps: Mutex::new(profiles.into_iter().map(ResolutionStep::Ready).collect()),
+                    steps: Mutex::new(
+                        profiles
+                            .into_iter()
+                            .map(|profile| ResolutionStep::Ready(Box::new(profile)))
+                            .collect(),
+                    ),
                     resolved: Mutex::new(Vec::new()),
                     ready: None,
                     trace: None,
@@ -4794,32 +4799,38 @@ mod turn {
                 slug,
                 script,
                 trace,
-                output_ceiling,
-                context_ceiling,
-                thinking,
-                parallel_tool_calls,
+                ProfileSettings {
+                    output_ceiling,
+                    context_ceiling,
+                    thinking,
+                    parallel_tool_calls,
+                },
                 Ok(()),
             )
+        }
+
+        struct ProfileSettings {
+            output_ceiling: Option<u64>,
+            context_ceiling: Option<u64>,
+            thinking: ThinkingLevel,
+            parallel_tool_calls: bool,
         }
 
         fn profile_with_expressibility(
             slug: &str,
             script: Vec<AiEvent>,
             trace: &GenerationTrace,
-            output_ceiling: Option<u64>,
-            context_ceiling: Option<u64>,
-            thinking: ThinkingLevel,
-            parallel_tool_calls: bool,
+            settings: ProfileSettings,
             expressibility: Result<(), String>,
         ) -> GenerationProfile {
             let mut capabilities = caps();
-            capabilities.max_context_tokens = context_ceiling;
-            capabilities.max_output_tokens = output_ceiling;
-            capabilities.supports_parallel_tool_calls = parallel_tool_calls;
+            capabilities.max_context_tokens = settings.context_ceiling;
+            capabilities.max_output_tokens = settings.output_ceiling;
+            capabilities.supports_parallel_tool_calls = settings.parallel_tool_calls;
             let profile = GenerationProfile {
                 identity: ego_core::config::ModelRef(slug.to_string()),
                 request_model: slug.split_once('/').unwrap().1.to_string(),
-                thinking,
+                thinking: settings.thinking,
                 generator: Arc::new(RecordingGenerator {
                     inner: FakeGenerator::new(vec![script]),
                     trace: trace.clone(),
@@ -4829,7 +4840,10 @@ mod turn {
                 metering: metering(),
                 rates: Some(rates()),
             };
-            assert_eq!(profile.output_ceiling(), output_ceiling.or(context_ceiling));
+            assert_eq!(
+                profile.output_ceiling(),
+                settings.output_ceiling.or(settings.context_ceiling)
+            );
             profile
         }
 
@@ -4844,14 +4858,16 @@ mod turn {
                 slug,
                 script,
                 trace,
-                output_ceiling,
-                Some(8_192),
-                if judge {
-                    ThinkingLevel::Off
-                } else {
-                    ThinkingLevel::High
+                ProfileSettings {
+                    output_ceiling,
+                    context_ceiling: Some(8_192),
+                    thinking: if judge {
+                        ThinkingLevel::Off
+                    } else {
+                        ThinkingLevel::High
+                    },
+                    parallel_tool_calls: false,
                 },
-                false,
                 Err("the selected wire cannot encode this request".into()),
             )
         }
@@ -4910,23 +4926,23 @@ mod turn {
                     .pop_front()
                     .expect("the scripted source has one step per boundary");
                 if matches!(step, ResolutionStep::Pending) {
-                    if let Some(ready) = &self.ready {
-                        if let Some(sender) = ready.lock().unwrap().take() {
-                            let _ = sender.send(());
-                        }
+                    if let Some(ready) = &self.ready
+                        && let Some(sender) = ready.lock().unwrap().take()
+                    {
+                        let _ = sender.send(());
                     }
                     return Box::pin(futures::future::pending());
                 }
                 let ResolutionStep::Ready(result) = step else {
                     unreachable!("pending steps return above");
                 };
-                Box::pin(futures::future::ready(result))
+                Box::pin(futures::future::ready(*result))
             }
         }
 
         #[test]
         fn main_read_tool_main_resolves_fresh_profiles_with_current_caps() {
-            let mut fx = Fixture::new(vec![
+            let fx = Fixture::new(vec![
                 vec![
                     AiEvent::TextDelta {
                         text: "before".into(),
@@ -5199,7 +5215,7 @@ mod turn {
                     EventKind::GenerationStarted {
                         attempt,
                         role: GenerationRole::Judge,
-                    } => Some(attempt.clone()),
+                    } => Some(*attempt),
                     _ => None,
                 })
                 .expect("Judge generation is durable");
