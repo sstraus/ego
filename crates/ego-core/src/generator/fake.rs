@@ -9,7 +9,7 @@ use std::sync::Mutex;
 use futures::stream;
 
 use super::attempt::{AttemptStream, GenerationAttempt};
-use super::port::{AiEvent, Generator};
+use super::port::{AiEvent, Generator, RequestExpressibilityError};
 use super::types::GenRequest;
 
 /// A `Generator` driven entirely by pre-scripted output.
@@ -51,6 +51,10 @@ impl FakeGenerator {
 }
 
 impl Generator for FakeGenerator {
+    fn ensure_expressible(&self, _req: &GenRequest) -> Result<(), RequestExpressibilityError> {
+        Ok(())
+    }
+
     /// Records the request and plays the next script.
     ///
     /// Passes the attempt straight through into the returned stream. A

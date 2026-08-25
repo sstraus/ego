@@ -47,7 +47,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use ego_ai::catalogue::{self, HostedModel};
+use ego_ai::catalogue::{self, HostedModel, ModelSlug, SuppliedAuthority};
 use ego_core::budget::PricingQuote;
 use ego_core::ceiling::Ceilings;
 use ego_core::cost::{Amount, CurrencyCode, PricingRevision};
@@ -146,6 +146,21 @@ fn read(path: &Path) -> Result<Facts, UsageError> {
 /// so callers name it once.
 pub type Hosted = HostedModel;
 
+fn merge_layers(
+    system: BTreeMap<String, Supplied>,
+    user: BTreeMap<String, Supplied>,
+) -> BTreeMap<String, (SuppliedAuthority, Supplied)> {
+    let mut merged = system
+        .into_iter()
+        .map(|(slug, supplied)| (slug, (SuppliedAuthority::System, supplied)))
+        .collect::<BTreeMap<_, _>>();
+    merged.extend(
+        user.into_iter()
+            .map(|(slug, supplied)| (slug, (SuppliedAuthority::User, supplied))),
+    );
+    merged
+}
+
 /// Every supplied hosted model, keyed by slug, user's winning over system's.
 ///
 /// `ceilings` decides whether the *prices* come with them. Capabilities always
@@ -155,23 +170,22 @@ pub type Hosted = HostedModel;
 /// error at any ceiling: an operator who typed a rate wrong should be told so
 /// rather than have the typo become invisible on runs that do not read it.
 pub fn supplied(ceilings: &Ceilings) -> Result<Vec<(String, HostedModel)>, UsageError> {
-    let mut paths = vec![PathBuf::from(SYSTEM_DIR).join(MODELS_FILE)];
-    if let Some(home) = config::ego_home() {
-        paths.push(home.join(MODELS_FILE));
-    }
+    let system = read(&PathBuf::from(SYSTEM_DIR).join(MODELS_FILE))?.model;
+    let user = match config::ego_home() {
+        Some(home) => read(&home.join(MODELS_FILE))?.model,
+        None => BTreeMap::new(),
+    };
+    let merged = merge_layers(system, user);
 
-    let mut merged: BTreeMap<String, Supplied> = BTreeMap::new();
-    for path in &paths {
-        merged.extend(read(path)?.model);
-    }
-
-    Ok(merged
+    merged
         .into_iter()
-        .map(|(slug, supplied)| {
-            (
+        .map(|(slug, (authority, supplied))| {
+            ModelSlug::parse(&slug).map_err(|error| UsageError(error.to_string()))?;
+            Ok((
                 slug,
                 HostedModel {
                     capabilities: supplied.capabilities,
+                    authority,
                     // A `models.toml` row is billed in money whether or not
                     // the operator wrote its rates down: the provider will
                     // charge either way, and this file is not where that
@@ -187,9 +201,9 @@ pub fn supplied(ceilings: &Ceilings) -> Result<Vec<(String, HostedModel)>, Usage
                         .flatten()
                         .map(|quote| catalogue::operator_rates(quote.into())),
                 },
-            )
+            ))
         })
-        .collect())
+        .collect()
 }
 
 #[cfg(test)]
@@ -249,6 +263,7 @@ reasoning_carryover = "same_provider_only"
 reasoning_efforts = "any"
 cancel = "cooperative"
 cache = "long"
+transport = "sse"
 "#
             ))
             .unwrap()

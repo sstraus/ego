@@ -65,6 +65,21 @@ async fn ordinary_main() -> std::process::ExitCode {
             state: ego_core::state::SessionState::default(),
             result: serde_json::Value::String(String::new()),
         },
+        Ok(Invocation::Models(args)) => {
+            let termination = match ego_cli::models::execute(&args).await {
+                Ok(rendered) => {
+                    out.line(&rendered);
+                    RunTermination::Done
+                }
+                Err(termination) => termination,
+            };
+            Ended {
+                termination,
+                session: ego_core::event::id::SessionId::new(),
+                state: ego_core::state::SessionState::default(),
+                result: serde_json::Value::String(String::new()),
+            }
+        }
         // `acp` serves many sessions over one connection, so there is no single
         // one to report — the same shape of absence `ls` has, for the opposite
         // reason. Its termination says whether the connection ended cleanly.

@@ -53,13 +53,15 @@ use ego_core::cost::{Amount, CumulativeCost, CurrencyCode, Money, PricingRevisio
 use ego_core::event::domain::{DomainEvent, ExitReason};
 use ego_core::event::id::SessionId;
 use ego_core::event::time::{Clock, Timestamp};
+use ego_core::generation_model_source::{
+    GenerationModelError, GenerationModelSource, GenerationProfile, GenerationRole,
+};
 use ego_core::generator::attempt::DeliveryCertainty;
 use ego_core::generator::capabilities::{
     CacheRetention, CancelSemantics, ModelCapabilities, ReasoningCarryover, ReasoningEffortSupport,
     Transport,
 };
 use ego_core::generator::port::AiEvent;
-use ego_core::generation_model_source::{GenerationModelError, GenerationModelSource, GenerationProfile, GenerationRole};
 use ego_core::generator::types::{ErrorKind, GenRequest, StopReason, ThinkingLevel};
 use ego_core::permit::fake::FakeFs;
 use ego_core::permit::{
@@ -324,7 +326,10 @@ async fn one_turn(
                 },
             }),
             gate: &mut gate,
-            config: TurnConfig { system: None, token_ceiling: None },
+            config: TurnConfig {
+                system: None,
+                token_ceiling: None,
+            },
         },
         Tools::new(
             &registry,

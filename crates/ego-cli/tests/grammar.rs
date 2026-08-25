@@ -37,6 +37,7 @@ fn parsed<const N: usize>(args: [&str; N]) -> ego_cli::cli::Args {
             panic!("that starts a session: use `converses` for it")
         }
         Invocation::Ls(_) => panic!("`ls` takes no Args: use `listed` for it"),
+        Invocation::Models(_) => panic!("`models` takes no Args: use the models tests for it"),
         Invocation::Acp(_) => panic!("`acp` takes no Args: use `served` for it"),
         Invocation::Auth(_) => panic!("`auth` takes no Args: use the auth tests for it"),
         Invocation::Answered(_) => panic!("that answered a question: use `answered` for it"),
@@ -50,6 +51,7 @@ fn parsed_slice(args: &[&str]) -> ego_cli::cli::Args {
             panic!("that starts a session: use `converses` for it")
         }
         Invocation::Ls(_) => panic!("`ls` takes no Args: use `listed` for it"),
+        Invocation::Models(_) => panic!("`models` takes no Args: use the models tests for it"),
         Invocation::Acp(_) => panic!("`acp` takes no Args: use `served` for it"),
         Invocation::Auth(_) => panic!("`auth` takes no Args: use the auth tests for it"),
         Invocation::Answered(_) => panic!("that answered a question: use `answered` for it"),

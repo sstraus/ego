@@ -33,15 +33,11 @@ use crate::event::id::{
     EventId, GenerationId, ItemId, Producer, QueuedPromptId, SessionId, TurnId,
 };
 use crate::event::time::Clock;
+use crate::generation_model_source::{GenerationModelErrorClass, GenerationModelSource};
 use crate::generator::attempt::{AttemptStream, GenerationAttempt, UsageReport, settled_cost};
 use crate::generator::history::conversation_from;
 use crate::generator::port::AiEvent;
-use crate::generator::types::{
-    Conversation, ErrorKind, GenRequest, Message, Role, StopReason,
-};
-use crate::generation_model_source::{
-    GenerationModelErrorClass, GenerationModelSource,
-};
+use crate::generator::types::{Conversation, ErrorKind, GenRequest, Message, Role, StopReason};
 use crate::permit::ExecObservation;
 use crate::permit::judge::{JudgeConfig, JudgeDecoder, JudgeInput, JudgeOutcome};
 use crate::permit::{Authority, Classification, Pending, PolicyDenied, Resolution, ToolResult};
@@ -847,6 +843,10 @@ impl<'a> TurnLoop<'a> {
                 ExitReason::Usage,
             );
         }
+        if let Err(refused) = profile.generator.ensure_expressible(&request) {
+            tracing::warn!(%refused, "the selected generator cannot encode this request");
+            return self.refuse(turn, refused.to_string(), ExitReason::Usage);
+        }
 
         // Per generation, and before the gate: a fallback chain can switch
         // rows mid-turn, and on a row that is not metered in currency the
@@ -864,22 +864,18 @@ impl<'a> TurnLoop<'a> {
         ));
 
         let quote = profile.rates.as_ref().map(|rates| rates.quote.clone());
-        let reservation =
-            match self
-                .gate
-                .reserve(
-                    &profile.metering,
-                    quote.as_ref(),
-                    &request,
-                    &profile.capabilities,
-                )
-            {
-                Ok(reservation) => reservation,
-                Err(denied) => {
-                    tracing::warn!(%denied, "the budget gate refused a generation");
-                    return self.refuse(turn, denied.to_string(), ExitReason::Budget);
-                }
-            };
+        let reservation = match self.gate.reserve(
+            &profile.metering,
+            quote.as_ref(),
+            &request,
+            &profile.capabilities,
+        ) {
+            Ok(reservation) => reservation,
+            Err(denied) => {
+                tracing::warn!(%denied, "the budget gate refused a generation");
+                return self.refuse(turn, denied.to_string(), ExitReason::Budget);
+            }
+        };
 
         let attempt = match GenerationAttempt::new(
             GenerationId::new(),
@@ -1409,6 +1405,18 @@ impl<'a> TurnLoop<'a> {
             )?;
             return Ok(JudgeRun::Unavailable);
         }
+        if let Err(refused) = profile.generator.ensure_expressible(&request) {
+            self.journal.append(
+                turn,
+                None,
+                None,
+                EventKind::Error {
+                    message: refused.to_string(),
+                    kind: ErrorKind::Unclassified,
+                },
+            )?;
+            return Ok(JudgeRun::Unavailable);
+        }
         self.journal.publish(&PublicEvent::metering_selected(
             turn,
             &profile.metering,
@@ -1419,18 +1427,17 @@ impl<'a> TurnLoop<'a> {
                 .map_or(&RateSource::None, |rates| &rates.source),
         ));
         let quote = profile.rates.as_ref().map(|rates| &rates.quote);
-        let reservation = match self.gate.reserve(
-            &profile.metering,
-            quote,
-            &request,
-            &profile.capabilities,
-        ) {
-            Ok(reservation) => reservation,
-            Err(denied) => {
-                tracing::warn!(%denied, "the budget gate refused the judge generation");
-                return Ok(JudgeRun::Ended(ExitReason::Budget));
-            }
-        };
+        let reservation =
+            match self
+                .gate
+                .reserve(&profile.metering, quote, &request, &profile.capabilities)
+            {
+                Ok(reservation) => reservation,
+                Err(denied) => {
+                    tracing::warn!(%denied, "the budget gate refused the judge generation");
+                    return Ok(JudgeRun::Ended(ExitReason::Budget));
+                }
+            };
         let attempt = match GenerationAttempt::new(
             GenerationId::new(),
             reservation,

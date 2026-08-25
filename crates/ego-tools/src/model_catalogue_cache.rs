@@ -43,7 +43,10 @@ impl std::fmt::Display for CacheError {
                 actual.display(),
                 expected.display()
             ),
-            Self::Io(error) => write!(f, "the model catalogue cache could not be accessed: {error}"),
+            Self::Io(error) => write!(
+                f,
+                "the model catalogue cache could not be accessed: {error}"
+            ),
         }
     }
 }
@@ -106,13 +109,7 @@ impl<'a> ModelCatalogueCache<'a> {
         is_alive: &dyn Fn(u32) -> bool,
     ) -> Result<ModelCatalogueLease, CacheError> {
         let refresh_lock_path = self.refresh_lock_path();
-        let held = Lease::acquire(
-            &refresh_lock_path,
-            pid,
-            now,
-            LEASE_STALE_AFTER,
-            is_alive,
-        )?;
+        let held = Lease::acquire(&refresh_lock_path, pid, now, LEASE_STALE_AFTER, is_alive)?;
         Ok(ModelCatalogueLease {
             _held: held,
             refresh_lock_path,

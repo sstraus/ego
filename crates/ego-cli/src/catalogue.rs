@@ -192,7 +192,12 @@ pub fn table(metas: &[SessionMeta], all: bool) -> Vec<String> {
         rows.push(row);
     }
 
-    let columns = rows[0].len();
+    plain_table(rows)
+}
+
+/// Pad a plain-text table to its widest cells without trailing whitespace.
+pub(crate) fn plain_table(rows: Vec<Vec<String>>) -> Vec<String> {
+    let columns = rows.first().map_or(0, Vec::len);
     let widths: Vec<usize> = (0..columns)
         .map(|at| {
             rows.iter()

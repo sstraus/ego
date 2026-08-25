@@ -14,7 +14,7 @@
 use std::sync::Arc;
 
 use ego_core::generator::attempt::{AttemptStream, DeliveryCertainty, GenerationAttempt};
-use ego_core::generator::port::Generator;
+use ego_core::generator::port::{Generator, RequestExpressibilityError};
 use ego_core::generator::types::{ErrorKind, GenRequest};
 use futures::{StreamExt, stream};
 
@@ -67,16 +67,6 @@ impl WireGenerator {
         &self.row.id
     }
 
-    /// Prove locally that this resolved provider can encode the exact request.
-    ///
-    /// This deliberately performs no transport I/O. Some provider rows have
-    /// authoritative control-plane resolution and some do not; request
-    /// expressibility is the one permanent fact every wire mapping can prove
-    /// before a generation attempt exists.
-    pub fn ensure_expressible(&self, req: &GenRequest) -> Result<(), wire::RequestRefused> {
-        self.build_request(req).map(drop)
-    }
-
     fn build_request(
         &self,
         req: &GenRequest,
@@ -93,6 +83,12 @@ impl WireGenerator {
 }
 
 impl Generator for WireGenerator {
+    fn ensure_expressible(&self, req: &GenRequest) -> Result<(), RequestExpressibilityError> {
+        self.build_request(req)
+            .map(drop)
+            .map_err(|refused| RequestExpressibilityError::new(refused.to_string()))
+    }
+
     fn generate(&self, req: GenRequest, attempt: GenerationAttempt) -> AttemptStream {
         // No credential branch here, and its absence is the change §6 bought.
         // A missing key is refused once, at resolution, where the message can

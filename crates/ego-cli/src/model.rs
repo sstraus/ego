@@ -7,11 +7,20 @@
 //! the process — reading the environment for a credential and for a daemon
 //! address.
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use ego_ai::catalogue::{Catalogue, ModelSlug, ResolveError, ResolvedModel};
 use ego_ai::http::{EgressPolicy, Http, ReqwestHttp};
 use ego_ai::provider::{Credentials, OLLAMA_BASE, OPENAI_BASE, ProviderRow, ResolvedCredential};
+use ego_core::ceiling::Ceilings;
+use ego_core::config::{AuthProviderLayer, ModelRef};
+use ego_core::generation_model_source::{
+    GenerationModelError, GenerationModelErrorClass, GenerationModelSource, GenerationProfile,
+    GenerationRole,
+};
+use ego_core::generator::port::Generator;
+use ego_core::generator::types::ThinkingLevel;
+use futures::future::BoxFuture;
 use url::Url;
 
 use crate::auth::overlay_headers;
@@ -102,7 +111,7 @@ pub fn transport(offline: bool) -> Result<Arc<dyn Http>, ResolveError> {
 /// that subscription contract without collapsing its metering into the API
 /// key row. Gemini remains absent because this batch adds no current login or
 /// acceptance evidence for it.
-fn rows(
+pub(crate) fn rows(
     auth: &std::collections::HashMap<String, ego_core::config::AuthProviderLayer>,
 ) -> Result<Vec<ProviderRow>, ResolveError> {
     let mut rows = vec![
@@ -136,6 +145,18 @@ fn rows(
     Ok(rows)
 }
 
+/// Assemble the one resolver-selected catalogue from current rows and facts.
+pub(crate) fn catalogue(
+    hosted: Vec<(String, facts::Hosted)>,
+    auth: &std::collections::HashMap<String, ego_core::config::AuthProviderLayer>,
+) -> Result<Catalogue, ResolveError> {
+    let mut catalogue = Catalogue::new(rows(auth)?);
+    for (slug, model) in hosted {
+        catalogue = catalogue.with_hosted(&slug, model);
+    }
+    Ok(catalogue)
+}
+
 /// Resolve `slug` against the daemon or against what was supplied.
 ///
 /// `hosted` comes from [`facts::supplied`] and is passed in rather than read
@@ -162,10 +183,7 @@ pub async fn resolve(
     auth: &std::collections::HashMap<String, ego_core::config::AuthProviderLayer>,
 ) -> Result<(ResolvedModel, ResolvedCredential), ResolveError> {
     let slug = ModelSlug::parse(slug)?;
-    let mut catalogue = Catalogue::new(rows(auth)?);
-    for (supplied, model) in hosted {
-        catalogue = catalogue.with_hosted(&supplied, model);
-    }
+    let catalogue = catalogue(hosted, auth)?;
     let row = catalogue.row(&slug.provider)?;
     // Read here, where a refusal can name the variable to set, rather than as
     // a 401 several layers later. No per-provider branch: the row names its
@@ -177,6 +195,176 @@ pub async fn resolve(
     // providers are daemons in order to resolve any of them.
     let model = catalogue.resolve(&slug, http, &credential).await?;
     Ok((model, credential))
+}
+
+#[derive(Debug, Clone)]
+struct MainSelection {
+    identity: ModelRef,
+    thinking: ThinkingLevel,
+}
+
+/// Mutable session selection observed afresh at every main generation boundary.
+#[derive(Debug)]
+pub struct GenerationSelection {
+    current: RwLock<MainSelection>,
+}
+
+impl GenerationSelection {
+    pub fn new(identity: ModelRef, thinking: ThinkingLevel) -> Self {
+        Self {
+            current: RwLock::new(MainSelection { identity, thinking }),
+        }
+    }
+
+    /// Install the selection committed by the interactive picker.
+    pub fn install(&self, identity: ModelRef, thinking: ThinkingLevel) -> Result<(), String> {
+        let mut current = self
+            .current
+            .write()
+            .map_err(|_| "the model selection lock is poisoned".to_string())?;
+        *current = MainSelection { identity, thinking };
+        Ok(())
+    }
+
+    fn read(&self) -> Result<MainSelection, GenerationModelError> {
+        self.current
+            .read()
+            .map(|selection| selection.clone())
+            .map_err(|_| {
+                GenerationModelError::new(
+                    GenerationModelErrorClass::Internal,
+                    "the model selection lock is poisoned",
+                )
+            })
+    }
+}
+
+/// CLI adapter for the core-owned fresh generation-model port.
+pub struct CliGenerationModelSource {
+    selection: Arc<GenerationSelection>,
+    judge: Option<ModelRef>,
+    ceilings: Ceilings,
+    auth: std::collections::HashMap<String, AuthProviderLayer>,
+    offline: bool,
+    http: Arc<dyn Http>,
+}
+
+impl CliGenerationModelSource {
+    pub fn new(
+        identity: ModelRef,
+        thinking: ThinkingLevel,
+        judge: Option<ModelRef>,
+        ceilings: Ceilings,
+        auth: std::collections::HashMap<String, AuthProviderLayer>,
+        offline: bool,
+    ) -> Result<Self, ResolveError> {
+        Ok(Self {
+            selection: Arc::new(GenerationSelection::new(identity, thinking)),
+            judge,
+            ceilings,
+            auth,
+            offline,
+            http: transport(offline)?,
+        })
+    }
+
+    pub fn selection(&self) -> Arc<GenerationSelection> {
+        Arc::clone(&self.selection)
+    }
+
+    async fn resolve_role(
+        &self,
+        role: GenerationRole,
+    ) -> Result<GenerationProfile, GenerationModelError> {
+        let (identity, thinking) = match role {
+            GenerationRole::Main => {
+                let selection = self.selection.read()?;
+                (selection.identity.clone(), selection.thinking)
+            }
+            GenerationRole::Judge => (
+                self.judge.clone().ok_or_else(|| {
+                    GenerationModelError::new(
+                        GenerationModelErrorClass::Usage,
+                        "no judge model is configured",
+                    )
+                })?,
+                ThinkingLevel::Off,
+            ),
+        };
+        let provider_id = identity
+            .0
+            .split_once('/')
+            .map(|(provider, _)| provider)
+            .unwrap_or(identity.0.as_str());
+        ensure_provider_mapping(provider_id).map_err(generation_error)?;
+        let hosted = facts::supplied(&self.ceilings).map_err(|error| {
+            GenerationModelError::new(GenerationModelErrorClass::Usage, error.to_string())
+        })?;
+        let credentials = crate::auth::request_credentials(
+            provider_id,
+            self.auth
+                .get(provider_id)
+                .and_then(|auth| auth.credential_command.as_deref()),
+            self.offline,
+        )
+        .await
+        .map_err(auth_generation_error)?;
+        let (resolved, credential) = resolve(
+            &identity.0,
+            hosted,
+            &self.http,
+            credentials.as_ref(),
+            &self.auth,
+        )
+        .await
+        .map_err(generation_error)?;
+        let request_model = resolved.model.clone();
+        let generator: Arc<dyn Generator> = Arc::new(ego_ai::generator::WireGenerator::new(
+            resolved.row,
+            Arc::clone(&self.http),
+            credential,
+        ));
+        Ok(GenerationProfile {
+            identity,
+            request_model,
+            thinking,
+            generator,
+            capabilities: resolved.capabilities,
+            metering: resolved.metering,
+            rates: resolved.rates,
+        })
+    }
+}
+
+impl GenerationModelSource for CliGenerationModelSource {
+    fn resolve<'a>(
+        &'a self,
+        role: GenerationRole,
+    ) -> BoxFuture<'a, Result<GenerationProfile, GenerationModelError>> {
+        Box::pin(self.resolve_role(role))
+    }
+}
+
+fn generation_error(error: ResolveError) -> GenerationModelError {
+    let class = if is_provider_failure(&error) {
+        GenerationModelErrorClass::Provider
+    } else {
+        GenerationModelErrorClass::Usage
+    };
+    GenerationModelError::new(class, error.to_string())
+}
+
+fn auth_generation_error(error: crate::auth::AuthError) -> GenerationModelError {
+    let class = match &error {
+        crate::auth::AuthError::Temporary { .. } => GenerationModelErrorClass::Provider,
+        crate::auth::AuthError::Io { .. } | crate::auth::AuthError::CorruptStore { .. } => {
+            GenerationModelErrorClass::Internal
+        }
+        crate::auth::AuthError::InvalidConfig(_)
+        | crate::auth::AuthError::MissingCredential { .. }
+        | crate::auth::AuthError::ReloginRequired { .. } => GenerationModelErrorClass::Usage,
+    };
+    GenerationModelError::new(class, error.to_string())
 }
 
 fn unavailable_mapping(provider: &str) -> Option<ResolveError> {

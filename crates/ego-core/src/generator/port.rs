@@ -3,6 +3,8 @@
 //! See `ARCHITECTURE.md` §2 ("ports belong to the consumer") and §3.1.
 //! `ego-ai` implements this trait; `ego-core` never opens a socket itself.
 
+use std::fmt;
+
 use serde::{Deserialize, Serialize};
 
 use super::attempt::{AttemptStream, DeliveryCertainty, GenerationAttempt};
@@ -111,6 +113,24 @@ pub enum AiEvent {
     Error { message: String, kind: ErrorKind },
 }
 
+/// A permanent, local inability to encode one exact generation request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequestExpressibilityError(String);
+
+impl RequestExpressibilityError {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self(message.into())
+    }
+}
+
+impl fmt::Display for RequestExpressibilityError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for RequestExpressibilityError {}
+
 /// The provider-neutral seam for generating the next assistant turn.
 ///
 /// `ego-core` owns this trait and the types it moves (`GenRequest`,
@@ -118,6 +138,12 @@ pub enum AiEvent {
 /// `Http`, credentials and the provider table. The dependency arrow is
 /// `ego-ai -> ego-core`, never the reverse.
 pub trait Generator: Send + Sync {
+    /// Prove locally that the adapter can encode this exact request.
+    ///
+    /// This performs no I/O. It is required, with no default, so a new adapter
+    /// cannot silently opt out of the proof callers need before reservation.
+    fn ensure_expressible(&self, req: &GenRequest) -> Result<(), RequestExpressibilityError>;
+
     /// Generate the next assistant turn.
     ///
     /// The [`GenerationAttempt`] is the budget gate, enforced in the

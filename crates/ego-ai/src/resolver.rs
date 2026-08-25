@@ -44,9 +44,7 @@ use std::sync::Arc;
 
 use futures::future::BoxFuture;
 
-use crate::catalogue::{
-    Catalogue, ModelDiscoveryReport, ModelSlug, ResolveError, ResolvedModel,
-};
+use crate::catalogue::{Catalogue, ModelDiscoveryReport, ModelSlug, ResolveError, ResolvedModel};
 use crate::http::Http;
 use crate::provider::{ProviderRow, ResolvedCredential};
 use ego_core::public::MeteringKind;
@@ -137,7 +135,6 @@ impl ModelResolver for Supplied {
         Box::pin(std::future::ready(at.catalogue.resolve_hosted(at.slug)))
     }
 
-
     fn enumerate<'a>(
         &'a self,
         at: &'a Enumeration<'a>,
@@ -174,15 +171,14 @@ impl ModelResolver for SubscriptionSupplied {
         })
     }
 
-
     fn enumerate<'a>(
         &'a self,
         at: &'a Enumeration<'a>,
     ) -> BoxFuture<'a, Result<ModelDiscoveryReport, String>> {
-        Box::pin(std::future::ready(at.catalogue.enumerate_hosted(
-            &at.row.id,
-            Some(MeteringKind::Subscription),
-        )))
+        Box::pin(std::future::ready(
+            at.catalogue
+                .enumerate_hosted(&at.row.id, Some(MeteringKind::Subscription)),
+        ))
     }
 }
 
@@ -201,7 +197,6 @@ impl ModelResolver for OllamaDaemon {
     ) -> BoxFuture<'a, Result<ResolvedModel, ResolveError>> {
         Box::pin(crate::ollama::resolve(at.row, &at.slug.model, at.http))
     }
-
 
     fn enumerate<'a>(
         &'a self,
@@ -235,14 +230,13 @@ impl ModelResolver for XaiLanguageModels {
         })
     }
 
-
     fn enumerate<'a>(
         &'a self,
         at: &'a Enumeration<'a>,
     ) -> BoxFuture<'a, Result<ModelDiscoveryReport, String>> {
-        Box::pin(std::future::ready(at.catalogue.enumerate_hosted(
-            &at.row.id,
-            Some(MeteringKind::Currency),
-        )))
+        Box::pin(std::future::ready(
+            at.catalogue
+                .enumerate_hosted(&at.row.id, Some(MeteringKind::Currency)),
+        ))
     }
 }

@@ -23,13 +23,15 @@ use ego_core::config::{Mode, PermCfg, Ruleset, Source};
 use ego_core::cost::{Amount, CurrencyCode, Money, PricingRevision, RateSource};
 use ego_core::event::domain::ExitReason;
 use ego_core::event::id::SessionId;
+use ego_core::generation_model_source::{
+    GenerationModelError, GenerationModelSource, GenerationProfile, GenerationRole,
+};
 use ego_core::generator::capabilities::{
     CacheRetention, CancelSemantics, ModelCapabilities, ReasoningCarryover, ReasoningEffortSupport,
     Transport,
 };
 use ego_core::generator::fake::FakeGenerator;
 use ego_core::generator::port::AiEvent;
-use ego_core::generation_model_source::{GenerationModelError, GenerationModelSource, GenerationProfile, GenerationRole};
 use ego_core::generator::types::{StopReason, ThinkingLevel};
 use ego_core::permit::rule::{Head, Rule};
 use ego_core::permit::{
@@ -1607,7 +1609,10 @@ mod end_to_end {
                 generator: self.generator.clone(),
                 capabilities: caps(),
                 metering: metering(),
-                rates: Some(ResolvedRates { quote: quote(), source: RateSource::Operator }),
+                rates: Some(ResolvedRates {
+                    quote: quote(),
+                    source: RateSource::Operator,
+                }),
             })))
         }
     }
@@ -1651,9 +1656,14 @@ mod end_to_end {
                     cancel: CancelToken::new(),
                 },
                 GenerationRuntime {
-                    source: Arc::new(FixedSource { generator: Arc::clone(&generator) }),
+                    source: Arc::new(FixedSource {
+                        generator: Arc::clone(&generator),
+                    }),
                     gate: &mut gate,
-                    config: TurnConfig { system: None, token_ceiling: None },
+                    config: TurnConfig {
+                        system: None,
+                        token_ceiling: None,
+                    },
                 },
                 Tools::new(
                     &ws.registry,
@@ -1737,9 +1747,14 @@ mod end_to_end {
                     cancel: CancelToken::new(),
                 },
                 GenerationRuntime {
-                    source: Arc::new(FixedSource { generator: Arc::clone(&generator) }),
+                    source: Arc::new(FixedSource {
+                        generator: Arc::clone(&generator),
+                    }),
                     gate: &mut gate,
-                    config: TurnConfig { system: None, token_ceiling: None },
+                    config: TurnConfig {
+                        system: None,
+                        token_ceiling: None,
+                    },
                 },
                 Tools::new(
                     &ws.registry,
@@ -1833,5 +1848,4 @@ mod end_to_end {
             transport: Transport::Sse,
         }
     }
-
 }

@@ -357,9 +357,17 @@ impl ModelDiscoveryFailure {
     }
 }
 
+/// The resolver-owned authority kind for one enumeration result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModelDiscoverySource {
+    Supplied,
+    Discovered { provider: String },
+}
+
 /// A validated enumeration result. Private fields preserve its completeness invariant.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelDiscoveryReport {
+    source: ModelDiscoverySource,
     models: Vec<ModelDiscoveryEntry>,
     failures: Vec<ModelDiscoveryFailure>,
     complete: bool,
@@ -367,15 +375,46 @@ pub struct ModelDiscoveryReport {
 
 impl ModelDiscoveryReport {
     pub fn try_new(
+        source: ModelDiscoverySource,
         mut models: Vec<ModelDiscoveryEntry>,
         failures: Vec<ModelDiscoveryFailure>,
         complete: bool,
     ) -> Result<Self, String> {
+        match &source {
+            ModelDiscoverySource::Supplied => {
+                if models
+                    .iter()
+                    .any(|entry| !matches!(&entry.provenance, ModelFactProvenance::Supplied { .. }))
+                {
+                    return Err("a supplied discovery report can contain only supplied rows".into());
+                }
+            }
+            ModelDiscoverySource::Discovered { provider } => {
+                if provider.is_empty() {
+                    return Err("a discovered report requires a non-empty provider id".into());
+                }
+                if let Some(entry) = models.iter().find(|entry| {
+                    entry.slug.provider.as_str() != provider
+                        || !matches!(
+                            &entry.provenance,
+                            ModelFactProvenance::Discovered { provider: discovered }
+                                if discovered == provider
+                        )
+                }) {
+                    return Err(format!(
+                        "discovery row `{}` was not discovered by `{provider}`",
+                        entry.slug
+                    ));
+                }
+            }
+        }
         if !complete && !failures.iter().any(|failure| failure.model.is_none()) {
             return Err("an incomplete discovery report requires an unnamed source failure".into());
         }
         if complete && failures.iter().any(|failure| failure.model.is_none()) {
-            return Err("a complete discovery report cannot carry an unnamed source failure".into());
+            return Err(
+                "a complete discovery report cannot carry an unnamed source failure".into(),
+            );
         }
         if failures.iter().any(|failure| {
             failure
@@ -387,17 +426,19 @@ impl ModelDiscoveryReport {
         }
         models.sort_by(|left, right| left.slug.cmp(&right.slug));
         let mut seen = BTreeSet::new();
-        if models
-            .iter()
-            .any(|entry| !seen.insert(entry.slug.clone()))
-        {
+        if models.iter().any(|entry| !seen.insert(entry.slug.clone())) {
             return Err("a discovery report cannot contain duplicate model slugs".into());
         }
         Ok(Self {
+            source,
             models,
             failures,
             complete,
         })
+    }
+
+    pub fn source(&self) -> &ModelDiscoverySource {
+        &self.source
     }
 
     pub fn models(&self) -> &[ModelDiscoveryEntry] {
@@ -438,12 +479,7 @@ impl CachedDiscoverySlice {
         let mut current: BTreeMap<ModelSlug, CachedDiscoveryModel> = report
             .models
             .into_iter()
-            .filter(|entry| {
-                matches!(
-                    &entry.provenance,
-                    ModelFactProvenance::Discovered { .. }
-                )
-            })
+            .filter(|entry| matches!(&entry.provenance, ModelFactProvenance::Discovered { .. }))
             .map(|entry| {
                 (
                     entry.slug.clone(),
@@ -495,7 +531,9 @@ impl CachedDiscoverySlice {
             .as_ref()
             .is_some_and(|failure| failure.model.is_some())
         {
-            return Err(format!("cached source failure for `{provider}` names a model"));
+            return Err(format!(
+                "cached source failure for `{provider}` names a model"
+            ));
         }
         let mut seen = BTreeSet::new();
         for model in &self.models {
@@ -506,17 +544,28 @@ impl CachedDiscoverySlice {
                 ));
             }
             match &model.entry.provenance {
-                ModelFactProvenance::Discovered { provider: discovered }
-                    if discovered == provider => {}
-                _ => return Err(format!("cached row `{}` is not discovered by `{provider}`", model.entry.slug)),
+                ModelFactProvenance::Discovered {
+                    provider: discovered,
+                } if discovered == provider => {}
+                _ => {
+                    return Err(format!(
+                        "cached row `{}` is not discovered by `{provider}`",
+                        model.entry.slug
+                    ));
+                }
             }
             if !seen.insert(model.entry.slug.clone()) {
-                return Err(format!("cached provider `{provider}` contains a duplicate row"));
+                return Err(format!(
+                    "cached provider `{provider}` contains a duplicate row"
+                ));
             }
             if let Some(failure) = &model.failure {
                 if let Some(name) = &failure.model {
                     if name != &model.entry.slug.model {
-                        return Err(format!("cached row failure does not belong to `{}`", model.entry.slug));
+                        return Err(format!(
+                            "cached row failure does not belong to `{}`",
+                            model.entry.slug
+                        ));
                     }
                 } else if self.source_failure.as_ref() != Some(failure) {
                     return Err(format!(
@@ -563,11 +612,34 @@ impl DiscoveryCacheV1 {
         provider: &str,
         report: ModelDiscoveryReport,
     ) -> Result<(), String> {
+        match report.source() {
+            ModelDiscoverySource::Discovered {
+                provider: discovered,
+            } if discovered == provider => {}
+            ModelDiscoverySource::Discovered {
+                provider: discovered,
+            } => {
+                return Err(format!(
+                    "discovery report for `{discovered}` does not belong in provider cache `{provider}`"
+                ));
+            }
+            ModelDiscoverySource::Supplied => {
+                return Err(format!(
+                    "a supplied report does not belong in provider cache `{provider}`"
+                ));
+            }
+        }
         for entry in report.models() {
             match &entry.provenance {
-                ModelFactProvenance::Discovered { provider: discovered }
-                    if discovered == provider && entry.slug.provider == provider => {}
-                _ => return Err(format!("discovery row `{}` does not belong in provider cache `{provider}`", entry.slug)),
+                ModelFactProvenance::Discovered {
+                    provider: discovered,
+                } if discovered == provider && entry.slug.provider == provider => {}
+                _ => {
+                    return Err(format!(
+                        "discovery row `{}` does not belong in provider cache `{provider}`",
+                        entry.slug
+                    ));
+                }
             }
         }
         let baseline = self.providers.get(provider).cloned().unwrap_or_default();
@@ -948,7 +1020,7 @@ impl Catalogue {
                 })
             })
             .collect::<Result<Vec<_>, String>>()?;
-        ModelDiscoveryReport::try_new(models, Vec::new(), true)
+        ModelDiscoveryReport::try_new(ModelDiscoverySource::Supplied, models, Vec::new(), true)
     }
 }
 

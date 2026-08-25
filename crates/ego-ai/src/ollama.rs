@@ -43,8 +43,9 @@ use ego_core::generator::types::ThinkingLevel;
 use serde::Deserialize;
 
 use crate::catalogue::{
-    ModelDiscoveryEntry, ModelDiscoveryFailure, ModelDiscoveryReport, ModelFactProvenance,
-    ModelSlug, ResolveError, ResolvedModel, control_plane, is_locally_served, unmetered,
+    ModelDiscoveryEntry, ModelDiscoveryFailure, ModelDiscoveryReport, ModelDiscoverySource,
+    ModelFactProvenance, ModelSlug, ResolveError, ResolvedModel, control_plane, is_locally_served,
+    unmetered,
 };
 use crate::http::{Http, HttpRequest, Method, fetch};
 use crate::provider::ProviderRow;
@@ -136,6 +137,9 @@ pub async fn enumerate(
         Ok(body) => body,
         Err(message) => {
             return ModelDiscoveryReport::try_new(
+                ModelDiscoverySource::Discovered {
+                    provider: row.id.clone(),
+                },
                 Vec::new(),
                 vec![ModelDiscoveryFailure::source(
                     "source_unreachable",
@@ -150,6 +154,9 @@ pub async fn enumerate(
         Ok(document) => document,
         Err(error) => {
             return ModelDiscoveryReport::try_new(
+                ModelDiscoverySource::Discovered {
+                    provider: row.id.clone(),
+                },
                 Vec::new(),
                 vec![ModelDiscoveryFailure::source(
                     "source_malformed",
@@ -161,6 +168,9 @@ pub async fn enumerate(
     };
     let Some(items) = document.get("models").and_then(serde_json::Value::as_array) else {
         return ModelDiscoveryReport::try_new(
+            ModelDiscoverySource::Discovered {
+                provider: row.id.clone(),
+            },
             Vec::new(),
             vec![ModelDiscoveryFailure::source(
                 "source_malformed",
@@ -214,7 +224,14 @@ pub async fn enumerate(
         });
     }
 
-    ModelDiscoveryReport::try_new(models, failures, complete)
+    ModelDiscoveryReport::try_new(
+        ModelDiscoverySource::Discovered {
+            provider: row.id.clone(),
+        },
+        models,
+        failures,
+        complete,
+    )
 }
 
 /// The daemon's own entry for `model`, or the list it does serve.

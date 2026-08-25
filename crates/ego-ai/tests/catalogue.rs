@@ -14,8 +14,8 @@
 use std::collections::BTreeSet;
 
 use ego_ai::catalogue::{
-    Catalogue, HostedModel, LOCAL_UNMETERED, ModelSlug, ResolveError, SuppliedAuthority, operator_rates, subscription,
-    tabulated, unmetered,
+    Catalogue, HostedModel, LOCAL_UNMETERED, ModelSlug, ResolveError, SuppliedAuthority,
+    operator_rates, subscription, tabulated, unmetered,
 };
 use ego_ai::ollama;
 use ego_ai::provider::ProviderRow;

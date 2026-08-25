@@ -42,6 +42,8 @@ pub enum Invocation {
     Resume(Box<Args>),
     /// `ego ls` — the catalogue, this workspace's by default.
     Ls(Box<LsArgs>),
+    /// `ego models` — the shared model catalogue snapshot.
+    Models(Box<ModelsArgs>),
     /// `ego acp` — serve the Agent Client Protocol on stdio, until the host
     /// closes it.
     Acp(Box<AcpArgs>),
@@ -142,7 +144,7 @@ const UNAVAILABLE: &[Unavailable] = &[
 /// exist. That is `every_waiting_on_reason_is_the_one_the_document_prints`'s
 /// defect moved one link along the chain — two surfaces agreeing perfectly
 /// about something that has stopped being true.
-pub const BUILT: &[&str] = &["run", "resume", "ls", "acp", "auth"];
+pub const BUILT: &[&str] = &["run", "resume", "ls", "models", "acp", "auth"];
 
 /// A command `CLI.md` §2 documents that this build does not implement, and the
 /// subsystem it is waiting on.
@@ -181,14 +183,6 @@ pub const UNBUILT: &[(&str, &str)] = &[
         "mcp-server",
         "ego's own MCP server surface (**M2**): the scoped run/continue/cancel/\
          status tools it would expose",
-    ),
-    (
-        "models",
-        "a catalogue to enumerate. Hosted facts are supplied and local ones are \
-         discovered per resolution \
-         (`docs/decisions/2026-08-21-what-a-model-resolves-to.md`), so this \
-         build resolves one model at a time and holds no list to print or \
-         refresh; generated catalogues are **M5**",
     ),
     (
         "config",
@@ -335,6 +329,14 @@ pub struct LsArgs {
     pub output: Output,
 }
 
+/// The exact `ego models [--provider P] [--refresh] [--json]` grammar.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelsArgs {
+    pub provider: Option<String>,
+    pub refresh: bool,
+    pub json: bool,
+}
+
 /// The parsed command line of `ego acp`.
 ///
 /// Two fields, and the absent third is the point: `ego acp`'s stdout **is** the
@@ -440,6 +442,26 @@ struct LsCommand {
 
     #[command(flatten)]
     common: Common,
+}
+
+#[derive(Debug, Parser)]
+#[command(
+    name = "ego models",
+    about = "List the shared model catalogue.",
+    disable_help_subcommand = true
+)]
+struct ModelsCommand {
+    /// Restrict enumeration and output to one admitted provider.
+    #[arg(long)]
+    provider: Option<String>,
+
+    /// Refresh the selected discoverable provider slices.
+    #[arg(long)]
+    refresh: bool,
+
+    /// Emit the exact versioned snapshot object.
+    #[arg(long)]
+    json: bool,
 }
 
 /// `ego acp` — the protocol, on stdio.
@@ -740,6 +762,7 @@ fn overview(program: &str) -> String {
             "run" => "Run an agent from a prompt, headless",
             "resume" => "Continue a session; no ID = latest in this workspace",
             "ls" => "List sessions (this workspace; --all for every one)",
+            "models" => "List the shared model catalogue",
             "acp" => "Serve the Agent Client Protocol on stdio",
             "auth" => "Manage subscription credentials",
             other => other,
@@ -867,6 +890,14 @@ pub fn parse(argv: Vec<String>) -> Result<Invocation, UsageError> {
                 session_dir: parsed.common.places.session_dir,
                 directory: parsed.common.places.directory,
                 output: parsed.common.output,
+            }))),
+        },
+        Some("models") => match clap_or_answer::<ModelsCommand>(&tokens)? {
+            Parsed::Answered(text) => Ok(Invocation::Answered(text)),
+            Parsed::Command(parsed) => Ok(Invocation::Models(Box::new(ModelsArgs {
+                provider: parsed.provider,
+                refresh: parsed.refresh,
+                json: parsed.json,
             }))),
         },
         Some("auth") => match clap_or_answer::<AuthCommand>(&tokens)? {

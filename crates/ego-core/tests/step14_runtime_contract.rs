@@ -15,7 +15,9 @@ use ego_core::config::{Mode, PermCfg, Ruleset, Source};
 use ego_core::event::domain::{DomainEvent, Envelope, EventKind};
 use ego_core::event::id::{EventId, Producer, Seq, TurnId};
 use ego_core::event::time::Timestamp;
-use ego_core::generation_model_source::{GenerationModelError, GenerationModelSource, GenerationProfile, GenerationRole};
+use ego_core::generation_model_source::{
+    GenerationModelError, GenerationModelSource, GenerationProfile, GenerationRole,
+};
 use ego_core::permit::{
     Authority, BackendIdentity, CanonPath, Classification, Confinement, EnvName, EnvPolicy,
     ExecCaps, ExecObservation, PolicyDenied, PolicyDigest, PolicyEngine, RunConfinement, SpawnSpec,
@@ -424,7 +426,7 @@ mod turn_execution_observation {
         EvidenceError, EvidencePage, EvidenceRead, EvidenceStore, EvidenceWriter,
     };
     use ego_core::store::session_store::{SessionMeta, SessionStore, StoreError};
-use ego_core::turn::{CancelToken, GenerationRuntime, Session, Tools, TurnConfig, TurnLoop};
+    use ego_core::turn::{CancelToken, GenerationRuntime, Session, Tools, TurnConfig, TurnLoop};
     use futures::future::BoxFuture;
     use futures::stream::BoxStream;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -593,18 +595,18 @@ use ego_core::turn::{CancelToken, GenerationRuntime, Session, Tools, TurnConfig,
                 thinking: ThinkingLevel::Off,
                 generator: self.generator.clone(),
                 capabilities: ModelCapabilities {
-                        schema_version: 1,
-                        max_context_tokens: Some(10_000),
-                        max_output_tokens: Some(1_000),
-                        max_tools: Some(16),
-                        supports_parallel_tool_calls: false,
-                        reasoning_carryover: ReasoningCarryover::Unsupported,
-                        reasoning_efforts: ReasoningEffortSupport::Any,
-                        reasoning_state_dialect: None,
-                        cancel: CancelSemantics::Cooperative,
-                        cache: CacheRetention::Short,
-                        transport: Transport::Sse,
-                    },
+                    schema_version: 1,
+                    max_context_tokens: Some(10_000),
+                    max_output_tokens: Some(1_000),
+                    max_tools: Some(16),
+                    supports_parallel_tool_calls: false,
+                    reasoning_carryover: ReasoningCarryover::Unsupported,
+                    reasoning_efforts: ReasoningEffortSupport::Any,
+                    reasoning_state_dialect: None,
+                    cancel: CancelSemantics::Cooperative,
+                    cache: CacheRetention::Short,
+                    transport: Transport::Sse,
+                },
                 metering: Metering::Unmetered {
                     revision: MeteringRevision(String::from("test")),
                 },

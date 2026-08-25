@@ -17,6 +17,10 @@ use ego_core::config::{
 use ego_core::cost::CurrencyCode;
 use ego_core::event::domain::CancelCause;
 use ego_core::event::id::SessionId;
+use ego_core::generation_model_source::{
+    GenerationModelError, GenerationModelErrorClass, GenerationModelSource, GenerationProfile,
+    GenerationRole,
+};
 use ego_core::generator::capabilities::ModelCapabilities;
 use ego_core::permit::judge::{JudgeConfig, JudgeInput};
 use ego_core::permit::{
@@ -29,8 +33,8 @@ use ego_core::sink::EventSink;
 use ego_core::state::{ItemKind, SessionState};
 use ego_core::store::session_store::{SessionMeta, SessionStore};
 use ego_core::turn::{
-    CancelToken, InteractiveControl, JudgeModel, Model, QueueStatus, Session, Tools, TurnConfig,
-    TurnLoop, TurnOutcome, interactive_control,
+    CancelToken, GenerationRuntime, InteractiveControl, JudgeContext, QueueStatus, Session, Tools,
+    TurnConfig, TurnLoop, TurnOutcome, interactive_control,
 };
 use ego_tools::clock::SystemClock;
 use ego_tools::exec::{ExecLimits, ExecRunConfig, GuardedExec, ProcessError};
@@ -48,7 +52,7 @@ use crate::output::{
 use crate::render::caps::{Capabilities, Environment, Terminal};
 use crate::render::osc::{Osc, Progress, State};
 use crate::session::{self, Opened};
-use crate::{config, facts, model, prompt, repl, schema};
+use crate::{config, model, prompt, repl, schema};
 
 /// The currency a session settles in.
 ///
@@ -136,8 +140,8 @@ pub async fn run(args: Args, out: &Stdout, cancel: CancelToken) -> Ended {
 
 /// Talk to the model until the person stops, then say how it ended.
 ///
-/// The mirror of [`run`] for a session driven from a keyboard: one resolution,
-/// one session, one lease, many turns.
+/// The mirror of [`run`] for a session driven from a keyboard: one session,
+/// one lease, many turns, and fresh authority at every generation boundary.
 pub async fn interactive(args: Args, out: &Stdout, cancel: CancelToken) -> Ended {
     // A machine-readable stream has no reader here. `--output json` is a
     // single document at completion and a conversation has no completion, so
@@ -406,7 +410,7 @@ pub async fn run_with<S: EventSink>(
 
 /// The same run, driven by a person instead of by argv.
 ///
-/// Everything before the first turn is identical — one resolution, one
+/// Everything before the first turn is identical — startup preflight, one
 /// session, one lease — which is why this is a driver and not a second
 /// pipeline. `session::open` replays the log from disk, so opening one per
 /// typed line would make a conversation get slower the longer it went on.
@@ -606,25 +610,6 @@ fn tools(selected: Option<&Vec<String>>) -> Result<Vec<Arc<dyn Tool>>, UsageErro
         .collect())
 }
 
-/// The output ceiling the request carries.
-///
-/// `BudgetGate::reserve` needs one from somewhere: with neither the model nor
-/// the request stating a cap it refuses with `UnstatedCeiling { Output }`,
-/// which is right — a generation with no bound on its output has no bound on
-/// its price. Ollama states none (`ollama.rs`: "the daemon states no output
-/// ceiling, so the request must cap itself"), so this is the ordinary path for
-/// every local run rather than an edge case, and there is no `CLI.md` §3 flag
-/// to supply it with.
-///
-/// The served context window is the answer, because it is a bound rather than
-/// a guess: no generation can emit more output tokens than fit in the window it
-/// is generating into. It over-reserves — the prompt already occupies part of
-/// that window — and over-reserving is the safe direction for a gate whose only
-/// failure that matters is authorising too much.
-fn output_ceiling(caps: &ModelCapabilities) -> Option<u64> {
-    caps.max_output_tokens.or(caps.max_context_tokens)
-}
-
 /// The capability names `session.started` publishes.
 ///
 /// Feature detection by name (`CLI.md` §4.2), so a consumer never parses a
@@ -821,19 +806,6 @@ fn chosen(args: &Args, root: &Path) -> Result<Chosen, UsageError> {
     Ok(Chosen { store, id })
 }
 
-/// The provider this run generates through.
-struct Provider {
-    http: Arc<dyn ego_ai::http::Http>,
-    resolved: ego_ai::catalogue::ResolvedModel,
-    credential: ego_ai::provider::ResolvedCredential,
-}
-
-struct ResolvedJudge {
-    generator: ego_ai::generator::WireGenerator,
-    resolved: ego_ai::catalogue::ResolvedModel,
-    config: JudgeConfig,
-}
-
 /// Prove the fixed judge generation envelope before a session exists.
 ///
 /// Dynamic authority facts occupy one user-text block and cannot change the
@@ -842,7 +814,7 @@ struct ResolvedJudge {
 /// shape without sending a generation or pretending that the provider was
 /// contacted. The exact in-turn request is checked again by `TurnLoop`.
 fn preflight_judge(
-    judge: &ResolvedJudge,
+    judge: &GenerationProfile,
     confinement: &RunConfinement,
     exec_caps: ExecCaps,
 ) -> Result<(), RunTermination> {
@@ -860,13 +832,17 @@ fn preflight_judge(
         path,
     };
     let request =
-        JudgeInput::new(&call, confinement, exec_caps, &escalation).request(&judge.config);
-    let gaps = judge.resolved.capabilities.request_gaps(&request);
+        JudgeInput::new(&call, confinement, exec_caps, &escalation).request(&JudgeConfig {
+            identity: judge.identity.clone(),
+            request_model: judge.request_model.clone(),
+            max_output_tokens: judge.output_ceiling(),
+        });
+    let gaps = judge.capabilities.request_gaps(&request);
     if !gaps.is_empty() {
         return Err(RunTermination::UsageError {
             message: format!(
                 "judge model `{}` is incompatible with the fixed judge request: {}",
-                judge.config.identity.0.as_str(),
+                judge.identity.0.as_str(),
                 gaps.iter()
                     .map(ToString::to_string)
                     .collect::<Vec<_>>()
@@ -880,68 +856,23 @@ fn preflight_judge(
         .map_err(|error| RunTermination::UsageError {
             message: format!(
                 "judge model `{}` cannot encode the fixed judge request: {error}",
-                judge.config.identity.0.as_str()
+                judge.identity.0.as_str()
             ),
         })
 }
 
-/// A transport, the catalogue row `--model` names, and the credential that
-/// will sign for it.
-///
-/// The two ways this fails are two exit codes, which is what
-/// `is_provider_failure` is asked: a slug nobody has heard of is the operator's
-/// mistake (exit 2) and a daemon that is not listening is not (exit 4), and one
-/// answer covering both would tell half of them the wrong thing.
-async fn provider(
-    slug: &str,
-    effective: &Effective,
-    offline: bool,
-) -> Result<Provider, RunTermination> {
-    let provider_id = slug
-        .split_once('/')
-        .map(|(provider, _)| provider)
-        .unwrap_or(slug);
-    model::ensure_provider_mapping(provider_id).map_err(|err| RunTermination::UsageError {
-        message: err.to_string(),
-    })?;
-    let http = model::transport(offline).map_err(|err| RunTermination::Provider {
-        message: err.to_string(),
-    })?;
-    let hosted =
-        facts::supplied(&effective.ceilings).map_err(|err| RunTermination::UsageError {
-            message: err.to_string(),
-        })?;
-    // One credential source for the whole request: refresh, resolution and
-    // header assembly share the locked auth store selected by `ego auth`.
-    let creds = crate::auth::request_credentials(
-        provider_id,
-        effective
-            .auth
-            .get(provider_id)
-            .and_then(|auth| auth.credential_command.as_deref()),
-        offline,
-    )
-    .await
-    .map_err(|err| RunTermination::UsageError {
-        message: err.to_string(),
-    })?;
-    let (resolved, credential) =
-        model::resolve(slug, hosted, &http, creds.as_ref(), &effective.auth)
-            .await
-            .map_err(|err| {
-                let message = err.to_string();
-                if model::is_provider_failure(&err) {
-                    RunTermination::Provider { message }
-                } else {
-                    RunTermination::UsageError { message }
-                }
-            })?;
-
-    Ok(Provider {
-        http,
-        resolved,
-        credential,
-    })
+fn generation_refusal(error: GenerationModelError) -> RunTermination {
+    match error.class {
+        GenerationModelErrorClass::Usage => RunTermination::UsageError {
+            message: error.message,
+        },
+        GenerationModelErrorClass::Provider => RunTermination::Provider {
+            message: error.message,
+        },
+        GenerationModelErrorClass::Internal => RunTermination::Failed {
+            message: error.message,
+        },
+    }
 }
 
 /// Build the process boundary for one cancellation scope.
@@ -1053,45 +984,46 @@ async fn execute<S: EventSink>(
     let (proof, proof_observation) = guarded_exec(&confinement, &proof_evidence, &cancel).await?;
     drop(proof);
 
-    let Provider {
-        http,
-        resolved,
-        credential,
-    } = provider(&slug, &effective, args.offline).await?;
-
     let mode = effective.mode.unwrap_or(Mode::Default);
-    let judge = if mode == Mode::Auto {
-        let identity = effective
-            .judge
-            .clone()
-            .ok_or_else(|| RunTermination::UsageError {
-                message: "`auto` mode requires `[permissions] judge = \"provider/model\"`"
-                    .to_string(),
-            })?;
-        let Provider {
-            http,
-            resolved,
-            credential,
-        } = provider(&identity.0, &effective, args.offline).await?;
-        let config = JudgeConfig {
-            identity,
-            request_model: resolved.model.clone(),
-            max_output_tokens: output_ceiling(&resolved.capabilities),
-        };
-        let judge = ResolvedJudge {
-            generator: ego_ai::generator::WireGenerator::new(
-                resolved.row.clone(),
-                http,
-                credential,
-            ),
-            resolved,
-            config,
-        };
-        preflight_judge(&judge, &confinement, proof_observation.capabilities())?;
-        Some(judge)
+    let judge_identity = if mode == Mode::Auto {
+        Some(
+            effective
+                .judge
+                .clone()
+                .ok_or_else(|| RunTermination::UsageError {
+                    message: "`auto` mode requires `[permissions] judge = \"provider/model\"`"
+                        .to_string(),
+                })?,
+        )
     } else {
         None
     };
+    let source = model::CliGenerationModelSource::new(
+        ego_core::config::ModelRef(slug),
+        args.thinking,
+        judge_identity,
+        effective.ceilings.clone(),
+        effective.auth.clone(),
+        args.offline,
+    )
+    .map_err(|error| RunTermination::Provider {
+        message: error.to_string(),
+    })?;
+    let source: Arc<dyn GenerationModelSource> = Arc::new(source);
+    let main_preflight = source
+        .resolve(GenerationRole::Main)
+        .await
+        .map_err(generation_refusal)?;
+    let main_capabilities = main_preflight.capabilities.clone();
+    drop(main_preflight);
+    let judge_enabled = mode == Mode::Auto;
+    if judge_enabled {
+        let judge = source
+            .resolve(GenerationRole::Judge)
+            .await
+            .map_err(generation_refusal)?;
+        preflight_judge(&judge, &confinement, proof_observation.capabilities())?;
+    }
 
     let currency = CurrencyCode::new(SETTLEMENT).expect("a constant this file controls");
     let clock = SystemClock;
@@ -1127,9 +1059,10 @@ async fn execute<S: EventSink>(
         }
     };
 
-    // Everything that can refuse has refused. From here the run has a session,
-    // and every ending is a `RunTermination` with a log behind it.
-    let sink = destination(&resolved.capabilities);
+    // Every startup gate has passed. From here the run has a session; a later
+    // fresh model-resolution refusal is recorded by the turn loop before it
+    // becomes a `RunTermination`.
+    let sink = destination(&main_capabilities);
     let sink = &sink;
     //
     // The opening reduction, taken once: it is what `session.started` is
@@ -1152,8 +1085,6 @@ async fn execute<S: EventSink>(
         &opening,
     );
 
-    let generator =
-        ego_ai::generator::WireGenerator::new(resolved.row.clone(), Arc::clone(&http), credential);
     // An untrusted workspace resolves to `Mode::Default`; a trusted
     // interactive run may obtain its mode from the admitted config layers.
     let policy = match &driver {
@@ -1176,11 +1107,8 @@ async fn execute<S: EventSink>(
     let mut gate = budget::gate(&effective.ceilings, effective.clamped.money, currency);
 
     let config = TurnConfig {
-        model: resolved.model.clone(),
         system,
-        thinking: args.thinking,
-        max_output_tokens: output_ceiling(&resolved.capabilities),
-        parallel_tool_calls: resolved.capabilities.supports_parallel_tool_calls,
+        token_ceiling: effective.ceilings.tokens,
     };
 
     let turns = Turns {
@@ -1199,7 +1127,8 @@ async fn execute<S: EventSink>(
     // `Session`, so a `Ctrl+C` on turn one would leave every later turn to
     // abort before its first check. A fresh loop takes a fresh token. It costs
     // nothing — every field below is a borrow or a clone of something already
-    // resolved, and no I/O is repeated.
+    // assembled; generation authority itself is deliberately resolved
+    // again inside each attempt.
     // A macro and not a closure: the loop borrows from this function's locals,
     // and a closure cannot name the lifetime of a `TurnLoop<'_>` it returns.
     macro_rules! build {
@@ -1212,13 +1141,9 @@ async fn execute<S: EventSink>(
                 sink,
                 cancel: $cancel.clone(),
             };
-            let model = Model {
-                generator: &generator,
+            let runtime = GenerationRuntime {
+                source: Arc::clone(&source),
                 gate: &mut gate,
-                metering: resolved.metering.clone(),
-                rates: resolved.rates.clone(),
-                token_ceiling: effective.ceilings.tokens,
-                caps: resolved.capabilities.clone(),
                 config: config.clone(),
             };
             let tools = Tools::new(
@@ -1229,23 +1154,14 @@ async fn execute<S: EventSink>(
                 &evidence,
                 CanonPath::new(&cwd),
             );
-            let loop_ = if let Some(judge) = judge.as_ref() {
-                TurnLoop::with_judge(
-                    session,
-                    model,
-                    tools,
-                    JudgeModel {
-                        generator: &judge.generator,
-                        metering: judge.resolved.metering.clone(),
-                        rates: judge.resolved.rates.clone(),
-                        caps: judge.resolved.capabilities.clone(),
-                        config: judge.config.clone(),
-                        confinement: confinement.clone(),
-                        exec_caps: $observation.capabilities(),
-                    },
-                )
+            let loop_ = TurnLoop::new(session, runtime, tools);
+            let loop_ = if judge_enabled {
+                loop_.with_judge(JudgeContext {
+                    confinement: confinement.clone(),
+                    exec_caps: $observation.capabilities(),
+                })
             } else {
-                TurnLoop::new(session, model, tools)
+                loop_
             };
             loop_.with_execution_observation($observation)
         }};

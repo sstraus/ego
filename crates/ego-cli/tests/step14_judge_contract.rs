@@ -13,6 +13,7 @@ use support::{Ego, Plan, Reply, Stub, text, tool_call};
 
 const MODEL: &str = "ollama/qwen3";
 const HOSTED_MODEL: &str = "openai/gpt-5.1";
+const XAI_JUDGE_MODEL: &str = "xai-oauth/grok-code-fast-1";
 
 const OPENAI_FACTS: &str = r#"
 [model."openai/gpt-5.1".capabilities]
@@ -34,6 +35,20 @@ uncached_input = "0.00000125"
 cache_read = "0.000000125"
 cache_write = "0.0000015625"
 output = "0.00001"
+"#;
+
+const XAI_FACTS: &str = r#"
+[model."xai-oauth/grok-code-fast-1".capabilities]
+schema_version = 2
+max_context_tokens = 400000
+max_output_tokens = 128000
+max_tools = 128
+supports_parallel_tool_calls = true
+reasoning_carryover = "same_provider_only"
+reasoning_efforts = "any"
+cancel = "cooperative"
+cache = "long"
+transport = "sse"
 "#;
 
 fn judge_response(verdict: &str, reason: &str) -> Reply {
@@ -364,6 +379,66 @@ fn incompatible_judge_capabilities_refuse_before_generation_or_session_creation(
                 .next()
                 .is_none(),
         "judge preflight must not create a durable session: {}",
+        sessions.display()
+    );
+}
+
+#[test]
+fn inexpressible_judge_wire_refuses_before_generation_or_session_creation() {
+    let stub = Stub::start(Plan::default());
+    let ego = Ego::against(&stub);
+    let config = ego.home_file(
+        "config.toml",
+        &format!("[permissions]\njudge = \"{XAI_JUDGE_MODEL}\"\n"),
+    );
+    ego.home_file("models.toml", XAI_FACTS);
+    ego.home_file(
+        "auth.json",
+        r#"{"xai-oauth":{"type":"o_auth","access":"access-token"}}"#,
+    );
+
+    let finished = ego
+        .args([
+            "--model",
+            MODEL,
+            "--mode",
+            "auto",
+            "--sandbox",
+            "off",
+            "--output",
+            "json",
+            "Ask",
+        ])
+        .run();
+
+    assert_eq!(
+        finished.code,
+        Some(2),
+        "an inexpressible judge request was not a startup usage error; stderr={:?}; stdout={:?}",
+        finished.stderr,
+        finished.stdout,
+    );
+    assert!(
+        finished.stderr.contains(XAI_JUDGE_MODEL),
+        "the preflight refusal did not name the judge model: {}",
+        finished.stderr
+    );
+    assert_eq!(
+        stub.generations().len(),
+        0,
+        "an inexpressible judge must not make a provider generation"
+    );
+    let sessions = config
+        .parent()
+        .expect("config has a home directory")
+        .join("sessions");
+    assert!(
+        !sessions.exists()
+            || std::fs::read_dir(&sessions)
+                .expect("the sessions directory is readable")
+                .next()
+                .is_none(),
+        "judge wire preflight must not create a durable session: {}",
         sessions.display()
     );
 }

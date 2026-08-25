@@ -33,17 +33,17 @@ between an interactive terminal, a pipeline, and an ACP host.
 ## What works today
 
 The working binary provides interactive sessions, headless runs, durable
-resume/listing, subscription login and an ACP server. Ollama and OpenAI remain
-selectable directly; current subscription profiles use `ego auth`. Commands
-whose subsystem has not landed are refused by name instead of being advertised
-as working.
+resume/listing, a shared current-model catalogue, subscription login and an ACP
+server. Ollama and OpenAI remain selectable directly; current subscription
+profiles use `ego auth`. Commands whose subsystem has not landed are refused by
+name instead of being advertised as working.
 
 ## Quickstart
 
-Available entry points are `ego [PROMPT]`, `ego run`, `ego resume`, `ego ls`
-and `ego acp`, plus `ego auth` for subscription credentials. Promptless
-`ego resume [ID]` re-enters the interactive driver; a resume carrying a prompt
-or `-` stays headless.
+Available entry points are `ego [PROMPT]`, `ego run`, `ego resume`, `ego ls`,
+`ego models` and `ego acp`, plus `ego auth` for subscription credentials.
+Promptless `ego resume [ID]` re-enters the interactive driver; a resume carrying
+a prompt or `-` stays headless.
 
 For a subscription profile, log in before selecting its model:
 
@@ -58,6 +58,7 @@ Start Ollama, install a model, then open an interactive εgo session:
 
 ```sh
 ollama pull qwen3
+ego models --provider ollama --refresh
 cargo run -p ego-cli -- -m ollama/qwen3
 ```
 
