@@ -1,39 +1,148 @@
-//! RED contract for the shared catalogue picker and atomic user-config path.
+//! RED contract for the shared catalogue picker and atomic user-config port.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-use ego_ai::catalogue::{FactFreshness, ModelAvailability, ModelAvailabilityCause};
-use ego_core::config::{ConfigLayer, ModelRef, Source};
+use ego_ai::catalogue::{
+    FactFreshness, ModelAvailability, ModelAvailabilityCause, ModelCatalogueEntry,
+    ModelCatalogueSnapshot, ModelCatalogueSourceStatus, ModelFactProvenance, ModelSlug,
+    SuppliedAuthority,
+};
+use ego_core::config::{
+    ConfigLayer, ModelRef, Source, UserConfigError, UserConfigMutation, UserConfigStore,
+};
+use ego_core::generator::capabilities::{
+    CacheRetention, CancelSemantics, ModelCapabilities, ReasoningCarryover,
+    ReasoningEffortSupport, Transport,
+};
 use ego_core::generator::types::ThinkingLevel;
+use ego_core::public::MeteringKind;
 use ego_cli::model::GenerationSelection;
 use ego_cli::model_picker::{ModelPicker, PickerKey, PickerOutcome};
 
+fn capabilities() -> ModelCapabilities {
+    ModelCapabilities {
+        schema_version: 1,
+        max_context_tokens: Some(128_000),
+        max_output_tokens: Some(16_000),
+        max_tools: Some(128),
+        supports_parallel_tool_calls: true,
+        reasoning_carryover: ReasoningCarryover::Portable,
+        reasoning_efforts: ReasoningEffortSupport::Any,
+        reasoning_state_dialect: None,
+        cancel: CancelSemantics::Cooperative,
+        cache: CacheRetention::Short,
+        transport: Transport::Sse,
+    }
+}
+
+fn entry(
+    slug: &str,
+    provenance: ModelFactProvenance,
+    metering: MeteringKind,
+    availability: ModelAvailability,
+) -> ModelCatalogueEntry {
+    ModelCatalogueEntry {
+        slug: ModelSlug::parse(slug).unwrap(),
+        capabilities: capabilities(),
+        metering,
+        provenance,
+        freshness: FactFreshness::Current,
+        availability,
+    }
+}
+
+fn source(
+    provider: &str,
+    provenance: ModelFactProvenance,
+    availability: ModelAvailability,
+) -> ModelCatalogueSourceStatus {
+    ModelCatalogueSourceStatus {
+        provider: provider.into(),
+        provenance,
+        freshness: FactFreshness::Current,
+        availability,
+    }
+}
+
+fn catalogue() -> Arc<ModelCatalogueSnapshot> {
+    let openai = ModelFactProvenance::supplied(SuppliedAuthority::System);
+    let ollama = ModelFactProvenance::discovered("ollama");
+    Arc::new(ModelCatalogueSnapshot::from_entries_and_sources(
+        vec![
+            entry("openai/gpt-5.6", openai.clone(), MeteringKind::Currency, ModelAvailability::Available),
+            entry("ollama/qwen3", ollama.clone(), MeteringKind::Unmetered, ModelAvailability::Available),
+        ],
+        vec![
+            source("openai", openai, ModelAvailability::Available),
+            source("ollama", ollama, ModelAvailability::Available),
+        ],
+    ))
+}
+
+#[derive(Clone)]
+struct RecordingUserConfigStore {
+    mutations: Arc<Mutex<Vec<UserConfigMutation>>>,
+    fail: bool,
+}
+
+impl RecordingUserConfigStore {
+    fn new(fail: bool) -> Self {
+        Self {
+            mutations: Arc::new(Mutex::new(Vec::new())),
+            fail,
+        }
+    }
+
+    fn mutations(&self) -> Vec<UserConfigMutation> {
+        self.mutations.lock().unwrap().clone()
+    }
+}
+
+impl UserConfigStore for RecordingUserConfigStore {
+    fn mutate(&self, mutation: UserConfigMutation) -> Result<(), UserConfigError> {
+        self.mutations.lock().unwrap().push(mutation);
+        if self.fail {
+            Err(UserConfigError::new("injected user-config replace failure"))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+fn selection() -> Arc<GenerationSelection> {
+    Arc::new(GenerationSelection::new(
+        ModelRef("openai/gpt-5.6".into()),
+        ThinkingLevel::Medium,
+    ))
+}
+
 #[test]
 fn picker_and_models_use_one_snapshot_identity_order_and_availability() {
-    let snapshot = Arc::new(ego_cli::models::build_catalogue_snapshot());
+    let snapshot = catalogue();
     let picker = ModelPicker::new(Arc::clone(&snapshot));
 
     assert!(Arc::ptr_eq(picker.snapshot(), &snapshot));
     assert_eq!(picker.entries(), snapshot.models.as_slice());
     assert_eq!(picker.sources(), snapshot.sources.as_slice());
     assert_eq!(snapshot.v, 1);
-    assert!(snapshot
-        .models
-        .windows(2)
-        .all(|rows| rows[0].slug <= rows[1].slug));
+    assert_eq!(
+        snapshot.models.iter().map(|row| row.slug.to_string()).collect::<Vec<_>>(),
+        ["ollama/qwen3", "openai/gpt-5.6"],
+    );
+    assert_eq!(
+        snapshot.sources.iter().map(|source| source.provider.as_str()).collect::<Vec<_>>(),
+        ["ollama", "openai"],
+    );
     assert!(snapshot.models.iter().all(|row| match row.availability {
         ModelAvailability::Available => true,
         ModelAvailability::Unavailable { .. } => !picker.can_select(&row.slug),
-    }));
-    assert!(snapshot.models.iter().all(|row| {
-        matches!(row.freshness, FactFreshness::Current | FactFreshness::Cached)
     }));
 }
 
 #[test]
 fn picker_does_not_define_a_second_model_row_or_reorder_shared_entries() {
-    let snapshot = ego_cli::models::build_catalogue_snapshot();
-    let picker = ModelPicker::new(Arc::new(snapshot.clone()));
+    let snapshot = catalogue();
+    let picker = ModelPicker::new(Arc::clone(&snapshot));
     assert_eq!(picker.row_count(), snapshot.models.len());
     assert_eq!(picker.slugs(), snapshot.models.iter().map(|row| row.slug.clone()).collect::<Vec<_>>());
     assert_eq!(picker.reasoning_efforts(), snapshot.models.iter().map(|row| row.capabilities.reasoning_efforts.clone()).collect::<Vec<_>>());
@@ -51,63 +160,63 @@ fn absent_thinking_flag_preserves_file_value_and_unknown_keys_fail_strictly() {
 }
 
 #[test]
-fn picker_escape_changes_neither_memory_nor_disk_and_s_commits_memory_only() {
-    let selection = Arc::new(GenerationSelection::new(
-        ModelRef("openai/gpt-5.6".into()),
-        ThinkingLevel::Medium,
-    ));
-    let mut picker = ModelPicker::for_selection(
-        ego_cli::models::build_catalogue_snapshot(),
-        Arc::clone(&selection),
-        "# keep\nmodel = 'openai/gpt-5.6'\nthinking = 'medium'\nbare = true\n",
-    );
-    let before = picker.config_text();
-    assert_eq!(picker.key(PickerKey::Escape), PickerOutcome::Cancelled);
-    assert_eq!(picker.config_text(), before);
+fn escape_and_session_only_record_no_user_config_mutation() {
+    let store = RecordingUserConfigStore::new(false);
+    let selection = selection();
+    let mut picker = ModelPicker::for_selection(catalogue(), Arc::clone(&selection), Arc::new(store.clone()));
+    assert_eq!(picker.key(PickerKey::Escape).unwrap(), PickerOutcome::Cancelled);
+    assert!(store.mutations().is_empty());
     assert_eq!(picker.selection(), ("openai/gpt-5.6", ThinkingLevel::Medium));
 
-    picker.reopen();
+    let store = RecordingUserConfigStore::new(false);
+    let selection = selection();
+    let mut picker = ModelPicker::for_selection(catalogue(), Arc::clone(&selection), Arc::new(store.clone()));
     picker.choose("openai/gpt-5.6", ThinkingLevel::High).unwrap();
-    assert_eq!(picker.key(PickerKey::SessionOnly), PickerOutcome::SessionInstalled);
-    assert_eq!(picker.selection().1, ThinkingLevel::High);
-    assert_eq!(picker.config_text(), before);
+    assert_eq!(picker.key(PickerKey::SessionOnly).unwrap(), PickerOutcome::SessionInstalled);
+    assert!(store.mutations().is_empty());
+    assert_eq!(picker.selection(), ("openai/gpt-5.6", ThinkingLevel::High));
 }
 
 #[test]
-fn enter_replaces_user_defaults_only_after_disk_commit_and_preserves_comments_order() {
-    let selection = Arc::new(GenerationSelection::new(
-        ModelRef("openai/gpt-5.6".into()),
-        ThinkingLevel::Medium,
-    ));
-    let mut picker = ModelPicker::for_selection(
-        ego_cli::models::build_catalogue_snapshot(),
-        selection,
-        "# preserve\nmodel = 'openai/gpt-5.6'\n\nthinking = 'medium'\nbare = true\n",
-    );
+fn enter_records_one_typed_mutation_then_installs_memory() {
+    let store = RecordingUserConfigStore::new(false);
+    let selection = selection();
+    let mut picker = ModelPicker::for_selection(catalogue(), Arc::clone(&selection), Arc::new(store.clone()));
     picker.choose("openai/gpt-5.6", ThinkingLevel::High).unwrap();
-    assert_eq!(picker.key(PickerKey::Enter), PickerOutcome::Persisted);
-    let persisted = picker.config_text();
-    assert!(persisted.contains("# preserve"));
-    assert!(persisted.find("model").unwrap() < persisted.find("thinking").unwrap());
-    let parsed = ConfigLayer::parse(Source::User, &persisted).unwrap();
-    assert_eq!(parsed.value.model, Some(ModelRef("openai/gpt-5.6".into())));
-    assert_eq!(parsed.value.thinking, Some(ThinkingLevel::High));
-    assert_eq!(picker.disk_written_before_memory_install(), true);
+    assert_eq!(picker.key(PickerKey::Enter).unwrap(), PickerOutcome::Persisted);
+    assert_eq!(store.mutations(), vec![UserConfigMutation::ModelAndThinking {
+        model: "openai/gpt-5.6".into(),
+        thinking: ThinkingLevel::High,
+    }]);
+    assert_eq!(picker.selection(), ("openai/gpt-5.6", ThinkingLevel::High));
 }
 
 #[test]
-fn every_generation_reresolves_selected_slug_against_current_catalogue_authority() {
+fn failed_enter_records_the_typed_mutation_but_keeps_memory_unchanged() {
+    let store = RecordingUserConfigStore::new(true);
+    let selection = selection();
+    let mut picker = ModelPicker::for_selection(catalogue(), Arc::clone(&selection), Arc::new(store.clone()));
+    picker.choose("openai/gpt-5.6", ThinkingLevel::High).unwrap();
+    let _error = picker.key(PickerKey::Enter).unwrap_err();
+    assert_eq!(store.mutations(), vec![UserConfigMutation::ModelAndThinking {
+        model: "openai/gpt-5.6".into(),
+        thinking: ThinkingLevel::High,
+    }]);
+    assert_eq!(picker.selection(), ("openai/gpt-5.6", ThinkingLevel::Medium));
+}
+
+#[test]
+fn replacing_the_snapshot_updates_picker_availability_without_a_second_catalogue() {
     let selection = Arc::new(GenerationSelection::new(
         ModelRef("ollama/qwen3".into()),
         ThinkingLevel::Low,
     ));
     let mut picker = ModelPicker::for_selection(
-        ego_cli::models::build_catalogue_snapshot(),
+        catalogue(),
         selection,
-        "model = 'ollama/qwen3'\nthinking = 'low'\n",
+        Arc::new(RecordingUserConfigStore::new(false)),
     );
-    let first = picker.generation_boundary_resolution();
-    let mut unavailable = ego_cli::models::build_catalogue_snapshot();
+    let mut unavailable = (*catalogue()).clone();
     unavailable
         .models
         .iter_mut()
@@ -117,8 +226,8 @@ fn every_generation_reresolves_selected_slug_against_current_catalogue_authority
         cause: ModelAvailabilityCause::SourceUnreachable,
         message: "provider unavailable".into(),
     };
-    picker.replace_snapshot(unavailable);
-    let second = picker.generation_boundary_resolution();
-    assert_ne!(first.authority_revision(), second.authority_revision());
-    assert!(second.is_unavailable());
+    let unavailable = Arc::new(unavailable);
+    picker.replace_snapshot(Arc::clone(&unavailable));
+    assert!(Arc::ptr_eq(picker.snapshot(), &unavailable));
+    assert!(!picker.can_select(&ModelSlug::parse("ollama/qwen3").unwrap()));
 }

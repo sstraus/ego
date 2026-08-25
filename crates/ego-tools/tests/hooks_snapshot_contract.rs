@@ -137,8 +137,8 @@ impl Fixture {
 }
 
 #[test]
-fn snapshot_version_is_five_and_validation_exposes_exact_rejection_set() {
-    assert_eq!(SNAPSHOT_VERSION, 5);
+fn snapshot_version_is_six_and_validation_exposes_exact_rejection_set() {
+    assert_eq!(SNAPSHOT_VERSION, 6);
     let fixture = Fixture::new();
     let state = fixture.full_replay();
     assert_eq!(state.hook_settlements().len(), 1);
