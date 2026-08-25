@@ -18,7 +18,7 @@ use ego_acp::question::{
     AcpQuestionAdapter, CapabilityCapture, QuestionMappingError, QuestionRequest,
 };
 use ego_core::event::id::ItemId;
-use ego_core::question::{Elicitor, QuestionMode, QuestionOption, QuestionOutcome};
+use ego_core::question::{QuestionMode, QuestionOption, QuestionOutcome};
 
 fn single_request() -> QuestionRequest {
     QuestionRequest::new(

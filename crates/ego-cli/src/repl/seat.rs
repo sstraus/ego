@@ -2595,6 +2595,7 @@ mod tests {
             },
             drafts: 0,
             notice: None,
+            ..SurfaceStatus::default()
         }));
         let waiting = Waiting::new(status);
 
