@@ -13,6 +13,7 @@ use crate::cost::CostDelta;
 use crate::generator::attempt::{AttemptRef, Outcome};
 use crate::generator::types::{ErrorKind, ReasoningState};
 use crate::permit::{Authority, Escalation, ExecObservation, ToolResult};
+use crate::question::{QuestionOutcome, QuestionRequest};
 use crate::state::Usage;
 
 /// The full envelope every `DomainEvent` carries, per ARCH §1: a monotonic
@@ -227,6 +228,16 @@ pub enum EventKind {
     /// codec-v6 shape: replacing the old string is deliberately not decoded
     /// as a compatibility spelling.
     ToolCallCompleted { ok: bool, result: ToolResult },
+    /// A typed human-input request became durable before any host was asked.
+    /// The envelope's item is the sole question identity; `tool_call` names
+    /// the pure model tool whose result this question will eventually close.
+    QuestionRequested {
+        request: QuestionRequest,
+        tool_call: ItemId,
+    },
+    /// The terminal human-input outcome, correlated by the same envelope item
+    /// as [`QuestionRequested`](Self::QuestionRequested).
+    QuestionSettled { outcome: QuestionOutcome },
     /// A sensitive action needs a permission decision.
     ///
     /// Structured rather than a rendered `description`, because the question
@@ -401,6 +412,8 @@ impl EventKind {
             EventKind::ToolCallStarted { .. } => "tool_call_started",
             EventKind::ToolCallDelta { .. } => "tool_call_delta",
             EventKind::ToolCallCompleted { .. } => "tool_call_completed",
+            EventKind::QuestionRequested { .. } => "question_requested",
+            EventKind::QuestionSettled { .. } => "question_settled",
             EventKind::PermissionRequested { .. } => "permission_requested",
             EventKind::PermissionAmended { .. } => "permission_amended",
             EventKind::PermissionDecided { .. } => "permission_decided",

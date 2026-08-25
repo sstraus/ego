@@ -22,6 +22,7 @@ use ego_core::generation_model_source::{
     GenerationRole,
 };
 use ego_core::generator::capabilities::ModelCapabilities;
+use ego_core::generator::types::ThinkingLevel;
 use ego_core::permit::judge::{JudgeConfig, JudgeInput};
 use ego_core::permit::{
     CanonPath, Change, Escalation, ExecCaps, ExecObservation, HumanApprover, Op, OpName,
@@ -1000,7 +1001,7 @@ async fn execute<S: EventSink>(
     };
     let source = model::CliGenerationModelSource::new(
         ego_core::config::ModelRef(slug),
-        args.thinking,
+        effective.thinking.unwrap_or(ThinkingLevel::Off),
         judge_identity,
         effective.ceilings.clone(),
         effective.auth.clone(),
@@ -1653,6 +1654,10 @@ pub fn diagnose(termination: &RunTermination, broken: Option<String>) {
             message.clone()
         }
         RunTermination::Failed { message } => message.clone(),
+        RunTermination::QuestionRequired { question } => format!(
+            "stopped: human input required — answer with `ego resume --answer {}=JSON`",
+            question.id
+        ),
         // Two sentences, because one of them was about to be false. "Nobody
         // could grant it" describes a question the evaluation order exhausted;
         // said of a refusal somebody made, it denies that anybody decided,

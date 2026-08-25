@@ -38,6 +38,16 @@ pub fn tmp_path_for(path: &Path) -> PathBuf {
     PathBuf::from(name)
 }
 
+/// Whether an atomic replacement was published with confirmed durability.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AtomicReplacePublication {
+    /// Rename published the replacement and the parent directory was synced.
+    PublishedDurably,
+    /// Rename published the replacement, but the parent-directory durability
+    /// operation failed. The diagnostic is the unhidden OS failure.
+    PublishedDurabilityUncertain { diagnostic: String },
+}
+
 /// The filesystem operations the durable session adapters need, and nothing else.
 pub trait StoreIo: Send + Sync {
     /// Create a new private staging file, refusing an existing name.
@@ -121,6 +131,24 @@ pub trait StoreIo: Send + Sync {
     /// directory entry itself can be lost).
     fn replace_atomic(&self, path: &Path, bytes: &[u8]) -> io::Result<()>;
 
+    /// Replace `path` while distinguishing errors before publication from a
+    /// failed durability operation after the rename made new bytes visible.
+    ///
+    /// Adapters must implement this only when they can prove that phase
+    /// boundary. The default fails without performing I/O, so a generic fake
+    /// cannot accidentally claim durable publication by forwarding the older
+    /// phase-erasing method.
+    fn replace_atomic_publication(
+        &self,
+        _path: &Path,
+        _bytes: &[u8],
+    ) -> io::Result<AtomicReplacePublication> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "phase-aware atomic replacement is not implemented",
+        ))
+    }
+
     /// Shorten the file at `path` to `len` bytes, discarding everything
     /// past it. Used by tail repair to drop a torn final line
     /// (`plans/m0a-contracts.md` Step 6); a whole-file rewrite through
@@ -140,11 +168,13 @@ pub trait StoreIo: Send + Sync {
 
 /// Whether a durability barrier actually reaches the device.
 ///
-/// The *only* thing that differs between [`OsIo`] and [`NonDurableOsIo`].
-/// Every filesystem operation below is written once and takes this as a
-/// parameter, so the two types cannot drift into two different sets of
-/// rename/truncate semantics — which is the one way a barrier-free variant
-/// could quietly stop testing what the real one does.
+/// The only thing that differs in the legacy filesystem operations shared by
+/// [`OsIo`] and [`NonDurableOsIo`]. Every such operation below is written once
+/// and takes this as a parameter, so the two types cannot drift into different
+/// rename/truncate semantics. The phase-aware publication method is the one
+/// deliberate exception: `NonDurableOsIo` leaves its default unsupported,
+/// because an adapter that elides durability barriers cannot report one as
+/// confirmed.
 /// Without `test-support` this enum has exactly one variant, so eliding a
 /// barrier is not merely discouraged in a production build — it cannot be
 /// spelled.
@@ -169,9 +199,19 @@ impl Barrier {
     }
 }
 
-/// [`StoreIo::replace_atomic`], with `barrier` deciding whether the two
-/// fsyncs it describes are issued. The tmp+rename half is unconditional.
-fn replace_atomic_with(path: &Path, bytes: &[u8], barrier: Barrier) -> io::Result<()> {
+/// The internal publication result retains the original I/O error so legacy
+/// callers keep its kind while the phase-aware port receives its diagnostic.
+enum ReplacePublication {
+    PublishedDurably,
+    PublishedDurabilityUncertain(io::Error),
+}
+
+/// Atomic replacement with the rename boundary represented explicitly.
+fn replace_atomic_publication_with(
+    path: &Path,
+    bytes: &[u8],
+    barrier: Barrier,
+) -> io::Result<ReplacePublication> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -197,9 +237,23 @@ fn replace_atomic_with(path: &Path, bytes: &[u8], barrier: Barrier) -> io::Resul
     // storage, but the directory entry pointing at them is a separate
     // write that a crash can still lose.
     if let Some(parent) = path.parent() {
-        barrier.apply(&fs::File::open(parent)?)?;
+        let directory = match fs::File::open(parent) {
+            Ok(directory) => directory,
+            Err(error) => return Ok(ReplacePublication::PublishedDurabilityUncertain(error)),
+        };
+        if let Err(error) = barrier.apply(&directory) {
+            return Ok(ReplacePublication::PublishedDurabilityUncertain(error));
+        }
     }
-    Ok(())
+    Ok(ReplacePublication::PublishedDurably)
+}
+
+/// Preserve the original phase-erasing contract for every existing caller.
+fn replace_atomic_with(path: &Path, bytes: &[u8], barrier: Barrier) -> io::Result<()> {
+    match replace_atomic_publication_with(path, bytes, barrier)? {
+        ReplacePublication::PublishedDurably => Ok(()),
+        ReplacePublication::PublishedDurabilityUncertain(error) => Err(error),
+    }
 }
 
 /// [`StoreIo::truncate`], with `barrier` deciding whether the shortened
@@ -376,6 +430,23 @@ impl StoreIo for OsIo {
         replace_atomic_with(path, bytes, Barrier::Fsync)
     }
 
+    fn replace_atomic_publication(
+        &self,
+        path: &Path,
+        bytes: &[u8],
+    ) -> io::Result<AtomicReplacePublication> {
+        match replace_atomic_publication_with(path, bytes, Barrier::Fsync)? {
+            ReplacePublication::PublishedDurably => {
+                Ok(AtomicReplacePublication::PublishedDurably)
+            }
+            ReplacePublication::PublishedDurabilityUncertain(error) => {
+                Ok(AtomicReplacePublication::PublishedDurabilityUncertain {
+                    diagnostic: error.to_string(),
+                })
+            }
+        }
+    }
+
     fn truncate(&self, path: &Path, len: u64) -> io::Result<()> {
         truncate_with(path, len, Barrier::Fsync)
     }
@@ -409,13 +480,15 @@ impl StoreIo for OsIo {
 /// changed**. For tests that sweep a large number of filesystem states and
 /// assert nothing about surviving a power loss.
 ///
-/// Every operation is the real one: the same `create_dir_all`, the same
-/// tmp-write-then-`rename`, the same `set_len`, the same `read_dir` — see
-/// `replace_atomic_with` and `truncate_with`, which both types share so
-/// there is exactly one implementation of these semantics. Only
-/// `Barrier::Fsync` becomes `Barrier::Elided`. A test running on this still
-/// meets real rename and truncate behaviour, and so still catches the class
-/// of bug a hand-written in-memory fake would stop catching.
+/// Every legacy operation is the real one: the same `create_dir_all`, the
+/// same tmp-write-then-`rename`, the same `set_len`, the same `read_dir` — see
+/// `replace_atomic_with` and `truncate_with`, which both types share so there
+/// is exactly one implementation of these semantics. Only `Barrier::Fsync`
+/// becomes `Barrier::Elided`. A test running on this still meets real rename
+/// and truncate behaviour, and so still catches the class of bug a hand-written
+/// in-memory fake would stop catching. It intentionally does not override
+/// [`StoreIo::replace_atomic_publication`]: no elided barrier may claim durable
+/// publication.
 ///
 /// **What is given up, precisely:** a crash after one of these calls returns
 /// may leave the old contents, or a lost directory entry, or a torn tail

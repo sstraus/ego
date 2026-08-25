@@ -38,7 +38,6 @@ use agent_client_protocol::{ConnectTo, Stdio};
 use agent_client_protocol_schema::v1;
 use ego_acp::project::stop_reason_v1;
 use ego_acp::serve::{Turn, Turns};
-use ego_core::generator::types::ThinkingLevel;
 use ego_core::run::RunTermination;
 
 use crate::cli::{AcpArgs, Args, Output, SessionChoice, Stdin};
@@ -112,7 +111,7 @@ impl Host {
             model: None,
             offline: false,
             sandbox: None,
-            thinking: ThinkingLevel::Off,
+            thinking: None,
             system: None,
             append_system: None,
             instructions: None,
@@ -127,6 +126,7 @@ impl Host {
             mode: None,
             allow: Vec::new(),
             deny: Vec::new(),
+            answers: Vec::new(),
             // `Id` and not `Resume`: `session/new` minted this id before the
             // session existed, so the first prompt has to create it and every
             // later one has to attach to it — which is precisely what `Id`

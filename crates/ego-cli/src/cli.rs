@@ -24,7 +24,7 @@ use std::str::FromStr;
 use clap::error::ErrorKind;
 use clap::{ArgAction, Args as ClapArgs, Parser, Subcommand};
 use ego_core::config::Mode;
-use ego_core::event::id::SessionId;
+use ego_core::event::id::{ItemId, SessionId};
 use ego_core::generator::types::ThinkingLevel;
 use ego_core::permit::Confinement;
 
@@ -358,7 +358,7 @@ pub struct Args {
     /// leaves precedence resolution to config; the effective default is
     /// `workspace`.
     pub sandbox: Option<Confinement>,
-    pub thinking: ThinkingLevel,
+    pub thinking: Option<ThinkingLevel>,
     pub system: Option<String>,
     pub append_system: Option<String>,
     pub instructions: Option<PathBuf>,
@@ -376,6 +376,9 @@ pub struct Args {
     /// config file go through exactly one parser.
     pub allow: Vec<String>,
     pub deny: Vec<String>,
+    /// Answers that settle pending questions while resuming this session.
+    /// Empty for every command except `resume --answer`.
+    pub answers: Vec<ResumeAnswer>,
     pub session: SessionChoice,
     pub session_dir: Option<PathBuf>,
     pub output: Output,
@@ -390,6 +393,13 @@ pub struct Args {
     pub profile: Option<String>,
     pub quiet: bool,
     pub no_color: bool,
+}
+
+/// One validated `resume --answer QUESTION_ID=JSON` value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResumeAnswer {
+    pub id: ItemId,
+    pub json: String,
 }
 
 /// The clap definition. Kept separate from [`Args`] so that the shape the
@@ -423,6 +433,15 @@ struct ResumeCommand {
 
     /// The prompt. `-` reads it from stdin.
     prompt: Option<String>,
+
+    /// Settle a pending question. Repeat for multiple sibling questions.
+    #[arg(
+        long = "answer",
+        value_name = "QUESTION_ID=JSON",
+        action = ArgAction::Append,
+        value_parser = parse_resume_answer
+    )]
+    answers: Vec<ResumeAnswer>,
 
     #[command(flatten)]
     flags: Flags,
@@ -565,8 +584,8 @@ struct Flags {
     sandbox: Option<Confinement>,
 
     /// off|minimal|low|medium|high|xhigh|max
-    #[arg(long, value_parser = parse_thinking, default_value = "off")]
-    thinking: ThinkingLevel,
+    #[arg(long, value_parser = parse_thinking)]
+    thinking: Option<ThinkingLevel>,
 
     /// Replace the system prompt. `@file` reads it from a file.
     #[arg(long)]
@@ -694,6 +713,20 @@ fn parse_thinking(value: &str) -> Result<ThinkingLevel, String> {
             "`{other}` is not a thinking level: off|minimal|low|medium|high|xhigh|max"
         )),
     }
+}
+
+fn parse_resume_answer(value: &str) -> Result<ResumeAnswer, String> {
+    let (id, json) = value.split_once('=').ok_or_else(|| {
+        "an answer must be QUESTION_ID=JSON; the first `=` separates the stable id from JSON"
+            .to_string()
+    })?;
+    let id = ItemId::from_str(id).map_err(|error| format!("`{id}` is not a question id: {error}"))?;
+    serde_json::from_str::<serde_json::Value>(json)
+        .map_err(|error| format!("the answer for {id} is not valid JSON: {error}"))?;
+    Ok(ResumeAnswer {
+        id,
+        json: json.to_string(),
+    })
 }
 
 /// Split `argv` at the first bare `--`.
@@ -869,7 +902,10 @@ pub fn parse(argv: Vec<String>) -> Result<Invocation, UsageError> {
             Parsed::Answered(text) => Ok(Invocation::Answered(text)),
             Parsed::Command(parsed) => {
                 let args = into_resume_args(parsed)?;
-                if args.prompt.is_none() && args.stdin == Stdin::Ambient {
+                if args.prompt.is_none()
+                    && args.stdin == Stdin::Ambient
+                    && args.answers.is_empty()
+                {
                     Ok(Invocation::Interactive(Box::new(args)))
                 } else {
                     Ok(Invocation::Resume(Box::new(args)))
@@ -935,7 +971,12 @@ pub fn parse(argv: Vec<String>) -> Result<Invocation, UsageError> {
 /// than silently demoted to a prompt that would then have a stray argument
 /// after it.
 fn into_resume_args(command: ResumeCommand) -> Result<Args, UsageError> {
-    let ResumeCommand { id, prompt, flags } = command;
+    let ResumeCommand {
+        id,
+        prompt,
+        answers,
+        flags,
+    } = command;
 
     for (given, flag) in [
         (flags.session.is_some(), "--session"),
@@ -966,6 +1007,7 @@ fn into_resume_args(command: ResumeCommand) -> Result<Args, UsageError> {
 
     let mut args = into_args(RunCommand { prompt, flags })?;
     args.session = SessionChoice::Resume(id);
+    args.answers = answers;
     Ok(args)
 }
 
@@ -1025,6 +1067,7 @@ fn into_args(command: RunCommand) -> Result<Args, UsageError> {
         mode,
         allow: flags.allow,
         deny: flags.deny,
+        answers: Vec::new(),
         session,
         session_dir: flags.common.places.session_dir,
         output: flags.common.output,

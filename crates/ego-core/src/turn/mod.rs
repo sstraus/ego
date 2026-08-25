@@ -54,6 +54,59 @@ pub use control::{
 pub use journal::Journal;
 pub use tools::Tools;
 
+/// The final model-visible registry. Only `Effect` enters preparation,
+/// permission policy, and guarded I/O; human input crosses its own typed port.
+#[derive(Clone)]
+pub enum RegisteredTool {
+    Effect(Arc<dyn crate::permit::Tool>),
+    HumanInput(Arc<dyn crate::question::HumanInputTool>),
+}
+
+impl RegisteredTool {
+    pub fn descriptor(&self) -> crate::generator::types::ToolDescriptor {
+        match self {
+            Self::Effect(tool) => {
+                let descriptor = tool.descriptor();
+                crate::generator::types::ToolDescriptor {
+                    name: descriptor.name,
+                    description: descriptor.description,
+                    parameters: descriptor.schema.to_value(),
+                }
+            }
+            Self::HumanInput(tool) => tool.descriptor(),
+        }
+    }
+
+    pub fn as_effect(&self) -> Option<&Arc<dyn crate::permit::Tool>> {
+        match self {
+            Self::Effect(tool) => Some(tool),
+            Self::HumanInput(_) => None,
+        }
+    }
+
+    pub fn as_human_input(&self) -> Option<&Arc<dyn crate::question::HumanInputTool>> {
+        match self {
+            Self::HumanInput(tool) => Some(tool),
+            Self::Effect(_) => None,
+        }
+    }
+}
+
+impl From<Arc<dyn crate::permit::Tool>> for RegisteredTool {
+    fn from(tool: Arc<dyn crate::permit::Tool>) -> Self {
+        Self::Effect(tool)
+    }
+}
+
+impl<T> From<Arc<T>> for RegisteredTool
+where
+    T: crate::permit::Tool + 'static,
+{
+    fn from(tool: Arc<T>) -> Self {
+        Self::Effect(tool)
+    }
+}
+
 /// A cooperative cancellation signal
 /// (`docs/decisions/2026-08-21-the-turn-loop.md` §4).
 ///
@@ -1695,7 +1748,10 @@ impl<'a> TurnLoop<'a> {
                                             tool: request.tool().to_string(),
                                         },
                                     )?;
-                                    prepared = match self.tools.prepare_amendment(tool, params) {
+                                    prepared = match self
+                                        .tools
+                                        .prepare_amendment(tool.as_ref(), params)
+                                    {
                                         Ok(prepared) => prepared,
                                         Err(refusal) => return Ok(answered(false, refusal)),
                                     };
@@ -1730,7 +1786,10 @@ impl<'a> TurnLoop<'a> {
                                     tool: request.tool().to_string(),
                                 },
                             )?;
-                            prepared = match self.tools.prepare_amendment(tool, params) {
+                            prepared = match self
+                                .tools
+                                .prepare_amendment(tool.as_ref(), params)
+                            {
                                 Ok(prepared) => prepared,
                                 Err(refusal) => return Ok(answered(false, refusal)),
                             };
@@ -1744,7 +1803,7 @@ impl<'a> TurnLoop<'a> {
             &self.cancel,
             &mut self.control,
             turn,
-            self.tools.execute(tool, authorized),
+            self.tools.execute(tool.as_ref(), authorized),
             InterruptDisposition::AwaitEffect,
         )
         .await;

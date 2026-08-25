@@ -164,6 +164,9 @@
 //! - **Permission items** — permissions travel over
 //!   `session/request_permission`, a request/response RPC pair the agent sends
 //!   the client, not a `session/update` notification.
+//! - **Question items** — questions travel over unstable form elicitation, a
+//!   request/response RPC pair with the stable question item as its scope, not
+//!   as transcript chunks or tool-call updates.
 //! - **`Subagent` items** — no ACP 1.6.0 protocol concept.
 //! - **`Error`** — a mid-turn error surfaces as the JSON-RPC error response to
 //!   the `session/prompt` call, a different message shape (a response's error
@@ -269,6 +272,10 @@ pub fn stop_reason_v1(termination: &RunTermination) -> Result<v1::StopReason, St
         RunTermination::BudgetExceeded => {
             Err("the turn stopped because a budget ceiling was reached".to_string())
         }
+        RunTermination::QuestionRequired { question } => Err(format!(
+            "question {} still requires an answer; resume it with `ego resume --answer {}=JSON`",
+            question.id, question.id
+        )),
         // Split for the reason the line UI splits it (`ego-cli`'s
         // `termination_note`): "nobody could grant it" describes a question
         // the evaluation order exhausted, and said of a refusal somebody made
@@ -406,6 +413,7 @@ pub fn project_v1(event: &PublicEvent) -> Option<v1::SessionUpdate> {
             | ItemKind::Reasoning
             | ItemKind::Permission
             | ItemKind::Subagent => None,
+            ItemKind::Question => None,
         },
 
         PublicEvent::ItemDelta {
@@ -424,7 +432,10 @@ pub fn project_v1(event: &PublicEvent) -> Option<v1::SessionUpdate> {
             // cannot be represented without the accumulated content so far,
             // which a stateless per-event projection does not have.
             ItemKind::Tool => None,
-            ItemKind::UserMessage | ItemKind::Permission | ItemKind::Subagent => None,
+            ItemKind::UserMessage
+            | ItemKind::Permission
+            | ItemKind::Subagent => None,
+            ItemKind::Question => None,
         },
 
         PublicEvent::ItemCompleted {
@@ -457,7 +468,10 @@ pub fn project_v1(event: &PublicEvent) -> Option<v1::SessionUpdate> {
                         text.clone().unwrap_or_default(),
                     )]),
             ))),
-            ItemKind::Reasoning | ItemKind::Permission | ItemKind::Subagent => None,
+            ItemKind::Reasoning
+            | ItemKind::Permission
+            | ItemKind::Subagent => None,
+            ItemKind::Question => None,
         },
 
         // See the module doc comment's "no counterpart in either version"
@@ -496,6 +510,7 @@ pub fn project_v2(event: &PublicEvent) -> Option<v2::SessionUpdate> {
             | ItemKind::Reasoning
             | ItemKind::Permission
             | ItemKind::Subagent => None,
+            ItemKind::Question => None,
         },
 
         PublicEvent::ItemDelta {
@@ -515,7 +530,10 @@ pub fn project_v2(event: &PublicEvent) -> Option<v2::SessionUpdate> {
             ItemKind::Tool => Some(v2::SessionUpdate::ToolCallContentChunk(
                 v2::ToolCallContentChunk::new(item_id_string(*item), text.clone()),
             )),
-            ItemKind::UserMessage | ItemKind::Permission | ItemKind::Subagent => None,
+            ItemKind::UserMessage
+            | ItemKind::Permission
+            | ItemKind::Subagent => None,
+            ItemKind::Question => None,
         },
 
         PublicEvent::ItemCompleted {
@@ -543,7 +561,10 @@ pub fn project_v2(event: &PublicEvent) -> Option<v2::SessionUpdate> {
                     .status(tool_status_v2(*ok))
                     .content(vec![text.clone().unwrap_or_default().into()]),
             )),
-            ItemKind::Reasoning | ItemKind::Permission | ItemKind::Subagent => None,
+            ItemKind::Reasoning
+            | ItemKind::Permission
+            | ItemKind::Subagent => None,
+            ItemKind::Question => None,
         },
 
         // v2 added `StateUpdate` — a `session/update` reporting the agent's

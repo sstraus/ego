@@ -20,6 +20,7 @@
 
 use crate::event::domain::{CancelCause, ExitReason};
 use crate::permit::Authority;
+use crate::public::QuestionReport;
 
 /// Who refused the call that ended the run — or that nobody did.
 ///
@@ -97,6 +98,8 @@ pub enum RunTermination {
     ///
     /// [`MaxTurns`]: Self::MaxTurns
     PermissionRequired { action: String, by: DeniedBy },
+    /// A durable question awaits an answer from the invoking human.
+    QuestionRequired { question: QuestionReport },
     /// The provider or the network failed.
     Provider { message: String },
     /// Our own defect.
@@ -137,6 +140,7 @@ impl RunTermination {
             RunTermination::Failed { .. } => 1,
             RunTermination::UsageError { .. } => 2,
             RunTermination::PermissionRequired { .. } => 3,
+            RunTermination::QuestionRequired { .. } => 3,
             RunTermination::Provider { .. } => 4,
             RunTermination::BudgetExceeded => 5,
             RunTermination::MaxTurns => 5,
@@ -160,11 +164,25 @@ impl RunTermination {
             RunTermination::MaxTurns => "max_turns",
             RunTermination::TimedOut => "timeout",
             RunTermination::PermissionRequired { .. } => "permission",
+            RunTermination::QuestionRequired { .. } => "question",
             RunTermination::TaskFailed
             | RunTermination::UsageError { .. }
             | RunTermination::Provider { .. }
             | RunTermination::Failed { .. }
             | RunTermination::Signalled(_) => "error",
+        }
+    }
+
+    /// The core-owned completion fragment used by headless hosts. Rich CLI
+    /// accounting remains an adapter concern; the question itself does not.
+    pub fn report(&self) -> RunReport {
+        RunReport {
+            ok: matches!(self, Self::Done),
+            exit_reason: self.exit_reason(),
+            question: match self {
+                Self::QuestionRequired { question } => Some(question.clone()),
+                _ => None,
+            },
         }
     }
 
@@ -226,4 +244,13 @@ impl RunTermination {
             }),
         }
     }
+}
+
+/// Stable structured termination information owned by core.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct RunReport {
+    pub ok: bool,
+    pub exit_reason: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub question: Option<QuestionReport>,
 }

@@ -361,7 +361,7 @@ fn question_tool_is_human_input_not_an_effect_and_has_no_permission_op() {
         }
     }
 
-    let parser = Arc::new(FakeHumanInput);
+    let parser: Arc<dyn HumanInputTool> = Arc::new(FakeHumanInput);
     let registered = RegisteredTool::HumanInput(Arc::clone(&parser));
     assert!(matches!(registered, RegisteredTool::HumanInput(_)));
     assert!(registered.as_effect().is_none());

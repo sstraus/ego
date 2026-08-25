@@ -116,6 +116,18 @@ fn selection() -> Arc<GenerationSelection> {
     ))
 }
 
+fn assert_selection(
+    selection: &GenerationSelection,
+    model: &str,
+    thinking: ThinkingLevel,
+) {
+    let snapshot = selection
+        .snapshot()
+        .expect("the shared generation selection is readable");
+    assert_eq!(snapshot.identity, ModelRef(model.into()));
+    assert_eq!(snapshot.thinking, thinking);
+}
+
 #[test]
 fn picker_and_models_use_one_snapshot_identity_order_and_availability() {
     let snapshot = catalogue();
@@ -162,19 +174,27 @@ fn absent_thinking_flag_preserves_file_value_and_unknown_keys_fail_strictly() {
 #[test]
 fn escape_and_session_only_record_no_user_config_mutation() {
     let store = RecordingUserConfigStore::new(Ok(UserConfigPublication::PublishedDurably));
-    let selection = selection();
-    let mut picker = ModelPicker::for_selection(catalogue(), Arc::clone(&selection), Arc::new(store.clone()));
+    let escape_selection = selection();
+    let mut picker = ModelPicker::for_selection(
+        catalogue(),
+        Arc::clone(&escape_selection),
+        Arc::new(store.clone()),
+    );
     assert_eq!(picker.key(PickerKey::Escape).unwrap(), PickerOutcome::Cancelled);
     assert!(store.mutations().is_empty());
-    assert_eq!(picker.selection(), ("openai/gpt-5.6", ThinkingLevel::Medium));
+    assert_selection(&escape_selection, "openai/gpt-5.6", ThinkingLevel::Medium);
 
     let store = RecordingUserConfigStore::new(Ok(UserConfigPublication::PublishedDurably));
-    let selection = selection();
-    let mut picker = ModelPicker::for_selection(catalogue(), Arc::clone(&selection), Arc::new(store.clone()));
+    let session_selection = selection();
+    let mut picker = ModelPicker::for_selection(
+        catalogue(),
+        Arc::clone(&session_selection),
+        Arc::new(store.clone()),
+    );
     picker.choose("openai/gpt-5.6", ThinkingLevel::High).unwrap();
     assert_eq!(picker.key(PickerKey::SessionOnly).unwrap(), PickerOutcome::SessionInstalled);
     assert!(store.mutations().is_empty());
-    assert_eq!(picker.selection(), ("openai/gpt-5.6", ThinkingLevel::High));
+    assert_selection(&session_selection, "openai/gpt-5.6", ThinkingLevel::High);
 }
 
 #[test]
@@ -191,7 +211,7 @@ fn enter_records_one_typed_mutation_then_installs_memory() {
         model: "openai/gpt-5.6".into(),
         thinking: ThinkingLevel::High,
     }]);
-    assert_eq!(picker.selection(), ("openai/gpt-5.6", ThinkingLevel::High));
+    assert_selection(&selection, "openai/gpt-5.6", ThinkingLevel::High);
 }
 
 #[test]
@@ -207,7 +227,7 @@ fn failed_enter_records_the_typed_mutation_but_keeps_memory_unchanged() {
         model: "openai/gpt-5.6".into(),
         thinking: ThinkingLevel::High,
     }]);
-    assert_eq!(picker.selection(), ("openai/gpt-5.6", ThinkingLevel::Medium));
+    assert_selection(&selection, "openai/gpt-5.6", ThinkingLevel::Medium);
 }
 
 #[test]
@@ -232,7 +252,7 @@ fn uncertain_publication_installs_memory_and_preserves_diagnostic() {
             diagnostic: diagnostic.into(),
         })
     );
-    assert_eq!(picker.selection(), ("openai/gpt-5.6", ThinkingLevel::High));
+    assert_selection(&selection, "openai/gpt-5.6", ThinkingLevel::High);
 }
 
 #[test]

@@ -20,6 +20,7 @@ use crate::event::id::{
 use crate::generator::attempt::{AttemptRef, DeliveryCertainty, Outcome, UsageReport};
 use crate::generator::types::ReasoningState;
 use crate::permit::ToolResult;
+use crate::question::{QuestionAnswer, QuestionError, QuestionOutcome, QuestionRequest};
 
 /// Token counts, split by the categories providers price separately.
 ///
@@ -246,6 +247,7 @@ pub enum ItemKind {
     Assistant,
     Reasoning,
     ToolCall,
+    Question,
 }
 
 /// Per-item state: accumulated text for messages, reasoning and tool calls.
@@ -451,6 +453,122 @@ pub enum SubagentEvent {
 pub struct ForkRecord {
     pub source: SessionId,
     pub at_seq: Seq,
+}
+
+/// The one durable human-input request that currently suspends a session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingQuestion {
+    item: ItemId,
+    turn: TurnId,
+    request_event: EventId,
+    tool_call: ItemId,
+    request: QuestionRequest,
+}
+
+/// A durable settlement retained for deterministic recovery until (and after)
+/// the correlated pure tool result is observed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SettledQuestion {
+    pending: PendingQuestion,
+    settlement_event: EventId,
+    outcome: QuestionOutcome,
+}
+
+impl SettledQuestion {
+    pub fn item_id(&self) -> ItemId {
+        self.pending.item
+    }
+
+    pub fn tool_call(&self) -> ItemId {
+        self.pending.tool_call
+    }
+
+    pub fn outcome(&self) -> &QuestionOutcome {
+        &self.outcome
+    }
+
+    pub fn settlement_event(&self) -> EventId {
+        self.settlement_event
+    }
+}
+
+impl PendingQuestion {
+    pub fn item_id(&self) -> ItemId {
+        self.item
+    }
+
+    pub fn turn(&self) -> TurnId {
+        self.turn
+    }
+
+    pub fn request_event(&self) -> EventId {
+        self.request_event
+    }
+
+    pub fn tool_call(&self) -> ItemId {
+        self.tool_call
+    }
+
+    pub fn request(&self) -> &QuestionRequest {
+        &self.request
+    }
+}
+
+/// One not-yet-started sibling closed before a question suspends its turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SiblingClosure {
+    item: ItemId,
+    seq: Seq,
+}
+
+impl SiblingClosure {
+    pub fn item(&self) -> ItemId {
+        self.item
+    }
+
+    pub fn seq(&self) -> Seq {
+        self.seq
+    }
+}
+
+/// The pure suspension plan consumed by the journal's existing sibling-close
+/// path before control returns to a headless caller.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuestionSuspension {
+    siblings: Vec<ItemId>,
+    closures: Vec<SiblingClosure>,
+}
+
+impl QuestionSuspension {
+    pub fn sibling_items(&self) -> &[ItemId] {
+        &self.siblings
+    }
+
+    pub fn sibling_closures(&self) -> &[SiblingClosure] {
+        &self.closures
+    }
+}
+
+/// Everything resume needs to close the original pure model-tool call and
+/// continue the turn that requested it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuestionContinuation {
+    pub question: ItemId,
+    pub turn: TurnId,
+    pub original_turn: TurnId,
+    pub tool_call: ItemId,
+    pub tool_result: ToolResult,
+    ok: bool,
+}
+
+impl QuestionContinuation {
+    pub fn continues_original_turn(&self) -> bool {
+        self.turn == self.original_turn
+    }
+
+    pub fn ok(&self) -> bool {
+        self.ok
+    }
 }
 
 /// One money observation, in the order it was applied.
@@ -692,6 +810,16 @@ pub struct SessionState {
     /// Greatest accepted FIFO tail through which delivery was expedited.
     #[serde(default)]
     expedited_prompt_through: Option<QueuedPromptId>,
+    /// The sole requested-but-unsettled human-input item.
+    #[serde(default)]
+    pending_question: Option<PendingQuestion>,
+    /// Settlements are retained both for deterministic completion recovery
+    /// and to distinguish duplicate resume from an identity never observed.
+    #[serde(default)]
+    settled_questions: HashMap<ItemId, SettledQuestion>,
+    /// Turns whose not-yet-started sibling batch was closed for suspension.
+    #[serde(default)]
+    question_sibling_closures: HashMap<TurnId, Vec<SiblingClosure>>,
 }
 
 /// A session that has observed nothing.
@@ -732,11 +860,159 @@ impl Default for SessionState {
             queued_prompt_ledger: Vec::default(),
             consumed_prompts: Vec::default(),
             expedited_prompt_through: None,
+            pending_question: None,
+            settled_questions: HashMap::default(),
+            question_sibling_closures: HashMap::default(),
         }
     }
 }
 
 impl SessionState {
+    /// Rebuild the pure state from durable events in their supplied order.
+    pub fn replay(events: impl IntoIterator<Item = DomainEvent>) -> Self {
+        let mut state = Self::default();
+        for event in events {
+            state.apply(&event);
+        }
+        state
+    }
+
+    pub fn turn(&self, turn: TurnId) -> Option<&TurnState> {
+        self.turns.get(&turn)
+    }
+
+    pub fn pending_question(&self) -> Option<&PendingQuestion> {
+        self.pending_question.as_ref()
+    }
+
+    /// Parse a resume value against the pending request without changing
+    /// state. The caller persists `QuestionSettled` before applying anything.
+    pub fn answer_pending(
+        &mut self,
+        question: ItemId,
+        json: &str,
+    ) -> Result<QuestionAnswer, QuestionError> {
+        let pending = self.pending_for(question)?;
+        QuestionAnswer::from_json(&pending.request, json)
+    }
+
+    /// Validate an already parsed answer and prepare the pure tool result for
+    /// the original turn. Durable events remain the only mutation authority.
+    pub fn resume_question(
+        &mut self,
+        question: ItemId,
+        answer: QuestionAnswer,
+    ) -> Result<QuestionContinuation, QuestionError> {
+        let pending = self.pending_for(question)?;
+        answer.validate_for(&pending.request)?;
+        Ok(QuestionContinuation {
+            question,
+            turn: pending.turn,
+            original_turn: pending.turn,
+            tool_call: pending.tool_call,
+            tool_result: ToolResult::builtin(answer.model_text()),
+            ok: true,
+        })
+    }
+
+    fn pending_for(&self, question: ItemId) -> Result<&PendingQuestion, QuestionError> {
+        match &self.pending_question {
+            Some(pending) if pending.item == question => Ok(pending),
+            Some(_) => Err(QuestionError::WrongQuestion),
+            None if self.settled_questions.contains_key(&question) => {
+                Err(QuestionError::AlreadySettled)
+            }
+            None => Err(QuestionError::NoPendingQuestion),
+        }
+    }
+
+    /// Recreate the pure result for a settlement that survived a process exit
+    /// before its correlated `ToolCallCompleted` was appended.
+    pub fn complete_settled_question(
+        &self,
+        question: ItemId,
+    ) -> Result<QuestionContinuation, QuestionError> {
+        let settled = self
+            .settled_questions
+            .get(&question)
+            .ok_or(QuestionError::NoPendingQuestion)?;
+        if self
+            .items
+            .get(&settled.pending.tool_call)
+            .is_some_and(|item| item.completed)
+        {
+            return Err(QuestionError::AlreadySettled);
+        }
+        let (ok, text) = match &settled.outcome {
+            QuestionOutcome::Answered(answer) => (true, answer.model_text()),
+            QuestionOutcome::Declined => (false, "question declined".to_string()),
+            QuestionOutcome::Cancelled => (false, "question cancelled".to_string()),
+            QuestionOutcome::Unavailable => return Err(QuestionError::NoPendingQuestion),
+        };
+        Ok(QuestionContinuation {
+            question,
+            turn: settled.pending.turn,
+            original_turn: settled.pending.turn,
+            tool_call: settled.pending.tool_call,
+            tool_result: ToolResult::builtin(text),
+            ok,
+        })
+    }
+
+    /// Record the ordered sibling-close plan used before returning a durable
+    /// question suspension. The journal turns this plan into ordinary failed
+    /// `ToolCallCompleted` events.
+    pub fn suspend_question(
+        &mut self,
+        question: ItemId,
+        siblings: impl IntoIterator<Item = ItemId>,
+    ) -> Result<QuestionSuspension, QuestionError> {
+        let turn = self.pending_for(question)?.turn;
+        let siblings: Vec<ItemId> = siblings.into_iter().collect();
+        let mut seq = self.last_seq;
+        let closures: Vec<SiblingClosure> = siblings
+            .iter()
+            .copied()
+            .map(|item| SiblingClosure {
+                item,
+                seq: seq.next(),
+            })
+            .collect();
+        self.question_sibling_closures.insert(turn, closures.clone());
+        Ok(QuestionSuspension { siblings, closures })
+    }
+
+    pub fn not_started_siblings_closed(&self, turn: TurnId) -> bool {
+        self.question_sibling_closures.contains_key(&turn)
+    }
+
+    pub fn has_turn_completed(&self, turn: TurnId) -> bool {
+        self.turns.get(&turn).is_some_and(|state| state.completed)
+    }
+
+    pub fn refuse_new_prompt(&self, _turn: TurnId) -> Result<(), QuestionError> {
+        if self.pending_question.is_some() {
+            Err(QuestionError::PendingQuestion)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Incomplete effect calls excluding the pure call intentionally waiting
+    /// on the pending question.
+    pub fn torn_tool_errors(&self) -> Vec<ItemId> {
+        let pending_call = self.pending_question.as_ref().map(|pending| pending.tool_call);
+        self.items
+            .iter()
+            .filter_map(|(id, item)| {
+                (item.kind == ItemKind::ToolCall
+                    && !item.completed
+                    && Some(*id) != pending_call)
+                    .then_some(*id)
+            })
+            .collect()
+    }
+
     /// The terminal-facing queue projection. The reducer remains its sole
     /// owner; interactive control carries intents, not a second copy.
     pub fn queue_status(&self) -> QueueStatus {
@@ -969,6 +1245,62 @@ impl SessionState {
                     item.tool_result = Some(result.clone());
                     item.completed = true;
                     item.ok = Some(*ok);
+                }
+            }
+            EventKind::QuestionRequested { request, tool_call } => {
+                let Some(item) = ev.env.item else {
+                    return;
+                };
+                if request.validate().is_err()
+                    || self.pending_question.is_some()
+                    || self.settled_questions.contains_key(&item)
+                {
+                    return;
+                }
+                self.turns.entry(ev.env.turn).or_default();
+                let _ = self.item_mut(ev, ItemKind::Question);
+                self.pending_question = Some(PendingQuestion {
+                    item,
+                    turn: ev.env.turn,
+                    request_event: ev.env.id,
+                    tool_call: *tool_call,
+                    request: request.clone(),
+                });
+            }
+            EventKind::QuestionSettled { outcome } => {
+                let Some(item) = ev.env.item else {
+                    return;
+                };
+                let Some(pending) = self.pending_question.as_ref() else {
+                    return;
+                };
+                let valid = pending.item == item
+                    && pending.turn == ev.env.turn
+                    && ev.env.parent == Some(pending.request_event)
+                    && match outcome {
+                        QuestionOutcome::Answered(answer) => {
+                            answer.validate_for(&pending.request).is_ok()
+                        }
+                        QuestionOutcome::Declined | QuestionOutcome::Cancelled => true,
+                        // `Unavailable` is a host result, never a settlement:
+                        // it is exactly the state in which the request stays pending.
+                        QuestionOutcome::Unavailable => false,
+                    };
+                if valid {
+                    if let Some(pending) = self.pending_question.take() {
+                        if let Some(question) = self.items.get_mut(&item) {
+                            question.completed = true;
+                            question.ok = Some(matches!(outcome, QuestionOutcome::Answered(_)));
+                        }
+                        self.settled_questions.insert(
+                            item,
+                            SettledQuestion {
+                                pending,
+                                settlement_event: ev.env.id,
+                                outcome: outcome.clone(),
+                            },
+                        );
+                    }
                 }
             }
             EventKind::PermissionRequested { escalation, .. } => {

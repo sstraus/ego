@@ -59,7 +59,7 @@ use serde::{Deserialize, Serialize};
 /// v5: `SessionState` gained the admitted hook catalogue, live hook
 /// invocations, and their settlements. A v4 cache cannot reconstruct that
 /// state, so it is discarded and the authoritative log is replayed.
-pub const SNAPSHOT_VERSION: u32 = 5;
+pub const SNAPSHOT_VERSION: u32 = 6;
 
 /// A reduced [`SessionState`] plus the point in the log it reduces.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

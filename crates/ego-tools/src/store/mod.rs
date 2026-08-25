@@ -14,7 +14,7 @@ mod writer;
 pub use evidence::SessionEvidenceStore;
 #[cfg(feature = "test-support")]
 pub use io::NonDurableOsIo;
-pub use io::{OsIo, StoreIo, tmp_path_for};
+pub use io::{AtomicReplacePublication, OsIo, StoreIo, tmp_path_for};
 pub use jsonl_store::{JsonlStore, Repair};
 pub use lease::{Lease, LeaseError};
 pub use snapshot::{SNAPSHOT_VERSION, Snapshot, SnapshotPolicy, SnapshotRejection, validate};

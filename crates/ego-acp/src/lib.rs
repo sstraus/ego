@@ -6,5 +6,6 @@
 
 pub mod negotiate;
 pub mod project;
+pub mod question;
 pub mod serve;
 pub mod sink;

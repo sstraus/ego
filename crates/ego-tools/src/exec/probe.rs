@@ -945,7 +945,7 @@ async fn probe(
     let Classification::Settled(Ok(authorized)) = tools.authorize(call) else {
         return false;
     };
-    tools.execute(tool, authorized).await.is_ok()
+    tools.execute(tool.as_ref(), authorized).await.is_ok()
 }
 
 #[cfg(test)]

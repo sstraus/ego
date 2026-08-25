@@ -111,7 +111,7 @@ pub fn layers(
         found.extend(layer(source, &path)?);
     }
     found.extend(env_layer()?);
-    found.push(flags_layer(args)?);
+    found.push(args_layer(args)?);
 
     Ok(found)
 }
@@ -138,11 +138,8 @@ fn env_layer() -> Result<Option<Sourced<ConfigLayer>>, UsageError> {
 /// override is subject to the same strict schema: `-c bogus=1` is refused by
 /// name exactly as a config file's unknown key would be, rather than being
 /// accepted because it came from a flag.
-fn flags_layer(args: &Args) -> Result<Sourced<ConfigLayer>, UsageError> {
-    let mut toml = String::new();
-    if let Some(model) = &args.model {
-        toml.push_str(&format!("model = {}\n", quote(model)));
-    }
+fn args_layer(args: &Args) -> Result<Sourced<ConfigLayer>, UsageError> {
+    let mut toml = selection_flags(args.model.as_deref(), args.thinking);
     if args.bare {
         toml.push_str("bare = true\n");
     }
@@ -201,6 +198,33 @@ fn flags_layer(args: &Args) -> Result<Sourced<ConfigLayer>, UsageError> {
     ConfigLayer::parse(Source::Flags, &toml)
         .map_err(|err| UsageError(format!("the command line: {err}")))
 }
+
+/// The model-selection flags as one precedence layer.
+///
+/// An absent value contributes no key, so a user or profile default remains
+/// authoritative instead of being overwritten by a parser default.
+pub fn flags_layer(
+    model: Option<&str>,
+    thinking: Option<ego_core::generator::types::ThinkingLevel>,
+) -> Sourced<ConfigLayer> {
+    ConfigLayer::parse(Source::Flags, &selection_flags(model, thinking))
+        .expect("typed model-selection flags form a valid config layer")
+}
+
+fn selection_flags(
+    model: Option<&str>,
+    thinking: Option<ego_core::generator::types::ThinkingLevel>,
+) -> String {
+    let mut toml = String::new();
+    if let Some(model) = model {
+        toml.push_str(&format!("model = {}\n", quote(model)));
+    }
+    if let Some(thinking) = thinking {
+        toml.push_str(&format!("thinking = {}\n", quote(thinking.as_str())));
+    }
+    toml
+}
+
 
 /// The active profile: `--profile` beats `EGO_PROFILE`, per §7's precedence.
 pub fn profile(args: &Args) -> Option<String> {

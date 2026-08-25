@@ -18,6 +18,7 @@ pub mod generation_model_source;
 pub mod generator;
 pub mod permit;
 pub mod public;
+pub mod question;
 pub mod run;
 pub mod sink;
 pub mod state;

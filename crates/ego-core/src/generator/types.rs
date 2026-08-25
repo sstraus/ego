@@ -31,6 +31,21 @@ pub enum ThinkingLevel {
     Max,
 }
 
+impl ThinkingLevel {
+    /// The canonical spelling used by CLI and persisted configuration.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Minimal => "minimal",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::XHigh => "xhigh",
+            Self::Max => "max",
+        }
+    }
+}
+
 /// Why a generation stopped, pi's scale (`docs/02-pi.md` §2) minus `Pending`.
 ///
 /// The one deliberate deviation from pi, decided in

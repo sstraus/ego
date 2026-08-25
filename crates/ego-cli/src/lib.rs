@@ -23,6 +23,7 @@ pub mod cli;
 pub mod config;
 pub mod facts;
 pub mod model;
+pub mod model_picker;
 pub mod models;
 pub mod output;
 pub mod prompt;

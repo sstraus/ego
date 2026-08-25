@@ -93,6 +93,22 @@ impl Default for ItemId {
     }
 }
 
+impl std::str::FromStr for ItemId {
+    type Err = MalformedId;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        Uuid::parse_str(text)
+            .map(Self)
+            .map_err(|_| MalformedId(text.to_string()))
+    }
+}
+
+impl std::fmt::Display for ItemId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 /// Stable identity for one durably accepted prompt (UUIDv7).
 ///
 /// Queue order never comes from this UUID. [`Seq`] is the authoritative

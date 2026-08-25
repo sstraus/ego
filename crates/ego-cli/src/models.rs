@@ -13,7 +13,6 @@ use ego_ai::resolver::Enumeration;
 use ego_core::ceiling::Ceilings;
 use ego_core::event::time::Clock;
 use ego_core::generator::capabilities::ReasoningEffortSupport;
-use ego_core::generator::types::ThinkingLevel;
 use ego_core::run::RunTermination;
 use ego_tools::clock::SystemClock;
 use ego_tools::model_catalogue_cache::ModelCatalogueCache;
@@ -371,21 +370,9 @@ fn reasoning(support: &ReasoningEffortSupport) -> String {
         ReasoningEffortSupport::Any => "any".to_string(),
         ReasoningEffortSupport::Only(levels) => levels
             .iter()
-            .map(|level| thinking(*level))
+            .map(|level| level.as_str())
             .collect::<Vec<_>>()
             .join(","),
-    }
-}
-
-fn thinking(level: ThinkingLevel) -> &'static str {
-    match level {
-        ThinkingLevel::Off => "off",
-        ThinkingLevel::Minimal => "minimal",
-        ThinkingLevel::Low => "low",
-        ThinkingLevel::Medium => "medium",
-        ThinkingLevel::High => "high",
-        ThinkingLevel::XHigh => "xhigh",
-        ThinkingLevel::Max => "max",
     }
 }
 

@@ -11,6 +11,7 @@ use crate::cost::{CostDelta, Money, RateSource};
 use crate::event::domain::{DomainEvent, EventKind, ExitReason, OccupancyProvenance};
 use crate::event::id::{ItemId, SessionId, TurnId};
 use crate::generator::types::ErrorKind;
+use crate::question::{QuestionMode, QuestionOption, QuestionRequest};
 use crate::state::Usage;
 
 /// The current `PublicEvent` schema version, carried in `SessionStarted`'s
@@ -27,13 +28,39 @@ use crate::state::Usage;
 /// version raised early is only an integer pending confirmation, and the two
 /// are not equally wrong.
 ///
+/// Version 7 adds the public question item and its structured report. The
+/// durable codec stays at 7 because new event variants are additive.
+///
 /// **The integer is re-derived at merge, never carried from here.** Three
 /// branches move this constant — metering, permissions and this one — so the
 /// number above is arithmetic on the base this branch forked from, not a
 /// measurement of the merged tree. At merge: read the constant on the merge
 /// base and add one. A value that is not what you expect means another branch
 /// moved it too, and is a reason to stop and look rather than to overwrite.
-pub const PUBLIC_EVENT_VERSION: u32 = 6;
+pub const PUBLIC_EVENT_VERSION: u32 = 7;
+
+/// The structured question payload shared by JSON completion and public
+/// event projections. `id` is the `QuestionRequested` envelope item.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuestionReport {
+    pub id: ItemId,
+    pub prompt: String,
+    pub mode: QuestionMode,
+    pub options: Vec<QuestionOption>,
+    pub free_text: bool,
+}
+
+impl QuestionReport {
+    pub fn from_request(id: ItemId, request: &QuestionRequest) -> Self {
+        Self {
+            id,
+            prompt: request.prompt.clone(),
+            mode: request.mode,
+            options: request.options.clone(),
+            free_text: request.free_text,
+        }
+    }
+}
 
 /// How a run came to load one instruction file.
 ///
@@ -102,6 +129,8 @@ pub enum ItemKind {
     Tool,
     /// A permission request/decision.
     Permission,
+    /// A model-requested human-input item.
+    Question,
     /// A subagent invocation.
     Subagent,
 }
@@ -397,7 +426,7 @@ impl PublicEvent {
 /// Returns `None` for:
 /// - internal-only event kinds that never leak into the public stream
 ///   (`Compacted`, `Forked`, and all three hook evidence events — none of
-///   them is one of the six public item kinds, and none belongs on the
+///   them is one of the seven public item kinds, and none belongs on the
 ///   three-level envelope);
 /// - an item-shaped event (message/tool/permission/subagent content) whose
 ///   envelope carries no item id. `state.rs`'s reducer already tolerates
@@ -459,6 +488,26 @@ pub fn project_public(ev: &DomainEvent) -> Option<PublicEvent> {
             kind: ItemKind::Tool,
             ok: *ok,
             text: Some(result.model_text()),
+        }),
+        EventKind::QuestionRequested { request, .. } => Some(PublicEvent::ItemStarted {
+            turn,
+            item: item?,
+            kind: ItemKind::Question,
+            name: Some("ask_question".to_string()),
+            text: Some(
+                serde_json::to_string(&QuestionReport::from_request(item?, request))
+                    .expect("a validated question report always serializes"),
+            ),
+        }),
+        EventKind::QuestionSettled {
+            outcome: crate::question::QuestionOutcome::Unavailable,
+        } => None,
+        EventKind::QuestionSettled { outcome } => Some(PublicEvent::ItemCompleted {
+            turn,
+            item: item?,
+            kind: ItemKind::Question,
+            ok: matches!(outcome, crate::question::QuestionOutcome::Answered(_)),
+            text: None,
         }),
         // `name` carries the tool, as it does for `ToolCallStarted`. It used
         // to be `None` because the internal event had no tool to give, not

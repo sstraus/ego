@@ -7,6 +7,11 @@
 mod keys;
 mod seat;
 
+pub mod actions;
+pub mod selector;
+pub mod status;
+pub mod surface;
+
 pub use seat::{EditPhase, Seat, SurfaceEditMode, SurfaceOutput, SurfacePhase};
 
 use reedline::Signal;

@@ -203,6 +203,13 @@ struct MainSelection {
     thinking: ThinkingLevel,
 }
 
+/// Read-only view of the model authority currently installed for main turns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GenerationSelectionSnapshot {
+    pub identity: ModelRef,
+    pub thinking: ThinkingLevel,
+}
+
 /// Mutable session selection observed afresh at every main generation boundary.
 #[derive(Debug)]
 pub struct GenerationSelection {
@@ -224,6 +231,15 @@ impl GenerationSelection {
             .map_err(|_| "the model selection lock is poisoned".to_string())?;
         *current = MainSelection { identity, thinking };
         Ok(())
+    }
+
+    /// Observe the same mutable authority read at every generation boundary.
+    pub fn snapshot(&self) -> Result<GenerationSelectionSnapshot, GenerationModelError> {
+        let current = self.read()?;
+        Ok(GenerationSelectionSnapshot {
+            identity: current.identity,
+            thinking: current.thinking,
+        })
     }
 
     fn read(&self) -> Result<MainSelection, GenerationModelError> {

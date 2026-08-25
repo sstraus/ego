@@ -2,10 +2,11 @@
 //! sources — no file I/O (`plans/m0a-contracts.md` Step 12).
 
 use super::error::ConfigError;
-use super::layer::{AuthProviderLayer, ConfigLayer, Mode, ModelRef};
+use super::layer::{AuthProviderLayer, ConfigLayer, Mode, ModelRef, UiLayer};
 use super::ruleset::Ruleset;
 use super::source::{Source, Sourced, Trust};
 use crate::ceiling::{Ceilings, Clamped};
+use crate::generator::types::ThinkingLevel;
 use crate::permit::Confinement;
 use crate::permit::rule::Rule;
 
@@ -22,6 +23,7 @@ pub enum Posture {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Effective {
     pub model: Option<ModelRef>,
+    pub thinking: Option<ThinkingLevel>,
     pub mode: Option<Mode>,
     pub sandbox: Option<Confinement>,
     pub permissions: Ruleset,
@@ -41,6 +43,8 @@ pub struct Effective {
     /// Provider login-command and identity-header configuration, after layer
     /// precedence. Values are non-secret.
     pub auth: std::collections::HashMap<String, AuthProviderLayer>,
+    /// Interactive presentation fields after per-field precedence.
+    pub ui: UiLayer,
 }
 
 /// Resolves layered config into one [`Effective`] value.
@@ -113,12 +117,14 @@ pub fn resolve(
     }
 
     let mut model = None;
+    let mut thinking = None;
     let mut mode = None;
     let mut sandbox = None;
     let mut permissions = Ruleset::default();
     let mut judge = None;
     let mut ceilings = Ceilings::default();
     let mut auth = std::collections::HashMap::new();
+    let mut ui = UiLayer::default();
 
     for sourced in &eligible {
         let profile = active_profile.and_then(|name| sourced.value.profile.get(name));
@@ -128,6 +134,12 @@ pub fn resolve(
             .or_else(|| sourced.value.model.clone())
         {
             model = Some(m);
+        }
+        if let Some(value) = profile
+            .and_then(|profile| profile.thinking)
+            .or(sourced.value.thinking)
+        {
+            thinking = Some(value);
         }
         if let Some(m) = profile.and_then(|p| p.mode).or(sourced.value.mode) {
             mode = Some(m);
@@ -175,6 +187,15 @@ pub fn resolve(
                     .retain(|existing, _| !existing.eq_ignore_ascii_case(name));
                 resolved.headers.insert(name.clone(), value.clone());
             }
+        }
+        if let Some(segments) = sourced
+            .value
+            .ui
+            .as_ref()
+            .and_then(|ui| ui.statusline.as_ref())
+            .and_then(|statusline| statusline.segments.clone())
+        {
+            ui.statusline.get_or_insert_default().segments = Some(segments);
         }
     }
 
@@ -261,6 +282,7 @@ pub fn resolve(
 
     Ok(Effective {
         model,
+        thinking,
         mode,
         sandbox,
         permissions,
@@ -269,5 +291,6 @@ pub fn resolve(
         ceilings,
         clamped,
         auth,
+        ui,
     })
 }

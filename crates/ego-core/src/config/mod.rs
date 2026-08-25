@@ -6,6 +6,7 @@
 mod discovery;
 mod error;
 mod layer;
+mod mutation;
 mod resolve;
 mod ruleset;
 mod source;
@@ -15,7 +16,13 @@ pub use discovery::{
     Refusal, Selection, Skipped, SystemPrompt, load, plan, system_prompt,
 };
 pub use error::ConfigError;
-pub use layer::{AuthProviderLayer, ConfigLayer, Mode, ModelRef, PermCfg, ProfileLayer};
+pub use layer::{
+    AuthProviderLayer, ConfigLayer, Mode, ModelRef, PermCfg, ProfileLayer, StatusSegmentName,
+    StatuslineLayer, UiLayer,
+};
+pub use mutation::{
+    UserConfigError, UserConfigMutation, UserConfigPublication, UserConfigStore,
+};
 pub use resolve::{Effective, Posture, resolve};
 pub use ruleset::{OriginSet, Ruleset, SourcedRule};
 pub use source::{Source, Sourced, Trust};

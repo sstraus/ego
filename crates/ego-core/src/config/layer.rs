@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use super::error::ConfigError;
 use super::source::{Source, Sourced};
 use crate::ceiling::Budget;
+use crate::generator::types::ThinkingLevel;
 use crate::permit::Confinement;
 use crate::permit::rule::Rule;
 
@@ -101,6 +102,7 @@ where
 #[serde(deny_unknown_fields)]
 pub struct ProfileLayer {
     pub model: Option<ModelRef>,
+    pub thinking: Option<ThinkingLevel>,
     #[serde(default, deserialize_with = "mode")]
     pub mode: Option<Mode>,
     pub sandbox: Option<Confinement>,
@@ -108,6 +110,146 @@ pub struct ProfileLayer {
     /// A spend ceiling, in the same grammar `--budget` takes
     /// (`crate::ceiling::Budget`).
     pub budget: Option<Budget>,
+}
+
+/// A persisted status-line segment name.
+///
+/// Custom render values exist at the live UI boundary, but persisted names
+/// must be supplied by ego itself so a typo cannot silently become an empty
+/// row on every launch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum StatusSegmentName {
+    Model,
+    Effort,
+    Mode,
+    Context,
+    Cost,
+    Queue,
+    Drafts,
+    Interrupt,
+    Cwd,
+    Git,
+}
+
+impl Serialize for StatusSegmentName {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for StatusSegmentName {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let name = String::deserialize(deserializer)?;
+        Self::from_name(&name).ok_or_else(|| {
+            serde::de::Error::unknown_variant(&name, StatusSegmentName::NAMES)
+        })
+    }
+}
+
+pub(super) fn validate_status_segment_names(names: &[String]) -> Result<(), String> {
+    let segments = names
+        .iter()
+        .map(|name| {
+            StatusSegmentName::from_name(name)
+                .ok_or_else(|| format!("unknown status-line segment `{name}`"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    validate_unique_status_segments(&segments)
+}
+
+fn validate_unique_status_segments(segments: &[StatusSegmentName]) -> Result<(), String> {
+    let mut unique = Vec::with_capacity(segments.len());
+    for segment in segments {
+        if unique.contains(segment) {
+            return Err(format!(
+                "duplicate status-line segment `{}`",
+                segment.as_str()
+            ));
+        }
+        unique.push(*segment);
+    }
+    Ok(())
+}
+
+impl StatusSegmentName {
+    /// Every accepted persisted spelling.
+    pub const NAMES: &[&str] = &[
+        "model",
+        "effort",
+        "mode",
+        "context",
+        "cost",
+        "queue",
+        "drafts",
+        "interrupt",
+        "cwd",
+        "git",
+    ];
+
+    /// Parse one persisted built-in name.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "model" => Some(Self::Model),
+            "effort" => Some(Self::Effort),
+            "mode" => Some(Self::Mode),
+            "context" => Some(Self::Context),
+            "cost" => Some(Self::Cost),
+            "queue" => Some(Self::Queue),
+            "drafts" => Some(Self::Drafts),
+            "interrupt" => Some(Self::Interrupt),
+            "cwd" => Some(Self::Cwd),
+            "git" => Some(Self::Git),
+            _ => None,
+        }
+    }
+
+    /// Return the canonical persisted spelling.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Model => "model",
+            Self::Effort => "effort",
+            Self::Mode => "mode",
+            Self::Context => "context",
+            Self::Cost => "cost",
+            Self::Queue => "queue",
+            Self::Drafts => "drafts",
+            Self::Interrupt => "interrupt",
+            Self::Cwd => "cwd",
+            Self::Git => "git",
+        }
+    }
+}
+
+/// The strict `[ui.statusline]` schema.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StatuslineLayer {
+    #[serde(default, deserialize_with = "status_segments")]
+    pub segments: Option<Vec<StatusSegmentName>>,
+}
+
+fn status_segments<'de, D>(deserializer: D) -> Result<Option<Vec<StatusSegmentName>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let segments = Option::<Vec<StatusSegmentName>>::deserialize(deserializer)?;
+    if let Some(segments) = &segments {
+        validate_unique_status_segments(segments).map_err(serde::de::Error::custom)?;
+    }
+    Ok(segments)
+}
+
+/// The strict `[ui]` schema.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UiLayer {
+    pub statusline: Option<StatuslineLayer>,
 }
 
 /// Non-secret authentication overrides for one provider.
@@ -153,6 +295,8 @@ where
 #[serde(deny_unknown_fields)]
 pub struct ConfigLayer {
     pub model: Option<ModelRef>,
+    /// Default reasoning effort. Absence contributes no precedence value.
+    pub thinking: Option<ThinkingLevel>,
     #[serde(default, deserialize_with = "mode")]
     pub mode: Option<Mode>,
     pub sandbox: Option<Confinement>,
@@ -175,6 +319,8 @@ pub struct ConfigLayer {
     /// Provider login commands and non-secret identity-header overlays.
     #[serde(default)]
     pub auth: HashMap<String, AuthProviderLayer>,
+    /// Interactive presentation configuration, resolved like other fields.
+    pub ui: Option<UiLayer>,
 }
 
 impl ConfigLayer {

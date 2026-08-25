@@ -5,6 +5,7 @@
 //! process spawning, sandbox backends, session storage.
 
 pub mod clock;
+pub mod config;
 pub mod exec;
 pub mod fs;
 pub mod instructions;

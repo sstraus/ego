@@ -331,6 +331,15 @@ impl ToolResult {
         Self { content }
     }
 
+    /// True when the complete result was produced in memory and carries no
+    /// evidence or external-effect provenance.
+    pub fn is_pure(&self) -> bool {
+        self.content.iter().all(|block| {
+            matches!(block.provenance, ToolOutputProvenance::Builtin)
+                && block.full_output.is_none()
+        })
+    }
+
     /// The single textual answer provider protocols accept for a tool call.
     /// Provenance stays explicit when several process streams are projected
     /// into that one protocol field.

@@ -7,7 +7,6 @@
 //! authorising and executing, and a single future has no such between.
 
 use serde_json::Value;
-use std::sync::Arc;
 
 use crate::generator::types::ToolDescriptor as GenToolDescriptor;
 use crate::permit::{
@@ -16,9 +15,11 @@ use crate::permit::{
 };
 use crate::store::evidence::EvidenceStore;
 
+use super::RegisteredTool;
+
 /// Everything the loop needs to turn a model's tool call into an effect.
 pub struct Tools<'a> {
-    registry: &'a [Arc<dyn Tool>],
+    registry: Vec<RegisteredTool>,
     policy: &'a PolicyEngine,
     /// The *raw* filesystem. [`GuardedEffects`] binds one permit to the raw
     /// effect ports at construction, so a fresh facade is built per
@@ -31,7 +32,7 @@ pub struct Tools<'a> {
 
 impl<'a> Tools<'a> {
     pub fn new(
-        registry: &'a [Arc<dyn Tool>],
+        registry: &[std::sync::Arc<dyn Tool>],
         policy: &'a PolicyEngine,
         fs: &'a dyn Fs,
         process: &'a dyn ProcessExecutor,
@@ -39,7 +40,31 @@ impl<'a> Tools<'a> {
         cwd: CanonPath,
     ) -> Self {
         Self {
-            registry,
+            registry: registry
+                .iter()
+                .cloned()
+                .map(RegisteredTool::Effect)
+                .collect(),
+            policy,
+            fs,
+            process,
+            evidence,
+            cwd,
+        }
+    }
+
+    /// Construct the final mixed registry used when human-input tools are
+    /// present alongside effect tools.
+    pub fn from_registry(
+        registry: &[RegisteredTool],
+        policy: &'a PolicyEngine,
+        fs: &'a dyn Fs,
+        process: &'a dyn ProcessExecutor,
+        evidence: &'a dyn EvidenceStore,
+        cwd: CanonPath,
+    ) -> Self {
+        Self {
+            registry: registry.to_vec(),
             policy,
             fs,
             process,
@@ -57,14 +82,7 @@ impl<'a> Tools<'a> {
     pub fn descriptors(&self) -> Vec<GenToolDescriptor> {
         self.registry
             .iter()
-            .map(|tool| {
-                let descriptor = tool.descriptor();
-                GenToolDescriptor {
-                    name: descriptor.name,
-                    description: descriptor.description,
-                    parameters: descriptor.schema.to_value(),
-                }
-            })
+            .map(RegisteredTool::descriptor)
             .collect()
     }
 
@@ -75,16 +93,41 @@ impl<'a> Tools<'a> {
     /// are answers *to the model*, which is going to read them as the tool
     /// result and try again. A caller that could distinguish them would still
     /// do the same thing with both.
-    pub fn prepare(&self, name: &str, args: &str) -> Result<(&'a dyn Tool, PreparedCall), String> {
+    pub fn prepare(
+        &self,
+        name: &str,
+        args: &str,
+    ) -> Result<(std::sync::Arc<dyn Tool>, PreparedCall), String> {
         let tool = self
             .registry
             .iter()
+            .filter_map(RegisteredTool::as_effect)
             .find(|tool| tool.descriptor().name == name)
+            .cloned()
             .ok_or_else(|| format!("there is no tool named {name}"))?;
         let params = serde_json::from_str(args)
             .map_err(|err| format!("{name} was called with arguments that are not JSON: {err}"))?;
         let call = self.prepare_params(tool.as_ref(), params)?;
-        Ok((tool.as_ref(), call))
+        Ok((tool, call))
+    }
+
+    /// Parse a human-input call without admitting it to effect preparation or
+    /// permission policy.
+    pub fn parse_human_input(
+        &self,
+        name: &str,
+        args: &str,
+    ) -> Result<crate::question::QuestionRequest, String> {
+        let tool = self
+            .registry
+            .iter()
+            .filter_map(RegisteredTool::as_human_input)
+            .find(|tool| tool.descriptor().name == name)
+            .ok_or_else(|| format!("there is no human-input tool named {name}"))?;
+        let params = serde_json::from_str(args).map_err(|error| {
+            format!("{name} was called with arguments that are not JSON: {error}")
+        })?;
+        tool.parse(params)
     }
 
     /// Prepare raw parameters supplied by the human amendment path.
@@ -94,13 +137,13 @@ impl<'a> Tools<'a> {
     /// canonicalisation boundary as model-supplied parameters.
     pub fn prepare_amendment(
         &self,
-        tool: &'a dyn Tool,
+        tool: &dyn Tool,
         params: Value,
     ) -> Result<PreparedCall, String> {
         self.prepare_params(tool, params)
     }
 
-    fn prepare_params(&self, tool: &'a dyn Tool, params: Value) -> Result<PreparedCall, String> {
+    fn prepare_params(&self, tool: &dyn Tool, params: Value) -> Result<PreparedCall, String> {
         let ctx = PrepareCtx {
             cwd: self.cwd.clone(),
             resolver: self.fs,
@@ -166,7 +209,7 @@ impl<'a> Tools<'a> {
     /// between where a different call could be substituted.
     pub async fn execute(
         &self,
-        tool: &'a dyn Tool,
+        tool: &dyn Tool,
         authorized: Authorized,
     ) -> Result<crate::permit::ToolResult, ToolError> {
         let (call, permit) = authorized.into_parts();

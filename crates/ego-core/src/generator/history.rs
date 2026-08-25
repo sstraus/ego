@@ -107,6 +107,10 @@ pub fn conversation_from(
             ItemKind::Assistant => {
                 push(&mut messages, Role::Assistant, text_block(&item.text));
             }
+            // Questions are control state for one pure tool call. Their
+            // request and settlement are not conversation messages; the
+            // correlated `ToolCallCompleted` is the provider-visible answer.
+            ItemKind::Question => {}
             // Taken a generation at a time, not a call at a time. The model
             // issued every call in one run at once, so all their uses belong
             // to one assistant turn and all their results to the one user
