@@ -1296,21 +1296,19 @@ impl SessionState {
                         // it is exactly the state in which the request stays pending.
                         QuestionOutcome::Unavailable => false,
                     };
-                if valid {
-                    if let Some(pending) = self.pending_question.take() {
-                        if let Some(question) = self.items.get_mut(&item) {
-                            question.completed = true;
-                            question.ok = Some(matches!(outcome, QuestionOutcome::Answered(_)));
-                        }
-                        self.settled_questions.insert(
-                            item,
-                            SettledQuestion {
-                                pending,
-                                settlement_event: ev.env.id,
-                                outcome: outcome.clone(),
-                            },
-                        );
+                if valid && let Some(pending) = self.pending_question.take() {
+                    if let Some(question) = self.items.get_mut(&item) {
+                        question.completed = true;
+                        question.ok = Some(matches!(outcome, QuestionOutcome::Answered(_)));
                     }
+                    self.settled_questions.insert(
+                        item,
+                        SettledQuestion {
+                            pending,
+                            settlement_event: ev.env.id,
+                            outcome: outcome.clone(),
+                        },
+                    );
                 }
             }
             EventKind::PermissionRequested { escalation, .. } => {
