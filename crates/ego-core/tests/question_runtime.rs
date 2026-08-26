@@ -29,12 +29,13 @@ use ego_core::question::{
     AskQuestionTool, Elicitor, ElicitorError, QuestionAnswer, QuestionMode, QuestionOption,
     QuestionOutcome, QuestionRequest,
 };
+use ego_core::run::{RunAppend, RunRevision, RunTransaction};
 use ego_core::sink::CollectingSink;
 use ego_core::state::{ItemKind, SessionState};
 use ego_core::store::evidence::{
     EvidenceError, EvidencePage, EvidenceRead, EvidenceStore, EvidenceWriter,
 };
-use ego_core::store::session_store::{SessionMeta, SessionStore, StoreError};
+use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
 use ego_core::turn::{
     CancelToken, GenerationRuntime, RegisteredTool, Session, Tools, TurnConfig, TurnLoop,
 };
@@ -130,10 +131,22 @@ impl SessionStore for MemoryStore {
         Ok(())
     }
 
+    fn compare_and_append_run(
+        &self,
+        _session: &ego_core::event::id::SessionId,
+        _expected_revision: Option<RunRevision>,
+        _transaction: RunTransaction,
+    ) -> Result<RunAppend, StoreError> {
+        Err(StoreError::Io(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "this event-only fixture does not accept run transactions",
+        )))
+    }
+
     fn read(
         &self,
         _id: &ego_core::event::id::SessionId,
-    ) -> Result<BoxStream<'static, Result<DomainEvent, StoreError>>, StoreError> {
+    ) -> Result<BoxStream<'static, Result<SessionEntry, StoreError>>, StoreError> {
         unimplemented!("this integration test only appends")
     }
 

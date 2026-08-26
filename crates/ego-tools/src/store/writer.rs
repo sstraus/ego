@@ -29,9 +29,10 @@ use ego_core::compact::{CompactionPublication, CompactionTargetStore};
 use ego_core::event::domain::DomainEvent;
 use ego_core::event::id::SessionId;
 use ego_core::event::time::Timestamp;
+use ego_core::run::{RunAppend, RunRevision, RunTransaction};
 use ego_core::state::SessionState;
 use ego_core::store::evidence::EvidenceError;
-use ego_core::store::session_store::{SessionMeta, SessionStore, StoreError};
+use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
 use futures::stream::BoxStream;
 
 use super::SessionEvidenceStore;
@@ -169,9 +170,20 @@ impl SessionStore for SessionWriter<'_> {
     fn read(
         &self,
         id: &SessionId,
-    ) -> Result<BoxStream<'static, Result<DomainEvent, StoreError>>, StoreError> {
+    ) -> Result<BoxStream<'static, Result<SessionEntry, StoreError>>, StoreError> {
         self.check(id)?;
         self.store.read(id)
+    }
+
+    fn compare_and_append_run(
+        &self,
+        session: &SessionId,
+        expected_revision: Option<RunRevision>,
+        transaction: RunTransaction,
+    ) -> Result<RunAppend, StoreError> {
+        self.check(session)?;
+        self.store
+            .compare_and_append_run(session, expected_revision, transaction)
     }
 
     fn list(&self) -> Result<Vec<SessionMeta>, StoreError> {

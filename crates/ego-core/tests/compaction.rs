@@ -39,12 +39,13 @@ use ego_core::public::{
     ItemKind as PublicItemKind, PUBLIC_EVENT_VERSION, PublicEvent, project_public,
 };
 use ego_core::question::{QuestionMode, QuestionOption, QuestionRequest};
+use ego_core::run::{RunAppend, RunRevision, RunTransaction};
 use ego_core::sink::CollectingSink;
 use ego_core::state::{ItemKind, SessionState, Usage};
 use ego_core::store::evidence::{
     EvidenceError, EvidencePage, EvidenceRead, EvidenceStore, EvidenceWriter,
 };
-use ego_core::store::session_store::{SessionMeta, SessionStore, StoreError};
+use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
 use ego_core::turn::{CancelToken, GenerationRuntime, Session, Tools, TurnConfig, TurnLoop};
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
@@ -520,12 +521,27 @@ impl SessionStore for CompactionMemoryStore {
         Ok(())
     }
 
+    fn compare_and_append_run(
+        &self,
+        _session: &SessionId,
+        _expected_revision: Option<RunRevision>,
+        _transaction: RunTransaction,
+    ) -> Result<RunAppend, StoreError> {
+        Err(StoreError::Io(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "this event-only fixture does not accept run transactions",
+        )))
+    }
+
     fn read(
         &self,
         _id: &SessionId,
-    ) -> Result<BoxStream<'static, Result<DomainEvent, StoreError>>, StoreError> {
-        let events = self.events();
-        Ok(Box::pin(futures::stream::iter(events.into_iter().map(Ok))))
+    ) -> Result<BoxStream<'static, Result<SessionEntry, StoreError>>, StoreError> {
+        let entries = self
+            .events()
+            .into_iter()
+            .map(|event| Ok(SessionEntry::Event(event)));
+        Ok(Box::pin(futures::stream::iter(entries)))
     }
 
     fn list(&self) -> Result<Vec<SessionMeta>, StoreError> {

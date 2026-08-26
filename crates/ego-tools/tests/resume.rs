@@ -11,7 +11,7 @@ use std::time::Duration;
 use ego_core::event::domain::{DomainEvent, Envelope, EventKind, ExitReason};
 use ego_core::event::id::{EventId, ItemId, Producer, Seq, SessionId, TurnId};
 use ego_core::event::time::Timestamp;
-use ego_core::store::session_store::{SessionStore, StoreError};
+use ego_core::store::session_store::{SessionEntry, SessionStore, StoreError};
 use ego_tools::store::{JsonlStore, LeaseInputs, OpenError, OsIo};
 use futures::StreamExt;
 use futures::executor::block_on;
@@ -126,7 +126,13 @@ impl Fixture {
         let stream = self.store.read(&self.id).unwrap();
         block_on(stream.collect::<Vec<_>>())
             .into_iter()
-            .collect::<Result<Vec<_>, _>>()
+            .map(|result| match result? {
+                SessionEntry::Event(event) => Ok(event),
+                SessionEntry::RunTransaction(_) => Err(StoreError::Io(std::io::Error::other(
+                    "event-only fixture contained a run transaction",
+                ))),
+            })
+            .collect()
     }
 
     /// A second `JsonlStore` over the same root — what another process

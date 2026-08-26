@@ -8,7 +8,7 @@
 //! ```
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use ego_core::compact::{CompactionLineage, CompactionPublication};
 use ego_core::event::domain::{DomainEvent, EventKind};
@@ -16,14 +16,15 @@ use ego_core::event::hook::HookCatalogueEvidence;
 use ego_core::event::id::{Producer, Seq, SessionId};
 use ego_core::event::time::Timestamp;
 use ego_core::permit::ExecObservation;
+use ego_core::run::{RunAppend, RunCommand, RunRevision, RunTransaction};
 use ego_core::state::SessionState;
 use ego_core::store::codec::{
     CODEC_VERSION, CodecError, Header, StoreLine, decode_line, encode_header, encode_record,
 };
-use ego_core::store::session_store::{SessionMeta, SessionStore, StoreError};
+use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
 use futures::stream::{self, BoxStream};
 
-use super::io::{StoreIo, tmp_path_for};
+use super::io::{AtomicReplacePublication, StoreIo, tmp_path_for};
 use super::snapshot::{SNAPSHOT_VERSION, Snapshot, SnapshotRejection, validate};
 
 /// Filesystem-private cache projection. The public store port exposes only
@@ -43,6 +44,7 @@ struct LogManifestFacts {
     created: Timestamp,
     workspace_root: PathBuf,
     last_ts: Option<Timestamp>,
+    model: Option<String>,
     lineage: Option<CompactionLineage>,
     execution: Option<ExecObservation>,
     hooks: HookCatalogueEvidence,
@@ -118,7 +120,10 @@ fn header_end(bytes: &[u8]) -> Result<Option<usize>, StoreError> {
 /// A line counts as durable only if it is terminated by a newline: a final
 /// line without one is by definition a half-finished append, which is the
 /// single most likely crash artefact for an append-only log. Beyond that,
-/// every line must decode — checksum included — and must be a record.
+/// every line must decode — checksum included — and must be a recognised
+/// record or a syntactically valid unknown line. Unknown lines are immutable
+/// bytes owned by a newer codec; recovery preserves them rather than treating
+/// them as torn tail.
 ///
 /// The scan stops at the *first* rejected line rather than skipping it and
 /// resuming, and everything after it is dropped too. That is deliberate: a
@@ -133,7 +138,7 @@ fn valid_prefix(bytes: &[u8], start: usize) -> (usize, usize) {
             break; // torn final line: no terminating newline
         };
         match decode_line(&bytes[end..end + offset]) {
-            Ok(StoreLine::Record(_)) => {}
+            Ok(StoreLine::Record(_) | StoreLine::Unknown(_)) => {}
             _ => break,
         }
         end += offset + 1;
@@ -193,38 +198,54 @@ fn log_manifest_facts(log: &[u8]) -> Option<LogManifestFacts> {
         _ => return None,
     };
     let mut last_ts = None;
+    let mut model = None;
     let mut lineage = None;
     let mut execution = None;
     let mut hooks = HookCatalogueEvidence::default();
-    for event in lines.filter_map(|line| match decode_line(line) {
+    for entry in lines.filter_map(|line| match decode_line(line) {
         Ok(StoreLine::Record(record)) => {
-            serde_json::from_str::<DomainEvent>(record.payload.get()).ok()
+            serde_json::from_str::<SessionEntry>(record.payload.get()).ok()
         }
         _ => None,
     }) {
-        last_ts = Some(event.env.ts);
-        match event.kind {
-            EventKind::CompactionSeeded {
-                source,
-                source_seq,
-                prompt_revision,
-                ..
-            } => {
-                lineage = Some(CompactionLineage {
-                    source,
-                    source_seq,
-                    prompt_revision,
-                })
+        match entry {
+            SessionEntry::Event(event) => {
+                last_ts = Some(event.env.ts);
+                match event.kind {
+                    EventKind::CompactionSeeded {
+                        source,
+                        source_seq,
+                        prompt_revision,
+                        ..
+                    } => {
+                        lineage = Some(CompactionLineage {
+                            source,
+                            source_seq,
+                            prompt_revision,
+                        })
+                    }
+                    EventKind::ExecutionObserved { observation } => execution = Some(observation),
+                    EventKind::HookCatalogueAdmitted { descriptors } => hooks = descriptors,
+                    _ => {}
+                }
             }
-            EventKind::ExecutionObserved { observation } => execution = Some(observation),
-            EventKind::HookCatalogueAdmitted { descriptors } => hooks = descriptors,
-            _ => {}
+            SessionEntry::RunTransaction(transaction) => {
+                last_ts = Some(transaction.observed_at());
+                if let RunCommand::CommandAdmitted {
+                    model: admitted_model,
+                    ..
+                } = transaction.command()
+                {
+                    model = Some(admitted_model.clone());
+                }
+            }
         }
     }
     Some(LogManifestFacts {
         created,
         workspace_root,
         last_ts,
+        model,
         lineage,
         execution,
         hooks,
@@ -238,6 +259,7 @@ pub struct JsonlStore {
     root: PathBuf,
     workspace: PathBuf,
     pub(super) io: Arc<dyn StoreIo>,
+    run_compare: Mutex<()>,
 }
 
 impl JsonlStore {
@@ -270,6 +292,7 @@ impl JsonlStore {
             root: root.into(),
             workspace: workspace.into(),
             io: Arc::from(io),
+            run_compare: Mutex::new(()),
         }
     }
 
@@ -283,6 +306,47 @@ impl JsonlStore {
 
     fn manifest_path(&self, id: &SessionId) -> PathBuf {
         self.session_dir(id).join("manifest.json")
+    }
+
+    fn current_run_revision_from_lines<'a>(
+        &self,
+        lines: impl Iterator<Item = &'a [u8]>,
+    ) -> Result<Option<RunRevision>, StoreError> {
+        let mut current = None;
+        for line in lines {
+            let entry = match decode_line(line) {
+                Ok(StoreLine::Record(record)) => {
+                    serde_json::from_str::<SessionEntry>(record.payload.get()).map_err(|error| {
+                        StoreError::Codec(CodecError::Malformed(error.to_string()))
+                    })?
+                }
+                Ok(StoreLine::Header(_)) => {
+                    return Err(StoreError::Codec(CodecError::Malformed(
+                        "unexpected header record past the log's first line".to_string(),
+                    )));
+                }
+                Ok(StoreLine::Unknown(_)) => {
+                    return Err(StoreError::Codec(CodecError::Malformed(
+                        "cannot compare a run revision across an unknown record".to_string(),
+                    )));
+                }
+                Err(error) => return Err(error.into()),
+            };
+            let SessionEntry::RunTransaction(transaction) = entry else {
+                continue;
+            };
+            let expected = current
+                .map(RunRevision::next)
+                .unwrap_or_else(|| RunRevision::new(1));
+            if transaction.revision() != expected {
+                return Err(StoreError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "run transaction revisions are not contiguous",
+                )));
+            }
+            current = Some(transaction.revision());
+        }
+        Ok(current)
     }
 
     /// Publish the complete first log image for a clean compaction target.
@@ -492,7 +556,15 @@ impl JsonlStore {
         let stream = SessionStore::read(self, id)?;
         Ok(futures::executor::block_on(async {
             use futures::StreamExt;
-            stream.filter_map(|r| async move { r.ok() }).collect().await
+            stream
+                .filter_map(|result| async move {
+                    match result.ok()? {
+                        SessionEntry::Event(event) => Some(event),
+                        SessionEntry::RunTransaction(_) => None,
+                    }
+                })
+                .collect()
+                .await
         }))
     }
 
@@ -609,7 +681,11 @@ impl JsonlStore {
             // recovery path that loses the manifest is the one directly
             // above.
             workspace_root: facts.workspace_root,
-            model: previous.as_ref().and_then(|m| m.meta.model.clone()),
+            model: facts.model.or_else(|| {
+                previous
+                    .as_ref()
+                    .and_then(|manifest| manifest.meta.model.clone())
+            }),
             // `created` comes from the log header rather than the old
             // manifest: the header is written once, at session creation, and
             // never rewritten, whereas this manifest is a derived cache that
@@ -671,13 +747,26 @@ impl JsonlStore {
         } else {
             None
         };
+        let workspace_root = if is_new_session {
+            self.workspace.clone()
+        } else {
+            previous
+                .as_ref()
+                .map(|manifest| manifest.meta.workspace_root.clone())
+                .or_else(|| log_facts.as_ref().map(|facts| facts.workspace_root.clone()))
+                .ok_or(StoreError::MissingHeader)?
+        };
         let meta = SessionMeta {
             id: *id,
-            // This store created the session, so its own workspace is the
-            // one the header carries. Reading the header back to confirm
-            // would be an I/O round trip to learn a value already in hand.
-            workspace_root: self.workspace.clone(),
-            model: previous.as_ref().and_then(|m| m.meta.model.clone()),
+            // Only an ordinary event-first session takes the constructor's
+            // workspace. Once a header exists, preserve its projection: a
+            // run-first header was authored from the admitted RunRoot and a
+            // differently configured store must not overwrite that fact.
+            workspace_root,
+            model: previous
+                .as_ref()
+                .and_then(|manifest| manifest.meta.model.clone())
+                .or_else(|| log_facts.as_ref().and_then(|facts| facts.model.clone())),
             created: previous
                 .as_ref()
                 .map(|m| m.meta.created)
@@ -737,7 +826,7 @@ impl SessionStore for JsonlStore {
             self.io.append_line(&log_path, &encode_header(&header))?;
         }
 
-        let record_line = encode_record(ev.env.seq, ev)?;
+        let record_line = encode_record(ev.env.seq, &SessionEntry::Event(ev.clone()))?;
         self.io.append_line(&log_path, &record_line)?;
 
         // Force the established turn/execution boundaries and every hook
@@ -785,7 +874,7 @@ impl SessionStore for JsonlStore {
     fn read(
         &self,
         id: &SessionId,
-    ) -> Result<BoxStream<'static, Result<DomainEvent, StoreError>>, StoreError> {
+    ) -> Result<BoxStream<'static, Result<SessionEntry, StoreError>>, StoreError> {
         let bytes = self
             .io
             .read(&self.log_path(id))?
@@ -808,10 +897,10 @@ impl SessionStore for JsonlStore {
         // stream's lifetime with `&self`. Owning the decoded results makes
         // the stream `'static`, so a caller does not have to keep this
         // `JsonlStore` borrowed for as long as it holds the stream.
-        let events: Vec<Result<DomainEvent, StoreError>> = lines
+        let entries: Vec<Result<SessionEntry, StoreError>> = lines
             .map(|line| match decode_line(line) {
                 Ok(StoreLine::Record(record)) => {
-                    serde_json::from_str::<DomainEvent>(record.payload.get())
+                    serde_json::from_str::<SessionEntry>(record.payload.get())
                         .map_err(|e| StoreError::Codec(CodecError::Malformed(e.to_string())))
                 }
                 Ok(StoreLine::Header(_)) => Err(StoreError::Codec(CodecError::Malformed(
@@ -824,7 +913,174 @@ impl SessionStore for JsonlStore {
             })
             .collect();
 
-        Ok(Box::pin(stream::iter(events)))
+        Ok(Box::pin(stream::iter(entries)))
+    }
+
+    fn compare_and_append_run(
+        &self,
+        session: &SessionId,
+        expected_revision: Option<RunRevision>,
+        transaction: RunTransaction,
+    ) -> Result<RunAppend, StoreError> {
+        let _compare = self.run_compare.lock().map_err(|_| {
+            StoreError::Io(std::io::Error::other(
+                "the session run-append lock was poisoned",
+            ))
+        })?;
+
+        if transaction.run_id().session_id() != *session {
+            return Err(StoreError::WrongSession {
+                expected: transaction.run_id().session_id(),
+                asked: *session,
+            });
+        }
+
+        let log_path = self.log_path(session);
+        let existing = self.io.read(&log_path)?;
+        if existing.is_none() {
+            let first_admission = matches!(
+                transaction.command(),
+                RunCommand::CommandAdmitted {
+                    expected_revision: None,
+                    start: true,
+                    ..
+                }
+            );
+            if expected_revision.is_some()
+                || transaction.revision() != RunRevision::new(1)
+                || !first_admission
+            {
+                return Err(StoreError::NotFound);
+            }
+
+            let header = Header::new(
+                *session,
+                transaction.observed_at(),
+                transaction.root().as_path().to_path_buf(),
+            );
+            let mut image = encode_header(&header);
+            image.push(b'\n');
+            let record_seq: Seq = serde_json::from_value(
+                serde_json::to_value(transaction.revision())
+                    .expect("RunRevision always serialises"),
+            )
+            .expect("RunRevision and Seq share the durable integer representation");
+            image.extend_from_slice(&encode_record(
+                record_seq,
+                &SessionEntry::RunTransaction(transaction.clone()),
+            )?);
+            image.push(b'\n');
+
+            match self.io.replace_atomic_publication(&log_path, &image)? {
+                AtomicReplacePublication::PublishedDurably => {
+                    if let Err(error) = self.rebuild_manifest_from_log(session, &image) {
+                        tracing::warn!(
+                            session = %session_dir_name(session),
+                            error = %error,
+                            "run transaction committed but its manifest projection failed"
+                        );
+                    }
+                    return Ok(RunAppend::Committed {
+                        revision: transaction.revision(),
+                    });
+                }
+                AtomicReplacePublication::PublishedDurabilityUncertain { diagnostic } => {
+                    if let Err(error) = self.rebuild_manifest_from_log(session, &image) {
+                        tracing::warn!(
+                            session = %session_dir_name(session),
+                            error = %error,
+                            "uncertain run publication also failed its manifest projection"
+                        );
+                    }
+                    return Ok(RunAppend::CommittedDurabilityUncertain { diagnostic });
+                }
+            }
+        }
+
+        let bytes = existing.expect("checked above");
+        let mut lines = split_lines(&bytes).into_iter();
+        let header = match lines.next().and_then(|line| decode_line(line).ok()) {
+            Some(StoreLine::Header(header)) if header.v == CODEC_VERSION => header,
+            _ => {
+                // Preserve the port's precise header diagnostics.
+                header_end(&bytes)?;
+                return Err(StoreError::MissingHeader);
+            }
+        };
+        if header.session != *session {
+            return Err(StoreError::WrongSession {
+                expected: header.session,
+                asked: *session,
+            });
+        }
+        let current = self.current_run_revision_from_lines(lines)?;
+        if expected_revision.is_none() {
+            return current.map_or_else(
+                || {
+                    Err(StoreError::Io(std::io::Error::new(
+                        std::io::ErrorKind::AlreadyExists,
+                        "an initial run append requires an absent session log",
+                    )))
+                },
+                |actual| Ok(RunAppend::Conflict { actual }),
+            );
+        }
+        if current != expected_revision {
+            return current.map_or(Err(StoreError::NotFound), |actual| {
+                Ok(RunAppend::Conflict { actual })
+            });
+        }
+        if header.workspace_root.as_path() != transaction.root().as_path() {
+            return Err(StoreError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "run transaction root does not match the session header",
+            )));
+        }
+        let committed = current
+            .map(RunRevision::next)
+            .unwrap_or_else(|| RunRevision::new(1));
+        if transaction.revision() != committed {
+            return Err(StoreError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "run transaction revision is not the expected successor",
+            )));
+        }
+
+        let record_seq: Seq = serde_json::from_value(
+            serde_json::to_value(transaction.revision()).expect("RunRevision always serialises"),
+        )
+        .expect("RunRevision and Seq share the durable integer representation");
+        let line = encode_record(
+            record_seq,
+            &SessionEntry::RunTransaction(transaction.clone()),
+        )?;
+        self.io.append_line(&log_path, &line)?;
+        let mut published = bytes;
+        published.extend_from_slice(&line);
+        published.push(b'\n');
+        if let Err(error) = self.io.fsync(&log_path) {
+            if let Err(manifest_error) = self.rebuild_manifest_from_log(session, &published) {
+                tracing::warn!(
+                    session = %session_dir_name(session),
+                    error = %manifest_error,
+                    "uncertain run append also failed its manifest projection"
+                );
+            }
+            return Ok(RunAppend::CommittedDurabilityUncertain {
+                diagnostic: error.to_string(),
+            });
+        }
+
+        if let Err(error) = self.rebuild_manifest_from_log(session, &published) {
+            tracing::warn!(
+                session = %session_dir_name(session),
+                error = %error,
+                "run transaction committed but its manifest projection failed"
+            );
+        }
+        Ok(RunAppend::Committed {
+            revision: transaction.revision(),
+        })
     }
 
     fn list(&self) -> Result<Vec<SessionMeta>, StoreError> {

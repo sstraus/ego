@@ -16,13 +16,14 @@ use futures::stream::{self, BoxStream};
 use ego_core::event::domain::DomainEvent;
 use ego_core::event::id::SessionId;
 use ego_core::event::time::{Clock, Timestamp};
-use ego_core::run::{
-    CancelKey, CancelRequest, ContinueRequest, IdSource, RequestDigest, RequestId, RunAdmission,
-    EventSinkFactory, RunAppend, RunCommandOutcome, RunController, RunExecution,
-    RunExecutionBindings, RunExecutor, RunExecutorError, RunHandle, RunId, RunPreparation,
-    RunRetention, RunRoot, RunStart, RunStatus, RunRevision, RunTransaction, StartRequest,
-};
 use ego_core::generator::capabilities::ModelCapabilities;
+use ego_core::run::{
+    CancelKey, CancelRequest, ContinueRequest, EventSinkFactory, IdSource, RequestDigest,
+    RequestId, RunAdmission, RunAppend, RunCommandOutcome, RunController, RunExecution,
+    RunExecutionBindings, RunExecutor, RunExecutorError, RunHandle, RunId, RunPreparation,
+    RunRecoveryOutcome, RunRetention, RunRevision, RunRoot, RunSettlement, RunStart, RunStatus,
+    RunTransaction, StartRequest,
+};
 use ego_core::sink::{EventSink, NullSink};
 use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
 
@@ -124,9 +125,14 @@ impl SessionStore for RecordingSessionStore {
         let fault = self.faults.lock().expect("store faults").pop_front();
         if let Some(fault) = fault {
             match fault {
-                StoreFault::Reject => return Err(StoreError::Io(std::io::Error::other("rejected"))),
+                StoreFault::Reject => {
+                    return Err(StoreError::Io(std::io::Error::other("rejected")));
+                }
                 StoreFault::PublishedUncertain => {
-                    self.sequence.lock().expect("transaction sequence").push("publish");
+                    self.sequence
+                        .lock()
+                        .expect("transaction sequence")
+                        .push("publish");
                     self.entries
                         .lock()
                         .expect("session entries")
@@ -140,14 +146,12 @@ impl SessionStore for RecordingSessionStore {
             }
         }
         let mut entries = self.entries.lock().expect("session entries");
-        let current = entries
-            .get(session)
-            .and_then(|entries| {
-                entries.iter().rev().find_map(|entry| match entry {
-                    SessionEntry::RunTransaction(transaction) => Some(transaction.revision()),
-                    SessionEntry::Event(_) => None,
-                })
-            });
+        let current = entries.get(session).and_then(|entries| {
+            entries.iter().rev().find_map(|entry| match entry {
+                SessionEntry::RunTransaction(transaction) => Some(transaction.revision()),
+                SessionEntry::Event(_) => None,
+            })
+        });
         if expected_revision != current {
             return match current {
                 Some(actual) => Ok(RunAppend::Conflict { actual }),
@@ -158,7 +162,10 @@ impl SessionStore for RecordingSessionStore {
             .entry(*session)
             .or_default()
             .push(SessionEntry::RunTransaction(transaction));
-        self.sequence.lock().expect("transaction sequence").push("commit");
+        self.sequence
+            .lock()
+            .expect("transaction sequence")
+            .push("commit");
         Ok(RunAppend::Committed {
             revision: current.map_or_else(|| RunRevision::new(1), RunRevision::next),
         })
@@ -170,6 +177,7 @@ enum ExecutorCall {
     Prepare,
     Start(RunId),
     Recover(RunId),
+    Observe(RunId),
     Submit(RunId),
     Interrupt(RunId),
 }
@@ -177,6 +185,11 @@ enum ExecutorCall {
 struct ScriptedRunExecutor {
     calls: Mutex<Vec<ExecutorCall>>,
     recoveries: Mutex<VecDeque<Result<ego_core::run::RecoveryEvidence, RunExecutorError>>>,
+    observations: Mutex<VecDeque<Result<RunSettlement, RunExecutorError>>>,
+    submissions: Mutex<VecDeque<Result<RunSettlement, RunExecutorError>>>,
+    next_prepared: Mutex<u64>,
+    prepared_tokens: Mutex<Vec<u64>>,
+    bindings_received: Mutex<usize>,
     submit_gate: Mutex<SubmitGate>,
     submit_gate_changed: Condvar,
     started_roots: Mutex<Vec<(RunId, RunRoot)>>,
@@ -217,6 +230,11 @@ impl ScriptedRunExecutor {
         Self {
             calls: Mutex::new(Vec::new()),
             recoveries: Mutex::new(VecDeque::new()),
+            observations: Mutex::new(VecDeque::new()),
+            submissions: Mutex::new(VecDeque::new()),
+            next_prepared: Mutex::new(0),
+            prepared_tokens: Mutex::new(Vec::new()),
+            bindings_received: Mutex::new(0),
             submit_gate: Mutex::new(SubmitGate::default()),
             submit_gate_changed: Condvar::new(),
             started_roots: Mutex::new(Vec::new()),
@@ -233,10 +251,7 @@ impl ScriptedRunExecutor {
         gate.waker = None;
     }
 
-    fn with_start_barrier(
-        sequence: Arc<Mutex<Vec<&'static str>>>,
-        barrier: Arc<Barrier>,
-    ) -> Self {
+    fn with_start_barrier(sequence: Arc<Mutex<Vec<&'static str>>>, barrier: Arc<Barrier>) -> Self {
         let mut executor = Self::with_sequence(sequence);
         executor.start_barrier = Some(barrier);
         executor
@@ -246,6 +261,20 @@ impl ScriptedRunExecutor {
         self.recoveries
             .lock()
             .expect("executor recoveries")
+            .push_back(result);
+    }
+
+    fn observation_result(&self, result: Result<RunSettlement, RunExecutorError>) {
+        self.observations
+            .lock()
+            .expect("executor observations")
+            .push_back(result);
+    }
+
+    fn submission_result(&self, result: Result<RunSettlement, RunExecutorError>) {
+        self.submissions
+            .lock()
+            .expect("executor submissions")
             .push_back(result);
     }
 
@@ -276,10 +305,18 @@ impl ScriptedRunExecutor {
     }
 
     fn started_roots(&self) -> Vec<(RunId, RunRoot)> {
-        self.started_roots
+        self.started_roots.lock().expect("executor roots").clone()
+    }
+
+    fn prepared_tokens(&self) -> Vec<u64> {
+        self.prepared_tokens
             .lock()
-            .expect("executor roots")
+            .expect("prepared tokens")
             .clone()
+    }
+
+    fn bindings_received(&self) -> usize {
+        *self.bindings_received.lock().expect("execution bindings")
     }
 }
 
@@ -294,8 +331,13 @@ impl RunExecutor for ScriptedRunExecutor {
             .lock()
             .expect("transaction sequence")
             .push("prepare");
-        self.calls.lock().expect("executor calls").push(ExecutorCall::Prepare);
-        Box::pin(future::ready(Ok(PreparedToken(1))))
+        self.calls
+            .lock()
+            .expect("executor calls")
+            .push(ExecutorCall::Prepare);
+        let mut next = self.next_prepared.lock().expect("prepared sequence");
+        *next += 1;
+        Box::pin(future::ready(Ok(PreparedToken(*next))))
     }
 
     fn start<'a>(
@@ -310,8 +352,14 @@ impl RunExecutor for ScriptedRunExecutor {
             .lock()
             .expect("executor roots")
             .push((run, request.root.clone()));
-        self.sequence.lock().expect("transaction sequence").push("start");
-        self.calls.lock().expect("executor calls").push(ExecutorCall::Start(run));
+        self.sequence
+            .lock()
+            .expect("transaction sequence")
+            .push("start");
+        self.calls
+            .lock()
+            .expect("executor calls")
+            .push(ExecutorCall::Start(run));
         Box::pin(future::ready(Ok(RunHandle::new(run))))
     }
 
@@ -319,13 +367,35 @@ impl RunExecutor for ScriptedRunExecutor {
         &'a self,
         run: &'a RunId,
     ) -> BoxFuture<'a, Result<ego_core::run::RecoveryEvidence, RunExecutorError>> {
-        self.calls.lock().expect("executor calls").push(ExecutorCall::Recover(*run));
+        self.calls
+            .lock()
+            .expect("executor calls")
+            .push(ExecutorCall::Recover(*run));
         let result = self
             .recoveries
             .lock()
             .expect("executor recoveries")
             .pop_front()
             .unwrap_or(Ok(ego_core::run::RecoveryEvidence::Ambiguous));
+        Box::pin(future::ready(result))
+    }
+
+    fn observe<'a>(
+        &'a self,
+        handle: &'a RunHandle,
+        _bindings: RunExecutionBindings,
+    ) -> BoxFuture<'a, Result<RunSettlement, RunExecutorError>> {
+        self.calls
+            .lock()
+            .expect("executor calls")
+            .push(ExecutorCall::Observe(handle.run_id()));
+        *self.bindings_received.lock().expect("execution bindings") += 1;
+        let result = self
+            .observations
+            .lock()
+            .expect("executor observations")
+            .pop_front()
+            .unwrap_or_else(|| Ok(RunSettlement::completed()));
         Box::pin(future::ready(result))
     }
 
@@ -336,9 +406,24 @@ impl RunExecutor for ScriptedRunExecutor {
         prepared: Self::Prepared,
         _bindings: RunExecutionBindings,
     ) -> BoxFuture<'a, Result<ego_core::run::RunSettlement, RunExecutorError>> {
-        let _prepared_serial = prepared.0;
-        self.calls.lock().expect("executor calls").push(ExecutorCall::Submit(handle.run_id()));
-        self.sequence.lock().expect("transaction sequence").push("submit");
+        self.prepared_tokens
+            .lock()
+            .expect("prepared tokens")
+            .push(prepared.0);
+        *self.bindings_received.lock().expect("execution bindings") += 1;
+        self.calls
+            .lock()
+            .expect("executor calls")
+            .push(ExecutorCall::Submit(handle.run_id()));
+        self.sequence
+            .lock()
+            .expect("transaction sequence")
+            .push("submit");
+        let mut scripted = self
+            .submissions
+            .lock()
+            .expect("executor submissions")
+            .pop_front();
         let gate = &self.submit_gate;
         let changed = &self.submit_gate_changed;
         Box::pin(futures::future::poll_fn(move |cx| {
@@ -351,7 +436,11 @@ impl RunExecutor for ScriptedRunExecutor {
                 )));
             }
             if gate.released {
-                return Poll::Ready(Ok(ego_core::run::RunSettlement::completed()));
+                return Poll::Ready(
+                    scripted
+                        .take()
+                        .unwrap_or_else(|| Ok(ego_core::run::RunSettlement::completed())),
+                );
             }
             gate.waker = Some(cx.waker().clone());
             Poll::Pending
@@ -366,7 +455,10 @@ impl RunExecutor for ScriptedRunExecutor {
             .lock()
             .expect("executor calls")
             .push(ExecutorCall::Interrupt(handle.run_id()));
-        self.sequence.lock().expect("transaction sequence").push("interrupt");
+        self.sequence
+            .lock()
+            .expect("transaction sequence")
+            .push("interrupt");
         let waker = {
             let mut gate = self.submit_gate.lock().expect("executor gate");
             gate.interrupted = true;
@@ -428,7 +520,8 @@ fn start(root: &str, value: u128, body: &str) -> StartRequest {
     )
 }
 
-type Controller = RunController<RecordingSessionStore, ScriptedRunExecutor, FixedClock, SequenceIds>;
+type Controller =
+    RunController<RecordingSessionStore, ScriptedRunExecutor, FixedClock, SequenceIds>;
 
 fn controller(store: Arc<RecordingSessionStore>, executor: Arc<ScriptedRunExecutor>) -> Controller {
     RunController::new(
@@ -436,8 +529,7 @@ fn controller(store: Arc<RecordingSessionStore>, executor: Arc<ScriptedRunExecut
         executor,
         Arc::new(FixedClock::default()),
         Arc::new(SequenceIds::default()),
-        RunRetention::new(NonZeroUsize::new(2).expect("non-zero retention"))
-            .expect("retention"),
+        RunRetention::new(NonZeroUsize::new(2).expect("non-zero retention")).expect("retention"),
     )
 }
 
@@ -446,12 +538,7 @@ fn bindings() -> RunExecutionBindings {
 }
 
 fn admitted_start(controller: &Controller, request: StartRequest) -> RunAdmission {
-    match futures::executor::block_on(controller.start(
-        request,
-        bindings(),
-    ))
-    .expect("run command")
-    {
+    match futures::executor::block_on(controller.start(request, bindings())).expect("run command") {
         RunCommandOutcome::Admitted(admission) => admission,
         RunCommandOutcome::Replayed(_) => panic!("fresh start unexpectedly replayed"),
     }
@@ -461,15 +548,9 @@ fn execute(controller: &Controller, execution: RunExecution) {
     futures::executor::block_on(controller.execute(execution)).expect("run execution");
 }
 
-fn admitted_continue(
-    controller: &Controller,
-    request: ContinueRequest,
-) -> RunAdmission {
-    match futures::executor::block_on(controller.continue_run(
-        request,
-        bindings(),
-    ))
-    .expect("run command")
+fn admitted_continue(controller: &Controller, request: ContinueRequest) -> RunAdmission {
+    match futures::executor::block_on(controller.continue_run(request, bindings()))
+        .expect("run command")
     {
         RunCommandOutcome::Admitted(admission) => admission,
         RunCommandOutcome::Replayed(_) => panic!("fresh continuation unexpectedly replayed"),
@@ -480,20 +561,14 @@ fn start_command(
     controller: &Controller,
     request: StartRequest,
 ) -> Result<RunCommandOutcome, ego_core::run::RunError> {
-    futures::executor::block_on(controller.start(
-        request,
-        bindings(),
-    ))
+    futures::executor::block_on(controller.start(request, bindings()))
 }
 
 fn continue_command(
     controller: &Controller,
     request: ContinueRequest,
 ) -> Result<RunCommandOutcome, ego_core::run::RunError> {
-    futures::executor::block_on(controller.continue_run(
-        request,
-        bindings(),
-    ))
+    futures::executor::block_on(controller.continue_run(request, bindings()))
 }
 
 fn replayed_run_id(outcome: RunCommandOutcome) -> RunId {
@@ -521,10 +596,7 @@ fn revision_one_is_atomically_published_before_any_executor_start() {
     let session = admission.session_id();
     let run = admission.run_id();
     assert_eq!(
-        sequence
-            .lock()
-            .expect("transaction sequence")
-            .as_slice(),
+        sequence.lock().expect("transaction sequence").as_slice(),
         ["prepare", "commit"]
     );
     assert_eq!(store.transactions(session).len(), 1);
@@ -538,10 +610,7 @@ fn revision_one_is_atomically_published_before_any_executor_start() {
     executor.allow_effects();
     execute(&controller, admission.into_execution());
     assert_eq!(
-        sequence
-            .lock()
-            .expect("transaction sequence")
-            .as_slice(),
+        sequence.lock().expect("transaction sequence").as_slice(),
         ["prepare", "commit", "start", "submit", "commit"]
     );
     assert_eq!(store.transactions(session).len(), 2);
@@ -550,6 +619,8 @@ fn revision_one_is_atomically_published_before_any_executor_start() {
         ego_core::run::RunCommand::CommandSettled { .. }
     ));
     assert_eq!(store.transactions(session)[1].status(), RunStatus::Settled);
+    assert_eq!(executor.prepared_tokens(), vec![1]);
+    assert_eq!(executor.bindings_received(), 1);
     assert_eq!(
         executor.calls(),
         vec![
@@ -566,10 +637,7 @@ fn start_derives_uuidv5_session_identity_and_mints_a_distinct_run_nonce() {
     let executor = Arc::new(ScriptedRunExecutor::default());
     let controller = controller(store, executor);
     let admission = admitted_start(&controller, start("/a", 2, "a"));
-    assert_eq!(
-        admission.session_id(),
-        RequestId::session_id(request(2))
-    );
+    assert_eq!(admission.session_id(), RequestId::session_id(request(2)));
     assert_ne!(admission.run_id().nonce(), admission.session_id().uuid());
     assert_eq!(admission.run_id().session_id(), admission.session_id());
 }
@@ -580,8 +648,7 @@ fn exact_replay_is_idempotent_but_digest_mismatch_and_identity_collision_have_no
     let executor = Arc::new(ScriptedRunExecutor::default());
     let controller = controller(Arc::clone(&store), Arc::clone(&executor));
     let first = admitted_start(&controller, start("/a", 3, "a"));
-    let replay = start_command(&controller, start("/a", 3, "a"))
-        .expect("exact replay");
+    let replay = start_command(&controller, start("/a", 3, "a")).expect("exact replay");
     assert_eq!(replayed_run_id(replay), first.run_id());
     assert_eq!(
         executor
@@ -601,8 +668,14 @@ fn exact_replay_is_idempotent_but_digest_mismatch_and_identity_collision_have_no
 
     let transactions_before_collision = store.transactions(first.session_id());
     let collision = start_command(&controller, start("/b", 3, "a"));
-    assert!(matches!(collision, Err(ego_core::run::RunError::IdentityCollision { .. })));
-    assert_eq!(store.transactions(first.session_id()), transactions_before_collision);
+    assert!(matches!(
+        collision,
+        Err(ego_core::run::RunError::IdentityCollision { .. })
+    ));
+    assert_eq!(
+        store.transactions(first.session_id()),
+        transactions_before_collision
+    );
     assert!(effect_calls(&executor).is_empty());
 }
 
@@ -614,13 +687,12 @@ fn concurrent_same_request_has_one_winner_and_one_replay() {
     let left = Arc::clone(&controller);
     let right = Arc::clone(&controller);
     let (a, b) = std::thread::scope(|scope| {
-        let first = scope.spawn(|| {
-            start_command(&left, start("/a", 4, "a"))
-        });
-        let second = scope.spawn(|| {
-            start_command(&right, start("/a", 4, "a"))
-        });
-        (first.join().expect("first start"), second.join().expect("second start"))
+        let first = scope.spawn(|| start_command(&left, start("/a", 4, "a")));
+        let second = scope.spawn(|| start_command(&right, start("/a", 4, "a")));
+        (
+            first.join().expect("first start"),
+            second.join().expect("second start"),
+        )
     });
     let first = a.expect("first start");
     let second = b.expect("second start");
@@ -643,7 +715,11 @@ fn prepublication_failure_starts_no_executor_and_published_uncertain_starts_no_e
     store.fail_next(StoreFault::Reject);
     let controller = controller(Arc::clone(&store), Arc::clone(&executor));
     assert!(start_command(&controller, start("/a", 5, "a")).is_err());
-    assert!(store.transactions(RequestId::session_id(request(5))).is_empty());
+    assert!(
+        store
+            .transactions(RequestId::session_id(request(5)))
+            .is_empty()
+    );
     assert!(effect_calls(&executor).is_empty());
 
     store.fail_next(StoreFault::PublishedUncertain);
@@ -665,9 +741,48 @@ fn prepublication_failure_starts_no_executor_and_published_uncertain_starts_no_e
         futures::executor::block_on(controller.status(run_id))
             .expect("new authority snapshot")
             .status(),
-        RunStatus::Uncertain
+        RunStatus::Running
     );
     assert!(effect_calls(&executor).is_empty());
+}
+
+#[test]
+fn submit_error_publishes_uncertain_settlement_and_completes_subscription() {
+    let store = Arc::new(RecordingSessionStore::default());
+    let executor = Arc::new(ScriptedRunExecutor::default());
+    executor.submission_result(Err(RunExecutorError::new("submission failed")));
+    let controller = controller(Arc::clone(&store), Arc::clone(&executor));
+    let admission = admitted_start(&controller, start("/submit-error", 7, "error"));
+    let run = admission.run_id();
+    let session = admission.session_id();
+    let subscription = admission.subscription();
+    executor.allow_effects();
+
+    let error = futures::executor::block_on(controller.execute(admission.into_execution()))
+        .expect_err("submit error must reach the caller");
+    assert!(matches!(
+        error,
+        ego_core::run::RunError::Executor(error) if error.to_string() == "submission failed"
+    ));
+    let settled = futures::executor::block_on(subscription);
+    assert_eq!(settled.status(), RunStatus::Uncertain);
+    assert_eq!(settled.settlement(), Some(&RunSettlement::Uncertain));
+    assert_eq!(store.transactions(session).len(), 2);
+    assert!(matches!(
+        store.transactions(session)[1].command(),
+        ego_core::run::RunCommand::CommandSettled {
+            settlement: RunSettlement::Uncertain,
+            ..
+        }
+    ));
+    assert_eq!(
+        executor.calls(),
+        vec![
+            ExecutorCall::Prepare,
+            ExecutorCall::Start(run),
+            ExecutorCall::Submit(run),
+        ]
+    );
 }
 
 #[test]
@@ -684,13 +799,16 @@ fn continuation_and_cancel_commit_receipts_before_submit_or_interrupt_and_never_
     let settled_start = futures::executor::block_on(controller.status(run)).expect("start status");
     assert_eq!(settled_start.status(), RunStatus::Settled);
 
-    let next = admitted_continue(&controller, ContinueRequest::new(
-        run,
-        request(8),
-        digest("b"),
-        settled_start.revision(),
-        "continue",
-    ));
+    let next = admitted_continue(
+        &controller,
+        ContinueRequest::new(
+            run,
+            request(8),
+            digest("b"),
+            settled_start.revision(),
+            "continue",
+        ),
+    );
     let next_revision = next.revision();
     let cancel_key: CancelKey = next.cancel_key().clone();
     let execution = next.into_execution();
@@ -717,7 +835,9 @@ fn continuation_and_cancel_commit_receipts_before_submit_or_interrupt_and_never_
     );
     assert_eq!(
         sequence.lock().expect("transaction sequence").as_slice(),
-        ["prepare", "commit", "start", "submit", "commit", "prepare", "commit"]
+        [
+            "prepare", "commit", "start", "submit", "commit", "prepare", "commit"
+        ]
     );
 
     executor.block_effects();
@@ -747,64 +867,80 @@ fn continuation_and_cancel_commit_receipts_before_submit_or_interrupt_and_never_
     assert_eq!(
         sequence.lock().expect("transaction sequence").as_slice(),
         [
-            "prepare", "commit", "start", "submit", "commit", "prepare", "commit", "submit",
-            "commit", "interrupt"
+            "prepare",
+            "commit",
+            "start",
+            "submit",
+            "commit",
+            "prepare",
+            "commit",
+            "submit",
+            "commit",
+            "interrupt"
         ]
     );
     worker.join().expect("cancelled execution");
     assert_eq!(
         sequence.lock().expect("transaction sequence").as_slice(),
         [
-            "prepare", "commit", "start", "submit", "commit", "prepare", "commit", "submit",
-            "commit", "interrupt", "commit"
+            "prepare",
+            "commit",
+            "start",
+            "submit",
+            "commit",
+            "prepare",
+            "commit",
+            "submit",
+            "commit",
+            "interrupt",
+            "commit"
         ]
     );
     let final_status = futures::executor::block_on(controller.status(run)).expect("final status");
     assert_eq!(final_status.status(), RunStatus::Cancelled);
     let transactions = store.transactions(session);
-    assert_eq!(transactions.len(), 6);
+    assert_eq!(transactions.len(), 5);
     assert_eq!(transactions[0].revision(), RunRevision::new(1));
     assert_eq!(transactions[1].revision(), RunRevision::new(2));
     assert_eq!(transactions[2].revision(), RunRevision::new(3));
     assert_eq!(transactions[3].revision(), RunRevision::new(4));
     assert_eq!(transactions[4].revision(), RunRevision::new(5));
-    assert_eq!(transactions[5].revision(), RunRevision::new(6));
     assert!(matches!(
-        transactions[4].command(),
+        transactions[3].command(),
         ego_core::run::RunCommand::CancelRequested { .. }
     ));
     assert!(matches!(
-        transactions[3].command(),
-        ego_core::run::RunCommand::CommandSettled { .. }
-    ));
-    assert!(matches!(
-        transactions[5].command(),
+        transactions[4].command(),
         ego_core::run::RunCommand::CommandSettled { .. }
     ));
     assert_eq!(transactions[0].status(), RunStatus::Running);
     assert_eq!(transactions[1].status(), RunStatus::Settled);
     assert_eq!(transactions[2].status(), RunStatus::Running);
-    assert_eq!(transactions[3].status(), RunStatus::Settled);
-    assert_eq!(transactions[4].status(), RunStatus::Cancelling);
-    assert_eq!(transactions[5].status(), RunStatus::Cancelled);
-    assert_eq!(executor.calls(), vec![
-        ExecutorCall::Prepare,
-        ExecutorCall::Start(run),
-        ExecutorCall::Submit(run),
-        ExecutorCall::Prepare,
-        ExecutorCall::Submit(run),
-        ExecutorCall::Interrupt(run),
-    ]);
+    assert_eq!(transactions[3].status(), RunStatus::Cancelling);
+    assert_eq!(transactions[4].status(), RunStatus::Cancelled);
+    assert_eq!(
+        executor.calls(),
+        vec![
+            ExecutorCall::Prepare,
+            ExecutorCall::Start(run),
+            ExecutorCall::Submit(run),
+            ExecutorCall::Prepare,
+            ExecutorCall::Submit(run),
+            ExecutorCall::Interrupt(run),
+        ]
+    );
 
     let calls_after_cancel = executor.calls();
-    assert!(futures::executor::block_on(controller.cancel(CancelRequest::new(
-        run,
-        request(10),
-        digest("stale"),
-        next_revision,
-    )))
-    .is_err());
-    assert_eq!(store.transactions(session).len(), 6);
+    assert!(
+        futures::executor::block_on(controller.cancel(CancelRequest::new(
+            run,
+            request(10),
+            digest("stale"),
+            next_revision,
+        )))
+        .is_err()
+    );
+    assert_eq!(store.transactions(session).len(), 5);
     assert_eq!(executor.calls(), calls_after_cancel);
 }
 
@@ -832,14 +968,19 @@ fn distinct_roots_run_concurrently_without_sharing_a_lease() {
     let first_root = first.root();
     let second_root = second.root();
     assert_ne!(first_run, second_run);
-    assert!(continue_command(&controller, ContinueRequest::new(
-        first_run,
-        request(13),
-        digest("busy"),
-        first.revision(),
-        "blocked",
-    ))
-    .is_err());
+    assert!(
+        continue_command(
+            &controller,
+            ContinueRequest::new(
+                first_run,
+                request(13),
+                digest("busy"),
+                first.revision(),
+                "blocked",
+            )
+        )
+        .is_err()
+    );
 
     executor.allow_effects();
     let first_execution = first.into_execution();
@@ -854,12 +995,16 @@ fn distinct_roots_run_concurrently_without_sharing_a_lease() {
     });
     let started_roots = executor.started_roots();
     assert_eq!(started_roots.len(), 2);
-    assert!(started_roots.iter().any(|(run, root)| {
-        *run == first_run && root == &first_root
-    }));
-    assert!(started_roots.iter().any(|(run, root)| {
-        *run == second_run && root == &second_root
-    }));
+    assert!(
+        started_roots
+            .iter()
+            .any(|(run, root)| { *run == first_run && root == &first_root })
+    );
+    assert!(
+        started_roots
+            .iter()
+            .any(|(run, root)| { *run == second_run && root == &second_root })
+    );
     assert_eq!(
         futures::executor::block_on(controller.status(second_run))
             .expect("status")
@@ -873,12 +1018,14 @@ fn recovery_controller() -> (
     Arc<RecordingSessionStore>,
     Arc<ScriptedRunExecutor>,
     RunId,
+    CancelKey,
 ) {
     let store = Arc::new(RecordingSessionStore::default());
     let first_executor = Arc::new(ScriptedRunExecutor::default());
     let first_controller = controller(Arc::clone(&store), Arc::clone(&first_executor));
     let admission = admitted_start(&first_controller, start("/recover", 20, "recovery"));
     let run_id = admission.run_id();
+    let cancel_key = admission.cancel_key().clone();
     drop(admission);
     drop(first_controller);
     drop(first_executor);
@@ -889,12 +1036,13 @@ fn recovery_controller() -> (
         store,
         executor,
         run_id,
+        cancel_key,
     )
 }
 
 #[test]
 fn recovery_running_reattaches_live_execution() {
-    let (controller, store, executor, run) = recovery_controller();
+    let (controller, store, executor, run, original_cancel_key) = recovery_controller();
     let calls_before_status = executor.calls();
     let status_before_recovery = futures::executor::block_on(controller.status(run))
         .expect("running status before explicit recovery");
@@ -904,20 +1052,53 @@ fn recovery_running_reattaches_live_execution() {
     executor.recovery_result(Ok(ego_core::run::RecoveryEvidence::Running(
         RunHandle::new(run),
     )));
+    executor.observation_result(Ok(RunSettlement::completed()));
     assert_eq!(store.transactions(run.session_id()).len(), 1);
-    futures::executor::block_on(controller.recover(run)).expect("running recovery");
+    let recovery =
+        futures::executor::block_on(controller.recover(run, bindings())).expect("running recovery");
+    let reattachment = match recovery {
+        RunRecoveryOutcome::Reattached(reattachment) => reattachment,
+        RunRecoveryOutcome::Observed(_) => panic!("running recovery returned observation"),
+    };
+    assert_eq!(reattachment.snapshot().status(), RunStatus::Running);
+    assert_ne!(reattachment.cancel_key(), &original_cancel_key);
+    assert_eq!(
+        reattachment.subscription().snapshot().status(),
+        RunStatus::Running
+    );
+    execute(&controller, reattachment.into_execution());
     let status = futures::executor::block_on(controller.status(run)).expect("running status");
-    assert_eq!(status.status(), RunStatus::Running);
-    assert_eq!(executor.calls(), vec![ExecutorCall::Recover(run)]);
-    assert_eq!(store.transactions(run.session_id()).len(), 1);
+    assert_eq!(status.status(), RunStatus::Settled);
+    assert_eq!(
+        executor.calls(),
+        vec![ExecutorCall::Recover(run), ExecutorCall::Observe(run)]
+    );
+    assert_eq!(executor.bindings_received(), 1);
+    assert_eq!(store.transactions(run.session_id()).len(), 2);
+    assert!(matches!(
+        store.transactions(run.session_id())[1].command(),
+        ego_core::run::RunCommand::CommandSettled { .. }
+    ));
 }
 
 #[test]
 fn recovery_terminal_preserves_terminal_settlement() {
-    let (controller, store, executor, run) = recovery_controller();
+    let (controller, store, executor, run, _) = recovery_controller();
     executor.recovery_result(Ok(ego_core::run::RecoveryEvidence::Terminal));
-    assert_eq!(store.transactions(run.session_id())[0].status(), RunStatus::Running);
-    futures::executor::block_on(controller.recover(run)).expect("terminal recovery");
+    assert_eq!(
+        store.transactions(run.session_id())[0].status(),
+        RunStatus::Running
+    );
+    let recovery = futures::executor::block_on(controller.recover(run, bindings()))
+        .expect("terminal recovery");
+    let observation = match recovery {
+        RunRecoveryOutcome::Observed(observation) => observation,
+        RunRecoveryOutcome::Reattached(_) => panic!("terminal recovery reattached"),
+    };
+    assert_eq!(
+        observation.snapshot().settlement(),
+        Some(&RunSettlement::completed())
+    );
     assert_eq!(
         futures::executor::block_on(controller.status(run))
             .expect("terminal status")
@@ -930,15 +1111,30 @@ fn recovery_terminal_preserves_terminal_settlement() {
         store.transactions(run.session_id())[1].command(),
         ego_core::run::RunCommand::CommandSettled { .. }
     ));
-    assert_eq!(store.transactions(run.session_id())[1].status(), RunStatus::Settled);
+    assert_eq!(
+        store.transactions(run.session_id())[1].status(),
+        RunStatus::Settled
+    );
 }
 
 #[test]
 fn recovery_cancelled_before_start_settles_interrupted() {
-    let (controller, store, executor, run) = recovery_controller();
+    let (controller, store, executor, run, _) = recovery_controller();
     executor.recovery_result(Ok(ego_core::run::RecoveryEvidence::CancelledBeforeStart));
-    assert_eq!(store.transactions(run.session_id())[0].status(), RunStatus::Running);
-    futures::executor::block_on(controller.recover(run)).expect("interrupted recovery");
+    assert_eq!(
+        store.transactions(run.session_id())[0].status(),
+        RunStatus::Running
+    );
+    let recovery = futures::executor::block_on(controller.recover(run, bindings()))
+        .expect("interrupted recovery");
+    let observation = match recovery {
+        RunRecoveryOutcome::Observed(observation) => observation,
+        RunRecoveryOutcome::Reattached(_) => panic!("interrupted recovery reattached"),
+    };
+    assert_eq!(
+        observation.snapshot().settlement(),
+        Some(&RunSettlement::Interrupted)
+    );
     assert_eq!(
         futures::executor::block_on(controller.status(run))
             .expect("interrupted status")
@@ -951,15 +1147,30 @@ fn recovery_cancelled_before_start_settles_interrupted() {
         store.transactions(run.session_id())[1].command(),
         ego_core::run::RunCommand::CommandSettled { .. }
     ));
-    assert_eq!(store.transactions(run.session_id())[1].status(), RunStatus::Interrupted);
+    assert_eq!(
+        store.transactions(run.session_id())[1].status(),
+        RunStatus::Interrupted
+    );
 }
 
 #[test]
 fn recovery_ambiguous_external_effect_is_uncertain_and_not_retried() {
-    let (controller, store, executor, run) = recovery_controller();
+    let (controller, store, executor, run, _) = recovery_controller();
     executor.recovery_result(Ok(ego_core::run::RecoveryEvidence::Ambiguous));
-    assert_eq!(store.transactions(run.session_id())[0].status(), RunStatus::Running);
-    futures::executor::block_on(controller.recover(run)).expect("uncertain recovery");
+    assert_eq!(
+        store.transactions(run.session_id())[0].status(),
+        RunStatus::Running
+    );
+    let recovery = futures::executor::block_on(controller.recover(run, bindings()))
+        .expect("uncertain recovery");
+    let observation = match recovery {
+        RunRecoveryOutcome::Observed(observation) => observation,
+        RunRecoveryOutcome::Reattached(_) => panic!("ambiguous recovery reattached"),
+    };
+    assert_eq!(
+        observation.snapshot().settlement(),
+        Some(&RunSettlement::Uncertain)
+    );
     assert_eq!(
         futures::executor::block_on(controller.status(run))
             .expect("uncertain status")
@@ -967,15 +1178,43 @@ fn recovery_ambiguous_external_effect_is_uncertain_and_not_retried() {
         RunStatus::Uncertain
     );
     assert_eq!(executor.calls(), vec![ExecutorCall::Recover(run)]);
-    assert!(futures::executor::block_on(controller.status(run))
-        .expect("stable uncertain status")
-        .blocks_new_turn());
+    assert!(
+        futures::executor::block_on(controller.status(run))
+            .expect("stable uncertain status")
+            .blocks_new_turn()
+    );
     assert_eq!(store.transactions(run.session_id()).len(), 2);
     assert!(matches!(
         store.transactions(run.session_id())[1].command(),
         ego_core::run::RunCommand::CommandSettled { .. }
     ));
-    assert_eq!(store.transactions(run.session_id())[1].status(), RunStatus::Uncertain);
+    assert_eq!(
+        store.transactions(run.session_id())[1].status(),
+        RunStatus::Uncertain
+    );
+}
+
+#[test]
+fn recovery_not_recoverable_is_observed_as_uncertain() {
+    let (controller, store, executor, run, _) = recovery_controller();
+    executor.recovery_result(Ok(ego_core::run::RecoveryEvidence::NotRecoverable));
+    let recovery = futures::executor::block_on(controller.recover(run, bindings()))
+        .expect("not recoverable recovery");
+    let observation = match recovery {
+        RunRecoveryOutcome::Observed(observation) => observation,
+        RunRecoveryOutcome::Reattached(_) => panic!("not recoverable recovery reattached"),
+    };
+    assert_eq!(observation.snapshot().status(), RunStatus::Uncertain);
+    assert_eq!(
+        observation.snapshot().settlement(),
+        Some(&RunSettlement::Uncertain)
+    );
+    assert_eq!(executor.calls(), vec![ExecutorCall::Recover(run)]);
+    assert_eq!(store.transactions(run.session_id()).len(), 2);
+    assert!(matches!(
+        store.transactions(run.session_id())[1].command(),
+        ego_core::run::RunCommand::CommandSettled { .. }
+    ));
 }
 
 #[test]
@@ -990,8 +1229,8 @@ fn recovery_of_an_already_terminal_durable_run_never_calls_recover() {
     let run = admission.run_id();
     first_executor.allow_effects();
     execute(&first_controller, admission.into_execution());
-    let start_status = futures::executor::block_on(first_controller.status(run))
-        .expect("initial terminal status");
+    let start_status =
+        futures::executor::block_on(first_controller.status(run)).expect("initial terminal status");
     let settled = admitted_continue(
         &first_controller,
         ContinueRequest::new(
@@ -1020,6 +1259,9 @@ fn recovery_of_an_already_terminal_durable_run_never_calls_recover() {
             .status(),
         RunStatus::Settled
     );
+    let recovery = futures::executor::block_on(fresh_controller.recover(run, bindings()))
+        .expect("already terminal recovery");
+    assert!(matches!(recovery, RunRecoveryOutcome::Observed(_)));
     assert!(fresh_executor.calls().is_empty());
 }
 
@@ -1034,12 +1276,12 @@ fn retention_prunes_completed_receipts_but_preserves_active_work_across_replay()
     let active_session = active.session_id();
     executor.allow_effects();
     execute(&controller, active.into_execution());
-    let active_status = futures::executor::block_on(controller.status(active_run))
-        .expect("active status");
+    let active_status =
+        futures::executor::block_on(controller.status(active_run)).expect("active status");
     assert_eq!(active_status.status(), RunStatus::Settled);
 
-    let active_replay = start_command(&controller, start("/active", 30, "active"))
-        .expect("active exact replay");
+    let active_replay =
+        start_command(&controller, start("/active", 30, "active")).expect("active exact replay");
     assert_eq!(replayed_run_id(active_replay), active_run);
     assert_eq!(store.transactions(active_session).len(), 2);
     assert_eq!(
@@ -1051,35 +1293,44 @@ fn retention_prunes_completed_receipts_but_preserves_active_work_across_replay()
         1
     );
 
-    let first = admitted_continue(&controller, ContinueRequest::new(
-        active_run,
-        request(31),
-        digest("continue-31"),
-        active_status.revision(),
-        "continue 31",
-    ));
+    let first = admitted_continue(
+        &controller,
+        ContinueRequest::new(
+            active_run,
+            request(31),
+            digest("continue-31"),
+            active_status.revision(),
+            "continue 31",
+        ),
+    );
     execute(&controller, first.into_execution());
     let first_status = futures::executor::block_on(controller.status(active_run))
         .expect("first continuation status");
 
-    let second = admitted_continue(&controller, ContinueRequest::new(
-        active_run,
-        request(32),
-        digest("continue-32"),
-        first_status.revision(),
-        "continue 32",
-    ));
+    let second = admitted_continue(
+        &controller,
+        ContinueRequest::new(
+            active_run,
+            request(32),
+            digest("continue-32"),
+            first_status.revision(),
+            "continue 32",
+        ),
+    );
     execute(&controller, second.into_execution());
     let second_status = futures::executor::block_on(controller.status(active_run))
         .expect("second continuation status");
 
-    let third = admitted_continue(&controller, ContinueRequest::new(
-        active_run,
-        request(33),
-        digest("continue-33"),
-        second_status.revision(),
-        "continue 33",
-    ));
+    let third = admitted_continue(
+        &controller,
+        ContinueRequest::new(
+            active_run,
+            request(33),
+            digest("continue-33"),
+            second_status.revision(),
+            "continue 33",
+        ),
+    );
     execute(&controller, third.into_execution());
     let third_status = futures::executor::block_on(controller.status(active_run))
         .expect("third continuation status");
@@ -1087,29 +1338,41 @@ fn retention_prunes_completed_receipts_but_preserves_active_work_across_replay()
 
     let calls_before_retained_replay = executor.calls();
     let transactions_before_retained_replay = store.transactions(active_session);
-    let middle_replay = continue_command(&controller, ContinueRequest::new(
-        active_run,
-        request(32),
-        digest("continue-32"),
-        first_status.revision(),
-        "continue 32",
-    ))
+    let middle_replay = continue_command(
+        &controller,
+        ContinueRequest::new(
+            active_run,
+            request(32),
+            digest("continue-32"),
+            first_status.revision(),
+            "continue 32",
+        ),
+    )
     .expect("middle retained replay");
     assert_eq!(replayed_run_id(middle_replay), active_run);
     assert_eq!(executor.calls(), calls_before_retained_replay);
-    assert_eq!(store.transactions(active_session), transactions_before_retained_replay);
+    assert_eq!(
+        store.transactions(active_session),
+        transactions_before_retained_replay
+    );
 
-    let recent_replay = continue_command(&controller, ContinueRequest::new(
-        active_run,
-        request(33),
-        digest("continue-33"),
-        second_status.revision(),
-        "continue 33",
-    ))
+    let recent_replay = continue_command(
+        &controller,
+        ContinueRequest::new(
+            active_run,
+            request(33),
+            digest("continue-33"),
+            second_status.revision(),
+            "continue 33",
+        ),
+    )
     .expect("recent retained replay");
     assert_eq!(replayed_run_id(recent_replay), active_run);
     assert_eq!(executor.calls(), calls_before_retained_replay);
-    assert_eq!(store.transactions(active_session), transactions_before_retained_replay);
+    assert_eq!(
+        store.transactions(active_session),
+        transactions_before_retained_replay
+    );
 
     let calls_before_occupied_start = executor.calls();
     let transactions_before_occupied_start = store.transactions(active_session);
@@ -1120,12 +1383,19 @@ fn retention_prunes_completed_receipts_but_preserves_active_work_across_replay()
         Err(ego_core::run::RunError::IdentityCollision { .. })
     ));
     assert_eq!(executor.calls(), calls_before_occupied_start);
-    assert_eq!(store.transactions(active_session), transactions_before_occupied_start);
-    assert_eq!(sequence.lock().expect("transaction sequence").as_slice(), sequence_before_occupied_start.as_slice());
+    assert_eq!(
+        store.transactions(active_session),
+        transactions_before_occupied_start
+    );
+    assert_eq!(
+        sequence.lock().expect("transaction sequence").as_slice(),
+        sequence_before_occupied_start.as_slice()
+    );
 
     let calls_before_pruned_resubmit = executor.calls();
     let transactions_before_pruned_resubmit = store.transactions(active_session);
-    let pruned_continuation = admitted_continue(&controller,
+    let pruned_continuation = admitted_continue(
+        &controller,
         ContinueRequest::new(
             active_run,
             request(31),
@@ -1139,7 +1409,20 @@ fn retention_prunes_completed_receipts_but_preserves_active_work_across_replay()
         store.transactions(active_session).len(),
         transactions_before_pruned_resubmit.len() + 1
     );
-    assert_eq!(executor.calls(), calls_before_pruned_resubmit);
+    let mut calls_after_pruned_admission = calls_before_pruned_resubmit.clone();
+    calls_after_pruned_admission.push(ExecutorCall::Prepare);
+    assert_eq!(executor.calls(), calls_after_pruned_admission);
+    assert_eq!(
+        executor
+            .calls()
+            .iter()
+            .filter(|call| matches!(call, ExecutorCall::Start(_) | ExecutorCall::Submit(_)))
+            .count(),
+        calls_before_pruned_resubmit
+            .iter()
+            .filter(|call| matches!(call, ExecutorCall::Start(_) | ExecutorCall::Submit(_)))
+            .count()
+    );
     execute(&controller, pruned_continuation.into_execution());
     assert_eq!(
         executor
@@ -1195,7 +1478,8 @@ fn retention_prunes_completed_receipts_but_preserves_active_work_across_replay()
             transactions_before_blocked.len() + 1
         );
         let sequence_after_admission = sequence.lock().expect("transaction sequence").clone();
-        let replay = continue_command(&controller,
+        let replay = continue_command(
+            &controller,
             ContinueRequest::new(
                 active_run,
                 request(34),
@@ -1206,7 +1490,10 @@ fn retention_prunes_completed_receipts_but_preserves_active_work_across_replay()
         )
         .expect("blocked continuation replay");
         assert_eq!(replayed_run_id(replay), active_run);
-        assert_eq!(store.transactions(active_session), transactions_after_admission);
+        assert_eq!(
+            store.transactions(active_session),
+            transactions_after_admission
+        );
         assert_eq!(
             executor
                 .calls()
@@ -1226,9 +1513,7 @@ fn retention_prunes_completed_receipts_but_preserves_active_work_across_replay()
             RunStatus::Running
         );
         executor.allow_effects();
-        let settled_run = worker
-            .join()
-            .expect("blocked continuation task");
+        let settled_run = worker.join().expect("blocked continuation task");
         (settled_run, transactions_after_admission)
     });
     assert_eq!(blocked.0, active_run);

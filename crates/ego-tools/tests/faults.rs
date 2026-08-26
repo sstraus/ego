@@ -26,7 +26,7 @@ use ego_core::event::domain::{DomainEvent, Envelope, EventKind, ExitReason};
 use ego_core::event::id::{EventId, Producer, Seq, SessionId, TurnId};
 use ego_core::event::time::Timestamp;
 use ego_core::store::codec::CODEC_VERSION;
-use ego_core::store::session_store::{SessionMeta, SessionStore, StoreError};
+use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
 use ego_tools::store::{JsonlStore, NonDurableOsIo, OsIo, tmp_path_for};
 use futures::StreamExt;
 use futures::executor::block_on;
@@ -76,7 +76,13 @@ mod faults {
             let stream = self.store.read(&self.id)?;
             block_on(stream.collect::<Vec<_>>())
                 .into_iter()
-                .collect::<Result<Vec<_>, _>>()
+                .map(|result| match result? {
+                    SessionEntry::Event(event) => Ok(event),
+                    SessionEntry::RunTransaction(_) => Err(StoreError::Io(std::io::Error::other(
+                        "event-only fixture contained a run transaction",
+                    ))),
+                })
+                .collect()
         }
     }
 
@@ -179,7 +185,13 @@ mod faults {
         let stream = store.read(id)?;
         block_on(stream.collect::<Vec<_>>())
             .into_iter()
-            .collect::<Result<Vec<_>, _>>()
+            .map(|result| match result? {
+                SessionEntry::Event(event) => Ok(event),
+                SessionEntry::RunTransaction(_) => Err(StoreError::Io(std::io::Error::other(
+                    "event-only fixture contained a run transaction",
+                ))),
+            })
+            .collect()
     }
 
     fn append_raw(path: &Path, bytes: &[u8]) {

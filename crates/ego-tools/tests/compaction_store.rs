@@ -6,7 +6,7 @@ use ego_core::event::domain::{DomainEvent, Envelope, EventKind};
 use ego_core::event::id::{EventId, ItemId, Producer, Seq, SessionId, TurnId};
 use ego_core::event::time::Timestamp;
 use ego_core::state::Usage;
-use ego_core::store::session_store::SessionStore;
+use ego_core::store::session_store::{SessionEntry, SessionStore};
 use ego_tools::store::{AtomicReplacePublication, JsonlStore, OsIo, StoreIo};
 use futures::StreamExt;
 use futures::executor::block_on;
@@ -36,8 +36,15 @@ fn read_all(store: &JsonlStore, id: &SessionId) -> Vec<DomainEvent> {
             .collect::<Vec<_>>(),
     )
     .into_iter()
-    .collect::<Result<Vec<_>, _>>()
-    .expect("target log is durable and decodable")
+    .map(
+        |result| match result.expect("target log is durable and decodable") {
+            SessionEntry::Event(event) => event,
+            SessionEntry::RunTransaction(_) => {
+                panic!("compaction target contained a run transaction")
+            }
+        },
+    )
+    .collect()
 }
 
 fn seq(value: u64) -> Seq {

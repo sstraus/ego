@@ -15,7 +15,8 @@ use ego_cli::catalogue::{self, CATALOGUE_VERSION};
 use ego_core::event::domain::DomainEvent;
 use ego_core::event::id::SessionId;
 use ego_core::event::time::Timestamp;
-use ego_core::store::session_store::{SessionMeta, SessionStore, StoreError};
+use ego_core::run::{RunAppend, RunRevision, RunTransaction};
+use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
 use futures::stream::BoxStream;
 
 /// A store that knows a catalogue and nothing else.
@@ -32,10 +33,22 @@ impl SessionStore for Catalogue {
         Err(StoreError::NotFound)
     }
 
+    fn compare_and_append_run(
+        &self,
+        _session: &SessionId,
+        _expected_revision: Option<RunRevision>,
+        _transaction: RunTransaction,
+    ) -> Result<RunAppend, StoreError> {
+        Err(StoreError::Io(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "this event-only fixture does not accept run transactions",
+        )))
+    }
+
     fn read(
         &self,
         _id: &SessionId,
-    ) -> Result<BoxStream<'static, Result<DomainEvent, StoreError>>, StoreError> {
+    ) -> Result<BoxStream<'static, Result<SessionEntry, StoreError>>, StoreError> {
         Err(StoreError::NotFound)
     }
 
@@ -54,10 +67,22 @@ impl SessionStore for Unreadable {
         Err(StoreError::NotFound)
     }
 
+    fn compare_and_append_run(
+        &self,
+        _session: &SessionId,
+        _expected_revision: Option<RunRevision>,
+        _transaction: RunTransaction,
+    ) -> Result<RunAppend, StoreError> {
+        Err(StoreError::Io(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "this event-only fixture does not accept run transactions",
+        )))
+    }
+
     fn read(
         &self,
         _id: &SessionId,
-    ) -> Result<BoxStream<'static, Result<DomainEvent, StoreError>>, StoreError> {
+    ) -> Result<BoxStream<'static, Result<SessionEntry, StoreError>>, StoreError> {
         Err(StoreError::NotFound)
     }
 

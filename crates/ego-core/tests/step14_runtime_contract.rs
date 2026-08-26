@@ -421,11 +421,12 @@ mod turn_execution_observation {
     use ego_core::generator::types::{StopReason, ThinkingLevel};
     use ego_core::permit::fake::FakeFs;
     use ego_core::permit::{ProcessError, ProcessExecutor, ToolResult};
+    use ego_core::run::{RunAppend, RunRevision, RunTransaction};
     use ego_core::sink::CollectingSink;
     use ego_core::store::evidence::{
         EvidenceError, EvidencePage, EvidenceRead, EvidenceStore, EvidenceWriter,
     };
-    use ego_core::store::session_store::{SessionMeta, SessionStore, StoreError};
+    use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
     use ego_core::turn::{CancelToken, GenerationRuntime, Session, Tools, TurnConfig, TurnLoop};
     use futures::future::BoxFuture;
     use futures::stream::BoxStream;
@@ -465,10 +466,22 @@ mod turn_execution_observation {
             Ok(())
         }
 
+        fn compare_and_append_run(
+            &self,
+            _session: &ego_core::event::id::SessionId,
+            _expected_revision: Option<RunRevision>,
+            _transaction: RunTransaction,
+        ) -> Result<RunAppend, StoreError> {
+            Err(StoreError::Io(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "this event-only fixture does not accept run transactions",
+            )))
+        }
+
         fn read(
             &self,
             _id: &ego_core::event::id::SessionId,
-        ) -> Result<BoxStream<'static, Result<DomainEvent, StoreError>>, StoreError> {
+        ) -> Result<BoxStream<'static, Result<SessionEntry, StoreError>>, StoreError> {
             unimplemented!("observation turn tests only append")
         }
 

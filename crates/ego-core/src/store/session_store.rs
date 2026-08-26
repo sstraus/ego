@@ -13,6 +13,19 @@ use crate::compact::CompactionLineage;
 use crate::event::domain::DomainEvent;
 use crate::event::id::SessionId;
 use crate::event::time::Timestamp;
+use crate::run::{RunAppend, RunRevision, RunTransaction};
+
+/// One durable item in a session's single ordered append-only stream.
+///
+/// Conversation events and run-control transitions deliberately share the
+/// same store and read path. A second lifecycle log would allow replay and
+/// conversation history to disagree about which durable facts exist.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum SessionEntry {
+    Event(DomainEvent),
+    RunTransaction(RunTransaction),
+}
 
 /// The catalogue entry for one session (`ARCHITECTURE.md` §5's
 /// `manifest.json` fields: `id, workspace_root, model, created, updated,
@@ -23,11 +36,9 @@ use crate::event::time::Timestamp;
 /// stores them — the exact on-disk bytes are the implementation's concern,
 /// not this type's.
 ///
-/// `model` and `title` are `Option` because `SessionStore::append` is the
-/// only way this port learns anything: it receives just a `SessionId` and a
-/// `DomainEvent`, and no `EventKind` (`ARCHITECTURE.md` §1) carries model or
-/// title information. A store built only from `append` calls therefore has
-/// no way to populate them at this milestone.
+/// `model` and `title` are `Option` because an event-first session provides
+/// neither. A run admission can project its selected model; no durable entry
+/// currently supplies a title.
 ///
 /// `workspace_root` is **not** among them, and used to be. The reason it was
 /// optional — that `append` cannot learn a workspace — stopped being true
@@ -38,8 +49,8 @@ use crate::event::time::Timestamp;
 /// dead branches for. See
 /// `docs/decisions/2026-08-21-the-two-commands-the-header-unblocked.md` §1.
 ///
-/// `created` and `updated` are never optional: both come straight from the
-/// envelope timestamp of an event the store actually received.
+/// `created` and `updated` are never optional: both come from the durable
+/// entry timestamps and the header authored at session birth.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionMeta {
     pub id: SessionId,
@@ -155,7 +166,7 @@ pub trait SessionStore: Send + Sync {
     /// with no notion of filesystem durability.
     fn append(&self, id: &SessionId, ev: &DomainEvent) -> Result<(), StoreError>;
 
-    /// Read back `id`'s durable log as a stream of per-event results.
+    /// Read back `id`'s durable log as a stream of ordered entry results.
     ///
     /// Each item is its own `Result`: a corrupt or truncated line must
     /// never be silently skipped, since replay integrity and later tail
@@ -165,7 +176,21 @@ pub trait SessionStore: Send + Sync {
     fn read(
         &self,
         id: &SessionId,
-    ) -> Result<BoxStream<'static, Result<DomainEvent, StoreError>>, StoreError>;
+    ) -> Result<BoxStream<'static, Result<SessionEntry, StoreError>>, StoreError>;
+
+    /// Append one run-control transaction when the durable run revision is
+    /// exactly `expected_revision`.
+    ///
+    /// `None` means that the session log must be absent. A successful first
+    /// append publishes its header and transaction as one atomic image. Run
+    /// revisions count only `RunTransaction` entries; interleaved conversation
+    /// events never advance the compare value.
+    fn compare_and_append_run(
+        &self,
+        session: &SessionId,
+        expected_revision: Option<RunRevision>,
+        transaction: RunTransaction,
+    ) -> Result<RunAppend, StoreError>;
 
     /// List every session this store knows about, from its manifests.
     fn list(&self) -> Result<Vec<SessionMeta>, StoreError>;

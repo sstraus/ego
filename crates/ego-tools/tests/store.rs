@@ -12,7 +12,7 @@ use ego_core::event::domain::{DomainEvent, Envelope, EventKind, ExitReason};
 use ego_core::event::id::{EventId, Producer, QueuedPromptId, Seq, SessionId, TurnId};
 use ego_core::event::time::Timestamp;
 use ego_core::store::codec::{CODEC_VERSION, CodecError, StoreLine, decode_line, encode_record};
-use ego_core::store::session_store::{SessionStore, StoreError};
+use ego_core::store::session_store::{SessionEntry, SessionStore, StoreError};
 use ego_tools::store::{JsonlStore, OsIo, StoreIo};
 use futures::StreamExt;
 use futures::executor::block_on;
@@ -359,7 +359,14 @@ mod store {
 
         let events: Vec<DomainEvent> = block_on(store.read(&id).unwrap().collect::<Vec<_>>())
             .into_iter()
-            .map(|r| r.expect("every appended event should decode cleanly"))
+            .map(
+                |result| match result.expect("every appended event should decode cleanly") {
+                    SessionEntry::Event(event) => event,
+                    SessionEntry::RunTransaction(_) => {
+                        panic!("event-only session contained a run transaction")
+                    }
+                },
+            )
             .collect();
         assert_eq!(events, vec![e1, e2]);
     }
@@ -493,7 +500,7 @@ mod store {
         assert_ne!(text, corrupted, "fixture must actually corrupt a byte");
         std::fs::write(&path, corrupted).unwrap();
 
-        let results: Vec<Result<DomainEvent, StoreError>> =
+        let results: Vec<Result<SessionEntry, StoreError>> =
             block_on(store.read(&id).unwrap().collect());
         assert_eq!(
             results.len(),
@@ -502,7 +509,7 @@ mod store {
         );
 
         match &results[0] {
-            Ok(e) => assert_eq!(
+            Ok(SessionEntry::Event(e)) => assert_eq!(
                 e.kind,
                 EventKind::UserPrompt {
                     text: "first-event-marker".to_string(),
@@ -520,7 +527,7 @@ mod store {
             results[1]
         );
         match &results[2] {
-            Ok(e) => assert_eq!(
+            Ok(SessionEntry::Event(e)) => assert_eq!(
                 e.kind,
                 EventKind::UserPrompt {
                     text: "third-event-marker".to_string(),

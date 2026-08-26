@@ -42,12 +42,13 @@ use ego_core::permit::{
 };
 use ego_core::public::PublicEvent;
 use ego_core::run::RunTermination;
+use ego_core::run::{RunAppend, RunRevision, RunTransaction};
 use ego_core::sink::{CollectingSink, EventSink};
 use ego_core::state::{ItemKind, SessionState, Usage};
 use ego_core::store::evidence::{
     EvidenceError, EvidencePage, EvidenceRead, EvidenceStore, EvidenceWriter,
 };
-use ego_core::store::session_store::{SessionMeta, SessionStore, StoreError};
+use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
 use ego_core::turn::{
     CancelToken, ControlError, GenerationRuntime, JudgeContext, Session, Tools, TurnConfig,
     TurnLoop,
@@ -118,10 +119,22 @@ mod turn {
             Ok(())
         }
 
+        fn compare_and_append_run(
+            &self,
+            _session: &SessionId,
+            _expected_revision: Option<RunRevision>,
+            _transaction: RunTransaction,
+        ) -> Result<RunAppend, StoreError> {
+            Err(StoreError::Io(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "this event-only fixture does not accept run transactions",
+            )))
+        }
+
         fn read(
             &self,
             _id: &SessionId,
-        ) -> Result<BoxStream<'static, Result<DomainEvent, StoreError>>, StoreError> {
+        ) -> Result<BoxStream<'static, Result<SessionEntry, StoreError>>, StoreError> {
             unimplemented!("the turn loop only appends")
         }
 

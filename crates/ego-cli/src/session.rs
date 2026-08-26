@@ -11,8 +11,9 @@ use std::time::Duration;
 use ego_core::event::domain::DomainEvent;
 use ego_core::event::id::SessionId;
 use ego_core::event::time::{Clock, Timestamp};
+use ego_core::run::{RunAppend, RunRevision, RunTransaction};
 use ego_core::state::SessionState;
-use ego_core::store::session_store::{SessionMeta, SessionStore, StoreError};
+use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
 use ego_tools::store::SessionEvidenceStore;
 use ego_tools::store::{JsonlStore, LeaseInputs, OpenSession, OsIo};
 use futures::stream::BoxStream;
@@ -56,7 +57,16 @@ impl SessionStore for NullStore {
     fn read(
         &self,
         _id: &SessionId,
-    ) -> Result<BoxStream<'static, Result<DomainEvent, StoreError>>, StoreError> {
+    ) -> Result<BoxStream<'static, Result<SessionEntry, StoreError>>, StoreError> {
+        Err(StoreError::NotFound)
+    }
+
+    fn compare_and_append_run(
+        &self,
+        _session: &SessionId,
+        _expected_revision: Option<RunRevision>,
+        _transaction: RunTransaction,
+    ) -> Result<RunAppend, StoreError> {
         Err(StoreError::NotFound)
     }
 
