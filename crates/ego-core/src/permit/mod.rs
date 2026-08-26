@@ -7,6 +7,7 @@
 mod approver;
 mod authority;
 pub mod fake;
+mod foreign;
 mod fs;
 mod grant;
 pub mod judge;
@@ -23,6 +24,12 @@ mod tool;
 /// caller could name is one step from a caller that supplies one.
 pub use approver::{Approver, HumanApprover, PermissionDecision, Verdict};
 pub use authority::{Authority, RuleAuthority};
+pub use foreign::{
+    CleanupCertainty, DnsResolution, DuplexEnd, DuplexHandle, DuplexSession, DuplexSettlement,
+    DuplexSpawner, ForeignToolId, ForeignTransportTarget, ForeignValueError, HttpBody, HttpHeader,
+    HttpRequest, InvocationDigest, NetworkTarget, OneHop, OneHopResponse, ResolvedConnect,
+    Resolver, Subject, TransportError,
+};
 pub use fs::{Fs, FsError, GuardedEffects, GuardedIo, IoDenied, PathResolver};
 pub use grant::{
     Authorized, Classification, Escalation, Pending, PermissionRequest, Permit, PermitDenied,

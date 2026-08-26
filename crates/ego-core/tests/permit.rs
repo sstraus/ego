@@ -7,10 +7,11 @@ use std::path::Path;
 use ego_core::config::{Mode, OriginSet, PermCfg, Ruleset, Source};
 use ego_core::permit::rule::Rule;
 use ego_core::permit::{
-    Authority, Authorized, CanonPath, Change, Classification, Entry, EntryKind, Escalation, Fs,
-    FsError, GuardedEffects, GuardedIo, IoDenied, Op, OpName, PathResolver, Pending, PermitDenied,
-    PolicyDenied, PolicyEngine, PrepareCtx, PreparedCall, ProcessError, ProcessExecutor,
-    Resolution, Scan, ScanLimits, ScanRequest, Tool, ToolError, ToolResult, Typed,
+    Authority, Authorized, CanonPath, Change, Classification, DuplexHandle, DuplexSpawner, Entry,
+    EntryKind, Escalation, Fs, FsError, GuardedEffects, GuardedIo, HttpRequest, IoDenied, OneHop,
+    Op, OpName, PathResolver, Pending, PermitDenied, PolicyDenied, PolicyEngine, PrepareCtx,
+    PreparedCall, ProcessError, ProcessExecutor, Resolution, ResolvedConnect, Resolver, Scan,
+    ScanLimits, ScanRequest, SpawnSpec, Tool, ToolError, ToolResult, TransportError, Typed,
 };
 use ego_core::store::evidence::{
     EvidenceError, EvidencePage, EvidenceRead, EvidenceStore, EvidenceWriter,
@@ -62,9 +63,49 @@ mod permit {
     static NO_PROCESS: NoProcess = NoProcess;
     static NO_EVIDENCE: NoEvidence = NoEvidence;
 
+    struct NoResolver;
+    impl Resolver for NoResolver {
+        fn resolve(
+            &self,
+            _target: ego_core::permit::NetworkTarget,
+        ) -> BoxFuture<'static, Result<ego_core::permit::DnsResolution, TransportError>> {
+            Box::pin(future::ready(Err(TransportError::Offline)))
+        }
+    }
+    struct NoHop;
+    impl OneHop for NoHop {
+        fn execute(
+            &self,
+            _connect: ResolvedConnect,
+            _request: HttpRequest,
+        ) -> BoxFuture<'static, Result<ego_core::permit::OneHopResponse, TransportError>> {
+            Box::pin(future::ready(Err(TransportError::Offline)))
+        }
+    }
+    struct NoDuplex;
+    impl DuplexSpawner for NoDuplex {
+        fn spawn(
+            &self,
+            _spec: SpawnSpec,
+        ) -> BoxFuture<'static, Result<DuplexHandle, TransportError>> {
+            Box::pin(future::ready(Err(TransportError::Offline)))
+        }
+    }
+    static NO_RESOLVER: NoResolver = NoResolver;
+    static NO_HOP: NoHop = NoHop;
+    static NO_DUPLEX: NoDuplex = NoDuplex;
+
     fn guarded<'a>(granted: Authorized, fs: &'a dyn Fs) -> GuardedEffects<'a> {
         let (_, permit) = granted.into_parts();
-        GuardedEffects::new(permit, fs, &NO_PROCESS, &NO_EVIDENCE)
+        GuardedEffects::new(
+            permit,
+            fs,
+            &NO_PROCESS,
+            &NO_EVIDENCE,
+            &NO_RESOLVER,
+            &NO_HOP,
+            &NO_DUPLEX,
+        )
     }
 
     fn prepare_ctx<'a>(fs: &'a FakeFs) -> PrepareCtx<'a> {

@@ -93,8 +93,8 @@ const OPERATIONS: &[(Head, Option<&str>)] = &[
     (Head::List, None),
     (Head::Search, None),
     (Head::Exec, None),
-    (Head::Net, Some("a tool that reaches the network")),
-    (Head::Tool, Some("an MCP client")),
+    (Head::Net, None),
+    (Head::Tool, None),
 ];
 
 /// A well-formed rule this build cannot enforce (§6a).

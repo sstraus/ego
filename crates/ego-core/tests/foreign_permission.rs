@@ -26,7 +26,7 @@ fn rules(allow: &[&str], deny: &[&str]) -> Ruleset {
             .collect::<Vec<_>>()
             .join(", ")
     };
-    ConfigLayer::parse(
+    let permissions = ConfigLayer::parse(
         Source::Project,
         &format!(
             "[permissions]\nallow=[{}]\ndeny=[{}]",
@@ -37,9 +37,8 @@ fn rules(allow: &[&str], deny: &[&str]) -> Ruleset {
     .expect("permission fixture")
     .value
     .permissions
-    .expect("permissions")
-    .map(|permissions| Ruleset::from_layer(permissions, Source::Project))
-    .expect("permissions")
+    .expect("permissions");
+    Ruleset::from_layer(permissions, Source::Project)
 }
 
 fn digest(value: &str) -> ego_core::permit::InvocationDigest {
@@ -53,13 +52,13 @@ fn digest(value: &str) -> ego_core::permit::InvocationDigest {
     ego_core::permit::InvocationDigest::parse(&format!("sha256:{hex}")).expect("canonical digest")
 }
 
-fn tool(server: &str, name: &str, args: &str) -> ego_core::permit::ForeignToolId {
+fn tool(server: &str, name: &str) -> ego_core::permit::ForeignToolId {
     ego_core::permit::ForeignToolId::new(server, name).expect("foreign identity")
 }
 
 fn http_call(server: &str, name: &str, args: &str, target: &str) -> PreparedCall {
     PreparedCall::foreign_http(
-        tool(server, name, args),
+        tool(server, name),
         digest(args),
         ego_core::permit::ForeignTransportTarget::http("https", target).expect("HTTP target"),
     )
@@ -67,12 +66,7 @@ fn http_call(server: &str, name: &str, args: &str, target: &str) -> PreparedCall
 
 fn stdio_call(server: &str, argv: Vec<OsString>) -> PreparedCall {
     let spec = SpawnSpec::new(argv, None, None, EnvPolicy::Inherited).expect("spawn spec");
-    PreparedCall::foreign_stdio(
-        tool(server, "execute", "args-a"),
-        digest("args-a"),
-        server,
-        spec,
-    )
+    PreparedCall::foreign_stdio(tool(server, "execute"), digest("args-a"), server, spec)
 }
 
 #[derive(Clone, Default)]
@@ -122,12 +116,7 @@ impl OneHop for FakeOneHop {
     ) -> BoxFuture<'static, Result<ego_core::permit::OneHopResponse, TransportError>> {
         *self.calls.lock().expect("calls") += 1;
         Box::pin(future::ready(Ok(
-            ego_core::permit::OneHopResponse::response(
-                200,
-                vec![],
-                vec![],
-                ego_core::generator::attempt::DeliveryCertainty::DefinitelyUnsent,
-            ),
+            ego_core::permit::OneHopResponse::response(200, vec![], vec![]),
         )))
     }
 }
@@ -140,7 +129,7 @@ struct FakeSession {
 }
 impl AsyncRead for FakeSession {
     fn poll_read(
-        mut self: std::pin::Pin<&mut Self>,
+        self: std::pin::Pin<&mut Self>,
         _: &mut Context<'_>,
         buf: &mut [u8],
     ) -> Poll<std::io::Result<usize>> {
@@ -266,9 +255,9 @@ fn permission_requires_outer_and_inner_opaque_plus_exact_http_or_spawn_authority
         ego_core::permit::Classification::Settled(Ok(_))
     ));
     let outer = PreparedCall::speakeasy(
-        tool("router", "execute_tool", "outer"),
+        tool("router", "execute_tool"),
         digest("outer"),
-        tool("srv", "search", "inner"),
+        tool("srv", "search"),
         digest("inner"),
         ego_core::permit::ForeignTransportTarget::http("https", "api.example.test:443")
             .expect("target"),
@@ -309,6 +298,7 @@ fn guarded_http_consumes_one_dns_answer_and_rejects_reuse_as_authority_spent() {
         "192.0.2.10",
     );
     let one_hop = FakeOneHop::default();
+    let spawner = FakeSpawner::default();
     let guarded = GuardedEffects::new(
         permit,
         &MemoryFs,
@@ -316,12 +306,16 @@ fn guarded_http_consumes_one_dns_answer_and_rejects_reuse_as_authority_spent() {
         &NoEvidence,
         &resolver,
         &one_hop,
-        &FakeSpawner::default(),
+        &spawner,
     );
     let request = HttpRequest::get("/").expect("request");
     let first = futures::executor::block_on(guarded.guarded_http(call.clone(), request.clone()))
         .expect("first hop");
     assert_eq!(first.status(), 200);
+    assert_eq!(
+        first.delivery(),
+        ego_core::generator::attempt::DeliveryCertainty::PossiblySent
+    );
     assert_eq!(resolver.calls(), 1);
     let second = futures::executor::block_on(guarded.guarded_http(call, request))
         .expect_err("spent authority");
@@ -342,14 +336,16 @@ fn guarded_duplex_returns_one_child_capability_and_exact_spawn_spec() {
             other => panic!("expected authorization, got {other:?}"),
         };
     let (call, permit) = authorized.into_parts();
+    let resolver = FakeResolver::default();
+    let one_hop = FakeOneHop::default();
     let spawner = FakeSpawner::default();
     let guarded = GuardedEffects::new(
         permit,
         &MemoryFs,
         &NoProcess,
         &NoEvidence,
-        &FakeResolver::default(),
-        &FakeOneHop::default(),
+        &resolver,
+        &one_hop,
         &spawner,
     );
     let mut handle =
@@ -392,13 +388,15 @@ fn guarded_duplex_returns_one_child_capability_and_exact_spawn_spec() {
             other => panic!("expected second authorization, got {other:?}"),
         };
     let (interrupt_call, interrupt_permit) = authorized.into_parts();
+    let interrupt_resolver = FakeResolver::default();
+    let interrupt_one_hop = FakeOneHop::default();
     let interrupt_guarded = GuardedEffects::new(
         interrupt_permit,
         &MemoryFs,
         &NoProcess,
         &NoEvidence,
-        &FakeResolver::default(),
-        &FakeOneHop::default(),
+        &interrupt_resolver,
+        &interrupt_one_hop,
         &spawner,
     );
     let interrupt_handle =

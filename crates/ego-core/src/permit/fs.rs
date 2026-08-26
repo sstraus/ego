@@ -10,11 +10,18 @@
 
 use std::fmt;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use futures::future::{self, BoxFuture};
 
+use super::foreign::{
+    DuplexHandle, DuplexSpawner, ForeignToolId, ForeignTransportTarget, HttpRequest,
+    InvocationDigest, NetworkTarget, OneHop, OneHopResponse, ResolvedConnect, Resolver,
+    TransportError,
+};
 use super::grant::{Permit, PermitDenied};
 use super::path::CanonPath;
+use super::prepared_call::{Op, PreparedCall};
 use super::scan::{Entry, EntryKind, Found, LineMatcher, Match, Scan, ScanRequest};
 use super::spawn::{ProcessError, ProcessExecutor, SpawnSpec};
 use super::tool::{ToolError, ToolResult};
@@ -158,6 +165,17 @@ pub trait GuardedIo: Send + Sync {
         &'a self,
         request: &'a EvidenceRead,
     ) -> BoxFuture<'a, Result<EvidencePage, ToolError>>;
+
+    fn guarded_http(
+        &self,
+        call: PreparedCall,
+        request: HttpRequest,
+    ) -> BoxFuture<'_, Result<OneHopResponse, TransportError>>;
+
+    fn guarded_duplex(
+        &self,
+        call: PreparedCall,
+    ) -> BoxFuture<'_, Result<DuplexHandle, TransportError>>;
 }
 
 /// Why a guarded operation did not produce what was asked for: the permit
@@ -215,6 +233,10 @@ pub struct GuardedEffects<'a> {
     fs: &'a dyn Fs,
     process: &'a dyn ProcessExecutor,
     evidence: &'a dyn EvidenceStore,
+    resolver: &'a dyn Resolver,
+    one_hop: &'a dyn OneHop,
+    duplex: &'a dyn DuplexSpawner,
+    foreign_spent: AtomicBool,
 }
 
 impl<'a> GuardedEffects<'a> {
@@ -223,13 +245,98 @@ impl<'a> GuardedEffects<'a> {
         fs: &'a dyn Fs,
         process: &'a dyn ProcessExecutor,
         evidence: &'a dyn EvidenceStore,
+        resolver: &'a dyn Resolver,
+        one_hop: &'a dyn OneHop,
+        duplex: &'a dyn DuplexSpawner,
     ) -> Self {
         Self {
             permit,
             fs,
             process,
             evidence,
+            resolver,
+            one_hop,
+            duplex,
+            foreign_spent: AtomicBool::new(false),
         }
+    }
+
+    fn claim_foreign(
+        &self,
+        call: &PreparedCall,
+        kind: ForeignKind,
+    ) -> Result<ForeignClaim, TransportError> {
+        let claim = ForeignClaim::from_call(call)?;
+        self.permit
+            .allows_foreign(&claim.invocations, &claim.transport)?;
+        if let Some(network) = &claim.network {
+            self.permit.allows_network(network)?;
+        }
+        if let Some(spawn) = &claim.spawn {
+            self.permit
+                .allows_spawn(spawn)
+                .map_err(|_| TransportError::AuthorityMismatch)?;
+        }
+        match kind {
+            ForeignKind::Http
+                if claim.transport.is_http()
+                    && claim.network.as_ref() == claim.transport.network()
+                    && claim.spawn.is_none() => {}
+            ForeignKind::Duplex
+                if claim.transport.is_stdio()
+                    && claim.network.is_none()
+                    && claim.spawn.is_some() => {}
+            _ => return Err(TransportError::AuthorityMismatch),
+        }
+        self.foreign_spent
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| TransportError::AuthoritySpent)?;
+        Ok(claim)
+    }
+
+    pub fn guarded_http(
+        &self,
+        call: PreparedCall,
+        request: HttpRequest,
+    ) -> BoxFuture<'_, Result<OneHopResponse, TransportError>> {
+        let claim = self.claim_foreign(&call, ForeignKind::Http);
+        Box::pin(async move {
+            let claim = claim?;
+            let network = claim
+                .transport
+                .network()
+                .ok_or(TransportError::AuthorityMismatch)?;
+            let connect = match network.ip() {
+                Some(ip) => ResolvedConnect::literal(
+                    claim.transport.clone(),
+                    network.clone(),
+                    ip,
+                    claim.invocations,
+                ),
+                None => {
+                    let resolution = self.resolver.resolve(network.clone()).await?;
+                    ResolvedConnect::from_resolution(
+                        network,
+                        resolution,
+                        claim.invocations,
+                        claim.transport.clone(),
+                    )?
+                }
+            };
+            self.one_hop.execute(connect, request).await
+        })
+    }
+
+    pub fn guarded_duplex(
+        &self,
+        call: PreparedCall,
+    ) -> BoxFuture<'_, Result<DuplexHandle, TransportError>> {
+        let claim = self.claim_foreign(&call, ForeignKind::Duplex);
+        Box::pin(async move {
+            let claim = claim?;
+            let spec = claim.spawn.ok_or(TransportError::AuthorityMismatch)?;
+            self.duplex.spawn(spec).await
+        })
     }
 
     /// Re-resolve `root`, check it against the permit with `allows`, and hand
@@ -406,5 +513,68 @@ impl GuardedIo for GuardedEffects<'_> {
             return Box::pin(future::ready(Err(denied.into())));
         }
         Box::pin(async move { self.evidence.read_page(request).await.map_err(Into::into) })
+    }
+
+    fn guarded_http(
+        &self,
+        call: PreparedCall,
+        request: HttpRequest,
+    ) -> BoxFuture<'_, Result<OneHopResponse, TransportError>> {
+        GuardedEffects::guarded_http(self, call, request)
+    }
+
+    fn guarded_duplex(
+        &self,
+        call: PreparedCall,
+    ) -> BoxFuture<'_, Result<DuplexHandle, TransportError>> {
+        GuardedEffects::guarded_duplex(self, call)
+    }
+}
+
+struct ForeignClaim {
+    invocations: Vec<(ForeignToolId, InvocationDigest)>,
+    transport: ForeignTransportTarget,
+    network: Option<NetworkTarget>,
+    spawn: Option<SpawnSpec>,
+}
+
+enum ForeignKind {
+    Http,
+    Duplex,
+}
+
+impl ForeignClaim {
+    fn from_call(call: &PreparedCall) -> Result<Self, TransportError> {
+        let mut invocations = Vec::new();
+        let mut transport = None;
+        let mut network = None;
+        let mut spawn = None;
+        for op in &call.ops {
+            match op {
+                Op::Opaque {
+                    tool,
+                    params_digest,
+                    transport: route,
+                } => {
+                    if transport.as_ref().is_some_and(|existing| existing != route) {
+                        return Err(TransportError::AuthorityMismatch);
+                    }
+                    transport = Some(route.clone());
+                    invocations.push((tool.clone(), params_digest.clone()));
+                }
+                Op::Connect { target } if network.is_none() => network = Some(target.clone()),
+                Op::Spawn { spec } if spawn.is_none() => spawn = Some(spec.clone()),
+                _ => return Err(TransportError::AuthorityMismatch),
+            }
+        }
+        if invocations.is_empty() {
+            return Err(TransportError::AuthorityMismatch);
+        }
+        Ok(Self {
+            invocations,
+            transport: transport.ok_or(TransportError::AuthorityMismatch)?,
+            network,
+            spawn,
+        })
     }
 }

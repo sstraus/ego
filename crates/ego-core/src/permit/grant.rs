@@ -17,6 +17,9 @@ use serde::{Deserialize, Serialize};
 
 use super::approver::{Approver, HumanApprover, ModeApprover, PermissionDecision, Verdict};
 use super::authority::{Authority, RuleAuthority};
+use super::foreign::{
+    ForeignToolId, ForeignTransportTarget, InvocationDigest, NetworkTarget, Subject, TransportError,
+};
 use super::path::CanonPath;
 use super::prepared_call::{Change, Op, OpName, PreparedCall};
 use super::rule::RuleId;
@@ -310,6 +313,28 @@ impl Permit {
             })
         }
     }
+
+    pub(crate) fn allows_foreign(
+        &self,
+        invocations: &[(ForeignToolId, InvocationDigest)],
+        transport: &ForeignTransportTarget,
+    ) -> Result<(), TransportError> {
+        if self.scope.foreign_invocations == invocations
+            && self.scope.foreign_transport.as_ref() == Some(transport)
+        {
+            Ok(())
+        } else {
+            Err(TransportError::AuthorityMismatch)
+        }
+    }
+
+    pub(crate) fn allows_network(&self, target: &NetworkTarget) -> Result<(), TransportError> {
+        if self.scope.network.as_ref() == Some(target) {
+            Ok(())
+        } else {
+            Err(TransportError::AuthorityMismatch)
+        }
+    }
 }
 
 /// A call and the grant that answers it, as one value.
@@ -558,6 +583,29 @@ pub enum PolicyDenied {
         path: CanonPath,
         by: Authority,
     },
+    /// A non-filesystem operation denied by a rule.
+    DeniedSubject {
+        tool: String,
+        op: OpName,
+        subject: Subject,
+        by: RuleId,
+        from: Source,
+        also: OriginSet,
+    },
+    /// A non-filesystem operation forbidden by the mode floor.
+    ModeForbidsSubject {
+        tool: String,
+        mode: Mode,
+        op: OpName,
+        subject: Subject,
+    },
+    /// A party refused a non-filesystem operation.
+    RefusedSubject {
+        tool: String,
+        op: OpName,
+        subject: Subject,
+        by: Authority,
+    },
     /// Session evidence authority is valid only as the call's sole operation.
     EvidenceMustStandAlone { tool: String },
 }
@@ -571,16 +619,20 @@ impl PolicyDenied {
     /// the *allow* case, where nothing stops early.
     pub fn authority(&self) -> Authority {
         match self {
-            PolicyDenied::Denied { by, from, also, .. } => Authority::Rules {
+            PolicyDenied::Denied { by, from, also, .. }
+            | PolicyDenied::DeniedSubject { by, from, also, .. } => Authority::Rules {
                 rules: vec![RuleAuthority {
                     id: by.clone(),
                     from: *from,
                     also: *also,
                 }],
             },
-            PolicyDenied::ModeForbids { mode, .. } => Authority::Mode { mode: *mode },
+            PolicyDenied::ModeForbids { mode, .. }
+            | PolicyDenied::ModeForbidsSubject { mode, .. } => Authority::Mode { mode: *mode },
             PolicyDenied::OutsideWorkspace { .. } => Authority::Boundary,
-            PolicyDenied::Refused { by, .. } => by.clone(),
+            PolicyDenied::Refused { by, .. } | PolicyDenied::RefusedSubject { by, .. } => {
+                by.clone()
+            }
             PolicyDenied::EvidenceMustStandAlone { .. } => Authority::SessionEvidence,
         }
     }
@@ -652,6 +704,29 @@ impl fmt::Display for PolicyDenied {
             PolicyDenied::Refused { tool, op, path, .. } => {
                 write!(f, "{tool} may not {op} {path}: permission was refused")
             }
+            PolicyDenied::DeniedSubject {
+                tool,
+                op,
+                subject,
+                by,
+                from,
+                ..
+            } => write!(
+                f,
+                "{tool} may not {op} {subject}: denied by {by} in the {from} config"
+            ),
+            PolicyDenied::ModeForbidsSubject {
+                tool,
+                mode,
+                op,
+                subject,
+            } => write!(
+                f,
+                "{tool} may not {op} {subject}: {mode} mode forbids every operation that changes anything"
+            ),
+            PolicyDenied::RefusedSubject {
+                tool, op, subject, ..
+            } => write!(f, "{tool} may not {op} {subject}: permission was refused"),
             PolicyDenied::EvidenceMustStandAlone { tool } => write!(
                 f,
                 "{tool} may not combine session evidence with another operation"
@@ -694,6 +769,14 @@ pub enum Escalation {
         op: OpName,
         path: CanonPath,
     },
+    /// No allow rule covered a non-filesystem operation.
+    NoRuleCoversSubject { op: OpName, subject: Subject },
+    /// The mode declined a non-filesystem operation.
+    ModeAsksSubject {
+        mode: Mode,
+        op: OpName,
+        subject: Subject,
+    },
 }
 
 impl Escalation {
@@ -702,13 +785,29 @@ impl Escalation {
     /// can answer.
     pub fn op(&self) -> OpName {
         match self {
-            Escalation::NoRuleCovers { op, .. } | Escalation::ModeAsks { op, .. } => *op,
+            Escalation::NoRuleCovers { op, .. }
+            | Escalation::ModeAsks { op, .. }
+            | Escalation::NoRuleCoversSubject { op, .. }
+            | Escalation::ModeAsksSubject { op, .. } => *op,
         }
     }
 
     pub fn path(&self) -> &CanonPath {
         match self {
             Escalation::NoRuleCovers { path, .. } | Escalation::ModeAsks { path, .. } => path,
+            Escalation::NoRuleCoversSubject { .. } | Escalation::ModeAsksSubject { .. } => {
+                panic!("a non-filesystem escalation has no path")
+            }
+        }
+    }
+
+    pub fn subject(&self) -> Subject {
+        match self {
+            Escalation::NoRuleCovers { path, .. } | Escalation::ModeAsks { path, .. } => {
+                Subject::Path(path.clone())
+            }
+            Escalation::NoRuleCoversSubject { subject, .. }
+            | Escalation::ModeAsksSubject { subject, .. } => subject.clone(),
         }
     }
 }
@@ -721,6 +820,12 @@ impl fmt::Display for Escalation {
             }
             Escalation::ModeAsks { mode, op, path } => {
                 write!(f, "{mode} mode does not approve {op} {path} on its own")
+            }
+            Escalation::NoRuleCoversSubject { op, subject } => {
+                write!(f, "no rule covers {op} {subject}")
+            }
+            Escalation::ModeAsksSubject { mode, op, subject } => {
+                write!(f, "{mode} mode does not approve {op} {subject} on its own")
             }
         }
     }
@@ -814,6 +919,20 @@ impl fmt::Display for PermissionRequest {
                         "\n- read session evidence {} at byte {}",
                         request.reference, request.offset
                     )?;
+                }
+                Op::Opaque {
+                    tool,
+                    params_digest,
+                    transport,
+                } => write!(
+                    f,
+                    "\n- invoke {} ({}) over {}",
+                    TerminalSafe(&tool.to_string()),
+                    params_digest,
+                    TerminalSafe(&transport.to_string())
+                )?,
+                Op::Connect { target } => {
+                    write!(f, "\n- connect {}", TerminalSafe(&target.to_string()))?;
                 }
             }
         }
@@ -1201,12 +1320,15 @@ impl PolicyEngine {
         let mut rules: Vec<RuleAuthority> = Vec::new();
         for op in &call.ops {
             let Some(entry) = self.matching(&self.allow, op) else {
-                let why = Escalation::NoRuleCovers {
-                    op: op.name(),
-                    path: op
-                        .subject_path(&self.workspace)
-                        .expect("session evidence is settled before rule matching")
-                        .clone(),
+                let why = match op.subject_path(&self.workspace) {
+                    Some(path) => Escalation::NoRuleCovers {
+                        op: op.name(),
+                        path: path.clone(),
+                    },
+                    None => Escalation::NoRuleCoversSubject {
+                        op: op.name(),
+                        subject: op.subject(&self.workspace),
+                    },
                 };
                 return Classification::Ask(self.pending(call, why));
             };
@@ -1241,12 +1363,9 @@ impl PolicyEngine {
                 let permit = self.mint(scope_of(&call));
                 Resolution::Settled(Ok(Authorized { call, permit, by }))
             }
-            Verdict::Deny { by } => Resolution::Settled(Err(PolicyDenied::Refused {
-                tool: pending.call.tool,
-                op: pending.ask.why.op(),
-                path: pending.ask.why.path().clone(),
-                by,
-            })),
+            Verdict::Deny { by } => {
+                Resolution::Settled(Err(refused(pending.call.tool, &pending.ask.why, by)))
+            }
             Verdict::Escalate { why } => Resolution::Ask(self.pending(pending.call, why)),
         }
     }
@@ -1266,12 +1385,7 @@ impl PolicyEngine {
                 Resolution::Settled(Ok(Authorized { call, permit, by }))
             }
             super::judge::JudgeOutcome::Deny { .. } => {
-                Resolution::Settled(Err(PolicyDenied::Refused {
-                    tool: pending.call.tool,
-                    op: pending.ask.why.op(),
-                    path: pending.ask.why.path().clone(),
-                    by,
-                }))
+                Resolution::Settled(Err(refused(pending.call.tool, &pending.ask.why, by)))
             }
             super::judge::JudgeOutcome::Escalate { .. } => Resolution::Ask(pending),
         }
@@ -1301,12 +1415,11 @@ impl PolicyEngine {
             }
             PermissionDecision::Deny => Resolution::HumanSettled {
                 request,
-                result: Err(PolicyDenied::Refused {
-                    tool: pending.call.tool,
-                    op: pending.ask.why.op(),
-                    path: pending.ask.why.path().clone(),
-                    by: Authority::Party,
-                }),
+                result: Err(refused(
+                    pending.call.tool,
+                    &pending.ask.why,
+                    Authority::Party,
+                )),
             },
             PermissionDecision::Amend { params } => Resolution::Reclassify { request, params },
         }
@@ -1330,16 +1443,17 @@ impl PolicyEngine {
 
     /// Steps 0 to 2: everything that can refuse an operation outright.
     fn judge(&self, call: &PreparedCall, op: &Op) -> Result<(), PolicyDenied> {
-        let path = op
-            .subject_path(&self.workspace)
-            .expect("session evidence is settled before ordinary policy");
+        let path = op.subject_path(&self.workspace);
 
         // 0. The workspace boundary. Evaluated before the rules because it is
         //    not one of them: no operator wrote it, `--allow` cannot widen it,
         //    and `yolo` does not lift it. `yolo` bypasses *asking*; the
         //    sandbox (`ARCHITECTURE.md` §3.4 axis 4) is the axis that widens
         //    or narrows where ego may reach, and it is a separate control.
-        if !matches!(op, Op::Spawn { .. }) && !path.is_or_under(&self.workspace) {
+        if let Some(path) = path
+            && !matches!(op, Op::Spawn { .. })
+            && !path.is_or_under(&self.workspace)
+        {
             return Err(PolicyDenied::OutsideWorkspace {
                 tool: call.tool.clone(),
                 op: op.name(),
@@ -1350,13 +1464,23 @@ impl PolicyEngine {
         // 1. Deny, before any allow at any scope.
         if let Some(entry) = self.matching(&self.deny, op) {
             let (from, also) = entry.attribution();
-            return Err(PolicyDenied::Denied {
-                tool: call.tool.clone(),
-                op: op.name(),
-                path: path.clone(),
-                by: entry.rule().id(),
-                from,
-                also,
+            return Err(match path {
+                Some(path) => PolicyDenied::Denied {
+                    tool: call.tool.clone(),
+                    op: op.name(),
+                    path: path.clone(),
+                    by: entry.rule().id(),
+                    from,
+                    also,
+                },
+                None => PolicyDenied::DeniedSubject {
+                    tool: call.tool.clone(),
+                    op: op.name(),
+                    subject: op.subject(&self.workspace),
+                    by: entry.rule().id(),
+                    from,
+                    also,
+                },
             });
         }
 
@@ -1364,11 +1488,19 @@ impl PolicyEngine {
         //    relax it: `plan` means the run does not change anything, and a
         //    mode a rule could switch off would not mean that.
         if self.mode == Mode::Plan && op.mutates() {
-            return Err(PolicyDenied::ModeForbids {
-                tool: call.tool.clone(),
-                mode: self.mode,
-                op: op.name(),
-                path: path.clone(),
+            return Err(match path {
+                Some(path) => PolicyDenied::ModeForbids {
+                    tool: call.tool.clone(),
+                    mode: self.mode,
+                    op: op.name(),
+                    path: path.clone(),
+                },
+                None => PolicyDenied::ModeForbidsSubject {
+                    tool: call.tool.clone(),
+                    mode: self.mode,
+                    op: op.name(),
+                    subject: op.subject(&self.workspace),
+                },
             });
         }
 
@@ -1409,6 +1541,26 @@ impl PolicyEngine {
     }
 }
 
+fn refused(tool: String, why: &Escalation, by: Authority) -> PolicyDenied {
+    match why {
+        Escalation::NoRuleCovers { path, .. } | Escalation::ModeAsks { path, .. } => {
+            PolicyDenied::Refused {
+                tool,
+                op: why.op(),
+                path: path.clone(),
+                by,
+            }
+        }
+        Escalation::NoRuleCoversSubject { subject, .. }
+        | Escalation::ModeAsksSubject { subject, .. } => PolicyDenied::RefusedSubject {
+            tool,
+            op: why.op(),
+            subject: subject.clone(),
+            by,
+        },
+    }
+}
+
 /// The authority a call's own operations contribute — **the** definition,
 /// called once and never inlined at a second site.
 ///
@@ -1435,6 +1587,25 @@ fn scope_of(call: &PreparedCall) -> Scope {
             Op::Write { path, .. } => scope.write_paths.push(path.clone()),
             Op::Spawn { spec } => scope.spawn = Some(spec.clone()),
             Op::ReadEvidence { request } => scope.evidence = Some(request.clone()),
+            Op::Opaque {
+                tool,
+                params_digest,
+                transport,
+            } => {
+                scope
+                    .foreign_invocations
+                    .push((tool.clone(), params_digest.clone()));
+                match &scope.foreign_transport {
+                    Some(existing) if existing != transport => {
+                        scope.foreign_transport = None;
+                    }
+                    None if scope.foreign_invocations.len() == 1 => {
+                        scope.foreign_transport = Some(transport.clone());
+                    }
+                    _ => {}
+                }
+            }
+            Op::Connect { target } => scope.network = Some(target.clone()),
         }
     }
     scope
@@ -1462,8 +1633,10 @@ mod tests {
     use super::*;
     use crate::permit::fake::{FakeFs, FakeWriteTool};
     use crate::permit::{
-        Change, EnvPolicy, Fs, GuardedEffects, GuardedIo, IoDenied, Op, PrepareCtx, ProcessError,
-        ProcessExecutor, Tool, ToolError, ToolResult, Typed,
+        Change, DnsResolution, DuplexHandle, DuplexSpawner, EnvPolicy, Fs, GuardedEffects,
+        GuardedIo, HttpRequest, IoDenied, NetworkTarget, OneHop, OneHopResponse, Op, PrepareCtx,
+        ProcessError, ProcessExecutor, ResolvedConnect, Resolver, Tool, ToolError, ToolResult,
+        TransportError, Typed,
     };
     use crate::store::evidence::{EvidenceError, EvidencePage, EvidenceStore, EvidenceWriter};
 
@@ -1497,11 +1670,50 @@ mod tests {
         }
     }
 
+    struct NoForeign;
+
+    impl Resolver for NoForeign {
+        fn resolve(
+            &self,
+            _target: NetworkTarget,
+        ) -> BoxFuture<'static, Result<DnsResolution, TransportError>> {
+            Box::pin(future::ready(Err(TransportError::AuthorityMismatch)))
+        }
+    }
+
+    impl OneHop for NoForeign {
+        fn execute(
+            &self,
+            _connect: ResolvedConnect,
+            _request: HttpRequest,
+        ) -> BoxFuture<'static, Result<OneHopResponse, TransportError>> {
+            Box::pin(future::ready(Err(TransportError::AuthorityMismatch)))
+        }
+    }
+
+    impl DuplexSpawner for NoForeign {
+        fn spawn(
+            &self,
+            _spec: SpawnSpec,
+        ) -> BoxFuture<'static, Result<DuplexHandle, TransportError>> {
+            Box::pin(future::ready(Err(TransportError::AuthorityMismatch)))
+        }
+    }
+
     static NO_PROCESS: NoProcess = NoProcess;
     static NO_EVIDENCE: NoEvidence = NoEvidence;
+    static NO_FOREIGN: NoForeign = NoForeign;
 
     fn guarded(permit: Permit, fs: &dyn Fs) -> GuardedEffects<'_> {
-        GuardedEffects::new(permit, fs, &NO_PROCESS, &NO_EVIDENCE)
+        GuardedEffects::new(
+            permit,
+            fs,
+            &NO_PROCESS,
+            &NO_EVIDENCE,
+            &NO_FOREIGN,
+            &NO_FOREIGN,
+            &NO_FOREIGN,
+        )
     }
 
     fn prepare_ctx<'a>(fs: &'a FakeFs) -> PrepareCtx<'a> {

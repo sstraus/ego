@@ -7,6 +7,9 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+use super::foreign::{
+    ForeignToolId, ForeignTransportTarget, InvocationDigest, NetworkTarget, Subject,
+};
 use super::path::CanonPath;
 use super::spawn::SpawnSpec;
 use crate::store::evidence::EvidenceRead;
@@ -43,6 +46,14 @@ pub enum Op {
     Spawn { spec: SpawnSpec },
     /// Complete tool evidence addressed inside the current session.
     ReadEvidence { request: EvidenceRead },
+    /// One exact foreign operation and the route on which it may be invoked.
+    Opaque {
+        tool: ForeignToolId,
+        params_digest: InvocationDigest,
+        transport: ForeignTransportTarget,
+    },
+    /// One exact logical or literal network authority.
+    Connect { target: NetworkTarget },
 }
 
 /// What a [`Op::Write`] does to the file it names.
@@ -108,6 +119,8 @@ pub enum OpName {
     Write,
     Spawn,
     ReadEvidence,
+    Opaque,
+    Connect,
 }
 
 impl fmt::Display for OpName {
@@ -119,6 +132,8 @@ impl fmt::Display for OpName {
             OpName::Write => "write",
             OpName::Spawn => "spawn",
             OpName::ReadEvidence => "read_evidence",
+            OpName::Opaque => "opaque",
+            OpName::Connect => "connect",
         };
         write!(f, "{name}")
     }
@@ -134,6 +149,8 @@ impl Op {
             Op::Write { .. } => OpName::Write,
             Op::Spawn { .. } => OpName::Spawn,
             Op::ReadEvidence { .. } => OpName::ReadEvidence,
+            Op::Opaque { .. } => OpName::Opaque,
+            Op::Connect { .. } => OpName::Connect,
         }
     }
 
@@ -154,7 +171,7 @@ impl Op {
             Op::Read { .. } | Op::List { .. } | Op::Search { .. } | Op::ReadEvidence { .. } => {
                 false
             }
-            Op::Write { .. } | Op::Spawn { .. } => true,
+            Op::Write { .. } | Op::Spawn { .. } | Op::Opaque { .. } | Op::Connect { .. } => true,
         }
     }
 
@@ -165,7 +182,7 @@ impl Op {
             Op::Read { path } | Op::Write { path, .. } => Some(path),
             Op::List { root, .. } | Op::Search { root, .. } => Some(root),
             Op::Spawn { spec } => spec.cwd(),
-            Op::ReadEvidence { .. } => None,
+            Op::ReadEvidence { .. } | Op::Opaque { .. } | Op::Connect { .. } => None,
         }
     }
 
@@ -177,8 +194,27 @@ impl Op {
     pub(crate) fn subject_path<'a>(&'a self, workspace: &'a CanonPath) -> Option<&'a CanonPath> {
         match self {
             Op::Spawn { spec } => Some(spec.cwd().unwrap_or(workspace)),
-            Op::ReadEvidence { .. } => None,
+            Op::ReadEvidence { .. } | Op::Opaque { .. } | Op::Connect { .. } => None,
             _ => self.path(),
+        }
+    }
+
+    /// The exact closed diagnostic subject for this operation.
+    pub fn subject(&self, _workspace: &CanonPath) -> Subject {
+        match self {
+            Op::Read { path } | Op::Write { path, .. } => Subject::Path(path.clone()),
+            Op::List { root, .. } | Op::Search { root, .. } => Subject::Path(root.clone()),
+            Op::Spawn { spec } => Subject::Process(spec.clone()),
+            Op::ReadEvidence { request } => Subject::Evidence(request.clone()),
+            Op::Opaque {
+                tool,
+                params_digest,
+                ..
+            } => Subject::Foreign {
+                tool: tool.clone(),
+                params_digest: params_digest.clone(),
+            },
+            Op::Connect { target } => Subject::Network(target.clone()),
         }
     }
 }
@@ -188,4 +224,79 @@ impl Op {
 pub struct PreparedCall {
     pub tool: String,
     pub ops: Vec<Op>,
+}
+
+impl PreparedCall {
+    pub fn foreign_http(
+        tool: ForeignToolId,
+        params_digest: InvocationDigest,
+        transport: ForeignTransportTarget,
+    ) -> Self {
+        let network = transport.network().cloned();
+        let rendered = tool.to_string();
+        let mut ops = vec![Op::Opaque {
+            tool,
+            params_digest,
+            transport,
+        }];
+        if let Some(target) = network {
+            ops.push(Op::Connect { target });
+        }
+        Self {
+            tool: rendered,
+            ops,
+        }
+    }
+
+    pub fn foreign_stdio(
+        tool: ForeignToolId,
+        params_digest: InvocationDigest,
+        server: &str,
+        spec: SpawnSpec,
+    ) -> Self {
+        let rendered = tool.to_string();
+        let transport = ForeignTransportTarget::stdio(server)
+            .expect("a prepared stdio call must carry a validated server identity");
+        Self {
+            tool: rendered,
+            ops: vec![
+                Op::Opaque {
+                    tool,
+                    params_digest,
+                    transport,
+                },
+                Op::Spawn { spec },
+            ],
+        }
+    }
+
+    pub fn speakeasy(
+        outer_tool: ForeignToolId,
+        outer_digest: InvocationDigest,
+        inner_tool: ForeignToolId,
+        inner_digest: InvocationDigest,
+        transport: ForeignTransportTarget,
+    ) -> Self {
+        let network = transport.network().cloned();
+        let rendered = outer_tool.to_string();
+        let mut ops = vec![
+            Op::Opaque {
+                tool: outer_tool,
+                params_digest: outer_digest,
+                transport: transport.clone(),
+            },
+            Op::Opaque {
+                tool: inner_tool,
+                params_digest: inner_digest,
+                transport,
+            },
+        ];
+        if let Some(target) = network {
+            ops.push(Op::Connect { target });
+        }
+        Self {
+            tool: rendered,
+            ops,
+        }
+    }
 }

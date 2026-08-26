@@ -4,6 +4,7 @@
 
 use super::path::CanonPath;
 use super::spawn::SpawnSpec;
+use super::{ForeignToolId, ForeignTransportTarget, InvocationDigest, NetworkTarget};
 use crate::store::evidence::EvidenceRead;
 
 /// The boundaries a [`Permit`](super::Permit) enforces.
@@ -43,6 +44,9 @@ pub struct Scope {
     /// the permit was minted for, never arbitrary content.
     pub(super) search_paths: Vec<CanonPath>,
     pub(super) endpoints: Vec<String>,
+    pub(super) network: Option<NetworkTarget>,
+    pub(super) foreign_invocations: Vec<(ForeignToolId, InvocationDigest)>,
+    pub(super) foreign_transport: Option<ForeignTransportTarget>,
     pub(super) spawn: Option<SpawnSpec>,
     pub(super) evidence: Option<EvidenceRead>,
 }
@@ -71,6 +75,21 @@ impl Scope {
     /// Every endpoint this scope may connect to.
     pub fn endpoints(&self) -> &[String] {
         &self.endpoints
+    }
+
+    /// The exact logical or literal network target admitted for one hop.
+    pub fn network(&self) -> Option<&NetworkTarget> {
+        self.network.as_ref()
+    }
+
+    /// Every exact foreign operation fingerprint admitted by this call.
+    pub fn foreign_invocations(&self) -> &[(ForeignToolId, InvocationDigest)] {
+        &self.foreign_invocations
+    }
+
+    /// The exact route identity admitted for the foreign call.
+    pub fn foreign_transport(&self) -> Option<&ForeignTransportTarget> {
+        self.foreign_transport.as_ref()
     }
 
     /// The exact process specification this scope may spawn.

@@ -10,8 +10,8 @@ use serde_json::Value;
 
 use crate::generator::types::ToolDescriptor as GenToolDescriptor;
 use crate::permit::{
-    Authorized, CanonPath, Classification, Fs, GuardedEffects, Pending, PolicyEngine, PrepareCtx,
-    PreparedCall, ProcessExecutor, Resolution, Tool, ToolError,
+    Authorized, CanonPath, Classification, DuplexSpawner, Fs, GuardedEffects, OneHop, Pending,
+    PolicyEngine, PrepareCtx, PreparedCall, ProcessExecutor, Resolution, Resolver, Tool, ToolError,
 };
 use crate::store::evidence::EvidenceStore;
 
@@ -37,6 +37,9 @@ pub struct Tools<'a> {
     fs: &'a dyn Fs,
     process: &'a dyn ProcessExecutor,
     evidence: &'a dyn EvidenceStore,
+    resolver: &'a dyn Resolver,
+    one_hop: &'a dyn OneHop,
+    duplex: &'a dyn DuplexSpawner,
     cwd: CanonPath,
 }
 
@@ -47,6 +50,9 @@ impl<'a> Tools<'a> {
         fs: &'a dyn Fs,
         process: &'a dyn ProcessExecutor,
         evidence: &'a dyn EvidenceStore,
+        resolver: &'a dyn Resolver,
+        one_hop: &'a dyn OneHop,
+        duplex: &'a dyn DuplexSpawner,
         cwd: CanonPath,
     ) -> Self {
         Self {
@@ -59,6 +65,9 @@ impl<'a> Tools<'a> {
             fs,
             process,
             evidence,
+            resolver,
+            one_hop,
+            duplex,
             cwd,
         }
     }
@@ -71,6 +80,9 @@ impl<'a> Tools<'a> {
         fs: &'a dyn Fs,
         process: &'a dyn ProcessExecutor,
         evidence: &'a dyn EvidenceStore,
+        resolver: &'a dyn Resolver,
+        one_hop: &'a dyn OneHop,
+        duplex: &'a dyn DuplexSpawner,
         cwd: CanonPath,
     ) -> Self {
         Self {
@@ -79,6 +91,9 @@ impl<'a> Tools<'a> {
             fs,
             process,
             evidence,
+            resolver,
+            one_hop,
+            duplex,
             cwd,
         }
     }
@@ -230,7 +245,15 @@ impl<'a> Tools<'a> {
         authorized: Authorized,
     ) -> Result<crate::permit::ToolResult, ToolError> {
         let (call, permit) = authorized.into_parts();
-        let guarded = GuardedEffects::new(permit, self.fs, self.process, self.evidence);
+        let guarded = GuardedEffects::new(
+            permit,
+            self.fs,
+            self.process,
+            self.evidence,
+            self.resolver,
+            self.one_hop,
+            self.duplex,
+        );
         tool.execute(call, &guarded).await
     }
 }

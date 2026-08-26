@@ -169,8 +169,12 @@ impl Rule {
                 pattern.matches(at.as_path(), root)
             }
             (Rule::Exec(pattern), Op::Spawn { spec }) => pattern.matches_os(spec.argv()),
-            // `net` and `tool` are not missing arms — there is no operation
-            // of either shape in this workspace. See the module comment.
+            (Rule::Net(endpoint), Op::Connect { target }) => {
+                endpoint.matches(target.host(), target.port())
+            }
+            (Rule::Tool { server, name }, Op::Opaque { tool, .. }) => {
+                server == tool.server() && name == tool.name()
+            }
             _ => false,
         }
     }

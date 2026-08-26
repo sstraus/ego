@@ -144,7 +144,10 @@ impl ModeApprover {
                 // Auto-approves workspace writes. `classify`'s step 0 already
                 // established that every path in this call is in the
                 // workspace.
-                Mode::Edits => !matches!(op, Op::Spawn { .. }),
+                Mode::Edits => !matches!(
+                    op,
+                    Op::Spawn { .. } | Op::Opaque { .. } | Op::Connect { .. }
+                ),
                 // `ARCHITECTURE.md:242` — these review unresolved
                 // **sensitive** actions, not every action. A read inside the
                 // workspace that stopped the run to ask would be the prompt
@@ -157,16 +160,19 @@ impl ModeApprover {
                 Mode::Plan | Mode::Default | Mode::Auto => !op.mutates(),
             };
             if !approved {
-                return Verdict::Escalate {
-                    why: Escalation::ModeAsks {
+                let why = match op.subject_path(&self.workspace) {
+                    Some(path) => Escalation::ModeAsks {
                         mode: self.mode,
                         op: op.name(),
-                        path: op
-                            .subject_path(&self.workspace)
-                            .expect("session evidence is settled before mode approval")
-                            .clone(),
+                        path: path.clone(),
+                    },
+                    None => Escalation::ModeAsksSubject {
+                        mode: self.mode,
+                        op: op.name(),
+                        subject: op.subject(&self.workspace),
                     },
                 };
+                return Verdict::Escalate { why };
             }
         }
         Verdict::Allow {

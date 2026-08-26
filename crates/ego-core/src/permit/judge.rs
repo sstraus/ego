@@ -238,6 +238,15 @@ enum CanonicalOp {
         reference: String,
         offset: u64,
     },
+    Opaque {
+        server: String,
+        name: String,
+        params_digest: String,
+        transport: String,
+    },
+    Connect {
+        target: String,
+    },
 }
 
 impl From<&Op> for CanonicalOp {
@@ -273,6 +282,19 @@ impl From<&Op> for CanonicalOp {
             Op::ReadEvidence { request } => Self::ReadEvidence {
                 reference: request.reference.to_string(),
                 offset: request.offset,
+            },
+            Op::Opaque {
+                tool,
+                params_digest,
+                transport,
+            } => Self::Opaque {
+                server: tool.server().to_owned(),
+                name: tool.name().to_owned(),
+                params_digest: params_digest.as_str().to_owned(),
+                transport: transport.to_string(),
+            },
+            Op::Connect { target } => Self::Connect {
+                target: target.to_string(),
             },
         }
     }
@@ -346,9 +368,11 @@ impl From<&Escalation> for CanonicalEscalation {
             source: match escalation {
                 Escalation::NoRuleCovers { .. } => "rules",
                 Escalation::ModeAsks { .. } => "mode",
+                Escalation::NoRuleCoversSubject { .. } => "rules",
+                Escalation::ModeAsksSubject { .. } => "mode",
             },
             operation: escalation.op().to_string(),
-            path: escalation.path().to_string(),
+            path: escalation.subject().to_string(),
         }
     }
 }
