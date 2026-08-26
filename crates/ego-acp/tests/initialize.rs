@@ -11,26 +11,12 @@
 //! end is a dependency we do not control.
 
 use agent_client_protocol::{ConnectTo, Lines};
-use agent_client_protocol_schema::{ProtocolVersion, v1};
+use agent_client_protocol_schema::ProtocolVersion;
 use ego_acp::negotiate::negotiate;
-use ego_acp::serve::{Turn, Turns};
 use futures::channel::mpsc;
 use futures::{SinkExt, StreamExt};
 
-/// A host that never runs a turn.
-///
-/// `initialize` is answered before any session exists, so a prompt cannot
-/// arrive during these tests. Returning an error rather than a plausible stop
-/// reason means a test that *did* somehow reach a turn fails loudly instead of
-/// passing on a fiction.
-#[derive(Clone)]
-struct NeverPrompted;
-
-impl Turns for NeverPrompted {
-    async fn run(&self, _turn: Turn) -> Result<v1::StopReason, String> {
-        Err("this test never prompts, so this is unreachable".to_string())
-    }
-}
+mod support;
 
 /// The JSON-RPC response to one `initialize` asking for `wanted`.
 async fn initialize(wanted: u16) -> serde_json::Value {
@@ -41,7 +27,7 @@ async fn initialize(wanted: u16) -> serde_json::Value {
         from_agent.sink_map_err(std::io::Error::other),
         to_agent_rx.map(Ok::<_, std::io::Error>),
     );
-    let agent = tokio::spawn(ego_acp::serve::agent(NeverPrompted).connect_to(transport));
+    let agent = tokio::spawn(support::agent().connect_to(transport));
 
     // The *client's* shape, not ours: a client asking for `2` or newer sends
     // v2's `initialize`, whose `info` is required where v1's `clientInfo` is

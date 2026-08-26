@@ -18,23 +18,37 @@
 //! JSON. A literal would pass while the two mappings diverged, which is the one
 //! failure this file exists to catch.
 
+use std::collections::{BTreeMap, HashMap};
+use std::future::Future;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use agent_client_protocol::{ConnectTo, Lines};
 use agent_client_protocol_schema::{ProtocolVersion, v1};
 use ego_acp::project::project_acp_v1;
-use ego_acp::serve::{Turn, Turns};
-use ego_core::event::id::{ItemId, TurnId};
+use ego_core::config::ModelRef;
+use ego_core::event::domain::{CancelCause, DomainEvent};
+use ego_core::event::id::{ItemId, SessionId, TurnId};
+use ego_core::event::time::{Clock, Timestamp};
 use ego_core::generator::capabilities::{
     CacheRetention, CancelSemantics, ModelCapabilities, ReasoningCarryover, ReasoningEffortSupport,
     Transport,
 };
 use ego_core::public::{ItemKind, PublicEvent};
-use ego_core::sink::EventSink;
+use ego_core::run::{
+    IdSource, RunAppend, RunExecutionBindings, RunExecutor, RunExecutorError, RunHandle, RunId,
+    RunPreparation, RunPrepared, RunRevision, RunRoot, RunSettlement, RunStart, RunTransaction,
+};
 use ego_core::state::SessionState;
+use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
+use ego_core::turn::CancelToken;
 use futures::channel::mpsc;
+use futures::future::{self, BoxFuture};
+use futures::stream::BoxStream;
 use futures::{SinkExt, StreamExt};
+use tokio::sync::Notify;
+
+mod support;
 
 /// The model a turn in this file resolved to.
 ///
@@ -127,85 +141,286 @@ fn published() -> Vec<PublicEvent> {
     ]
 }
 
-/// A host that records the turn it was given and publishes a fixed stream.
-///
-/// It does not resolve a model or open a store: that is `ego-cli`'s half of the
-/// [`Turns`] seam, and running it here would test the CLI through the ACP
-/// connection instead of the connection itself.
 #[derive(Clone, Default)]
-struct Recorder {
-    seen: Arc<Mutex<Vec<(String, PathBuf)>>>,
-}
-
-impl Recorder {
-    /// The `(text, cwd)` of every turn this host was asked to run.
-    fn turns(&self) -> Vec<(String, PathBuf)> {
-        self.seen.lock().expect("no handler panicked").clone()
-    }
-}
-
-impl Turns for Recorder {
-    async fn run(&self, turn: Turn) -> Result<v1::StopReason, String> {
-        self.seen
-            .lock()
-            .expect("no handler panicked")
-            .push((turn.text.clone(), turn.cwd.clone()));
-
-        let sink = turn.updates.sink(caps());
-        let state = SessionState::default();
-        for event in published() {
-            sink.publish(&event, &state);
-        }
-        Ok(v1::StopReason::EndTurn)
-    }
-}
-
-/// A host whose turn does not finish until the test lets it, and which reports
-/// whether its own token was cancelled.
-///
-/// [`Recorder`] cannot express either question: its turn is over before the
-/// next line is read, so there is never a moment at which a second request
-/// arrives *during* a turn — which is the only moment the admission rule and
-/// the cancel token are about.
-#[derive(Clone, Default)]
-struct Blocking {
-    /// Notified as each turn begins.
-    started: Arc<tokio::sync::Notify>,
-    /// Awaited by each turn before it returns.
-    release: Arc<tokio::sync::Notify>,
-    /// One entry per turn admitted: its text, and whether its own token was
-    /// cancelled by the time it was allowed to end.
+struct BlockingState {
+    started: Arc<Notify>,
+    release: Arc<Notify>,
     ran: Arc<Mutex<Vec<(String, bool)>>>,
 }
 
-impl Blocking {
+#[derive(Clone)]
+enum PromptMode {
+    Publish,
+    Block(BlockingState),
+}
+
+#[derive(Clone)]
+struct PromptExecutor {
+    mode: PromptMode,
+    turns: Arc<Mutex<Vec<(String, PathBuf)>>>,
+    roots: Arc<Mutex<HashMap<RunId, RunRoot>>>,
+}
+
+struct PromptAuthority {
+    cancel: CancelToken,
+    mode: PromptMode,
+}
+
+struct PreparedToken;
+
+impl PromptExecutor {
+    fn publishing() -> Self {
+        Self {
+            mode: PromptMode::Publish,
+            turns: Arc::new(Mutex::new(Vec::new())),
+            roots: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    fn blocking() -> Self {
+        Self {
+            mode: PromptMode::Block(BlockingState::default()),
+            turns: Arc::new(Mutex::new(Vec::new())),
+            roots: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    fn turns(&self) -> Vec<(String, PathBuf)> {
+        self.turns.lock().expect("prompt turns").clone()
+    }
+
     async fn turn_began(&self) {
-        self.started.notified().await;
+        match &self.mode {
+            PromptMode::Block(blocking) => blocking.started.notified().await,
+            PromptMode::Publish => panic!("publishing executor has no blocking turn"),
+        }
     }
 
     fn let_a_turn_end(&self) {
-        self.release.notify_one();
+        match &self.mode {
+            PromptMode::Block(blocking) => blocking.release.notify_one(),
+            PromptMode::Publish => panic!("publishing executor has no blocking turn"),
+        }
     }
 
     fn ran(&self) -> Vec<(String, bool)> {
-        self.ran.lock().expect("no handler panicked").clone()
+        match &self.mode {
+            PromptMode::Block(blocking) => blocking.ran.lock().expect("prompt runs").clone(),
+            PromptMode::Publish => panic!("publishing executor has no blocking turn"),
+        }
     }
 }
 
-impl Turns for Blocking {
-    async fn run(&self, turn: Turn) -> Result<v1::StopReason, String> {
-        self.started.notify_one();
-        self.release.notified().await;
-        let cancelled = turn.cancel.is_cancelled();
-        self.ran
+impl RunExecutor for PromptExecutor {
+    type Prepared = PreparedToken;
+
+    fn prepare<'a>(
+        &'a self,
+        _request: &'a RunPreparation,
+    ) -> BoxFuture<'a, Result<RunPrepared<Self::Prepared>, RunExecutorError>> {
+        Box::pin(future::ready(Ok(RunPrepared::new(
+            ModelRef("model/test".to_owned()),
+            PreparedToken,
+        ))))
+    }
+
+    fn start<'a>(
+        &'a self,
+        request: &'a RunStart,
+    ) -> BoxFuture<'a, Result<RunHandle, RunExecutorError>> {
+        self.roots
             .lock()
-            .expect("no handler panicked")
-            .push((turn.text.clone(), cancelled));
-        if cancelled {
-            Ok(v1::StopReason::Cancelled)
-        } else {
-            Ok(v1::StopReason::EndTurn)
+            .expect("prompt roots")
+            .insert(request.run_id, request.root.clone());
+        let authority = PromptAuthority {
+            cancel: CancelToken::new(),
+            mode: self.mode.clone(),
+        };
+        Box::pin(future::ready(Ok(RunHandle::new(
+            request.run_id,
+            Arc::new(authority),
+        ))))
+    }
+
+    fn recover<'a>(
+        &'a self,
+        _run: &'a RunId,
+    ) -> BoxFuture<'a, Result<ego_core::run::RecoveryEvidence, RunExecutorError>> {
+        Box::pin(future::ready(Ok(
+            ego_core::run::RecoveryEvidence::Ambiguous,
+        )))
+    }
+
+    fn observe<'a>(
+        &'a self,
+        _handle: &'a RunHandle,
+        _bindings: RunExecutionBindings,
+    ) -> BoxFuture<'a, Result<RunSettlement, RunExecutorError>> {
+        Box::pin(future::ready(Ok(RunSettlement::completed())))
+    }
+
+    fn submit<'a>(
+        &'a self,
+        handle: &'a RunHandle,
+        prompt: &'a str,
+        _prepared: Self::Prepared,
+        bindings: RunExecutionBindings,
+    ) -> BoxFuture<'a, Result<RunSettlement, RunExecutorError>> {
+        let authority = handle
+            .authority::<Arc<PromptAuthority>>()
+            .expect("prompt authority");
+        let mode = authority.mode.clone();
+        let cancel = authority.cancel.clone();
+        let root = self
+            .roots
+            .lock()
+            .expect("prompt roots")
+            .get(&handle.run_id())
+            .cloned()
+            .expect("started prompt root");
+        let prompt = prompt.to_owned();
+        let turns = Arc::clone(&self.turns);
+        Box::pin(async move {
+            match mode {
+                PromptMode::Publish => {
+                    turns
+                        .lock()
+                        .expect("prompt turns")
+                        .push((prompt, root.as_path().to_path_buf()));
+                    let sink = bindings.sink_factory.create(&caps());
+                    let state = SessionState::default();
+                    for event in published() {
+                        sink.publish(&event, &state);
+                    }
+                    Ok(RunSettlement::completed())
+                }
+                PromptMode::Block(blocking) => {
+                    blocking.started.notify_one();
+                    blocking.release.notified().await;
+                    let cancelled = cancel.is_cancelled();
+                    blocking
+                        .ran
+                        .lock()
+                        .expect("prompt runs")
+                        .push((prompt, cancelled));
+                    if cancelled {
+                        Ok(RunSettlement::cancelled(ego_core::run::CancelReason::User))
+                    } else {
+                        Ok(RunSettlement::completed())
+                    }
+                }
+            }
+        })
+    }
+
+    fn interrupt<'a>(
+        &'a self,
+        handle: &'a RunHandle,
+    ) -> BoxFuture<'a, Result<(), RunExecutorError>> {
+        let authority = handle
+            .authority::<Arc<PromptAuthority>>()
+            .expect("prompt authority");
+        authority.cancel.cancel(CancelCause::User);
+        Box::pin(future::ready(Ok(())))
+    }
+}
+
+#[derive(Default)]
+struct PromptStore {
+    entries: Mutex<BTreeMap<SessionId, Vec<SessionEntry>>>,
+}
+
+impl SessionStore for PromptStore {
+    fn append(&self, id: &SessionId, event: &DomainEvent) -> Result<(), StoreError> {
+        self.entries
+            .lock()
+            .expect("prompt entries")
+            .entry(*id)
+            .or_default()
+            .push(SessionEntry::Event(event.clone()));
+        Ok(())
+    }
+
+    fn read(
+        &self,
+        id: &SessionId,
+    ) -> Result<BoxStream<'static, Result<SessionEntry, StoreError>>, StoreError> {
+        let entries = self
+            .entries
+            .lock()
+            .expect("prompt entries")
+            .get(id)
+            .cloned()
+            .ok_or(StoreError::NotFound)?;
+        Ok(Box::pin(futures::stream::iter(
+            entries.into_iter().map(Ok::<_, StoreError>),
+        )))
+    }
+
+    fn list(&self) -> Result<Vec<SessionMeta>, StoreError> {
+        Ok(self
+            .entries
+            .lock()
+            .expect("prompt entries")
+            .keys()
+            .map(|id| SessionMeta {
+                id: *id,
+                workspace_root: PathBuf::from("/tmp"),
+                model: None,
+                created: Timestamp::EPOCH,
+                updated: Timestamp::EPOCH,
+                title: None,
+                lineage: None,
+            })
+            .collect())
+    }
+
+    fn compare_and_append_run(
+        &self,
+        session: &SessionId,
+        expected_revision: Option<RunRevision>,
+        transaction: RunTransaction,
+    ) -> Result<RunAppend, StoreError> {
+        let mut entries = self.entries.lock().expect("prompt entries");
+        let actual = entries.get(session).and_then(|entries| {
+            entries.iter().rev().find_map(|entry| match entry {
+                SessionEntry::RunTransaction(transaction) => Some(transaction.revision()),
+                SessionEntry::Event(_) => None,
+            })
+        });
+        if expected_revision != actual {
+            return Ok(RunAppend::Conflict {
+                actual: actual.ok_or(StoreError::NotFound)?,
+            });
         }
+        let revision = transaction.revision();
+        entries
+            .entry(*session)
+            .or_default()
+            .push(SessionEntry::RunTransaction(transaction));
+        Ok(RunAppend::Committed { revision })
+    }
+}
+
+#[derive(Default)]
+struct PromptClock;
+
+impl Clock for PromptClock {
+    fn now(&self) -> Timestamp {
+        Timestamp::EPOCH
+    }
+}
+
+#[derive(Default)]
+struct PromptIds {
+    next: Mutex<u128>,
+}
+
+impl IdSource for PromptIds {
+    fn next_uuid(&self) -> uuid::Uuid {
+        let mut next = self.next.lock().expect("prompt ids");
+        *next += 1;
+        uuid::Uuid::from_u128(*next)
     }
 }
 
@@ -222,17 +437,26 @@ struct Connected {
 }
 
 impl Connected {
-    fn to<T: Turns>(turns: T) -> Self {
+    fn to(executor: PromptExecutor) -> Self {
         let (to_agent, to_agent_rx) = mpsc::unbounded::<String>();
         let (from_agent, from_agent_rx) = mpsc::unbounded::<String>();
         let transport = Lines::new(
             from_agent.sink_map_err(std::io::Error::other),
             to_agent_rx.map(Ok::<_, std::io::Error>),
         );
+        let store = Arc::new(PromptStore::default());
+        let executor = Arc::new(executor);
+        let ids = Arc::new(PromptIds::default());
+        let agent = support::agent_with(
+            store,
+            Arc::clone(&executor),
+            Arc::new(PromptClock),
+            Arc::clone(&ids),
+        );
         Connected {
             to_agent,
             from_agent: from_agent_rx,
-            agent: tokio::spawn(ego_acp::serve::agent(turns).connect_to(transport)),
+            agent: tokio::spawn(agent.connect_to(transport)),
             next_id: 1,
         }
     }
@@ -384,7 +608,7 @@ fn expected_updates(session: &str) -> Vec<serde_json::Value> {
 /// in order, and then the answer.
 #[tokio::test]
 async fn a_prompt_produces_the_same_updates_the_cli_would_and_then_its_stop_reason() {
-    let turns = Recorder::default();
+    let turns = PromptExecutor::publishing();
     let mut connection = Connected::to(turns.clone());
     let session = connection.open("/tmp/some-workspace").await;
 
@@ -434,7 +658,7 @@ async fn a_prompt_produces_the_same_updates_the_cli_would_and_then_its_stop_reas
 /// with the wrong id, because there is only one id to build it with.
 #[tokio::test]
 async fn each_session_receives_only_its_own_updates() {
-    let mut connection = Connected::to(Recorder::default());
+    let mut connection = Connected::to(PromptExecutor::publishing());
     let first = connection.open("/tmp/first").await;
     let second = connection.open("/tmp/second").await;
     assert_ne!(first, second, "session/new handed out the same id twice");
@@ -471,7 +695,7 @@ async fn each_session_receives_only_its_own_updates() {
 /// for keeping it.
 #[tokio::test]
 async fn the_two_block_kinds_every_agent_must_accept_reach_the_turn() {
-    let turns = Recorder::default();
+    let turns = PromptExecutor::publishing();
     let mut connection = Connected::to(turns.clone());
     let session = connection.open("/tmp/ws").await;
 
@@ -504,7 +728,7 @@ async fn the_two_block_kinds_every_agent_must_accept_reach_the_turn() {
 /// prompt silently answered without the picture it asked about.
 #[tokio::test]
 async fn an_image_is_refused_by_name_and_no_turn_is_started() {
-    let turns = Recorder::default();
+    let turns = PromptExecutor::publishing();
     let mut connection = Connected::to(turns.clone());
     let session = connection.open("/tmp/ws").await;
 
@@ -560,7 +784,7 @@ async fn an_image_is_refused_by_name_and_no_turn_is_started() {
 /// A prompt for a session nobody opened is refused, and says how to open one.
 #[tokio::test]
 async fn a_prompt_for_an_unopened_session_is_refused() {
-    let turns = Recorder::default();
+    let turns = PromptExecutor::publishing();
     let mut connection = Connected::to(turns.clone());
     connection.open("/tmp/ws").await;
 
@@ -599,7 +823,7 @@ async fn a_prompt_for_an_unopened_session_is_refused() {
 /// error *and* ran the turn anyway would satisfy the first assertion alone.
 #[tokio::test]
 async fn a_second_prompt_while_a_turn_is_running_is_refused_and_starts_nothing() {
-    let host = Blocking::default();
+    let host = PromptExecutor::blocking();
     let mut connection = Connected::to(host.clone());
     let session = connection.open("/tmp/ws").await;
 
@@ -664,7 +888,7 @@ async fn a_second_prompt_while_a_turn_is_running_is_refused_and_starts_nothing()
 /// arrived later.
 #[tokio::test]
 async fn cancel_reaches_the_turn_that_is_running() {
-    let host = Blocking::default();
+    let host = PromptExecutor::blocking();
     let mut connection = Connected::to(host.clone());
     let session = connection.open("/tmp/ws").await;
 
@@ -725,7 +949,7 @@ async fn cancel_reaches_the_turn_that_is_running() {
 /// would pass both tests above and make every session single-use.
 #[tokio::test]
 async fn a_session_accepts_another_prompt_once_its_turn_has_ended() {
-    let host = Blocking::default();
+    let host = PromptExecutor::blocking();
     let mut connection = Connected::to(host.clone());
     let session = connection.open("/tmp/ws").await;
 
@@ -771,7 +995,7 @@ async fn a_session_accepts_another_prompt_once_its_turn_has_ended() {
 /// missing tool to the agent being bad at using them.
 #[tokio::test]
 async fn session_new_refuses_mcp_servers_this_build_cannot_connect_to() {
-    let mut connection = Connected::to(Recorder::default());
+    let mut connection = Connected::to(PromptExecutor::publishing());
     let (initialized, _) = connection
         .request(
             "initialize",

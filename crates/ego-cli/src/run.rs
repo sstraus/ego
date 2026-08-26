@@ -9,6 +9,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::task::Waker;
 use std::time::Duration;
 
 use ego_core::config::{
@@ -33,7 +34,10 @@ use ego_core::permit::{
 };
 use ego_core::public::{PUBLIC_EVENT_VERSION, PublicEvent, QuestionReport, project_public};
 use ego_core::question::{AskQuestionTool, Elicitor, QuestionOutcome};
-use ego_core::run::{DeniedBy, RunTermination, Signal};
+use ego_core::run::{
+    CancelReason, DeniedBy, RecoveryEvidence, RunExecutionBindings, RunExecutor, RunExecutorError,
+    RunHandle, RunPreparation, RunPrepared, RunSettlement, RunStart, RunTermination, Signal,
+};
 use ego_core::sink::{EventSink, NullSink};
 use ego_core::state::{ItemKind, QuestionContinuation, SessionState};
 use ego_core::store::session_store::{SessionMeta, SessionStore};
@@ -510,28 +514,7 @@ pub async fn run_with<S: EventSink>(
     destination: impl FnOnce(&ModelCapabilities) -> S,
     cancel: CancelToken,
 ) -> Ended {
-    run_with_elicitor(args, destination, cancel, None).await
-}
-
-/// A headless/hosted run with its optional implementation of core's sole
-/// human-input port. ACP uses this seam; ordinary headless CLI passes none.
-pub async fn run_with_elicitor<S: EventSink>(
-    args: Args,
-    destination: impl FnOnce(&ModelCapabilities) -> S,
-    cancel: CancelToken,
-    elicitor: Option<Arc<dyn Elicitor>>,
-) -> Ended {
-    match execute(
-        args,
-        destination,
-        cancel,
-        Driver::Once,
-        elicitor,
-        None,
-        &Stderr,
-    )
-    .await
-    {
+    match execute(args, destination, cancel, Driver::Once, None, None, &Stderr).await {
         Ok(ended) => ended,
         Err(refusal) => Ended::refused(refusal),
     }
@@ -596,21 +579,32 @@ fn deadline(spec: &str) -> Result<Duration, UsageError> {
 
 /// The workspace this run is rooted at.
 ///
-/// `-C DIR` is applied to the process before anything else reads a path, so
-/// there is exactly one notion of "here" and every relative path in every
-/// later step agrees with it.
+/// `-C DIR` is resolved once and propagated explicitly. The process working
+/// directory is never mutated, so concurrent rooted adapters cannot retarget
+/// one another.
 pub(crate) fn workspace(directory: Option<&PathBuf>) -> Result<PathBuf, UsageError> {
-    if let Some(dir) = directory {
-        std::env::set_current_dir(dir)
-            .map_err(|err| UsageError(format!("-C {}: {err}", dir.display())))?;
-    }
-    std::env::current_dir()
-        .and_then(std::fs::canonicalize)
-        .map_err(|err| {
+    let directory = match directory {
+        Some(directory) => directory.clone(),
+        None => std::env::current_dir().map_err(|err| {
             UsageError(format!(
                 "the working directory could not be resolved: {err}"
             ))
-        })
+        })?,
+    };
+    std::fs::canonicalize(&directory).map_err(|err| {
+        UsageError(format!(
+            "the working directory {} could not be resolved: {err}",
+            directory.display()
+        ))
+    })
+}
+
+pub(crate) fn rooted_path(root: &Path, path: PathBuf) -> PathBuf {
+    if path.is_absolute() {
+        path
+    } else {
+        root.join(path)
+    }
 }
 
 /// `--instructions FILE`, resolved against this workspace.
@@ -656,6 +650,19 @@ fn explicit(path: &Path, cwd: &Path) -> Result<PathBuf, UsageError> {
     Ok(resolved)
 }
 
+fn rooted_at_file(value: &str, cwd: &Path) -> Result<String, UsageError> {
+    let Some(path) = value.strip_prefix('@') else {
+        return prompt::at_file(value);
+    };
+    let path = Path::new(path);
+    let rooted = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    };
+    prompt::at_file(&format!("@{}", rooted.display()))
+}
+
 /// The instructions and system prompt this run generates under.
 ///
 /// **`--bare`, and a headless run in an untrusted workspace, call
@@ -674,10 +681,10 @@ fn instructions(
         // `--system` replaces the prompt outright (`CLI.md` §3), so no file
         // contributed and none is published. `--append-system` still applies:
         // "append to it" means to whatever `--system` left.
-        let mut text = prompt::at_file(text)?;
+        let mut text = rooted_at_file(text, cwd)?;
         if let Some(extra) = &args.append_system {
             text.push_str("\n\n");
-            text.push_str(&prompt::at_file(extra)?);
+            text.push_str(&rooted_at_file(extra, cwd)?);
         }
         return Ok(Some(SystemPrompt::verbatim(text)));
     }
@@ -700,7 +707,7 @@ fn instructions(
 
     let mut assembled = system_prompt(&set, root, &selection);
     if let Some(extra) = &args.append_system {
-        let extra = prompt::at_file(extra)?;
+        let extra = rooted_at_file(extra, cwd)?;
         assembled = Some(match assembled {
             Some(mut prompt) => {
                 prompt.text.push_str("\n\n");
@@ -789,13 +796,22 @@ fn settings(
     trust_for: impl FnOnce(&Path) -> Trust,
     diagnostics: &dyn Diagnostics,
 ) -> Result<Settings, UsageError> {
+    let cwd = workspace(args.directory.as_ref())?;
+    rooted_settings(args, cwd, trust_for, diagnostics)
+}
+
+fn rooted_settings(
+    args: &Args,
+    cwd: PathBuf,
+    trust_for: impl FnOnce(&Path) -> Trust,
+    diagnostics: &dyn Diagnostics,
+) -> Result<Settings, UsageError> {
     let started = std::time::Instant::now();
     let timeout = match args.timeout.as_deref() {
         Some(spec) => Some(deadline(spec)?),
         None => None,
     };
 
-    let cwd = workspace(args.directory.as_ref())?;
     // The workspace root is the working directory. Discovering a repository
     // root is `git`'s question and would make the answer depend on a tool that
     // may not be installed; `-C` is how a caller says otherwise.
@@ -864,8 +880,25 @@ fn materials(
     seeded: bool,
     diagnostics: &dyn Diagnostics,
 ) -> Result<Materials, UsageError> {
+    let text = if seeded {
+        prompt::seed(args.prompt.as_deref(), args.stdin, &prompt::ProcessStdin)?
+    } else {
+        prompt::assemble(args.prompt.as_deref(), args.stdin, &prompt::ProcessStdin)?
+    };
+    prepared_materials(settings, args, text, diagnostics)
+}
+
+fn prepared_materials(
+    settings: &Settings,
+    args: &Args,
+    text: String,
+    diagnostics: &dyn Diagnostics,
+) -> Result<Materials, UsageError> {
     let compiled = match args.schema.as_deref() {
-        Some(spec) => Some(schema::Schema::compile(&prompt::at_file(spec)?)?),
+        Some(spec) => Some(schema::Schema::compile(&rooted_at_file(
+            spec,
+            &settings.cwd,
+        )?)?),
         None => None,
     };
     let system = instructions(
@@ -876,13 +909,6 @@ fn materials(
         diagnostics,
     )?;
     let registry = tools(args.tools.as_ref())?;
-    // An interactive session may start with nothing to ask; a one-shot may
-    // not. Same table otherwise.
-    let text = if seeded {
-        prompt::seed(args.prompt.as_deref(), args.stdin, &prompt::ProcessStdin)?
-    } else {
-        prompt::assemble(args.prompt.as_deref(), args.stdin, &prompt::ProcessStdin)?
-    };
     let slug = args
         .model
         .clone()
@@ -924,7 +950,10 @@ struct Chosen {
 fn chosen(args: &Args, root: &Path) -> Result<Chosen, UsageError> {
     let store_root = match args.session {
         SessionChoice::Ephemeral => None,
-        _ => Some(session::store_root(args.session_dir.as_ref())?),
+        _ => Some(rooted_path(
+            root,
+            session::store_root(args.session_dir.as_ref())?,
+        )),
     };
     // The same `root` that derives a named session's id below, so "the session
     // called build in this workspace" and "the sessions belonging to this
@@ -1008,6 +1037,130 @@ fn generation_refusal(error: GenerationModelError) -> RunTermination {
     }
 }
 
+struct GenerationPreflight {
+    source: Arc<dyn GenerationModelSource>,
+    selection: Arc<model::GenerationSelection>,
+    model: ego_core::config::ModelRef,
+    capabilities: ModelCapabilities,
+    judge_enabled: bool,
+    proof_directory: tempfile::TempDir,
+    proof_evidence: SessionEvidenceStore,
+}
+
+async fn generation_preflight(
+    args: &Args,
+    session_id: SessionId,
+    confinement: &RunConfinement,
+    effective: &Effective,
+    slug: String,
+    cancel: &CancelToken,
+    status: &mut Option<InteractiveStatus>,
+) -> Result<GenerationPreflight, RunTermination> {
+    let proof_directory = tempfile::tempdir().map_err(|error| RunTermination::Failed {
+        message: format!("could not create the sandbox proof store: {error}"),
+    })?;
+    let proof_evidence =
+        SessionEvidenceStore::open(proof_directory.path(), session_id, EVIDENCE_CAP).map_err(
+            |error| RunTermination::Failed {
+                message: format!("could not open the sandbox proof store: {error}"),
+            },
+        )?;
+    let (proof, proof_observation) = guarded_exec(confinement, &proof_evidence, cancel).await?;
+    drop(proof);
+
+    let mode = effective.mode.unwrap_or(Mode::Default);
+    let judge_identity = if mode == Mode::Auto {
+        Some(
+            effective
+                .judge
+                .clone()
+                .ok_or_else(|| RunTermination::UsageError {
+                    message: "`auto` mode requires `[permissions] judge = \"provider/model\"`"
+                        .to_string(),
+                })?,
+        )
+    } else {
+        None
+    };
+    let source = model::CliGenerationModelSource::new(
+        ego_core::config::ModelRef(slug),
+        effective.thinking.unwrap_or(ThinkingLevel::Off),
+        judge_identity,
+        effective.ceilings.clone(),
+        effective.auth.clone(),
+        args.offline,
+    )
+    .map_err(|error| RunTermination::Provider {
+        message: error.to_string(),
+    })?;
+    let selection = source.selection();
+    if status.as_ref().is_some_and(|status| status.human) {
+        let catalogue_snapshot = Arc::new(
+            models::build_catalogue_snapshot(&ModelsArgs {
+                provider: None,
+                refresh: false,
+                json: false,
+            })
+            .await?,
+        );
+        let home = config::ego_home().ok_or_else(|| RunTermination::Failed {
+            message: "the model picker needs EGO_HOME or HOME for user configuration".to_string(),
+        })?;
+        let config_store: Arc<dyn UserConfigStore> = Arc::new(OsUserConfigStore::new(
+            Arc::new(OsIo),
+            home.join("config.toml"),
+        ));
+        let picker = Arc::new(Mutex::new(ModelPicker::for_selection(
+            Arc::clone(&catalogue_snapshot),
+            Arc::clone(&selection),
+            Arc::clone(&config_store),
+        )));
+        let status = status
+            .as_mut()
+            .expect("a human interactive status was checked above");
+        status
+            .seat
+            .install_model_picker(
+                Arc::clone(&picker),
+                Arc::clone(&selection),
+                Arc::clone(&config_store),
+            )
+            .map_err(|error| RunTermination::Failed {
+                message: format!("interactive actions could not be installed: {error}"),
+            })?;
+        status.picker = Some(picker);
+        debug_assert!(
+            status.picker.is_some(),
+            "the run retains the installed picker"
+        );
+    }
+    let source: Arc<dyn GenerationModelSource> = Arc::new(source);
+    let main = source
+        .resolve(GenerationRole::Main)
+        .await
+        .map_err(generation_refusal)?;
+    let model = main.identity.clone();
+    let capabilities = main.capabilities.clone();
+    let judge_enabled = mode == Mode::Auto;
+    if judge_enabled {
+        let judge = source
+            .resolve(GenerationRole::Judge)
+            .await
+            .map_err(generation_refusal)?;
+        preflight_judge(&judge, confinement, proof_observation.capabilities())?;
+    }
+
+    Ok(GenerationPreflight {
+        source,
+        selection,
+        model,
+        capabilities,
+        judge_enabled,
+        proof_directory,
+        proof_evidence,
+    })
+}
+
 /// Build the process boundary for one cancellation scope.
 ///
 /// A backend that cannot demonstrate a requested guarantee is a startup usage
@@ -1043,6 +1196,496 @@ fn cancelled_termination(cancel: &CancelToken) -> RunTermination {
         Some(CancelCause::Timeout) => RunTermination::TimedOut,
         Some(CancelCause::User) => RunTermination::Signalled(Signal::Int),
         _ => RunTermination::Signalled(Signal::Term),
+    }
+}
+
+enum HeadlessInput<'a> {
+    Prompt(&'a str),
+    Resumed(ego_core::event::id::TurnId),
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn drive_headless_turn(
+    active: &mut ActiveSession<'_>,
+    opening: SessionState,
+    clock: &SystemClock,
+    sink: &dyn EventSink,
+    cancel: &CancelToken,
+    source: Arc<dyn GenerationModelSource>,
+    effective: &Effective,
+    config: TurnConfig,
+    turns: &Turns<'_>,
+    registry: &[RegisteredTool],
+    policy: &PolicyEngine,
+    cwd: &Path,
+    confinement: &RunConfinement,
+    elicitor: Option<Arc<dyn Elicitor>>,
+    judge_enabled: bool,
+    input: HeadlessInput<'_>,
+    diagnostics: &dyn Diagnostics,
+) -> Result<(RunTermination, SessionState, Value), RunTermination> {
+    let currency = CurrencyCode::new(SETTLEMENT).expect("a controlled currency");
+    let mut gate = budget::gate(&effective.ceilings, effective.clamped.money, currency);
+    let (process, observation) = guarded_exec(confinement, active.evidence(), cancel).await?;
+    let execution_capabilities = observation.capabilities();
+    let session = Session {
+        id: active.id(),
+        state: opening,
+        store: active.store(),
+        clock,
+        sink,
+        cancel: cancel.clone(),
+    };
+    let runtime = GenerationRuntime {
+        source,
+        gate: &mut gate,
+        config,
+    };
+    let fs = OsFs;
+    let tools = Tools::from_registry(
+        registry,
+        policy,
+        &fs,
+        process.as_ref(),
+        active.evidence(),
+        CanonPath::new(cwd),
+    );
+    let loop_ = TurnLoop::new(session, runtime, tools);
+    let loop_ = match elicitor {
+        Some(elicitor) => loop_.with_elicitor(elicitor),
+        None => loop_,
+    };
+    let mut loop_ = if judge_enabled {
+        loop_.with_judge(JudgeContext {
+            confinement: confinement.clone(),
+            exec_caps: execution_capabilities,
+        })
+    } else {
+        loop_
+    }
+    .with_execution_observation(observation);
+    let (termination, result) = match input {
+        HeadlessInput::Prompt(prompt) => turns.drive(&mut loop_, prompt, cancel, diagnostics).await,
+        HeadlessInput::Resumed(turn) => {
+            turns
+                .drive_resumed(&mut loop_, turn, cancel, diagnostics)
+                .await
+        }
+    };
+    Ok((termination, loop_.into_state(), result))
+}
+
+/// The headless pipeline after every refusal-producing selection has resolved.
+pub struct CliPrepared {
+    store: Arc<JsonlStore>,
+    session_id: SessionId,
+    schema_retries: u32,
+    max_turns: Option<u32>,
+    started: std::time::Instant,
+    timeout: Option<Duration>,
+    root: PathBuf,
+    cwd: PathBuf,
+    confinement: RunConfinement,
+    effective: Effective,
+    system: Option<SystemPrompt>,
+    registry: Vec<RegisteredTool>,
+    compiled: Option<schema::Schema>,
+    source: Arc<dyn GenerationModelSource>,
+    capabilities: ModelCapabilities,
+    judge_enabled: bool,
+    proof_directory: tempfile::TempDir,
+    proof_evidence: SessionEvidenceStore,
+}
+
+impl CliPrepared {
+    async fn prepare(
+        mut args: Args,
+        store: Arc<JsonlStore>,
+        request: &RunPreparation,
+    ) -> Result<RunPrepared<Self>, RunTermination> {
+        let usage = |error: UsageError| RunTermination::UsageError {
+            message: error.to_string(),
+        };
+        args.model = request
+            .requested_model
+            .as_ref()
+            .map(|model| model.0.clone());
+        let settings = rooted_settings(
+            &args,
+            request.root.as_path().to_path_buf(),
+            |_| Trust::Untrusted,
+            &Stderr,
+        )
+        .map_err(usage)?;
+        let Materials {
+            system,
+            registry,
+            compiled,
+            text: _,
+            slug,
+        } = prepared_materials(&settings, &args, String::new(), &Stderr).map_err(usage)?;
+        let Settings {
+            started,
+            timeout,
+            root,
+            cwd,
+            confinement,
+            effective,
+        } = settings;
+
+        let proof_cancel = CancelToken::new();
+        let mut no_status = None;
+        let GenerationPreflight {
+            source,
+            selection: _,
+            model,
+            capabilities,
+            judge_enabled,
+            proof_directory,
+            proof_evidence,
+        } = generation_preflight(
+            &args,
+            request.run_id.session_id(),
+            &confinement,
+            &effective,
+            slug,
+            &proof_cancel,
+            &mut no_status,
+        )
+        .await?;
+        let schema_retries = args.schema_retries;
+        let max_turns = args.max_turns;
+
+        Ok(RunPrepared::new(
+            model,
+            Self {
+                store,
+                session_id: request.run_id.session_id(),
+                schema_retries,
+                max_turns,
+                started,
+                timeout,
+                root,
+                cwd,
+                confinement,
+                effective,
+                system,
+                registry,
+                compiled,
+                source,
+                capabilities,
+                judge_enabled,
+                proof_directory,
+                proof_evidence,
+            },
+        ))
+    }
+
+    async fn submit(
+        self,
+        prompt: &str,
+        bindings: RunExecutionBindings,
+        cancel: &CancelToken,
+    ) -> Result<RunSettlement, RunExecutorError> {
+        let clock = SystemClock;
+        let opened = Opened::Durable(Box::new(
+            session::open(self.store.as_ref(), &self.session_id, &clock)
+                .map_err(|error| RunExecutorError::new(error.to_string()))?,
+        ));
+        if let Some(note_text) = opened.repair_note() {
+            Stderr.note(&note_text);
+        }
+        let opening = opened.state();
+        drop(self.proof_directory);
+        drop(self.proof_evidence);
+        let mut active = ActiveSession::durable(opened, opening.clone(), EVIDENCE_CAP)
+            .map_err(|error| RunExecutorError::new(error.to_string()))?;
+        let sink = bindings.sink_factory.create(&self.capabilities);
+        sink.publish(
+            &PublicEvent::SessionStarted {
+                v: PUBLIC_EVENT_VERSION,
+                session: active.id(),
+                capabilities: capabilities(
+                    &self.registry,
+                    self.system.is_some(),
+                    self.compiled.is_some(),
+                ),
+                mcp_errors: Vec::new(),
+                hook_errors: Vec::new(),
+                instructions: self
+                    .system
+                    .as_ref()
+                    .map(|system| system.sources.clone())
+                    .unwrap_or_default(),
+            },
+            &opening,
+        );
+
+        let mode = self.effective.mode.unwrap_or(Mode::Default);
+        let policy = PolicyEngine::new(
+            CanonPath::new(&self.root),
+            mode,
+            self.effective.permissions.clone(),
+        );
+        let config = TurnConfig {
+            system: self.system,
+            token_ceiling: self.effective.ceilings.tokens,
+        };
+        let turns = Turns {
+            schema: self.compiled.as_ref(),
+            retries: self.schema_retries,
+            max_turns: self.max_turns,
+            timeout: self.timeout,
+            started: self.started,
+        };
+        let (termination, state, _) = match drive_headless_turn(
+            &mut active,
+            opening,
+            &clock,
+            sink.as_ref(),
+            cancel,
+            self.source,
+            &self.effective,
+            config,
+            &turns,
+            &self.registry,
+            &policy,
+            &self.cwd,
+            &self.confinement,
+            bindings.elicitor,
+            self.judge_enabled,
+            HeadlessInput::Prompt(prompt),
+            &Stderr,
+        )
+        .await
+        {
+            Ok(outcome) => outcome,
+            Err(termination) => return settlement(termination),
+        };
+        active.replace_state(state);
+        settlement(termination)
+    }
+}
+
+fn run_executor_error(termination: RunTermination) -> RunExecutorError {
+    RunExecutorError::new(match termination {
+        RunTermination::UsageError { message }
+        | RunTermination::Provider { message }
+        | RunTermination::Failed { message } => message,
+        other => format!(
+            "the prepared run stopped before submission: {}",
+            other.exit_reason()
+        ),
+    })
+}
+
+fn settlement(termination: RunTermination) -> Result<RunSettlement, RunExecutorError> {
+    match termination {
+        RunTermination::Done | RunTermination::TaskFailed | RunTermination::MaxTurns => {
+            Ok(RunSettlement::completed())
+        }
+        RunTermination::PermissionRequired { action, by } => {
+            Ok(RunSettlement::permission_required(action, by))
+        }
+        RunTermination::TimedOut => Ok(RunSettlement::cancelled(CancelReason::Timeout)),
+        RunTermination::Signalled(Signal::Int) => Ok(RunSettlement::cancelled(CancelReason::User)),
+        RunTermination::Signalled(Signal::Term) => Ok(RunSettlement::cancelled(CancelReason::Host)),
+        RunTermination::BudgetExceeded => Ok(RunSettlement::completed()),
+        RunTermination::QuestionRequired { question } => Err(RunExecutorError::new(format!(
+            "question {} still requires an answer",
+            question.id
+        ))),
+        termination => Err(run_executor_error(termination)),
+    }
+}
+
+#[derive(Default)]
+struct CliRunAuthority {
+    state: Mutex<CliRunAuthorityState>,
+}
+
+#[derive(Default)]
+struct CliRunAuthorityState {
+    active: Option<CancelToken>,
+    pending_interrupt: bool,
+    settlement: Option<RunSettlement>,
+    observers: Vec<Waker>,
+}
+
+impl CliRunAuthority {
+    fn begin(&self) -> CancelToken {
+        let mut state = self.state.lock().expect("CLI run authority");
+        let cancel = CancelToken::new();
+        if state.pending_interrupt {
+            state.pending_interrupt = false;
+            cancel.cancel(CancelCause::User);
+        }
+        state.active = Some(cancel.clone());
+        state.settlement = None;
+        cancel
+    }
+
+    fn interrupt(&self) {
+        let mut state = self.state.lock().expect("CLI run authority");
+        match state.active.as_ref() {
+            Some(cancel) => cancel.cancel(CancelCause::User),
+            None => state.pending_interrupt = true,
+        }
+    }
+
+    fn complete(&self, settlement: RunSettlement) {
+        let observers = {
+            let mut state = self.state.lock().expect("CLI run authority");
+            state.active = None;
+            state.settlement = Some(settlement);
+            std::mem::take(&mut state.observers)
+        };
+        for observer in observers {
+            observer.wake();
+        }
+    }
+
+    async fn observe(&self) -> RunSettlement {
+        futures::future::poll_fn(|context| {
+            let mut state = self.state.lock().expect("CLI run authority");
+            match state.settlement.clone() {
+                Some(settlement) => std::task::Poll::Ready(settlement),
+                None => {
+                    if !state
+                        .observers
+                        .iter()
+                        .any(|observer| observer.will_wake(context.waker()))
+                    {
+                        state.observers.push(context.waker().clone());
+                    }
+                    std::task::Poll::Pending
+                }
+            }
+        })
+        .await
+    }
+}
+
+/// Production executor adapter for controller-owned headless turns.
+pub struct CliRunExecutor {
+    args: Args,
+    store: Arc<JsonlStore>,
+}
+
+impl CliRunExecutor {
+    /// Build the fixed headless inputs for the ACP host once, before admission.
+    pub fn for_acp(session_dir: Option<PathBuf>, store: Arc<JsonlStore>) -> Self {
+        Self {
+            args: Args {
+                prompt: None,
+                stdin: crate::cli::Stdin::Ambient,
+                model: None,
+                offline: false,
+                sandbox: None,
+                thinking: None,
+                system: None,
+                append_system: None,
+                instructions: None,
+                bare: false,
+                mode: None,
+                allow: Vec::new(),
+                deny: Vec::new(),
+                answers: Vec::new(),
+                session: SessionChoice::Ephemeral,
+                session_dir,
+                output: Output::Json,
+                schema: None,
+                schema_retries: 0,
+                budget: None,
+                max_turns: None,
+                timeout: None,
+                tools: None,
+                directory: None,
+                set: Vec::new(),
+                profile: None,
+                quiet: false,
+                no_color: false,
+            },
+            store,
+        }
+    }
+
+    fn authority(handle: &RunHandle) -> Result<Arc<CliRunAuthority>, RunExecutorError> {
+        handle
+            .authority::<Arc<CliRunAuthority>>()
+            .cloned()
+            .ok_or_else(|| RunExecutorError::new("run handle carries another executor authority"))
+    }
+}
+
+impl RunExecutor for CliRunExecutor {
+    type Prepared = CliPrepared;
+
+    fn prepare<'a>(
+        &'a self,
+        request: &'a RunPreparation,
+    ) -> futures::future::BoxFuture<'a, Result<RunPrepared<Self::Prepared>, RunExecutorError>> {
+        Box::pin(async move {
+            CliPrepared::prepare(self.args.clone(), Arc::clone(&self.store), request)
+                .await
+                .map_err(run_executor_error)
+        })
+    }
+
+    fn start<'a>(
+        &'a self,
+        request: &'a RunStart,
+    ) -> futures::future::BoxFuture<'a, Result<RunHandle, RunExecutorError>> {
+        Box::pin(async move {
+            Ok(RunHandle::new(
+                request.run_id,
+                Arc::new(CliRunAuthority::default()),
+            ))
+        })
+    }
+
+    fn recover<'a>(
+        &'a self,
+        _run: &'a ego_core::run::RunId,
+    ) -> futures::future::BoxFuture<'a, Result<RecoveryEvidence, RunExecutorError>> {
+        Box::pin(async { Ok(RecoveryEvidence::NotRecoverable) })
+    }
+
+    fn observe<'a>(
+        &'a self,
+        handle: &'a RunHandle,
+        _bindings: RunExecutionBindings,
+    ) -> futures::future::BoxFuture<'a, Result<RunSettlement, RunExecutorError>> {
+        Box::pin(async move { Ok(Self::authority(handle)?.observe().await) })
+    }
+
+    fn submit<'a>(
+        &'a self,
+        handle: &'a RunHandle,
+        prompt: &'a str,
+        prepared: Self::Prepared,
+        bindings: RunExecutionBindings,
+    ) -> futures::future::BoxFuture<'a, Result<RunSettlement, RunExecutorError>> {
+        Box::pin(async move {
+            let authority = Self::authority(handle)?;
+            let cancel = authority.begin();
+            let result = prepared.submit(prompt, bindings, &cancel).await;
+            match result.as_ref() {
+                Ok(settlement) => authority.complete(settlement.clone()),
+                Err(_) => authority.complete(RunSettlement::Uncertain),
+            }
+            result
+        })
+    }
+
+    fn interrupt<'a>(
+        &'a self,
+        handle: &'a RunHandle,
+    ) -> futures::future::BoxFuture<'a, Result<(), RunExecutorError>> {
+        Box::pin(async move {
+            Self::authority(handle)?.interrupt();
+            Ok(())
+        })
     }
 }
 
@@ -1137,104 +1780,25 @@ async fn execute<S: EventSink>(
         effective,
     } = settings;
 
-    // Capability proof is a startup gate, so it runs before provider
-    // resolution and before the durable session is opened. Its evidence lives
-    // in a disposable session-bound store. The actual turn executor below is
-    // rebuilt with the turn's latching cancellation token and the real
-    // session evidence facade.
-    let proof_directory = tempfile::tempdir().map_err(|err| RunTermination::Failed {
-        message: format!("could not create the sandbox proof store: {err}"),
-    })?;
-    let proof_evidence =
-        SessionEvidenceStore::open(proof_directory.path(), session_id, EVIDENCE_CAP).map_err(
-            |err| RunTermination::Failed {
-                message: format!("could not open the sandbox proof store: {err}"),
-            },
-        )?;
-    let (proof, proof_observation) = guarded_exec(&confinement, &proof_evidence, &cancel).await?;
-    drop(proof);
-
-    let mode = effective.mode.unwrap_or(Mode::Default);
-    let judge_identity = if mode == Mode::Auto {
-        Some(
-            effective
-                .judge
-                .clone()
-                .ok_or_else(|| RunTermination::UsageError {
-                    message: "`auto` mode requires `[permissions] judge = \"provider/model\"`"
-                        .to_string(),
-                })?,
-        )
-    } else {
-        None
-    };
-    let source = model::CliGenerationModelSource::new(
-        ego_core::config::ModelRef(slug),
-        effective.thinking.unwrap_or(ThinkingLevel::Off),
-        judge_identity,
-        effective.ceilings.clone(),
-        effective.auth.clone(),
-        args.offline,
+    let GenerationPreflight {
+        source,
+        selection,
+        model: _,
+        capabilities: main_capabilities,
+        judge_enabled,
+        proof_directory,
+        proof_evidence,
+    } = generation_preflight(
+        &args,
+        session_id,
+        &confinement,
+        &effective,
+        slug,
+        &cancel,
+        &mut status,
     )
-    .map_err(|error| RunTermination::Provider {
-        message: error.to_string(),
-    })?;
-    let selection = source.selection();
-    if status.as_ref().is_some_and(|status| status.human) {
-        let catalogue_snapshot = Arc::new(
-            models::build_catalogue_snapshot(&ModelsArgs {
-                provider: None,
-                refresh: false,
-                json: false,
-            })
-            .await?,
-        );
-        let home = config::ego_home().ok_or_else(|| RunTermination::Failed {
-            message: "the model picker needs EGO_HOME or HOME for user configuration".to_string(),
-        })?;
-        let config_store: Arc<dyn UserConfigStore> = Arc::new(OsUserConfigStore::new(
-            Arc::new(OsIo),
-            home.join("config.toml"),
-        ));
-        let picker = Arc::new(Mutex::new(ModelPicker::for_selection(
-            Arc::clone(&catalogue_snapshot),
-            Arc::clone(&selection),
-            Arc::clone(&config_store),
-        )));
-        let status = status
-            .as_mut()
-            .expect("a human interactive status was checked above");
-        status
-            .seat
-            .install_model_picker(
-                Arc::clone(&picker),
-                Arc::clone(&selection),
-                Arc::clone(&config_store),
-            )
-            .map_err(|error| RunTermination::Failed {
-                message: format!("interactive actions could not be installed: {error}"),
-            })?;
-        status.picker = Some(picker);
-        debug_assert!(
-            status.picker.is_some(),
-            "the run retains the installed picker"
-        );
-    }
-    let source: Arc<dyn GenerationModelSource> = Arc::new(source);
-    let main_preflight = source
-        .resolve(GenerationRole::Main)
-        .await
-        .map_err(generation_refusal)?;
-    let main_capabilities = main_preflight.capabilities.clone();
-    drop(main_preflight);
-    let judge_enabled = mode == Mode::Auto;
-    if judge_enabled {
-        let judge = source
-            .resolve(GenerationRole::Judge)
-            .await
-            .map_err(generation_refusal)?;
-        preflight_judge(&judge, &confinement, proof_observation.capabilities())?;
-    }
+    .await?;
+    let mode = effective.mode.unwrap_or(Mode::Default);
 
     let currency = CurrencyCode::new(SETTLEMENT).expect("a constant this file controls");
     let opened = match early_opened {
@@ -1410,19 +1974,30 @@ async fn execute<S: EventSink>(
 
     match driver {
         Driver::Once => {
-            let (process, observation) =
-                guarded_exec(&confinement, active.evidence(), &cancel).await?;
-            let mut loop_ = build!(active, opening, &cancel, process, observation);
-            let (termination, result) = match resume.as_ref() {
-                Some(continuation) => {
-                    turns
-                        .drive_resumed(&mut loop_, continuation.turn, &cancel, diagnostics)
-                        .await
-                }
-                None => turns.drive(&mut loop_, &text, &cancel, diagnostics).await,
+            let input = match resume.as_ref() {
+                Some(continuation) => HeadlessInput::Resumed(continuation.turn),
+                None => HeadlessInput::Prompt(&text),
             };
-
-            let state = loop_.into_state();
+            let (termination, state, result) = drive_headless_turn(
+                &mut active,
+                opening,
+                &clock,
+                sink,
+                &cancel,
+                Arc::clone(&source),
+                &effective,
+                config.clone(),
+                &turns,
+                &registry,
+                &policy,
+                &cwd,
+                &confinement,
+                elicitor,
+                judge_enabled,
+                input,
+                diagnostics,
+            )
+            .await?;
             active.replace_state(state.clone());
             Ok(Ended {
                 termination,
@@ -2126,7 +2701,10 @@ fn listed(args: &crate::cli::LsArgs, out: &Stdout) -> Result<(), RunTermination>
     };
 
     let root = workspace(args.directory.as_ref()).map_err(usage)?;
-    let store_root = session::store_root(args.session_dir.as_ref()).map_err(usage)?;
+    let store_root = rooted_path(
+        &root,
+        session::store_root(args.session_dir.as_ref()).map_err(usage)?,
+    );
     // The workspace is handed over for the same reason `run` hands it over —
     // a store writes it into the header of any session it creates — even
     // though listing creates none. One constructor, one meaning.

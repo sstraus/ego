@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::task::{Poll, Waker};
 
-use agent_client_protocol::{ConnectTo, Lines};
+use agent_client_protocol::{Client, ConnectTo, ConnectionTo, Lines};
 use agent_client_protocol_schema::{ProtocolVersion, v1};
 use futures::channel::mpsc;
 use futures::future::{self, BoxFuture};
@@ -827,7 +827,7 @@ async fn session_new_prompt_and_baseline_cancel_notification_drive_the_shared_co
     ));
     assert_eq!(
         transactions[0].root(),
-        RunRoot::new("/workspace/project").expect("root")
+        &RunRoot::new("/workspace/project").expect("root")
     );
     assert!(matches!(
         transactions[1].command(),
@@ -1147,10 +1147,10 @@ async fn immediate_cancel_uses_the_first_admitted_turn_and_does_not_retarget_a_l
         [
             "prepare",
             "commit",
-            "start",
-            "submit",
             "commit",
+            "start",
             "interrupt",
+            "submit",
             "commit"
         ]
     );
