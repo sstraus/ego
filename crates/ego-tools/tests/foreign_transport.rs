@@ -16,11 +16,28 @@ use ego_core::permit::{
     TransportError, TransportFailure,
 };
 use ego_tools::exec::{
-    ExecLimits, ExecRunConfig, RunEffectPorts, SessionEvidenceStore, TransportLimits,
+    ExecLimits, ExecRunConfig, ProcessError, RunEffectPorts, SessionEvidenceStore, TransportLimits,
 };
 use futures::StreamExt;
 use futures::future::{self, BoxFuture};
 use futures::io::{AsyncReadExt, AsyncWriteExt};
+
+struct ScenarioRuntime(tokio::runtime::Runtime);
+
+impl ScenarioRuntime {
+    fn new() -> Self {
+        Self(
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("scenario runtime"),
+        )
+    }
+
+    fn block_on<F: std::future::Future>(&self, future: F) -> F::Output {
+        self.0.block_on(future)
+    }
+}
 
 fn rules(allow: &[&str]) -> Ruleset {
     let values = allow
@@ -80,6 +97,7 @@ fn authorized(call: PreparedCall, allow: &[&str]) -> ego_core::permit::Authorize
 }
 
 struct RunFixture {
+    runtime: ScenarioRuntime,
     _evidence_root: tempfile::TempDir,
     evidence: SessionEvidenceStore,
     cancel: ego_core::turn::CancelToken,
@@ -108,6 +126,18 @@ fn run_ports_with_limits(
     exec_limits: ExecLimits,
     transport_limits: TransportLimits,
 ) -> RunFixture {
+    try_run_ports_with_limits(resolver, offline, cancel, exec_limits, transport_limits)
+        .expect("run ports")
+}
+
+fn try_run_ports_with_limits(
+    resolver: RecordingResolver,
+    offline: bool,
+    cancel: ego_core::turn::CancelToken,
+    exec_limits: ExecLimits,
+    transport_limits: TransportLimits,
+) -> Result<RunFixture, ProcessError> {
+    let runtime = ScenarioRuntime::new();
     let root = CanonPath::new(
         std::fs::canonicalize(std::env::current_dir().expect("cwd")).expect("canonical cwd"),
     );
@@ -127,14 +157,14 @@ fn run_ports_with_limits(
         transport_limits,
         Arc::new(resolver),
     );
-    let (ports, _) =
-        futures::executor::block_on(RunEffectPorts::for_run(config)).expect("run ports");
-    RunFixture {
+    let (ports, _) = runtime.block_on(RunEffectPorts::for_run(config))?;
+    Ok(RunFixture {
+        runtime,
         _evidence_root: evidence_root,
         evidence,
         cancel,
         ports,
-    }
+    })
 }
 
 fn run_ports(resolver: RecordingResolver, offline: bool) -> RunFixture {
@@ -143,6 +173,21 @@ fn run_ports(resolver: RecordingResolver, offline: bool) -> RunFixture {
         offline,
         ego_core::turn::CancelToken::new(),
         TransportLimits::new(1024, 1024, Duration::from_secs(1)).expect("transport limits"),
+    )
+}
+
+fn try_run_ports(
+    resolver: RecordingResolver,
+    offline: bool,
+    cancel: ego_core::turn::CancelToken,
+    transport_limits: TransportLimits,
+) -> Result<RunFixture, ProcessError> {
+    try_run_ports_with_limits(
+        resolver,
+        offline,
+        cancel,
+        ExecLimits::new(1024, Duration::from_millis(250)).expect("exec limits"),
+        transport_limits,
     )
 }
 
@@ -351,8 +396,10 @@ fn guarded_http_is_the_only_subject_under_test_and_redirect_needs_fresh_authorit
         fixture.ports.one_hop(),
         fixture.ports.duplex(),
     );
-    let response =
-        futures::executor::block_on(guarded.guarded_http(call, request)).expect("guarded HTTP");
+    let response = fixture
+        .runtime
+        .block_on(guarded.guarded_http(call, request))
+        .expect("guarded HTTP");
     assert!(matches!(
         response,
         ego_core::permit::OneHopResponse::Redirect {
@@ -413,13 +460,21 @@ fn guarded_duplex_settles_binary_child_and_keeps_stdout_out_of_evidence() {
         fixture.ports.one_hop(),
         fixture.ports.duplex(),
     );
-    let mut handle =
-        futures::executor::block_on(guarded.guarded_duplex(call)).expect("guarded duplex");
+    let mut handle = fixture
+        .runtime
+        .block_on(guarded.guarded_duplex(call))
+        .expect("guarded duplex");
     assert_eq!(handle.delivery(), DeliveryCertainty::DefinitelyUnsent);
-    futures::executor::block_on(handle.write_all(b"\0\xff\x80")).expect("binary write");
-    futures::executor::block_on(handle.flush()).expect("flush");
+    fixture
+        .runtime
+        .block_on(handle.write_all(b"\0\xff\x80"))
+        .expect("binary write");
+    fixture.runtime.block_on(handle.flush()).expect("flush");
     let mut output = Vec::new();
-    futures::executor::block_on(handle.read_to_end(&mut output)).expect("binary read");
+    fixture
+        .runtime
+        .block_on(handle.read_to_end(&mut output))
+        .expect("binary read");
     let sentinel = b"EGO_FOREIGN_TRANSPORT_SENTINEL\0";
     let frame = output
         .windows(sentinel.len())
@@ -428,7 +483,7 @@ fn guarded_duplex_settles_binary_child_and_keeps_stdout_out_of_evidence() {
     assert_eq!(output[frame + sentinel.len()], 3);
     assert_eq!(&output[frame + sentinel.len() + 1..], b"\0\xff\x80");
     assert_eq!(handle.delivery(), DeliveryCertainty::PossiblySent);
-    let settlement = futures::executor::block_on(handle.settle());
+    let settlement = fixture.runtime.block_on(handle.settle());
     assert!(matches!(
         settlement.end(),
         ego_core::permit::DuplexEnd::Exited { code: 0 }
@@ -494,15 +549,24 @@ fn guarded_duplex_interrupts_a_blocked_child_after_write() {
         fixture.ports.one_hop(),
         fixture.ports.duplex(),
     );
-    let mut handle = futures::executor::block_on(guarded.guarded_duplex(call)).expect("duplex");
+    let mut handle = fixture
+        .runtime
+        .block_on(guarded.guarded_duplex(call))
+        .expect("duplex");
     let ready_marker = b"EGO_DUPLEX_READY\0";
     let mut ready = vec![0_u8; ready_marker.len() + 4];
-    futures::executor::block_on(handle.read_exact(&mut ready)).expect("ready");
+    fixture
+        .runtime
+        .block_on(handle.read_exact(&mut ready))
+        .expect("ready");
     assert_eq!(&ready[..ready_marker.len()], ready_marker);
     let direct = u32::from_le_bytes(ready[ready_marker.len()..].try_into().unwrap());
-    futures::executor::block_on(handle.write_all(b"outbound")).expect("write");
+    fixture
+        .runtime
+        .block_on(handle.write_all(b"outbound"))
+        .expect("write");
     assert_eq!(handle.delivery(), DeliveryCertainty::PossiblySent);
-    let settlement = futures::executor::block_on(handle.interrupt());
+    let settlement = fixture.runtime.block_on(handle.interrupt());
     assert!(matches!(
         settlement.end(),
         ego_core::permit::DuplexEnd::Interrupted
@@ -545,11 +609,17 @@ fn guarded_duplex_times_out_blocked_child_with_exact_timeout() {
         fixture.ports.one_hop(),
         fixture.ports.duplex(),
     );
-    let mut handle = futures::executor::block_on(guarded.guarded_duplex(call)).expect("duplex");
+    let mut handle = fixture
+        .runtime
+        .block_on(guarded.guarded_duplex(call))
+        .expect("duplex");
     let mut ready = vec![0_u8; b"EGO_DUPLEX_READY\n".len()];
-    futures::executor::block_on(handle.read_exact(&mut ready)).expect("ready");
+    fixture
+        .runtime
+        .block_on(handle.read_exact(&mut ready))
+        .expect("ready");
     assert_eq!(ready, b"EGO_DUPLEX_READY\n");
-    let settlement = futures::executor::block_on(handle.settle());
+    let settlement = fixture.runtime.block_on(handle.settle());
     assert!(matches!(
         settlement.end(),
         ego_core::permit::DuplexEnd::TimedOut { timeout: value } if *value == timeout
@@ -593,14 +663,23 @@ fn guarded_duplex_cancels_blocked_child_after_write() {
         fixture.ports.one_hop(),
         fixture.ports.duplex(),
     );
-    let mut handle = futures::executor::block_on(guarded.guarded_duplex(call)).expect("duplex");
+    let mut handle = fixture
+        .runtime
+        .block_on(guarded.guarded_duplex(call))
+        .expect("duplex");
     let ready_marker = b"EGO_DUPLEX_READY\0";
     let mut ready = vec![0_u8; ready_marker.len() + 4];
-    futures::executor::block_on(handle.read_exact(&mut ready)).expect("ready");
+    fixture
+        .runtime
+        .block_on(handle.read_exact(&mut ready))
+        .expect("ready");
     assert_eq!(&ready[..ready_marker.len()], ready_marker);
-    futures::executor::block_on(handle.write_all(b"outbound")).expect("write");
+    fixture
+        .runtime
+        .block_on(handle.write_all(b"outbound"))
+        .expect("write");
     cancel.cancel(ego_core::turn::CancelCause::User);
-    let settlement = futures::executor::block_on(handle.settle());
+    let settlement = fixture.runtime.block_on(handle.settle());
     assert!(matches!(
         settlement.end(),
         ego_core::permit::DuplexEnd::Cancelled
@@ -629,16 +708,25 @@ fn guarded_duplex_interrupt_cleans_a_long_lived_descendant() {
         fixture.ports.one_hop(),
         fixture.ports.duplex(),
     );
-    let mut handle = futures::executor::block_on(guarded.guarded_duplex(call)).expect("duplex");
+    let mut handle = fixture
+        .runtime
+        .block_on(guarded.guarded_duplex(call))
+        .expect("duplex");
     let marker = b"EGO_DESCENDANTS\0";
     let mut frame = vec![0_u8; marker.len() + 8];
-    futures::executor::block_on(handle.read_exact(&mut frame)).expect("descendant frame");
+    fixture
+        .runtime
+        .block_on(handle.read_exact(&mut frame))
+        .expect("descendant frame");
     assert_eq!(&frame[..marker.len()], marker);
     let direct = u32::from_le_bytes(frame[marker.len()..marker.len() + 4].try_into().unwrap());
     let descendant = u32::from_le_bytes(frame[marker.len() + 4..].try_into().unwrap());
     assert_ne!(direct, descendant);
-    futures::executor::block_on(handle.write_all(b"outbound")).expect("write");
-    let settlement = futures::executor::block_on(handle.interrupt());
+    fixture
+        .runtime
+        .block_on(handle.write_all(b"outbound"))
+        .expect("write");
+    let settlement = fixture.runtime.block_on(handle.interrupt());
     assert!(matches!(
         settlement.end(),
         ego_core::permit::DuplexEnd::Interrupted
@@ -695,12 +783,18 @@ fn guarded_duplex_settles_bounded_stderr_evidence_without_stdout_protocol() {
         fixture.ports.one_hop(),
         fixture.ports.duplex(),
     );
-    let mut handle = futures::executor::block_on(guarded.guarded_duplex(call)).expect("duplex");
+    let mut handle = fixture
+        .runtime
+        .block_on(guarded.guarded_duplex(call))
+        .expect("duplex");
     let mut output = Vec::new();
-    futures::executor::block_on(handle.read_to_end(&mut output)).expect("stdout");
+    fixture
+        .runtime
+        .block_on(handle.read_to_end(&mut output))
+        .expect("stdout");
     assert_eq!(output, b"EGO_C6_STDOUT_SENTINEL\0");
     assert_eq!(handle.delivery(), DeliveryCertainty::DefinitelyUnsent);
-    let settlement = futures::executor::block_on(handle.settle());
+    let settlement = fixture.runtime.block_on(handle.settle());
     assert!(matches!(
         settlement.end(),
         ego_core::permit::DuplexEnd::Exited { code: 0 }
@@ -804,7 +898,10 @@ fn one_resolution_binds_selected_ip_and_preserves_logical_host() {
         fixture.ports.one_hop(),
         fixture.ports.duplex(),
     );
-    let response = futures::executor::block_on(guarded.guarded_http(call, req)).unwrap();
+    let response = fixture
+        .runtime
+        .block_on(guarded.guarded_http(call, req))
+        .unwrap();
     assert_eq!(resolver.calls.lock().unwrap().as_slice(), &[target]);
     assert_eq!(response.status(), 204);
     let captures = server.finish();
@@ -896,7 +993,9 @@ fn foreign_transport_proxy_child() {
         fixture.ports.one_hop(),
         fixture.ports.duplex(),
     );
-    let response = futures::executor::block_on(guarded.guarded_http(call, request))
+    let response = fixture
+        .runtime
+        .block_on(guarded.guarded_http(call, request))
         .expect("child guarded HTTP");
     assert_eq!(response.status(), 204);
     assert_eq!(resolver.calls.lock().expect("calls").as_slice(), &[target]);
@@ -952,7 +1051,10 @@ fn redirect_is_one_hop_and_does_not_touch_second_listener() {
             fixture.ports.one_hop(),
             fixture.ports.duplex(),
         );
-        let response = futures::executor::block_on(guarded.guarded_http(call, req)).unwrap();
+        let response = fixture
+            .runtime
+            .block_on(guarded.guarded_http(call, req))
+            .unwrap();
         let calls = resolver.calls.lock().unwrap().len();
         let captures = first.finish();
         assert_eq!(captures.len(), 1);
@@ -1004,7 +1106,9 @@ fn reset_never_retries_a_request() {
         fixture.ports.one_hop(),
         fixture.ports.duplex(),
     );
-    let error = futures::executor::block_on(guarded.guarded_http(call, request))
+    let error = fixture
+        .runtime
+        .block_on(guarded.guarded_http(call, request))
         .expect_err("reset must not produce a response");
     assert!(matches!(
         error.failure(),
@@ -1064,7 +1168,9 @@ fn fresh_authorizations_use_fresh_sockets() {
             fixture.ports.one_hop(),
             fixture.ports.duplex(),
         );
-        let response = futures::executor::block_on(guarded.guarded_http(call, request))
+        let response = fixture
+            .runtime
+            .block_on(guarded.guarded_http(call, request))
             .expect("fresh authorized HTTP");
         assert_eq!(response.status(), 204);
     }
@@ -1144,24 +1250,18 @@ fn response_headers_keep_raw_duplicate_order_and_body_is_streamed() {
         fixture.ports.one_hop(),
         fixture.ports.duplex(),
     );
-    std::thread::scope(|scope| {
-        let (response_tx, response_rx) = mpsc::channel();
-        let response_thread = scope.spawn(move || {
-            let result = futures::executor::block_on(guarded.guarded_http(call, request));
-            response_tx.send(result).expect("HTTP response");
-        });
-        first_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("server flushed first body chunk");
-        let mut response = match response_rx.recv_timeout(Duration::from_secs(1)) {
-            Ok(Ok(response)) => response,
-            Ok(Err(error)) => panic!("streaming HTTP: {error:?}"),
-            Err(error) => {
-                let _ = release_tx.send(());
-                response_thread.join().expect("HTTP response thread");
-                panic!("headers were not returned before second chunk: {error}");
-            }
-        };
+    fixture.runtime.block_on(async {
+        let mut response = guarded
+            .guarded_http(call, request)
+            .await
+            .expect("streaming HTTP");
+        tokio::task::spawn_blocking(move || {
+            first_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("server flushed first body chunk");
+        })
+        .await
+        .expect("first body synchronization task");
         let ego_core::permit::OneHopResponse::Response { headers, body, .. } = &mut response else {
             panic!("expected streaming response");
         };
@@ -1179,7 +1279,8 @@ fn response_headers_keep_raw_duplicate_order_and_body_is_streamed() {
             ]
         );
         assert_eq!(
-            futures::executor::block_on(body.next())
+            body.next()
+                .await
                 .expect("first body item")
                 .expect("first body chunk"),
             b"abc"
@@ -1187,13 +1288,13 @@ fn response_headers_keep_raw_duplicate_order_and_body_is_streamed() {
         assert!(!second_sent.load(std::sync::atomic::Ordering::Acquire));
         release_tx.send(()).expect("release second body chunk");
         assert_eq!(
-            futures::executor::block_on(body.next())
+            body.next()
+                .await
                 .expect("second body item")
                 .expect("second body chunk"),
             b"def"
         );
-        assert_eq!(futures::executor::block_on(body.next()), None);
-        response_thread.join().expect("HTTP response thread");
+        assert_eq!(body.next().await, None);
     });
     assert_eq!(resolver.calls.lock().expect("calls").as_slice(), &[target]);
     let captures = server.finish();
@@ -1236,7 +1337,9 @@ fn oversized_request_is_definitely_unsent_before_socket() {
         fixture.ports.one_hop(),
         fixture.ports.duplex(),
     );
-    let error = futures::executor::block_on(guarded.guarded_http(call, request))
+    let error = fixture
+        .runtime
+        .block_on(guarded.guarded_http(call, request))
         .expect_err("request limit must reject");
     assert!(matches!(
         error.failure(),
@@ -1292,7 +1395,9 @@ fn response_header_limit_is_typed_and_possibly_sent() {
         fixture.ports.one_hop(),
         fixture.ports.duplex(),
     );
-    let error = futures::executor::block_on(guarded.guarded_http(call, request))
+    let error = fixture
+        .runtime
+        .block_on(guarded.guarded_http(call, request))
         .expect_err("response header limit");
     assert!(matches!(
         error.failure(),
@@ -1349,12 +1454,16 @@ fn response_body_limit_is_typed_after_headers_and_possibly_sent() {
         fixture.ports.one_hop(),
         fixture.ports.duplex(),
     );
-    let mut response = futures::executor::block_on(guarded.guarded_http(call, request))
+    let mut response = fixture
+        .runtime
+        .block_on(guarded.guarded_http(call, request))
         .expect("headers precede body limit");
     assert_eq!(response.status(), 200);
     assert_eq!(response.delivery(), DeliveryCertainty::PossiblySent);
     let body = response.body().expect("streaming body");
-    let error = futures::executor::block_on(body.next())
+    let error = fixture
+        .runtime
+        .block_on(body.next())
         .expect("body limit item")
         .expect_err("response body limit");
     assert!(matches!(
@@ -1414,28 +1523,39 @@ fn absolute_hop_timeout_covers_phased_exchange() {
         fixture.ports.one_hop(),
         fixture.ports.duplex(),
     );
-    let mut response = futures::executor::block_on(guarded.guarded_http(call, request))
-        .expect("headers before timeout");
-    first_rx
-        .recv_timeout(Duration::from_millis(100))
-        .expect("first body phase");
-    let body = response.body().expect("streaming body");
-    assert_eq!(
-        futures::executor::block_on(body.next())
-            .expect("first body item")
-            .expect("first body chunk"),
-        b"abc"
-    );
-    let error = futures::executor::block_on(body.next())
-        .expect("timeout body item")
-        .expect_err("absolute hop timeout");
-    assert!(matches!(
-        error.failure(),
-        TransportFailure::TimedOut {
-            limit
-        } if *limit == Duration::from_millis(100)
-    ));
-    assert_eq!(error.delivery(), DeliveryCertainty::PossiblySent);
+    fixture.runtime.block_on(async {
+        let mut response = guarded
+            .guarded_http(call, request)
+            .await
+            .expect("headers before timeout");
+        tokio::task::spawn_blocking(move || {
+            first_rx
+                .recv_timeout(Duration::from_millis(100))
+                .expect("first body phase");
+        })
+        .await
+        .expect("first body synchronization task");
+        let body = response.body().expect("streaming body");
+        assert_eq!(
+            body.next()
+                .await
+                .expect("first body item")
+                .expect("first body chunk"),
+            b"abc"
+        );
+        let error = body
+            .next()
+            .await
+            .expect("timeout body item")
+            .expect_err("absolute hop timeout");
+        assert!(matches!(
+            error.failure(),
+            TransportFailure::TimedOut {
+                limit
+            } if *limit == Duration::from_millis(100)
+        ));
+        assert_eq!(error.delivery(), DeliveryCertainty::PossiblySent);
+    });
     let _ = release_tx.send(());
     assert_eq!(resolver.calls.lock().expect("calls").as_slice(), &[target]);
     let captures = server.finish();
@@ -1477,7 +1597,9 @@ fn cancellation_before_io_is_definitely_unsent_and_skips_dns_and_socket() {
         fixture.ports.one_hop(),
         fixture.ports.duplex(),
     );
-    let error = futures::executor::block_on(guarded.guarded_http(call, request))
+    let error = fixture
+        .runtime
+        .block_on(guarded.guarded_http(call, request))
         .expect_err("pre-cancelled HTTP");
     assert!(matches!(error.failure(), TransportFailure::Cancelled));
     assert_eq!(error.delivery(), DeliveryCertainty::DefinitelyUnsent);
@@ -1526,24 +1648,27 @@ fn cancellation_during_io_is_possibly_sent_after_one_request() {
         fixture.ports.one_hop(),
         fixture.ports.duplex(),
     );
-    std::thread::scope(|scope| {
-        let (result_tx, result_rx) = mpsc::channel();
-        let request_thread = scope.spawn(move || {
-            let result = futures::executor::block_on(guarded.guarded_http(call, request));
-            result_tx.send(result).expect("cancelled HTTP result");
+    fixture.runtime.block_on(async {
+        let request_future = guarded.guarded_http(call, request);
+        tokio::pin!(request_future);
+        let received = tokio::task::spawn_blocking(move || {
+            received_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("server received request");
         });
-        received_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("server received request");
-        cancel.cancel(ego_core::turn::CancelCause::User);
-        let error = result_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("cancelled result")
-            .expect_err("in-flight cancellation");
+        let error = tokio::select! {
+            result = &mut request_future => result.expect_err("in-flight cancellation"),
+            received_result = received => {
+                received_result.expect("request synchronization task");
+                cancel.cancel(ego_core::turn::CancelCause::User);
+                request_future
+                    .await
+                    .expect_err("cancelled result")
+            }
+        };
         assert!(matches!(error.failure(), TransportFailure::Cancelled));
         assert_eq!(error.delivery(), DeliveryCertainty::PossiblySent);
         release_tx.send(()).expect("release cancelled server");
-        request_thread.join().expect("cancelled request thread");
     });
     assert_eq!(resolver.calls.lock().expect("calls").as_slice(), &[target]);
     let captures = server.finish();
@@ -1562,31 +1687,61 @@ fn offline_http_refuses_before_dns_or_socket() {
     let target = NetworkTarget::new("offline.example.test", server.address.port()).unwrap();
     let resolver = RecordingResolver::default();
     resolver.insert(target.clone(), IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
-    let fixture = run_ports_with(
+    let result = try_run_ports(
         resolver.clone(),
         true,
         ego_core::turn::CancelToken::new(),
         TransportLimits::new(1024, 1024, Duration::from_secs(1)).expect("transport limits"),
     );
-    let request = request();
-    let auth = authorized(
-        http_call(&format!("{target}"), &request),
-        &["tool(srv/search)", &format!("net({target})")],
-    );
-    let (call, permit) = auth.into_parts();
-    let guarded = GuardedEffects::new(
-        permit,
-        &NoFs,
-        fixture.ports.process(),
-        &fixture.evidence,
-        fixture.ports.resolver(),
-        fixture.ports.one_hop(),
-        fixture.ports.duplex(),
-    );
-    let error =
-        futures::executor::block_on(guarded.guarded_http(call, request)).expect_err("offline HTTP");
-    assert!(matches!(error.failure(), TransportFailure::Offline));
-    assert_eq!(error.delivery(), DeliveryCertainty::DefinitelyUnsent);
-    assert!(resolver.calls.lock().expect("calls").is_empty());
-    assert!(server.finish().is_empty(), "offline opened no socket");
+    #[cfg(target_os = "linux")]
+    {
+        match result {
+            Err(error) => assert!(
+                matches!(error, ProcessError::MissingCapabilities(_)),
+                "offline construction failed for an unrelated reason: {error:?}"
+            ),
+            Ok(_) => panic!("Linux offline construction unexpectedly succeeded"),
+        }
+        assert!(resolver.calls.lock().expect("calls").is_empty());
+        assert!(server.finish().is_empty(), "offline opened no socket");
+        return;
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let fixture = match result {
+            Ok(fixture) => fixture,
+            Err(error) => {
+                assert!(
+                    matches!(error, ProcessError::MissingCapabilities(_)),
+                    "offline construction failed for an unrelated reason: {error:?}"
+                );
+                assert!(resolver.calls.lock().expect("calls").is_empty());
+                assert!(server.finish().is_empty(), "offline opened no socket");
+                return;
+            }
+        };
+        let request = request();
+        let auth = authorized(
+            http_call(&format!("{target}"), &request),
+            &["tool(srv/search)", &format!("net({target})")],
+        );
+        let (call, permit) = auth.into_parts();
+        let guarded = GuardedEffects::new(
+            permit,
+            &NoFs,
+            fixture.ports.process(),
+            &fixture.evidence,
+            fixture.ports.resolver(),
+            fixture.ports.one_hop(),
+            fixture.ports.duplex(),
+        );
+        let error = fixture
+            .runtime
+            .block_on(guarded.guarded_http(call, request))
+            .expect_err("offline HTTP");
+        assert!(matches!(error.failure(), TransportFailure::Offline));
+        assert_eq!(error.delivery(), DeliveryCertainty::DefinitelyUnsent);
+        assert!(resolver.calls.lock().expect("calls").is_empty());
+        assert!(server.finish().is_empty(), "offline opened no socket");
+    }
 }
