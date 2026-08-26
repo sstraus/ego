@@ -29,6 +29,12 @@ impl RootResolver for CanonicalRoots {
                 candidate.display()
             ))
         })?;
+        if !canonical.is_dir() {
+            return Err(RootResolveError::new(format!(
+                "the ACP working directory {} is not a directory",
+                canonical.display()
+            )));
+        }
         RunRoot::new(canonical).map_err(|error| RootResolveError::new(error.to_string()))
     }
 }

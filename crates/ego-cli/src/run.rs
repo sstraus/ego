@@ -591,12 +591,19 @@ pub(crate) fn workspace(directory: Option<&PathBuf>) -> Result<PathBuf, UsageErr
             ))
         })?,
     };
-    std::fs::canonicalize(&directory).map_err(|err| {
+    let canonical = std::fs::canonicalize(&directory).map_err(|err| {
         UsageError(format!(
             "the working directory {} could not be resolved: {err}",
             directory.display()
         ))
-    })
+    })?;
+    if !canonical.is_dir() {
+        return Err(UsageError(format!(
+            "the working directory {} is not a directory",
+            canonical.display()
+        )));
+    }
+    Ok(canonical)
 }
 
 pub(crate) fn rooted_path(root: &Path, path: PathBuf) -> PathBuf {

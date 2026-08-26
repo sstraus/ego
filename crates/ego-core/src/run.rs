@@ -2000,16 +2000,24 @@ impl FoldedRun {
         let first = transactions
             .first()
             .ok_or(RunError::Store(StoreError::NotFound))?;
+        if !matches!(&first.command, RunCommand::CommandAdmitted { .. }) {
+            return Err(RunError::Integrity {
+                message: "the first run transaction is not a command admission".to_owned(),
+            });
+        }
         let run_id = first.run_id;
         let root = first.root.clone();
         let mut admissions: Vec<AdmissionReceipt> = Vec::new();
-        let mut active = None;
+        let mut active: Option<ActiveLease> = None;
         let mut expected = RunRevision::new(1);
+        let mut previous_revision = None;
+        let mut admitted_model: Option<ModelRef> = None;
+        let mut admitted_leases = BTreeSet::new();
         let mut snapshot = RunSnapshot {
             run_id,
             root: root.clone(),
             revision: expected,
-            status: first.status,
+            status: RunStatus::Running,
             settlement: None,
         };
         let mut cancels = BTreeMap::new();
@@ -2026,6 +2034,115 @@ impl FoldedRun {
             }
             match &transaction.command {
                 RunCommand::CommandAdmitted {
+                    expected_revision,
+                    lease,
+                    executor_id,
+                    model,
+                    start,
+                    ..
+                } => {
+                    if *start != previous_revision.is_none()
+                        || *expected_revision != previous_revision
+                    {
+                        return Err(RunError::Integrity {
+                            message: "run admission start and expected revision do not match its stream position"
+                                .to_owned(),
+                        });
+                    }
+                    if transaction.status != RunStatus::Running {
+                        return Err(RunError::Integrity {
+                            message: "command admission does not carry running status".to_owned(),
+                        });
+                    }
+                    if *executor_id != run_id.nonce {
+                        return Err(RunError::Integrity {
+                            message: "run admission executor identity does not match the run nonce"
+                                .to_owned(),
+                        });
+                    }
+                    if admitted_model
+                        .as_ref()
+                        .is_some_and(|admitted| admitted != model)
+                    {
+                        return Err(RunError::Integrity {
+                            message: "run admission changes the immutable model".to_owned(),
+                        });
+                    }
+                    if active.is_some() || admitted_leases.contains(lease) {
+                        return Err(RunError::Integrity {
+                            message: "run admission does not own one new inactive lease".to_owned(),
+                        });
+                    }
+                }
+                RunCommand::CancelRequested {
+                    request_id, lease, ..
+                } => {
+                    if transaction.status != RunStatus::Cancelling {
+                        return Err(RunError::Integrity {
+                            message: "cancel request does not carry cancelling status".to_owned(),
+                        });
+                    }
+                    if active.map(|value| value.lease) != Some(*lease)
+                        || cancels.values().any(|(_, existing)| existing == lease)
+                        || cancels.contains_key(request_id)
+                    {
+                        return Err(RunError::Integrity {
+                            message: "cancel receipt does not name exactly one active lease"
+                                .to_owned(),
+                        });
+                    }
+                }
+                RunCommand::CommandSettled { lease, settlement } => {
+                    if transaction.status != settlement.status() {
+                        return Err(RunError::Integrity {
+                            message: "command settlement status disagrees with its settlement"
+                                .to_owned(),
+                        });
+                    }
+                    if active.map(|value| value.lease) != Some(*lease)
+                        || admissions
+                            .iter()
+                            .find(|receipt| receipt.lease == *lease)
+                            .is_none_or(|receipt| receipt.settlement.is_some())
+                    {
+                        return Err(RunError::Integrity {
+                            message: "duplicate or foreign settlement".to_owned(),
+                        });
+                    }
+                }
+            }
+
+            let settling_lease = match &transaction.command {
+                RunCommand::CommandSettled { lease, .. } => Some(*lease),
+                _ => None,
+            };
+            if settling_lease.is_none() && !transaction.pruned_receipts.is_empty() {
+                return Err(RunError::Integrity {
+                    message: "receipt pruning is not carried by a command settlement".to_owned(),
+                });
+            }
+            let mut newly_pruned = BTreeSet::new();
+            for lease in &transaction.pruned_receipts {
+                if pruned.contains(lease) || !newly_pruned.insert(*lease) {
+                    return Err(RunError::Integrity {
+                        message: "one receipt was pruned more than once".to_owned(),
+                    });
+                }
+                let receipt = admissions
+                    .iter()
+                    .find(|receipt| receipt.lease == *lease)
+                    .ok_or_else(|| RunError::Integrity {
+                        message: "receipt pruning names no admission".to_owned(),
+                    })?;
+                if receipt.settlement.is_none() && settling_lease != Some(*lease) {
+                    return Err(RunError::Integrity {
+                        message: "unsettled receipt was pruned".to_owned(),
+                    });
+                }
+            }
+
+            match &transaction.command {
+                RunCommand::CommandAdmitted {
                     request_id,
                     digest,
                     lease,
@@ -2033,11 +2150,6 @@ impl FoldedRun {
                     model,
                     ..
                 } => {
-                    if active.is_some() {
-                        return Err(RunError::Integrity {
-                            message: "two run commands own one active lease".to_owned(),
-                        });
-                    }
                     admissions.push(AdmissionReceipt {
                         request_id: *request_id,
                         digest: digest.clone(),
@@ -2047,6 +2159,8 @@ impl FoldedRun {
                         model: model.clone(),
                         pruned: false,
                     });
+                    admitted_model.get_or_insert_with(|| model.clone());
+                    admitted_leases.insert(*lease);
                     active = Some(ActiveLease { lease: *lease });
                     snapshot.settlement = None;
                 }
@@ -2055,30 +2169,13 @@ impl FoldedRun {
                     digest,
                     lease,
                 } => {
-                    if active.map(|value| value.lease) != Some(*lease)
-                        || cancels.values().any(|(_, existing)| existing == lease)
-                        || cancels
-                            .insert(*request_id, (digest.clone(), *lease))
-                            .is_some()
-                    {
-                        return Err(RunError::Integrity {
-                            message: "cancel receipt does not name exactly one active lease"
-                                .to_owned(),
-                        });
-                    }
+                    cancels.insert(*request_id, (digest.clone(), *lease));
                 }
                 RunCommand::CommandSettled { lease, settlement } => {
-                    if active.map(|value| value.lease) != Some(*lease) {
-                        return Err(RunError::Integrity {
-                            message: "duplicate or foreign settlement".to_owned(),
-                        });
-                    }
                     let receipt = admissions
                         .iter_mut()
                         .find(|receipt| receipt.lease == *lease)
-                        .ok_or_else(|| RunError::Integrity {
-                            message: "settlement has no admission".to_owned(),
-                        })?;
+                        .expect("validated settlement has an admission");
                     receipt.settlement = Some(settlement.clone());
                     active = None;
                     snapshot.settlement = Some(settlement.clone());
@@ -2087,25 +2184,15 @@ impl FoldedRun {
             snapshot.revision = transaction.revision;
             snapshot.status = transaction.status;
             for lease in &transaction.pruned_receipts {
-                if !pruned.insert(*lease) {
-                    return Err(RunError::Integrity {
-                        message: "one receipt was pruned more than once".to_owned(),
-                    });
-                }
+                pruned.insert(*lease);
                 let receipt = admissions
                     .iter_mut()
                     .find(|receipt| receipt.lease == *lease)
-                    .ok_or_else(|| RunError::Integrity {
-                        message: "receipt pruning names no admission".to_owned(),
-                    })?;
-                if receipt.settlement.is_none() {
-                    return Err(RunError::Integrity {
-                        message: "active receipt was pruned".to_owned(),
-                    });
-                }
+                    .expect("validated pruning has an admission");
                 receipt.pruned = true;
                 cancels.retain(|_, (_, cancel_lease)| *cancel_lease != *lease);
             }
+            previous_revision = Some(transaction.revision);
             expected = expected.next();
         }
         Ok(Self {

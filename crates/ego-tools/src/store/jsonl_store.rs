@@ -7,8 +7,9 @@
 //!     events.jsonl        # the log; first line is a versioned header record
 //! ```
 
+use std::fs::{self, OpenOptions};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use ego_core::compact::{CompactionLineage, CompactionPublication};
 use ego_core::event::domain::{DomainEvent, EventKind};
@@ -22,6 +23,7 @@ use ego_core::store::codec::{
     CODEC_VERSION, CodecError, Header, StoreLine, decode_line, encode_header, encode_record,
 };
 use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
+use fd_lock::RwLock;
 use futures::stream::{self, BoxStream};
 
 use super::io::{AtomicReplacePublication, StoreIo, tmp_path_for};
@@ -259,7 +261,6 @@ pub struct JsonlStore {
     root: PathBuf,
     workspace: PathBuf,
     pub(super) io: Arc<dyn StoreIo>,
-    run_compare: Mutex<()>,
 }
 
 impl JsonlStore {
@@ -292,7 +293,6 @@ impl JsonlStore {
             root: root.into(),
             workspace: workspace.into(),
             io: Arc::from(io),
-            run_compare: Mutex::new(()),
         }
     }
 
@@ -306,6 +306,32 @@ impl JsonlStore {
 
     fn manifest_path(&self, id: &SessionId) -> PathBuf {
         self.session_dir(id).join("manifest.json")
+    }
+
+    fn events_lock_path(&self, id: &SessionId) -> PathBuf {
+        self.session_dir(id).join("events.lock")
+    }
+
+    /// Serialize one complete log mutation and its manifest projection.
+    /// This is deliberately distinct from the long-held session writer lease.
+    fn with_events_lock<T>(
+        &self,
+        id: &SessionId,
+        operation: impl FnOnce() -> Result<T, StoreError>,
+    ) -> Result<T, StoreError> {
+        let lock_path = self.events_lock_path(id);
+        if let Some(parent) = lock_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(lock_path)?;
+        let mut lock = RwLock::new(file);
+        let _guard = lock.write()?;
+        operation()
     }
 
     fn current_run_revision_from_lines<'a>(
@@ -356,6 +382,19 @@ impl JsonlStore {
     /// and must be selected even when the directory durability barrier or the
     /// derived manifest cache reports a failure.
     pub(super) fn publish_compaction_seed(
+        &self,
+        id: &SessionId,
+        seed: &DomainEvent,
+    ) -> CompactionPublication {
+        self.with_events_lock(id, || {
+            Ok(self.publish_compaction_seed_already_locked(id, seed))
+        })
+        .unwrap_or_else(|error| CompactionPublication::NotPublished {
+            diagnostic: format!("the compaction target lock could not be acquired: {error}"),
+        })
+    }
+
+    fn publish_compaction_seed_already_locked(
         &self,
         id: &SessionId,
         seed: &DomainEvent,
@@ -600,6 +639,10 @@ impl JsonlStore {
     /// Deleting a lease file here would be actively wrong: it would evict a
     /// *live* writer.
     pub fn recover(&self, id: &SessionId) -> Result<Repair, StoreError> {
+        self.with_events_lock(id, || self.recover_already_locked(id))
+    }
+
+    fn recover_already_locked(&self, id: &SessionId) -> Result<Repair, StoreError> {
         let mut repair = Repair::default();
 
         let manifest_path = self.manifest_path(id);
@@ -815,10 +858,8 @@ impl JsonlStore {
         self.io.replace_atomic(&self.manifest_path(id), &bytes)?;
         Ok(())
     }
-}
 
-impl SessionStore for JsonlStore {
-    fn append(&self, id: &SessionId, ev: &DomainEvent) -> Result<(), StoreError> {
+    fn append_already_locked(&self, id: &SessionId, ev: &DomainEvent) -> Result<(), StoreError> {
         let log_path = self.log_path(id);
         let is_new_session = !self.io.exists(&log_path)?;
         if is_new_session {
@@ -829,9 +870,6 @@ impl SessionStore for JsonlStore {
         let record_line = encode_record(ev.env.seq, &SessionEntry::Event(ev.clone()))?;
         self.io.append_line(&log_path, &record_line)?;
 
-        // Force the established turn/execution boundaries and every hook
-        // durability boundary. In particular, catalogue bytes must be stable
-        // before their derived manifest projection can be published.
         let is_turn_boundary = matches!(ev.kind, EventKind::TurnCompleted { .. });
         let is_execution_observation = matches!(ev.kind, EventKind::ExecutionObserved { .. });
         let is_hook_admission = matches!(ev.kind, EventKind::HookCatalogueAdmitted { .. });
@@ -857,9 +895,6 @@ impl SessionStore for JsonlStore {
             self.io.fsync(&log_path)?;
         }
 
-        // The manifest follows creation, turn/execution boundaries, and a
-        // complete catalogue admission. Invocation start and settlement are
-        // log-only facts and never pay for a manifest replacement.
         if (is_new_session && !is_hook_invocation)
             || is_turn_boundary
             || is_execution_observation
@@ -871,63 +906,12 @@ impl SessionStore for JsonlStore {
         Ok(())
     }
 
-    fn read(
-        &self,
-        id: &SessionId,
-    ) -> Result<BoxStream<'static, Result<SessionEntry, StoreError>>, StoreError> {
-        let bytes = self
-            .io
-            .read(&self.log_path(id))?
-            .ok_or(StoreError::NotFound)?;
-        // The same check `recover` makes, through the same function, so a
-        // header one of them accepts cannot be one the other rejects. An
-        // unterminated first line is `None` there because it costs nothing to
-        // discard; here it is simply not a header, which is what it always
-        // was to a reader.
-        if header_end(&bytes)?.is_none() {
-            return Err(StoreError::MissingHeader);
-        }
-        let mut lines = split_lines(&bytes).into_iter();
-        lines.next();
-
-        // Read eagerly into an owned `Vec` rather than streaming
-        // incrementally off disk: this store already reads the whole log
-        // into memory to validate the header above, so a second, lazy pass
-        // would buy nothing this milestone needs while entangling the
-        // stream's lifetime with `&self`. Owning the decoded results makes
-        // the stream `'static`, so a caller does not have to keep this
-        // `JsonlStore` borrowed for as long as it holds the stream.
-        let entries: Vec<Result<SessionEntry, StoreError>> = lines
-            .map(|line| match decode_line(line) {
-                Ok(StoreLine::Record(record)) => {
-                    serde_json::from_str::<SessionEntry>(record.payload.get())
-                        .map_err(|e| StoreError::Codec(CodecError::Malformed(e.to_string())))
-                }
-                Ok(StoreLine::Header(_)) => Err(StoreError::Codec(CodecError::Malformed(
-                    "unexpected header record past the log's first line".to_string(),
-                ))),
-                Ok(StoreLine::Unknown(_)) => Err(StoreError::Codec(CodecError::Malformed(
-                    "record line is neither a header nor a recognised record".to_string(),
-                ))),
-                Err(e) => Err(StoreError::Codec(e)),
-            })
-            .collect();
-
-        Ok(Box::pin(stream::iter(entries)))
-    }
-
-    fn compare_and_append_run(
+    fn compare_and_append_run_already_locked(
         &self,
         session: &SessionId,
         expected_revision: Option<RunRevision>,
         transaction: RunTransaction,
     ) -> Result<RunAppend, StoreError> {
-        let _compare = self.run_compare.lock().map_err(|_| {
-            StoreError::Io(std::io::Error::other(
-                "the session run-append lock was poisoned",
-            ))
-        })?;
-
         if transaction.run_id().session_id() != *session {
             return Err(StoreError::WrongSession {
                 expected: transaction.run_id().session_id(),
@@ -1002,7 +986,6 @@ impl SessionStore for JsonlStore {
         let header = match lines.next().and_then(|line| decode_line(line).ok()) {
             Some(StoreLine::Header(header)) if header.v == CODEC_VERSION => header,
             _ => {
-                // Preserve the port's precise header diagnostics.
                 header_end(&bytes)?;
                 return Err(StoreError::MissingHeader);
             }
@@ -1080,6 +1063,68 @@ impl SessionStore for JsonlStore {
         }
         Ok(RunAppend::Committed {
             revision: transaction.revision(),
+        })
+    }
+}
+
+impl SessionStore for JsonlStore {
+    fn append(&self, id: &SessionId, ev: &DomainEvent) -> Result<(), StoreError> {
+        self.with_events_lock(id, || self.append_already_locked(id, ev))
+    }
+
+    fn read(
+        &self,
+        id: &SessionId,
+    ) -> Result<BoxStream<'static, Result<SessionEntry, StoreError>>, StoreError> {
+        let bytes = self
+            .io
+            .read(&self.log_path(id))?
+            .ok_or(StoreError::NotFound)?;
+        // The same check `recover` makes, through the same function, so a
+        // header one of them accepts cannot be one the other rejects. An
+        // unterminated first line is `None` there because it costs nothing to
+        // discard; here it is simply not a header, which is what it always
+        // was to a reader.
+        if header_end(&bytes)?.is_none() {
+            return Err(StoreError::MissingHeader);
+        }
+        let mut lines = split_lines(&bytes).into_iter();
+        lines.next();
+
+        // Read eagerly into an owned `Vec` rather than streaming
+        // incrementally off disk: this store already reads the whole log
+        // into memory to validate the header above, so a second, lazy pass
+        // would buy nothing this milestone needs while entangling the
+        // stream's lifetime with `&self`. Owning the decoded results makes
+        // the stream `'static`, so a caller does not have to keep this
+        // `JsonlStore` borrowed for as long as it holds the stream.
+        let entries: Vec<Result<SessionEntry, StoreError>> = lines
+            .map(|line| match decode_line(line) {
+                Ok(StoreLine::Record(record)) => {
+                    serde_json::from_str::<SessionEntry>(record.payload.get())
+                        .map_err(|e| StoreError::Codec(CodecError::Malformed(e.to_string())))
+                }
+                Ok(StoreLine::Header(_)) => Err(StoreError::Codec(CodecError::Malformed(
+                    "unexpected header record past the log's first line".to_string(),
+                ))),
+                Ok(StoreLine::Unknown(_)) => Err(StoreError::Codec(CodecError::Malformed(
+                    "record line is neither a header nor a recognised record".to_string(),
+                ))),
+                Err(e) => Err(StoreError::Codec(e)),
+            })
+            .collect();
+
+        Ok(Box::pin(stream::iter(entries)))
+    }
+
+    fn compare_and_append_run(
+        &self,
+        session: &SessionId,
+        expected_revision: Option<RunRevision>,
+        transaction: RunTransaction,
+    ) -> Result<RunAppend, StoreError> {
+        self.with_events_lock(session, || {
+            self.compare_and_append_run_already_locked(session, expected_revision, transaction)
         })
     }
 
