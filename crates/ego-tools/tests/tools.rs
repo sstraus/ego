@@ -35,10 +35,11 @@ use ego_core::generator::port::AiEvent;
 use ego_core::generator::types::{StopReason, ThinkingLevel};
 use ego_core::permit::rule::{Head, Rule};
 use ego_core::permit::{
-    Authority, Authorized, CanonPath, Change, Classification, Escalation, GuardedEffects,
-    GuardedIo, Op, OpName, Pending, PermitDenied, PolicyDenied, PolicyEngine, PrepareCtx,
-    PreparedCall, ProcessError, ProcessExecutor, Resolution, ScanRequest, Tool, ToolError,
-    ToolResult, Typed, TypedTool,
+    Authority, Authorized, CanonPath, Change, Classification, DuplexHandle, DuplexSpawner,
+    Escalation, GuardedEffects, GuardedIo, HttpRequest, OneHop, Op, OpName, Pending, PermitDenied,
+    PolicyDenied, PolicyEngine, PrepareCtx, PreparedCall, ProcessError, ProcessExecutor,
+    Resolution, ResolvedConnect, Resolver, ScanRequest, SpawnSpec, Tool, ToolError, ToolResult,
+    TransportError, TransportFailure, Typed, TypedTool,
 };
 use ego_core::run::DeniedBy;
 use ego_core::sink::CollectingSink;
@@ -70,6 +71,41 @@ impl ProcessExecutor for NoProcess {
         ))))
     }
 }
+
+struct NoResolver;
+impl Resolver for NoResolver {
+    fn resolve(
+        &self,
+        _target: ego_core::permit::NetworkTarget,
+    ) -> BoxFuture<'static, Result<ego_core::permit::DnsResolution, TransportError>> {
+        Box::pin(futures::future::ready(Err(
+            TransportError::definitely_unsent(TransportFailure::Offline),
+        )))
+    }
+}
+struct NoHop;
+impl OneHop for NoHop {
+    fn execute(
+        &self,
+        _connect: ResolvedConnect,
+        _request: HttpRequest,
+    ) -> BoxFuture<'static, Result<ego_core::permit::OneHopResponse, TransportError>> {
+        Box::pin(futures::future::ready(Err(
+            TransportError::definitely_unsent(TransportFailure::Offline),
+        )))
+    }
+}
+struct NoDuplex;
+impl DuplexSpawner for NoDuplex {
+    fn spawn(&self, _spec: SpawnSpec) -> BoxFuture<'static, Result<DuplexHandle, TransportError>> {
+        Box::pin(futures::future::ready(Err(
+            TransportError::definitely_unsent(TransportFailure::Offline),
+        )))
+    }
+}
+static NO_RESOLVER: NoResolver = NoResolver;
+static NO_HOP: NoHop = NoHop;
+static NO_DUPLEX: NoDuplex = NoDuplex;
 
 struct NoEvidence;
 
@@ -182,7 +218,15 @@ impl Workspace {
         let call = tool.prepare(params, &self.ctx())?;
         let granted = self.authorize(call).expect("policy admits this");
         let (call, permit) = granted.into_parts();
-        let guarded = GuardedEffects::new(permit, &self.fs, &self.process, &self.evidence);
+        let guarded = GuardedEffects::new(
+            permit,
+            &self.fs,
+            &self.process,
+            &self.evidence,
+            &NO_RESOLVER,
+            &NO_HOP,
+            &NO_DUPLEX,
+        );
         block_on(tool.execute(call, &guarded)).map(|result: ToolResult| result.model_text())
     }
 

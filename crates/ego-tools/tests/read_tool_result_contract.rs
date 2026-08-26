@@ -15,8 +15,11 @@ use ego_core::store::evidence::{
     EVIDENCE_PAGE_BYTES, EvidenceError, EvidenceId, EvidenceRead, EvidenceRef, EvidenceStore as _,
 };
 use ego_core::turn::{CancelToken, Tools as TurnTools};
-use ego_tools::exec::{ExecLimits, ExecRunConfig, GuardedExec, ProcessError, SessionEvidenceStore};
+use ego_tools::exec::{
+    ExecLimits, ExecRunConfig, ProcessError, RunEffectPorts, SessionEvidenceStore, TransportLimits,
+};
 use ego_tools::fs::OsFs;
+use ego_tools::http::SystemResolver;
 use ego_tools::tools::builtins;
 use tempfile::TempDir;
 
@@ -31,7 +34,7 @@ fn block_on<F: Future>(future: F) -> F::Output {
 struct Run {
     _evidence_root: TempDir,
     evidence: SessionEvidenceStore,
-    executor: Arc<GuardedExec>,
+    ports: RunEffectPorts,
     policy: PolicyEngine,
     registry: Vec<Arc<dyn ego_core::permit::Tool>>,
     fs: OsFs,
@@ -52,12 +55,20 @@ fn open_run() -> Result<Run, ProcessError> {
     let cancel = CancelToken::new();
     let policy = RunConfinement::new(Confinement::Off, false, cwd()).unwrap();
     let limits = ExecLimits::new(1024, Duration::from_millis(250))?;
-    let config = ExecRunConfig::new(policy, evidence.clone(), cancel, limits);
-    let (executor, _) = block_on(GuardedExec::for_run(config))?;
+    let transport_limits = TransportLimits::new(1024, 1024, Duration::from_secs(1))?;
+    let config = ExecRunConfig::new(
+        policy,
+        evidence.clone(),
+        cancel,
+        limits,
+        transport_limits,
+        Arc::new(SystemResolver::new()),
+    );
+    let (ports, _) = block_on(RunEffectPorts::for_run(config))?;
     Ok(Run {
         _evidence_root: evidence_root,
         evidence,
-        executor,
+        ports,
         policy: evidence_policy(cwd()),
         registry: builtins(),
         fs: OsFs,
@@ -137,8 +148,11 @@ fn tools<'a>(run: &'a Run, root: CanonPath) -> TurnTools<'a> {
         &run.registry,
         &run.policy,
         &run.fs,
-        run.executor.as_ref(),
+        run.ports.process(),
         &run.evidence,
+        run.ports.resolver(),
+        run.ports.one_hop(),
+        run.ports.duplex(),
         root,
     )
 }

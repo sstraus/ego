@@ -1,13 +1,13 @@
 //! RED contract for argv-native execution, confinement, and process evidence.
 //!
 //! The provider is never involved here. Each process is a real argv-native
-//! child launched through the same `GuardedExec::for_run` path production uses.
+//! child launched through the same run-owned guarded process path production uses.
 //! Platform evidence is accepted only when paired controls demonstrate it;
 //! unsupported guarantees must return `MissingCapabilities` before spawn.
 //!
 //! Direct backend tests prove lifecycle, evidence, and paired confinement
 //! behaviour. The composite test below also proves the production
-//! ExecTool -> PolicyEngine -> Authorized -> GuardedEffects -> GuardedExec
+//! ExecTool -> PolicyEngine -> Authorized -> GuardedEffects -> process adapter
 //! path; direct backend calls never stand in for that authorization proof.
 
 use std::ffi::OsString;
@@ -28,8 +28,11 @@ use ego_core::permit::{
 use ego_core::store::evidence::{EvidenceRef, EvidenceStore as _};
 use ego_core::turn::CancelToken;
 use ego_core::turn::Tools as TurnTools;
-use ego_tools::exec::{ExecLimits, ExecRunConfig, GuardedExec, ProcessError, SessionEvidenceStore};
+use ego_tools::exec::{
+    ExecLimits, ExecRunConfig, ProcessError, RunEffectPorts, SessionEvidenceStore, TransportLimits,
+};
 use ego_tools::fs::OsFs;
+use ego_tools::http::SystemResolver;
 use ego_tools::tools::builtins;
 
 fn block_on<F: Future>(future: F) -> F::Output {
@@ -73,7 +76,7 @@ fn decode_standard_base64(encoded: &str) -> Vec<u8> {
 struct Run {
     _evidence_root: tempfile::TempDir,
     evidence: SessionEvidenceStore,
-    executor: Arc<GuardedExec>,
+    ports: RunEffectPorts,
     observation: ExecObservation,
     cancel: CancelToken,
 }
@@ -98,20 +101,28 @@ fn open_run(
         .map_err(ProcessError::Evidence)?;
     let cancel = CancelToken::new();
     let limits = ExecLimits::new(preview, Duration::from_millis(250))?;
+    let transport_limits = TransportLimits::new(1024, 1024, Duration::from_secs(1))?;
     let policy = run_confinement(level, offline, workspace);
-    let config = ExecRunConfig::new(policy, evidence.clone(), cancel.clone(), limits);
-    let (executor, observation) = block_on(GuardedExec::for_run(config))?;
+    let config = ExecRunConfig::new(
+        policy,
+        evidence.clone(),
+        cancel.clone(),
+        limits,
+        transport_limits,
+        Arc::new(SystemResolver::new()),
+    );
+    let (ports, observation) = block_on(RunEffectPorts::for_run(config))?;
     Ok(Run {
         _evidence_root: evidence_root,
         evidence,
-        executor,
+        ports,
         observation,
         cancel,
     })
 }
 
 fn execute(run: &Run, spec: SpawnSpec) -> Result<(), ProcessError> {
-    block_on(run.executor.execute(&spec)).map(|_| ())
+    block_on(run.ports.process().execute(&spec)).map(|_| ())
 }
 
 fn assert_two_process_streams_with_full_output(result: &ToolResult) {
@@ -462,7 +473,7 @@ fn guarded_exec_runs_the_exact_argv_without_reparse_or_mutation() {
         None,
         cwd(),
     );
-    let out = block_on(run.executor.execute(&prepared)).unwrap();
+    let out = block_on(run.ports.process().execute(&prepared)).unwrap();
 
     let debug = format!("{out:?}");
     assert!(debug.contains("literal * ; $(false)"));
@@ -494,8 +505,11 @@ fn exec_tool_preparation_policy_authorization_and_guarded_execution_preserve_ide
         &registry,
         &policy,
         &fs,
-        run.executor.as_ref(),
+        run.ports.process(),
         &run.evidence,
+        run.ports.resolver(),
+        run.ports.one_hop(),
+        run.ports.duplex(),
         root.clone(),
     );
     let params = serde_json::json!({
@@ -564,8 +578,11 @@ fn exec_tool_policy_denial_stops_before_guarded_effects() {
         &registry,
         &policy,
         &fs,
-        run.executor.as_ref(),
+        run.ports.process(),
         &run.evidence,
+        run.ports.resolver(),
+        run.ports.one_hop(),
+        run.ports.duplex(),
         root.clone(),
     );
     let params = serde_json::json!({
@@ -602,7 +619,7 @@ fn environment_policy_materializes_names_without_values_in_identity() {
     }
 
     let run = open_run(Confinement::Off, false, cwd(), 1024 * 1024, 1024).unwrap();
-    let inherited = block_on(run.executor.execute(&fixture_arg_spec_with_env(
+    let inherited = block_on(run.ports.process().execute(&fixture_arg_spec_with_env(
         "exec_contract_fixture_reports_environment_presence_without_values",
         [OsString::from("PATH")],
         None,
@@ -612,7 +629,7 @@ fn environment_policy_materializes_names_without_values_in_identity() {
     .unwrap();
     assert!(format!("{inherited:?}").contains("PATH=present"));
 
-    let out = block_on(run.executor.execute(&fixture_arg_spec_with_env(
+    let out = block_on(run.ports.process().execute(&fixture_arg_spec_with_env(
         "exec_contract_fixture_reports_environment_presence_without_values",
         [
             OsString::from("PATH"),
@@ -628,7 +645,7 @@ fn environment_policy_materializes_names_without_values_in_identity() {
     assert!(debug.contains(&format!("{unique_absent}=absent")));
 
     let deny_path = EnvPolicy::inherited_except(["PATH"]).unwrap();
-    let out = block_on(run.executor.execute(&fixture_arg_spec_with_env(
+    let out = block_on(run.ports.process().execute(&fixture_arg_spec_with_env(
         "exec_contract_fixture_reports_environment_presence_without_values",
         [OsString::from("PATH")],
         None,
@@ -642,7 +659,7 @@ fn environment_policy_materializes_names_without_values_in_identity() {
 #[test]
 fn child_stdin_is_a_closed_pipe_and_reaches_eof() {
     let run = open_run(Confinement::Off, false, cwd(), 1024 * 1024, 1024).unwrap();
-    let out = block_on(run.executor.execute(&fixture_arg_spec(
+    let out = block_on(run.ports.process().execute(&fixture_arg_spec(
         "exec_contract_fixture_consumes_stdin_to_eof",
         [],
         None,
@@ -663,7 +680,7 @@ fn child_does_not_inherit_open_descriptors_at_or_above_three() {
     assert!(open_files.iter().any(|file| file.as_raw_fd() >= 3));
 
     let run = open_run(Confinement::Off, false, cwd(), 1024 * 1024, 1024).unwrap();
-    let out = block_on(run.executor.execute(&fixture_arg_spec(
+    let out = block_on(run.ports.process().execute(&fixture_arg_spec(
         "exec_contract_fixture_rejects_inherited_fds",
         [],
         None,
@@ -689,7 +706,7 @@ fn linux_helper_receives_an_eof_pipe_and_refuses_inherited_fd_above_stderr() {
 fn real_process_output_keeps_stream_provenance_and_full_evidence_reference() {
     let workspace = cwd();
     let run = open_run(Confinement::Off, false, workspace, 1024 * 1024, 1024).unwrap();
-    let out = block_on(run.executor.execute(&fixture_arg_spec(
+    let out = block_on(run.ports.process().execute(&fixture_arg_spec(
         "exec_contract_fixture_echoes_argument",
         [OsString::from("stdout evidence")],
         None,
@@ -711,7 +728,7 @@ fn concurrent_stdout_and_stderr_draining_preserves_both_streams() {
         1024,
     )
     .unwrap();
-    let out = block_on(run.executor.execute(&fixture_spec(
+    let out = block_on(run.ports.process().execute(&fixture_spec(
         "exec_contract_fixture_emits_both_streams",
         &[],
         None,
@@ -733,7 +750,7 @@ fn binary_process_output_uses_explicit_base64_without_replacement_characters() {
         1024,
     )
     .unwrap();
-    let out = block_on(run.executor.execute(&fixture_spec(
+    let out = block_on(run.ports.process().execute(&fixture_spec(
         "exec_contract_fixture_emits_binary_streams",
         &[],
         None,
@@ -777,7 +794,7 @@ fn binary_process_output_uses_explicit_base64_without_replacement_characters() {
 fn finite_large_output_succeeds_with_head_tail_preview_and_reference() {
     let workspace = cwd();
     let run = open_run(Confinement::Off, false, workspace.clone(), 128 * 1024, 64).unwrap();
-    let out = block_on(run.executor.execute(&fixture_spec(
+    let out = block_on(run.ports.process().execute(&fixture_spec(
         "exec_contract_fixture_emits_both_streams",
         &[],
         None,
@@ -901,7 +918,7 @@ fn nonzero_exit_is_a_typed_process_failure() {
 #[test]
 fn nonzero_exit_drains_both_streams_before_carrying_failed_result() {
     let run = open_run(Confinement::Off, false, cwd(), 1024 * 1024, 1024).unwrap();
-    let err = block_on(run.executor.execute(&fixture_arg_spec(
+    let err = block_on(run.ports.process().execute(&fixture_arg_spec(
         "exec_contract_fixture_emits_both_streams_and_exits_nonzero",
         [],
         None,
@@ -946,7 +963,7 @@ fn signal_termination_is_a_typed_process_failure() {
 #[test]
 fn signal_termination_drains_both_streams_before_carrying_failed_result() {
     let run = open_run(Confinement::Off, false, cwd(), 1024 * 1024, 1024).unwrap();
-    let err = block_on(run.executor.execute(&fixture_arg_spec(
+    let err = block_on(run.ports.process().execute(&fixture_arg_spec(
         "exec_contract_fixture_emits_both_streams_and_signals",
         [],
         None,
@@ -1484,7 +1501,7 @@ fn linux_landlock_abi_status_and_workspace_rights_are_fail_closed() {
     // The helper path is an implementation detail, but the target remains a
     // public exact-argv contract: a confined launch must execute the same
     // current-test executable and fixture arguments, not a helper substitute.
-    let out = block_on(run.executor.execute(&fixture_arg_spec(
+    let out = block_on(run.ports.process().execute(&fixture_arg_spec(
         "exec_contract_fixture_echoes_argument",
         [OsString::from("linux exact target")],
         None,
