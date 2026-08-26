@@ -895,6 +895,12 @@ fn recovery_controller() -> (
 #[test]
 fn recovery_running_reattaches_live_execution() {
     let (controller, store, executor, run) = recovery_controller();
+    let calls_before_status = executor.calls();
+    let status_before_recovery = futures::executor::block_on(controller.status(run))
+        .expect("running status before explicit recovery");
+    assert_eq!(status_before_recovery.status(), RunStatus::Running);
+    assert_eq!(executor.calls(), calls_before_status);
+    assert_eq!(store.transactions(run.session_id()).len(), 1);
     executor.recovery_result(Ok(ego_core::run::RecoveryEvidence::Running(
         RunHandle::new(run),
     )));
