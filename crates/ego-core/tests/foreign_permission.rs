@@ -11,8 +11,9 @@ use futures::io::{AsyncRead, AsyncWrite};
 use ego_core::config::{ConfigLayer, Mode, Ruleset, Source};
 use ego_core::permit::{
     CanonPath, DuplexHandle, DuplexSession, DuplexSpawner, EnvPolicy, Fs, FsError, GuardedEffects,
-    HttpRequest, NetworkTarget, OneHop, PathResolver, PolicyEngine, PreparedCall, ProcessError,
-    ProcessExecutor, Resolver, Scan, ScanRequest, SpawnSpec, Subject, ToolResult, TransportError,
+    HttpHeader, HttpRequest, HttpRequestDigest, HttpRoute, HttpScheme, NetworkTarget, OneHop,
+    PathResolver, PolicyEngine, PreparedCall, PreparedConnect, ProcessError, ProcessExecutor,
+    Resolver, Scan, ScanRequest, SpawnSpec, Subject, ToolResult, TransportError, TransportFailure,
 };
 use ego_core::store::evidence::{
     EvidenceError, EvidencePage, EvidenceRead, EvidenceStore, EvidenceWriter,
@@ -56,11 +57,37 @@ fn tool(server: &str, name: &str) -> ego_core::permit::ForeignToolId {
     ego_core::permit::ForeignToolId::new(server, name).expect("foreign identity")
 }
 
-fn http_call(server: &str, name: &str, args: &str, target: &str) -> PreparedCall {
+fn request() -> HttpRequest {
+    HttpRequest::new(
+        "GET",
+        "/",
+        vec![HttpHeader::new("x-trace", b"one".to_vec()).expect("header")],
+        b"body".to_vec(),
+    )
+    .expect("request")
+}
+
+fn route(target: &str) -> HttpRoute {
+    HttpRoute::new(
+        HttpScheme::Https,
+        NetworkTarget::parse(target).expect("network target"),
+    )
+    .expect("route")
+}
+
+fn http_call(
+    server: &str,
+    name: &str,
+    args: &str,
+    target: &str,
+    req: &HttpRequest,
+) -> PreparedCall {
+    let route = route(target);
     PreparedCall::foreign_http(
         tool(server, name),
         digest(args),
-        ego_core::permit::ForeignTransportTarget::http("https", target).expect("HTTP target"),
+        ego_core::permit::ForeignTransportTarget::http(route),
+        req,
     )
 }
 
@@ -107,14 +134,35 @@ impl Resolver for FakeResolver {
 #[derive(Clone, Default)]
 struct FakeOneHop {
     calls: Arc<Mutex<usize>>,
+    observed: Arc<
+        Mutex<
+            Option<(
+                HttpRoute,
+                NetworkTarget,
+                std::net::IpAddr,
+                HttpRequestDigest,
+            )>,
+        >,
+    >,
+    failure: Arc<Mutex<Option<TransportError>>>,
 }
 impl OneHop for FakeOneHop {
     fn execute(
         &self,
-        _connect: ego_core::permit::ResolvedConnect,
-        _request: HttpRequest,
+        connect: ego_core::permit::ResolvedConnect,
+        request: HttpRequest,
     ) -> BoxFuture<'static, Result<ego_core::permit::OneHopResponse, TransportError>> {
         *self.calls.lock().expect("calls") += 1;
+        assert_eq!(connect.request_digest(), &HttpRequestDigest::of(&request));
+        *self.observed.lock().expect("observed") = Some((
+            connect.route().clone(),
+            connect.target().clone(),
+            connect.selected(),
+            connect.request_digest().clone(),
+        ));
+        if let Some(error) = self.failure.lock().expect("failure").take() {
+            return Box::pin(future::ready(Err(error)));
+        }
         Box::pin(future::ready(Ok(
             ego_core::permit::OneHopResponse::response(200, vec![], vec![]),
         )))
@@ -245,13 +293,20 @@ impl EvidenceStore for NoEvidence {
 
 #[test]
 fn permission_requires_outer_and_inner_opaque_plus_exact_http_or_spawn_authority() {
+    let req = request();
     let policy = PolicyEngine::new(
         CanonPath::new("/workspace"),
         Mode::Default,
         rules(&["tool(srv/search)", "net(api.example.test:443)"], &[]),
     );
     assert!(matches!(
-        policy.classify(http_call("srv", "search", "args-a", "api.example.test:443")),
+        policy.classify(http_call(
+            "srv",
+            "search",
+            "args-a",
+            "api.example.test:443",
+            &req
+        )),
         ego_core::permit::Classification::Settled(Ok(_))
     ));
     let outer = PreparedCall::speakeasy(
@@ -259,8 +314,8 @@ fn permission_requires_outer_and_inner_opaque_plus_exact_http_or_spawn_authority
         digest("outer"),
         tool("srv", "search"),
         digest("inner"),
-        ego_core::permit::ForeignTransportTarget::http("https", "api.example.test:443")
-            .expect("target"),
+        ego_core::permit::ForeignTransportTarget::http(route("api.example.test:443")),
+        &req,
     );
     assert!(matches!(
         policy.classify(outer),
@@ -275,23 +330,35 @@ fn permission_requires_outer_and_inner_opaque_plus_exact_http_or_spawn_authority
         ),
     );
     assert!(matches!(
-        denied.classify(http_call("srv", "search", "args-a", "api.example.test:443")),
+        denied.classify(http_call(
+            "srv",
+            "search",
+            "args-a",
+            "api.example.test:443",
+            &req
+        )),
         ego_core::permit::Classification::Settled(Err(_))
     ));
 }
 
 #[test]
 fn guarded_http_consumes_one_dns_answer_and_rejects_reuse_as_authority_spent() {
+    let req = request();
     let policy = PolicyEngine::new(
         CanonPath::new("/workspace"),
         Mode::Default,
         rules(&["tool(srv/search)", "net(api.example.test:443)"], &[]),
     );
-    let authorized =
-        match policy.classify(http_call("srv", "search", "args-a", "api.example.test:443")) {
-            ego_core::permit::Classification::Settled(Ok(value)) => value,
-            other => panic!("expected authorization, got {other:?}"),
-        };
+    let authorized = match policy.classify(http_call(
+        "srv",
+        "search",
+        "args-a",
+        "api.example.test:443",
+        &req,
+    )) {
+        ego_core::permit::Classification::Settled(Ok(value)) => value,
+        other => panic!("expected authorization, got {other:?}"),
+    };
     let (call, permit) = authorized.into_parts();
     let resolver = FakeResolver::one(
         NetworkTarget::parse("api.example.test:443").expect("target"),
@@ -308,8 +375,7 @@ fn guarded_http_consumes_one_dns_answer_and_rejects_reuse_as_authority_spent() {
         &one_hop,
         &spawner,
     );
-    let request = HttpRequest::get("/").expect("request");
-    let first = futures::executor::block_on(guarded.guarded_http(call.clone(), request.clone()))
+    let first = futures::executor::block_on(guarded.guarded_http(call.clone(), req.clone()))
         .expect("first hop");
     assert_eq!(first.status(), 200);
     assert_eq!(
@@ -317,10 +383,273 @@ fn guarded_http_consumes_one_dns_answer_and_rejects_reuse_as_authority_spent() {
         ego_core::generator::attempt::DeliveryCertainty::PossiblySent
     );
     assert_eq!(resolver.calls(), 1);
-    let second = futures::executor::block_on(guarded.guarded_http(call, request))
-        .expect_err("spent authority");
+    let second =
+        futures::executor::block_on(guarded.guarded_http(call, req)).expect_err("spent authority");
     assert!(matches!(second, TransportError::AuthoritySpent));
     assert_eq!(resolver.calls(), 1);
+    let observed = one_hop
+        .observed
+        .lock()
+        .expect("observed")
+        .clone()
+        .expect("connect");
+    assert_eq!(observed.0, route("api.example.test:443"));
+    assert_eq!(
+        observed.1,
+        NetworkTarget::parse("api.example.test:443").expect("target")
+    );
+    assert_eq!(observed.2, "192.0.2.10".parse().expect("IP"));
+    assert_eq!(observed.3, HttpRequestDigest::of(&request()));
+}
+
+#[test]
+fn http_request_digest_changes_for_every_wire_significant_component() {
+    let base = HttpRequest::new(
+        "GET",
+        "/",
+        vec![
+            HttpHeader::new("x-first", b"one".to_vec()).expect("header"),
+            HttpHeader::new("x-second", b"two".to_vec()).expect("header"),
+        ],
+        b"body".to_vec(),
+    )
+    .expect("request");
+    let variants = [
+        HttpRequest::new("POST", "/", base.headers().to_vec(), base.body().to_vec())
+            .expect("method"),
+        HttpRequest::new(
+            "GET",
+            "/?changed=1",
+            base.headers().to_vec(),
+            base.body().to_vec(),
+        )
+        .expect("path"),
+        HttpRequest::new(
+            "GET",
+            "/",
+            vec![HttpHeader::new("x-other", b"one".to_vec()).expect("header")],
+            base.body().to_vec(),
+        )
+        .expect("header name"),
+        HttpRequest::new(
+            "GET",
+            "/",
+            vec![base.headers()[1].clone(), base.headers()[0].clone()],
+            base.body().to_vec(),
+        )
+        .expect("header order"),
+        HttpRequest::new(
+            "GET",
+            "/",
+            vec![
+                HttpHeader::new("x-trace", b"one".to_vec()).expect("header"),
+                HttpHeader::new("x-trace", b"two".to_vec()).expect("header"),
+            ],
+            base.body().to_vec(),
+        )
+        .expect("repeated value"),
+        HttpRequest::new("GET", "/", base.headers().to_vec(), b"changed".to_vec()).expect("body"),
+    ];
+    for variant in variants {
+        assert_ne!(
+            HttpRequestDigest::of(&base),
+            HttpRequestDigest::of(&variant)
+        );
+    }
+    let connect = PreparedConnect::new(
+        NetworkTarget::parse("api.example.test:443").expect("target"),
+        &base,
+    );
+    assert_eq!(connect.request_digest(), &HttpRequestDigest::of(&base));
+    let subject = Subject::Network(NetworkTarget::parse("api.example.test:443").expect("target"));
+    let rendered = serde_json::to_string(&subject).expect("subject");
+    assert!(!rendered.contains("x-first"));
+    let digest_debug = format!("{:?}", HttpRequestDigest::of(&base));
+    assert!(!rendered.contains(&digest_debug));
+}
+
+#[test]
+fn mismatched_actual_request_refuses_before_dns_without_spending_claim() {
+    let prepared_request = request();
+    let actual_request = HttpRequest::new(
+        "POST",
+        "/",
+        prepared_request.headers().to_vec(),
+        prepared_request.body().to_vec(),
+    )
+    .expect("request");
+    let policy = PolicyEngine::new(
+        CanonPath::new("/workspace"),
+        Mode::Default,
+        rules(&["tool(srv/search)", "net(api.example.test:443)"], &[]),
+    );
+    let authorized = match policy.classify(http_call(
+        "srv",
+        "search",
+        "args-a",
+        "api.example.test:443",
+        &prepared_request,
+    )) {
+        ego_core::permit::Classification::Settled(Ok(value)) => value,
+        other => panic!("expected authorization, got {other:?}"),
+    };
+    let (call, permit) = authorized.into_parts();
+    let resolver = FakeResolver::one(
+        NetworkTarget::parse("api.example.test:443").expect("target"),
+        "192.0.2.10",
+    );
+    let one_hop = FakeOneHop::default();
+    let spawner = FakeSpawner::default();
+    let guarded = GuardedEffects::new(
+        permit,
+        &MemoryFs,
+        &NoProcess,
+        &NoEvidence,
+        &resolver,
+        &one_hop,
+        &spawner,
+    );
+    let error = futures::executor::block_on(guarded.guarded_http(call.clone(), actual_request))
+        .expect_err("digest mismatch");
+    assert!(matches!(
+        error.failure(),
+        TransportFailure::AuthorityMismatch
+    ));
+    assert_eq!(
+        error.delivery(),
+        ego_core::generator::attempt::DeliveryCertainty::DefinitelyUnsent
+    );
+    assert_eq!(resolver.calls(), 0);
+    let response = futures::executor::block_on(guarded.guarded_http(call, prepared_request))
+        .expect("matching request");
+    assert_eq!(
+        response.delivery(),
+        ego_core::generator::attempt::DeliveryCertainty::PossiblySent
+    );
+    assert_eq!(resolver.calls(), 1);
+}
+
+#[test]
+fn resolution_target_mismatch_is_definitely_unsent_and_literal_skips_dns() {
+    let req = request();
+    let policy = PolicyEngine::new(
+        CanonPath::new("/workspace"),
+        Mode::Default,
+        rules(&["tool(srv/search)", "net(api.example.test:443)"], &[]),
+    );
+    let authorized = match policy.classify(http_call(
+        "srv",
+        "search",
+        "args-a",
+        "api.example.test:443",
+        &req,
+    )) {
+        ego_core::permit::Classification::Settled(Ok(value)) => value,
+        other => panic!("expected authorization, got {other:?}"),
+    };
+    let (call, permit) = authorized.into_parts();
+    let resolver = FakeResolver::one(
+        NetworkTarget::parse("other.example.test:443").expect("target"),
+        "192.0.2.10",
+    );
+    let one_hop = FakeOneHop::default();
+    let spawner = FakeSpawner::default();
+    let guarded = GuardedEffects::new(
+        permit,
+        &MemoryFs,
+        &NoProcess,
+        &NoEvidence,
+        &resolver,
+        &one_hop,
+        &spawner,
+    );
+    let error =
+        futures::executor::block_on(guarded.guarded_http(call, req)).expect_err("target mismatch");
+    assert!(matches!(
+        error.failure(),
+        TransportFailure::AuthorityMismatch
+    ));
+    assert_eq!(
+        error.delivery(),
+        ego_core::generator::attempt::DeliveryCertainty::DefinitelyUnsent
+    );
+
+    let literal = HttpRequest::get("/").expect("request");
+    let policy = PolicyEngine::new(
+        CanonPath::new("/workspace"),
+        Mode::Default,
+        rules(&["tool(srv/search)", "net(127.0.0.1:443)"], &[]),
+    );
+    let authorized = match policy.classify(http_call(
+        "srv",
+        "search",
+        "args-a",
+        "127.0.0.1:443",
+        &literal,
+    )) {
+        ego_core::permit::Classification::Settled(Ok(value)) => value,
+        other => panic!("expected authorization, got {other:?}"),
+    };
+    let (call, permit) = authorized.into_parts();
+    let resolver = FakeResolver::default();
+    let one_hop = FakeOneHop::default();
+    let guarded = GuardedEffects::new(
+        permit,
+        &MemoryFs,
+        &NoProcess,
+        &NoEvidence,
+        &resolver,
+        &one_hop,
+        &spawner,
+    );
+    futures::executor::block_on(guarded.guarded_http(call, literal)).expect("literal HTTP");
+    assert_eq!(resolver.calls(), 0);
+}
+
+#[test]
+fn post_effect_transport_failure_retains_possibly_sent_delivery() {
+    let req = request();
+    let policy = PolicyEngine::new(
+        CanonPath::new("/workspace"),
+        Mode::Default,
+        rules(&["tool(srv/search)", "net(api.example.test:443)"], &[]),
+    );
+    let authorized = match policy.classify(http_call(
+        "srv",
+        "search",
+        "args-a",
+        "api.example.test:443",
+        &req,
+    )) {
+        ego_core::permit::Classification::Settled(Ok(value)) => value,
+        other => panic!("expected authorization, got {other:?}"),
+    };
+    let (call, permit) = authorized.into_parts();
+    let resolver = FakeResolver::one(
+        NetworkTarget::parse("api.example.test:443").expect("target"),
+        "192.0.2.10",
+    );
+    let one_hop = FakeOneHop::default();
+    *one_hop.failure.lock().expect("failure") = Some(TransportError::possibly_sent(
+        TransportFailure::Exchange("reset".into()),
+    ));
+    let spawner = FakeSpawner::default();
+    let guarded = GuardedEffects::new(
+        permit,
+        &MemoryFs,
+        &NoProcess,
+        &NoEvidence,
+        &resolver,
+        &one_hop,
+        &spawner,
+    );
+    let error =
+        futures::executor::block_on(guarded.guarded_http(call, req)).expect_err("exchange failure");
+    assert!(matches!(error.failure(), TransportFailure::Exchange(_)));
+    assert_eq!(
+        error.delivery(),
+        ego_core::generator::attempt::DeliveryCertainty::PossiblySent
+    );
 }
 
 #[test]
