@@ -11,7 +11,8 @@ use ego_core::permit::{
     EntryKind, Escalation, Fs, FsError, GuardedEffects, GuardedIo, HttpRequest, IoDenied, OneHop,
     Op, OpName, PathResolver, Pending, PermitDenied, PolicyDenied, PolicyEngine, PrepareCtx,
     PreparedCall, ProcessError, ProcessExecutor, Resolution, ResolvedConnect, Resolver, Scan,
-    ScanLimits, ScanRequest, SpawnSpec, Tool, ToolError, ToolResult, TransportError, Typed,
+    ScanLimits, ScanRequest, SpawnSpec, Tool, ToolError, ToolResult, TransportError,
+    TransportFailure, Typed,
 };
 use ego_core::store::evidence::{
     EvidenceError, EvidencePage, EvidenceRead, EvidenceStore, EvidenceWriter,
@@ -69,7 +70,9 @@ mod permit {
             &self,
             _target: ego_core::permit::NetworkTarget,
         ) -> BoxFuture<'static, Result<ego_core::permit::DnsResolution, TransportError>> {
-            Box::pin(future::ready(Err(TransportError::Offline)))
+            Box::pin(future::ready(Err(TransportError::definitely_unsent(
+                TransportFailure::Offline,
+            ))))
         }
     }
     struct NoHop;
@@ -79,7 +82,9 @@ mod permit {
             _connect: ResolvedConnect,
             _request: HttpRequest,
         ) -> BoxFuture<'static, Result<ego_core::permit::OneHopResponse, TransportError>> {
-            Box::pin(future::ready(Err(TransportError::Offline)))
+            Box::pin(future::ready(Err(TransportError::definitely_unsent(
+                TransportFailure::Offline,
+            ))))
         }
     }
     struct NoDuplex;
@@ -88,7 +93,9 @@ mod permit {
             &self,
             _spec: SpawnSpec,
         ) -> BoxFuture<'static, Result<DuplexHandle, TransportError>> {
-            Box::pin(future::ready(Err(TransportError::Offline)))
+            Box::pin(future::ready(Err(TransportError::definitely_unsent(
+                TransportFailure::Offline,
+            ))))
         }
     }
     static NO_RESOLVER: NoResolver = NoResolver;

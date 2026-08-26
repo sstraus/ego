@@ -26,9 +26,10 @@ pub use approver::{Approver, HumanApprover, PermissionDecision, Verdict};
 pub use authority::{Authority, RuleAuthority};
 pub use foreign::{
     CleanupCertainty, DnsResolution, DuplexEnd, DuplexHandle, DuplexSession, DuplexSettlement,
-    DuplexSpawner, ForeignToolId, ForeignTransportTarget, ForeignValueError, HttpBody, HttpHeader,
-    HttpRequest, InvocationDigest, NetworkTarget, OneHop, OneHopResponse, ResolvedConnect,
-    Resolver, Subject, TransportError,
+    DuplexSpawner, ForeignToolId, ForeignTransportTarget, ForeignValueError, GuardedHttp, HttpBody,
+    HttpHeader, HttpRequest, HttpRequestDigest, HttpRoute, HttpScheme, InvocationDigest,
+    NetworkTarget, OneHop, OneHopResponse, PreparedConnect, ResolvedConnect, Resolver, Subject,
+    TransportError, TransportFailure,
 };
 pub use fs::{Fs, FsError, GuardedEffects, GuardedIo, IoDenied, PathResolver};
 pub use grant::{

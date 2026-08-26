@@ -10,6 +10,7 @@ use futures::future::BoxFuture;
 use futures::io::{AsyncRead, AsyncWrite};
 use futures::stream::BoxStream;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use sha2::{Digest as _, Sha256};
 
 use super::{CanonPath, EnvName, EnvPolicy, SpawnSpec, ToolResult};
 use crate::generator::attempt::DeliveryCertainty;
@@ -136,10 +137,6 @@ impl NetworkTarget {
         Self::new(host, port)
     }
 
-    pub(crate) fn with_default_port(value: &str, default: u16) -> Result<Self, ForeignValueError> {
-        Self::parse(value).or_else(|_| Self::new(value, default))
-    }
-
     pub fn host(&self) -> &str {
         &self.host
     }
@@ -163,32 +160,112 @@ impl fmt::Display for NetworkTarget {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum HttpScheme {
+    Http,
+    Https,
+}
+
+impl HttpScheme {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Http => "http",
+            Self::Https => "https",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct HttpRoute {
+    scheme: HttpScheme,
+    target: NetworkTarget,
+}
+
+impl HttpRoute {
+    pub fn new(scheme: HttpScheme, target: NetworkTarget) -> Result<Self, ForeignValueError> {
+        Ok(Self { scheme, target })
+    }
+
+    pub fn scheme(&self) -> HttpScheme {
+        self.scheme
+    }
+
+    pub fn target(&self) -> &NetworkTarget {
+        &self.target
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct HttpRequestDigest([u8; 32]);
+
+impl HttpRequestDigest {
+    pub fn of(request: &HttpRequest) -> Self {
+        let mut hasher = Sha256::new();
+        hash_http_frame(&mut hasher, b"ego.http-request");
+        hash_http_frame(&mut hasher, b"1");
+        hash_http_frame(&mut hasher, request.method.as_bytes());
+        hash_http_frame(&mut hasher, request.path.as_bytes());
+        hasher.update((request.headers.len() as u128).to_be_bytes());
+        for header in &request.headers {
+            hash_http_frame(&mut hasher, header.name.as_bytes());
+            hash_http_frame(&mut hasher, &header.value);
+        }
+        hash_http_frame(&mut hasher, &request.body);
+        Self(hasher.finalize().into())
+    }
+}
+
+fn hash_http_frame(hasher: &mut Sha256, bytes: &[u8]) {
+    hasher.update((bytes.len() as u128).to_be_bytes());
+    hasher.update(bytes);
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedConnect {
+    target: NetworkTarget,
+    request_digest: HttpRequestDigest,
+}
+
+impl PreparedConnect {
+    pub fn new(target: NetworkTarget, request: &HttpRequest) -> Self {
+        Self {
+            target,
+            request_digest: HttpRequestDigest::of(request),
+        }
+    }
+
+    pub(crate) fn from_parts(target: NetworkTarget, request_digest: HttpRequestDigest) -> Self {
+        Self {
+            target,
+            request_digest,
+        }
+    }
+
+    pub fn target(&self) -> &NetworkTarget {
+        &self.target
+    }
+
+    pub fn request_digest(&self) -> &HttpRequestDigest {
+        &self.request_digest
+    }
+
+    pub fn matches(&self, request: &HttpRequest) -> bool {
+        self.request_digest == HttpRequestDigest::of(request)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ForeignTransportTarget(ForeignTransportKind);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum ForeignTransportKind {
-    Http {
-        scheme: String,
-        network: NetworkTarget,
-    },
-    Stdio {
-        server: String,
-    },
+    Http(HttpRoute),
+    Stdio { server: String },
 }
 
 impl ForeignTransportTarget {
-    pub fn http(scheme: &str, target: &str) -> Result<Self, ForeignValueError> {
-        let scheme = scheme.to_ascii_lowercase();
-        let default = match scheme.as_str() {
-            "http" => 80,
-            "https" => 443,
-            _ => return Err(ForeignValueError::InvalidTransport),
-        };
-        Ok(Self(ForeignTransportKind::Http {
-            scheme,
-            network: NetworkTarget::with_default_port(target, default)?,
-        }))
+    pub fn http(route: HttpRoute) -> Self {
+        Self(ForeignTransportKind::Http(route))
     }
 
     pub fn stdio(server: &str) -> Result<Self, ForeignValueError> {
@@ -200,32 +277,21 @@ impl ForeignTransportTarget {
         }))
     }
 
-    pub fn network(&self) -> Option<&NetworkTarget> {
+    pub(crate) fn http_route(&self) -> Option<&HttpRoute> {
         match &self.0 {
-            ForeignTransportKind::Http { network, .. } => Some(network),
+            ForeignTransportKind::Http(route) => Some(route),
             ForeignTransportKind::Stdio { .. } => None,
         }
     }
 
-    pub fn scheme(&self) -> Option<&str> {
-        match &self.0 {
-            ForeignTransportKind::Http { scheme, .. } => Some(scheme),
+    pub(crate) fn into_http_route(self) -> Option<HttpRoute> {
+        match self.0 {
+            ForeignTransportKind::Http(route) => Some(route),
             ForeignTransportKind::Stdio { .. } => None,
         }
     }
 
-    pub fn server(&self) -> Option<&str> {
-        match &self.0 {
-            ForeignTransportKind::Http { .. } => None,
-            ForeignTransportKind::Stdio { server } => Some(server),
-        }
-    }
-
-    pub fn is_http(&self) -> bool {
-        matches!(&self.0, ForeignTransportKind::Http { .. })
-    }
-
-    pub fn is_stdio(&self) -> bool {
+    pub(crate) fn is_stdio(&self) -> bool {
         matches!(&self.0, ForeignTransportKind::Stdio { .. })
     }
 }
@@ -233,7 +299,9 @@ impl ForeignTransportTarget {
 impl fmt::Display for ForeignTransportTarget {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.0 {
-            ForeignTransportKind::Http { scheme, network } => write!(f, "{scheme}://{network}"),
+            ForeignTransportKind::Http(route) => {
+                write!(f, "{}://{}", route.scheme.as_str(), route.target)
+            }
             ForeignTransportKind::Stdio { server } => write!(f, "stdio:{server}"),
         }
     }
@@ -665,59 +733,58 @@ impl DnsResolution {
 
 #[derive(Debug)]
 pub struct ResolvedConnect {
-    transport: ForeignTransportTarget,
-    target: NetworkTarget,
+    route: HttpRoute,
     selected: IpAddr,
-    invocations: Vec<(ForeignToolId, InvocationDigest)>,
+    request_digest: HttpRequestDigest,
 }
 
 impl ResolvedConnect {
     pub(crate) fn from_resolution(
-        expected: &NetworkTarget,
+        route: HttpRoute,
+        connect: PreparedConnect,
         resolution: DnsResolution,
-        invocations: Vec<(ForeignToolId, InvocationDigest)>,
-        transport: ForeignTransportTarget,
+        selected: IpAddr,
     ) -> Result<Self, TransportError> {
-        if resolution.target != *expected {
-            return Err(TransportError::AuthorityMismatch);
+        if route.target != connect.target
+            || resolution.target != connect.target
+            || resolution.addresses.is_empty()
+            || !resolution.addresses.contains(&selected)
+        {
+            return Err(authority_mismatch());
         }
-        let selected = *resolution
-            .addresses
-            .first()
-            .ok_or(TransportError::AuthorityMismatch)?;
         Ok(Self {
-            transport,
-            target: expected.clone(),
+            route,
             selected,
-            invocations,
+            request_digest: connect.request_digest,
         })
     }
 
     pub(crate) fn literal(
-        transport: ForeignTransportTarget,
-        target: NetworkTarget,
-        selected: IpAddr,
-        invocations: Vec<(ForeignToolId, InvocationDigest)>,
-    ) -> Self {
-        Self {
-            transport,
-            target,
-            selected,
-            invocations,
+        route: HttpRoute,
+        connect: PreparedConnect,
+    ) -> Result<Self, TransportError> {
+        let selected = connect.target.ip().ok_or_else(authority_mismatch)?;
+        if route.target != connect.target {
+            return Err(authority_mismatch());
         }
+        Ok(Self {
+            route,
+            selected,
+            request_digest: connect.request_digest,
+        })
     }
 
-    pub fn transport(&self) -> &ForeignTransportTarget {
-        &self.transport
+    pub fn route(&self) -> &HttpRoute {
+        &self.route
     }
     pub fn target(&self) -> &NetworkTarget {
-        &self.target
+        &self.route.target
     }
     pub fn selected(&self) -> IpAddr {
         self.selected
     }
-    pub fn invocations(&self) -> &[(ForeignToolId, InvocationDigest)] {
-        &self.invocations
+    pub fn request_digest(&self) -> &HttpRequestDigest {
+        &self.request_digest
     }
 }
 
@@ -904,23 +971,100 @@ pub trait OneHop: Send + Sync {
     ) -> BoxFuture<'static, Result<OneHopResponse, TransportError>>;
 }
 
+pub struct GuardedHttp<'a> {
+    resolver: &'a dyn Resolver,
+    one_hop: &'a dyn OneHop,
+}
+
+impl<'a> GuardedHttp<'a> {
+    pub fn new(resolver: &'a dyn Resolver, one_hop: &'a dyn OneHop) -> Self {
+        Self { resolver, one_hop }
+    }
+
+    pub fn execute_admitted(
+        &self,
+        route: HttpRoute,
+        connect: PreparedConnect,
+        request: HttpRequest,
+    ) -> BoxFuture<'_, Result<OneHopResponse, TransportError>> {
+        if route.target != connect.target || !connect.matches(&request) {
+            return Box::pin(futures::future::ready(Err(authority_mismatch())));
+        }
+
+        Box::pin(async move {
+            let resolved = if connect.target.ip().is_some() {
+                ResolvedConnect::literal(route, connect)?
+            } else {
+                let resolution = self.resolver.resolve(connect.target.clone()).await?;
+                let selected = resolution
+                    .addresses
+                    .first()
+                    .copied()
+                    .ok_or_else(authority_mismatch)?;
+                ResolvedConnect::from_resolution(route, connect, resolution, selected)?
+            };
+            self.one_hop.execute(resolved, request).await
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TransportError {
+pub struct TransportError {
+    failure: TransportFailure,
+    delivery: DeliveryCertainty,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TransportFailure {
     AuthoritySpent,
     AuthorityMismatch,
     Offline,
     Resolution(String),
-    Transport(String),
+    InvalidRequest(String),
+    Connect(String),
+    Exchange(String),
+    ResponseBody(String),
+    Cancelled,
+    TimedOut { limit: Duration },
+    RequestLimit { limit: u64 },
+    ResponseLimit { limit: u64 },
 }
 
-impl From<ForeignValueError> for TransportError {
-    fn from(value: ForeignValueError) -> Self {
-        Self::Resolution(value.to_string())
+impl TransportError {
+    pub fn definitely_unsent(failure: TransportFailure) -> Self {
+        Self {
+            failure,
+            delivery: DeliveryCertainty::DefinitelyUnsent,
+        }
+    }
+
+    pub fn possibly_sent(failure: TransportFailure) -> Self {
+        Self {
+            failure,
+            delivery: DeliveryCertainty::PossiblySent,
+        }
+    }
+
+    pub fn failure(&self) -> &TransportFailure {
+        &self.failure
+    }
+
+    pub fn delivery(&self) -> DeliveryCertainty {
+        self.delivery
     }
 }
+
+fn authority_mismatch() -> TransportError {
+    TransportError::definitely_unsent(TransportFailure::AuthorityMismatch)
+}
+
 impl fmt::Display for TransportError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "foreign transport failed: {self:?}")
+        write!(
+            f,
+            "foreign transport failed: {:?} ({:?})",
+            self.failure, self.delivery
+        )
     }
 }
 impl std::error::Error for TransportError {}

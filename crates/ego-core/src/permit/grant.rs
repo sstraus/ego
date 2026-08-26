@@ -18,7 +18,8 @@ use serde::{Deserialize, Serialize};
 use super::approver::{Approver, HumanApprover, ModeApprover, PermissionDecision, Verdict};
 use super::authority::{Authority, RuleAuthority};
 use super::foreign::{
-    ForeignToolId, ForeignTransportTarget, InvocationDigest, NetworkTarget, Subject, TransportError,
+    ForeignToolId, ForeignTransportTarget, InvocationDigest, PreparedConnect, Subject,
+    TransportError, TransportFailure,
 };
 use super::path::CanonPath;
 use super::prepared_call::{Change, Op, OpName, PreparedCall};
@@ -324,15 +325,21 @@ impl Permit {
         {
             Ok(())
         } else {
-            Err(TransportError::AuthorityMismatch)
+            Err(TransportError::definitely_unsent(
+                TransportFailure::AuthorityMismatch,
+            ))
         }
     }
 
-    pub(crate) fn allows_network(&self, target: &NetworkTarget) -> Result<(), TransportError> {
-        if self.scope.network.as_ref() == Some(target) {
+    pub(crate) fn allows_network(&self, connect: &PreparedConnect) -> Result<(), TransportError> {
+        if self.scope.network.as_ref() == Some(connect.target())
+            && self.scope.http_request_digest.as_ref() == Some(connect.request_digest())
+        {
             Ok(())
         } else {
-            Err(TransportError::AuthorityMismatch)
+            Err(TransportError::definitely_unsent(
+                TransportFailure::AuthorityMismatch,
+            ))
         }
     }
 }
@@ -931,7 +938,7 @@ impl fmt::Display for PermissionRequest {
                     params_digest,
                     TerminalSafe(&transport.to_string())
                 )?,
-                Op::Connect { target } => {
+                Op::Connect { target, .. } => {
                     write!(f, "\n- connect {}", TerminalSafe(&target.to_string()))?;
                 }
             }
@@ -1605,7 +1612,13 @@ fn scope_of(call: &PreparedCall) -> Scope {
                     _ => {}
                 }
             }
-            Op::Connect { target } => scope.network = Some(target.clone()),
+            Op::Connect {
+                target,
+                request_digest,
+            } => {
+                scope.network = Some(target.clone());
+                scope.http_request_digest = Some(request_digest.clone());
+            }
         }
     }
     scope
@@ -1636,7 +1649,7 @@ mod tests {
         Change, DnsResolution, DuplexHandle, DuplexSpawner, EnvPolicy, Fs, GuardedEffects,
         GuardedIo, HttpRequest, IoDenied, NetworkTarget, OneHop, OneHopResponse, Op, PrepareCtx,
         ProcessError, ProcessExecutor, ResolvedConnect, Resolver, Tool, ToolError, ToolResult,
-        TransportError, Typed,
+        TransportError, TransportFailure, Typed,
     };
     use crate::store::evidence::{EvidenceError, EvidencePage, EvidenceStore, EvidenceWriter};
 
@@ -1677,7 +1690,9 @@ mod tests {
             &self,
             _target: NetworkTarget,
         ) -> BoxFuture<'static, Result<DnsResolution, TransportError>> {
-            Box::pin(future::ready(Err(TransportError::AuthorityMismatch)))
+            Box::pin(future::ready(Err(TransportError::definitely_unsent(
+                TransportFailure::AuthorityMismatch,
+            ))))
         }
     }
 
@@ -1687,7 +1702,9 @@ mod tests {
             _connect: ResolvedConnect,
             _request: HttpRequest,
         ) -> BoxFuture<'static, Result<OneHopResponse, TransportError>> {
-            Box::pin(future::ready(Err(TransportError::AuthorityMismatch)))
+            Box::pin(future::ready(Err(TransportError::definitely_unsent(
+                TransportFailure::AuthorityMismatch,
+            ))))
         }
     }
 
@@ -1696,7 +1713,9 @@ mod tests {
             &self,
             _spec: SpawnSpec,
         ) -> BoxFuture<'static, Result<DuplexHandle, TransportError>> {
-            Box::pin(future::ready(Err(TransportError::AuthorityMismatch)))
+            Box::pin(future::ready(Err(TransportError::definitely_unsent(
+                TransportFailure::AuthorityMismatch,
+            ))))
         }
     }
 

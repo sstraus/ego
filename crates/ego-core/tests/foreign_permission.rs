@@ -402,7 +402,10 @@ fn guarded_http_consumes_one_dns_answer_and_rejects_reuse_as_authority_spent() {
         observed.1,
         NetworkTarget::parse("api.example.test:443").expect("target")
     );
-    assert_eq!(observed.2, "192.0.2.10".parse().expect("IP"));
+    assert_eq!(
+        observed.2,
+        "192.0.2.10".parse::<std::net::IpAddr>().expect("IP")
+    );
     assert_eq!(observed.3, HttpRequestDigest::of(&request()));
 }
 

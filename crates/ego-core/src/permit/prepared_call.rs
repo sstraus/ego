@@ -8,7 +8,8 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use super::foreign::{
-    ForeignToolId, ForeignTransportTarget, InvocationDigest, NetworkTarget, Subject,
+    ForeignToolId, ForeignTransportTarget, HttpRequest, HttpRequestDigest, InvocationDigest,
+    NetworkTarget, PreparedConnect, Subject,
 };
 use super::path::CanonPath;
 use super::spawn::SpawnSpec;
@@ -53,7 +54,10 @@ pub enum Op {
         transport: ForeignTransportTarget,
     },
     /// One exact logical or literal network authority.
-    Connect { target: NetworkTarget },
+    Connect {
+        target: NetworkTarget,
+        request_digest: HttpRequestDigest,
+    },
 }
 
 /// What a [`Op::Write`] does to the file it names.
@@ -214,7 +218,7 @@ impl Op {
                 tool: tool.clone(),
                 params_digest: params_digest.clone(),
             },
-            Op::Connect { target } => Subject::Network(target.clone()),
+            Op::Connect { target, .. } => Subject::Network(target.clone()),
         }
     }
 }
@@ -231,16 +235,22 @@ impl PreparedCall {
         tool: ForeignToolId,
         params_digest: InvocationDigest,
         transport: ForeignTransportTarget,
+        request: &HttpRequest,
     ) -> Self {
-        let network = transport.network().cloned();
+        let connect = transport
+            .http_route()
+            .map(|route| PreparedConnect::new(route.target().clone(), request));
         let rendered = tool.to_string();
         let mut ops = vec![Op::Opaque {
             tool,
             params_digest,
             transport,
         }];
-        if let Some(target) = network {
-            ops.push(Op::Connect { target });
+        if let Some(connect) = connect {
+            ops.push(Op::Connect {
+                target: connect.target().clone(),
+                request_digest: connect.request_digest().clone(),
+            });
         }
         Self {
             tool: rendered,
@@ -276,8 +286,11 @@ impl PreparedCall {
         inner_tool: ForeignToolId,
         inner_digest: InvocationDigest,
         transport: ForeignTransportTarget,
+        request: &HttpRequest,
     ) -> Self {
-        let network = transport.network().cloned();
+        let connect = transport
+            .http_route()
+            .map(|route| PreparedConnect::new(route.target().clone(), request));
         let rendered = outer_tool.to_string();
         let mut ops = vec![
             Op::Opaque {
@@ -291,8 +304,11 @@ impl PreparedCall {
                 transport,
             },
         ];
-        if let Some(target) = network {
-            ops.push(Op::Connect { target });
+        if let Some(connect) = connect {
+            ops.push(Op::Connect {
+                target: connect.target().clone(),
+                request_digest: connect.request_digest().clone(),
+            });
         }
         Self {
             tool: rendered,

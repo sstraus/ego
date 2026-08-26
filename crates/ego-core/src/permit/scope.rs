@@ -4,7 +4,9 @@
 
 use super::path::CanonPath;
 use super::spawn::SpawnSpec;
-use super::{ForeignToolId, ForeignTransportTarget, InvocationDigest, NetworkTarget};
+use super::{
+    ForeignToolId, ForeignTransportTarget, HttpRequestDigest, InvocationDigest, NetworkTarget,
+};
 use crate::store::evidence::EvidenceRead;
 
 /// The boundaries a [`Permit`](super::Permit) enforces.
@@ -45,6 +47,7 @@ pub struct Scope {
     pub(super) search_paths: Vec<CanonPath>,
     pub(super) endpoints: Vec<String>,
     pub(super) network: Option<NetworkTarget>,
+    pub(super) http_request_digest: Option<HttpRequestDigest>,
     pub(super) foreign_invocations: Vec<(ForeignToolId, InvocationDigest)>,
     pub(super) foreign_transport: Option<ForeignTransportTarget>,
     pub(super) spawn: Option<SpawnSpec>,

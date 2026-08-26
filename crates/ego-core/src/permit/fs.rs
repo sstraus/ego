@@ -15,9 +15,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use futures::future::{self, BoxFuture};
 
 use super::foreign::{
-    DuplexHandle, DuplexSpawner, ForeignToolId, ForeignTransportTarget, HttpRequest,
-    InvocationDigest, NetworkTarget, OneHop, OneHopResponse, ResolvedConnect, Resolver,
-    TransportError,
+    DuplexHandle, DuplexSpawner, ForeignToolId, ForeignTransportTarget, GuardedHttp, HttpRequest,
+    InvocationDigest, OneHop, OneHopResponse, PreparedConnect, Resolver, TransportError,
+    TransportFailure,
 };
 use super::grant::{Permit, PermitDenied};
 use super::path::CanonPath;
@@ -233,8 +233,7 @@ pub struct GuardedEffects<'a> {
     fs: &'a dyn Fs,
     process: &'a dyn ProcessExecutor,
     evidence: &'a dyn EvidenceStore,
-    resolver: &'a dyn Resolver,
-    one_hop: &'a dyn OneHop,
+    http: GuardedHttp<'a>,
     duplex: &'a dyn DuplexSpawner,
     foreign_spent: AtomicBool,
 }
@@ -254,8 +253,7 @@ impl<'a> GuardedEffects<'a> {
             fs,
             process,
             evidence,
-            resolver,
-            one_hop,
+            http: GuardedHttp::new(resolver, one_hop),
             duplex,
             foreign_spent: AtomicBool::new(false),
         }
@@ -265,32 +263,40 @@ impl<'a> GuardedEffects<'a> {
         &self,
         call: &PreparedCall,
         kind: ForeignKind,
+        request: Option<&HttpRequest>,
     ) -> Result<ForeignClaim, TransportError> {
         let claim = ForeignClaim::from_call(call)?;
         self.permit
             .allows_foreign(&claim.invocations, &claim.transport)?;
-        if let Some(network) = &claim.network {
-            self.permit.allows_network(network)?;
+        if let Some(connect) = &claim.connect {
+            self.permit.allows_network(connect)?;
         }
         if let Some(spawn) = &claim.spawn {
             self.permit
                 .allows_spawn(spawn)
-                .map_err(|_| TransportError::AuthorityMismatch)?;
+                .map_err(|_| authority_mismatch())?;
         }
         match kind {
             ForeignKind::Http
-                if claim.transport.is_http()
-                    && claim.network.as_ref() == claim.transport.network()
+                if claim
+                    .transport
+                    .http_route()
+                    .zip(claim.connect.as_ref())
+                    .zip(request)
+                    .is_some_and(|((route, connect), request)| {
+                        route.target() == connect.target() && connect.matches(request)
+                    })
                     && claim.spawn.is_none() => {}
             ForeignKind::Duplex
                 if claim.transport.is_stdio()
-                    && claim.network.is_none()
+                    && claim.connect.is_none()
+                    && request.is_none()
                     && claim.spawn.is_some() => {}
-            _ => return Err(TransportError::AuthorityMismatch),
+            _ => return Err(authority_mismatch()),
         }
         self.foreign_spent
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .map_err(|_| TransportError::AuthoritySpent)?;
+            .map_err(|_| authority_spent())?;
         Ok(claim)
     }
 
@@ -299,31 +305,15 @@ impl<'a> GuardedEffects<'a> {
         call: PreparedCall,
         request: HttpRequest,
     ) -> BoxFuture<'_, Result<OneHopResponse, TransportError>> {
-        let claim = self.claim_foreign(&call, ForeignKind::Http);
+        let claim = self.claim_foreign(&call, ForeignKind::Http, Some(&request));
         Box::pin(async move {
             let claim = claim?;
-            let network = claim
+            let route = claim
                 .transport
-                .network()
-                .ok_or(TransportError::AuthorityMismatch)?;
-            let connect = match network.ip() {
-                Some(ip) => ResolvedConnect::literal(
-                    claim.transport.clone(),
-                    network.clone(),
-                    ip,
-                    claim.invocations,
-                ),
-                None => {
-                    let resolution = self.resolver.resolve(network.clone()).await?;
-                    ResolvedConnect::from_resolution(
-                        network,
-                        resolution,
-                        claim.invocations,
-                        claim.transport.clone(),
-                    )?
-                }
-            };
-            self.one_hop.execute(connect, request).await
+                .into_http_route()
+                .ok_or_else(authority_mismatch)?;
+            let connect = claim.connect.ok_or_else(authority_mismatch)?;
+            self.http.execute_admitted(route, connect, request).await
         })
     }
 
@@ -331,10 +321,10 @@ impl<'a> GuardedEffects<'a> {
         &self,
         call: PreparedCall,
     ) -> BoxFuture<'_, Result<DuplexHandle, TransportError>> {
-        let claim = self.claim_foreign(&call, ForeignKind::Duplex);
+        let claim = self.claim_foreign(&call, ForeignKind::Duplex, None);
         Box::pin(async move {
             let claim = claim?;
-            let spec = claim.spawn.ok_or(TransportError::AuthorityMismatch)?;
+            let spec = claim.spawn.ok_or_else(authority_mismatch)?;
             self.duplex.spawn(spec).await
         })
     }
@@ -534,7 +524,7 @@ impl GuardedIo for GuardedEffects<'_> {
 struct ForeignClaim {
     invocations: Vec<(ForeignToolId, InvocationDigest)>,
     transport: ForeignTransportTarget,
-    network: Option<NetworkTarget>,
+    connect: Option<PreparedConnect>,
     spawn: Option<SpawnSpec>,
 }
 
@@ -547,7 +537,7 @@ impl ForeignClaim {
     fn from_call(call: &PreparedCall) -> Result<Self, TransportError> {
         let mut invocations = Vec::new();
         let mut transport = None;
-        let mut network = None;
+        let mut connect = None;
         let mut spawn = None;
         for op in &call.ops {
             match op {
@@ -557,24 +547,40 @@ impl ForeignClaim {
                     transport: route,
                 } => {
                     if transport.as_ref().is_some_and(|existing| existing != route) {
-                        return Err(TransportError::AuthorityMismatch);
+                        return Err(authority_mismatch());
                     }
                     transport = Some(route.clone());
                     invocations.push((tool.clone(), params_digest.clone()));
                 }
-                Op::Connect { target } if network.is_none() => network = Some(target.clone()),
+                Op::Connect {
+                    target,
+                    request_digest,
+                } if connect.is_none() => {
+                    connect = Some(PreparedConnect::from_parts(
+                        target.clone(),
+                        request_digest.clone(),
+                    ));
+                }
                 Op::Spawn { spec } if spawn.is_none() => spawn = Some(spec.clone()),
-                _ => return Err(TransportError::AuthorityMismatch),
+                _ => return Err(authority_mismatch()),
             }
         }
         if invocations.is_empty() {
-            return Err(TransportError::AuthorityMismatch);
+            return Err(authority_mismatch());
         }
         Ok(Self {
             invocations,
-            transport: transport.ok_or(TransportError::AuthorityMismatch)?,
-            network,
+            transport: transport.ok_or_else(authority_mismatch)?,
+            connect,
             spawn,
         })
     }
+}
+
+fn authority_mismatch() -> TransportError {
+    TransportError::definitely_unsent(TransportFailure::AuthorityMismatch)
+}
+
+fn authority_spent() -> TransportError {
+    TransportError::definitely_unsent(TransportFailure::AuthoritySpent)
 }
