@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 use std::num::NonZeroUsize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::task::{Poll, Waker};
 
@@ -20,8 +20,9 @@ use ego_core::event::domain::DomainEvent;
 use ego_core::event::id::SessionId;
 use ego_core::event::time::{Clock, Timestamp};
 use ego_core::run::{
-    IdSource, RunAppend, RunController, RunExecutor, RunExecutorError,
-    RunHandle, RunId, RunRetention, RunRevision, RunSettlement, RunStart, RunTransaction,
+    IdSource, RunAppend, RunController, RunExecutionBindings, RunExecutor, RunExecutorError,
+    RunHandle, RunId, RunPreparation, RunRetention, RunRevision, RunRoot, RunSettlement,
+    RunStart, RunTransaction,
 };
 use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
 
@@ -29,6 +30,49 @@ use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, St
 struct AcpStore {
     entries: Mutex<BTreeMap<SessionId, Vec<SessionEntry>>>,
     sequence: Arc<Mutex<Vec<&'static str>>>,
+}
+
+#[derive(Default)]
+struct FixedRootResolver {
+    calls: Mutex<Vec<PathBuf>>,
+}
+
+impl FixedRootResolver {
+    fn calls(&self) -> Vec<PathBuf> {
+        self.calls.lock().expect("root resolver calls").clone()
+    }
+}
+
+impl ego_acp::serve::RootResolver for FixedRootResolver {
+    fn resolve(
+        &self,
+        cwd: &Path,
+    ) -> Result<RunRoot, ego_acp::serve::RootResolveError> {
+        self.calls
+            .lock()
+            .expect("root resolver calls")
+            .push(cwd.to_path_buf());
+        RunRoot::new(cwd.to_string_lossy().to_string())
+            .map_err(|error| ego_acp::serve::RootResolveError::new(error.to_string()))
+    }
+}
+
+#[derive(Default)]
+struct RecordingExecutionSpawner {
+    spawned: Mutex<usize>,
+}
+
+impl RecordingExecutionSpawner {
+    fn spawned(&self) -> usize {
+        *self.spawned.lock().expect("execution spawns")
+    }
+}
+
+impl ego_acp::serve::ExecutionSpawner for RecordingExecutionSpawner {
+    fn spawn(&self, execution: BoxFuture<'static, ()>) {
+        *self.spawned.lock().expect("execution spawns") += 1;
+        tokio::spawn(execution);
+    }
 }
 
 impl AcpStore {
@@ -136,6 +180,7 @@ impl SessionStore for AcpStore {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ExecutorCall {
+    Prepare,
     Start(RunId),
     Recover(RunId),
     Submit(RunId),
@@ -146,8 +191,11 @@ struct AcpExecutor {
     calls: Mutex<Vec<ExecutorCall>>,
     settlements: Mutex<VecDeque<Result<ego_core::run::RunSettlement, RunExecutorError>>>,
     gate: Mutex<SubmitGate>,
+    started_roots: Mutex<Vec<(RunId, RunRoot)>>,
     sequence: Arc<Mutex<Vec<&'static str>>>,
 }
+
+struct PreparedToken(u64);
 
 struct SubmitGate {
     released: bool,
@@ -181,12 +229,20 @@ impl AcpExecutor {
             calls: Mutex::new(Vec::new()),
             settlements: Mutex::new(VecDeque::new()),
             gate: Mutex::new(SubmitGate::default()),
+            started_roots: Mutex::new(Vec::new()),
             sequence,
         }
     }
 
     fn calls(&self) -> Vec<ExecutorCall> {
         self.calls.lock().expect("ACP executor calls").clone()
+    }
+
+    fn started_roots(&self) -> Vec<(RunId, RunRoot)> {
+        self.started_roots
+            .lock()
+            .expect("ACP executor roots")
+            .clone()
     }
 
     fn allow_submit(&self) {
@@ -231,10 +287,28 @@ impl AcpExecutor {
 }
 
 impl RunExecutor for AcpExecutor {
+    type Prepared = PreparedToken;
+
+    fn prepare<'a>(
+        &'a self,
+        _request: &'a RunPreparation,
+    ) -> BoxFuture<'a, Result<Self::Prepared, RunExecutorError>> {
+        self.calls
+            .lock()
+            .expect("ACP executor calls")
+            .push(ExecutorCall::Prepare);
+        self.sequence.lock().expect("ACP executor sequence").push("prepare");
+        Box::pin(future::ready(Ok(PreparedToken(1))))
+    }
+
     fn start<'a>(
         &'a self,
         request: &'a RunStart,
     ) -> BoxFuture<'a, Result<RunHandle, RunExecutorError>> {
+        self.started_roots
+            .lock()
+            .expect("ACP executor roots")
+            .push((request.run_id, request.root.clone()));
         self.calls
             .lock()
             .expect("ACP executor calls")
@@ -251,14 +325,19 @@ impl RunExecutor for AcpExecutor {
             .lock()
             .expect("ACP executor calls")
             .push(ExecutorCall::Recover(*run));
-        Box::pin(future::ready(Ok(ego_core::run::RecoveryEvidence::Running)))
+        Box::pin(future::ready(Ok(ego_core::run::RecoveryEvidence::Running(
+            RunHandle::new(*run),
+        ))))
     }
 
     fn submit<'a>(
         &'a self,
         handle: &'a RunHandle,
         _prompt: &'a str,
+        prepared: Self::Prepared,
+        _bindings: RunExecutionBindings,
     ) -> BoxFuture<'a, Result<ego_core::run::RunSettlement, RunExecutorError>> {
+        let _prepared_serial = prepared.0;
         self.calls
             .lock()
             .expect("ACP executor calls")
@@ -365,6 +444,13 @@ fn controller(store: Arc<AcpStore>, executor: Arc<AcpExecutor>) -> Arc<Controlle
     ))
 }
 
+fn test_ports() -> (Arc<FixedRootResolver>, Arc<RecordingExecutionSpawner>) {
+    (
+        Arc::new(FixedRootResolver::default()),
+        Arc::new(RecordingExecutionSpawner::default()),
+    )
+}
+
 struct Connected {
     to_agent: mpsc::UnboundedSender<String>,
     from_agent: mpsc::UnboundedReceiver<String>,
@@ -373,7 +459,11 @@ struct Connected {
 }
 
 impl Connected {
-    fn with(controller: Arc<Controller>) -> Self {
+    fn with(
+        controller: Arc<Controller>,
+        roots: Arc<FixedRootResolver>,
+        spawner: Arc<RecordingExecutionSpawner>,
+    ) -> Self {
         let (to_agent, to_agent_rx) = mpsc::unbounded::<String>();
         let (from_agent, from_agent_rx) = mpsc::unbounded::<String>();
         let transport = Lines::new(
@@ -383,7 +473,15 @@ impl Connected {
         Self {
             to_agent,
             from_agent: from_agent_rx,
-            agent: tokio::spawn(ego_acp::serve::agent(controller).connect_to(transport)),
+            agent: tokio::spawn(
+                ego_acp::serve::agent(
+                    controller,
+                    roots,
+                    spawner,
+                    Arc::new(AcpIds::default()),
+                )
+                .connect_to(transport),
+            ),
             next_id: 1,
         }
     }
@@ -476,8 +574,18 @@ async fn session_new_prompt_and_baseline_cancel_notification_drive_the_shared_co
     let store = Arc::new(AcpStore::with_sequence(Arc::clone(&sequence)));
     let executor = Arc::new(AcpExecutor::with_sequence(Arc::clone(&sequence)));
     let controller = controller(Arc::clone(&store), Arc::clone(&executor));
-    let mut connection = Connected::with(Arc::clone(&controller));
+    let (roots, spawner) = test_ports();
+    let mut connection = Connected::with(Arc::clone(&controller), Arc::clone(&roots), Arc::clone(&spawner));
     let session = connection.open("/workspace/project").await;
+    assert_eq!(
+        roots.calls(),
+        vec![PathBuf::from("/workspace/project")]
+    );
+    assert!(store
+        .entries
+        .lock()
+        .expect("session entries")
+        .is_empty());
     let prompt_id = connection
         .send(
             "session/prompt",
@@ -487,20 +595,49 @@ async fn session_new_prompt_and_baseline_cancel_notification_drive_the_shared_co
             }),
         )
         .await;
+    executor.wait_for_submit_start().await;
     connection
         .notify("session/cancel", serde_json::json!({ "sessionId": session }))
         .await;
     let (response, _) = connection.response_to(prompt_id).await;
     assert_eq!(response["result"]["stopReason"], "cancelled");
+    assert_eq!(spawner.spawned(), 1);
     let id = session.parse::<SessionId>().expect("session identity");
     let run_id = store
         .transactions(id)
         .first()
         .expect("start transaction")
         .run_id();
-    let run = controller.status(run_id).expect("run status");
+    let run = controller.status(run_id).await.expect("run status");
     assert_eq!(run.status(), ego_core::run::RunStatus::Cancelled);
-    assert_eq!(store.transactions(id).len(), 2);
+    assert_eq!(
+        executor.started_roots(),
+        vec![(run_id, RunRoot::new("/workspace/project").expect("root"))]
+    );
+    let transactions = store.transactions(id);
+    assert_eq!(transactions.len(), 3);
+    assert!(matches!(
+        transactions[0].command(),
+        ego_core::run::RunCommand::CommandAdmitted { .. }
+    ));
+    assert_eq!(
+        transactions[0].root(),
+        RunRoot::new("/workspace/project").expect("root")
+    );
+    assert!(matches!(
+        transactions[1].command(),
+        ego_core::run::RunCommand::CancelRequested { .. }
+    ));
+    assert!(matches!(
+        transactions[2].command(),
+        ego_core::run::RunCommand::CommandSettled { .. }
+    ));
+    assert_eq!(transactions[0].revision(), RunRevision::new(1));
+    assert_eq!(transactions[1].revision(), RunRevision::new(2));
+    assert_eq!(transactions[2].revision(), RunRevision::new(3));
+    assert_eq!(transactions[0].status(), ego_core::run::RunStatus::Running);
+    assert_eq!(transactions[1].status(), ego_core::run::RunStatus::Cancelling);
+    assert_eq!(transactions[2].status(), ego_core::run::RunStatus::Cancelled);
     assert_eq!(
         executor
             .calls()
@@ -510,8 +647,12 @@ async fn session_new_prompt_and_baseline_cancel_notification_drive_the_shared_co
         1
     );
     let sequence = sequence.lock().expect("ACP order").clone();
-    assert_eq!(sequence.iter().filter(|step| **step == "commit").count(), 2);
-    assert!(sequence.windows(2).any(|pair| pair == ["commit", "interrupt"]));
+    assert_eq!(
+        sequence.as_slice(),
+        [
+            "prepare", "commit", "start", "submit", "commit", "interrupt", "commit"
+        ]
+    );
     connection.finish().await;
 }
 
@@ -521,7 +662,12 @@ async fn duplicate_cancel_replays_one_receipt_and_one_interrupt() {
     let store = Arc::new(AcpStore::with_sequence(Arc::clone(&sequence)));
     let executor = Arc::new(AcpExecutor::with_sequence(Arc::clone(&sequence)));
     let controller = controller(Arc::clone(&store), Arc::clone(&executor));
-    let mut connection = Connected::with(Arc::clone(&controller));
+    let (roots, spawner) = test_ports();
+    let mut connection = Connected::with(
+        Arc::clone(&controller),
+        Arc::clone(&roots),
+        Arc::clone(&spawner),
+    );
     let session = connection.open("/workspace/project").await;
     let prompt_id = connection
         .send(
@@ -529,13 +675,38 @@ async fn duplicate_cancel_replays_one_receipt_and_one_interrupt() {
             serde_json::json!({"sessionId": session, "prompt": [{"type":"text","text":"blocked"}]}),
         )
         .await;
+    executor.wait_for_submit_start().await;
     let cancel = serde_json::json!({ "sessionId": session });
     connection.notify("session/cancel", cancel.clone()).await;
     connection.notify("session/cancel", cancel).await;
     let (response, _) = connection.response_to(prompt_id).await;
     assert_eq!(response["result"]["stopReason"], "cancelled");
     let id = session.parse::<SessionId>().expect("session identity");
-    assert_eq!(store.transactions(id).len(), 2);
+    let transactions = store.transactions(id);
+    assert_eq!(transactions.len(), 3);
+    assert!(matches!(
+        transactions[0].command(),
+        ego_core::run::RunCommand::CommandAdmitted { .. }
+    ));
+    assert!(matches!(
+        transactions[1].command(),
+        ego_core::run::RunCommand::CancelRequested { .. }
+    ));
+    assert!(matches!(
+        transactions[2].command(),
+        ego_core::run::RunCommand::CommandSettled { .. }
+    ));
+    assert_eq!(transactions[0].revision(), RunRevision::new(1));
+    assert_eq!(transactions[1].revision(), RunRevision::new(2));
+    assert_eq!(transactions[2].revision(), RunRevision::new(3));
+    assert_eq!(transactions[0].status(), ego_core::run::RunStatus::Running);
+    assert_eq!(transactions[1].status(), ego_core::run::RunStatus::Cancelling);
+    assert_eq!(transactions[2].status(), ego_core::run::RunStatus::Cancelled);
+    let run_id = transactions[0].run_id();
+    assert_eq!(
+        controller.status(run_id).await.expect("cancelled status").status(),
+        ego_core::run::RunStatus::Cancelled
+    );
     assert_eq!(
         executor
             .calls()
@@ -545,21 +716,31 @@ async fn duplicate_cancel_replays_one_receipt_and_one_interrupt() {
         1
     );
     let sequence = sequence.lock().expect("ACP order").clone();
-    assert_eq!(sequence.iter().filter(|step| **step == "commit").count(), 2);
-    assert!(sequence.windows(2).any(|pair| pair == ["commit", "interrupt"]));
+    assert_eq!(
+        sequence.as_slice(),
+        [
+            "prepare", "commit", "start", "submit", "commit", "interrupt", "commit"
+        ]
+    );
     connection.finish().await;
 }
 
 #[tokio::test]
 async fn noninteractive_permission_failure_returns_a_wire_error_without_waiting_for_a_human() {
-    let store = Arc::new(AcpStore::default());
-    let executor = Arc::new(AcpExecutor::default());
+    let sequence = Arc::new(Mutex::new(Vec::new()));
+    let store = Arc::new(AcpStore::with_sequence(Arc::clone(&sequence)));
+    let executor = Arc::new(AcpExecutor::with_sequence(Arc::clone(&sequence)));
     executor.settle_next(RunSettlement::permission_required(
         "foreign network access",
         ego_core::run::DeniedBy::Nobody,
     ));
     let controller = controller(Arc::clone(&store), Arc::clone(&executor));
-    let mut connection = Connected::with(controller);
+    let (roots, spawner) = test_ports();
+    let mut connection = Connected::with(
+        Arc::clone(&controller),
+        Arc::clone(&roots),
+        Arc::clone(&spawner),
+    );
     let session = connection.open("/workspace/project").await;
     let prompt_id = connection
         .send(
@@ -579,7 +760,31 @@ async fn noninteractive_permission_failure_returns_a_wire_error_without_waiting_
         "the turn stopped because foreign network access needed a permission nobody could grant"
     );
     let id = session.parse::<SessionId>().expect("session identity");
-    assert_eq!(store.transactions(id).len(), 2);
+    let transactions = store.transactions(id);
+    assert_eq!(transactions.len(), 2);
+    assert!(matches!(
+        transactions[0].command(),
+        ego_core::run::RunCommand::CommandAdmitted { .. }
+    ));
+    assert_eq!(transactions[0].revision(), RunRevision::new(1));
+    assert_eq!(transactions[1].revision(), RunRevision::new(2));
+    assert!(matches!(
+        transactions[1].command(),
+        ego_core::run::RunCommand::CommandSettled { .. }
+    ));
+    assert_eq!(transactions[0].status(), ego_core::run::RunStatus::Running);
+    assert_eq!(transactions[1].status(), ego_core::run::RunStatus::Settled);
+    let run_id = transactions[0].run_id();
+    assert_eq!(
+        controller.status(run_id).await
+            .expect("permission status")
+            .status(),
+        ego_core::run::RunStatus::Settled
+    );
+    assert_eq!(
+        sequence.lock().expect("permission order").as_slice(),
+        ["prepare", "commit", "start", "submit", "commit"]
+    );
     assert!(executor.any_submit_started());
     assert!(!executor.calls().iter().any(|call| matches!(call, ExecutorCall::Interrupt(_))));
     connection.finish().await;
@@ -587,10 +792,12 @@ async fn noninteractive_permission_failure_returns_a_wire_error_without_waiting_
 
 #[tokio::test]
 async fn immediate_cancel_is_admitted_before_effect_and_does_not_retarget_a_later_turn() {
-    let store = Arc::new(AcpStore::default());
-    let executor = Arc::new(AcpExecutor::default());
+    let sequence = Arc::new(Mutex::new(Vec::new()));
+    let store = Arc::new(AcpStore::with_sequence(Arc::clone(&sequence)));
+    let executor = Arc::new(AcpExecutor::with_sequence(Arc::clone(&sequence)));
     let controller = controller(Arc::clone(&store), Arc::clone(&executor));
-    let mut connection = Connected::with(Arc::clone(&controller));
+    let (roots, spawner) = test_ports();
+    let mut connection = Connected::with(Arc::clone(&controller), roots, spawner);
     let session = connection.open("/workspace/project").await;
     connection
         .notify("session/cancel", serde_json::json!({ "sessionId": session }))
@@ -612,17 +819,43 @@ async fn immediate_cancel_is_admitted_before_effect_and_does_not_retarget_a_late
     executor.allow_submit();
     let (response, _) = connection.response_to(prompt_id).await;
     assert_eq!(response["result"]["stopReason"], "end_turn");
-    assert_eq!(store.transactions(id).len(), 2);
+    let transactions = store.transactions(id);
+    assert_eq!(transactions.len(), 2);
+    assert!(matches!(
+        transactions[0].command(),
+        ego_core::run::RunCommand::CommandAdmitted { .. }
+    ));
+    assert_eq!(transactions[0].revision(), RunRevision::new(1));
+    assert_eq!(transactions[1].revision(), RunRevision::new(2));
+    assert!(matches!(
+        transactions[1].command(),
+        ego_core::run::RunCommand::CommandSettled { .. }
+    ));
+    assert_eq!(transactions[0].status(), ego_core::run::RunStatus::Running);
+    assert_eq!(transactions[1].status(), ego_core::run::RunStatus::Settled);
+    let run_id = transactions[0].run_id();
+    assert_eq!(
+        controller.status(run_id).await
+            .expect("successful status")
+            .status(),
+        ego_core::run::RunStatus::Settled
+    );
+    assert_eq!(
+        sequence.lock().expect("successful order").as_slice(),
+        ["prepare", "commit", "start", "submit", "commit"]
+    );
     assert!(!executor.calls().iter().any(|call| matches!(call, ExecutorCall::Interrupt(_))));
     connection.finish().await;
 }
 
 #[tokio::test]
 async fn unknown_and_between_turn_cancel_notifications_have_no_store_or_executor_effect() {
-    let store = Arc::new(AcpStore::default());
-    let executor = Arc::new(AcpExecutor::default());
+    let sequence = Arc::new(Mutex::new(Vec::new()));
+    let store = Arc::new(AcpStore::with_sequence(Arc::clone(&sequence)));
+    let executor = Arc::new(AcpExecutor::with_sequence(Arc::clone(&sequence)));
     let controller = controller(Arc::clone(&store), Arc::clone(&executor));
-    let mut connection = Connected::with(controller);
+    let (roots, spawner) = test_ports();
+    let mut connection = Connected::with(Arc::clone(&controller), roots, spawner);
     let session = connection.open("/workspace/project").await;
     connection
         .notify(
@@ -650,17 +883,47 @@ async fn unknown_and_between_turn_cancel_notifications_have_no_store_or_executor
     executor.allow_submit();
     let (response, _) = connection.response_to(prompt_id).await;
     assert_eq!(response["result"]["stopReason"], "end_turn");
-    assert_eq!(store.transactions(id).len(), 2);
+    let transactions = store.transactions(id);
+    assert_eq!(transactions.len(), 2);
+    assert!(matches!(
+        transactions[0].command(),
+        ego_core::run::RunCommand::CommandAdmitted { .. }
+    ));
+    assert_eq!(transactions[0].revision(), RunRevision::new(1));
+    assert_eq!(transactions[1].revision(), RunRevision::new(2));
+    assert!(matches!(
+        transactions[1].command(),
+        ego_core::run::RunCommand::CommandSettled { .. }
+    ));
+    assert_eq!(transactions[0].status(), ego_core::run::RunStatus::Running);
+    assert_eq!(transactions[1].status(), ego_core::run::RunStatus::Settled);
+    let run_id = transactions[0].run_id();
+    assert_eq!(
+        controller.status(run_id).await
+            .expect("successful status")
+            .status(),
+        ego_core::run::RunStatus::Settled
+    );
+    assert_eq!(
+        sequence.lock().expect("successful order").as_slice(),
+        ["prepare", "commit", "start", "submit", "commit"]
+    );
     assert!(!executor.calls().iter().any(|call| matches!(call, ExecutorCall::Interrupt(_))));
     connection.finish().await;
 }
 
 #[tokio::test]
 async fn disconnect_detaches_wire_subscription_without_cancelling_the_durable_run() {
-    let store = Arc::new(AcpStore::default());
-    let executor = Arc::new(AcpExecutor::default());
+    let sequence = Arc::new(Mutex::new(Vec::new()));
+    let store = Arc::new(AcpStore::with_sequence(Arc::clone(&sequence)));
+    let executor = Arc::new(AcpExecutor::with_sequence(Arc::clone(&sequence)));
     let controller = controller(Arc::clone(&store), Arc::clone(&executor));
-    let mut connection = Connected::with(Arc::clone(&controller));
+    let (roots, spawner) = test_ports();
+    let mut connection = Connected::with(
+        Arc::clone(&controller),
+        Arc::clone(&roots),
+        Arc::clone(&spawner),
+    );
     let session = connection.open("/workspace/project").await;
     let prompt_id = connection
         .send(
@@ -678,7 +941,14 @@ async fn disconnect_detaches_wire_subscription_without_cancelling_the_durable_ru
         .first()
         .expect("run transaction after disconnect")
         .run_id();
-    let run = controller.status(run_id).expect("run after disconnect");
+    assert_eq!(store.transactions(id).len(), 1);
+    assert_eq!(store.transactions(id)[0].revision(), RunRevision::new(1));
+    let run = controller.status(run_id).await.expect("run after disconnect");
     assert_eq!(run.status(), ego_core::run::RunStatus::Running);
     assert!(!executor.calls().iter().any(|call| matches!(call, ExecutorCall::Interrupt(_))));
+    assert_eq!(
+        sequence.lock().expect("disconnect order").as_slice(),
+        ["prepare", "commit", "start", "submit"]
+    );
+    assert_eq!(spawner.spawned(), 1);
 }
