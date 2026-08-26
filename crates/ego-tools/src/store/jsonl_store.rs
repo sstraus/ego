@@ -236,7 +236,7 @@ fn log_manifest_facts(log: &[u8]) -> Option<LogManifestFacts> {
                     ..
                 } = transaction.command()
                 {
-                    model = Some(admitted_model.clone());
+                    model = Some(admitted_model.0.clone());
                 }
             }
         }

@@ -36,6 +36,7 @@ use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::config::ModelRef;
 use crate::event::id::SessionId;
 use crate::event::time::{Clock, Timestamp};
 use crate::generator::capabilities::ModelCapabilities;
@@ -563,7 +564,7 @@ pub enum RunCommand {
         lease: TurnLease,
         executor_id: Uuid,
         prompt: String,
-        model: String,
+        model: ModelRef,
         start: bool,
     },
     CancelRequested {
@@ -591,7 +592,7 @@ pub struct StartRequest {
     root: RunRoot,
     request_id: RequestId,
     digest: RequestDigest,
-    model: String,
+    requested_model: Option<ModelRef>,
     prompt: String,
 }
 
@@ -600,15 +601,15 @@ impl StartRequest {
         root: RunRoot,
         request_id: RequestId,
         digest: RequestDigest,
-        model: String,
-        prompt: String,
+        requested_model: Option<ModelRef>,
+        prompt: impl Into<String>,
     ) -> Self {
         Self {
             root,
             request_id,
             digest,
-            model,
-            prompt,
+            requested_model,
+            prompt: prompt.into(),
         }
     }
 }
@@ -678,8 +679,27 @@ pub struct CancelKey {
 pub struct RunPreparation {
     pub run_id: RunId,
     pub root: RunRoot,
-    pub model: String,
+    pub requested_model: Option<ModelRef>,
     pub continuation: bool,
+}
+
+pub struct RunPrepared<P> {
+    model: ModelRef,
+    capability: P,
+}
+
+impl<P> RunPrepared<P> {
+    pub fn new(model: ModelRef, capability: P) -> Self {
+        Self { model, capability }
+    }
+
+    pub fn model(&self) -> &ModelRef {
+        &self.model
+    }
+
+    pub fn into_parts(self) -> (ModelRef, P) {
+        (self.model, self.capability)
+    }
 }
 
 /// Executor start request for the first admitted prompt.
@@ -687,22 +707,52 @@ pub struct RunPreparation {
 pub struct RunStart {
     pub run_id: RunId,
     pub root: RunRoot,
-    pub model: String,
+    pub model: ModelRef,
 }
 
 /// Opaque live identity held by the executor adapter.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RunHandle {
     run_id: RunId,
+    authority: Arc<dyn Any + Send + Sync>,
 }
 
 impl RunHandle {
-    pub const fn new(run_id: RunId) -> Self {
-        Self { run_id }
+    pub fn new<A>(run_id: RunId, authority: A) -> Self
+    where
+        A: Any + Send + Sync,
+    {
+        Self {
+            run_id,
+            authority: Arc::new(authority),
+        }
     }
 
     pub const fn run_id(&self) -> RunId {
         self.run_id
+    }
+
+    pub fn authority<A>(&self) -> Option<&A>
+    where
+        A: Any + Send + Sync,
+    {
+        self.authority.downcast_ref::<A>()
+    }
+}
+
+impl Clone for RunHandle {
+    fn clone(&self) -> Self {
+        Self {
+            run_id: self.run_id,
+            authority: Arc::clone(&self.authority),
+        }
+    }
+}
+
+impl std::fmt::Debug for RunHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RunHandle")
+            .field("run_id", &self.run_id)
+            .finish_non_exhaustive()
     }
 }
 
@@ -758,7 +808,7 @@ pub trait RunExecutor: Send + Sync {
     fn prepare<'a>(
         &'a self,
         request: &'a RunPreparation,
-    ) -> BoxFuture<'a, Result<Self::Prepared, RunExecutorError>>;
+    ) -> BoxFuture<'a, Result<RunPrepared<Self::Prepared>, RunExecutorError>>;
 
     fn start<'a>(
         &'a self,
@@ -790,7 +840,7 @@ pub trait RunExecutor: Send + Sync {
     ) -> BoxFuture<'a, Result<(), RunExecutorError>>;
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum RecoveryEvidence {
     Running(RunHandle),
     Terminal,
@@ -990,7 +1040,7 @@ pub enum RunCommandOutcome {
 enum ExecutionMode {
     Start {
         root: RunRoot,
-        model: String,
+        model: ModelRef,
         prompt: String,
         prepared: Box<dyn Any + Send>,
     },
@@ -1091,7 +1141,7 @@ struct AdmissionReceipt {
     lease: TurnLease,
     settlement: Option<RunSettlement>,
     start: bool,
-    model: String,
+    model: ModelRef,
     pruned: bool,
 }
 
@@ -1169,10 +1219,11 @@ where
             .prepare(&RunPreparation {
                 run_id,
                 root: request.root.clone(),
-                model: request.model.clone(),
+                requested_model: request.requested_model.clone(),
                 continuation: false,
             })
             .await?;
+        let (model, prepared) = prepared.into_parts();
         let lease = TurnLease(self.ids.next_uuid());
         let transaction = RunTransaction {
             revision: RunRevision::new(1),
@@ -1185,7 +1236,7 @@ where
                 lease,
                 executor_id: run_id.nonce,
                 prompt: request.prompt.clone(),
-                model: request.model.clone(),
+                model: model.clone(),
                 start: true,
             },
             status: RunStatus::Running,
@@ -1212,7 +1263,7 @@ where
                     },
                     lease,
                     request.prompt,
-                    request.model,
+                    model,
                     prepared,
                     bindings,
                     true,
@@ -1249,18 +1300,26 @@ where
             });
         }
 
+        let model = self.model_of(&folded);
         let prepared = self
             .executor
             .prepare(&RunPreparation {
                 run_id: request.run_id,
                 root: folded.snapshot.root.clone(),
-                model: self.model_of(&folded),
+                requested_model: Some(model.clone()),
                 continuation: true,
             })
             .await?;
+        let (prepared_model, prepared) = prepared.into_parts();
+        if prepared_model != model {
+            return Err(RunError::Integrity {
+                message: format!(
+                    "continuation preparation model mismatch: expected {model:?}, actual {prepared_model:?}"
+                ),
+            });
+        }
         let lease = TurnLease(self.ids.next_uuid());
         let revision = folded.snapshot.revision.next();
-        let model = self.model_of(&folded);
         let transaction = RunTransaction {
             revision,
             run_id: request.run_id,
@@ -1351,7 +1410,7 @@ where
                         model,
                     })
                     .await?;
-                self.bind_handle(run_id, handle)?;
+                self.bind_handle(run_id, &handle)?;
                 self.interrupt_if_cancelling(run_id, lease, &handle).await?;
                 self.executor
                     .submit(&handle, &prompt, *prepared, bindings)
@@ -1371,7 +1430,7 @@ where
                     .expect("run live state")
                     .handles
                     .get(&run_id)
-                    .copied()
+                    .cloned()
                     .ok_or_else(|| RunError::Integrity {
                         message: "continuation has no live or recovered executor handle".to_owned(),
                     })?;
@@ -1381,7 +1440,7 @@ where
                     .await
             }
             ExecutionMode::RecoveredObserve { handle } => {
-                self.bind_handle(run_id, handle)?;
+                self.bind_handle(run_id, &handle)?;
                 self.interrupt_if_cancelling(run_id, lease, &handle).await?;
                 self.executor.observe(&handle, bindings).await
             }
@@ -1426,7 +1485,7 @@ where
         let lease = folded.active_lease()?;
         match self.executor.recover(&run_id).await? {
             RecoveryEvidence::Running(handle) => {
-                self.bind_handle(run_id, handle)?;
+                self.bind_handle(run_id, &handle)?;
                 Ok(RunRecoveryOutcome::Reattached(self.reattachment(
                     folded.snapshot,
                     lease,
@@ -1454,7 +1513,7 @@ where
         snapshot: RunSnapshot,
         lease: TurnLease,
         prompt: String,
-        model: String,
+        model: ModelRef,
         prepared: E::Prepared,
         bindings: RunExecutionBindings,
         start: bool,
@@ -1543,7 +1602,7 @@ where
         }
     }
 
-    fn bind_handle(&self, run_id: RunId, handle: RunHandle) -> Result<(), RunError> {
+    fn bind_handle(&self, run_id: RunId, handle: &RunHandle) -> Result<(), RunError> {
         if handle.run_id != run_id {
             return Err(RunError::Integrity {
                 message: "executor returned a handle for another run".to_owned(),
@@ -1553,7 +1612,7 @@ where
             .lock()
             .expect("run live state")
             .handles
-            .insert(run_id, handle);
+            .insert(run_id, handle.clone());
         Ok(())
     }
 
@@ -1738,7 +1797,7 @@ where
                         .expect("run live state")
                         .handles
                         .get(&request.run_id)
-                        .copied()
+                        .cloned()
                 };
                 if let Some(handle) = handle {
                     self.interrupt_if_cancelling(request.run_id, active.lease, &handle)
@@ -1910,7 +1969,7 @@ where
         retained.into_iter().take(excess).collect()
     }
 
-    fn model_of(&self, folded: &FoldedRun) -> String {
+    fn model_of(&self, folded: &FoldedRun) -> ModelRef {
         folded
             .admissions
             .first()
