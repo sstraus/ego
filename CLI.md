@@ -32,7 +32,7 @@ ego ls                        list sessions (this workspace; --all for every one
 ego fork <ID>                 branch a session
 ego export <ID>               render a session (--format md|json|jsonl)
 ego mcp add NAME --stdio [--cwd DIR] [--inherit-env NAME]... -- COMMAND [ARG]...
-ego mcp add NAME --http URL [--auth none|oauth]
+ego mcp add NAME --http URL [--auth none|oauth] [--allow-insecure-loopback]
 ego mcp rm NAME | ls [--json] | login NAME | reload [NAME]
                               current MCP server management; every variation
                               enters one complete reconciliation path
