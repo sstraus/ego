@@ -101,3 +101,36 @@ pub async fn serve(args: &AcpArgs) -> RunTermination {
         },
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn canonical_roots_accepts_a_directory_but_rejects_an_existing_regular_file() {
+        let owner = tempdir().expect("ACP root owner");
+        let directory = owner.path().join("workspace");
+        std::fs::create_dir(&directory).expect("ACP workspace directory");
+        let regular_file = owner.path().join("workspace-file");
+        std::fs::write(&regular_file, b"not a workspace").expect("ACP workspace file");
+        let roots = CanonicalRoots {
+            base: owner.path().to_path_buf(),
+        };
+
+        assert_eq!(
+            roots
+                .resolve(Path::new("workspace"))
+                .expect("directory is an ACP root")
+                .as_path(),
+            std::fs::canonicalize(directory)
+                .expect("canonical ACP workspace")
+                .as_path()
+        );
+        assert!(
+            roots.resolve(Path::new("workspace-file")).is_err(),
+            "an existing regular file must be rejected as an ACP root: {}",
+            regular_file.display()
+        );
+    }
+}

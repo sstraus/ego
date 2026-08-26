@@ -675,6 +675,61 @@ fn effect_calls(executor: &ScriptedRunExecutor) -> Vec<ExecutorCall> {
         .collect()
 }
 
+fn rewrite_transaction(
+    store: &RecordingSessionStore,
+    session: SessionId,
+    index: usize,
+    mutate: impl FnOnce(&mut serde_json::Value),
+) {
+    let mut entries = store.entries.lock().expect("session entries");
+    let entry = entries
+        .get_mut(&session)
+        .and_then(|entries| entries.get_mut(index))
+        .expect("transaction fixture entry");
+    let SessionEntry::RunTransaction(transaction) = entry else {
+        panic!("transaction fixture entry was an event");
+    };
+    let mut value = serde_json::to_value(&*transaction).expect("transaction serialises");
+    mutate(&mut value);
+    *transaction = serde_json::from_value(value).expect("mutated transaction remains valid");
+}
+
+fn assert_corrupt_run_is_rejected_everywhere(
+    controller: &Controller,
+    executor: &ScriptedRunExecutor,
+    store: &RecordingSessionStore,
+    run: RunId,
+    session: SessionId,
+    request_id: u128,
+    expected_revision: RunRevision,
+) {
+    let calls_before = executor.calls();
+    let transactions_before = store.transactions(session);
+    assert!(matches!(
+        futures::executor::block_on(controller.status(run)),
+        Err(ego_core::run::RunError::Integrity { .. })
+    ));
+    assert!(matches!(
+        futures::executor::block_on(controller.continue_run(
+            ContinueRequest::new(
+                run,
+                request(request_id),
+                digest("corrupt-fold"),
+                expected_revision,
+                "corrupt fold",
+            ),
+            bindings(),
+        )),
+        Err(ego_core::run::RunError::Integrity { .. })
+    ));
+    assert!(matches!(
+        futures::executor::block_on(controller.recover(run, bindings())),
+        Err(ego_core::run::RunError::Integrity { .. })
+    ));
+    assert_eq!(store.transactions(session), transactions_before);
+    assert_eq!(executor.calls(), calls_before);
+}
+
 #[test]
 fn run_prepared_exposes_resolved_model_and_opaque_capability_parts() {
     let prepared = RunPrepared::new(model_ref("model/test"), PreparedToken(7));
@@ -891,6 +946,389 @@ fn submit_error_publishes_uncertain_settlement_and_completes_subscription() {
             ExecutorCall::Start(run),
             ExecutorCall::Submit(run),
         ]
+    );
+}
+
+#[test]
+fn folding_rejects_a_checksum_valid_admitted_status_that_is_not_running() {
+    let store = Arc::new(RecordingSessionStore::default());
+    let executor = Arc::new(ScriptedRunExecutor::default());
+    let controller = controller(Arc::clone(&store), Arc::clone(&executor));
+    let admission = admitted_start(&controller, start("/fold-admitted", 30, "admitted"));
+    let run = admission.run_id();
+    let session = admission.session_id();
+    rewrite_transaction(&store, session, 0, |value| {
+        value["status"] = serde_json::json!("settled");
+    });
+
+    assert_corrupt_run_is_rejected_everywhere(
+        &controller,
+        &executor,
+        &store,
+        run,
+        session,
+        130,
+        RunRevision::new(1),
+    );
+}
+
+#[test]
+fn folding_rejects_a_checksum_valid_cancel_status_that_is_not_cancelling() {
+    let store = Arc::new(RecordingSessionStore::default());
+    let executor = Arc::new(ScriptedRunExecutor::default());
+    let controller = controller(Arc::clone(&store), Arc::clone(&executor));
+    let admission = admitted_start(&controller, start("/fold-cancel", 31, "cancel"));
+    let run = admission.run_id();
+    let session = admission.session_id();
+    let key = admission.cancel_key().clone();
+    futures::executor::block_on(controller.cancel_admitted(&key)).expect("cancel admission");
+    rewrite_transaction(&store, session, 1, |value| {
+        value["status"] = serde_json::json!("running");
+    });
+
+    assert_corrupt_run_is_rejected_everywhere(
+        &controller,
+        &executor,
+        &store,
+        run,
+        session,
+        131,
+        RunRevision::new(2),
+    );
+}
+
+#[test]
+fn folding_rejects_a_checksum_valid_settled_status_that_disagrees_with_its_settlement() {
+    let store = Arc::new(RecordingSessionStore::default());
+    let executor = Arc::new(ScriptedRunExecutor::default());
+    let controller = controller(Arc::clone(&store), Arc::clone(&executor));
+    let admission = admitted_start(&controller, start("/fold-settled", 32, "settled"));
+    let run = admission.run_id();
+    let session = admission.session_id();
+    executor.allow_effects();
+    execute(&controller, admission.into_execution());
+    rewrite_transaction(&store, session, 1, |value| {
+        value["status"] = serde_json::json!("running");
+    });
+
+    assert_corrupt_run_is_rejected_everywhere(
+        &controller,
+        &executor,
+        &store,
+        run,
+        session,
+        132,
+        RunRevision::new(2),
+    );
+}
+
+#[test]
+fn folding_rejects_a_malformed_first_admission_start_flag() {
+    let store = Arc::new(RecordingSessionStore::default());
+    let executor = Arc::new(ScriptedRunExecutor::default());
+    let controller = controller(Arc::clone(&store), Arc::clone(&executor));
+    let admission = admitted_start(&controller, start("/fold-first", 33, "first"));
+    let run = admission.run_id();
+    let session = admission.session_id();
+    rewrite_transaction(&store, session, 0, |value| {
+        value["command"]["start"] = serde_json::json!(false);
+    });
+
+    assert_corrupt_run_is_rejected_everywhere(
+        &controller,
+        &executor,
+        &store,
+        run,
+        session,
+        133,
+        RunRevision::new(1),
+    );
+}
+
+#[test]
+fn folding_rejects_a_malformed_first_admission_expected_revision() {
+    let store = Arc::new(RecordingSessionStore::default());
+    let executor = Arc::new(ScriptedRunExecutor::default());
+    let controller = controller(Arc::clone(&store), Arc::clone(&executor));
+    let admission = admitted_start(&controller, start("/fold-first-revision", 34, "first"));
+    let run = admission.run_id();
+    let session = admission.session_id();
+    rewrite_transaction(&store, session, 0, |value| {
+        value["command"]["expected_revision"] = serde_json::json!(1);
+    });
+
+    assert_corrupt_run_is_rejected_everywhere(
+        &controller,
+        &executor,
+        &store,
+        run,
+        session,
+        134,
+        RunRevision::new(1),
+    );
+}
+
+#[test]
+fn folding_rejects_a_malformed_continuation_start_flag() {
+    let store = Arc::new(RecordingSessionStore::default());
+    let executor = Arc::new(ScriptedRunExecutor::default());
+    let controller = controller(Arc::clone(&store), Arc::clone(&executor));
+    let admission = admitted_start(&controller, start("/fold-continuation", 34, "first"));
+    let run = admission.run_id();
+    let session = admission.session_id();
+    executor.allow_effects();
+    execute(&controller, admission.into_execution());
+    let settled = futures::executor::block_on(controller.status(run)).expect("settled start");
+    let continuation = admitted_continue(
+        &controller,
+        ContinueRequest::new(
+            run,
+            request(35),
+            digest("continuation"),
+            settled.revision(),
+            "continuation",
+        ),
+    );
+    drop(continuation);
+    rewrite_transaction(&store, session, 2, |value| {
+        value["command"]["start"] = serde_json::json!(true);
+    });
+
+    assert_corrupt_run_is_rejected_everywhere(
+        &controller,
+        &executor,
+        &store,
+        run,
+        session,
+        135,
+        RunRevision::new(3),
+    );
+}
+
+#[test]
+fn folding_rejects_a_malformed_continuation_expected_revision() {
+    let store = Arc::new(RecordingSessionStore::default());
+    let executor = Arc::new(ScriptedRunExecutor::default());
+    let controller = controller(Arc::clone(&store), Arc::clone(&executor));
+    let admission = admitted_start(
+        &controller,
+        start("/fold-continuation-revision", 35, "first"),
+    );
+    let run = admission.run_id();
+    let session = admission.session_id();
+    executor.allow_effects();
+    execute(&controller, admission.into_execution());
+    let settled = futures::executor::block_on(controller.status(run)).expect("settled start");
+    let continuation = admitted_continue(
+        &controller,
+        ContinueRequest::new(
+            run,
+            request(36),
+            digest("continuation-revision"),
+            settled.revision(),
+            "continuation",
+        ),
+    );
+    drop(continuation);
+    rewrite_transaction(&store, session, 2, |value| {
+        value["command"]["expected_revision"] = serde_json::Value::Null;
+    });
+
+    assert_corrupt_run_is_rejected_everywhere(
+        &controller,
+        &executor,
+        &store,
+        run,
+        session,
+        136,
+        RunRevision::new(3),
+    );
+}
+
+#[test]
+fn folding_rejects_an_admission_whose_executor_id_is_not_the_run_nonce() {
+    let store = Arc::new(RecordingSessionStore::default());
+    let executor = Arc::new(ScriptedRunExecutor::default());
+    let controller = controller(Arc::clone(&store), Arc::clone(&executor));
+    let admission = admitted_start(&controller, start("/fold-executor", 37, "executor"));
+    let run = admission.run_id();
+    let session = admission.session_id();
+    rewrite_transaction(&store, session, 0, |value| {
+        value["command"]["executor_id"] = serde_json::json!("00000000-0000-0000-0000-000000000099");
+    });
+
+    assert_corrupt_run_is_rejected_everywhere(
+        &controller,
+        &executor,
+        &store,
+        run,
+        session,
+        137,
+        RunRevision::new(1),
+    );
+}
+
+#[test]
+fn folding_rejects_a_continuation_with_a_different_persisted_model() {
+    let store = Arc::new(RecordingSessionStore::default());
+    let executor = Arc::new(ScriptedRunExecutor::default());
+    let controller = controller(Arc::clone(&store), Arc::clone(&executor));
+    let admission = admitted_start(&controller, start("/fold-model", 38, "first"));
+    let run = admission.run_id();
+    let session = admission.session_id();
+    executor.allow_effects();
+    execute(&controller, admission.into_execution());
+    let settled = futures::executor::block_on(controller.status(run)).expect("settled start");
+    let continuation = admitted_continue(
+        &controller,
+        ContinueRequest::new(
+            run,
+            request(39),
+            digest("continuation-model"),
+            settled.revision(),
+            "continuation",
+        ),
+    );
+    drop(continuation);
+    rewrite_transaction(&store, session, 2, |value| {
+        value["command"]["model"] = serde_json::json!("model/other");
+    });
+
+    assert_corrupt_run_is_rejected_everywhere(
+        &controller,
+        &executor,
+        &store,
+        run,
+        session,
+        139,
+        RunRevision::new(3),
+    );
+}
+
+#[test]
+fn folding_rejects_a_continuation_that_reuses_a_settled_lease() {
+    let store = Arc::new(RecordingSessionStore::default());
+    let executor = Arc::new(ScriptedRunExecutor::default());
+    let controller = controller(Arc::clone(&store), Arc::clone(&executor));
+    let admission = admitted_start(&controller, start("/fold-lease", 40, "first"));
+    let run = admission.run_id();
+    let session = admission.session_id();
+    executor.allow_effects();
+    execute(&controller, admission.into_execution());
+    let settled = futures::executor::block_on(controller.status(run)).expect("settled start");
+    let continuation = admitted_continue(
+        &controller,
+        ContinueRequest::new(
+            run,
+            request(41),
+            digest("continuation-lease"),
+            settled.revision(),
+            "continuation",
+        ),
+    );
+    drop(continuation);
+    let first_lease = serde_json::to_value(store.transactions(session)[0].command())
+        .expect("settled admission serialises")["lease"]
+        .clone();
+    rewrite_transaction(&store, session, 2, |value| {
+        value["command"]["lease"] = first_lease;
+    });
+
+    assert_corrupt_run_is_rejected_everywhere(
+        &controller,
+        &executor,
+        &store,
+        run,
+        session,
+        141,
+        RunRevision::new(3),
+    );
+}
+
+#[test]
+fn folding_rejects_pruning_an_admitted_receipt_before_its_settlement() {
+    let store = Arc::new(RecordingSessionStore::default());
+    let executor = Arc::new(ScriptedRunExecutor::default());
+    let controller = controller(Arc::clone(&store), Arc::clone(&executor));
+    let admission = admitted_start(&controller, start("/fold-pruning", 42, "pruning"));
+    let run = admission.run_id();
+    let session = admission.session_id();
+    rewrite_transaction(&store, session, 0, |value| {
+        value["pruned_receipts"] = serde_json::json!(["00000000-0000-0000-0000-000000000002"]);
+    });
+
+    assert_corrupt_run_is_rejected_everywhere(
+        &controller,
+        &executor,
+        &store,
+        run,
+        session,
+        143,
+        RunRevision::new(1),
+    );
+}
+
+#[test]
+fn folding_rejects_pruning_an_unknown_receipt() {
+    let store = Arc::new(RecordingSessionStore::default());
+    let executor = Arc::new(ScriptedRunExecutor::default());
+    let controller = controller(Arc::clone(&store), Arc::clone(&executor));
+    let admission = admitted_start(&controller, start("/fold-unknown-pruning", 43, "pruning"));
+    let run = admission.run_id();
+    let session = admission.session_id();
+    rewrite_transaction(&store, session, 0, |value| {
+        value["pruned_receipts"] = serde_json::json!(["00000000-0000-0000-0000-000000000099"]);
+    });
+
+    assert_corrupt_run_is_rejected_everywhere(
+        &controller,
+        &executor,
+        &store,
+        run,
+        session,
+        144,
+        RunRevision::new(1),
+    );
+}
+
+#[test]
+fn folding_rejects_pruning_a_settled_receipt_on_a_later_admission() {
+    let store = Arc::new(RecordingSessionStore::default());
+    let executor = Arc::new(ScriptedRunExecutor::default());
+    let controller = controller(Arc::clone(&store), Arc::clone(&executor));
+    let admission = admitted_start(&controller, start("/fold-later-pruning", 44, "first"));
+    let run = admission.run_id();
+    let session = admission.session_id();
+    executor.allow_effects();
+    execute(&controller, admission.into_execution());
+    let settled = futures::executor::block_on(controller.status(run)).expect("settled start");
+    let continuation = admitted_continue(
+        &controller,
+        ContinueRequest::new(
+            run,
+            request(45),
+            digest("later-pruning"),
+            settled.revision(),
+            "continuation",
+        ),
+    );
+    drop(continuation);
+
+    let first_lease = serde_json::to_value(store.transactions(session)[0].command())
+        .expect("settled admission serialises")["lease"]
+        .clone();
+    rewrite_transaction(&store, session, 2, |value| {
+        value["pruned_receipts"] = serde_json::json!([first_lease]);
+    });
+
+    assert_corrupt_run_is_rejected_everywhere(
+        &controller,
+        &executor,
+        &store,
+        run,
+        session,
+        145,
+        RunRevision::new(3),
     );
 }
 

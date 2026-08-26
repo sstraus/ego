@@ -289,8 +289,10 @@ struct SubmitGate {
     released: bool,
     interrupted: bool,
     started: bool,
+    finished: bool,
     waker: Option<Waker>,
     started_waker: Option<Waker>,
+    finished_waker: Option<Waker>,
 }
 
 impl Default for SubmitGate {
@@ -299,8 +301,10 @@ impl Default for SubmitGate {
             released: false,
             interrupted: false,
             started: false,
+            finished: false,
             waker: None,
             started_waker: None,
+            finished_waker: None,
         }
     }
 }
@@ -375,8 +379,10 @@ impl AcpExecutor {
         gate.released = false;
         gate.interrupted = false;
         gate.started = false;
+        gate.finished = false;
         gate.waker = None;
         gate.started_waker = None;
+        gate.finished_waker = None;
     }
 
     async fn wait_for_submit_start(&self) {
@@ -386,6 +392,19 @@ impl AcpExecutor {
                 Poll::Ready(())
             } else {
                 gate.started_waker = Some(cx.waker().clone());
+                Poll::Pending
+            }
+        })
+        .await;
+    }
+
+    async fn wait_for_submit_finish(&self) {
+        futures::future::poll_fn(|cx| {
+            let mut gate = self.gate.lock().expect("ACP submit gate");
+            if gate.finished {
+                Poll::Ready(())
+            } else {
+                gate.finished_waker = Some(cx.waker().clone());
                 Poll::Pending
             }
         })
@@ -406,6 +425,10 @@ impl AcpExecutor {
             .expect("ACP executor calls")
             .iter()
             .any(|call| matches!(call, ExecutorCall::Submit(_)))
+    }
+
+    fn submit_finished(&self) -> bool {
+        self.gate.lock().expect("ACP submit gate").finished
     }
 }
 
@@ -545,6 +568,14 @@ impl RunExecutor for AcpExecutor {
                 waker.wake();
             }
             if let Some(outcome) = outcome {
+                let finished_waker = {
+                    let mut gate = gate.lock().expect("ACP submit gate");
+                    gate.finished = true;
+                    gate.finished_waker.take()
+                };
+                if let Some(waker) = finished_waker {
+                    waker.wake();
+                }
                 return Poll::Ready(outcome);
             }
             Poll::Pending
@@ -609,11 +640,19 @@ impl IdSource for AcpIds {
 type Controller = RunController<AcpStore, AcpExecutor, AcpClock, AcpIds>;
 
 fn controller(store: Arc<AcpStore>, executor: Arc<AcpExecutor>) -> Arc<Controller> {
+    controller_with_ids(store, executor, Arc::new(AcpIds::default()))
+}
+
+fn controller_with_ids(
+    store: Arc<AcpStore>,
+    executor: Arc<AcpExecutor>,
+    ids: Arc<AcpIds>,
+) -> Arc<Controller> {
     Arc::new(RunController::new(
         store,
         executor,
         Arc::new(AcpClock::default()),
-        Arc::new(AcpIds::default()),
+        ids,
         RunRetention::new(NonZeroUsize::new(4).expect("retention")).expect("retention"),
     ))
 }
@@ -648,6 +687,22 @@ impl Connected {
         spawner: Arc<RecordingExecutionSpawner>,
         bindings_builder: Arc<RecordingRunBindingsBuilder>,
     ) -> Self {
+        Self::with_ids(
+            controller,
+            roots,
+            spawner,
+            bindings_builder,
+            Arc::new(AcpIds::default()),
+        )
+    }
+
+    fn with_ids(
+        controller: Arc<Controller>,
+        roots: Arc<FixedRootResolver>,
+        spawner: Arc<RecordingExecutionSpawner>,
+        bindings_builder: Arc<RecordingRunBindingsBuilder>,
+        ids: Arc<AcpIds>,
+    ) -> Self {
         let (to_agent, to_agent_rx) = mpsc::unbounded::<String>();
         let (from_agent, from_agent_rx) = mpsc::unbounded::<String>();
         let transport = Lines::new(
@@ -658,14 +713,8 @@ impl Connected {
             to_agent,
             from_agent: from_agent_rx,
             agent: tokio::spawn(
-                ego_acp::serve::agent(
-                    controller,
-                    roots,
-                    spawner,
-                    Arc::new(AcpIds::default()),
-                    bindings_builder,
-                )
-                .connect_to(transport),
+                ego_acp::serve::agent(controller, roots, spawner, ids, bindings_builder)
+                    .connect_to(transport),
             ),
             next_id: 1,
         }
@@ -725,12 +774,21 @@ impl Connected {
     }
 
     async fn open(&mut self, cwd: &str) -> String {
+        self.open_with_capabilities(cwd, serde_json::json!({}))
+            .await
+    }
+
+    async fn open_with_capabilities(
+        &mut self,
+        cwd: &str,
+        client_capabilities: serde_json::Value,
+    ) -> String {
         let (initialize, _) = self
             .request(
                 "initialize",
                 serde_json::json!({
                     "protocolVersion": ProtocolVersion::V1.as_u16(),
-                    "clientCapabilities": {},
+                    "clientCapabilities": client_capabilities,
                 }),
             )
             .await;
@@ -753,6 +811,33 @@ impl Connected {
     async fn finish(self) {
         self.to_agent.close_channel();
         let _ = self.agent.await;
+    }
+
+    fn close(self) -> tokio::task::JoinHandle<Result<(), agent_client_protocol::Error>> {
+        self.to_agent.close_channel();
+        self.agent
+    }
+}
+
+/// One reusable server boundary whose connections share durable ports and
+/// identity allocation while each connection receives its own ACP router.
+struct ReusableBoundary {
+    controller: Arc<Controller>,
+    roots: Arc<FixedRootResolver>,
+    spawner: Arc<RecordingExecutionSpawner>,
+    bindings_builder: Arc<RecordingRunBindingsBuilder>,
+    ids: Arc<AcpIds>,
+}
+
+impl ReusableBoundary {
+    fn connect(&self) -> Connected {
+        Connected::with_ids(
+            Arc::clone(&self.controller),
+            Arc::clone(&self.roots),
+            Arc::clone(&self.spawner),
+            Arc::clone(&self.bindings_builder),
+            Arc::clone(&self.ids),
+        )
     }
 }
 
@@ -1335,4 +1420,170 @@ async fn disconnect_detaches_wire_subscription_without_cancelling_the_durable_ru
         ["prepare", "commit", "start", "submit"]
     );
     assert_eq!(spawner.spawned(), 1);
+}
+
+#[tokio::test]
+async fn reusable_boundary_scopes_two_connections_and_preserves_disconnected_execution() {
+    let sequence = Arc::new(Mutex::new(Vec::new()));
+    let store = Arc::new(AcpStore::with_sequence(Arc::clone(&sequence)));
+    let executor = Arc::new(AcpExecutor::with_sequence(Arc::clone(&sequence)));
+    let ids = Arc::new(AcpIds::default());
+    let (roots, spawner, bindings_builder) = test_ports();
+    let boundary = ReusableBoundary {
+        controller: controller_with_ids(
+            Arc::clone(&store),
+            Arc::clone(&executor),
+            Arc::clone(&ids),
+        ),
+        roots: Arc::clone(&roots),
+        spawner: Arc::clone(&spawner),
+        bindings_builder: Arc::clone(&bindings_builder),
+        ids,
+    };
+
+    let mut connection_a = boundary.connect();
+    let mut connection_b = boundary.connect();
+    let session_a = connection_a.open("/workspace/a").await;
+    let prompt_a = connection_a
+        .send(
+            "session/prompt",
+            serde_json::json!({
+                "sessionId": session_a,
+                "prompt": [{ "type": "text", "text": "A" }],
+            }),
+        )
+        .await;
+    assert!(prompt_a > 0);
+    executor.wait_for_submit_start().await;
+
+    let session_b = connection_b
+        .open_with_capabilities(
+            "/workspace/b",
+            serde_json::json!({ "elicitation": { "form": {} } }),
+        )
+        .await;
+    assert_ne!(
+        session_a, session_b,
+        "each connection must receive its own session"
+    );
+    let (cross_connection, _) = connection_b
+        .request(
+            "session/prompt",
+            serde_json::json!({
+                "sessionId": session_a,
+                "prompt": [{ "type": "text", "text": "B targeting A" }],
+            }),
+        )
+        .await;
+    assert!(
+        cross_connection.get("error").is_some(),
+        "connection B must not prompt connection A's session: {cross_connection}"
+    );
+    connection_b
+        .notify(
+            "session/cancel",
+            serde_json::json!({ "sessionId": session_a }),
+        )
+        .await;
+    assert_eq!(
+        executor
+            .calls()
+            .iter()
+            .filter(|call| matches!(call, ExecutorCall::Interrupt(_)))
+            .count(),
+        0,
+        "connection B must not cancel connection A's run"
+    );
+
+    let mut agent_a = connection_a.close();
+    let joined_a = tokio::time::timeout(std::time::Duration::from_secs(1), &mut agent_a).await;
+    assert!(
+        joined_a.is_ok(),
+        "disconnect must let the ACP router join while submit remains blocked"
+    );
+    assert!(
+        !executor.submit_finished(),
+        "closing the ACP connection must not release its independent execution"
+    );
+    let (after_disconnect, _) = connection_b
+        .request(
+            "session/prompt",
+            serde_json::json!({
+                "sessionId": session_a,
+                "prompt": [{ "type": "text", "text": "B after disconnect" }],
+            }),
+        )
+        .await;
+    assert!(
+        after_disconnect.get("error").is_some(),
+        "a fresh connection must not use a disconnected session: {after_disconnect}"
+    );
+    let id_a = session_a.parse::<SessionId>().expect("session A identity");
+    let run_a = store
+        .transactions(id_a)
+        .first()
+        .expect("A admission survives disconnect")
+        .run_id();
+    assert_eq!(
+        boundary
+            .controller
+            .status(run_a)
+            .await
+            .expect("A status after disconnect")
+            .status(),
+        ego_core::run::RunStatus::Running
+    );
+    executor.settle_next(RunSettlement::completed());
+    executor.wait_for_submit_finish().await;
+    assert_eq!(store.transactions(id_a).len(), 2);
+    assert_eq!(
+        boundary
+            .controller
+            .status(run_a)
+            .await
+            .expect("A status after durable settlement")
+            .status(),
+        ego_core::run::RunStatus::Settled
+    );
+    assert_eq!(
+        executor
+            .calls()
+            .iter()
+            .filter(|call| matches!(call, ExecutorCall::Interrupt(_)))
+            .count(),
+        0,
+        "disconnect must detach A without interrupting its execution"
+    );
+    assert_eq!(
+        bindings_builder.builds(),
+        vec![(
+            v1::SessionId::new(session_a.clone()),
+            CapabilityCapture::default()
+        )],
+        "B's capabilities must not retroactively affect A's bindings"
+    );
+
+    executor.reset_submit();
+    let prompt_b = connection_b
+        .send(
+            "session/prompt",
+            serde_json::json!({
+                "sessionId": session_b,
+                "prompt": [{ "type": "text", "text": "B" }],
+            }),
+        )
+        .await;
+    executor.wait_for_submit_start().await;
+    executor.settle_next(RunSettlement::completed());
+    let (response_b, _) = connection_b.response_to(prompt_b).await;
+    assert_eq!(response_b["result"]["stopReason"], "end_turn");
+    assert_eq!(
+        bindings_builder.builds(),
+        vec![
+            (v1::SessionId::new(session_a), CapabilityCapture::default()),
+            (v1::SessionId::new(session_b), CapabilityCapture::form()),
+        ],
+        "capability capture must remain connection-scoped"
+    );
+    connection_b.finish().await;
 }

@@ -6,11 +6,14 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::mpsc::{self, SyncSender};
+use std::sync::{Arc, Barrier, Condvar, Mutex};
+use std::time::Duration;
 
 use ego_core::event::domain::{DomainEvent, Envelope, EventKind, ExitReason};
 use ego_core::event::id::{EventId, Producer, QueuedPromptId, Seq, SessionId, TurnId};
 use ego_core::event::time::Timestamp;
+use ego_core::run::{RunAppend, RunRevision, RunTransaction};
 use ego_core::store::codec::{CODEC_VERSION, CodecError, StoreLine, decode_line, encode_record};
 use ego_core::store::session_store::{SessionEntry, SessionStore, StoreError};
 use ego_tools::store::{JsonlStore, OsIo, StoreIo};
@@ -61,6 +64,10 @@ mod store {
         root.join(session_dir_name(id)).join("events.jsonl")
     }
 
+    fn run_lock_path(root: &std::path::Path, id: &SessionId) -> PathBuf {
+        root.join(session_dir_name(id)).join("events.lock")
+    }
+
     fn manifest_path(root: &std::path::Path, id: &SessionId) -> PathBuf {
         root.join(session_dir_name(id)).join("manifest.json")
     }
@@ -106,6 +113,152 @@ mod store {
 
         fn list_dirs(&self, path: &std::path::Path) -> std::io::Result<Vec<PathBuf>> {
             self.inner.list_dirs(path)
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum GateSide {
+        A,
+        B,
+    }
+
+    #[derive(Default)]
+    struct GateState {
+        a_read_authoritatively: bool,
+        release_a: bool,
+        b_read_while_a_held: bool,
+    }
+
+    /// A real-filesystem adapter that pauses A after its authoritative log
+    /// read. The pause is inside the StoreIo call, so a production store that
+    /// short-locks the session log holds `<session>/events.lock` throughout
+    /// the gate. B uses an independent store and adapter instance.
+    struct GateIo {
+        inner: OsIo,
+        target: PathBuf,
+        side: GateSide,
+        state: Arc<(Mutex<GateState>, Condvar)>,
+        b_read: Option<SyncSender<()>>,
+    }
+
+    impl GateIo {
+        fn wait_for_a_read(state: &Arc<(Mutex<GateState>, Condvar)>) {
+            let (lock, changed) = (&state.0, &state.1);
+            let mut state = lock.lock().expect("CAS gate state");
+            while !state.a_read_authoritatively {
+                state = changed.wait(state).expect("CAS gate wait");
+            }
+        }
+
+        fn release_a(state: &Arc<(Mutex<GateState>, Condvar)>) {
+            let (lock, changed) = (&state.0, &state.1);
+            let mut state = lock.lock().expect("CAS gate state");
+            state.release_a = true;
+            changed.notify_all();
+        }
+    }
+
+    impl StoreIo for GateIo {
+        fn append_line(&self, path: &std::path::Path, line: &[u8]) -> std::io::Result<()> {
+            self.inner.append_line(path, line)
+        }
+
+        fn fsync(&self, path: &std::path::Path) -> std::io::Result<()> {
+            self.inner.fsync(path)
+        }
+
+        fn read(&self, path: &std::path::Path) -> std::io::Result<Option<Vec<u8>>> {
+            let bytes = self.inner.read(path)?;
+            if path != self.target {
+                return Ok(bytes);
+            }
+            let (lock, changed) = (&self.state.0, &self.state.1);
+            let mut state = lock.lock().expect("CAS gate state");
+            match self.side {
+                GateSide::A => {
+                    state.a_read_authoritatively = true;
+                    changed.notify_all();
+                    while !state.release_a {
+                        state = changed.wait(state).expect("CAS gate wait");
+                    }
+                }
+                GateSide::B => {
+                    if !state.release_a {
+                        state.b_read_while_a_held = true;
+                    }
+                    changed.notify_all();
+                    if let Some(signal) = &self.b_read {
+                        signal.send(()).expect("CAS B read observer");
+                    }
+                }
+            }
+            Ok(bytes)
+        }
+
+        fn exists(&self, path: &std::path::Path) -> std::io::Result<bool> {
+            self.inner.exists(path)
+        }
+
+        fn replace_atomic(&self, path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+            self.inner.replace_atomic(path, bytes)
+        }
+
+        fn truncate(&self, path: &std::path::Path, len: u64) -> std::io::Result<()> {
+            self.inner.truncate(path, len)
+        }
+
+        fn remove_file(&self, path: &std::path::Path) -> std::io::Result<()> {
+            self.inner.remove_file(path)
+        }
+
+        fn list_dirs(&self, path: &std::path::Path) -> std::io::Result<Vec<PathBuf>> {
+            self.inner.list_dirs(path)
+        }
+    }
+
+    fn admitted_run_transaction(
+        session: &SessionId,
+        revision: u64,
+        expected_revision: Option<u64>,
+        start: bool,
+    ) -> RunTransaction {
+        let session = serde_json::to_value(session).expect("session id serialises");
+        serde_json::from_value(serde_json::json!({
+            "revision": revision,
+            "run_id": {
+                "session_id": session,
+                "nonce": "00000000-0000-7000-8000-000000000054"
+            },
+            "root": "/workspace",
+            "command": {
+                "kind": "command_admitted",
+                "request_id": "00000000-0000-7000-8000-000000000055",
+                "digest": "store-race",
+                "expected_revision": expected_revision,
+                "lease": "00000000-0000-7000-8000-000000000056",
+                "executor_id": "00000000-0000-7000-8000-000000000057",
+                "prompt": "store race",
+                "model": "model/test",
+                "start": start
+            },
+            "status": "running",
+            "observed_at": 0,
+            "pruned_receipts": []
+        }))
+        .expect("admitted run transaction fixture deserialises")
+    }
+
+    fn run_lock_is_held(path: &std::path::Path) -> Result<(), String> {
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .map_err(|error| format!("run CAS lock could not be opened: {error}"))?;
+        let mut lock = fd_lock::RwLock::new(file);
+        match lock.try_write() {
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(()),
+            Ok(_) => Err("a second writer acquired the held run lock".to_owned()),
+            Err(error) => Err(format!("run CAS lock probe failed: {error}")),
         }
     }
 
@@ -330,6 +483,171 @@ mod store {
     }
 
     // -- append / read roundtrip ------------------------------------------
+
+    #[test]
+    fn independent_run_cas_holds_a_session_lock_and_preserves_one_valid_stream() {
+        let dir = tempdir().unwrap();
+        let session = SessionId::new();
+        let initial = admitted_run_transaction(&session, 1, None, true);
+        let initial_store = JsonlStore::new(dir.path(), "/workspace", Box::new(OsIo));
+        assert!(matches!(
+            initial_store.compare_and_append_run(&session, None, initial.clone()),
+            Ok(RunAppend::Committed { revision }) if revision == RunRevision::new(1)
+        ));
+
+        let collision = initial_store
+            .compare_and_append_run(&session, None, initial)
+            .expect("an existing revision-one session must report a collision");
+        assert_eq!(
+            collision,
+            RunAppend::Conflict {
+                actual: RunRevision::new(1)
+            }
+        );
+
+        let target = log_path(dir.path(), &session);
+        let state = Arc::new((Mutex::new(GateState::default()), Condvar::new()));
+        let (b_read_signal, b_read_observer) = mpsc::sync_channel(1);
+        let left = Arc::new(JsonlStore::new(
+            dir.path(),
+            "/workspace",
+            Box::new(GateIo {
+                inner: OsIo,
+                target: target.clone(),
+                side: GateSide::A,
+                state: Arc::clone(&state),
+                b_read: None,
+            }),
+        ));
+        let right = Arc::new(JsonlStore::new(
+            dir.path(),
+            "/workspace",
+            Box::new(GateIo {
+                inner: OsIo,
+                target,
+                side: GateSide::B,
+                state: Arc::clone(&state),
+                b_read: Some(b_read_signal),
+            }),
+        ));
+        let candidate = admitted_run_transaction(&session, 2, Some(1), false);
+        let left_candidate = candidate.clone();
+        let right_candidate = candidate;
+        let b_start = Arc::new(Barrier::new(2));
+
+        let (left_result, right_result) = std::thread::scope(|scope| {
+            let left_worker = scope.spawn({
+                let left = Arc::clone(&left);
+                let state = Arc::clone(&state);
+                move || {
+                    let result = left.compare_and_append_run(
+                        &session,
+                        Some(RunRevision::new(1)),
+                        left_candidate,
+                    );
+                    GateIo::release_a(&state);
+                    result
+                }
+            });
+            GateIo::wait_for_a_read(&state);
+            let lock_probe = run_lock_is_held(&run_lock_path(dir.path(), &session));
+
+            let right_worker = scope.spawn({
+                let right = Arc::clone(&right);
+                let b_start = Arc::clone(&b_start);
+                move || {
+                    b_start.wait();
+                    right.compare_and_append_run(
+                        &session,
+                        Some(RunRevision::new(1)),
+                        right_candidate,
+                    )
+                }
+            });
+            b_start.wait();
+            // This bounded receive is the deterministic scheduling point. On
+            // the RED implementation B enters its authoritative read while
+            // A is paused; once production owns events.lock around that read,
+            // B remains outside read until A is released. Either way A is
+            // released below before joining, so the fixture cannot deadlock.
+            let b_read_before_release = b_read_observer
+                .recv_timeout(Duration::from_millis(250))
+                .is_ok();
+            GateIo::release_a(&state);
+            let results = (
+                left_worker.join().expect("left run CAS worker"),
+                right_worker.join().expect("right run CAS worker"),
+            );
+            assert!(
+                lock_probe.is_ok(),
+                "A must hold the per-session events.lock during its authoritative read: {lock_probe:?}"
+            );
+            assert_eq!(
+                state.0.lock().expect("CAS gate state").b_read_while_a_held,
+                b_read_before_release,
+                "the bounded B-read observation must match the gate state"
+            );
+            results
+        });
+
+        let results = [left_result.unwrap(), right_result.unwrap()];
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| {
+                    matches!(
+                        result,
+                        &&RunAppend::Committed { revision }
+                            if revision == RunRevision::new(2)
+                    )
+                })
+                .count(),
+            1,
+            "exactly one store must commit revision two: {results:?}"
+        );
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| {
+                    matches!(
+                        result,
+                        &&RunAppend::Conflict { actual } if actual == RunRevision::new(2)
+                    )
+                })
+                .count(),
+            1,
+            "exactly one store must observe the committed revision: {results:?}"
+        );
+        assert!(
+            results.contains(&RunAppend::Committed {
+                revision: RunRevision::new(2)
+            }),
+            "exactly one store must commit revision two: {results:?}"
+        );
+        assert!(
+            results.contains(&RunAppend::Conflict {
+                actual: RunRevision::new(2)
+            }),
+            "the other store must observe the committed revision: {results:?}"
+        );
+        let final_store = JsonlStore::new(dir.path(), "/workspace", Box::new(OsIo));
+        let entries = block_on(
+            final_store
+                .read(&session)
+                .expect("valid final stream")
+                .collect::<Vec<_>>(),
+        );
+        assert_eq!(
+            entries.len(),
+            2,
+            "one initial and one winning append remain"
+        );
+        assert!(entries.iter().all(|entry| entry.is_ok()));
+        let metadata = final_store.list().expect("valid final manifest");
+        assert_eq!(metadata.len(), 1);
+        assert_eq!(metadata[0].id, session);
+        assert_eq!(metadata[0].workspace_root, PathBuf::from("/workspace"));
+    }
 
     #[test]
     fn store_append_then_read_roundtrips_events_in_order() {

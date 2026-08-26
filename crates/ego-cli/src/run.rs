@@ -2841,6 +2841,28 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
+    fn workspace_accepts_a_directory_but_rejects_an_existing_regular_file() {
+        let owner = tempdir().expect("workspace owner");
+        let directory = owner.path().join("workspace");
+        std::fs::create_dir(&directory).expect("workspace directory");
+        let regular_file = owner.path().join("workspace-file");
+        std::fs::write(&regular_file, b"not a workspace").expect("workspace file");
+
+        let directory_arg = directory.clone();
+        assert_eq!(
+            workspace(Some(&directory_arg)).expect("directory is a workspace"),
+            std::fs::canonicalize(directory).expect("canonical workspace")
+        );
+
+        let file_arg = regular_file.clone();
+        assert!(
+            workspace(Some(&file_arg)).is_err(),
+            "an existing regular file must be rejected as a workspace root: {}",
+            regular_file.display()
+        );
+    }
+
+    #[test]
     fn ephemeral_compact_refuses_before_confirmation_resolution_generation_or_publication() {
         let source = SessionId::new();
         let owner = tempdir().expect("ephemeral evidence owner");
