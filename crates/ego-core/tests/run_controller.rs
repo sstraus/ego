@@ -13,6 +13,7 @@ use std::task::{Poll, Waker};
 use futures::future::{self, BoxFuture};
 use futures::stream::{self, BoxStream};
 
+use ego_core::config::ModelRef;
 use ego_core::event::domain::DomainEvent;
 use ego_core::event::id::SessionId;
 use ego_core::event::time::{Clock, Timestamp};
@@ -21,8 +22,8 @@ use ego_core::run::{
     CancelKey, CancelRequest, ContinueRequest, EventSinkFactory, IdSource, RequestDigest,
     RequestId, RunAdmission, RunAppend, RunCommandOutcome, RunController, RunExecution,
     RunExecutionBindings, RunExecutor, RunExecutorError, RunHandle, RunId, RunPreparation,
-    RunRecoveryOutcome, RunRetention, RunRevision, RunRoot, RunSettlement, RunStart, RunStatus,
-    RunTransaction, StartRequest,
+    RunPrepared, RunRecoveryOutcome, RunRetention, RunRevision, RunRoot, RunSettlement, RunStart,
+    RunStatus, RunTransaction, StartRequest,
 };
 use ego_core::sink::{EventSink, NullSink};
 use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
@@ -188,13 +189,22 @@ struct ScriptedRunExecutor {
     observations: Mutex<VecDeque<Result<RunSettlement, RunExecutorError>>>,
     submissions: Mutex<VecDeque<Result<RunSettlement, RunExecutorError>>>,
     next_prepared: Mutex<u64>,
+    prepared_models: Mutex<VecDeque<ModelRef>>,
+    prepared_requests: Mutex<Vec<Option<ModelRef>>>,
     prepared_tokens: Mutex<Vec<u64>>,
     bindings_received: Mutex<usize>,
     submit_gate: Mutex<SubmitGate>,
     submit_gate_changed: Condvar,
     started_roots: Mutex<Vec<(RunId, RunRoot)>>,
+    started_models: Mutex<Vec<(RunId, ModelRef)>>,
+    authorities: Mutex<Vec<Arc<RecordingAuthority>>>,
     start_barrier: Option<Arc<Barrier>>,
     sequence: Arc<Mutex<Vec<&'static str>>>,
+}
+
+#[derive(Default)]
+struct RecordingAuthority {
+    _observations: Arc<Mutex<Vec<RunId>>>,
 }
 
 struct PreparedToken(u64);
@@ -233,11 +243,15 @@ impl ScriptedRunExecutor {
             observations: Mutex::new(VecDeque::new()),
             submissions: Mutex::new(VecDeque::new()),
             next_prepared: Mutex::new(0),
+            prepared_models: Mutex::new(VecDeque::new()),
+            prepared_requests: Mutex::new(Vec::new()),
             prepared_tokens: Mutex::new(Vec::new()),
             bindings_received: Mutex::new(0),
             submit_gate: Mutex::new(SubmitGate::default()),
             submit_gate_changed: Condvar::new(),
             started_roots: Mutex::new(Vec::new()),
+            started_models: Mutex::new(Vec::new()),
+            authorities: Mutex::new(Vec::new()),
             start_barrier: None,
             sequence,
         }
@@ -315,6 +329,39 @@ impl ScriptedRunExecutor {
             .clone()
     }
 
+    fn prepare_model(&self, model: ModelRef) {
+        self.prepared_models
+            .lock()
+            .expect("prepared models")
+            .push_back(model);
+    }
+
+    fn prepared_requests(&self) -> Vec<Option<ModelRef>> {
+        self.prepared_requests
+            .lock()
+            .expect("prepared requests")
+            .clone()
+    }
+
+    fn started_models(&self) -> Vec<(RunId, ModelRef)> {
+        self.started_models.lock().expect("started models").clone()
+    }
+
+    fn authority_observations(&self) -> Vec<RunId> {
+        self.authorities
+            .lock()
+            .expect("executor authorities")
+            .iter()
+            .flat_map(|authority| {
+                authority
+                    ._observations
+                    .lock()
+                    .expect("authority observations")
+                    .clone()
+            })
+            .collect()
+    }
+
     fn bindings_received(&self) -> usize {
         *self.bindings_received.lock().expect("execution bindings")
     }
@@ -325,8 +372,12 @@ impl RunExecutor for ScriptedRunExecutor {
 
     fn prepare<'a>(
         &'a self,
-        _request: &'a RunPreparation,
-    ) -> BoxFuture<'a, Result<Self::Prepared, RunExecutorError>> {
+        request: &'a RunPreparation,
+    ) -> BoxFuture<'a, Result<RunPrepared<Self::Prepared>, RunExecutorError>> {
+        self.prepared_requests
+            .lock()
+            .expect("prepared requests")
+            .push(request.requested_model.clone());
         self.sequence
             .lock()
             .expect("transaction sequence")
@@ -337,7 +388,16 @@ impl RunExecutor for ScriptedRunExecutor {
             .push(ExecutorCall::Prepare);
         let mut next = self.next_prepared.lock().expect("prepared sequence");
         *next += 1;
-        Box::pin(future::ready(Ok(PreparedToken(*next))))
+        let model = self
+            .prepared_models
+            .lock()
+            .expect("prepared models")
+            .pop_front()
+            .unwrap_or_else(|| ModelRef("model/test".to_owned()));
+        Box::pin(future::ready(Ok(RunPrepared::new(
+            model,
+            PreparedToken(*next),
+        ))))
     }
 
     fn start<'a>(
@@ -352,6 +412,10 @@ impl RunExecutor for ScriptedRunExecutor {
             .lock()
             .expect("executor roots")
             .push((run, request.root.clone()));
+        self.started_models
+            .lock()
+            .expect("started models")
+            .push((run, request.model.clone()));
         self.sequence
             .lock()
             .expect("transaction sequence")
@@ -360,7 +424,12 @@ impl RunExecutor for ScriptedRunExecutor {
             .lock()
             .expect("executor calls")
             .push(ExecutorCall::Start(run));
-        Box::pin(future::ready(Ok(RunHandle::new(run))))
+        let authority = Arc::new(RecordingAuthority::default());
+        self.authorities
+            .lock()
+            .expect("executor authorities")
+            .push(Arc::clone(&authority));
+        Box::pin(future::ready(Ok(RunHandle::new(run, authority))))
     }
 
     fn recover<'a>(
@@ -389,6 +458,14 @@ impl RunExecutor for ScriptedRunExecutor {
             .lock()
             .expect("executor calls")
             .push(ExecutorCall::Observe(handle.run_id()));
+        let authority = handle
+            .authority::<Arc<RecordingAuthority>>()
+            .expect("recovered handle authority");
+        authority
+            ._observations
+            .lock()
+            .expect("authority observations")
+            .push(handle.run_id());
         *self.bindings_received.lock().expect("execution bindings") += 1;
         let result = self
             .observations
@@ -410,6 +487,14 @@ impl RunExecutor for ScriptedRunExecutor {
             .lock()
             .expect("prepared tokens")
             .push(prepared.0);
+        let authority = handle
+            .authority::<Arc<RecordingAuthority>>()
+            .expect("started handle authority");
+        authority
+            ._observations
+            .lock()
+            .expect("authority observations")
+            .push(handle.run_id());
         *self.bindings_received.lock().expect("execution bindings") += 1;
         self.calls
             .lock()
@@ -515,9 +600,13 @@ fn start(root: &str, value: u128, body: &str) -> StartRequest {
         RunRoot::new(root).expect("absolute run root"),
         request(value),
         digest(body),
-        "model/test".parse().expect("model"),
+        None,
         body.to_owned(),
     )
+}
+
+fn model_ref(value: &str) -> ModelRef {
+    ModelRef(value.to_owned())
 }
 
 type Controller =
@@ -587,6 +676,15 @@ fn effect_calls(executor: &ScriptedRunExecutor) -> Vec<ExecutorCall> {
 }
 
 #[test]
+fn run_prepared_exposes_resolved_model_and_opaque_capability_parts() {
+    let prepared = RunPrepared::new(model_ref("model/test"), PreparedToken(7));
+    assert_eq!(prepared.model(), &model_ref("model/test"));
+    let (model, capability) = prepared.into_parts();
+    assert_eq!(model, model_ref("model/test"));
+    assert_eq!(capability.0, 7);
+}
+
+#[test]
 fn revision_one_is_atomically_published_before_any_executor_start() {
     let sequence = Arc::new(Mutex::new(Vec::new()));
     let store = Arc::new(RecordingSessionStore::with_sequence(Arc::clone(&sequence)));
@@ -604,8 +702,14 @@ fn revision_one_is_atomically_published_before_any_executor_start() {
         store.transactions(session)[0].command(),
         ego_core::run::RunCommand::CommandAdmitted { .. }
     ));
+    assert!(matches!(
+        store.transactions(session)[0].command(),
+        ego_core::run::RunCommand::CommandAdmitted { model, .. }
+            if model == &model_ref("model/test")
+    ));
     assert!(effect_calls(&executor).is_empty());
     assert_eq!(admission.revision(), RunRevision::new(1));
+    assert_eq!(executor.prepared_requests(), vec![None]);
 
     executor.allow_effects();
     execute(&controller, admission.into_execution());
@@ -621,6 +725,11 @@ fn revision_one_is_atomically_published_before_any_executor_start() {
     assert_eq!(store.transactions(session)[1].status(), RunStatus::Settled);
     assert_eq!(executor.prepared_tokens(), vec![1]);
     assert_eq!(executor.bindings_received(), 1);
+    assert_eq!(
+        executor.started_models(),
+        vec![(run, model_ref("model/test"))]
+    );
+    assert_eq!(executor.authority_observations(), vec![run]);
     assert_eq!(
         executor.calls(),
         vec![
@@ -786,6 +895,47 @@ fn submit_error_publishes_uncertain_settlement_and_completes_subscription() {
 }
 
 #[test]
+fn continuation_rejects_a_prepared_model_that_differs_from_persisted_identity() {
+    let store = Arc::new(RecordingSessionStore::default());
+    let executor = Arc::new(ScriptedRunExecutor::default());
+    let controller = controller(Arc::clone(&store), Arc::clone(&executor));
+    let admission = admitted_start(&controller, start("/model", 8, "first"));
+    let run = admission.run_id();
+    let session = admission.session_id();
+    executor.allow_effects();
+    execute(&controller, admission.into_execution());
+    let status = futures::executor::block_on(controller.status(run)).expect("settled start");
+    let transactions_before = store.transactions(session);
+    let calls_before = executor.calls();
+    executor.prepare_model(model_ref("model/other"));
+
+    let result = continue_command(
+        &controller,
+        ContinueRequest::new(
+            run,
+            request(9),
+            digest("second"),
+            status.revision(),
+            "second",
+        ),
+    );
+    assert!(matches!(
+        result,
+        Err(ego_core::run::RunError::Integrity { .. })
+    ));
+    assert_eq!(store.transactions(session), transactions_before);
+    let mut expected_calls = calls_before;
+    expected_calls.push(ExecutorCall::Prepare);
+    assert_eq!(executor.calls(), expected_calls);
+    assert_eq!(
+        futures::executor::block_on(controller.status(run))
+            .expect("status after model mismatch")
+            .status(),
+        RunStatus::Settled
+    );
+}
+
+#[test]
 fn continuation_and_cancel_commit_receipts_before_submit_or_interrupt_and_never_retarget() {
     let sequence = Arc::new(Mutex::new(Vec::new()));
     let store = Arc::new(RecordingSessionStore::with_sequence(Arc::clone(&sequence)));
@@ -812,6 +962,10 @@ fn continuation_and_cancel_commit_receipts_before_submit_or_interrupt_and_never_
     let next_revision = next.revision();
     let cancel_key: CancelKey = next.cancel_key().clone();
     let execution = next.into_execution();
+    assert_eq!(
+        executor.prepared_requests(),
+        vec![None, Some(model_ref("model/test"))]
+    );
     let transactions = store.transactions(session);
     assert_eq!(transactions.len(), 3);
     assert_eq!(transactions[0].revision(), RunRevision::new(1));
@@ -819,7 +973,8 @@ fn continuation_and_cancel_commit_receipts_before_submit_or_interrupt_and_never_
     assert_eq!(transactions[2].revision(), RunRevision::new(3));
     assert!(matches!(
         transactions[2].command(),
-        ego_core::run::RunCommand::CommandAdmitted { .. }
+        ego_core::run::RunCommand::CommandAdmitted { model, .. }
+            if model == &model_ref("model/test")
     ));
     assert!(matches!(
         transactions[1].command(),
@@ -1050,7 +1205,7 @@ fn recovery_running_reattaches_live_execution() {
     assert_eq!(executor.calls(), calls_before_status);
     assert_eq!(store.transactions(run.session_id()).len(), 1);
     executor.recovery_result(Ok(ego_core::run::RecoveryEvidence::Running(
-        RunHandle::new(run),
+        RunHandle::new(run, Arc::new(RecordingAuthority::default())),
     )));
     executor.observation_result(Ok(RunSettlement::completed()));
     assert_eq!(store.transactions(run.session_id()).len(), 1);
