@@ -1100,7 +1100,7 @@ pub struct RunReattachment {
     snapshot: RunSnapshot,
     cancel_key: CancelKey,
     subscription: RunSubscription,
-    execution: RunExecution,
+    execution: Box<RunExecution>,
 }
 
 impl RunReattachment {
@@ -1114,7 +1114,7 @@ impl RunReattachment {
         self.subscription.clone()
     }
     pub fn into_execution(self) -> RunExecution {
-        self.execution
+        *self.execution
     }
 }
 
@@ -1253,6 +1253,12 @@ where
                         message: "initial run commit returned a non-initial revision".to_owned(),
                     });
                 }
+                let mode = ExecutionMode::Start {
+                    root: request.root.clone(),
+                    model,
+                    prompt: request.prompt,
+                    prepared: Box::new(prepared),
+                };
                 Ok(RunCommandOutcome::Admitted(self.admission(
                     RunSnapshot {
                         run_id,
@@ -1262,11 +1268,8 @@ where
                         settlement: None,
                     },
                     lease,
-                    request.prompt,
-                    model,
-                    prepared,
                     bindings,
-                    true,
+                    mode,
                 )))
             }
             RunAppend::Conflict { .. } => {
@@ -1345,21 +1348,24 @@ where
         )? {
             RunAppend::Committed {
                 revision: committed,
-            } => Ok(RunCommandOutcome::Admitted(self.admission(
-                RunSnapshot {
-                    run_id: request.run_id,
-                    root: folded.snapshot.root,
-                    revision: committed,
-                    status: RunStatus::Running,
-                    settlement: None,
-                },
-                lease,
-                request.prompt,
-                model,
-                prepared,
-                bindings,
-                false,
-            ))),
+            } => {
+                let mode = ExecutionMode::Continue {
+                    prompt: request.prompt,
+                    prepared: Box::new(prepared),
+                };
+                Ok(RunCommandOutcome::Admitted(self.admission(
+                    RunSnapshot {
+                        run_id: request.run_id,
+                        root: folded.snapshot.root,
+                        revision: committed,
+                        status: RunStatus::Running,
+                        settlement: None,
+                    },
+                    lease,
+                    bindings,
+                    mode,
+                )))
+            }
             RunAppend::Conflict { .. } => {
                 let winner = self.read_exact(request.run_id).await?;
                 if let Some(receipt) = self.retained_receipt(&winner, request.request_id) {
@@ -1512,11 +1518,8 @@ where
         &self,
         snapshot: RunSnapshot,
         lease: TurnLease,
-        prompt: String,
-        model: ModelRef,
-        prepared: E::Prepared,
         bindings: RunExecutionBindings,
-        start: bool,
+        mode: ExecutionMode,
     ) -> RunAdmission {
         let state = Arc::new(Mutex::new(SubscriptionState {
             snapshot: snapshot.clone(),
@@ -1539,19 +1542,7 @@ where
                 run_id: snapshot.run_id,
                 lease,
                 bindings,
-                mode: if start {
-                    ExecutionMode::Start {
-                        root: snapshot.root,
-                        model,
-                        prompt,
-                        prepared: Box::new(prepared),
-                    }
-                } else {
-                    ExecutionMode::Continue {
-                        prompt,
-                        prepared: Box::new(prepared),
-                    }
-                },
+                mode,
                 subscription: state,
             },
         }
@@ -1580,13 +1571,13 @@ where
             subscription: RunSubscription {
                 state: Arc::clone(&state),
             },
-            execution: RunExecution {
+            execution: Box::new(RunExecution {
                 run_id: snapshot.run_id,
                 lease,
                 bindings,
                 mode: ExecutionMode::RecoveredObserve { handle },
                 subscription: state,
-            },
+            }),
         }
     }
 
@@ -1813,12 +1804,14 @@ where
             }
             RunAppend::Conflict { .. } => {
                 let winner = self.read_exact(request.run_id).await?;
-                if let Some((digest, lease)) = winner.cancel_receipt(request.request_id) {
-                    if digest == &request.digest
-                        && required_lease.is_none_or(|required| required == lease)
-                    {
-                        return Ok(winner.snapshot);
-                    }
+                if winner
+                    .cancel_receipt(request.request_id)
+                    .is_some_and(|(digest, lease)| {
+                        digest == &request.digest
+                            && required_lease.is_none_or(|required| required == lease)
+                    })
+                {
+                    return Ok(winner.snapshot);
                 }
                 Err(RunError::StaleRevision {
                     expected: request.expected_revision,
