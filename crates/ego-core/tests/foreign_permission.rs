@@ -122,11 +122,11 @@ impl Resolver for FakeResolver {
     ) -> BoxFuture<'static, Result<ego_core::permit::DnsResolution, TransportError>> {
         *self.calls.lock().expect("calls") += 1;
         Box::pin(future::ready(
-            self.answer
-                .lock()
-                .expect("answer")
-                .take()
-                .ok_or_else(|| TransportError::Resolution("DNS evidence exhausted".into())),
+            self.answer.lock().expect("answer").take().ok_or_else(|| {
+                TransportError::definitely_unsent(TransportFailure::Resolution(
+                    "DNS evidence exhausted".into(),
+                ))
+            }),
         ))
     }
 }
@@ -385,7 +385,11 @@ fn guarded_http_consumes_one_dns_answer_and_rejects_reuse_as_authority_spent() {
     assert_eq!(resolver.calls(), 1);
     let second =
         futures::executor::block_on(guarded.guarded_http(call, req)).expect_err("spent authority");
-    assert!(matches!(second, TransportError::AuthoritySpent));
+    assert!(matches!(second.failure(), TransportFailure::AuthoritySpent));
+    assert_eq!(
+        second.delivery(),
+        ego_core::generator::attempt::DeliveryCertainty::DefinitelyUnsent
+    );
     assert_eq!(resolver.calls(), 1);
     let observed = one_hop
         .observed
