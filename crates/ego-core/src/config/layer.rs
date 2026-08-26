@@ -1,9 +1,13 @@
 //! The config schema. Every layer is `deny_unknown_fields`
 //! (`CLI.md` §4.5) — an unrecognised key is a hard error, not a silent skip.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::net::IpAddr;
+use std::path::PathBuf;
+use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
+use url::{Host, Url};
 
 use super::error::ConfigError;
 use super::source::{Source, Sourced};
@@ -110,6 +114,465 @@ pub struct ProfileLayer {
     /// A spend ceiling, in the same grammar `--budget` takes
     /// (`crate::ceiling::Budget`).
     pub budget: Option<Budget>,
+    /// Complete MCP entries contributed by this profile. Entries replace the
+    /// same name from the layer's base table; their fields never merge.
+    #[serde(default)]
+    pub mcp: McpLayer,
+}
+
+/// A stable MCP server identifier.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct McpServerName(String);
+
+impl FromStr for McpServerName {
+    type Err = McpValueError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let valid = (1..=64).contains(&value.len())
+            && value
+                .bytes()
+                .next()
+                .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+            && value.bytes().skip(1).all(|byte| {
+                byte.is_ascii_lowercase()
+                    || byte.is_ascii_digit()
+                    || matches!(byte, b'.' | b'_' | b'-')
+            });
+        if !valid {
+            return Err(McpValueError::new(
+                "MCP server name must match [a-z0-9][a-z0-9._-]{0,63}",
+            ));
+        }
+        Ok(Self(value.to_owned()))
+    }
+}
+
+impl McpServerName {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for McpServerName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for McpServerName {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        String::deserialize(deserializer)?
+            .parse()
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+/// One inherited environment variable name. Values remain outside config.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct McpEnvironmentName(String);
+
+impl FromStr for McpEnvironmentName {
+    type Err = McpValueError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let mut bytes = value.bytes();
+        let valid = bytes
+            .next()
+            .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_')
+            && bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_');
+        if !valid {
+            return Err(McpValueError::new(
+                "MCP environment name must match [A-Za-z_][A-Za-z0-9_]*",
+            ));
+        }
+        Ok(Self(value.to_owned()))
+    }
+}
+
+impl McpEnvironmentName {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for McpEnvironmentName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for McpEnvironmentName {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        String::deserialize(deserializer)?
+            .parse()
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+/// A semantic MCP value failed lexical or cross-field validation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpValueError {
+    message: String,
+}
+
+impl McpValueError {
+    fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for McpValueError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for McpValueError {}
+
+/// MCP entries contributed by one base layer or profile.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpLayer {
+    #[serde(default)]
+    pub servers: BTreeMap<McpServerName, McpLayerEntry>,
+}
+
+/// One complete named layer entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum McpLayerEntry {
+    Server(McpServerConfig),
+    Tombstone,
+}
+
+/// One current MCP transport configuration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum McpServerConfig {
+    Stdio(McpStdioConfig),
+    Http(McpHttpConfig),
+}
+
+impl McpServerConfig {
+    pub fn stdio(
+        command: String,
+        args: Vec<String>,
+        cwd: Option<PathBuf>,
+        inherit_env: Vec<McpEnvironmentName>,
+    ) -> Result<Self, McpValueError> {
+        McpStdioConfig::new(command, args, cwd, inherit_env).map(Self::Stdio)
+    }
+
+    pub fn http(
+        url: Url,
+        auth: McpHttpAuth,
+        allow_insecure_loopback: bool,
+    ) -> Result<Self, McpValueError> {
+        McpHttpConfig::new(url, auth, allow_insecure_loopback).map(Self::Http)
+    }
+
+    pub fn validate(&self) -> Result<(), McpValueError> {
+        match self {
+            Self::Stdio(config) => config.validate(),
+            Self::Http(config) => config.validate(),
+        }
+    }
+}
+
+/// A child-process MCP server. Environment values are inherited only when
+/// execution begins and never become part of this value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpStdioConfig {
+    pub command: String,
+    pub args: Vec<String>,
+    pub cwd: Option<PathBuf>,
+    pub inherit_env: Vec<McpEnvironmentName>,
+}
+
+impl McpStdioConfig {
+    pub fn new(
+        command: String,
+        args: Vec<String>,
+        cwd: Option<PathBuf>,
+        inherit_env: Vec<McpEnvironmentName>,
+    ) -> Result<Self, McpValueError> {
+        let config = Self {
+            command,
+            args,
+            cwd,
+            inherit_env,
+        };
+        config.validate()?;
+        Ok(config)
+    }
+
+    pub fn validate(&self) -> Result<(), McpValueError> {
+        if self.command.is_empty() {
+            return Err(McpValueError::new("MCP stdio command must not be empty"));
+        }
+        let mut seen = Vec::<String>::with_capacity(self.inherit_env.len());
+        for name in &self.inherit_env {
+            let folded = name.0.to_ascii_lowercase();
+            if seen.contains(&folded) {
+                return Err(McpValueError::new(format!(
+                    "duplicate MCP environment name `{name}` ignoring case"
+                )));
+            }
+            seen.push(folded);
+        }
+        Ok(())
+    }
+}
+
+/// Authentication behavior for a stateless HTTP MCP server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum McpHttpAuth {
+    None,
+    Oauth,
+}
+
+/// A parsed absolute URL that preserves the operator's exact non-secret text
+/// for diagnostics and comment-preserving configuration publication.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpHttpUrl {
+    text: String,
+    parsed: Url,
+}
+
+impl McpHttpUrl {
+    pub fn as_url(&self) -> &Url {
+        &self.parsed
+    }
+}
+
+impl From<Url> for McpHttpUrl {
+    fn from(parsed: Url) -> Self {
+        Self {
+            text: parsed.to_string(),
+            parsed,
+        }
+    }
+}
+
+impl FromStr for McpHttpUrl {
+    type Err = McpValueError;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        let parsed = Url::parse(text)
+            .map_err(|error| McpValueError::new(format!("invalid MCP HTTP URL: {error}")))?;
+        Ok(Self {
+            text: text.to_owned(),
+            parsed,
+        })
+    }
+}
+
+impl std::fmt::Display for McpHttpUrl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.text)
+    }
+}
+
+impl<'de> Deserialize<'de> for McpHttpUrl {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        String::deserialize(deserializer)?
+            .parse()
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+impl Default for McpHttpAuth {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
+/// A stateless HTTP MCP server after URL-policy validation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpHttpConfig {
+    pub url: McpHttpUrl,
+    pub auth: McpHttpAuth,
+    pub allow_insecure_loopback: bool,
+}
+
+impl McpHttpConfig {
+    pub fn new(
+        url: impl Into<McpHttpUrl>,
+        auth: McpHttpAuth,
+        allow_insecure_loopback: bool,
+    ) -> Result<Self, McpValueError> {
+        let config = Self {
+            url: url.into(),
+            auth,
+            allow_insecure_loopback,
+        };
+        config.validate()?;
+        Ok(config)
+    }
+
+    pub fn validate(&self) -> Result<(), McpValueError> {
+        if authority_has_userinfo(&self.url.text)
+            || !self.url.parsed.username().is_empty()
+            || self.url.parsed.password().is_some()
+        {
+            return Err(McpValueError::new("MCP HTTP URL must not contain userinfo"));
+        }
+        if self.url.parsed.fragment().is_some() {
+            return Err(McpValueError::new(
+                "MCP HTTP URL must not contain a fragment",
+            ));
+        }
+        if self.url.parsed.host().is_none() {
+            return Err(McpValueError::new(
+                "MCP HTTP URL must have an absolute host",
+            ));
+        }
+
+        match self.url.parsed.scheme() {
+            "https" if self.allow_insecure_loopback => Err(McpValueError::new(
+                "allow_insecure_loopback is invalid for HTTPS",
+            )),
+            "https" => Ok(()),
+            "http" if !self.allow_insecure_loopback => Err(McpValueError::new(
+                "plaintext HTTP requires allow_insecure_loopback = true",
+            )),
+            "http" if !is_exact_loopback(&self.url) => Err(McpValueError::new(
+                "plaintext HTTP requires exact localhost or an IP-literal loopback host",
+            )),
+            "http" => Ok(()),
+            _ => Err(McpValueError::new(
+                "MCP HTTP URL scheme must be http or https",
+            )),
+        }
+    }
+}
+
+fn authority_has_userinfo(text: &str) -> bool {
+    text.split_once("://")
+        .map(|(_, remainder)| {
+            remainder
+                .split(['/', '?', '#'])
+                .next()
+                .is_some_and(|authority| authority.contains('@'))
+        })
+        .unwrap_or(false)
+}
+
+fn is_exact_loopback(url: &McpHttpUrl) -> bool {
+    match url.parsed.host() {
+        Some(Host::Domain(host)) => host == "localhost",
+        Some(Host::Ipv4(address)) => IpAddr::V4(address).is_loopback(),
+        Some(Host::Ipv6(address)) => IpAddr::V6(address).is_loopback(),
+        None => false,
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct McpStdioWire {
+    transport: McpStdioTransport,
+    command: String,
+    #[serde(default)]
+    args: Vec<String>,
+    cwd: Option<PathBuf>,
+    #[serde(default)]
+    inherit_env: Vec<McpEnvironmentName>,
+}
+
+#[derive(Deserialize)]
+enum McpStdioTransport {
+    #[serde(rename = "stdio")]
+    Stdio,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct McpHttpWire {
+    transport: McpHttpTransport,
+    url: McpHttpUrl,
+    #[serde(default)]
+    auth: McpHttpAuth,
+    #[serde(default)]
+    allow_insecure_loopback: bool,
+}
+
+#[derive(Deserialize)]
+enum McpHttpTransport {
+    #[serde(rename = "http")]
+    Http,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct McpTombstoneWire {
+    removed: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum McpEntryWire {
+    Stdio(McpStdioWire),
+    Http(McpHttpWire),
+    Tombstone(McpTombstoneWire),
+}
+
+impl McpEntryWire {
+    fn into_entry(self) -> Result<McpLayerEntry, McpValueError> {
+        match self {
+            Self::Stdio(wire) => {
+                let _ = wire.transport;
+                McpStdioConfig::new(wire.command, wire.args, wire.cwd, wire.inherit_env)
+                    .map(McpServerConfig::Stdio)
+                    .map(McpLayerEntry::Server)
+            }
+            Self::Http(wire) => {
+                let _ = wire.transport;
+                McpHttpConfig::new(wire.url, wire.auth, wire.allow_insecure_loopback)
+                    .map(McpServerConfig::Http)
+                    .map(McpLayerEntry::Server)
+            }
+            Self::Tombstone(wire) if wire.removed => Ok(McpLayerEntry::Tombstone),
+            Self::Tombstone(_) => Err(McpValueError::new("MCP tombstone requires removed = true")),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for McpLayerEntry {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        McpEntryWire::deserialize(deserializer)?
+            .into_entry()
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+impl<'de> Deserialize<'de> for McpServerConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        match McpEntryWire::deserialize(deserializer)?
+            .into_entry()
+            .map_err(serde::de::Error::custom)?
+        {
+            McpLayerEntry::Server(server) => Ok(server),
+            McpLayerEntry::Tombstone => Err(serde::de::Error::custom(
+                "an invocation-scoped MCP server cannot be a tombstone",
+            )),
+        }
+    }
 }
 
 /// A persisted status-line segment name.
@@ -146,9 +609,8 @@ impl<'de> Deserialize<'de> for StatusSegmentName {
         D: serde::Deserializer<'de>,
     {
         let name = String::deserialize(deserializer)?;
-        Self::from_name(&name).ok_or_else(|| {
-            serde::de::Error::unknown_variant(&name, StatusSegmentName::NAMES)
-        })
+        Self::from_name(&name)
+            .ok_or_else(|| serde::de::Error::unknown_variant(&name, StatusSegmentName::NAMES))
     }
 }
 
@@ -321,6 +783,9 @@ pub struct ConfigLayer {
     pub auth: HashMap<String, AuthProviderLayer>,
     /// Interactive presentation configuration, resolved like other fields.
     pub ui: Option<UiLayer>,
+    /// Name-keyed MCP entries in this layer.
+    #[serde(default)]
+    pub mcp: McpLayer,
 }
 
 impl ConfigLayer {

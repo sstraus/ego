@@ -4,12 +4,12 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use ego_core::config::{
-    ConfigLayer, McpConfigProvenance, McpLayerEntry, McpServerConfig, ResolvedMcpEntry, Source,
-    Sourced, Trust, UserConfigMutation, UserMcpSlot, resolve,
+    ConfigLayer, McpConfigProvenance, McpLayerEntry, McpServerConfig, McpServerName,
+    ResolvedMcpEntry, Source, Sourced, Trust, UserConfigMutation, UserMcpSlot, resolve,
 };
 use ego_core::credentials::{
-    CredentialKey, CredentialRemoval, CredentialStore, CredentialStoreError, CredentialTarget,
-    SecretMaterial,
+    CredentialKey, CredentialRemoval, CredentialStore, CredentialStoreError,
+    CredentialStoreErrorKind, CredentialStoreOperation, CredentialTarget, SecretMaterial,
 };
 
 fn layer(source: Source, body: &str) -> Sourced<ConfigLayer> {
@@ -27,6 +27,11 @@ command = "mcp-local"
 args = ["--safe"]
 cwd = "/workspace"
 inherit_env = ["TOKEN", "HOME"]
+
+[mcp.servers.relative]
+transport = "stdio"
+command = "mcp-relative"
+cwd = "."
 
 [mcp.servers.remote]
 transport = "http"
@@ -64,6 +69,11 @@ removed = true
     assert!(
         matches!(local, Some(McpLayerEntry::Server(McpServerConfig::Stdio(s))) if s.command == "mcp-local" && s.args == ["--safe"] && s.cwd.as_deref().map(|p| p.to_string_lossy().into_owned()) == Some("/workspace".into()) && s.inherit_env.iter().map(ToString::to_string).collect::<Vec<_>>() == ["TOKEN", "HOME"])
     );
+    assert!(matches!(
+        config.value.mcp.servers.get(&"relative".parse().expect("name")),
+        Some(McpLayerEntry::Server(McpServerConfig::Stdio(s)))
+            if s.cwd.as_deref() == Some(std::path::Path::new("."))
+    ));
     let remote = config
         .value
         .mcp
@@ -146,8 +156,12 @@ fn resolution_is_whole_entry_profile_trust_and_ambient_aware() {
         Source::System,
         "[mcp.servers.x]\ntransport='stdio'\ncommand='system'",
     );
-    let effective =
-        resolve(&[base, profile_layer, system], Trust::Trusted, Some("dev")).expect("resolution");
+    let effective = resolve(
+        &[base, profile_layer, system.clone()],
+        Trust::Trusted,
+        Some("dev"),
+    )
+    .expect("resolution");
     let name = "x".parse().expect("name");
     assert!(
         matches!(effective.mcp.entry(&name), Some(ResolvedMcpEntry::Configured { server: McpServerConfig::Http(h), provenance: McpConfigProvenance::Profile { source: Source::User, name: profile_name } }) if h.url.to_string() == "https://profile" && profile_name == "dev")
@@ -174,7 +188,7 @@ fn resolution_is_whole_entry_profile_trust_and_ambient_aware() {
 
 #[test]
 fn user_mutations_encode_exact_slot_expected_entry_and_reveal_semantics() {
-    let name = "remote".parse().expect("name");
+    let name: McpServerName = "remote".parse().expect("name");
     let server = McpServerConfig::Stdio(ego_core::config::McpStdioConfig {
         command: "mcp".into(),
         args: vec![],
@@ -184,10 +198,11 @@ fn user_mutations_encode_exact_slot_expected_entry_and_reveal_semantics() {
     let set = UserConfigMutation::McpSet {
         slot: UserMcpSlot::Profile("dev".into()),
         name: name.clone(),
+        expected_user_entry: Some(McpLayerEntry::Tombstone),
         server: server.clone(),
     };
     assert!(
-        matches!(set, UserConfigMutation::McpSet { slot: UserMcpSlot::Profile(profile), name: n, server: McpServerConfig::Stdio(_) } if profile == "dev" && n == name)
+        matches!(set, UserConfigMutation::McpSet { slot: UserMcpSlot::Profile(profile), name: n, expected_user_entry: Some(McpLayerEntry::Tombstone), server: McpServerConfig::Stdio(_) } if profile == "dev" && n == name)
     );
     let delete = UserConfigMutation::McpDeleteUserEntry {
         slot: UserMcpSlot::Base,
@@ -281,4 +296,23 @@ fn credential_fake_proves_resource_audience_account_identity_and_redaction() {
     );
     let debug = format!("{:?}", SecretMaterial::new(b"secret-a".to_vec()));
     assert!(!debug.contains("secret-a"));
+}
+
+#[test]
+fn credential_store_errors_have_only_fixed_closed_diagnostics() {
+    for kind in [
+        CredentialStoreErrorKind::Unavailable,
+        CredentialStoreErrorKind::Invalid,
+        CredentialStoreErrorKind::Ambiguous,
+        CredentialStoreErrorKind::Corrupt,
+        CredentialStoreErrorKind::Unsupported,
+        CredentialStoreErrorKind::UnsupportedVersion,
+        CredentialStoreErrorKind::Collision,
+    ] {
+        let error = CredentialStoreError::new(CredentialStoreOperation::Get, kind);
+        let repeated = CredentialStoreError::new(CredentialStoreOperation::Get, kind);
+        assert!(!error.diagnostic().is_empty());
+        assert_eq!(error.diagnostic(), repeated.diagnostic());
+        assert!(!format!("{error:?} {error}").contains("opaque"));
+    }
 }

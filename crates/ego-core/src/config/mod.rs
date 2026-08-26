@@ -17,12 +17,15 @@ pub use discovery::{
 };
 pub use error::ConfigError;
 pub use layer::{
-    AuthProviderLayer, ConfigLayer, Mode, ModelRef, PermCfg, ProfileLayer, StatusSegmentName,
-    StatuslineLayer, UiLayer,
+    AuthProviderLayer, ConfigLayer, McpEnvironmentName, McpHttpAuth, McpHttpConfig, McpHttpUrl,
+    McpLayer, McpLayerEntry, McpServerConfig, McpServerName, McpStdioConfig, McpValueError, Mode,
+    ModelRef, PermCfg, ProfileLayer, StatusSegmentName, StatuslineLayer, UiLayer,
 };
 pub use mutation::{
-    UserConfigError, UserConfigMutation, UserConfigPublication, UserConfigStore,
+    UserConfigError, UserConfigMutation, UserConfigPublication, UserConfigStore, UserMcpSlot,
 };
-pub use resolve::{Effective, Posture, resolve};
+pub use resolve::{
+    Effective, McpConfigProvenance, Posture, ResolvedMcpConfig, ResolvedMcpEntry, resolve,
+};
 pub use ruleset::{OriginSet, Ruleset, SourcedRule};
 pub use source::{Source, Sourced, Trust};

@@ -6,7 +6,14 @@
 
 use crate::generator::types::ThinkingLevel;
 
-use super::layer::validate_status_segment_names;
+use super::layer::{McpLayerEntry, McpServerConfig, McpServerName, validate_status_segment_names};
+
+/// The exact user-owned table changed by an MCP mutation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UserMcpSlot {
+    Base,
+    Profile(String),
+}
 
 /// One complete, atomic change to the user configuration authority.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,6 +25,24 @@ pub enum UserConfigMutation {
     },
     /// Replace the final ordered status-line segment list.
     Statusline { segments: Vec<String> },
+    /// Set one complete server in the exact base or profile slot.
+    McpSet {
+        slot: UserMcpSlot,
+        name: McpServerName,
+        expected_user_entry: Option<McpLayerEntry>,
+        server: McpServerConfig,
+    },
+    /// Delete exactly the entry the caller resolved from a user-owned slot.
+    McpDeleteUserEntry {
+        slot: UserMcpSlot,
+        name: McpServerName,
+        expected_entry: McpLayerEntry,
+    },
+    /// Hide a system entry only if the base user slot is still absent.
+    McpInsertUserTombstone {
+        name: McpServerName,
+        expected_user_entry: Option<McpLayerEntry>,
+    },
 }
 
 impl UserConfigMutation {
@@ -27,11 +52,46 @@ impl UserConfigMutation {
     /// duplicate status segment is not an ordering instruction: it is an
     /// ambiguous configuration and therefore fails as a whole.
     pub fn validate(&self) -> Result<(), UserConfigError> {
-        let Self::Statusline { segments } = self else {
-            return Ok(());
-        };
-
-        validate_status_segment_names(segments).map_err(UserConfigError::new)
+        match self {
+            Self::Statusline { segments } => {
+                validate_status_segment_names(segments).map_err(UserConfigError::new)
+            }
+            Self::McpSet {
+                expected_user_entry,
+                server,
+                ..
+            } => {
+                if let Some(McpLayerEntry::Server(expected)) = expected_user_entry {
+                    expected
+                        .validate()
+                        .map_err(|error| UserConfigError::new(error.to_string()))?;
+                }
+                server
+                    .validate()
+                    .map_err(|error| UserConfigError::new(error.to_string()))
+            }
+            Self::McpDeleteUserEntry {
+                expected_entry: McpLayerEntry::Server(server),
+                ..
+            } => server
+                .validate()
+                .map_err(|error| UserConfigError::new(error.to_string())),
+            Self::McpInsertUserTombstone {
+                expected_user_entry: Some(_),
+                ..
+            } => Err(UserConfigError::new(
+                "an MCP tombstone insertion must compare against an absent user entry",
+            )),
+            Self::ModelAndThinking { .. }
+            | Self::McpDeleteUserEntry {
+                expected_entry: McpLayerEntry::Tombstone,
+                ..
+            }
+            | Self::McpInsertUserTombstone {
+                expected_user_entry: None,
+                ..
+            } => Ok(()),
+        }
     }
 }
 

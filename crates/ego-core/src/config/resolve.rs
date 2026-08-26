@@ -2,7 +2,12 @@
 //! sources — no file I/O (`plans/m0a-contracts.md` Step 12).
 
 use super::error::ConfigError;
-use super::layer::{AuthProviderLayer, ConfigLayer, Mode, ModelRef, UiLayer};
+use std::collections::BTreeMap;
+
+use super::layer::{
+    AuthProviderLayer, ConfigLayer, McpLayerEntry, McpServerConfig, McpServerName, Mode, ModelRef,
+    UiLayer,
+};
 use super::ruleset::Ruleset;
 use super::source::{Source, Sourced, Trust};
 use crate::ceiling::{Ceilings, Clamped};
@@ -16,6 +21,49 @@ use crate::permit::rule::Rule;
 pub enum Posture {
     Bare,
     Ambient,
+}
+
+/// The exact authority that supplied a winning MCP entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum McpConfigProvenance {
+    Layer { source: Source },
+    Profile { source: Source, name: String },
+}
+
+/// One resolved MCP entry. Tombstones remain visible to management while
+/// configured-only consumers receive no server from them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolvedMcpEntry {
+    Configured {
+        server: McpServerConfig,
+        provenance: McpConfigProvenance,
+    },
+    Tombstone {
+        provenance: McpConfigProvenance,
+    },
+}
+
+/// Complete effective MCP configuration after profile, precedence, and trust.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ResolvedMcpConfig {
+    entries: BTreeMap<McpServerName, ResolvedMcpEntry>,
+}
+
+impl ResolvedMcpConfig {
+    pub fn entry(&self, name: &McpServerName) -> Option<&ResolvedMcpEntry> {
+        self.entries.get(name)
+    }
+
+    pub fn configured(&self, name: &McpServerName) -> Option<&McpServerConfig> {
+        match self.entry(name) {
+            Some(ResolvedMcpEntry::Configured { server, .. }) => Some(server),
+            Some(ResolvedMcpEntry::Tombstone { .. }) | None => None,
+        }
+    }
+
+    pub fn entries(&self) -> &BTreeMap<McpServerName, ResolvedMcpEntry> {
+        &self.entries
+    }
 }
 
 /// The fully resolved config: one layer's worth of values, after precedence
@@ -45,6 +93,8 @@ pub struct Effective {
     pub auth: std::collections::HashMap<String, AuthProviderLayer>,
     /// Interactive presentation fields after per-field precedence.
     pub ui: UiLayer,
+    /// Effective configured entries and winning tombstones with provenance.
+    pub mcp: ResolvedMcpConfig,
 }
 
 /// Resolves layered config into one [`Effective`] value.
@@ -125,9 +175,28 @@ pub fn resolve(
     let mut ceilings = Ceilings::default();
     let mut auth = std::collections::HashMap::new();
     let mut ui = UiLayer::default();
+    let mut mcp = ResolvedMcpConfig::default();
 
     for sourced in &eligible {
         let profile = active_profile.and_then(|name| sourced.value.profile.get(name));
+
+        apply_mcp_entries(
+            &mut mcp,
+            &sourced.value.mcp.servers,
+            McpConfigProvenance::Layer {
+                source: sourced.source,
+            },
+        );
+        if let (Some(profile), Some(name)) = (profile, active_profile) {
+            apply_mcp_entries(
+                &mut mcp,
+                &profile.mcp.servers,
+                McpConfigProvenance::Profile {
+                    source: sourced.source,
+                    name: name.to_owned(),
+                },
+            );
+        }
 
         if let Some(m) = profile
             .and_then(|p| p.model.clone())
@@ -292,5 +361,25 @@ pub fn resolve(
         clamped,
         auth,
         ui,
+        mcp,
     })
+}
+
+fn apply_mcp_entries(
+    resolved: &mut ResolvedMcpConfig,
+    entries: &BTreeMap<McpServerName, McpLayerEntry>,
+    provenance: McpConfigProvenance,
+) {
+    for (name, entry) in entries {
+        let entry = match entry {
+            McpLayerEntry::Server(server) => ResolvedMcpEntry::Configured {
+                server: server.clone(),
+                provenance: provenance.clone(),
+            },
+            McpLayerEntry::Tombstone => ResolvedMcpEntry::Tombstone {
+                provenance: provenance.clone(),
+            },
+        };
+        resolved.entries.insert(name.clone(), entry);
+    }
 }

@@ -13,6 +13,7 @@ pub mod ceiling;
 pub mod compact;
 pub mod config;
 pub mod cost;
+pub mod credentials;
 pub mod digest;
 pub mod event;
 pub mod generation_model_source;
