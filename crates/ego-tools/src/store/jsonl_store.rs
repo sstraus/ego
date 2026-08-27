@@ -639,6 +639,9 @@ impl JsonlStore {
     /// Deleting a lease file here would be actively wrong: it would evict a
     /// *live* writer.
     pub fn recover(&self, id: &SessionId) -> Result<Repair, StoreError> {
+        if !self.io.exists(&self.session_dir(id))? {
+            return Ok(Repair::default());
+        }
         self.with_events_lock(id, || self.recover_already_locked(id))
     }
 
