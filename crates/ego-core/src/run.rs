@@ -2236,9 +2236,9 @@ fn sha1(input: &[u8]) -> [u8; 20] {
         0x10325476,
         0xc3d2e1f0,
     ];
-    for chunk in bytes.chunks_exact(64) {
+    for chunk in bytes.as_chunks::<64>().0 {
         let mut w = [0_u32; 80];
-        for (index, word) in chunk.chunks_exact(4).enumerate() {
+        for (index, word) in chunk.as_chunks::<4>().0.iter().enumerate() {
             w[index] = u32::from_be_bytes([word[0], word[1], word[2], word[3]]);
         }
         for index in 16..80 {
@@ -2271,7 +2271,7 @@ fn sha1(input: &[u8]) -> [u8; 20] {
         h[4] = h[4].wrapping_add(e);
     }
     let mut output = [0_u8; 20];
-    for (chunk, word) in output.chunks_exact_mut(4).zip(h) {
+    for (chunk, word) in output.as_chunks_mut::<4>().0.iter_mut().zip(h) {
         chunk.copy_from_slice(&word.to_be_bytes());
     }
     output

@@ -768,12 +768,20 @@ impl<'a> TurnLoop<'a> {
 
     /// Run one turn: the prompt, every generation it takes to answer it, and
     /// the tool calls in between.
+    #[expect(
+        clippy::result_large_err,
+        reason = "TurnAbandoned carries the exact durable session state by contract"
+    )]
     pub async fn run(&mut self, prompt: &str) -> Result<TurnOutcome, TurnAbandoned> {
         self.run_prompts(vec![(prompt.to_string(), None)]).await
     }
 
     /// Settle one durable pending question and continue its original turn.
     /// No new turn or user prompt is minted.
+    #[expect(
+        clippy::result_large_err,
+        reason = "TurnAbandoned carries the exact durable session state by contract"
+    )]
     pub async fn resume_question(
         &mut self,
         question: ItemId,
@@ -867,6 +875,10 @@ impl<'a> TurnLoop<'a> {
     }
 
     /// Continue an already-settled pure question result on its original turn.
+    #[expect(
+        clippy::result_large_err,
+        reason = "TurnAbandoned carries the exact durable session state by contract"
+    )]
     pub async fn resume_turn(&mut self, turn: TurnId) -> Result<TurnOutcome, TurnAbandoned> {
         if let Some(observation) = self.execution_observation.take()
             && let Err(cause) = self.journal.append(
@@ -917,6 +929,10 @@ impl<'a> TurnLoop<'a> {
 
     /// Consume every accepted prompt that lacks a correlated `UserPrompt` as
     /// one fresh user turn. Empty recovery is not a turn and spends nothing.
+    #[expect(
+        clippy::result_large_err,
+        reason = "TurnAbandoned carries the exact durable session state by contract"
+    )]
     pub async fn run_queued_turn(&mut self) -> Result<Option<TurnOutcome>, TurnAbandoned> {
         let prompts: Vec<_> = self
             .journal
@@ -932,6 +948,10 @@ impl<'a> TurnLoop<'a> {
         self.run_prompts(prompts).await.map(Some)
     }
 
+    #[expect(
+        clippy::result_large_err,
+        reason = "TurnAbandoned carries the exact durable session state by contract"
+    )]
     async fn run_prompts(
         &mut self,
         prompts: Vec<(String, Option<crate::event::id::QueuedPromptId>)>,
