@@ -1715,6 +1715,9 @@ mod end_to_end {
                     &ws.fs,
                     &ws.process,
                     &ws.evidence,
+                    &NO_RESOLVER,
+                    &NO_HOP,
+                    &NO_DUPLEX,
                     ws.cwd(),
                 ),
             );
@@ -1806,6 +1809,9 @@ mod end_to_end {
                     &ws.fs,
                     &ws.process,
                     &ws.evidence,
+                    &NO_RESOLVER,
+                    &NO_HOP,
+                    &NO_DUPLEX,
                     ws.cwd(),
                 ),
             );

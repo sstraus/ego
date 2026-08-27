@@ -6,7 +6,7 @@ mod landlock;
 mod null;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod probe;
-mod process;
+pub(crate) mod process;
 #[cfg(target_os = "macos")]
 mod profile;
 #[cfg(target_os = "macos")]
@@ -16,7 +16,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ego_core::permit::{
-    CanonPath, ExecCaps, ExecObservation, PolicyDigest, RunConfinement, SpawnSpec,
+    CanonPath, DuplexSpawner, ExecCaps, ExecObservation, OneHop, PolicyDigest, Resolver,
+    RunConfinement, SpawnSpec,
 };
 use ego_core::turn::CancelToken;
 use futures::future::BoxFuture;
@@ -31,6 +32,20 @@ pub use ego_core::permit::{ProcessError, ProcessExecutor};
 pub use landlock::dispatch_helper as dispatch_landlock_helper;
 #[cfg(target_os = "macos")]
 pub use probe::dispatch_network_probe;
+
+pub(crate) fn runtime_handle() -> tokio::runtime::Handle {
+    static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+    RUNTIME
+        .get_or_init(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .thread_name("ego-effects")
+                .build()
+                .expect("the run effect runtime must be constructible")
+        })
+        .handle()
+        .clone()
+}
 
 /// Per-run bounds that are not model-controlled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,7 +95,9 @@ pub struct ExecRunConfig {
     policy: RunConfinement,
     evidence: SessionEvidenceStore,
     cancel: CancelToken,
-    limits: ExecLimits,
+    exec_limits: ExecLimits,
+    transport_limits: TransportLimits,
+    resolver: Arc<dyn Resolver>,
 }
 
 impl ExecRunConfig {
@@ -88,46 +105,122 @@ impl ExecRunConfig {
         policy: RunConfinement,
         evidence: SessionEvidenceStore,
         cancel: CancelToken,
-        limits: ExecLimits,
+        exec_limits: ExecLimits,
+        transport_limits: TransportLimits,
+        resolver: Arc<dyn Resolver>,
     ) -> Self {
         Self {
             policy,
             evidence,
             cancel,
-            limits,
+            exec_limits,
+            transport_limits,
+            resolver,
         }
+    }
+}
+
+/// Per-hop byte and lifetime bounds captured by one run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TransportLimits {
+    max_request_bytes: u64,
+    max_response_bytes: u64,
+    timeout: Duration,
+}
+
+impl TransportLimits {
+    pub fn new(
+        max_request_bytes: u64,
+        max_response_bytes: u64,
+        timeout: Duration,
+    ) -> Result<Self, TransportLimitsError> {
+        if max_request_bytes == 0 {
+            return Err(TransportLimitsError::ZeroRequestBytes);
+        }
+        if max_response_bytes == 0 {
+            return Err(TransportLimitsError::ZeroResponseBytes);
+        }
+        if timeout.is_zero() {
+            return Err(TransportLimitsError::ZeroTimeout);
+        }
+        Ok(Self {
+            max_request_bytes,
+            max_response_bytes,
+            timeout,
+        })
+    }
+
+    pub const fn max_request_bytes(self) -> u64 {
+        self.max_request_bytes
+    }
+
+    pub const fn max_response_bytes(self) -> u64 {
+        self.max_response_bytes
+    }
+
+    pub const fn timeout(self) -> Duration {
+        self.timeout
+    }
+}
+
+/// Why run transport bounds cannot be constructed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransportLimitsError {
+    ZeroRequestBytes,
+    ZeroResponseBytes,
+    ZeroTimeout,
+}
+
+impl std::fmt::Display for TransportLimitsError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::ZeroRequestBytes => "transport request budget must be greater than zero",
+            Self::ZeroResponseBytes => "transport response budget must be greater than zero",
+            Self::ZeroTimeout => "transport timeout must be greater than zero",
+        })
+    }
+}
+
+impl std::error::Error for TransportLimitsError {}
+
+impl From<TransportLimitsError> for ProcessError {
+    fn from(error: TransportLimitsError) -> Self {
+        Self::Invariant(error.to_string())
     }
 }
 
 /// The only public process executor. Policy, evidence ownership,
 /// cancellation and lifecycle bounds are captured before any call can run.
 pub struct GuardedExec {
-    backend: Arc<dyn Backend>,
-    evidence: SessionEvidenceStore,
-    cancel: CancelToken,
-    limits: ExecLimits,
+    context: Arc<process::RunProcessContext>,
 }
 
 impl GuardedExec {
-    pub(crate) fn provisional(
-        backend: Arc<dyn Backend>,
-        evidence: SessionEvidenceStore,
-        cancel: CancelToken,
-        limits: ExecLimits,
-    ) -> Self {
-        Self {
-            backend,
-            evidence,
-            cancel,
-            limits,
-        }
+    fn new(context: Arc<process::RunProcessContext>) -> Self {
+        Self { context }
     }
+}
 
-    pub async fn for_run(
-        config: ExecRunConfig,
-    ) -> Result<(Arc<Self>, ExecObservation), ProcessError> {
+impl ProcessExecutor for GuardedExec {
+    fn execute<'a>(
+        &'a self,
+        spec: &'a SpawnSpec,
+    ) -> BoxFuture<'a, Result<ego_core::permit::ToolResult, ProcessError>> {
+        Box::pin(self.context.execute(spec))
+    }
+}
+
+/// The complete external-effect adapter set owned by one run.
+pub struct RunEffectPorts {
+    process: Arc<GuardedExec>,
+    http: Arc<crate::http::OneShotHttpTransport>,
+    duplex: Arc<crate::stdio::GuardedDuplex>,
+}
+
+impl RunEffectPorts {
+    pub async fn for_run(config: ExecRunConfig) -> Result<(Self, ExecObservation), ProcessError> {
         let (selected, runtime_roots) =
-            select_backend(&config.policy, config.cancel.clone(), config.limits).await?;
+            select_backend(&config.policy, config.cancel.clone(), config.exec_limits).await?;
         selected.prerequisite(&config.policy)?;
         let capabilities = selected.capabilities();
         config
@@ -141,26 +234,68 @@ impl GuardedExec {
             policy_digest_with_runtime_roots(&config.policy, selected.as_ref(), &runtime_roots)?,
         );
         let backend: Arc<dyn Backend> = selected;
-        let executor = Arc::new(Self {
-            backend,
-            evidence: config.evidence,
-            cancel: config.cancel,
-            limits: config.limits,
-        });
-        Ok((executor, observation))
+        Ok((Self::build(config, backend, capabilities), observation))
     }
-}
 
-impl ProcessExecutor for GuardedExec {
-    fn execute<'a>(
-        &'a self,
-        spec: &'a SpawnSpec,
-    ) -> BoxFuture<'a, Result<ego_core::permit::ToolResult, ProcessError>> {
-        let backend = Arc::clone(&self.backend);
-        let evidence = self.evidence.clone();
-        let cancel = self.cancel.clone();
-        let limits = self.limits;
-        Box::pin(async move { process::execute(backend, evidence, cancel, limits, spec).await })
+    fn build(config: ExecRunConfig, backend: Arc<dyn Backend>, capabilities: ExecCaps) -> Self {
+        let context = Arc::new(process::RunProcessContext::new(
+            backend,
+            config.evidence,
+            config.cancel.clone(),
+            config.exec_limits,
+            config.policy,
+            capabilities,
+        ));
+        Self {
+            process: Arc::new(GuardedExec::new(Arc::clone(&context))),
+            http: Arc::new(crate::http::OneShotHttpTransport::new(
+                config.resolver,
+                config.cancel,
+                config.transport_limits,
+                context.offline(),
+            )),
+            duplex: Arc::new(crate::stdio::GuardedDuplex::new(context)),
+        }
+    }
+
+    pub(crate) fn for_probe(
+        policy: RunConfinement,
+        evidence: SessionEvidenceStore,
+        cancel: CancelToken,
+        exec_limits: ExecLimits,
+        transport_limits: TransportLimits,
+        resolver: Arc<dyn Resolver>,
+        backend: Arc<dyn Backend>,
+    ) -> Self {
+        let capabilities = backend.maximum_demonstrable_caps();
+        Self::build(
+            ExecRunConfig::new(
+                policy,
+                evidence,
+                cancel,
+                exec_limits,
+                transport_limits,
+                resolver,
+            ),
+            backend,
+            capabilities,
+        )
+    }
+
+    pub fn process(&self) -> &dyn ProcessExecutor {
+        self.process.as_ref()
+    }
+
+    pub fn resolver(&self) -> &dyn Resolver {
+        self.http.as_ref()
+    }
+
+    pub fn one_hop(&self) -> &dyn OneHop {
+        self.http.as_ref()
+    }
+
+    pub fn duplex(&self) -> &dyn DuplexSpawner {
+        self.duplex.as_ref()
     }
 }
 

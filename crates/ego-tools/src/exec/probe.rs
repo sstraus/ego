@@ -11,14 +11,14 @@ use std::time::Duration;
 use ego_core::config::{Mode, PermCfg, Ruleset, Source};
 use ego_core::event::id::SessionId;
 use ego_core::permit::{
-    CanonPath, Classification, ExecCaps, ProcessError, RunConfinement, Tool, Typed,
+    CanonPath, Classification, Confinement, ExecCaps, ProcessError, RunConfinement, Tool, Typed,
 };
 use ego_core::turn::{CancelToken, Tools};
 
 use crate::store::SessionEvidenceStore;
 
 use super::backend::{Backend, MeasuredBackend};
-use super::{ExecLimits, GuardedExec};
+use super::{ExecLimits, RunEffectPorts, TransportLimits};
 
 #[cfg(target_os = "linux")]
 use super::landlock::{LandlockBackend, derived_runtime_roots};
@@ -928,10 +928,34 @@ async fn probe(
             Source::Project,
         ),
     );
-    let executor = GuardedExec::provisional(backend, evidence.clone(), cancel, limits);
+    let Ok(run_policy) = RunConfinement::new(Confinement::Off, false, cwd.clone()) else {
+        return false;
+    };
+    let Ok(transport_limits) = TransportLimits::new(1, 1, Duration::from_secs(2)) else {
+        return false;
+    };
+    let ports = RunEffectPorts::for_probe(
+        run_policy,
+        evidence.clone(),
+        cancel,
+        limits,
+        transport_limits,
+        Arc::new(crate::http::SystemResolver::new()),
+        backend,
+    );
     let fs = crate::fs::OsFs;
     let registry: Vec<Arc<dyn Tool>> = vec![Arc::new(Typed(crate::tools::ExecTool))];
-    let tools = Tools::new(&registry, &policy, &fs, &executor, &evidence, cwd.clone());
+    let tools = Tools::new(
+        &registry,
+        &policy,
+        &fs,
+        ports.process(),
+        &evidence,
+        ports.resolver(),
+        ports.one_hop(),
+        ports.duplex(),
+        cwd.clone(),
+    );
     let Ok(arguments) = serde_json::to_string(&serde_json::json!({
         "argv": argv,
         "cwd": cwd.to_string(),

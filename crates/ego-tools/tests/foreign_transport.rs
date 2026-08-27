@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use ego_core::config::{ConfigLayer, Mode, Ruleset, Source};
+use ego_core::event::domain::CancelCause;
 use ego_core::generator::attempt::DeliveryCertainty;
 use ego_core::permit::{
     CanonPath, Confinement, DnsResolution, EnvPolicy, Fs, FsError, GuardedEffects, HttpRequest,
@@ -20,7 +21,7 @@ use ego_tools::exec::{
 };
 use futures::StreamExt;
 use futures::future::{self, BoxFuture};
-use futures::io::{AsyncReadExt, AsyncWriteExt};
+use futures::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
 struct ScenarioRuntime(tokio::runtime::Runtime);
 
@@ -100,7 +101,6 @@ struct RunFixture {
     runtime: ScenarioRuntime,
     _evidence_root: tempfile::TempDir,
     evidence: SessionEvidenceStore,
-    cancel: ego_core::turn::CancelToken,
     ports: RunEffectPorts,
 }
 
@@ -162,7 +162,6 @@ fn try_run_ports_with_limits(
         runtime,
         _evidence_root: evidence_root,
         evidence,
-        cancel,
         ports,
     })
 }
@@ -223,7 +222,13 @@ impl Resolver for RecordingResolver {
                     TransportFailure::Resolution("no answer".into()),
                 ))
             },
-            |(target, addresses)| DnsResolution::new(target, addresses).map_err(Into::into),
+            |(target, addresses)| {
+                DnsResolution::new(target, addresses).map_err(|_| {
+                    TransportError::definitely_unsent(TransportFailure::Resolution(
+                        "fixture returned no addresses".into(),
+                    ))
+                })
+            },
         )))
     }
 }
@@ -346,11 +351,105 @@ fn host_values(request: &[u8]) -> Vec<Vec<u8>> {
         .split(|byte| *byte == b'\n')
         .filter_map(|line| {
             let line = line.strip_suffix(b"\r").unwrap_or(line);
-            let (name, value) = line.split_once(|byte| *byte == b':')?;
+            let separator = line.iter().position(|byte| *byte == b':')?;
+            let (name, value) = line.split_at(separator);
+            let value = &value[1..];
             name.eq_ignore_ascii_case(b"host")
                 .then(|| value.strip_prefix(b" ").unwrap_or(value).to_vec())
         })
         .collect()
+}
+
+struct FrameScanner {
+    unread: Vec<u8>,
+}
+
+impl FrameScanner {
+    const MAX_BUFFER: usize = 64 * 1024;
+    const READ_TIMEOUT: Duration = Duration::from_secs(1);
+
+    fn new() -> Self {
+        Self { unread: Vec::new() }
+    }
+
+    async fn read_fixed<R>(&mut self, reader: &mut R, marker: &[u8], payload_len: usize) -> Vec<u8>
+    where
+        R: AsyncRead + Unpin,
+    {
+        self.read_marker(reader, marker).await;
+        self.read_payload(reader, payload_len).await
+    }
+
+    async fn read_length_prefixed<R>(&mut self, reader: &mut R, marker: &[u8]) -> Vec<u8>
+    where
+        R: AsyncRead + Unpin,
+    {
+        self.read_marker(reader, marker).await;
+        let length = self.read_payload(reader, 1).await[0] as usize;
+        self.read_payload(reader, length).await
+    }
+
+    async fn read_marker<R>(&mut self, reader: &mut R, marker: &[u8])
+    where
+        R: AsyncRead + Unpin,
+    {
+        assert!(!marker.is_empty(), "frame marker must not be empty");
+        loop {
+            if let Some(index) = self
+                .unread
+                .windows(marker.len())
+                .position(|candidate| candidate == marker)
+            {
+                self.unread.drain(..index + marker.len());
+                return;
+            }
+            self.read_more(reader).await;
+        }
+    }
+
+    async fn read_payload<R>(&mut self, reader: &mut R, length: usize) -> Vec<u8>
+    where
+        R: AsyncRead + Unpin,
+    {
+        while self.unread.len() < length {
+            self.read_more(reader).await;
+        }
+        self.unread.drain(..length).collect()
+    }
+
+    async fn drain_to_eof<R>(&mut self, reader: &mut R)
+    where
+        R: AsyncRead + Unpin,
+    {
+        self.unread.clear();
+        let mut chunk = [0_u8; 1024];
+        loop {
+            let count = tokio::time::timeout(Self::READ_TIMEOUT, reader.read(&mut chunk))
+                .await
+                .expect("frame drain timeout")
+                .expect("frame drain");
+            if count == 0 {
+                return;
+            }
+        }
+    }
+
+    async fn read_more<R>(&mut self, reader: &mut R)
+    where
+        R: AsyncRead + Unpin,
+    {
+        let mut chunk = [0_u8; 1024];
+        let count = tokio::time::timeout(Self::READ_TIMEOUT, reader.read(&mut chunk))
+            .await
+            .expect("frame read timeout")
+            .expect("frame read");
+        assert_ne!(count, 0, "frame ended before payload");
+        self.unread.extend_from_slice(&chunk[..count]);
+        assert!(
+            self.unread.len() <= Self::MAX_BUFFER,
+            "frame scan exceeded bounded buffer"
+        );
+    }
 }
 
 fn response_server(status: u16, location: &'static str) -> SocketServer {
@@ -421,7 +520,7 @@ fn duplex_spec(name: &str, timeout: Option<Duration>) -> (SpawnSpec, String) {
     let executable = std::env::current_exe().expect("test executable");
     let spec = SpawnSpec::new(
         vec![
-            executable.into_os_string(),
+            executable.clone().into_os_string(),
             OsString::from("--ignored"),
             OsString::from("--exact"),
             OsString::from(name),
@@ -470,18 +569,12 @@ fn guarded_duplex_settles_binary_child_and_keeps_stdout_out_of_evidence() {
         .block_on(handle.write_all(b"\0\xff\x80"))
         .expect("binary write");
     fixture.runtime.block_on(handle.flush()).expect("flush");
-    let mut output = Vec::new();
-    fixture
-        .runtime
-        .block_on(handle.read_to_end(&mut output))
-        .expect("binary read");
     let sentinel = b"EGO_FOREIGN_TRANSPORT_SENTINEL\0";
-    let frame = output
-        .windows(sentinel.len())
-        .position(|candidate| candidate == sentinel)
-        .expect("sentinel frame");
-    assert_eq!(output[frame + sentinel.len()], 3);
-    assert_eq!(&output[frame + sentinel.len() + 1..], b"\0\xff\x80");
+    let mut scanner = FrameScanner::new();
+    let payload = fixture
+        .runtime
+        .block_on(scanner.read_length_prefixed(&mut handle, sentinel));
+    assert_eq!(payload, b"\0\xff\x80");
     assert_eq!(handle.delivery(), DeliveryCertainty::PossiblySent);
     let settlement = fixture.runtime.block_on(handle.settle());
     assert!(matches!(
@@ -554,13 +647,11 @@ fn guarded_duplex_interrupts_a_blocked_child_after_write() {
         .block_on(guarded.guarded_duplex(call))
         .expect("duplex");
     let ready_marker = b"EGO_DUPLEX_READY\0";
-    let mut ready = vec![0_u8; ready_marker.len() + 4];
-    fixture
+    let mut scanner = FrameScanner::new();
+    let ready = fixture
         .runtime
-        .block_on(handle.read_exact(&mut ready))
-        .expect("ready");
-    assert_eq!(&ready[..ready_marker.len()], ready_marker);
-    let direct = u32::from_le_bytes(ready[ready_marker.len()..].try_into().unwrap());
+        .block_on(scanner.read_fixed(&mut handle, ready_marker, 4));
+    let direct = u32::from_le_bytes(ready.try_into().unwrap());
     fixture
         .runtime
         .block_on(handle.write_all(b"outbound"))
@@ -613,12 +704,12 @@ fn guarded_duplex_times_out_blocked_child_with_exact_timeout() {
         .runtime
         .block_on(guarded.guarded_duplex(call))
         .expect("duplex");
-    let mut ready = vec![0_u8; b"EGO_DUPLEX_READY\n".len()];
-    fixture
+    let ready_marker = b"EGO_DUPLEX_READY\n";
+    let mut scanner = FrameScanner::new();
+    let ready = fixture
         .runtime
-        .block_on(handle.read_exact(&mut ready))
-        .expect("ready");
-    assert_eq!(ready, b"EGO_DUPLEX_READY\n");
+        .block_on(scanner.read_fixed(&mut handle, ready_marker, 0));
+    assert!(ready.is_empty());
     let settlement = fixture.runtime.block_on(handle.settle());
     assert!(matches!(
         settlement.end(),
@@ -668,17 +759,16 @@ fn guarded_duplex_cancels_blocked_child_after_write() {
         .block_on(guarded.guarded_duplex(call))
         .expect("duplex");
     let ready_marker = b"EGO_DUPLEX_READY\0";
-    let mut ready = vec![0_u8; ready_marker.len() + 4];
-    fixture
+    let mut scanner = FrameScanner::new();
+    let ready = fixture
         .runtime
-        .block_on(handle.read_exact(&mut ready))
-        .expect("ready");
-    assert_eq!(&ready[..ready_marker.len()], ready_marker);
+        .block_on(scanner.read_fixed(&mut handle, ready_marker, 4));
+    assert_eq!(ready.len(), 4);
     fixture
         .runtime
         .block_on(handle.write_all(b"outbound"))
         .expect("write");
-    cancel.cancel(ego_core::turn::CancelCause::User);
+    cancel.cancel(CancelCause::User);
     let settlement = fixture.runtime.block_on(handle.settle());
     assert!(matches!(
         settlement.end(),
@@ -713,14 +803,12 @@ fn guarded_duplex_interrupt_cleans_a_long_lived_descendant() {
         .block_on(guarded.guarded_duplex(call))
         .expect("duplex");
     let marker = b"EGO_DESCENDANTS\0";
-    let mut frame = vec![0_u8; marker.len() + 8];
-    fixture
+    let mut scanner = FrameScanner::new();
+    let frame = fixture
         .runtime
-        .block_on(handle.read_exact(&mut frame))
-        .expect("descendant frame");
-    assert_eq!(&frame[..marker.len()], marker);
-    let direct = u32::from_le_bytes(frame[marker.len()..marker.len() + 4].try_into().unwrap());
-    let descendant = u32::from_le_bytes(frame[marker.len() + 4..].try_into().unwrap());
+        .block_on(scanner.read_fixed(&mut handle, marker, 8));
+    let direct = u32::from_le_bytes(frame[..4].try_into().unwrap());
+    let descendant = u32::from_le_bytes(frame[4..].try_into().unwrap());
     assert_ne!(direct, descendant);
     fixture
         .runtime
@@ -787,18 +875,25 @@ fn guarded_duplex_settles_bounded_stderr_evidence_without_stdout_protocol() {
         .runtime
         .block_on(guarded.guarded_duplex(call))
         .expect("duplex");
-    let mut output = Vec::new();
-    fixture
+    let marker = b"EGO_C6_STDOUT_SENTINEL\0";
+    let mut scanner = FrameScanner::new();
+    let payload = fixture
         .runtime
-        .block_on(handle.read_to_end(&mut output))
-        .expect("stdout");
-    assert_eq!(output, b"EGO_C6_STDOUT_SENTINEL\0");
+        .block_on(scanner.read_fixed(&mut handle, marker, 0));
+    assert!(payload.is_empty());
+    fixture.runtime.block_on(scanner.drain_to_eof(&mut handle));
     assert_eq!(handle.delivery(), DeliveryCertainty::DefinitelyUnsent);
     let settlement = fixture.runtime.block_on(handle.settle());
-    assert!(matches!(
+    assert!(
+        matches!(
+            settlement.end(),
+            ego_core::permit::DuplexEnd::Exited { code: 0 }
+        ),
+        "unexpected duplex end: end={:?}; cleanup={:?}; evidence={:?}",
         settlement.end(),
-        ego_core::permit::DuplexEnd::Exited { code: 0 }
-    ));
+        settlement.cleanup(),
+        settlement.evidence()
+    );
     assert!(matches!(
         settlement.cleanup(),
         ego_core::permit::CleanupCertainty::Complete
@@ -946,6 +1041,7 @@ fn proxy_environment_is_not_an_authority_source() {
         .expect("proxy child");
     assert!(status.success(), "proxy child status: {status}");
 
+    let destination_port = destination.address.port();
     let destination_captures = destination.finish();
     let proxy_captures = proxy.finish();
     assert_eq!(destination_captures.len(), 1, "destination accepted once");
@@ -953,7 +1049,7 @@ fn proxy_environment_is_not_an_authority_source() {
     assert!(!destination_captures[0].request.is_empty());
     let expected_host = format!(
         "Host: proxy-is-not-authority.example.test:{}",
-        destination.address.port()
+        destination_port
     );
     assert_eq!(
         host_values(&destination_captures[0].request),
@@ -1575,7 +1671,7 @@ fn cancellation_before_io_is_definitely_unsent_and_skips_dns_and_socket() {
     let resolver = RecordingResolver::default();
     resolver.insert(target.clone(), IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
     let cancel = ego_core::turn::CancelToken::new();
-    cancel.cancel(ego_core::turn::CancelCause::User);
+    cancel.cancel(CancelCause::User);
     let fixture = run_ports_with(
         resolver.clone(),
         false,
@@ -1660,7 +1756,7 @@ fn cancellation_during_io_is_possibly_sent_after_one_request() {
             result = &mut request_future => result.expect_err("in-flight cancellation"),
             received_result = received => {
                 received_result.expect("request synchronization task");
-                cancel.cancel(ego_core::turn::CancelCause::User);
+                cancel.cancel(CancelCause::User);
                 request_future
                     .await
                     .expect_err("cancelled result")

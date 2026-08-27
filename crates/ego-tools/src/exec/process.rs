@@ -1,24 +1,100 @@
 //! Common process lifecycle: pipes, bounds, cancellation and tree cleanup.
 
+use std::pin::Pin;
 use std::process::{ExitStatus, Stdio};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
-use ego_core::permit::{ProcessError, SpawnSpec, StreamProvenance, ToolContentBlock, ToolResult};
+use ego_core::generator::attempt::DeliveryCertainty;
+use ego_core::permit::{
+    CleanupCertainty, DuplexEnd, DuplexSession, DuplexSettlement, ExecCaps, ProcessError,
+    RunConfinement, SpawnSpec, StreamProvenance, ToolContentBlock, ToolResult, TransportError,
+    TransportFailure,
+};
 use ego_core::store::evidence::{EvidenceError, EvidenceStore as _, EvidenceWriter};
 use ego_core::turn::CancelToken;
+use futures::future::BoxFuture;
+use futures::io::{AsyncRead as FuturesAsyncRead, AsyncWrite as FuturesAsyncWrite};
 use tokio::io::{AsyncRead, AsyncReadExt as _};
 use tokio::process::Child;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use crate::store::SessionEvidenceStore;
+use tokio_util::compat::{Compat, TokioAsyncReadCompatExt as _, TokioAsyncWriteCompatExt as _};
 
 use super::ExecLimits;
 use super::backend::{Backend, executable, prefixed_command};
 
 const PIPE_CHUNK_BYTES: usize = 16 * 1024;
 const PIPE_CHANNEL_CHUNKS: usize = 4;
+
+/// Process state captured once and shared by the run's normal and duplex
+/// process adapters.
+pub(crate) struct RunProcessContext {
+    backend: Arc<dyn Backend>,
+    evidence: SessionEvidenceStore,
+    cancel: CancelToken,
+    limits: ExecLimits,
+    confinement: RunConfinement,
+    capabilities: ExecCaps,
+}
+
+impl RunProcessContext {
+    pub(crate) fn new(
+        backend: Arc<dyn Backend>,
+        evidence: SessionEvidenceStore,
+        cancel: CancelToken,
+        limits: ExecLimits,
+        confinement: RunConfinement,
+        capabilities: ExecCaps,
+    ) -> Self {
+        Self {
+            backend,
+            evidence,
+            cancel,
+            limits,
+            confinement,
+            capabilities,
+        }
+    }
+
+    pub(crate) fn offline(&self) -> bool {
+        self.confinement.offline()
+    }
+
+    pub(crate) async fn execute(&self, spec: &SpawnSpec) -> Result<ToolResult, ProcessError> {
+        self.confinement
+            .requirements()
+            .check(self.capabilities)
+            .map_err(ProcessError::MissingCapabilities)?;
+        let backend = Arc::clone(&self.backend);
+        let evidence = self.evidence.clone();
+        let cancel = self.cancel.clone();
+        let limits = self.limits;
+        let spec = spec.clone();
+        super::runtime_handle()
+            .spawn(async move { execute(backend, evidence, cancel, limits, &spec).await })
+            .await
+            .map_err(|error| ProcessError::Backend(format!("process task failed: {error}")))?
+    }
+
+    pub(crate) async fn spawn_duplex(
+        self: Arc<Self>,
+        spec: SpawnSpec,
+    ) -> Result<Box<dyn DuplexSession>, TransportError> {
+        super::runtime_handle()
+            .spawn(async move { spawn_duplex(self, spec).await })
+            .await
+            .map_err(|error| {
+                TransportError::definitely_unsent(TransportFailure::Exchange(format!(
+                    "duplex spawn task failed: {error}"
+                )))
+            })?
+    }
+}
 
 pub(crate) async fn execute(
     backend: Arc<dyn Backend>,
@@ -201,6 +277,368 @@ pub(crate) async fn execute(
     }
 
     Ok(result)
+}
+
+async fn spawn_duplex(
+    context: Arc<RunProcessContext>,
+    spec: SpawnSpec,
+) -> Result<Box<dyn DuplexSession>, TransportError> {
+    if let Err(missing) = context
+        .confinement
+        .requirements()
+        .check(context.capabilities)
+    {
+        let failure = if missing.missing().contains(ExecCaps::NO_IP_NETWORK) {
+            TransportFailure::Offline
+        } else {
+            TransportFailure::Exchange(missing.to_string())
+        };
+        return Err(TransportError::definitely_unsent(failure));
+    }
+    if context.cancel.is_cancelled() {
+        return Err(TransportError::definitely_unsent(
+            TransportFailure::Cancelled,
+        ));
+    }
+
+    let mut command =
+        prefixed_command(context.backend.launch_prefix(), &spec).map_err(process_before_spawn)?;
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    configure_process_group(&mut command);
+
+    let stderr_writer = context
+        .evidence
+        .begin()
+        .map_err(|error| process_before_spawn(ProcessError::Evidence(error)))?;
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            let _ = abort_writer(stderr_writer).await;
+            return Err(process_before_spawn(ProcessError::Launch {
+                executable: executable(&spec),
+                reason: error.to_string(),
+            }));
+        }
+    };
+    let tree_id = child.id();
+    let Some(stdin) = child.stdin.take() else {
+        terminate_tree(&mut child, tree_id, context.limits.termination_grace()).await;
+        let _ = abort_writer(stderr_writer).await;
+        return Err(process_before_spawn(ProcessError::Invariant(
+            "stdin pipe was not installed".into(),
+        )));
+    };
+    let Some(stdout) = child.stdout.take() else {
+        terminate_tree(&mut child, tree_id, context.limits.termination_grace()).await;
+        let _ = abort_writer(stderr_writer).await;
+        return Err(process_before_spawn(ProcessError::Invariant(
+            "stdout pipe was not installed".into(),
+        )));
+    };
+    let Some(stderr) = child.stderr.take() else {
+        terminate_tree(&mut child, tree_id, context.limits.termination_grace()).await;
+        let _ = abort_writer(stderr_writer).await;
+        return Err(process_before_spawn(ProcessError::Invariant(
+            "stderr pipe was not installed".into(),
+        )));
+    };
+
+    let delivery = Arc::new(AtomicBool::new(false));
+    let started = tokio::time::Instant::now();
+    Ok(Box::new(ProcessDuplex {
+        stdin: Some(stdin.compat_write()),
+        stdout: Some(stdout.compat()),
+        lifecycle: Some(DuplexLifecycle {
+            child,
+            tree_id,
+            stderr: start_drain(
+                stderr,
+                StreamProvenance::Stderr,
+                stderr_writer,
+                context.limits.preview_bytes(),
+            ),
+            watcher: Some(start_duplex_watcher(
+                tree_id,
+                context.cancel.clone(),
+                spec.timeout(),
+                started,
+                context.limits.termination_grace(),
+            )),
+            started,
+            timeout: spec.timeout(),
+            cancel: context.cancel.clone(),
+            grace: context.limits.termination_grace(),
+        }),
+        delivery,
+        _context: context,
+    }))
+}
+
+fn process_before_spawn(error: ProcessError) -> TransportError {
+    TransportError::definitely_unsent(TransportFailure::Exchange(error.to_string()))
+}
+
+struct DuplexLifecycle {
+    child: Child,
+    tree_id: Option<u32>,
+    stderr: DrainHandle,
+    watcher: Option<DuplexWatcher>,
+    started: tokio::time::Instant,
+    timeout: Option<Duration>,
+    cancel: CancelToken,
+    grace: Duration,
+}
+
+struct ProcessDuplex {
+    stdin: Option<Compat<tokio::process::ChildStdin>>,
+    stdout: Option<Compat<tokio::process::ChildStdout>>,
+    lifecycle: Option<DuplexLifecycle>,
+    delivery: Arc<AtomicBool>,
+    _context: Arc<RunProcessContext>,
+}
+
+impl FuturesAsyncRead for ProcessDuplex {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &mut [u8],
+    ) -> Poll<std::io::Result<usize>> {
+        let Some(stdout) = self.stdout.as_mut() else {
+            return Poll::Ready(Ok(0));
+        };
+        Pin::new(stdout).poll_read(context, buffer)
+    }
+}
+
+impl FuturesAsyncWrite for ProcessDuplex {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        let Some(stdin) = self.stdin.as_mut() else {
+            return Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "duplex stdin is closed",
+            )));
+        };
+        match Pin::new(stdin).poll_write(context, buffer) {
+            Poll::Ready(Ok(written)) => {
+                if written != 0 {
+                    self.delivery.store(true, Ordering::Release);
+                }
+                Poll::Ready(Ok(written))
+            }
+            other => other,
+        }
+    }
+
+    fn poll_flush(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        match self.stdin.as_mut() {
+            Some(stdin) => Pin::new(stdin).poll_flush(context),
+            None => Poll::Ready(Ok(())),
+        }
+    }
+
+    fn poll_close(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        match self.stdin.as_mut() {
+            Some(stdin) => Pin::new(stdin).poll_close(context),
+            None => Poll::Ready(Ok(())),
+        }
+    }
+}
+
+impl DuplexSession for ProcessDuplex {
+    fn delivery(&self) -> DeliveryCertainty {
+        delivery_certainty(&self.delivery)
+    }
+
+    fn settle(self: Box<Self>) -> BoxFuture<'static, DuplexSettlement> {
+        settle_on_runtime(*self, false)
+    }
+
+    fn interrupt(self: Box<Self>) -> BoxFuture<'static, DuplexSettlement> {
+        settle_on_runtime(*self, true)
+    }
+}
+
+fn settle_on_runtime(
+    session: ProcessDuplex,
+    interrupt: bool,
+) -> BoxFuture<'static, DuplexSettlement> {
+    let delivery = Arc::clone(&session.delivery);
+    let task = super::runtime_handle().spawn(settle_duplex(session, interrupt));
+    Box::pin(async move {
+        task.await.unwrap_or_else(|error| {
+            DuplexSettlement::new(
+                DuplexEnd::Failed,
+                CleanupCertainty::Uncertain,
+                delivery_certainty(&delivery),
+                Err(EvidenceError::Io {
+                    message: format!("duplex settlement task failed: {error}"),
+                }),
+            )
+        })
+    })
+}
+
+async fn settle_duplex(mut session: ProcessDuplex, interrupt: bool) -> DuplexSettlement {
+    drop(session.stdin.take());
+    drop(session.stdout.take());
+    let delivery = delivery_certainty(&session.delivery);
+    let Some(mut lifecycle) = session.lifecycle.take() else {
+        return DuplexSettlement::new(
+            DuplexEnd::Failed,
+            CleanupCertainty::Uncertain,
+            delivery,
+            Err(EvidenceError::Io {
+                message: "duplex lifecycle was already consumed".into(),
+            }),
+        );
+    };
+
+    let watcher_complete = match lifecycle.watcher.take() {
+        Some(watcher) => watcher.stop().await,
+        None => false,
+    };
+
+    let (end, mut cleanup) = if interrupt {
+        let complete =
+            terminate_tree(&mut lifecycle.child, lifecycle.tree_id, lifecycle.grace).await;
+        (DuplexEnd::Interrupted, cleanup_certainty(complete))
+    } else {
+        settle_child(&mut lifecycle).await
+    };
+    if !watcher_complete {
+        cleanup = CleanupCertainty::Uncertain;
+    }
+    let evidence = finalize_stderr(lifecycle.stderr).await;
+    DuplexSettlement::new(end, cleanup, delivery, evidence)
+}
+
+async fn settle_child(lifecycle: &mut DuplexLifecycle) -> (DuplexEnd, CleanupCertainty) {
+    loop {
+        if lifecycle.cancel.is_cancelled() {
+            let complete =
+                terminate_tree(&mut lifecycle.child, lifecycle.tree_id, lifecycle.grace).await;
+            return (DuplexEnd::Cancelled, cleanup_certainty(complete));
+        }
+        if lifecycle
+            .timeout
+            .is_some_and(|timeout| lifecycle.started.elapsed() >= timeout)
+        {
+            let timeout = lifecycle.timeout.expect("checked as present");
+            let complete =
+                terminate_tree(&mut lifecycle.child, lifecycle.tree_id, lifecycle.grace).await;
+            return (DuplexEnd::TimedOut { timeout }, cleanup_certainty(complete));
+        }
+        match lifecycle.child.try_wait() {
+            Ok(Some(status)) => {
+                let complete = cleanup_descendants(lifecycle.tree_id, lifecycle.grace).await;
+                return (duplex_end(status), cleanup_certainty(complete));
+            }
+            Ok(None) => tokio::time::sleep(Duration::from_millis(2)).await,
+            Err(_) => {
+                terminate_tree(&mut lifecycle.child, lifecycle.tree_id, lifecycle.grace).await;
+                return (DuplexEnd::Failed, CleanupCertainty::Uncertain);
+            }
+        }
+    }
+}
+
+fn duplex_end(status: ExitStatus) -> DuplexEnd {
+    if let Some(code) = status.code() {
+        return DuplexEnd::Exited { code };
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt as _;
+        DuplexEnd::Signalled {
+            signal: status.signal(),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        DuplexEnd::Signalled { signal: None }
+    }
+}
+
+fn cleanup_certainty(complete: bool) -> CleanupCertainty {
+    if complete {
+        CleanupCertainty::Complete
+    } else {
+        CleanupCertainty::Uncertain
+    }
+}
+
+struct DuplexWatcher {
+    task: JoinHandle<()>,
+    stop: oneshot::Sender<()>,
+}
+
+impl DuplexWatcher {
+    async fn stop(self) -> bool {
+        let Self { task, stop } = self;
+        let _ = stop.send(());
+        task.await.is_ok()
+    }
+}
+
+fn start_duplex_watcher(
+    tree_id: Option<u32>,
+    cancel: CancelToken,
+    timeout: Option<Duration>,
+    started: tokio::time::Instant,
+    grace: Duration,
+) -> DuplexWatcher {
+    let (stop, mut stopped) = oneshot::channel();
+    let task = tokio::spawn(async move {
+        loop {
+            if cancel.is_cancelled() || timeout.is_some_and(|limit| started.elapsed() >= limit) {
+                terminate_group(tree_id, grace).await;
+                return;
+            }
+            tokio::select! {
+                _ = &mut stopped => return,
+                _ = tokio::time::sleep(Duration::from_millis(2)) => {}
+            }
+        }
+    });
+    DuplexWatcher { task, stop }
+}
+
+async fn finalize_stderr(handle: DrainHandle) -> Result<ToolResult, EvidenceError> {
+    let pending = join_drain(handle).await.map_err(process_to_evidence)?;
+    let block = commit_stream(pending).await.map_err(process_to_evidence)?;
+    Ok(ToolResult::new(vec![block]))
+}
+
+fn process_to_evidence(error: ProcessError) -> EvidenceError {
+    match error {
+        ProcessError::Evidence(error) => error,
+        ProcessError::EvidenceLimit { limit, .. } => EvidenceError::Limit { limit },
+        error => EvidenceError::Io {
+            message: error.to_string(),
+        },
+    }
+}
+
+fn delivery_certainty(delivery: &AtomicBool) -> DeliveryCertainty {
+    if delivery.load(Ordering::Acquire) {
+        DeliveryCertainty::PossiblySent
+    } else {
+        DeliveryCertainty::DefinitelyUnsent
+    }
 }
 
 struct DrainHandle {
@@ -576,20 +1014,77 @@ fn configure_process_group(command: &mut tokio::process::Command) {
 #[cfg(not(any(unix, windows)))]
 fn configure_process_group(_command: &mut tokio::process::Command) {}
 
-async fn terminate_tree(child: &mut Child, tree_id: Option<u32>, grace: Duration) {
-    let group_exists = signal_tree(tree_id, false).await;
-    if group_exists {
-        tokio::time::sleep(grace).await;
-        let _ = signal_tree(tree_id, true).await;
+async fn terminate_tree(child: &mut Child, tree_id: Option<u32>, grace: Duration) -> bool {
+    terminate_group(tree_id, grace).await;
+    if child.try_wait().ok().flatten().is_none() && child.kill().await.is_err() {
+        return false;
     }
-    let _ = child.wait().await;
+    child.wait().await.is_ok() && wait_for_tree_absence(tree_id, grace).await
 }
 
-async fn cleanup_descendants(tree_id: Option<u32>, grace: Duration) {
+async fn cleanup_descendants(tree_id: Option<u32>, grace: Duration) -> bool {
+    terminate_group(tree_id, grace).await;
+    wait_for_tree_absence(tree_id, grace).await
+}
+
+async fn terminate_group(tree_id: Option<u32>, grace: Duration) {
     if signal_tree(tree_id, false).await {
         tokio::time::sleep(grace).await;
         let _ = signal_tree(tree_id, true).await;
     }
+}
+
+async fn wait_for_tree_absence(tree_id: Option<u32>, grace: Duration) -> bool {
+    let deadline = tokio::time::Instant::now() + grace;
+    loop {
+        if tree_is_absent(tree_id).await {
+            return true;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+#[cfg(unix)]
+async fn tree_is_absent(tree_id: Option<u32>) -> bool {
+    use nix::sys::signal::killpg;
+    use nix::unistd::Pid;
+
+    let Some(id) = tree_id else {
+        return false;
+    };
+    let Ok(id) = i32::try_from(id) else {
+        return false;
+    };
+    matches!(
+        killpg(Pid::from_raw(id), None),
+        Err(nix::errno::Errno::ESRCH)
+    )
+}
+
+#[cfg(windows)]
+async fn tree_is_absent(tree_id: Option<u32>) -> bool {
+    let Some(id) = tree_id else {
+        return false;
+    };
+    let filter = format!("PID eq {id}");
+    let output = tokio::process::Command::new("tasklist")
+        .args(["/FI", &filter, "/NH"])
+        .output()
+        .await;
+    output.is_ok_and(|output| {
+        output.status.success()
+            && !String::from_utf8_lossy(&output.stdout)
+                .split_whitespace()
+                .any(|field| field == id.to_string())
+    })
+}
+
+#[cfg(not(any(unix, windows)))]
+async fn tree_is_absent(_tree_id: Option<u32>) -> bool {
+    false
 }
 
 #[cfg(unix)]
