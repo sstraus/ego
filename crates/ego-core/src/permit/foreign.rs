@@ -792,6 +792,7 @@ pub trait Resolver: Send + Sync {
     fn resolve(
         &self,
         target: NetworkTarget,
+        deadline: Option<std::time::Instant>,
     ) -> BoxFuture<'static, Result<DnsResolution, TransportError>>;
 }
 
@@ -968,6 +969,7 @@ pub trait OneHop: Send + Sync {
         &self,
         connect: ResolvedConnect,
         request: HttpRequest,
+        deadline: Option<std::time::Instant>,
     ) -> BoxFuture<'static, Result<OneHopResponse, TransportError>>;
 }
 
@@ -986,6 +988,7 @@ impl<'a> GuardedHttp<'a> {
         route: HttpRoute,
         connect: PreparedConnect,
         request: HttpRequest,
+        deadline: Option<std::time::Instant>,
     ) -> BoxFuture<'_, Result<OneHopResponse, TransportError>> {
         if route.target != connect.target || !connect.matches(&request) {
             return Box::pin(futures::future::ready(Err(authority_mismatch())));
@@ -995,7 +998,10 @@ impl<'a> GuardedHttp<'a> {
             let resolved = if connect.target.ip().is_some() {
                 ResolvedConnect::literal(route, connect)?
             } else {
-                let resolution = self.resolver.resolve(connect.target.clone()).await?;
+                let resolution = self
+                    .resolver
+                    .resolve(connect.target.clone(), deadline)
+                    .await?;
                 let selected = resolution
                     .addresses
                     .first()
@@ -1003,7 +1009,7 @@ impl<'a> GuardedHttp<'a> {
                     .ok_or_else(authority_mismatch)?;
                 ResolvedConnect::from_resolution(route, connect, resolution, selected)?
             };
-            self.one_hop.execute(resolved, request).await
+            self.one_hop.execute(resolved, request, deadline).await
         })
     }
 }
@@ -1025,9 +1031,7 @@ pub enum TransportFailure {
     Exchange(String),
     ResponseBody(String),
     Cancelled,
-    TimedOut { limit: Duration },
-    RequestLimit { limit: u64 },
-    ResponseLimit { limit: u64 },
+    TimedOut,
 }
 
 impl TransportError {

@@ -18,7 +18,7 @@ use ego_core::turn::{CancelToken, Tools};
 use crate::store::SessionEvidenceStore;
 
 use super::backend::{Backend, MeasuredBackend};
-use super::{ExecLimits, RunEffectPorts, TransportLimits};
+use super::{ExecLimits, HttpCallTimeout, RunEffectPorts};
 
 #[cfg(target_os = "linux")]
 use super::landlock::{LandlockBackend, derived_runtime_roots};
@@ -931,15 +931,13 @@ async fn probe(
     let Ok(run_policy) = RunConfinement::new(Confinement::Off, false, cwd.clone()) else {
         return false;
     };
-    let Ok(transport_limits) = TransportLimits::new(1, 1, Duration::from_secs(2)) else {
-        return false;
-    };
     let ports = RunEffectPorts::for_probe(
         run_policy,
         evidence.clone(),
         cancel,
         limits,
-        transport_limits,
+        HttpCallTimeout::default(),
+        None,
         Arc::new(crate::http::SystemResolver::new()),
         backend,
     );

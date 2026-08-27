@@ -4,6 +4,7 @@ use std::ffi::OsString;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
+use std::time::Instant;
 
 use futures::future::{self, BoxFuture};
 use futures::io::{AsyncRead, AsyncWrite};
@@ -11,9 +12,10 @@ use futures::io::{AsyncRead, AsyncWrite};
 use ego_core::config::{ConfigLayer, Mode, Ruleset, Source};
 use ego_core::permit::{
     CanonPath, DuplexHandle, DuplexSession, DuplexSpawner, EnvPolicy, Fs, FsError, GuardedEffects,
-    HttpHeader, HttpRequest, HttpRequestDigest, HttpRoute, HttpScheme, NetworkTarget, OneHop,
-    PathResolver, PolicyEngine, PreparedCall, PreparedConnect, ProcessError, ProcessExecutor,
-    Resolver, Scan, ScanRequest, SpawnSpec, Subject, ToolResult, TransportError, TransportFailure,
+    GuardedHttp, HttpHeader, HttpRequest, HttpRequestDigest, HttpRoute, HttpScheme, NetworkTarget,
+    OneHop, PathResolver, PolicyEngine, PreparedCall, PreparedConnect, ProcessError,
+    ProcessExecutor, Resolver, Scan, ScanRequest, SpawnSpec, Subject, ToolResult, TransportError,
+    TransportFailure,
 };
 use ego_core::store::evidence::{
     EvidenceError, EvidencePage, EvidenceRead, EvidenceStore, EvidenceWriter,
@@ -100,6 +102,7 @@ fn stdio_call(server: &str, argv: Vec<OsString>) -> PreparedCall {
 struct FakeResolver {
     answer: Arc<Mutex<Option<ego_core::permit::DnsResolution>>>,
     calls: Arc<Mutex<usize>>,
+    deadlines: Arc<Mutex<Vec<Option<Instant>>>>,
 }
 impl FakeResolver {
     fn one(target: NetworkTarget, ip: &str) -> Self {
@@ -109,18 +112,25 @@ impl FakeResolver {
                     .expect("DNS"),
             ))),
             calls: Arc::new(Mutex::new(0)),
+            deadlines: Arc::new(Mutex::new(Vec::new())),
         }
     }
     fn calls(&self) -> usize {
         *self.calls.lock().expect("calls")
+    }
+
+    fn deadlines(&self) -> Vec<Option<Instant>> {
+        self.deadlines.lock().expect("deadlines").clone()
     }
 }
 impl Resolver for FakeResolver {
     fn resolve(
         &self,
         _target: NetworkTarget,
+        deadline: Option<Instant>,
     ) -> BoxFuture<'static, Result<ego_core::permit::DnsResolution, TransportError>> {
         *self.calls.lock().expect("calls") += 1;
+        self.deadlines.lock().expect("deadlines").push(deadline);
         Box::pin(future::ready(
             self.answer.lock().expect("answer").take().ok_or_else(|| {
                 TransportError::definitely_unsent(TransportFailure::Resolution(
@@ -145,14 +155,17 @@ struct FakeOneHop {
         >,
     >,
     failure: Arc<Mutex<Option<TransportError>>>,
+    deadlines: Arc<Mutex<Vec<Option<Instant>>>>,
 }
 impl OneHop for FakeOneHop {
     fn execute(
         &self,
         connect: ego_core::permit::ResolvedConnect,
         request: HttpRequest,
+        deadline: Option<Instant>,
     ) -> BoxFuture<'static, Result<ego_core::permit::OneHopResponse, TransportError>> {
         *self.calls.lock().expect("calls") += 1;
+        self.deadlines.lock().expect("deadlines").push(deadline);
         assert_eq!(connect.request_digest(), &HttpRequestDigest::of(&request));
         *self.observed.lock().expect("observed") = Some((
             connect.route().clone(),
@@ -166,6 +179,12 @@ impl OneHop for FakeOneHop {
         Box::pin(future::ready(Ok(
             ego_core::permit::OneHopResponse::response(200, vec![], vec![]),
         )))
+    }
+}
+
+impl FakeOneHop {
+    fn deadlines(&self) -> Vec<Option<Instant>> {
+        self.deadlines.lock().expect("deadlines").clone()
     }
 }
 
@@ -383,6 +402,8 @@ fn guarded_http_consumes_one_dns_answer_and_rejects_reuse_as_authority_spent() {
         ego_core::generator::attempt::DeliveryCertainty::PossiblySent
     );
     assert_eq!(resolver.calls(), 1);
+    assert_eq!(resolver.deadlines(), vec![None]);
+    assert_eq!(one_hop.deadlines(), vec![None]);
     let second =
         futures::executor::block_on(guarded.guarded_http(call, req)).expect_err("spent authority");
     assert!(matches!(second.failure(), TransportFailure::AuthoritySpent));
@@ -407,6 +428,44 @@ fn guarded_http_consumes_one_dns_answer_and_rejects_reuse_as_authority_spent() {
         "192.0.2.10".parse::<std::net::IpAddr>().expect("IP")
     );
     assert_eq!(observed.3, HttpRequestDigest::of(&request()));
+}
+
+#[test]
+fn guarded_http_passes_one_deadline_to_dns_and_hop_and_skips_dns_for_literal() {
+    let target = NetworkTarget::parse("api.example.test:443").expect("target");
+    let named_route = route("api.example.test:443");
+    let req = request();
+    let connect = PreparedConnect::new(target.clone(), &req);
+    let resolver = FakeResolver::one(target, "192.0.2.10");
+    let one_hop = FakeOneHop::default();
+    let guarded = GuardedHttp::new(&resolver, &one_hop);
+    let deadline = Instant::now() + std::time::Duration::from_secs(30);
+    futures::executor::block_on(guarded.execute_admitted(
+        named_route,
+        connect,
+        req,
+        Some(deadline),
+    ))
+    .expect("named target HTTP");
+    assert_eq!(resolver.deadlines(), vec![Some(deadline)]);
+    assert_eq!(one_hop.deadlines(), vec![Some(deadline)]);
+
+    let literal_target = NetworkTarget::parse("127.0.0.1:443").expect("literal target");
+    let literal_request = HttpRequest::get("/").expect("literal request");
+    let literal_connect = PreparedConnect::new(literal_target, &literal_request);
+    let literal_resolver = FakeResolver::default();
+    let literal_one_hop = FakeOneHop::default();
+    let literal_guarded = GuardedHttp::new(&literal_resolver, &literal_one_hop);
+    futures::executor::block_on(literal_guarded.execute_admitted(
+        route("127.0.0.1:443"),
+        literal_connect,
+        literal_request,
+        Some(deadline),
+    ))
+    .expect("literal target HTTP");
+    assert_eq!(literal_resolver.calls(), 0);
+    assert!(literal_resolver.deadlines().is_empty());
+    assert_eq!(literal_one_hop.deadlines(), vec![Some(deadline)]);
 }
 
 #[test]

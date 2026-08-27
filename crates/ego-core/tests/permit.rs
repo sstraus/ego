@@ -3,6 +3,7 @@
 //! See `ARCHITECTURE.md` §3.2 and §3.4, and `plans/m0a-contracts.md` Step 11.
 
 use std::path::Path;
+use std::time::Instant;
 
 use ego_core::config::{Mode, OriginSet, PermCfg, Ruleset, Source};
 use ego_core::permit::rule::Rule;
@@ -69,6 +70,7 @@ mod permit {
         fn resolve(
             &self,
             _target: ego_core::permit::NetworkTarget,
+            _deadline: Option<Instant>,
         ) -> BoxFuture<'static, Result<ego_core::permit::DnsResolution, TransportError>> {
             Box::pin(future::ready(Err(TransportError::definitely_unsent(
                 TransportFailure::Offline,
@@ -81,6 +83,7 @@ mod permit {
             &self,
             _connect: ResolvedConnect,
             _request: HttpRequest,
+            _deadline: Option<Instant>,
         ) -> BoxFuture<'static, Result<ego_core::permit::OneHopResponse, TransportError>> {
             Box::pin(future::ready(Err(TransportError::definitely_unsent(
                 TransportFailure::Offline,

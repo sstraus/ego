@@ -313,7 +313,9 @@ impl<'a> GuardedEffects<'a> {
                 .into_http_route()
                 .ok_or_else(authority_mismatch)?;
             let connect = claim.connect.ok_or_else(authority_mismatch)?;
-            self.http.execute_admitted(route, connect, request).await
+            self.http
+                .execute_admitted(route, connect, request, None)
+                .await
         })
     }
 

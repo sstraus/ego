@@ -1689,6 +1689,7 @@ mod tests {
         fn resolve(
             &self,
             _target: NetworkTarget,
+            _deadline: Option<std::time::Instant>,
         ) -> BoxFuture<'static, Result<DnsResolution, TransportError>> {
             Box::pin(future::ready(Err(TransportError::definitely_unsent(
                 TransportFailure::AuthorityMismatch,
@@ -1701,6 +1702,7 @@ mod tests {
             &self,
             _connect: ResolvedConnect,
             _request: HttpRequest,
+            _deadline: Option<std::time::Instant>,
         ) -> BoxFuture<'static, Result<OneHopResponse, TransportError>> {
             Box::pin(future::ready(Err(TransportError::definitely_unsent(
                 TransportFailure::AuthorityMismatch,

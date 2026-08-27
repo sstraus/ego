@@ -13,7 +13,7 @@ mod profile;
 mod seatbelt;
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ego_core::permit::{
     CanonPath, DuplexSpawner, ExecCaps, ExecObservation, OneHop, PolicyDigest, Resolver,
@@ -96,7 +96,8 @@ pub struct ExecRunConfig {
     evidence: SessionEvidenceStore,
     cancel: CancelToken,
     exec_limits: ExecLimits,
-    transport_limits: TransportLimits,
+    http_call_timeout: HttpCallTimeout,
+    run_deadline: Option<Instant>,
     resolver: Arc<dyn Resolver>,
 }
 
@@ -106,7 +107,8 @@ impl ExecRunConfig {
         evidence: SessionEvidenceStore,
         cancel: CancelToken,
         exec_limits: ExecLimits,
-        transport_limits: TransportLimits,
+        http_call_timeout: HttpCallTimeout,
+        run_deadline: Option<Instant>,
         resolver: Arc<dyn Resolver>,
     ) -> Self {
         Self {
@@ -114,77 +116,59 @@ impl ExecRunConfig {
             evidence,
             cancel,
             exec_limits,
-            transport_limits,
+            http_call_timeout,
+            run_deadline,
             resolver,
         }
     }
 }
 
-/// Per-hop byte and lifetime bounds captured by one run.
+/// The maximum lifetime of one logical provider HTTP call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TransportLimits {
-    max_request_bytes: u64,
-    max_response_bytes: u64,
-    timeout: Duration,
-}
+pub struct HttpCallTimeout(Duration);
 
-impl TransportLimits {
-    pub fn new(
-        max_request_bytes: u64,
-        max_response_bytes: u64,
-        timeout: Duration,
-    ) -> Result<Self, TransportLimitsError> {
-        if max_request_bytes == 0 {
-            return Err(TransportLimitsError::ZeroRequestBytes);
-        }
-        if max_response_bytes == 0 {
-            return Err(TransportLimitsError::ZeroResponseBytes);
-        }
+impl HttpCallTimeout {
+    pub fn new(timeout: Duration) -> Result<Self, HttpCallTimeoutError> {
         if timeout.is_zero() {
-            return Err(TransportLimitsError::ZeroTimeout);
+            return Err(HttpCallTimeoutError::Zero);
         }
-        Ok(Self {
-            max_request_bytes,
-            max_response_bytes,
-            timeout,
-        })
+        if Instant::now().checked_add(timeout).is_none() {
+            return Err(HttpCallTimeoutError::Unrepresentable);
+        }
+        Ok(Self(timeout))
     }
 
-    pub const fn max_request_bytes(self) -> u64 {
-        self.max_request_bytes
-    }
-
-    pub const fn max_response_bytes(self) -> u64 {
-        self.max_response_bytes
-    }
-
-    pub const fn timeout(self) -> Duration {
-        self.timeout
+    pub const fn duration(self) -> Duration {
+        self.0
     }
 }
 
-/// Why run transport bounds cannot be constructed.
+impl Default for HttpCallTimeout {
+    fn default() -> Self {
+        Self(Duration::from_secs(30 * 60))
+    }
+}
+
+/// Why a logical HTTP timeout cannot be represented.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TransportLimitsError {
-    ZeroRequestBytes,
-    ZeroResponseBytes,
-    ZeroTimeout,
+pub enum HttpCallTimeoutError {
+    Zero,
+    Unrepresentable,
 }
 
-impl std::fmt::Display for TransportLimitsError {
+impl std::fmt::Display for HttpCallTimeoutError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
-            Self::ZeroRequestBytes => "transport request budget must be greater than zero",
-            Self::ZeroResponseBytes => "transport response budget must be greater than zero",
-            Self::ZeroTimeout => "transport timeout must be greater than zero",
+            Self::Zero => "HTTP call timeout must be greater than zero",
+            Self::Unrepresentable => "HTTP call timeout is too large for the monotonic clock",
         })
     }
 }
 
-impl std::error::Error for TransportLimitsError {}
+impl std::error::Error for HttpCallTimeoutError {}
 
-impl From<TransportLimitsError> for ProcessError {
-    fn from(error: TransportLimitsError) -> Self {
+impl From<HttpCallTimeoutError> for ProcessError {
+    fn from(error: HttpCallTimeoutError) -> Self {
         Self::Invariant(error.to_string())
     }
 }
@@ -251,7 +235,8 @@ impl RunEffectPorts {
             http: Arc::new(crate::http::OneShotHttpTransport::new(
                 config.resolver,
                 config.cancel,
-                config.transport_limits,
+                config.http_call_timeout,
+                config.run_deadline,
                 context.offline(),
             )),
             duplex: Arc::new(crate::stdio::GuardedDuplex::new(context)),
@@ -263,7 +248,8 @@ impl RunEffectPorts {
         evidence: SessionEvidenceStore,
         cancel: CancelToken,
         exec_limits: ExecLimits,
-        transport_limits: TransportLimits,
+        http_call_timeout: HttpCallTimeout,
+        run_deadline: Option<Instant>,
         resolver: Arc<dyn Resolver>,
         backend: Arc<dyn Backend>,
     ) -> Self {
@@ -274,7 +260,8 @@ impl RunEffectPorts {
                 evidence,
                 cancel,
                 exec_limits,
-                transport_limits,
+                http_call_timeout,
+                run_deadline,
                 resolver,
             ),
             backend,
@@ -292,6 +279,10 @@ impl RunEffectPorts {
 
     pub fn one_hop(&self) -> &dyn OneHop {
         self.http.as_ref()
+    }
+
+    pub fn begin_http_call(&self) -> Instant {
+        self.http.call_deadline()
     }
 
     pub fn duplex(&self) -> &dyn DuplexSpawner {

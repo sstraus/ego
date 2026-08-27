@@ -16,7 +16,7 @@ use ego_core::store::evidence::{
 };
 use ego_core::turn::{CancelToken, Tools as TurnTools};
 use ego_tools::exec::{
-    ExecLimits, ExecRunConfig, ProcessError, RunEffectPorts, SessionEvidenceStore, TransportLimits,
+    ExecLimits, ExecRunConfig, HttpCallTimeout, ProcessError, RunEffectPorts, SessionEvidenceStore,
 };
 use ego_tools::fs::OsFs;
 use ego_tools::http::SystemResolver;
@@ -55,13 +55,14 @@ fn open_run() -> Result<Run, ProcessError> {
     let cancel = CancelToken::new();
     let policy = RunConfinement::new(Confinement::Off, false, cwd()).unwrap();
     let limits = ExecLimits::new(1024, Duration::from_millis(250))?;
-    let transport_limits = TransportLimits::new(1024, 1024, Duration::from_secs(1))?;
+    let http_call_timeout = HttpCallTimeout::new(Duration::from_secs(1))?;
     let config = ExecRunConfig::new(
         policy,
         evidence.clone(),
         cancel,
         limits,
-        transport_limits,
+        http_call_timeout,
+        None,
         Arc::new(SystemResolver::new()),
     );
     let (ports, _) = block_on(RunEffectPorts::for_run(config))?;

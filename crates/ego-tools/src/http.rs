@@ -3,6 +3,7 @@
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Instant;
 
 use ego_core::permit::{
     DnsResolution, HttpHeader, HttpRequest, HttpScheme, NetworkTarget, OneHop, OneHopResponse,
@@ -12,7 +13,7 @@ use ego_core::turn::CancelToken;
 use futures::future::BoxFuture;
 use futures::{SinkExt as _, StreamExt as _};
 
-use crate::exec::{TransportLimits, runtime_handle};
+use crate::exec::{HttpCallTimeout, runtime_handle};
 
 /// The host resolver used by production composition.
 #[derive(Default)]
@@ -28,8 +29,9 @@ impl Resolver for SystemResolver {
     fn resolve(
         &self,
         target: NetworkTarget,
+        deadline: Option<Instant>,
     ) -> BoxFuture<'static, Result<DnsResolution, TransportError>> {
-        let task = runtime_handle().spawn(async move {
+        let mut task = AbortOnDrop(runtime_handle().spawn(async move {
             let addresses = tokio::net::lookup_host((target.host().to_owned(), target.port()))
                 .await
                 .map_err(|error| {
@@ -42,13 +44,18 @@ impl Resolver for SystemResolver {
             DnsResolution::new(target, addresses).map_err(|error| {
                 TransportError::definitely_unsent(TransportFailure::Resolution(error.to_string()))
             })
-        });
+        }));
         Box::pin(async move {
-            task.await.map_err(|error| {
-                TransportError::definitely_unsent(TransportFailure::Resolution(format!(
-                    "resolver task failed: {error}"
-                )))
-            })?
+            tokio::select! {
+                result = &mut task.0 => result.map_err(|error| {
+                    TransportError::definitely_unsent(TransportFailure::Resolution(format!(
+                        "resolver task failed: {error}"
+                    )))
+                })?,
+                _ = deadline_elapsed(deadline) => {
+                    Err(definitely_unsent(TransportFailure::TimedOut))
+                }
+            }
         })
     }
 }
@@ -58,7 +65,8 @@ impl Resolver for SystemResolver {
 pub(crate) struct OneShotHttpTransport {
     resolver: Arc<dyn Resolver>,
     cancel: CancelToken,
-    limits: TransportLimits,
+    timeout: HttpCallTimeout,
+    run_deadline: Option<Instant>,
     offline: bool,
 }
 
@@ -66,15 +74,25 @@ impl OneShotHttpTransport {
     pub(crate) fn new(
         resolver: Arc<dyn Resolver>,
         cancel: CancelToken,
-        limits: TransportLimits,
+        timeout: HttpCallTimeout,
+        run_deadline: Option<Instant>,
         offline: bool,
     ) -> Self {
         Self {
             resolver,
             cancel,
-            limits,
+            timeout,
+            run_deadline,
             offline,
         }
+    }
+
+    pub(crate) fn call_deadline(&self) -> Instant {
+        let now = Instant::now();
+        let configured = now.checked_add(self.timeout.duration()).unwrap_or(now);
+        self.run_deadline.map_or(configured, |run_deadline| {
+            std::cmp::min(configured, run_deadline)
+        })
     }
 }
 
@@ -82,6 +100,7 @@ impl Resolver for OneShotHttpTransport {
     fn resolve(
         &self,
         target: NetworkTarget,
+        deadline: Option<Instant>,
     ) -> BoxFuture<'static, Result<DnsResolution, TransportError>> {
         if self.offline {
             return Box::pin(futures::future::ready(Err(definitely_unsent(
@@ -90,19 +109,28 @@ impl Resolver for OneShotHttpTransport {
         }
         if self.cancel.is_cancelled() {
             return Box::pin(futures::future::ready(Err(definitely_unsent(
-                TransportFailure::Cancelled,
+                cancellation_failure(&self.cancel),
+            ))));
+        }
+        let deadline = deadline.or_else(|| Some(self.call_deadline()));
+        if deadline.is_some_and(|deadline| deadline <= Instant::now()) {
+            return Box::pin(futures::future::ready(Err(definitely_unsent(
+                TransportFailure::TimedOut,
             ))));
         }
         let resolver = Arc::clone(&self.resolver);
         let cancel = self.cancel.clone();
         let task = runtime_handle().spawn(async move {
-            let mut resolution = Box::pin(resolver.resolve(target));
+            let mut resolution = Box::pin(resolver.resolve(target, deadline));
             loop {
                 tokio::select! {
                     result = &mut resolution => return result,
+                    _ = deadline_elapsed(deadline) => {
+                        return Err(definitely_unsent(TransportFailure::TimedOut));
+                    }
                     _ = tokio::time::sleep(std::time::Duration::from_millis(2)) => {
                         if cancel.is_cancelled() {
-                            return Err(definitely_unsent(TransportFailure::Cancelled));
+                            return Err(definitely_unsent(cancellation_failure(&cancel)));
                         }
                     }
                 }
@@ -123,6 +151,7 @@ impl OneHop for OneShotHttpTransport {
         &self,
         connect: ResolvedConnect,
         request: HttpRequest,
+        deadline: Option<Instant>,
     ) -> BoxFuture<'static, Result<OneHopResponse, TransportError>> {
         if self.offline {
             return Box::pin(futures::future::ready(Err(definitely_unsent(
@@ -131,7 +160,7 @@ impl OneHop for OneShotHttpTransport {
         }
         if self.cancel.is_cancelled() {
             return Box::pin(futures::future::ready(Err(definitely_unsent(
-                TransportFailure::Cancelled,
+                cancellation_failure(&self.cancel),
             ))));
         }
         if &ego_core::permit::HttpRequestDigest::of(&request) != connect.request_digest() {
@@ -139,17 +168,15 @@ impl OneHop for OneShotHttpTransport {
                 TransportFailure::AuthorityMismatch,
             ))));
         }
-        if request_bytes(&request).is_none_or(|bytes| bytes > self.limits.max_request_bytes()) {
+        let deadline = deadline.unwrap_or_else(|| self.call_deadline());
+        if deadline <= Instant::now() {
             return Box::pin(futures::future::ready(Err(definitely_unsent(
-                TransportFailure::RequestLimit {
-                    limit: self.limits.max_request_bytes(),
-                },
+                TransportFailure::TimedOut,
             ))));
         }
 
         let cancel = self.cancel.clone();
-        let limits = self.limits;
-        let task = runtime_handle().spawn(execute_one_hop(connect, request, cancel, limits));
+        let task = runtime_handle().spawn(execute_one_hop(connect, request, cancel, deadline));
         Box::pin(async move {
             task.await.map_err(|error| {
                 possibly_sent(TransportFailure::Exchange(format!(
@@ -164,9 +191,8 @@ async fn execute_one_hop(
     connect: ResolvedConnect,
     request: HttpRequest,
     cancel: CancelToken,
-    limits: TransportLimits,
+    deadline: Instant,
 ) -> Result<OneHopResponse, TransportError> {
-    let deadline = tokio::time::Instant::now() + limits.timeout();
     let route = connect.route();
     let scheme = match route.scheme() {
         HttpScheme::Http => "http",
@@ -208,12 +234,12 @@ async fn execute_one_hop(
     let response = loop {
         tokio::select! {
             result = &mut send => break result.map_err(exchange_error)?,
-            _ = tokio::time::sleep_until(deadline) => {
-                return Err(possibly_sent(TransportFailure::TimedOut { limit: limits.timeout() }));
+            _ = deadline_elapsed(Some(deadline)) => {
+                return Err(possibly_sent(TransportFailure::TimedOut));
             }
             _ = tokio::time::sleep(std::time::Duration::from_millis(2)) => {
                 if cancel.is_cancelled() {
-                    return Err(possibly_sent(TransportFailure::Cancelled));
+                    return Err(possibly_sent(cancellation_failure(&cancel)));
                 }
             }
         }
@@ -221,39 +247,29 @@ async fn execute_one_hop(
 
     let status = response.status().as_u16();
     let headers = response_headers(response.headers())?;
-    let mut response_bytes = header_bytes(&headers).ok_or_else(|| response_limit(limits))?;
-    if response_bytes > limits.max_response_bytes() {
-        return Err(response_limit(limits));
-    }
 
     if response.status().is_redirection()
         && let Some(location) = response.headers().get(reqwest::header::LOCATION)
     {
         let location = location.as_bytes().to_vec();
-        response_bytes = checked_add_len(response_bytes, location.len())
-            .ok_or_else(|| response_limit(limits))?;
-        if response_bytes > limits.max_response_bytes() {
-            return Err(response_limit(limits));
-        }
         return Ok(OneHopResponse::redirect(status, headers, location));
     }
 
     let (mut sender, receiver) = futures::channel::mpsc::channel(1);
     runtime_handle().spawn(async move {
         let mut body = response.bytes_stream();
-        let mut observed = response_bytes;
         loop {
             let next = tokio::select! {
                 item = body.next() => item,
-                _ = tokio::time::sleep_until(deadline) => {
-                    let _ = sender.send(Err(possibly_sent(TransportFailure::TimedOut {
-                        limit: limits.timeout(),
-                    }))).await;
+                _ = deadline_elapsed(Some(deadline)) => {
+                    let _ = sender.send(Err(possibly_sent(TransportFailure::TimedOut))).await;
                     return;
                 }
                 _ = tokio::time::sleep(std::time::Duration::from_millis(2)) => {
                     if cancel.is_cancelled() {
-                        let _ = sender.send(Err(possibly_sent(TransportFailure::Cancelled))).await;
+                        let _ = sender
+                            .send(Err(possibly_sent(cancellation_failure(&cancel))))
+                            .await;
                         return;
                     }
                     continue;
@@ -261,15 +277,6 @@ async fn execute_one_hop(
             };
             match next {
                 Some(Ok(chunk)) => {
-                    let Some(next_total) = checked_add_len(observed, chunk.len()) else {
-                        let _ = sender.send(Err(response_limit(limits))).await;
-                        return;
-                    };
-                    if next_total > limits.max_response_bytes() {
-                        let _ = sender.send(Err(response_limit(limits))).await;
-                        return;
-                    }
-                    observed = next_total;
                     if sender.send(Ok(chunk.to_vec())).await.is_err() {
                         return;
                     }
@@ -293,22 +300,6 @@ async fn execute_one_hop(
     ))
 }
 
-fn request_bytes(request: &HttpRequest) -> Option<u64> {
-    let mut total = 0_u64;
-    for bytes in [
-        request.method().as_bytes(),
-        request.path().as_bytes(),
-        request.body(),
-    ] {
-        total = checked_add_len(total, bytes.len())?;
-    }
-    for header in request.headers() {
-        total = checked_add_len(total, header.name().len())?;
-        total = checked_add_len(total, header.value().len())?;
-    }
-    Some(total)
-}
-
 fn response_headers(
     headers: &reqwest::header::HeaderMap,
 ) -> Result<Vec<HttpHeader>, TransportError> {
@@ -324,19 +315,6 @@ fn response_headers(
         .collect()
 }
 
-fn header_bytes(headers: &[HttpHeader]) -> Option<u64> {
-    headers.iter().try_fold(0_u64, |total, header| {
-        checked_add_len(
-            checked_add_len(total, header.name().len())?,
-            header.value().len(),
-        )
-    })
-}
-
-fn checked_add_len(total: u64, len: usize) -> Option<u64> {
-    total.checked_add(u64::try_from(len).ok()?)
-}
-
 fn exchange_error(error: reqwest::Error) -> TransportError {
     let failure = if error.is_connect() {
         TransportFailure::Connect(error.to_string())
@@ -350,18 +328,34 @@ fn exchange_error(error: reqwest::Error) -> TransportError {
     }
 }
 
-fn response_limit(limits: TransportLimits) -> TransportError {
-    possibly_sent(TransportFailure::ResponseLimit {
-        limit: limits.max_response_bytes(),
-    })
-}
-
 fn definitely_unsent(failure: TransportFailure) -> TransportError {
     TransportError::definitely_unsent(failure)
 }
 
 fn possibly_sent(failure: TransportFailure) -> TransportError {
     TransportError::possibly_sent(failure)
+}
+
+fn cancellation_failure(cancel: &CancelToken) -> TransportFailure {
+    match cancel.cause() {
+        Some(ego_core::event::domain::CancelCause::Timeout) => TransportFailure::TimedOut,
+        _ => TransportFailure::Cancelled,
+    }
+}
+
+async fn deadline_elapsed(deadline: Option<Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await,
+        None => std::future::pending().await,
+    }
+}
+
+struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
+
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 #[derive(Debug)]

@@ -17,7 +17,7 @@ use ego_core::permit::{
     TransportError, TransportFailure,
 };
 use ego_tools::exec::{
-    ExecLimits, ExecRunConfig, ProcessError, RunEffectPorts, SessionEvidenceStore, TransportLimits,
+    ExecLimits, ExecRunConfig, HttpCallTimeout, ProcessError, RunEffectPorts, SessionEvidenceStore,
 };
 use futures::StreamExt;
 use futures::future::{self, BoxFuture};
@@ -108,14 +108,14 @@ fn run_ports_with(
     resolver: RecordingResolver,
     offline: bool,
     cancel: ego_core::turn::CancelToken,
-    transport_limits: TransportLimits,
+    http_call_timeout: HttpCallTimeout,
 ) -> RunFixture {
     run_ports_with_limits(
         resolver,
         offline,
         cancel,
         ExecLimits::new(1024, Duration::from_millis(250)).expect("exec limits"),
-        transport_limits,
+        http_call_timeout,
     )
 }
 
@@ -124,9 +124,9 @@ fn run_ports_with_limits(
     offline: bool,
     cancel: ego_core::turn::CancelToken,
     exec_limits: ExecLimits,
-    transport_limits: TransportLimits,
+    http_call_timeout: HttpCallTimeout,
 ) -> RunFixture {
-    try_run_ports_with_limits(resolver, offline, cancel, exec_limits, transport_limits)
+    try_run_ports_with_limits(resolver, offline, cancel, exec_limits, http_call_timeout)
         .expect("run ports")
 }
 
@@ -135,7 +135,43 @@ fn try_run_ports_with_limits(
     offline: bool,
     cancel: ego_core::turn::CancelToken,
     exec_limits: ExecLimits,
-    transport_limits: TransportLimits,
+    http_call_timeout: HttpCallTimeout,
+) -> Result<RunFixture, ProcessError> {
+    try_run_ports_with_limits_and_deadline(
+        resolver,
+        offline,
+        cancel,
+        exec_limits,
+        http_call_timeout,
+        None,
+    )
+}
+
+fn run_ports_with_deadline(
+    resolver: RecordingResolver,
+    offline: bool,
+    cancel: ego_core::turn::CancelToken,
+    http_call_timeout: HttpCallTimeout,
+    run_deadline: Option<Instant>,
+) -> RunFixture {
+    try_run_ports_with_limits_and_deadline(
+        resolver,
+        offline,
+        cancel,
+        ExecLimits::new(1024, Duration::from_millis(250)).expect("exec limits"),
+        http_call_timeout,
+        run_deadline,
+    )
+    .expect("run ports")
+}
+
+fn try_run_ports_with_limits_and_deadline(
+    resolver: RecordingResolver,
+    offline: bool,
+    cancel: ego_core::turn::CancelToken,
+    exec_limits: ExecLimits,
+    http_call_timeout: HttpCallTimeout,
+    run_deadline: Option<Instant>,
 ) -> Result<RunFixture, ProcessError> {
     let runtime = ScenarioRuntime::new();
     let root = CanonPath::new(
@@ -154,7 +190,8 @@ fn try_run_ports_with_limits(
         evidence.clone(),
         cancel.clone(),
         exec_limits,
-        transport_limits,
+        http_call_timeout,
+        run_deadline,
         Arc::new(resolver),
     );
     let (ports, _) = runtime.block_on(RunEffectPorts::for_run(config))?;
@@ -171,7 +208,7 @@ fn run_ports(resolver: RecordingResolver, offline: bool) -> RunFixture {
         resolver,
         offline,
         ego_core::turn::CancelToken::new(),
-        TransportLimits::new(1024, 1024, Duration::from_secs(1)).expect("transport limits"),
+        HttpCallTimeout::default(),
     )
 }
 
@@ -179,14 +216,14 @@ fn try_run_ports(
     resolver: RecordingResolver,
     offline: bool,
     cancel: ego_core::turn::CancelToken,
-    transport_limits: TransportLimits,
+    http_call_timeout: HttpCallTimeout,
 ) -> Result<RunFixture, ProcessError> {
     try_run_ports_with_limits(
         resolver,
         offline,
         cancel,
         ExecLimits::new(1024, Duration::from_millis(250)).expect("exec limits"),
-        transport_limits,
+        http_call_timeout,
     )
 }
 
@@ -194,6 +231,7 @@ fn try_run_ports(
 struct RecordingResolver {
     answer: Arc<Mutex<Vec<(NetworkTarget, Vec<IpAddr>)>>>,
     calls: Arc<Mutex<Vec<NetworkTarget>>>,
+    delay: Arc<Mutex<Option<Duration>>>,
 }
 impl RecordingResolver {
     fn insert(&self, target: NetworkTarget, ip: IpAddr) {
@@ -202,13 +240,19 @@ impl RecordingResolver {
             .expect("answers")
             .push((target, vec![ip]));
     }
+
+    fn delay(&self, duration: Duration) {
+        *self.delay.lock().expect("delay") = Some(duration);
+    }
 }
 impl Resolver for RecordingResolver {
     fn resolve(
         &self,
         target: NetworkTarget,
+        _deadline: Option<Instant>,
     ) -> BoxFuture<'static, Result<DnsResolution, TransportError>> {
         self.calls.lock().expect("calls").push(target.clone());
+        let delay = *self.delay.lock().expect("delay");
         let answer = self
             .answer
             .lock()
@@ -216,20 +260,25 @@ impl Resolver for RecordingResolver {
             .iter()
             .find(|(candidate, _)| *candidate == target)
             .cloned();
-        Box::pin(future::ready(answer.map_or_else(
-            || {
-                Err(TransportError::definitely_unsent(
-                    TransportFailure::Resolution("no answer".into()),
-                ))
-            },
-            |(target, addresses)| {
-                DnsResolution::new(target, addresses).map_err(|_| {
-                    TransportError::definitely_unsent(TransportFailure::Resolution(
-                        "fixture returned no addresses".into(),
+        Box::pin(async move {
+            if let Some(delay) = delay {
+                tokio::time::sleep(delay).await;
+            }
+            answer.map_or_else(
+                || {
+                    Err(TransportError::definitely_unsent(
+                        TransportFailure::Resolution("no answer".into()),
                     ))
-                })
-            },
-        )))
+                },
+                |(target, addresses)| {
+                    DnsResolution::new(target, addresses).map_err(|_| {
+                        TransportError::definitely_unsent(TransportFailure::Resolution(
+                            "fixture returned no addresses".into(),
+                        ))
+                    })
+                },
+            )
+        })
     }
 }
 
@@ -322,12 +371,12 @@ fn read_request(stream: &mut TcpStream) -> Vec<u8> {
         .set_read_timeout(Some(Duration::from_millis(500)))
         .expect("request timeout");
     let mut request = Vec::new();
-    let mut chunk = [0_u8; 1024];
     loop {
-        match stream.read(&mut chunk) {
+        let mut byte = [0_u8; 1];
+        match stream.read(&mut byte) {
             Ok(0) => break,
             Ok(count) => {
-                request.extend_from_slice(&chunk[..count]);
+                request.extend_from_slice(&byte[..count]);
                 if request.windows(4).any(|window| window == b"\r\n\r\n") {
                     break;
                 }
@@ -342,6 +391,28 @@ fn read_request(stream: &mut TcpStream) -> Vec<u8> {
             }
             Err(error) => panic!("request: {error}"),
         }
+    }
+    let body_len = request
+        .split(|byte| *byte == b'\n')
+        .find_map(|line| {
+            let line = line.strip_suffix(b"\r").unwrap_or(line);
+            let separator = line.iter().position(|byte| *byte == b':')?;
+            let (name, value) = line.split_at(separator);
+            name.eq_ignore_ascii_case(b"content-length")
+                .then(|| std::str::from_utf8(&value[1..]).ok()?.trim().parse().ok())
+                .flatten()
+        })
+        .unwrap_or(0);
+    let body_start = request
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|index| index + 4)
+        .unwrap_or(request.len());
+    let already_read = request.len() - body_start;
+    if already_read < body_len {
+        let mut body = vec![0_u8; body_len - already_read];
+        stream.read_exact(&mut body).expect("request body");
+        request.extend_from_slice(&body);
     }
     request
 }
@@ -577,12 +648,16 @@ fn guarded_duplex_settles_binary_child_and_keeps_stdout_out_of_evidence() {
     assert_eq!(payload, b"\0\xff\x80");
     assert_eq!(handle.delivery(), DeliveryCertainty::PossiblySent);
     let settlement = fixture.runtime.block_on(handle.settle());
+    let actual_end = settlement.end();
+    let actual_cleanup = settlement.cleanup();
+    let actual_evidence = settlement.evidence();
+    assert!(
+        matches!(actual_end, ego_core::permit::DuplexEnd::Exited { code: 0 }),
+        "unexpected duplex settlement: end={actual_end:?}, cleanup={actual_cleanup:?}, delivery={:?}, evidence={actual_evidence:?}",
+        settlement.delivery()
+    );
     assert!(matches!(
-        settlement.end(),
-        ego_core::permit::DuplexEnd::Exited { code: 0 }
-    ));
-    assert!(matches!(
-        settlement.cleanup(),
+        actual_cleanup,
         ego_core::permit::CleanupCertainty::Complete
     ));
     assert_eq!(settlement.delivery(), DeliveryCertainty::PossiblySent);
@@ -618,6 +693,7 @@ fn foreign_transport_fixture_binary() {
     std::io::stderr()
         .write_all(b"fixture bounded stderr evidence\n")
         .expect("fixture stderr");
+    std::io::stderr().flush().expect("fixture stderr flush");
     std::io::stdout()
         .write_all(b"EGO_FOREIGN_TRANSPORT_SENTINEL\0")
         .expect("fixture stdout");
@@ -626,6 +702,7 @@ fn foreign_transport_fixture_binary() {
         .expect("fixture length");
     std::io::stdout().write_all(&input).expect("fixture echo");
     std::io::stdout().flush().expect("fixture flush");
+    std::process::exit(0);
 }
 
 #[test]
@@ -743,7 +820,7 @@ fn guarded_duplex_cancels_blocked_child_after_write() {
         RecordingResolver::default(),
         false,
         cancel.clone(),
-        TransportLimits::new(1024, 1024, Duration::from_secs(1)).expect("transport limits"),
+        HttpCallTimeout::default(),
     );
     let guarded = GuardedEffects::new(
         permit,
@@ -860,7 +937,7 @@ fn guarded_duplex_settles_bounded_stderr_evidence_without_stdout_protocol() {
         false,
         ego_core::turn::CancelToken::new(),
         ExecLimits::new(32, Duration::from_millis(250)).expect("exec limits"),
-        TransportLimits::new(1024, 1024, Duration::from_secs(1)).expect("transport limits"),
+        HttpCallTimeout::default(),
     );
     let guarded = GuardedEffects::new(
         permit,
@@ -1173,7 +1250,7 @@ fn redirect_is_one_hop_and_does_not_touch_second_listener() {
 
 #[test]
 fn reset_never_retries_a_request() {
-    let server = SocketServer::bind(|mut stream| {
+    let server = SocketServer::bind(move |mut stream| {
         let peer = stream.peer_addr().expect("peer");
         let request = read_request(&mut stream);
         stream.shutdown(Shutdown::Both).expect("reset connection");
@@ -1223,7 +1300,7 @@ fn reset_never_retries_a_request() {
 
 #[test]
 fn fresh_authorizations_use_fresh_sockets() {
-    let server = SocketServer::bind(|mut stream| {
+    let server = SocketServer::bind(move |mut stream| {
         let peer = stream.peer_addr().expect("peer");
         let request = read_request(&mut stream);
         write!(
@@ -1402,23 +1479,28 @@ fn response_headers_keep_raw_duplicate_order_and_body_is_streamed() {
 }
 
 #[test]
-fn oversized_request_is_definitely_unsent_before_socket() {
-    let server = SocketServer::bind(|stream| CapturedConnection {
-        peer: stream.peer_addr().expect("peer"),
-        request: Vec::new(),
-        request_count: 0,
+fn large_request_is_sent_without_shared_request_byte_cap() {
+    let server = SocketServer::bind(|mut stream| {
+        let peer = stream.peer_addr().expect("peer");
+        let request = read_request(&mut stream);
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        )
+        .expect("response");
+        CapturedConnection {
+            peer,
+            request,
+            request_count: 1,
+        }
     });
-    let target = NetworkTarget::new("127.0.0.1", server.address.port()).unwrap();
+    let target =
+        NetworkTarget::new("large-request.example.test", server.address.port()).expect("target");
     let resolver = RecordingResolver::default();
-    let cancel = ego_core::turn::CancelToken::new();
-    let fixture = run_ports_with(
-        resolver.clone(),
-        false,
-        cancel,
-        TransportLimits::new(1024, 1024, Duration::from_secs(1)).expect("transport limits"),
-    );
+    resolver.insert(target.clone(), IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+    let fixture = run_ports(resolver.clone(), false);
     let body = vec![b'x'; 2048];
-    let request = HttpRequest::new("POST", "/", Vec::new(), body).expect("request");
+    let request = HttpRequest::new("POST", "/", Vec::new(), body.clone()).expect("request");
     let authorized = authorized(
         http_call(&format!("{target}"), &request),
         &["tool(srv/search)", &format!("net({target})")],
@@ -1433,30 +1515,32 @@ fn oversized_request_is_definitely_unsent_before_socket() {
         fixture.ports.one_hop(),
         fixture.ports.duplex(),
     );
-    let error = fixture
+    let response = fixture
         .runtime
         .block_on(guarded.guarded_http(call, request))
-        .expect_err("request limit must reject");
-    assert!(matches!(
-        error.failure(),
-        TransportFailure::RequestLimit { limit: 1024 }
-    ));
-    assert_eq!(error.delivery(), DeliveryCertainty::DefinitelyUnsent);
-    assert!(resolver.calls.lock().expect("calls").is_empty());
-    assert!(server.finish().is_empty(), "request limit opened no socket");
+        .expect("large request");
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.delivery(), DeliveryCertainty::PossiblySent);
+    assert_eq!(resolver.calls.lock().expect("calls").as_slice(), &[target]);
+    let captures = server.finish();
+    assert_eq!(captures.len(), 1);
+    assert_eq!(captures[0].request_count, 1);
+    assert!(captures[0].request.ends_with(&body));
 }
 
 #[test]
-fn response_header_limit_is_typed_and_possibly_sent() {
-    let server = SocketServer::bind(|mut stream| {
+fn large_raw_response_headers_are_not_shared_byte_limited() {
+    let header_value = vec![b'x'; 256];
+    let header_value_for_server = header_value.clone();
+    let server = SocketServer::bind(move |mut stream| {
         let peer = stream.peer_addr().expect("peer");
         let request = read_request(&mut stream);
         stream
-            .write_all(b"HTTP/1.1 200 OK\r\nX-Overflow: ")
+            .write_all(b"HTTP/1.1 200 OK\r\nX-Large: ")
             .expect("response prefix");
         stream
-            .write_all(&vec![b'x'; 256])
-            .expect("oversized response header");
+            .write_all(&header_value_for_server)
+            .expect("large response header");
         stream
             .write_all(b"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
             .expect("response suffix");
@@ -1467,14 +1551,14 @@ fn response_header_limit_is_typed_and_possibly_sent() {
         }
     });
     let target =
-        NetworkTarget::new("header-overflow.example.test", server.address.port()).expect("target");
+        NetworkTarget::new("large-header.example.test", server.address.port()).expect("target");
     let resolver = RecordingResolver::default();
     resolver.insert(target.clone(), IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
     let fixture = run_ports_with(
         resolver.clone(),
         false,
         ego_core::turn::CancelToken::new(),
-        TransportLimits::new(1024, 64, Duration::from_secs(1)).expect("transport limits"),
+        HttpCallTimeout::default(),
     );
     let request = request();
     let auth = authorized(
@@ -1491,15 +1575,23 @@ fn response_header_limit_is_typed_and_possibly_sent() {
         fixture.ports.one_hop(),
         fixture.ports.duplex(),
     );
-    let error = fixture
+    let response = fixture
         .runtime
         .block_on(guarded.guarded_http(call, request))
-        .expect_err("response header limit");
-    assert!(matches!(
-        error.failure(),
-        TransportFailure::ResponseLimit { limit: 64 }
-    ));
-    assert_eq!(error.delivery(), DeliveryCertainty::PossiblySent);
+        .expect("large response header");
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.delivery(), DeliveryCertainty::PossiblySent);
+    let ego_core::permit::OneHopResponse::Response { headers, .. } = &response else {
+        panic!("expected response");
+    };
+    assert_eq!(
+        headers
+            .iter()
+            .find(|header| header.name() == "x-large")
+            .expect("large header")
+            .value(),
+        header_value.as_slice()
+    );
     assert_eq!(resolver.calls.lock().expect("calls").as_slice(), &[target]);
     let captures = server.finish();
     assert_eq!(captures.len(), 1);
@@ -1508,16 +1600,30 @@ fn response_header_limit_is_typed_and_possibly_sent() {
 }
 
 #[test]
-fn response_body_limit_is_typed_after_headers_and_possibly_sent() {
-    let server = SocketServer::bind(|mut stream| {
+fn large_streamed_response_body_is_delivered_without_shared_byte_cap() {
+    let first = vec![b'a'; 1024];
+    let second = vec![b'b'; 1024];
+    let first_for_server = first.clone();
+    let second_for_server = second.clone();
+    let (first_tx, first_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let server = SocketServer::bind(move |mut stream| {
         let peer = stream.peer_addr().expect("peer");
         let request = read_request(&mut stream);
         stream
-            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1024\r\nConnection: close\r\n\r\n")
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2048\r\nConnection: close\r\n\r\n")
             .expect("response headers");
         stream
-            .write_all(&vec![b'b'; 1024])
-            .expect("oversized response body");
+            .write_all(&first_for_server)
+            .expect("first body chunk");
+        stream.flush().expect("first body flush");
+        first_tx.send(()).expect("first body synchronization");
+        release_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("release second body chunk");
+        stream
+            .write_all(&second_for_server)
+            .expect("second body chunk");
         stream.flush().expect("body flush");
         CapturedConnection {
             peer,
@@ -1526,14 +1632,14 @@ fn response_body_limit_is_typed_after_headers_and_possibly_sent() {
         }
     });
     let target =
-        NetworkTarget::new("body-overflow.example.test", server.address.port()).expect("target");
+        NetworkTarget::new("large-body.example.test", server.address.port()).expect("target");
     let resolver = RecordingResolver::default();
     resolver.insert(target.clone(), IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
     let fixture = run_ports_with(
         resolver.clone(),
         false,
         ego_core::turn::CancelToken::new(),
-        TransportLimits::new(1024, 128, Duration::from_secs(1)).expect("transport limits"),
+        HttpCallTimeout::default(),
     );
     let request = request();
     let auth = authorized(
@@ -1553,20 +1659,34 @@ fn response_body_limit_is_typed_after_headers_and_possibly_sent() {
     let mut response = fixture
         .runtime
         .block_on(guarded.guarded_http(call, request))
-        .expect("headers precede body limit");
+        .expect("large streamed body");
     assert_eq!(response.status(), 200);
     assert_eq!(response.delivery(), DeliveryCertainty::PossiblySent);
     let body = response.body().expect("streaming body");
-    let error = fixture
-        .runtime
-        .block_on(body.next())
-        .expect("body limit item")
-        .expect_err("response body limit");
-    assert!(matches!(
-        error.failure(),
-        TransportFailure::ResponseLimit { limit: 128 }
-    ));
-    assert_eq!(error.delivery(), DeliveryCertainty::PossiblySent);
+    let chunks = fixture.runtime.block_on(async {
+        tokio::task::spawn_blocking(move || {
+            first_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("server flushed first body chunk");
+        })
+        .await
+        .expect("first body synchronization task");
+        let first_chunk = body
+            .next()
+            .await
+            .expect("first body item")
+            .expect("first body chunk");
+        release_tx.send(()).expect("release second body chunk");
+        let second_chunk = body
+            .next()
+            .await
+            .expect("second body item")
+            .expect("second body chunk");
+        assert_eq!(body.next().await, None);
+        vec![first_chunk, second_chunk]
+    });
+    let bytes = chunks.concat();
+    assert_eq!(bytes, [first, second].concat());
     assert_eq!(resolver.calls.lock().expect("calls").as_slice(), &[target]);
     let captures = server.finish();
     assert_eq!(captures.len(), 1);
@@ -1602,7 +1722,7 @@ fn absolute_hop_timeout_covers_phased_exchange() {
         resolver.clone(),
         false,
         ego_core::turn::CancelToken::new(),
-        TransportLimits::new(1024, 1024, Duration::from_millis(100)).expect("transport limits"),
+        HttpCallTimeout::new(Duration::from_millis(100)).expect("HTTP call timeout"),
     );
     let request = request();
     let auth = authorized(
@@ -1644,12 +1764,7 @@ fn absolute_hop_timeout_covers_phased_exchange() {
             .await
             .expect("timeout body item")
             .expect_err("absolute hop timeout");
-        assert!(matches!(
-            error.failure(),
-            TransportFailure::TimedOut {
-                limit
-            } if *limit == Duration::from_millis(100)
-        ));
+        assert!(matches!(error.failure(), TransportFailure::TimedOut));
         assert_eq!(error.delivery(), DeliveryCertainty::PossiblySent);
     });
     let _ = release_tx.send(());
@@ -1658,6 +1773,79 @@ fn absolute_hop_timeout_covers_phased_exchange() {
     assert_eq!(captures.len(), 1);
     assert_eq!(captures[0].request_count, 1);
     assert!(!captures[0].request.is_empty());
+}
+
+#[test]
+fn delayed_resolution_times_out_before_socket() {
+    let server = SocketServer::bind(|stream| CapturedConnection {
+        peer: stream.peer_addr().expect("peer"),
+        request: Vec::new(),
+        request_count: 0,
+    });
+    let target = NetworkTarget::new("delayed-resolution.example.test", server.address.port())
+        .expect("target");
+    let resolver = RecordingResolver::default();
+    resolver.insert(target.clone(), IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+    resolver.delay(Duration::from_millis(250));
+    let fixture = run_ports_with(
+        resolver.clone(),
+        false,
+        ego_core::turn::CancelToken::new(),
+        HttpCallTimeout::new(Duration::from_millis(100)).expect("HTTP call timeout"),
+    );
+    let request = request();
+    let auth = authorized(
+        http_call(&format!("{target}"), &request),
+        &["tool(srv/search)", &format!("net({target})")],
+    );
+    let (call, permit) = auth.into_parts();
+    let guarded = GuardedEffects::new(
+        permit,
+        &NoFs,
+        fixture.ports.process(),
+        &fixture.evidence,
+        fixture.ports.resolver(),
+        fixture.ports.one_hop(),
+        fixture.ports.duplex(),
+    );
+    let error = fixture
+        .runtime
+        .block_on(guarded.guarded_http(call, request))
+        .expect_err("delayed resolution timeout");
+    assert!(matches!(error.failure(), TransportFailure::TimedOut));
+    assert_eq!(error.delivery(), DeliveryCertainty::DefinitelyUnsent);
+    assert_eq!(resolver.calls.lock().expect("calls").as_slice(), &[target]);
+    assert!(
+        server.finish().is_empty(),
+        "resolver timeout opened no socket"
+    );
+}
+
+#[test]
+fn http_call_deadline_is_bounded_by_run_deadline() {
+    let earlier = Instant::now() + Duration::from_secs(1);
+    let bounded_fixture = run_ports_with_deadline(
+        RecordingResolver::default(),
+        false,
+        ego_core::turn::CancelToken::new(),
+        HttpCallTimeout::new(Duration::from_secs(30)).expect("HTTP call timeout"),
+        Some(earlier),
+    );
+    let bounded = bounded_fixture.ports.begin_http_call();
+    assert!(bounded <= earlier);
+
+    let configured_fixture = run_ports_with_deadline(
+        RecordingResolver::default(),
+        false,
+        ego_core::turn::CancelToken::new(),
+        HttpCallTimeout::new(Duration::from_secs(30)).expect("HTTP call timeout"),
+        None,
+    );
+    let before = Instant::now();
+    let configured = configured_fixture.ports.begin_http_call();
+    let after = Instant::now();
+    assert!(configured >= before + Duration::from_secs(30));
+    assert!(configured <= after + Duration::from_secs(30));
 }
 
 #[test]
@@ -1672,12 +1860,7 @@ fn cancellation_before_io_is_definitely_unsent_and_skips_dns_and_socket() {
     resolver.insert(target.clone(), IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
     let cancel = ego_core::turn::CancelToken::new();
     cancel.cancel(CancelCause::User);
-    let fixture = run_ports_with(
-        resolver.clone(),
-        false,
-        cancel,
-        TransportLimits::new(1024, 1024, Duration::from_secs(1)).expect("transport limits"),
-    );
+    let fixture = run_ports_with(resolver.clone(), false, cancel, HttpCallTimeout::default());
     let request = request();
     let auth = authorized(
         http_call(&format!("{target}"), &request),
@@ -1727,7 +1910,7 @@ fn cancellation_during_io_is_possibly_sent_after_one_request() {
         resolver.clone(),
         false,
         cancel.clone(),
-        TransportLimits::new(1024, 1024, Duration::from_secs(2)).expect("transport limits"),
+        HttpCallTimeout::new(Duration::from_secs(2)).expect("HTTP call timeout"),
     );
     let request = request();
     let auth = authorized(
@@ -1787,7 +1970,7 @@ fn offline_http_refuses_before_dns_or_socket() {
         resolver.clone(),
         true,
         ego_core::turn::CancelToken::new(),
-        TransportLimits::new(1024, 1024, Duration::from_secs(1)).expect("transport limits"),
+        HttpCallTimeout::default(),
     );
     #[cfg(target_os = "linux")]
     {

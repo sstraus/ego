@@ -23,13 +23,13 @@ use ego_core::event::domain::CancelCause;
 use ego_core::event::id::SessionId;
 use ego_core::permit::{
     CanonPath, Classification, Confinement, EnvPolicy, ExecCaps, ExecObservation, Op, PolicyDenied,
-    ProcessExecutor, RunConfinement, SpawnSpec, StreamProvenance, ToolOutputProvenance, ToolResult,
+    RunConfinement, SpawnSpec, StreamProvenance, ToolOutputProvenance, ToolResult,
 };
 use ego_core::store::evidence::{EvidenceRef, EvidenceStore as _};
 use ego_core::turn::CancelToken;
 use ego_core::turn::Tools as TurnTools;
 use ego_tools::exec::{
-    ExecLimits, ExecRunConfig, ProcessError, RunEffectPorts, SessionEvidenceStore, TransportLimits,
+    ExecLimits, ExecRunConfig, HttpCallTimeout, ProcessError, RunEffectPorts, SessionEvidenceStore,
 };
 use ego_tools::fs::OsFs;
 use ego_tools::http::SystemResolver;
@@ -101,14 +101,15 @@ fn open_run(
         .map_err(ProcessError::Evidence)?;
     let cancel = CancelToken::new();
     let limits = ExecLimits::new(preview, Duration::from_millis(250))?;
-    let transport_limits = TransportLimits::new(1024, 1024, Duration::from_secs(1))?;
+    let http_call_timeout = HttpCallTimeout::new(Duration::from_secs(1))?;
     let policy = run_confinement(level, offline, workspace);
     let config = ExecRunConfig::new(
         policy,
         evidence.clone(),
         cancel.clone(),
         limits,
-        transport_limits,
+        http_call_timeout,
+        None,
         Arc::new(SystemResolver::new()),
     );
     let (ports, observation) = block_on(RunEffectPorts::for_run(config))?;

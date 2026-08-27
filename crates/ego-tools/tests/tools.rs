@@ -17,6 +17,7 @@
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 
 use ego_core::budget::{BudgetGate, Metering, PricingQuote, ResolvedRates, SettlementSource};
 use ego_core::config::{Mode, PermCfg, Ruleset, Source};
@@ -77,6 +78,7 @@ impl Resolver for NoResolver {
     fn resolve(
         &self,
         _target: ego_core::permit::NetworkTarget,
+        _deadline: Option<Instant>,
     ) -> BoxFuture<'static, Result<ego_core::permit::DnsResolution, TransportError>> {
         Box::pin(futures::future::ready(Err(
             TransportError::definitely_unsent(TransportFailure::Offline),
@@ -89,6 +91,7 @@ impl OneHop for NoHop {
         &self,
         _connect: ResolvedConnect,
         _request: HttpRequest,
+        _deadline: Option<Instant>,
     ) -> BoxFuture<'static, Result<ego_core::permit::OneHopResponse, TransportError>> {
         Box::pin(futures::future::ready(Err(
             TransportError::definitely_unsent(TransportFailure::Offline),
