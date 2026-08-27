@@ -375,12 +375,11 @@ impl ego_tools::credentials::CredentialBackend for RecordingBackend {
         if !state
             .entries
             .contains_key(&(service.to_owned(), user.to_owned()))
+            && let Some(payload) = state.collision_payload.take()
         {
-            if let Some(payload) = state.collision_payload.take() {
-                state
-                    .entries
-                    .insert((service.to_owned(), user.to_owned()), payload);
-            }
+            state
+                .entries
+                .insert((service.to_owned(), user.to_owned()), payload);
         }
         Ok(state
             .entries
