@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use ego_core::config::{
-    ConfigLayer, McpLayerEntry, McpServerConfig, Source, UserConfigMutation, UserConfigPublication,
-    UserConfigStore, UserMcpSlot,
+    ConfigLayer, McpLayerEntry, McpServerConfig, McpServerName, Source, UserConfigMutation,
+    UserConfigPublication, UserConfigStore, UserMcpSlot,
 };
 use ego_core::credentials::{
     CredentialKey, CredentialRemoval, CredentialStore, CredentialTarget, SecretMaterial,
@@ -98,10 +98,11 @@ fn mcp_set_delete_and_tombstone_preserve_comments_order_and_unrelated_entries() 
     let path = fixture(&dir);
     let io = FakeIo::new();
     let store = OsUserConfigStore::new(&io, &path);
-    let name = "managed".parse().expect("name");
+    let name: McpServerName = "managed".parse().expect("name");
     let set = UserConfigMutation::McpSet {
         slot: UserMcpSlot::Base,
         name: name.clone(),
+        expected_user_entry: None,
         server: stdio("first"),
     };
     assert_eq!(
@@ -129,7 +130,7 @@ fn mcp_set_delete_and_tombstone_preserve_comments_order_and_unrelated_entries() 
         store.mutate(insert).expect("tombstone"),
         UserConfigPublication::PublishedDurably
     );
-    let published = std::fs::read_to_string(path).expect("read");
+    let published = std::fs::read_to_string(&path).expect("read");
     ConfigLayer::parse(Source::User, &published).expect("strict published config");
     let parsed = ConfigLayer::parse(Source::User, &published)
         .expect("strict published config")
@@ -137,6 +138,23 @@ fn mcp_set_delete_and_tombstone_preserve_comments_order_and_unrelated_entries() 
     assert!(matches!(
         parsed.mcp.servers.get(&"managed".parse().expect("name")),
         Some(McpLayerEntry::Tombstone)
+    ));
+    let reveal = UserConfigMutation::McpSet {
+        slot: UserMcpSlot::Base,
+        name: "managed".parse().expect("name"),
+        expected_user_entry: Some(McpLayerEntry::Tombstone),
+        server: stdio("revealed"),
+    };
+    assert_eq!(
+        store.mutate(reveal).expect("replace tombstone"),
+        UserConfigPublication::PublishedDurably
+    );
+    let revealed = ConfigLayer::parse(Source::User, &std::fs::read_to_string(&path).expect("read"))
+        .expect("strict revealed config")
+        .value;
+    assert!(matches!(
+        revealed.mcp.servers.get(&"managed".parse().expect("name")),
+        Some(McpLayerEntry::Server(McpServerConfig::Stdio(s))) if s.command == "revealed"
     ));
 }
 
@@ -146,7 +164,7 @@ fn stale_compare_and_set_is_unpublished_and_publication_uncertainty_is_durable()
     let path = fixture(&dir);
     let io = FakeIo::new();
     let store = OsUserConfigStore::new(&io, &path);
-    let name = "managed".parse().expect("name");
+    let name: McpServerName = "managed".parse().expect("name");
     let stale = UserConfigMutation::McpDeleteUserEntry {
         slot: UserMcpSlot::Base,
         name: name.clone(),
@@ -157,6 +175,15 @@ fn stale_compare_and_set_is_unpublished_and_publication_uncertainty_is_durable()
         std::fs::read_to_string(&path).expect("read"),
         "# keep\nmodel = 'old'\n\n[mcp.servers.unrelated]\ntransport='stdio'\ncommand='keep'\n"
     );
+    let before_stale_set = std::fs::read(&path).expect("read bytes");
+    let stale_set = UserConfigMutation::McpSet {
+        slot: UserMcpSlot::Base,
+        name: name.clone(),
+        expected_user_entry: Some(McpLayerEntry::Tombstone),
+        server: stdio("must-not-publish"),
+    };
+    assert!(store.mutate(stale_set).is_err());
+    assert_eq!(std::fs::read(&path).expect("read bytes"), before_stale_set);
     let uncertain_io = FakeIo {
         uncertain: true,
         ..FakeIo::new()
@@ -165,6 +192,7 @@ fn stale_compare_and_set_is_unpublished_and_publication_uncertainty_is_durable()
     let set = UserConfigMutation::McpSet {
         slot: UserMcpSlot::Profile("dev".into()),
         name,
+        expected_user_entry: None,
         server: stdio("published"),
     };
     assert!(
@@ -261,6 +289,69 @@ fn credential_full_key_mismatch_is_collision_and_redacted() {
     assert!(!rendered.contains("collision-secret"));
 }
 
+#[test]
+fn credential_backend_failures_map_to_closed_categories_and_no_entry_is_operation_specific() {
+    use ego_core::credentials::{CredentialStoreErrorKind, CredentialStoreOperation};
+    use ego_tools::credentials::CredentialBackendError as B;
+
+    let key = CredentialKey::new(
+        "https://issuer".into(),
+        CredentialTarget::ProtectedResource("https://resource".into()),
+        None,
+    )
+    .expect("key");
+    let cases = [
+        (B::Invalid, CredentialStoreErrorKind::Invalid),
+        (B::TooLong, CredentialStoreErrorKind::Invalid),
+        (B::Ambiguous, CredentialStoreErrorKind::Ambiguous),
+        (B::BadEncoding, CredentialStoreErrorKind::Corrupt),
+        (B::BadDataFormat, CredentialStoreErrorKind::Corrupt),
+        (B::BadStoreFormat, CredentialStoreErrorKind::Corrupt),
+        (
+            B::NotSupportedByStore,
+            CredentialStoreErrorKind::Unsupported,
+        ),
+        (B::PlatformFailure, CredentialStoreErrorKind::Unavailable),
+        (B::NoStorageAccess, CredentialStoreErrorKind::Unavailable),
+        (B::NoDefaultStore, CredentialStoreErrorKind::Unavailable),
+    ];
+    for (backend_error, expected_kind) in cases {
+        let backend = RecordingBackend::default();
+        backend.fail_next(backend_error);
+        let error = ego_tools::credentials::OsCredentialStore::new(backend)
+            .get(&key)
+            .expect_err("backend category must fail closed");
+        assert_eq!(error.operation(), CredentialStoreOperation::Get);
+        assert_eq!(error.kind(), expected_kind);
+        assert!(!format!("{error:?} {error}").contains("backend_error"));
+    }
+
+    let backend = RecordingBackend::default();
+    backend.fail_next(B::NoEntry);
+    assert!(
+        ego_tools::credentials::OsCredentialStore::new(backend)
+            .get(&key)
+            .expect("get NoEntry is absence")
+            .is_none()
+    );
+
+    let backend = RecordingBackend::default();
+    backend.fail_next(B::NoEntry);
+    assert_eq!(
+        ego_tools::credentials::OsCredentialStore::new(backend)
+            .delete(&key)
+            .expect("delete NoEntry is absence"),
+        CredentialRemoval::Absent
+    );
+
+    let backend = RecordingBackend::default();
+    backend.fail_next(B::NoEntry);
+    let error = ego_tools::credentials::OsCredentialStore::new(backend)
+        .put(&key, SecretMaterial::new(b"opaque".to_vec()))
+        .expect_err("put NoEntry is unavailable");
+    assert_eq!(error.kind(), CredentialStoreErrorKind::Unavailable);
+}
+
 #[derive(Default, Clone)]
 struct RecordingBackend(Arc<Mutex<BackendState>>);
 
@@ -268,6 +359,7 @@ struct RecordingBackend(Arc<Mutex<BackendState>>);
 struct BackendState {
     entries: HashMap<(String, String), Vec<u8>>,
     collision_payload: Option<Vec<u8>>,
+    next_error: Option<ego_tools::credentials::CredentialBackendError>,
 }
 
 impl ego_tools::credentials::CredentialBackend for RecordingBackend {
@@ -277,6 +369,9 @@ impl ego_tools::credentials::CredentialBackend for RecordingBackend {
         user: &str,
     ) -> Result<Option<Vec<u8>>, ego_tools::credentials::CredentialBackendError> {
         let mut state = self.0.lock().expect("backend lock");
+        if let Some(error) = state.next_error.take() {
+            return Err(error);
+        }
         if !state
             .entries
             .contains_key(&(service.to_owned(), user.to_owned()))
@@ -298,9 +393,11 @@ impl ego_tools::credentials::CredentialBackend for RecordingBackend {
         user: &str,
         value: Vec<u8>,
     ) -> Result<(), ego_tools::credentials::CredentialBackendError> {
-        self.0
-            .lock()
-            .expect("backend lock")
+        let mut state = self.0.lock().expect("backend lock");
+        if let Some(error) = state.next_error.take() {
+            return Err(error);
+        }
+        state
             .entries
             .insert((service.to_owned(), user.to_owned()), value);
         Ok(())
@@ -310,10 +407,11 @@ impl ego_tools::credentials::CredentialBackend for RecordingBackend {
         service: &str,
         user: &str,
     ) -> Result<bool, ego_tools::credentials::CredentialBackendError> {
-        Ok(self
-            .0
-            .lock()
-            .expect("backend lock")
+        let mut state = self.0.lock().expect("backend lock");
+        if let Some(error) = state.next_error.take() {
+            return Err(error);
+        }
+        Ok(state
             .entries
             .remove(&(service.to_owned(), user.to_owned()))
             .is_some())
@@ -321,6 +419,10 @@ impl ego_tools::credentials::CredentialBackend for RecordingBackend {
 }
 
 impl RecordingBackend {
+    fn fail_next(&self, error: ego_tools::credentials::CredentialBackendError) {
+        self.0.lock().expect("backend lock").next_error = Some(error);
+    }
+
     fn overwrite_existing_payloads(&self, payload: Vec<u8>) {
         for value in self.0.lock().expect("backend lock").entries.values_mut() {
             *value = payload.clone();

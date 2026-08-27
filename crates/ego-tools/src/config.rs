@@ -5,11 +5,11 @@ use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 
 use ego_core::config::{
-    ConfigLayer, Source, UserConfigError, UserConfigMutation, UserConfigPublication,
-    UserConfigStore,
+    ConfigLayer, McpHttpAuth, McpLayerEntry, McpServerConfig, Source, UserConfigError,
+    UserConfigMutation, UserConfigPublication, UserConfigStore, UserMcpSlot,
 };
 use fd_lock::RwLock;
-use toml_edit::{Array, DocumentMut, Item, Value, value};
+use toml_edit::{Array, DocumentMut, Item, Table, Value, value};
 
 use crate::store::{AtomicReplacePublication, StoreIo};
 
@@ -60,11 +60,13 @@ where
             })?,
             None => String::new(),
         };
+        let parsed = ConfigLayer::parse(Source::User, &text)
+            .map_err(|error| UserConfigError::new(format!("invalid user config: {error}")))?;
         let mut document = text
             .parse::<DocumentMut>()
             .map_err(|error| UserConfigError::new(format!("invalid user config TOML: {error}")))?;
 
-        apply(&mut document, mutation)?;
+        apply(&mut document, &parsed.value, mutation)?;
         let published = document.to_string();
         ConfigLayer::parse(Source::User, &published).map_err(|error| {
             UserConfigError::new(format!(
@@ -84,7 +86,11 @@ where
     }
 }
 
-fn apply(document: &mut DocumentMut, mutation: UserConfigMutation) -> Result<(), UserConfigError> {
+fn apply(
+    document: &mut DocumentMut,
+    parsed: &ConfigLayer,
+    mutation: UserConfigMutation,
+) -> Result<(), UserConfigError> {
     match mutation {
         UserConfigMutation::ModelAndThinking { model, thinking } => {
             let root = document.as_table_mut();
@@ -110,8 +116,167 @@ fn apply(document: &mut DocumentMut, mutation: UserConfigMutation) -> Result<(),
             })?;
             replace_item_preserving_decor(target, value(array));
         }
+        UserConfigMutation::McpSet {
+            slot,
+            name,
+            expected_user_entry,
+            server,
+        } => {
+            let current = mcp_entry(parsed, &slot, &name);
+            if current != expected_user_entry.as_ref() {
+                return Err(UserConfigError::new(
+                    "user config changed before the MCP entry could be set",
+                ));
+            }
+            let target = mcp_servers_table_mut(document, &slot)?;
+            target.insert(&name.to_string(), Item::Table(server_table(&server)?));
+        }
+        UserConfigMutation::McpDeleteUserEntry {
+            slot,
+            name,
+            expected_entry,
+        } => {
+            let current = mcp_entry(parsed, &slot, &name);
+            if current != Some(&expected_entry) {
+                return Err(UserConfigError::new(
+                    "user config changed before the MCP entry could be deleted",
+                ));
+            }
+            let target = existing_mcp_servers_table_mut(document, &slot).ok_or_else(|| {
+                UserConfigError::new("the expected MCP entry is absent from the user config")
+            })?;
+            if target.remove(&name.to_string()).is_none() {
+                return Err(UserConfigError::new(
+                    "the expected MCP entry is absent from the user config",
+                ));
+            }
+        }
+        UserConfigMutation::McpInsertUserTombstone {
+            name,
+            expected_user_entry,
+        } => {
+            let current = parsed.mcp.servers.get(&name);
+            if current != expected_user_entry.as_ref() {
+                return Err(UserConfigError::new(
+                    "user config changed before the MCP tombstone could be inserted",
+                ));
+            }
+            let target = mcp_servers_table_mut(document, &UserMcpSlot::Base)?;
+            let mut tombstone = Table::new();
+            tombstone.insert("removed", value(true));
+            target.insert(&name.to_string(), Item::Table(tombstone));
+        }
     }
     Ok(())
+}
+
+fn mcp_entry<'a>(
+    parsed: &'a ConfigLayer,
+    slot: &UserMcpSlot,
+    name: &ego_core::config::McpServerName,
+) -> Option<&'a McpLayerEntry> {
+    match slot {
+        UserMcpSlot::Base => parsed.mcp.servers.get(name),
+        UserMcpSlot::Profile(profile) => parsed
+            .profile
+            .get(profile)
+            .and_then(|layer| layer.mcp.servers.get(name)),
+    }
+}
+
+fn mcp_servers_table_mut<'a>(
+    document: &'a mut DocumentMut,
+    slot: &UserMcpSlot,
+) -> Result<&'a mut Table, UserConfigError> {
+    let root = document.as_table_mut();
+    let mcp = match slot {
+        UserMcpSlot::Base => table_field_mut(root, "mcp")?,
+        UserMcpSlot::Profile(profile) => {
+            let profiles = table_field_mut(root, "profile")?;
+            let profile = table_field_mut(profiles, profile)?;
+            table_field_mut(profile, "mcp")?
+        }
+    };
+    table_field_mut(mcp, "servers")
+}
+
+fn existing_mcp_servers_table_mut<'a>(
+    document: &'a mut DocumentMut,
+    slot: &UserMcpSlot,
+) -> Option<&'a mut Table> {
+    let root = document.as_table_mut();
+    let mcp = match slot {
+        UserMcpSlot::Base => root.get_mut("mcp")?.as_table_mut()?,
+        UserMcpSlot::Profile(profile) => root
+            .get_mut("profile")?
+            .as_table_mut()?
+            .get_mut(profile)?
+            .as_table_mut()?
+            .get_mut("mcp")?
+            .as_table_mut()?,
+    };
+    mcp.get_mut("servers")?.as_table_mut()
+}
+
+fn table_field_mut<'a>(
+    table: &'a mut Table,
+    field: &str,
+) -> Result<&'a mut Table, UserConfigError> {
+    if !table.contains_key(field) {
+        let mut nested = Table::new();
+        nested.set_implicit(true);
+        table.insert(field, Item::Table(nested));
+    }
+    table
+        .get_mut(field)
+        .and_then(Item::as_table_mut)
+        .ok_or_else(|| UserConfigError::new(format!("user config `{field}` is not a table")))
+}
+
+fn server_table(server: &McpServerConfig) -> Result<Table, UserConfigError> {
+    let mut table = Table::new();
+    match server {
+        McpServerConfig::Stdio(stdio) => {
+            table.insert("transport", value("stdio"));
+            table.insert("command", value(stdio.command.as_str()));
+            if !stdio.args.is_empty() {
+                table.insert("args", string_array(&stdio.args));
+            }
+            if let Some(cwd) = &stdio.cwd {
+                let cwd = cwd.to_str().ok_or_else(|| {
+                    UserConfigError::new("MCP stdio working directory is not valid UTF-8")
+                })?;
+                table.insert("cwd", value(cwd));
+            }
+            if !stdio.inherit_env.is_empty() {
+                let names = stdio
+                    .inherit_env
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>();
+                table.insert("inherit_env", string_array(&names));
+            }
+        }
+        McpServerConfig::Http(http) => {
+            table.insert("transport", value("http"));
+            table.insert("url", value(http.url.to_string()));
+            if http.auth == McpHttpAuth::Oauth {
+                table.insert("auth", value("oauth"));
+            }
+            if http.allow_insecure_loopback {
+                table.insert("allow_insecure_loopback", value(true));
+            }
+        }
+    }
+    Ok(table)
+}
+
+fn string_array(values: &[String]) -> Item {
+    let mut array = Array::new();
+    for value in values {
+        array.push(value.as_str());
+    }
+    value(array)
 }
 
 /// Parse the scalar through `toml_edit` so the replacement keeps the literal
