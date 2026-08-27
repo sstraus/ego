@@ -187,6 +187,105 @@ fn replay_preserves_all_machine_event_kinds_and_their_sanitized_fields() {
 }
 
 #[test]
+fn begin_refresh_allocates_unique_monotonic_epochs_for_concurrent_writers() {
+    let home = tempfile::tempdir().expect("temp EGO_HOME");
+    let writers = (0..8)
+        .map(|index| {
+            let root = home.path().to_owned();
+            std::thread::spawn(move || {
+                journal(&root)
+                    .begin_refresh(
+                        format!("request-{index}"),
+                        "reload".to_owned(),
+                        Some("all".to_owned()),
+                    )
+                    .expect("refresh epoch")
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut epochs = writers
+        .into_iter()
+        .map(|writer| writer.join().expect("writer"))
+        .collect::<Vec<_>>();
+    epochs.sort_unstable();
+    assert_eq!(epochs, (1..=8).collect::<Vec<_>>());
+}
+
+#[test]
+fn begin_refresh_replay_advances_and_durability_or_overflow_fails_closed() {
+    let home = tempfile::tempdir().expect("temp EGO_HOME");
+    assert_eq!(
+        journal(home.path())
+            .begin_refresh("request-1".to_owned(), "reload".to_owned(), None)
+            .expect("epoch"),
+        1
+    );
+    assert_eq!(journal(home.path()).replay().expect("replay").len(), 1);
+    assert_eq!(
+        journal(home.path())
+            .begin_refresh("request-2".to_owned(), "rescan".to_owned(), None)
+            .expect("epoch"),
+        2
+    );
+}
+
+#[test]
+fn begin_refresh_durability_uncertainty_returns_no_epoch_or_snapshot() {
+    let home = tempfile::tempdir().expect("temp EGO_HOME");
+    let mcp = home.path().join("mcp");
+    let failing_adapter = JsonlMcpRegistryJournal::new(mcp.clone(), Box::new(FailingFsyncIo));
+
+    let error = failing_adapter
+        .begin_refresh("uncertain-request".to_owned(), "reload".to_owned(), None)
+        .expect_err("refresh begin must fail closed when fsync is uncertain");
+    assert_eq!(error.operation(), McpRegistryJournalOperation::BeginRefresh);
+    assert_eq!(
+        error.kind(),
+        McpRegistryJournalErrorKind::DurabilityUncertain
+    );
+
+    let reopened_adapter = journal(home.path());
+    let events = reopened_adapter.replay().expect("replay journal");
+    assert!(events.iter().any(|event| matches!(
+        event,
+        McpRegistryEvent::RefreshRequested { request_id, .. }
+            if request_id == "uncertain-request"
+    )));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, McpRegistryEvent::SnapshotPublished { .. }))
+    );
+}
+
+#[test]
+fn begin_refresh_refuses_committed_maximum_without_appending() {
+    let home = tempfile::tempdir().expect("temp EGO_HOME");
+    let adapter = journal(home.path());
+    adapter
+        .append(McpRegistryEvent::RefreshRequested {
+            request_id: "maximum-request".to_owned(),
+            trigger: "reload".to_owned(),
+            server_scope: None,
+            config_revision: u64::MAX,
+        })
+        .expect("maximum epoch record");
+
+    let error = adapter
+        .begin_refresh("overflow-request".to_owned(), "reload".to_owned(), None)
+        .expect_err("u64 maximum must not wrap");
+    assert_eq!(error.operation(), McpRegistryJournalOperation::BeginRefresh);
+    assert_eq!(error.kind(), McpRegistryJournalErrorKind::Exhausted);
+    let events = journal(home.path()).replay().expect("replay journal");
+    assert_eq!(events.len(), 1);
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        McpRegistryEvent::RefreshRequested { request_id, .. }
+            if request_id == "overflow-request"
+    )));
+}
+
+#[test]
 fn replay_keeps_a_requested_refresh_without_inventing_publication() {
     let home = tempfile::tempdir().expect("temp EGO_HOME");
     journal(home.path())
@@ -265,6 +364,14 @@ fn append_reports_durability_uncertain_after_the_record_was_written() {
             .expect("journal record is UTF-8")
             .contains("durability-request"),
         "the requested event must be written before fsync fails"
+    );
+    assert!(
+        journal(home.path())
+            .replay()
+            .expect("replay uncertain journal")
+            .iter()
+            .all(|event| !matches!(event, McpRegistryEvent::SnapshotPublished { .. })),
+        "journal durability uncertainty must not publish a controller snapshot"
     );
 }
 

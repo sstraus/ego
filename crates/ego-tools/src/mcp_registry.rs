@@ -97,8 +97,11 @@ impl JsonlMcpRegistryJournal {
         }
     }
 
-    fn append_locked(&self, event: McpRegistryEvent) -> Result<(), McpRegistryJournalError> {
-        let operation = McpRegistryJournalOperation::Append;
+    fn append_locked(
+        &self,
+        event: McpRegistryEvent,
+        operation: McpRegistryJournalOperation,
+    ) -> Result<(), McpRegistryJournalError> {
         if let Some(bytes) = self
             .io
             .read(&self.path)
@@ -121,8 +124,10 @@ impl JsonlMcpRegistryJournal {
             .map_err(|_| Self::error(operation, McpRegistryJournalErrorKind::DurabilityUncertain))
     }
 
-    fn replay_locked(&self) -> Result<Vec<McpRegistryEvent>, McpRegistryJournalError> {
-        let operation = McpRegistryJournalOperation::Replay;
+    fn replay_locked(
+        &self,
+        operation: McpRegistryJournalOperation,
+    ) -> Result<Vec<McpRegistryEvent>, McpRegistryJournalError> {
         let Some(bytes) = self
             .io
             .read(&self.path)
@@ -138,12 +143,48 @@ impl JsonlMcpRegistryJournal {
 impl McpRegistryJournal for JsonlMcpRegistryJournal {
     fn append(&self, event: McpRegistryEvent) -> Result<(), McpRegistryJournalError> {
         self.with_lock(McpRegistryJournalOperation::Append, || {
-            self.append_locked(event)
+            self.append_locked(event, McpRegistryJournalOperation::Append)
+        })
+    }
+
+    fn begin_refresh(
+        &self,
+        request_id: String,
+        trigger: String,
+        server_scope: Option<String>,
+    ) -> Result<u64, McpRegistryJournalError> {
+        let operation = McpRegistryJournalOperation::BeginRefresh;
+        self.with_lock(operation, || {
+            let next = self
+                .replay_locked(operation)?
+                .into_iter()
+                .filter_map(|event| match event {
+                    McpRegistryEvent::RefreshRequested {
+                        config_revision, ..
+                    } => Some(config_revision),
+                    _ => None,
+                })
+                .max()
+                .unwrap_or(0)
+                .checked_add(1)
+                .ok_or_else(|| Self::error(operation, McpRegistryJournalErrorKind::Exhausted))?;
+            self.append_locked(
+                McpRegistryEvent::RefreshRequested {
+                    request_id,
+                    trigger,
+                    server_scope,
+                    config_revision: next,
+                },
+                operation,
+            )?;
+            Ok(next)
         })
     }
 
     fn replay(&self) -> Result<Vec<McpRegistryEvent>, McpRegistryJournalError> {
-        self.with_lock(McpRegistryJournalOperation::Replay, || self.replay_locked())
+        self.with_lock(McpRegistryJournalOperation::Replay, || {
+            self.replay_locked(McpRegistryJournalOperation::Replay)
+        })
     }
 }
 

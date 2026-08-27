@@ -5,6 +5,7 @@ mod effects;
 mod error;
 mod http;
 mod oauth;
+mod registry;
 mod server;
 mod state;
 mod stdio;
@@ -23,6 +24,12 @@ pub use oauth::{
     McpAuthorizationInteraction, McpClientMetadata, McpCredentialBundle, McpLoginRequest,
     McpLoginResult, McpOAuthCallback, McpOAuthInteraction, McpPkceContext, McpPkceMethod,
     McpTokenRefreshRequest, McpTokenRefreshResult, login, refresh_token,
+};
+pub use registry::{
+    McpAdmittedCandidate, McpCacheMetadata, McpCandidateAdmission, McpCandidateError,
+    McpCandidateIdentity, McpCandidateRequest, McpCapabilities, McpRegistryController,
+    McpRegistryError, McpRegistryPublication, McpRegistryRefresh, McpRegistryStatus, RegistryScope,
+    RegistryTrigger,
 };
 pub use server::{McpServerPort, McpServerToolCall, serve_stdio};
 pub use state::{

@@ -43,6 +43,7 @@ pub enum McpRegistryEvent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum McpRegistryJournalOperation {
     Append,
+    BeginRefresh,
     Replay,
 }
 
@@ -50,6 +51,7 @@ impl fmt::Display for McpRegistryJournalOperation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::Append => "append",
+            Self::BeginRefresh => "begin refresh",
             Self::Replay => "replay",
         })
     }
@@ -62,6 +64,7 @@ pub enum McpRegistryJournalErrorKind {
     Corrupt,
     UnsupportedVersion,
     DurabilityUncertain,
+    Exhausted,
 }
 
 impl fmt::Display for McpRegistryJournalErrorKind {
@@ -71,6 +74,7 @@ impl fmt::Display for McpRegistryJournalErrorKind {
             Self::Corrupt => "corrupt",
             Self::UnsupportedVersion => "unsupported version",
             Self::DurabilityUncertain => "durability uncertain",
+            Self::Exhausted => "revision space exhausted",
         })
     }
 }
@@ -111,6 +115,13 @@ impl std::error::Error for McpRegistryJournalError {}
 /// Consumer-owned machine journal port.
 pub trait McpRegistryJournal: Send + Sync {
     fn append(&self, event: McpRegistryEvent) -> Result<(), McpRegistryJournalError>;
+
+    fn begin_refresh(
+        &self,
+        request_id: String,
+        trigger: String,
+        server_scope: Option<String>,
+    ) -> Result<u64, McpRegistryJournalError>;
 
     fn replay(&self) -> Result<Vec<McpRegistryEvent>, McpRegistryJournalError>;
 }
