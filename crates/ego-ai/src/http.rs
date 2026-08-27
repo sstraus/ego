@@ -66,10 +66,252 @@ use std::sync::Arc;
 
 use ego_core::generator::attempt::DeliveryCertainty;
 use ego_core::generator::types::ErrorKind;
+use ego_core::permit::{
+    HttpRequest as CoreHttpRequest, HttpRequestDigest, HttpRoute, HttpScheme, NetworkTarget,
+    PreparedConnect,
+};
 use futures::StreamExt;
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
+use sha2::{Digest, Sha256};
 use url::{Host, Url};
+
+const HTTP_PROFILE_FINGERPRINT_DOMAIN: &[u8] = b"ego.http-profile";
+const HTTP_PROFILE_POLICY_VERSION: &[u8] = b"1";
+
+/// The identity of one exact, versioned set of admitted HTTP routes.
+///
+/// The digest is deliberately opaque. Callers may compare fingerprints and
+/// name the owning profile, but cannot turn one back into reusable authority.
+#[derive(Clone, PartialEq, Eq)]
+pub struct HttpProfileFingerprint {
+    id: String,
+    digest: [u8; 32],
+}
+
+impl HttpProfileFingerprint {
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+}
+
+impl fmt::Debug for HttpProfileFingerprint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HttpProfileFingerprint")
+            .field("id", &self.id)
+            .finish_non_exhaustive()
+    }
+}
+
+/// A reusable policy table that is private to provider and auxiliary endpoint
+/// ownership inside `ego-ai`.
+#[derive(Clone)]
+pub(crate) struct AdmittedHttpProfile {
+    fingerprint: HttpProfileFingerprint,
+    routes: Vec<HttpRoute>,
+}
+
+/// A single admitted HTTP hop, bound to its exact target and request bytes.
+///
+/// This type intentionally does not implement `Clone`: the outer adapter
+/// consumes it when it spends the authority.
+pub struct PreparedHttpCall {
+    profile: HttpProfileFingerprint,
+    route: HttpRoute,
+    connect: PreparedConnect,
+    request: CoreHttpRequest,
+}
+
+impl PreparedHttpCall {
+    pub fn profile(&self) -> &HttpProfileFingerprint {
+        &self.profile
+    }
+
+    pub fn route(&self) -> &HttpRoute {
+        &self.route
+    }
+
+    pub fn request_digest(&self) -> &HttpRequestDigest {
+        self.connect.request_digest()
+    }
+
+    pub fn into_parts(
+        self,
+    ) -> (
+        HttpProfileFingerprint,
+        HttpRoute,
+        PreparedConnect,
+        CoreHttpRequest,
+    ) {
+        (self.profile, self.route, self.connect, self.request)
+    }
+}
+
+/// Why an HTTP profile or attempted use of it is invalid.
+///
+/// Variants carry no URL, header, body, or request-target material so neither
+/// `Debug` nor `Display` can disclose credentials or prompt bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HttpProfileError {
+    EmptyId,
+    EmptyRoutes,
+    DuplicateRoute,
+    UnsupportedScheme,
+    MissingHost,
+    MissingPort,
+    UserInfo,
+    Fragment,
+    RouteNotAdmitted,
+    RequestTargetMismatch,
+    InvalidTarget,
+}
+
+impl fmt::Display for HttpProfileError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let message = match self {
+            Self::EmptyId => "HTTP profile ID is empty",
+            Self::EmptyRoutes => "HTTP profile has no admitted routes",
+            Self::DuplicateRoute => "HTTP profile contains a duplicate route",
+            Self::UnsupportedScheme => "HTTP profile call uses an unsupported scheme",
+            Self::MissingHost => "HTTP profile call has no host",
+            Self::MissingPort => "HTTP profile call has no effective port",
+            Self::UserInfo => "HTTP profile call contains user information",
+            Self::Fragment => "HTTP profile call contains a fragment",
+            Self::RouteNotAdmitted => "HTTP profile does not admit the requested route",
+            Self::RequestTargetMismatch => "HTTP profile URL and request target do not match",
+            Self::InvalidTarget => "HTTP profile call contains an invalid target",
+        };
+        f.write_str(message)
+    }
+}
+
+impl std::error::Error for HttpProfileError {}
+
+impl AdmittedHttpProfile {
+    pub(crate) fn try_new(id: &str, mut routes: Vec<HttpRoute>) -> Result<Self, HttpProfileError> {
+        if id.is_empty() {
+            return Err(HttpProfileError::EmptyId);
+        }
+        if routes.is_empty() {
+            return Err(HttpProfileError::EmptyRoutes);
+        }
+
+        routes.sort_by(compare_http_routes);
+        if routes.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(HttpProfileError::DuplicateRoute);
+        }
+
+        let fingerprint = fingerprint_http_profile(id, &routes);
+        Ok(Self {
+            fingerprint,
+            routes,
+        })
+    }
+
+    pub(crate) fn prepare(
+        &self,
+        url: Url,
+        request: CoreHttpRequest,
+    ) -> Result<PreparedHttpCall, HttpProfileError> {
+        if has_userinfo(&url) {
+            return Err(HttpProfileError::UserInfo);
+        }
+        if url.fragment().is_some() {
+            return Err(HttpProfileError::Fragment);
+        }
+
+        let scheme = match url.scheme() {
+            "http" => HttpScheme::Http,
+            "https" => HttpScheme::Https,
+            _ => return Err(HttpProfileError::UnsupportedScheme),
+        };
+        let host = url.host_str().ok_or(HttpProfileError::MissingHost)?;
+        let port = url
+            .port_or_known_default()
+            .ok_or(HttpProfileError::MissingPort)?;
+        let target = NetworkTarget::new(host, port).map_err(|_| HttpProfileError::InvalidTarget)?;
+        let route =
+            HttpRoute::new(scheme, target.clone()).map_err(|_| HttpProfileError::InvalidTarget)?;
+
+        if self
+            .routes
+            .binary_search_by(|item| compare_http_routes(item, &route))
+            .is_err()
+        {
+            return Err(HttpProfileError::RouteNotAdmitted);
+        }
+
+        let mut url_target = url.path().to_owned();
+        if let Some(query) = url.query() {
+            url_target.push('?');
+            url_target.push_str(query);
+        }
+        if url_target != request.path() {
+            return Err(HttpProfileError::RequestTargetMismatch);
+        }
+
+        let connect = PreparedConnect::new(target, &request);
+        if connect.target() != route.target() {
+            return Err(HttpProfileError::InvalidTarget);
+        }
+        Ok(PreparedHttpCall {
+            profile: self.fingerprint.clone(),
+            route,
+            connect,
+            request,
+        })
+    }
+}
+
+fn compare_http_routes(left: &HttpRoute, right: &HttpRoute) -> std::cmp::Ordering {
+    scheme_tag(left.scheme())
+        .cmp(&scheme_tag(right.scheme()))
+        .then_with(|| left.target().host().cmp(right.target().host()))
+        .then_with(|| left.target().port().cmp(&right.target().port()))
+}
+
+fn scheme_tag(scheme: HttpScheme) -> u8 {
+    match scheme {
+        HttpScheme::Http => 0,
+        HttpScheme::Https => 1,
+    }
+}
+
+fn fingerprint_http_profile(id: &str, routes: &[HttpRoute]) -> HttpProfileFingerprint {
+    let mut hasher = Sha256::new();
+    hash_profile_frame(&mut hasher, HTTP_PROFILE_FINGERPRINT_DOMAIN);
+    hash_profile_frame(&mut hasher, HTTP_PROFILE_POLICY_VERSION);
+    hash_profile_frame(&mut hasher, id.as_bytes());
+    hasher.update((routes.len() as u128).to_be_bytes());
+    for route in routes {
+        hash_profile_frame(&mut hasher, &[scheme_tag(route.scheme())]);
+        hash_profile_frame(&mut hasher, route.target().host().as_bytes());
+        hash_profile_frame(&mut hasher, &route.target().port().to_be_bytes());
+    }
+    HttpProfileFingerprint {
+        id: id.to_owned(),
+        digest: hasher.finalize().into(),
+    }
+}
+
+fn hash_profile_frame(hasher: &mut Sha256, bytes: &[u8]) {
+    hasher.update((bytes.len() as u128).to_be_bytes());
+    hasher.update(bytes);
+}
+
+fn has_userinfo(url: &Url) -> bool {
+    if !url.username().is_empty() || url.password().is_some() {
+        return true;
+    }
+    url.as_str()
+        .strip_prefix(url.scheme())
+        .and_then(|rest| rest.strip_prefix("://"))
+        .and_then(|rest| {
+            rest.split(|character| matches!(character, '/' | '?' | '#'))
+                .next()
+        })
+        .is_some_and(|authority| authority.contains('@'))
+}
 
 /// A response body, streamed. Deliberately a stream and not a `Vec<u8>`:
 /// generation is streamed end to end, and buffering it here would make every
@@ -658,47 +900,4 @@ pub(crate) async fn exchange(http: &Arc<dyn Http>, req: HttpRequest) -> Result<E
 /// did, so an integration test could only claim the resolver was used, never
 /// show it.
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use reqwest::dns::{Name, Resolve};
-    use std::str::FromStr;
-
-    async fn resolve(host: &str) -> Result<Vec<SocketAddr>, String> {
-        LoopbackResolver
-            .resolve(Name::from_str(host).expect("a valid DNS name"))
-            .await
-            .map(|addrs| addrs.collect())
-            .map_err(|e| e.to_string())
-    }
-
-    #[tokio::test]
-    async fn the_offline_resolver_answers_for_localhost_from_a_constant() {
-        for spelling in ["localhost", "localhost."] {
-            let addrs = resolve(spelling)
-                .await
-                .unwrap_or_else(|e| panic!("{spelling} should resolve: {e}"));
-            assert_eq!(
-                addrs.iter().map(|a| a.ip()).collect::<Vec<_>>(),
-                vec![IpAddr::from([127, 0, 0, 1])],
-                "{spelling} must map to the loopback address and nothing else"
-            );
-        }
-    }
-
-    /// The name the admission table already refuses. It is refused here too,
-    /// because a single check is a single place to get it wrong — and because
-    /// this is the layer that makes "no DNS query leaves" a fact about the
-    /// program rather than a claim about its callers.
-    #[tokio::test]
-    async fn the_offline_resolver_refuses_every_other_name_rather_than_asking() {
-        for host in ["api.openai.com", "evil.localhost", "localhost.evil.com"] {
-            let err = resolve(host)
-                .await
-                .expect_err("{host} must not be resolved offline");
-            assert!(
-                err.contains(host),
-                "the refusal must name {host}, got: {err}"
-            );
-        }
-    }
-}
+mod tests;
