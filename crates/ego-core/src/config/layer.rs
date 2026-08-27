@@ -331,9 +331,10 @@ impl McpStdioConfig {
 }
 
 /// Authentication behavior for a stateless HTTP MCP server.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum McpHttpAuth {
+    #[default]
     None,
     Oauth,
 }
@@ -388,12 +389,6 @@ impl<'de> Deserialize<'de> for McpHttpUrl {
         String::deserialize(deserializer)?
             .parse()
             .map_err(serde::de::Error::custom)
-    }
-}
-
-impl Default for McpHttpAuth {
-    fn default() -> Self {
-        Self::None
     }
 }
 
