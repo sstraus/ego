@@ -11,15 +11,15 @@ fn result_metadata_preserves_ttl_and_cache_scope_without_guessing_scope() {
     assert_eq!(private.ttl_ms(), Some(30_000));
     assert_eq!(private.cache_scope(), CacheScope::Private);
 
-    let shared = McpResultMetadata::new(Some(1_000), CacheScope::Shared).expect("metadata");
-    assert_eq!(shared.ttl_ms(), Some(1_000));
-    assert_eq!(shared.cache_scope(), CacheScope::Shared);
+    let public = McpResultMetadata::new(Some(1_000), CacheScope::Public).expect("metadata");
+    assert_eq!(public.ttl_ms(), Some(1_000));
+    assert_eq!(public.cache_scope(), CacheScope::Public);
 
-    assert!(McpResultMetadata::new(Some(0), CacheScope::Private).is_err());
-    let result = McpToolResult::new(br#"{"content":[{"type":"text","text":"safe"}]}"#, private)
+    let immediate = McpResultMetadata::new(Some(0), CacheScope::Public).expect("immediate stale metadata");
+    assert_eq!(immediate.ttl_ms(), Some(0));
+    let result = McpToolResult::new(br#"{"resultType":"complete","content":[{"type":"text","text":"safe"}]}"#)
         .expect("tool result");
-    assert_eq!(result.cache().ttl_ms(), Some(30_000));
-    assert_eq!(result.cache().cache_scope(), CacheScope::Private);
+    assert!(result.body().windows(b"resultType".len()).any(|window| window == b"resultType"));
 }
 
 #[test]

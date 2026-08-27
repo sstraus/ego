@@ -1,6 +1,7 @@
 //! Current MCP 2026-07-28 protocol ownership and guarded transport adapters.
 
 mod client;
+mod dynamic;
 mod effects;
 mod error;
 mod http;
@@ -13,6 +14,7 @@ mod stdio;
 pub use client::{
     MCP_PROTOCOL_REVISION, McpClient, McpClientCancellation, McpClientOptions, McpClientSettlement,
 };
+pub use dynamic::{McpDynamicCapture, McpDynamicFamily, McpDynamicTool, McpPreparedDynamicCall};
 pub use effects::{
     McpDuplexEffects, McpFuture, McpHttpEffects, McpHttpEnd, McpHttpPurpose, McpHttpSettlement,
     McpPreparedHttpParts, McpRequestId, PreparedMcpHttpCall,
@@ -33,6 +35,7 @@ pub use registry::{
 };
 pub use server::{McpServerPort, McpServerToolCall, serve_stdio};
 pub use state::{
-    CacheScope, McpInputRequestId, McpInputResponse, McpInputState, McpRefreshRequest,
-    McpResultMetadata, McpRetryRequest, McpSubscription, McpSubscriptionEvent, McpToolResult,
+    CacheScope, McpInputMapping, McpInputRequestId, McpInputRequired, McpInputResponse,
+    McpInputState, McpManualOutcome, McpMappedInput, McpRefreshRequest, McpResultMetadata,
+    McpRetryRequest, McpSubscription, McpSubscriptionEvent, McpToolResult,
 };

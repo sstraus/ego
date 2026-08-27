@@ -1049,6 +1049,7 @@ dependencies = [
  "ego-core",
  "futures",
  "http",
+ "jsonschema",
  "rmcp",
  "serde",
  "serde_json",

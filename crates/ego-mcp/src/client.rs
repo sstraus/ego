@@ -11,9 +11,10 @@ use futures::StreamExt;
 use futures::stream::BoxStream;
 use http::{HeaderName, HeaderValue};
 use rmcp::model::{
-    CancelledNotificationParam, ClientCapabilities, ClientInfo, ClientJsonRpcMessage,
-    ClientRequest, Implementation, ListToolsRequest, PaginatedRequestParams, ProtocolVersion,
-    ServerJsonRpcMessage, ServerResult,
+    CallToolRequestParams, CallToolResult, CancelledNotificationParam, ClientCapabilities,
+    ClientInfo, ClientJsonRpcMessage, ClientRequest, GetPromptRequestParams, GetPromptResult,
+    Implementation, ListToolsRequest, PaginatedRequestParams, ProtocolVersion,
+    ReadResourceRequestParams, ReadResourceResult, ServerJsonRpcMessage, ServerResult,
 };
 use rmcp::service::{PeerRequestOptions, RunningService};
 use rmcp::transport::common::client_side_sse::NeverRetry;
@@ -29,7 +30,7 @@ use crate::http::{AdmittedMcpHttpProfile, header, path_and_query};
 use crate::stdio::SharedDuplex;
 use crate::{
     McpDuplexEffects, McpError, McpFailure, McpHttpEffects, McpHttpEnd, McpHttpPurpose,
-    McpHttpSettlement, McpRequestId,
+    McpHttpSettlement, McpManualOutcome, McpRequestId,
 };
 
 pub const MCP_PROTOCOL_REVISION: &str = "2026-07-28";
@@ -63,6 +64,7 @@ struct ActiveHttpRequest {
 #[derive(Default)]
 struct ClientControl {
     cancelled: AtomicBool,
+    operation_claimed: AtomicBool,
     active: Mutex<Option<ActiveHttpRequest>>,
     settlements: Mutex<Vec<McpHttpSettlement>>,
 }
@@ -600,7 +602,6 @@ enum ClientState {
     Running {
         service: RunningService<RoleClient, ClientInfo>,
         duplex: Option<SharedDuplex>,
-        stdio: bool,
     },
     Failed {
         duplex: Option<SharedDuplex>,
@@ -703,7 +704,6 @@ impl McpClient {
                         self.state = ClientState::Running {
                             service,
                             duplex: None,
-                            stdio: false,
                         };
                         Ok(())
                     }
@@ -722,7 +722,6 @@ impl McpClient {
                         self.state = ClientState::Running {
                             service,
                             duplex: Some(shared),
-                            stdio: true,
                         };
                         Ok(())
                     }
@@ -751,24 +750,91 @@ impl McpClient {
                 "MCP client was cancelled",
             ));
         }
-        let ClientState::Running { service, stdio, .. } = &self.state else {
+        let ClientState::Running { service, .. } = &self.state else {
             return Err(McpError::new(
                 McpFailure::Protocol,
                 "MCP client has not discovered its server",
             ));
         };
-        let tools = if *stdio {
-            self.list_stdio_tools(service).await?
-        } else {
-            service
-                .list_all_tools()
-                .await
-                .map_err(|error| McpError::new(McpFailure::Protocol, error.to_string()))?
-        };
+        self.claim_operation()?;
+        let tools = self.list_current_tools(service).await?;
         Ok(project_tools(tools))
     }
 
-    async fn list_stdio_tools(
+    /// Perform one manual tools/call round. Input-required is returned to the
+    /// durable continuation owner and is never fulfilled automatically.
+    pub async fn call_tool_once(
+        &self,
+        params: CallToolRequestParams,
+    ) -> Result<McpManualOutcome<CallToolResult>, McpError> {
+        let service = self.running_service()?;
+        self.claim_operation()?;
+        let response = service
+            .call_tool_once(params)
+            .await
+            .map_err(|error| McpError::new(McpFailure::Protocol, error.to_string()))?;
+        McpManualOutcome::from_call(response)
+    }
+
+    /// Perform one manual resources/read round without entering rmcp's MRTR
+    /// loop.
+    pub async fn read_resource_once(
+        &self,
+        params: ReadResourceRequestParams,
+    ) -> Result<McpManualOutcome<ReadResourceResult>, McpError> {
+        let service = self.running_service()?;
+        self.claim_operation()?;
+        let response = service
+            .read_resource_once(params)
+            .await
+            .map_err(|error| McpError::new(McpFailure::Protocol, error.to_string()))?;
+        McpManualOutcome::from_resource(response)
+    }
+
+    /// Perform one manual prompts/get round without entering rmcp's MRTR loop.
+    pub async fn get_prompt_once(
+        &self,
+        params: GetPromptRequestParams,
+    ) -> Result<McpManualOutcome<GetPromptResult>, McpError> {
+        let service = self.running_service()?;
+        self.claim_operation()?;
+        let response = service
+            .get_prompt_once(params)
+            .await
+            .map_err(|error| McpError::new(McpFailure::Protocol, error.to_string()))?;
+        McpManualOutcome::from_prompt(response)
+    }
+
+    fn running_service(&self) -> Result<&RunningService<RoleClient, ClientInfo>, McpError> {
+        if self.control.cancelled.load(Ordering::Acquire) {
+            return Err(McpError::new(
+                McpFailure::Cancelled,
+                "MCP client was cancelled",
+            ));
+        }
+        let ClientState::Running { service, .. } = &self.state else {
+            return Err(McpError::new(
+                McpFailure::Protocol,
+                "MCP client has not discovered its server",
+            ));
+        };
+        Ok(service)
+    }
+
+    fn claim_operation(&self) -> Result<(), McpError> {
+        self.control
+            .operation_claimed
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| {
+                McpError::new(
+                    McpFailure::Authority,
+                    "MCP client operation authority was already spent",
+                )
+            })?;
+        Ok(())
+    }
+
+    async fn list_current_tools(
         &self,
         service: &RunningService<RoleClient, ClientInfo>,
     ) -> Result<Vec<rmcp::model::Tool>, McpError> {
@@ -810,6 +876,18 @@ impl McpClient {
                     "MCP server returned an unexpected tools/list response",
                 ));
             };
+            if !result
+                .result_type
+                .as_ref()
+                .is_some_and(rmcp::model::ResultType::is_complete)
+                || result.ttl_ms.is_none()
+                || result.cache_scope.is_none()
+            {
+                return Err(McpError::new(
+                    McpFailure::Protocol,
+                    "current tools/list result requires resultType, ttlMs, and cacheScope",
+                ));
+            }
             tools.extend(result.tools);
             cursor = result.next_cursor;
             if cursor.is_none() {

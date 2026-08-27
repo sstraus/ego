@@ -120,6 +120,8 @@ pub enum DeliveryCertainty {
     /// The bytes did not leave. A retry cannot double-bill.
     #[default]
     DefinitelyUnsent,
+    /// The operation completed and therefore reached the remote peer.
+    DefinitelySent,
     /// The bytes may have arrived — a timeout, a reset mid-write, a stream
     /// cut before its terminal frame. A retry may be billed twice.
     PossiblySent,

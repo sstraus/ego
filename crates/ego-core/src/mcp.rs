@@ -1,0 +1,540 @@
+//! Protocol-neutral MCP projections owned by the core domain.
+//!
+//! Wire parsing remains in `ego-mcp`. These types retain the authority,
+//! provenance and cache facts that must survive after protocol bytes have
+//! been validated.
+
+use std::fmt;
+
+use serde::{Deserialize, Serialize};
+
+use crate::digest::sha256_hex;
+use crate::generator::attempt::DeliveryCertainty;
+use crate::permit::InvocationDigest;
+use crate::store::evidence::{EvidenceId, EvidenceRef};
+
+/// Maximum UTF-8 bytes exposed to a model from one foreign result.
+pub const FOREIGN_VISIBLE_BYTES: usize = 64 * 1024;
+/// Maximum bytes retained inline for one unsupported content block.
+pub const FOREIGN_UNSUPPORTED_BYTES: usize = 32 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheScope {
+    Public,
+    Private,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextSensitivity {
+    Public,
+    Restricted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextKind {
+    Resource,
+    Prompt,
+    Tool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct McpAdmissionFingerprint {
+    generation: String,
+    operation: String,
+    schema: String,
+}
+
+impl McpAdmissionFingerprint {
+    pub fn new(
+        generation: impl Into<String>,
+        operation: impl Into<String>,
+        schema: impl Into<String>,
+    ) -> Result<Self, McpProjectionError> {
+        let fingerprint = Self {
+            generation: generation.into(),
+            operation: operation.into(),
+            schema: schema.into(),
+        };
+        if [
+            &fingerprint.generation,
+            &fingerprint.operation,
+            &fingerprint.schema,
+        ]
+        .into_iter()
+        .any(|part| !valid_identity(part))
+        {
+            return Err(McpProjectionError::InvalidFingerprint);
+        }
+        Ok(fingerprint)
+    }
+
+    pub fn generation(&self) -> &str {
+        &self.generation
+    }
+
+    pub fn operation(&self) -> &str {
+        &self.operation
+    }
+
+    pub fn schema(&self) -> &str {
+        &self.schema
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ForeignContent {
+    Text {
+        text: String,
+    },
+    Unsupported {
+        content_type: String,
+        retained: Vec<u8>,
+        original_bytes: u64,
+        sha256: String,
+    },
+}
+
+impl ForeignContent {
+    pub fn text(text: impl Into<String>) -> Self {
+        Self::Text { text: text.into() }
+    }
+
+    pub fn unsupported(content_type: impl Into<String>, bytes: &[u8]) -> Self {
+        let retained = bytes
+            .get(..bytes.len().min(FOREIGN_UNSUPPORTED_BYTES))
+            .unwrap_or(bytes)
+            .to_vec();
+        Self::Unsupported {
+            content_type: content_type.into(),
+            retained,
+            original_bytes: bytes.len().try_into().unwrap_or(u64::MAX),
+            sha256: sha256_hex(bytes),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UnsupportedContent {
+    kind: String,
+    original_bytes: u64,
+    retained_bytes: u64,
+    sha256: String,
+}
+
+impl UnsupportedContent {
+    pub fn kind(&self) -> &str {
+        &self.kind
+    }
+
+    pub fn original_bytes(&self) -> u64 {
+        self.original_bytes
+    }
+
+    pub fn retained_bytes(&self) -> u64 {
+        self.retained_bytes
+    }
+
+    pub fn sha256(&self) -> &str {
+        &self.sha256
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CancellationClassification {
+    Completed,
+    Cancelled,
+    TimedOut,
+    Failed,
+    Uncertain,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ForeignResult {
+    server: String,
+    tool: String,
+    invocation_digest: String,
+    admission_generation: String,
+    result_type: String,
+    ttl_ms: Option<u64>,
+    cache_scope: Option<CacheScope>,
+    visible_text: String,
+    visible_truncated: bool,
+    unsupported: Vec<UnsupportedContent>,
+    evidence: EvidenceRef,
+    delivery: DeliveryCertainty,
+    cancellation: CancellationClassification,
+}
+
+impl ForeignResult {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        server: impl Into<String>,
+        tool: impl Into<String>,
+        invocation_digest: InvocationDigest,
+        admission_generation: impl Into<String>,
+        result_type: impl Into<String>,
+        ttl_ms: Option<u64>,
+        cache_scope: Option<CacheScope>,
+        content: Vec<ForeignContent>,
+    ) -> Result<Self, McpProjectionError> {
+        let server = server.into();
+        let tool = tool.into();
+        let admission_generation = admission_generation.into();
+        let result_type = result_type.into();
+        if !valid_identity(&server)
+            || !valid_identity(&tool)
+            || !valid_identity(&admission_generation)
+        {
+            return Err(McpProjectionError::InvalidIdentity);
+        }
+        if result_type.trim().is_empty() || result_type.chars().any(char::is_control) {
+            return Err(McpProjectionError::MissingResultType);
+        }
+
+        let sanitized =
+            serde_json::to_vec(&content).map_err(|_| McpProjectionError::InvalidContent)?;
+        let evidence = EvidenceRef::new(
+            EvidenceId::parse(sha256_hex(&sanitized))
+                .map_err(|_| McpProjectionError::InvalidContent)?,
+            sanitized.len().try_into().unwrap_or(u64::MAX),
+        );
+        let mut visible_text = String::new();
+        let mut unsupported = Vec::new();
+        let mut visible_truncated = false;
+        for block in content {
+            match block {
+                ForeignContent::Text { text } => {
+                    append_bounded_text(&mut visible_text, &text, &mut visible_truncated);
+                }
+                ForeignContent::Unsupported {
+                    content_type,
+                    retained,
+                    original_bytes,
+                    sha256,
+                } => unsupported.push(UnsupportedContent {
+                    kind: content_type,
+                    original_bytes,
+                    retained_bytes: retained.len().try_into().unwrap_or(u64::MAX),
+                    sha256,
+                }),
+            }
+        }
+        Ok(Self {
+            server,
+            tool,
+            invocation_digest: invocation_digest.as_str().to_owned(),
+            admission_generation,
+            result_type,
+            ttl_ms,
+            cache_scope,
+            visible_text,
+            visible_truncated,
+            unsupported,
+            evidence,
+            delivery: DeliveryCertainty::DefinitelySent,
+            cancellation: CancellationClassification::Completed,
+        })
+    }
+
+    pub fn server(&self) -> &str {
+        &self.server
+    }
+    pub fn tool(&self) -> &str {
+        &self.tool
+    }
+    pub fn invocation_digest(&self) -> &str {
+        &self.invocation_digest
+    }
+    pub fn admission_generation(&self) -> &str {
+        &self.admission_generation
+    }
+    pub fn result_type(&self) -> &str {
+        &self.result_type
+    }
+    pub fn ttl_ms(&self) -> Option<u64> {
+        self.ttl_ms
+    }
+    pub fn cache_scope(&self) -> Option<CacheScope> {
+        self.cache_scope
+    }
+    pub fn visible_text(&self) -> &str {
+        &self.visible_text
+    }
+    pub const fn visible_limit(&self) -> usize {
+        FOREIGN_VISIBLE_BYTES
+    }
+    pub fn visible_truncated(&self) -> bool {
+        self.visible_truncated
+    }
+    pub fn unsupported(&self) -> &[UnsupportedContent] {
+        &self.unsupported
+    }
+    pub fn evidence_reference(&self) -> &EvidenceRef {
+        &self.evidence
+    }
+    pub fn delivery(&self) -> DeliveryCertainty {
+        self.delivery
+    }
+    pub fn cancellation(&self) -> CancellationClassification {
+        self.cancellation
+    }
+}
+
+fn append_bounded_text(target: &mut String, text: &str, truncated: &mut bool) {
+    if target.len() >= FOREIGN_VISIBLE_BYTES {
+        *truncated |= !text.is_empty();
+        return;
+    }
+    if !target.is_empty() {
+        target.push('\n');
+    }
+    let remaining = FOREIGN_VISIBLE_BYTES.saturating_sub(target.len());
+    if text.len() <= remaining {
+        target.push_str(text);
+        return;
+    }
+    let mut boundary = remaining.min(text.len());
+    while !text.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    target.push_str(&text[..boundary]);
+    *truncated = true;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextEntry {
+    kind: ContextKind,
+    server: String,
+    source: String,
+    name: String,
+    description: String,
+    arguments: Vec<String>,
+    sensitivity: ContextSensitivity,
+    cache_scope: CacheScope,
+    ttl_ms: Option<u64>,
+    revision: String,
+    admission_generation: Option<String>,
+}
+
+impl ContextEntry {
+    pub fn resource(
+        server: impl Into<String>,
+        source: impl Into<String>,
+        name: impl Into<String>,
+        sensitivity: ContextSensitivity,
+        cache_scope: CacheScope,
+        revision: impl Into<String>,
+    ) -> Result<Self, ContextError> {
+        Self::new(
+            ContextKind::Resource,
+            server,
+            source,
+            name,
+            "",
+            Vec::new(),
+            sensitivity,
+            cache_scope,
+            revision,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn prompt(
+        server: impl Into<String>,
+        name: impl Into<String>,
+        description: impl Into<String>,
+        arguments: Vec<String>,
+        sensitivity: ContextSensitivity,
+        cache_scope: CacheScope,
+        revision: impl Into<String>,
+    ) -> Result<Self, ContextError> {
+        let name = name.into();
+        Self::new(
+            ContextKind::Prompt,
+            server,
+            name.clone(),
+            name,
+            description,
+            arguments,
+            sensitivity,
+            cache_scope,
+            revision,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        kind: ContextKind,
+        server: impl Into<String>,
+        source: impl Into<String>,
+        name: impl Into<String>,
+        description: impl Into<String>,
+        arguments: Vec<String>,
+        sensitivity: ContextSensitivity,
+        cache_scope: CacheScope,
+        revision: impl Into<String>,
+    ) -> Result<Self, ContextError> {
+        let entry = Self {
+            kind,
+            server: server.into(),
+            source: source.into(),
+            name: name.into(),
+            description: description.into(),
+            arguments,
+            sensitivity,
+            cache_scope,
+            ttl_ms: None,
+            revision: revision.into(),
+            admission_generation: None,
+        };
+        if !valid_identity(&entry.server)
+            || entry.source.trim().is_empty()
+            || entry.name.trim().is_empty()
+            || entry.revision.trim().is_empty()
+            || entry
+                .arguments
+                .iter()
+                .any(|argument| argument.trim().is_empty())
+        {
+            return Err(ContextError::InvalidEntry);
+        }
+        Ok(entry)
+    }
+
+    pub fn with_cache_ttl(mut self, ttl_ms: u64) -> Self {
+        self.ttl_ms = Some(ttl_ms);
+        self
+    }
+    pub fn with_admission_generation(
+        mut self,
+        generation: impl Into<String>,
+    ) -> Result<Self, ContextError> {
+        let generation = generation.into();
+        if !valid_identity(&generation) {
+            return Err(ContextError::InvalidEntry);
+        }
+        self.admission_generation = Some(generation);
+        Ok(self)
+    }
+    pub fn kind(&self) -> ContextKind {
+        self.kind
+    }
+    pub fn server(&self) -> &str {
+        &self.server
+    }
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    pub fn description(&self) -> &str {
+        &self.description
+    }
+    pub fn arguments(&self) -> &[String] {
+        &self.arguments
+    }
+    pub fn sensitivity(&self) -> ContextSensitivity {
+        self.sensitivity
+    }
+    pub fn cache_scope(&self) -> CacheScope {
+        self.cache_scope
+    }
+    pub fn ttl_ms(&self) -> Option<u64> {
+        self.ttl_ms
+    }
+    pub fn revision(&self) -> &str {
+        &self.revision
+    }
+    pub fn admission_generation(&self) -> Option<&str> {
+        self.admission_generation.as_deref()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ContextSnapshot(Vec<ContextEntry>);
+
+impl ContextSnapshot {
+    pub fn new(entries: Vec<ContextEntry>) -> Result<Self, ContextError> {
+        let mut identities = std::collections::HashSet::with_capacity(entries.len());
+        if entries.iter().any(|entry| {
+            !identities.insert((entry.kind, entry.server.clone(), entry.source.clone()))
+        }) {
+            return Err(ContextError::DuplicateEntry);
+        }
+        Ok(Self(entries))
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+    pub fn iter(&self) -> std::slice::Iter<'_, ContextEntry> {
+        self.0.iter()
+    }
+    pub fn entries(&self) -> &[ContextEntry] {
+        &self.0
+    }
+}
+
+pub trait ContextSource: Send + Sync {
+    fn capture(&self) -> Result<ContextSnapshot, ContextError>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum McpProjectionError {
+    InvalidIdentity,
+    InvalidFingerprint,
+    MissingResultType,
+    InvalidContent,
+}
+
+impl fmt::Display for McpProjectionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::InvalidIdentity => "invalid MCP identity",
+            Self::InvalidFingerprint => "invalid MCP admission fingerprint",
+            Self::MissingResultType => "MCP resultType is missing or invalid",
+            Self::InvalidContent => "invalid MCP content projection",
+        })
+    }
+}
+
+impl std::error::Error for McpProjectionError {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContextError {
+    InvalidEntry,
+    DuplicateEntry,
+    Unavailable(String),
+}
+
+impl fmt::Display for ContextError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidEntry => formatter.write_str("invalid context entry"),
+            Self::DuplicateEntry => formatter.write_str("duplicate context entry"),
+            Self::Unavailable(message) => {
+                write!(formatter, "context source unavailable: {message}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ContextError {}
+
+fn valid_identity(value: &str) -> bool {
+    !value.trim().is_empty() && !value.chars().any(char::is_control)
+}

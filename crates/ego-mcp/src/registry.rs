@@ -16,7 +16,7 @@ use ego_core::turn::{
 use rmcp::model::{Prompt, Resource};
 use sha2::{Digest, Sha256};
 
-use crate::McpFuture;
+use crate::{McpDynamicFamily, McpFuture};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RegistryTrigger {
@@ -225,6 +225,7 @@ pub struct McpAdmittedCandidate {
     resources: Arc<[Resource]>,
     prompts: Arc<[Prompt]>,
     cache: McpCacheMetadata,
+    dynamic_family: Option<McpDynamicFamily>,
 }
 
 impl McpAdmittedCandidate {
@@ -244,6 +245,12 @@ impl McpAdmittedCandidate {
         }
         CapturedToolCatalogue::new("candidate", tools.clone())
             .map_err(|error| McpRegistryError::InvalidCandidate(error.to_string()))?;
+        let descriptors = tools
+            .iter()
+            .map(RegisteredTool::descriptor)
+            .collect::<Vec<_>>();
+        let dynamic_family = McpDynamicFamily::detect(&descriptors)
+            .map_err(|error| McpRegistryError::InvalidCandidate(error.to_string()))?;
         Ok(Self {
             name: Arc::from(name),
             identity,
@@ -252,6 +259,7 @@ impl McpAdmittedCandidate {
             resources: resources.into(),
             prompts: prompts.into(),
             cache,
+            dynamic_family,
         })
     }
 }
@@ -293,6 +301,7 @@ struct AdmittedServerSlice {
     _resources: Arc<[Resource]>,
     _prompts: Arc<[Prompt]>,
     _cache: McpCacheMetadata,
+    _dynamic_family: Option<McpDynamicFamily>,
 }
 
 impl AdmittedServerSlice {
@@ -305,6 +314,7 @@ impl AdmittedServerSlice {
             _resources: candidate.resources,
             _prompts: candidate.prompts,
             _cache: candidate.cache,
+            _dynamic_family: candidate.dynamic_family,
         }
     }
 }

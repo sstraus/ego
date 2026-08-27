@@ -231,6 +231,31 @@ pub struct PreparedCall {
 }
 
 impl PreparedCall {
+    pub fn foreign_protocol(
+        tool: ForeignToolId,
+        params_digest: InvocationDigest,
+        transport: ForeignTransportTarget,
+        admission_fingerprint: &str,
+    ) -> Self {
+        let rendered = tool.to_string();
+        let connect = protocol_connect(&transport, admission_fingerprint);
+        let mut ops = vec![Op::Opaque {
+            tool,
+            params_digest,
+            transport,
+        }];
+        if let Some((target, request_digest)) = connect {
+            ops.push(Op::Connect {
+                target,
+                request_digest,
+            });
+        }
+        Self {
+            tool: rendered,
+            ops,
+        }
+    }
+
     pub fn foreign_http(
         tool: ForeignToolId,
         params_digest: InvocationDigest,
@@ -315,4 +340,37 @@ impl PreparedCall {
             ops,
         }
     }
+
+    pub fn speakeasy_protocol(
+        outer_tool: ForeignToolId,
+        outer_digest: InvocationDigest,
+        inner_tool: ForeignToolId,
+        inner_digest: InvocationDigest,
+        transport: ForeignTransportTarget,
+        request: &HttpRequest,
+    ) -> Self {
+        Self::speakeasy(
+            outer_tool,
+            outer_digest,
+            inner_tool,
+            inner_digest,
+            transport,
+            request,
+        )
+    }
+}
+
+fn protocol_connect(
+    transport: &ForeignTransportTarget,
+    admission_fingerprint: &str,
+) -> Option<(NetworkTarget, HttpRequestDigest)> {
+    let route = transport.http_route()?;
+    let request = HttpRequest::new(
+        "POST",
+        "/.ego/mcp-protocol-envelope",
+        Vec::new(),
+        admission_fingerprint.as_bytes().to_vec(),
+    )
+    .expect("the internal protocol-envelope frame is canonical");
+    Some((route.target().clone(), HttpRequestDigest::of(&request)))
 }

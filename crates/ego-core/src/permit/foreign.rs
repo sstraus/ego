@@ -60,6 +60,11 @@ impl fmt::Display for ForeignToolId {
 pub struct InvocationDigest(String);
 
 impl InvocationDigest {
+    /// Hash canonical invocation bytes into the permission grammar's digest form.
+    pub fn from_bytes(bytes: &[u8]) -> Self {
+        Self(format!("sha256:{:x}", Sha256::digest(bytes)))
+    }
+
     pub fn parse(value: &str) -> Result<Self, ForeignValueError> {
         let Some(hex) = value.strip_prefix("sha256:") else {
             return Err(ForeignValueError::InvalidDigest);
