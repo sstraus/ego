@@ -570,7 +570,7 @@ impl Default for FixedClock {
 
 impl Clock for FixedClock {
     fn now(&self) -> Timestamp {
-        self.now.clone()
+        self.now
     }
 }
 
@@ -1606,13 +1606,17 @@ fn distinct_roots_run_concurrently_without_sharing_a_lease() {
     );
 }
 
-fn recovery_controller() -> (
-    RunController<RecordingSessionStore, ScriptedRunExecutor, FixedClock, SequenceIds>,
+type RecoveryController =
+    RunController<RecordingSessionStore, ScriptedRunExecutor, FixedClock, SequenceIds>;
+type RecoveryFixture = (
+    RecoveryController,
     Arc<RecordingSessionStore>,
     Arc<ScriptedRunExecutor>,
     RunId,
     CancelKey,
-) {
+);
+
+fn recovery_controller() -> RecoveryFixture {
     let store = Arc::new(RecordingSessionStore::default());
     let first_executor = Arc::new(ScriptedRunExecutor::default());
     let first_controller = controller(Arc::clone(&store), Arc::clone(&first_executor));
@@ -2048,7 +2052,7 @@ fn retention_prunes_completed_receipts_but_preserves_active_work_across_replay()
     let blocked_controller = Arc::clone(&controller);
     let blocked_run = active_run;
     let blocked = std::thread::scope(|scope| {
-        let blocked_expected_for_worker = blocked_expected.clone();
+        let blocked_expected_for_worker = blocked_expected;
         let worker = scope.spawn(move || {
             let admission = admitted_continue(
                 &blocked_controller,
