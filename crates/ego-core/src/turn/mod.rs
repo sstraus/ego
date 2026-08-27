@@ -10,8 +10,10 @@
 //! anything. `ARCHITECTURE.md` §4: this is thin async orchestration, and every
 //! decision inside it is a pure function it calls.
 
+mod catalogue;
 mod control;
 mod journal;
+mod mcp_registry;
 mod tools;
 
 use std::collections::BTreeSet;
@@ -54,12 +56,17 @@ use crate::sink::EventSink;
 use crate::state::{SessionState, Usage};
 use crate::store::session_store::{SessionStore, StoreError};
 
+pub use catalogue::{AdmittedToolSource, CapturedToolCatalogue, ToolCatalogueError};
 use control::{BoundaryIntent, ControlIntent};
 pub use control::{
     ControlError, InteractiveControl, InteractiveIngress, QueueStatus, interactive_control,
 };
 pub use journal::Journal;
-use tools::PreparedToolCall;
+pub use mcp_registry::{
+    McpRegistryEvent, McpRegistryJournal, McpRegistryJournalError, McpRegistryJournalErrorKind,
+    McpRegistryJournalOperation,
+};
+use tools::{GenerationToolCatalogue, PreparedToolCall};
 pub use tools::{ToolEffectPorts, Tools};
 
 /// The final model-visible registry. Only `Effect` enters preparation,
@@ -243,8 +250,9 @@ struct PendingCall {
     item: ItemId,
     /// The `ToolCallStarted` event, named as the result's causal parent.
     started: EventId,
-    name: String,
+    selected: Option<Result<RegisteredTool, String>>,
     args: String,
+    _catalogue_generation: Arc<str>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -642,11 +650,14 @@ impl<'a> TurnLoop<'a> {
         let drained = self
             .drain(
                 turn,
-                generation,
                 stream,
-                &profile.metering,
-                quote.as_ref(),
-                GenerationVisibility::CompactionPrivate,
+                DrainGeneration {
+                    event: generation,
+                    metering: &profile.metering,
+                    quote: quote.as_ref(),
+                    visibility: GenerationVisibility::CompactionPrivate,
+                    catalogue: None,
+                },
             )
             .await;
 
@@ -1101,7 +1112,8 @@ impl<'a> TurnLoop<'a> {
                 return Ok(DriveOutcome::Ended(exit, None));
             }
 
-            for (index, call) in pending.iter().enumerate() {
+            let mut pending = pending;
+            for index in 0..pending.len() {
                 // `CLI.md` §4.4: a run with nobody to ask does not answer a
                 // permission question on the model's behalf. The denial is
                 // still logged against the call — the model's audience
@@ -1116,8 +1128,9 @@ impl<'a> TurnLoop<'a> {
                 // needed an answer — reading like a refusal somebody
                 // configured on purpose. `DeniedBy` is what carries that
                 // difference past the prose and into §4.1's object.
-                let denial = match self.run_tool(turn, call).await? {
+                let denial = match self.run_tool(turn, &mut pending[index]).await? {
                     ToolOutcome::Answered { ok, result } => {
+                        let call = &pending[index];
                         self.journal.append(
                             turn,
                             Some(call.item),
@@ -1158,6 +1171,7 @@ impl<'a> TurnLoop<'a> {
                         return Ok(DriveOutcome::Ended(reason, None));
                     }
                 };
+                let call = &pending[index];
                 self.journal.append(
                     turn,
                     Some(call.item),
@@ -1328,10 +1342,18 @@ impl<'a> TurnLoop<'a> {
             Controlled::Failed(cause) => return Err(cause),
         };
 
+        let catalogue = match self.tools.capture() {
+            Ok(catalogue) => catalogue,
+            Err(error) => {
+                tracing::warn!(%error, "the admitted tool catalogue refused a generation");
+                return self.refuse(turn, error.to_string(), ExitReason::Internal);
+            }
+        };
+
         let request = GenRequest {
             model: profile.request_model.clone(),
             messages: conversation,
-            tools: self.tools.descriptors(),
+            tools: catalogue.descriptors(),
             thinking: profile.thinking,
             max_output_tokens: profile.output_ceiling(),
             parallel_tool_calls: profile.capabilities.supports_parallel_tool_calls,
@@ -1428,11 +1450,14 @@ impl<'a> TurnLoop<'a> {
         let drained = self
             .drain(
                 turn,
-                generation,
                 stream,
-                &profile.metering,
-                quote.as_ref(),
-                GenerationVisibility::Conversation,
+                DrainGeneration {
+                    event: generation,
+                    metering: &profile.metering,
+                    quote: quote.as_ref(),
+                    visibility: GenerationVisibility::Conversation,
+                    catalogue: Some(&catalogue),
+                },
             )
             .await;
 
@@ -1564,12 +1589,16 @@ impl<'a> TurnLoop<'a> {
     async fn drain(
         &mut self,
         turn: TurnId,
-        generation: EventId,
         mut stream: AttemptStream,
-        metering: &Metering,
-        quote: Option<&PricingQuote>,
-        visibility: GenerationVisibility,
+        generation: DrainGeneration<'_>,
     ) -> Drained {
+        let DrainGeneration {
+            event: generation,
+            metering,
+            quote,
+            visibility,
+            catalogue,
+        } = generation;
         let reference = stream.attempt();
         let mut pending = Vec::new();
         let mut message: Option<ItemId> = None;
@@ -1723,6 +1752,11 @@ impl<'a> TurnLoop<'a> {
                     } else {
                         let item = ItemId::new();
                         seen.insert(call_id.clone());
+                        let catalogue = catalogue.expect(
+                            "a conversation generation always retains its captured catalogue",
+                        );
+                        let selected = catalogue.select(&name);
+                        let catalogue_generation = catalogue.generation();
                         self.journal
                             .append(
                                 turn,
@@ -1748,8 +1782,9 @@ impl<'a> TurnLoop<'a> {
                                 pending.push(PendingCall {
                                     item,
                                     started,
-                                    name,
+                                    selected: Some(selected),
                                     args,
+                                    _catalogue_generation: catalogue_generation,
                                 });
                             })
                     }
@@ -2112,7 +2147,7 @@ impl<'a> TurnLoop<'a> {
         Ok(JudgeRun::Decided { outcome, by })
     }
 
-    /// Look up, authorise and run one call the model asked for.
+    /// Authorise and run one call prepared from its captured catalogue.
     ///
     /// A *failure* comes back as `Answered { ok: false, .. }` and is logged as
     /// a failed tool result rather than raised. The model is the audience: it
@@ -2126,18 +2161,26 @@ impl<'a> TurnLoop<'a> {
     async fn run_tool(
         &mut self,
         turn: TurnId,
-        call: &PendingCall,
+        call: &mut PendingCall,
     ) -> Result<ToolOutcome, StoreError> {
         let answered = |ok, text: String| ToolOutcome::Answered {
             ok,
             result: ToolResult::builtin(text),
         };
-        let prepared = match self.tools.prepare_registered(&call.name, &call.args) {
-            Ok(prepared) => prepared,
+        let selected = match call
+            .selected
+            .take()
+            .expect("a pending call is settled at most once")
+        {
+            Ok(selected) => selected,
             // Not a permission event. `prepare` refuses calls that never
             // reached the engine — an unknown tool, unparseable arguments —
             // and appending a decision here would record a fact the policy
             // never established.
+            Err(refusal) => return Ok(answered(false, refusal)),
+        };
+        let prepared = match self.tools.prepare_selected(selected, &call.args) {
+            Ok(prepared) => prepared,
             Err(refusal) => return Ok(answered(false, refusal)),
         };
         let (tool, mut prepared) = match prepared {
@@ -2561,6 +2604,14 @@ enum Generated {
 enum GenerationVisibility {
     Conversation,
     CompactionPrivate,
+}
+
+struct DrainGeneration<'a> {
+    event: EventId,
+    metering: &'a Metering,
+    quote: Option<&'a PricingQuote>,
+    visibility: GenerationVisibility,
+    catalogue: Option<&'a GenerationToolCatalogue>,
 }
 
 struct Drained {

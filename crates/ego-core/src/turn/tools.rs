@@ -16,6 +16,41 @@ use crate::permit::{
 use crate::store::evidence::EvidenceStore;
 
 use super::RegisteredTool;
+use super::catalogue::{
+    AdmittedToolSource, CapturedToolCatalogue, ToolCatalogueError, validate_distinct,
+};
+
+struct EmptyAdmittedToolSource;
+
+impl AdmittedToolSource for EmptyAdmittedToolSource {
+    fn capture(&self) -> Result<CapturedToolCatalogue, ToolCatalogueError> {
+        CapturedToolCatalogue::new("static", Vec::new())
+    }
+}
+
+pub(crate) struct GenerationToolCatalogue {
+    generation: std::sync::Arc<str>,
+    registry: Vec<RegisteredTool>,
+    descriptors: Vec<GenToolDescriptor>,
+}
+
+impl GenerationToolCatalogue {
+    pub(crate) fn generation(&self) -> std::sync::Arc<str> {
+        std::sync::Arc::clone(&self.generation)
+    }
+
+    pub(crate) fn descriptors(&self) -> Vec<GenToolDescriptor> {
+        self.descriptors.clone()
+    }
+
+    pub(crate) fn select(&self, name: &str) -> Result<RegisteredTool, String> {
+        self.registry
+            .iter()
+            .find(|registered| registered.descriptor().name == name)
+            .cloned()
+            .ok_or_else(|| format!("there is no tool named {name}"))
+    }
+}
 
 /// A model call after the mixed registry has selected its typed boundary.
 /// Human input never acquires an effect tool or enters permission policy.
@@ -60,6 +95,7 @@ impl<'a> ToolEffectPorts<'a> {
 /// Everything the loop needs to turn a model's tool call into an effect.
 pub struct Tools<'a> {
     registry: Vec<RegisteredTool>,
+    source: std::sync::Arc<dyn AdmittedToolSource>,
     policy: &'a PolicyEngine,
     /// The *raw* filesystem. [`GuardedEffects`] binds one permit to the raw
     /// effect ports at construction, so a fresh facade is built per
@@ -81,6 +117,7 @@ impl<'a> Tools<'a> {
                 .cloned()
                 .map(RegisteredTool::Effect)
                 .collect(),
+            source: std::sync::Arc::new(EmptyAdmittedToolSource),
             policy,
             effects,
             cwd,
@@ -97,10 +134,43 @@ impl<'a> Tools<'a> {
     ) -> Self {
         Self {
             registry: registry.to_vec(),
+            source: std::sync::Arc::new(EmptyAdmittedToolSource),
             policy,
             effects,
             cwd,
         }
+    }
+
+    /// Construct static tools plus one owned source captured per generation.
+    pub fn from_registry_with_source(
+        registry: &[RegisteredTool],
+        source: std::sync::Arc<dyn AdmittedToolSource>,
+        policy: &'a PolicyEngine,
+        effects: ToolEffectPorts<'a>,
+        cwd: CanonPath,
+    ) -> Result<Self, ToolCatalogueError> {
+        validate_distinct(registry)?;
+        Ok(Self {
+            registry: registry.to_vec(),
+            source,
+            policy,
+            effects,
+            cwd,
+        })
+    }
+
+    pub(crate) fn capture(&self) -> Result<GenerationToolCatalogue, ToolCatalogueError> {
+        let dynamic = self.source.capture()?;
+        let mut registry = Vec::with_capacity(self.registry.len() + dynamic.tools().len());
+        registry.extend(self.registry.iter().cloned());
+        registry.extend(dynamic.tools().iter().cloned());
+        validate_distinct(&registry)?;
+        let descriptors = registry.iter().map(RegisteredTool::descriptor).collect();
+        Ok(GenerationToolCatalogue {
+            generation: std::sync::Arc::from(dynamic.generation()),
+            registry,
+            descriptors,
+        })
     }
 
     /// What the model is told it can call.
@@ -141,22 +211,16 @@ impl<'a> Tools<'a> {
         Ok((tool, call))
     }
 
-    /// Select and parse one call through the variant registered for its
-    /// descriptor. This is the sole mixed-registry dispatch point.
-    pub(crate) fn prepare_registered(
+    pub(crate) fn prepare_selected(
         &self,
-        name: &str,
+        registered: RegisteredTool,
         args: &str,
     ) -> Result<PreparedToolCall, String> {
-        let registered = self
-            .registry
-            .iter()
-            .find(|registered| registered.descriptor().name == name)
-            .ok_or_else(|| format!("there is no tool named {name}"))?;
+        let name = registered.descriptor().name;
         let params = serde_json::from_str(args).map_err(|error| {
             format!("{name} was called with arguments that are not JSON: {error}")
         })?;
-        match registered {
+        match &registered {
             RegisteredTool::Effect(tool) => Ok(PreparedToolCall::Effect {
                 tool: std::sync::Arc::clone(tool),
                 call: self.prepare_params(tool.as_ref(), params)?,
