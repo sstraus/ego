@@ -14,6 +14,7 @@ use ego_core::ceiling::Ceilings;
 use ego_core::event::time::Clock;
 use ego_core::generator::capabilities::ReasoningEffortSupport;
 use ego_core::run::RunTermination;
+use ego_core::turn::CancelToken;
 use ego_tools::clock::SystemClock;
 use ego_tools::model_catalogue_cache::ModelCatalogueCache;
 use ego_tools::store::OsIo;
@@ -23,8 +24,11 @@ use crate::cli::ModelsArgs;
 use crate::{config, facts, model};
 
 /// Build and render the one snapshot consumed by every model-listing surface.
-pub async fn execute(args: &ModelsArgs) -> Result<String, RunTermination> {
-    let snapshot = build_catalogue_snapshot(args).await?;
+pub async fn execute(args: &ModelsArgs, cancel: &CancelToken) -> Result<String, RunTermination> {
+    let scope = crate::provider_http::CommandHttpScope::online(cancel.clone())
+        .await
+        .map_err(|message| RunTermination::Provider { message })?;
+    let snapshot = build_catalogue_snapshot(args, scope.http()).await?;
     if args.json {
         serde_json::to_string(&snapshot).map_err(|error| RunTermination::Failed {
             message: format!("the model catalogue could not be rendered: {error}"),
@@ -38,6 +42,7 @@ pub async fn execute(args: &ModelsArgs) -> Result<String, RunTermination> {
 /// non-interactive model surface.
 pub async fn build_catalogue_snapshot(
     args: &ModelsArgs,
+    http: &std::sync::Arc<dyn ego_ai::http::Http>,
 ) -> Result<ModelCatalogueSnapshot, RunTermination> {
     let auth = config::auth().map_err(usage)?;
     let rows = model::rows(&auth).map_err(|error| usage_message(error.to_string()))?;
@@ -47,10 +52,7 @@ pub async fn build_catalogue_snapshot(
         .collect::<BTreeSet<_>>();
     let selected = select_rows(rows, args.provider.as_deref())?;
 
-    // Filtering is settled before transport, credentials, cache, or model facts.
-    let http = model::transport(false).map_err(|error| RunTermination::Provider {
-        message: error.to_string(),
-    })?;
+    // Filtering is settled before credentials, cache, or model facts.
     let hosted = facts::supplied(&Ceilings::default()).map_err(usage)?;
     let unsupported_sources =
         unsupported_supplied_sources(&hosted, &admitted, args.provider.as_deref());
@@ -98,7 +100,7 @@ pub async fn build_catalogue_snapshot(
                 .enumerate(&Enumeration {
                     catalogue: &catalogue,
                     row,
-                    http: &http,
+                    http,
                 })
                 .await
                 .map_err(|message| RunTermination::Failed { message })?;

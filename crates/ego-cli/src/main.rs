@@ -40,14 +40,29 @@ async fn ordinary_main() -> std::process::ExitCode {
 
     let ended = match cli::parse(std::env::args().collect()) {
         Ok(Invocation::Auth(args)) => {
-            let termination = match ego_cli::auth::execute(&args).await {
-                Ok(text) => {
-                    out.write(&text);
-                    RunTermination::Done
+            let mut running = Box::pin(ego_cli::auth::execute(&args, &cancel));
+            let termination = tokio::select! {
+                biased;
+                cause = run::stop_signal(None) => {
+                    cancel.cancel(cause);
+                    let _ = running.as_mut().await;
+                    run::cancelled_termination(&cancel)
                 }
-                Err(err) => RunTermination::UsageError {
-                    message: err.to_string(),
-                },
+                result = &mut running => {
+                    if cancel.is_cancelled() {
+                        run::cancelled_termination(&cancel)
+                    } else {
+                        match result {
+                            Ok(text) => {
+                                out.write(&text);
+                                RunTermination::Done
+                            }
+                            Err(err) => RunTermination::UsageError {
+                                message: err.to_string(),
+                            },
+                        }
+                    }
+                }
             };
             Ended {
                 termination,
@@ -66,7 +81,7 @@ async fn ordinary_main() -> std::process::ExitCode {
             result: serde_json::Value::String(String::new()),
         },
         Ok(Invocation::Models(args)) => {
-            let termination = match ego_cli::models::execute(&args).await {
+            let termination = match ego_cli::models::execute(&args, &cancel).await {
                 Ok(rendered) => {
                     out.line(&rendered);
                     RunTermination::Done

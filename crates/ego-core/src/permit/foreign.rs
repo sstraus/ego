@@ -106,9 +106,7 @@ impl NetworkTarget {
         };
         let url = url::Url::parse(&format!("http://{authority}:{port}/"))
             .map_err(|_| ForeignValueError::InvalidNetworkTarget)?;
-        let host = url
-            .host_str()
-            .ok_or(ForeignValueError::InvalidNetworkTarget)?;
+        let host = canonical_url_host(&url)?;
         if !url.username().is_empty()
             || url.password().is_some()
             || url.path() != "/"
@@ -118,23 +116,18 @@ impl NetworkTarget {
         {
             return Err(ForeignValueError::InvalidNetworkTarget);
         }
-        Ok(Self {
-            host: host.to_owned(),
-            port,
-        })
+        Ok(Self { host, port })
     }
 
     pub fn parse(value: &str) -> Result<Self, ForeignValueError> {
         let url = url::Url::parse(&format!("http://{value}/"))
             .map_err(|_| ForeignValueError::InvalidNetworkTarget)?;
-        let host = url
-            .host_str()
-            .ok_or(ForeignValueError::InvalidNetworkTarget)?;
+        let host = canonical_url_host(&url)?;
         let port = url.port().ok_or(ForeignValueError::InvalidNetworkTarget)?;
         if !url.username().is_empty() || url.password().is_some() || url.path() != "/" {
             return Err(ForeignValueError::InvalidNetworkTarget);
         }
-        Self::new(host, port)
+        Self::new(&host, port)
     }
 
     pub fn host(&self) -> &str {
@@ -147,6 +140,15 @@ impl NetworkTarget {
 
     pub fn ip(&self) -> Option<IpAddr> {
         self.host.parse().ok()
+    }
+}
+
+fn canonical_url_host(url: &url::Url) -> Result<String, ForeignValueError> {
+    match url.host() {
+        Some(url::Host::Domain(host)) => Ok(host.to_owned()),
+        Some(url::Host::Ipv4(host)) => Ok(host.to_string()),
+        Some(url::Host::Ipv6(host)) => Ok(host.to_string()),
+        None => Err(ForeignValueError::InvalidNetworkTarget),
     }
 }
 

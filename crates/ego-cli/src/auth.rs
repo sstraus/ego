@@ -5,25 +5,30 @@
 //! tokens cannot be lost when two ego processes share an account.
 
 use std::collections::{BTreeMap, HashMap};
+use std::ffi::OsString;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::future::Future;
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use fd_lock::RwLock;
+use futures::future::BoxFuture;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-use tokio::process::Command;
 
 use ego_ai::oauth::{self, BuiltInFlow, LoginGrant, OAuthToken, PollOutcome};
 use ego_ai::provider::{Credentials, EnvCredentials, MissingCredential, Secret};
+use ego_core::credentials::SecretMaterial;
+use ego_core::event::domain::CancelCause;
+use ego_core::turn::CancelToken;
+use ego_tools::exec::{SecretChildError, SecretChildRequest, run_secret_child};
 
 const PROGRAM_TIMEOUT: Duration = Duration::from_secs(120);
+const PROGRAM_TERMINATION_GRACE: Duration = Duration::from_millis(500);
 const FORBIDDEN_HEADERS: &[&str] = &[
     "authorization",
     "x-api-key",
@@ -165,6 +170,10 @@ pub enum AuthError {
         program: String,
         reason: String,
     },
+    CredentialCommand {
+        program: String,
+        failure: CredentialCommandFailure,
+    },
     ReloginRequired {
         provider: String,
         reason: String,
@@ -191,6 +200,9 @@ impl fmt::Display for AuthError {
             Self::MissingCredential { program, reason } => {
                 write!(f, "no credential from {program}: {reason}")
             }
+            Self::CredentialCommand { program, failure } => {
+                write!(f, "no credential from {program}: {failure}")
+            }
             Self::ReloginRequired { provider, reason } => write!(
                 f,
                 "{provider} login expired; run `ego auth login {provider}`: {reason}"
@@ -208,6 +220,105 @@ impl fmt::Display for AuthError {
 }
 
 impl std::error::Error for AuthError {}
+
+/// Secret-free failure semantics owned by the credential-command consumer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CredentialCommandFailure {
+    Cancelled,
+    RunTimeout,
+    CommandTimeout,
+    Exit(Option<i32>),
+    CleanupUncertain {
+        cause: Option<Box<CredentialCommandFailure>>,
+    },
+    Io(String),
+}
+
+impl fmt::Display for CredentialCommandFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Cancelled => formatter.write_str("cancelled"),
+            Self::RunTimeout => formatter.write_str("run deadline expired"),
+            Self::CommandTimeout => formatter.write_str("timed out"),
+            Self::Exit(Some(code)) => write!(formatter, "exited with code {code}"),
+            Self::Exit(None) => formatter.write_str("exited by signal"),
+            Self::CleanupUncertain { cause } => {
+                formatter.write_str("process-tree cleanup is uncertain")?;
+                if let Some(cause) = cause {
+                    write!(formatter, " after {cause}")?;
+                }
+                Ok(())
+            }
+            Self::Io(reason) => formatter.write_str(reason),
+        }
+    }
+}
+
+pub(crate) struct CredentialCommandRequest {
+    argv: Vec<OsString>,
+    stdin: Option<SecretMaterial>,
+    cancel: CancelToken,
+    run_deadline: Option<Instant>,
+}
+
+#[derive(Clone, Copy)]
+struct CredentialCommandScope<'a> {
+    commands: &'a dyn CredentialCommandPort,
+    cancel: &'a CancelToken,
+    run_deadline: Option<Instant>,
+}
+
+pub(crate) trait CredentialCommandPort: Send + Sync {
+    fn run<'a>(
+        &'a self,
+        request: CredentialCommandRequest,
+    ) -> BoxFuture<'a, Result<SecretMaterial, CredentialCommandFailure>>;
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct OsCredentialCommand;
+
+impl CredentialCommandPort for OsCredentialCommand {
+    fn run<'a>(
+        &'a self,
+        request: CredentialCommandRequest,
+    ) -> BoxFuture<'a, Result<SecretMaterial, CredentialCommandFailure>> {
+        Box::pin(async move {
+            let output = run_secret_child(SecretChildRequest {
+                argv: request.argv,
+                cwd: None,
+                stdin: request.stdin,
+                cancel: request.cancel,
+                run_deadline: request.run_deadline,
+                command_timeout: PROGRAM_TIMEOUT,
+                termination_grace: PROGRAM_TERMINATION_GRACE,
+            })
+            .await
+            .map_err(credential_child_failure)?;
+            Ok(output.into_stdout())
+        })
+    }
+}
+
+fn credential_child_failure(error: SecretChildError) -> CredentialCommandFailure {
+    match error {
+        SecretChildError::Cancelled => CredentialCommandFailure::Cancelled,
+        SecretChildError::RunTimeout => CredentialCommandFailure::RunTimeout,
+        SecretChildError::CommandTimeout => CredentialCommandFailure::CommandTimeout,
+        SecretChildError::Exit(code) => CredentialCommandFailure::Exit(code),
+        SecretChildError::CleanupUncertain { cause } => {
+            CredentialCommandFailure::CleanupUncertain {
+                cause: cause.map(|cause| Box::new(credential_child_failure(*cause))),
+            }
+        }
+        SecretChildError::InvalidRequest(reason) => {
+            CredentialCommandFailure::Io(reason.to_string())
+        }
+        SecretChildError::Launch(error) | SecretChildError::Io(error) => {
+            CredentialCommandFailure::Io(error.to_string())
+        }
+    }
+}
 
 /// The single credential store under an ego home.
 #[derive(Debug, Clone)]
@@ -351,7 +462,11 @@ pub struct AuthConfig {
 }
 
 /// Execute the credential-management command and return protocol-clean text.
-pub async fn execute(args: &crate::cli::AuthArgs) -> Result<String, AuthError> {
+pub async fn execute(
+    args: &crate::cli::AuthArgs,
+    cancel: &CancelToken,
+) -> Result<String, AuthError> {
+    let commands = OsCredentialCommand;
     let home = ego_home()?;
     let store = AuthStore::new(&home);
     match args.action {
@@ -373,7 +488,7 @@ pub async fn execute(args: &crate::cli::AuthArgs) -> Result<String, AuthError> {
             let Some(id) = args.provider.as_deref() else {
                 return Ok(known_and_discovered(&home));
             };
-            login(&store, &home, id, args.device).await?;
+            login(&store, &home, id, args.device, cancel, &commands).await?;
             Ok(format!("logged in {id}\n"))
         }
     }
@@ -410,7 +525,14 @@ fn status(store: &AuthStore, selected: Option<&str>) -> Result<String, AuthError
     Ok(text)
 }
 
-async fn login(store: &AuthStore, home: &Path, id: &str, device: bool) -> Result<(), AuthError> {
+async fn login(
+    store: &AuthStore,
+    home: &Path,
+    id: &str,
+    device: bool,
+    cancel: &CancelToken,
+    commands: &dyn CredentialCommandPort,
+) -> Result<(), AuthError> {
     let config = crate::config::auth().map_err(|err| AuthError::InvalidConfig(err.to_string()))?;
     let command = config
         .get(id)
@@ -419,11 +541,25 @@ async fn login(store: &AuthStore, home: &Path, id: &str, device: bool) -> Result
     let source = select_source(id, command, plugin, oauth::built_in(id).is_some(), None);
     let entry = match source {
         CredentialSource::Command(program) => {
-            run_configured_command(&program, "login", None).await?
+            run_configured_command_scoped(&program, "login", None, commands, cancel, None).await?
         }
-        CredentialSource::Plugin(program) => run_program(&program, "login", None).await?,
+        CredentialSource::Plugin(program) => {
+            run_program_scoped(&program, "login", None, commands, cancel, None).await?
+        }
         CredentialSource::BuiltIn(provider) => {
-            built_in_login(&provider, std::io::stdin().is_terminal(), device).await?
+            let scope = crate::provider_http::CommandHttpScope::online(cancel.clone())
+                .await
+                .map_err(|reason| AuthError::MissingCredential {
+                    program: format!("ego built-in {provider} login"),
+                    reason,
+                })?;
+            built_in_login(
+                &provider,
+                std::io::stdin().is_terminal(),
+                device,
+                scope.http().as_ref(),
+            )
+            .await?
         }
         CredentialSource::Environment(var) => {
             return Err(AuthError::MissingCredential {
@@ -440,6 +576,7 @@ async fn login(store: &AuthStore, home: &Path, id: &str, device: bool) -> Result
             });
         }
     };
+    ensure_store_may_mutate(cancel, None)?;
     store.put(id, entry)
 }
 
@@ -500,20 +637,21 @@ fn choose_login_method(methods: &[LoginMethod]) -> Result<LoginMethod, AuthError
     }
 }
 
-async fn built_in_login(id: &str, tty: bool, force_device: bool) -> Result<AuthEntry, AuthError> {
+async fn built_in_login(
+    id: &str,
+    tty: bool,
+    force_device: bool,
+    http: &dyn ego_ai::http::Http,
+) -> Result<AuthEntry, AuthError> {
     let flow = oauth::built_in(id).ok_or_else(|| AuthError::MissingCredential {
         program: format!("ego built-in {id} login"),
         reason: "unknown built-in provider".to_string(),
     })?;
-    let http = crate::model::transport(false).map_err(|err| AuthError::MissingCredential {
-        program: format!("ego built-in {id} login"),
-        reason: err.to_string(),
-    })?;
     let method = choose_login_method(&login_methods(flow, tty, force_device))?;
     let token = match (flow, method) {
-        (BuiltInFlow::MiniMax, _) => minimax_login(flow, http.as_ref()).await?,
-        (_, LoginMethod::Browser) => browser_login(flow, http.as_ref()).await?,
-        (_, LoginMethod::Device) => device_login(flow, http.as_ref()).await?,
+        (BuiltInFlow::MiniMax, _) => minimax_login(flow, http).await?,
+        (_, LoginMethod::Browser) => browser_login(flow, http).await?,
+        (_, LoginMethod::Device) => device_login(flow, http).await?,
     };
     token_entry(flow, token)
 }
@@ -529,7 +667,9 @@ async fn device_login(
         flow.device_authorization_request()
     }
     .map_err(flow_error)?;
-    let response = oauth::execute(http, start).await.map_err(flow_error)?;
+    let response = oauth::execute(http, flow, start)
+        .await
+        .map_err(flow_error)?;
     let device = flow
         .read_device_authorization(response)
         .map_err(flow_error)?;
@@ -548,7 +688,9 @@ async fn device_login(
             flow.device_poll_request(&device.device_code, Some(&device.user_code))
         }
         .map_err(flow_error)?;
-        let response = oauth::execute(http, request).await.map_err(flow_error)?;
+        let response = oauth::execute(http, flow, request)
+            .await
+            .map_err(flow_error)?;
         match flow
             .read_poll(response, now_ms(), None)
             .map_err(flow_error)?
@@ -558,7 +700,9 @@ async fn device_login(
             PollOutcome::Token(token) => return Ok(token),
             PollOutcome::GitHubToken(github) => {
                 let request = flow.copilot_exchange_request(&github).map_err(flow_error)?;
-                let response = oauth::execute(http, request).await.map_err(flow_error)?;
+                let response = oauth::execute(http, flow, request)
+                    .await
+                    .map_err(flow_error)?;
                 return flow
                     .read_token(response, now_ms(), Some(&github))
                     .map_err(flow_error);
@@ -572,7 +716,9 @@ async fn device_login(
                         state: None,
                     })
                     .map_err(flow_error)?;
-                let response = oauth::execute(http, request).await.map_err(flow_error)?;
+                let response = oauth::execute(http, flow, request)
+                    .await
+                    .map_err(flow_error)?;
                 return flow
                     .read_token(response, now_ms(), None)
                     .map_err(flow_error);
@@ -640,7 +786,9 @@ async fn browser_login(
             state: Some(&state),
         })
         .map_err(flow_error)?;
-    let response = oauth::execute(http, request).await.map_err(flow_error)?;
+    let response = oauth::execute(http, flow, request)
+        .await
+        .map_err(flow_error)?;
     flow.read_token(response, now_ms(), None)
         .map_err(flow_error)
 }
@@ -758,7 +906,9 @@ async fn minimax_login(
     let request = flow
         .minimax_user_code_request(&oauth::pkce_challenge(&verifier), &state)
         .map_err(flow_error)?;
-    let response = oauth::execute(http, request).await.map_err(flow_error)?;
+    let response = oauth::execute(http, flow, request)
+        .await
+        .map_err(flow_error)?;
     let code = flow
         .read_minimax_user_code(response, &state)
         .map_err(flow_error)?;
@@ -775,7 +925,9 @@ async fn minimax_login(
                 verifier: &verifier,
             })
             .map_err(flow_error)?;
-        let response = oauth::execute(http, request).await.map_err(flow_error)?;
+        let response = oauth::execute(http, flow, request)
+            .await
+            .map_err(flow_error)?;
         match flow
             .read_poll(response, now_ms(), None)
             .map_err(flow_error)?
@@ -926,19 +1078,56 @@ fn apply_refresh_result_unlocked(
 pub async fn request_credentials(
     id: &str,
     command: Option<&str>,
-    offline: bool,
+    http: &dyn ego_ai::http::Http,
 ) -> Result<Arc<dyn Credentials>, AuthError> {
-    let home = optional_ego_home();
-    request_credentials_at(home.as_deref(), id, command, offline).await
+    let commands = OsCredentialCommand;
+    let cancel = CancelToken::new();
+    request_credentials_scoped(id, command, http, &commands, &cancel, None).await
 }
 
+pub(crate) async fn request_credentials_scoped(
+    id: &str,
+    command: Option<&str>,
+    http: &dyn ego_ai::http::Http,
+    commands: &dyn CredentialCommandPort,
+    cancel: &CancelToken,
+    run_deadline: Option<Instant>,
+) -> Result<Arc<dyn Credentials>, AuthError> {
+    let home = optional_ego_home();
+    request_credentials_at_scoped(
+        home.as_deref(),
+        id,
+        command,
+        http,
+        commands,
+        cancel,
+        run_deadline,
+    )
+    .await
+}
+
+#[cfg(test)]
 async fn request_credentials_at(
     home: Option<&Path>,
     id: &str,
     command: Option<&str>,
-    offline: bool,
+    http: &dyn ego_ai::http::Http,
 ) -> Result<Arc<dyn Credentials>, AuthError> {
-    refresh_for_run_at(home, id, command, offline).await?;
+    let commands = OsCredentialCommand;
+    let cancel = CancelToken::new();
+    request_credentials_at_scoped(home, id, command, http, &commands, &cancel, None).await
+}
+
+async fn request_credentials_at_scoped(
+    home: Option<&Path>,
+    id: &str,
+    command: Option<&str>,
+    http: &dyn ego_ai::http::Http,
+    commands: &dyn CredentialCommandPort,
+    cancel: &CancelToken,
+    run_deadline: Option<Instant>,
+) -> Result<Arc<dyn Credentials>, AuthError> {
+    refresh_for_run_at(home, id, command, http, commands, cancel, run_deadline).await?;
     Ok(match home {
         Some(home) => Arc::new(StoreCredentials::new(home)),
         None => Arc::new(EnvCredentials),
@@ -951,7 +1140,10 @@ async fn refresh_for_run_at(
     home: Option<&Path>,
     id: &str,
     command: Option<&str>,
-    offline: bool,
+    http: &dyn ego_ai::http::Http,
+    commands: &dyn CredentialCommandPort,
+    cancel: &CancelToken,
+    run_deadline: Option<Instant>,
 ) -> Result<(), AuthError> {
     if oauth::built_in(id).is_none() && command.is_none() {
         return Ok(());
@@ -981,10 +1173,28 @@ async fn refresh_for_run_at(
     let source = select_source(id, command, plugin, oauth::built_in(id).is_some(), None);
     let refreshed = match source {
         CredentialSource::Command(program) => {
-            run_configured_command(&program, "refresh", Some(&current)).await
+            run_configured_command_scoped(
+                &program,
+                "refresh",
+                Some(&current),
+                commands,
+                cancel,
+                run_deadline,
+            )
+            .await
         }
-        CredentialSource::Plugin(program) => run_program(&program, "refresh", Some(&current)).await,
-        CredentialSource::BuiltIn(_) => refresh_built_in(id, &current, offline).await,
+        CredentialSource::Plugin(program) => {
+            run_program_scoped(
+                &program,
+                "refresh",
+                Some(&current),
+                commands,
+                cancel,
+                run_deadline,
+            )
+            .await
+        }
+        CredentialSource::BuiltIn(_) => refresh_built_in(id, &current, http).await,
         CredentialSource::Environment(_) | CredentialSource::Missing(_) => {
             return Err(AuthError::MissingCredential {
                 program: format!("ego auth login {id}"),
@@ -993,13 +1203,34 @@ async fn refresh_for_run_at(
             });
         }
     };
+    ensure_store_may_mutate(cancel, run_deadline)?;
     apply_refresh_result_unlocked(&store, &mut entries, id, refreshed)
+}
+
+fn ensure_store_may_mutate(
+    cancel: &CancelToken,
+    run_deadline: Option<Instant>,
+) -> Result<(), AuthError> {
+    if run_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+        cancel.cancel(CancelCause::Timeout);
+    }
+    match cancel.cause() {
+        Some(CancelCause::Timeout) => Err(AuthError::CredentialCommand {
+            program: "credential refresh".to_string(),
+            failure: CredentialCommandFailure::RunTimeout,
+        }),
+        Some(_) => Err(AuthError::CredentialCommand {
+            program: "credential refresh".to_string(),
+            failure: CredentialCommandFailure::Cancelled,
+        }),
+        None => Ok(()),
+    }
 }
 
 async fn refresh_built_in(
     id: &str,
     current: &AuthEntry,
-    offline: bool,
+    http: &dyn ego_ai::http::Http,
 ) -> Result<AuthEntry, AuthError> {
     let flow = oauth::built_in(id).ok_or_else(|| AuthError::MissingCredential {
         program: format!("ego auth login {id}"),
@@ -1015,17 +1246,13 @@ async fn refresh_built_in(
             reason: "the stored credential has no refresh token".to_string(),
         });
     };
-    let http = crate::model::transport(offline).map_err(|err| AuthError::MissingCredential {
-        program: format!("ego auth login {id}"),
-        reason: err.to_string(),
-    })?;
     let request = if flow == BuiltInFlow::GitHubCopilot {
         flow.copilot_exchange_request(refresh.expose())
     } else {
         flow.refresh_request(refresh.expose())
     }
     .map_err(flow_error)?;
-    let response = oauth::execute(http.as_ref(), request)
+    let response = oauth::execute(http, flow, request)
         .await
         .map_err(flow_error)?;
     let token = flow
@@ -1187,13 +1414,17 @@ pub async fn run_program(
     verb: &str,
     current: Option<&AuthEntry>,
 ) -> Result<AuthEntry, AuthError> {
-    run_program_parts(program, &[], &program.display().to_string(), verb, current).await
+    let commands = OsCredentialCommand;
+    run_program_scoped(program, verb, current, &commands, &CancelToken::new(), None).await
 }
 
-async fn run_configured_command(
+async fn run_configured_command_scoped(
     command: &str,
     verb: &str,
     current: Option<&AuthEntry>,
+    commands: &dyn CredentialCommandPort,
+    cancel: &CancelToken,
+    run_deadline: Option<Instant>,
 ) -> Result<AuthEntry, AuthError> {
     let mut words = shell_words::split(command).map_err(|err| AuthError::MissingCredential {
         program: command.to_string(),
@@ -1206,7 +1437,42 @@ async fn run_configured_command(
         });
     }
     let program = PathBuf::from(words.remove(0));
-    run_program_parts(&program, &words, command, verb, current).await
+    run_program_parts(
+        &program,
+        &words,
+        command,
+        verb,
+        current,
+        CredentialCommandScope {
+            commands,
+            cancel,
+            run_deadline,
+        },
+    )
+    .await
+}
+
+async fn run_program_scoped(
+    program: &Path,
+    verb: &str,
+    current: Option<&AuthEntry>,
+    commands: &dyn CredentialCommandPort,
+    cancel: &CancelToken,
+    run_deadline: Option<Instant>,
+) -> Result<AuthEntry, AuthError> {
+    run_program_parts(
+        program,
+        &[],
+        &program.display().to_string(),
+        verb,
+        current,
+        CredentialCommandScope {
+            commands,
+            cancel,
+            run_deadline,
+        },
+    )
+    .await
 }
 
 async fn run_program_parts(
@@ -1215,40 +1481,39 @@ async fn run_program_parts(
     label: &str,
     verb: &str,
     current: Option<&AuthEntry>,
+    scope: CredentialCommandScope<'_>,
 ) -> Result<AuthEntry, AuthError> {
-    let mut child = Command::new(program)
-        .args(arguments)
-        .arg(verb)
-        .stdin(if current.is_some() {
-            Stdio::piped()
-        } else {
-            Stdio::inherit()
+    let mut argv = Vec::with_capacity(arguments.len() + 2);
+    argv.push(program.as_os_str().to_os_string());
+    argv.extend(arguments.iter().map(OsString::from));
+    argv.push(OsString::from(verb));
+    let stdin = current.map(|entry| {
+        SecretMaterial::new(serde_json::to_vec(entry).expect("an auth entry serialises"))
+    });
+    let stdout = scope
+        .commands
+        .run(CredentialCommandRequest {
+            argv,
+            stdin,
+            cancel: scope.cancel.clone(),
+            run_deadline: scope.run_deadline,
         })
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .map_err(|err| missing_label(label, err.to_string()))?;
-    if let Some(entry) = current {
-        let bytes = serde_json::to_vec(entry).expect("an auth entry serialises");
-        child
-            .stdin
-            .take()
-            .expect("piped above")
-            .write_all(&bytes)
-            .await
-            .map_err(|err| missing_label(label, err.to_string()))?;
-    }
-    let output = tokio::time::timeout(PROGRAM_TIMEOUT, child.wait_with_output())
         .await
-        .map_err(|_| missing_label(label, "timed out"))?
-        .map_err(|err| missing_label(label, err.to_string()))?;
-    if !output.status.success() {
-        return Err(missing_label(
-            label,
-            format!("exited with {}", output.status),
-        ));
-    }
-    parse_program_output(label, &output.stdout)
+        .map_err(|failure| match failure {
+            CredentialCommandFailure::Exit(code) => missing_label(
+                label,
+                code.map_or_else(
+                    || "exited by signal".to_string(),
+                    |code| format!("exited with code {code}"),
+                ),
+            ),
+            CredentialCommandFailure::Io(reason) => missing_label(label, reason),
+            failure => AuthError::CredentialCommand {
+                program: label.to_string(),
+                failure,
+            },
+        })?;
+    parse_program_output(label, stdout.expose_secret_bytes())
 }
 
 fn parse_program_output(program: &str, stdout: &[u8]) -> Result<AuthEntry, AuthError> {
@@ -1300,6 +1565,14 @@ mod tests {
         authorization_code, login_methods, request_credentials_at, wait_for_browser_code,
     };
 
+    struct UnexpectedHttp;
+
+    impl ego_ai::http::Http for UnexpectedHttp {
+        fn begin_call(&self) -> Box<dyn ego_ai::http::HttpCall> {
+            panic!("credential tests must not perform an HTTP exchange")
+        }
+    }
+
     #[tokio::test]
     async fn request_credentials_read_the_token_written_by_login() {
         let root = tempfile::tempdir().unwrap();
@@ -1314,7 +1587,7 @@ mod tests {
             )
             .unwrap();
 
-        let credentials = request_credentials_at(Some(root.path()), "nous", None, true)
+        let credentials = request_credentials_at(Some(root.path()), "nous", None, &UnexpectedHttp)
             .await
             .unwrap();
         let credential = ProviderRow::nous_default()
@@ -1356,7 +1629,7 @@ mod tests {
             Some(root.path()),
             "nous",
             Some(command.to_str().unwrap()),
-            true,
+            &UnexpectedHttp,
         )
         .await
         .unwrap();

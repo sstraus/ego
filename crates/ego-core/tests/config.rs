@@ -1347,33 +1347,51 @@ fn config_a_tool_named_rule_is_refused_with_the_effect_it_should_have_named() {
     assert!(said.contains("exec"), "{said}");
 }
 
-/// §6a at the surface an operator actually types into. The rule is well formed
-/// and this build has nothing to match it with, so it is refused **here** —
-/// not accepted and quietly ignored at the moment it would have mattered.
+/// A system-layer network deny is parsed into the canonical rule AST and keeps
+/// its source when it reaches the effective configuration.
 #[test]
-fn config_a_rule_this_build_cannot_enforce_is_refused_at_load() {
-    let err = ConfigLayer::parse(
+fn config_a_system_network_deny_loads_as_a_parsed_rule_with_system_source() {
+    let parsed = ConfigLayer::parse(
         Source::System,
         "[permissions]\ndeny = [\"net(api.github.com)\"]\n",
     )
-    .expect_err("no tool in this build produces net operations");
-    let said = err.to_string();
+    .expect("network deny is enforceable by the foreign HTTP boundary");
+    let permissions = parsed.value.permissions.as_ref().expect("permissions");
+    assert!(matches!(permissions.deny.as_slice(), [Rule::Net(_)]));
+    assert_eq!(permissions.deny, vec![rule("net(api.github.com)")]);
 
-    assert!(said.contains("cannot be enforced"), "{said}");
-    assert!(said.contains("a tool that reaches the network"), "{said}");
+    let effective = resolve(&[parsed], Trust::Untrusted, None).expect("effective config");
+    let entry = &effective.permissions.deny[0];
+    assert_eq!(entry.rule(), &rule("net(api.github.com)"));
+    assert_eq!(entry.rule().to_string(), "net(api.github.com)");
+    assert_eq!(entry.origins().iter().collect::<Vec<_>>(), [Source::System]);
+    assert_eq!(entry.authority(), Source::System);
 }
 
-/// The refusal is not confined to `deny`, and this is the direction that would
-/// be easy to miss: an unenforceable *allow* is harmless to the machine and
-/// still a lie to the operator, who believes they have widened something.
+/// The same parsed network rule shape is retained for a project-layer allow,
+/// including its canonical value and source attribution.
 #[test]
-fn config_an_unenforceable_allow_is_refused_the_same_way() {
-    let err = ConfigLayer::parse(
+fn config_a_project_network_allow_loads_as_a_parsed_rule_with_project_source() {
+    let parsed = ConfigLayer::parse(
         Source::Project,
         "[permissions]\nallow = [\"net(api.github.com)\"]\n",
     )
-    .expect_err("nothing in this build reaches the network through a rule");
-    assert!(err.to_string().contains("cannot be enforced"));
+    .expect("network allow is enforceable by the foreign HTTP boundary");
+    let permissions = parsed.value.permissions.as_ref().expect("permissions");
+    assert!(matches!(permissions.allow.as_slice(), [Rule::Net(_)]));
+    assert_eq!(permissions.allow, vec![rule("net(api.github.com)")]);
+
+    // Project permissions are ambient configuration and therefore require an
+    // explicitly trusted workspace to enter the effective ruleset.
+    let effective = resolve(&[parsed], Trust::Trusted, None).expect("effective config");
+    let entry = &effective.permissions.allow[0];
+    assert_eq!(entry.rule(), &rule("net(api.github.com)"));
+    assert_eq!(entry.rule().to_string(), "net(api.github.com)");
+    assert_eq!(
+        entry.origins().iter().collect::<Vec<_>>(),
+        [Source::Project]
+    );
+    assert_eq!(entry.authority(), Source::Project);
 }
 
 /// A `[profile.NAME]` table's rules go through the same parser. A profile that

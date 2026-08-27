@@ -27,7 +27,7 @@ use ego_core::permit::{
 };
 use ego_core::store::evidence::{EvidenceRef, EvidenceStore as _};
 use ego_core::turn::CancelToken;
-use ego_core::turn::Tools as TurnTools;
+use ego_core::turn::{ToolEffectPorts, Tools as TurnTools};
 use ego_tools::exec::{
     ExecLimits, ExecRunConfig, HttpCallTimeout, ProcessError, RunEffectPorts, SessionEvidenceStore,
 };
@@ -505,12 +505,14 @@ fn exec_tool_preparation_policy_authorization_and_guarded_execution_preserve_ide
     let tools = TurnTools::new(
         &registry,
         &policy,
-        &fs,
-        run.ports.process(),
-        &run.evidence,
-        run.ports.resolver(),
-        run.ports.one_hop(),
-        run.ports.duplex(),
+        ToolEffectPorts::new(
+            &fs,
+            run.ports.process(),
+            &run.evidence,
+            run.ports.resolver(),
+            run.ports.one_hop(),
+            run.ports.duplex(),
+        ),
         root.clone(),
     );
     let params = serde_json::json!({
@@ -578,12 +580,14 @@ fn exec_tool_policy_denial_stops_before_guarded_effects() {
     let tools = TurnTools::new(
         &registry,
         &policy,
-        &fs,
-        run.ports.process(),
-        &run.evidence,
-        run.ports.resolver(),
-        run.ports.one_hop(),
-        run.ports.duplex(),
+        ToolEffectPorts::new(
+            &fs,
+            run.ports.process(),
+            &run.evidence,
+            run.ports.resolver(),
+            run.ports.one_hop(),
+            run.ports.duplex(),
+        ),
         root.clone(),
     );
     let params = serde_json::json!({

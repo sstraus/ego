@@ -636,98 +636,63 @@ fn rule_different_predicates_have_different_ids() {
     );
 }
 
-// --- §6a: a head with no operations refuses at load ---------------------
+// --- §6a: every published head is enforceable at load -------------------
 
-/// The distinction the whole section rests on. `net(...)` is a **valid
-/// sentence** — it parses, canonicalises and takes an ID, because
-/// `ARCHITECTURE.md:252` gates on the grammar being published whole. What it
-/// lacks is an operation of that shape to match.
+/// Network and tool heads now name operations produced by this build. Their
+/// canonical rendering and IDs therefore survive the same round trip as the
+/// original five enforceable heads.
 #[test]
-fn rule_an_unenforceable_head_still_parses_and_still_has_an_id() {
-    // `write(src/**)` and `exec(git *)` both left this list when real tools
-    // began constructing their operations. Their IDs did not move, which is
-    // what the design promised.
-    for raw in ["net(github.com)", "tool(github/create_issue)"] {
-        let rule = parse(raw);
-        assert!(
-            rule.head().awaiting().is_some(),
-            "`{raw}` should have no operations in this build"
-        );
-        let id = rule.id().to_string();
-        assert!(id.starts_with(&format!("r{GRAMMAR_VERSION}:")), "{id}");
+fn rule_network_and_tool_heads_retain_canonical_ids_and_rendering() {
+    for (written, canonical) in [
+        ("net(GITHUB.com)", "net(github.com)"),
+        ("tool( github / create_issue )", "tool(github/create_issue)"),
+    ] {
+        let rule = parse(written);
+        assert_eq!(rule.head().awaiting(), None, "`{written}` is enforceable");
         assert_eq!(
-            id,
-            parse(raw).id().to_string(),
-            "an id nobody can enforce is still stable"
+            rule.to_string(),
+            canonical,
+            "`{written}` canonical spelling"
         );
-    }
-}
-
-/// The other half: `load` refuses it, so nobody stores a boundary that is not
-/// there. An operator who writes `net(github.com)` in a deny list would
-/// otherwise get a rule that matches nothing and **cannot tell that apart from
-/// a boundary that works** — "vacuous rather than fail-open" is a distinction
-/// visible only to us.
-#[test]
-fn rule_load_refuses_a_head_with_no_operations_and_parse_does_not() {
-    // `write(src/**)` and `exec(git *)` both left this list when real tools
-    // began constructing their operations. Their IDs did not move.
-    for raw in ["net(github.com)", "tool(github/create_issue)"] {
-        assert!(Rule::parse(raw).is_ok(), "`{raw}` is a valid sentence");
-        let err = Rule::load(raw).expect_err("nothing can enforce it");
         assert!(
-            matches!(err, RuleLoadError::Unenforceable(_)),
-            "`{raw}` is not a grammar error: {err:?}"
+            rule.id()
+                .to_string()
+                .starts_with(&format!("r{GRAMMAR_VERSION}:")),
+            "{}",
+            rule.id()
         );
+        let canonical_rule = parse(canonical);
+        assert_eq!(
+            canonical_rule.head().awaiting(),
+            None,
+            "`{canonical}` is enforceable"
+        );
+        assert_eq!(canonical_rule.to_string(), canonical);
+        assert_eq!(rule.id(), canonical_rule.id(), "`{written}` stable ID");
     }
 }
 
-/// **Not a parse error**, and the type says so rather than the message. A
-/// grammar error here would be a temporary lie about a permanent grammar, and
-/// it would churn the rule's ID on the day the head became usable.
+/// `load` and `parse` agree for the two heads added to the operation table by
+/// the foreign-effect boundary.
 #[test]
-fn rule_unenforceable_is_a_different_error_from_a_head_that_does_not_exist() {
-    assert!(matches!(
-        Rule::load("net(github.com)"),
-        Err(RuleLoadError::Unenforceable(_))
-    ));
+fn rule_load_accepts_enforceable_heads_and_matches_parse() {
+    for raw in ["net(github.com)", "tool(github/create_issue)"] {
+        assert_eq!(Rule::load(raw), Ok(parse(raw)), "`{raw}` round trip");
+    }
+}
+
+/// `bash` remains an unknown head: adding enforceable `net` and `tool` heads
+/// does not create an alias or broaden the grammar with tool names.
+#[test]
+fn rule_unknown_bash_remains_a_parse_error() {
     assert!(matches!(
         Rule::load("bash(git *)"),
         Err(RuleLoadError::Parse(RuleParseError::UnknownHead { .. }))
     ));
 }
 
-/// The refusal names the rule, the effect, and what is missing — because an
-/// operator who is told only "refused" removes the wrong line, or removes the
-/// rule and believes the boundary went with it.
-#[test]
-fn rule_the_refusal_says_which_rule_which_effect_and_what_is_missing() {
-    let said = Rule::load("net(github.com)").unwrap_err().to_string();
-    assert!(said.contains("net(github.com)"), "{said}");
-    assert!(
-        said.contains("no tool in this build produces net"),
-        "{said}"
-    );
-    assert!(said.contains("a tool that reaches the network"), "{said}");
-}
-
-/// The heads that name operations this build produces are not refused. The
-/// control that stops the test above from passing because `load` refuses
-/// everything.
-///
-/// **`write(src/**)` left this list and has come back**, and the round trip is
-/// worth more than either state. It was here originally because `Op::Write`
-/// exists as a variant, not because anything constructed one — no builtin did
-/// — so a stored `write(...)` rule loaded and matched nothing, which is the
-/// failure §6a exists to prevent. `WriteTool` constructs one now, so the head
-/// is enforceable again, and no rule was rewritten and no ID recomputed on
-/// either crossing.
-///
-/// What decides which list this spelling belongs in is not this file. It is
-/// `ego-tools/tests/tools.rs::the_heads_this_build_says_it_enforces_are_the_ones_its_tools_ask_for`,
-/// which derives the answer from the registry instead of restating it — and
-/// which was itself blind to a newly registered tool until it started
-/// checking its sample list against `builtins()`.
+/// Every published head now has an operation table entry, so all seven heads
+/// load through the same canonical path and round trip through `parse`.
 #[test]
 fn rule_load_admits_every_head_that_names_an_operation_that_exists() {
     for raw in [
@@ -736,13 +701,19 @@ fn rule_load_admits_every_head_that_names_an_operation_that_exists() {
         "list(src)",
         "search(src/**)",
         "exec(git *)",
+        "net(github.com)",
+        "tool(github/create_issue)",
     ] {
         assert_eq!(
             parse(raw).head().awaiting(),
             None,
             "`{raw}` names an operation this build produces"
         );
-        Rule::load(raw).unwrap_or_else(|err| panic!("`{raw}` should load: {err}"));
+        assert_eq!(
+            Rule::load(raw),
+            Ok(parse(raw)),
+            "`{raw}` should load and round trip"
+        );
     }
 }
 

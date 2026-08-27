@@ -27,6 +27,7 @@ pub mod model_picker;
 pub mod models;
 pub mod output;
 pub mod prompt;
+pub mod provider_http;
 pub mod render;
 pub mod repl;
 pub mod run;

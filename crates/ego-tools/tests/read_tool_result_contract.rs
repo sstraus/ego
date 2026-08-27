@@ -14,7 +14,7 @@ use ego_core::permit::{
 use ego_core::store::evidence::{
     EVIDENCE_PAGE_BYTES, EvidenceError, EvidenceId, EvidenceRead, EvidenceRef, EvidenceStore as _,
 };
-use ego_core::turn::{CancelToken, Tools as TurnTools};
+use ego_core::turn::{CancelToken, ToolEffectPorts, Tools as TurnTools};
 use ego_tools::exec::{
     ExecLimits, ExecRunConfig, HttpCallTimeout, ProcessError, RunEffectPorts, SessionEvidenceStore,
 };
@@ -148,12 +148,14 @@ fn tools<'a>(run: &'a Run, root: CanonPath) -> TurnTools<'a> {
     TurnTools::new(
         &run.registry,
         &run.policy,
-        &run.fs,
-        run.ports.process(),
-        &run.evidence,
-        run.ports.resolver(),
-        run.ports.one_hop(),
-        run.ports.duplex(),
+        ToolEffectPorts::new(
+            &run.fs,
+            run.ports.process(),
+            &run.evidence,
+            run.ports.resolver(),
+            run.ports.one_hop(),
+            run.ports.duplex(),
+        ),
         root,
     )
 }

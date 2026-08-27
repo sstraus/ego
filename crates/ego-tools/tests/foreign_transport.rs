@@ -20,7 +20,7 @@ use ego_tools::exec::{
     ExecLimits, ExecRunConfig, HttpCallTimeout, ProcessError, RunEffectPorts, SessionEvidenceStore,
 };
 use futures::StreamExt;
-use futures::future::{self, BoxFuture};
+use futures::future::BoxFuture;
 use futures::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
 struct ScenarioRuntime(tokio::runtime::Runtime);
@@ -227,9 +227,12 @@ fn try_run_ports(
     )
 }
 
+type RecordingAnswer = (NetworkTarget, Vec<IpAddr>);
+type RecordingAnswers = Vec<RecordingAnswer>;
+
 #[derive(Clone, Default)]
 struct RecordingResolver {
-    answer: Arc<Mutex<Vec<(NetworkTarget, Vec<IpAddr>)>>>,
+    answer: Arc<Mutex<RecordingAnswers>>,
     calls: Arc<Mutex<Vec<NetworkTarget>>>,
     delay: Arc<Mutex<Option<Duration>>>,
 }
@@ -910,10 +913,14 @@ fn guarded_duplex_interrupt_cleans_a_long_lived_descendant() {
 #[test]
 #[ignore]
 fn foreign_duplex_descendant_fixture() {
-    let descendant = std::process::Command::new("sh")
+    let mut descendant = std::process::Command::new("sh")
         .args(["-c", "sleep 30"])
         .spawn()
         .expect("descendant");
+    let descendant_pid = descendant.id();
+    std::thread::spawn(move || {
+        descendant.wait().expect("descendant wait");
+    });
     let marker = b"EGO_DESCENDANTS\0";
     std::io::stdout()
         .write_all(marker)
@@ -922,7 +929,7 @@ fn foreign_duplex_descendant_fixture() {
         .write_all(&std::process::id().to_le_bytes())
         .expect("direct pid");
     std::io::stdout()
-        .write_all(&descendant.id().to_le_bytes())
+        .write_all(&descendant_pid.to_le_bytes())
         .expect("descendant pid");
     std::io::stdout().flush().expect("descendant flush");
     std::thread::park();

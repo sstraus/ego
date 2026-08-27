@@ -176,12 +176,14 @@ mod permit {
     /// `block_on` rather than an async test: nothing in the order awaits I/O,
     /// and a runtime dependency in `ego-core`'s tests to drive a future that
     /// is ready on construction would be a dependency on nothing.
+    type SettledResult = Result<Authorized, Box<PolicyDenied>>;
+
     trait Settles {
-        fn classify_settled(&self, call: PreparedCall) -> Result<Authorized, PolicyDenied>;
+        fn classify_settled(&self, call: PreparedCall) -> SettledResult;
     }
 
     impl Settles for PolicyEngine {
-        fn classify_settled(&self, call: PreparedCall) -> Result<Authorized, PolicyDenied> {
+        fn classify_settled(&self, call: PreparedCall) -> SettledResult {
             let unanswered = |pending: &Pending| {
                 panic!(
                     "expected an answer, got a question for the operator: {}",
@@ -189,11 +191,11 @@ mod permit {
                 )
             };
             let pending = match self.classify(call) {
-                Classification::Settled(answer) => return answer,
+                Classification::Settled(answer) => return answer.map_err(Box::new),
                 Classification::Ask(pending) => pending,
             };
             match block_on(self.settle(pending)) {
-                Resolution::Settled(answer) => answer,
+                Resolution::Settled(answer) => answer.map_err(Box::new),
                 Resolution::Ask(pending) => unanswered(&pending),
                 Resolution::HumanSettled { .. } | Resolution::Reclassify { .. } => {
                     unreachable!("this engine has no human seat")
@@ -265,8 +267,8 @@ mod permit {
             .classify_settled(write_call("/ws/src/main.rs"))
             .expect_err("plan mode changes nothing");
         assert_eq!(
-            denied,
-            PolicyDenied::ModeForbids {
+            &*denied,
+            &PolicyDenied::ModeForbids {
                 tool: "edit".to_string(),
                 mode: Mode::Plan,
                 op: OpName::Write,
@@ -308,8 +310,8 @@ mod permit {
             .classify_settled(read_call("/etc/passwd"))
             .expect_err("the workspace is the boundary");
         assert_eq!(
-            denied,
-            PolicyDenied::OutsideWorkspace {
+            &*denied,
+            &PolicyDenied::OutsideWorkspace {
                 tool: "read".to_string(),
                 op: OpName::Read,
                 path: CanonPath::new("/etc/passwd"),
@@ -377,7 +379,7 @@ mod permit {
         let denied = engine
             .classify_settled(read_call("/etc/passwd"))
             .expect_err("yolo does not move the workspace");
-        assert!(matches!(denied, PolicyDenied::OutsideWorkspace { .. }));
+        assert!(matches!(*denied, PolicyDenied::OutsideWorkspace { .. }));
     }
 
     #[test]
@@ -397,8 +399,8 @@ mod permit {
             .classify_settled(write_call("/ws/src/main.rs"))
             .expect_err("the deny covers it and no allow may relax one");
         assert_eq!(
-            denied,
-            PolicyDenied::Denied {
+            &*denied,
+            &PolicyDenied::Denied {
                 tool: "edit".to_string(),
                 op: OpName::Write,
                 path: CanonPath::new("/ws/src/main.rs"),
@@ -428,7 +430,7 @@ mod permit {
         let denied = engine
             .classify_settled(read_call("/ws/secrets/prod.env"))
             .expect_err("a deny is not a suggestion");
-        assert!(matches!(denied, PolicyDenied::Denied { .. }));
+        assert!(matches!(*denied, PolicyDenied::Denied { .. }));
     }
 
     #[test]
@@ -442,7 +444,7 @@ mod permit {
             .classify_settled(write_call("/ws/src/main.rs"))
             .expect_err("plan changes nothing, whatever the rules say");
         assert!(matches!(
-            denied,
+            *denied,
             PolicyDenied::ModeForbids {
                 mode: Mode::Plan,
                 op: OpName::Write,
@@ -697,8 +699,8 @@ mod permit {
             .classify_settled(call)
             .expect_err("op two is denied, and that ends the call");
         assert_eq!(
-            denied,
-            PolicyDenied::Denied {
+            &*denied,
+            &PolicyDenied::Denied {
                 tool: "read".to_string(),
                 op: OpName::Read,
                 path: CanonPath::new("/ws/secrets/prod.env"),
@@ -945,8 +947,8 @@ mod permit {
             .classify_settled(list_call("/etc", "*"))
             .expect_err("the workspace is the boundary for listing too");
         assert_eq!(
-            denied,
-            PolicyDenied::OutsideWorkspace {
+            &*denied,
+            &PolicyDenied::OutsideWorkspace {
                 tool: "glob".to_string(),
                 op: OpName::List,
                 path: CanonPath::new("/etc"),

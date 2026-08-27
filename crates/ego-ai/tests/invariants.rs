@@ -73,7 +73,9 @@ use ego_core::store::evidence::{
     EvidenceError, EvidencePage, EvidenceRead, EvidenceStore, EvidenceWriter,
 };
 use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
-use ego_core::turn::{CancelToken, GenerationRuntime, Session, Tools, TurnConfig, TurnLoop};
+use ego_core::turn::{
+    CancelToken, GenerationRuntime, Session, ToolEffectPorts, Tools, TurnConfig, TurnLoop,
+};
 use futures::StreamExt;
 use futures::future::{self, BoxFuture};
 use futures::stream::BoxStream;
@@ -357,12 +359,7 @@ async fn one_turn(
         Tools::new(
             &registry,
             &policy,
-            &fs,
-            &process,
-            &evidence,
-            &foreign,
-            &foreign,
-            &foreign,
+            ToolEffectPorts::new(&fs, &process, &evidence, &foreign, &foreign, &foreign),
             CanonPath::new("/ws"),
         ),
     );

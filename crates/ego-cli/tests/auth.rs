@@ -185,12 +185,12 @@ fn every_selectable_subscription_row_resolves_from_the_one_store_or_names_login(
     ];
 
     for row in rows {
-        if !matches!(row.id.as_str(), "anthropic" | "openrouter") {
+        if !matches!(row.id(), "anthropic" | "openrouter") {
             let missing = row.credential.resolve(&credentials).unwrap_err();
-            assert_eq!(missing.var, format!("ego auth login {}", row.id));
+            assert_eq!(missing.var, format!("ego auth login {}", row.id()));
         }
 
-        let entry = match row.id.as_str() {
+        let entry = match row.id() {
             "openai-codex" => oauth(CODEX_TOKEN),
             "github-copilot" => {
                 oauth("tid=1;proxy-ep=proxy.individual.githubcopilot.com;exp=4102444800")
@@ -201,7 +201,7 @@ fn every_selectable_subscription_row_resolves_from_the_one_store_or_names_login(
             },
             _ => oauth("access-token"),
         };
-        store.put(&row.id, entry).unwrap();
+        store.put(row.id(), entry).unwrap();
         let resolved = row.credential.resolve(&credentials).unwrap();
         assert!(
             resolved
@@ -209,7 +209,7 @@ fn every_selectable_subscription_row_resolves_from_the_one_store_or_names_login(
                 .iter()
                 .any(|(name, _)| name.eq_ignore_ascii_case("authorization")),
             "{} did not derive bearer auth",
-            row.id
+            row.id()
         );
     }
 }

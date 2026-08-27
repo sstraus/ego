@@ -20,7 +20,8 @@ use ego_core::generation_model_source::{
 };
 use ego_core::permit::{
     Authority, BackendIdentity, CanonPath, Classification, Confinement, EnvName, EnvPolicy,
-    ExecCaps, ExecObservation, PolicyDenied, PolicyDigest, PolicyEngine, RunConfinement, SpawnSpec,
+    ExecCaps, ExecObservation, OneHop, OneHopResponse, PolicyDenied, PolicyDigest, PolicyEngine,
+    ResolvedConnect, Resolver, RunConfinement, SpawnSpec, TransportError,
 };
 use ego_core::permit::{Op, PreparedCall};
 use ego_core::public::project_public;
@@ -427,11 +428,53 @@ mod turn_execution_observation {
         EvidenceError, EvidencePage, EvidenceRead, EvidenceStore, EvidenceWriter,
     };
     use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
-    use ego_core::turn::{CancelToken, GenerationRuntime, Session, Tools, TurnConfig, TurnLoop};
+    use ego_core::turn::{
+        CancelToken, GenerationRuntime, Session, ToolEffectPorts, Tools, TurnConfig, TurnLoop,
+    };
     use futures::future::BoxFuture;
     use futures::stream::BoxStream;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
+
+    struct NoResolver;
+
+    impl Resolver for NoResolver {
+        fn resolve(
+            &self,
+            _target: ego_core::permit::NetworkTarget,
+            _deadline: Option<std::time::Instant>,
+        ) -> BoxFuture<'static, Result<ego_core::permit::DnsResolution, TransportError>> {
+            panic!("step14 test unexpectedly resolved an HTTP target")
+        }
+    }
+
+    struct NoHop;
+
+    impl OneHop for NoHop {
+        fn execute(
+            &self,
+            _connect: ResolvedConnect,
+            _request: ego_core::permit::HttpRequest,
+            _deadline: Option<std::time::Instant>,
+        ) -> BoxFuture<'static, Result<OneHopResponse, TransportError>> {
+            panic!("step14 test unexpectedly executed an HTTP hop")
+        }
+    }
+
+    struct NoDuplex;
+
+    impl ego_core::permit::DuplexSpawner for NoDuplex {
+        fn spawn(
+            &self,
+            _spec: ego_core::permit::SpawnSpec,
+        ) -> BoxFuture<'static, Result<ego_core::permit::DuplexHandle, TransportError>> {
+            panic!("step14 test unexpectedly spawned a duplex")
+        }
+    }
+
+    static NO_RESOLVER: NoResolver = NoResolver;
+    static NO_HOP: NoHop = NoHop;
+    static NO_DUPLEX: NoDuplex = NoDuplex;
 
     #[derive(Default)]
     struct MemoryStore {
@@ -564,9 +607,14 @@ mod turn_execution_observation {
             let tools = Tools::new(
                 &self.registry,
                 &self.policy,
-                &self.fs,
-                &self.process,
-                &self.evidence,
+                ToolEffectPorts::new(
+                    &self.fs,
+                    &self.process,
+                    &self.evidence,
+                    &NO_RESOLVER,
+                    &NO_HOP,
+                    &NO_DUPLEX,
+                ),
                 CanonPath::new("/ws"),
             );
             TurnLoop::new(

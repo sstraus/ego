@@ -1066,7 +1066,7 @@ pub struct RunAdmission {
     snapshot: RunSnapshot,
     cancel_key: CancelKey,
     subscription: RunSubscription,
-    execution: RunExecution,
+    execution: Box<RunExecution>,
 }
 
 impl RunAdmission {
@@ -1092,7 +1092,7 @@ impl RunAdmission {
         self.subscription.clone()
     }
     pub fn into_execution(self) -> RunExecution {
-        self.execution
+        *self.execution
     }
 }
 
@@ -1538,13 +1538,13 @@ where
             subscription: RunSubscription {
                 state: Arc::clone(&state),
             },
-            execution: RunExecution {
+            execution: Box::new(RunExecution {
                 run_id: snapshot.run_id,
                 lease,
                 bindings,
                 mode,
                 subscription: state,
-            },
+            }),
         }
     }
 

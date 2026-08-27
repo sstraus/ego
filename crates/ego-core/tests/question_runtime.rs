@@ -6,6 +6,7 @@
 //! is the persisted QuestionRequested envelope ItemId.
 
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use ego_core::budget::{BudgetGate, Metering};
 use ego_core::config::{Mode, ModelRef, Ruleset};
@@ -24,7 +25,10 @@ use ego_core::generator::fake::FakeGenerator;
 use ego_core::generator::port::AiEvent;
 use ego_core::generator::types::StopReason;
 use ego_core::permit::fake::{FakeFs, FakeWriteTool};
-use ego_core::permit::{CanonPath, ProcessError, ProcessExecutor, SpawnSpec, ToolResult, Typed};
+use ego_core::permit::{
+    CanonPath, DuplexHandle, DuplexSpawner, HttpRequest, OneHop, OneHopResponse, ProcessError,
+    ProcessExecutor, ResolvedConnect, Resolver, SpawnSpec, ToolResult, TransportError, Typed,
+};
 use ego_core::question::{
     AskQuestionTool, Elicitor, ElicitorError, QuestionAnswer, QuestionMode, QuestionOption,
     QuestionOutcome, QuestionRequest,
@@ -37,7 +41,8 @@ use ego_core::store::evidence::{
 };
 use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
 use ego_core::turn::{
-    CancelToken, GenerationRuntime, RegisteredTool, Session, Tools, TurnConfig, TurnLoop,
+    CancelToken, GenerationRuntime, RegisteredTool, Session, ToolEffectPorts, Tools, TurnConfig,
+    TurnLoop,
 };
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
@@ -193,6 +198,39 @@ impl EvidenceStore for NoEvidence {
     }
 }
 
+struct NoResolver;
+
+impl Resolver for NoResolver {
+    fn resolve(
+        &self,
+        _target: ego_core::permit::NetworkTarget,
+        _deadline: Option<Instant>,
+    ) -> BoxFuture<'static, Result<ego_core::permit::DnsResolution, TransportError>> {
+        panic!("question suspension unexpectedly resolved an HTTP target")
+    }
+}
+
+struct NoHop;
+
+impl OneHop for NoHop {
+    fn execute(
+        &self,
+        _connect: ResolvedConnect,
+        _request: HttpRequest,
+        _deadline: Option<Instant>,
+    ) -> BoxFuture<'static, Result<OneHopResponse, TransportError>> {
+        panic!("question suspension unexpectedly executed an HTTP hop")
+    }
+}
+
+struct NoDuplex;
+
+impl DuplexSpawner for NoDuplex {
+    fn spawn(&self, _spec: SpawnSpec) -> BoxFuture<'static, Result<DuplexHandle, TransportError>> {
+        panic!("question suspension unexpectedly spawned a duplex")
+    }
+}
+
 struct FixedSource {
     generator: Arc<FakeGenerator>,
 }
@@ -277,6 +315,9 @@ fn unavailable_elicitor_persists_question_closes_unstarted_siblings_and_leaves_t
     let fs = FakeFs::default();
     let process = NoProcess;
     let evidence = NoEvidence;
+    let resolver = NoResolver;
+    let one_hop = NoHop;
+    let duplex = NoDuplex;
     let write: Arc<dyn ego_core::permit::Tool> = Arc::new(Typed(FakeWriteTool));
     let registry = vec![
         RegisteredTool::HumanInput(Arc::new(AskQuestionTool)),
@@ -285,9 +326,7 @@ fn unavailable_elicitor_persists_question_closes_unstarted_siblings_and_leaves_t
     let tools = Tools::from_registry(
         &registry,
         &policy,
-        &fs,
-        &process,
-        &evidence,
+        ToolEffectPorts::new(&fs, &process, &evidence, &resolver, &one_hop, &duplex),
         CanonPath::new("/ws"),
     );
     let source = Arc::new(FixedSource { generator });

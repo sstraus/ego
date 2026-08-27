@@ -1316,7 +1316,7 @@ impl PolicyEngine {
         }
         for op in &call.ops {
             if let Err(denied) = self.judge(&call, op) {
-                return Classification::Settled(Err(denied));
+                return Classification::Settled(Err(*denied));
             }
         }
         // Every rule that covered an op, not the first one to match. An
@@ -1449,7 +1449,7 @@ impl PolicyEngine {
     }
 
     /// Steps 0 to 2: everything that can refuse an operation outright.
-    fn judge(&self, call: &PreparedCall, op: &Op) -> Result<(), PolicyDenied> {
+    fn judge(&self, call: &PreparedCall, op: &Op) -> Result<(), Box<PolicyDenied>> {
         let path = op.subject_path(&self.workspace);
 
         // 0. The workspace boundary. Evaluated before the rules because it is
@@ -1461,17 +1461,17 @@ impl PolicyEngine {
             && !matches!(op, Op::Spawn { .. })
             && !path.is_or_under(&self.workspace)
         {
-            return Err(PolicyDenied::OutsideWorkspace {
+            return Err(Box::new(PolicyDenied::OutsideWorkspace {
                 tool: call.tool.clone(),
                 op: op.name(),
                 path: path.clone(),
-            });
+            }));
         }
 
         // 1. Deny, before any allow at any scope.
         if let Some(entry) = self.matching(&self.deny, op) {
             let (from, also) = entry.attribution();
-            return Err(match path {
+            return Err(Box::new(match path {
                 Some(path) => PolicyDenied::Denied {
                     tool: call.tool.clone(),
                     op: op.name(),
@@ -1488,14 +1488,14 @@ impl PolicyEngine {
                     from,
                     also,
                 },
-            });
+            }));
         }
 
         // 2. The mode floor. Above the allow list, so an allow rule cannot
         //    relax it: `plan` means the run does not change anything, and a
         //    mode a rule could switch off would not mean that.
         if self.mode == Mode::Plan && op.mutates() {
-            return Err(match path {
+            return Err(Box::new(match path {
                 Some(path) => PolicyDenied::ModeForbids {
                     tool: call.tool.clone(),
                     mode: self.mode,
@@ -1508,7 +1508,7 @@ impl PolicyEngine {
                     op: op.name(),
                     subject: op.subject(&self.workspace),
                 },
-            });
+            }));
         }
 
         Ok(())

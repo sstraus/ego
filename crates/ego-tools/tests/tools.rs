@@ -48,7 +48,9 @@ use ego_core::state::SessionState;
 use ego_core::store::evidence::{
     EvidenceError, EvidencePage, EvidenceRead, EvidenceStore, EvidenceWriter,
 };
-use ego_core::turn::{CancelToken, GenerationRuntime, Session, Tools, TurnConfig, TurnLoop};
+use ego_core::turn::{
+    CancelToken, GenerationRuntime, Session, ToolEffectPorts, Tools, TurnConfig, TurnLoop,
+};
 use ego_tools::clock::SystemClock;
 use ego_tools::fs::OsFs;
 use ego_tools::store::{JsonlStore, OsIo};
@@ -141,6 +143,8 @@ struct Workspace {
     policy: PolicyEngine,
     registry: Vec<Arc<dyn Tool>>,
 }
+
+type AuthorizationResult = Result<Authorized, Box<PolicyDenied>>;
 
 impl Workspace {
     /// `src/main.rs`, `src/deep/lib.rs` and a `.env` nobody should be able to
@@ -245,7 +249,7 @@ impl Workspace {
     /// A call still open after `settle` would mean a read-only builtin had
     /// started asking for authority it never used to need — worth a loud
     /// failure naming the tool, not a quiet `is_err()`.
-    fn authorize(&self, call: PreparedCall) -> Result<Authorized, PolicyDenied> {
+    fn authorize(&self, call: PreparedCall) -> AuthorizationResult {
         let unanswered = |pending: &Pending| {
             panic!(
                 "a read-only builtin needed permission it never used to need: {}",
@@ -253,11 +257,11 @@ impl Workspace {
             )
         };
         let pending = match self.policy.classify(call) {
-            Classification::Settled(answer) => return answer,
+            Classification::Settled(answer) => return answer.map_err(Box::new),
             Classification::Ask(pending) => pending,
         };
         match block_on(self.policy.settle(pending)) {
-            Resolution::Settled(answer) => answer,
+            Resolution::Settled(answer) => answer.map_err(Box::new),
             Resolution::Ask(pending) => unanswered(&pending),
             Resolution::HumanSettled { .. } | Resolution::Reclassify { .. } => {
                 unreachable!("this engine has no human seat")
@@ -558,8 +562,8 @@ mod read {
         let denied = ws.authorize(call).expect_err("it is outside the workspace");
 
         assert!(matches!(
-            denied,
-            PolicyDenied::OutsideWorkspace {
+            denied.as_ref(),
+            &PolicyDenied::OutsideWorkspace {
                 op: OpName::Read,
                 ..
             }
@@ -669,8 +673,8 @@ mod write {
         let denied = ws.authorize(call).expect_err("it is outside the workspace");
 
         assert!(matches!(
-            denied,
-            PolicyDenied::OutsideWorkspace {
+            denied.as_ref(),
+            &PolicyDenied::OutsideWorkspace {
                 op: OpName::Write,
                 ..
             }
@@ -1084,8 +1088,8 @@ mod edit {
         let denied = ws.authorize(call).expect_err("it is outside the workspace");
 
         assert!(matches!(
-            denied,
-            PolicyDenied::OutsideWorkspace {
+            denied.as_ref(),
+            &PolicyDenied::OutsideWorkspace {
                 op: OpName::Read,
                 ..
             }
@@ -1275,8 +1279,8 @@ mod glob {
         let denied = ws.authorize(call).expect_err("it is outside the workspace");
 
         assert!(matches!(
-            denied,
-            PolicyDenied::OutsideWorkspace {
+            denied.as_ref(),
+            &PolicyDenied::OutsideWorkspace {
                 op: OpName::List,
                 ..
             }
@@ -1427,8 +1431,8 @@ mod grep {
         let denied = ws.authorize(call).expect_err("it is outside the workspace");
 
         assert!(matches!(
-            denied,
-            PolicyDenied::OutsideWorkspace {
+            denied.as_ref(),
+            &PolicyDenied::OutsideWorkspace {
                 op: OpName::Search,
                 ..
             }
@@ -1715,12 +1719,14 @@ mod end_to_end {
                 Tools::new(
                     &ws.registry,
                     &ws.policy,
-                    &ws.fs,
-                    &ws.process,
-                    &ws.evidence,
-                    &NO_RESOLVER,
-                    &NO_HOP,
-                    &NO_DUPLEX,
+                    ToolEffectPorts::new(
+                        &ws.fs,
+                        &ws.process,
+                        &ws.evidence,
+                        &NO_RESOLVER,
+                        &NO_HOP,
+                        &NO_DUPLEX,
+                    ),
                     ws.cwd(),
                 ),
             );
@@ -1809,12 +1815,14 @@ mod end_to_end {
                 Tools::new(
                     &ws.registry,
                     &ws.policy,
-                    &ws.fs,
-                    &ws.process,
-                    &ws.evidence,
-                    &NO_RESOLVER,
-                    &NO_HOP,
-                    &NO_DUPLEX,
+                    ToolEffectPorts::new(
+                        &ws.fs,
+                        &ws.process,
+                        &ws.evidence,
+                        &NO_RESOLVER,
+                        &NO_HOP,
+                        &NO_DUPLEX,
+                    ),
                     ws.cwd(),
                 ),
             );

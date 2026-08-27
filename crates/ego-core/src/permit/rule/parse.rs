@@ -70,13 +70,10 @@ impl Head {
 /// a head costs one entry. `None` means an operation of that shape exists
 /// today; `Some(awaiting)` names the thing whose arrival changes that.
 ///
-/// The grammar publishes seven heads and this workspace produces four kinds of
-/// operation. That gap has an unacceptable default: an operator who writes
-/// `exec(rm -rf /)` in a deny list gets a rule that matches nothing, and
-/// **cannot tell that apart from a boundary that works**. "Vacuous rather than
-/// fail-open" is a distinction visible only to us. So the rule parses, gets a
-/// stable ID, and is refused at load with a true statement about
-/// enforceability rather than a false one about grammar.
+/// The grammar publishes seven heads and this workspace currently produces all
+/// seven operation shapes. The table stays explicit so a future grammar head
+/// cannot load before the build has an operation it can match: a vacuous rule
+/// is indistinguishable from a boundary that works to its operator.
 const OPERATIONS: &[(Head, Option<&str>)] = &[
     (Head::Read, None),
     // `None` again, and the round trip is the mechanism working rather than

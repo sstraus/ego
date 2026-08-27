@@ -10,7 +10,7 @@
 use std::sync::{Arc, RwLock};
 
 use ego_ai::catalogue::{Catalogue, ModelSlug, ResolveError, ResolvedModel};
-use ego_ai::http::{EgressPolicy, Http, ReqwestHttp};
+use ego_ai::http::Http;
 use ego_ai::provider::{Credentials, OLLAMA_BASE, OPENAI_BASE, ProviderRow, ResolvedCredential};
 use ego_core::ceiling::Ceilings;
 use ego_core::config::{AuthProviderLayer, ModelRef};
@@ -20,6 +20,7 @@ use ego_core::generation_model_source::{
 };
 use ego_core::generator::port::Generator;
 use ego_core::generator::types::ThinkingLevel;
+use ego_core::turn::CancelToken;
 use futures::future::BoxFuture;
 use url::Url;
 
@@ -72,25 +73,6 @@ fn base(var: &str, fallback: &str) -> Result<Url, ResolveError> {
     })?;
     url.set_path("/v1/");
     Ok(url)
-}
-
-/// The transport this run generates over.
-///
-/// Built once and shared: `--offline` is a property of the transport
-/// (`ego-ai/src/http.rs`), so a second client built without the policy would
-/// be a hole in it.
-pub fn transport(offline: bool) -> Result<Arc<dyn Http>, ResolveError> {
-    let policy = if offline {
-        EgressPolicy::LoopbackOnly
-    } else {
-        EgressPolicy::Unrestricted
-    };
-    ReqwestHttp::new(policy)
-        .map(|http| Arc::new(http) as Arc<dyn Http>)
-        .map_err(|err| ResolveError::EndpointUnreachable {
-            endpoint: "the local transport".to_string(),
-            message: err.to_string(),
-        })
 }
 
 /// The rows this build knows how to reach.
@@ -261,8 +243,7 @@ pub struct CliGenerationModelSource {
     judge: Option<ModelRef>,
     ceilings: Ceilings,
     auth: std::collections::HashMap<String, AuthProviderLayer>,
-    offline: bool,
-    http: Arc<dyn Http>,
+    credential_commands: Arc<dyn crate::auth::CredentialCommandPort>,
 }
 
 impl CliGenerationModelSource {
@@ -272,25 +253,41 @@ impl CliGenerationModelSource {
         judge: Option<ModelRef>,
         ceilings: Ceilings,
         auth: std::collections::HashMap<String, AuthProviderLayer>,
-        offline: bool,
-    ) -> Result<Self, ResolveError> {
-        Ok(Self {
+    ) -> Self {
+        Self {
             selection: Arc::new(GenerationSelection::new(identity, thinking)),
             judge,
             ceilings,
             auth,
-            offline,
-            http: transport(offline)?,
-        })
+            credential_commands: Arc::new(crate::auth::OsCredentialCommand),
+        }
     }
 
     pub fn selection(&self) -> Arc<GenerationSelection> {
         Arc::clone(&self.selection)
     }
 
+    /// Bind durable model configuration to one actual effect scope.
+    pub fn bind(
+        self: &Arc<Self>,
+        http: Arc<dyn Http>,
+        cancel: CancelToken,
+        run_deadline: Option<std::time::Instant>,
+    ) -> Arc<dyn GenerationModelSource> {
+        Arc::new(BoundGenerationModelSource {
+            source: Arc::clone(self),
+            http,
+            cancel,
+            run_deadline,
+        })
+    }
+
     async fn resolve_role(
         &self,
         role: GenerationRole,
+        http: &Arc<dyn Http>,
+        cancel: &CancelToken,
+        run_deadline: Option<std::time::Instant>,
     ) -> Result<GenerationProfile, GenerationModelError> {
         let (identity, thinking) = match role {
             GenerationRole::Main | GenerationRole::Compaction => {
@@ -316,28 +313,26 @@ impl CliGenerationModelSource {
         let hosted = facts::supplied(&self.ceilings).map_err(|error| {
             GenerationModelError::new(GenerationModelErrorClass::Usage, error.to_string())
         })?;
-        let credentials = crate::auth::request_credentials(
+        let credentials = crate::auth::request_credentials_scoped(
             provider_id,
             self.auth
                 .get(provider_id)
                 .and_then(|auth| auth.credential_command.as_deref()),
-            self.offline,
+            http.as_ref(),
+            self.credential_commands.as_ref(),
+            cancel,
+            run_deadline,
         )
         .await
         .map_err(auth_generation_error)?;
-        let (resolved, credential) = resolve(
-            &identity.0,
-            hosted,
-            &self.http,
-            credentials.as_ref(),
-            &self.auth,
-        )
-        .await
-        .map_err(generation_error)?;
+        let (resolved, credential) =
+            resolve(&identity.0, hosted, http, credentials.as_ref(), &self.auth)
+                .await
+                .map_err(generation_error)?;
         let request_model = resolved.model.clone();
         let generator: Arc<dyn Generator> = Arc::new(ego_ai::generator::WireGenerator::new(
             resolved.row,
-            Arc::clone(&self.http),
+            Arc::clone(http),
             credential,
         ));
         Ok(GenerationProfile {
@@ -352,12 +347,22 @@ impl CliGenerationModelSource {
     }
 }
 
-impl GenerationModelSource for CliGenerationModelSource {
+struct BoundGenerationModelSource {
+    source: Arc<CliGenerationModelSource>,
+    http: Arc<dyn Http>,
+    cancel: CancelToken,
+    run_deadline: Option<std::time::Instant>,
+}
+
+impl GenerationModelSource for BoundGenerationModelSource {
     fn resolve<'a>(
         &'a self,
         role: GenerationRole,
     ) -> BoxFuture<'a, Result<GenerationProfile, GenerationModelError>> {
-        Box::pin(self.resolve_role(role))
+        Box::pin(
+            self.source
+                .resolve_role(role, &self.http, &self.cancel, self.run_deadline),
+        )
     }
 }
 
@@ -378,6 +383,7 @@ fn auth_generation_error(error: crate::auth::AuthError) -> GenerationModelError 
         }
         crate::auth::AuthError::InvalidConfig(_)
         | crate::auth::AuthError::MissingCredential { .. }
+        | crate::auth::AuthError::CredentialCommand { .. }
         | crate::auth::AuthError::ReloginRequired { .. } => GenerationModelErrorClass::Usage,
     };
     GenerationModelError::new(class, error.to_string())

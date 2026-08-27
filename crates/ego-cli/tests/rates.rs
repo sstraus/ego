@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ego_ai::catalogue::{ResolvedModel, tabulated, unmetered};
-use ego_ai::http::{ByteStream, Http, HttpError, HttpRequest, HttpResponse};
+use ego_ai::http::{Http, HttpCall, PreparedHttpCall};
 use ego_ai::provider::ProviderRow;
 use ego_cli::budget::{NoRates, TableSource};
 use ego_core::budget::{BudgetGate, Ledger, Metering};
@@ -28,6 +28,7 @@ use ego_core::generator::capabilities::{
     CacheRetention, CancelSemantics, ModelCapabilities, ReasoningCarryover, ReasoningEffortSupport,
     Transport,
 };
+use ego_core::permit::{HttpHeader, OneHopResponse, TransportError, TransportFailure};
 use ego_tools::pricing::PricingCache;
 use ego_tools::store::OsIo;
 use futures::future::BoxFuture;
@@ -47,22 +48,26 @@ const ETAG: &str = "\"8cc8759e\"";
 /// *how many times the network was touched*, often zero, and a counter is the
 /// whole apparatus that needs.
 struct Wire {
-    answer: Mutex<Option<(u16, String, Option<String>)>>,
-    calls: Mutex<u32>,
+    answer: Arc<Mutex<Option<(u16, String, Option<String>)>>>,
+    calls: Arc<Mutex<u32>>,
 }
 
 impl Wire {
     fn silent() -> Arc<Wire> {
         Arc::new(Wire {
-            answer: Mutex::new(None),
-            calls: Mutex::new(0),
+            answer: Arc::new(Mutex::new(None)),
+            calls: Arc::new(Mutex::new(0)),
         })
     }
 
     fn answering(status: u16, body: &str, etag: Option<&str>) -> Arc<Wire> {
         Arc::new(Wire {
-            answer: Mutex::new(Some((status, body.to_string(), etag.map(str::to_string)))),
-            calls: Mutex::new(0),
+            answer: Arc::new(Mutex::new(Some((
+                status,
+                body.to_string(),
+                etag.map(str::to_string),
+            )))),
+            calls: Arc::new(Mutex::new(0)),
         })
     }
 
@@ -72,28 +77,40 @@ impl Wire {
 }
 
 impl Http for Wire {
-    fn execute(&self, _req: HttpRequest) -> BoxFuture<'static, Result<HttpResponse, HttpError>> {
+    fn begin_call(&self) -> Box<dyn HttpCall> {
+        Box::new(WireCall {
+            answer: Arc::clone(&self.answer),
+            calls: Arc::clone(&self.calls),
+        })
+    }
+}
+
+struct WireCall {
+    answer: Arc<Mutex<Option<(u16, String, Option<String>)>>>,
+    calls: Arc<Mutex<u32>>,
+}
+
+impl HttpCall for WireCall {
+    fn execute(
+        &mut self,
+        _call: PreparedHttpCall,
+    ) -> BoxFuture<'static, Result<OneHopResponse, TransportError>> {
         *self.calls.lock().unwrap() += 1;
         let answer = self.answer.lock().unwrap().clone();
         Box::pin(async move {
             let Some((status, body, etag)) = answer else {
-                return Err(HttpError::Transport {
-                    message: "upstream is down".to_string(),
-                    delivery: ego_core::generator::attempt::DeliveryCertainty::DefinitelyUnsent,
-                });
+                return Err(TransportError::definitely_unsent(
+                    TransportFailure::Exchange("upstream is down".to_string()),
+                ));
             };
-            let mut headers = vec![("content-type".to_string(), "application/json".to_string())];
+            let mut headers = vec![
+                HttpHeader::new("content-type", b"application/json".to_vec())
+                    .expect("content type header"),
+            ];
             if let Some(etag) = etag {
-                headers.push(("etag".to_string(), etag));
+                headers.push(HttpHeader::new("etag", etag.into_bytes()).expect("etag header"));
             }
-            let body: ByteStream = Box::pin(futures::stream::once(async move {
-                Ok(bytes::Bytes::from(body.into_bytes()))
-            }));
-            Ok(HttpResponse {
-                status,
-                headers,
-                body,
-            })
+            Ok(OneHopResponse::response(status, headers, body.into_bytes()))
         })
     }
 }

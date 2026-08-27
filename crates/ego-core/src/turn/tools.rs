@@ -27,6 +27,36 @@ pub(crate) enum PreparedToolCall {
     HumanInput(crate::question::QuestionRequest),
 }
 
+/// Raw external-effect ports bound to a tool call only after authorization.
+pub struct ToolEffectPorts<'a> {
+    fs: &'a dyn Fs,
+    process: &'a dyn ProcessExecutor,
+    evidence: &'a dyn EvidenceStore,
+    resolver: &'a dyn Resolver,
+    one_hop: &'a dyn OneHop,
+    duplex: &'a dyn DuplexSpawner,
+}
+
+impl<'a> ToolEffectPorts<'a> {
+    pub fn new(
+        fs: &'a dyn Fs,
+        process: &'a dyn ProcessExecutor,
+        evidence: &'a dyn EvidenceStore,
+        resolver: &'a dyn Resolver,
+        one_hop: &'a dyn OneHop,
+        duplex: &'a dyn DuplexSpawner,
+    ) -> Self {
+        Self {
+            fs,
+            process,
+            evidence,
+            resolver,
+            one_hop,
+            duplex,
+        }
+    }
+}
+
 /// Everything the loop needs to turn a model's tool call into an effect.
 pub struct Tools<'a> {
     registry: Vec<RegisteredTool>,
@@ -34,12 +64,7 @@ pub struct Tools<'a> {
     /// The *raw* filesystem. [`GuardedEffects`] binds one permit to the raw
     /// effect ports at construction, so a fresh facade is built per
     /// authorised call; there is no permit to swap into a shared one.
-    fs: &'a dyn Fs,
-    process: &'a dyn ProcessExecutor,
-    evidence: &'a dyn EvidenceStore,
-    resolver: &'a dyn Resolver,
-    one_hop: &'a dyn OneHop,
-    duplex: &'a dyn DuplexSpawner,
+    effects: ToolEffectPorts<'a>,
     cwd: CanonPath,
 }
 
@@ -47,12 +72,7 @@ impl<'a> Tools<'a> {
     pub fn new(
         registry: &[std::sync::Arc<dyn Tool>],
         policy: &'a PolicyEngine,
-        fs: &'a dyn Fs,
-        process: &'a dyn ProcessExecutor,
-        evidence: &'a dyn EvidenceStore,
-        resolver: &'a dyn Resolver,
-        one_hop: &'a dyn OneHop,
-        duplex: &'a dyn DuplexSpawner,
+        effects: ToolEffectPorts<'a>,
         cwd: CanonPath,
     ) -> Self {
         Self {
@@ -62,12 +82,7 @@ impl<'a> Tools<'a> {
                 .map(RegisteredTool::Effect)
                 .collect(),
             policy,
-            fs,
-            process,
-            evidence,
-            resolver,
-            one_hop,
-            duplex,
+            effects,
             cwd,
         }
     }
@@ -77,23 +92,13 @@ impl<'a> Tools<'a> {
     pub fn from_registry(
         registry: &[RegisteredTool],
         policy: &'a PolicyEngine,
-        fs: &'a dyn Fs,
-        process: &'a dyn ProcessExecutor,
-        evidence: &'a dyn EvidenceStore,
-        resolver: &'a dyn Resolver,
-        one_hop: &'a dyn OneHop,
-        duplex: &'a dyn DuplexSpawner,
+        effects: ToolEffectPorts<'a>,
         cwd: CanonPath,
     ) -> Self {
         Self {
             registry: registry.to_vec(),
             policy,
-            fs,
-            process,
-            evidence,
-            resolver,
-            one_hop,
-            duplex,
+            effects,
             cwd,
         }
     }
@@ -178,7 +183,7 @@ impl<'a> Tools<'a> {
     fn prepare_params(&self, tool: &dyn Tool, params: Value) -> Result<PreparedCall, String> {
         let ctx = PrepareCtx {
             cwd: self.cwd.clone(),
-            resolver: self.fs,
+            resolver: self.effects.fs,
         };
         tool.prepare(params, &ctx)
             .map_err(|err: ToolError| err.to_string())
@@ -247,12 +252,12 @@ impl<'a> Tools<'a> {
         let (call, permit) = authorized.into_parts();
         let guarded = GuardedEffects::new(
             permit,
-            self.fs,
-            self.process,
-            self.evidence,
-            self.resolver,
-            self.one_hop,
-            self.duplex,
+            self.effects.fs,
+            self.effects.process,
+            self.effects.evidence,
+            self.effects.resolver,
+            self.effects.one_hop,
+            self.effects.duplex,
         );
         tool.execute(call, &guarded).await
     }

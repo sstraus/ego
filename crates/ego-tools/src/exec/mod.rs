@@ -7,10 +7,12 @@ mod null;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod probe;
 pub(crate) mod process;
+mod process_tree;
 #[cfg(target_os = "macos")]
 mod profile;
 #[cfg(target_os = "macos")]
 mod seatbelt;
+mod secret_child;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -32,6 +34,7 @@ pub use ego_core::permit::{ProcessError, ProcessExecutor};
 pub use landlock::dispatch_helper as dispatch_landlock_helper;
 #[cfg(target_os = "macos")]
 pub use probe::dispatch_network_probe;
+pub use secret_child::{SecretChildError, SecretChildOutput, SecretChildRequest, run_secret_child};
 
 pub(crate) fn runtime_handle() -> tokio::runtime::Handle {
     static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
@@ -243,30 +246,9 @@ impl RunEffectPorts {
         }
     }
 
-    pub(crate) fn for_probe(
-        policy: RunConfinement,
-        evidence: SessionEvidenceStore,
-        cancel: CancelToken,
-        exec_limits: ExecLimits,
-        http_call_timeout: HttpCallTimeout,
-        run_deadline: Option<Instant>,
-        resolver: Arc<dyn Resolver>,
-        backend: Arc<dyn Backend>,
-    ) -> Self {
+    pub(crate) fn for_probe(config: ExecRunConfig, backend: Arc<dyn Backend>) -> Self {
         let capabilities = backend.maximum_demonstrable_caps();
-        Self::build(
-            ExecRunConfig::new(
-                policy,
-                evidence,
-                cancel,
-                exec_limits,
-                http_call_timeout,
-                run_deadline,
-                resolver,
-            ),
-            backend,
-            capabilities,
-        )
+        Self::build(config, backend, capabilities)
     }
 
     pub fn process(&self) -> &dyn ProcessExecutor {

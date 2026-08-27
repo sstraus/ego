@@ -33,7 +33,8 @@ use ego_core::generator::types::{
 };
 use ego_core::permit::fake::FakeFs;
 use ego_core::permit::{
-    CanonPath, PolicyEngine, ProcessError, ProcessExecutor, SpawnSpec, ToolResult,
+    CanonPath, DuplexHandle, DuplexSpawner, OneHop, OneHopResponse, PolicyEngine, ProcessError,
+    ProcessExecutor, ResolvedConnect, Resolver, SpawnSpec, ToolResult, TransportError,
 };
 use ego_core::public::{
     ItemKind as PublicItemKind, PUBLIC_EVENT_VERSION, PublicEvent, project_public,
@@ -46,11 +47,50 @@ use ego_core::store::evidence::{
     EvidenceError, EvidencePage, EvidenceRead, EvidenceStore, EvidenceWriter,
 };
 use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
-use ego_core::turn::{CancelToken, GenerationRuntime, Session, Tools, TurnConfig, TurnLoop};
+use ego_core::turn::{
+    CancelToken, GenerationRuntime, Session, ToolEffectPorts, Tools, TurnConfig, TurnLoop,
+};
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
+
+struct NoResolver;
+
+impl Resolver for NoResolver {
+    fn resolve(
+        &self,
+        _target: ego_core::permit::NetworkTarget,
+        _deadline: Option<std::time::Instant>,
+    ) -> BoxFuture<'static, Result<ego_core::permit::DnsResolution, TransportError>> {
+        panic!("compaction test unexpectedly resolved an HTTP target")
+    }
+}
+
+struct NoHop;
+
+impl OneHop for NoHop {
+    fn execute(
+        &self,
+        _connect: ResolvedConnect,
+        _request: ego_core::permit::HttpRequest,
+        _deadline: Option<std::time::Instant>,
+    ) -> BoxFuture<'static, Result<OneHopResponse, TransportError>> {
+        panic!("compaction test unexpectedly executed an HTTP hop")
+    }
+}
+
+struct NoDuplex;
+
+impl DuplexSpawner for NoDuplex {
+    fn spawn(&self, _spec: SpawnSpec) -> BoxFuture<'static, Result<DuplexHandle, TransportError>> {
+        panic!("compaction test unexpectedly spawned a duplex")
+    }
+}
+
+static NO_RESOLVER: NoResolver = NoResolver;
+static NO_HOP: NoHop = NoHop;
+static NO_DUPLEX: NoDuplex = NoDuplex;
 
 const SOURCE: &str = "00000000-0000-0000-0000-000000000001";
 
@@ -717,9 +757,7 @@ fn compaction_turn_with_state(
     let tools = Tools::new(
         &registry,
         policy,
-        fs,
-        process,
-        evidence,
+        ToolEffectPorts::new(fs, process, evidence, &NO_RESOLVER, &NO_HOP, &NO_DUPLEX),
         CanonPath::new("/ws"),
     );
     let cancel = CancelToken::new();
@@ -1130,21 +1168,19 @@ fn compaction_busy_states_and_cancellation_are_not_silently_admitted() {
         ]);
         let (mut turn, _store, _cancel) = compaction_turn_with_state(source, busy_state(&busy));
         let result = futures::executor::block_on(turn.prepare_compaction(None, Vec::new()));
-        assert!(match (&result, &busy) {
+        assert!(matches!(
+            (&result, &busy),
             (
                 Err(CompactionError::NotIdle(CompactionBusy::AcceptedPrompt)),
                 CompactionBusy::AcceptedPrompt,
-            )
-            | (
+            ) | (
                 Err(CompactionError::NotIdle(CompactionBusy::PendingQuestion)),
                 CompactionBusy::PendingQuestion,
-            )
-            | (
+            ) | (
                 Err(CompactionError::NotIdle(CompactionBusy::LiveAttempt)),
                 CompactionBusy::LiveAttempt,
-            ) => true,
-            _ => false,
-        });
+            )
+        ));
     }
 
     let (compact_profile, _) = compaction_profile(

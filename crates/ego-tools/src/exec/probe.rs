@@ -13,12 +13,12 @@ use ego_core::event::id::SessionId;
 use ego_core::permit::{
     CanonPath, Classification, Confinement, ExecCaps, ProcessError, RunConfinement, Tool, Typed,
 };
-use ego_core::turn::{CancelToken, Tools};
+use ego_core::turn::{CancelToken, ToolEffectPorts, Tools};
 
 use crate::store::SessionEvidenceStore;
 
 use super::backend::{Backend, MeasuredBackend};
-use super::{ExecLimits, HttpCallTimeout, RunEffectPorts};
+use super::{ExecLimits, ExecRunConfig, HttpCallTimeout, RunEffectPorts};
 
 #[cfg(target_os = "linux")]
 use super::landlock::{LandlockBackend, derived_runtime_roots};
@@ -932,13 +932,15 @@ async fn probe(
         return false;
     };
     let ports = RunEffectPorts::for_probe(
-        run_policy,
-        evidence.clone(),
-        cancel,
-        limits,
-        HttpCallTimeout::default(),
-        None,
-        Arc::new(crate::http::SystemResolver::new()),
+        ExecRunConfig::new(
+            run_policy,
+            evidence.clone(),
+            cancel,
+            limits,
+            HttpCallTimeout::default(),
+            None,
+            Arc::new(crate::http::SystemResolver::new()),
+        ),
         backend,
     );
     let fs = crate::fs::OsFs;
@@ -946,12 +948,14 @@ async fn probe(
     let tools = Tools::new(
         &registry,
         &policy,
-        &fs,
-        ports.process(),
-        &evidence,
-        ports.resolver(),
-        ports.one_hop(),
-        ports.duplex(),
+        ToolEffectPorts::new(
+            &fs,
+            ports.process(),
+            &evidence,
+            ports.resolver(),
+            ports.one_hop(),
+            ports.duplex(),
+        ),
         cwd.clone(),
     );
     let Ok(arguments) = serde_json::to_string(&serde_json::json!({

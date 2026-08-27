@@ -1,6 +1,7 @@
 //! RED contract for regression case guarded HTTP and one-child duplex authority.
 
 use std::ffi::OsString;
+use std::net::{IpAddr, Ipv6Addr};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
@@ -141,19 +142,17 @@ impl Resolver for FakeResolver {
     }
 }
 
+type ObservedConnect = (
+    HttpRoute,
+    NetworkTarget,
+    std::net::IpAddr,
+    HttpRequestDigest,
+);
+
 #[derive(Clone, Default)]
 struct FakeOneHop {
     calls: Arc<Mutex<usize>>,
-    observed: Arc<
-        Mutex<
-            Option<(
-                HttpRoute,
-                NetworkTarget,
-                std::net::IpAddr,
-                HttpRequestDigest,
-            )>,
-        >,
-    >,
+    observed: Arc<Mutex<Option<ObservedConnect>>>,
     failure: Arc<Mutex<Option<TransportError>>>,
     deadlines: Arc<Mutex<Vec<Option<Instant>>>>,
 }
@@ -834,4 +833,22 @@ fn process_subject_round_trips_native_bytes_and_unknown_fields_fail_closed() {
     let mut value = serde_json::to_value(subject).expect("subject");
     value["extra"] = true.into();
     assert!(serde_json::from_value::<Subject>(value).is_err());
+}
+
+#[test]
+fn network_target_ipv6_literals_are_canonical_ip_targets() {
+    let cases = [
+        ("[::1]", Ipv6Addr::LOCALHOST),
+        (
+            "[::ffff:127.0.0.1]",
+            Ipv6Addr::new(0, 0, 0, 0, 0, 0xffff, 0x7f00, 1),
+        ),
+    ];
+
+    for (input, expected_ip) in cases {
+        let target = NetworkTarget::new(input, 443).expect("IPv6 target");
+        assert_eq!(target.host(), expected_ip.to_string());
+        assert_eq!(target.ip(), Some(IpAddr::V6(expected_ip)));
+        assert_eq!(target.to_string(), format!("[{expected_ip}]:443"));
+    }
 }

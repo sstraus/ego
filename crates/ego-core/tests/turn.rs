@@ -36,9 +36,10 @@ use ego_core::generator::types::{
 };
 use ego_core::permit::rule::Rule;
 use ego_core::permit::{
-    Authority, CanonPath, Confinement, EnvPolicy, ExecCaps, Fs, GuardedIo, HumanApprover, Op,
-    PermissionDecision, PermissionRequest, PolicyEngine, PrepareCtx, PreparedCall, ProcessError,
-    ProcessExecutor, RunConfinement, SpawnSpec, ToolError, ToolResult, Typed, TypedTool,
+    Authority, CanonPath, Confinement, EnvPolicy, ExecCaps, Fs, GuardedIo, HumanApprover, OneHop,
+    OneHopResponse, Op, PermissionDecision, PermissionRequest, PolicyEngine, PrepareCtx,
+    PreparedCall, ProcessError, ProcessExecutor, ResolvedConnect, Resolver, RunConfinement,
+    SpawnSpec, ToolError, ToolResult, TransportError, Typed, TypedTool,
 };
 use ego_core::public::PublicEvent;
 use ego_core::run::RunTermination;
@@ -50,8 +51,8 @@ use ego_core::store::evidence::{
 };
 use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
 use ego_core::turn::{
-    CancelToken, ControlError, GenerationRuntime, JudgeContext, Session, Tools, TurnConfig,
-    TurnLoop,
+    CancelToken, ControlError, GenerationRuntime, JudgeContext, Session, ToolEffectPorts, Tools,
+    TurnConfig, TurnLoop,
 };
 use futures::StreamExt;
 use futures::executor::block_on;
@@ -66,6 +67,46 @@ mod common;
 mod turn {
     use super::*;
     use ego_core::permit::fake::{FakeFs, FakeWriteTool};
+
+    struct NoResolver;
+
+    impl Resolver for NoResolver {
+        fn resolve(
+            &self,
+            _target: ego_core::permit::NetworkTarget,
+            _deadline: Option<std::time::Instant>,
+        ) -> BoxFuture<'static, Result<ego_core::permit::DnsResolution, TransportError>> {
+            panic!("turn test unexpectedly resolved an HTTP target")
+        }
+    }
+
+    struct NoHop;
+
+    impl OneHop for NoHop {
+        fn execute(
+            &self,
+            _connect: ResolvedConnect,
+            _request: ego_core::permit::HttpRequest,
+            _deadline: Option<std::time::Instant>,
+        ) -> BoxFuture<'static, Result<OneHopResponse, TransportError>> {
+            panic!("turn test unexpectedly executed an HTTP hop")
+        }
+    }
+
+    struct NoDuplex;
+
+    impl ego_core::permit::DuplexSpawner for NoDuplex {
+        fn spawn(
+            &self,
+            _spec: ego_core::permit::SpawnSpec,
+        ) -> BoxFuture<'static, Result<ego_core::permit::DuplexHandle, TransportError>> {
+            panic!("turn test unexpectedly spawned a duplex")
+        }
+    }
+
+    static NO_RESOLVER: NoResolver = NoResolver;
+    static NO_HOP: NoHop = NoHop;
+    static NO_DUPLEX: NoDuplex = NoDuplex;
 
     /// A `SessionStore` that keeps the log in memory, and can be told to fail
     /// on the nth append — which is the only way to test what the loop does
@@ -947,9 +988,14 @@ mod turn {
         let tools = Tools::new(
             &fx.registry,
             &fx.policy,
-            &fx.fs,
-            fx.process.as_ref(),
-            &fx.evidence,
+            ToolEffectPorts::new(
+                &fx.fs,
+                fx.process.as_ref(),
+                &fx.evidence,
+                &NO_RESOLVER,
+                &NO_HOP,
+                &NO_DUPLEX,
+            ),
             CanonPath::new("/ws"),
         );
         let mut turn = TurnLoop::new(
@@ -1156,9 +1202,14 @@ mod turn {
         let tools = Tools::new(
             &fx.registry,
             &fx.policy,
-            &fx.fs,
-            fx.process.as_ref(),
-            &fx.evidence,
+            ToolEffectPorts::new(
+                &fx.fs,
+                fx.process.as_ref(),
+                &fx.evidence,
+                &NO_RESOLVER,
+                &NO_HOP,
+                &NO_DUPLEX,
+            ),
             CanonPath::new("/ws"),
         );
         let mut turn = TurnLoop::new(
@@ -1279,9 +1330,14 @@ mod turn {
         let tools = Tools::new(
             &fx.registry,
             &fx.policy,
-            &fx.fs,
-            fx.process.as_ref(),
-            &fx.evidence,
+            ToolEffectPorts::new(
+                &fx.fs,
+                fx.process.as_ref(),
+                &fx.evidence,
+                &NO_RESOLVER,
+                &NO_HOP,
+                &NO_DUPLEX,
+            ),
             CanonPath::new("/ws"),
         );
         let mut turn = TurnLoop::new(
@@ -1414,9 +1470,14 @@ mod turn {
         let tools = Tools::new(
             &fx.registry,
             &fx.policy,
-            &fx.fs,
-            fx.process.as_ref(),
-            &fx.evidence,
+            ToolEffectPorts::new(
+                &fx.fs,
+                fx.process.as_ref(),
+                &fx.evidence,
+                &NO_RESOLVER,
+                &NO_HOP,
+                &NO_DUPLEX,
+            ),
             CanonPath::new("/ws"),
         );
         let mut turn = TurnLoop::new(
@@ -1465,9 +1526,14 @@ mod turn {
         let tools = Tools::new(
             &fx.registry,
             &fx.policy,
-            &fx.fs,
-            fx.process.as_ref(),
-            &fx.evidence,
+            ToolEffectPorts::new(
+                &fx.fs,
+                fx.process.as_ref(),
+                &fx.evidence,
+                &NO_RESOLVER,
+                &NO_HOP,
+                &NO_DUPLEX,
+            ),
             CanonPath::new("/ws"),
         );
         let mut turn = TurnLoop::new(
@@ -1541,9 +1607,14 @@ mod turn {
             let tools = Tools::new(
                 &fx.registry,
                 &fx.policy,
-                &fx.fs,
-                fx.process.as_ref(),
-                &fx.evidence,
+                ToolEffectPorts::new(
+                    &fx.fs,
+                    fx.process.as_ref(),
+                    &fx.evidence,
+                    &NO_RESOLVER,
+                    &NO_HOP,
+                    &NO_DUPLEX,
+                ),
                 CanonPath::new("/ws"),
             );
             let mut turn = TurnLoop::new(
@@ -1587,9 +1658,14 @@ mod turn {
             let tools = Tools::new(
                 &fx.registry,
                 &fx.policy,
-                &fx.fs,
-                fx.process.as_ref(),
-                &fx.evidence,
+                ToolEffectPorts::new(
+                    &fx.fs,
+                    fx.process.as_ref(),
+                    &fx.evidence,
+                    &NO_RESOLVER,
+                    &NO_HOP,
+                    &NO_DUPLEX,
+                ),
                 CanonPath::new("/ws"),
             );
             let mut turn = TurnLoop::new(
@@ -1676,9 +1752,14 @@ mod turn {
         let tools = Tools::new(
             &fx.registry,
             &fx.policy,
-            &fx.fs,
-            fx.process.as_ref(),
-            &fx.evidence,
+            ToolEffectPorts::new(
+                &fx.fs,
+                fx.process.as_ref(),
+                &fx.evidence,
+                &NO_RESOLVER,
+                &NO_HOP,
+                &NO_DUPLEX,
+            ),
             CanonPath::new("/ws"),
         );
         let mut turn = TurnLoop::new(
@@ -1757,9 +1838,14 @@ mod turn {
         let recovery_tools = Tools::new(
             &fx.registry,
             &fx.policy,
-            &fx.fs,
-            fx.process.as_ref(),
-            &fx.evidence,
+            ToolEffectPorts::new(
+                &fx.fs,
+                fx.process.as_ref(),
+                &fx.evidence,
+                &NO_RESOLVER,
+                &NO_HOP,
+                &NO_DUPLEX,
+            ),
             CanonPath::new("/ws"),
         );
         let mut recovery = TurnLoop::new(
@@ -1826,9 +1912,7 @@ mod turn {
             Tools::new(
                 &[],
                 &policy,
-                &fs,
-                &process,
-                &evidence,
+                ToolEffectPorts::new(&fs, &process, &evidence, &NO_RESOLVER, &NO_HOP, &NO_DUPLEX),
                 CanonPath::new("/ws"),
             ),
         )
@@ -1868,9 +1952,14 @@ mod turn {
         let tools = Tools::new(
             &fx.registry,
             &fx.policy,
-            &fx.fs,
-            fx.process.as_ref(),
-            &fx.evidence,
+            ToolEffectPorts::new(
+                &fx.fs,
+                fx.process.as_ref(),
+                &fx.evidence,
+                &NO_RESOLVER,
+                &NO_HOP,
+                &NO_DUPLEX,
+            ),
             CanonPath::new("/ws"),
         );
         let mut turn = TurnLoop::new(
@@ -1938,9 +2027,14 @@ mod turn {
         let tools = Tools::new(
             &fx.registry,
             &fx.policy,
-            &fx.fs,
-            fx.process.as_ref(),
-            &fx.evidence,
+            ToolEffectPorts::new(
+                &fx.fs,
+                fx.process.as_ref(),
+                &fx.evidence,
+                &NO_RESOLVER,
+                &NO_HOP,
+                &NO_DUPLEX,
+            ),
             CanonPath::new("/ws"),
         );
         let mut turn = TurnLoop::new(
@@ -2028,9 +2122,14 @@ mod turn {
         let tools = Tools::new(
             &fx.registry,
             &fx.policy,
-            &fx.fs,
-            fx.process.as_ref(),
-            &fx.evidence,
+            ToolEffectPorts::new(
+                &fx.fs,
+                fx.process.as_ref(),
+                &fx.evidence,
+                &NO_RESOLVER,
+                &NO_HOP,
+                &NO_DUPLEX,
+            ),
             CanonPath::new("/ws"),
         );
         let mut turn = TurnLoop::new(
@@ -2093,9 +2192,7 @@ mod turn {
             Tools::new(
                 &[],
                 &policy,
-                &fs,
-                &process,
-                &evidence,
+                ToolEffectPorts::new(&fs, &process, &evidence, &NO_RESOLVER, &NO_HOP, &NO_DUPLEX),
                 CanonPath::new("/ws"),
             ),
         )
@@ -2149,9 +2246,14 @@ mod turn {
         let tools = Tools::new(
             &fx.registry,
             &fx.policy,
-            &fx.fs,
-            fx.process.as_ref(),
-            &fx.evidence,
+            ToolEffectPorts::new(
+                &fx.fs,
+                fx.process.as_ref(),
+                &fx.evidence,
+                &NO_RESOLVER,
+                &NO_HOP,
+                &NO_DUPLEX,
+            ),
             CanonPath::new("/ws"),
         );
         let mut turn = TurnLoop::new(
@@ -2223,9 +2325,14 @@ mod turn {
         let recovery_tools = Tools::new(
             &fx.registry,
             &fx.policy,
-            &fx.fs,
-            fx.process.as_ref(),
-            &fx.evidence,
+            ToolEffectPorts::new(
+                &fx.fs,
+                fx.process.as_ref(),
+                &fx.evidence,
+                &NO_RESOLVER,
+                &NO_HOP,
+                &NO_DUPLEX,
+            ),
             CanonPath::new("/ws"),
         );
         let mut recovery = TurnLoop::new(
@@ -2272,9 +2379,14 @@ mod turn {
         let tools = Tools::new(
             &fx.registry,
             &fx.policy,
-            &fx.fs,
-            fx.process.as_ref(),
-            &fx.evidence,
+            ToolEffectPorts::new(
+                &fx.fs,
+                fx.process.as_ref(),
+                &fx.evidence,
+                &NO_RESOLVER,
+                &NO_HOP,
+                &NO_DUPLEX,
+            ),
             CanonPath::new("/ws"),
         );
         let mut turn = TurnLoop::new(
@@ -2334,9 +2446,14 @@ mod turn {
         let recovery_tools = Tools::new(
             &fx.registry,
             &fx.policy,
-            &fx.fs,
-            fx.process.as_ref(),
-            &fx.evidence,
+            ToolEffectPorts::new(
+                &fx.fs,
+                fx.process.as_ref(),
+                &fx.evidence,
+                &NO_RESOLVER,
+                &NO_HOP,
+                &NO_DUPLEX,
+            ),
             CanonPath::new("/ws"),
         );
         let mut recovery = TurnLoop::new(
@@ -2377,9 +2494,14 @@ mod turn {
         let tools = Tools::new(
             &fx.registry,
             &fx.policy,
-            &fx.fs,
-            fx.process.as_ref(),
-            &fx.evidence,
+            ToolEffectPorts::new(
+                &fx.fs,
+                fx.process.as_ref(),
+                &fx.evidence,
+                &NO_RESOLVER,
+                &NO_HOP,
+                &NO_DUPLEX,
+            ),
             CanonPath::new("/ws"),
         );
         let mut turn = TurnLoop::new(
@@ -2444,9 +2566,14 @@ mod turn {
         let recovery_tools = Tools::new(
             &fx.registry,
             &fx.policy,
-            &fx.fs,
-            fx.process.as_ref(),
-            &fx.evidence,
+            ToolEffectPorts::new(
+                &fx.fs,
+                fx.process.as_ref(),
+                &fx.evidence,
+                &NO_RESOLVER,
+                &NO_HOP,
+                &NO_DUPLEX,
+            ),
             CanonPath::new("/ws"),
         );
         let mut recovery = TurnLoop::new(
@@ -2503,9 +2630,14 @@ mod turn {
         let tools = Tools::new(
             &fx.registry,
             &fx.policy,
-            &fx.fs,
-            fx.process.as_ref(),
-            &fx.evidence,
+            ToolEffectPorts::new(
+                &fx.fs,
+                fx.process.as_ref(),
+                &fx.evidence,
+                &NO_RESOLVER,
+                &NO_HOP,
+                &NO_DUPLEX,
+            ),
             CanonPath::new("/ws"),
         );
         let mut turn = TurnLoop::new(
@@ -2572,9 +2704,14 @@ mod turn {
         let recovery_tools = Tools::new(
             &fx.registry,
             &fx.policy,
-            &fx.fs,
-            fx.process.as_ref(),
-            &fx.evidence,
+            ToolEffectPorts::new(
+                &fx.fs,
+                fx.process.as_ref(),
+                &fx.evidence,
+                &NO_RESOLVER,
+                &NO_HOP,
+                &NO_DUPLEX,
+            ),
             CanonPath::new("/ws"),
         );
         let mut recovery = TurnLoop::new(
@@ -3261,9 +3398,14 @@ mod turn {
         let tools = Tools::new(
             &fx.registry,
             &fx.policy,
-            &fx.fs,
-            fx.process.as_ref(),
-            &fx.evidence,
+            ToolEffectPorts::new(
+                &fx.fs,
+                fx.process.as_ref(),
+                &fx.evidence,
+                &NO_RESOLVER,
+                &NO_HOP,
+                &NO_DUPLEX,
+            ),
             CanonPath::new("/ws"),
         );
         let mut turn = TurnLoop::new(
@@ -3371,9 +3513,14 @@ mod turn {
         let tools = Tools::new(
             &fx.registry,
             &fx.policy,
-            &fx.fs,
-            fx.process.as_ref(),
-            &fx.evidence,
+            ToolEffectPorts::new(
+                &fx.fs,
+                fx.process.as_ref(),
+                &fx.evidence,
+                &NO_RESOLVER,
+                &NO_HOP,
+                &NO_DUPLEX,
+            ),
             CanonPath::new("/ws"),
         );
         let mut turn = TurnLoop::new(
@@ -3437,9 +3584,14 @@ mod turn {
         let tools = Tools::new(
             &fx.registry,
             &fx.policy,
-            &fx.fs,
-            fx.process.as_ref(),
-            &fx.evidence,
+            ToolEffectPorts::new(
+                &fx.fs,
+                fx.process.as_ref(),
+                &fx.evidence,
+                &NO_RESOLVER,
+                &NO_HOP,
+                &NO_DUPLEX,
+            ),
             CanonPath::new("/ws"),
         );
         let mut turn = TurnLoop::new(
@@ -3842,9 +3994,14 @@ mod turn {
         let tools = Tools::new(
             &fx.registry,
             &fx.policy,
-            &fx.fs,
-            fx.process.as_ref(),
-            &fx.evidence,
+            ToolEffectPorts::new(
+                &fx.fs,
+                fx.process.as_ref(),
+                &fx.evidence,
+                &NO_RESOLVER,
+                &NO_HOP,
+                &NO_DUPLEX,
+            ),
             CanonPath::new("/ws"),
         );
         let mut turn = TurnLoop::new(
@@ -3892,9 +4049,14 @@ mod turn {
         let tools = Tools::new(
             &fx.registry,
             &fx.policy,
-            &fx.fs,
-            fx.process.as_ref(),
-            &fx.evidence,
+            ToolEffectPorts::new(
+                &fx.fs,
+                fx.process.as_ref(),
+                &fx.evidence,
+                &NO_RESOLVER,
+                &NO_HOP,
+                &NO_DUPLEX,
+            ),
             CanonPath::new("/ws"),
         );
         let refusing = model_with_reasoning(
@@ -3945,9 +4107,14 @@ mod turn {
         let tools = Tools::new(
             &fx.registry,
             &fx.policy,
-            &fx.fs,
-            fx.process.as_ref(),
-            &fx.evidence,
+            ToolEffectPorts::new(
+                &fx.fs,
+                fx.process.as_ref(),
+                &fx.evidence,
+                &NO_RESOLVER,
+                &NO_HOP,
+                &NO_DUPLEX,
+            ),
             CanonPath::new("/ws"),
         );
         let refusing = model_with_reasoning(
@@ -3999,9 +4166,14 @@ mod turn {
         let tools = Tools::new(
             &fx.registry,
             &fx.policy,
-            &fx.fs,
-            fx.process.as_ref(),
-            &fx.evidence,
+            ToolEffectPorts::new(
+                &fx.fs,
+                fx.process.as_ref(),
+                &fx.evidence,
+                &NO_RESOLVER,
+                &NO_HOP,
+                &NO_DUPLEX,
+            ),
             CanonPath::new("/ws"),
         );
         let silent =
@@ -4038,9 +4210,14 @@ mod turn {
         let tools = Tools::new(
             &fx.registry,
             &fx.policy,
-            &fx.fs,
-            fx.process.as_ref(),
-            &fx.evidence,
+            ToolEffectPorts::new(
+                &fx.fs,
+                fx.process.as_ref(),
+                &fx.evidence,
+                &NO_RESOLVER,
+                &NO_HOP,
+                &NO_DUPLEX,
+            ),
             CanonPath::new("/ws"),
         );
         let mut turn = TurnLoop::new(
@@ -4110,9 +4287,14 @@ mod turn {
         let tools = Tools::new(
             &fx.registry,
             &fx.policy,
-            &fx.fs,
-            fx.process.as_ref(),
-            &fx.evidence,
+            ToolEffectPorts::new(
+                &fx.fs,
+                fx.process.as_ref(),
+                &fx.evidence,
+                &NO_RESOLVER,
+                &NO_HOP,
+                &NO_DUPLEX,
+            ),
             CanonPath::new("/ws"),
         );
         let mut turn = TurnLoop::new(
@@ -4188,9 +4370,14 @@ mod turn {
         let tools = Tools::new(
             &fx.registry,
             &fx.policy,
-            &fx.fs,
-            fx.process.as_ref(),
-            &fx.evidence,
+            ToolEffectPorts::new(
+                &fx.fs,
+                fx.process.as_ref(),
+                &fx.evidence,
+                &NO_RESOLVER,
+                &NO_HOP,
+                &NO_DUPLEX,
+            ),
             CanonPath::new("/ws"),
         );
         let mut turn = TurnLoop::new(
@@ -5017,9 +5204,14 @@ mod turn {
             let tools = Tools::new(
                 &fx.registry,
                 &fx.policy,
-                &fx.fs,
-                fx.process.as_ref(),
-                &fx.evidence,
+                ToolEffectPorts::new(
+                    &fx.fs,
+                    fx.process.as_ref(),
+                    &fx.evidence,
+                    &NO_RESOLVER,
+                    &NO_HOP,
+                    &NO_DUPLEX,
+                ),
                 CanonPath::new("/ws"),
             );
             let mut turn = TurnLoop::new(
@@ -5154,9 +5346,14 @@ mod turn {
             let tools = Tools::new(
                 &fx.registry,
                 &fx.policy,
-                &fx.fs,
-                fx.process.as_ref(),
-                &fx.evidence,
+                ToolEffectPorts::new(
+                    &fx.fs,
+                    fx.process.as_ref(),
+                    &fx.evidence,
+                    &NO_RESOLVER,
+                    &NO_HOP,
+                    &NO_DUPLEX,
+                ),
                 CanonPath::new("/ws"),
             );
             let mut turn = TurnLoop::new(
@@ -5270,9 +5467,14 @@ mod turn {
             let tools = Tools::new(
                 &fx.registry,
                 &fx.policy,
-                &fx.fs,
-                fx.process.as_ref(),
-                &fx.evidence,
+                ToolEffectPorts::new(
+                    &fx.fs,
+                    fx.process.as_ref(),
+                    &fx.evidence,
+                    &NO_RESOLVER,
+                    &NO_HOP,
+                    &NO_DUPLEX,
+                ),
                 CanonPath::new("/ws"),
             );
             let mut gate = fx.gate.borrow_mut();
@@ -5322,9 +5524,14 @@ mod turn {
                 let tools = Tools::new(
                     &fx.registry,
                     &fx.policy,
-                    &fx.fs,
-                    fx.process.as_ref(),
-                    &fx.evidence,
+                    ToolEffectPorts::new(
+                        &fx.fs,
+                        fx.process.as_ref(),
+                        &fx.evidence,
+                        &NO_RESOLVER,
+                        &NO_HOP,
+                        &NO_DUPLEX,
+                    ),
                     CanonPath::new("/ws"),
                 );
                 let mut gate = fx.gate.borrow_mut();
@@ -5377,9 +5584,14 @@ mod turn {
             let tools = Tools::new(
                 &fx.registry,
                 &fx.policy,
-                &fx.fs,
-                fx.process.as_ref(),
-                &fx.evidence,
+                ToolEffectPorts::new(
+                    &fx.fs,
+                    fx.process.as_ref(),
+                    &fx.evidence,
+                    &NO_RESOLVER,
+                    &NO_HOP,
+                    &NO_DUPLEX,
+                ),
                 CanonPath::new("/ws"),
             );
             let mut gate = fx.gate.borrow_mut();
@@ -5458,9 +5670,14 @@ mod turn {
             let tools = Tools::new(
                 &fx.registry,
                 &fx.policy,
-                &fx.fs,
-                fx.process.as_ref(),
-                &fx.evidence,
+                ToolEffectPorts::new(
+                    &fx.fs,
+                    fx.process.as_ref(),
+                    &fx.evidence,
+                    &NO_RESOLVER,
+                    &NO_HOP,
+                    &NO_DUPLEX,
+                ),
                 CanonPath::new("/ws"),
             );
             let mut turn = TurnLoop::new(
@@ -5545,9 +5762,14 @@ mod turn {
             let tools = Tools::new(
                 &fx.registry,
                 &fx.policy,
-                &fx.fs,
-                fx.process.as_ref(),
-                &fx.evidence,
+                ToolEffectPorts::new(
+                    &fx.fs,
+                    fx.process.as_ref(),
+                    &fx.evidence,
+                    &NO_RESOLVER,
+                    &NO_HOP,
+                    &NO_DUPLEX,
+                ),
                 CanonPath::new("/ws"),
             );
             let mut gate = fx.gate.borrow_mut();
@@ -5612,9 +5834,14 @@ mod turn {
             let tools = Tools::new(
                 &fx.registry,
                 &fx.policy,
-                &fx.fs,
-                fx.process.as_ref(),
-                &fx.evidence,
+                ToolEffectPorts::new(
+                    &fx.fs,
+                    fx.process.as_ref(),
+                    &fx.evidence,
+                    &NO_RESOLVER,
+                    &NO_HOP,
+                    &NO_DUPLEX,
+                ),
                 CanonPath::new("/ws"),
             );
             let mut turn = TurnLoop::new(
@@ -5672,9 +5899,14 @@ mod turn {
             let tools = Tools::new(
                 &fx.registry,
                 &fx.policy,
-                &fx.fs,
-                fx.process.as_ref(),
-                &fx.evidence,
+                ToolEffectPorts::new(
+                    &fx.fs,
+                    fx.process.as_ref(),
+                    &fx.evidence,
+                    &NO_RESOLVER,
+                    &NO_HOP,
+                    &NO_DUPLEX,
+                ),
                 CanonPath::new("/ws"),
             );
             let mut turn = TurnLoop::new(
@@ -5742,9 +5974,14 @@ mod turn {
                 let tools = Tools::new(
                     &fx.registry,
                     &fx.policy,
-                    &fx.fs,
-                    fx.process.as_ref(),
-                    &fx.evidence,
+                    ToolEffectPorts::new(
+                        &fx.fs,
+                        fx.process.as_ref(),
+                        &fx.evidence,
+                        &NO_RESOLVER,
+                        &NO_HOP,
+                        &NO_DUPLEX,
+                    ),
                     CanonPath::new("/ws"),
                 );
                 let mut turn = TurnLoop::new(
@@ -5835,9 +6072,14 @@ mod turn {
             let tools = Tools::new(
                 &fx.registry,
                 &fx.policy,
-                &fx.fs,
-                fx.process.as_ref(),
-                &fx.evidence,
+                ToolEffectPorts::new(
+                    &fx.fs,
+                    fx.process.as_ref(),
+                    &fx.evidence,
+                    &NO_RESOLVER,
+                    &NO_HOP,
+                    &NO_DUPLEX,
+                ),
                 CanonPath::new("/ws"),
             );
             let mut turn = TurnLoop::new(
@@ -5939,9 +6181,14 @@ mod turn {
             let tools = Tools::new(
                 &fx.registry,
                 &fx.policy,
-                &fx.fs,
-                fx.process.as_ref(),
-                &fx.evidence,
+                ToolEffectPorts::new(
+                    &fx.fs,
+                    fx.process.as_ref(),
+                    &fx.evidence,
+                    &NO_RESOLVER,
+                    &NO_HOP,
+                    &NO_DUPLEX,
+                ),
                 CanonPath::new("/ws"),
             );
             let mut turn = TurnLoop::new(

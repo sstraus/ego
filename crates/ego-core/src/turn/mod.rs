@@ -60,7 +60,7 @@ pub use control::{
 };
 pub use journal::Journal;
 use tools::PreparedToolCall;
-pub use tools::Tools;
+pub use tools::{ToolEffectPorts, Tools};
 
 /// The final model-visible registry. Only `Effect` enters preparation,
 /// permission policy, and guarded I/O; human input crosses its own typed port.

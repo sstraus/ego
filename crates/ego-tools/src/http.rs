@@ -1,7 +1,7 @@
 //! Run-owned DNS and exactly-one-hop HTTP adapters.
 
 use std::io;
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -103,9 +103,7 @@ impl Resolver for OneShotHttpTransport {
         deadline: Option<Instant>,
     ) -> BoxFuture<'static, Result<DnsResolution, TransportError>> {
         if self.offline {
-            return Box::pin(futures::future::ready(Err(definitely_unsent(
-                TransportFailure::Offline,
-            ))));
+            return Box::pin(futures::future::ready(offline_resolution(target)));
         }
         if self.cancel.is_cancelled() {
             return Box::pin(futures::future::ready(Err(definitely_unsent(
@@ -153,7 +151,7 @@ impl OneHop for OneShotHttpTransport {
         request: HttpRequest,
         deadline: Option<Instant>,
     ) -> BoxFuture<'static, Result<OneHopResponse, TransportError>> {
-        if self.offline {
+        if self.offline && !offline_connect_allowed(&connect) {
             return Box::pin(futures::future::ready(Err(definitely_unsent(
                 TransportFailure::Offline,
             ))));
@@ -184,6 +182,28 @@ impl OneHop for OneShotHttpTransport {
                 )))
             })?
         })
+    }
+}
+
+fn offline_resolution(target: NetworkTarget) -> Result<DnsResolution, TransportError> {
+    if target.host() != "localhost" {
+        return Err(definitely_unsent(TransportFailure::Offline));
+    }
+    DnsResolution::new(target, vec![IpAddr::V4(Ipv4Addr::LOCALHOST)])
+        .map_err(|error| definitely_unsent(TransportFailure::Resolution(error.to_string())))
+}
+
+fn offline_connect_allowed(connect: &ResolvedConnect) -> bool {
+    let target = connect.target();
+    let logical_loopback =
+        target.host() == "localhost" || target.ip().is_some_and(canonical_is_loopback);
+    logical_loopback && canonical_is_loopback(connect.selected())
+}
+
+fn canonical_is_loopback(address: IpAddr) -> bool {
+    match address {
+        IpAddr::V4(address) => address.is_loopback(),
+        IpAddr::V6(address) => address.to_canonical().is_loopback(),
     }
 }
 
@@ -370,3 +390,6 @@ impl reqwest::dns::Resolve for DenyFallbackResolver {
         })
     }
 }
+
+#[cfg(test)]
+mod tests;

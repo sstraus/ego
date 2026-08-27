@@ -21,8 +21,7 @@ use ego_core::event::domain::CancelCause;
 use ego_core::event::domain::EventKind;
 use ego_core::event::id::{Producer, SessionId};
 use ego_core::generation_model_source::{
-    GenerationModelError, GenerationModelErrorClass, GenerationModelSource, GenerationProfile,
-    GenerationRole,
+    GenerationModelError, GenerationModelErrorClass, GenerationProfile, GenerationRole,
 };
 use ego_core::generator::capabilities::ModelCapabilities;
 use ego_core::generator::types::ThinkingLevel;
@@ -43,11 +42,12 @@ use ego_core::state::{ItemKind, QuestionContinuation, SessionState};
 use ego_core::store::session_store::{SessionMeta, SessionStore};
 use ego_core::turn::{
     CancelToken, GenerationRuntime, InteractiveControl, Journal, JudgeContext, QueueStatus,
-    RegisteredTool, Session, Tools, TurnConfig, TurnLoop, TurnOutcome, interactive_control,
+    RegisteredTool, Session, ToolEffectPorts, Tools, TurnConfig, TurnLoop, TurnOutcome,
+    interactive_control,
 };
 use ego_tools::clock::SystemClock;
 use ego_tools::config::OsUserConfigStore;
-use ego_tools::exec::{ExecLimits, ExecRunConfig, GuardedExec, ProcessError};
+use ego_tools::exec::{ProcessError, RunEffectPorts};
 use ego_tools::fs::OsFs;
 use ego_tools::instructions::OsInstructionIo;
 use ego_tools::store::{JsonlStore, OsIo, SessionEvidenceStore};
@@ -61,6 +61,7 @@ use crate::models;
 use crate::output::{
     Diagnostics, InteractiveOutput, JsonlSink, Report, Stderr, Stdout, TextOutput, TextSink, note,
 };
+use crate::provider_http::{ProviderHttpAdapter, run_effect_ports};
 use crate::render::caps::{Capabilities, Environment, OscProfile, Terminal};
 use crate::render::osc::{Osc, Progress, State};
 use crate::session::{self, ActiveSession, Opened};
@@ -167,7 +168,7 @@ const GRACE: Duration = Duration::from_secs(5);
 
 /// Complete stdout or stderr beyond this per-stream bound fails the tool and
 /// terminates its process tree. Preview memory is bounded separately by
-/// [`ExecLimits`].
+/// [`ego_tools::exec::ExecLimits`].
 const EVIDENCE_CAP: u64 = 64 * 1024 * 1024;
 
 /// What the run produced, beyond how it ended.
@@ -781,11 +782,9 @@ fn capabilities(tools: &[RegisteredTool], instructions: bool, schema: bool) -> V
 /// Everything the command line and the config layers settle before this run
 /// touches a store, a provider, or a file of its own.
 struct Settings {
-    /// When the run began. `--timeout` is measured from here rather than from
-    /// the first turn, because the time a model took to resolve is time the
-    /// operator spent waiting for this command.
-    started: std::time::Instant,
-    timeout: Option<Duration>,
+    /// `--timeout`, measured from settings resolution rather than the first
+    /// turn so provider setup consumes the same absolute run budget.
+    run_deadline: Option<std::time::Instant>,
     /// The workspace root, and the directory relative paths resolve against.
     /// The same path today — [`workspace`] makes the root *be* the working
     /// directory — and two fields because they answer two questions.
@@ -818,6 +817,13 @@ fn rooted_settings(
         Some(spec) => Some(deadline(spec)?),
         None => None,
     };
+    let run_deadline = timeout
+        .map(|timeout| {
+            started
+                .checked_add(timeout)
+                .ok_or_else(|| UsageError("--timeout exceeds the monotonic clock".to_string()))
+        })
+        .transpose()?;
 
     // The workspace root is the working directory. Discovering a repository
     // root is `git`'s question and would make the answer depend on a tool that
@@ -857,8 +863,7 @@ fn rooted_settings(
     .map_err(|err| UsageError(err.to_string()))?;
 
     Ok(Settings {
-        started,
-        timeout,
+        run_deadline,
         root,
         cwd,
         confinement,
@@ -1045,7 +1050,7 @@ fn generation_refusal(error: GenerationModelError) -> RunTermination {
 }
 
 struct GenerationPreflight {
-    source: Arc<dyn GenerationModelSource>,
+    source: Arc<model::CliGenerationModelSource>,
     selection: Arc<model::GenerationSelection>,
     model: ego_core::config::ModelRef,
     capabilities: ModelCapabilities,
@@ -1055,12 +1060,50 @@ struct GenerationPreflight {
 }
 
 async fn generation_preflight(
-    args: &Args,
     session_id: SessionId,
     confinement: &RunConfinement,
     effective: &Effective,
     slug: String,
     cancel: &CancelToken,
+    run_deadline: Option<std::time::Instant>,
+    status: &mut Option<InteractiveStatus>,
+) -> Result<GenerationPreflight, RunTermination> {
+    let mut running = Box::pin(generation_preflight_inner(
+        session_id,
+        confinement,
+        effective,
+        slug,
+        cancel,
+        run_deadline,
+        status,
+    ));
+    tokio::select! {
+        biased;
+        cause = stop_signal(run_deadline) => {
+            cancel.cancel(cause);
+            let _ = running.as_mut().await;
+            Err(cancelled_termination(cancel))
+        }
+        result = &mut running => {
+            if run_deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
+                cancel.cancel(CancelCause::Timeout);
+            }
+            if cancel.is_cancelled() {
+                Err(cancelled_termination(cancel))
+            } else {
+                result
+            }
+        }
+    }
+}
+
+async fn generation_preflight_inner(
+    session_id: SessionId,
+    confinement: &RunConfinement,
+    effective: &Effective,
+    slug: String,
+    cancel: &CancelToken,
+    run_deadline: Option<std::time::Instant>,
     status: &mut Option<InteractiveStatus>,
 ) -> Result<GenerationPreflight, RunTermination> {
     let proof_directory = tempfile::tempdir().map_err(|error| RunTermination::Failed {
@@ -1072,8 +1115,9 @@ async fn generation_preflight(
                 message: format!("could not open the sandbox proof store: {error}"),
             },
         )?;
-    let (proof, proof_observation) = guarded_exec(confinement, &proof_evidence, cancel).await?;
-    drop(proof);
+    let (proof_ports, proof_observation) =
+        effect_scope(confinement, &proof_evidence, cancel, run_deadline).await?;
+    let http = Arc::new(ProviderHttpAdapter::new(proof_ports)) as Arc<dyn ego_ai::http::Http>;
 
     let mode = effective.mode.unwrap_or(Mode::Default);
     let judge_identity = if mode == Mode::Auto {
@@ -1089,25 +1133,24 @@ async fn generation_preflight(
     } else {
         None
     };
-    let source = model::CliGenerationModelSource::new(
+    let source = Arc::new(model::CliGenerationModelSource::new(
         ego_core::config::ModelRef(slug),
         effective.thinking.unwrap_or(ThinkingLevel::Off),
         judge_identity,
         effective.ceilings.clone(),
         effective.auth.clone(),
-        args.offline,
-    )
-    .map_err(|error| RunTermination::Provider {
-        message: error.to_string(),
-    })?;
+    ));
     let selection = source.selection();
     if status.as_ref().is_some_and(|status| status.human) {
         let catalogue_snapshot = Arc::new(
-            models::build_catalogue_snapshot(&ModelsArgs {
-                provider: None,
-                refresh: false,
-                json: false,
-            })
+            models::build_catalogue_snapshot(
+                &ModelsArgs {
+                    provider: None,
+                    refresh: false,
+                    json: false,
+                },
+                &http,
+            )
             .await?,
         );
         let home = config::ego_home().ok_or_else(|| RunTermination::Failed {
@@ -1141,8 +1184,8 @@ async fn generation_preflight(
             "the run retains the installed picker"
         );
     }
-    let source: Arc<dyn GenerationModelSource> = Arc::new(source);
-    let main = source
+    let bound = source.bind(Arc::clone(&http), cancel.clone(), run_deadline);
+    let main = bound
         .resolve(GenerationRole::Main)
         .await
         .map_err(generation_refusal)?;
@@ -1150,7 +1193,7 @@ async fn generation_preflight(
     let capabilities = main.capabilities.clone();
     let judge_enabled = mode == Mode::Auto;
     if judge_enabled {
-        let judge = source
+        let judge = bound
             .resolve(GenerationRole::Judge)
             .await
             .map_err(generation_refusal)?;
@@ -1168,37 +1211,38 @@ async fn generation_preflight(
     })
 }
 
-/// Build the process boundary for one cancellation scope.
+/// Build the complete effect boundary for one cancellation scope.
 ///
 /// A backend that cannot demonstrate a requested guarantee is a startup usage
 /// refusal (exit 2), not an internal error and never a silent downgrade.
-async fn guarded_exec(
+async fn effect_scope(
     confinement: &RunConfinement,
     evidence: &SessionEvidenceStore,
     cancel: &CancelToken,
-) -> Result<(Arc<GuardedExec>, ExecObservation), RunTermination> {
-    let config = ExecRunConfig::new(
+    run_deadline: Option<std::time::Instant>,
+) -> Result<(Arc<RunEffectPorts>, ExecObservation), RunTermination> {
+    run_effect_ports(
         confinement.clone(),
         evidence.clone(),
         cancel.clone(),
-        ExecLimits::default(),
-    );
-    GuardedExec::for_run(config)
-        .await
-        .map_err(|err| match &err {
-            ProcessError::MissingCapabilities(_) | ProcessError::Backend(_) => {
-                RunTermination::UsageError {
-                    message: err.to_string(),
-                }
-            }
-            ProcessError::Cancelled => cancelled_termination(cancel),
-            _ => RunTermination::Failed {
+        run_deadline,
+    )
+    .await
+    .map_err(|err| match &err {
+        ProcessError::MissingCapabilities(_) | ProcessError::Backend(_) => {
+            RunTermination::UsageError {
                 message: err.to_string(),
-            },
-        })
+            }
+        }
+        ProcessError::Cancelled => cancelled_termination(cancel),
+        _ => RunTermination::Failed {
+            message: err.to_string(),
+        },
+    })
 }
 
-fn cancelled_termination(cancel: &CancelToken) -> RunTermination {
+/// Map the first latched cancellation cause to the CLI termination contract.
+pub fn cancelled_termination(cancel: &CancelToken) -> RunTermination {
     match cancel.cause() {
         Some(CancelCause::Timeout) => RunTermination::TimedOut,
         Some(CancelCause::User) => RunTermination::Signalled(Signal::Int),
@@ -1218,7 +1262,7 @@ async fn drive_headless_turn(
     clock: &SystemClock,
     sink: &dyn EventSink,
     cancel: &CancelToken,
-    source: Arc<dyn GenerationModelSource>,
+    source: Arc<model::CliGenerationModelSource>,
     effective: &Effective,
     config: TurnConfig,
     turns: &Turns<'_>,
@@ -1226,6 +1270,7 @@ async fn drive_headless_turn(
     policy: &PolicyEngine,
     cwd: &Path,
     confinement: &RunConfinement,
+    run_deadline: Option<std::time::Instant>,
     elicitor: Option<Arc<dyn Elicitor>>,
     judge_enabled: bool,
     input: HeadlessInput<'_>,
@@ -1233,8 +1278,11 @@ async fn drive_headless_turn(
 ) -> Result<(RunTermination, SessionState, Value), RunTermination> {
     let currency = CurrencyCode::new(SETTLEMENT).expect("a controlled currency");
     let mut gate = budget::gate(&effective.ceilings, effective.clamped.money, currency);
-    let (process, observation) = guarded_exec(confinement, active.evidence(), cancel).await?;
+    let (ports, observation) =
+        effect_scope(confinement, active.evidence(), cancel, run_deadline).await?;
     let execution_capabilities = observation.capabilities();
+    let http =
+        Arc::new(ProviderHttpAdapter::new(Arc::clone(&ports))) as Arc<dyn ego_ai::http::Http>;
     let session = Session {
         id: active.id(),
         state: opening,
@@ -1244,7 +1292,7 @@ async fn drive_headless_turn(
         cancel: cancel.clone(),
     };
     let runtime = GenerationRuntime {
-        source,
+        source: source.bind(http, cancel.clone(), run_deadline),
         gate: &mut gate,
         config,
     };
@@ -1252,9 +1300,14 @@ async fn drive_headless_turn(
     let tools = Tools::from_registry(
         registry,
         policy,
-        &fs,
-        process.as_ref(),
-        active.evidence(),
+        ToolEffectPorts::new(
+            &fs,
+            ports.process(),
+            active.evidence(),
+            ports.resolver(),
+            ports.one_hop(),
+            ports.duplex(),
+        ),
         CanonPath::new(cwd),
     );
     let loop_ = TurnLoop::new(session, runtime, tools);
@@ -1288,8 +1341,7 @@ pub struct CliPrepared {
     session_id: SessionId,
     schema_retries: u32,
     max_turns: Option<u32>,
-    started: std::time::Instant,
-    timeout: Option<Duration>,
+    run_deadline: Option<std::time::Instant>,
     root: PathBuf,
     cwd: PathBuf,
     confinement: RunConfinement,
@@ -1297,7 +1349,7 @@ pub struct CliPrepared {
     system: Option<SystemPrompt>,
     registry: Vec<RegisteredTool>,
     compiled: Option<schema::Schema>,
-    source: Arc<dyn GenerationModelSource>,
+    source: Arc<model::CliGenerationModelSource>,
     capabilities: ModelCapabilities,
     judge_enabled: bool,
     proof_directory: tempfile::TempDir,
@@ -1332,8 +1384,7 @@ impl CliPrepared {
             slug,
         } = prepared_materials(&settings, &args, String::new(), &Stderr).map_err(usage)?;
         let Settings {
-            started,
-            timeout,
+            run_deadline,
             root,
             cwd,
             confinement,
@@ -1351,12 +1402,12 @@ impl CliPrepared {
             proof_directory,
             proof_evidence,
         } = generation_preflight(
-            &args,
             request.run_id.session_id(),
             &confinement,
             &effective,
             slug,
             &proof_cancel,
+            run_deadline,
             &mut no_status,
         )
         .await?;
@@ -1370,8 +1421,7 @@ impl CliPrepared {
                 session_id: request.run_id.session_id(),
                 schema_retries,
                 max_turns,
-                started,
-                timeout,
+                run_deadline,
                 root,
                 cwd,
                 confinement,
@@ -1442,8 +1492,7 @@ impl CliPrepared {
             schema: self.compiled.as_ref(),
             retries: self.schema_retries,
             max_turns: self.max_turns,
-            timeout: self.timeout,
-            started: self.started,
+            deadline: self.run_deadline,
         };
         let (termination, state, _) = match drive_headless_turn(
             &mut active,
@@ -1459,6 +1508,7 @@ impl CliPrepared {
             &policy,
             &self.cwd,
             &self.confinement,
+            self.run_deadline,
             bindings.elicitor,
             self.judge_enabled,
             HeadlessInput::Prompt(prompt),
@@ -1779,8 +1829,7 @@ async fn execute<S: EventSink>(
     }
 
     let Settings {
-        started,
-        timeout,
+        run_deadline,
         root,
         cwd,
         confinement,
@@ -1796,12 +1845,12 @@ async fn execute<S: EventSink>(
         proof_directory,
         proof_evidence,
     } = generation_preflight(
-        &args,
         session_id,
         &confinement,
         &effective,
         slug,
         &cancel,
+        run_deadline,
         &mut status,
     )
     .await?;
@@ -1917,8 +1966,7 @@ async fn execute<S: EventSink>(
         schema: compiled.as_ref(),
         retries: args.schema_retries,
         max_turns: args.max_turns,
-        timeout,
-        started,
+        deadline: run_deadline,
     };
 
     // One turn's worth of loop, built from the state the last one left behind.
@@ -1934,7 +1982,7 @@ async fn execute<S: EventSink>(
     // A macro and not a closure: the loop borrows from this function's locals,
     // and a closure cannot name the lifetime of a `TurnLoop<'_>` it returns.
     macro_rules! build {
-        ($active:expr, $state:expr, $cancel:expr, $process:expr, $observation:expr) => {{
+        ($active:expr, $state:expr, $cancel:expr, $ports:expr, $observation:expr) => {{
             let session = Session {
                 id: $active.id(),
                 state: $state,
@@ -1943,17 +1991,24 @@ async fn execute<S: EventSink>(
                 sink,
                 cancel: $cancel.clone(),
             };
+            let http = Arc::new(ProviderHttpAdapter::new(Arc::clone(&$ports)))
+                as Arc<dyn ego_ai::http::Http>;
             let runtime = GenerationRuntime {
-                source: Arc::clone(&source),
+                source: source.bind(http, $cancel.clone(), run_deadline),
                 gate: &mut gate,
                 config: config.clone(),
             };
             let tools = Tools::from_registry(
                 &registry,
                 &policy,
-                &fs,
-                $process.as_ref(),
-                $active.evidence(),
+                ToolEffectPorts::new(
+                    &fs,
+                    $ports.process(),
+                    $active.evidence(),
+                    $ports.resolver(),
+                    $ports.one_hop(),
+                    $ports.duplex(),
+                ),
                 CanonPath::new(&cwd),
             );
             let loop_ = TurnLoop::new(session, runtime, tools);
@@ -1999,6 +2054,7 @@ async fn execute<S: EventSink>(
                 &policy,
                 &cwd,
                 &confinement,
+                run_deadline,
                 elicitor,
                 judge_enabled,
                 input,
@@ -2112,11 +2168,15 @@ async fn execute<S: EventSink>(
                                 .collect();
 
                             let compaction_cancel = CancelToken::new();
-                            let (process, observation) =
-                                guarded_exec(&confinement, active.evidence(), &compaction_cancel)
-                                    .await?;
+                            let (ports, observation) = effect_scope(
+                                &confinement,
+                                active.evidence(),
+                                &compaction_cancel,
+                                run_deadline,
+                            )
+                            .await?;
                             let mut compaction =
-                                build!(active, state, &compaction_cancel, process, observation)
+                                build!(active, state, &compaction_cancel, ports, observation)
                                     .with_interactive_control(&mut control);
                             let prepared = compaction
                                 .prepare_compaction(target_system.clone(), target_tools)
@@ -2253,9 +2313,10 @@ async fn execute<S: EventSink>(
                 // Per turn, for the reason `build` documents.
                 seat.busy();
                 let turn_cancel = CancelToken::new();
-                let (process, observation) =
-                    guarded_exec(&confinement, active.evidence(), &turn_cancel).await?;
-                let mut loop_ = build!(active, state, &turn_cancel, process, observation)
+                let (ports, observation) =
+                    effect_scope(&confinement, active.evidence(), &turn_cancel, run_deadline)
+                        .await?;
+                let mut loop_ = build!(active, state, &turn_cancel, ports, observation)
                     .with_interactive_control(&mut control);
                 let driven = match resumed_turn {
                     Some(turn) => {
@@ -2449,11 +2510,15 @@ struct Turns<'a> {
     schema: Option<&'a schema::Schema>,
     retries: u32,
     max_turns: Option<u32>,
-    timeout: Option<Duration>,
-    started: std::time::Instant,
+    deadline: Option<std::time::Instant>,
 }
 
 impl Turns<'_> {
+    fn deadline_expired(&self) -> bool {
+        self.deadline
+            .is_some_and(|deadline| std::time::Instant::now() >= deadline)
+    }
+
     async fn drive(
         &self,
         loop_: &mut TurnLoop<'_>,
@@ -2561,30 +2626,36 @@ impl Turns<'_> {
         prompt: &str,
         cancel: &CancelToken,
     ) -> Result<TurnOutcome, RunTermination> {
-        let remaining = self
-            .timeout
-            .map(|budget| budget.saturating_sub(self.started.elapsed()));
-
-        let outcome = {
+        let (outcome, stopped) = {
             let mut running = Box::pin(loop_.run(prompt));
             let mut stopped = false;
             loop {
                 if stopped {
                     tokio::select! {
-                        done = &mut running => break Some(done),
-                        () = tokio::time::sleep(GRACE) => break None,
+                        done = &mut running => break (Some(done), stopped),
+                        () = tokio::time::sleep(GRACE) => break (None, stopped),
                     }
                 }
                 tokio::select! {
-                    done = &mut running => break Some(done),
-                    cause = stop_signal(remaining) => {
+                    biased;
+                    cause = stop_signal(self.deadline) => {
                         cancel.cancel(cause);
                         stopped = true;
+                    }
+                    done = &mut running => {
+                        if self.deadline_expired() {
+                            cancel.cancel(CancelCause::Timeout);
+                            stopped = true;
+                        }
+                        break (Some(done), stopped);
                     }
                 }
             }
         };
 
+        if stopped {
+            return Err(cancelled_termination(cancel));
+        }
         match outcome {
             Some(Ok(outcome)) => Ok(outcome),
             Some(Err(abandoned)) => Err(RunTermination::Failed {
@@ -2607,28 +2678,35 @@ impl Turns<'_> {
         turn: ego_core::event::id::TurnId,
         cancel: &CancelToken,
     ) -> Result<TurnOutcome, RunTermination> {
-        let remaining = self
-            .timeout
-            .map(|budget| budget.saturating_sub(self.started.elapsed()));
-        let outcome = {
+        let (outcome, stopped) = {
             let mut running = Box::pin(loop_.resume_turn(turn));
             let mut stopped = false;
             loop {
                 if stopped {
                     tokio::select! {
-                        done = &mut running => break Some(done),
-                        () = tokio::time::sleep(GRACE) => break None,
+                        done = &mut running => break (Some(done), stopped),
+                        () = tokio::time::sleep(GRACE) => break (None, stopped),
                     }
                 }
                 tokio::select! {
-                    done = &mut running => break Some(done),
-                    cause = stop_signal(remaining) => {
+                    biased;
+                    cause = stop_signal(self.deadline) => {
                         cancel.cancel(cause);
                         stopped = true;
+                    }
+                    done = &mut running => {
+                        if self.deadline_expired() {
+                            cancel.cancel(CancelCause::Timeout);
+                            stopped = true;
+                        }
+                        break (Some(done), stopped);
                     }
                 }
             }
         };
+        if stopped {
+            return Err(cancelled_termination(cancel));
+        }
         match outcome {
             Some(Ok(outcome)) => Ok(outcome),
             Some(Err(abandoned)) => Err(RunTermination::Failed {
@@ -2650,10 +2728,10 @@ impl Turns<'_> {
 /// this returns the cause rather than the fact — and `CancelToken` keeps the
 /// first one, so a deadline that expires a moment after the user pressed
 /// Ctrl-C does not rewrite what happened.
-async fn stop_signal(remaining: Option<Duration>) -> CancelCause {
+pub async fn stop_signal(deadline: Option<std::time::Instant>) -> CancelCause {
     let deadline = async {
-        match remaining {
-            Some(left) => tokio::time::sleep(left).await,
+        match deadline {
+            Some(deadline) => tokio::time::sleep_until(deadline.into()).await,
             // Nothing to wait for; never resolves, so `select!` ignores it.
             None => std::future::pending().await,
         }

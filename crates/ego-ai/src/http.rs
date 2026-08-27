@@ -342,10 +342,7 @@ fn has_userinfo(url: &Url) -> bool {
     url.as_str()
         .strip_prefix(url.scheme())
         .and_then(|rest| rest.strip_prefix("://"))
-        .and_then(|rest| {
-            rest.split(|character| matches!(character, '/' | '?' | '#'))
-                .next()
-        })
+        .and_then(|rest| rest.split(['/', '?', '#']).next())
         .is_some_and(|authority| authority.contains('@'))
 }
 

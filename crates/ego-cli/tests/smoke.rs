@@ -43,20 +43,31 @@
 //! is why the offline suite and the live check cannot drift: one writes what
 //! the other reads.
 
-use std::sync::Arc;
+use std::mem;
+use std::sync::{Arc, Mutex};
 
-use ego_ai::http::{EgressPolicy, Http, HttpRequest, HttpResponse, ReqwestHttp};
+use ego_ai::generator::WireGenerator;
+use ego_ai::http::{Http, HttpCall, HttpRequest, PreparedHttpCall};
 use ego_ai::provider::{Credentials, ProviderRow};
 use ego_ai::wire::RequestTarget;
+use ego_cli::provider_http::ProviderHttpAdapter;
 use ego_core::budget::{BudgetGate, Metering, PricingQuote};
 use ego_core::cost::{Amount, CurrencyCode, Money, PricingRevision};
+use ego_core::event::id::SessionId;
+use ego_core::generator::attempt::GenerationAttempt;
 use ego_core::generator::capabilities::{
     CacheRetention, CancelSemantics, ModelCapabilities, ReasoningCarryover, ReasoningEffortSupport,
     Transport,
 };
-use ego_core::generator::port::AiEvent;
+use ego_core::generator::port::{AiEvent, Generator};
 use ego_core::generator::types::{GenRequest, StopReason};
+use ego_core::permit::{CanonPath, Confinement, OneHopResponse, RunConfinement, TransportError};
+use ego_core::turn::CancelToken;
+use ego_tools::exec::{ExecLimits, ExecRunConfig, HttpCallTimeout, RunEffectPorts};
+use ego_tools::http::SystemResolver;
+use ego_tools::store::SessionEvidenceStore;
 use futures::StreamExt;
+use futures::future::BoxFuture;
 
 #[path = "../../ego-ai/tests/profiles/mod.rs"]
 mod profiles;
@@ -154,16 +165,16 @@ fn built(row: &ProviderRow, creds: &dyn Credentials, req: &GenRequest) -> HttpRe
     let credential = row
         .credential
         .resolve(creds)
-        .unwrap_or_else(|err| panic!("{} was asked for by name: {err}", row.id));
+        .unwrap_or_else(|err| panic!("{} was asked for by name: {err}", row.id()));
     let mut headers = credential.headers();
     for (name, value) in &row.extra_headers {
         headers.retain(|(present, _)| !present.eq_ignore_ascii_case(name));
         headers.push((name.clone(), value.clone()));
     }
-    let target = RequestTarget::new(credential.base_override().unwrap_or(&row.base), &headers);
+    let target = RequestTarget::new(credential.base_override().unwrap_or(row.base()), &headers);
     row.wire
         .build_request(&target, req)
-        .unwrap_or_else(|refused| panic!("{}: {refused}", row.id))
+        .unwrap_or_else(|refused| panic!("{}: {refused}", row.id()))
 }
 
 /// Prove the spend is bounded *before* anything is sent.
@@ -184,39 +195,146 @@ fn bounded(req: &GenRequest, metering: &Metering) {
         });
 }
 
-/// One request, sent for real, with the raw bytes kept.
-async fn send(http: &dyn Http, request: HttpRequest) -> (u16, String) {
-    let response: HttpResponse = http
-        .execute(request)
-        .await
-        .unwrap_or_else(|err| panic!("the transport failed before the provider answered: {err}"));
-    let status = response.status;
-    let mut body = Vec::new();
-    let mut chunks = response.body;
-    while let Some(chunk) = chunks.next().await {
-        let bytes = chunk.unwrap_or_else(|err| panic!("the stream was cut: {err}"));
-        body.extend_from_slice(&bytes);
+/// The observed response remains a test concern; the adapter still owns the
+/// one-shot capability and returns the original typed response untouched.
+#[derive(Default)]
+struct ObservedResponse {
+    status: Option<u16>,
+    body: Vec<u8>,
+}
+
+struct RecordingHttp {
+    inner: Arc<dyn Http>,
+    observed: Arc<Mutex<ObservedResponse>>,
+}
+
+impl Http for RecordingHttp {
+    fn begin_call(&self) -> Box<dyn HttpCall> {
+        Box::new(RecordingHttpCall {
+            inner: self.inner.begin_call(),
+            observed: Arc::clone(&self.observed),
+        })
     }
-    (status, String::from_utf8_lossy(&body).into_owned())
 }
 
-/// The events this profile's mapping produces for `transcript`.
-async fn replay(row: &ProviderRow, transcript: &str) -> Vec<AiEvent> {
-    let response = Ok(HttpResponse {
-        status: 200,
-        headers: vec![("content-type".to_string(), "text/event-stream".to_string())],
-        body: Box::pin(futures::stream::once({
-            let bytes = bytes::Bytes::copy_from_slice(transcript.as_bytes());
-            async move { Ok(bytes) }
-        })),
-    });
-    row.wire.decode(response, row.cost.clone()).collect().await
+struct RecordingHttpCall {
+    inner: Box<dyn HttpCall>,
+    observed: Arc<Mutex<ObservedResponse>>,
 }
 
-fn transport() -> Arc<dyn Http> {
-    Arc::new(
-        ReqwestHttp::new(EgressPolicy::Unrestricted)
-            .unwrap_or_else(|err| panic!("no transport could be built: {err}")),
+impl HttpCall for RecordingHttpCall {
+    fn execute(
+        &mut self,
+        call: PreparedHttpCall,
+    ) -> BoxFuture<'static, Result<OneHopResponse, TransportError>> {
+        let observed = Arc::clone(&self.observed);
+        let future = self.inner.execute(call);
+        Box::pin(async move {
+            let mut response = future.await?;
+            observed.lock().expect("response recorder lock").status = Some(response.status());
+            let body = response
+                .body()
+                .map(|slot| mem::replace(slot, Box::pin(futures::stream::empty())));
+            if let Some(body) = body {
+                let observed_body = Arc::clone(&observed);
+                let body = body.map(move |chunk| {
+                    if let Ok(bytes) = &chunk {
+                        observed_body
+                            .lock()
+                            .expect("response recorder lock")
+                            .body
+                            .extend_from_slice(bytes);
+                    }
+                    chunk
+                });
+                *response.body().expect("response body remains present") = Box::pin(body);
+            }
+            Ok(response)
+        })
+    }
+}
+
+struct SmokeTransport {
+    _evidence_root: tempfile::TempDir,
+    http: Arc<dyn Http>,
+}
+
+impl SmokeTransport {
+    async fn new() -> SmokeTransport {
+        let workspace = std::env::current_dir().expect("workspace");
+        let confinement = RunConfinement::new(Confinement::Off, false, CanonPath::new(&workspace))
+            .expect("online confinement");
+        let evidence_root = tempfile::tempdir().expect("evidence directory");
+        let evidence =
+            SessionEvidenceStore::open(evidence_root.path(), SessionId::new(), 64 * 1024 * 1024)
+                .expect("evidence store");
+        let config = ExecRunConfig::new(
+            confinement,
+            evidence,
+            CancelToken::new(),
+            ExecLimits::default(),
+            HttpCallTimeout::default(),
+            None,
+            Arc::new(SystemResolver::new()),
+        );
+        let (ports, _) = RunEffectPorts::for_run(config).await.expect("effect ports");
+        let http = Arc::new(ProviderHttpAdapter::new(Arc::new(ports))) as Arc<dyn Http>;
+        SmokeTransport {
+            _evidence_root: evidence_root,
+            http,
+        }
+    }
+}
+
+fn attempt_for(gate: &mut BudgetGate, req: &GenRequest, metering: &Metering) -> GenerationAttempt {
+    let quote = match metering {
+        Metering::Unmetered { .. } => None,
+        _ => Some(pessimistic_quote()),
+    };
+    let reservation = gate
+        .reserve(metering, quote.as_ref(), req, &caps())
+        .unwrap_or_else(|err| panic!("smoke request was not admitted: {err:?}"));
+    GenerationAttempt::new(
+        ego_core::event::id::GenerationId::new(),
+        reservation,
+        metering,
+        quote.as_ref(),
+        req,
+        &caps(),
+    )
+    .expect("attempt matches its reservation")
+}
+
+/// One request, sent through the final generator/adapter boundary, with the
+/// raw response body retained for the optional live recording.
+async fn send(
+    row: &ProviderRow,
+    creds: &dyn Credentials,
+    req: GenRequest,
+    metering: &Metering,
+    http: Arc<dyn Http>,
+) -> (Option<u16>, String, Vec<AiEvent>, String) {
+    let request = built(row, creds, &req);
+    let request_json = request_fixture(&request);
+    let credential = row
+        .credential
+        .resolve(creds)
+        .unwrap_or_else(|err| panic!("{} was asked for by name: {err}", row.id()));
+    let observed = Arc::new(Mutex::new(ObservedResponse::default()));
+    let recording = RecordingHttp {
+        inner: http,
+        observed: Arc::clone(&observed),
+    };
+    let generator = WireGenerator::new(row.clone(), Arc::new(recording), credential);
+    let mut gate = BudgetGate::new(usd("0.05"));
+    let attempt = attempt_for(&mut gate, &req, metering);
+    let events: Vec<AiEvent> = generator.generate(req, attempt).collect().await;
+    let observed = observed.lock().expect("response recorder lock");
+    (
+        observed.status,
+        String::from_utf8_lossy(&observed.body).into_owned(),
+        events,
+        request_json,
     )
 }
 
@@ -254,23 +372,26 @@ async fn smoke(profile: &Profile, when: &str) {
     let command = auth
         .get(profile.id)
         .and_then(|provider| provider.credential_command.as_deref());
-    let creds = ego_cli::auth::request_credentials(profile.id, command, false)
+    let transport = SmokeTransport::new().await;
+    let creds = ego_cli::auth::request_credentials(profile.id, command, transport.http.as_ref())
         .await
         .unwrap_or_else(|err| panic!("{} credential preparation failed: {err}", profile.id));
-    let http = transport();
+    let http = Arc::clone(&transport.http);
 
     // --- check 5, for the canonical body ---
     let req = canonical(profile);
     bounded(&req, &profile.metering());
-    let request = built(&row, creds.as_ref(), &req);
-    // The fixture is taken from the request before it is sent, because an
-    // `HttpRequest` is not `Clone` — and it must not become one: a request
-    // carries a credential, and a type that can be duplicated is a credential
-    // that can be left in a second place.
-    let request_json = request_fixture(&request);
-    let (status, transcript) = send(http.as_ref(), request).await;
+    let (status, transcript, events, request_json) = send(
+        &row,
+        creds.as_ref(),
+        req,
+        &profile.metering(),
+        Arc::clone(&http),
+    )
+    .await;
     assert_eq!(
-        status, 200,
+        status,
+        Some(200),
         "{} refused the body this build sends: {transcript}",
         profile.id
     );
@@ -278,7 +399,6 @@ async fn smoke(profile: &Profile, when: &str) {
     // The acceptance claim is narrow on purpose: a 200 proves the server took
     // the request, never that it did what the request said. What is asserted
     // beyond the status is only what the bytes themselves show.
-    let events = replay(&row, &transcript).await;
     let stops: Vec<StopReason> = events
         .iter()
         .filter_map(|event| match event {
@@ -313,8 +433,15 @@ async fn smoke(profile: &Profile, when: &str) {
     // --- the tool-calling transcript ---
     let tools = tool_calling(profile);
     bounded(&tools, &profile.metering());
-    let (status, tool_transcript) = send(http.as_ref(), built(&row, creds.as_ref(), &tools)).await;
-    assert_eq!(status, 200, "{}: {tool_transcript}", profile.id);
+    let (status, tool_transcript, _, _) = send(
+        &row,
+        creds.as_ref(),
+        tools,
+        &profile.metering(),
+        Arc::clone(&http),
+    )
+    .await;
+    assert_eq!(status, Some(200), "{}: {tool_transcript}", profile.id);
     write(
         profile,
         "stream",
@@ -331,7 +458,9 @@ async fn smoke(profile: &Profile, when: &str) {
         model: "this-model-does-not-exist".to_string(),
         ..canonical(profile)
     };
-    let (status, error_body) = send(http.as_ref(), built(&row, creds.as_ref(), &absent)).await;
+    let (status, error_body, _, _) =
+        send(&row, creds.as_ref(), absent, &profile.metering(), http).await;
+    let status = status.expect("the provider answered the invalid model");
     assert_ne!(
         status, 200,
         "{} answered 200 for a model that does not exist",
