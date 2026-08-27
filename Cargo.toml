@@ -4,6 +4,7 @@ members = [
     "crates/ego-ai",
     "crates/ego-tools",
     "crates/ego-acp",
+    "crates/ego-mcp",
     "crates/ego-cli",
 ]
 exclude = ["vendor/reedline"]
@@ -38,6 +39,7 @@ publish = false
 
 [workspace.dependencies]
 ego-core = { path = "crates/ego-core" }
+ego-mcp = { path = "crates/ego-mcp" }
 
 [workspace.lints.rust]
 unsafe_code = "deny"
