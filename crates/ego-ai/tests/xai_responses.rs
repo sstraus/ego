@@ -16,6 +16,7 @@ use ego_core::generator::types::{
     ContentBlock, Conversation, GenRequest, Message, ReasoningState, Role, StopReason,
     ThinkingLevel, ToolDescriptor,
 };
+use ego_core::permit::HttpHeader;
 use futures::StreamExt;
 use url::Url;
 
@@ -43,7 +44,9 @@ async fn decode(sse: &str) -> Vec<AiEvent> {
         .decode(
             Ok(HttpResponse {
                 status: 200,
-                headers: vec![("content-type".to_string(), "text/event-stream".to_string())],
+                headers: vec![
+                    HttpHeader::new("content-type", b"text/event-stream".to_vec()).expect("header"),
+                ],
                 body: Box::pin(futures::stream::iter(
                     sse.as_bytes()
                         .chunks(11)
@@ -315,7 +318,7 @@ async fn non_2xx_uses_the_shared_three_event_failure_contract() {
 fn xai_oauth_row_selects_xai_responses_and_cost_ticks() {
     let row = ProviderRow::xai_oauth_default();
     assert_eq!(format!("{:?}", row.wire), "XaiResponses");
-    assert_eq!(row.base.as_str(), "https://api.x.ai/v1/");
+    assert_eq!(row.base().as_str(), "https://api.x.ai/v1/");
     assert_eq!(
         row.cost
             .as_ref()

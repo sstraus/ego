@@ -1210,3 +1210,150 @@ pub fn decode(
     };
     super::decode_response(response, Box::new(decoder))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::http::{HttpResponse, test_http_error};
+    use ego_core::generator::attempt::DeliveryCertainty;
+    use ego_core::permit::{TransportError, TransportFailure};
+    use futures::StreamExt;
+
+    const TEXT_TRANSCRIPT: &str =
+        include_str!("../../tests/goldens/profile/openai/stream/text.sse");
+
+    #[test]
+    fn a_stream_cut_mid_frame_is_an_error_and_not_a_short_answer() {
+        let marker = "openai raw exchange marker";
+        let cut = &TEXT_TRANSCRIPT.as_bytes()[..TEXT_TRANSCRIPT.len() / 2];
+        let mut decoder = StreamDecoder::default();
+        let mut events = decoder.push(cut);
+        events.extend(
+            decoder.finish(Some(test_http_error(TransportError::possibly_sent(
+                TransportFailure::Exchange(marker.to_owned()),
+            )))),
+        );
+
+        assert!(
+            events.contains(&AiEvent::DeliveryObserved(DeliveryCertainty::PossiblySent)),
+            "a cut stream may already have been billed, so a retry is the caller's \
+             decision to take knowingly: {events:?}"
+        );
+        assert_eq!(events.last(), Some(&AiEvent::Stop(StopReason::Error)));
+        let explained = events.iter().any(|event| match event {
+            AiEvent::Error { message, .. } => {
+                message.contains("HTTP exchange failed") && !message.contains(marker)
+            }
+            _ => false,
+        });
+        assert!(
+            explained,
+            "the safe transport class must survive without raw detail: {events:?}"
+        );
+    }
+
+    #[test]
+    fn a_cut_after_the_finish_reason_is_a_complete_turn_with_no_usage() {
+        let upto = TEXT_TRANSCRIPT
+            .find("\"finish_reason\":\"stop\"")
+            .map(|at| TEXT_TRANSCRIPT[at..].find("\n\n").expect("the frame ends") + at + 2)
+            .expect("the transcript has a finish_reason");
+        let mut decoder = StreamDecoder::default();
+        let mut events = decoder.push(&TEXT_TRANSCRIPT.as_bytes()[..upto]);
+        events.extend(
+            decoder.finish(Some(test_http_error(TransportError::possibly_sent(
+                TransportFailure::Exchange("openai decoder marker".to_owned()),
+            )))),
+        );
+
+        assert_eq!(events.last(), Some(&AiEvent::Stop(StopReason::Stop)));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AiEvent::Error { .. })),
+            "the model finished; the transport failing afterwards is not the turn \
+             failing: {events:?}"
+        );
+        assert!(
+            !events.iter().any(|e| matches!(e, AiEvent::Usage(_))),
+            "no usage arrived, and none may be invented: {events:?}"
+        );
+    }
+
+    #[test]
+    fn a_request_that_never_left_says_so() {
+        let events = StreamDecoder::default().finish(Some(test_http_error(
+            TransportError::definitely_unsent(TransportFailure::Offline),
+        )));
+
+        assert_eq!(
+            events.first(),
+            Some(&AiEvent::DeliveryObserved(
+                DeliveryCertainty::DefinitelyUnsent
+            ))
+        );
+        assert_eq!(events.last(), Some(&AiEvent::Stop(StopReason::Error)));
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                AiEvent::Error {
+                    message,
+                    kind: ErrorKind::Invalid
+                } if message.contains("HTTP is unavailable under offline confinement")
+            )),
+            "offline refusal must be invalid and secret-free: {events:?}"
+        );
+    }
+
+    #[test]
+    fn a_transport_failure_and_a_policy_refusal_are_different_classes() {
+        let class_of = |events: &[AiEvent]| {
+            events.iter().find_map(|event| match event {
+                AiEvent::Error { kind, .. } => Some(*kind),
+                _ => None,
+            })
+        };
+
+        let refused = StreamDecoder::default().finish(Some(test_http_error(
+            TransportError::definitely_unsent(TransportFailure::Offline),
+        )));
+        assert_eq!(class_of(&refused), Some(ErrorKind::Invalid));
+
+        let transport = StreamDecoder::default().finish(Some(test_http_error(
+            TransportError::definitely_unsent(TransportFailure::Connect(
+                "connection refused".to_owned(),
+            )),
+        )));
+        assert_eq!(class_of(&transport), Some(ErrorKind::Transient));
+    }
+
+    #[test]
+    fn a_body_that_fails_halfway_carries_its_certainty_out_through_the_stream() {
+        let response = Ok(HttpResponse {
+            status: 200,
+            headers: Vec::new(),
+            body: Box::pin(futures::stream::iter(vec![
+                Ok(bytes::Bytes::from_static(
+                    b"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"par",
+                )),
+                Err(test_http_error(TransportError::possibly_sent(
+                    TransportFailure::ResponseBody("openai body marker".to_owned()),
+                ))),
+            ])),
+        });
+        let events: Vec<AiEvent> = futures::executor::block_on(decode(response, None).collect());
+
+        assert_eq!(events.last(), Some(&AiEvent::Stop(StopReason::Error)));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    AiEvent::DeliveryObserved(DeliveryCertainty::PossiblySent)
+                ))
+                .count(),
+            2,
+            "once on arrival and once on the failure: {events:?}"
+        );
+    }
+}

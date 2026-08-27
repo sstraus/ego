@@ -43,7 +43,7 @@ pub async fn build_catalogue_snapshot(
     let rows = model::rows(&auth).map_err(|error| usage_message(error.to_string()))?;
     let admitted = rows
         .iter()
-        .map(|row| row.id.clone())
+        .map(|row| row.id().to_owned())
         .collect::<BTreeSet<_>>();
     let selected = select_rows(rows, args.provider.as_deref())?;
 
@@ -67,7 +67,7 @@ pub async fn build_catalogue_snapshot(
     let mut cache = read_cache(&cache_store)?;
     let needs_observation = selected
         .iter()
-        .any(|row| args.refresh || !cache.providers.contains_key(&row.id));
+        .any(|row| args.refresh || !cache.providers.contains_key(row.id()));
 
     let mut supplied_entries = Vec::new();
     let mut supplied_sources = unsupported_sources;
@@ -89,7 +89,7 @@ pub async fn build_catalogue_snapshot(
         let mut publish = false;
 
         for row in &selected {
-            let observe = args.refresh || !cache.providers.contains_key(&row.id);
+            let observe = args.refresh || !cache.providers.contains_key(row.id());
             if !observe {
                 continue;
             }
@@ -124,7 +124,7 @@ pub async fn build_catalogue_snapshot(
                         .find(|failure| failure.model.is_none())
                         .cloned();
                     cache
-                        .merge_provider(&row.id, report)
+                        .merge_provider(row.id(), report)
                         .map_err(|message| RunTermination::Failed { message })?;
                     current_discovered.extend(observed);
                     current_discovered_sources.insert(provider.clone());
@@ -149,7 +149,7 @@ pub async fn build_catalogue_snapshot(
     let mut models = supplied_entries;
     let mut sources = supplied_sources;
     for row in &selected {
-        let Some(slice) = cache.providers.get(&row.id) else {
+        let Some(slice) = cache.providers.get(row.id()) else {
             continue;
         };
         project_cached(
@@ -157,7 +157,7 @@ pub async fn build_catalogue_snapshot(
             slice,
             &current_discovered,
             &current_discovered_sources,
-            current_source_failures.get(&row.id),
+            current_source_failures.get(row.id()),
             &mut models,
             &mut sources,
         );
@@ -215,7 +215,7 @@ fn select_rows(
         return Ok(rows);
     };
     rows.into_iter()
-        .find(|row| row.id == provider)
+        .find(|row| row.id() == provider)
         .map(|row| vec![row])
         .ok_or_else(|| usage_message(format!("no admitted model provider `{provider}`")))
 }
@@ -248,7 +248,7 @@ fn project_supplied(
     }
     if let Some(provenance) = entries.first().map(|entry| entry.provenance.clone()) {
         sources.push(ModelCatalogueSourceStatus {
-            provider: row.id.clone(),
+            provider: row.id().to_owned(),
             provenance,
             freshness: FactFreshness::Current,
             availability: credential,
@@ -298,9 +298,9 @@ fn project_cached(
     }
     let failure = current_source_failure.or(slice.source_failure.as_ref());
     sources.push(ModelCatalogueSourceStatus {
-        provider: row.id.clone(),
-        provenance: ModelFactProvenance::discovered(row.id.clone()),
-        freshness: if current_sources.contains(&row.id) {
+        provider: row.id().to_owned(),
+        provenance: ModelFactProvenance::discovered(row.id().to_owned()),
+        freshness: if current_sources.contains(row.id()) {
             FactFreshness::Current
         } else {
             FactFreshness::Cached

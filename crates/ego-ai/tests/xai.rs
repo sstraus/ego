@@ -591,7 +591,7 @@ fn the_xai_row_speaks_the_family_mapping_and_states_its_own_charge() {
     // is not believing it, and whether it settles is the gate's decision.
     let row = row();
 
-    assert_eq!(row.id, "xai");
+    assert_eq!(row.id(), "xai");
     assert!(row.cost.is_some(), "xAI states a charge per request");
     assert_eq!(
         row.cost.as_ref().unwrap().revision().field,
@@ -608,7 +608,7 @@ fn the_openrouter_row_is_built_and_deliberately_not_discovering() {
     // this row supplies, and it is not an oversight.
     let row = ProviderRow::openrouter_default();
 
-    assert_eq!(row.id, "openrouter");
+    assert_eq!(row.id(), "openrouter");
     assert_eq!(
         row.cost
             .as_ref()

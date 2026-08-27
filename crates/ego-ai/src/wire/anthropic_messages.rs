@@ -1079,3 +1079,62 @@ pub fn decode(
     );
     super::decode_response(response, Box::new(StreamDecoder::default()))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::http::test_http_error;
+    use ego_core::generator::attempt::DeliveryCertainty;
+    use ego_core::permit::{TransportError, TransportFailure};
+
+    const TEXT_TRANSCRIPT: &str =
+        include_str!("../../tests/goldens/profile/anthropic/stream/text.sse");
+
+    #[test]
+    fn a_transport_failure_keeps_what_the_transport_observed() {
+        let cut = TEXT_TRANSCRIPT
+            .split_once("event: message_delta")
+            .expect("the golden has one")
+            .0;
+        let mut decoder = StreamDecoder::default();
+        let mut events = decoder.push(cut.as_bytes());
+        events.extend(
+            decoder.finish(Some(test_http_error(TransportError::possibly_sent(
+                TransportFailure::Exchange("anthropic decoder marker".to_owned()),
+            )))),
+        );
+
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                AiEvent::DeliveryObserved(DeliveryCertainty::PossiblySent)
+            )),
+            "{events:?}"
+        );
+        assert_eq!(events.last(), Some(&AiEvent::Stop(StopReason::Error)));
+    }
+
+    #[test]
+    fn a_cut_after_the_stop_reason_is_a_complete_turn() {
+        let upto = TEXT_TRANSCRIPT
+            .find(r#""stop_reason":"end_turn""#)
+            .map(|at| TEXT_TRANSCRIPT[at..].find("\n\n").expect("the frame ends") + at + 2)
+            .expect("the golden has one");
+        let mut decoder = StreamDecoder::default();
+        let mut events = decoder.push(&TEXT_TRANSCRIPT.as_bytes()[..upto]);
+        events.extend(
+            decoder.finish(Some(test_http_error(TransportError::possibly_sent(
+                TransportFailure::Exchange("anthropic decoder marker".to_owned()),
+            )))),
+        );
+
+        assert_eq!(events.last(), Some(&AiEvent::Stop(StopReason::Stop)));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AiEvent::Error { .. })),
+            "the model finished; the transport failing afterwards is not the turn \
+             failing: {events:?}"
+        );
+    }
+}

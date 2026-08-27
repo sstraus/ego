@@ -915,7 +915,10 @@ impl Catalogue {
     /// refuses until one is supplied.
     pub fn new(rows: impl IntoIterator<Item = ProviderRow>) -> Self {
         Catalogue {
-            rows: rows.into_iter().map(|row| (row.id.clone(), row)).collect(),
+            rows: rows
+                .into_iter()
+                .map(|row| (row.id().to_owned(), row))
+                .collect(),
             hosted: BTreeMap::new(),
         }
     }
@@ -1040,7 +1043,7 @@ impl Catalogue {
 /// (`docs/decisions/2026-08-21-a-shared-shape-is-not-a-shared-contract.md` §2
 /// names this as the one casualty of the base/path split).
 pub fn control_plane(row: &ProviderRow, path: &str) -> Result<Url, ResolveError> {
-    let mut url = row.base.clone();
+    let mut url = row.base().clone();
     url.set_path(path);
     url.set_query(None);
     Ok(url)

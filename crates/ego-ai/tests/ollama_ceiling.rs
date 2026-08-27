@@ -57,6 +57,7 @@ use ego_core::generator::port::AiEvent;
 use ego_core::generator::types::{
     Conversation, GenRequest, Message, Role, StopReason, ThinkingLevel,
 };
+use ego_core::permit::HttpHeader;
 use futures::StreamExt;
 
 const IGNORED_REQUEST: &str = include_str!("goldens/ollama_ceiling_ignored.request.json");
@@ -97,7 +98,9 @@ async fn replay(transcript: &'static str) -> Vec<AiEvent> {
         .decode(
             Ok(HttpResponse {
                 status: 200,
-                headers: vec![("content-type".to_string(), "text/event-stream".to_string())],
+                headers: vec![
+                    HttpHeader::new("content-type", b"text/event-stream".to_vec()).expect("header"),
+                ],
                 body: Box::pin(futures::stream::iter(chunks)),
             }),
             row.cost.clone(),
@@ -194,7 +197,7 @@ fn the_ceiling_the_ollama_profile_sends_is_the_one_this_daemon_reads() {
     };
 
     let row = ProviderRow::ollama_default();
-    let target = ego_ai::wire::RequestTarget::new(&row.base, &[]);
+    let target = ego_ai::wire::RequestTarget::new(row.base(), &[]);
     let request = row
         .wire
         .build_request(&target, &req)

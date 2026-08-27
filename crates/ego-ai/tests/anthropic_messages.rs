@@ -29,17 +29,17 @@
 //! (`service_tier`, `inference_geo`, `ping`, `stop_sequence`), so that
 //! ignoring them is tested rather than assumed.
 
-use ego_ai::http::{HttpError, HttpResponse};
+use ego_ai::http::HttpResponse;
 use ego_ai::wire::RequestTarget;
 use ego_ai::wire::anthropic_messages::{
     DIALECT, Inexpressible, StreamDecoder, VERSION, VERSION_HEADER, build_request, request_body,
 };
-use ego_core::generator::attempt::DeliveryCertainty;
 use ego_core::generator::port::AiEvent;
 use ego_core::generator::types::{
     ContentBlock, Conversation, ErrorKind, GenRequest, Message, ReasoningState, Role, StopReason,
     ThinkingLevel, ToolDescriptor,
 };
+use ego_core::permit::HttpHeader;
 use ego_core::state::Usage;
 use url::Url;
 
@@ -919,61 +919,6 @@ fn a_stream_that_ends_before_message_stop_is_an_error() {
     );
 }
 
-/// A transport failure mid-stream is reported with the certainty the transport
-/// read, not with one this decoder invented.
-#[test]
-fn a_transport_failure_keeps_what_the_transport_observed() {
-    let cut = TEXT_TRANSCRIPT
-        .split_once("event: message_delta")
-        .expect("the golden has one")
-        .0;
-    let mut decoder = StreamDecoder::default();
-    let mut events = decoder.push(cut.as_bytes());
-    events.extend(decoder.finish(Some(HttpError::Transport {
-        message: "connection reset".to_string(),
-        delivery: DeliveryCertainty::PossiblySent,
-    })));
-
-    assert!(
-        events.iter().any(|event| matches!(
-            event,
-            AiEvent::DeliveryObserved(DeliveryCertainty::PossiblySent)
-        )),
-        "{events:?}"
-    );
-    assert_eq!(events.last(), Some(&AiEvent::Stop(StopReason::Error)));
-}
-
-/// The mirror of the two cases above, and the rule they share with the
-/// `openai-completions` family: once `message_delta` has carried a
-/// `stop_reason`, the turn is complete. A transport that dies afterwards costs
-/// only `message_stop`, which carries nothing, and calling that a failed turn
-/// would report an error the model never had.
-#[test]
-fn a_cut_after_the_stop_reason_is_a_complete_turn() {
-    // The golden has two `message_delta` frames and only the second carries a
-    // stop reason; cutting at the first would be the case above, not this one.
-    let upto = TEXT_TRANSCRIPT
-        .find(r#""stop_reason":"end_turn""#)
-        .map(|at| TEXT_TRANSCRIPT[at..].find("\n\n").expect("the frame ends") + at + 2)
-        .expect("the golden has one");
-    let mut decoder = StreamDecoder::default();
-    let mut events = decoder.push(&TEXT_TRANSCRIPT.as_bytes()[..upto]);
-    events.extend(decoder.finish(Some(HttpError::Transport {
-        message: "connection reset".to_string(),
-        delivery: DeliveryCertainty::PossiblySent,
-    })));
-
-    assert_eq!(events.last(), Some(&AiEvent::Stop(StopReason::Stop)));
-    assert!(
-        !events
-            .iter()
-            .any(|event| matches!(event, AiEvent::Error { .. })),
-        "the model finished; the transport failing afterwards is not the turn \
-         failing: {events:?}"
-    );
-}
-
 /// A non-200 is decoded from the body the provider sent with it.
 #[tokio::test]
 async fn a_refused_request_relays_the_sentence_the_provider_wrote() {
@@ -982,7 +927,9 @@ async fn a_refused_request_relays_the_sentence_the_provider_wrote() {
     let body = include_str!("goldens/profile/anthropic/error/404.json");
     let response = Ok(HttpResponse {
         status: 404,
-        headers: vec![("content-type".to_string(), "application/json".to_string())],
+        headers: vec![
+            HttpHeader::new("content-type", b"application/json".to_vec()).expect("header"),
+        ],
         body: Box::pin(futures::stream::once(async move {
             Ok(bytes::Bytes::from(body.as_bytes()))
         })),

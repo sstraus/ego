@@ -18,7 +18,7 @@ use ego_core::generator::port::{Generator, RequestExpressibilityError};
 use ego_core::generator::types::{ErrorKind, GenRequest};
 use futures::{StreamExt, stream};
 
-use crate::http::Http;
+use crate::http::{AdmittedHttpProfile, Http};
 use crate::provider::{ProviderRow, ResolvedCredential};
 use crate::wire;
 
@@ -31,9 +31,10 @@ use crate::wire;
 /// place.
 pub struct WireGenerator {
     row: ProviderRow,
+    profile: AdmittedHttpProfile,
     /// `Arc`, not a borrow, and that is forced rather than preferred:
     /// [`AttemptStream::new`] takes a `BoxStream<'static, _>`, so the future
-    /// that calls [`Http::execute`] outlives any borrow of `self`.
+    /// that executes the admitted profile outlives any borrow of `self`.
     http: Arc<dyn Http>,
     /// The row's credential, already resolved.
     ///
@@ -55,8 +56,14 @@ pub struct WireGenerator {
 
 impl WireGenerator {
     pub fn new(row: ProviderRow, http: Arc<dyn Http>, credential: ResolvedCredential) -> Self {
+        let profile = match credential.base_override() {
+            Some(base) => AdmittedHttpProfile::from_urls(row.id(), std::slice::from_ref(base))
+                .expect("a resolved provider base is an admitted HTTP route"),
+            None => row.http_profile.clone(),
+        };
         WireGenerator {
             row,
+            profile,
             http,
             credential,
         }
@@ -64,7 +71,7 @@ impl WireGenerator {
 
     /// Which provider this generates against.
     pub fn provider(&self) -> &str {
-        &self.row.id
+        self.row.id()
     }
 
     fn build_request(
@@ -76,7 +83,7 @@ impl WireGenerator {
             headers.retain(|(existing, _)| !existing.eq_ignore_ascii_case(name));
             headers.push((name.clone(), value.clone()));
         }
-        let base = self.credential.base_override().unwrap_or(&self.row.base);
+        let base = self.credential.base_override().unwrap_or(self.row.base());
         let target = wire::RequestTarget::new(base, &headers);
         self.row.wire.build_request(&target, req)
     }
@@ -100,9 +107,8 @@ impl Generator for WireGenerator {
         let request = match self.build_request(&req) {
             Ok(request) => request,
             // Refused before a socket exists. `DefinitelyUnsent` is honest
-            // here for the same reason `HttpError::refused_before_sending` is
-            // allowed to assert it: the decision is a pure function of the
-            // request — no DNS, no connection, no bytes.
+            // here because the decision is a pure function of the request —
+            // no DNS, no connection, no bytes.
             //
             // Returning an empty stream instead would settle as an abort with
             // a missing usage report, which says "the provider was called and
@@ -123,6 +129,7 @@ impl Generator for WireGenerator {
         };
 
         let http = Arc::clone(&self.http);
+        let profile = self.profile.clone();
         // The row's own declaration of where it states a charge, carried to
         // the decoder rather than looked up there: one mapping is spoken by
         // providers that report a cost and by providers that do not, and a
@@ -130,7 +137,7 @@ impl Generator for WireGenerator {
         // the metering ADR §8 forbids.
         let cost = self.row.cost.clone();
         let wire = self.row.wire;
-        let inner = stream::once(async move { http.execute(request).await })
+        let inner = stream::once(async move { profile.execute(http.as_ref(), request).await })
             .flat_map(move |response| wire.decode(response, cost.clone()))
             .boxed();
         AttemptStream::new(attempt, inner)

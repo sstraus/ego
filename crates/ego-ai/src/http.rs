@@ -1,88 +1,30 @@
-//! The transport seam, and the egress policy that is a property of the seam
-//! rather than a habit of its callers.
+//! Provider-owned HTTP admission over the run-owned one-hop transport.
 //!
-//! `ARCHITECTURE.md` §3.1 gives `ego-ai` ownership of `Http`; `CLI.md` §3
-//! promises `--offline` "assert no non-loopback egress (enforced at
-//! transport)". This module is where that promise is kept, and — just as
-//! importantly — where its exact size is written down.
-//!
-//! # Why the check cannot live in the providers
-//!
-//! The obvious implementation is for each wire format to look at its base URL
-//! before calling out. That is the convention `plans/m0b-vertical-slice.md`
-//! Step 8 forbids, and it is not pedantry: **a host string is not a socket.**
-//! Three things sit between the two, and each of them is a way for a
-//! host-string check to be true while the packets go somewhere else:
-//!
-//! 1. **A proxy.** `HTTP_PROXY=http://exfil.example` makes an HTTP client
-//!    open its connection to the proxy, not to the URL's host. The request
-//!    line still says `127.0.0.1`. The check passes; the bytes leave.
-//! 2. **A redirect.** An admitted loopback server answering `302 Location:
-//!    https://evil.example` gets followed by default — [`reqwest`] allows ten
-//!    hops. The first hop is the only one a caller-side check ever sees.
-//! 3. **Resolution.** Deciding whether a *name* is loopback means asking a
-//!    resolver, and asking a resolver about `secrets.attacker.example` is
-//!    itself non-loopback egress — subdomain-encoded DNS is a textbook
-//!    exfiltration channel. A policy that leaks the question before it
-//!    decides the answer has already broken the promise it is enforcing.
-//!
-//! So the policy lives here, at the one place that owns the socket, and it is
-//! applied at all three points: to the initial target, to every redirect hop,
-//! and to resolution itself.
-//!
-//! # What this seam does and does not guarantee
-//!
-//! `docs/08-codex-critique.md` R2 was accepted (`docs/10-triage.md`) on the
-//! condition that the capability is **labelled honestly**, so:
-//!
-//! - It guarantees that this transport opens no connection to a non-loopback
-//!   address, sends no DNS query, and consults no proxy, when the policy is
-//!   [`EgressPolicy::LoopbackOnly`].
-//! - It does **not** confine anything else. R2 names four exits — provider
-//!   HTTP, MCP transports, hooks, and spawned commands. This is the first.
-//!   The other three do not exist yet; when they do, each needs its own
-//!   enforcement at its own boundary, because a spawned `curl` is not stopped
-//!   by a type in this file.
-//! - It does **not** guarantee that a prompt stays on the machine. An
-//!   admitted loopback peer may forward upstream on its own account: Ollama's
-//!   `cloudPassthroughMiddleware` proxies a `:cloud` model request from
-//!   `localhost:11434` to `ollama.com`, and the caller cannot tell from the
-//!   API shape. "No non-loopback socket *from ego*" is the true claim;
-//!   "nothing reaches the network" is not, and this module does not make it.
-//!
-//! # Why delivery certainty is reported here too
-//!
-//! For the same reason, one level down. Whether the request bytes left is a
-//! fact about the socket, and it survives only as long as the error keeps its
-//! type: a failure flattened to a `String` cannot say whether the connector
-//! never opened or the response died halfway, and those are opposite answers
-//! to whether a retry double-bills. So [`HttpError`] carries a
-//! [`DeliveryCertainty`] rather than making every wire format guess from
-//! prose — see [`HttpError::delivery`].
+//! `ego-ai` owns logical calls, URLs, redirects and provider profiles. The
+//! injected [`Http`] port owns no provider knowledge: one call handle spends
+//! one freshly prepared capability at a time and keeps the run's absolute
+//! deadline across every admitted redirect.
 
+use std::collections::HashSet;
 use std::fmt;
-use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use ego_core::generator::attempt::DeliveryCertainty;
 use ego_core::generator::types::ErrorKind;
 use ego_core::permit::{
-    HttpRequest as CoreHttpRequest, HttpRequestDigest, HttpRoute, HttpScheme, NetworkTarget,
-    PreparedConnect,
+    HttpHeader, HttpRequest as CoreHttpRequest, HttpRequestDigest, HttpRoute, HttpScheme,
+    NetworkTarget, OneHopResponse, PreparedConnect, TransportError, TransportFailure,
 };
 use futures::StreamExt;
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 use sha2::{Digest, Sha256};
-use url::{Host, Url};
+use url::Url;
 
 const HTTP_PROFILE_FINGERPRINT_DOMAIN: &[u8] = b"ego.http-profile";
 const HTTP_PROFILE_POLICY_VERSION: &[u8] = b"1";
 
 /// The identity of one exact, versioned set of admitted HTTP routes.
-///
-/// The digest is deliberately opaque. Callers may compare fingerprints and
-/// name the owning profile, but cannot turn one back into reusable authority.
 #[derive(Clone, PartialEq, Eq)]
 pub struct HttpProfileFingerprint {
     id: String,
@@ -103,18 +45,25 @@ impl fmt::Debug for HttpProfileFingerprint {
     }
 }
 
-/// A reusable policy table that is private to provider and auxiliary endpoint
-/// ownership inside `ego-ai`.
+/// A reusable policy table private to one provider or auxiliary endpoint.
 #[derive(Clone)]
 pub(crate) struct AdmittedHttpProfile {
     fingerprint: HttpProfileFingerprint,
     routes: Vec<HttpRoute>,
 }
 
+impl fmt::Debug for AdmittedHttpProfile {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AdmittedHttpProfile")
+            .field("fingerprint", &self.fingerprint)
+            .field("routes", &self.routes)
+            .finish()
+    }
+}
+
 /// A single admitted HTTP hop, bound to its exact target and request bytes.
 ///
-/// This type intentionally does not implement `Clone`: the outer adapter
-/// consumes it when it spends the authority.
+/// Deliberately non-`Clone`: the outer adapter consumes the authority.
 pub struct PreparedHttpCall {
     profile: HttpProfileFingerprint,
     route: HttpRoute,
@@ -147,10 +96,9 @@ impl PreparedHttpCall {
     }
 }
 
-/// Why an HTTP profile or attempted use of it is invalid.
+/// Why a profile or one attempted use of it is invalid.
 ///
-/// Variants carry no URL, header, body, or request-target material so neither
-/// `Debug` nor `Display` can disclose credentials or prompt bytes.
+/// No variant carries URL, header, body or request-target material.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HttpProfileError {
     EmptyId,
@@ -164,11 +112,14 @@ pub(crate) enum HttpProfileError {
     RouteNotAdmitted,
     RequestTargetMismatch,
     InvalidTarget,
+    InvalidRequest,
+    InvalidRedirect,
+    RedirectCycle,
 }
 
 impl fmt::Display for HttpProfileError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let message = match self {
+        f.write_str(match self {
             Self::EmptyId => "HTTP profile ID is empty",
             Self::EmptyRoutes => "HTTP profile has no admitted routes",
             Self::DuplicateRoute => "HTTP profile contains a duplicate route",
@@ -180,8 +131,10 @@ impl fmt::Display for HttpProfileError {
             Self::RouteNotAdmitted => "HTTP profile does not admit the requested route",
             Self::RequestTargetMismatch => "HTTP profile URL and request target do not match",
             Self::InvalidTarget => "HTTP profile call contains an invalid target",
-        };
-        f.write_str(message)
+            Self::InvalidRequest => "HTTP profile call contains an invalid request",
+            Self::InvalidRedirect => "HTTP profile received an invalid redirect location",
+            Self::RedirectCycle => "HTTP profile detected a redirect cycle",
+        })
     }
 }
 
@@ -195,17 +148,29 @@ impl AdmittedHttpProfile {
         if routes.is_empty() {
             return Err(HttpProfileError::EmptyRoutes);
         }
-
         routes.sort_by(compare_http_routes);
         if routes.windows(2).any(|pair| pair[0] == pair[1]) {
             return Err(HttpProfileError::DuplicateRoute);
         }
-
-        let fingerprint = fingerprint_http_profile(id, &routes);
         Ok(Self {
-            fingerprint,
+            fingerprint: fingerprint_http_profile(id, &routes, &[]),
             routes,
         })
+    }
+
+    pub(crate) fn from_urls(id: &str, urls: &[Url]) -> Result<Self, HttpProfileError> {
+        let mut bindings = urls
+            .iter()
+            .map(|url| url.as_str().as_bytes().to_vec())
+            .collect::<Vec<_>>();
+        bindings.sort();
+        let mut profile = urls
+            .iter()
+            .map(route_from_url)
+            .collect::<Result<Vec<_>, _>>()
+            .and_then(|routes| Self::try_new(id, routes))?;
+        profile.fingerprint = fingerprint_http_profile(id, &profile.routes, &bindings);
+        Ok(profile)
     }
 
     pub(crate) fn prepare(
@@ -213,26 +178,7 @@ impl AdmittedHttpProfile {
         url: Url,
         request: CoreHttpRequest,
     ) -> Result<PreparedHttpCall, HttpProfileError> {
-        if has_userinfo(&url) {
-            return Err(HttpProfileError::UserInfo);
-        }
-        if url.fragment().is_some() {
-            return Err(HttpProfileError::Fragment);
-        }
-
-        let scheme = match url.scheme() {
-            "http" => HttpScheme::Http,
-            "https" => HttpScheme::Https,
-            _ => return Err(HttpProfileError::UnsupportedScheme),
-        };
-        let host = url.host_str().ok_or(HttpProfileError::MissingHost)?;
-        let port = url
-            .port_or_known_default()
-            .ok_or(HttpProfileError::MissingPort)?;
-        let target = NetworkTarget::new(host, port).map_err(|_| HttpProfileError::InvalidTarget)?;
-        let route =
-            HttpRoute::new(scheme, target.clone()).map_err(|_| HttpProfileError::InvalidTarget)?;
-
+        let route = route_from_url(&url)?;
         if self
             .routes
             .binary_search_by(|item| compare_http_routes(item, &route))
@@ -250,10 +196,7 @@ impl AdmittedHttpProfile {
             return Err(HttpProfileError::RequestTargetMismatch);
         }
 
-        let connect = PreparedConnect::new(target, &request);
-        if connect.target() != route.target() {
-            return Err(HttpProfileError::InvalidTarget);
-        }
+        let connect = PreparedConnect::new(route.target().clone(), &request);
         Ok(PreparedHttpCall {
             profile: self.fingerprint.clone(),
             route,
@@ -261,6 +204,91 @@ impl AdmittedHttpProfile {
             request,
         })
     }
+
+    /// Execute one logical request, retaining one handle and fresh authority
+    /// across every admitted redirect.
+    pub(crate) async fn execute(
+        &self,
+        http: &dyn Http,
+        request: HttpRequest,
+    ) -> Result<HttpResponse, HttpError> {
+        let mut call = http.begin_call();
+        let mut request = request;
+        let mut identities = HashSet::new();
+        let mut prior_effect = false;
+
+        loop {
+            let core = request
+                .to_core()
+                .map_err(|failure| HttpError::profile(failure, delivery_after(prior_effect)))?;
+            let prepared = self
+                .prepare(request.url.clone(), core)
+                .map_err(|failure| HttpError::profile(failure, delivery_after(prior_effect)))?;
+            let identity = (prepared.route().clone(), prepared.request_digest().clone());
+            if !identities.insert(identity) {
+                return Err(HttpError::profile(
+                    HttpProfileError::RedirectCycle,
+                    delivery_after(prior_effect),
+                ));
+            }
+
+            match call.execute(prepared).await {
+                Err(error) => return Err(HttpError::transport(error).promote(prior_effect)),
+                Ok(OneHopResponse::Response {
+                    status,
+                    headers,
+                    body,
+                    ..
+                }) => {
+                    let body = body.map(|chunk| {
+                        chunk
+                            .map(bytes::Bytes::from)
+                            .map_err(|error| HttpError::transport(error).promote(true))
+                    });
+                    return Ok(HttpResponse {
+                        status,
+                        headers,
+                        body: Box::pin(body),
+                    });
+                }
+                Ok(OneHopResponse::Redirect { location, .. }) => {
+                    prior_effect = true;
+                    let location = std::str::from_utf8(&location).map_err(|_| {
+                        HttpError::profile(
+                            HttpProfileError::InvalidRedirect,
+                            DeliveryCertainty::PossiblySent,
+                        )
+                    })?;
+                    request.url = request.url.join(location).map_err(|_| {
+                        HttpError::profile(
+                            HttpProfileError::InvalidRedirect,
+                            DeliveryCertainty::PossiblySent,
+                        )
+                    })?;
+                }
+            }
+        }
+    }
+}
+
+fn route_from_url(url: &Url) -> Result<HttpRoute, HttpProfileError> {
+    if has_userinfo(url) {
+        return Err(HttpProfileError::UserInfo);
+    }
+    if url.fragment().is_some() {
+        return Err(HttpProfileError::Fragment);
+    }
+    let scheme = match url.scheme() {
+        "http" => HttpScheme::Http,
+        "https" => HttpScheme::Https,
+        _ => return Err(HttpProfileError::UnsupportedScheme),
+    };
+    let host = url.host_str().ok_or(HttpProfileError::MissingHost)?;
+    let port = url
+        .port_or_known_default()
+        .ok_or(HttpProfileError::MissingPort)?;
+    let target = NetworkTarget::new(host, port).map_err(|_| HttpProfileError::InvalidTarget)?;
+    HttpRoute::new(scheme, target).map_err(|_| HttpProfileError::InvalidTarget)
 }
 
 fn compare_http_routes(left: &HttpRoute, right: &HttpRoute) -> std::cmp::Ordering {
@@ -277,7 +305,11 @@ fn scheme_tag(scheme: HttpScheme) -> u8 {
     }
 }
 
-fn fingerprint_http_profile(id: &str, routes: &[HttpRoute]) -> HttpProfileFingerprint {
+fn fingerprint_http_profile(
+    id: &str,
+    routes: &[HttpRoute],
+    bindings: &[Vec<u8>],
+) -> HttpProfileFingerprint {
     let mut hasher = Sha256::new();
     hash_profile_frame(&mut hasher, HTTP_PROFILE_FINGERPRINT_DOMAIN);
     hash_profile_frame(&mut hasher, HTTP_PROFILE_POLICY_VERSION);
@@ -287,6 +319,10 @@ fn fingerprint_http_profile(id: &str, routes: &[HttpRoute]) -> HttpProfileFinger
         hash_profile_frame(&mut hasher, &[scheme_tag(route.scheme())]);
         hash_profile_frame(&mut hasher, route.target().host().as_bytes());
         hash_profile_frame(&mut hasher, &route.target().port().to_be_bytes());
+    }
+    hasher.update((bindings.len() as u128).to_be_bytes());
+    for binding in bindings {
+        hash_profile_frame(&mut hasher, binding);
     }
     HttpProfileFingerprint {
         id: id.to_owned(),
@@ -313,150 +349,23 @@ fn has_userinfo(url: &Url) -> bool {
         .is_some_and(|authority| authority.contains('@'))
 }
 
-/// A response body, streamed. Deliberately a stream and not a `Vec<u8>`:
-/// generation is streamed end to end, and buffering it here would make every
-/// delta wait for the last one.
-pub type ByteStream = BoxStream<'static, Result<bytes::Bytes, HttpError>>;
-
-/// What egress this transport is allowed to perform.
-///
-/// [`LoopbackOnly`](Self::LoopbackOnly) is what `--offline` selects. The
-/// variant is named for what it enforces rather than for the flag that
-/// selects it, because "offline" overstates it — see the module doc's third
-/// bullet on what an admitted loopback peer may still do.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EgressPolicy {
-    /// Any http(s) destination is admitted. The default posture.
-    Unrestricted,
-    /// Only loopback destinations are admitted, and nothing is resolved.
-    LoopbackOnly,
-}
-
-/// Names the destination that was refused and which fact refused it.
-///
-/// `ARCHITECTURE.md` §3.2: a denial must name what was denied. A bare
-/// "blocked by --offline" would leave a user guessing between a typo, a LAN
-/// address they thought was local, and a name that merely looks like one.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum EgressRefused {
-    /// The URL's scheme is not one this transport speaks. Refused under
-    /// every policy, including [`EgressPolicy::Unrestricted`]: `file:///etc`
-    /// is not an HTTP request that happens to be local, it is not an HTTP
-    /// request.
-    NotHttp { scheme: String },
-    /// The URL carries no host at all.
-    NoHost { url: String },
-    /// The host is an IP address, and it is not a loopback one.
-    NotLoopbackAddress { host: String },
-    /// The host is a name. Under [`EgressPolicy::LoopbackOnly`] the only
-    /// name admitted is `localhost`, which RFC 6761 §6.3 reserves for
-    /// loopback and which this module maps itself; deciding about any other
-    /// name would mean asking a resolver, which is the egress being refused.
-    NameNeedsResolution { host: String },
-}
-
-impl fmt::Display for EgressRefused {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            EgressRefused::NotHttp { scheme } => {
-                write!(f, "egress refused: {scheme} is not an http(s) scheme")
-            }
-            EgressRefused::NoHost { url } => {
-                write!(f, "egress refused: {url} names no host")
-            }
-            EgressRefused::NotLoopbackAddress { host } => {
-                write!(f, "egress refused: {host} is not a loopback address")
-            }
-            EgressRefused::NameNeedsResolution { host } => write!(
-                f,
-                "egress refused: deciding whether {host} is loopback would \
-                 require a DNS query, which is itself egress"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for EgressRefused {}
-
-/// True for the one name RFC 6761 §6.3 reserves for loopback.
-///
-/// The `url` crate has already lowercased the host and applied IDNA, so
-/// `LOCALHOST` and the fullwidth spelling both arrive here as `localhost`.
-/// A single trailing dot is the DNS root and is stripped; everything else is
-/// a different name. In particular `evil.localhost` is **not** admitted:
-/// RFC 6761 does reserve the whole subtree, but resolvers vary on whether
-/// they honour it, and mapping it here would mean inventing a resolution the
-/// system does not perform. No local daemon needs it, so the tighter rule
-/// wins.
-fn is_localhost(host: &str) -> bool {
-    host.strip_suffix('.').unwrap_or(host) == "localhost"
-}
-
-impl EgressPolicy {
-    /// Decides whether one URL may be contacted.
-    ///
-    /// **Pure**: no DNS, no socket, no clock, no environment. That is not an
-    /// incidental property — it is the guarantee. A refusal costs no packets
-    /// because the decision needed none, which is why "no non-loopback
-    /// egress" can be said about the refusal path at all.
-    ///
-    /// Classification reads [`Url::host`], never the raw authority string.
-    /// The `url` crate normalises every IPv4 spelling — `2130706433`,
-    /// `0177.0.0.1`, `0x7f000001`, `127.1` — to the same `Host::Ipv4`, and
-    /// parses `http://127.0.0.1@evil.com/` with `evil.com` as the host and
-    /// `127.0.0.1` as mere userinfo. A textual check would get both
-    /// backwards.
-    pub fn admit(&self, url: &Url) -> Result<(), EgressRefused> {
-        if !matches!(url.scheme(), "http" | "https") {
-            return Err(EgressRefused::NotHttp {
-                scheme: url.scheme().to_string(),
-            });
-        }
-        let host = url.host().ok_or_else(|| EgressRefused::NoHost {
-            url: url.to_string(),
-        })?;
-        match self {
-            EgressPolicy::Unrestricted => {}
-            EgressPolicy::LoopbackOnly => match host {
-                Host::Ipv4(addr) if addr.is_loopback() => {}
-                // `to_canonical` folds `::ffff:127.0.0.1` down to the IPv4
-                // loopback it actually addresses; `Ipv6Addr::is_loopback`
-                // alone would refuse a genuinely local destination.
-                Host::Ipv6(addr) if addr.to_canonical().is_loopback() => {}
-                Host::Ipv4(addr) => {
-                    return Err(EgressRefused::NotLoopbackAddress {
-                        host: addr.to_string(),
-                    });
-                }
-                Host::Ipv6(addr) => {
-                    return Err(EgressRefused::NotLoopbackAddress {
-                        host: addr.to_string(),
-                    });
-                }
-                Host::Domain(name) if is_localhost(name) => {}
-                Host::Domain(name) => {
-                    return Err(EgressRefused::NameNeedsResolution {
-                        host: name.to_string(),
-                    });
-                }
-            },
-        }
-        Ok(())
-    }
-}
-
-/// The HTTP verbs this transport speaks.
+/// The HTTP verbs currently used by provider and auxiliary mappings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Method {
     Get,
     Post,
 }
 
-/// One request. The target is an ordinary [`Url`] and needs no prior
-/// blessing, because the transport admits it itself — see [`Http`].
-///
-/// `Debug` is written out by hand — see the impl below for why a derive is
-/// wrong here.
+impl Method {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Get => "GET",
+            Self::Post => "POST",
+        }
+    }
+}
+
+/// One provider-owned request before its profile prepares one-hop authority.
 pub struct HttpRequest {
     pub url: Url,
     pub method: Method,
@@ -464,24 +373,29 @@ pub struct HttpRequest {
     pub body: Option<Vec<u8>>,
 }
 
-/// Header **names**, never values, and the body's length rather than the body.
-///
-/// This is the one container [`Secret`](crate::provider::Secret)'s guarantee
-/// does not reach. That type refuses to print in every formatter, on the
-/// argument — correct, and recorded in the plan — that a value which refuses
-/// makes a forgetful container harmless. But `ResolvedCredential::headers` calls
-/// `expose()` and returns `format!("Bearer {}", …)` as an ordinary `String`,
-/// and from that line on the credential is no longer a `Secret`. This struct
-/// is what receives it, which makes it exactly "the next type that happens to
-/// hold one and derives `Debug`" — the failure the plan named while deciding
-/// to put the guarantee on the value.
-///
-/// The body is elided for the second half of the same checklist item: it is
-/// the prompt. `HttpResponse` solves both by having no `Debug` at all; that is
-/// not available here, because a request one cannot print is a request nobody
-/// can diagnose, and diagnosability is why `ProviderRow` derives `Debug` in
-/// the first place. So: everything a reader needs, and neither of the two
-/// things they must not have.
+impl HttpRequest {
+    fn to_core(&self) -> Result<CoreHttpRequest, HttpProfileError> {
+        let mut path = self.url.path().to_owned();
+        if let Some(query) = self.url.query() {
+            path.push('?');
+            path.push_str(query);
+        }
+        let headers = self
+            .headers
+            .iter()
+            .map(|(name, value)| HttpHeader::new(name, value.as_bytes().to_vec()))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| HttpProfileError::InvalidRequest)?;
+        CoreHttpRequest::new(
+            self.method.as_str(),
+            &path,
+            headers,
+            self.body.clone().unwrap_or_default(),
+        )
+        .map_err(|_| HttpProfileError::InvalidRequest)
+    }
+}
+
 impl fmt::Debug for HttpRequest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("HttpRequest")
@@ -500,7 +414,6 @@ impl fmt::Debug for HttpRequest {
     }
 }
 
-/// Prints as `<N bytes>`: a length is a diagnostic, the bytes are the prompt.
 struct Elided(usize);
 
 impl fmt::Debug for Elided {
@@ -509,332 +422,160 @@ impl fmt::Debug for Elided {
     }
 }
 
-/// One response: the status and headers a wire format needs to tell a stream
-/// of events from a stream of error text, plus the body it decodes.
-///
-/// No `Debug`: a [`ByteStream`] has none, and buffering the body to print it
-/// is exactly what streaming exists to avoid.
+pub type ByteStream = BoxStream<'static, Result<bytes::Bytes, HttpError>>;
+
+/// One response with ordered raw headers and a streamed body.
 pub struct HttpResponse {
     pub status: u16,
-    pub headers: Vec<(String, String)>,
+    pub headers: Vec<HttpHeader>,
     pub body: ByteStream,
 }
 
-/// What went wrong at the transport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HttpFailure {
+    Profile(HttpProfileError),
+    Authority,
+    Offline,
+    Resolution,
+    InvalidRequest,
+    Connect,
+    Exchange,
+    ResponseBody,
+    Cancelled,
+    TimedOut,
+}
+
+/// A secret-free protocol view of a typed transport or profile failure.
 #[derive(Debug)]
-pub enum HttpError {
-    /// The policy refused a destination — either the request's own, or a
-    /// redirect hop's.
-    ///
-    /// Carries a [`DeliveryCertainty`] because those two are not the same
-    /// event. The request's own destination is refused by a pure predicate
-    /// before a socket exists; a *redirect* hop is refused after the original
-    /// request was written, answered, and possibly billed. Reading "refused"
-    /// as "nothing was sent" would authorise a retry of a request the provider
-    /// already has.
-    Refused {
-        refused: EgressRefused,
-        delivery: DeliveryCertainty,
-    },
-    /// Everything else the transport can fail at, carrying the only reading of
-    /// [`DeliveryCertainty`] anyone is in a position to take.
-    Transport {
-        message: String,
-        delivery: DeliveryCertainty,
-    },
+pub struct HttpError {
+    failure: HttpFailure,
+    delivery: DeliveryCertainty,
 }
 
 impl HttpError {
-    /// A refusal decided before anything was sent.
-    ///
-    /// The only constructor that may assert [`DeliveryCertainty::DefinitelyUnsent`]
-    /// by hand, and it is correct exactly because [`EgressPolicy::admit`] is
-    /// pure: no DNS, no socket, no bytes. Every other refusal reads its
-    /// certainty off the failure that produced it.
-    pub fn refused_before_sending(refused: EgressRefused) -> Self {
-        HttpError::Refused {
-            refused,
-            delivery: DeliveryCertainty::DefinitelyUnsent,
+    fn profile(failure: HttpProfileError, delivery: DeliveryCertainty) -> Self {
+        Self {
+            failure: HttpFailure::Profile(failure),
+            delivery,
         }
     }
 
-    /// Whether the request bytes may have reached the far side.
-    ///
-    /// This lives on the transport error and not on the wire format because
-    /// the wire format cannot answer it. By the time a failure is prose, "the
-    /// connector never opened a socket" and "the connection died halfway
-    /// through the response" read identically — and they are opposite answers
-    /// to whether a retry can be billed twice
-    /// (`ego_core::generator::attempt::DeliveryCertainty`). The distinction
-    /// exists exactly once, here, at the layer that watched it happen.
-    pub fn delivery(&self) -> DeliveryCertainty {
-        match self {
-            HttpError::Refused { delivery, .. } | HttpError::Transport { delivery, .. } => {
-                *delivery
+    fn transport(error: TransportError) -> Self {
+        let failure = match error.failure() {
+            TransportFailure::AuthoritySpent | TransportFailure::AuthorityMismatch => {
+                HttpFailure::Authority
             }
+            TransportFailure::Offline => HttpFailure::Offline,
+            TransportFailure::Resolution(_) => HttpFailure::Resolution,
+            TransportFailure::InvalidRequest(_) => HttpFailure::InvalidRequest,
+            TransportFailure::Connect(_) => HttpFailure::Connect,
+            TransportFailure::Exchange(_) => HttpFailure::Exchange,
+            TransportFailure::ResponseBody(_) => HttpFailure::ResponseBody,
+            TransportFailure::Cancelled => HttpFailure::Cancelled,
+            TransportFailure::TimedOut => HttpFailure::TimedOut,
+        };
+        Self {
+            failure,
+            delivery: error.delivery(),
         }
     }
 
-    /// The egress refusal inside this error, if that is what it is.
-    pub fn refusal(&self) -> Option<&EgressRefused> {
-        match self {
-            HttpError::Refused { refused, .. } => Some(refused),
-            HttpError::Transport { .. } => None,
+    fn promote(mut self, prior_effect: bool) -> Self {
+        if prior_effect {
+            self.delivery = DeliveryCertainty::PossiblySent;
         }
+        self
     }
 
-    /// Which class of failure this is, in the caller's vocabulary.
-    ///
-    /// Beside [`delivery`](Self::delivery) and for the same reason: by the
-    /// time a failure is prose, a refused destination and a dead socket read
-    /// identically, and they are opposite answers to whether a retry can
-    /// succeed. The distinction exists exactly once, here.
-    ///
-    /// A [`Refused`](HttpError::Refused) is [`ErrorKind::Invalid`] and not
-    /// [`ErrorKind::Refused`], whose name is the near miss to watch for:
-    /// `ErrorKind::Refused` means *the provider* refused the account, and
-    /// nothing here reached a provider. An egress refusal is ego's own policy
-    /// answering a question about the request's destination — which is a
-    /// property of the request, will be the same on every retry, and belongs
-    /// in front of the operator as a usage error rather than as an outage.
+    pub fn delivery(&self) -> DeliveryCertainty {
+        self.delivery
+    }
+
     pub fn kind(&self) -> ErrorKind {
-        match self {
-            HttpError::Refused { .. } => ErrorKind::Invalid,
-            HttpError::Transport { .. } => ErrorKind::Transient,
+        match self.failure {
+            HttpFailure::Profile(_)
+            | HttpFailure::Authority
+            | HttpFailure::Offline
+            | HttpFailure::InvalidRequest => ErrorKind::Invalid,
+            HttpFailure::Resolution
+            | HttpFailure::Connect
+            | HttpFailure::Exchange
+            | HttpFailure::ResponseBody
+            | HttpFailure::Cancelled
+            | HttpFailure::TimedOut => ErrorKind::Transient,
         }
     }
+}
+
+#[cfg(test)]
+pub(crate) fn test_http_error(error: TransportError) -> HttpError {
+    HttpError::transport(error)
 }
 
 impl fmt::Display for HttpError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            HttpError::Refused { refused, .. } => write!(f, "{refused}"),
-            HttpError::Transport { message, .. } => write!(f, "transport error: {message}"),
-        }
+        let message = match self.failure {
+            HttpFailure::Profile(failure) => return write!(f, "{failure}"),
+            HttpFailure::Authority => "HTTP authority was invalid",
+            HttpFailure::Offline => "HTTP is unavailable under offline confinement",
+            HttpFailure::Resolution => "HTTP name resolution failed",
+            HttpFailure::InvalidRequest => "HTTP request construction failed",
+            HttpFailure::Connect => "HTTP connection failed",
+            HttpFailure::Exchange => "HTTP exchange failed",
+            HttpFailure::ResponseBody => "HTTP response body failed",
+            HttpFailure::Cancelled => "HTTP call was cancelled",
+            HttpFailure::TimedOut => "HTTP call timed out",
+        };
+        f.write_str(message)
     }
 }
 
 impl std::error::Error for HttpError {}
 
-/// The transport seam (`ARCHITECTURE.md` §3.1).
-///
-/// An implementation that opens sockets **must** admit its own target under
-/// its own policy, and must do so again for every redirect hop. That
-/// obligation sits here rather than on callers deliberately: an earlier draft
-/// of this module made the check unforgeable by handing `execute` a sealed
-/// `Destination` token that only [`EgressPolicy::admit`] could mint. It was
-/// dropped because it moved the check back to the caller while looking like
-/// it had moved it to the seam — and because a token minted under one policy
-/// could be presented to a transport built with another, which is a hole a
-/// self-check does not have. `--offline` is a property of the transport, so
-/// the transport is what checks.
-pub trait Http: Send + Sync {
-    fn execute(&self, req: HttpRequest) -> BoxFuture<'static, Result<HttpResponse, HttpError>>;
-}
-
-/// A resolver that answers only for `localhost`, from a constant.
-///
-/// Installed under [`EgressPolicy::LoopbackOnly`] so that the offline path
-/// performs no DNS query at all — not even for `localhost`, whose system
-/// resolution can be redirected through `/etc/hosts` or a search domain.
-/// Every other name is refused here as well as at admission: this is the
-/// layer that makes "sends no DNS query" true rather than merely intended.
-///
-/// Its *installation* has no test, and that is not an oversight. Deleting
-/// the `dns_resolver` call below changes nothing observable: admission has
-/// already refused every name except `localhost`, and `localhost` resolves to
-/// loopback through the system too, so the two paths are indistinguishable
-/// from outside while the first layer holds. That is what a second layer of
-/// defence *is* — a test that could see it would prove it was not redundant.
-/// The risk worth guarding is the two layers disagreeing, and they cannot:
-/// both ask [`is_localhost`], and a change there fails tests on both sides.
-#[derive(Debug)]
-struct LoopbackResolver;
-
-impl reqwest::dns::Resolve for LoopbackResolver {
-    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
-        // The port is filled in by the connector from the URL; hyper's own
-        // resolvers return zero here for the same reason.
-        let answer: Result<Vec<SocketAddr>, EgressRefused> = if is_localhost(name.as_str()) {
-            Ok(vec![SocketAddr::new(IpAddr::from([127, 0, 0, 1]), 0)])
-        } else {
-            Err(EgressRefused::NameNeedsResolution {
-                host: name.as_str().to_string(),
-            })
-        };
-        Box::pin(async move {
-            match answer {
-                Ok(addrs) => {
-                    let iter: reqwest::dns::Addrs = Box::new(addrs.into_iter());
-                    Ok(iter)
-                }
-                Err(refused) => Err(Box::new(refused) as Box<dyn std::error::Error + Send + Sync>),
-            }
-        })
-    }
-}
-
-/// The real transport.
-///
-/// Construction takes the policy because two of the three ways a host-string
-/// check gets defeated are decided when the client is built, not when a
-/// request is made: whether a proxy is consulted, and what happens on a
-/// redirect. A policy handed to `execute` instead of to `new` would arrive
-/// too late for both.
-#[derive(Debug)]
-pub struct ReqwestHttp {
-    policy: EgressPolicy,
-    client: reqwest::Client,
-}
-
-impl ReqwestHttp {
-    /// Builds a transport that enforces `policy`.
-    ///
-    /// Under [`EgressPolicy::LoopbackOnly`] this: refuses every proxy, so
-    /// `HTTP_PROXY` cannot redirect an admitted loopback request (the
-    /// `system-proxy` feature is also off in `Cargo.toml`, so the
-    /// environment is not read at all — `tests/http.rs` pins that); resolves
-    /// through [`LoopbackResolver`], so no DNS query leaves; and re-runs
-    /// `admit` on every redirect hop, so an admitted server cannot forward
-    /// the connection off-box with a `Location` header.
-    pub fn new(policy: EgressPolicy) -> Result<Self, HttpError> {
-        let mut builder = reqwest::Client::builder();
-        builder = match policy {
-            EgressPolicy::Unrestricted => builder,
-            EgressPolicy::LoopbackOnly => {
-                builder.no_proxy().dns_resolver(Arc::new(LoopbackResolver))
-            }
-        };
-        let client = builder
-            .redirect(reqwest::redirect::Policy::custom(
-                move |attempt| match policy.admit(attempt.url()) {
-                    Ok(_) => attempt.follow(),
-                    Err(refused) => attempt.error(refused),
-                },
-            ))
-            .build()
-            .map_err(|e| HttpError::Transport {
-                delivery: delivery_of(&e),
-                message: e.to_string(),
-            })?;
-        Ok(Self { policy, client })
-    }
-}
-
-/// Recovers the typed [`EgressRefused`] a redirect refusal was built from.
-///
-/// `reqwest` boxes the error a redirect policy returns, so without this the
-/// refusal would come back as prose and criterion "a refusal names which
-/// destination and why" would hold for the first hop but not the second.
-fn refusal_in(err: &reqwest::Error) -> Option<EgressRefused> {
-    let mut source: Option<&(dyn std::error::Error + 'static)> = std::error::Error::source(err);
-    while let Some(cause) = source {
-        if let Some(refused) = cause.downcast_ref::<EgressRefused>() {
-            return Some(refused.clone());
-        }
-        source = cause.source();
-    }
-    None
-}
-
-/// Reads whether `err` happened before the request bytes went out.
-///
-/// Two kinds are unsent with certainty. `is_builder` never touched the
-/// network at all. `is_connect` is `reqwest` walking the source chain for
-/// `hyper_util`'s `Kind::Connect`, which is raised by the *connector* — no
-/// TCP handshake completed, so no request line was written. Everything else
-/// — a timeout, a reset, a body that stopped arriving, a redirect loop — is
-/// [`DeliveryCertainty::PossiblySent`], because the local side genuinely
-/// cannot tell an error before the bytes left from one after.
-///
-/// One known way `is_connect` understates: `hyper_util`'s pooled client
-/// retries a request whose connection was closed before any response
-/// arrived, and if that *second* attempt fails to connect the error is
-/// `Kind::Connect` even though the first attempt's bytes may have been
-/// processed. Removing it means disabling connection reuse
-/// (`pool_max_idle_per_host(0)`), which costs a TLS handshake on every
-/// generation of an agent loop — too much for a race this narrow. Recorded
-/// rather than papered over; see `POTENTIALS.md`.
-fn delivery_of(err: &reqwest::Error) -> DeliveryCertainty {
-    if err.is_builder() || err.is_connect() {
-        DeliveryCertainty::DefinitelyUnsent
-    } else {
+fn delivery_after(prior_effect: bool) -> DeliveryCertainty {
+    if prior_effect {
         DeliveryCertainty::PossiblySent
+    } else {
+        DeliveryCertainty::DefinitelyUnsent
     }
 }
 
-fn to_http_error(err: reqwest::Error) -> HttpError {
-    // `delivery_of` is asked in both arms, and that is the point. A refusal
-    // that surfaces here is not the pre-flight one: it came either from the
-    // resolver, which fails the *connector* and so reads as `is_connect`, or
-    // from the redirect policy, which fires only after the original request
-    // was written and answered. One of those is unsent and the other is not,
-    // and the word "refused" does not distinguish them.
-    let delivery = delivery_of(&err);
-    match refusal_in(&err) {
-        Some(refused) => HttpError::Refused { refused, delivery },
-        None => HttpError::Transport {
-            delivery,
-            message: err.to_string(),
-        },
+/// One logical HTTP call retaining its absolute deadline across all hops.
+pub trait HttpCall: Send {
+    fn execute(
+        &mut self,
+        call: PreparedHttpCall,
+    ) -> BoxFuture<'static, Result<OneHopResponse, TransportError>>;
+}
+
+/// Consumer-owned HTTP port. Beginning once creates one logical call scope.
+pub trait Http: Send + Sync {
+    fn begin_call(&self) -> Box<dyn HttpCall>;
+}
+
+/// One buffered auxiliary exchange. Generation bodies remain streamed.
+pub(crate) struct Exchange {
+    pub status: u16,
+    pub headers: Vec<HttpHeader>,
+    pub bytes: Vec<u8>,
+}
+
+impl Exchange {
+    /// The first UTF-8 value of `name`, matched case-insensitively.
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|header| header.name().eq_ignore_ascii_case(name))
+            .and_then(|header| std::str::from_utf8(header.value()).ok())
     }
 }
 
-impl Http for ReqwestHttp {
-    fn execute(&self, req: HttpRequest) -> BoxFuture<'static, Result<HttpResponse, HttpError>> {
-        // The first of the three enforcement points. It runs before anything
-        // is built, so a refusal here costs no DNS query and no socket.
-        if let Err(refused) = self.policy.admit(&req.url) {
-            return Box::pin(async move { Err(HttpError::refused_before_sending(refused)) });
-        }
-        let method = match req.method {
-            Method::Get => reqwest::Method::GET,
-            Method::Post => reqwest::Method::POST,
-        };
-        let mut builder = self.client.request(method, req.url);
-        for (name, value) in req.headers {
-            builder = builder.header(name, value);
-        }
-        if let Some(body) = req.body {
-            builder = builder.body(body);
-        }
-        Box::pin(async move {
-            let response = builder.send().await.map_err(to_http_error)?;
-            let status = response.status().as_u16();
-            let headers = response
-                .headers()
-                .iter()
-                .map(|(name, value)| {
-                    (
-                        name.as_str().to_string(),
-                        String::from_utf8_lossy(value.as_bytes()).into_owned(),
-                    )
-                })
-                .collect();
-            let body = futures::StreamExt::map(response.bytes_stream(), |chunk| {
-                chunk.map_err(to_http_error)
-            });
-            Ok(HttpResponse {
-                status,
-                headers,
-                body: Box::pin(body),
-            })
-        })
-    }
-}
-
-/// One control-plane exchange, buffered.
-///
-/// Buffering is right here and wrong for a generation: these bodies are a
-/// model list, a status object or a price table, and the whole point of the
-/// call is to have all of it before deciding anything.
-///
-/// Shared by every resolver that asks a provider something — `ollama`'s
-/// `/api/tags` and `/api/ps`, `xai`'s `/language-models` — because the two
-/// must not disagree about what a non-2xx means. It lives beside the
-/// transport rather than beside either caller for the same reason.
-pub(crate) async fn fetch(http: &Arc<dyn Http>, req: HttpRequest) -> Result<Vec<u8>, String> {
-    let answer = exchange(http, req).await?;
+pub(crate) async fn fetch(
+    http: &Arc<dyn Http>,
+    profile: &AdmittedHttpProfile,
+    request: HttpRequest,
+) -> Result<Vec<u8>, String> {
+    let answer = exchange(http, profile, request).await?;
     if !(200..300).contains(&answer.status) {
         return Err(format!(
             "it answered {}: {}",
@@ -845,46 +586,23 @@ pub(crate) async fn fetch(http: &Arc<dyn Http>, req: HttpRequest) -> Result<Vec<
     Ok(answer.bytes)
 }
 
-/// What a buffered exchange actually returned, with no verdict on it.
-pub(crate) struct Exchange {
-    pub status: u16,
-    pub headers: Vec<(String, String)>,
-    pub bytes: Vec<u8>,
-}
-
-impl Exchange {
-    /// The first value of `name`, matched case-insensitively.
-    ///
-    /// HTTP field names are case-insensitive and nothing between here and the
-    /// wire normalises them, so a comparison on the exact spelling would work
-    /// against one server and silently find nothing against the next.
-    pub fn header(&self, name: &str) -> Option<&str> {
-        self.headers
-            .iter()
-            .find(|(field, _)| field.eq_ignore_ascii_case(name))
-            .map(|(_, value)| value.as_str())
-    }
-}
-
-/// The exchange [`fetch`] is built from, for the one caller whose non-2xx is
-/// not an error.
-///
-/// A conditional request answered `304 Not Modified` is the *best* outcome for
-/// the price table — the cached bytes are still current and 1.8 MB did not
-/// have to cross the network — so it cannot go through the verdict above,
-/// which exists so the two resolvers cannot disagree about what a failure is.
-/// Splitting it out keeps that shared verdict in one place rather than giving
-/// the pricing fetch a private copy of the buffering loop.
-pub(crate) async fn exchange(http: &Arc<dyn Http>, req: HttpRequest) -> Result<Exchange, String> {
+pub(crate) async fn exchange(
+    http: &Arc<dyn Http>,
+    profile: &AdmittedHttpProfile,
+    request: HttpRequest,
+) -> Result<Exchange, String> {
     let HttpResponse {
         status,
         headers,
         mut body,
-    } = http.execute(req).await.map_err(|err| format!("{err:?}"))?;
+    } = profile
+        .execute(http.as_ref(), request)
+        .await
+        .map_err(|error| error.to_string())?;
 
     let mut bytes = Vec::new();
     while let Some(chunk) = body.next().await {
-        bytes.extend_from_slice(&chunk.map_err(|err| format!("{err:?}"))?);
+        bytes.extend_from_slice(&chunk.map_err(|error| error.to_string())?);
     }
     Ok(Exchange {
         status,
@@ -893,11 +611,5 @@ pub(crate) async fn exchange(http: &Arc<dyn Http>, req: HttpRequest) -> Result<E
     })
 }
 
-/// [`LoopbackResolver`] is private, and it is the second of the three
-/// enforcement points, so it needs a test that can see it. From
-/// `tests/http.rs` it is invisible — and worse, indistinguishable: a request
-/// to `localhost` succeeds whether this resolver answered or the system one
-/// did, so an integration test could only claim the resolver was used, never
-/// show it.
 #[cfg(test)]
 mod tests;

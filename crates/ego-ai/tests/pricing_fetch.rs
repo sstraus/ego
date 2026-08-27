@@ -5,7 +5,7 @@
 //! this crate, because it owns `Http`, and §7 settles what the run does when it
 //! fails. What is tested here is only the exchange — whether the cache is
 //! *consulted* is `Metering::ceiling_needs_rates`, one layer up, and whether
-//! the network is reachable at all is `EgressPolicy`, one layer down.
+//! the network is reachable at all is the transport policy, one layer down.
 
 mod support;
 

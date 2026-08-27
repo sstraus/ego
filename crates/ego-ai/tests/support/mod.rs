@@ -12,17 +12,59 @@
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
-use ego_ai::http::{Http, HttpError, HttpRequest, HttpResponse, Method};
+use ego_ai::http::{Http, HttpCall, Method, PreparedHttpCall};
 use ego_ai::provider::{
     CredentialStrategy, Credentials, MissingCredential, ResolvedCredential, Secret,
 };
-use ego_core::generator::attempt::DeliveryCertainty;
+use ego_core::permit::{
+    DnsResolution, DuplexHandle, DuplexSpawner, HttpHeader, NetworkTarget, OneHop, OneHopResponse,
+    ResolvedConnect, Resolver, SpawnSpec, TransportError, TransportFailure,
+};
 use futures::future::BoxFuture;
 
 /// The bearer value [`credential`] resolves to, so a test that inspects the
 /// header it becomes has something to compare against.
 pub const TEST_KEY: &str = "test-key";
+
+/// Inert foreign-effect ports for tests that exercise unrelated turn paths.
+/// Each effect fails before any external work, so a test cannot accidentally
+/// reach a real network or child process while assembling a turn.
+pub struct NoForeign;
+
+impl Resolver for NoForeign {
+    fn resolve(
+        &self,
+        _target: NetworkTarget,
+        _deadline: Option<Instant>,
+    ) -> BoxFuture<'static, Result<DnsResolution, TransportError>> {
+        Box::pin(futures::future::ready(Err(
+            TransportError::definitely_unsent(TransportFailure::AuthorityMismatch),
+        )))
+    }
+}
+
+impl OneHop for NoForeign {
+    fn execute(
+        &self,
+        _connect: ResolvedConnect,
+        _request: ego_core::permit::HttpRequest,
+        _deadline: Option<Instant>,
+    ) -> BoxFuture<'static, Result<OneHopResponse, TransportError>> {
+        Box::pin(futures::future::ready(Err(
+            TransportError::definitely_unsent(TransportFailure::AuthorityMismatch),
+        )))
+    }
+}
+
+impl DuplexSpawner for NoForeign {
+    fn spawn(&self, _spec: SpawnSpec) -> BoxFuture<'static, Result<DuplexHandle, TransportError>> {
+        Box::pin(futures::future::ready(Err(
+            TransportError::definitely_unsent(TransportFailure::AuthorityMismatch),
+        )))
+    }
+}
 
 /// A resolved credential, for a test whose subject is not the credential.
 ///
@@ -91,8 +133,8 @@ pub struct Asked {
 /// *order* the resolver asks in as well as what it does with the replies, and
 /// a map keyed by path would silently pass a resolver that asked backwards.
 pub struct StubServer {
-    answers: Mutex<VecDeque<Answer>>,
-    seen: Mutex<Vec<Asked>>,
+    answers: Arc<Mutex<VecDeque<Answer>>>,
+    seen: Arc<Mutex<Vec<Asked>>>,
 }
 
 /// One scripted reply.
@@ -129,8 +171,8 @@ impl Answer {
 impl StubServer {
     pub fn new(answers: impl IntoIterator<Item = impl Into<Answer>>) -> Arc<Self> {
         Arc::new(StubServer {
-            answers: Mutex::new(answers.into_iter().map(Into::into).collect()),
-            seen: Mutex::new(Vec::new()),
+            answers: Arc::new(Mutex::new(answers.into_iter().map(Into::into).collect())),
+            seen: Arc::new(Mutex::new(Vec::new())),
         })
     }
 
@@ -149,35 +191,71 @@ impl StubServer {
 }
 
 impl Http for StubServer {
-    fn execute(&self, req: HttpRequest) -> BoxFuture<'static, Result<HttpResponse, HttpError>> {
+    fn begin_call(&self) -> Box<dyn HttpCall> {
+        Box::new(StubCall {
+            answers: Arc::clone(&self.answers),
+            seen: Arc::clone(&self.seen),
+        })
+    }
+}
+
+struct StubCall {
+    answers: Arc<Mutex<VecDeque<Answer>>>,
+    seen: Arc<Mutex<Vec<Asked>>>,
+}
+
+impl HttpCall for StubCall {
+    fn execute(
+        &mut self,
+        call: PreparedHttpCall,
+    ) -> BoxFuture<'static, Result<OneHopResponse, TransportError>> {
+        let (_, _route, _, request) = call.into_parts();
+        let method = match request.method() {
+            "GET" => Method::Get,
+            "POST" => Method::Post,
+            other => panic!("unsupported fixture method {other}"),
+        };
+        let headers = request
+            .headers()
+            .iter()
+            .map(|header| {
+                (
+                    header.name().to_owned(),
+                    String::from_utf8(header.value().to_vec()).expect("fixture header is UTF-8"),
+                )
+            })
+            .collect();
         self.seen.lock().unwrap().push(Asked {
-            method: req.method,
-            path: req.url.path().to_string(),
-            headers: req.headers.clone(),
-            body: req
-                .body
-                .as_ref()
-                .map(|body| String::from_utf8_lossy(body).to_string()),
+            method,
+            path: request.path().to_owned(),
+            headers,
+            body: (!request.body().is_empty()).then(|| {
+                String::from_utf8(request.body().to_vec()).expect("fixture body is UTF-8")
+            }),
         });
         let answer = self.answers.lock().unwrap().pop_front();
         Box::pin(async move {
             match answer {
-                Some(answer) => Ok(HttpResponse {
-                    status: answer.status,
-                    headers: std::iter::once((
-                        "content-type".to_string(),
-                        "application/json".to_string(),
+                Some(answer) => {
+                    let headers = std::iter::once(
+                        HttpHeader::new("content-type", b"application/json".to_vec())
+                            .expect("fixture header"),
+                    )
+                    .chain(answer.headers.into_iter().map(|(name, value)| {
+                        HttpHeader::new(&name, value.into_bytes()).expect("fixture header")
+                    }))
+                    .collect();
+                    Ok(OneHopResponse::response(
+                        answer.status,
+                        headers,
+                        answer.body.into_bytes(),
                     ))
-                    .chain(answer.headers)
-                    .collect(),
-                    body: Box::pin(futures::stream::once(async move {
-                        Ok(bytes::Bytes::from(answer.body.into_bytes()))
-                    })),
-                }),
-                None => Err(HttpError::Transport {
-                    message: "the stub was asked more than it was scripted for".to_string(),
-                    delivery: DeliveryCertainty::DefinitelyUnsent,
-                }),
+                }
+                None => Err(TransportError::definitely_unsent(
+                    TransportFailure::Exchange(
+                        "the stub was asked more than it was scripted for".to_string(),
+                    ),
+                )),
             }
         })
     }

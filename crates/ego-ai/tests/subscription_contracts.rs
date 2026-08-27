@@ -25,7 +25,7 @@ fn request(messages: Vec<Message>) -> GenRequest {
 
 fn built_body(row: &ProviderRow, request: &GenRequest) -> serde_json::Value {
     let headers = vec![("authorization".to_string(), "Bearer test".to_string())];
-    let target = RequestTarget::new(&row.base, &headers);
+    let target = RequestTarget::new(row.base(), &headers);
     let built = row.wire.build_request(&target, request).unwrap();
     serde_json::from_slice(built.body.as_deref().expect("a JSON body")).unwrap()
 }
@@ -36,7 +36,7 @@ fn kimi_coding_uses_the_current_coding_v1_anthropic_contract() {
     let row = ProviderRow::kimi_coding_default();
     assert_eq!(format!("{:?}", row.wire), "AnthropicMessages");
     let headers = vec![("authorization".to_string(), "Bearer test".to_string())];
-    let target = RequestTarget::new(&row.base, &headers);
+    let target = RequestTarget::new(row.base(), &headers);
     let built = row
         .wire
         .build_request(&target, &request(vec![Message::text(Role::User, "say ok")]))
@@ -84,7 +84,7 @@ fn copilot_sets_current_dynamic_headers_without_changing_shared_chat_bytes() {
             "agent",
         ),
     ] {
-        let target = RequestTarget::new(&row.base, &headers);
+        let target = RequestTarget::new(row.base(), &headers);
         let built = GithubCopilotCompletions
             .build_request(&target, &request(messages))
             .unwrap();
@@ -128,7 +128,7 @@ fn minimax_oauth_and_nous_select_only_the_captured_current_shapes() {
     let minimax = ProviderRow::minimax_oauth_default();
     assert_eq!(format!("{:?}", minimax.wire), "AnthropicMessages");
     assert_eq!(
-        minimax.base.as_str(),
+        minimax.base().as_str(),
         "https://api.minimax.io/anthropic/v1/"
     );
 
@@ -159,11 +159,11 @@ fn captured_chat_clients_do_not_invent_a_parallel_tool_calls_field() {
         ProviderRow::nous_default(),
     ] {
         let body = built_body(&row, &req);
-        assert!(body.get("tools").is_some(), "{} dropped tools", row.id);
+        assert!(body.get("tools").is_some(), "{} dropped tools", row.id());
         assert!(
             body.get("parallel_tool_calls").is_none(),
             "{} invented a field its pinned client does not send: {body}",
-            row.id
+            row.id()
         );
     }
 }

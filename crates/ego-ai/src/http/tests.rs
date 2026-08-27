@@ -1,50 +1,14 @@
 use super::*;
 use ego_core::permit::{
-    HttpHeader, HttpRequest, HttpRequestDigest, HttpRoute, HttpScheme, NetworkTarget,
+    HttpHeader, HttpRequest as CoreHttpRequest, HttpRequestDigest, HttpRoute, HttpScheme,
+    NetworkTarget, OneHopResponse, TransportError, TransportFailure,
 };
-use reqwest::dns::{Name, Resolve};
-use std::net::IpAddr;
-use std::str::FromStr;
+use futures::StreamExt;
+use futures::future::BoxFuture;
+use futures::stream;
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
 use url::Url;
-
-async fn resolve(host: &str) -> Result<Vec<SocketAddr>, String> {
-    LoopbackResolver
-        .resolve(Name::from_str(host).expect("a valid DNS name"))
-        .await
-        .map(|addrs| addrs.collect())
-        .map_err(|e| e.to_string())
-}
-
-#[tokio::test]
-async fn the_offline_resolver_answers_for_localhost_from_a_constant() {
-    for spelling in ["localhost", "localhost."] {
-        let addrs = resolve(spelling)
-            .await
-            .unwrap_or_else(|e| panic!("{spelling} should resolve: {e}"));
-        assert_eq!(
-            addrs.iter().map(|a| a.ip()).collect::<Vec<_>>(),
-            vec![IpAddr::from([127, 0, 0, 1])],
-            "{spelling} must map to the loopback address and nothing else"
-        );
-    }
-}
-
-/// The name the admission table already refuses. It is refused here too,
-/// because a single check is a single place to get it wrong — and because
-/// this is the layer that makes "no DNS query leaves" a fact about the
-/// program rather than a claim about its callers.
-#[tokio::test]
-async fn the_offline_resolver_refuses_every_other_name_rather_than_asking() {
-    for host in ["api.openai.com", "evil.localhost", "localhost.evil.com"] {
-        let err = resolve(host)
-            .await
-            .expect_err("{host} must not be resolved offline");
-        assert!(
-            err.contains(host),
-            "the refusal must name {host}, got: {err}"
-        );
-    }
-}
 
 fn route(host: &str, port: u16) -> HttpRoute {
     HttpRoute::new(
@@ -54,7 +18,7 @@ fn route(host: &str, port: u16) -> HttpRoute {
     .expect("valid route")
 }
 
-fn request(path: &str, body: &[u8]) -> HttpRequest {
+fn request(path: &str, body: &[u8]) -> CoreHttpRequest {
     request_with(
         "POST",
         path,
@@ -63,8 +27,124 @@ fn request(path: &str, body: &[u8]) -> HttpRequest {
     )
 }
 
-fn request_with(method: &str, path: &str, headers: Vec<HttpHeader>, body: &[u8]) -> HttpRequest {
-    HttpRequest::new(method, path, headers, body.to_vec()).expect("valid request")
+fn request_with(
+    method: &str,
+    path: &str,
+    headers: Vec<HttpHeader>,
+    body: &[u8],
+) -> CoreHttpRequest {
+    CoreHttpRequest::new(method, path, headers, body.to_vec()).expect("valid request")
+}
+
+#[derive(Clone)]
+struct RecordedHop {
+    profile: HttpProfileFingerprint,
+    route: HttpRoute,
+    digest: HttpRequestDigest,
+    path: String,
+}
+
+struct RecordingHttp {
+    begins: Arc<Mutex<usize>>,
+    calls: Arc<Mutex<Vec<RecordedHop>>>,
+    responses: Arc<Mutex<VecDeque<Result<OneHopResponse, TransportError>>>>,
+}
+
+impl RecordingHttp {
+    fn new(responses: Vec<Result<OneHopResponse, TransportError>>) -> Self {
+        Self {
+            begins: Arc::new(Mutex::new(0)),
+            calls: Arc::new(Mutex::new(Vec::new())),
+            responses: Arc::new(Mutex::new(responses.into_iter().collect())),
+        }
+    }
+
+    fn begin_count(&self) -> usize {
+        *self.begins.lock().expect("begin count")
+    }
+
+    fn calls(&self) -> Vec<RecordedHop> {
+        self.calls.lock().expect("calls").clone()
+    }
+}
+
+struct RecordingHttpCall {
+    calls: Arc<Mutex<Vec<RecordedHop>>>,
+    responses: Arc<Mutex<VecDeque<Result<OneHopResponse, TransportError>>>>,
+}
+
+impl Http for RecordingHttp {
+    fn begin_call(&self) -> Box<dyn HttpCall> {
+        *self.begins.lock().expect("begin count") += 1;
+        Box::new(RecordingHttpCall {
+            calls: Arc::clone(&self.calls),
+            responses: Arc::clone(&self.responses),
+        })
+    }
+}
+
+impl HttpCall for RecordingHttpCall {
+    fn execute(
+        &mut self,
+        call: PreparedHttpCall,
+    ) -> BoxFuture<'static, Result<OneHopResponse, TransportError>> {
+        let (profile, route, connect, request) = call.into_parts();
+        self.calls.lock().expect("calls").push(RecordedHop {
+            profile,
+            route,
+            digest: connect.request_digest().clone(),
+            path: request.path().to_owned(),
+        });
+        let response = self
+            .responses
+            .lock()
+            .expect("responses")
+            .pop_front()
+            .expect("logical call response");
+        Box::pin(async move { response })
+    }
+}
+
+fn profile_for(host: &str) -> AdmittedHttpProfile {
+    AdmittedHttpProfile::try_new("provider", vec![route(host, 443)]).expect("profile")
+}
+
+fn response(status: u16, headers: Vec<HttpHeader>, body: Vec<Vec<u8>>) -> OneHopResponse {
+    OneHopResponse::streaming_response(
+        status,
+        headers,
+        Box::pin(stream::iter(body.into_iter().map(Ok))),
+    )
+}
+
+fn redirect(location: impl Into<Vec<u8>>) -> OneHopResponse {
+    OneHopResponse::redirect(307, Vec::new(), location.into())
+}
+
+async fn execute_profile(
+    profile: &AdmittedHttpProfile,
+    http: &RecordingHttp,
+    request: crate::http::HttpRequest,
+) -> Result<HttpResponse, HttpError> {
+    profile.execute(http, request).await
+}
+
+fn provider_request(url: &str) -> crate::http::HttpRequest {
+    crate::http::HttpRequest {
+        url: Url::parse(url).expect("URL"),
+        method: Method::Post,
+        headers: vec![("x-test".to_owned(), "raw".to_owned())],
+        body: Some(b"prompt".to_vec()),
+    }
+}
+
+fn logical_request(path: &str, body: &[u8]) -> CoreHttpRequest {
+    request_with(
+        "POST",
+        path,
+        vec![HttpHeader::new("x-test", b"raw".to_vec()).expect("header")],
+        body,
+    )
 }
 
 #[test]
@@ -283,4 +363,210 @@ fn prepared_capability_refuses_target_and_digest_drift_before_io() {
         )
         .expect("fresh capability");
     assert_ne!(first.request_digest(), second.request_digest());
+}
+
+#[tokio::test]
+async fn logical_call_begins_once_consumes_one_capability_and_streams_response() {
+    let profile = profile_for("api.example.test");
+    let headers = vec![
+        HttpHeader::new("x-duplicate", b"first".to_vec()).expect("header"),
+        HttpHeader::new("x-duplicate", b"second\xff".to_vec()).expect("header"),
+    ];
+    let expected_headers = headers.clone();
+    let http = RecordingHttp::new(vec![Ok(response(
+        200,
+        headers,
+        vec![b"first body".to_vec(), b"second body".to_vec()],
+    ))]);
+    let mut result = execute_profile(
+        &profile,
+        &http,
+        provider_request("https://api.example.test/v1/chat"),
+    )
+    .await
+    .expect("logical HTTP call");
+
+    assert_eq!(http.begin_count(), 1);
+    let calls = http.calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].profile, profile.fingerprint);
+    assert_eq!(calls[0].route, route("api.example.test", 443));
+    assert_eq!(calls[0].path, "/v1/chat");
+    assert_eq!(
+        calls[0].digest,
+        HttpRequestDigest::of(&logical_request("/v1/chat", b"prompt"))
+    );
+    assert_eq!(result.status, 200);
+    assert_eq!(result.headers, expected_headers);
+    let first = result
+        .body
+        .next()
+        .await
+        .expect("first body")
+        .expect("chunk");
+    let second = result
+        .body
+        .next()
+        .await
+        .expect("second body")
+        .expect("chunk");
+    assert_eq!(first, bytes::Bytes::from_static(b"first body"));
+    assert_eq!(second, bytes::Bytes::from_static(b"second body"));
+    assert!(result.body.next().await.is_none());
+}
+
+#[tokio::test]
+async fn admitted_redirect_prepares_fresh_capability_on_same_call_handle() {
+    let profile = profile_for("api.example.test");
+    let http = RecordingHttp::new(vec![
+        Ok(redirect(b"/next")),
+        Ok(response(200, Vec::new(), vec![b"done".to_vec()])),
+    ]);
+    let result = execute_profile(
+        &profile,
+        &http,
+        provider_request("https://api.example.test/start"),
+    )
+    .await
+    .expect("redirected logical call");
+
+    assert_eq!(result.status, 200);
+    assert_eq!(http.begin_count(), 1);
+    let calls = http.calls();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0].profile, profile.fingerprint);
+    assert_eq!(calls[1].profile, profile.fingerprint);
+    assert_eq!(calls[0].route, route("api.example.test", 443));
+    assert_eq!(calls[1].route, route("api.example.test", 443));
+    assert_eq!(calls[0].path, "/start");
+    assert_eq!(calls[1].path, "/next");
+    assert_ne!(calls[0].digest, calls[1].digest);
+}
+
+#[tokio::test]
+async fn admitted_redirect_chain_has_no_arbitrary_hop_cap() {
+    let profile = profile_for("api.example.test");
+    let mut responses = (1..=11)
+        .map(|step| Ok(redirect(format!("/step{step}"))))
+        .collect::<Vec<_>>();
+    responses.push(Ok(response(200, Vec::new(), vec![b"done".to_vec()])));
+    let http = RecordingHttp::new(responses);
+    let result = execute_profile(
+        &profile,
+        &http,
+        provider_request("https://api.example.test/step0"),
+    )
+    .await
+    .expect("long redirect chain");
+
+    assert_eq!(result.status, 200);
+    assert_eq!(http.begin_count(), 1);
+    let calls = http.calls();
+    assert_eq!(calls.len(), 12);
+    for (step, call) in calls.iter().enumerate() {
+        assert_eq!(call.path, format!("/step{step}"));
+    }
+}
+
+#[tokio::test]
+async fn canonical_request_identity_cycle_refuses_before_repeating_effect() {
+    let profile = profile_for("api.example.test");
+    let http = RecordingHttp::new(vec![Ok(redirect(b"/b")), Ok(redirect(b"/a"))]);
+    let error = match execute_profile(
+        &profile,
+        &http,
+        provider_request("https://api.example.test/a"),
+    )
+    .await
+    {
+        Err(error) => error,
+        Ok(_) => panic!("request cycle must refuse"),
+    };
+
+    assert_eq!(error.delivery(), DeliveryCertainty::PossiblySent);
+    assert_eq!(http.begin_count(), 1);
+    assert_eq!(http.calls().len(), 2);
+}
+
+#[tokio::test]
+async fn unadmitted_redirect_refuses_before_second_hop_and_keeps_delivery() {
+    let profile = profile_for("api.example.test");
+    let http = RecordingHttp::new(vec![Ok(redirect(b"https://evil.example.test/next"))]);
+    let error = match execute_profile(
+        &profile,
+        &http,
+        provider_request("https://api.example.test/start"),
+    )
+    .await
+    {
+        Err(error) => error,
+        Ok(_) => panic!("unadmitted redirect must refuse"),
+    };
+
+    assert_eq!(error.delivery(), DeliveryCertainty::PossiblySent);
+    assert_eq!(http.begin_count(), 1);
+    assert_eq!(http.calls().len(), 1);
+    assert_eq!(http.calls()[0].path, "/start");
+}
+
+#[tokio::test]
+async fn later_definitely_unsent_hop_error_is_promoted_after_response() {
+    let profile = profile_for("api.example.test");
+    let later_error = TransportError::definitely_unsent(TransportFailure::Connect(
+        "socket was not opened".to_owned(),
+    ));
+    let http = RecordingHttp::new(vec![Ok(redirect(b"/next")), Err(later_error)]);
+    let error = match execute_profile(
+        &profile,
+        &http,
+        provider_request("https://api.example.test/start"),
+    )
+    .await
+    {
+        Err(error) => error,
+        Ok(_) => panic!("later hop must fail"),
+    };
+
+    assert_eq!(error.delivery(), DeliveryCertainty::PossiblySent);
+    assert_eq!(http.begin_count(), 1);
+    assert_eq!(http.calls().len(), 2);
+}
+
+#[tokio::test]
+async fn response_body_error_preserves_typed_delivery() {
+    let profile = profile_for("api.example.test");
+    let body_error = TransportError::possibly_sent(TransportFailure::ResponseBody(
+        "body stream stopped".to_owned(),
+    ));
+    let streamed = OneHopResponse::streaming_response(
+        200,
+        Vec::new(),
+        Box::pin(stream::iter(vec![Ok(b"part".to_vec()), Err(body_error)])),
+    );
+    let http = RecordingHttp::new(vec![Ok(streamed)]);
+    let mut result = execute_profile(
+        &profile,
+        &http,
+        provider_request("https://api.example.test/start"),
+    )
+    .await
+    .expect("body-stream response");
+
+    assert_eq!(result.status, 200);
+    assert_eq!(
+        result
+            .body
+            .next()
+            .await
+            .expect("body chunk")
+            .expect("chunk"),
+        bytes::Bytes::from_static(b"part")
+    );
+    let error = result
+        .body
+        .next()
+        .await
+        .expect("body error")
+        .expect_err("typed body error");
+    assert_eq!(error.delivery(), DeliveryCertainty::PossiblySent);
 }

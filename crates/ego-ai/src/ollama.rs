@@ -125,6 +125,7 @@ pub async fn enumerate(
     let url = control_plane(row, "/api/tags").map_err(|error| error.to_string())?;
     let body = match fetch(
         http,
+        &row.http_profile,
         HttpRequest {
             url: url.clone(),
             method: Method::Get,
@@ -138,7 +139,7 @@ pub async fn enumerate(
         Err(message) => {
             return ModelDiscoveryReport::try_new(
                 ModelDiscoverySource::Discovered {
-                    provider: row.id.clone(),
+                    provider: row.id().to_owned(),
                 },
                 Vec::new(),
                 vec![ModelDiscoveryFailure::source(
@@ -155,7 +156,7 @@ pub async fn enumerate(
         Err(error) => {
             return ModelDiscoveryReport::try_new(
                 ModelDiscoverySource::Discovered {
-                    provider: row.id.clone(),
+                    provider: row.id().to_owned(),
                 },
                 Vec::new(),
                 vec![ModelDiscoveryFailure::source(
@@ -169,7 +170,7 @@ pub async fn enumerate(
     let Some(items) = document.get("models").and_then(serde_json::Value::as_array) else {
         return ModelDiscoveryReport::try_new(
             ModelDiscoverySource::Discovered {
-                provider: row.id.clone(),
+                provider: row.id().to_owned(),
             },
             Vec::new(),
             vec![ModelDiscoveryFailure::source(
@@ -215,18 +216,18 @@ pub async fn enumerate(
         }
         models.push(ModelDiscoveryEntry {
             slug: ModelSlug {
-                provider: row.id.clone(),
+                provider: row.id().to_owned(),
                 model: tag.name.clone(),
             },
             capabilities: capabilities_from(&tag, None),
             metering: MeteringKind::Unmetered,
-            provenance: ModelFactProvenance::discovered(row.id.clone()),
+            provenance: ModelFactProvenance::discovered(row.id().to_owned()),
         });
     }
 
     ModelDiscoveryReport::try_new(
         ModelDiscoverySource::Discovered {
-            provider: row.id.clone(),
+            provider: row.id().to_owned(),
         },
         models,
         failures,
@@ -243,6 +244,7 @@ async fn installed(
     let url = control_plane(row, "/api/tags")?;
     let body = fetch(
         http,
+        &row.http_profile,
         HttpRequest {
             url: url.clone(),
             method: Method::Get,
@@ -307,6 +309,7 @@ async fn running_context(
     let url = control_plane(row, "/api/ps")?;
     let body = fetch(
         http,
+        &row.http_profile,
         HttpRequest {
             url: url.clone(),
             method: Method::Get,
@@ -340,6 +343,7 @@ async fn load(row: &ProviderRow, model: &str, http: &Arc<dyn Http>) -> Result<()
     let body = serde_json::json!({ "model": model, "messages": [] });
     fetch(
         http,
+        &row.http_profile,
         HttpRequest {
             url: url.clone(),
             method: Method::Post,

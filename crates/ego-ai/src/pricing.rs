@@ -520,11 +520,11 @@ impl Row<'_> {
 // --- the fetch ---
 
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use url::Url;
 
-use crate::http::{Exchange, Http, HttpRequest, Method, exchange};
+use crate::http::{AdmittedHttpProfile, Exchange, Http, HttpRequest, Method, exchange};
 
 /// The document itself, on the branch litellm publishes from.
 ///
@@ -543,6 +543,14 @@ pub const UPSTREAM: &str =
 /// [`UPSTREAM`], parsed.
 pub fn upstream() -> Url {
     Url::parse(UPSTREAM).expect("a constant this file controls")
+}
+
+fn http_profile() -> &'static AdmittedHttpProfile {
+    static PROFILE: OnceLock<AdmittedHttpProfile> = OnceLock::new();
+    PROFILE.get_or_init(|| {
+        AdmittedHttpProfile::from_urls("aux/pricing/litellm/v1", &[upstream()])
+            .expect("the built-in pricing URL is an admitted HTTP route")
+    })
 }
 
 /// The response header that identifies which upstream artefact these bytes are.
@@ -646,9 +654,7 @@ impl std::error::Error for FetchError {}
 /// every rate source on a ceiling existing and §7 makes `--offline` a property
 /// of the transport, so both refusals happen above and below this function
 /// rather than inside it: `Metering::ceiling_needs_rates` decides whether to
-/// call at all, and `EgressPolicy::LoopbackOnly` refuses the request with no
-/// special case here. A check written here as well would be a third opinion
-/// that could disagree with either.
+/// call at all, and the injected run transport enforces offline confinement.
 pub async fn fetch(http: &Arc<dyn Http>, known: Option<&str>) -> Result<Fetched, FetchError> {
     let unreachable = |message: String| FetchError::Unreachable {
         endpoint: UPSTREAM.to_string(),
@@ -656,6 +662,7 @@ pub async fn fetch(http: &Arc<dyn Http>, known: Option<&str>) -> Result<Fetched,
     };
     let answer = exchange(
         http,
+        http_profile(),
         HttpRequest {
             url: upstream(),
             method: Method::Get,

@@ -20,6 +20,7 @@ use std::sync::Arc;
 
 use url::Url;
 
+use crate::http::AdmittedHttpProfile;
 use crate::resolver::{
     ModelResolver, OllamaDaemon, SubscriptionSupplied, Supplied, XaiLanguageModels,
 };
@@ -312,7 +313,7 @@ impl std::error::Error for MissingCredential {}
 /// nowhere else.
 #[derive(Debug, Clone)]
 pub struct ProviderRow {
-    pub id: String,
+    id: String,
     /// Scheme, host and any prefix — and **no path this row owns**.
     ///
     /// A base and not a full endpoint, because a path is a fact about the API
@@ -331,7 +332,9 @@ pub struct ProviderRow {
     /// `https://gateway.example/openai/v1` would resolve
     /// `chat/completions` to `https://gateway.example/openai/chat/completions`
     /// — a silently wrong address for a deployment shape that really exists.
-    pub base: Url,
+    base: Url,
+    /// Exact network routes this immutable provider row admits.
+    pub(crate) http_profile: AdmittedHttpProfile,
     pub credential: CredentialStrategy,
     /// Non-secret identity headers declared by this profile. Credential and
     /// wire-format headers are excluded and validated at configuration load.
@@ -454,7 +457,24 @@ fn as_base(mut base: Url) -> Url {
     base
 }
 
+fn admitted_base(id: &str, base: Url) -> (Url, AdmittedHttpProfile) {
+    let base = as_base(base);
+    let profile = AdmittedHttpProfile::from_urls(id, std::slice::from_ref(&base))
+        .expect("a provider base already parsed as an HTTP URL is an admitted route");
+    (base, profile)
+}
+
 impl ProviderRow {
+    /// The stable provider identifier bound into this row's HTTP profile.
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// The normalized base URL bound into this row's HTTP profile.
+    pub fn base(&self) -> &Url {
+        &self.base
+    }
+
     /// The hosted row.
     ///
     /// Infallible, and that is the change the profile ADR's §3 argues for: a
@@ -474,9 +494,11 @@ impl ProviderRow {
     /// and the id are the row's. Azure and the compatible gateways serve this
     /// wire format at their own hostnames, and a test serves it on loopback.
     pub fn openai_at(base: Url) -> Self {
+        let (base, http_profile) = admitted_base("openai", base);
         ProviderRow {
             id: "openai".to_string(),
-            base: as_base(base),
+            base,
+            http_profile,
             extra_headers: Vec::new(),
             wire: &OpenAiCompletions,
             resolver: &Supplied,
@@ -524,9 +546,11 @@ impl ProviderRow {
     /// which shares the family's request projection and its whole decoder and
     /// differs in one field.
     pub fn ollama(base: Url) -> Self {
+        let (base, http_profile) = admitted_base("ollama", base);
         ProviderRow {
             id: "ollama".to_string(),
-            base: as_base(base),
+            base,
+            http_profile,
             extra_headers: Vec::new(),
             wire: &Ollama,
             resolver: &OllamaDaemon,
@@ -558,9 +582,11 @@ impl ProviderRow {
     /// family member: alone among the six, xAI publishes what it will charge
     /// the key that asks.
     pub fn xai(base: Url) -> Self {
+        let (base, http_profile) = admitted_base("xai", base);
         ProviderRow {
             id: "xai".to_string(),
-            base: as_base(base),
+            base,
+            http_profile,
             extra_headers: Vec::new(),
             wire: &OpenAiCompletions,
             resolver: &XaiLanguageModels,
@@ -577,9 +603,14 @@ impl ProviderRow {
     }
 
     pub fn openai_codex_default() -> Self {
+        let (base, http_profile) = admitted_base(
+            "openai-codex",
+            Url::parse(OPENAI_CODEX_BASE).expect("a constant this file controls"),
+        );
         ProviderRow {
             id: "openai-codex".to_string(),
-            base: as_base(Url::parse(OPENAI_CODEX_BASE).expect("a constant this file controls")),
+            base,
+            http_profile,
             extra_headers: vec![
                 ("originator".to_string(), "ego".to_string()),
                 ("user-agent".to_string(), "ego".to_string()),
@@ -594,9 +625,14 @@ impl ProviderRow {
     }
 
     pub fn github_copilot_default() -> Self {
+        let (base, http_profile) = admitted_base(
+            "github-copilot",
+            Url::parse(GITHUB_COPILOT_BASE).expect("a constant this file controls"),
+        );
         ProviderRow {
             id: "github-copilot".to_string(),
-            base: as_base(Url::parse(GITHUB_COPILOT_BASE).expect("a constant this file controls")),
+            base,
+            http_profile,
             extra_headers: vec![
                 (
                     "user-agent".to_string(),
@@ -622,9 +658,14 @@ impl ProviderRow {
     }
 
     pub fn xai_oauth_default() -> Self {
+        let (base, http_profile) = admitted_base(
+            "xai-oauth",
+            Url::parse(XAI_BASE).expect("a constant this file controls"),
+        );
         ProviderRow {
             id: "xai-oauth".to_string(),
-            base: as_base(Url::parse(XAI_BASE).expect("a constant this file controls")),
+            base,
+            http_profile,
             extra_headers: Vec::new(),
             wire: &XaiResponses,
             resolver: &XAI_OAUTH_SUBSCRIPTION,
@@ -639,9 +680,14 @@ impl ProviderRow {
     }
 
     pub fn kimi_coding_default() -> Self {
+        let (base, http_profile) = admitted_base(
+            "kimi-coding",
+            Url::parse(KIMI_CODING_BASE).expect("a constant this file controls"),
+        );
         ProviderRow {
             id: "kimi-coding".to_string(),
-            base: as_base(Url::parse(KIMI_CODING_BASE).expect("a constant this file controls")),
+            base,
+            http_profile,
             extra_headers: Vec::new(),
             wire: &AnthropicMessages,
             resolver: &KIMI_CODING_SUBSCRIPTION,
@@ -653,9 +699,14 @@ impl ProviderRow {
     }
 
     pub fn qwen_oauth_default() -> Self {
+        let (base, http_profile) = admitted_base(
+            "qwen-oauth",
+            Url::parse(QWEN_OAUTH_BASE).expect("a constant this file controls"),
+        );
         ProviderRow {
             id: "qwen-oauth".to_string(),
-            base: as_base(Url::parse(QWEN_OAUTH_BASE).expect("a constant this file controls")),
+            base,
+            http_profile,
             extra_headers: Vec::new(),
             wire: &QwenPortal,
             resolver: &QWEN_OAUTH_SUBSCRIPTION,
@@ -667,9 +718,14 @@ impl ProviderRow {
     }
 
     pub fn minimax_oauth_default() -> Self {
+        let (base, http_profile) = admitted_base(
+            "minimax-oauth",
+            Url::parse(MINIMAX_OAUTH_BASE).expect("a constant this file controls"),
+        );
         ProviderRow {
             id: "minimax-oauth".to_string(),
-            base: as_base(Url::parse(MINIMAX_OAUTH_BASE).expect("a constant this file controls")),
+            base,
+            http_profile,
             extra_headers: Vec::new(),
             wire: &AnthropicMessages,
             resolver: &MINIMAX_OAUTH_SUBSCRIPTION,
@@ -681,9 +737,14 @@ impl ProviderRow {
     }
 
     pub fn nous_default() -> Self {
+        let (base, http_profile) = admitted_base(
+            "nous",
+            Url::parse(NOUS_BASE).expect("a constant this file controls"),
+        );
         ProviderRow {
             id: "nous".to_string(),
-            base: as_base(Url::parse(NOUS_BASE).expect("a constant this file controls")),
+            base,
+            http_profile,
             extra_headers: Vec::new(),
             wire: &NousPortal,
             resolver: &NOUS_SUBSCRIPTION,
@@ -716,9 +777,11 @@ impl ProviderRow {
     /// table read live is a third-party table with extra steps, and §5 ranks
     /// it below the operator's own figures either way.
     pub fn openrouter(base: Url) -> Self {
+        let (base, http_profile) = admitted_base("openrouter", base);
         ProviderRow {
             id: "openrouter".to_string(),
-            base: as_base(base),
+            base,
+            http_profile,
             extra_headers: Vec::new(),
             wire: &OpenAiCompletions,
             resolver: &Supplied,
@@ -750,9 +813,11 @@ impl ProviderRow {
     /// credential, and [`wire::anthropic_messages`](crate::wire::anthropic_messages)
     /// owns it.
     pub fn anthropic(base: Url) -> Self {
+        let (base, http_profile) = admitted_base("anthropic", base);
         ProviderRow {
             id: "anthropic".to_string(),
-            base: as_base(base),
+            base,
+            http_profile,
             extra_headers: Vec::new(),
             wire: &AnthropicMessages,
             resolver: &Supplied,
@@ -790,9 +855,11 @@ impl ProviderRow {
     /// provider names rather than a scheme — which is why
     /// [`CredentialStrategy::HeaderFromEnv`] is data and not a second enum.
     pub fn gemini(base: Url) -> Self {
+        let (base, http_profile) = admitted_base("gemini", base);
         ProviderRow {
             id: "gemini".to_string(),
-            base: as_base(base),
+            base,
+            http_profile,
             extra_headers: Vec::new(),
             wire: &GeminiInteractions,
             resolver: &Supplied,

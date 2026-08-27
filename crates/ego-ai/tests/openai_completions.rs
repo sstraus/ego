@@ -36,6 +36,7 @@ use ego_core::generator::types::{
     ContentBlock, Conversation, ErrorKind, GenRequest, Message, ReasoningState, Role, StopReason,
     ThinkingLevel, ToolDescriptor,
 };
+use ego_core::permit::HttpHeader;
 use ego_core::state::Usage;
 use futures::StreamExt;
 use url::Url;
@@ -637,67 +638,6 @@ fn a_finish_reason_maps_to_the_stop_it_names() {
     }
 }
 
-/// The case the plan names. A stream that stops in the middle of a frame has
-/// not ended — it has been cut — and the difference has to reach the caller,
-/// because the model never said whether it had finished.
-#[test]
-fn a_stream_cut_mid_frame_is_an_error_and_not_a_short_answer() {
-    let cut = &TEXT_TRANSCRIPT.as_bytes()[..TEXT_TRANSCRIPT.len() / 2];
-    let mut decoder = StreamDecoder::default();
-    let mut events = decoder.push(cut);
-    events.extend(decoder.finish(Some(HttpError::Transport {
-        message: "connection reset by peer".to_string(),
-        delivery: DeliveryCertainty::PossiblySent,
-    })));
-
-    assert!(
-        events.contains(&AiEvent::DeliveryObserved(DeliveryCertainty::PossiblySent)),
-        "a cut stream may already have been billed, so a retry is the caller's \
-         decision to take knowingly: {events:?}"
-    );
-    assert_eq!(events.last(), Some(&AiEvent::Stop(StopReason::Error)));
-    let explained = events.iter().any(|event| match event {
-        AiEvent::Error { message, .. } => message.contains("connection reset by peer"),
-        _ => false,
-    });
-    assert!(
-        explained,
-        "the cause must survive to the caller: {events:?}"
-    );
-}
-
-/// The mirror of the case above, and the reason the truncation rule is one
-/// line. Once the model has said why it stopped, the answer is complete; a
-/// stream that dies afterwards costs only the usage chunk — which OpenAI's own
-/// schema warns may not arrive — and reporting that as a failed turn would be
-/// worse than reporting nothing.
-#[test]
-fn a_cut_after_the_finish_reason_is_a_complete_turn_with_no_usage() {
-    let upto = TEXT_TRANSCRIPT
-        .find("\"finish_reason\":\"stop\"")
-        .map(|at| TEXT_TRANSCRIPT[at..].find("\n\n").expect("the frame ends") + at + 2)
-        .expect("the transcript has a finish_reason");
-    let mut decoder = StreamDecoder::default();
-    let mut events = decoder.push(&TEXT_TRANSCRIPT.as_bytes()[..upto]);
-    events.extend(decoder.finish(Some(HttpError::Transport {
-        message: "connection reset by peer".to_string(),
-        delivery: DeliveryCertainty::PossiblySent,
-    })));
-
-    assert_eq!(events.last(), Some(&AiEvent::Stop(StopReason::Stop)));
-    assert!(
-        !events
-            .iter()
-            .any(|event| matches!(event, AiEvent::Error { .. })),
-        "the model finished; the transport failing afterwards is not the turn \
-         failing: {events:?}"
-    );
-    assert!(
-        !events.iter().any(|e| matches!(e, AiEvent::Usage(_))),
-        "no usage arrived, and none may be invented: {events:?}"
-    );
-}
-
 /// Half-assembled arguments are not arguments. Dispatching a tool with a
 /// truncated JSON string would run it on whatever the fragment happened to
 /// parse as; the fragments are dropped, and the error says they were.
@@ -917,7 +857,9 @@ fn responding(status: u16, body: &'static str) -> Result<HttpResponse, HttpError
         .collect();
     Ok(HttpResponse {
         status,
-        headers: vec![("content-type".to_string(), "text/event-stream".to_string())],
+        headers: vec![
+            HttpHeader::new("content-type", b"text/event-stream".to_vec()).expect("header"),
+        ],
         body: Box::pin(futures::stream::iter(chunks)),
     })
 }
@@ -1017,83 +959,6 @@ async fn an_unmapped_status_is_unclassified_rather_than_assumed_retryable() {
     );
 }
 
-/// The half of delivery certainty that makes a retry safe. A request refused
-/// by the egress policy never opened a socket, so retrying it — against a
-/// different provider, say — cannot be billed twice.
-#[tokio::test]
-async fn a_request_that_never_left_says_so() {
-    use ego_ai::http::EgressRefused;
-    let events: Vec<AiEvent> = decode(
-        Err(HttpError::refused_before_sending(
-            EgressRefused::NameNeedsResolution {
-                host: "api.openai.com".to_string(),
-            },
-        )),
-        None,
-    )
-    .collect()
-    .await;
-
-    assert_eq!(
-        events.first(),
-        Some(&AiEvent::DeliveryObserved(
-            DeliveryCertainty::DefinitelyUnsent
-        ))
-    );
-    assert_eq!(events.last(), Some(&AiEvent::Stop(StopReason::Error)));
-    assert!(
-        events.iter().any(|event| match event {
-            AiEvent::Error { message, .. } => message.contains("api.openai.com"),
-            _ => false,
-        }),
-        "the refusal must still name what it refused: {events:?}"
-    );
-}
-
-/// The transport is the only layer that can tell these two apart, and by the
-/// time either is prose they read identically — which is why the class comes
-/// off `HttpError` and not off the message.
-///
-/// An egress refusal is `Invalid` and not `Refused`, and the near miss is the
-/// point of the test: `ErrorKind::Refused` means the *provider* turned the
-/// account away, and a request the policy stopped never reached a provider.
-/// It is ego's own answer about the request's destination — the same on every
-/// retry, and an operator's configuration problem rather than an outage.
-#[tokio::test]
-async fn a_transport_failure_and_a_policy_refusal_are_different_classes() {
-    use ego_ai::http::EgressRefused;
-
-    let class_of = |events: &[AiEvent]| {
-        events.iter().find_map(|event| match event {
-            AiEvent::Error { kind, .. } => Some(*kind),
-            _ => None,
-        })
-    };
-
-    let refused: Vec<AiEvent> = decode(
-        Err(HttpError::refused_before_sending(
-            EgressRefused::NameNeedsResolution {
-                host: "api.openai.com".to_string(),
-            },
-        )),
-        None,
-    )
-    .collect()
-    .await;
-    assert_eq!(class_of(&refused), Some(ErrorKind::Invalid));
-
-    let transport: Vec<AiEvent> = decode(
-        Err(HttpError::Transport {
-            message: "connection refused".to_string(),
-            delivery: DeliveryCertainty::DefinitelyUnsent,
-        }),
-        None,
-    )
-    .collect()
-    .await;
-    assert_eq!(class_of(&transport), Some(ErrorKind::Transient));
-}
-
 /// A stream that ended without saying why, after a status that proved the
 /// request was accepted. Neither the request nor the account is what went
 /// wrong and the same bytes may well complete next time, so it is
@@ -1112,37 +977,4 @@ fn a_stream_that_stops_without_a_finish_reason_is_transient() {
         "{events:?}"
     );
     assert_eq!(events.last(), Some(&AiEvent::Stop(StopReason::Error)));
-}
-
-/// A body that dies halfway is `PossiblySent`, and it reaches the caller
-/// through the stream rather than through a return value nobody reads.
-#[tokio::test]
-async fn a_body_that_fails_halfway_carries_its_certainty_out_through_the_stream() {
-    let response = Ok(HttpResponse {
-        status: 200,
-        headers: Vec::new(),
-        body: Box::pin(futures::stream::iter(vec![
-            Ok(bytes::Bytes::from_static(
-                b"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"par",
-            )),
-            Err(HttpError::Transport {
-                message: "connection reset by peer".to_string(),
-                delivery: DeliveryCertainty::PossiblySent,
-            }),
-        ])),
-    });
-    let events: Vec<AiEvent> = decode(response, None).collect().await;
-
-    assert_eq!(events.last(), Some(&AiEvent::Stop(StopReason::Error)));
-    assert_eq!(
-        events
-            .iter()
-            .filter(|event| matches!(
-                event,
-                AiEvent::DeliveryObserved(DeliveryCertainty::PossiblySent)
-            ))
-            .count(),
-        2,
-        "once on arrival and once on the failure: {events:?}"
-    );
 }

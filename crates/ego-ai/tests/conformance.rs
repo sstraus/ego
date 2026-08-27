@@ -7,6 +7,7 @@ use ego_ai::wire::provider_cost::{OPENROUTER_COST_FIELD, XAI_COST_FIELD};
 use ego_core::generator::attempt::DeliveryCertainty;
 use ego_core::generator::port::AiEvent;
 use ego_core::generator::types::StopReason;
+use ego_core::permit::HttpHeader;
 use ego_core::state::Usage;
 use futures::StreamExt;
 
@@ -58,7 +59,10 @@ async fn decode(row: &ProviderRow, status: u16, body: &str, content_type: &str) 
         .decode(
             Ok(HttpResponse {
                 status,
-                headers: vec![("content-type".to_string(), content_type.to_string())],
+                headers: vec![
+                    HttpHeader::new("content-type", content_type.as_bytes().to_vec())
+                        .expect("header"),
+                ],
                 body: Box::pin(futures::stream::iter(chunks)),
             }),
             row.cost.clone(),
@@ -135,7 +139,7 @@ async fn check_1_the_request_each_profile_builds_is_the_one_it_committed() {
             headers.retain(|(present, _)| !present.eq_ignore_ascii_case(name));
             headers.push((name.clone(), value.clone()));
         }
-        let target = RequestTarget::new(credential.base_override().unwrap_or(&row.base), &headers);
+        let target = RequestTarget::new(credential.base_override().unwrap_or(row.base()), &headers);
         let built = row
             .wire
             .build_request(&target, &req)

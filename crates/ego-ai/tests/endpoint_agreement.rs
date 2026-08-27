@@ -177,8 +177,8 @@ fn userinfo_cannot_appear_in_a_rule_and_does_not_fool_the_seam() {
 //
 // `http.rs` cannot call it, for two independent reasons:
 //
-// 1. **`Endpoint` cannot express what `--offline` decides.** `EgressPolicy::
-//    LoopbackOnly` admits all of `127.0.0.0/8`, IPv6 loopback, and the name
+// 1. **`Endpoint` cannot express what `--offline` decides.** The transport's
+//    `LoopbackOnly` admits all of `127.0.0.0/8`, IPv6 loopback, and the name
 //    `localhost`. `Host::Ip` is a single literal and the grammar has no range
 //    construct — §4 lists what a rule deliberately cannot say, and a CIDR
 //    would be a new one nobody asked for. A shared classifier would therefore

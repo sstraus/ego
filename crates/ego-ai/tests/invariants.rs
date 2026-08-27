@@ -41,10 +41,8 @@ use std::sync::{Arc, Mutex};
 
 use ego_ai::catalogue::{self, Catalogue, HostedModel, ModelSlug, SuppliedAuthority};
 use ego_ai::generator::WireGenerator;
-use ego_ai::http::{Http, HttpError, HttpRequest, HttpResponse};
+use ego_ai::http::{Http, HttpCall, HttpError, HttpRequest, HttpResponse, PreparedHttpCall};
 use ego_ai::provider::{CredentialStrategy, ProviderRow};
-use ego_ai::resolver::Supplied;
-use ego_ai::wire::openai_completions::OpenAiCompletions;
 use ego_ai::wire::provider_cost::ProviderCost;
 use ego_ai::wire::{RequestRefused, RequestTarget, WireFormat};
 use ego_core::budget::{BudgetGate, PricingQuote};
@@ -67,6 +65,7 @@ use ego_core::permit::fake::FakeFs;
 use ego_core::permit::{
     CanonPath, PolicyEngine, ProcessError, ProcessExecutor, SpawnSpec, Tool, ToolResult,
 };
+use ego_core::permit::{HttpHeader, OneHopResponse, TransportError, TransportFailure};
 use ego_core::run::{RunAppend, RunRevision, RunTransaction};
 use ego_core::sink::NullSink;
 use ego_core::state::{ItemKind, SessionState, Usage};
@@ -82,7 +81,7 @@ use serde::Deserialize;
 use url::Url;
 
 mod support;
-use support::FakeCredentials;
+use support::{FakeCredentials, NoForeign};
 
 /// The openai-completions recording the family is already tested against.
 ///
@@ -245,37 +244,47 @@ impl EvidenceStore for NoEvidence {
 /// Chunked at a size that falls inside every frame of both transcripts, so a
 /// mapping that assumed a frame arrives whole fails here rather than against a
 /// real socket.
-struct StubHttp(Mutex<Option<String>>);
+struct StubHttp(Arc<Mutex<Option<String>>>);
 
 impl StubHttp {
     fn replaying(body: impl Into<String>) -> Arc<Self> {
-        Arc::new(StubHttp(Mutex::new(Some(body.into()))))
+        Arc::new(StubHttp(Arc::new(Mutex::new(Some(body.into())))))
     }
 }
 
 impl Http for StubHttp {
-    fn execute(&self, _req: HttpRequest) -> BoxFuture<'static, Result<HttpResponse, HttpError>> {
+    fn begin_call(&self) -> Box<dyn HttpCall> {
+        Box::new(StubCall(Arc::clone(&self.0)))
+    }
+}
+
+struct StubCall(Arc<Mutex<Option<String>>>);
+
+impl HttpCall for StubCall {
+    fn execute(
+        &mut self,
+        _call: PreparedHttpCall,
+    ) -> BoxFuture<'static, Result<OneHopResponse, TransportError>> {
         let body = self.0.lock().expect("not poisoned").take();
         Box::pin(async move {
             let Some(body) = body else {
-                return Err(HttpError::Transport {
-                    message: "the stub was asked twice".to_string(),
-                    delivery: DeliveryCertainty::DefinitelyUnsent,
-                });
+                return Err(TransportError::definitely_unsent(
+                    TransportFailure::Exchange("the stub was asked twice".to_owned()),
+                ));
             };
-            let chunks: Vec<Result<bytes::Bytes, HttpError>> = body
+            let chunks: Vec<Result<Vec<u8>, TransportError>> = body
                 .as_bytes()
                 .chunks(7)
-                .map(|chunk| Ok(bytes::Bytes::copy_from_slice(chunk)))
+                .map(|chunk| Ok(chunk.to_vec()))
                 .collect();
-            Ok(HttpResponse {
-                status: 200,
-                headers: vec![(
-                    "content-type".to_string(),
-                    "application/octet-stream".to_string(),
-                )],
-                body: Box::pin(futures::stream::iter(chunks)),
-            })
+            Ok(OneHopResponse::streaming_response(
+                200,
+                vec![
+                    HttpHeader::new("content-type", b"application/octet-stream".to_vec())
+                        .expect("fixture header"),
+                ],
+                Box::pin(futures::stream::iter(chunks)),
+            ))
         })
     }
 }
@@ -314,6 +323,7 @@ async fn one_turn(
     let fs = FakeFs::default();
     let process = NoProcess;
     let evidence = NoEvidence;
+    let foreign = NoForeign;
     let registry: Vec<Arc<dyn Tool>> = Vec::new();
     let mut gate = BudgetGate::new(usd("10"));
 
@@ -350,6 +360,9 @@ async fn one_turn(
             &fs,
             &process,
             &evidence,
+            &foreign,
+            &foreign,
+            &foreign,
             CanonPath::new("/ws"),
         ),
     );
@@ -391,26 +404,14 @@ fn settled(exit: ExitReason, state: &SessionState, usage: Usage, total: &str) {
 /// A provider nobody wrote a line of code for generates, settles and is
 /// priced.
 ///
-/// Everything about "acme" here is a value: an id, a base URL, the variable
-/// its key lives in, the mapping it speaks, and the model facts an operator
-/// supplied. Nothing anywhere learns the name — which is the invariant, and
-/// the reason this is written as a row literal rather than through a
-/// constructor named after a vendor.
+/// The row is constructor-backed, with an operator-supplied endpoint and the
+/// OpenAI mapping. Nothing in the core path branches on the provider name.
 #[tokio::test]
 async fn a_provider_on_a_supported_dialect_is_configuration_and_nothing_else() {
-    let acme = ProviderRow {
-        resolver: &Supplied,
-        id: "acme".to_string(),
-        base: Url::parse("https://api.acme.example/v1/").expect("a valid url"),
-        extra_headers: Vec::new(),
-        credential: CredentialStrategy::BearerFromEnv {
-            var: KEY_VAR.to_string(),
-        },
-        wire: &OpenAiCompletions,
-        cost: None,
-    };
+    let acme =
+        ProviderRow::openai_at(Url::parse("https://api.acme.example/v1/").expect("a valid url"));
 
-    let (exit, state) = one_turn("acme/wonder-1", acme, FAMILY_TRANSCRIPT).await;
+    let (exit, state) = one_turn("openai/wonder-1", acme, FAMILY_TRANSCRIPT).await;
 
     settled(
         exit,
@@ -636,15 +637,11 @@ fn beacon_transcript() -> String {
 
 /// The stranger's row. A value like any other row, which is the claim.
 fn beacon_row() -> ProviderRow {
-    ProviderRow {
-        resolver: &Supplied,
-        id: "beacon".to_string(),
-        base: Url::parse("https://beacon.example/").expect("a valid url"),
-        extra_headers: Vec::new(),
-        credential: CredentialStrategy::None,
-        wire: &Beacon,
-        cost: None,
-    }
+    let mut row =
+        ProviderRow::openai_at(Url::parse("https://beacon.example/v1/").expect("a valid url"));
+    row.credential = CredentialStrategy::None;
+    row.wire = &Beacon;
+    row
 }
 
 /// A protocol nobody designed `AiEvent` against reaches the same settled end.
@@ -654,7 +651,7 @@ fn beacon_row() -> ProviderRow {
 /// is the point: the ledger priced a report it had never seen the shape of.
 #[tokio::test]
 async fn a_new_protocol_is_an_adapter_and_its_registration() {
-    let (exit, state) = one_turn("beacon/lighthouse", beacon_row(), beacon_transcript()).await;
+    let (exit, state) = one_turn("openai/lighthouse", beacon_row(), beacon_transcript()).await;
 
     settled(
         exit,
@@ -686,7 +683,7 @@ async fn a_stranger_protocols_own_error_shape_ends_the_turn() {
         r#"{"halt":{"why":"the beacon is dark","permanent":false}}"#,
     ]);
 
-    let (exit, state) = one_turn("beacon/lighthouse", beacon_row(), transcript).await;
+    let (exit, state) = one_turn("openai/lighthouse", beacon_row(), transcript).await;
 
     assert_eq!(exit, ExitReason::Provider);
     assert_eq!(answer(&state), "Due ");
@@ -710,7 +707,7 @@ async fn a_cut_stream_settles_against_the_last_report_the_mapping_held() {
         r#"{"say":{"text":"file — perché no? 😀","seen":{"prompt":900,"from_cache":400,"emitted":250}}}"#,
     ]);
 
-    let (exit, state) = one_turn("beacon/lighthouse", beacon_row(), transcript).await;
+    let (exit, state) = one_turn("openai/lighthouse", beacon_row(), transcript).await;
 
     assert_eq!(exit, ExitReason::Provider);
     assert_eq!(answer(&state), "Due file — perché no? 😀");

@@ -34,17 +34,17 @@
 //! `interaction.status_update`, `step_usage`), so that ignoring them is tested
 //! rather than assumed.
 
-use ego_ai::http::{HttpError, HttpResponse};
+use ego_ai::http::HttpResponse;
 use ego_ai::wire::RequestTarget;
 use ego_ai::wire::gemini_interactions::{
     DIALECT, Inexpressible, StreamDecoder, build_request, request_body,
 };
-use ego_core::generator::attempt::DeliveryCertainty;
 use ego_core::generator::port::AiEvent;
 use ego_core::generator::types::{
     ContentBlock, Conversation, ErrorKind, GenRequest, Message, ReasoningState, Role, StopReason,
     ThinkingLevel, ToolDescriptor,
 };
+use ego_core::permit::HttpHeader;
 use ego_core::state::Usage;
 use url::Url;
 
@@ -695,52 +695,6 @@ fn a_stream_that_ends_before_the_interaction_completes_is_an_error() {
     );
 }
 
-/// A transport failure mid-stream is reported with the certainty the transport
-/// read, not with one this decoder invented.
-#[test]
-fn a_transport_failure_keeps_what_the_transport_observed() {
-    let cut = TEXT_TRANSCRIPT
-        .split_once("event: interaction.completed")
-        .expect("the golden has one")
-        .0;
-    let mut decoder = StreamDecoder::default();
-    let mut events = decoder.push(cut.as_bytes());
-    events.extend(decoder.finish(Some(HttpError::Transport {
-        message: "connection reset".to_string(),
-        delivery: DeliveryCertainty::PossiblySent,
-    })));
-
-    assert!(
-        events.iter().any(|event| matches!(
-            event,
-            AiEvent::DeliveryObserved(DeliveryCertainty::PossiblySent)
-        )),
-        "{events:?}"
-    );
-    assert_eq!(events.last(), Some(&AiEvent::Stop(StopReason::Error)));
-}
-
-/// Once the interaction has reported its status the turn is complete, and a
-/// transport that dies afterwards is not the turn failing.
-#[test]
-fn a_cut_after_the_status_is_a_complete_turn() {
-    let mut decoder = StreamDecoder::default();
-    let mut events = decoder.push(TEXT_TRANSCRIPT.as_bytes());
-    events.extend(decoder.finish(Some(HttpError::Transport {
-        message: "connection reset".to_string(),
-        delivery: DeliveryCertainty::PossiblySent,
-    })));
-
-    assert_eq!(events.last(), Some(&AiEvent::Stop(StopReason::Stop)));
-    assert!(
-        !events
-            .iter()
-            .any(|event| matches!(event, AiEvent::Error { .. })),
-        "the interaction completed; the transport failing afterwards is not the \
-         turn failing: {events:?}"
-    );
-}
-
 /// A non-200 is decoded from the body the provider sent with it.
 #[tokio::test]
 async fn a_refused_request_relays_the_sentence_the_provider_wrote() {
@@ -749,7 +703,9 @@ async fn a_refused_request_relays_the_sentence_the_provider_wrote() {
     let body = include_str!("goldens/profile/gemini/error/404.json");
     let response = Ok(HttpResponse {
         status: 404,
-        headers: vec![("content-type".to_string(), "application/json".to_string())],
+        headers: vec![
+            HttpHeader::new("content-type", b"application/json".to_vec()).expect("header"),
+        ],
         body: Box::pin(futures::stream::once(async move {
             Ok(bytes::Bytes::from(body.as_bytes()))
         })),

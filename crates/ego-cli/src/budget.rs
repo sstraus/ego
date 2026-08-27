@@ -291,7 +291,7 @@ impl TableSource<'_> {
         revision: &PricingRevision,
     ) -> Result<Option<ResolvedRates>, NoRates> {
         let table = Table::decode(bytes).map_err(|source| NoRates::Table { source })?;
-        match table.quote(&model.row.id, &model.model) {
+        match table.quote(model.row.id(), &model.model) {
             Ok(entry) => Ok(Some(table_rates(entry.into_quote(revision.clone())))),
             // The one absence that is not a failure: the gate turns it into
             // `NoPricingQuote`, naming the model rather than the table.

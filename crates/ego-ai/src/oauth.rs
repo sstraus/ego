@@ -6,6 +6,7 @@
 //! HTTP seam.
 
 use std::fmt;
+use std::sync::OnceLock;
 
 use base64::Engine;
 use futures::StreamExt;
@@ -13,7 +14,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use url::Url;
 
-use crate::http::{Http, HttpRequest, Method};
+use crate::http::{AdmittedHttpProfile, Http, HttpRequest, Method};
 
 const CODEX_CLIENT: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const ANTHROPIC_CLIENT: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
@@ -72,6 +73,36 @@ impl BuiltInFlow {
             Self::Nous => "nous",
             Self::OpenRouter => "openrouter",
         }
+    }
+
+    fn http_profile(self) -> &'static AdmittedHttpProfile {
+        static PROFILES: OnceLock<[AdmittedHttpProfile; 9]> = OnceLock::new();
+        &PROFILES.get_or_init(|| {
+            [
+                oauth_profile("openai-codex", &["https://auth.openai.com/"]),
+                oauth_profile("anthropic", &["https://platform.claude.com/"]),
+                oauth_profile(
+                    "github-copilot",
+                    &["https://github.com/", "https://api.github.com/"],
+                ),
+                oauth_profile("xai-oauth", &["https://auth.x.ai/"]),
+                oauth_profile("kimi-coding", &["https://auth.kimi.com/"]),
+                oauth_profile("qwen-oauth", &["https://chat.qwen.ai/"]),
+                oauth_profile("minimax-oauth", &["https://api.minimax.io/"]),
+                oauth_profile("nous", &["https://portal.nousresearch.com/"]),
+                oauth_profile("openrouter", &["https://openrouter.ai/"]),
+            ]
+        })[match self {
+            Self::OpenAiCodex => 0,
+            Self::Anthropic => 1,
+            Self::GitHubCopilot => 2,
+            Self::Xai => 3,
+            Self::KimiCoding => 4,
+            Self::Qwen => 5,
+            Self::MiniMax => 6,
+            Self::Nous => 7,
+            Self::OpenRouter => 8,
+        }]
     }
 
     fn client_id(self) -> Option<&'static str> {
@@ -665,6 +696,15 @@ impl BuiltInFlow {
     }
 }
 
+fn oauth_profile(id: &str, routes: &[&str]) -> AdmittedHttpProfile {
+    let routes = routes
+        .iter()
+        .map(|route| Url::parse(route).expect("a built-in OAuth route is a URL"))
+        .collect::<Vec<_>>();
+    AdmittedHttpProfile::from_urls(&format!("aux/oauth/{id}/v1"), &routes)
+        .expect("built-in OAuth routes form an admitted profile")
+}
+
 pub fn built_in(id: &str) -> Option<BuiltInFlow> {
     FLOWS.iter().copied().find(|flow| flow.id() == id)
 }
@@ -738,9 +778,14 @@ pub fn pkce_challenge(verifier: &str) -> String {
 
 /// Execute one OAuth request through the injected transport and buffer only
 /// the small token response. Generation bodies remain streamed elsewhere.
-pub async fn execute(http: &dyn Http, request: HttpRequest) -> Result<TokenStatus, FlowError> {
-    let response = http
-        .execute(request)
+pub async fn execute(
+    http: &dyn Http,
+    flow: BuiltInFlow,
+    request: HttpRequest,
+) -> Result<TokenStatus, FlowError> {
+    let response = flow
+        .http_profile()
+        .execute(http, request)
         .await
         .map_err(|err| FlowError::Temporary {
             provider: "OAuth transport".to_string(),

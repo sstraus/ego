@@ -19,11 +19,12 @@
 use std::sync::{Arc, Mutex};
 
 use ego_ai::generator::WireGenerator;
-use ego_ai::http::{Http, HttpError, HttpRequest, HttpResponse, Method};
+use ego_ai::http::{
+    Http, HttpCall, HttpError, HttpRequest, HttpResponse, Method, PreparedHttpCall,
+};
 use ego_ai::provider::{CredentialStrategy, ProviderRow, ResolvedCredential};
-use ego_ai::resolver::Supplied;
 use ego_ai::wire::RequestTarget;
-use ego_ai::wire::openai_completions::{OpenAiCompletions, request_body};
+use ego_ai::wire::openai_completions::request_body;
 use ego_core::budget::{BudgetGate, Metering, PricingQuote, SettlementSource};
 use ego_core::cost::{Amount, CurrencyCode, Money, PricingRevision};
 use ego_core::event::id::GenerationId;
@@ -37,6 +38,7 @@ use ego_core::generator::types::{
     ContentBlock, Conversation, GenRequest, Message, ReasoningState, Role, StopReason,
     ThinkingLevel,
 };
+use ego_core::permit::{HttpHeader, HttpScheme, OneHopResponse, TransportError, TransportFailure};
 use futures::StreamExt;
 use futures::future::BoxFuture;
 use url::Url;
@@ -49,7 +51,7 @@ const TEXT_TRANSCRIPT: &str = include_str!("goldens/profile/openai/stream/text.s
 /// The variable the fixture row names, and the value a configured machine
 /// would have put in it. Two constants rather than two literals: the tests
 /// below assert that the first appears where the second must not.
-const KEY_VAR: &str = "EGO_TEST_API_KEY";
+const KEY_VAR: &str = "OPENAI_API_KEY";
 const KEY: &str = "sk-not-a-real-key";
 const COPILOT_TOKEN: &str = "tid=1;proxy-ep=proxy.enterprise.example;exp=1800003600";
 
@@ -131,17 +133,7 @@ fn request_carrying_reasoning() -> GenRequest {
 }
 
 fn row() -> ProviderRow {
-    ProviderRow {
-        resolver: &Supplied,
-        id: "stub".to_string(),
-        base: Url::parse("https://api.example/v1/").expect("a valid url"),
-        extra_headers: Vec::new(),
-        wire: &OpenAiCompletions,
-        credential: CredentialStrategy::BearerFromEnv {
-            var: KEY_VAR.to_string(),
-        },
-        cost: None,
-    }
+    ProviderRow::openai_at(Url::parse("https://api.example/v1/").expect("a valid url"))
 }
 
 /// The fixture row, over `http`, on a machine where the key is configured.
@@ -167,13 +159,7 @@ fn credential(creds: &dyn ego_ai::provider::Credentials) -> ResolvedCredential {
 }
 
 fn row_with_credential_base_override() -> ProviderRow {
-    let mut row = row();
-    row.base = Url::parse("https://row.example/v1/").expect("a row base");
-    row.extra_headers = vec![("originator".to_string(), "ego-test".to_string())];
-    row.credential = CredentialStrategy::OAuth {
-        provider: "github-copilot".to_string(),
-    };
-    row
+    ProviderRow::github_copilot_default()
 }
 
 fn credential_with_base_override(row: &ProviderRow) -> ResolvedCredential {
@@ -207,29 +193,32 @@ fn attempt_for(gate: &mut BudgetGate, req: &GenRequest) -> GenerationAttempt {
 /// Answers every request with one canned outcome, and keeps what it was
 /// asked. The `Mutex` is what makes it `Sync`, which `Http` requires.
 struct StubHttp {
-    answer: Mutex<Option<Result<HttpResponse, HttpError>>>,
-    seen: Mutex<Vec<HttpRequest>>,
+    answer: Arc<Mutex<Option<Result<OneHopResponse, TransportError>>>>,
+    seen: Arc<Mutex<Vec<HttpRequest>>>,
 }
 
 impl StubHttp {
-    fn new(answer: Result<HttpResponse, HttpError>) -> Arc<Self> {
+    fn new(answer: Result<OneHopResponse, TransportError>) -> Arc<Self> {
         Arc::new(StubHttp {
-            answer: Mutex::new(Some(answer)),
-            seen: Mutex::new(Vec::new()),
+            answer: Arc::new(Mutex::new(Some(answer))),
+            seen: Arc::new(Mutex::new(Vec::new())),
         })
     }
 
     fn responding(status: u16, body: &'static str) -> Arc<Self> {
-        let chunks: Vec<Result<bytes::Bytes, HttpError>> = body
+        let chunks: Vec<Result<Vec<u8>, TransportError>> = body
             .as_bytes()
             .chunks(7)
-            .map(|chunk| Ok(bytes::Bytes::copy_from_slice(chunk)))
+            .map(|chunk| Ok(chunk.to_vec()))
             .collect();
-        StubHttp::new(Ok(HttpResponse {
+        StubHttp::new(Ok(OneHopResponse::streaming_response(
             status,
-            headers: vec![("content-type".to_string(), "text/event-stream".to_string())],
-            body: Box::pin(futures::stream::iter(chunks)),
-        }))
+            vec![
+                HttpHeader::new("content-type", b"text/event-stream".to_vec())
+                    .expect("fixture header"),
+            ],
+            Box::pin(futures::stream::iter(chunks)),
+        )))
     }
 
     fn calls(&self) -> usize {
@@ -238,18 +227,61 @@ impl StubHttp {
 }
 
 impl Http for StubHttp {
-    fn execute(&self, req: HttpRequest) -> BoxFuture<'static, Result<HttpResponse, HttpError>> {
-        self.seen.lock().expect("not poisoned").push(req);
+    fn begin_call(&self) -> Box<dyn HttpCall> {
+        Box::new(StubCall {
+            answer: Arc::clone(&self.answer),
+            seen: Arc::clone(&self.seen),
+        })
+    }
+}
+
+struct StubCall {
+    answer: Arc<Mutex<Option<Result<OneHopResponse, TransportError>>>>,
+    seen: Arc<Mutex<Vec<HttpRequest>>>,
+}
+
+impl HttpCall for StubCall {
+    fn execute(
+        &mut self,
+        call: PreparedHttpCall,
+    ) -> BoxFuture<'static, Result<OneHopResponse, TransportError>> {
+        let (_, route, _, request) = call.into_parts();
+        let scheme = match route.scheme() {
+            HttpScheme::Http => "http",
+            HttpScheme::Https => "https",
+        };
+        let headers = request
+            .headers()
+            .iter()
+            .map(|header| {
+                (
+                    header.name().to_owned(),
+                    String::from_utf8(header.value().to_vec()).expect("fixture header is UTF-8"),
+                )
+            })
+            .collect();
+        let url = Url::parse(&format!("{scheme}://{}{}", route.target(), request.path()))
+            .expect("prepared request URL");
+        let method = match request.method() {
+            "GET" => Method::Get,
+            "POST" => Method::Post,
+            other => panic!("unsupported fixture method {other}"),
+        };
+        self.seen.lock().expect("not poisoned").push(HttpRequest {
+            url,
+            method,
+            headers,
+            body: (!request.body().is_empty()).then(|| request.body().to_vec()),
+        });
         let answer = self
             .answer
             .lock()
             .expect("not poisoned")
             .take()
             .unwrap_or_else(|| {
-                Err(HttpError::Transport {
-                    message: "the stub was asked twice".to_string(),
-                    delivery: DeliveryCertainty::DefinitelyUnsent,
-                })
+                Err(TransportError::definitely_unsent(
+                    TransportFailure::Exchange("the stub was asked twice".to_owned()),
+                ))
             });
         Box::pin(async move { answer })
     }
@@ -274,7 +306,7 @@ async fn the_transport_is_handed_exactly_what_the_wire_format_would_send() {
     assert_eq!(
         sent.url,
         row()
-            .base
+            .base()
             .join(ego_ai::wire::openai_completions::PATH)
             .expect("a path")
     );
@@ -307,7 +339,7 @@ async fn ensure_expressible_and_generate_share_headers_base_and_wire_body() {
         headers.retain(|(existing, _)| !existing.eq_ignore_ascii_case(name));
         headers.push((name.clone(), value.clone()));
     }
-    let target = RequestTarget::new(resolved.base_override().unwrap_or(&profile.base), &headers);
+    let target = RequestTarget::new(resolved.base_override().unwrap_or(profile.base()), &headers);
     let expected = profile
         .wire
         .build_request(&target, &req)
@@ -360,7 +392,7 @@ async fn the_generation_carries_the_attempt_ego_core_stamped() {
 /// `Aborted` with `DefinitelyUnsent` — which reads as "the provider was
 /// called and said nothing", and it was not called at all. The refusal is
 /// local, so the certainty is honest for the same reason
-/// `HttpError::refused_before_sending` is: no DNS, no socket, no bytes.
+/// A definitely-unsent transport error means: no DNS, no socket, no bytes.
 #[tokio::test]
 async fn a_request_this_format_cannot_express_stops_the_generation() {
     let http = StubHttp::responding(200, TEXT_TRANSCRIPT);
@@ -437,10 +469,9 @@ fn a_locally_refused_generation_still_settles_and_releases_the_hold() {
 /// the binding guessed it.
 #[tokio::test]
 async fn a_transport_failure_keeps_the_certainty_the_transport_reported() {
-    let http = StubHttp::new(Err(HttpError::Transport {
-        message: "connection reset by peer".to_string(),
-        delivery: DeliveryCertainty::PossiblySent,
-    }));
+    let http = StubHttp::new(Err(TransportError::possibly_sent(
+        TransportFailure::Connect("connection reset by peer".to_owned()),
+    )));
     let mut gate = BudgetGate::new(usd("10"));
     let generator = generator(http as Arc<dyn Http>);
 
@@ -474,7 +505,10 @@ async fn a_streamed_response_decodes_to_what_the_wire_format_decodes() {
     let direct: Vec<AiEvent> = ego_ai::wire::openai_completions::decode(
         Ok(HttpResponse {
             status: 200,
-            headers: vec![("content-type".to_string(), "text/event-stream".to_string())],
+            headers: vec![
+                HttpHeader::new("content-type", b"text/event-stream".to_vec())
+                    .expect("fixture header"),
+            ],
             body: Box::pin(futures::stream::iter(
                 TEXT_TRANSCRIPT
                     .as_bytes()
@@ -538,7 +572,7 @@ fn resolving_a_credential_leaves_nothing_behind_in_the_row() {
         "a row still says which variable to set: {printed}"
     );
     assert!(
-        printed.contains("stub"),
+        printed.contains(row.id()),
         "and the rest of the row is still diagnosable: {printed}"
     );
 }
@@ -742,10 +776,9 @@ impl ego_ai::wire::WireFormat for MarkerFormat {
 }
 
 fn marker_row() -> ProviderRow {
-    ProviderRow {
-        wire: &MarkerFormat,
-        ..row()
-    }
+    let mut row = row();
+    row.wire = &MarkerFormat;
+    row
 }
 
 #[tokio::test]

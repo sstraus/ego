@@ -135,10 +135,10 @@ pub async fn price(
 
     let url = supplied
         .row
-        .base
+        .base()
         .join(PATH)
         .map_err(|err| ResolveError::EndpointUnreachable {
-            endpoint: format!("{}{PATH}", supplied.row.base),
+            endpoint: format!("{}{PATH}", supplied.row.base()),
             message: format!("the row's base does not make a URL: {err}"),
         })?;
 
@@ -146,6 +146,7 @@ pub async fn price(
     headers.push(("accept".to_string(), "application/json".to_string()));
     let body = fetch(
         http,
+        &supplied.row.http_profile,
         HttpRequest {
             url: url.clone(),
             method: Method::Get,

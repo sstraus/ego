@@ -128,7 +128,7 @@ pub(crate) fn rows(
         ProviderRow::openrouter_default(),
     ];
     for row in &mut rows {
-        if let Some(config) = auth.get(&row.id) {
+        if let Some(config) = auth.get(row.id()) {
             let overlay = config
                 .headers
                 .iter()
@@ -136,7 +136,7 @@ pub(crate) fn rows(
                 .collect();
             row.extra_headers = overlay_headers(&row.extra_headers, &overlay).map_err(|err| {
                 ResolveError::EndpointUnreachable {
-                    endpoint: format!("auth.{}.headers", row.id),
+                    endpoint: format!("auth.{}.headers", row.id()),
                     message: err.to_string(),
                 }
             })?;
@@ -416,14 +416,14 @@ mod tests {
         rows(&Default::default())
             .expect("the built-in bases parse")
             .into_iter()
-            .map(|row| row.id)
+            .map(|row| row.id().to_owned())
             .collect()
     }
 
     #[test]
     fn codex_login_never_turns_into_a_chat_completions_row() {
         let row = ProviderRow::openai_codex_default();
-        assert_eq!(row.id, "openai-codex");
+        assert_eq!(row.id(), "openai-codex");
         assert_eq!(format!("{:?}", row.wire), "OpenAiCodexResponses");
         assert_ne!(format!("{:?}", row.wire), "OpenAiCompletions");
         assert!(unavailable_mapping("openai-codex").is_none());

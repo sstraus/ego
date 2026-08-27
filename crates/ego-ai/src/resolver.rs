@@ -140,7 +140,7 @@ impl ModelResolver for Supplied {
         at: &'a Enumeration<'a>,
     ) -> BoxFuture<'a, Result<ModelDiscoveryReport, String>> {
         Box::pin(std::future::ready(
-            at.catalogue.enumerate_hosted(&at.row.id, None),
+            at.catalogue.enumerate_hosted(at.row.id(), None),
         ))
     }
 }
@@ -177,7 +177,7 @@ impl ModelResolver for SubscriptionSupplied {
     ) -> BoxFuture<'a, Result<ModelDiscoveryReport, String>> {
         Box::pin(std::future::ready(
             at.catalogue
-                .enumerate_hosted(&at.row.id, Some(MeteringKind::Subscription)),
+                .enumerate_hosted(at.row.id(), Some(MeteringKind::Subscription)),
         ))
     }
 }
@@ -236,7 +236,7 @@ impl ModelResolver for XaiLanguageModels {
     ) -> BoxFuture<'a, Result<ModelDiscoveryReport, String>> {
         Box::pin(std::future::ready(
             at.catalogue
-                .enumerate_hosted(&at.row.id, Some(MeteringKind::Currency)),
+                .enumerate_hosted(at.row.id(), Some(MeteringKind::Currency)),
         ))
     }
 }

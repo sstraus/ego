@@ -35,19 +35,19 @@ fn parse(url: &str) -> Url {
 fn the_shipped_rows_address_the_endpoints_their_providers_serve() {
     let openai = ProviderRow::openai();
     assert_eq!(
-        RequestTarget::new(&openai.base, &[]).url(openai_completions::PATH),
+        RequestTarget::new(openai.base(), &[]).url(openai_completions::PATH),
         parse("https://api.openai.com/v1/chat/completions")
     );
 
     let ollama = ProviderRow::ollama_default();
     assert_eq!(
-        RequestTarget::new(&ollama.base, &[]).url(ollama::PATH),
+        RequestTarget::new(ollama.base(), &[]).url(ollama::PATH),
         parse("http://localhost:11434/v1/chat/completions")
     );
 
     let codex = ProviderRow::openai_codex_default();
     assert_eq!(
-        RequestTarget::new(&codex.base, &[]).url(openai_codex_responses::PATH),
+        RequestTarget::new(codex.base(), &[]).url(openai_codex_responses::PATH),
         parse("https://chatgpt.com/backend-api/codex/responses")
     );
 }
@@ -63,7 +63,7 @@ fn the_shipped_rows_address_the_endpoints_their_providers_serve() {
 fn a_base_with_a_prefix_keeps_it() {
     let row = ProviderRow::openai_at(parse("https://gateway.example/openai/v1/"));
     assert_eq!(
-        RequestTarget::new(&row.base, &[]).url(openai_completions::PATH),
+        RequestTarget::new(row.base(), &[]).url(openai_completions::PATH),
         parse("https://gateway.example/openai/v1/chat/completions")
     );
 }
@@ -78,9 +78,9 @@ fn a_base_with_a_prefix_keeps_it() {
 fn a_base_without_a_trailing_slash_is_normalised_rather_than_truncating_the_path() {
     let with = ProviderRow::openai_at(parse("https://gateway.example/openai/v1/"));
     let without = ProviderRow::openai_at(parse("https://gateway.example/openai/v1"));
-    assert_eq!(without.base, with.base);
+    assert_eq!(without.base(), with.base());
     assert_eq!(
-        RequestTarget::new(&without.base, &[]).url(openai_completions::PATH),
+        RequestTarget::new(without.base(), &[]).url(openai_completions::PATH),
         parse("https://gateway.example/openai/v1/chat/completions")
     );
 }

@@ -2,12 +2,13 @@
 
 mod support;
 
-use ego_ai::http::{ByteStream, Http, HttpError, HttpRequest, HttpResponse};
+use ego_ai::http::{Http, HttpCall, PreparedHttpCall};
 use ego_ai::oauth::{
     BuiltInFlow, FlowError, LoginGrant, OAuthToken, ProviderAuth, TokenStatus, built_in,
     codex_account_id, provider_auth, provider_base,
 };
 use ego_ai::provider::ProviderRow;
+use ego_core::permit::{OneHopResponse, TransportError};
 use futures::future::BoxFuture;
 use support::FakeCredentials;
 
@@ -410,13 +411,7 @@ fn subscription_rows_have_distinct_ids_endpoints_and_mappings() {
     ];
     let actual: Vec<_> = rows
         .iter()
-        .map(|row| {
-            (
-                row.id.as_str(),
-                row.base.as_str(),
-                format!("{:?}", row.wire),
-            )
-        })
+        .map(|row| (row.id(), row.base().as_str(), format!("{:?}", row.wire)))
         .collect();
     assert_eq!(
         actual,
@@ -473,12 +468,12 @@ fn subscription_rows_have_distinct_ids_endpoints_and_mappings() {
         assert!(
             resolver.contains("SubscriptionSupplied"),
             "{}: {resolver}",
-            row.id
+            row.id()
         );
         assert!(
-            resolver.contains(&format!("{}-subscription/v1", row.id)),
+            resolver.contains(&format!("{}-subscription/v1", row.id())),
             "{}: {resolver}",
-            row.id
+            row.id()
         );
     }
 }
@@ -500,11 +495,11 @@ fn every_selectable_subscription_row_names_login_when_all_sources_are_missing() 
 
     for row in rows {
         let error = row.credential.resolve(&credentials).unwrap_err();
-        assert_eq!(error.var, format!("ego auth login {}", row.id));
+        assert_eq!(error.var, format!("ego auth login {}", row.id()));
         assert!(
             error
                 .to_string()
-                .contains(&format!("`ego auth login {}`", row.id))
+                .contains(&format!("`ego auth login {}`", row.id()))
         );
     }
 }
@@ -537,9 +532,13 @@ fn copilot_proxy_endpoint_is_credential_derived() {
 async fn token_exchange_runs_only_through_the_injected_fixture_transport() {
     let http = FixtureHttp;
     let flow = built_in("xai-oauth").unwrap();
-    let response = ego_ai::oauth::execute(&http, flow.device_poll_request("device", None).unwrap())
-        .await
-        .unwrap();
+    let response = ego_ai::oauth::execute(
+        &http,
+        flow,
+        flow.device_poll_request("device", None).unwrap(),
+    )
+    .await
+    .unwrap();
     let values = flow
         .read_token(response, NOW_MS, None)
         .unwrap()
@@ -551,16 +550,24 @@ async fn token_exchange_runs_only_through_the_injected_fixture_transport() {
 struct FixtureHttp;
 
 impl Http for FixtureHttp {
-    fn execute(&self, _req: HttpRequest) -> BoxFuture<'static, Result<HttpResponse, HttpError>> {
-        let body: ByteStream = Box::pin(futures::stream::once(async {
-            Ok(bytes::Bytes::from_static(oauth_json()))
-        }));
-        Box::pin(async move {
-            Ok(HttpResponse {
-                status: 200,
-                headers: Vec::new(),
-                body,
-            })
+    fn begin_call(&self) -> Box<dyn HttpCall> {
+        Box::new(FixtureCall)
+    }
+}
+
+struct FixtureCall;
+
+impl HttpCall for FixtureCall {
+    fn execute(
+        &mut self,
+        _call: PreparedHttpCall,
+    ) -> BoxFuture<'static, Result<OneHopResponse, TransportError>> {
+        Box::pin(async {
+            Ok(OneHopResponse::response(
+                200,
+                Vec::new(),
+                oauth_json().to_vec(),
+            ))
         })
     }
 }

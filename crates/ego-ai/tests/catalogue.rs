@@ -197,7 +197,7 @@ fn a_supplied_hosted_model_resolves_to_exactly_what_was_supplied() {
         .expect("it was supplied");
 
     assert_eq!(resolved.model, "gpt-5.6", "the provider half is not sent");
-    assert_eq!(resolved.row.id, "openai");
+    assert_eq!(resolved.row.id(), "openai");
     assert_eq!(resolved.capabilities, hosted_caps());
     assert_eq!(resolved.metering, tabulated());
     assert_eq!(
@@ -878,30 +878,26 @@ fn a_local_slug_resolves_by_asking_the_daemon_through_the_same_call() {
     assert_eq!(stub.paths(), vec!["/api/tags", "/api/ps"]);
 }
 
-/// The *row* decides, not the provider id.
-///
-/// This is the test the old branch could not have passed. The row is called
-/// `acme` — a name no arm of `if slug.provider == OLLAMA` would ever match —
-/// and it carries the daemon resolver, so resolution asks the control plane.
-/// Nothing in `ego-ai` or `ego-cli` had to learn the name.
+/// The row's resolver decides, independently of its constructor identity.
+/// An OpenAI-shaped row can use the daemon resolver when an operator points it
+/// at a local Ollama endpoint.
 #[test]
 fn a_row_that_is_not_called_ollama_can_still_be_a_daemon() {
     let (http, stub) = server([(200, TAGS), (200, PS_LOADED)]);
-    let acme = ProviderRow {
-        id: "acme".to_string(),
-        resolver: &OllamaDaemon,
-        ..local_row()
-    };
+    let mut acme = ProviderRow::openai_at(
+        Url::parse("http://localhost:11434/v1/").expect("a valid local base"),
+    );
+    acme.resolver = &OllamaDaemon;
     let catalogue = Catalogue::new([acme]);
 
     let resolved = block_on(catalogue.resolve(
-        &ModelSlug::parse("acme/gemma4:e4b-mlx").unwrap(),
+        &ModelSlug::parse("openai/gemma4:e4b-mlx").unwrap(),
         &http,
         &credential(),
     ))
     .expect("the daemon serves it");
 
-    assert_eq!(resolved.row.id, "acme");
+    assert_eq!(resolved.row.id(), "openai");
     assert_eq!(resolved.capabilities.max_context_tokens, Some(32_768));
     assert_eq!(stub.paths(), vec!["/api/tags", "/api/ps"]);
 }
@@ -915,10 +911,8 @@ fn a_row_that_is_not_called_ollama_can_still_be_a_daemon() {
 #[test]
 fn a_row_called_ollama_that_names_the_supplied_resolver_asks_nothing() {
     let (http, stub) = unasked();
-    let supplied_locally = ProviderRow {
-        resolver: &Supplied,
-        ..local_row()
-    };
+    let mut supplied_locally = local_row();
+    supplied_locally.resolver = &Supplied;
     let catalogue = Catalogue::new([supplied_locally]).with_hosted(
         "ollama/gemma4:e4b-mlx",
         HostedModel {

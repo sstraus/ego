@@ -34,10 +34,8 @@
 
 use std::sync::{Arc, Mutex};
 
-use ego_ai::http::{Http, HttpError, HttpRequest, HttpResponse};
-use ego_ai::provider::{CredentialStrategy, ProviderRow, ResolvedCredential};
-use ego_ai::resolver::Supplied;
-use ego_ai::wire::openai_completions::OpenAiCompletions;
+use ego_ai::http::{Http, HttpCall, PreparedHttpCall};
+use ego_ai::provider::{ProviderRow, ResolvedCredential};
 use ego_ai::wire::provider_cost::{
     OPENROUTER_COST_FIELD, OpenRouterUsd, ProviderCost, XAI_COST_FIELD, XaiUsdTicks,
 };
@@ -48,15 +46,14 @@ use ego_core::cost::{
     UnknownCost,
 };
 use ego_core::event::id::GenerationId;
-use ego_core::generator::attempt::{
-    DeliveryCertainty, GenerationAttempt, Settlement, UsageReport, settled_cost,
-};
+use ego_core::generator::attempt::{GenerationAttempt, Settlement, UsageReport, settled_cost};
 use ego_core::generator::capabilities::{
     CacheRetention, CancelSemantics, ModelCapabilities, ReasoningCarryover, ReasoningEffortSupport,
     Transport,
 };
 use ego_core::generator::port::{AiEvent, Generator};
 use ego_core::generator::types::{Conversation, GenRequest, Message, Role, ThinkingLevel};
+use ego_core::permit::{HttpHeader, OneHopResponse, TransportError, TransportFailure};
 use futures::StreamExt;
 use futures::future::BoxFuture;
 use serde::Deserialize;
@@ -220,50 +217,58 @@ fn transcript(usage: &str) -> String {
 }
 
 struct StubHttp {
-    body: Mutex<Option<String>>,
+    body: Arc<Mutex<Option<String>>>,
 }
 
 impl StubHttp {
     fn new(body: String) -> Arc<Self> {
         Arc::new(StubHttp {
-            body: Mutex::new(Some(body)),
+            body: Arc::new(Mutex::new(Some(body))),
         })
     }
 }
 
 impl Http for StubHttp {
-    fn execute(&self, _req: HttpRequest) -> BoxFuture<'static, Result<HttpResponse, HttpError>> {
-        let body = self.body.lock().expect("not poisoned").take();
+    fn begin_call(&self) -> Box<dyn HttpCall> {
+        Box::new(StubCall(Arc::clone(&self.body)))
+    }
+}
+
+struct StubCall(Arc<Mutex<Option<String>>>);
+
+impl HttpCall for StubCall {
+    fn execute(
+        &mut self,
+        _call: PreparedHttpCall,
+    ) -> BoxFuture<'static, Result<OneHopResponse, TransportError>> {
+        let body = self.0.lock().expect("not poisoned").take();
         Box::pin(async move {
             match body {
-                Some(body) => Ok(HttpResponse {
-                    status: 200,
-                    headers: vec![("content-type".to_string(), "text/event-stream".to_string())],
-                    body: Box::pin(futures::stream::once(async move {
-                        Ok(bytes::Bytes::from(body.into_bytes()))
-                    })),
-                }),
-                None => Err(HttpError::Transport {
-                    message: "the stub was asked twice".to_string(),
-                    delivery: DeliveryCertainty::DefinitelyUnsent,
-                }),
+                Some(body) => Ok(OneHopResponse::response(
+                    200,
+                    vec![
+                        HttpHeader::new("content-type", b"text/event-stream".to_vec())
+                            .expect("fixture header"),
+                    ],
+                    body.into_bytes(),
+                )),
+                None => Err(TransportError::definitely_unsent(
+                    TransportFailure::Exchange("the stub was asked twice".to_owned()),
+                )),
             }
         })
     }
 }
 
 fn row(id: &str, cost: Arc<dyn ProviderCost>) -> ProviderRow {
-    ProviderRow {
-        resolver: &Supplied,
-        id: id.to_string(),
-        base: Url::parse("https://api.example/v1/").expect("a valid url"),
-        extra_headers: Vec::new(),
-        wire: &OpenAiCompletions,
-        credential: CredentialStrategy::BearerFromEnv {
-            var: "EGO_TEST_API_KEY".to_string(),
-        },
-        cost: Some(cost),
-    }
+    let base = Url::parse("https://api.example/v1/").expect("a valid url");
+    let mut row = match id {
+        "xai" => ProviderRow::xai(base.clone()),
+        "openrouter" => ProviderRow::openrouter(base),
+        other => panic!("unsupported provider fixture {other}"),
+    };
+    row.cost = Some(cost);
+    row
 }
 
 /// A machine where every provider's key is configured.
@@ -548,17 +553,7 @@ async fn a_row_with_no_cost_decoder_settles_from_its_table_as_it_always_did() {
 
     // The transcript still carries xAI's cost field; the row simply does not
     // declare that it reads one, so nothing may read it.
-    let plain = ProviderRow {
-        resolver: &Supplied,
-        id: "openai".to_string(),
-        base: Url::parse("https://api.example/v1/").expect("a valid url"),
-        extra_headers: Vec::new(),
-        wire: &OpenAiCompletions,
-        credential: CredentialStrategy::BearerFromEnv {
-            var: "EGO_TEST_API_KEY".to_string(),
-        },
-        cost: None,
-    };
+    let plain = ProviderRow::openai_at(Url::parse("https://api.example/v1/").expect("a valid url"));
     let credential = creds(&plain);
     let generator = WireGenerator::new(
         plain,
@@ -671,10 +666,10 @@ const TOLLGATE_USAGE: &str = r#"{"prompt_tokens":1000,"completion_tokens":250,
 ///
 /// This is the ADR rule's *sufficient* condition, and the counterpart of
 /// `crates/ego-core/tests/near_side.rs`, which is its necessary one: that
-/// grep proves the near side never names a provider, and this proves a
-/// stranger can add one anyway. Neither implies the other — a `match` on
-/// something other than a name would pass the grep, and a near side that
-/// named providers freely could still happen to be extensible.
+/// grep proves the near side never names a provider, and this proves an
+/// externally written decoder can use it. Neither implies the other — a
+/// `match` on something other than a name would pass the grep, and a near
+/// side that named providers freely could still happen to be extensible.
 ///
 /// The figure asserted is Tollgate's own and is nowhere near the table's
 /// $0.00675 for the same transcript, so a settlement that had quietly fallen
@@ -682,7 +677,7 @@ const TOLLGATE_USAGE: &str = r#"{"prompt_tokens":1000,"completion_tokens":250,
 #[tokio::test]
 async fn a_decoder_written_outside_this_crate_settles_without_touching_the_near_side() {
     let (gate, settled, events) = settle_through_core(
-        "tollgate",
+        "openrouter",
         Arc::new(TollgateStated::new("2026-08-22")),
         TOLLGATE_USAGE,
     )
