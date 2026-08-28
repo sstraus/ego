@@ -116,9 +116,8 @@ impl LocalPeer {
                         .position(|window| window == b"\r\n\r\n")
                         .expect("response headers")]
                         .to_vec();
-                    response_with_session.extend_from_slice(
-                        b"\r\nMcp-Session-Id: forbidden-session\r\n\r\n",
-                    );
+                    response_with_session
+                        .extend_from_slice(b"\r\nMcp-Session-Id: forbidden-session\r\n\r\n");
                     response_with_session.extend_from_slice(
                         &response[response
                             .windows(b"\r\n\r\n".len())
@@ -317,10 +316,9 @@ impl McpHttpEffects for PeerBroker {
                                     Some(BodyState::Pending(probe)),
                                 ))
                             }
-                            BodyState::Complete(chunk, _probe) => Some((
-                                Ok::<Vec<u8>, TransportError>(chunk),
-                                None,
-                            )),
+                            BodyState::Complete(chunk, _probe) => {
+                                Some((Ok::<Vec<u8>, TransportError>(chunk), None))
+                            }
                             BodyState::Pending(probe) => {
                                 futures::future::pending::<()>().await;
                                 Some((
@@ -419,10 +417,22 @@ fn assert_current_request(request: &[u8], method: &str) {
         .position(|window| window == b"\r\n\r\n")
         .expect("request headers");
     let head = String::from_utf8_lossy(&request[..separator]).to_ascii_lowercase();
+    let header_lines = head.split("\r\n").collect::<Vec<_>>();
     assert!(head.starts_with("post /mcp http/1.1\r\n"));
-    assert!(head.contains(&format!("mcp-method: {method}\r\n")));
-    let protocol_headers = head
-        .split("\r\n")
+    let method_header = format!("mcp-method: {method}");
+    let method_headers = header_lines
+        .iter()
+        .copied()
+        .filter(|line| line.starts_with("mcp-method:"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        method_headers,
+        vec![method_header.as_str()],
+        "exactly one exact MCP method header is required"
+    );
+    let protocol_headers = header_lines
+        .iter()
+        .copied()
         .filter(|line| line.starts_with("mcp-protocol-version:"))
         .collect::<Vec<_>>();
     assert_eq!(
@@ -445,9 +455,11 @@ fn assert_current_request(request: &[u8], method: &str) {
         body["params"]["_meta"]["io.modelcontextprotocol/clientInfo"]["name"],
         "ego"
     );
-    assert!(body["params"]["_meta"]["io.modelcontextprotocol/clientInfo"]["version"]
-        .as_str()
-        .is_some_and(|version| !version.is_empty()));
+    assert!(
+        body["params"]["_meta"]["io.modelcontextprotocol/clientInfo"]["version"]
+            .as_str()
+            .is_some_and(|version| !version.is_empty())
+    );
     assert!(body["params"]["_meta"]["io.modelcontextprotocol/clientCapabilities"].is_object());
 
     let lowered = String::from_utf8_lossy(request).to_ascii_lowercase();
@@ -459,7 +471,10 @@ fn assert_current_request(request: &[u8], method: &str) {
         "last-event-id",
         "reinitialize",
     ] {
-        assert!(!lowered.contains(forbidden), "forbidden MCP bytes: {forbidden}");
+        assert!(
+            !lowered.contains(forbidden),
+            "forbidden MCP bytes: {forbidden}"
+        );
     }
 }
 
@@ -476,7 +491,10 @@ fn assert_current_response(response: &[u8], session_header: bool) {
         "last-event-id",
         "reinitialize",
     ] {
-        assert!(!lowered.contains(forbidden), "forbidden MCP bytes: {forbidden}");
+        assert!(
+            !lowered.contains(forbidden),
+            "forbidden MCP bytes: {forbidden}"
+        );
     }
 }
 
@@ -517,7 +535,10 @@ fn real_peer_cancel_before_headers_releases_peer_and_reports_definitely_unsent()
     let responses = broker.responses();
     assert_eq!(requests.len(), 1);
     assert_current_request(&requests[0], "server/discover");
-    assert!(responses.is_empty(), "no peer response arrived before headers");
+    assert!(
+        responses.is_empty(),
+        "no peer response arrived before headers"
+    );
 }
 
 #[test]
@@ -613,8 +634,16 @@ async fn runtime_recorder_rejects_forbidden_mcp_bytes_and_requires_current_metad
     assert_eq!(MCP_PROTOCOL_REVISION, "2026-07-28");
     let requests = broker.requests();
     let responses = broker.responses();
-    assert_eq!(requests.len(), 2, "Discover/list must not retry or reinitialize");
-    assert_eq!(responses.len(), 2, "each logical POST has one peer response");
+    assert_eq!(
+        requests.len(),
+        2,
+        "Discover/list must not retry or reinitialize"
+    );
+    assert_eq!(
+        responses.len(),
+        2,
+        "each logical POST has one peer response"
+    );
     assert_current_request(&requests[0], "server/discover");
     assert_current_request(&requests[1], "tools/list");
     assert_current_response(&responses[0], false);
@@ -632,9 +661,7 @@ async fn runtime_recorder_rejects_a_server_session_header_without_retrying() {
     let server = Arc::clone(&peer);
     let thread = thread::spawn(move || server.serve_discover_and_list(true));
     let mut client = McpClient::connect_http(
-        "runtime-session-header"
-            .parse()
-            .expect("server name"),
+        "runtime-session-header".parse().expect("server name"),
         peer.config(),
         options(),
         Arc::clone(&broker) as Arc<dyn McpHttpEffects>,

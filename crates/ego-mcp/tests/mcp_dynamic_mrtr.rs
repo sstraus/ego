@@ -2,9 +2,7 @@
 
 use ego_core::config::McpServerName;
 use ego_core::generator::types::ToolDescriptor;
-use ego_mcp::{
-    McpCollapsedBootstrap, McpCollapsedCatalogue, McpInputResponse, McpInputState,
-};
+use ego_mcp::{McpCollapsedBootstrap, McpCollapsedCatalogue, McpInputResponse, McpInputState};
 use serde_json::json;
 
 fn server() -> McpServerName {
@@ -103,7 +101,7 @@ fn collapsed_bootstrap_rejects_retired_alias_families_and_invalid_schema_results
         json!({"structuredContent":{"name":"weather","description":"duplicate","inputSchema":{"type":7}}}),
     ] {
         assert!(
-            McpCollapsedCatalogue::from_schema_response(bootstrap.clone(), "weather", result)
+            McpCollapsedCatalogue::from_schema_response(bootstrap, "weather", result)
                 .is_err()
         );
     }

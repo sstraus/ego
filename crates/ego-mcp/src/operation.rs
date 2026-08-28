@@ -439,8 +439,7 @@ async fn execute_http(
     let selected = broker
         .selected_settlement()?
         .ok_or_else(|| protocol("selected MCP HTTP operation was not settled"))?;
-    let schema =
-        tool_schema_command(&outcome, &envelope, admission, factory.collapsed.as_ref())?;
+    let schema = tool_schema_command(&outcome, &envelope, admission, factory.collapsed.as_ref())?;
     let execution = project_outcome(
         outcome,
         &envelope,

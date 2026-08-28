@@ -28,9 +28,8 @@ pub struct McpCollapsedBootstrap;
 
 impl McpCollapsedBootstrap {
     pub fn new(tools: Vec<GeneratorToolDescriptor>) -> Result<Self, McpError> {
-        Self::detect(&tools)?.ok_or_else(|| {
-            protocol("MCP tools do not expose the collapsed bootstrap contract")
-        })
+        Self::detect(&tools)?
+            .ok_or_else(|| protocol("MCP tools do not expose the collapsed bootstrap contract"))
     }
 
     pub fn detect(tools: &[GeneratorToolDescriptor]) -> Result<Option<Self>, McpError> {
@@ -58,10 +57,6 @@ impl McpCollapsedBootstrap {
         } else {
             Ok(None)
         }
-    }
-
-    pub(crate) fn management_names(&self) -> &'static [&'static str] {
-        &COLLAPSED_MANAGEMENT_TOOLS
     }
 
     pub fn tool_names(&self) -> impl Iterator<Item = &'static str> {
@@ -168,12 +163,17 @@ impl McpCollapsedCatalogue {
             if !tool.parameters.is_object() {
                 return Err(invalid("collapsed inner tool definition is incomplete"));
             }
-            let compiled = Arc::new(CompiledSchema::new(tool.parameters, "collapsed inner tool")?);
+            let compiled = Arc::new(CompiledSchema::new(
+                tool.parameters,
+                "collapsed inner tool",
+            )?);
             if inner.insert(tool.name, compiled).is_some() {
                 return Err(protocol("duplicate collapsed inner tool identity"));
             }
         }
-        Ok(Self { inner: Arc::new(inner) })
+        Ok(Self {
+            inner: Arc::new(inner),
+        })
     }
 
     pub fn tool_names(&self) -> impl Iterator<Item = &str> {
@@ -229,12 +229,17 @@ impl McpCollapsedCatalogue {
         let mut inner = previous
             .map(|catalogue| catalogue.inner.as_ref().clone())
             .unwrap_or_default();
-        let compiled = Arc::new(CompiledSchema::new(tool.parameters, "collapsed inner tool")?);
+        let compiled = Arc::new(CompiledSchema::new(
+            tool.parameters,
+            "collapsed inner tool",
+        )?);
         inner.insert(tool.name, compiled);
         if inner.is_empty() {
             return Err(protocol("collapsed MCP catalogue is empty"));
         }
-        Ok(Self { inner: Arc::new(inner) })
+        Ok(Self {
+            inner: Arc::new(inner),
+        })
     }
 }
 
@@ -432,9 +437,7 @@ impl McpCapturedTool {
                 .and_then(Value::as_str)
                 .filter(|name| !name.trim().is_empty())
                 .ok_or_else(|| {
-                    ToolError::InvalidParams(
-                        "collapsed dispatch has no inner tool name".to_owned(),
-                    )
+                    ToolError::InvalidParams("collapsed dispatch has no inner tool name".to_owned())
                 })?;
             let arguments = object
                 .get("arguments")

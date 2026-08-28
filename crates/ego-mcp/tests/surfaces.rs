@@ -13,9 +13,8 @@ use ego_mcp::{
     McpAdmittedCandidate, McpCacheMetadata, McpCandidateAdmission, McpCandidateError,
     McpCandidateIdentity, McpCandidateInventory, McpCapabilities, McpCollapsedBootstrap,
     McpCollapsedCatalogue, McpEnvironmentBinding, McpHeaderBinding, McpOperation,
-    McpOperationFactory,
-    McpRegistryCandidate, McpRegistryController, McpRegistryRefresh, McpServerAdmission,
-    McpTransportMaterial, RegistryScope, RegistryTrigger,
+    McpOperationFactory, McpRegistryCandidate, McpRegistryController, McpRegistryRefresh,
+    McpServerAdmission, McpTransportMaterial, RegistryScope, RegistryTrigger,
 };
 use futures::future::BoxFuture;
 use serde_json::{Value, json};
@@ -320,7 +319,10 @@ fn dynamic_refresh(admission: &Arc<McpServerAdmission>) -> McpRegistryRefresh {
 #[tokio::test(flavor = "current_thread")]
 async fn collapsed_family_without_schema_publishes_management_only_bootstrap() {
     let bootstrap = McpCollapsedBootstrap::new(collapsed_management()).expect("bootstrap");
-    assert_eq!(bootstrap.tool_names().collect::<Vec<_>>(), vec!["get_tool_schema", "search_tools"]);
+    assert_eq!(
+        bootstrap.tool_names().collect::<Vec<_>>(),
+        vec!["get_tool_schema", "search_tools"]
+    );
     assert!(!bootstrap.tool_names().any(|name| name == "call_tool"));
     let admission = dynamic_admission();
     let queue = Arc::new(DynamicAdmission::default());
@@ -367,7 +369,7 @@ async fn described_collapsed_catalogue_publishes_next_generation_and_keeps_old_c
         "additionalProperties":false
     });
     let catalogue = McpCollapsedCatalogue::new(vec![descriptor("weather", old_schema.clone())])
-    .expect("described catalogue");
+        .expect("described catalogue");
     queue.push(DynamicOutcome::Candidate(dynamic_candidate(
         Arc::clone(&admission),
         Some(catalogue),

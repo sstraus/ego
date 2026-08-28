@@ -22,8 +22,8 @@ use sha2::{Digest, Sha256};
 
 use crate::dynamic::McpToolDefinition;
 use crate::{
-    McpCollapsedBootstrap, McpCollapsedCatalogue, McpDuplexEffectsFactory, McpError,
-    McpFailure, McpFuture, McpHttpEffects, McpInputRequiredRecorder, McpOperationFactory,
+    McpCollapsedBootstrap, McpCollapsedCatalogue, McpDuplexEffectsFactory, McpError, McpFailure,
+    McpFuture, McpHttpEffects, McpInputRequiredRecorder, McpOperationFactory,
     McpRuntimeCandidateAdmission, McpServerAdmission,
 };
 
@@ -473,9 +473,11 @@ fn compile_candidate_tool_definitions(
     let mut definitions = Vec::new();
     for descriptor in descriptors {
         let definition = match collapsed_bootstrap {
-            Some(bootstrap) if descriptor.name == bootstrap.dispatch_name() => collapsed.map(
-                |catalogue| McpToolDefinition::collapsed(descriptor.clone(), catalogue.clone()),
-            ),
+            Some(bootstrap) if descriptor.name == bootstrap.dispatch_name() => {
+                collapsed.map(|catalogue| {
+                    McpToolDefinition::collapsed(descriptor.clone(), catalogue.clone())
+                })
+            }
             _ => Some(McpToolDefinition::direct(descriptor.clone())),
         };
         if let Some(definition) = definition {
@@ -652,10 +654,7 @@ impl McpToolSchemaCommand {
 }
 
 pub(crate) trait McpToolSchemaAdmission: Send + Sync {
-    fn reconcile(
-        &self,
-        command: McpToolSchemaCommand,
-    ) -> McpFuture<'static, Result<(), McpError>>;
+    fn reconcile(&self, command: McpToolSchemaCommand) -> McpFuture<'static, Result<(), McpError>>;
 }
 
 struct ControllerToolSchemaAdmission {
@@ -663,10 +662,7 @@ struct ControllerToolSchemaAdmission {
 }
 
 impl McpToolSchemaAdmission for ControllerToolSchemaAdmission {
-    fn reconcile(
-        &self,
-        command: McpToolSchemaCommand,
-    ) -> McpFuture<'static, Result<(), McpError>> {
+    fn reconcile(&self, command: McpToolSchemaCommand) -> McpFuture<'static, Result<(), McpError>> {
         let controller = self.controller.clone();
         Box::pin(async move {
             let controller = controller.upgrade().ok_or_else(|| {
@@ -2201,7 +2197,10 @@ mod collapsed_mcp_red {
                 first.capture(),
                 "generation-2",
                 "calendar",
-                schema_definition("calendar", json!({"type":"object","additionalProperties":false})),
+                schema_definition(
+                    "calendar",
+                    json!({"type":"object","additionalProperties":false}),
+                ),
             ))
             .await
             .expect("second schema lookup");
@@ -2245,12 +2244,7 @@ mod collapsed_mcp_red {
     #[tokio::test(flavor = "current_thread")]
     async fn stale_or_invalid_schema_is_rejected_without_publication() {
         let cases = [
-            (
-                "empty definition",
-                "weather",
-                json!({}),
-                "generation-1",
-            ),
+            ("empty definition", "weather", json!({}), "generation-1"),
             (
                 "stale generation",
                 "weather",

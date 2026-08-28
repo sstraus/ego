@@ -22,10 +22,9 @@ use ego_core::permit::{
 use ego_core::turn::{McpRegistryEvent, McpRegistryJournal, McpRegistryJournalError};
 use ego_mcp::{
     McpAdmittedCandidate, McpCacheMetadata, McpCandidateAdmission, McpCandidateError,
-    McpCandidateIdentity, McpCandidateInventory, McpCapabilities, McpCollapsedCatalogue,
-    McpFuture, McpOperation, McpOperationFactory, McpRegistryCandidate,
-    McpRegistryController, McpRegistryRefresh, McpServerAdmission, McpTransportMaterial,
-    RegistryScope, RegistryTrigger,
+    McpCandidateIdentity, McpCandidateInventory, McpCapabilities, McpCollapsedCatalogue, McpFuture,
+    McpOperation, McpOperationFactory, McpRegistryCandidate, McpRegistryController,
+    McpRegistryRefresh, McpServerAdmission, McpTransportMaterial, RegistryScope, RegistryTrigger,
 };
 
 #[derive(Default)]
@@ -49,8 +48,14 @@ impl McpOperationFactory for FakeFactory {
             let [(outer, outer_digest), (inner, inner_digest)] = operation.invocations() else {
                 unreachable!("the count was checked above")
             };
-            assert_eq!(outer, &ForeignToolId::new("alpha", "call_tool").expect("outer"));
-            assert_eq!(inner, &ForeignToolId::new("alpha", "weather").expect("inner"));
+            assert_eq!(
+                outer,
+                &ForeignToolId::new("alpha", "call_tool").expect("outer")
+            );
+            assert_eq!(
+                inner,
+                &ForeignToolId::new("alpha", "weather").expect("inner")
+            );
             let request = HttpRequest::new(
                 "POST",
                 "/mcp",
@@ -259,8 +264,7 @@ fn dynamic_candidate(
         "weather",
         json!({"type":"object","properties":{"city":{"type":"string"}},"required":["city"],"additionalProperties":false}),
     );
-    let catalogue =
-        McpCollapsedCatalogue::new(vec![inner]).expect("catalogue");
+    let catalogue = McpCollapsedCatalogue::new(vec![inner]).expect("catalogue");
     McpAdmittedCandidate::new(
         admission,
         McpCandidateIdentity::validated("alpha"),
@@ -418,7 +422,10 @@ fn dynamic_capture_validates_inner_schema_and_executes_one_selected_call() {
         resolver: &fs,
     };
     let call = tool
-        .prepare(json!({"tool_name":"weather","arguments":{"city":"Rome"}}), &ctx)
+        .prepare(
+            json!({"tool_name":"weather","arguments":{"city":"Rome"}}),
+            &ctx,
+        )
         .expect("valid");
     assert_eq!(factory.prepares.lock().expect("prepares").as_slice(), &[2]);
     assert!(
