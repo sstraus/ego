@@ -622,7 +622,7 @@ impl McpRetryRequest {
     }
 }
 
-fn compile_schema(schema: &Value) -> Result<Validator, McpError> {
+pub(crate) fn compile_schema(schema: &Value) -> Result<Validator, McpError> {
     jsonschema::validator_for(schema)
         .map_err(|error| invalid(format!("invalid MRTR JSON Schema: {error}")))
 }
@@ -640,7 +640,7 @@ fn require_complete(
     }
 }
 
-fn validate_answer(validator: &Validator, answer: &Value) -> Result<(), McpError> {
+pub(crate) fn validate_answer(validator: &Validator, answer: &Value) -> Result<(), McpError> {
     let errors = validator
         .iter_errors(answer)
         .map(|error| format!("{}: {error}", error.instance_path()))

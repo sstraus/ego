@@ -57,7 +57,7 @@ fn decode_standard_base64(encoded: &str) -> Vec<u8> {
 
     assert_eq!(encoded.len() % 4, 0, "STANDARD base64 is quartet-aligned");
     let mut decoded = Vec::with_capacity(encoded.len() / 4 * 3);
-    for quartet in encoded.as_bytes().chunks_exact(4) {
+    for quartet in encoded.as_bytes().as_chunks::<4>().0 {
         let first = value(quartet[0]);
         let second = value(quartet[1]);
         decoded.push((first << 2) | (second >> 4));
@@ -509,9 +509,9 @@ fn exec_tool_preparation_policy_authorization_and_guarded_execution_preserve_ide
             &fs,
             run.ports.process(),
             &run.evidence,
-            run.ports.resolver(),
-            run.ports.one_hop(),
-            run.ports.duplex(),
+            run.ports.resolver_handle(),
+            run.ports.one_hop_handle(),
+            run.ports.duplex_handle(),
         ),
         root.clone(),
     );
@@ -584,9 +584,9 @@ fn exec_tool_policy_denial_stops_before_guarded_effects() {
             &fs,
             run.ports.process(),
             &run.evidence,
-            run.ports.resolver(),
-            run.ports.one_hop(),
-            run.ports.duplex(),
+            run.ports.resolver_handle(),
+            run.ports.one_hop_handle(),
+            run.ports.duplex_handle(),
         ),
         root.clone(),
     );

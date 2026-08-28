@@ -293,7 +293,7 @@ impl From<&Op> for CanonicalOp {
                 params_digest: params_digest.as_str().to_owned(),
                 transport: transport.to_string(),
             },
-            Op::Connect { target, .. } => Self::Connect {
+            Op::Connect { target, .. } | Op::ProtocolConnect { target } => Self::Connect {
                 target: target.to_string(),
             },
         }

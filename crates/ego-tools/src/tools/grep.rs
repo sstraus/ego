@@ -44,13 +44,13 @@ impl TypedTool for GrepTool {
         // See `glob`: a query that does not compile is the model's mistake and
         // is worth reporting before a permit is minted for it.
         compile(&params.query)?;
-        Ok(PreparedCall {
-            tool: self.name().to_string(),
-            ops: vec![Op::Search {
+        Ok(PreparedCall::new(
+            self.name(),
+            vec![Op::Search {
                 root: root_of(ctx, params.path.as_ref())?,
                 query: params.query,
             }],
-        })
+        ))
     }
 
     fn execute<'a>(

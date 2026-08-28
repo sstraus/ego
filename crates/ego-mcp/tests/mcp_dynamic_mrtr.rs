@@ -1,7 +1,8 @@
 //! Coarse RED contract for current dynamic MCP families and MRTR.
 
 use ego_core::config::McpServerName;
-use ego_mcp::{McpDynamicFamily, McpDynamicTool, McpInputResponse, McpInputState};
+use ego_core::generator::types::ToolDescriptor;
+use ego_mcp::{McpDynamicCatalogue, McpDynamicFamily, McpInputResponse, McpInputState};
 use serde_json::json;
 
 fn server() -> McpServerName {
@@ -14,50 +15,74 @@ fn original() -> Vec<u8> {
     br#"{"method":"tools/call","params":{"name":"execute_tool","arguments":{"x":1}}}"#.to_vec()
 }
 
-#[test]
-fn standalone_speakeasy_outer_and_inner_authorities_are_independent() {
-    let family = McpDynamicFamily::standalone();
-    let tool = McpDynamicTool::new("execute_tool", family).expect("dynamic tool");
-    tool.compile_inner(
-        "inner",
-        json!({"type":"object","properties":{"x":{"type":"integer"}}}),
-    )
-    .expect("compiled inner schema");
-    let prepared = tool
-        .prepare_wrapper(json!({"name":"inner","arguments":{"x":1}}), "capture-1")
-        .expect("wrapper");
-    assert_eq!(prepared.ops.len(), 2);
-    assert!(matches!(
-        prepared.ops.as_slice(),
-        [
-            ego_core::permit::Op::Opaque { .. },
-            ego_core::permit::Op::Opaque { .. }
-        ]
-    ));
+fn descriptor(name: &str, parameters: serde_json::Value) -> ToolDescriptor {
+    ToolDescriptor {
+        name: name.to_owned(),
+        description: "fixture".to_owned(),
+        parameters,
+    }
 }
 
 #[test]
-fn gram_dynamic_toolsets_require_current_inner_schema_and_stale_capture_refuses() {
-    let tool = McpDynamicTool::new("execute_tool", McpDynamicFamily::gram()).expect("dynamic tool");
-    tool.compile_inner(
+fn standalone_speakeasy_outer_and_inner_authorities_are_independent() {
+    let tools = vec![
+        descriptor(
+            "list_tools",
+            json!({"type":"object","additionalProperties":false}),
+        ),
+        descriptor(
+            "describe_tool",
+            json!({"type":"object","additionalProperties":false}),
+        ),
+        descriptor(
+            "execute_tool",
+            json!({"type":"object","properties":{"name":{"type":"string"},"arguments":{"type":"object"}},"required":["name","arguments"],"additionalProperties":false}),
+        ),
+    ];
+    let family = McpDynamicFamily::detect(&tools)
+        .expect("family")
+        .expect("standalone");
+    assert_eq!(family, McpDynamicFamily::standalone());
+    let catalogue = McpDynamicCatalogue::new(family, vec![descriptor(
+        "inner",
+        json!({"type":"object","properties":{"x":{"type":"integer"}},"required":["x"],"additionalProperties":false}),
+    )]).expect("compiled inner schema");
+    assert_eq!(catalogue.tool_names().collect::<Vec<_>>(), vec!["inner"]);
+    assert!(catalogue.tool_names().any(|name| name == "inner"));
+}
+
+#[test]
+fn gram_dynamic_toolsets_require_current_inner_schema() {
+    let tools = vec![
+        descriptor(
+            "search_tools",
+            json!({"type":"object","additionalProperties":false}),
+        ),
+        descriptor(
+            "describe_tools",
+            json!({"type":"object","additionalProperties":false}),
+        ),
+        descriptor(
+            "execute_tool",
+            json!({"type":"object","properties":{"name":{"type":"string"},"arguments":{"type":"object"}},"required":["name","arguments"],"additionalProperties":false}),
+        ),
+    ];
+    let family = McpDynamicFamily::detect(&tools)
+        .expect("family")
+        .expect("Gram");
+    assert_eq!(family, McpDynamicFamily::gram());
+    let catalogue = McpDynamicCatalogue::new(family, vec![descriptor(
         "weather",
-        json!({"type":"object","properties":{"city":{"type":"string"}}}),
-    )
-    .expect("schema");
-    let prepared = tool
-        .prepare_wrapper(
-            json!({"name":"weather","arguments":{"city":"Rome"}}),
-            "capture-2",
-        )
-        .expect("Gram wrapper");
-    assert_eq!(prepared.ops.len(), 2);
-    let capture = tool.capture("capture-2");
-    assert!(capture.validate("weather", json!({"city":"Rome"})).is_ok());
-    assert!(capture.validate("missing", json!({})).is_err());
+        json!({"type":"object","properties":{"city":{"type":"string"}},"required":["city"],"additionalProperties":false}),
+    )]).expect("schema");
+    assert!(catalogue.tool_names().any(|name| name == "weather"));
+    assert!(!catalogue.tool_names().any(|name| name == "missing"));
     assert!(
-        capture
-            .validate_after_refresh("capture-3", "weather", json!({"city":"Rome"}))
-            .is_err()
+        McpDynamicCatalogue::new(
+            McpDynamicFamily::gram(),
+            vec![descriptor("broken", json!({"type": 7}))],
+        )
+        .is_err()
     );
 }
 

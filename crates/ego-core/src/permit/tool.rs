@@ -8,12 +8,15 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::fs::{FsError, GuardedIo, IoDenied, PathResolver};
+use super::PathResolver;
+use super::fs::{FsError, GuardedIo, IoDenied};
 use super::grant::PermitDenied;
 use super::path::CanonPath;
 use super::prepared_call::PreparedCall;
 use super::spawn::ProcessError;
+use crate::mcp::{ForeignResult, ToolExecution};
 use crate::store::evidence::{EvidenceError, EvidencePage, EvidenceRef};
+use crate::suspension::ContinuationError;
 
 /// Maximum UTF-8 bytes exposed for one failed-tool diagnostic.
 pub const MAX_TOOL_ERROR_DIAGNOSTIC_BYTES: usize = 4 * 1024;
@@ -26,9 +29,7 @@ pub struct ToolDescriptor {
     pub schema: schemars::Schema,
 }
 
-/// What `Tool::prepare` sees: enough to resolve canonical operations, never
-/// enough to perform any (`ARCHITECTURE.md` §3.2 — `prepare` runs before a
-/// `Permit` exists, so it gets a [`PathResolver`], not a [`GuardedIo`]).
+/// Read-only canonicalization context available before policy authorization.
 pub struct PrepareCtx<'a> {
     pub cwd: CanonPath,
     pub resolver: &'a dyn PathResolver,
@@ -57,6 +58,8 @@ pub enum ToolError {
     Evidence(EvidenceError),
     /// The admitted process did not complete successfully.
     Process(ProcessError),
+    /// Durable MCP continuation authority could not be prepared or recorded.
+    Continuation(ContinuationError),
 }
 
 impl std::fmt::Display for ToolError {
@@ -67,6 +70,7 @@ impl std::fmt::Display for ToolError {
             ToolError::Fs(err) => write!(f, "{err}"),
             ToolError::Evidence(err) => write!(f, "{err}"),
             ToolError::Process(err) => write!(f, "{err}"),
+            ToolError::Continuation(err) => write!(f, "{err}"),
         }
     }
 }
@@ -123,6 +127,12 @@ impl From<EvidenceError> for ToolError {
 impl From<ProcessError> for ToolError {
     fn from(error: ProcessError) -> Self {
         Self::Process(error)
+    }
+}
+
+impl From<ContinuationError> for ToolError {
+    fn from(error: ContinuationError) -> Self {
+        Self::Continuation(error)
     }
 }
 
@@ -318,26 +328,53 @@ impl ToolContentBlock {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolResult {
     pub content: Vec<ToolContentBlock>,
+    provenance: ToolResultProvenance,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ToolResultProvenance {
+    Builtin,
+    Foreign { result: Box<ForeignResult> },
 }
 
 impl ToolResult {
     pub fn builtin(text: impl Into<String>) -> Self {
         Self {
             content: vec![ToolContentBlock::builtin(text)],
+            provenance: ToolResultProvenance::Builtin,
         }
     }
 
     pub fn new(content: Vec<ToolContentBlock>) -> Self {
-        Self { content }
+        Self {
+            content,
+            provenance: ToolResultProvenance::Builtin,
+        }
+    }
+
+    pub fn from_foreign(result: ForeignResult) -> Self {
+        let content = vec![ToolContentBlock::builtin(result.visible_text().to_owned())];
+        Self {
+            content,
+            provenance: ToolResultProvenance::Foreign {
+                result: Box::new(result),
+            },
+        }
+    }
+
+    pub fn provenance(&self) -> &ToolResultProvenance {
+        &self.provenance
     }
 
     /// True when the complete result was produced in memory and carries no
     /// evidence or external-effect provenance.
     pub fn is_pure(&self) -> bool {
-        self.content.iter().all(|block| {
-            matches!(block.provenance, ToolOutputProvenance::Builtin)
-                && block.full_output.is_none()
-        })
+        matches!(self.provenance, ToolResultProvenance::Builtin)
+            && self.content.iter().all(|block| {
+                matches!(block.provenance, ToolOutputProvenance::Builtin)
+                    && block.full_output.is_none()
+            })
     }
 
     /// The single textual answer provider protocols accept for a tool call.
@@ -481,7 +518,7 @@ pub trait Tool: Send + Sync {
         &'a self,
         call: PreparedCall,
         io: &'a dyn GuardedIo,
-    ) -> BoxFuture<'a, Result<ToolResult, ToolError>>;
+    ) -> BoxFuture<'a, Result<ToolExecution, ToolError>>;
 }
 
 /// The typed half of a builtin tool: params with a `schemars`-derived
@@ -529,7 +566,7 @@ impl<T: TypedTool> Tool for Typed<T> {
         &'a self,
         call: PreparedCall,
         io: &'a dyn GuardedIo,
-    ) -> BoxFuture<'a, Result<ToolResult, ToolError>> {
-        self.0.execute(call, io)
+    ) -> BoxFuture<'a, Result<ToolExecution, ToolError>> {
+        Box::pin(async move { self.0.execute(call, io).await.map(ToolExecution::Complete) })
     }
 }

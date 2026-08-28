@@ -10,8 +10,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::digest::sha256_hex;
 use crate::generator::attempt::DeliveryCertainty;
-use crate::permit::InvocationDigest;
-use crate::store::evidence::{EvidenceId, EvidenceRef};
+use crate::permit::{InvocationDigest, ToolResult};
+use crate::store::evidence::EvidenceRef;
 
 /// Maximum UTF-8 bytes exposed to a model from one foreign result.
 pub const FOREIGN_VISIBLE_BYTES: usize = 64 * 1024;
@@ -38,6 +38,99 @@ pub enum ContextKind {
     Resource,
     Prompt,
     Tool,
+}
+
+/// The exact foreign subject retained by one admitted MCP operation.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum McpSubject {
+    Tool { server: String, name: String },
+    Resource { server: String, uri: String },
+    Prompt { server: String, name: String },
+}
+
+impl McpSubject {
+    pub fn server(&self) -> &str {
+        match self {
+            Self::Tool { server, .. }
+            | Self::Resource { server, .. }
+            | Self::Prompt { server, .. } => server,
+        }
+    }
+
+    pub fn operation_name(&self) -> &str {
+        match self {
+            Self::Tool { name, .. } | Self::Prompt { name, .. } => name,
+            Self::Resource { uri, .. } => uri,
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), McpProjectionError> {
+        if !valid_identity(self.server())
+            || self.operation_name().trim().is_empty()
+            || self.operation_name().chars().any(char::is_control)
+        {
+            return Err(McpProjectionError::InvalidIdentity);
+        }
+        Ok(())
+    }
+}
+
+/// The selected protocol method. Lifecycle and management requests are not
+/// admitted by this vocabulary and therefore cannot consume its authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpOperationKind {
+    CallTool,
+    ReadResource,
+    GetPrompt,
+}
+
+impl McpOperationKind {
+    pub fn method(self) -> &'static str {
+        match self {
+            Self::CallTool => "tools/call",
+            Self::ReadResource => "resources/read",
+            Self::GetPrompt => "prompts/get",
+        }
+    }
+
+    pub fn matches(self, subject: &McpSubject) -> bool {
+        matches!(
+            (self, subject),
+            (Self::CallTool, McpSubject::Tool { .. })
+                | (Self::ReadResource, McpSubject::Resource { .. })
+                | (Self::GetPrompt, McpSubject::Prompt { .. })
+        )
+    }
+}
+
+/// A durable continuation was recorded before the foreign operation returned
+/// control to the turn loop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForeignInputRequired {
+    continuation_id: String,
+}
+
+impl ForeignInputRequired {
+    pub fn new(continuation_id: impl Into<String>) -> Result<Self, McpProjectionError> {
+        let continuation_id = continuation_id.into();
+        if !valid_identity(&continuation_id) {
+            return Err(McpProjectionError::InvalidIdentity);
+        }
+        Ok(Self { continuation_id })
+    }
+
+    pub fn continuation_id(&self) -> &str {
+        &self.continuation_id
+    }
+}
+
+/// The only two outcomes a foreign tool execution may expose.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolExecution {
+    Complete(ToolResult),
+    InputRequired(ForeignInputRequired),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -161,7 +254,7 @@ pub struct ForeignResult {
     server: String,
     tool: String,
     invocation_digest: String,
-    admission_generation: String,
+    admission: McpAdmissionFingerprint,
     result_type: String,
     ttl_ms: Option<u64>,
     cache_scope: Option<CacheScope>,
@@ -179,33 +272,25 @@ impl ForeignResult {
         server: impl Into<String>,
         tool: impl Into<String>,
         invocation_digest: InvocationDigest,
-        admission_generation: impl Into<String>,
+        admission: McpAdmissionFingerprint,
         result_type: impl Into<String>,
         ttl_ms: Option<u64>,
         cache_scope: Option<CacheScope>,
         content: Vec<ForeignContent>,
+        evidence: EvidenceRef,
+        delivery: DeliveryCertainty,
+        cancellation: CancellationClassification,
     ) -> Result<Self, McpProjectionError> {
         let server = server.into();
         let tool = tool.into();
-        let admission_generation = admission_generation.into();
         let result_type = result_type.into();
-        if !valid_identity(&server)
-            || !valid_identity(&tool)
-            || !valid_identity(&admission_generation)
-        {
+        if !valid_identity(&server) || !valid_identity(&tool) {
             return Err(McpProjectionError::InvalidIdentity);
         }
         if result_type.trim().is_empty() || result_type.chars().any(char::is_control) {
             return Err(McpProjectionError::MissingResultType);
         }
 
-        let sanitized =
-            serde_json::to_vec(&content).map_err(|_| McpProjectionError::InvalidContent)?;
-        let evidence = EvidenceRef::new(
-            EvidenceId::parse(sha256_hex(&sanitized))
-                .map_err(|_| McpProjectionError::InvalidContent)?,
-            sanitized.len().try_into().unwrap_or(u64::MAX),
-        );
         let mut visible_text = String::new();
         let mut unsupported = Vec::new();
         let mut visible_truncated = false;
@@ -231,7 +316,7 @@ impl ForeignResult {
             server,
             tool,
             invocation_digest: invocation_digest.as_str().to_owned(),
-            admission_generation,
+            admission,
             result_type,
             ttl_ms,
             cache_scope,
@@ -239,8 +324,8 @@ impl ForeignResult {
             visible_truncated,
             unsupported,
             evidence,
-            delivery: DeliveryCertainty::DefinitelySent,
-            cancellation: CancellationClassification::Completed,
+            delivery,
+            cancellation,
         })
     }
 
@@ -254,7 +339,10 @@ impl ForeignResult {
         &self.invocation_digest
     }
     pub fn admission_generation(&self) -> &str {
-        &self.admission_generation
+        self.admission.generation()
+    }
+    pub fn admission(&self) -> &McpAdmissionFingerprint {
+        &self.admission
     }
     pub fn result_type(&self) -> &str {
         &self.result_type

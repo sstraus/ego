@@ -6,6 +6,8 @@
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use sha2::{Digest as _, Sha256};
 
 use super::foreign::{
     ForeignToolId, ForeignTransportTarget, HttpRequest, HttpRequestDigest, InvocationDigest,
@@ -13,6 +15,7 @@ use super::foreign::{
 };
 use super::path::CanonPath;
 use super::spawn::SpawnSpec;
+use crate::mcp::{McpAdmissionFingerprint, McpOperationKind, McpSubject};
 use crate::store::evidence::EvidenceRead;
 
 /// One canonical operation a `Tool::execute` intends to perform.
@@ -58,6 +61,9 @@ pub enum Op {
         target: NetworkTarget,
         request_digest: HttpRequestDigest,
     },
+    /// One MCP target whose exact request bytes are minted later by the
+    /// admitted protocol profile. This does not grant ordinary HTTP.
+    ProtocolConnect { target: NetworkTarget },
 }
 
 /// What a [`Op::Write`] does to the file it names.
@@ -154,7 +160,7 @@ impl Op {
             Op::Spawn { .. } => OpName::Spawn,
             Op::ReadEvidence { .. } => OpName::ReadEvidence,
             Op::Opaque { .. } => OpName::Opaque,
-            Op::Connect { .. } => OpName::Connect,
+            Op::Connect { .. } | Op::ProtocolConnect { .. } => OpName::Connect,
         }
     }
 
@@ -175,7 +181,11 @@ impl Op {
             Op::Read { .. } | Op::List { .. } | Op::Search { .. } | Op::ReadEvidence { .. } => {
                 false
             }
-            Op::Write { .. } | Op::Spawn { .. } | Op::Opaque { .. } | Op::Connect { .. } => true,
+            Op::Write { .. }
+            | Op::Spawn { .. }
+            | Op::Opaque { .. }
+            | Op::Connect { .. }
+            | Op::ProtocolConnect { .. } => true,
         }
     }
 
@@ -186,7 +196,10 @@ impl Op {
             Op::Read { path } | Op::Write { path, .. } => Some(path),
             Op::List { root, .. } | Op::Search { root, .. } => Some(root),
             Op::Spawn { spec } => spec.cwd(),
-            Op::ReadEvidence { .. } | Op::Opaque { .. } | Op::Connect { .. } => None,
+            Op::ReadEvidence { .. }
+            | Op::Opaque { .. }
+            | Op::Connect { .. }
+            | Op::ProtocolConnect { .. } => None,
         }
     }
 
@@ -198,7 +211,10 @@ impl Op {
     pub(crate) fn subject_path<'a>(&'a self, workspace: &'a CanonPath) -> Option<&'a CanonPath> {
         match self {
             Op::Spawn { spec } => Some(spec.cwd().unwrap_or(workspace)),
-            Op::ReadEvidence { .. } | Op::Opaque { .. } | Op::Connect { .. } => None,
+            Op::ReadEvidence { .. }
+            | Op::Opaque { .. }
+            | Op::Connect { .. }
+            | Op::ProtocolConnect { .. } => None,
             _ => self.path(),
         }
     }
@@ -218,7 +234,9 @@ impl Op {
                 tool: tool.clone(),
                 params_digest: params_digest.clone(),
             },
-            Op::Connect { target, .. } => Subject::Network(target.clone()),
+            Op::Connect { target, .. } | Op::ProtocolConnect { target } => {
+                Subject::Network(target.clone())
+            }
         }
     }
 }
@@ -228,32 +246,175 @@ impl Op {
 pub struct PreparedCall {
     pub tool: String,
     pub ops: Vec<Op>,
+    mcp: Option<Box<McpPreparedEnvelope>>,
+}
+
+/// Protocol facts captured before policy classifies an MCP operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpPreparedEnvelope {
+    subject: McpSubject,
+    operation: McpOperationKind,
+    admission: McpAdmissionFingerprint,
+    transport_fingerprint: String,
+    transport: ForeignTransportTarget,
+    parameters: Vec<u8>,
+}
+
+impl McpPreparedEnvelope {
+    pub fn subject(&self) -> &McpSubject {
+        &self.subject
+    }
+
+    pub fn operation(&self) -> McpOperationKind {
+        self.operation
+    }
+
+    pub fn admission(&self) -> &McpAdmissionFingerprint {
+        &self.admission
+    }
+
+    pub fn transport_fingerprint(&self) -> &str {
+        &self.transport_fingerprint
+    }
+
+    pub fn transport(&self) -> &ForeignTransportTarget {
+        &self.transport
+    }
+
+    pub fn parameters(&self) -> &[u8] {
+        &self.parameters
+    }
 }
 
 impl PreparedCall {
-    pub fn foreign_protocol(
-        tool: ForeignToolId,
-        params_digest: InvocationDigest,
-        transport: ForeignTransportTarget,
-        admission_fingerprint: &str,
-    ) -> Self {
-        let rendered = tool.to_string();
-        let connect = protocol_connect(&transport, admission_fingerprint);
-        let mut ops = vec![Op::Opaque {
-            tool,
-            params_digest,
-            transport,
-        }];
-        if let Some((target, request_digest)) = connect {
-            ops.push(Op::Connect {
-                target,
-                request_digest,
-            });
-        }
+    pub fn new(tool: impl Into<String>, ops: Vec<Op>) -> Self {
         Self {
-            tool: rendered,
+            tool: tool.into(),
             ops,
+            mcp: None,
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn mcp(
+        subject: McpSubject,
+        operation: McpOperationKind,
+        invocations: Vec<(ForeignToolId, InvocationDigest)>,
+        admission: McpAdmissionFingerprint,
+        transport_fingerprint: impl Into<String>,
+        transport: ForeignTransportTarget,
+        parameters: &Value,
+    ) -> Result<Self, crate::mcp::McpProjectionError> {
+        subject.validate()?;
+        if !operation.matches(&subject) || transport.http_route().is_none() {
+            return Err(crate::mcp::McpProjectionError::InvalidIdentity);
+        }
+        let transport_fingerprint = transport_fingerprint.into();
+        if transport_fingerprint.trim().is_empty()
+            || transport_fingerprint.chars().any(char::is_control)
+        {
+            return Err(crate::mcp::McpProjectionError::InvalidFingerprint);
+        }
+        let parameters = serde_json::to_vec(parameters)
+            .map_err(|_| crate::mcp::McpProjectionError::InvalidContent)?;
+        let mut ops = invocations
+            .into_iter()
+            .map(|(tool, params_digest)| Op::Opaque {
+                tool,
+                params_digest,
+                transport: transport.clone(),
+            })
+            .collect::<Vec<_>>();
+        let route = transport.http_route().expect("validated HTTP transport");
+        ops.push(Op::ProtocolConnect {
+            target: route.target().clone(),
+        });
+        Ok(Self {
+            tool: subject.operation_name().to_owned(),
+            ops,
+            mcp: Some(Box::new(McpPreparedEnvelope {
+                subject,
+                operation,
+                admission,
+                transport_fingerprint,
+                transport,
+                parameters,
+            })),
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn mcp_stdio(
+        subject: McpSubject,
+        operation: McpOperationKind,
+        invocations: Vec<(ForeignToolId, InvocationDigest)>,
+        admission: McpAdmissionFingerprint,
+        transport_fingerprint: impl Into<String>,
+        server: &str,
+        spec: SpawnSpec,
+        parameters: &Value,
+    ) -> Result<Self, crate::mcp::McpProjectionError> {
+        subject.validate()?;
+        if !operation.matches(&subject) {
+            return Err(crate::mcp::McpProjectionError::InvalidIdentity);
+        }
+        let transport_fingerprint = transport_fingerprint.into();
+        if transport_fingerprint.trim().is_empty()
+            || transport_fingerprint.chars().any(char::is_control)
+        {
+            return Err(crate::mcp::McpProjectionError::InvalidFingerprint);
+        }
+        let transport = ForeignTransportTarget::stdio(server)
+            .map_err(|_| crate::mcp::McpProjectionError::InvalidIdentity)?;
+        let parameters = serde_json::to_vec(parameters)
+            .map_err(|_| crate::mcp::McpProjectionError::InvalidContent)?;
+        let mut ops = invocations
+            .into_iter()
+            .map(|(tool, params_digest)| Op::Opaque {
+                tool,
+                params_digest,
+                transport: transport.clone(),
+            })
+            .collect::<Vec<_>>();
+        ops.push(Op::Spawn { spec });
+        Ok(Self {
+            tool: subject.operation_name().to_owned(),
+            ops,
+            mcp: Some(Box::new(McpPreparedEnvelope {
+                subject,
+                operation,
+                admission,
+                transport_fingerprint,
+                transport,
+                parameters,
+            })),
+        })
+    }
+
+    pub fn mcp_envelope(&self) -> Option<&McpPreparedEnvelope> {
+        self.mcp.as_deref()
+    }
+
+    pub(crate) fn apply_verified_resume_parameters(
+        &mut self,
+        parameters: &Value,
+    ) -> Result<(), crate::mcp::McpProjectionError> {
+        let envelope = self
+            .mcp
+            .as_deref_mut()
+            .ok_or(crate::mcp::McpProjectionError::InvalidIdentity)?;
+        envelope.parameters = serde_json::to_vec(parameters)
+            .map_err(|_| crate::mcp::McpProjectionError::InvalidContent)?;
+        Ok(())
+    }
+
+    /// Stable within the current contract: every canonical operation and MCP
+    /// envelope field participates, in order, without exposing their values.
+    pub fn authority_fingerprint(&self) -> [u8; 32] {
+        let mut digest = Sha256::new();
+        digest.update(b"ego:prepared-call:v1\0");
+        digest.update(format!("{self:?}").as_bytes());
+        digest.finalize().into()
     }
 
     pub fn foreign_http(
@@ -280,6 +441,7 @@ impl PreparedCall {
         Self {
             tool: rendered,
             ops,
+            mcp: None,
         }
     }
 
@@ -302,6 +464,7 @@ impl PreparedCall {
                 },
                 Op::Spawn { spec },
             ],
+            mcp: None,
         }
     }
 
@@ -338,39 +501,7 @@ impl PreparedCall {
         Self {
             tool: rendered,
             ops,
+            mcp: None,
         }
     }
-
-    pub fn speakeasy_protocol(
-        outer_tool: ForeignToolId,
-        outer_digest: InvocationDigest,
-        inner_tool: ForeignToolId,
-        inner_digest: InvocationDigest,
-        transport: ForeignTransportTarget,
-        request: &HttpRequest,
-    ) -> Self {
-        Self::speakeasy(
-            outer_tool,
-            outer_digest,
-            inner_tool,
-            inner_digest,
-            transport,
-            request,
-        )
-    }
-}
-
-fn protocol_connect(
-    transport: &ForeignTransportTarget,
-    admission_fingerprint: &str,
-) -> Option<(NetworkTarget, HttpRequestDigest)> {
-    let route = transport.http_route()?;
-    let request = HttpRequest::new(
-        "POST",
-        "/.ego/mcp-protocol-envelope",
-        Vec::new(),
-        admission_fingerprint.as_bytes().to_vec(),
-    )
-    .expect("the internal protocol-envelope frame is canonical");
-    Some((route.target().clone(), HttpRequestDigest::of(&request)))
 }

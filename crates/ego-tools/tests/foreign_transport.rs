@@ -565,9 +565,9 @@ fn guarded_http_is_the_only_subject_under_test_and_redirect_needs_fresh_authorit
         &NoFs,
         fixture.ports.process(),
         &fixture.evidence,
-        fixture.ports.resolver(),
-        fixture.ports.one_hop(),
-        fixture.ports.duplex(),
+        fixture.ports.resolver_handle(),
+        fixture.ports.one_hop_handle(),
+        fixture.ports.duplex_handle(),
     );
     let response = fixture
         .runtime
@@ -629,9 +629,9 @@ fn guarded_duplex_settles_binary_child_and_keeps_stdout_out_of_evidence() {
         &NoFs,
         fixture.ports.process(),
         &fixture.evidence,
-        fixture.ports.resolver(),
-        fixture.ports.one_hop(),
-        fixture.ports.duplex(),
+        fixture.ports.resolver_handle(),
+        fixture.ports.one_hop_handle(),
+        fixture.ports.duplex_handle(),
     );
     let mut handle = fixture
         .runtime
@@ -718,9 +718,9 @@ fn guarded_duplex_interrupts_a_blocked_child_after_write() {
         &NoFs,
         fixture.ports.process(),
         &fixture.evidence,
-        fixture.ports.resolver(),
-        fixture.ports.one_hop(),
-        fixture.ports.duplex(),
+        fixture.ports.resolver_handle(),
+        fixture.ports.one_hop_handle(),
+        fixture.ports.duplex_handle(),
     );
     let mut handle = fixture
         .runtime
@@ -776,9 +776,9 @@ fn guarded_duplex_times_out_blocked_child_with_exact_timeout() {
         &NoFs,
         fixture.ports.process(),
         &fixture.evidence,
-        fixture.ports.resolver(),
-        fixture.ports.one_hop(),
-        fixture.ports.duplex(),
+        fixture.ports.resolver_handle(),
+        fixture.ports.one_hop_handle(),
+        fixture.ports.duplex_handle(),
     );
     let mut handle = fixture
         .runtime
@@ -830,9 +830,9 @@ fn guarded_duplex_cancels_blocked_child_after_write() {
         &NoFs,
         fixture.ports.process(),
         &fixture.evidence,
-        fixture.ports.resolver(),
-        fixture.ports.one_hop(),
-        fixture.ports.duplex(),
+        fixture.ports.resolver_handle(),
+        fixture.ports.one_hop_handle(),
+        fixture.ports.duplex_handle(),
     );
     let mut handle = fixture
         .runtime
@@ -874,9 +874,9 @@ fn guarded_duplex_interrupt_cleans_a_long_lived_descendant() {
         &NoFs,
         fixture.ports.process(),
         &fixture.evidence,
-        fixture.ports.resolver(),
-        fixture.ports.one_hop(),
-        fixture.ports.duplex(),
+        fixture.ports.resolver_handle(),
+        fixture.ports.one_hop_handle(),
+        fixture.ports.duplex_handle(),
     );
     let mut handle = fixture
         .runtime
@@ -951,9 +951,9 @@ fn guarded_duplex_settles_bounded_stderr_evidence_without_stdout_protocol() {
         &NoFs,
         fixture.ports.process(),
         &fixture.evidence,
-        fixture.ports.resolver(),
-        fixture.ports.one_hop(),
-        fixture.ports.duplex(),
+        fixture.ports.resolver_handle(),
+        fixture.ports.one_hop_handle(),
+        fixture.ports.duplex_handle(),
     );
     let mut handle = fixture
         .runtime
@@ -1073,9 +1073,9 @@ fn one_resolution_binds_selected_ip_and_preserves_logical_host() {
         &NoFs,
         fixture.ports.process(),
         &fixture.evidence,
-        fixture.ports.resolver(),
-        fixture.ports.one_hop(),
-        fixture.ports.duplex(),
+        fixture.ports.resolver_handle(),
+        fixture.ports.one_hop_handle(),
+        fixture.ports.duplex_handle(),
     );
     let response = fixture
         .runtime
@@ -1169,9 +1169,9 @@ fn foreign_transport_proxy_child() {
         &NoFs,
         fixture.ports.process(),
         &fixture.evidence,
-        fixture.ports.resolver(),
-        fixture.ports.one_hop(),
-        fixture.ports.duplex(),
+        fixture.ports.resolver_handle(),
+        fixture.ports.one_hop_handle(),
+        fixture.ports.duplex_handle(),
     );
     let response = fixture
         .runtime
@@ -1227,9 +1227,9 @@ fn redirect_is_one_hop_and_does_not_touch_second_listener() {
             &NoFs,
             fixture.ports.process(),
             &fixture.evidence,
-            fixture.ports.resolver(),
-            fixture.ports.one_hop(),
-            fixture.ports.duplex(),
+            fixture.ports.resolver_handle(),
+            fixture.ports.one_hop_handle(),
+            fixture.ports.duplex_handle(),
         );
         let response = fixture
             .runtime
@@ -1282,9 +1282,9 @@ fn reset_never_retries_a_request() {
         &NoFs,
         fixture.ports.process(),
         &fixture.evidence,
-        fixture.ports.resolver(),
-        fixture.ports.one_hop(),
-        fixture.ports.duplex(),
+        fixture.ports.resolver_handle(),
+        fixture.ports.one_hop_handle(),
+        fixture.ports.duplex_handle(),
     );
     let error = fixture
         .runtime
@@ -1344,9 +1344,9 @@ fn fresh_authorizations_use_fresh_sockets() {
             &NoFs,
             fixture.ports.process(),
             &fixture.evidence,
-            fixture.ports.resolver(),
-            fixture.ports.one_hop(),
-            fixture.ports.duplex(),
+            fixture.ports.resolver_handle(),
+            fixture.ports.one_hop_handle(),
+            fixture.ports.duplex_handle(),
         );
         let response = fixture
             .runtime
@@ -1426,9 +1426,9 @@ fn response_headers_keep_raw_duplicate_order_and_body_is_streamed() {
         &NoFs,
         fixture.ports.process(),
         &fixture.evidence,
-        fixture.ports.resolver(),
-        fixture.ports.one_hop(),
-        fixture.ports.duplex(),
+        fixture.ports.resolver_handle(),
+        fixture.ports.one_hop_handle(),
+        fixture.ports.duplex_handle(),
     );
     fixture.runtime.block_on(async {
         let mut response = guarded
@@ -1518,9 +1518,9 @@ fn large_request_is_sent_without_shared_request_byte_cap() {
         &NoFs,
         fixture.ports.process(),
         &fixture.evidence,
-        fixture.ports.resolver(),
-        fixture.ports.one_hop(),
-        fixture.ports.duplex(),
+        fixture.ports.resolver_handle(),
+        fixture.ports.one_hop_handle(),
+        fixture.ports.duplex_handle(),
     );
     let response = fixture
         .runtime
@@ -1578,9 +1578,9 @@ fn large_raw_response_headers_are_not_shared_byte_limited() {
         &NoFs,
         fixture.ports.process(),
         &fixture.evidence,
-        fixture.ports.resolver(),
-        fixture.ports.one_hop(),
-        fixture.ports.duplex(),
+        fixture.ports.resolver_handle(),
+        fixture.ports.one_hop_handle(),
+        fixture.ports.duplex_handle(),
     );
     let response = fixture
         .runtime
@@ -1659,9 +1659,9 @@ fn large_streamed_response_body_is_delivered_without_shared_byte_cap() {
         &NoFs,
         fixture.ports.process(),
         &fixture.evidence,
-        fixture.ports.resolver(),
-        fixture.ports.one_hop(),
-        fixture.ports.duplex(),
+        fixture.ports.resolver_handle(),
+        fixture.ports.one_hop_handle(),
+        fixture.ports.duplex_handle(),
     );
     let mut response = fixture
         .runtime
@@ -1742,9 +1742,9 @@ fn absolute_hop_timeout_covers_phased_exchange() {
         &NoFs,
         fixture.ports.process(),
         &fixture.evidence,
-        fixture.ports.resolver(),
-        fixture.ports.one_hop(),
-        fixture.ports.duplex(),
+        fixture.ports.resolver_handle(),
+        fixture.ports.one_hop_handle(),
+        fixture.ports.duplex_handle(),
     );
     fixture.runtime.block_on(async {
         let mut response = guarded
@@ -1811,9 +1811,9 @@ fn delayed_resolution_times_out_before_socket() {
         &NoFs,
         fixture.ports.process(),
         &fixture.evidence,
-        fixture.ports.resolver(),
-        fixture.ports.one_hop(),
-        fixture.ports.duplex(),
+        fixture.ports.resolver_handle(),
+        fixture.ports.one_hop_handle(),
+        fixture.ports.duplex_handle(),
     );
     let error = fixture
         .runtime
@@ -1879,9 +1879,9 @@ fn cancellation_before_io_is_definitely_unsent_and_skips_dns_and_socket() {
         &NoFs,
         fixture.ports.process(),
         &fixture.evidence,
-        fixture.ports.resolver(),
-        fixture.ports.one_hop(),
-        fixture.ports.duplex(),
+        fixture.ports.resolver_handle(),
+        fixture.ports.one_hop_handle(),
+        fixture.ports.duplex_handle(),
     );
     let error = fixture
         .runtime
@@ -1930,9 +1930,9 @@ fn cancellation_during_io_is_possibly_sent_after_one_request() {
         &NoFs,
         fixture.ports.process(),
         &fixture.evidence,
-        fixture.ports.resolver(),
-        fixture.ports.one_hop(),
-        fixture.ports.duplex(),
+        fixture.ports.resolver_handle(),
+        fixture.ports.one_hop_handle(),
+        fixture.ports.duplex_handle(),
     );
     fixture.runtime.block_on(async {
         let request_future = guarded.guarded_http(call, request);
@@ -2017,9 +2017,9 @@ fn offline_http_refuses_before_dns_or_socket() {
             &NoFs,
             fixture.ports.process(),
             &fixture.evidence,
-            fixture.ports.resolver(),
-            fixture.ports.one_hop(),
-            fixture.ports.duplex(),
+            fixture.ports.resolver_handle(),
+            fixture.ports.one_hop_handle(),
+            fixture.ports.duplex_handle(),
         );
         let error = fixture
             .runtime

@@ -163,6 +163,20 @@ impl AdmittedMcpHttpProfile {
         })
     }
 
+    pub(crate) fn fingerprint(&self) -> [u8; 32] {
+        self.fingerprint
+    }
+
+    pub(crate) fn route(&self, url: &Url) -> Result<HttpRoute, McpError> {
+        if !self.routes.contains(&origin(url)?) {
+            return Err(McpError::new(
+                McpFailure::Authority,
+                "HTTP route is not admitted",
+            ));
+        }
+        route(url)
+    }
+
     pub(crate) fn prepare(
         &self,
         server: &McpServerName,
@@ -171,19 +185,14 @@ impl AdmittedMcpHttpProfile {
         request: HttpRequest,
         deadline: Instant,
     ) -> Result<PreparedMcpHttpCall, McpError> {
-        if !self.routes.contains(&origin(url)?) {
-            return Err(McpError::new(
-                McpFailure::Authority,
-                "HTTP route is not admitted",
-            ));
-        }
+        self.route(url)?;
         if request.path() != path_and_query(url) {
             return Err(McpError::new(
                 McpFailure::Authority,
                 "HTTP request path does not match its admitted URL",
             ));
         }
-        let route = route(url)?;
+        let route = self.route(url)?;
         Ok(PreparedMcpHttpCall::prepared(
             self.fingerprint,
             server.clone(),

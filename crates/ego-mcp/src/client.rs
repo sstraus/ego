@@ -764,11 +764,11 @@ impl McpClient {
     /// Perform one manual tools/call round. Input-required is returned to the
     /// durable continuation owner and is never fulfilled automatically.
     pub async fn call_tool_once(
-        &self,
+        &mut self,
         params: CallToolRequestParams,
     ) -> Result<McpManualOutcome<CallToolResult>, McpError> {
-        let service = self.running_service()?;
         self.claim_operation()?;
+        let service = self.running_service_mut()?;
         let response = service
             .call_tool_once(params)
             .await
@@ -779,11 +779,11 @@ impl McpClient {
     /// Perform one manual resources/read round without entering rmcp's MRTR
     /// loop.
     pub async fn read_resource_once(
-        &self,
+        &mut self,
         params: ReadResourceRequestParams,
     ) -> Result<McpManualOutcome<ReadResourceResult>, McpError> {
-        let service = self.running_service()?;
         self.claim_operation()?;
+        let service = self.running_service_mut()?;
         let response = service
             .read_resource_once(params)
             .await
@@ -793,11 +793,11 @@ impl McpClient {
 
     /// Perform one manual prompts/get round without entering rmcp's MRTR loop.
     pub async fn get_prompt_once(
-        &self,
+        &mut self,
         params: GetPromptRequestParams,
     ) -> Result<McpManualOutcome<GetPromptResult>, McpError> {
-        let service = self.running_service()?;
         self.claim_operation()?;
+        let service = self.running_service_mut()?;
         let response = service
             .get_prompt_once(params)
             .await
@@ -805,14 +805,16 @@ impl McpClient {
         McpManualOutcome::from_prompt(response)
     }
 
-    fn running_service(&self) -> Result<&RunningService<RoleClient, ClientInfo>, McpError> {
+    fn running_service_mut(
+        &mut self,
+    ) -> Result<&mut RunningService<RoleClient, ClientInfo>, McpError> {
         if self.control.cancelled.load(Ordering::Acquire) {
             return Err(McpError::new(
                 McpFailure::Cancelled,
                 "MCP client was cancelled",
             ));
         }
-        let ClientState::Running { service, .. } = &self.state else {
+        let ClientState::Running { service, .. } = &mut self.state else {
             return Err(McpError::new(
                 McpFailure::Protocol,
                 "MCP client has not discovered its server",

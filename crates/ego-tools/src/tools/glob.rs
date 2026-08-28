@@ -45,13 +45,13 @@ impl TypedTool for GlobTool {
         // fact about the model's arguments, and saying so before anything is
         // authorised beats minting a permit for a call that cannot run.
         compile(&params.pattern)?;
-        Ok(PreparedCall {
-            tool: self.name().to_string(),
-            ops: vec![Op::List {
+        Ok(PreparedCall::new(
+            self.name(),
+            vec![Op::List {
                 root: root_of(ctx, params.path.as_ref())?,
                 pattern: params.pattern,
             }],
-        })
+        ))
     }
 
     fn execute<'a>(

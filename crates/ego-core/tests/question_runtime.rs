@@ -315,9 +315,9 @@ fn unavailable_elicitor_persists_question_closes_unstarted_siblings_and_leaves_t
     let fs = FakeFs::default();
     let process = NoProcess;
     let evidence = NoEvidence;
-    let resolver = NoResolver;
-    let one_hop = NoHop;
-    let duplex = NoDuplex;
+    let resolver = Arc::new(NoResolver);
+    let one_hop = Arc::new(NoHop);
+    let duplex = Arc::new(NoDuplex);
     let write: Arc<dyn ego_core::permit::Tool> = Arc::new(Typed(FakeWriteTool));
     let registry = vec![
         RegisteredTool::HumanInput(Arc::new(AskQuestionTool)),
@@ -326,7 +326,14 @@ fn unavailable_elicitor_persists_question_closes_unstarted_siblings_and_leaves_t
     let tools = Tools::from_registry(
         &registry,
         &policy,
-        ToolEffectPorts::new(&fs, &process, &evidence, &resolver, &one_hop, &duplex),
+        ToolEffectPorts::new(
+            &fs,
+            &process,
+            &evidence,
+            resolver.clone(),
+            one_hop.clone(),
+            duplex.clone(),
+        ),
         CanonPath::new("/ws"),
     );
     let source = Arc::new(FixedSource { generator });

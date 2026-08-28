@@ -85,12 +85,12 @@ async fn one_hop_with_selected(
     let route = HttpRoute::new(HttpScheme::Http, target.clone()).expect("HTTP route");
     let request = HttpRequest::get("/").expect("HTTP request");
     let connect = PreparedConnect::new(target, &request);
-    let resolver = FixedResolver::new(selected);
+    let resolver = Arc::new(FixedResolver::new(selected));
     let transport = offline_transport(Arc::new(FixedResolver::new(selected)), CancelToken::new());
-    let hop = DelegatingHop {
+    let hop = Arc::new(DelegatingHop {
         transport: Arc::clone(&transport),
-    };
-    GuardedHttp::new(&resolver, &hop)
+    });
+    GuardedHttp::new(resolver.clone(), hop.clone())
         .execute_admitted(
             route,
             connect,
@@ -112,7 +112,7 @@ async fn cancelled_literal(host: &str) -> Result<OneHopResponse, TransportError>
         cancel,
     );
 
-    GuardedHttp::new(transport.as_ref(), transport.as_ref())
+    GuardedHttp::new(transport.clone(), transport.clone())
         .execute_admitted(
             route,
             connect,

@@ -9,6 +9,12 @@ use std::time::Instant;
 use ego_core::config::{
     McpConfigProvenance, McpServerConfig, McpServerName, ResolvedMcpConfig, ResolvedMcpEntry,
 };
+use ego_core::generator::types::ToolDescriptor as GeneratorToolDescriptor;
+use ego_core::mcp::{
+    CacheScope, ContextEntry, ContextError, ContextSensitivity, ContextSnapshot, ContextSource,
+    McpAdmissionFingerprint, McpOperationKind, McpSubject,
+};
+use ego_core::permit::Tool;
 use ego_core::turn::{
     AdmittedToolSource, CapturedToolCatalogue, McpRegistryEvent, McpRegistryJournal,
     McpRegistryJournalError, RegisteredTool, ToolCatalogueError,
@@ -16,7 +22,8 @@ use ego_core::turn::{
 use rmcp::model::{Prompt, Resource};
 use sha2::{Digest, Sha256};
 
-use crate::{McpDynamicFamily, McpFuture};
+use crate::dynamic::McpToolDefinition;
+use crate::{McpDynamicCatalogue, McpDynamicFamily, McpFuture, McpOperationFactory};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RegistryTrigger {
@@ -172,12 +179,16 @@ pub struct McpCapabilities {
 }
 
 impl McpCapabilities {
-    pub fn tools() -> Self {
+    pub fn new(tools: bool, resources: bool, prompts: bool) -> Self {
         Self {
-            tools: true,
-            resources: false,
-            prompts: false,
+            tools,
+            resources,
+            prompts,
         }
+    }
+
+    pub fn tools() -> Self {
+        Self::new(true, false, false)
     }
 
     pub fn has_tools(&self) -> bool {
@@ -217,49 +228,136 @@ impl McpCacheMetadata {
 }
 
 #[derive(Clone)]
+pub struct McpCandidateInventory {
+    capabilities: McpCapabilities,
+    tools: Vec<GeneratorToolDescriptor>,
+    resources: Vec<Resource>,
+    prompts: Vec<Prompt>,
+    cache: McpCacheMetadata,
+    dynamic: Option<McpDynamicCatalogue>,
+}
+
+impl McpCandidateInventory {
+    pub fn new(
+        capabilities: McpCapabilities,
+        tools: Vec<GeneratorToolDescriptor>,
+        resources: Vec<Resource>,
+        prompts: Vec<Prompt>,
+        cache: McpCacheMetadata,
+        dynamic: Option<McpDynamicCatalogue>,
+    ) -> Self {
+        Self {
+            capabilities,
+            tools,
+            resources,
+            prompts,
+            cache,
+            dynamic,
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct McpAdmittedCandidate {
     name: Arc<str>,
     identity: McpCandidateIdentity,
     capabilities: McpCapabilities,
-    tools: Arc<[RegisteredTool]>,
+    config: Arc<McpServerConfig>,
+    tools: Arc<[McpToolDefinition]>,
     resources: Arc<[Resource]>,
     prompts: Arc<[Prompt]>,
     cache: McpCacheMetadata,
     dynamic_family: Option<McpDynamicFamily>,
+    factory: Arc<dyn McpOperationFactory>,
 }
 
 impl McpAdmittedCandidate {
     pub fn new(
         name: String,
         identity: McpCandidateIdentity,
-        capabilities: McpCapabilities,
-        tools: Vec<RegisteredTool>,
-        resources: Vec<Resource>,
-        prompts: Vec<Prompt>,
-        cache: McpCacheMetadata,
+        config: McpServerConfig,
+        inventory: McpCandidateInventory,
+        factory: Arc<dyn McpOperationFactory>,
     ) -> Result<Self, McpRegistryError> {
         if name.is_empty() || identity.as_str().is_empty() || name != identity.as_str() {
             return Err(McpRegistryError::InvalidCandidate(
                 "MCP candidate identity does not match its configured name".to_owned(),
             ));
         }
-        CapturedToolCatalogue::new("candidate", tools.clone())
+        config
+            .validate()
             .map_err(|error| McpRegistryError::InvalidCandidate(error.to_string()))?;
-        let descriptors = tools
-            .iter()
-            .map(RegisteredTool::descriptor)
-            .collect::<Vec<_>>();
-        let dynamic_family = McpDynamicFamily::detect(&descriptors)
+        let McpCandidateInventory {
+            capabilities,
+            tools,
+            resources,
+            prompts,
+            cache,
+            dynamic,
+        } = inventory;
+        validate_candidate_contents(&capabilities, &tools, &resources, &prompts)?;
+        let dynamic_family = McpDynamicFamily::detect(&tools)
             .map_err(|error| McpRegistryError::InvalidCandidate(error.to_string()))?;
+        match (&dynamic_family, &dynamic) {
+            (Some(detected), Some(catalogue)) if detected == catalogue.family() => {}
+            (None, None) => {}
+            (Some(_), None) => {
+                return Err(McpRegistryError::InvalidCandidate(
+                    "dynamic MCP family has no admitted inner catalogue".to_owned(),
+                ));
+            }
+            _ => {
+                return Err(McpRegistryError::InvalidCandidate(
+                    "dynamic MCP catalogue does not match the detected family".to_owned(),
+                ));
+            }
+        }
+        let mut definitions = Vec::new();
+        for descriptor in tools {
+            let definition = if let Some(catalogue) = &dynamic {
+                if catalogue
+                    .family()
+                    .management_names()
+                    .contains(&descriptor.name.as_str())
+                {
+                    if descriptor.name == "execute_tool" {
+                        Some(McpToolDefinition::dynamic(descriptor, catalogue.clone()))
+                    } else {
+                        None
+                    }
+                } else {
+                    Some(McpToolDefinition::direct(descriptor))
+                }
+            } else {
+                Some(McpToolDefinition::direct(descriptor))
+            };
+            if let Some(definition) = definition {
+                definitions.push(
+                    definition
+                        .map_err(|error| McpRegistryError::InvalidCandidate(error.to_string()))?,
+                );
+            }
+        }
+        let mut names = std::collections::BTreeSet::new();
+        for definition in &definitions {
+            if !names.insert(definition.name().to_owned()) {
+                return Err(McpRegistryError::InvalidCandidate(format!(
+                    "duplicate MCP tool {}",
+                    definition.name()
+                )));
+            }
+        }
         Ok(Self {
             name: Arc::from(name),
             identity,
             capabilities,
-            tools: tools.into(),
+            config: Arc::new(config),
+            tools: definitions.into(),
             resources: resources.into(),
             prompts: prompts.into(),
             cache,
             dynamic_family,
+            factory,
         })
     }
 }
@@ -294,28 +392,170 @@ impl From<McpRegistryJournalError> for McpRegistryError {
 }
 
 struct AdmittedServerSlice {
-    _identity: McpCandidateIdentity,
-    _provenance: McpConfigProvenance,
-    _capabilities: McpCapabilities,
-    tools: Arc<[RegisteredTool]>,
-    _resources: Arc<[Resource]>,
-    _prompts: Arc<[Prompt]>,
-    _cache: McpCacheMetadata,
-    _dynamic_family: Option<McpDynamicFamily>,
+    identity: McpCandidateIdentity,
+    provenance: McpConfigProvenance,
+    capabilities: McpCapabilities,
+    config: Arc<McpServerConfig>,
+    tools: Arc<[McpToolDefinition]>,
+    resources: Arc<[Resource]>,
+    prompts: Arc<[Prompt]>,
+    cache: McpCacheMetadata,
+    dynamic_family: Option<McpDynamicFamily>,
+    factory: Arc<dyn McpOperationFactory>,
 }
 
 impl AdmittedServerSlice {
     fn from_candidate(candidate: McpAdmittedCandidate, provenance: McpConfigProvenance) -> Self {
         Self {
-            _identity: candidate.identity,
-            _provenance: provenance,
-            _capabilities: candidate.capabilities,
+            identity: candidate.identity,
+            provenance,
+            capabilities: candidate.capabilities,
+            config: candidate.config,
             tools: candidate.tools,
-            _resources: candidate.resources,
-            _prompts: candidate.prompts,
-            _cache: candidate.cache,
-            _dynamic_family: candidate.dynamic_family,
+            resources: candidate.resources,
+            prompts: candidate.prompts,
+            cache: candidate.cache,
+            dynamic_family: candidate.dynamic_family,
+            factory: candidate.factory,
         }
+    }
+}
+
+#[derive(Clone)]
+pub struct McpCapturedServer {
+    identity: McpCandidateIdentity,
+    provenance: McpConfigProvenance,
+    capabilities: McpCapabilities,
+    config: Arc<McpServerConfig>,
+    cache: McpCacheMetadata,
+    dynamic_family: Option<McpDynamicFamily>,
+    factory: Arc<dyn McpOperationFactory>,
+}
+
+impl McpCapturedServer {
+    pub fn identity(&self) -> &McpCandidateIdentity {
+        &self.identity
+    }
+
+    pub fn provenance(&self) -> &McpConfigProvenance {
+        &self.provenance
+    }
+
+    pub fn capabilities(&self) -> &McpCapabilities {
+        &self.capabilities
+    }
+
+    pub fn config(&self) -> &McpServerConfig {
+        &self.config
+    }
+
+    pub fn cache(&self) -> &McpCacheMetadata {
+        &self.cache
+    }
+
+    pub fn dynamic_family(&self) -> Option<&McpDynamicFamily> {
+        self.dynamic_family.as_ref()
+    }
+
+    pub fn operation_factory(&self) -> Arc<dyn McpOperationFactory> {
+        Arc::clone(&self.factory)
+    }
+}
+
+#[derive(Clone)]
+pub struct McpCapturedContextOperation {
+    entry: ContextEntry,
+    subject: McpSubject,
+    operation: McpOperationKind,
+    admission: McpAdmissionFingerprint,
+    config: Arc<McpServerConfig>,
+    factory: Arc<dyn McpOperationFactory>,
+}
+
+impl McpCapturedContextOperation {
+    pub fn entry(&self) -> &ContextEntry {
+        &self.entry
+    }
+
+    pub fn subject(&self) -> &McpSubject {
+        &self.subject
+    }
+
+    pub fn operation(&self) -> McpOperationKind {
+        self.operation
+    }
+
+    pub fn admission(&self) -> &McpAdmissionFingerprint {
+        &self.admission
+    }
+
+    pub fn config(&self) -> &McpServerConfig {
+        &self.config
+    }
+
+    pub fn operation_factory(&self) -> Arc<dyn McpOperationFactory> {
+        Arc::clone(&self.factory)
+    }
+}
+
+pub struct McpCapturedContextSource {
+    snapshot: ContextSnapshot,
+    operations: Arc<[McpCapturedContextOperation]>,
+}
+
+impl McpCapturedContextSource {
+    fn new(operations: Vec<McpCapturedContextOperation>) -> Result<Self, McpRegistryError> {
+        let snapshot = ContextSnapshot::new(
+            operations
+                .iter()
+                .map(|operation| operation.entry.clone())
+                .collect(),
+        )
+        .map_err(|error| McpRegistryError::InvalidCandidate(error.to_string()))?;
+        Ok(Self {
+            snapshot,
+            operations: operations.into(),
+        })
+    }
+
+    pub fn operations(&self) -> &[McpCapturedContextOperation] {
+        &self.operations
+    }
+}
+
+impl ContextSource for McpCapturedContextSource {
+    fn capture(&self) -> Result<ContextSnapshot, ContextError> {
+        Ok(self.snapshot.clone())
+    }
+}
+
+#[derive(Clone)]
+pub struct McpRegistryCapture {
+    generation: Arc<str>,
+    tools: Arc<[Arc<dyn Tool>]>,
+    contexts: Arc<McpCapturedContextSource>,
+    servers: Arc<[McpCapturedServer]>,
+}
+
+impl McpRegistryCapture {
+    pub fn generation(&self) -> &str {
+        &self.generation
+    }
+
+    pub fn tools(&self) -> &[Arc<dyn Tool>] {
+        &self.tools
+    }
+
+    pub fn context_source(&self) -> Arc<dyn ContextSource> {
+        Arc::clone(&self.contexts) as Arc<dyn ContextSource>
+    }
+
+    pub fn context_operations(&self) -> &[McpCapturedContextOperation] {
+        self.contexts.operations()
+    }
+
+    pub fn servers(&self) -> &[McpCapturedServer] {
+        &self.servers
     }
 }
 
@@ -325,16 +565,27 @@ struct AdmittedRegistrySnapshot {
     config_revision: u64,
     servers: BTreeMap<McpServerName, Arc<AdmittedServerSlice>>,
     tools: Arc<[RegisteredTool]>,
+    capture: McpRegistryCapture,
 }
 
 impl AdmittedRegistrySnapshot {
     fn empty() -> Self {
+        let contexts = Arc::new(
+            McpCapturedContextSource::new(Vec::new())
+                .expect("the empty MCP context capture is valid"),
+        );
         Self {
             number: 0,
             generation: Arc::from("generation-0"),
             config_revision: 0,
             servers: BTreeMap::new(),
             tools: Arc::from(Vec::<RegisteredTool>::new()),
+            capture: McpRegistryCapture {
+                generation: Arc::from("generation-0"),
+                tools: Arc::from(Vec::<Arc<dyn Tool>>::new()),
+                contexts,
+                servers: Arc::from(Vec::<McpCapturedServer>::new()),
+            },
         }
     }
 }
@@ -376,6 +627,7 @@ pub struct McpRegistryPublication {
     config_revision: u64,
     admitted_servers: Vec<String>,
     admitted_tools: Vec<String>,
+    capture: McpRegistryCapture,
 }
 
 impl McpRegistryPublication {
@@ -397,6 +649,10 @@ impl McpRegistryPublication {
 
     pub fn admitted_tools(&self) -> &[String] {
         &self.admitted_tools
+    }
+
+    pub fn capture(&self) -> &McpRegistryCapture {
+        &self.capture
     }
 }
 
@@ -483,13 +739,16 @@ impl McpRegistryController {
                     };
                     match self.admission.admit(request).await {
                         Ok(candidate) => {
-                            if candidate.name.as_ref() != name.as_str() {
+                            if candidate.name.as_ref() != name.as_str()
+                                || candidate.config.as_ref() != server
+                            {
                                 return self.fail_refresh(
                                     &request_id,
                                     name,
                                     McpCandidateError::Invalid {
-                                        cause: "candidate identity changed during admission"
-                                            .to_owned(),
+                                        cause:
+                                            "candidate identity or config changed during admission"
+                                                .to_owned(),
                                     },
                                     &predecessor,
                                 );
@@ -536,6 +795,11 @@ impl McpRegistryController {
         Arc::new(RegistryToolSource {
             state: Arc::clone(&self.state),
         })
+    }
+
+    pub fn capture(&self) -> Result<McpRegistryCapture, McpRegistryError> {
+        self.current_snapshot()
+            .map(|snapshot| snapshot.capture.clone())
     }
 
     fn current_snapshot(&self) -> Result<Arc<AdmittedRegistrySnapshot>, McpRegistryError> {
@@ -624,11 +888,34 @@ impl McpRegistryController {
             }
         };
         let generation: Arc<str> = Arc::from(format!("generation-{number}"));
-        let mut tools = servers
-            .values()
-            .flat_map(|server| server.tools.iter().cloned())
+        let mut effect_tools = Vec::<Arc<dyn Tool>>::new();
+        for (name, server) in &servers {
+            for definition in server.tools.iter() {
+                let tool = match definition.capture(
+                    name.as_str(),
+                    &generation,
+                    Arc::clone(&server.config),
+                    Arc::clone(&server.factory),
+                ) {
+                    Ok(tool) => tool,
+                    Err(error) => {
+                        return self.fail_publication(
+                            request_id,
+                            error.to_string(),
+                            &predecessor,
+                            servers.keys(),
+                        );
+                    }
+                };
+                effect_tools.push(tool);
+            }
+        }
+        effect_tools.sort_by_key(|tool| tool.descriptor().name);
+        let tools = effect_tools
+            .iter()
+            .cloned()
+            .map(RegisteredTool::Effect)
             .collect::<Vec<_>>();
-        tools.sort_by_key(|tool| tool.descriptor().name);
         if let Err(error) = CapturedToolCatalogue::new(generation.to_string(), tools.clone()) {
             return self.fail_publication(
                 request_id,
@@ -637,12 +924,42 @@ impl McpRegistryController {
                 servers.keys(),
             );
         }
+        let contexts = match capture_contexts(&generation, &servers) {
+            Ok(contexts) => Arc::new(contexts),
+            Err(error) => {
+                return self.fail_publication(
+                    request_id,
+                    error.to_string(),
+                    &predecessor,
+                    servers.keys(),
+                );
+            }
+        };
+        let captured_servers = servers
+            .values()
+            .map(|server| McpCapturedServer {
+                identity: server.identity.clone(),
+                provenance: server.provenance.clone(),
+                capabilities: server.capabilities.clone(),
+                config: Arc::clone(&server.config),
+                cache: server.cache.clone(),
+                dynamic_family: server.dynamic_family.clone(),
+                factory: Arc::clone(&server.factory),
+            })
+            .collect::<Vec<_>>();
+        let capture = McpRegistryCapture {
+            generation: Arc::clone(&generation),
+            tools: effect_tools.into(),
+            contexts,
+            servers: captured_servers.into(),
+        };
         let snapshot = Arc::new(AdmittedRegistrySnapshot {
             number,
             generation: Arc::clone(&generation),
             config_revision,
             servers,
             tools: tools.into(),
+            capture,
         });
         let publication = publication_of(&snapshot);
         self.journal.append(McpRegistryEvent::SnapshotPublished {
@@ -719,6 +1036,7 @@ fn publication_of(snapshot: &Arc<AdmittedRegistrySnapshot>) -> McpRegistryPublic
         config_revision: snapshot.config_revision,
         admitted_servers: snapshot.servers.keys().map(ToString::to_string).collect(),
         admitted_tools,
+        capture: snapshot.capture.clone(),
     }
 }
 
@@ -738,4 +1056,155 @@ fn descriptor_digests(tools: &[RegisteredTool]) -> Vec<String> {
         .collect::<Vec<_>>();
     digests.sort();
     digests
+}
+
+fn validate_candidate_contents(
+    capabilities: &McpCapabilities,
+    tools: &[GeneratorToolDescriptor],
+    resources: &[Resource],
+    prompts: &[Prompt],
+) -> Result<(), McpRegistryError> {
+    if (!tools.is_empty() && !capabilities.has_tools())
+        || (!resources.is_empty() && !capabilities.has_resources())
+        || (!prompts.is_empty() && !capabilities.has_prompts())
+    {
+        return Err(McpRegistryError::InvalidCandidate(
+            "MCP candidate content exceeds its advertised capabilities".to_owned(),
+        ));
+    }
+    let mut tool_names = std::collections::BTreeSet::new();
+    for tool in tools {
+        if tool.name.trim().is_empty()
+            || !tool.parameters.is_object()
+            || !tool_names.insert(tool.name.as_str())
+        {
+            return Err(McpRegistryError::InvalidCandidate(
+                "MCP candidate contains an invalid or duplicate tool".to_owned(),
+            ));
+        }
+    }
+    let mut resource_uris = std::collections::BTreeSet::new();
+    for resource in resources {
+        if resource.uri.trim().is_empty()
+            || resource.name.trim().is_empty()
+            || !resource_uris.insert(resource.uri.as_str())
+        {
+            return Err(McpRegistryError::InvalidCandidate(
+                "MCP candidate contains an invalid or duplicate resource".to_owned(),
+            ));
+        }
+    }
+    let mut prompt_names = std::collections::BTreeSet::new();
+    for prompt in prompts {
+        if prompt.name.trim().is_empty()
+            || !prompt_names.insert(prompt.name.as_str())
+            || prompt.arguments.as_ref().is_some_and(|arguments| {
+                let mut names = std::collections::BTreeSet::new();
+                arguments.iter().any(|argument| {
+                    argument.name.trim().is_empty() || !names.insert(&argument.name)
+                })
+            })
+        {
+            return Err(McpRegistryError::InvalidCandidate(
+                "MCP candidate contains an invalid or duplicate prompt".to_owned(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn capture_contexts(
+    generation: &str,
+    servers: &BTreeMap<McpServerName, Arc<AdmittedServerSlice>>,
+) -> Result<McpCapturedContextSource, McpRegistryError> {
+    let mut operations = Vec::new();
+    for (server_name, server) in servers {
+        for resource in server.resources.iter() {
+            let descriptor = descriptor_fingerprint(resource)?;
+            let revision = server
+                .cache
+                .source_revision()
+                .unwrap_or(&descriptor)
+                .to_owned();
+            let entry = ContextEntry::resource(
+                server_name.to_string(),
+                resource.uri.clone(),
+                resource.name.clone(),
+                ContextSensitivity::Restricted,
+                CacheScope::Private,
+                revision,
+            )
+            .and_then(|entry| entry.with_admission_generation(generation))
+            .map_err(|error| McpRegistryError::InvalidCandidate(error.to_string()))?;
+            let subject = McpSubject::Resource {
+                server: server_name.to_string(),
+                uri: resource.uri.clone(),
+            };
+            let admission = McpAdmissionFingerprint::new(
+                generation,
+                format!("{server_name}/{}", resource.uri),
+                descriptor,
+            )
+            .map_err(|error| McpRegistryError::InvalidCandidate(error.to_string()))?;
+            operations.push(McpCapturedContextOperation {
+                entry,
+                subject,
+                operation: McpOperationKind::ReadResource,
+                admission,
+                config: Arc::clone(&server.config),
+                factory: Arc::clone(&server.factory),
+            });
+        }
+        for prompt in server.prompts.iter() {
+            let descriptor = descriptor_fingerprint(prompt)?;
+            let revision = server
+                .cache
+                .source_revision()
+                .unwrap_or(&descriptor)
+                .to_owned();
+            let arguments = prompt
+                .arguments
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .map(|argument| argument.name.clone())
+                .collect();
+            let entry = ContextEntry::prompt(
+                server_name.to_string(),
+                prompt.name.clone(),
+                prompt.description.clone().unwrap_or_default(),
+                arguments,
+                ContextSensitivity::Restricted,
+                CacheScope::Private,
+                revision,
+            )
+            .and_then(|entry| entry.with_admission_generation(generation))
+            .map_err(|error| McpRegistryError::InvalidCandidate(error.to_string()))?;
+            let subject = McpSubject::Prompt {
+                server: server_name.to_string(),
+                name: prompt.name.clone(),
+            };
+            let admission = McpAdmissionFingerprint::new(
+                generation,
+                format!("{server_name}/{}", prompt.name),
+                descriptor,
+            )
+            .map_err(|error| McpRegistryError::InvalidCandidate(error.to_string()))?;
+            operations.push(McpCapturedContextOperation {
+                entry,
+                subject,
+                operation: McpOperationKind::GetPrompt,
+                admission,
+                config: Arc::clone(&server.config),
+                factory: Arc::clone(&server.factory),
+            });
+        }
+    }
+    McpCapturedContextSource::new(operations)
+}
+
+fn descriptor_fingerprint(value: &impl serde::Serialize) -> Result<String, McpRegistryError> {
+    let bytes = serde_json::to_vec(value)
+        .map_err(|error| McpRegistryError::InvalidCandidate(error.to_string()))?;
+    Ok(format!("sha256:{:x}", Sha256::digest(bytes)))
 }

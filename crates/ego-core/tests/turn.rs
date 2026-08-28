@@ -104,10 +104,6 @@ mod turn {
         }
     }
 
-    static NO_RESOLVER: NoResolver = NoResolver;
-    static NO_HOP: NoHop = NoHop;
-    static NO_DUPLEX: NoDuplex = NoDuplex;
-
     /// A `SessionStore` that keeps the log in memory, and can be told to fail
     /// on the nth append — which is the only way to test what the loop does
     /// when the log cannot be written.
@@ -358,12 +354,12 @@ mod turn {
             params: ReadParams,
             ctx: &PrepareCtx<'_>,
         ) -> Result<PreparedCall, ToolError> {
-            Ok(PreparedCall {
-                tool: self.name().to_string(),
-                ops: vec![Op::Read {
+            Ok(PreparedCall::new(
+                self.name().to_string(),
+                vec![Op::Read {
                     path: ctx.resolver.canonicalize(Path::new(&params.path))?,
                 }],
-            })
+            ))
         }
 
         fn execute<'a>(
@@ -413,10 +409,10 @@ mod turn {
                 EnvPolicy::Inherited,
             )
             .map_err(|err| ToolError::InvalidParams(err.to_string()))?;
-            Ok(PreparedCall {
-                tool: self.name().to_string(),
-                ops: vec![Op::Spawn { spec }],
-            })
+            Ok(PreparedCall::new(
+                self.name().to_string(),
+                vec![Op::Spawn { spec }],
+            ))
         }
 
         fn execute<'a>(
@@ -484,12 +480,12 @@ mod turn {
             params: ReadParams,
             ctx: &PrepareCtx<'_>,
         ) -> Result<PreparedCall, ToolError> {
-            Ok(PreparedCall {
-                tool: self.name().to_string(),
-                ops: vec![Op::Read {
+            Ok(PreparedCall::new(
+                self.name().to_string(),
+                vec![Op::Read {
                     path: ctx.resolver.canonicalize(Path::new(&params.path))?,
                 }],
-            })
+            ))
         }
 
         fn execute<'a>(
@@ -544,12 +540,12 @@ mod turn {
             params: ReadParams,
             ctx: &PrepareCtx<'_>,
         ) -> Result<PreparedCall, ToolError> {
-            Ok(PreparedCall {
-                tool: self.name().to_string(),
-                ops: vec![Op::Read {
+            Ok(PreparedCall::new(
+                self.name().to_string(),
+                vec![Op::Read {
                     path: ctx.resolver.canonicalize(Path::new(&params.path))?,
                 }],
-            })
+            ))
         }
 
         fn execute<'a>(
@@ -992,9 +988,9 @@ mod turn {
                 &fx.fs,
                 fx.process.as_ref(),
                 &fx.evidence,
-                &NO_RESOLVER,
-                &NO_HOP,
-                &NO_DUPLEX,
+                Arc::new(NoResolver),
+                Arc::new(NoHop),
+                Arc::new(NoDuplex),
             ),
             CanonPath::new("/ws"),
         );
@@ -1206,9 +1202,9 @@ mod turn {
                 &fx.fs,
                 fx.process.as_ref(),
                 &fx.evidence,
-                &NO_RESOLVER,
-                &NO_HOP,
-                &NO_DUPLEX,
+                Arc::new(NoResolver),
+                Arc::new(NoHop),
+                Arc::new(NoDuplex),
             ),
             CanonPath::new("/ws"),
         );
@@ -1334,9 +1330,9 @@ mod turn {
                 &fx.fs,
                 fx.process.as_ref(),
                 &fx.evidence,
-                &NO_RESOLVER,
-                &NO_HOP,
-                &NO_DUPLEX,
+                Arc::new(NoResolver),
+                Arc::new(NoHop),
+                Arc::new(NoDuplex),
             ),
             CanonPath::new("/ws"),
         );
@@ -1474,9 +1470,9 @@ mod turn {
                 &fx.fs,
                 fx.process.as_ref(),
                 &fx.evidence,
-                &NO_RESOLVER,
-                &NO_HOP,
-                &NO_DUPLEX,
+                Arc::new(NoResolver),
+                Arc::new(NoHop),
+                Arc::new(NoDuplex),
             ),
             CanonPath::new("/ws"),
         );
@@ -1530,9 +1526,9 @@ mod turn {
                 &fx.fs,
                 fx.process.as_ref(),
                 &fx.evidence,
-                &NO_RESOLVER,
-                &NO_HOP,
-                &NO_DUPLEX,
+                Arc::new(NoResolver),
+                Arc::new(NoHop),
+                Arc::new(NoDuplex),
             ),
             CanonPath::new("/ws"),
         );
@@ -1611,9 +1607,9 @@ mod turn {
                     &fx.fs,
                     fx.process.as_ref(),
                     &fx.evidence,
-                    &NO_RESOLVER,
-                    &NO_HOP,
-                    &NO_DUPLEX,
+                    Arc::new(NoResolver),
+                    Arc::new(NoHop),
+                    Arc::new(NoDuplex),
                 ),
                 CanonPath::new("/ws"),
             );
@@ -1662,9 +1658,9 @@ mod turn {
                     &fx.fs,
                     fx.process.as_ref(),
                     &fx.evidence,
-                    &NO_RESOLVER,
-                    &NO_HOP,
-                    &NO_DUPLEX,
+                    Arc::new(NoResolver),
+                    Arc::new(NoHop),
+                    Arc::new(NoDuplex),
                 ),
                 CanonPath::new("/ws"),
             );
@@ -1756,9 +1752,9 @@ mod turn {
                 &fx.fs,
                 fx.process.as_ref(),
                 &fx.evidence,
-                &NO_RESOLVER,
-                &NO_HOP,
-                &NO_DUPLEX,
+                Arc::new(NoResolver),
+                Arc::new(NoHop),
+                Arc::new(NoDuplex),
             ),
             CanonPath::new("/ws"),
         );
@@ -1842,9 +1838,9 @@ mod turn {
                 &fx.fs,
                 fx.process.as_ref(),
                 &fx.evidence,
-                &NO_RESOLVER,
-                &NO_HOP,
-                &NO_DUPLEX,
+                Arc::new(NoResolver),
+                Arc::new(NoHop),
+                Arc::new(NoDuplex),
             ),
             CanonPath::new("/ws"),
         );
@@ -1912,7 +1908,14 @@ mod turn {
             Tools::new(
                 &[],
                 &policy,
-                ToolEffectPorts::new(&fs, &process, &evidence, &NO_RESOLVER, &NO_HOP, &NO_DUPLEX),
+                ToolEffectPorts::new(
+                    &fs,
+                    &process,
+                    &evidence,
+                    Arc::new(NoResolver),
+                    Arc::new(NoHop),
+                    Arc::new(NoDuplex),
+                ),
                 CanonPath::new("/ws"),
             ),
         )
@@ -1956,9 +1959,9 @@ mod turn {
                 &fx.fs,
                 fx.process.as_ref(),
                 &fx.evidence,
-                &NO_RESOLVER,
-                &NO_HOP,
-                &NO_DUPLEX,
+                Arc::new(NoResolver),
+                Arc::new(NoHop),
+                Arc::new(NoDuplex),
             ),
             CanonPath::new("/ws"),
         );
@@ -2031,9 +2034,9 @@ mod turn {
                 &fx.fs,
                 fx.process.as_ref(),
                 &fx.evidence,
-                &NO_RESOLVER,
-                &NO_HOP,
-                &NO_DUPLEX,
+                Arc::new(NoResolver),
+                Arc::new(NoHop),
+                Arc::new(NoDuplex),
             ),
             CanonPath::new("/ws"),
         );
@@ -2126,9 +2129,9 @@ mod turn {
                 &fx.fs,
                 fx.process.as_ref(),
                 &fx.evidence,
-                &NO_RESOLVER,
-                &NO_HOP,
-                &NO_DUPLEX,
+                Arc::new(NoResolver),
+                Arc::new(NoHop),
+                Arc::new(NoDuplex),
             ),
             CanonPath::new("/ws"),
         );
@@ -2192,7 +2195,14 @@ mod turn {
             Tools::new(
                 &[],
                 &policy,
-                ToolEffectPorts::new(&fs, &process, &evidence, &NO_RESOLVER, &NO_HOP, &NO_DUPLEX),
+                ToolEffectPorts::new(
+                    &fs,
+                    &process,
+                    &evidence,
+                    Arc::new(NoResolver),
+                    Arc::new(NoHop),
+                    Arc::new(NoDuplex),
+                ),
                 CanonPath::new("/ws"),
             ),
         )
@@ -2250,9 +2260,9 @@ mod turn {
                 &fx.fs,
                 fx.process.as_ref(),
                 &fx.evidence,
-                &NO_RESOLVER,
-                &NO_HOP,
-                &NO_DUPLEX,
+                Arc::new(NoResolver),
+                Arc::new(NoHop),
+                Arc::new(NoDuplex),
             ),
             CanonPath::new("/ws"),
         );
@@ -2329,9 +2339,9 @@ mod turn {
                 &fx.fs,
                 fx.process.as_ref(),
                 &fx.evidence,
-                &NO_RESOLVER,
-                &NO_HOP,
-                &NO_DUPLEX,
+                Arc::new(NoResolver),
+                Arc::new(NoHop),
+                Arc::new(NoDuplex),
             ),
             CanonPath::new("/ws"),
         );
@@ -2383,9 +2393,9 @@ mod turn {
                 &fx.fs,
                 fx.process.as_ref(),
                 &fx.evidence,
-                &NO_RESOLVER,
-                &NO_HOP,
-                &NO_DUPLEX,
+                Arc::new(NoResolver),
+                Arc::new(NoHop),
+                Arc::new(NoDuplex),
             ),
             CanonPath::new("/ws"),
         );
@@ -2450,9 +2460,9 @@ mod turn {
                 &fx.fs,
                 fx.process.as_ref(),
                 &fx.evidence,
-                &NO_RESOLVER,
-                &NO_HOP,
-                &NO_DUPLEX,
+                Arc::new(NoResolver),
+                Arc::new(NoHop),
+                Arc::new(NoDuplex),
             ),
             CanonPath::new("/ws"),
         );
@@ -2498,9 +2508,9 @@ mod turn {
                 &fx.fs,
                 fx.process.as_ref(),
                 &fx.evidence,
-                &NO_RESOLVER,
-                &NO_HOP,
-                &NO_DUPLEX,
+                Arc::new(NoResolver),
+                Arc::new(NoHop),
+                Arc::new(NoDuplex),
             ),
             CanonPath::new("/ws"),
         );
@@ -2570,9 +2580,9 @@ mod turn {
                 &fx.fs,
                 fx.process.as_ref(),
                 &fx.evidence,
-                &NO_RESOLVER,
-                &NO_HOP,
-                &NO_DUPLEX,
+                Arc::new(NoResolver),
+                Arc::new(NoHop),
+                Arc::new(NoDuplex),
             ),
             CanonPath::new("/ws"),
         );
@@ -2634,9 +2644,9 @@ mod turn {
                 &fx.fs,
                 fx.process.as_ref(),
                 &fx.evidence,
-                &NO_RESOLVER,
-                &NO_HOP,
-                &NO_DUPLEX,
+                Arc::new(NoResolver),
+                Arc::new(NoHop),
+                Arc::new(NoDuplex),
             ),
             CanonPath::new("/ws"),
         );
@@ -2708,9 +2718,9 @@ mod turn {
                 &fx.fs,
                 fx.process.as_ref(),
                 &fx.evidence,
-                &NO_RESOLVER,
-                &NO_HOP,
-                &NO_DUPLEX,
+                Arc::new(NoResolver),
+                Arc::new(NoHop),
+                Arc::new(NoDuplex),
             ),
             CanonPath::new("/ws"),
         );
@@ -3402,9 +3412,9 @@ mod turn {
                 &fx.fs,
                 fx.process.as_ref(),
                 &fx.evidence,
-                &NO_RESOLVER,
-                &NO_HOP,
-                &NO_DUPLEX,
+                Arc::new(NoResolver),
+                Arc::new(NoHop),
+                Arc::new(NoDuplex),
             ),
             CanonPath::new("/ws"),
         );
@@ -3517,9 +3527,9 @@ mod turn {
                 &fx.fs,
                 fx.process.as_ref(),
                 &fx.evidence,
-                &NO_RESOLVER,
-                &NO_HOP,
-                &NO_DUPLEX,
+                Arc::new(NoResolver),
+                Arc::new(NoHop),
+                Arc::new(NoDuplex),
             ),
             CanonPath::new("/ws"),
         );
@@ -3588,9 +3598,9 @@ mod turn {
                 &fx.fs,
                 fx.process.as_ref(),
                 &fx.evidence,
-                &NO_RESOLVER,
-                &NO_HOP,
-                &NO_DUPLEX,
+                Arc::new(NoResolver),
+                Arc::new(NoHop),
+                Arc::new(NoDuplex),
             ),
             CanonPath::new("/ws"),
         );
@@ -3998,9 +4008,9 @@ mod turn {
                 &fx.fs,
                 fx.process.as_ref(),
                 &fx.evidence,
-                &NO_RESOLVER,
-                &NO_HOP,
-                &NO_DUPLEX,
+                Arc::new(NoResolver),
+                Arc::new(NoHop),
+                Arc::new(NoDuplex),
             ),
             CanonPath::new("/ws"),
         );
@@ -4053,9 +4063,9 @@ mod turn {
                 &fx.fs,
                 fx.process.as_ref(),
                 &fx.evidence,
-                &NO_RESOLVER,
-                &NO_HOP,
-                &NO_DUPLEX,
+                Arc::new(NoResolver),
+                Arc::new(NoHop),
+                Arc::new(NoDuplex),
             ),
             CanonPath::new("/ws"),
         );
@@ -4111,9 +4121,9 @@ mod turn {
                 &fx.fs,
                 fx.process.as_ref(),
                 &fx.evidence,
-                &NO_RESOLVER,
-                &NO_HOP,
-                &NO_DUPLEX,
+                Arc::new(NoResolver),
+                Arc::new(NoHop),
+                Arc::new(NoDuplex),
             ),
             CanonPath::new("/ws"),
         );
@@ -4170,9 +4180,9 @@ mod turn {
                 &fx.fs,
                 fx.process.as_ref(),
                 &fx.evidence,
-                &NO_RESOLVER,
-                &NO_HOP,
-                &NO_DUPLEX,
+                Arc::new(NoResolver),
+                Arc::new(NoHop),
+                Arc::new(NoDuplex),
             ),
             CanonPath::new("/ws"),
         );
@@ -4214,9 +4224,9 @@ mod turn {
                 &fx.fs,
                 fx.process.as_ref(),
                 &fx.evidence,
-                &NO_RESOLVER,
-                &NO_HOP,
-                &NO_DUPLEX,
+                Arc::new(NoResolver),
+                Arc::new(NoHop),
+                Arc::new(NoDuplex),
             ),
             CanonPath::new("/ws"),
         );
@@ -4291,9 +4301,9 @@ mod turn {
                 &fx.fs,
                 fx.process.as_ref(),
                 &fx.evidence,
-                &NO_RESOLVER,
-                &NO_HOP,
-                &NO_DUPLEX,
+                Arc::new(NoResolver),
+                Arc::new(NoHop),
+                Arc::new(NoDuplex),
             ),
             CanonPath::new("/ws"),
         );
@@ -4374,9 +4384,9 @@ mod turn {
                 &fx.fs,
                 fx.process.as_ref(),
                 &fx.evidence,
-                &NO_RESOLVER,
-                &NO_HOP,
-                &NO_DUPLEX,
+                Arc::new(NoResolver),
+                Arc::new(NoHop),
+                Arc::new(NoDuplex),
             ),
             CanonPath::new("/ws"),
         );
@@ -5208,9 +5218,9 @@ mod turn {
                     &fx.fs,
                     fx.process.as_ref(),
                     &fx.evidence,
-                    &NO_RESOLVER,
-                    &NO_HOP,
-                    &NO_DUPLEX,
+                    Arc::new(NoResolver),
+                    Arc::new(NoHop),
+                    Arc::new(NoDuplex),
                 ),
                 CanonPath::new("/ws"),
             );
@@ -5350,9 +5360,9 @@ mod turn {
                     &fx.fs,
                     fx.process.as_ref(),
                     &fx.evidence,
-                    &NO_RESOLVER,
-                    &NO_HOP,
-                    &NO_DUPLEX,
+                    Arc::new(NoResolver),
+                    Arc::new(NoHop),
+                    Arc::new(NoDuplex),
                 ),
                 CanonPath::new("/ws"),
             );
@@ -5471,9 +5481,9 @@ mod turn {
                     &fx.fs,
                     fx.process.as_ref(),
                     &fx.evidence,
-                    &NO_RESOLVER,
-                    &NO_HOP,
-                    &NO_DUPLEX,
+                    Arc::new(NoResolver),
+                    Arc::new(NoHop),
+                    Arc::new(NoDuplex),
                 ),
                 CanonPath::new("/ws"),
             );
@@ -5528,9 +5538,9 @@ mod turn {
                         &fx.fs,
                         fx.process.as_ref(),
                         &fx.evidence,
-                        &NO_RESOLVER,
-                        &NO_HOP,
-                        &NO_DUPLEX,
+                        Arc::new(NoResolver),
+                        Arc::new(NoHop),
+                        Arc::new(NoDuplex),
                     ),
                     CanonPath::new("/ws"),
                 );
@@ -5588,9 +5598,9 @@ mod turn {
                     &fx.fs,
                     fx.process.as_ref(),
                     &fx.evidence,
-                    &NO_RESOLVER,
-                    &NO_HOP,
-                    &NO_DUPLEX,
+                    Arc::new(NoResolver),
+                    Arc::new(NoHop),
+                    Arc::new(NoDuplex),
                 ),
                 CanonPath::new("/ws"),
             );
@@ -5674,9 +5684,9 @@ mod turn {
                     &fx.fs,
                     fx.process.as_ref(),
                     &fx.evidence,
-                    &NO_RESOLVER,
-                    &NO_HOP,
-                    &NO_DUPLEX,
+                    Arc::new(NoResolver),
+                    Arc::new(NoHop),
+                    Arc::new(NoDuplex),
                 ),
                 CanonPath::new("/ws"),
             );
@@ -5766,9 +5776,9 @@ mod turn {
                     &fx.fs,
                     fx.process.as_ref(),
                     &fx.evidence,
-                    &NO_RESOLVER,
-                    &NO_HOP,
-                    &NO_DUPLEX,
+                    Arc::new(NoResolver),
+                    Arc::new(NoHop),
+                    Arc::new(NoDuplex),
                 ),
                 CanonPath::new("/ws"),
             );
@@ -5838,9 +5848,9 @@ mod turn {
                     &fx.fs,
                     fx.process.as_ref(),
                     &fx.evidence,
-                    &NO_RESOLVER,
-                    &NO_HOP,
-                    &NO_DUPLEX,
+                    Arc::new(NoResolver),
+                    Arc::new(NoHop),
+                    Arc::new(NoDuplex),
                 ),
                 CanonPath::new("/ws"),
             );
@@ -5903,9 +5913,9 @@ mod turn {
                     &fx.fs,
                     fx.process.as_ref(),
                     &fx.evidence,
-                    &NO_RESOLVER,
-                    &NO_HOP,
-                    &NO_DUPLEX,
+                    Arc::new(NoResolver),
+                    Arc::new(NoHop),
+                    Arc::new(NoDuplex),
                 ),
                 CanonPath::new("/ws"),
             );
@@ -5978,9 +5988,9 @@ mod turn {
                         &fx.fs,
                         fx.process.as_ref(),
                         &fx.evidence,
-                        &NO_RESOLVER,
-                        &NO_HOP,
-                        &NO_DUPLEX,
+                        Arc::new(NoResolver),
+                        Arc::new(NoHop),
+                        Arc::new(NoDuplex),
                     ),
                     CanonPath::new("/ws"),
                 );
@@ -6076,9 +6086,9 @@ mod turn {
                     &fx.fs,
                     fx.process.as_ref(),
                     &fx.evidence,
-                    &NO_RESOLVER,
-                    &NO_HOP,
-                    &NO_DUPLEX,
+                    Arc::new(NoResolver),
+                    Arc::new(NoHop),
+                    Arc::new(NoDuplex),
                 ),
                 CanonPath::new("/ws"),
             );
@@ -6185,9 +6195,9 @@ mod turn {
                     &fx.fs,
                     fx.process.as_ref(),
                     &fx.evidence,
-                    &NO_RESOLVER,
-                    &NO_HOP,
-                    &NO_DUPLEX,
+                    Arc::new(NoResolver),
+                    Arc::new(NoHop),
+                    Arc::new(NoDuplex),
                 ),
                 CanonPath::new("/ws"),
             );

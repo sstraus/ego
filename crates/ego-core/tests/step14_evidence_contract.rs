@@ -167,12 +167,12 @@ fn read_evidence_authority_covers_the_exact_reference_and_offset_only() {
     let root = CanonPath::new("/workspace");
     let admitted = EvidenceRead::new(reference(32), 0).unwrap();
     let policy = PolicyEngine::new(root, ego_core::config::Mode::Plan, Default::default());
-    let call = ego_core::permit::PreparedCall {
-        tool: "read_tool_result".to_string(),
-        ops: vec![Op::ReadEvidence {
+    let call = ego_core::permit::PreparedCall::new(
+        "read_tool_result",
+        vec![Op::ReadEvidence {
             request: admitted.clone(),
         }],
-    };
+    );
 
     let Classification::Settled(Ok(authorized)) = policy.classify(call) else {
         panic!("session evidence must settle intrinsically");

@@ -5,19 +5,18 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::Notify;
 
+use ego_core::config::McpServerConfig;
 use ego_core::config::{ConfigLayer, McpConfigProvenance, Source, Trust, resolve};
-use ego_core::permit::{
-    GuardedIo, PrepareCtx, PreparedCall, Tool, ToolDescriptor, ToolError, ToolResult,
-};
-use ego_core::turn::{
-    McpRegistryEvent, McpRegistryJournal, McpRegistryJournalError, RegisteredTool,
-};
+use ego_core::mcp::ToolExecution;
+use ego_core::permit::{PreparedCall, ToolError};
+use ego_core::turn::{McpRegistryEvent, McpRegistryJournal, McpRegistryJournalError};
 use ego_mcp::{
-    McpAdmittedCandidate, McpCandidateAdmission, McpCandidateError, McpCandidateRequest,
-    McpRegistryController, McpRegistryError, McpRegistryRefresh, RegistryScope, RegistryTrigger,
+    McpAdmittedCandidate, McpCandidateAdmission, McpCandidateError, McpCandidateInventory,
+    McpCandidateRequest, McpOperation, McpOperationFactory, McpRegistryController,
+    McpRegistryError, McpRegistryRefresh, RegistryScope, RegistryTrigger,
 };
 use futures::future::BoxFuture;
-use serde_json::{Value, json};
+use serde_json::json;
 
 const SERVER: &str = "alpha";
 
@@ -180,25 +179,41 @@ impl Drop for CountingTool {
         self.dropped.fetch_add(1, Ordering::SeqCst);
     }
 }
-impl Tool for CountingTool {
-    fn descriptor(&self) -> ToolDescriptor {
-        ToolDescriptor {
+impl CountingTool {
+    fn generator_descriptor(&self) -> ego_core::generator::types::ToolDescriptor {
+        ego_core::generator::types::ToolDescriptor {
             name: self.name.clone(),
             description: "counting MCP test tool".to_owned(),
-            schema: serde_json::from_value(json!({"type":"object"})).expect("object schema"),
+            parameters: json!({"type":"object","additionalProperties":false}),
         }
     }
-    fn prepare(&self, _params: Value, _ctx: &PrepareCtx<'_>) -> Result<PreparedCall, ToolError> {
-        Err(ToolError::InvalidParams(
-            "capture test does not execute parameters".to_owned(),
-        ))
+}
+
+struct CountingFactory {
+    tools: Vec<Arc<CountingTool>>,
+}
+
+impl McpOperationFactory for CountingFactory {
+    fn prepare(
+        &self,
+        _config: &McpServerConfig,
+        _operation: McpOperation,
+    ) -> Result<PreparedCall, ToolError> {
+        Ok(PreparedCall::new("counted", Vec::new()))
     }
+
     fn execute<'a>(
         &'a self,
+        _config: &'a McpServerConfig,
         _call: PreparedCall,
-        _io: &'a dyn GuardedIo,
-    ) -> BoxFuture<'a, Result<ToolResult, ToolError>> {
-        Box::pin(async { Ok(ToolResult::builtin("counted")) })
+        _io: &'a dyn ego_core::permit::GuardedIo,
+    ) -> BoxFuture<'a, Result<ToolExecution, ToolError>> {
+        let _retained = self.tools.len();
+        Box::pin(async {
+            Ok(ToolExecution::Complete(
+                ego_core::permit::ToolResult::builtin("counted"),
+            ))
+        })
     }
 }
 
@@ -228,15 +243,30 @@ fn refresh_with(
     McpRegistryRefresh::new(config, trigger, RegistryScope::All)
 }
 fn candidate(name: &str, tools: Vec<Arc<CountingTool>>) -> McpAdmittedCandidate {
-    let tools = tools.into_iter().map(RegisteredTool::from).collect();
+    let descriptors = tools
+        .iter()
+        .map(|tool| tool.generator_descriptor())
+        .collect();
+    let factory = Arc::new(CountingFactory { tools });
     McpAdmittedCandidate::new(
         name.to_owned(),
         ego_mcp::McpCandidateIdentity::validated(name),
-        ego_mcp::McpCapabilities::tools(),
-        tools,
-        Vec::new(),
-        Vec::new(),
-        ego_mcp::McpCacheMetadata::default(),
+        McpServerConfig::stdio(
+            "mcp-alpha".to_owned(),
+            vec!["--current".to_owned()],
+            None,
+            Vec::new(),
+        )
+        .expect("stdio candidate config"),
+        McpCandidateInventory::new(
+            ego_mcp::McpCapabilities::tools(),
+            descriptors,
+            Vec::new(),
+            Vec::new(),
+            ego_mcp::McpCacheMetadata::default(),
+            None,
+        ),
+        factory,
     )
     .expect("validated candidate")
 }

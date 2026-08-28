@@ -64,7 +64,7 @@ impl HttpCall for ProviderHttpCall {
         let ports = Arc::clone(&self.ports);
         let deadline = self.deadline;
         Box::pin(async move {
-            GuardedHttp::new(ports.resolver(), ports.one_hop())
+            GuardedHttp::new(ports.resolver_handle(), ports.one_hop_handle())
                 .execute_admitted(route, connect, request, Some(deadline))
                 .await
         })

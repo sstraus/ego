@@ -4,6 +4,7 @@ use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::net::IpAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use futures::future::BoxFuture;
@@ -980,13 +981,14 @@ pub trait OneHop: Send + Sync {
     ) -> BoxFuture<'static, Result<OneHopResponse, TransportError>>;
 }
 
-pub struct GuardedHttp<'a> {
-    resolver: &'a dyn Resolver,
-    one_hop: &'a dyn OneHop,
+#[derive(Clone)]
+pub struct GuardedHttp {
+    resolver: Arc<dyn Resolver>,
+    one_hop: Arc<dyn OneHop>,
 }
 
-impl<'a> GuardedHttp<'a> {
-    pub fn new(resolver: &'a dyn Resolver, one_hop: &'a dyn OneHop) -> Self {
+impl GuardedHttp {
+    pub fn new(resolver: Arc<dyn Resolver>, one_hop: Arc<dyn OneHop>) -> Self {
         Self { resolver, one_hop }
     }
 
@@ -996,19 +998,18 @@ impl<'a> GuardedHttp<'a> {
         connect: PreparedConnect,
         request: HttpRequest,
         deadline: Option<std::time::Instant>,
-    ) -> BoxFuture<'_, Result<OneHopResponse, TransportError>> {
+    ) -> BoxFuture<'static, Result<OneHopResponse, TransportError>> {
         if route.target != connect.target || !connect.matches(&request) {
             return Box::pin(futures::future::ready(Err(authority_mismatch())));
         }
 
+        let resolver = Arc::clone(&self.resolver);
+        let one_hop = Arc::clone(&self.one_hop);
         Box::pin(async move {
             let resolved = if connect.target.ip().is_some() {
                 ResolvedConnect::literal(route, connect)?
             } else {
-                let resolution = self
-                    .resolver
-                    .resolve(connect.target.clone(), deadline)
-                    .await?;
+                let resolution = resolver.resolve(connect.target.clone(), deadline).await?;
                 let selected = resolution
                     .addresses
                     .first()
@@ -1016,7 +1017,7 @@ impl<'a> GuardedHttp<'a> {
                     .ok_or_else(authority_mismatch)?;
                 ResolvedConnect::from_resolution(route, connect, resolution, selected)?
             };
-            self.one_hop.execute(resolved, request, deadline).await
+            one_hop.execute(resolved, request, deadline).await
         })
     }
 }

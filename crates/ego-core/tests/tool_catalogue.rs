@@ -123,10 +123,10 @@ impl TypedTool for TaggedTool {
         _params: EmptyParams,
         _ctx: &ego_core::permit::PrepareCtx<'_>,
     ) -> Result<ego_core::permit::PreparedCall, ToolError> {
-        Ok(ego_core::permit::PreparedCall {
-            tool: self.label.clone(),
-            ops: Vec::new(),
-        })
+        Ok(ego_core::permit::PreparedCall::new(
+            self.label.clone(),
+            Vec::new(),
+        ))
     }
 
     fn execute<'a>(
@@ -313,9 +313,9 @@ fn loop_with(
     let fs = Box::leak(Box::new(ego_core::permit::fake::FakeFs::default()));
     let process = Box::leak(Box::new(NoProcess));
     let evidence = Box::leak(Box::new(NoEvidence));
-    let resolver = Box::leak(Box::new(NoResolver));
-    let hop = Box::leak(Box::new(NoHop));
-    let duplex = Box::leak(Box::new(NoDuplex));
+    let resolver = Arc::new(NoResolver);
+    let hop = Arc::new(NoHop);
+    let duplex = Arc::new(NoDuplex);
     let tools = Tools::from_registry_with_source(
         static_tools,
         source,

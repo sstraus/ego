@@ -6,6 +6,7 @@ mod effects;
 mod error;
 mod http;
 mod oauth;
+mod operation;
 mod registry;
 mod server;
 mod state;
@@ -14,7 +15,9 @@ mod stdio;
 pub use client::{
     MCP_PROTOCOL_REVISION, McpClient, McpClientCancellation, McpClientOptions, McpClientSettlement,
 };
-pub use dynamic::{McpDynamicCapture, McpDynamicFamily, McpDynamicTool, McpPreparedDynamicCall};
+pub use dynamic::{
+    McpCapturedTool, McpDynamicCatalogue, McpDynamicFamily, McpOperation, McpOperationFactory,
+};
 pub use effects::{
     McpDuplexEffects, McpFuture, McpHttpEffects, McpHttpEnd, McpHttpPurpose, McpHttpSettlement,
     McpPreparedHttpParts, McpRequestId, PreparedMcpHttpCall,
@@ -27,11 +30,16 @@ pub use oauth::{
     McpLoginResult, McpOAuthCallback, McpOAuthInteraction, McpPkceContext, McpPkceMethod,
     McpTokenRefreshRequest, McpTokenRefreshResult, login, refresh_token,
 };
+pub use operation::{
+    DurableMcpInputRequiredRecorder, McpHttpOperationFactory, McpInputRequiredRecorder,
+    McpResumeAdmission, McpStdioOperationFactory,
+};
 pub use registry::{
     McpAdmittedCandidate, McpCacheMetadata, McpCandidateAdmission, McpCandidateError,
-    McpCandidateIdentity, McpCandidateRequest, McpCapabilities, McpRegistryController,
-    McpRegistryError, McpRegistryPublication, McpRegistryRefresh, McpRegistryStatus, RegistryScope,
-    RegistryTrigger,
+    McpCandidateIdentity, McpCandidateInventory, McpCandidateRequest, McpCapabilities,
+    McpCapturedContextOperation, McpCapturedContextSource, McpCapturedServer, McpRegistryCapture,
+    McpRegistryController, McpRegistryError, McpRegistryPublication, McpRegistryRefresh,
+    McpRegistryStatus, RegistryScope, RegistryTrigger,
 };
 pub use server::{McpServerPort, McpServerToolCall, serve_stdio};
 pub use state::{

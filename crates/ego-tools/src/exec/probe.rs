@@ -952,9 +952,9 @@ async fn probe(
             &fs,
             ports.process(),
             &evidence,
-            ports.resolver(),
-            ports.one_hop(),
-            ports.duplex(),
+            ports.resolver_handle(),
+            ports.one_hop_handle(),
+            ports.duplex_handle(),
         ),
         cwd.clone(),
     );

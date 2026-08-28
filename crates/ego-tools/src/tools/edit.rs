@@ -78,14 +78,14 @@ impl TypedTool for EditTool {
         // edit has nothing to substitute into, so resolving through the parent
         // would only defer the failure to a read that cannot succeed.
         let path = resolve(ctx, &params.path)?;
-        Ok(PreparedCall {
-            tool: self.name().to_string(),
+        Ok(PreparedCall::new(
+            self.name(),
             // Two operations, because the tool performs two. `classify` and
             // `scope_of` already treat a call's ops as a conjunction, so this
             // needs a `read(...)` rule *and* a `write(...)` rule — and a
             // `write(...)` rule alone cannot authorise the read it does.
             // `docs/13-effect-tools.md` Step C, second invariant.
-            ops: vec![
+            vec![
                 Op::Read { path: path.clone() },
                 Op::Write {
                     path,
@@ -95,7 +95,7 @@ impl TypedTool for EditTool {
                     },
                 },
             ],
-        })
+        ))
     }
 
     fn execute<'a>(

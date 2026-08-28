@@ -486,7 +486,7 @@ async fn every_logical_post_receives_distinct_request_owned_authority() {
     ));
     http.push(McpHttpResponse::json(
         200,
-        br#"{"jsonrpc":"2.0","id":1,"result":{"resultType":"complete","tools":[],"nextCursor":null}}"#,
+        br#"{"jsonrpc":"2.0","id":1,"result":{"resultType":"complete","tools":[],"nextCursor":null,"ttlMs":0,"cacheScope":"private"}}"#,
     ));
     let mut client = McpClient::connect_http(
         "remote".parse().expect("server name"),

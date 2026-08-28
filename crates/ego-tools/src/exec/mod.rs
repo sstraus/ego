@@ -259,8 +259,16 @@ impl RunEffectPorts {
         self.http.as_ref()
     }
 
+    pub fn resolver_handle(&self) -> Arc<dyn Resolver> {
+        Arc::clone(&self.http) as Arc<dyn Resolver>
+    }
+
     pub fn one_hop(&self) -> &dyn OneHop {
         self.http.as_ref()
+    }
+
+    pub fn one_hop_handle(&self) -> Arc<dyn OneHop> {
+        Arc::clone(&self.http) as Arc<dyn OneHop>
     }
 
     pub fn begin_http_call(&self) -> Instant {
@@ -269,6 +277,10 @@ impl RunEffectPorts {
 
     pub fn duplex(&self) -> &dyn DuplexSpawner {
         self.duplex.as_ref()
+    }
+
+    pub fn duplex_handle(&self) -> Arc<dyn DuplexSpawner> {
+        Arc::clone(&self.duplex) as Arc<dyn DuplexSpawner>
     }
 }
 

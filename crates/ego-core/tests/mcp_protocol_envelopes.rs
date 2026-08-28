@@ -3,12 +3,14 @@
 use ego_core::generator::attempt::DeliveryCertainty;
 use ego_core::mcp::{
     CacheScope, ContextEntry, ContextKind, ContextSensitivity, ContextSnapshot, ContextSource,
-    ForeignContent, ForeignResult, McpAdmissionFingerprint,
+    ForeignContent, ForeignResult, McpAdmissionFingerprint, McpOperationKind, McpSubject,
 };
 use ego_core::permit::{
-    ForeignToolId, ForeignTransportTarget, HttpHeader, HttpRequest, HttpRoute, HttpScheme,
-    InvocationDigest, NetworkTarget, Op, PolicyEngine, PreparedCall,
+    ForeignToolId, ForeignTransportTarget, HttpRoute, HttpScheme, InvocationDigest, NetworkTarget,
+    Op, PolicyEngine, PreparedCall,
 };
+use ego_core::store::evidence::{EvidenceId, EvidenceRef};
+use serde_json::json;
 
 fn route() -> ForeignTransportTarget {
     ForeignTransportTarget::http(
@@ -18,16 +20,6 @@ fn route() -> ForeignTransportTarget {
         )
         .expect("HTTP route"),
     )
-}
-
-fn request() -> HttpRequest {
-    HttpRequest::new(
-        "POST",
-        "/mcp",
-        vec![HttpHeader::new("content-type", b"application/json".to_vec()).expect("header")],
-        b"json-rpc-bytes".to_vec(),
-    )
-    .expect("request")
 }
 
 fn rules(allow: &[&str]) -> ego_core::config::Ruleset {
@@ -60,41 +52,61 @@ fn digest(label: &str) -> InvocationDigest {
 
 #[test]
 fn protocol_envelope_refuses_semantic_or_byte_authority_mismatch_before_send() {
-    let call = PreparedCall::foreign_protocol(
-        ForeignToolId::new("alpha", "execute_tool").expect("tool identity"),
-        digest("params"),
+    let call = PreparedCall::mcp(
+        McpSubject::Tool {
+            server: "alpha".into(),
+            name: "weather".into(),
+        },
+        McpOperationKind::CallTool,
+        vec![(
+            ForeignToolId::new("alpha", "weather").expect("outer"),
+            digest("params"),
+        )],
+        McpAdmissionFingerprint::new("capture-7", "weather", "schema-7").expect("admission"),
+        "profile-7",
         route(),
-        "capture-7",
-    );
+        &json!({"name":"weather","arguments":{}}),
+    )
+    .expect("semantic preparation");
     assert!(matches!(
         call.ops.as_slice(),
-        [Op::Opaque { .. }, Op::Connect { .. }]
+        [Op::Opaque { .. }, Op::ProtocolConnect { .. }]
     ));
     let allowed = PolicyEngine::new(
         ego_core::permit::CanonPath::new("/workspace"),
         ego_core::config::Mode::Default,
-        rules(&["tool(alpha/execute_tool)", "net(mcp.example:443)"]),
+        rules(&["tool(alpha/weather)", "net(mcp.example:443)"]),
     );
     assert!(matches!(
         allowed.classify(call),
         ego_core::permit::Classification::Settled(Ok(_))
     ));
 
-    let mismatch = PreparedCall::foreign_protocol(
-        ForeignToolId::new("alpha", "execute_tool").expect("tool identity"),
-        digest("other-params"),
+    let mismatch = PreparedCall::mcp(
+        McpSubject::Tool {
+            server: "alpha".into(),
+            name: "weather".into(),
+        },
+        McpOperationKind::CallTool,
+        vec![(
+            ForeignToolId::new("alpha", "weather").expect("outer"),
+            digest("other-params"),
+        )],
+        McpAdmissionFingerprint::new("capture-8", "weather", "schema-7").expect("admission"),
+        "profile-7",
         route(),
-        "capture-8",
-    );
+        &json!({"name":"weather","arguments":{}}),
+    )
+    .expect("semantic preparation");
     assert!(matches!(
         mismatch.ops.as_slice(),
-        [Op::Opaque { .. }, Op::Connect { .. }]
+        [Op::Opaque { .. }, Op::ProtocolConnect { .. }]
     ));
     assert!(matches!(
         PolicyEngine::new(
             ego_core::permit::CanonPath::new("/workspace"),
             ego_core::config::Mode::Default,
-            rules(&["tool(alpha/execute_tool)"])
+            rules(&["tool(alpha/weather)"])
         )
         .classify(mismatch),
         ego_core::permit::Classification::Ask(_)
@@ -103,17 +115,35 @@ fn protocol_envelope_refuses_semantic_or_byte_authority_mismatch_before_send() {
 
 #[test]
 fn speakeasy_protocol_ops_need_outer_inner_and_network_rules() {
-    let call = PreparedCall::speakeasy_protocol(
-        ForeignToolId::new("alpha", "execute_tool").expect("outer identity"),
-        digest("outer"),
-        ForeignToolId::new("alpha", "weather").expect("inner identity"),
-        digest("inner"),
+    let call = PreparedCall::mcp(
+        McpSubject::Tool {
+            server: "alpha".into(),
+            name: "execute_tool".into(),
+        },
+        McpOperationKind::CallTool,
+        vec![
+            (
+                ForeignToolId::new("alpha", "execute_tool").expect("outer identity"),
+                digest("outer"),
+            ),
+            (
+                ForeignToolId::new("alpha", "weather").expect("inner identity"),
+                digest("inner"),
+            ),
+        ],
+        McpAdmissionFingerprint::new("capture-7", "execute_tool", "schema-7").expect("admission"),
+        "profile-7",
         route(),
-        &request(),
-    );
+        &json!({"name":"weather","arguments":{"city":"Rome"}}),
+    )
+    .expect("semantic preparation");
     assert!(matches!(
         call.ops.as_slice(),
-        [Op::Opaque { .. }, Op::Opaque { .. }, Op::Connect { .. }]
+        [
+            Op::Opaque { .. },
+            Op::Opaque { .. },
+            Op::ProtocolConnect { .. }
+        ]
     ));
     assert!(matches!(
         PolicyEngine::new(
@@ -145,7 +175,7 @@ fn foreign_result_preserves_provenance_bounds_unsupported_content_cache_and_deli
         "alpha",
         "execute_tool",
         digest("params"),
-        "capture-7",
+        McpAdmissionFingerprint::new("capture-7", "execute_tool", "schema-7").expect("admission"),
         "object",
         None,
         None,
@@ -153,6 +183,13 @@ fn foreign_result_preserves_provenance_bounds_unsupported_content_cache_and_deli
             ForeignContent::text("visible"),
             ForeignContent::unsupported("image", b"bounded-image-bytes"),
         ],
+        EvidenceRef::new(
+            EvidenceId::parse("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+                .expect("evidence id"),
+            20,
+        ),
+        DeliveryCertainty::DefinitelySent,
+        ego_core::mcp::CancellationClassification::Completed,
     )
     .expect("foreign result");
     assert_eq!(result.server(), "alpha");

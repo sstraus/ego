@@ -169,7 +169,7 @@ impl Rule {
                 pattern.matches(at.as_path(), root)
             }
             (Rule::Exec(pattern), Op::Spawn { spec }) => pattern.matches_os(spec.argv()),
-            (Rule::Net(endpoint), Op::Connect { target, .. }) => {
+            (Rule::Net(endpoint), Op::Connect { target, .. } | Op::ProtocolConnect { target }) => {
                 endpoint.matches(target.host(), target.port())
             }
             (Rule::Tool { server, name }, Op::Opaque { tool, .. }) => {

@@ -1,9 +1,15 @@
 //! Native OS adapter for the core-owned credential-store port.
 
+use std::fs::{self, OpenOptions};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
 use ego_core::credentials::{
     CredentialKey, CredentialRemoval, CredentialStore, CredentialStoreError,
     CredentialStoreErrorKind, CredentialStoreOperation, SecretMaterial,
 };
+use ego_core::suspension::{ContinuationError, ResumeKeySource};
+use fd_lock::RwLock;
 use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
 
@@ -11,6 +17,8 @@ const SERVICE: &str = "ego";
 const USER_PREFIX: &str = "mcp/oauth/v1/";
 const ENVELOPE_MAGIC: &[u8; 8] = b"EGO-MCP\0";
 const ENVELOPE_VERSION: u8 = 1;
+const RESUME_USER: &str = "mcp/resume/v1";
+const RESUME_LOCK: &str = "mcp-resume-key.lock";
 
 /// The closed failure surface exposed by a native credential backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -136,6 +144,84 @@ impl Default for OsCredentialStore<NativeKeyringBackend> {
     fn default() -> Self {
         Self::new(NativeKeyringBackend)
     }
+}
+
+/// Stable machine resume key stored in the native credential backend.
+pub struct OsResumeKey<B = NativeKeyringBackend> {
+    backend: B,
+    lock_path: PathBuf,
+}
+
+impl OsResumeKey<NativeKeyringBackend> {
+    pub fn open(root: impl AsRef<Path>) -> Self {
+        Self::new(NativeKeyringBackend, root.as_ref().join(RESUME_LOCK))
+    }
+}
+
+impl<B> OsResumeKey<B> {
+    pub fn new(backend: B, lock_path: impl Into<PathBuf>) -> Self {
+        Self {
+            backend,
+            lock_path: lock_path.into(),
+        }
+    }
+}
+
+impl<B> ResumeKeySource for OsResumeKey<B>
+where
+    B: CredentialBackend,
+{
+    fn resume_key(&self) -> Result<Arc<[u8]>, ContinuationError> {
+        if let Some(parent) = self.lock_path.parent() {
+            fs::create_dir_all(parent).map_err(|_| resume_key_unavailable())?;
+        }
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&self.lock_path)
+            .map_err(|_| resume_key_unavailable())?;
+        let mut lock = RwLock::new(file);
+        let _guard = lock.write().map_err(|_| resume_key_unavailable())?;
+        match self
+            .backend
+            .get(SERVICE, RESUME_USER)
+            .map_err(|_| resume_key_unavailable())?
+        {
+            Some(key) => resume_key_bytes(key),
+            None => {
+                let mut key = [0_u8; 32];
+                getrandom::fill(&mut key).map_err(|_| resume_key_unavailable())?;
+                self.backend
+                    .put(SERVICE, RESUME_USER, key.to_vec())
+                    .map_err(|_| resume_key_unavailable())?;
+                let stored = self
+                    .backend
+                    .get(SERVICE, RESUME_USER)
+                    .map_err(|_| resume_key_unavailable())?
+                    .ok_or_else(resume_key_unavailable)?;
+                key.zeroize();
+                resume_key_bytes(stored)
+            }
+        }
+    }
+}
+
+fn resume_key_bytes(mut key: Vec<u8>) -> Result<Arc<[u8]>, ContinuationError> {
+    if key.len() != 32 {
+        key.zeroize();
+        return Err(ContinuationError::Corrupt(
+            "native resume key has invalid length".to_owned(),
+        ));
+    }
+    let shared: Arc<[u8]> = Arc::from(key.as_slice());
+    key.zeroize();
+    Ok(shared)
+}
+
+fn resume_key_unavailable() -> ContinuationError {
+    ContinuationError::Unavailable("native resume key is unavailable".to_owned())
 }
 
 impl<B> CredentialStore for OsCredentialStore<B>

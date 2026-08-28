@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ego_core::config::{Mode, PermCfg, Ruleset, Source};
+use ego_core::mcp::ToolExecution;
 use ego_core::permit::{
     Authority, CanonPath, Classification, Confinement, Op, PolicyEngine, RunConfinement, ToolError,
     ToolOutputProvenance,
@@ -107,6 +108,13 @@ fn request(reference: &EvidenceRef, offset: u64) -> String {
     .to_string()
 }
 
+fn complete(result: ToolExecution) -> ego_core::permit::ToolResult {
+    match result {
+        ToolExecution::Complete(result) => result,
+        ToolExecution::InputRequired(_) => panic!("read_tool_result cannot suspend"),
+    }
+}
+
 #[test]
 fn read_tool_result_params_require_a_bounded_offset_and_deny_unknown_fields() {
     let root = cwd();
@@ -152,9 +160,9 @@ fn tools<'a>(run: &'a Run, root: CanonPath) -> TurnTools<'a> {
             &run.fs,
             run.ports.process(),
             &run.evidence,
-            run.ports.resolver(),
-            run.ports.one_hop(),
-            run.ports.duplex(),
+            run.ports.resolver_handle(),
+            run.ports.one_hop_handle(),
+            run.ports.duplex_handle(),
         ),
         root,
     )
@@ -184,7 +192,8 @@ fn read_tool_result_prepares_exact_reference_and_session_authority() {
             request: EvidenceRead::new(reference.clone(), 0).unwrap(),
         }]
     );
-    let result = block_on(tools.execute(tool.as_ref(), authorized)).expect("read evidence");
+    let result =
+        complete(block_on(tools.execute(tool.as_ref(), authorized)).expect("read evidence"));
     assert_eq!(result.model_text(), "complete evidence bytes");
     assert_eq!(
         result.content.len(),
@@ -220,7 +229,8 @@ fn read_tool_result_uses_original_byte_offsets_and_allows_inclusive_eof() {
     let Classification::Settled(Ok(authorized)) = tools.authorize(call) else {
         panic!("session evidence must settle intrinsically");
     };
-    let result = block_on(tools.execute(tool.as_ref(), authorized)).expect("offset evidence");
+    let result =
+        complete(block_on(tools.execute(tool.as_ref(), authorized)).expect("offset evidence"));
     assert_eq!(result.model_text(), "evidence bytes");
     assert!(matches!(
         &result.content[0].provenance,
@@ -239,7 +249,8 @@ fn read_tool_result_uses_original_byte_offsets_and_allows_inclusive_eof() {
     let Classification::Settled(Ok(authorized)) = tools.authorize(call) else {
         panic!("session evidence EOF must settle intrinsically");
     };
-    let result = block_on(tools.execute(tool.as_ref(), authorized)).expect("EOF evidence");
+    let result =
+        complete(block_on(tools.execute(tool.as_ref(), authorized)).expect("EOF evidence"));
     assert_eq!(result.content.len(), 1);
     assert_eq!(result.model_text(), "");
     assert!(matches!(
@@ -347,6 +358,7 @@ fn read_tool_result_has_no_filesystem_or_rule_authority() {
             request: EvidenceRead::new(reference, 0).unwrap(),
         }]
     );
-    let result = block_on(tools.execute(tool.as_ref(), authorized)).expect("read evidence");
+    let result =
+        complete(block_on(tools.execute(tool.as_ref(), authorized)).expect("read evidence"));
     assert_eq!(result.model_text(), "session-only evidence");
 }

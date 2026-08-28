@@ -31,13 +31,13 @@ pub use foreign::{
     NetworkTarget, OneHop, OneHopResponse, PreparedConnect, ResolvedConnect, Resolver, Subject,
     TransportError, TransportFailure,
 };
-pub use fs::{Fs, FsError, GuardedEffects, GuardedIo, IoDenied, PathResolver};
+pub use fs::{Fs, FsError, GuardedEffects, GuardedIo, IoDenied, McpHttpClaim, PathResolver};
 pub use grant::{
     Authorized, Classification, Escalation, Pending, PermissionRequest, Permit, PermitDenied,
     PolicyDenied, PolicyEngine, Resolution,
 };
 pub use path::CanonPath;
-pub use prepared_call::{Change, Op, OpName, PreparedCall};
+pub use prepared_call::{Change, McpPreparedEnvelope, Op, OpName, PreparedCall};
 pub use scan::{Entry, EntryKind, Found, LineMatcher, Match, Scan, ScanLimits, ScanRequest};
 pub use scope::Scope;
 pub use spawn::{

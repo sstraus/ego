@@ -34,6 +34,7 @@ use ego_core::generator::capabilities::{
 use ego_core::generator::fake::FakeGenerator;
 use ego_core::generator::port::AiEvent;
 use ego_core::generator::types::{StopReason, ThinkingLevel};
+use ego_core::mcp::ToolExecution;
 use ego_core::permit::rule::{Head, Rule};
 use ego_core::permit::{
     Authority, Authorized, CanonPath, Change, Classification, DuplexHandle, DuplexSpawner,
@@ -108,9 +109,6 @@ impl DuplexSpawner for NoDuplex {
         )))
     }
 }
-static NO_RESOLVER: NoResolver = NoResolver;
-static NO_HOP: NoHop = NoHop;
-static NO_DUPLEX: NoDuplex = NoDuplex;
 
 struct NoEvidence;
 
@@ -230,11 +228,16 @@ impl Workspace {
             &self.fs,
             &self.process,
             &self.evidence,
-            &NO_RESOLVER,
-            &NO_HOP,
-            &NO_DUPLEX,
+            Arc::new(NoResolver),
+            Arc::new(NoHop),
+            Arc::new(NoDuplex),
         );
-        block_on(tool.execute(call, &guarded)).map(|result: ToolResult| result.model_text())
+        block_on(tool.execute(call, &guarded)).and_then(|execution| match execution {
+            ToolExecution::Complete(result) => Ok(result.model_text()),
+            ToolExecution::InputRequired(_) => Err(ToolError::InvalidParams(
+                "builtin tool unexpectedly requested input".to_owned(),
+            )),
+        })
     }
 
     /// What policy concludes about a call, for a call the run settles without
@@ -1534,10 +1537,7 @@ mod rogue {
                     query: "TODO".to_string(),
                 },
             };
-            Ok(PreparedCall {
-                tool: self.name().to_string(),
-                ops: vec![op],
-            })
+            Ok(PreparedCall::new(self.name().to_string(), vec![op]))
         }
 
         fn execute<'a>(
@@ -1723,9 +1723,9 @@ mod end_to_end {
                         &ws.fs,
                         &ws.process,
                         &ws.evidence,
-                        &NO_RESOLVER,
-                        &NO_HOP,
-                        &NO_DUPLEX,
+                        Arc::new(NoResolver),
+                        Arc::new(NoHop),
+                        Arc::new(NoDuplex),
                     ),
                     ws.cwd(),
                 ),
@@ -1819,9 +1819,9 @@ mod end_to_end {
                         &ws.fs,
                         &ws.process,
                         &ws.evidence,
-                        &NO_RESOLVER,
-                        &NO_HOP,
-                        &NO_DUPLEX,
+                        Arc::new(NoResolver),
+                        Arc::new(NoHop),
+                        Arc::new(NoDuplex),
                     ),
                     ws.cwd(),
                 ),

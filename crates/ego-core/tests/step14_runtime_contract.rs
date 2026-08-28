@@ -163,12 +163,12 @@ fn evidence_request(digit: char, bytes: u64, offset: u64) -> EvidenceRead {
 #[test]
 fn read_tool_result_is_an_intrinsic_exact_session_capability() {
     let request = evidence_request('a', 128, 64);
-    let call = PreparedCall {
-        tool: "read_tool_result".to_string(),
-        ops: vec![Op::ReadEvidence {
+    let call = PreparedCall::new(
+        "read_tool_result",
+        vec![Op::ReadEvidence {
             request: request.clone(),
         }],
-    };
+    );
     let policy = PolicyEngine::new(
         workspace(),
         Mode::Plan,
@@ -201,10 +201,10 @@ fn read_tool_result_is_an_intrinsic_exact_session_capability() {
             .is_err()
     );
 
-    let combined = PreparedCall {
-        tool: "read_tool_result".to_string(),
-        ops: vec![Op::ReadEvidence { request }, Op::Read { path: workspace() }],
-    };
+    let combined = PreparedCall::new(
+        "read_tool_result",
+        vec![Op::ReadEvidence { request }, Op::Read { path: workspace() }],
+    );
     assert!(matches!(
         policy.classify(combined),
         Classification::Settled(Err(PolicyDenied::EvidenceMustStandAlone { .. }))
@@ -472,10 +472,6 @@ mod turn_execution_observation {
         }
     }
 
-    static NO_RESOLVER: NoResolver = NoResolver;
-    static NO_HOP: NoHop = NoHop;
-    static NO_DUPLEX: NoDuplex = NoDuplex;
-
     #[derive(Default)]
     struct MemoryStore {
         events: Mutex<Vec<DomainEvent>>,
@@ -611,9 +607,9 @@ mod turn_execution_observation {
                     &self.fs,
                     &self.process,
                     &self.evidence,
-                    &NO_RESOLVER,
-                    &NO_HOP,
-                    &NO_DUPLEX,
+                    Arc::new(NoResolver),
+                    Arc::new(NoHop),
+                    Arc::new(NoDuplex),
                 ),
                 CanonPath::new("/ws"),
             );

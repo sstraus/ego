@@ -32,12 +32,12 @@ impl TypedTool for ReadTool {
         params: ReadParams,
         ctx: &PrepareCtx<'_>,
     ) -> Result<PreparedCall, ToolError> {
-        Ok(PreparedCall {
-            tool: self.name().to_string(),
-            ops: vec![Op::Read {
+        Ok(PreparedCall::new(
+            self.name(),
+            vec![Op::Read {
                 path: resolve(ctx, &params.path)?,
             }],
-        })
+        ))
     }
 
     fn execute<'a>(

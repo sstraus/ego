@@ -18,8 +18,8 @@ use serde::{Deserialize, Serialize};
 use super::approver::{Approver, HumanApprover, ModeApprover, PermissionDecision, Verdict};
 use super::authority::{Authority, RuleAuthority};
 use super::foreign::{
-    ForeignToolId, ForeignTransportTarget, InvocationDigest, PreparedConnect, Subject,
-    TransportError, TransportFailure,
+    ForeignToolId, ForeignTransportTarget, InvocationDigest, NetworkTarget, PreparedConnect,
+    Subject, TransportError, TransportFailure,
 };
 use super::path::CanonPath;
 use super::prepared_call::{Change, Op, OpName, PreparedCall};
@@ -130,10 +130,9 @@ struct Sealed(());
 ///     Mode::Default,
 ///     Ruleset::from_layer(PermCfg { judge: None, allow, deny: Vec::new() }, Source::Project),
 /// );
-/// let call = PreparedCall {
-///     tool: "read".to_string(),
-///     ops: vec![Op::Read { path: CanonPath::new("/ws/a.rs") }],
-/// };
+/// let call = PreparedCall::new("read", vec![Op::Read {
+///     path: CanonPath::new("/ws/a.rs"),
+/// }]);
 /// let Classification::Settled(Ok(granted)) = engine.classify(call)
 ///     else { panic!("an allow rule covers this read") };
 /// let _scope = &granted.permit().scope;
@@ -152,10 +151,9 @@ struct Sealed(());
 ///     Mode::Default,
 ///     Ruleset::from_layer(PermCfg { judge: None, allow, deny: Vec::new() }, Source::Project),
 /// );
-/// let call = PreparedCall {
-///     tool: "read".to_string(),
-///     ops: vec![Op::Read { path: CanonPath::new("/ws/a.rs") }],
-/// };
+/// let call = PreparedCall::new("read", vec![Op::Read {
+///     path: CanonPath::new("/ws/a.rs"),
+/// }]);
 /// let Classification::Settled(Ok(granted)) = engine.classify(call)
 ///     else { panic!("an allow rule covers this read") };
 /// let _permit = granted.permit();
@@ -342,6 +340,19 @@ impl Permit {
             ))
         }
     }
+
+    pub(crate) fn allows_protocol_network(
+        &self,
+        target: &NetworkTarget,
+    ) -> Result<(), TransportError> {
+        if self.scope.network.as_ref() == Some(target) && self.scope.http_request_digest.is_none() {
+            Ok(())
+        } else {
+            Err(TransportError::definitely_unsent(
+                TransportFailure::AuthorityMismatch,
+            ))
+        }
+    }
 }
 
 /// A call and the grant that answers it, as one value.
@@ -373,10 +384,9 @@ impl Permit {
 ///     Mode::Default,
 ///     Ruleset::from_layer(PermCfg { judge: None, allow, deny: Vec::new() }, Source::Project),
 /// );
-/// let call = PreparedCall {
-///     tool: "read".to_string(),
-///     ops: vec![Op::Read { path: CanonPath::new("/ws/a.rs") }],
-/// };
+/// let call = PreparedCall::new("read", vec![Op::Read {
+///     path: CanonPath::new("/ws/a.rs"),
+/// }]);
 /// let Classification::Settled(Ok(granted)) = engine.classify(call)
 ///     else { panic!("an allow rule covers this read") };
 /// let _stolen = &granted.permit;
@@ -395,10 +405,9 @@ impl Permit {
 ///     Mode::Default,
 ///     Ruleset::from_layer(PermCfg { judge: None, allow, deny: Vec::new() }, Source::Project),
 /// );
-/// let call = PreparedCall {
-///     tool: "read".to_string(),
-///     ops: vec![Op::Read { path: CanonPath::new("/ws/a.rs") }],
-/// };
+/// let call = PreparedCall::new("read", vec![Op::Read {
+///     path: CanonPath::new("/ws/a.rs"),
+/// }]);
 /// let Classification::Settled(Ok(granted)) = engine.classify(call)
 ///     else { panic!("an allow rule covers this read") };
 /// let _borrowed = granted.permit();
@@ -424,10 +433,9 @@ impl Permit {
 ///     Ruleset::from_layer(PermCfg { judge: None, allow, deny: Vec::new() }, Source::Project),
 /// );
 /// let split = |path: &str| {
-///     let call = PreparedCall {
-///         tool: "read".to_string(),
-///         ops: vec![Op::Read { path: CanonPath::new(path) }],
-///     };
+///     let call = PreparedCall::new("read", vec![Op::Read {
+///         path: CanonPath::new(path),
+///     }]);
 ///     let Classification::Settled(Ok(granted)) = engine.classify(call)
 ///         else { panic!("an allow rule covers this read") };
 ///     granted.into_parts()
@@ -452,10 +460,9 @@ impl Permit {
 ///     Ruleset::from_layer(PermCfg { judge: None, allow, deny: Vec::new() }, Source::Project),
 /// );
 /// let split = |path: &str| {
-///     let call = PreparedCall {
-///         tool: "read".to_string(),
-///         ops: vec![Op::Read { path: CanonPath::new(path) }],
-///     };
+///     let call = PreparedCall::new("read", vec![Op::Read {
+///         path: CanonPath::new(path),
+///     }]);
 ///     let Classification::Settled(Ok(granted)) = engine.classify(call)
 ///         else { panic!("an allow rule covers this read") };
 ///     granted.into_parts()
@@ -522,6 +529,22 @@ impl Authorized {
     /// the tool, and the tool is handed no permit at all.
     pub fn into_parts(self) -> (PreparedCall, Permit) {
         (self.call, self.permit)
+    }
+
+    pub(crate) fn from_verified_resume(call: PreparedCall, by: Authority) -> Self {
+        let permit = Permit {
+            scope: scope_of(&call),
+            _sealed: Sealed(()),
+        };
+        Self { call, permit, by }
+    }
+
+    pub(crate) fn with_verified_resume_parameters(
+        mut self,
+        parameters: &serde_json::Value,
+    ) -> Result<Self, crate::mcp::McpProjectionError> {
+        self.call.apply_verified_resume_parameters(parameters)?;
+        Ok(self)
     }
 }
 
@@ -938,7 +961,7 @@ impl fmt::Display for PermissionRequest {
                     params_digest,
                     TerminalSafe(&transport.to_string())
                 )?,
-                Op::Connect { target, .. } => {
+                Op::Connect { target, .. } | Op::ProtocolConnect { target } => {
                     write!(f, "\n- connect {}", TerminalSafe(&target.to_string()))?;
                 }
             }
@@ -1203,6 +1226,17 @@ impl PolicyEngine {
             deny: permissions.deny,
             human: None,
         }
+    }
+
+    pub fn resume_floor(&self) -> crate::suspension::ResumeFloor {
+        crate::suspension::ResumeFloor::from_policy(
+            self.workspace.to_string(),
+            self.mode,
+            self.deny
+                .iter()
+                .map(|entry| entry.rule().id().to_string())
+                .collect(),
+        )
     }
 
     /// A policy with a human final party after the mode ceiling.
@@ -1619,6 +1653,10 @@ fn scope_of(call: &PreparedCall) -> Scope {
                 scope.network = Some(target.clone());
                 scope.http_request_digest = Some(request_digest.clone());
             }
+            Op::ProtocolConnect { target } => {
+                scope.network = Some(target.clone());
+                scope.http_request_digest = None;
+            }
         }
     }
     scope
@@ -1637,6 +1675,7 @@ fn scope_of(call: &PreparedCall) -> Scope {
 #[cfg(test)]
 mod tests {
     use std::ffi::OsString;
+    use std::sync::Arc;
     use std::time::Duration;
 
     use futures::executor::block_on;
@@ -1644,6 +1683,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::mcp::ToolExecution;
     use crate::permit::fake::{FakeFs, FakeWriteTool};
     use crate::permit::{
         Change, DnsResolution, DuplexHandle, DuplexSpawner, EnvPolicy, Fs, GuardedEffects,
@@ -1723,17 +1763,15 @@ mod tests {
 
     static NO_PROCESS: NoProcess = NoProcess;
     static NO_EVIDENCE: NoEvidence = NoEvidence;
-    static NO_FOREIGN: NoForeign = NoForeign;
-
     fn guarded(permit: Permit, fs: &dyn Fs) -> GuardedEffects<'_> {
         GuardedEffects::new(
             permit,
             fs,
             &NO_PROCESS,
             &NO_EVIDENCE,
-            &NO_FOREIGN,
-            &NO_FOREIGN,
-            &NO_FOREIGN,
+            Arc::new(NoForeign),
+            Arc::new(NoForeign),
+            Arc::new(NoForeign),
         )
     }
 
@@ -1781,13 +1819,13 @@ mod tests {
     }
 
     fn write_call(path: &str) -> PreparedCall {
-        PreparedCall {
-            tool: "edit".to_string(),
-            ops: vec![Op::Write {
+        PreparedCall::new(
+            "edit",
+            vec![Op::Write {
                 path: CanonPath::new(path),
                 change: Change::Whole(b"whatever".to_vec()),
             }],
-        }
+        )
     }
 
     #[test]
@@ -1932,6 +1970,9 @@ mod tests {
         let guarded = guarded(permit, &fs);
 
         let result = block_on(tool.execute(call, &guarded)).unwrap();
+        let ToolExecution::Complete(result) = result else {
+            panic!("write must complete")
+        };
         assert_eq!(result.model_text(), "wrote 5 bytes to /ws/allowed/note.txt");
         assert_eq!(
             fs.read(&CanonPath::new("/ws/allowed/note.txt")).unwrap(),

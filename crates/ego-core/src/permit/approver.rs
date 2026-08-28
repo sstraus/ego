@@ -146,7 +146,10 @@ impl ModeApprover {
                 // workspace.
                 Mode::Edits => !matches!(
                     op,
-                    Op::Spawn { .. } | Op::Opaque { .. } | Op::Connect { .. }
+                    Op::Spawn { .. }
+                        | Op::Opaque { .. }
+                        | Op::Connect { .. }
+                        | Op::ProtocolConnect { .. }
                 ),
                 // `ARCHITECTURE.md:242` — these review unresolved
                 // **sensitive** actions, not every action. A read inside the

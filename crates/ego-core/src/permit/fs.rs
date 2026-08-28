@@ -11,6 +11,7 @@
 use std::fmt;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use futures::future::{self, BoxFuture};
 
@@ -25,7 +26,8 @@ use super::prepared_call::{Op, PreparedCall};
 use super::scan::{Entry, EntryKind, Found, LineMatcher, Match, Scan, ScanRequest};
 use super::spawn::{ProcessError, ProcessExecutor, SpawnSpec};
 use super::tool::{ToolError, ToolResult};
-use crate::store::evidence::{EvidencePage, EvidenceRead, EvidenceStore};
+use crate::store::evidence::{EvidencePage, EvidenceRead, EvidenceRef, EvidenceStore};
+use crate::suspension::{ContinuationError, PreparedResume};
 
 /// Why a filesystem operation failed, as opposed to being *denied*.
 ///
@@ -170,12 +172,48 @@ pub trait GuardedIo: Send + Sync {
         &self,
         call: PreparedCall,
         request: HttpRequest,
-    ) -> BoxFuture<'_, Result<OneHopResponse, TransportError>>;
+    ) -> BoxFuture<'static, Result<OneHopResponse, TransportError>>;
+
+    /// Claim one selected MCP HTTP operation after policy has authorized its
+    /// semantic call. The returned capability is non-clone and binds exactly
+    /// one rendered request by value.
+    fn claim_mcp_http(&self, call: PreparedCall) -> Result<McpHttpClaim, TransportError>;
+
+    fn take_mcp_resume(&self) -> Result<PreparedResume, ContinuationError> {
+        Err(ContinuationError::AuthorityMismatch)
+    }
 
     fn guarded_duplex(
         &self,
         call: PreparedCall,
-    ) -> BoxFuture<'_, Result<DuplexHandle, TransportError>>;
+    ) -> BoxFuture<'static, Result<DuplexHandle, TransportError>>;
+
+    /// Persist complete sanitized foreign evidence in the session store.
+    fn store_evidence(&self, bytes: &[u8]) -> Result<EvidenceRef, ToolError>;
+}
+
+/// One selected MCP HTTP authority. Management traffic never receives this
+/// value, and exchange consumes it.
+pub struct McpHttpClaim {
+    envelope: super::prepared_call::McpPreparedEnvelope,
+    route: super::foreign::HttpRoute,
+    http: GuardedHttp,
+}
+
+impl McpHttpClaim {
+    pub fn envelope(&self) -> &super::prepared_call::McpPreparedEnvelope {
+        &self.envelope
+    }
+
+    pub fn exchange(
+        self,
+        request: HttpRequest,
+        deadline: Option<std::time::Instant>,
+    ) -> BoxFuture<'static, Result<OneHopResponse, TransportError>> {
+        let connect = PreparedConnect::new(self.route.target().clone(), &request);
+        self.http
+            .execute_admitted(self.route, connect, request, deadline)
+    }
 }
 
 /// Why a guarded operation did not produce what was asked for: the permit
@@ -233,9 +271,10 @@ pub struct GuardedEffects<'a> {
     fs: &'a dyn Fs,
     process: &'a dyn ProcessExecutor,
     evidence: &'a dyn EvidenceStore,
-    http: GuardedHttp<'a>,
-    duplex: &'a dyn DuplexSpawner,
+    http: GuardedHttp,
+    duplex: Arc<dyn DuplexSpawner>,
     foreign_spent: AtomicBool,
+    resume: Mutex<Option<PreparedResume>>,
 }
 
 impl<'a> GuardedEffects<'a> {
@@ -244,9 +283,25 @@ impl<'a> GuardedEffects<'a> {
         fs: &'a dyn Fs,
         process: &'a dyn ProcessExecutor,
         evidence: &'a dyn EvidenceStore,
-        resolver: &'a dyn Resolver,
-        one_hop: &'a dyn OneHop,
-        duplex: &'a dyn DuplexSpawner,
+        resolver: Arc<dyn Resolver>,
+        one_hop: Arc<dyn OneHop>,
+        duplex: Arc<dyn DuplexSpawner>,
+    ) -> Self {
+        Self::new_with_resume(
+            permit, fs, process, evidence, resolver, one_hop, duplex, None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_resume(
+        permit: Permit,
+        fs: &'a dyn Fs,
+        process: &'a dyn ProcessExecutor,
+        evidence: &'a dyn EvidenceStore,
+        resolver: Arc<dyn Resolver>,
+        one_hop: Arc<dyn OneHop>,
+        duplex: Arc<dyn DuplexSpawner>,
+        resume: Option<PreparedResume>,
     ) -> Self {
         Self {
             permit,
@@ -256,6 +311,7 @@ impl<'a> GuardedEffects<'a> {
             http: GuardedHttp::new(resolver, one_hop),
             duplex,
             foreign_spent: AtomicBool::new(false),
+            resume: Mutex::new(resume),
         }
     }
 
@@ -266,10 +322,15 @@ impl<'a> GuardedEffects<'a> {
         request: Option<&HttpRequest>,
     ) -> Result<ForeignClaim, TransportError> {
         let claim = ForeignClaim::from_call(call)?;
-        self.permit
-            .allows_foreign(&claim.invocations, &claim.transport)?;
+        if !claim.invocations.is_empty() {
+            self.permit
+                .allows_foreign(&claim.invocations, &claim.transport)?;
+        }
         if let Some(connect) = &claim.connect {
             self.permit.allows_network(connect)?;
+        }
+        if let Some(target) = &claim.protocol_target {
+            self.permit.allows_protocol_network(target)?;
         }
         if let Some(spawn) = &claim.spawn {
             self.permit
@@ -287,6 +348,16 @@ impl<'a> GuardedEffects<'a> {
                         route.target() == connect.target() && connect.matches(request)
                     })
                     && claim.spawn.is_none() => {}
+            ForeignKind::SelectedMcp
+                if call.mcp_envelope().is_some()
+                    && claim.protocol_target.as_ref()
+                        == claim
+                            .transport
+                            .http_route()
+                            .map(super::foreign::HttpRoute::target)
+                    && claim.connect.is_none()
+                    && claim.spawn.is_none()
+                    && request.is_none() => {}
             ForeignKind::Duplex
                 if claim.transport.is_stdio()
                     && claim.connect.is_none()
@@ -304,8 +375,9 @@ impl<'a> GuardedEffects<'a> {
         &self,
         call: PreparedCall,
         request: HttpRequest,
-    ) -> BoxFuture<'_, Result<OneHopResponse, TransportError>> {
+    ) -> BoxFuture<'static, Result<OneHopResponse, TransportError>> {
         let claim = self.claim_foreign(&call, ForeignKind::Http, Some(&request));
+        let http = self.http.clone();
         Box::pin(async move {
             let claim = claim?;
             let route = claim
@@ -313,21 +385,38 @@ impl<'a> GuardedEffects<'a> {
                 .into_http_route()
                 .ok_or_else(authority_mismatch)?;
             let connect = claim.connect.ok_or_else(authority_mismatch)?;
-            self.http
-                .execute_admitted(route, connect, request, None)
-                .await
+            http.execute_admitted(route, connect, request, None).await
+        })
+    }
+
+    pub fn claim_mcp_http(&self, call: PreparedCall) -> Result<McpHttpClaim, TransportError> {
+        let envelope = call
+            .mcp_envelope()
+            .cloned()
+            .ok_or_else(authority_mismatch)?;
+        let claim = self.claim_foreign(&call, ForeignKind::SelectedMcp, None)?;
+        let route = claim
+            .transport
+            .into_http_route()
+            .ok_or_else(authority_mismatch)?;
+        claim.protocol_target.ok_or_else(authority_mismatch)?;
+        Ok(McpHttpClaim {
+            envelope,
+            route,
+            http: self.http.clone(),
         })
     }
 
     pub fn guarded_duplex(
         &self,
         call: PreparedCall,
-    ) -> BoxFuture<'_, Result<DuplexHandle, TransportError>> {
+    ) -> BoxFuture<'static, Result<DuplexHandle, TransportError>> {
         let claim = self.claim_foreign(&call, ForeignKind::Duplex, None);
+        let duplex = Arc::clone(&self.duplex);
         Box::pin(async move {
             let claim = claim?;
             let spec = claim.spawn.ok_or_else(authority_mismatch)?;
-            self.duplex.spawn(spec).await
+            duplex.spawn(spec).await
         })
     }
 
@@ -511,15 +600,36 @@ impl GuardedIo for GuardedEffects<'_> {
         &self,
         call: PreparedCall,
         request: HttpRequest,
-    ) -> BoxFuture<'_, Result<OneHopResponse, TransportError>> {
+    ) -> BoxFuture<'static, Result<OneHopResponse, TransportError>> {
         GuardedEffects::guarded_http(self, call, request)
+    }
+
+    fn claim_mcp_http(&self, call: PreparedCall) -> Result<McpHttpClaim, TransportError> {
+        GuardedEffects::claim_mcp_http(self, call)
+    }
+
+    fn take_mcp_resume(&self) -> Result<PreparedResume, ContinuationError> {
+        self.resume
+            .lock()
+            .map_err(|_| ContinuationError::Unavailable("resume authority lock poisoned".into()))?
+            .take()
+            .ok_or(ContinuationError::AuthorityMismatch)
     }
 
     fn guarded_duplex(
         &self,
         call: PreparedCall,
-    ) -> BoxFuture<'_, Result<DuplexHandle, TransportError>> {
+    ) -> BoxFuture<'static, Result<DuplexHandle, TransportError>> {
         GuardedEffects::guarded_duplex(self, call)
+    }
+
+    fn store_evidence(&self, bytes: &[u8]) -> Result<EvidenceRef, ToolError> {
+        let mut writer = self.evidence.begin()?;
+        if let Err(error) = writer.append(bytes) {
+            let _ = writer.abort();
+            return Err(error.into());
+        }
+        writer.commit().map_err(Into::into)
     }
 }
 
@@ -527,19 +637,24 @@ struct ForeignClaim {
     invocations: Vec<(ForeignToolId, InvocationDigest)>,
     transport: ForeignTransportTarget,
     connect: Option<PreparedConnect>,
+    protocol_target: Option<super::foreign::NetworkTarget>,
     spawn: Option<SpawnSpec>,
 }
 
 enum ForeignKind {
     Http,
+    SelectedMcp,
     Duplex,
 }
 
 impl ForeignClaim {
     fn from_call(call: &PreparedCall) -> Result<Self, TransportError> {
         let mut invocations = Vec::new();
-        let mut transport = None;
+        let mut transport = call
+            .mcp_envelope()
+            .map(|envelope| envelope.transport().clone());
         let mut connect = None;
+        let mut protocol_target = None;
         let mut spawn = None;
         for op in &call.ops {
             match op {
@@ -563,17 +678,21 @@ impl ForeignClaim {
                         request_digest.clone(),
                     ));
                 }
+                Op::ProtocolConnect { target } if protocol_target.is_none() => {
+                    protocol_target = Some(target.clone());
+                }
                 Op::Spawn { spec } if spawn.is_none() => spawn = Some(spec.clone()),
                 _ => return Err(authority_mismatch()),
             }
         }
-        if invocations.is_empty() {
+        if invocations.is_empty() && call.mcp_envelope().is_none() {
             return Err(authority_mismatch());
         }
         Ok(Self {
             invocations,
             transport: transport.ok_or_else(authority_mismatch)?,
             connect,
+            protocol_target,
             spawn,
         })
     }

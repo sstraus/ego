@@ -47,9 +47,9 @@ impl TypedTool for WriteTool {
         params: WriteParams,
         ctx: &PrepareCtx<'_>,
     ) -> Result<PreparedCall, ToolError> {
-        Ok(PreparedCall {
-            tool: self.name().to_string(),
-            ops: vec![Op::Write {
+        Ok(PreparedCall::new(
+            self.name(),
+            vec![Op::Write {
                 // `resolve_target`, not `resolve`: a write whose target had to
                 // already exist could only ever overwrite.
                 path: resolve_target(ctx, &params.path)?,
@@ -60,7 +60,7 @@ impl TypedTool for WriteTool {
                 // another.
                 change: Change::Whole(params.contents.into_bytes()),
             }],
-        })
+        ))
     }
 
     fn execute<'a>(

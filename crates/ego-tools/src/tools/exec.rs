@@ -76,10 +76,7 @@ impl TypedTool for ExecTool {
         )
         .map_err(|err| ToolError::InvalidParams(err.to_string()))?;
 
-        Ok(PreparedCall {
-            tool: self.name().to_string(),
-            ops: vec![Op::Spawn { spec }],
-        })
+        Ok(PreparedCall::new(self.name(), vec![Op::Spawn { spec }]))
     }
 
     fn execute<'a>(

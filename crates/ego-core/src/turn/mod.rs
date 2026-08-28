@@ -2377,7 +2377,10 @@ impl<'a> TurnLoop<'a> {
             Controlled::Failed(cause) => return Err(cause),
         };
         Ok(match execution {
-            Ok(result) => ToolOutcome::Answered { ok: true, result },
+            Ok(crate::mcp::ToolExecution::Complete(result)) => {
+                ToolOutcome::Answered { ok: true, result }
+            }
+            Ok(crate::mcp::ToolExecution::InputRequired(_)) => ToolOutcome::QuestionRequired,
             Err(failure) => ToolOutcome::Answered {
                 ok: false,
                 result: failure.into_failed_result(),

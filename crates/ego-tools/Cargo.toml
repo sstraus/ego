@@ -10,6 +10,7 @@ publish.workspace = true
 ego-core.workspace = true
 fd-lock = "4.0.4"
 futures = "0.3.34"
+getrandom = "0.3.4"
 # `0.4` and not `0.4.20`, the version `docs/04-crates.md` names: a caret range
 # lets the MSRV-aware resolver pick the newest release our declared floor
 # allows, instead of a number here having to be kept level with that floor by

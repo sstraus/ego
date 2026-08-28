@@ -993,13 +993,13 @@ fn preflight_judge(
     exec_caps: ExecCaps,
 ) -> Result<(), RunTermination> {
     let path = confinement.workspace().clone();
-    let call = PreparedCall {
-        tool: "write".to_string(),
-        ops: vec![Op::Write {
+    let call = PreparedCall::new(
+        "write",
+        vec![Op::Write {
             path: path.clone(),
             change: Change::Whole(Vec::new()),
         }],
-    };
+    );
     let escalation = Escalation::ModeAsks {
         mode: Mode::Auto,
         op: OpName::Write,
@@ -1304,9 +1304,9 @@ async fn drive_headless_turn(
             &fs,
             ports.process(),
             active.evidence(),
-            ports.resolver(),
-            ports.one_hop(),
-            ports.duplex(),
+            ports.resolver_handle(),
+            ports.one_hop_handle(),
+            ports.duplex_handle(),
         ),
         CanonPath::new(cwd),
     );
@@ -2005,9 +2005,9 @@ async fn execute<S: EventSink>(
                     &fs,
                     $ports.process(),
                     $active.evidence(),
-                    $ports.resolver(),
-                    $ports.one_hop(),
-                    $ports.duplex(),
+                    $ports.resolver_handle(),
+                    $ports.one_hop_handle(),
+                    $ports.duplex_handle(),
                 ),
                 CanonPath::new(&cwd),
             );

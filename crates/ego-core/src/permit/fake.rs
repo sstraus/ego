@@ -243,13 +243,13 @@ impl TypedTool for FakeWriteTool {
         ctx: &PrepareCtx<'_>,
     ) -> Result<PreparedCall, ToolError> {
         let resolved = ctx.resolver.canonicalize(Path::new(&params.path))?;
-        Ok(PreparedCall {
-            tool: self.name().to_string(),
-            ops: vec![Op::Write {
+        Ok(PreparedCall::new(
+            self.name(),
+            vec![Op::Write {
                 path: resolved,
                 change: Change::Whole(params.contents.into_bytes()),
             }],
-        })
+        ))
     }
 
     fn execute<'a>(

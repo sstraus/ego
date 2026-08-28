@@ -378,20 +378,20 @@ fn guarded_http_consumes_one_dns_answer_and_rejects_reuse_as_authority_spent() {
         other => panic!("expected authorization, got {other:?}"),
     };
     let (call, permit) = authorized.into_parts();
-    let resolver = FakeResolver::one(
+    let resolver = Arc::new(FakeResolver::one(
         NetworkTarget::parse("api.example.test:443").expect("target"),
         "192.0.2.10",
-    );
-    let one_hop = FakeOneHop::default();
-    let spawner = FakeSpawner::default();
+    ));
+    let one_hop = Arc::new(FakeOneHop::default());
+    let spawner = Arc::new(FakeSpawner::default());
     let guarded = GuardedEffects::new(
         permit,
         &MemoryFs,
         &NoProcess,
         &NoEvidence,
-        &resolver,
-        &one_hop,
-        &spawner,
+        resolver.clone(),
+        one_hop.clone(),
+        spawner.clone(),
     );
     let first = futures::executor::block_on(guarded.guarded_http(call.clone(), req.clone()))
         .expect("first hop");
@@ -435,9 +435,9 @@ fn guarded_http_passes_one_deadline_to_dns_and_hop_and_skips_dns_for_literal() {
     let named_route = route("api.example.test:443");
     let req = request();
     let connect = PreparedConnect::new(target.clone(), &req);
-    let resolver = FakeResolver::one(target, "192.0.2.10");
-    let one_hop = FakeOneHop::default();
-    let guarded = GuardedHttp::new(&resolver, &one_hop);
+    let resolver = Arc::new(FakeResolver::one(target, "192.0.2.10"));
+    let one_hop = Arc::new(FakeOneHop::default());
+    let guarded = GuardedHttp::new(resolver.clone(), one_hop.clone());
     let deadline = Instant::now() + std::time::Duration::from_secs(30);
     futures::executor::block_on(guarded.execute_admitted(
         named_route,
@@ -452,9 +452,9 @@ fn guarded_http_passes_one_deadline_to_dns_and_hop_and_skips_dns_for_literal() {
     let literal_target = NetworkTarget::parse("127.0.0.1:443").expect("literal target");
     let literal_request = HttpRequest::get("/").expect("literal request");
     let literal_connect = PreparedConnect::new(literal_target, &literal_request);
-    let literal_resolver = FakeResolver::default();
-    let literal_one_hop = FakeOneHop::default();
-    let literal_guarded = GuardedHttp::new(&literal_resolver, &literal_one_hop);
+    let literal_resolver = Arc::new(FakeResolver::default());
+    let literal_one_hop = Arc::new(FakeOneHop::default());
+    let literal_guarded = GuardedHttp::new(literal_resolver.clone(), literal_one_hop.clone());
     futures::executor::block_on(literal_guarded.execute_admitted(
         route("127.0.0.1:443"),
         literal_connect,
@@ -559,20 +559,20 @@ fn mismatched_actual_request_refuses_before_dns_without_spending_claim() {
         other => panic!("expected authorization, got {other:?}"),
     };
     let (call, permit) = authorized.into_parts();
-    let resolver = FakeResolver::one(
+    let resolver = Arc::new(FakeResolver::one(
         NetworkTarget::parse("api.example.test:443").expect("target"),
         "192.0.2.10",
-    );
-    let one_hop = FakeOneHop::default();
-    let spawner = FakeSpawner::default();
+    ));
+    let one_hop = Arc::new(FakeOneHop::default());
+    let spawner = Arc::new(FakeSpawner::default());
     let guarded = GuardedEffects::new(
         permit,
         &MemoryFs,
         &NoProcess,
         &NoEvidence,
-        &resolver,
-        &one_hop,
-        &spawner,
+        resolver.clone(),
+        one_hop.clone(),
+        spawner.clone(),
     );
     let error = futures::executor::block_on(guarded.guarded_http(call.clone(), actual_request))
         .expect_err("digest mismatch");
@@ -613,20 +613,20 @@ fn resolution_target_mismatch_is_definitely_unsent_and_literal_skips_dns() {
         other => panic!("expected authorization, got {other:?}"),
     };
     let (call, permit) = authorized.into_parts();
-    let resolver = FakeResolver::one(
+    let resolver = Arc::new(FakeResolver::one(
         NetworkTarget::parse("other.example.test:443").expect("target"),
         "192.0.2.10",
-    );
-    let one_hop = FakeOneHop::default();
-    let spawner = FakeSpawner::default();
+    ));
+    let one_hop = Arc::new(FakeOneHop::default());
+    let spawner = Arc::new(FakeSpawner::default());
     let guarded = GuardedEffects::new(
         permit,
         &MemoryFs,
         &NoProcess,
         &NoEvidence,
-        &resolver,
-        &one_hop,
-        &spawner,
+        resolver.clone(),
+        one_hop.clone(),
+        spawner.clone(),
     );
     let error =
         futures::executor::block_on(guarded.guarded_http(call, req)).expect_err("target mismatch");
@@ -656,16 +656,17 @@ fn resolution_target_mismatch_is_definitely_unsent_and_literal_skips_dns() {
         other => panic!("expected authorization, got {other:?}"),
     };
     let (call, permit) = authorized.into_parts();
-    let resolver = FakeResolver::default();
-    let one_hop = FakeOneHop::default();
+    let resolver = Arc::new(FakeResolver::default());
+    let one_hop = Arc::new(FakeOneHop::default());
+    let spawner = Arc::new(FakeSpawner::default());
     let guarded = GuardedEffects::new(
         permit,
         &MemoryFs,
         &NoProcess,
         &NoEvidence,
-        &resolver,
-        &one_hop,
-        &spawner,
+        resolver.clone(),
+        one_hop.clone(),
+        spawner.clone(),
     );
     futures::executor::block_on(guarded.guarded_http(call, literal)).expect("literal HTTP");
     assert_eq!(resolver.calls(), 0);
@@ -690,23 +691,23 @@ fn post_effect_transport_failure_retains_possibly_sent_delivery() {
         other => panic!("expected authorization, got {other:?}"),
     };
     let (call, permit) = authorized.into_parts();
-    let resolver = FakeResolver::one(
+    let resolver = Arc::new(FakeResolver::one(
         NetworkTarget::parse("api.example.test:443").expect("target"),
         "192.0.2.10",
-    );
-    let one_hop = FakeOneHop::default();
+    ));
+    let one_hop = Arc::new(FakeOneHop::default());
     *one_hop.failure.lock().expect("failure") = Some(TransportError::possibly_sent(
         TransportFailure::Exchange("reset".into()),
     ));
-    let spawner = FakeSpawner::default();
+    let spawner = Arc::new(FakeSpawner::default());
     let guarded = GuardedEffects::new(
         permit,
         &MemoryFs,
         &NoProcess,
         &NoEvidence,
-        &resolver,
-        &one_hop,
-        &spawner,
+        resolver.clone(),
+        one_hop.clone(),
+        spawner.clone(),
     );
     let error =
         futures::executor::block_on(guarded.guarded_http(call, req)).expect_err("exchange failure");
@@ -730,17 +731,17 @@ fn guarded_duplex_returns_one_child_capability_and_exact_spawn_spec() {
             other => panic!("expected authorization, got {other:?}"),
         };
     let (call, permit) = authorized.into_parts();
-    let resolver = FakeResolver::default();
-    let one_hop = FakeOneHop::default();
-    let spawner = FakeSpawner::default();
+    let resolver = Arc::new(FakeResolver::default());
+    let one_hop = Arc::new(FakeOneHop::default());
+    let spawner = Arc::new(FakeSpawner::default());
     let guarded = GuardedEffects::new(
         permit,
         &MemoryFs,
         &NoProcess,
         &NoEvidence,
-        &resolver,
-        &one_hop,
-        &spawner,
+        resolver.clone(),
+        one_hop.clone(),
+        spawner.clone(),
     );
     let mut handle =
         futures::executor::block_on(guarded.guarded_duplex(call)).expect("child capability");
@@ -782,16 +783,16 @@ fn guarded_duplex_returns_one_child_capability_and_exact_spawn_spec() {
             other => panic!("expected second authorization, got {other:?}"),
         };
     let (interrupt_call, interrupt_permit) = authorized.into_parts();
-    let interrupt_resolver = FakeResolver::default();
-    let interrupt_one_hop = FakeOneHop::default();
+    let interrupt_resolver = Arc::new(FakeResolver::default());
+    let interrupt_one_hop = Arc::new(FakeOneHop::default());
     let interrupt_guarded = GuardedEffects::new(
         interrupt_permit,
         &MemoryFs,
         &NoProcess,
         &NoEvidence,
-        &interrupt_resolver,
-        &interrupt_one_hop,
-        &spawner,
+        interrupt_resolver.clone(),
+        interrupt_one_hop.clone(),
+        spawner.clone(),
     );
     let interrupt_handle =
         futures::executor::block_on(interrupt_guarded.guarded_duplex(interrupt_call))

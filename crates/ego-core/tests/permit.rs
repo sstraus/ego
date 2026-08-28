@@ -3,6 +3,7 @@
 //! See `ARCHITECTURE.md` §3.2 and §3.4, and `plans/m0a-contracts.md` Step 11.
 
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Instant;
 
 use ego_core::config::{Mode, OriginSet, PermCfg, Ruleset, Source};
@@ -101,10 +102,6 @@ mod permit {
             ))))
         }
     }
-    static NO_RESOLVER: NoResolver = NoResolver;
-    static NO_HOP: NoHop = NoHop;
-    static NO_DUPLEX: NoDuplex = NoDuplex;
-
     fn guarded<'a>(granted: Authorized, fs: &'a dyn Fs) -> GuardedEffects<'a> {
         let (_, permit) = granted.into_parts();
         GuardedEffects::new(
@@ -112,9 +109,9 @@ mod permit {
             fs,
             &NO_PROCESS,
             &NO_EVIDENCE,
-            &NO_RESOLVER,
-            &NO_HOP,
-            &NO_DUPLEX,
+            Arc::new(NoResolver),
+            Arc::new(NoHop),
+            Arc::new(NoDuplex),
         )
     }
 
@@ -205,12 +202,12 @@ mod permit {
     }
 
     fn read_call(path: &str) -> PreparedCall {
-        PreparedCall {
-            tool: "read".to_string(),
-            ops: vec![Op::Read {
+        PreparedCall::new(
+            "read",
+            vec![Op::Read {
                 path: CanonPath::new(path),
             }],
-        }
+        )
     }
 
     #[test]
@@ -246,13 +243,13 @@ mod permit {
     }
 
     fn write_call(path: &str) -> PreparedCall {
-        PreparedCall {
-            tool: "edit".to_string(),
-            ops: vec![Op::Write {
+        PreparedCall::new(
+            "edit",
+            vec![Op::Write {
                 path: CanonPath::new(path),
                 change: Change::Whole(b"pwned".to_vec()),
             }],
-        }
+        )
     }
 
     #[test]
@@ -625,9 +622,9 @@ mod permit {
     #[test]
     fn permit_step0_a_question_about_one_op_cannot_pre_empt_a_refusal_of_another() {
         let engine = engine(Mode::Yolo, &[], &[]);
-        let call = PreparedCall {
-            tool: "write".to_string(),
-            ops: vec![
+        let call = PreparedCall::new(
+            "write",
+            vec![
                 Op::Write {
                     path: CanonPath::new("/ws/src/main.rs"),
                     change: Change::Whole(b"harmless".to_vec()),
@@ -636,7 +633,7 @@ mod permit {
                     path: CanonPath::new("/etc/shadow"),
                 },
             ],
-        };
+        );
 
         let Classification::Settled(Err(denied)) = engine.classify(call) else {
             panic!("the second op is outside the workspace, and yolo does not lift that");
@@ -680,9 +677,9 @@ mod permit {
         // *last* question, or that collected them, would let the tool run
         // under a denial it had already been given.
         let engine = engine(Mode::Default, &["read(**)"], &["read(secrets/**)"]);
-        let call = PreparedCall {
-            tool: "read".to_string(),
-            ops: vec![
+        let call = PreparedCall::new(
+            "read",
+            vec![
                 Op::Read {
                     path: CanonPath::new("/ws/src/main.rs"),
                 },
@@ -694,7 +691,7 @@ mod permit {
                     change: Change::Whole(b"pwned".to_vec()),
                 },
             ],
-        };
+        );
         let denied = engine
             .classify_settled(call)
             .expect_err("op two is denied, and that ends the call");
@@ -811,9 +808,9 @@ mod permit {
         // acceptable half would let a tool do part of something nobody
         // approved.
         let engine = in_default_mode("/ws");
-        let call = PreparedCall {
-            tool: "read".to_string(),
-            ops: vec![
+        let call = PreparedCall::new(
+            "read",
+            vec![
                 Op::Read {
                     path: CanonPath::new("/ws/fine.txt"),
                 },
@@ -821,7 +818,7 @@ mod permit {
                     path: CanonPath::new("/etc/shadow"),
                 },
             ],
-        };
+        );
         assert!(engine.classify_settled(call).is_err());
     }
 
@@ -830,23 +827,23 @@ mod permit {
     // See `docs/decisions/2026-08-21-reading-without-reading-everything.md`.
 
     fn list_call(root: &str, pattern: &str) -> PreparedCall {
-        PreparedCall {
-            tool: "glob".to_string(),
-            ops: vec![Op::List {
+        PreparedCall::new(
+            "glob",
+            vec![Op::List {
                 root: CanonPath::new(root),
                 pattern: pattern.to_string(),
             }],
-        }
+        )
     }
 
     fn search_call(root: &str, query: &str) -> PreparedCall {
-        PreparedCall {
-            tool: "grep".to_string(),
-            ops: vec![Op::Search {
+        PreparedCall::new(
+            "grep",
+            vec![Op::Search {
                 root: CanonPath::new(root),
                 query: query.to_string(),
             }],
-        }
+        )
     }
 
     /// A workspace with something worth finding and something worth not
@@ -1445,10 +1442,7 @@ mod permit {
     }
 
     fn check(engine: &PolicyEngine, ops: &[(Kind, &str)]) {
-        let call = PreparedCall {
-            tool: "probe".to_string(),
-            ops: ops.iter().map(|(k, p)| op_of(*k, p)).collect(),
-        };
+        let call = PreparedCall::new("probe", ops.iter().map(|(k, p)| op_of(*k, p)).collect());
         let granted = engine
             .classify_settled(call)
             .expect("every generated call operates inside /ws, in a mode that admits it");

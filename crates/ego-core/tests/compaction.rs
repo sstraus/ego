@@ -88,10 +88,6 @@ impl DuplexSpawner for NoDuplex {
     }
 }
 
-static NO_RESOLVER: NoResolver = NoResolver;
-static NO_HOP: NoHop = NoHop;
-static NO_DUPLEX: NoDuplex = NoDuplex;
-
 const SOURCE: &str = "00000000-0000-0000-0000-000000000001";
 
 fn checkpoint() -> String {
@@ -757,7 +753,14 @@ fn compaction_turn_with_state(
     let tools = Tools::new(
         &registry,
         policy,
-        ToolEffectPorts::new(fs, process, evidence, &NO_RESOLVER, &NO_HOP, &NO_DUPLEX),
+        ToolEffectPorts::new(
+            fs,
+            process,
+            evidence,
+            Arc::new(NoResolver),
+            Arc::new(NoHop),
+            Arc::new(NoDuplex),
+        ),
         CanonPath::new("/ws"),
     );
     let cancel = CancelToken::new();

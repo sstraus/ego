@@ -6,7 +6,8 @@ use std::path::{Path, PathBuf};
 
 use ego_core::event::time::Clock;
 use ego_core::suspension::{
-    ClaimOutcome, ContinuationError, ContinuationJournal, ContinuationRecord, ContinuationState,
+    ClaimedContinuation, ContinuationError, ContinuationJournal, ContinuationRecord,
+    ContinuationState,
 };
 use fd_lock::RwLock;
 use serde::{Deserialize, Serialize};
@@ -23,6 +24,12 @@ const RECORD_VERSION: u32 = 1;
 struct Snapshot {
     version: u32,
     record: ContinuationRecord,
+}
+
+#[derive(Serialize)]
+struct SnapshotRef<'a> {
+    version: u32,
+    record: &'a ContinuationRecord,
 }
 
 #[derive(Debug, Deserialize)]
@@ -62,13 +69,13 @@ impl JsonlContinuationJournal {
         answer: &[u8],
     ) -> Result<String, ContinuationError> {
         let id = record.id().to_owned();
-        record.accept_answer(answer.to_vec())?;
+        record.accept_answer(answer.to_vec(), self.clock.now())?;
         self.with_lock(|| {
             let records = self.load_locked()?;
             if records.contains_key(&id) {
                 return Err(ContinuationError::DuplicateAnswer);
             }
-            self.append_locked(record)?;
+            self.append_locked(&record)?;
             Ok(id)
         })
     }
@@ -79,15 +86,21 @@ impl JsonlContinuationJournal {
     }
 
     /// Atomically consume a continuation at most once.
-    pub fn claim(&self, id: &str) -> Result<ClaimOutcome, ContinuationError> {
+    pub fn claim(&self, id: &str) -> Result<ClaimedContinuation, ContinuationError> {
         self.with_lock(|| {
-            let mut record = self.get_locked(id)?;
-            let outcome = record.claim(self.clock.now())?;
-            if outcome.is_first() {
-                self.append_locked(record)?;
-            }
-            Ok(outcome)
+            let claimed = self.get_locked(id)?.claim(self.clock.now())?;
+            self.append_locked(claimed.record())?;
+            Ok(claimed)
         })
+    }
+
+    /// Durably settle the exact claim token returned by [`Self::claim`].
+    pub fn settle(
+        &self,
+        claimed: ClaimedContinuation,
+        state: ContinuationState,
+    ) -> Result<(), ContinuationError> {
+        self.settle_claimed(claimed, state)
     }
 
     /// Record that a claimed remote effect has an unknown settlement.
@@ -95,7 +108,7 @@ impl JsonlContinuationJournal {
         self.with_lock(|| {
             let mut record = self.get_locked(id)?;
             record.settle(ContinuationState::Uncertain)?;
-            self.append_locked(record)
+            self.append_locked(&record)
         })
     }
 
@@ -174,8 +187,8 @@ impl JsonlContinuationJournal {
         Ok(records)
     }
 
-    fn append_locked(&self, record: ContinuationRecord) -> Result<(), ContinuationError> {
-        let line = serde_json::to_vec(&Snapshot {
+    fn append_locked(&self, record: &ContinuationRecord) -> Result<(), ContinuationError> {
+        let line = serde_json::to_vec(&SnapshotRef {
             version: RECORD_VERSION,
             record,
         })
@@ -196,15 +209,20 @@ impl ContinuationJournal for JsonlContinuationJournal {
             if self.load_locked()?.contains_key(&id) {
                 return Err(ContinuationError::InvalidTransition);
             }
-            self.append_locked(record)
+            self.append_locked(&record)
         })
     }
 
-    fn accept_answer(&self, id: &str, answer: &[u8]) -> Result<(), ContinuationError> {
+    fn accept_answer(
+        &self,
+        id: &str,
+        answer: &[u8],
+        now: ego_core::event::time::Timestamp,
+    ) -> Result<(), ContinuationError> {
         self.with_lock(|| {
             let mut record = self.get_locked(id)?;
-            record.accept_answer(answer.to_vec())?;
-            self.append_locked(record)
+            record.accept_answer(answer.to_vec(), now)?;
+            self.append_locked(&record)
         })
     }
 
@@ -216,22 +234,36 @@ impl ContinuationJournal for JsonlContinuationJournal {
         &self,
         id: &str,
         now: ego_core::event::time::Timestamp,
-    ) -> Result<ClaimOutcome, ContinuationError> {
+    ) -> Result<ClaimedContinuation, ContinuationError> {
         self.with_lock(|| {
-            let mut record = self.get_locked(id)?;
-            let outcome = record.claim(now)?;
-            if outcome.is_first() {
-                self.append_locked(record)?;
-            }
-            Ok(outcome)
+            let claimed = self.get_locked(id)?.claim(now)?;
+            self.append_locked(claimed.record())?;
+            Ok(claimed)
         })
     }
 
-    fn settle(&self, id: &str, state: ContinuationState) -> Result<(), ContinuationError> {
+    fn settle(
+        &self,
+        claimed: ClaimedContinuation,
+        state: ContinuationState,
+    ) -> Result<(), ContinuationError> {
+        self.settle_claimed(claimed, state)
+    }
+}
+
+impl JsonlContinuationJournal {
+    fn settle_claimed(
+        &self,
+        claimed: ClaimedContinuation,
+        state: ContinuationState,
+    ) -> Result<(), ContinuationError> {
         self.with_lock(|| {
-            let mut record = self.get_locked(id)?;
-            record.settle(state)?;
-            self.append_locked(record)
+            let durable = self.get_locked(claimed.id())?;
+            if durable != *claimed.record() {
+                return Err(ContinuationError::InvalidTransition);
+            }
+            let settled = claimed.settle(state)?;
+            self.append_locked(&settled)
         })
     }
 }

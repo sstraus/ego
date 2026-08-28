@@ -9,11 +9,13 @@
 use serde_json::Value;
 
 use crate::generator::types::ToolDescriptor as GenToolDescriptor;
+use crate::mcp::ToolExecution;
 use crate::permit::{
     Authorized, CanonPath, Classification, DuplexSpawner, Fs, GuardedEffects, OneHop, Pending,
     PolicyEngine, PrepareCtx, PreparedCall, ProcessExecutor, Resolution, Resolver, Tool, ToolError,
 };
 use crate::store::evidence::EvidenceStore;
+use crate::suspension::ResumeSealer;
 
 use super::RegisteredTool;
 use super::catalogue::{
@@ -67,9 +69,9 @@ pub struct ToolEffectPorts<'a> {
     fs: &'a dyn Fs,
     process: &'a dyn ProcessExecutor,
     evidence: &'a dyn EvidenceStore,
-    resolver: &'a dyn Resolver,
-    one_hop: &'a dyn OneHop,
-    duplex: &'a dyn DuplexSpawner,
+    resolver: std::sync::Arc<dyn Resolver>,
+    one_hop: std::sync::Arc<dyn OneHop>,
+    duplex: std::sync::Arc<dyn DuplexSpawner>,
 }
 
 impl<'a> ToolEffectPorts<'a> {
@@ -77,9 +79,9 @@ impl<'a> ToolEffectPorts<'a> {
         fs: &'a dyn Fs,
         process: &'a dyn ProcessExecutor,
         evidence: &'a dyn EvidenceStore,
-        resolver: &'a dyn Resolver,
-        one_hop: &'a dyn OneHop,
-        duplex: &'a dyn DuplexSpawner,
+        resolver: std::sync::Arc<dyn Resolver>,
+        one_hop: std::sync::Arc<dyn OneHop>,
+        duplex: std::sync::Arc<dyn DuplexSpawner>,
     ) -> Self {
         Self {
             fs,
@@ -102,6 +104,7 @@ pub struct Tools<'a> {
     /// authorised call; there is no permit to swap into a shared one.
     effects: ToolEffectPorts<'a>,
     cwd: CanonPath,
+    resume: Option<std::sync::Arc<ResumeSealer>>,
 }
 
 impl<'a> Tools<'a> {
@@ -121,6 +124,7 @@ impl<'a> Tools<'a> {
             policy,
             effects,
             cwd,
+            resume: None,
         }
     }
 
@@ -138,6 +142,7 @@ impl<'a> Tools<'a> {
             policy,
             effects,
             cwd,
+            resume: None,
         }
     }
 
@@ -156,7 +161,13 @@ impl<'a> Tools<'a> {
             policy,
             effects,
             cwd,
+            resume: None,
         })
+    }
+
+    pub fn with_resume(mut self, resume: std::sync::Arc<ResumeSealer>) -> Self {
+        self.resume = Some(resume);
+        self
     }
 
     pub(crate) fn capture(&self) -> Result<GenerationToolCatalogue, ToolCatalogueError> {
@@ -312,16 +323,27 @@ impl<'a> Tools<'a> {
         &self,
         tool: &dyn Tool,
         authorized: Authorized,
-    ) -> Result<crate::permit::ToolResult, ToolError> {
+    ) -> Result<ToolExecution, ToolError> {
+        let resume = if authorized.call().mcp_envelope().is_some() {
+            Some(
+                self.resume
+                    .as_ref()
+                    .ok_or(crate::suspension::ContinuationError::InvalidKey)?
+                    .prepare(&authorized, self.policy.resume_floor())?,
+            )
+        } else {
+            None
+        };
         let (call, permit) = authorized.into_parts();
-        let guarded = GuardedEffects::new(
+        let guarded = GuardedEffects::new_with_resume(
             permit,
             self.effects.fs,
             self.effects.process,
             self.effects.evidence,
-            self.effects.resolver,
-            self.effects.one_hop,
-            self.effects.duplex,
+            std::sync::Arc::clone(&self.effects.resolver),
+            std::sync::Arc::clone(&self.effects.one_hop),
+            std::sync::Arc::clone(&self.effects.duplex),
+            resume,
         );
         tool.execute(call, &guarded).await
     }
