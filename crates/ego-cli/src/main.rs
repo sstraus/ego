@@ -104,6 +104,14 @@ async fn ordinary_main() -> std::process::ExitCode {
             state: ego_core::state::SessionState::default(),
             result: serde_json::Value::String(String::new()),
         },
+        // `mcp-server` owns stdout as its JSON-RPC transport and serves many
+        // rooted runs, so the ordinary process projection must stay silent.
+        Ok(Invocation::McpServer(args)) => Ended {
+            termination: ego_cli::mcp_server::serve(&args).await,
+            session: ego_core::event::id::SessionId::new(),
+            state: ego_core::state::SessionState::default(),
+            result: serde_json::Value::String(String::new()),
+        },
         // `--help` and `--version`. On **stdout** and exit 0, because the
         // question was answered: `CLI.md` §4.3's exit 2 is a usage error, and
         // asking what a command does is not misusing it. The text is written

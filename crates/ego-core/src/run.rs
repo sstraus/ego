@@ -28,15 +28,17 @@ use std::future::Future;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::task::{Context, Poll, Waker};
 
 use futures::StreamExt;
 use futures::future::BoxFuture;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use uuid::Uuid;
 
-use crate::config::ModelRef;
+use crate::ceiling::Budget;
+use crate::config::{Mode, ModelRef};
+use crate::cost::Money;
 use crate::event::id::SessionId;
 use crate::event::time::{Clock, Timestamp};
 use crate::generator::capabilities::ModelCapabilities;
@@ -450,6 +452,108 @@ impl RunRevision {
     }
 }
 
+/// Immutable caller selections carried through admission and durable replay.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunSelections {
+    model: Option<ModelRef>,
+    thinking: Option<crate::generator::types::ThinkingLevel>,
+    mode: Option<Mode>,
+    #[serde(
+        default,
+        serialize_with = "serialize_run_budget",
+        deserialize_with = "deserialize_run_budget"
+    )]
+    budget: Option<Budget>,
+    profile: Option<String>,
+}
+
+impl RunSelections {
+    pub fn new(
+        model: Option<ModelRef>,
+        thinking: Option<crate::generator::types::ThinkingLevel>,
+        mode: Option<Mode>,
+        budget: Option<Budget>,
+        profile: Option<String>,
+    ) -> Self {
+        Self {
+            model,
+            thinking,
+            mode,
+            budget,
+            profile,
+        }
+    }
+
+    pub const fn empty() -> Self {
+        Self {
+            model: None,
+            thinking: None,
+            mode: None,
+            budget: None,
+            profile: None,
+        }
+    }
+
+    pub fn model(&self) -> Option<&ModelRef> {
+        self.model.as_ref()
+    }
+
+    pub const fn thinking(&self) -> Option<crate::generator::types::ThinkingLevel> {
+        self.thinking
+    }
+
+    pub const fn mode(&self) -> Option<Mode> {
+        self.mode
+    }
+
+    pub fn budget(&self) -> Option<&Budget> {
+        self.budget.as_ref()
+    }
+
+    pub fn profile(&self) -> Option<&str> {
+        self.profile.as_deref()
+    }
+
+    fn with_model(&self, model: ModelRef) -> Self {
+        let mut pinned = self.clone();
+        pinned.model = Some(model);
+        pinned
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+enum RunBudgetCodec {
+    Money(Money),
+    Tokens(u64),
+}
+
+fn serialize_run_budget<S>(budget: &Option<Budget>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    budget
+        .as_ref()
+        .map(|budget| match budget {
+            Budget::Money(money) => RunBudgetCodec::Money(*money),
+            Budget::Tokens(tokens) => RunBudgetCodec::Tokens(*tokens),
+        })
+        .serialize(serializer)
+}
+
+fn deserialize_run_budget<'de, D>(deserializer: D) -> Result<Option<Budget>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(
+        Option::<RunBudgetCodec>::deserialize(deserializer)?.map(|budget| match budget {
+            RunBudgetCodec::Money(money) => Budget::Money(money),
+            RunBudgetCodec::Tokens(tokens) => Budget::Tokens(tokens),
+        }),
+    )
+}
+
 /// Public durable lifecycle state. `Running` means admitted, not inferred
 /// provider activity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -520,6 +624,7 @@ pub struct RunTransaction {
     revision: RunRevision,
     run_id: RunId,
     root: RunRoot,
+    selections: RunSelections,
     command: RunCommand,
     status: RunStatus,
     observed_at: Timestamp,
@@ -538,6 +643,10 @@ impl RunTransaction {
 
     pub fn root(&self) -> &RunRoot {
         &self.root
+    }
+
+    pub fn selections(&self) -> &RunSelections {
+        &self.selections
     }
 
     pub fn command(&self) -> &RunCommand {
@@ -592,7 +701,7 @@ pub struct StartRequest {
     root: RunRoot,
     request_id: RequestId,
     digest: RequestDigest,
-    requested_model: Option<ModelRef>,
+    selections: RunSelections,
     prompt: String,
 }
 
@@ -601,14 +710,14 @@ impl StartRequest {
         root: RunRoot,
         request_id: RequestId,
         digest: RequestDigest,
-        requested_model: Option<ModelRef>,
+        selections: RunSelections,
         prompt: impl Into<String>,
     ) -> Self {
         Self {
             root,
             request_id,
             digest,
-            requested_model,
+            selections,
             prompt: prompt.into(),
         }
     }
@@ -679,7 +788,7 @@ pub struct CancelKey {
 pub struct RunPreparation {
     pub run_id: RunId,
     pub root: RunRoot,
-    pub requested_model: Option<ModelRef>,
+    pub selections: RunSelections,
     pub continuation: bool,
 }
 
@@ -941,6 +1050,7 @@ impl From<RunExecutorError> for RunError {
 pub struct RunSnapshot {
     run_id: RunId,
     root: RunRoot,
+    selections: RunSelections,
     revision: RunRevision,
     status: RunStatus,
     settlement: Option<RunSettlement>,
@@ -955,6 +1065,9 @@ impl RunSnapshot {
     }
     pub fn root(&self) -> RunRoot {
         self.root.clone()
+    }
+    pub fn selections(&self) -> &RunSelections {
+        &self.selections
     }
     pub const fn revision(&self) -> RunRevision {
         self.revision
@@ -1060,6 +1173,7 @@ pub struct RunExecution {
     bindings: RunExecutionBindings,
     mode: ExecutionMode,
     subscription: Arc<Mutex<SubscriptionState>>,
+    liveness: Arc<ExecutionLiveness>,
 }
 
 pub struct RunAdmission {
@@ -1153,14 +1267,18 @@ struct ActiveLease {
 struct LiveState {
     handles: HashMap<RunId, RunHandle>,
     subscriptions: HashMap<(RunId, TurnLease), Arc<Mutex<SubscriptionState>>>,
+    executions: HashMap<(RunId, TurnLease), Weak<ExecutionLiveness>>,
     interrupted: BTreeSet<(RunId, TurnLease)>,
 }
+
+struct ExecutionLiveness;
 
 impl LiveState {
     fn new() -> Self {
         Self {
             handles: HashMap::new(),
             subscriptions: HashMap::new(),
+            executions: HashMap::new(),
             interrupted: BTreeSet::new(),
         }
     }
@@ -1219,7 +1337,7 @@ where
             .prepare(&RunPreparation {
                 run_id,
                 root: request.root.clone(),
-                requested_model: request.requested_model.clone(),
+                selections: request.selections.clone(),
                 continuation: false,
             })
             .await?;
@@ -1229,6 +1347,7 @@ where
             revision: RunRevision::new(1),
             run_id,
             root: request.root.clone(),
+            selections: request.selections.clone(),
             command: RunCommand::CommandAdmitted {
                 request_id: request.request_id,
                 digest: request.digest.clone(),
@@ -1263,6 +1382,7 @@ where
                     RunSnapshot {
                         run_id,
                         root: request.root,
+                        selections: request.selections,
                         revision,
                         status: RunStatus::Running,
                         settlement: None,
@@ -1304,12 +1424,13 @@ where
         }
 
         let model = self.model_of(&folded);
+        let preparation_selections = folded.snapshot.selections.with_model(model.clone());
         let prepared = self
             .executor
             .prepare(&RunPreparation {
                 run_id: request.run_id,
                 root: folded.snapshot.root.clone(),
-                requested_model: Some(model.clone()),
+                selections: preparation_selections,
                 continuation: true,
             })
             .await?;
@@ -1327,6 +1448,7 @@ where
             revision,
             run_id: request.run_id,
             root: folded.snapshot.root.clone(),
+            selections: folded.snapshot.selections.clone(),
             command: RunCommand::CommandAdmitted {
                 request_id: request.request_id,
                 digest: request.digest.clone(),
@@ -1357,6 +1479,7 @@ where
                     RunSnapshot {
                         run_id: request.run_id,
                         root: folded.snapshot.root,
+                        selections: folded.snapshot.selections,
                         revision: committed,
                         status: RunStatus::Running,
                         settlement: None,
@@ -1393,6 +1516,7 @@ where
             bindings,
             mode,
             subscription: _subscription,
+            liveness: _liveness,
         } = execution;
         let effect = match mode {
             ExecutionMode::Start {
@@ -1489,6 +1613,20 @@ where
             ));
         }
         let lease = folded.active_lease()?;
+        let live_execution = {
+            let mut live = self.live.lock().expect("run live state");
+            let key = (run_id, lease);
+            let liveness = live.executions.get(&key).and_then(Weak::upgrade);
+            if liveness.is_none() {
+                live.executions.remove(&key);
+            }
+            liveness
+        };
+        if let Some(_liveness) = live_execution {
+            return Ok(RunRecoveryOutcome::Observed(
+                self.observation(&folded, lease),
+            ));
+        }
         match self.executor.recover(&run_id).await? {
             RecoveryEvidence::Running(handle) => {
                 self.bind_handle(run_id, &handle)?;
@@ -1526,11 +1664,14 @@ where
             complete: false,
             wakers: Vec::new(),
         }));
-        self.live
-            .lock()
-            .expect("run live state")
-            .subscriptions
-            .insert((snapshot.run_id, lease), Arc::clone(&state));
+        let liveness = Arc::new(ExecutionLiveness);
+        {
+            let mut live = self.live.lock().expect("run live state");
+            live.subscriptions
+                .insert((snapshot.run_id, lease), Arc::clone(&state));
+            live.executions
+                .insert((snapshot.run_id, lease), Arc::downgrade(&liveness));
+        }
         let cancel_key = self.cancel_key(&snapshot, lease);
         RunAdmission {
             snapshot: snapshot.clone(),
@@ -1544,6 +1685,7 @@ where
                 bindings,
                 mode,
                 subscription: state,
+                liveness,
             }),
         }
     }
@@ -1560,11 +1702,14 @@ where
             complete: false,
             wakers: Vec::new(),
         }));
-        self.live
-            .lock()
-            .expect("run live state")
-            .subscriptions
-            .insert((snapshot.run_id, lease), Arc::clone(&state));
+        let liveness = Arc::new(ExecutionLiveness);
+        {
+            let mut live = self.live.lock().expect("run live state");
+            live.subscriptions
+                .insert((snapshot.run_id, lease), Arc::clone(&state));
+            live.executions
+                .insert((snapshot.run_id, lease), Arc::downgrade(&liveness));
+        }
         RunReattachment {
             cancel_key: self.cancel_key(&snapshot, lease),
             snapshot: snapshot.clone(),
@@ -1577,6 +1722,7 @@ where
                 bindings,
                 mode: ExecutionMode::RecoveredObserve { handle },
                 subscription: state,
+                liveness,
             }),
         }
     }
@@ -1767,6 +1913,7 @@ where
             revision: folded.snapshot.revision.next(),
             run_id: request.run_id,
             root: folded.snapshot.root.clone(),
+            selections: folded.snapshot.selections.clone(),
             command: RunCommand::CancelRequested {
                 request_id: request.request_id,
                 digest: request.digest.clone(),
@@ -1797,6 +1944,7 @@ where
                 Ok(RunSnapshot {
                     run_id: request.run_id,
                     root: folded.snapshot.root,
+                    selections: folded.snapshot.selections,
                     revision,
                     status: RunStatus::Cancelling,
                     settlement: None,
@@ -1843,14 +1991,12 @@ where
                     .and_then(|receipt| receipt.settlement.as_ref())
                 {
                     if recorded == &settlement {
-                        if let Some(subscription) = self
-                            .live
-                            .lock()
-                            .expect("run live state")
-                            .subscriptions
-                            .get(&(run_id, lease))
-                            .cloned()
-                        {
+                        let subscription = {
+                            let mut live = self.live.lock().expect("run live state");
+                            live.executions.remove(&(run_id, lease));
+                            live.subscriptions.get(&(run_id, lease)).cloned()
+                        };
+                        if let Some(subscription) = subscription {
                             Self::publish_subscription(
                                 &subscription,
                                 folded.snapshot.clone(),
@@ -1872,6 +2018,7 @@ where
                 revision: folded.snapshot.revision.next(),
                 run_id,
                 root: folded.snapshot.root.clone(),
+                selections: folded.snapshot.selections.clone(),
                 command: RunCommand::CommandSettled {
                     lease,
                     settlement: settlement.clone(),
@@ -1889,18 +2036,17 @@ where
                     let snapshot = RunSnapshot {
                         run_id,
                         root: folded.snapshot.root,
+                        selections: folded.snapshot.selections,
                         revision,
                         status,
                         settlement: Some(settlement.clone()),
                     };
-                    if let Some(subscription) = self
-                        .live
-                        .lock()
-                        .expect("run live state")
-                        .subscriptions
-                        .get(&(run_id, lease))
-                        .cloned()
-                    {
+                    let subscription = {
+                        let mut live = self.live.lock().expect("run live state");
+                        live.executions.remove(&(run_id, lease));
+                        live.subscriptions.get(&(run_id, lease)).cloned()
+                    };
+                    if let Some(subscription) = subscription {
                         Self::publish_subscription(&subscription, snapshot.clone(), true);
                     }
                     return Ok(snapshot);
@@ -2000,6 +2146,7 @@ impl FoldedRun {
         }
         let run_id = first.run_id;
         let root = first.root.clone();
+        let selections = first.selections.clone();
         let mut admissions: Vec<AdmissionReceipt> = Vec::new();
         let mut active: Option<ActiveLease> = None;
         let mut expected = RunRevision::new(1);
@@ -2009,6 +2156,7 @@ impl FoldedRun {
         let mut snapshot = RunSnapshot {
             run_id,
             root: root.clone(),
+            selections: selections.clone(),
             revision: expected,
             status: RunStatus::Running,
             settlement: None,
@@ -2018,10 +2166,11 @@ impl FoldedRun {
         for transaction in &transactions {
             if transaction.run_id != run_id
                 || transaction.root != root
+                || transaction.selections != selections
                 || transaction.revision != expected
             {
                 return Err(RunError::Integrity {
-                    message: "run transaction stream changes identity, root, or revision order"
+                    message: "run transaction stream changes identity, root, selections, or revision order"
                         .to_owned(),
                 });
             }

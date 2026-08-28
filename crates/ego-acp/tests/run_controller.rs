@@ -29,7 +29,7 @@ use ego_core::generator::capabilities::{
 use ego_core::run::{
     EventSinkFactory, IdSource, RequestId, RunAppend, RunController, RunExecutionBindings,
     RunExecutor, RunExecutorError, RunHandle, RunId, RunPreparation, RunPrepared, RunRetention,
-    RunRevision, RunRoot, RunSettlement, RunStart, RunTransaction,
+    RunRevision, RunRoot, RunSelections, RunSettlement, RunStart, RunTransaction,
 };
 use ego_core::sink::{EventSink, NullSink};
 use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
@@ -270,7 +270,7 @@ struct AcpExecutor {
     settlements: Mutex<VecDeque<Result<ego_core::run::RunSettlement, RunExecutorError>>>,
     next_prepared: Mutex<u64>,
     prepared_models: Mutex<VecDeque<ModelRef>>,
-    prepared_requests: Mutex<Vec<Option<ModelRef>>>,
+    prepared_selections: Mutex<Vec<RunSelections>>,
     gate: Mutex<SubmitGate>,
     started_roots: Mutex<Vec<(RunId, RunRoot)>>,
     started_models: Mutex<Vec<(RunId, ModelRef)>>,
@@ -285,6 +285,7 @@ struct RecordingAuthority {
     _observations: Arc<Mutex<Vec<RunId>>>,
 }
 
+#[derive(Default)]
 struct SubmitGate {
     released: bool,
     interrupted: bool,
@@ -293,20 +294,6 @@ struct SubmitGate {
     waker: Option<Waker>,
     started_waker: Option<Waker>,
     finished_waker: Option<Waker>,
-}
-
-impl Default for SubmitGate {
-    fn default() -> Self {
-        Self {
-            released: false,
-            interrupted: false,
-            started: false,
-            finished: false,
-            waker: None,
-            started_waker: None,
-            finished_waker: None,
-        }
-    }
 }
 
 impl Default for AcpExecutor {
@@ -322,7 +309,7 @@ impl AcpExecutor {
             settlements: Mutex::new(VecDeque::new()),
             next_prepared: Mutex::new(0),
             prepared_models: Mutex::new(VecDeque::new()),
-            prepared_requests: Mutex::new(Vec::new()),
+            prepared_selections: Mutex::new(Vec::new()),
             gate: Mutex::new(SubmitGate::default()),
             started_roots: Mutex::new(Vec::new()),
             started_models: Mutex::new(Vec::new()),
@@ -350,10 +337,12 @@ impl AcpExecutor {
     }
 
     fn prepared_requests(&self) -> Vec<Option<ModelRef>> {
-        self.prepared_requests
+        self.prepared_selections
             .lock()
-            .expect("ACP prepared requests")
-            .clone()
+            .expect("ACP prepared selections")
+            .iter()
+            .map(|selections| selections.model().cloned())
+            .collect()
     }
 
     fn bindings_received(&self) -> usize {
@@ -439,10 +428,10 @@ impl RunExecutor for AcpExecutor {
         &'a self,
         request: &'a RunPreparation,
     ) -> BoxFuture<'a, Result<RunPrepared<Self::Prepared>, RunExecutorError>> {
-        self.prepared_requests
+        self.prepared_selections
             .lock()
-            .expect("ACP prepared requests")
-            .push(request.requested_model.clone());
+            .expect("ACP prepared selections")
+            .push(request.selections.clone());
         self.calls
             .lock()
             .expect("ACP executor calls")
@@ -620,7 +609,7 @@ impl Default for AcpClock {
 
 impl Clock for AcpClock {
     fn now(&self) -> Timestamp {
-        self.now.clone()
+        self.now
     }
 }
 

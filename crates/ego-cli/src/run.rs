@@ -7,14 +7,16 @@
 //! a store, then turns — and the two things only a process can do: notice a
 //! signal, and notice a deadline.
 
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::task::Waker;
 use std::time::Duration;
 
+use ego_core::ceiling::{Budget, Ceilings};
 use ego_core::config::{
-    Effective, Limits, Mode, Posture, Selection, SystemPrompt, Trust, UserConfigStore, resolve,
-    system_prompt,
+    Effective, Limits, Mode, ModelRef, Posture, Selection, SystemPrompt, Trust, UserConfigStore,
+    resolve, system_prompt,
 };
 use ego_core::cost::CurrencyCode;
 use ego_core::event::domain::CancelCause;
@@ -35,10 +37,11 @@ use ego_core::public::{PUBLIC_EVENT_VERSION, PublicEvent, QuestionReport, projec
 use ego_core::question::{AskQuestionTool, Elicitor, QuestionOutcome};
 use ego_core::run::{
     CancelReason, DeniedBy, RecoveryEvidence, RunExecutionBindings, RunExecutor, RunExecutorError,
-    RunHandle, RunPreparation, RunPrepared, RunSettlement, RunStart, RunTermination, Signal,
+    RunHandle, RunId, RunPreparation, RunPrepared, RunSettlement, RunStart, RunTermination, Signal,
 };
 use ego_core::sink::{EventSink, NullSink};
 use ego_core::state::{ItemKind, QuestionContinuation, SessionState};
+use ego_core::store::run_artifact::{PublishedRunArtifact, RunArtifactStore};
 use ego_core::store::session_store::{SessionMeta, SessionStore};
 use ego_core::turn::{
     CancelToken, GenerationRuntime, InteractiveControl, Journal, JudgeContext, QueueStatus,
@@ -53,6 +56,7 @@ use ego_tools::instructions::OsInstructionIo;
 use ego_tools::store::{JsonlStore, OsIo, SessionEvidenceStore};
 use ego_tools::tools::builtins;
 use serde_json::Value;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::budget;
 use crate::cli::{Args, ModelsArgs, Output, ResumeAnswer, SessionChoice, UsageError};
@@ -812,19 +816,6 @@ fn rooted_settings(
     trust_for: impl FnOnce(&Path) -> Trust,
     diagnostics: &dyn Diagnostics,
 ) -> Result<Settings, UsageError> {
-    let started = std::time::Instant::now();
-    let timeout = match args.timeout.as_deref() {
-        Some(spec) => Some(deadline(spec)?),
-        None => None,
-    };
-    let run_deadline = timeout
-        .map(|timeout| {
-            started
-                .checked_add(timeout)
-                .ok_or_else(|| UsageError("--timeout exceeds the monotonic clock".to_string()))
-        })
-        .transpose()?;
-
     // The workspace root is the working directory. Discovering a repository
     // root is `git`'s question and would make the answer depend on a tool that
     // may not be installed; `-C` is how a caller says otherwise.
@@ -837,6 +828,39 @@ fn rooted_settings(
     let layers = config::layers(&root, args, trust)?;
     let effective = resolve(&layers, trust, config::profile(args).as_deref())
         .map_err(|err| UsageError(err.to_string()))?;
+    finish_rooted_settings(args, cwd, effective, trust, diagnostics)
+}
+
+fn frozen_rooted_settings(
+    args: &Args,
+    cwd: PathBuf,
+    frozen: &config::FrozenRunConfig,
+    diagnostics: &dyn Diagnostics,
+) -> Result<Settings, UsageError> {
+    let effective = frozen.resolve(args)?;
+    finish_rooted_settings(args, cwd, effective, Trust::Untrusted, diagnostics)
+}
+
+fn finish_rooted_settings(
+    args: &Args,
+    cwd: PathBuf,
+    effective: Effective,
+    trust: Trust,
+    diagnostics: &dyn Diagnostics,
+) -> Result<Settings, UsageError> {
+    let started = std::time::Instant::now();
+    let timeout = match args.timeout.as_deref() {
+        Some(spec) => Some(deadline(spec)?),
+        None => None,
+    };
+    let run_deadline = timeout
+        .map(|timeout| {
+            started
+                .checked_add(timeout)
+                .ok_or_else(|| UsageError("--timeout exceeds the monotonic clock".to_string()))
+        })
+        .transpose()?;
+    let root = cwd.clone();
     if trust == Trust::Untrusted || args.bare {
         debug_assert_eq!(effective.posture, Posture::Bare);
     }
@@ -1335,9 +1359,27 @@ async fn drive_headless_turn(
     Ok((termination, loop_.into_state(), result))
 }
 
+/// Re-encode one typed selection through the current shared budget grammar.
+fn run_budget_spec(budget: &Budget) -> Result<String, RunTermination> {
+    match budget {
+        Budget::Money(_) => Ok(budget.to_string()),
+        Budget::Tokens(tokens) if tokens.is_multiple_of(1_000) => {
+            Ok(format!("{}k", tokens / 1_000))
+        }
+        Budget::Tokens(tokens) => Err(RunTermination::UsageError {
+            message: format!(
+                "the typed token budget {tokens} is not representable by the current budget grammar"
+            ),
+        }),
+    }
+}
+
 /// The headless pipeline after every refusal-producing selection has resolved.
 pub struct CliPrepared {
+    _permit: Option<OwnedSemaphorePermit>,
     store: Arc<JsonlStore>,
+    artifacts: Option<Arc<dyn RunArtifactStore>>,
+    run_id: RunId,
     session_id: SessionId,
     schema_retries: u32,
     max_turns: Option<u32>,
@@ -1360,21 +1402,34 @@ impl CliPrepared {
     async fn prepare(
         mut args: Args,
         store: Arc<JsonlStore>,
+        artifacts: Option<Arc<dyn RunArtifactStore>>,
         request: &RunPreparation,
+        permit: Option<OwnedSemaphorePermit>,
+        frozen: Option<&config::FrozenRunConfig>,
     ) -> Result<RunPrepared<Self>, RunTermination> {
         let usage = |error: UsageError| RunTermination::UsageError {
             message: error.to_string(),
         };
-        args.model = request
-            .requested_model
-            .as_ref()
-            .map(|model| model.0.clone());
-        let settings = rooted_settings(
-            &args,
-            request.root.as_path().to_path_buf(),
-            |_| Trust::Untrusted,
-            &Stderr,
-        )
+        if let Some(model) = request.selections.model() {
+            args.model = Some(model.0.clone());
+        }
+        if let Some(thinking) = request.selections.thinking() {
+            args.thinking = Some(thinking);
+        }
+        if let Some(mode) = request.selections.mode() {
+            args.mode = Some(mode);
+        }
+        if let Some(budget) = request.selections.budget() {
+            args.budget = Some(run_budget_spec(budget)?);
+        }
+        if let Some(profile) = request.selections.profile() {
+            args.profile = Some(profile.to_owned());
+        }
+        let root = request.root.as_path().to_path_buf();
+        let settings = match frozen {
+            Some(frozen) => frozen_rooted_settings(&args, root, frozen, &Stderr),
+            None => rooted_settings(&args, root, |_| Trust::Untrusted, &Stderr),
+        }
         .map_err(usage)?;
         let Materials {
             system,
@@ -1417,7 +1472,10 @@ impl CliPrepared {
         Ok(RunPrepared::new(
             model,
             Self {
+                _permit: permit,
                 store,
+                artifacts,
+                run_id: request.run_id,
                 session_id: request.run_id.session_id(),
                 schema_retries,
                 max_turns,
@@ -1444,6 +1502,8 @@ impl CliPrepared {
         bindings: RunExecutionBindings,
         cancel: &CancelToken,
     ) -> Result<RunSettlement, RunExecutorError> {
+        let run_id = self.run_id;
+        let artifacts = self.artifacts.clone();
         let clock = SystemClock;
         let opened = Opened::Durable(Box::new(
             session::open(self.store.as_ref(), &self.session_id, &clock)
@@ -1494,7 +1554,7 @@ impl CliPrepared {
             max_turns: self.max_turns,
             deadline: self.run_deadline,
         };
-        let (termination, state, _) = match drive_headless_turn(
+        let (termination, state, result) = match drive_headless_turn(
             &mut active,
             opening,
             &clock,
@@ -1520,7 +1580,27 @@ impl CliPrepared {
             Err(termination) => return settlement(termination),
         };
         active.replace_state(state);
-        settlement(termination)
+        let settlement = settlement(termination)?;
+        if matches!(&settlement, RunSettlement::Completed)
+            && let Some(artifacts) = artifacts
+        {
+            artifacts
+                .publish(run_id, public_result_artifact(result)?)
+                .map_err(|error| RunExecutorError::new(error.to_string()))?;
+        }
+        Ok(settlement)
+    }
+}
+
+fn public_result_artifact(result: Value) -> Result<PublishedRunArtifact, RunExecutorError> {
+    match result {
+        Value::String(text) => Ok(PublishedRunArtifact::output(
+            "text/plain",
+            text.into_bytes(),
+        )),
+        structured => serde_json::to_vec(&structured)
+            .map(|bytes| PublishedRunArtifact::output("application/json", bytes))
+            .map_err(|error| RunExecutorError::new(error.to_string())),
     }
 }
 
@@ -1627,44 +1707,106 @@ impl CliRunAuthority {
 pub struct CliRunExecutor {
     args: Args,
     store: Arc<JsonlStore>,
+    concurrency: Option<Arc<Semaphore>>,
+    frozen: Option<Arc<config::FrozenRunConfig>>,
+    artifacts: Option<Arc<dyn RunArtifactStore>>,
+}
+
+#[derive(Clone)]
+pub(crate) struct CliMcpRunPolicy {
+    pub(crate) root: ego_core::run::RunRoot,
+    pub(crate) model: ModelRef,
+    pub(crate) thinking: ThinkingLevel,
+    pub(crate) mode: Mode,
+    pub(crate) ceilings: Ceilings,
+    pub(crate) profile: Option<String>,
+}
+
+fn protocol_args(session_dir: Option<PathBuf>) -> Args {
+    Args {
+        prompt: None,
+        stdin: crate::cli::Stdin::Ambient,
+        model: None,
+        offline: false,
+        sandbox: None,
+        thinking: None,
+        system: None,
+        append_system: None,
+        instructions: None,
+        bare: false,
+        mode: None,
+        allow: Vec::new(),
+        deny: Vec::new(),
+        answers: Vec::new(),
+        session: SessionChoice::Ephemeral,
+        session_dir,
+        output: Output::Json,
+        schema: None,
+        schema_retries: 0,
+        budget: None,
+        max_turns: None,
+        timeout: None,
+        tools: None,
+        directory: None,
+        set: Vec::new(),
+        profile: None,
+        quiet: false,
+        no_color: false,
+    }
 }
 
 impl CliRunExecutor {
     /// Build the fixed headless inputs for the ACP host once, before admission.
     pub fn for_acp(session_dir: Option<PathBuf>, store: Arc<JsonlStore>) -> Self {
         Self {
-            args: Args {
-                prompt: None,
-                stdin: crate::cli::Stdin::Ambient,
-                model: None,
-                offline: false,
-                sandbox: None,
-                thinking: None,
-                system: None,
-                append_system: None,
-                instructions: None,
-                bare: false,
-                mode: None,
-                allow: Vec::new(),
-                deny: Vec::new(),
-                answers: Vec::new(),
-                session: SessionChoice::Ephemeral,
-                session_dir,
-                output: Output::Json,
-                schema: None,
-                schema_retries: 0,
-                budget: None,
-                max_turns: None,
-                timeout: None,
-                tools: None,
-                directory: None,
-                set: Vec::new(),
-                profile: None,
-                quiet: false,
-                no_color: false,
-            },
+            args: protocol_args(session_dir),
             store,
+            concurrency: None,
+            frozen: None,
+            artifacts: None,
         }
+    }
+
+    pub(crate) fn for_mcp(
+        root: ego_core::run::RunRoot,
+        session_dir: Option<PathBuf>,
+        store: Arc<JsonlStore>,
+        artifacts: Arc<dyn RunArtifactStore>,
+        max_concurrent_runs: NonZeroUsize,
+    ) -> Result<(Self, CliMcpRunPolicy), UsageError> {
+        let args = protocol_args(session_dir);
+        let frozen = Arc::new(config::FrozenRunConfig::capture(
+            root.as_path(),
+            &args,
+            Trust::Untrusted,
+        )?);
+        let effective = frozen.resolve(&args)?;
+        let model = effective.model.clone().ok_or_else(|| {
+            UsageError("mcp-server requires an effective configured model".to_owned())
+        })?;
+        if effective.ceilings.money.is_none() && effective.ceilings.tokens.is_none() {
+            return Err(UsageError(
+                "mcp-server requires at least one effective budget ceiling".to_owned(),
+            ));
+        }
+        let policy = CliMcpRunPolicy {
+            root,
+            model,
+            thinking: effective.thinking.unwrap_or(ThinkingLevel::Off),
+            mode: effective.mode.unwrap_or(Mode::Default),
+            ceilings: effective.ceilings,
+            profile: frozen.profile().map(str::to_owned),
+        };
+        Ok((
+            Self {
+                args,
+                store,
+                concurrency: Some(Arc::new(Semaphore::new(max_concurrent_runs.get()))),
+                frozen: Some(frozen),
+                artifacts: Some(artifacts),
+            },
+            policy,
+        ))
     }
 
     fn authority(handle: &RunHandle) -> Result<Arc<CliRunAuthority>, RunExecutorError> {
@@ -1683,9 +1825,24 @@ impl RunExecutor for CliRunExecutor {
         request: &'a RunPreparation,
     ) -> futures::future::BoxFuture<'a, Result<RunPrepared<Self::Prepared>, RunExecutorError>> {
         Box::pin(async move {
-            CliPrepared::prepare(self.args.clone(), Arc::clone(&self.store), request)
-                .await
-                .map_err(run_executor_error)
+            let permit = match &self.concurrency {
+                Some(concurrency) => {
+                    Some(Arc::clone(concurrency).try_acquire_owned().map_err(|_| {
+                        RunExecutorError::new("run concurrency ceiling is unavailable")
+                    })?)
+                }
+                None => None,
+            };
+            CliPrepared::prepare(
+                self.args.clone(),
+                Arc::clone(&self.store),
+                self.artifacts.clone(),
+                request,
+                permit,
+                self.frozen.as_deref(),
+            )
+            .await
+            .map_err(run_executor_error)
         })
     }
 

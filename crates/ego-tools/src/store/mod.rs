@@ -8,6 +8,7 @@ mod evidence;
 mod io;
 mod jsonl_store;
 mod lease;
+mod run_artifact;
 mod snapshot;
 mod writer;
 

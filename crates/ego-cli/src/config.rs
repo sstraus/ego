@@ -12,7 +12,8 @@
 use std::path::{Path, PathBuf};
 
 use ego_core::config::{
-    AuthProviderLayer, ConfigError, ConfigLayer, Source, Sourced, Trust, resolve,
+    AuthProviderLayer, ConfigError, ConfigLayer, Effective, Source,
+    Sourced, Trust, resolve,
 };
 
 use crate::cli::{Args, UsageError};
@@ -87,6 +88,41 @@ pub fn layers(
     args: &Args,
     trust: Trust,
 ) -> Result<Vec<Sourced<ConfigLayer>>, UsageError> {
+    let mut found = base_layers(workspace, trust)?;
+    found.push(args_layer(args)?);
+    Ok(found)
+}
+
+/// One startup snapshot of every non-request configuration input.
+#[derive(Clone)]
+pub(crate) struct FrozenRunConfig {
+    layers: Vec<Sourced<ConfigLayer>>,
+    profile: Option<String>,
+    trust: Trust,
+}
+
+impl FrozenRunConfig {
+    pub(crate) fn capture(workspace: &Path, args: &Args, trust: Trust) -> Result<Self, UsageError> {
+        Ok(Self {
+            layers: base_layers(workspace, trust)?,
+            profile: profile(args),
+            trust,
+        })
+    }
+
+    pub(crate) fn resolve(&self, args: &Args) -> Result<Effective, UsageError> {
+        let mut layers = self.layers.clone();
+        layers.push(args_layer(args)?);
+        resolve(&layers, self.trust, self.profile.as_deref())
+            .map_err(|error| UsageError(error.to_string()))
+    }
+
+    pub(crate) fn profile(&self) -> Option<&str> {
+        self.profile.as_deref()
+    }
+}
+
+fn base_layers(workspace: &Path, trust: Trust) -> Result<Vec<Sourced<ConfigLayer>>, UsageError> {
     // Which files this invocation is subject to, decided before any of them is
     // opened: whether a layer is *eligible* is a question about the posture and
     // the environment, and answering it separately from reading keeps the trust
@@ -111,8 +147,6 @@ pub fn layers(
         found.extend(layer(source, &path)?);
     }
     found.extend(env_layer()?);
-    found.push(args_layer(args)?);
-
     Ok(found)
 }
 

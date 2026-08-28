@@ -13,7 +13,8 @@ use std::task::{Poll, Waker};
 use futures::future::{self, BoxFuture};
 use futures::stream::{self, BoxStream};
 
-use ego_core::config::ModelRef;
+use ego_core::ceiling::Budget;
+use ego_core::config::{Mode, ModelRef};
 use ego_core::event::domain::DomainEvent;
 use ego_core::event::id::SessionId;
 use ego_core::event::time::{Clock, Timestamp};
@@ -22,8 +23,8 @@ use ego_core::run::{
     CancelKey, CancelRequest, ContinueRequest, EventSinkFactory, IdSource, RequestDigest,
     RequestId, RunAdmission, RunAppend, RunCommandOutcome, RunController, RunExecution,
     RunExecutionBindings, RunExecutor, RunExecutorError, RunHandle, RunId, RunPreparation,
-    RunPrepared, RunRecoveryOutcome, RunRetention, RunRevision, RunRoot, RunSettlement, RunStart,
-    RunStatus, RunTransaction, StartRequest,
+    RunPrepared, RunRecoveryOutcome, RunRetention, RunRevision, RunRoot, RunSelections,
+    RunSettlement, RunStart, RunStatus, RunTransaction, StartRequest,
 };
 use ego_core::sink::{EventSink, NullSink};
 use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
@@ -190,7 +191,7 @@ struct ScriptedRunExecutor {
     submissions: Mutex<VecDeque<Result<RunSettlement, RunExecutorError>>>,
     next_prepared: Mutex<u64>,
     prepared_models: Mutex<VecDeque<ModelRef>>,
-    prepared_requests: Mutex<Vec<Option<ModelRef>>>,
+    prepared_selections: Mutex<Vec<RunSelections>>,
     prepared_tokens: Mutex<Vec<u64>>,
     bindings_received: Mutex<usize>,
     submit_gate: Mutex<SubmitGate>,
@@ -244,7 +245,7 @@ impl ScriptedRunExecutor {
             submissions: Mutex::new(VecDeque::new()),
             next_prepared: Mutex::new(0),
             prepared_models: Mutex::new(VecDeque::new()),
-            prepared_requests: Mutex::new(Vec::new()),
+            prepared_selections: Mutex::new(Vec::new()),
             prepared_tokens: Mutex::new(Vec::new()),
             bindings_received: Mutex::new(0),
             submit_gate: Mutex::new(SubmitGate::default()),
@@ -337,10 +338,12 @@ impl ScriptedRunExecutor {
     }
 
     fn prepared_requests(&self) -> Vec<Option<ModelRef>> {
-        self.prepared_requests
+        self.prepared_selections
             .lock()
-            .expect("prepared requests")
-            .clone()
+            .expect("prepared selections")
+            .iter()
+            .map(|selections| selections.model().cloned())
+            .collect()
     }
 
     fn started_models(&self) -> Vec<(RunId, ModelRef)> {
@@ -374,10 +377,10 @@ impl RunExecutor for ScriptedRunExecutor {
         &'a self,
         request: &'a RunPreparation,
     ) -> BoxFuture<'a, Result<RunPrepared<Self::Prepared>, RunExecutorError>> {
-        self.prepared_requests
+        self.prepared_selections
             .lock()
-            .expect("prepared requests")
-            .push(request.requested_model.clone());
+            .expect("prepared selections")
+            .push(request.selections.clone());
         self.sequence
             .lock()
             .expect("transaction sequence")
@@ -600,8 +603,74 @@ fn start(root: &str, value: u128, body: &str) -> StartRequest {
         RunRoot::new(root).expect("absolute run root"),
         request(value),
         digest(body),
-        None,
+        selections(),
         body.to_owned(),
+    )
+}
+
+fn selections() -> RunSelections {
+    RunSelections::new(
+        None,
+        Some(ego_core::generator::types::ThinkingLevel::Low),
+        Some(Mode::Default),
+        Some("40k".parse::<Budget>().expect("typed budget")),
+        Some("ci".to_owned()),
+    )
+}
+
+#[test]
+fn selections_are_persisted_folded_and_pin_the_continuation_model() {
+    let store = Arc::new(RecordingSessionStore::default());
+    let executor = Arc::new(ScriptedRunExecutor::default());
+    let controller = controller(Arc::clone(&store), Arc::clone(&executor));
+    let request = StartRequest::new(
+        RunRoot::new("/selected").expect("root"),
+        request_id(58),
+        digest("selected"),
+        selections_with_model(),
+        "selected",
+    );
+    let admission = admitted_start(&controller, request);
+    let session = admission.session_id();
+    let run = admission.run_id();
+    let transaction = store.transactions(session).remove(0);
+    assert_eq!(transaction.selections(), &selections_with_model());
+    let encoded = serde_json::to_value(&transaction).expect("transaction encoding");
+    assert_eq!(
+        encoded["selections"],
+        serde_json::to_value(selections_with_model()).expect("selection encoding")
+    );
+    assert_eq!(admission.snapshot().selections(), &selections_with_model());
+    executor.allow_effects();
+    execute(&controller, admission.into_execution());
+    let status = futures::executor::block_on(controller.status(run)).expect("status");
+    let continuation = admitted_continue(
+        &controller,
+        ContinueRequest::new(
+            run,
+            request_id(59),
+            digest("next"),
+            status.revision(),
+            "next",
+        ),
+    );
+    assert_eq!(
+        continuation.snapshot().selections(),
+        &selections_with_model()
+    );
+}
+
+fn request_id(value: u128) -> RequestId {
+    RequestId::from_uuid(uuid::Uuid::from_u128(value))
+}
+
+fn selections_with_model() -> RunSelections {
+    RunSelections::new(
+        Some(model_ref("model/test")),
+        Some(ego_core::generator::types::ThinkingLevel::High),
+        Some(Mode::Edits),
+        Some("80k".parse::<Budget>().expect("typed budget")),
+        Some("ci".to_owned()),
     )
 }
 

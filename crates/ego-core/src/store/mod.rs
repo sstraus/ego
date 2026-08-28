@@ -5,4 +5,5 @@
 
 pub mod codec;
 pub mod evidence;
+pub mod run_artifact;
 pub mod session_store;

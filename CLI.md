@@ -36,7 +36,9 @@ ego mcp add NAME --http URL [--auth none|oauth] [--allow-insecure-loopback]
 ego mcp rm NAME | ls [--json] | login NAME | reload [NAME]
                               current MCP server management; every variation
                               enters one complete reconciliation path
-ego mcp-server                serve ego AS an MCP server on stdio: scoped
+ego mcp-server --max-concurrent-runs N --retained-requests N
+               --max-resource-bytes N [-C DIR] [--session-dir DIR]
+                              serve ego AS an MCP server on stdio: scoped
                               run/continue/cancel/status tools (delegation
                               surface for Claude, Codex, CI orchestrators) plus
                               sanitized resources; no MCP Tasks or prompts
@@ -68,7 +70,7 @@ Notes:
 ### 2.1 Availability — what ships today
 
 The same discipline as §3.1, and it was missing here until 2026-08-21. §2 lists
-fourteen commands; this build implements **six**. The other eight used to
+fourteen commands; this build implements **seven**. The other seven used to
 reach the *interactive* refusal, so `ego resume` was answered with a sentence
 about the permission dialog — true, and about a surface the caller had not
 asked for. They are now refused **by name**, each naming what it waits on, from
@@ -99,7 +101,7 @@ omitted when empty: two states, identical bytes.
 | `ego fork` | no | session forking (**M3**), which needs the branch point to be nameable in the log rather than just a file copy |
 | `ego export` | no | replay and export with `--sanitize` (**M3**). The projection exists; the redaction contract that makes an exported session safe to hand over does not |
 | `ego mcp` | no | the current MCP client (**M2**). There is no admitted snapshot to list, vary, authenticate, or reload; `docs/19-current-mcp-and-speakeasy.md` defines the final lifecycle |
-| `ego mcp-server` | no | ego's own MCP server surface (**M2**): the scoped run/continue/cancel/status tools it would expose |
+| `ego mcp-server` | **yes** | serves scoped `run`/`continue`/`cancel`/`status` tools and sanitized summary/output resources on stdio. `--max-concurrent-runs`, `--retained-requests`, and `--max-resource-bytes` are required non-zero deployment bounds; `-C`/the current directory is the sole canonical root and stdout remains protocol-only |
 | `ego auth` | **yes** | `login\|logout\|status [PROVIDER]`; credentials live in one locked `$EGO_HOME/auth.json`, while TOML commands and discovered auth plugins can supply login tokens |
 | `ego models` | **yes** | prints the shared current-model catalogue as deterministic text or versioned JSON; `--provider` filters both model and source rows, and `--refresh` updates authoritative discovered slices without promoting cached display facts into generation authority |
 | `ego config` | no | a config writer. The loader is strict and read-only, and nothing in this build writes a config file — `-c/--set` overrides one run |

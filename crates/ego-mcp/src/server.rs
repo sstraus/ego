@@ -6,7 +6,9 @@ use ego_core::permit::{DuplexHandle, DuplexSettlement, ToolResult};
 use futures::io::{AsyncRead, AsyncWrite};
 use rmcp::model::{
     CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
-    ListToolsResult, PaginatedRequestParams, ProtocolVersion, ServerCapabilities, ServerInfo, Tool,
+    ListResourcesResult, ListToolsResult, PaginatedRequestParams, ProtocolVersion,
+    ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult, Resource,
+    ResourceContents, ServerCapabilities, ServerInfo, Tool,
 };
 use rmcp::service::{RequestContext, RoleServer};
 use rmcp::{ServerHandler, ServiceExt};
@@ -19,6 +21,22 @@ pub struct McpServerToolCall {
     name: String,
     arguments: Map<String, serde_json::Value>,
     request_state: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpServerResourceDescriptor {
+    pub uri: String,
+    pub name: String,
+    pub description: String,
+    pub mime_type: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpServerResourceContents {
+    pub uri: String,
+    pub mime_type: String,
+    pub text: String,
+    pub blob: Option<String>,
 }
 
 impl McpServerToolCall {
@@ -56,7 +74,17 @@ impl McpServerToolCall {
 pub trait McpServerPort: Send + Sync {
     fn list_tools<'a>(&'a self) -> McpFuture<'a, Vec<ego_core::generator::types::ToolDescriptor>>;
 
-    fn call_tool<'a>(&'a self, call: McpServerToolCall) -> McpFuture<'a, ToolResult>;
+    fn call_tool<'a>(
+        &'a self,
+        call: McpServerToolCall,
+    ) -> McpFuture<'a, Result<ToolResult, McpError>>;
+
+    fn list_resources<'a>(&'a self) -> McpFuture<'a, Vec<McpServerResourceDescriptor>>;
+
+    fn read_resource<'a>(
+        &'a self,
+        uri: &'a str,
+    ) -> McpFuture<'a, Result<McpServerResourceContents, McpError>>;
 }
 
 #[derive(Clone)]
@@ -71,9 +99,16 @@ impl ServerHandler for ServerAdapter {
     }
 
     fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_server_info(
-            Implementation::new(self.name.to_string(), env!("CARGO_PKG_VERSION")),
+        ServerInfo::new(
+            ServerCapabilities::builder()
+                .enable_tools()
+                .enable_resources()
+                .build(),
         )
+        .with_server_info(Implementation::new(
+            self.name.to_string(),
+            env!("CARGO_PKG_VERSION"),
+        ))
     }
 
     async fn list_tools(
@@ -107,8 +142,57 @@ impl ServerHandler for ServerAdapter {
             request.request_state,
         )
         .map_err(|error| rmcp::ErrorData::invalid_params(error.to_string(), None))?;
-        let result = self.port.call_tool(call).await;
+        let result = self
+            .port
+            .call_tool(call)
+            .await
+            .map_err(|error| rmcp::ErrorData::invalid_params(error.to_string(), None))?;
         Ok(CallToolResult::success(vec![ContentBlock::text(result.model_text())]).into())
+    }
+
+    async fn list_resources(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListResourcesResult, rmcp::ErrorData> {
+        let resources = self
+            .port
+            .list_resources()
+            .await
+            .into_iter()
+            .map(|descriptor| {
+                let mut resource = Resource::new(descriptor.uri, descriptor.name)
+                    .with_description(descriptor.description);
+                if let Some(mime_type) = descriptor.mime_type {
+                    resource = resource.with_mime_type(mime_type);
+                }
+                resource
+            })
+            .collect();
+        Ok(ListResourcesResult::with_all_items(resources))
+    }
+
+    async fn read_resource(
+        &self,
+        request: ReadResourceRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ReadResourceResponse, rmcp::ErrorData> {
+        let contents = self
+            .port
+            .read_resource(&request.uri)
+            .await
+            .map_err(|error| match error.failure() {
+                McpFailure::Absent => rmcp::ErrorData::resource_not_found(error.to_string(), None),
+                _ => rmcp::ErrorData::invalid_params(error.to_string(), None),
+            })?;
+        let resource = match contents.blob {
+            Some(blob) => {
+                ResourceContents::blob(blob, contents.uri).with_mime_type(contents.mime_type)
+            }
+            None => ResourceContents::text(contents.text, contents.uri)
+                .with_mime_type(contents.mime_type),
+        };
+        Ok(ReadResourceResult::new(vec![resource]).into())
     }
 }
 

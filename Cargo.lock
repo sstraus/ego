@@ -1002,6 +1002,7 @@ dependencies = [
  "ego-acp",
  "ego-ai",
  "ego-core",
+ "ego-mcp",
  "ego-tools",
  "fd-lock",
  "futures",
@@ -1060,6 +1061,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "url",
+ "uuid",
 ]
 
 [[package]]

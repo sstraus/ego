@@ -18,6 +18,7 @@
 //!    definition (§4.5's last clause) is only possible while there is exactly
 //!    one definition.
 
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::str::FromStr;
 
@@ -47,6 +48,8 @@ pub enum Invocation {
     /// `ego acp` — serve the Agent Client Protocol on stdio, until the host
     /// closes it.
     Acp(Box<AcpArgs>),
+    /// `ego mcp-server` — serve scoped ego runs over MCP on stdio.
+    McpServer(Box<McpServerArgs>),
     /// `ego [PROMPT]`, or promptless `ego resume [ID]` — the interactive
     /// session of `CLI.md` §6.
     ///
@@ -144,7 +147,15 @@ const UNAVAILABLE: &[Unavailable] = &[
 /// exist. That is `every_waiting_on_reason_is_the_one_the_document_prints`'s
 /// defect moved one link along the chain — two surfaces agreeing perfectly
 /// about something that has stopped being true.
-pub const BUILT: &[&str] = &["run", "resume", "ls", "models", "acp", "auth"];
+pub const BUILT: &[&str] = &[
+    "run",
+    "resume",
+    "ls",
+    "models",
+    "acp",
+    "auth",
+    "mcp-server",
+];
 
 /// A command `CLI.md` §2 documents that this build does not implement, and the
 /// subsystem it is waiting on.
@@ -178,11 +189,6 @@ pub const UNBUILT: &[(&str, &str)] = &[
     (
         "mcp",
         "the MCP client (**M2**). There is no server to add, remove or log in to",
-    ),
-    (
-        "mcp-server",
-        "ego's own MCP server surface (**M2**): the scoped run/continue/cancel/\
-         status tools it would expose",
     ),
     (
         "config",
@@ -347,6 +353,16 @@ pub struct AcpArgs {
     pub directory: Option<PathBuf>,
 }
 
+/// Fixed deployment bounds for `ego mcp-server`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpServerArgs {
+    pub session_dir: Option<PathBuf>,
+    pub directory: Option<PathBuf>,
+    pub max_concurrent_runs: NonZeroUsize,
+    pub retained_requests: NonZeroUsize,
+    pub max_resource_bytes: NonZeroUsize,
+}
+
 /// The parsed command line of `ego run`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Args {
@@ -493,6 +509,27 @@ struct ModelsCommand {
 struct AcpCommand {
     #[command(flatten)]
     places: Places,
+}
+
+/// `ego mcp-server` — the scoped run protocol, on stdio.
+#[derive(Debug, Parser)]
+#[command(
+    name = "ego mcp-server",
+    about = "Serve scoped ego runs over MCP on stdio.",
+    disable_help_subcommand = true
+)]
+struct McpServerCommand {
+    #[command(flatten)]
+    places: Places,
+
+    #[arg(long)]
+    max_concurrent_runs: NonZeroUsize,
+
+    #[arg(long)]
+    retained_requests: NonZeroUsize,
+
+    #[arg(long)]
+    max_resource_bytes: NonZeroUsize,
 }
 
 /// Arguments shared by the three auth operations.
@@ -797,6 +834,7 @@ fn overview(program: &str) -> String {
             "ls" => "List sessions (this workspace; --all for every one)",
             "models" => "List the shared model catalogue",
             "acp" => "Serve the Agent Client Protocol on stdio",
+            "mcp-server" => "Serve scoped ego runs over MCP on stdio",
             "auth" => "Manage subscription credentials",
             other => other,
         };
@@ -917,6 +955,16 @@ pub fn parse(argv: Vec<String>) -> Result<Invocation, UsageError> {
             Parsed::Command(parsed) => Ok(Invocation::Acp(Box::new(AcpArgs {
                 session_dir: parsed.places.session_dir,
                 directory: parsed.places.directory,
+            }))),
+        },
+        Some("mcp-server") => match clap_or_answer::<McpServerCommand>(&tokens)? {
+            Parsed::Answered(text) => Ok(Invocation::Answered(text)),
+            Parsed::Command(parsed) => Ok(Invocation::McpServer(Box::new(McpServerArgs {
+                session_dir: parsed.places.session_dir,
+                directory: parsed.places.directory,
+                max_concurrent_runs: parsed.max_concurrent_runs,
+                retained_requests: parsed.retained_requests,
+                max_resource_bytes: parsed.max_resource_bytes,
             }))),
         },
         Some("ls") => match clap_or_answer::<LsCommand>(&tokens)? {

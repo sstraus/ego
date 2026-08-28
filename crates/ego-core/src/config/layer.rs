@@ -17,12 +17,12 @@ use crate::permit::Confinement;
 use crate::permit::rule::Rule;
 
 /// A model reference in `provider/name` form, e.g. `anthropic/claude-sonnet-5`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ModelRef(pub String);
 
 /// Permission mode — `ARCHITECTURE.md` §3.4 axis 1.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Mode {
     Plan,

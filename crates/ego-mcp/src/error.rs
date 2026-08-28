@@ -2,6 +2,7 @@ use ego_core::permit::TransportError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum McpFailure {
+    Absent,
     InvalidValue,
     InvalidResponse,
     Authority,
@@ -19,7 +20,7 @@ pub struct McpError {
 }
 
 impl McpError {
-    pub(crate) fn new(failure: McpFailure, message: impl Into<String>) -> Self {
+    pub fn new(failure: McpFailure, message: impl Into<String>) -> Self {
         Self {
             failure,
             message: message.into(),

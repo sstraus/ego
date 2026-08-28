@@ -230,6 +230,13 @@ mod store {
                 "nonce": "00000000-0000-7000-8000-000000000054"
             },
             "root": "/workspace",
+            "selections": {
+                "model": "model/test",
+                "thinking": null,
+                "mode": null,
+                "budget": null,
+                "profile": null
+            },
             "command": {
                 "kind": "command_admitted",
                 "request_id": "00000000-0000-7000-8000-000000000055",

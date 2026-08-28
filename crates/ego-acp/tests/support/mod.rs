@@ -94,8 +94,11 @@ impl SessionStore for Store {
     }
 }
 
+// Shared by integration crates; some crates exercise only the alternate injected adapters.
+#[allow(dead_code)]
 struct Executor;
 
+#[allow(dead_code)]
 struct Prepared;
 
 impl RunExecutor for Executor {
@@ -156,6 +159,7 @@ impl RunExecutor for Executor {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Default)]
 struct TestClock;
 
@@ -165,6 +169,7 @@ impl Clock for TestClock {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Default)]
 struct TestIds {
     next: Mutex<u128>,
@@ -197,6 +202,7 @@ impl ExecutionSpawner for TestSpawner {
     }
 }
 
+#[allow(dead_code)]
 pub fn agent() -> agent_client_protocol::AgentProtocolRouter {
     let ids = Arc::new(TestIds::default());
     agent_with(

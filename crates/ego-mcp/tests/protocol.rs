@@ -316,6 +316,13 @@ impl DuplexSession for ScriptedDuplex {
 
 struct ServerPort;
 
+fn invalid_server_error() -> McpError {
+    match McpServerToolCall::new(String::new(), serde_json::Map::new(), None) {
+        Ok(_) => panic!("invalid fixture call unexpectedly succeeded"),
+        Err(error) => error,
+    }
+}
+
 impl McpServerPort for ServerPort {
     fn list_tools<'a>(&'a self) -> McpFuture<'a, Vec<ego_core::generator::types::ToolDescriptor>> {
         Box::pin(async { Vec::new() })
@@ -324,8 +331,19 @@ impl McpServerPort for ServerPort {
     fn call_tool<'a>(
         &'a self,
         _call: McpServerToolCall,
-    ) -> McpFuture<'a, ego_core::permit::ToolResult> {
-        Box::pin(async { ego_core::permit::ToolResult::builtin("server result") })
+    ) -> McpFuture<'a, Result<ego_core::permit::ToolResult, McpError>> {
+        Box::pin(async { Ok(ego_core::permit::ToolResult::builtin("server result")) })
+    }
+
+    fn list_resources<'a>(&'a self) -> McpFuture<'a, Vec<ego_mcp::McpServerResourceDescriptor>> {
+        Box::pin(async { Vec::new() })
+    }
+
+    fn read_resource<'a>(
+        &'a self,
+        _uri: &'a str,
+    ) -> McpFuture<'a, Result<ego_mcp::McpServerResourceContents, McpError>> {
+        Box::pin(async { Err(invalid_server_error()) })
     }
 }
 

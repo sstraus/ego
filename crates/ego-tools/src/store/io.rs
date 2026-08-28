@@ -436,9 +436,7 @@ impl StoreIo for OsIo {
         bytes: &[u8],
     ) -> io::Result<AtomicReplacePublication> {
         match replace_atomic_publication_with(path, bytes, Barrier::Fsync)? {
-            ReplacePublication::PublishedDurably => {
-                Ok(AtomicReplacePublication::PublishedDurably)
-            }
+            ReplacePublication::PublishedDurably => Ok(AtomicReplacePublication::PublishedDurably),
             ReplacePublication::PublishedDurabilityUncertain(error) => {
                 Ok(AtomicReplacePublication::PublishedDurabilityUncertain {
                     diagnostic: error.to_string(),

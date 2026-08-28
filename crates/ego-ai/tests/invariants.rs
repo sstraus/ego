@@ -92,9 +92,7 @@ use support::{FakeCredentials, NoForeign};
 /// quietly weaken it into "a new provider and a new transcript".
 const FAMILY_TRANSCRIPT: &str = include_str!("goldens/profile/openai/stream/text.sse");
 
-/// The variable the invented hosted row names, and what a configured machine
-/// would have put in it.
-const KEY_VAR: &str = "ACME_API_KEY";
+/// The key a configured machine would have put in the fake credentials.
 const KEY: &str = "sk-not-a-real-key";
 
 // --- the near side's fixtures ---
@@ -325,7 +323,7 @@ async fn one_turn(
     let fs = FakeFs::default();
     let process = NoProcess;
     let evidence = NoEvidence;
-    let foreign = NoForeign;
+    let foreign: Arc<NoForeign> = Arc::new(NoForeign);
     let registry: Vec<Arc<dyn Tool>> = Vec::new();
     let mut gate = BudgetGate::new(usd("10"));
 
@@ -359,7 +357,14 @@ async fn one_turn(
         Tools::new(
             &registry,
             &policy,
-            ToolEffectPorts::new(&fs, &process, &evidence, &foreign, &foreign, &foreign),
+            ToolEffectPorts::new(
+                &fs,
+                &process,
+                &evidence,
+                foreign.clone(),
+                foreign.clone(),
+                foreign,
+            ),
             CanonPath::new("/ws"),
         ),
     );

@@ -19,8 +19,8 @@ use ego_core::event::time::Clock;
 use ego_core::generator::capabilities::ModelCapabilities;
 use ego_core::run::{
     CancelKey, ContinueRequest, EventSinkFactory, IdSource, RequestDigest, RequestId,
-    RunCommandOutcome, RunController, RunExecutor, RunRoot, RunSettlement, RunSnapshot,
-    StartRequest,
+    RunCommandOutcome, RunController, RunExecutor, RunRoot, RunSelections, RunSettlement,
+    RunSnapshot, StartRequest,
 };
 use ego_core::sink::EventSink;
 use ego_core::store::session_store::SessionStore;
@@ -407,7 +407,7 @@ where
                                         correlation.root,
                                         correlation.request_id,
                                         digest,
-                                        None,
+                                        RunSelections::empty(),
                                         text,
                                     ),
                                     bindings,

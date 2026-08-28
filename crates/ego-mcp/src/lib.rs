@@ -8,6 +8,7 @@ mod http;
 mod oauth;
 mod operation;
 mod registry;
+mod run_server;
 mod server;
 mod state;
 mod stdio;
@@ -41,7 +42,15 @@ pub use registry::{
     McpRegistryController, McpRegistryError, McpRegistryPublication, McpRegistryRefresh,
     McpRegistryStatus, RegistryScope, RegistryTrigger,
 };
-pub use server::{McpServerPort, McpServerToolCall, serve_stdio};
+pub use run_server::{
+    McpRunBindingsBuilder, McpRunExecutionSpawner, McpRunResourceReader, McpRunResourceRequest,
+    McpRunRootResolver, McpRunSelectionPolicy, McpRunServer, McpRunServerConfig,
+    McpRunServerFactory, McpRunServerPorts, SanitizedMcpRunResource, serialize_run_snapshot,
+};
+pub use server::{
+    McpServerPort, McpServerResourceContents, McpServerResourceDescriptor, McpServerToolCall,
+    serve_stdio,
+};
 pub use state::{
     CacheScope, McpInputMapping, McpInputRequestId, McpInputRequired, McpInputResponse,
     McpInputState, McpManualOutcome, McpMappedInput, McpRefreshRequest, McpResultMetadata,
