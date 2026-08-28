@@ -40,6 +40,7 @@ fn parsed<const N: usize>(args: [&str; N]) -> ego_cli::cli::Args {
         Invocation::Models(_) => panic!("`models` takes no Args: use the models tests for it"),
         Invocation::Acp(_) => panic!("`acp` takes no Args: use `served` for it"),
         Invocation::Auth(_) => panic!("`auth` takes no Args: use the auth tests for it"),
+        Invocation::Mcp(_) => panic!("`mcp` takes no Args: use the MCP tests for it"),
         Invocation::McpServer(_) => {
             panic!("`mcp-server` takes no Args: use the MCP server tests for it")
         }
@@ -57,6 +58,7 @@ fn parsed_slice(args: &[&str]) -> ego_cli::cli::Args {
         Invocation::Models(_) => panic!("`models` takes no Args: use the models tests for it"),
         Invocation::Acp(_) => panic!("`acp` takes no Args: use `served` for it"),
         Invocation::Auth(_) => panic!("`auth` takes no Args: use the auth tests for it"),
+        Invocation::Mcp(_) => panic!("`mcp` takes no Args: use the MCP tests for it"),
         Invocation::McpServer(_) => {
             panic!("`mcp-server` takes no Args: use the MCP server tests for it")
         }

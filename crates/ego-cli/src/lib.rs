@@ -22,6 +22,7 @@ pub mod catalogue;
 pub mod cli;
 pub mod config;
 pub mod facts;
+pub mod mcp;
 pub mod mcp_server;
 pub mod model;
 pub mod model_picker;

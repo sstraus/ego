@@ -2,32 +2,10 @@
 
 use std::path::Path;
 
-use ego_cli::cli::{Invocation, McpAction, McpSelector, parse};
+use ego_cli::cli::{Invocation, McpAction, parse};
 
 fn parse_ok(args: &[&str]) -> Invocation {
     parse(args.iter().map(|s| (*s).to_owned()).collect()).expect("valid MCP argv")
-}
-
-#[test]
-fn run_keeps_ordered_named_and_file_selectors() {
-    let Invocation::Run(args) = parse_ok(&[
-        "ego",
-        "run",
-        "--mcp",
-        "remote",
-        "--mcp",
-        "@scope.json",
-        "prompt",
-    ]) else {
-        panic!("expected run");
-    };
-    assert_eq!(
-        args.mcp,
-        vec![
-            McpSelector::Named("remote".parse().expect("name")),
-            McpSelector::File("scope.json".into()),
-        ]
-    );
 }
 
 #[test]
@@ -156,20 +134,6 @@ fn every_management_action_has_exact_typed_payload() {
         panic!("MCP");
     };
     assert!(matches!(args.action, McpAction::List { json: true }));
-    let Invocation::Mcp(args) = parse_ok(&["ego", "mcp", "login", "remote"]) else {
-        panic!("MCP");
-    };
-    assert!(matches!(args.action, McpAction::Login { name } if name.to_string() == "remote"));
-    let Invocation::Mcp(args) = parse_ok(&["ego", "mcp", "reload"]) else {
-        panic!("MCP");
-    };
-    assert!(matches!(args.action, McpAction::Reload { name: None }));
-    let Invocation::Mcp(args) = parse_ok(&["ego", "mcp", "reload", "remote"]) else {
-        panic!("MCP");
-    };
-    assert!(
-        matches!(args.action, McpAction::Reload { name: Some(name) } if name.to_string() == "remote")
-    );
 }
 
 #[test]

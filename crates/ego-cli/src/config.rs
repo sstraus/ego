@@ -12,8 +12,8 @@
 use std::path::{Path, PathBuf};
 
 use ego_core::config::{
-    AuthProviderLayer, ConfigError, ConfigLayer, Effective, Source,
-    Sourced, Trust, resolve,
+    AuthProviderLayer, ConfigError, ConfigLayer, Effective, McpLayerEntry, McpServerName, Source,
+    Sourced, Trust, UserMcpSlot, resolve,
 };
 
 use crate::cli::{Args, UsageError};
@@ -54,6 +54,74 @@ pub fn auth() -> Result<std::collections::HashMap<String, AuthProviderLayer>, Us
     resolve(&found, Trust::Untrusted, None)
         .map(|effective| effective.auth)
         .map_err(|err| UsageError(err.to_string()))
+}
+
+/// The system/user authority used by process-wide MCP management commands.
+///
+/// `ego mcp` has no workspace or trust flags. It therefore manages only the
+/// two non-ambient layers that are meaningful outside a run. The selected
+/// `EGO_PROFILE`, when present, still goes through core's ordinary profile
+/// resolution and names the exact user slot a mutation must compare.
+pub(crate) struct McpManagementConfig {
+    pub(crate) effective: Effective,
+    pub(crate) user: ConfigLayer,
+    pub(crate) profile: Option<String>,
+    pub(crate) user_path: PathBuf,
+}
+
+impl McpManagementConfig {
+    /// The exact user-owned entry observed before a compare-and-set mutation.
+    pub(crate) fn user_entry(
+        &self,
+        slot: &UserMcpSlot,
+        name: &McpServerName,
+    ) -> Option<&McpLayerEntry> {
+        match slot {
+            UserMcpSlot::Base => self.user.mcp.servers.get(name),
+            UserMcpSlot::Profile(profile) => self
+                .user
+                .profile
+                .get(profile)
+                .and_then(|layer| layer.mcp.servers.get(name)),
+        }
+    }
+
+    /// The slot selected for an add operation.
+    pub(crate) fn selected_user_slot(&self) -> UserMcpSlot {
+        self.profile
+            .clone()
+            .map(UserMcpSlot::Profile)
+            .unwrap_or(UserMcpSlot::Base)
+    }
+}
+
+/// Resolve the complete non-ambient MCP management view through core's one
+/// precedence implementation while retaining the exact user layer for CAS.
+pub(crate) fn mcp_management() -> Result<McpManagementConfig, UsageError> {
+    let user_path = ego_home()
+        .ok_or_else(|| UsageError("ego mcp needs EGO_HOME or HOME for user configuration".into()))?
+        .join("config.toml");
+    let mut found = Vec::new();
+    if let Some(system) = layer(Source::System, Path::new(SYSTEM_CONFIG))? {
+        found.push(system);
+    }
+    let user = match layer(Source::User, &user_path)? {
+        Some(user) => {
+            let value = user.value.clone();
+            found.push(user);
+            value
+        }
+        None => ConfigLayer::default(),
+    };
+    let profile = std::env::var(ENV_PROFILE).ok();
+    let effective = resolve(&found, Trust::Untrusted, profile.as_deref())
+        .map_err(|error| UsageError(error.to_string()))?;
+    Ok(McpManagementConfig {
+        effective,
+        user,
+        profile,
+        user_path,
+    })
 }
 
 /// Read one layer, or nothing if the file is not there.
@@ -258,7 +326,6 @@ fn selection_flags(
     }
     toml
 }
-
 
 /// The active profile: `--profile` beats `EGO_PROFILE`, per §7's precedence.
 pub fn profile(args: &Args) -> Option<String> {

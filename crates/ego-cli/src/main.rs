@@ -71,6 +71,14 @@ async fn ordinary_main() -> std::process::ExitCode {
                 result: serde_json::Value::String(String::new()),
             }
         }
+        // Configuration management has no session and observes no admitted
+        // protocol snapshot. It reports only the durable user-config outcome.
+        Ok(Invocation::Mcp(args)) => Ended {
+            termination: ego_cli::mcp::execute(&args, &out),
+            session: ego_core::event::id::SessionId::new(),
+            state: ego_core::state::SessionState::default(),
+            result: serde_json::Value::String(String::new()),
+        },
         // `ls` starts no session and takes no turn, so it has no `Ended` to
         // report — only a termination. The two absent fields are stated as
         // what they are rather than filled with a session id nothing wrote.

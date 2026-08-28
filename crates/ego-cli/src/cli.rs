@@ -3,10 +3,11 @@
 //! Three things happen here, in this order, and the order is the contract:
 //!
 //! 1. **`--` is honoured first.** §4.5 reserves it for prompt
-//!    disambiguation — `ego -- run` prompts the word "run" — so nothing
-//!    downstream may look at a token past it. `clap`'s own `--` handling is
-//!    per-subcommand and would have to decide `run` is a subcommand *before*
-//!    it could apply, which is the wrong way round.
+//!    disambiguation — `ego -- run` prompts the word "run" — and the MCP
+//!    grammar reserves it for the exact stdio child argv. Nothing downstream
+//!    may reinterpret a token past it. `clap`'s own `--` handling is per-
+//!    subcommand and would have to decide `run` is a subcommand *before* it
+//!    could apply, which is the wrong way round.
 //! 2. **The applicability matrix.** A flag `CLI.md` documents whose subsystem
 //!    this build does not have is refused **by name**, naming what it waits
 //!    on, and a retired flag is refused by name with its replacement (§4.3:
@@ -24,7 +25,10 @@ use std::str::FromStr;
 
 use clap::error::ErrorKind;
 use clap::{ArgAction, Args as ClapArgs, Parser, Subcommand};
-use ego_core::config::Mode;
+use ego_core::config::{
+    McpEnvironmentName, McpHttpAuth, McpHttpConfig, McpHttpUrl, McpServerConfig, McpServerName,
+    Mode,
+};
 use ego_core::event::id::{ItemId, SessionId};
 use ego_core::generator::types::ThinkingLevel;
 use ego_core::permit::Confinement;
@@ -34,6 +38,8 @@ use ego_core::permit::Confinement;
 pub enum Invocation {
     /// `ego auth login|logout|status [PROVIDER]`.
     Auth(Box<AuthArgs>),
+    /// `ego mcp add|rm|ls` — typed MCP configuration management.
+    Mcp(Box<McpArgs>),
     /// `ego run [PROMPT]` — the headless one-shot of `CLI.md` §2.
     Run(Box<Args>),
     /// `ego resume [ID] [PROMPT]` — the same run against a session that
@@ -154,6 +160,7 @@ pub const BUILT: &[&str] = &[
     "models",
     "acp",
     "auth",
+    "mcp",
     "mcp-server",
 ];
 
@@ -185,10 +192,6 @@ pub const UNBUILT: &[(&str, &str)] = &[
         "replay and export with `--sanitize` (**M3**). The projection exists; \
          the redaction contract that makes an exported session safe to hand \
          over does not",
-    ),
-    (
-        "mcp",
-        "the MCP client (**M2**). There is no server to add, remove or log in to",
     ),
     (
         "config",
@@ -361,6 +364,26 @@ pub struct McpServerArgs {
     pub max_concurrent_runs: NonZeroUsize,
     pub retained_requests: NonZeroUsize,
     pub max_resource_bytes: NonZeroUsize,
+}
+
+/// The exact semantic payload of `ego mcp`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpArgs {
+    pub action: McpAction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum McpAction {
+    Add {
+        name: McpServerName,
+        server: McpServerConfig,
+    },
+    Remove {
+        name: McpServerName,
+    },
+    List {
+        json: bool,
+    },
 }
 
 /// The parsed command line of `ego run`.
@@ -569,6 +592,81 @@ enum AuthSubcommand {
     Status { provider: Option<String> },
 }
 
+#[derive(Debug, Parser)]
+#[command(
+    name = "ego mcp",
+    about = "Manage configured MCP servers.",
+    disable_help_subcommand = true
+)]
+struct McpCommand {
+    #[command(subcommand)]
+    action: McpSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum McpSubcommand {
+    /// Add or replace one complete server entry.
+    Add(McpAddCommand),
+    /// Remove, mask, or reveal one configured server entry.
+    #[command(name = "rm")]
+    Remove { name: String },
+    /// List configured and admitted MCP state.
+    #[command(name = "ls")]
+    List {
+        /// Emit the typed machine-readable projection.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, ClapArgs)]
+#[command(
+    override_usage = "ego mcp add <NAME> --stdio [--cwd <DIR>] [--inherit-env <NAME>]... -- <COMMAND> [ARG]...\n       ego mcp add <NAME> --http <URL> [--auth <none|oauth>] [--allow-insecure-loopback]"
+)]
+struct McpAddCommand {
+    name: String,
+
+    /// Configure a subprocess transport. Its command follows literal `--`.
+    #[arg(long, required_unless_present = "http", conflicts_with = "http")]
+    stdio: bool,
+
+    /// Configure a Streamable HTTP transport.
+    #[arg(
+        long,
+        value_name = "URL",
+        required_unless_present = "stdio",
+        conflicts_with = "stdio"
+    )]
+    http: Option<String>,
+
+    /// Working directory for the stdio child.
+    #[arg(long, value_name = "DIR", requires = "stdio", conflicts_with = "http")]
+    cwd: Option<PathBuf>,
+
+    /// Environment variable inherited by the stdio child. Repeatable.
+    #[arg(
+        long,
+        value_name = "NAME",
+        action = ArgAction::Append,
+        requires = "stdio",
+        conflicts_with = "http"
+    )]
+    inherit_env: Vec<String>,
+
+    /// HTTP authentication mode.
+    #[arg(
+        long,
+        value_parser = ["none", "oauth"],
+        requires = "http",
+        conflicts_with = "stdio"
+    )]
+    auth: Option<String>,
+
+    /// Consent to plaintext HTTP for an exact loopback host.
+    #[arg(long, requires = "http", conflicts_with = "stdio")]
+    allow_insecure_loopback: bool,
+}
+
 /// The three flags every subcommand takes, declared once.
 ///
 /// `ls` starts no turn, so it shares almost nothing with `run` — but these
@@ -752,12 +850,99 @@ fn parse_thinking(value: &str) -> Result<ThinkingLevel, String> {
     }
 }
 
+fn parse_mcp_name(value: String) -> Result<McpServerName, UsageError> {
+    value
+        .parse::<McpServerName>()
+        .map_err(|error| UsageError(error.to_string()))
+}
+
+fn parse_mcp_env_name(value: String) -> Result<McpEnvironmentName, UsageError> {
+    value
+        .parse::<McpEnvironmentName>()
+        .map_err(|error| UsageError(error.to_string()))
+}
+
+fn into_mcp_args(
+    command: McpCommand,
+    separator_tail: Option<Vec<String>>,
+) -> Result<McpArgs, UsageError> {
+    let action = match command.action {
+        McpSubcommand::Add(add) => {
+            let name = parse_mcp_name(add.name)?;
+            let server = if add.stdio {
+                let mut child = separator_tail.ok_or_else(|| {
+                    UsageError(
+                        "--stdio requires literal `--` followed by a non-empty command".to_string(),
+                    )
+                })?;
+                if child.first().is_none_or(String::is_empty) {
+                    return Err(UsageError(
+                        "--stdio requires literal `--` followed by a non-empty command".to_string(),
+                    ));
+                }
+                let command = child.remove(0);
+                let inherit_env = add
+                    .inherit_env
+                    .into_iter()
+                    .map(parse_mcp_env_name)
+                    .collect::<Result<Vec<_>, _>>()?;
+                McpServerConfig::stdio(command, child, add.cwd, inherit_env)
+                    .map_err(|error| UsageError(error.to_string()))?
+            } else {
+                if separator_tail.is_some() {
+                    return Err(UsageError(
+                        "--http does not accept a command or arguments after literal `--`"
+                            .to_string(),
+                    ));
+                }
+                let raw_url = add.http.ok_or_else(|| {
+                    UsageError("ego mcp add requires exactly one transport".to_string())
+                })?;
+                let url = raw_url
+                    .parse::<McpHttpUrl>()
+                    .map_err(|error| UsageError(error.to_string()))?;
+                let auth = match add.auth.as_deref() {
+                    None | Some("none") => McpHttpAuth::None,
+                    Some("oauth") => McpHttpAuth::Oauth,
+                    Some(_) => unreachable!("clap restricts MCP HTTP auth values"),
+                };
+                McpHttpConfig::new(url, auth, add.allow_insecure_loopback)
+                    .map(McpServerConfig::Http)
+                    .map_err(|error| UsageError(error.to_string()))?
+            };
+            McpAction::Add { name, server }
+        }
+        McpSubcommand::Remove { name } => {
+            reject_mcp_separator(separator_tail)?;
+            McpAction::Remove {
+                name: parse_mcp_name(name)?,
+            }
+        }
+        McpSubcommand::List { json } => {
+            reject_mcp_separator(separator_tail)?;
+            McpAction::List { json }
+        }
+    };
+    Ok(McpArgs { action })
+}
+
+fn reject_mcp_separator(separator_tail: Option<Vec<String>>) -> Result<(), UsageError> {
+    if separator_tail.is_some() {
+        Err(UsageError(
+            "literal `--` and trailing arguments apply only to `ego mcp add --stdio`".to_string(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 fn parse_resume_answer(value: &str) -> Result<ResumeAnswer, String> {
     let (id, json) = value.split_once('=').ok_or_else(|| {
         "an answer must be QUESTION_ID=JSON; the first `=` separates the stable id from JSON"
             .to_string()
     })?;
-    let id = ItemId::from_str(id).map_err(|error| format!("`{id}` is not a question id: {error}"))?;
+    let id =
+        ItemId::from_str(id).map_err(|error| format!("`{id}` is not a question id: {error}"))?;
     serde_json::from_str::<serde_json::Value>(json)
         .map_err(|error| format!("the answer for {id} is not valid JSON: {error}"))?;
     Ok(ResumeAnswer {
@@ -768,18 +953,18 @@ fn parse_resume_answer(value: &str) -> Result<ResumeAnswer, String> {
 
 /// Split `argv` at the first bare `--`.
 ///
-/// Everything after it is prompt words. `ego -- run` is therefore the
-/// *interactive* form with the prompt "run", never the `run` subcommand, and
-/// `ego run -- --model` prompts the two words after the separator.
-fn split_at_separator(argv: Vec<String>) -> (Vec<String>, Vec<String>) {
+/// Everything after it is opaque positional input. It is prompt text for the
+/// run grammar and the child argv for `ego mcp add --stdio`; neither matrix nor
+/// clap may reinterpret those tokens as ego flags.
+fn split_at_separator(argv: Vec<String>) -> (Vec<String>, Option<Vec<String>>) {
     match argv.iter().position(|token| token == "--") {
         Some(at) => {
             let mut head = argv;
             let tail = head.split_off(at + 1);
             head.pop();
-            (head, tail)
+            (head, Some(tail))
         }
-        None => (argv, Vec::new()),
+        None => (argv, None),
     }
 }
 
@@ -836,6 +1021,7 @@ fn overview(program: &str) -> String {
             "acp" => "Serve the Agent Client Protocol on stdio",
             "mcp-server" => "Serve scoped ego runs over MCP on stdio",
             "auth" => "Manage subscription credentials",
+            "mcp" => "Manage configured MCP servers",
             other => other,
         };
         text.push_str(&format!("  {name:<8}{about}\n"));
@@ -924,11 +1110,14 @@ pub fn parse(argv: Vec<String>) -> Result<Invocation, UsageError> {
         // than written over something a person typed.
         None => tokens.insert(0, program.to_string()),
     }
-    // The separator and everything after it go back on the end, so clap sees
-    // the prompt words as positionals it must not interpret.
-    if !tail.is_empty() {
+    // The stdio MCP form consumes the already-separated tail semantically so
+    // every later child token, including another `--`, remains byte-for-byte
+    // argv. Other commands give the delimiter back to clap as prompt syntax.
+    if subcommand.as_deref() != Some("mcp")
+        && let Some(tail) = &tail
+    {
         tokens.push("--".to_string());
-        tokens.extend(tail);
+        tokens.extend(tail.iter().cloned());
     }
 
     match subcommand.as_deref() {
@@ -1000,6 +1189,10 @@ pub fn parse(argv: Vec<String>) -> Result<Invocation, UsageError> {
                     device,
                 })))
             }
+        },
+        Some("mcp") => match clap_or_answer::<McpCommand>(&tokens)? {
+            Parsed::Answered(text) => Ok(Invocation::Answered(text)),
+            Parsed::Command(parsed) => Ok(Invocation::Mcp(Box::new(into_mcp_args(parsed, tail)?))),
         },
         _ => match clap_or_answer::<RunCommand>(&tokens)? {
             Parsed::Answered(text) => Ok(Invocation::Answered(text)),

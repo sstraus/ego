@@ -33,17 +33,18 @@ between an interactive terminal, a pipeline, and an ACP host.
 ## What works today
 
 The working binary provides interactive sessions, headless runs, durable
-resume/listing, a shared current-model catalogue, subscription login and an ACP
-server. Ollama and OpenAI remain selectable directly; current subscription
-profiles use `ego auth`. Commands whose subsystem has not landed are refused by
-name instead of being advertised as working.
+resume/listing, a shared current-model catalogue, subscription login, MCP
+configuration management, an inbound MCP run server, and an ACP server. Ollama
+and OpenAI remain selectable directly; current subscription profiles use
+`ego auth`. Commands whose subsystem has not landed are refused by name instead
+of being advertised as working.
 
 ## Quickstart
 
 Available entry points are `ego [PROMPT]`, `ego run`, `ego resume`, `ego ls`,
-`ego models` and `ego acp`, plus `ego auth` for subscription credentials.
-Promptless `ego resume [ID]` re-enters the interactive driver; a resume carrying
-a prompt or `-` stays headless.
+`ego models`, `ego mcp`, `ego mcp-server`, and `ego acp`, plus `ego auth` for
+subscription credentials. Promptless `ego resume [ID]` re-enters the interactive
+driver; a resume carrying a prompt or `-` stays headless.
 
 For a subscription profile, log in before selecting its model:
 
