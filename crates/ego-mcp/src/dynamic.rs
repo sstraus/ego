@@ -11,36 +11,26 @@ use ego_core::permit::{
 };
 use futures::future::BoxFuture;
 use jsonschema::Validator;
+use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::{McpError, McpFailure, McpServerAdmission};
 
-const EXECUTE_TOOL: &str = "execute_tool";
+const SEARCH_TOOLS: &str = "search_tools";
+const GET_TOOL_SCHEMA: &str = "get_tool_schema";
+const CALL_TOOL: &str = "call_tool";
+const COLLAPSED_MANAGEMENT_TOOLS: [&str; 3] = [SEARCH_TOOLS, GET_TOOL_SCHEMA, CALL_TOOL];
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum DynamicKind {
-    Standalone,
-    Gram,
-}
+/// The one collapsed MCP bootstrap proven from compatible management schemas.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct McpCollapsedBootstrap;
 
-/// A current dynamic family proven from its management-tool schemas.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct McpDynamicFamily {
-    kind: DynamicKind,
-}
-
-impl McpDynamicFamily {
-    pub fn standalone() -> Self {
-        Self {
-            kind: DynamicKind::Standalone,
-        }
-    }
-
-    pub fn gram() -> Self {
-        Self {
-            kind: DynamicKind::Gram,
-        }
+impl McpCollapsedBootstrap {
+    pub fn new(tools: Vec<GeneratorToolDescriptor>) -> Result<Self, McpError> {
+        Self::detect(&tools)?.ok_or_else(|| {
+            protocol("MCP tools do not expose the collapsed bootstrap contract")
+        })
     }
 
     pub fn detect(tools: &[GeneratorToolDescriptor]) -> Result<Option<Self>, McpError> {
@@ -51,107 +41,90 @@ impl McpDynamicFamily {
         if by_name.len() != tools.len() {
             return Err(protocol("duplicate MCP tool identity"));
         }
-        let names: BTreeSet<&str> = by_name.keys().copied().collect();
-        let standalone = ["list_tools", "describe_tool", EXECUTE_TOOL]
-            .iter()
-            .all(|name| names.contains(name));
-        let gram = ["search_tools", "describe_tools", EXECUTE_TOOL]
-            .iter()
-            .all(|name| names.contains(name));
-        if standalone == gram {
-            return if standalone {
-                Err(protocol("ambiguous dynamic MCP family"))
-            } else {
-                Ok(None)
-            };
-        }
-        let family = if standalone {
-            Self::standalone()
-        } else {
-            Self::gram()
+        let Some(search_schema) = by_name.get(SEARCH_TOOLS) else {
+            return Ok(None);
         };
-        let execute_schema = by_name
-            .get(EXECUTE_TOOL)
-            .ok_or_else(|| protocol("dynamic family has no execute_tool schema"))?;
-        family.compile_wrapper(execute_schema)?;
-        Ok(Some(family))
-    }
-
-    pub(crate) fn name_field(&self) -> &'static str {
-        "name"
+        let Some(lookup_schema) = by_name.get(GET_TOOL_SCHEMA) else {
+            return Ok(None);
+        };
+        let Some(dispatch_schema) = by_name.get(CALL_TOOL) else {
+            return Ok(None);
+        };
+        if compatible_search_schema(search_schema)
+            && compatible_lookup_schema(lookup_schema)
+            && compatible_dispatch_schema(dispatch_schema)
+        {
+            Ok(Some(Self))
+        } else {
+            Ok(None)
+        }
     }
 
     pub(crate) fn management_names(&self) -> &'static [&'static str] {
-        match self.kind {
-            DynamicKind::Standalone => {
-                &["list_tools", "describe_tool", EXECUTE_TOOL, "list_scopes"]
-            }
-            DynamicKind::Gram => &["search_tools", "describe_tools", EXECUTE_TOOL],
-        }
+        &COLLAPSED_MANAGEMENT_TOOLS
     }
 
-    pub(crate) fn describe_name(&self) -> &'static str {
-        match self.kind {
-            DynamicKind::Standalone => "describe_tool",
-            DynamicKind::Gram => "describe_tools",
-        }
+    pub fn tool_names(&self) -> impl Iterator<Item = &'static str> {
+        [GET_TOOL_SCHEMA, SEARCH_TOOLS].into_iter()
     }
 
-    pub(crate) fn requested_names(&self, parameters: &Value) -> Result<Vec<String>, McpError> {
+    pub(crate) fn lookup_name(&self) -> &'static str {
+        GET_TOOL_SCHEMA
+    }
+
+    pub(crate) fn dispatch_name(&self) -> &'static str {
+        CALL_TOOL
+    }
+
+    pub(crate) fn requested_name(&self, parameters: &Value) -> Result<String, McpError> {
         let object = parameters
             .as_object()
-            .ok_or_else(|| invalid("dynamic describe parameters are not an object"))?;
-        let names = match self.kind {
-            DynamicKind::Standalone => vec![
-                object
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .filter(|name| !name.trim().is_empty())
-                    .ok_or_else(|| invalid("dynamic describe has no requested tool name"))?
-                    .to_owned(),
-            ],
-            DynamicKind::Gram => object
-                .get("tool_names")
-                .and_then(Value::as_array)
-                .filter(|names| !names.is_empty())
-                .ok_or_else(|| invalid("dynamic describe has no requested tool names"))?
-                .iter()
-                .map(|name| {
-                    name.as_str()
-                        .filter(|name| !name.trim().is_empty())
-                        .map(str::to_owned)
-                        .ok_or_else(|| invalid("dynamic describe tool name is invalid"))
-                })
-                .collect::<Result<Vec<_>, _>>()?,
-        };
-        let unique = names.iter().collect::<BTreeSet<_>>();
-        if unique.len() != names.len() {
-            return Err(invalid("dynamic describe tool names are duplicated"));
-        }
-        Ok(names)
+            .ok_or_else(|| invalid("collapsed schema lookup parameters are not an object"))?;
+        object
+            .get("tool_name")
+            .and_then(Value::as_str)
+            .filter(|name| !name.trim().is_empty())
+            .map(str::to_owned)
+            .ok_or_else(|| invalid("collapsed schema lookup has no requested tool name"))
     }
 
-    fn compile_wrapper(&self, schema: &Value) -> Result<Validator, McpError> {
-        let validator = compile_schema(schema, "dynamic wrapper")?;
-        let mut valid_probe = serde_json::Map::new();
-        valid_probe.insert(self.name_field().to_owned(), json!("probe"));
-        valid_probe.insert("arguments".to_owned(), json!({}));
-        let valid_probe = Value::Object(valid_probe);
-        let mut unknown_probe = valid_probe.clone();
-        unknown_probe
-            .as_object_mut()
-            .expect("probe is an object")
-            .insert("unexpected".to_owned(), Value::Bool(true));
-        if !validator.is_valid(&valid_probe)
-            || validator.is_valid(&json!({"arguments": {}}))
-            || validator.is_valid(&unknown_probe)
-        {
+    fn compile_dispatch(&self, schema: &Value) -> Result<Validator, McpError> {
+        if !compatible_dispatch_schema(schema) {
             return Err(protocol(
-                "execute_tool does not expose the current dynamic wrapper schema",
+                "call_tool does not expose the collapsed dispatch schema",
             ));
         }
-        Ok(validator)
+        compile_schema(schema, "collapsed dispatch")
     }
+}
+
+fn compatible_search_schema(schema: &Value) -> bool {
+    jsonschema::validator_for(schema).is_ok_and(|validator| {
+        validator.is_valid(&json!({"query": "probe"}))
+            && validator.is_valid(&json!({"query": "probe", "limit": 1}))
+            && !validator.is_valid(&json!({}))
+            && !validator.is_valid(&json!({"query": 1}))
+            && !validator.is_valid(&json!({"query": "probe", "limit": "1"}))
+    })
+}
+
+fn compatible_lookup_schema(schema: &Value) -> bool {
+    jsonschema::validator_for(schema).is_ok_and(|validator| {
+        validator.is_valid(&json!({"tool_name": "probe"}))
+            && !validator.is_valid(&json!({}))
+            && !validator.is_valid(&json!({"tool_name": 1}))
+            && !validator.is_valid(&json!({"name": "probe"}))
+    })
+}
+
+fn compatible_dispatch_schema(schema: &Value) -> bool {
+    jsonschema::validator_for(schema).is_ok_and(|validator| {
+        validator.is_valid(&json!({"tool_name": "probe", "arguments": {}}))
+            && !validator.is_valid(&json!({"arguments": {}}))
+            && !validator.is_valid(&json!({"tool_name": "probe"}))
+            && !validator.is_valid(&json!({"tool_name": "probe", "arguments": []}))
+            && !validator.is_valid(&json!({"name": "probe", "arguments": {}}))
+    })
 }
 
 struct CompiledSchema {
@@ -174,110 +147,118 @@ impl CompiledSchema {
 
 /// The inner catalogue discovered and validated before registry publication.
 #[derive(Clone)]
-pub struct McpDynamicCatalogue {
-    family: McpDynamicFamily,
+pub struct McpCollapsedCatalogue {
     inner: Arc<BTreeMap<String, Arc<CompiledSchema>>>,
 }
 
-impl McpDynamicCatalogue {
-    pub fn new(
-        family: McpDynamicFamily,
-        tools: Vec<GeneratorToolDescriptor>,
-    ) -> Result<Self, McpError> {
+impl McpCollapsedCatalogue {
+    pub fn new(tools: Vec<GeneratorToolDescriptor>) -> Result<Self, McpError> {
         if tools.is_empty() {
-            return Err(protocol("dynamic MCP catalogue is empty"));
+            return Err(protocol("collapsed MCP catalogue is empty"));
         }
-        let management = family
-            .management_names()
+        let management = COLLAPSED_MANAGEMENT_TOOLS
             .iter()
             .copied()
             .collect::<BTreeSet<_>>();
         let mut inner = BTreeMap::new();
         for tool in tools {
             if tool.name.trim().is_empty() || management.contains(tool.name.as_str()) {
-                return Err(invalid("dynamic inner tool identity is invalid"));
+                return Err(invalid("collapsed inner tool identity is invalid"));
             }
-            let compiled = Arc::new(CompiledSchema::new(tool.parameters, "dynamic inner tool")?);
+            if !tool.parameters.is_object() {
+                return Err(invalid("collapsed inner tool definition is incomplete"));
+            }
+            let compiled = Arc::new(CompiledSchema::new(tool.parameters, "collapsed inner tool")?);
             if inner.insert(tool.name, compiled).is_some() {
-                return Err(protocol("duplicate dynamic inner tool identity"));
+                return Err(protocol("duplicate collapsed inner tool identity"));
             }
         }
-        Ok(Self {
-            family,
-            inner: Arc::new(inner),
-        })
-    }
-
-    pub fn family(&self) -> &McpDynamicFamily {
-        &self.family
+        Ok(Self { inner: Arc::new(inner) })
     }
 
     pub fn tool_names(&self) -> impl Iterator<Item = &str> {
-        self.inner.keys().map(String::as_str)
+        std::iter::once(CALL_TOOL).chain(self.inner.keys().map(String::as_str))
+    }
+
+    pub fn from_schema_response(
+        _bootstrap: McpCollapsedBootstrap,
+        requested: &str,
+        result: Value,
+    ) -> Result<Self, McpError> {
+        let response: CollapsedSchemaResponse = serde_json::from_value(result)
+            .map_err(|error| invalid(format!("invalid collapsed schema response: {error}")))?;
+        Self::reconcile_definition(None, requested, response.structured_content)
+    }
+
+    pub(crate) fn reconcile_structured_content(
+        previous: Option<&Self>,
+        requested: &str,
+        structured_content: Value,
+    ) -> Result<Self, McpError> {
+        let definition: CollapsedSchemaDefinition = serde_json::from_value(structured_content)
+            .map_err(|error| invalid(format!("invalid collapsed tool schema: {error}")))?;
+        Self::reconcile_definition(previous, requested, definition)
+    }
+
+    fn reconcile_definition(
+        previous: Option<&Self>,
+        requested: &str,
+        definition: CollapsedSchemaDefinition,
+    ) -> Result<Self, McpError> {
+        Self::reconcile(previous, requested, definition.into_descriptor())
     }
 
     pub(crate) fn reconcile(
-        family: McpDynamicFamily,
         previous: Option<&Self>,
-        requested: &[String],
-        tools: Vec<GeneratorToolDescriptor>,
+        requested: &str,
+        tool: GeneratorToolDescriptor,
     ) -> Result<Self, McpError> {
-        if requested.is_empty() {
-            return Err(invalid("dynamic describe requested no tools"));
-        }
-        if previous.is_some_and(|catalogue| catalogue.family != family) {
-            return Err(invalid("dynamic catalogue family changed"));
-        }
-        let management = family
-            .management_names()
+        let management = COLLAPSED_MANAGEMENT_TOOLS
             .iter()
             .copied()
             .collect::<BTreeSet<_>>();
-        let requested_count = requested.len();
-        let requested = requested
-            .iter()
-            .map(String::as_str)
-            .collect::<BTreeSet<_>>();
-        if requested.is_empty()
-            || requested.len() != requested_count
-            || requested.len() != tools.len()
-            || requested
-                .iter()
-                .any(|name| name.trim().is_empty() || management.contains(*name))
+        if requested.trim().is_empty()
+            || management.contains(requested)
+            || tool.name != requested
+            || !tool.parameters.is_object()
         {
             return Err(invalid(
-                "dynamic described tool set does not match its request",
+                "collapsed schema definition does not match its request",
             ));
         }
         let mut inner = previous
             .map(|catalogue| catalogue.inner.as_ref().clone())
             .unwrap_or_default();
-        let mut described = BTreeSet::new();
-        for tool in tools {
-            if !requested.contains(tool.name.as_str())
-                || !described.insert(tool.name.clone())
-                || management.contains(tool.name.as_str())
-                || !tool.parameters.is_object()
-            {
-                return Err(invalid(
-                    "dynamic described tool set does not match its request",
-                ));
-            }
-            let compiled = Arc::new(CompiledSchema::new(tool.parameters, "dynamic inner tool")?);
-            inner.insert(tool.name, compiled);
-        }
-        if described.len() != requested.len() {
-            return Err(invalid(
-                "dynamic described tool set does not match its request",
-            ));
-        }
+        let compiled = Arc::new(CompiledSchema::new(tool.parameters, "collapsed inner tool")?);
+        inner.insert(tool.name, compiled);
         if inner.is_empty() {
-            return Err(protocol("dynamic MCP catalogue is empty"));
+            return Err(protocol("collapsed MCP catalogue is empty"));
         }
-        Ok(Self {
-            family,
-            inner: Arc::new(inner),
-        })
+        Ok(Self { inner: Arc::new(inner) })
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CollapsedSchemaResponse {
+    structured_content: CollapsedSchemaDefinition,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CollapsedSchemaDefinition {
+    name: String,
+    description: String,
+    input_schema: Value,
+}
+
+impl CollapsedSchemaDefinition {
+    fn into_descriptor(self) -> GeneratorToolDescriptor {
+        GeneratorToolDescriptor {
+            name: self.name,
+            description: self.description,
+            parameters: self.input_schema,
+        }
     }
 }
 
@@ -331,7 +312,7 @@ pub trait McpOperationFactory: Send + Sync {
 pub(crate) struct McpToolDefinition {
     descriptor: GeneratorToolDescriptor,
     outer: Arc<CompiledSchema>,
-    dynamic: Option<McpDynamicCatalogue>,
+    collapsed: Option<McpCollapsedCatalogue>,
 }
 
 impl McpToolDefinition {
@@ -346,26 +327,26 @@ impl McpToolDefinition {
         Ok(Self {
             descriptor,
             outer,
-            dynamic: None,
+            collapsed: None,
         })
     }
 
-    pub(crate) fn dynamic(
+    pub(crate) fn collapsed(
         descriptor: GeneratorToolDescriptor,
-        catalogue: McpDynamicCatalogue,
+        catalogue: McpCollapsedCatalogue,
     ) -> Result<Self, McpError> {
-        if descriptor.name != EXECUTE_TOOL {
-            return Err(invalid("dynamic wrapper identity is invalid"));
+        if descriptor.name != CALL_TOOL {
+            return Err(invalid("collapsed dispatch identity is invalid"));
         }
-        catalogue.family.compile_wrapper(&descriptor.parameters)?;
+        McpCollapsedBootstrap.compile_dispatch(&descriptor.parameters)?;
         let outer = Arc::new(CompiledSchema::new(
             descriptor.parameters.clone(),
-            "dynamic wrapper",
+            "collapsed dispatch",
         )?);
         Ok(Self {
             descriptor,
             outer,
-            dynamic: Some(catalogue),
+            collapsed: Some(catalogue),
         })
     }
 
@@ -373,17 +354,17 @@ impl McpToolDefinition {
         &self.descriptor.name
     }
 
-    pub(crate) fn dynamic_catalogue(&self) -> Option<&McpDynamicCatalogue> {
-        self.dynamic.as_ref()
+    pub(crate) fn collapsed_catalogue(&self) -> Option<&McpCollapsedCatalogue> {
+        self.collapsed.as_ref()
     }
 
     pub(crate) fn admission_schema_fingerprint(&self) -> String {
-        let Some(dynamic) = &self.dynamic else {
+        let Some(collapsed) = &self.collapsed else {
             return self.outer.fingerprint.to_string();
         };
         let mut hash = Sha256::new();
         hash.update(self.outer.fingerprint.as_bytes());
-        for (name, schema) in dynamic.inner.iter() {
+        for (name, schema) in collapsed.inner.iter() {
             hash.update([0]);
             hash.update(name.as_bytes());
             hash.update([0]);
@@ -418,7 +399,7 @@ impl McpToolDefinition {
             factory,
             admission,
             outer: Arc::clone(&self.outer),
-            dynamic: self.dynamic.clone(),
+            collapsed: self.collapsed.clone(),
         }))
     }
 }
@@ -431,7 +412,7 @@ pub struct McpCapturedTool {
     factory: Arc<dyn McpOperationFactory>,
     admission: McpAdmissionFingerprint,
     outer: Arc<CompiledSchema>,
-    dynamic: Option<McpDynamicCatalogue>,
+    collapsed: Option<McpCollapsedCatalogue>,
 }
 
 impl McpCapturedTool {
@@ -440,27 +421,31 @@ impl McpCapturedTool {
         let outer = ForeignToolId::new(&self.server, &self.descriptor.name)
             .map_err(|error| ToolError::InvalidParams(error.to_string()))?;
         let mut invocations = vec![(outer, digest_json(params).map_err(tool_params)?)];
-        if let Some(dynamic) = &self.dynamic {
+        if let Some(collapsed) = &self.collapsed {
             let object = params.as_object().ok_or_else(|| {
-                ToolError::InvalidParams("dynamic wrapper parameters are not an object".to_owned())
+                ToolError::InvalidParams(
+                    "collapsed dispatch parameters are not an object".to_owned(),
+                )
             })?;
             let name = object
-                .get(dynamic.family.name_field())
+                .get("tool_name")
                 .and_then(Value::as_str)
                 .filter(|name| !name.trim().is_empty())
                 .ok_or_else(|| {
-                    ToolError::InvalidParams("dynamic wrapper has no inner tool name".to_owned())
+                    ToolError::InvalidParams(
+                        "collapsed dispatch has no inner tool name".to_owned(),
+                    )
                 })?;
             let arguments = object
                 .get("arguments")
                 .cloned()
                 .unwrap_or_else(|| json!({}));
-            let inner = dynamic.inner.get(name).ok_or_else(|| {
+            let inner = collapsed.inner.get(name).ok_or_else(|| {
                 ToolError::InvalidParams(
-                    "dynamic inner tool is absent from the captured admission".to_owned(),
+                    "collapsed inner tool is absent from the captured admission".to_owned(),
                 )
             })?;
-            validate(&inner.validator, &arguments, "dynamic inner arguments")
+            validate(&inner.validator, &arguments, "collapsed inner arguments")
                 .map_err(tool_params)?;
             let inner_id = ForeignToolId::new(&self.server, name)
                 .map_err(|error| ToolError::InvalidParams(error.to_string()))?;

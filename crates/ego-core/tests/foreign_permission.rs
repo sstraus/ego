@@ -329,8 +329,8 @@ fn permission_requires_outer_and_inner_opaque_plus_exact_http_or_spawn_authority
         )),
         ego_core::permit::Classification::Settled(Ok(_))
     ));
-    let outer = PreparedCall::speakeasy(
-        tool("router", "execute_tool"),
+    let outer = PreparedCall::foreign_dispatch(
+        tool("router", "call_tool"),
         digest("outer"),
         tool("srv", "search"),
         digest("inner"),

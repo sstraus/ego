@@ -2,7 +2,9 @@
 
 use ego_core::config::McpServerName;
 use ego_core::generator::types::ToolDescriptor;
-use ego_mcp::{McpDynamicCatalogue, McpDynamicFamily, McpInputResponse, McpInputState};
+use ego_mcp::{
+    McpCollapsedBootstrap, McpCollapsedCatalogue, McpInputResponse, McpInputState,
+};
 use serde_json::json;
 
 fn server() -> McpServerName {
@@ -12,7 +14,7 @@ fn schema() -> Vec<u8> {
     br#"{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"],"additionalProperties":false}"#.to_vec()
 }
 fn original() -> Vec<u8> {
-    br#"{"method":"tools/call","params":{"name":"execute_tool","arguments":{"x":1}}}"#.to_vec()
+    br#"{"method":"tools/call","params":{"name":"call_tool","arguments":{"x":1}}}"#.to_vec()
 }
 
 fn descriptor(name: &str, parameters: serde_json::Value) -> ToolDescriptor {
@@ -23,67 +25,88 @@ fn descriptor(name: &str, parameters: serde_json::Value) -> ToolDescriptor {
     }
 }
 
-#[test]
-fn standalone_speakeasy_outer_and_inner_authorities_are_independent() {
-    let tools = vec![
+fn collapsed_management() -> Vec<ToolDescriptor> {
+    vec![
         descriptor(
-            "list_tools",
-            json!({"type":"object","additionalProperties":false}),
+            "search_tools",
+            json!({
+                "type":"object",
+                "properties":{"query":{"type":"string"},"limit":{"type":"integer","minimum":1}},
+                "required":["query"],"additionalProperties":false
+            }),
         ),
         descriptor(
-            "describe_tool",
-            json!({"type":"object","additionalProperties":false}),
+            "get_tool_schema",
+            json!({
+                "type":"object",
+                "properties":{"tool_name":{"type":"string"}},
+                "required":["tool_name"],"additionalProperties":false
+            }),
         ),
         descriptor(
-            "execute_tool",
-            json!({"type":"object","properties":{"name":{"type":"string"},"arguments":{"type":"object"}},"required":["name","arguments"],"additionalProperties":false}),
+            "call_tool",
+            json!({
+                "type":"object",
+                "properties":{"tool_name":{"type":"string"},"arguments":{"type":"object"}},
+                "required":["tool_name","arguments"],"additionalProperties":false
+            }),
         ),
-    ];
-    let family = McpDynamicFamily::detect(&tools)
-        .expect("family")
-        .expect("standalone");
-    assert_eq!(family, McpDynamicFamily::standalone());
-    let catalogue = McpDynamicCatalogue::new(family, vec![descriptor(
-        "inner",
-        json!({"type":"object","properties":{"x":{"type":"integer"}},"required":["x"],"additionalProperties":false}),
-    )]).expect("compiled inner schema");
-    assert_eq!(catalogue.tool_names().collect::<Vec<_>>(), vec!["inner"]);
-    assert!(catalogue.tool_names().any(|name| name == "inner"));
+    ]
 }
 
 #[test]
-fn gram_dynamic_toolsets_require_current_inner_schema() {
-    let tools = vec![
-        descriptor(
-            "search_tools",
-            json!({"type":"object","additionalProperties":false}),
-        ),
-        descriptor(
-            "describe_tools",
-            json!({"type":"object","additionalProperties":false}),
-        ),
-        descriptor(
-            "execute_tool",
-            json!({"type":"object","properties":{"name":{"type":"string"},"arguments":{"type":"object"}},"required":["name","arguments"],"additionalProperties":false}),
-        ),
-    ];
-    let family = McpDynamicFamily::detect(&tools)
-        .expect("family")
-        .expect("Gram");
-    assert_eq!(family, McpDynamicFamily::gram());
-    let catalogue = McpDynamicCatalogue::new(family, vec![descriptor(
-        "weather",
-        json!({"type":"object","properties":{"city":{"type":"string"}},"required":["city"],"additionalProperties":false}),
-    )]).expect("schema");
-    assert!(catalogue.tool_names().any(|name| name == "weather"));
-    assert!(!catalogue.tool_names().any(|name| name == "missing"));
-    assert!(
-        McpDynamicCatalogue::new(
-            McpDynamicFamily::gram(),
-            vec![descriptor("broken", json!({"type": 7}))],
-        )
-        .is_err()
+fn collapsed_bootstrap_withholds_dispatch_until_exact_schema_lookup() {
+    let bootstrap = McpCollapsedBootstrap::new(collapsed_management()).expect("bootstrap");
+    assert_eq!(
+        bootstrap.tool_names().collect::<Vec<_>>(),
+        vec!["get_tool_schema", "search_tools"]
     );
+    assert!(!bootstrap.tool_names().any(|name| name == "call_tool"));
+
+    let structured_content = json!({
+        "name":"weather",
+        "description":"Current weather",
+        "inputSchema":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"],"additionalProperties":false}
+    });
+    assert_eq!(
+        structured_content,
+        json!({"name":"weather","description":"Current weather","inputSchema":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"],"additionalProperties":false}})
+    );
+    let successor = McpCollapsedCatalogue::from_schema_response(
+        bootstrap,
+        "weather",
+        json!({"structuredContent":structured_content}),
+    )
+    .expect("one exact schema lookup");
+    assert!(successor.tool_names().any(|name| name == "call_tool"));
+    assert!(successor.tool_names().any(|name| name == "weather"));
+}
+
+#[test]
+fn collapsed_bootstrap_rejects_retired_alias_families_and_invalid_schema_results() {
+    for names in [
+        ["list_tools", "describe_tool", "execute_tool"],
+        ["search_tools", "describe_tools", "execute_tool"],
+    ] {
+        let tools = names
+            .into_iter()
+            .map(|name| descriptor(name, json!({"type":"object","additionalProperties":false})))
+            .collect();
+        assert!(McpCollapsedBootstrap::new(tools).is_err());
+    }
+
+    let bootstrap = McpCollapsedBootstrap::new(collapsed_management()).expect("bootstrap");
+    for result in [
+        json!({"structuredContent":{}}),
+        json!({"structuredContent":{"name":"search_tools","description":"recursive","inputSchema":{"type":"object"}}}),
+        json!({"structuredContent":{"name":"weather","description":"extra","inputSchema":{"type":"object"},"extra":true}}),
+        json!({"structuredContent":{"name":"weather","description":"duplicate","inputSchema":{"type":7}}}),
+    ] {
+        assert!(
+            McpCollapsedCatalogue::from_schema_response(bootstrap.clone(), "weather", result)
+                .is_err()
+        );
+    }
 }
 
 #[test]

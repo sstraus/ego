@@ -7,11 +7,11 @@ use ego_core::config::McpServerConfig;
 use sha2::{Digest, Sha256};
 
 use crate::operation::stdio_spawn_spec;
-use crate::registry::McpDescribedToolsAdmission;
+use crate::registry::McpToolSchemaAdmission;
 use crate::{
     McpAdmittedCandidate, McpCacheMetadata, McpCandidateAdmission, McpCandidateError,
     McpCandidateIdentity, McpCandidateInventory, McpCandidateRequest, McpCapabilities, McpClient,
-    McpClientOptions, McpDuplexEffectsFactory, McpDynamicFamily, McpFuture, McpHttpEffects,
+    McpClientOptions, McpCollapsedBootstrap, McpDuplexEffectsFactory, McpFuture, McpHttpEffects,
     McpHttpOperationFactory, McpInputRequiredRecorder, McpOperationFactory,
     McpStdioOperationFactory,
 };
@@ -23,7 +23,7 @@ pub(crate) struct McpRuntimeCandidateAdmission {
     http_management: Arc<dyn McpHttpEffects>,
     stdio_management: Arc<dyn McpDuplexEffectsFactory>,
     continuations: Arc<dyn McpInputRequiredRecorder>,
-    described: Arc<dyn McpDescribedToolsAdmission>,
+    schemas: Arc<dyn McpToolSchemaAdmission>,
     max_sse_event_size: usize,
     timeout: Duration,
 }
@@ -33,7 +33,7 @@ impl McpRuntimeCandidateAdmission {
         http_management: Arc<dyn McpHttpEffects>,
         stdio_management: Arc<dyn McpDuplexEffectsFactory>,
         continuations: Arc<dyn McpInputRequiredRecorder>,
-        described: Arc<dyn McpDescribedToolsAdmission>,
+        schemas: Arc<dyn McpToolSchemaAdmission>,
         max_sse_event_size: usize,
         timeout: Duration,
     ) -> Self {
@@ -41,7 +41,7 @@ impl McpRuntimeCandidateAdmission {
             http_management,
             stdio_management,
             continuations,
-            described,
+            schemas,
             max_sse_event_size,
             timeout,
         }
@@ -58,7 +58,7 @@ impl McpRuntimeCandidateAdmission {
     fn operation_factory(
         &self,
         config: &McpServerConfig,
-        family: Option<McpDynamicFamily>,
+        bootstrap: Option<McpCollapsedBootstrap>,
     ) -> Result<Arc<dyn McpOperationFactory>, McpCandidateError> {
         match config {
             McpServerConfig::Http(_) => McpHttpOperationFactory::runtime(
@@ -66,8 +66,8 @@ impl McpRuntimeCandidateAdmission {
                 Arc::clone(&self.continuations),
                 self.max_sse_event_size,
                 self.timeout,
-                family,
-                Arc::clone(&self.described),
+                bootstrap,
+                Arc::clone(&self.schemas),
             )
             .map(|factory| Arc::new(factory) as Arc<dyn McpOperationFactory>)
             .map_err(|error| invalid_candidate(error.to_string())),
@@ -75,8 +75,8 @@ impl McpRuntimeCandidateAdmission {
                 Arc::clone(&self.continuations),
                 self.max_sse_event_size,
                 self.timeout,
-                family,
-                Arc::clone(&self.described),
+                bootstrap,
+                Arc::clone(&self.schemas),
             )
             .map(|factory| Arc::new(factory) as Arc<dyn McpOperationFactory>)
             .map_err(|error| invalid_candidate(error.to_string())),
@@ -92,7 +92,7 @@ impl McpCandidateAdmission for McpRuntimeCandidateAdmission {
         let http_management = Arc::clone(&self.http_management);
         let stdio_management = Arc::clone(&self.stdio_management);
         let continuations = Arc::clone(&self.continuations);
-        let described = Arc::clone(&self.described);
+        let schemas = Arc::clone(&self.schemas);
         let max_sse_event_size = self.max_sse_event_size;
         let timeout = self.timeout;
         Box::pin(async move {
@@ -100,7 +100,7 @@ impl McpCandidateAdmission for McpRuntimeCandidateAdmission {
                 http_management,
                 stdio_management,
                 continuations,
-                described,
+                schemas,
                 max_sse_event_size,
                 timeout,
             );
@@ -134,9 +134,9 @@ impl McpCandidateAdmission for McpRuntimeCandidateAdmission {
             let settlement = client.settle().await;
             let inventory = inventory.map_err(|error| invalid_candidate(error.to_string()))?;
             settlement.map_err(|error| invalid_candidate(error.to_string()))?;
-            let family = McpDynamicFamily::detect(&inventory.tools)
+            let bootstrap = McpCollapsedBootstrap::detect(&inventory.tools)
                 .map_err(|error| invalid_candidate(error.to_string()))?;
-            let factory = runtime.operation_factory(request.config(), family.clone())?;
+            let factory = runtime.operation_factory(request.config(), bootstrap)?;
             let capabilities = McpCapabilities::new(
                 inventory.capabilities.tools.is_some(),
                 inventory.capabilities.resources.is_some(),

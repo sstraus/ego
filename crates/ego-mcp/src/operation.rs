@@ -27,9 +27,9 @@ use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::dynamic::{McpDynamicFamily, McpOperation, McpOperationFactory};
+use crate::dynamic::{McpCollapsedBootstrap, McpOperation, McpOperationFactory};
 use crate::http::AdmittedMcpHttpProfile;
-use crate::registry::{McpDescribedToolsAdmission, McpDescribedToolsCommand};
+use crate::registry::{McpToolSchemaAdmission, McpToolSchemaCommand};
 use crate::state::{compile_schema, validate_answer};
 use crate::{
     McpClient, McpClientOptions, McpDuplexEffects, McpError, McpFailure, McpFuture, McpHttpEffects,
@@ -44,9 +44,9 @@ struct OperationLimits {
 }
 
 #[derive(Clone)]
-struct DynamicDescribeAdmission {
-    family: McpDynamicFamily,
-    admission: Arc<dyn McpDescribedToolsAdmission>,
+struct CollapsedSchemaAdmission {
+    bootstrap: McpCollapsedBootstrap,
+    admission: Arc<dyn McpToolSchemaAdmission>,
 }
 
 impl OperationLimits {
@@ -80,7 +80,7 @@ pub struct McpHttpOperationFactory {
     management: Arc<dyn McpHttpEffects>,
     continuations: Arc<dyn McpInputRequiredRecorder>,
     limits: OperationLimits,
-    dynamic: Option<DynamicDescribeAdmission>,
+    collapsed: Option<CollapsedSchemaAdmission>,
 }
 
 /// Consumer-owned persistence boundary used before an input-required outcome
@@ -192,7 +192,7 @@ impl McpHttpOperationFactory {
             management,
             continuations,
             limits: OperationLimits::new(max_sse_event_size, timeout)?,
-            dynamic: None,
+            collapsed: None,
         })
     }
 
@@ -201,14 +201,17 @@ impl McpHttpOperationFactory {
         continuations: Arc<dyn McpInputRequiredRecorder>,
         max_sse_event_size: usize,
         timeout: Duration,
-        family: Option<McpDynamicFamily>,
-        admission: Arc<dyn McpDescribedToolsAdmission>,
+        bootstrap: Option<McpCollapsedBootstrap>,
+        admission: Arc<dyn McpToolSchemaAdmission>,
     ) -> Result<Self, McpError> {
         Ok(Self {
             management,
             continuations,
             limits: OperationLimits::new(max_sse_event_size, timeout)?,
-            dynamic: family.map(|family| DynamicDescribeAdmission { family, admission }),
+            collapsed: bootstrap.map(|bootstrap| CollapsedSchemaAdmission {
+                bootstrap,
+                admission,
+            }),
         })
     }
 }
@@ -247,7 +250,7 @@ impl McpOperationFactory for McpHttpOperationFactory {
 pub struct McpStdioOperationFactory {
     continuations: Arc<dyn McpInputRequiredRecorder>,
     limits: OperationLimits,
-    dynamic: Option<DynamicDescribeAdmission>,
+    collapsed: Option<CollapsedSchemaAdmission>,
 }
 
 impl McpStdioOperationFactory {
@@ -259,7 +262,7 @@ impl McpStdioOperationFactory {
         Ok(Self {
             continuations,
             limits: OperationLimits::new(max_sse_event_size, timeout)?,
-            dynamic: None,
+            collapsed: None,
         })
     }
 
@@ -267,13 +270,16 @@ impl McpStdioOperationFactory {
         continuations: Arc<dyn McpInputRequiredRecorder>,
         max_sse_event_size: usize,
         timeout: Duration,
-        family: Option<McpDynamicFamily>,
-        admission: Arc<dyn McpDescribedToolsAdmission>,
+        bootstrap: Option<McpCollapsedBootstrap>,
+        admission: Arc<dyn McpToolSchemaAdmission>,
     ) -> Result<Self, McpError> {
         Ok(Self {
             continuations,
             limits: OperationLimits::new(max_sse_event_size, timeout)?,
-            dynamic: family.map(|family| DynamicDescribeAdmission { family, admission }),
+            collapsed: bootstrap.map(|bootstrap| CollapsedSchemaAdmission {
+                bootstrap,
+                admission,
+            }),
         })
     }
 }
@@ -309,7 +315,7 @@ impl McpOperationFactory for McpStdioOperationFactory {
                 Arc::clone(&self.continuations),
                 self.limits,
                 admission,
-                self.dynamic.clone(),
+                self.collapsed.clone(),
             )
             .await
             .map_err(mcp_execution_error)
@@ -433,8 +439,8 @@ async fn execute_http(
     let selected = broker
         .selected_settlement()?
         .ok_or_else(|| protocol("selected MCP HTTP operation was not settled"))?;
-    let described =
-        described_tools_command(&outcome, &envelope, admission, factory.dynamic.as_ref())?;
+    let schema =
+        tool_schema_command(&outcome, &envelope, admission, factory.collapsed.as_ref())?;
     let execution = project_outcome(
         outcome,
         &envelope,
@@ -443,8 +449,8 @@ async fn execute_http(
         selected.delivery(),
         cancellation_from_http(selected.end()),
     )?;
-    if let (Some(dynamic), Some(command)) = (factory.dynamic.as_ref(), described) {
-        dynamic.admission.reconcile(command).await?;
+    if let (Some(collapsed), Some(command)) = (factory.collapsed.as_ref(), schema) {
+        collapsed.admission.reconcile(command).await?;
     }
     Ok(execution)
 }
@@ -456,7 +462,7 @@ async fn execute_stdio(
     continuations: Arc<dyn McpInputRequiredRecorder>,
     limits: OperationLimits,
     admission: Arc<McpServerAdmission>,
-    dynamic: Option<DynamicDescribeAdmission>,
+    collapsed: Option<CollapsedSchemaAdmission>,
 ) -> Result<ToolExecution, McpError> {
     let envelope = call
         .mcp_envelope()
@@ -497,7 +503,7 @@ async fn execute_stdio(
     let duplex = settlement
         .duplex()
         .ok_or_else(|| protocol("selected MCP stdio operation has no settlement"))?;
-    let described = described_tools_command(&outcome, &envelope, admission, dynamic.as_ref())?;
+    let schema = tool_schema_command(&outcome, &envelope, admission, collapsed.as_ref())?;
     let execution = project_outcome(
         outcome,
         &envelope,
@@ -506,8 +512,8 @@ async fn execute_stdio(
         duplex.delivery(),
         cancellation_from_duplex(duplex),
     )?;
-    if let (Some(dynamic), Some(command)) = (dynamic, described) {
-        dynamic.admission.reconcile(command).await?;
+    if let (Some(collapsed), Some(command)) = (collapsed, schema) {
+        collapsed.admission.reconcile(command).await?;
     }
     Ok(execution)
 }
@@ -603,19 +609,19 @@ fn map_manual<T>(
     }
 }
 
-fn described_tools_command(
+fn tool_schema_command(
     outcome: &OperationOutcome,
     envelope: &ego_core::permit::McpPreparedEnvelope,
     server_admission: Arc<McpServerAdmission>,
-    dynamic: Option<&DynamicDescribeAdmission>,
-) -> Result<Option<McpDescribedToolsCommand>, McpError> {
-    let Some(dynamic) = dynamic else {
+    collapsed: Option<&CollapsedSchemaAdmission>,
+) -> Result<Option<McpToolSchemaCommand>, McpError> {
+    let Some(collapsed) = collapsed else {
         return Ok(None);
     };
     let McpSubject::Tool { name, .. } = envelope.subject() else {
         return Ok(None);
     };
-    if name != dynamic.family.describe_name() {
+    if name != collapsed.bootstrap.lookup_name() {
         return Ok(None);
     }
     let OperationOutcome::Complete(CompleteResult::Tool(result)) = outcome else {
@@ -628,20 +634,20 @@ fn described_tools_command(
             .is_some_and(rmcp::model::ResultType::is_complete)
     {
         return Err(protocol(
-            "dynamic describe did not return a successful complete result",
+            "collapsed schema lookup did not return a successful complete result",
         ));
     }
     let structured_content = result
         .structured_content
         .clone()
-        .ok_or_else(|| protocol("dynamic describe result has no structuredContent"))?;
+        .ok_or_else(|| protocol("collapsed schema lookup result has no structuredContent"))?;
     let parameters: Value = serde_json::from_slice(envelope.parameters())?;
-    let requested_names = dynamic.family.requested_names(&parameters)?;
-    Ok(Some(McpDescribedToolsCommand::new(
+    let requested_name = collapsed.bootstrap.requested_name(&parameters)?;
+    Ok(Some(McpToolSchemaCommand::new(
         server_admission,
         envelope.admission().generation().to_owned(),
         envelope.admission().clone(),
-        requested_names,
+        requested_name,
         structured_content,
     )))
 }

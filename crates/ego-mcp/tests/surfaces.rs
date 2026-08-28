@@ -11,8 +11,9 @@ use ego_core::permit::{GuardedIo, PreparedCall, ToolError};
 use ego_core::turn::{McpRegistryEvent, McpRegistryJournal, McpRegistryJournalError};
 use ego_mcp::{
     McpAdmittedCandidate, McpCacheMetadata, McpCandidateAdmission, McpCandidateError,
-    McpCandidateIdentity, McpCandidateInventory, McpCapabilities, McpDynamicCatalogue,
-    McpDynamicFamily, McpEnvironmentBinding, McpHeaderBinding, McpOperation, McpOperationFactory,
+    McpCandidateIdentity, McpCandidateInventory, McpCapabilities, McpCollapsedBootstrap,
+    McpCollapsedCatalogue, McpEnvironmentBinding, McpHeaderBinding, McpOperation,
+    McpOperationFactory,
     McpRegistryCandidate, McpRegistryController, McpRegistryRefresh, McpServerAdmission,
     McpTransportMaterial, RegistryScope, RegistryTrigger,
 };
@@ -151,7 +152,7 @@ fn refresh_admits_live_values_and_rejects_duplicate_server_names() {
     );
 }
 
-const DYNAMIC_WRAPPER: &str = r#"{"type":"object","properties":{"name":{"type":"string"},"arguments":{"type":"object"}},"required":["name","arguments"],"additionalProperties":false}"#;
+const COLLAPSED_WRAPPER: &str = r#"{"type":"object","properties":{"tool_name":{"type":"string"},"arguments":{"type":"object"}},"required":["tool_name","arguments"],"additionalProperties":false}"#;
 
 fn descriptor(name: &str, parameters: Value) -> ToolDescriptor {
     ToolDescriptor {
@@ -161,19 +162,19 @@ fn descriptor(name: &str, parameters: Value) -> ToolDescriptor {
     }
 }
 
-fn gram_management() -> Vec<ToolDescriptor> {
+fn collapsed_management() -> Vec<ToolDescriptor> {
     vec![
         descriptor(
             "search_tools",
-            json!({"type":"object","additionalProperties":false}),
+            json!({"type":"object","properties":{"query":{"type":"string"},"limit":{"type":"integer","minimum":1}},"required":["query"],"additionalProperties":false}),
         ),
         descriptor(
-            "describe_tools",
-            json!({"type":"object","additionalProperties":false}),
+            "get_tool_schema",
+            json!({"type":"object","properties":{"tool_name":{"type":"string"}},"required":["tool_name"],"additionalProperties":false}),
         ),
         descriptor(
-            "execute_tool",
-            serde_json::from_str(DYNAMIC_WRAPPER).expect("wrapper"),
+            "call_tool",
+            serde_json::from_str(COLLAPSED_WRAPPER).expect("wrapper"),
         ),
     ]
 }
@@ -284,14 +285,14 @@ impl McpCandidateAdmission for DynamicAdmission {
 
 fn dynamic_candidate(
     admission: Arc<McpServerAdmission>,
-    catalogue: Option<McpDynamicCatalogue>,
+    catalogue: Option<McpCollapsedCatalogue>,
 ) -> McpAdmittedCandidate {
     McpAdmittedCandidate::new(
         Arc::clone(&admission),
         McpCandidateIdentity::validated("dynamic"),
         McpCandidateInventory::new(
             McpCapabilities::tools(),
-            gram_management(),
+            collapsed_management(),
             Vec::new(),
             Vec::new(),
             McpCacheMetadata::default(),
@@ -317,12 +318,10 @@ fn dynamic_refresh(admission: &Arc<McpServerAdmission>) -> McpRegistryRefresh {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn dynamic_family_without_described_catalogue_publishes_management_only_bootstrap() {
-    let family = McpDynamicFamily::detect(&gram_management())
-        .expect("dynamic family")
-        .expect("Gram family");
-    assert_eq!(family, McpDynamicFamily::gram());
-
+async fn collapsed_family_without_schema_publishes_management_only_bootstrap() {
+    let bootstrap = McpCollapsedBootstrap::new(collapsed_management()).expect("bootstrap");
+    assert_eq!(bootstrap.tool_names().collect::<Vec<_>>(), vec!["get_tool_schema", "search_tools"]);
+    assert!(!bootstrap.tool_names().any(|name| name == "call_tool"));
     let admission = dynamic_admission();
     let queue = Arc::new(DynamicAdmission::default());
     queue.push(DynamicOutcome::Candidate(dynamic_candidate(
@@ -343,18 +342,18 @@ async fn dynamic_family_without_described_catalogue_publishes_management_only_bo
     assert_eq!(publication.generation(), "generation-1");
     assert_eq!(
         publication.admitted_tools(),
-        &["describe_tools".to_owned(), "search_tools".to_owned()]
+        &["get_tool_schema".to_owned(), "search_tools".to_owned()]
     );
     assert!(
         !publication
             .admitted_tools()
             .iter()
-            .any(|name| name == "execute_tool")
+            .any(|name| name == "call_tool")
     );
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn described_dynamic_catalogue_publishes_next_generation_and_keeps_old_capture() {
+async fn described_collapsed_catalogue_publishes_next_generation_and_keeps_old_capture() {
     let admission = dynamic_admission();
     let queue = Arc::new(DynamicAdmission::default());
     queue.push(DynamicOutcome::Candidate(dynamic_candidate(
@@ -367,10 +366,7 @@ async fn described_dynamic_catalogue_publishes_next_generation_and_keeps_old_cap
         "required":["city"],
         "additionalProperties":false
     });
-    let catalogue = McpDynamicCatalogue::new(
-        McpDynamicFamily::gram(),
-        vec![descriptor("weather", old_schema.clone())],
-    )
+    let catalogue = McpCollapsedCatalogue::new(vec![descriptor("weather", old_schema.clone())])
     .expect("described catalogue");
     queue.push(DynamicOutcome::Candidate(dynamic_candidate(
         Arc::clone(&admission),
@@ -398,13 +394,13 @@ async fn described_dynamic_catalogue_publishes_next_generation_and_keeps_old_cap
         second
             .admitted_tools()
             .iter()
-            .any(|name| name == "execute_tool")
+            .any(|name| name == "call_tool")
     );
     assert!(
         !old_capture
             .tools()
             .iter()
-            .any(|tool| tool.descriptor().name == "execute_tool")
+            .any(|tool| tool.descriptor().name == "call_tool")
     );
     assert!(
         second
@@ -416,7 +412,7 @@ async fn described_dynamic_catalogue_publishes_next_generation_and_keeps_old_cap
 }
 
 #[test]
-fn dynamic_describe_validation_rejects_invalid_catalogue_without_a_partial_value() {
+fn collapsed_schema_validation_rejects_invalid_catalogue_without_a_partial_value() {
     let invalid = [
         vec![descriptor("weather", json!({"type": 7}))],
         vec![
@@ -430,12 +426,12 @@ fn dynamic_describe_validation_rejects_invalid_catalogue_without_a_partial_value
             ),
         ],
         vec![descriptor(
-            "execute_tool",
+            "call_tool",
             json!({"type":"object","additionalProperties":false}),
         )],
     ];
     for descriptors in invalid {
-        assert!(McpDynamicCatalogue::new(McpDynamicFamily::gram(), descriptors).is_err());
+        assert!(McpCollapsedCatalogue::new(descriptors).is_err());
     }
-    assert!(McpDynamicCatalogue::new(McpDynamicFamily::gram(), Vec::new()).is_err());
+    assert!(McpCollapsedCatalogue::new(Vec::new()).is_err());
 }

@@ -114,16 +114,55 @@ fn protocol_envelope_refuses_semantic_or_byte_authority_mismatch_before_send() {
 }
 
 #[test]
-fn speakeasy_protocol_ops_need_outer_inner_and_network_rules() {
+fn collapsed_dispatch_ops_need_outer_inner_and_network_rules() {
+    let call = PreparedCall::foreign_dispatch(
+        ForeignToolId::new("alpha", "call_tool").expect("outer identity"),
+        digest("outer"),
+        ForeignToolId::new("alpha", "weather").expect("inner identity"),
+        digest("inner"),
+        route(),
+        &ego_core::permit::HttpRequest::new("POST", "/mcp", Vec::new(), Vec::new())
+            .expect("request"),
+    );
+    assert!(matches!(
+        call.ops.as_slice(),
+        [Op::Opaque { .. }, Op::Opaque { .. }, Op::Connect { .. }]
+    ));
+    assert!(matches!(
+        PolicyEngine::new(
+            ego_core::permit::CanonPath::new("/workspace"),
+            ego_core::config::Mode::Default,
+            rules(&[
+                "tool(alpha/call_tool)",
+                "tool(alpha/weather)",
+                "net(mcp.example:443)"
+            ])
+        )
+        .classify(call.clone()),
+        ego_core::permit::Classification::Settled(Ok(_))
+    ));
+    assert!(matches!(
+        PolicyEngine::new(
+            ego_core::permit::CanonPath::new("/workspace"),
+            ego_core::config::Mode::Default,
+            rules(&["tool(alpha/call_tool)", "net(mcp.example:443)"])
+        )
+        .classify(call),
+        ego_core::permit::Classification::Ask(_)
+    ));
+}
+
+#[test]
+fn collapsed_protocol_subject_keeps_exact_call_tool_identity() {
     let call = PreparedCall::mcp(
         McpSubject::Tool {
             server: "alpha".into(),
-            name: "execute_tool".into(),
+            name: "call_tool".into(),
         },
         McpOperationKind::CallTool,
         vec![
             (
-                ForeignToolId::new("alpha", "execute_tool").expect("outer identity"),
+                ForeignToolId::new("alpha", "call_tool").expect("outer identity"),
                 digest("outer"),
             ),
             (
@@ -131,7 +170,7 @@ fn speakeasy_protocol_ops_need_outer_inner_and_network_rules() {
                 digest("inner"),
             ),
         ],
-        McpAdmissionFingerprint::new("capture-7", "execute_tool", "schema-7").expect("admission"),
+        McpAdmissionFingerprint::new("capture-7", "call_tool", "schema-7").expect("admission"),
         "profile-7",
         route(),
         &json!({"name":"weather","arguments":{"city":"Rome"}}),
@@ -150,7 +189,7 @@ fn speakeasy_protocol_ops_need_outer_inner_and_network_rules() {
             ego_core::permit::CanonPath::new("/workspace"),
             ego_core::config::Mode::Default,
             rules(&[
-                "tool(alpha/execute_tool)",
+                "tool(alpha/call_tool)",
                 "tool(alpha/weather)",
                 "net(mcp.example:443)"
             ])
@@ -162,7 +201,7 @@ fn speakeasy_protocol_ops_need_outer_inner_and_network_rules() {
         PolicyEngine::new(
             ego_core::permit::CanonPath::new("/workspace"),
             ego_core::config::Mode::Default,
-            rules(&["tool(alpha/execute_tool)", "net(mcp.example:443)"])
+            rules(&["tool(alpha/call_tool)", "net(mcp.example:443)"])
         )
         .classify(call.clone()),
         ego_core::permit::Classification::Ask(_)
@@ -173,9 +212,9 @@ fn speakeasy_protocol_ops_need_outer_inner_and_network_rules() {
 fn foreign_result_preserves_provenance_bounds_unsupported_content_cache_and_delivery() {
     let result = ForeignResult::new(
         "alpha",
-        "execute_tool",
+        "call_tool",
         digest("params"),
-        McpAdmissionFingerprint::new("capture-7", "execute_tool", "schema-7").expect("admission"),
+        McpAdmissionFingerprint::new("capture-7", "call_tool", "schema-7").expect("admission"),
         "object",
         None,
         None,
@@ -193,7 +232,7 @@ fn foreign_result_preserves_provenance_bounds_unsupported_content_cache_and_deli
     )
     .expect("foreign result");
     assert_eq!(result.server(), "alpha");
-    assert_eq!(result.tool(), "execute_tool");
+    assert_eq!(result.tool(), "call_tool");
     assert_eq!(result.admission_generation(), "capture-7");
     assert_eq!(result.ttl_ms(), None);
     assert_eq!(result.cache_scope(), None);
@@ -255,9 +294,9 @@ impl ContextSource for FakeContextSource {
 
 #[test]
 fn stale_capture_rejects_compiled_inner_schema_after_describe_refresh() {
-    let old = McpAdmissionFingerprint::new("capture-7", "execute_tool", "schema-1")
+    let old = McpAdmissionFingerprint::new("capture-7", "call_tool", "schema-1")
         .expect("old admission fingerprint");
-    let refreshed = McpAdmissionFingerprint::new("capture-8", "execute_tool", "schema-2")
+    let refreshed = McpAdmissionFingerprint::new("capture-8", "call_tool", "schema-2")
         .expect("new admission fingerprint");
     assert_ne!(old, refreshed);
 }

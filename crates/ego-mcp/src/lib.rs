@@ -22,7 +22,8 @@ pub use client::{
     MCP_PROTOCOL_REVISION, McpClient, McpClientCancellation, McpClientOptions, McpClientSettlement,
 };
 pub use dynamic::{
-    McpCapturedTool, McpDynamicCatalogue, McpDynamicFamily, McpOperation, McpOperationFactory,
+    McpCapturedTool, McpCollapsedBootstrap, McpCollapsedCatalogue, McpOperation,
+    McpOperationFactory,
 };
 pub use effects::{
     McpDuplexEffects, McpDuplexEffectsFactory, McpFuture, McpHttpEffects, McpHttpEnd,

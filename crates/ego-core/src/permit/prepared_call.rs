@@ -468,7 +468,7 @@ impl PreparedCall {
         }
     }
 
-    pub fn speakeasy(
+    pub fn foreign_dispatch(
         outer_tool: ForeignToolId,
         outer_digest: InvocationDigest,
         inner_tool: ForeignToolId,

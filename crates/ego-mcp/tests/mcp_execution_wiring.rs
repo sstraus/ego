@@ -15,12 +15,15 @@ use ego_core::config::{
 };
 use ego_core::generator::types::ToolDescriptor;
 use ego_core::mcp::ToolExecution;
-use ego_core::permit::{GuardedIo, Op, PreparedCall, ToolError, ToolResult};
+use ego_core::permit::{
+    ForeignToolId, ForeignTransportTarget, GuardedIo, HttpHeader, HttpRequest, HttpRoute,
+    HttpScheme, NetworkTarget, Op, PreparedCall, ToolError, ToolResult,
+};
 use ego_core::turn::{McpRegistryEvent, McpRegistryJournal, McpRegistryJournalError};
 use ego_mcp::{
     McpAdmittedCandidate, McpCacheMetadata, McpCandidateAdmission, McpCandidateError,
-    McpCandidateIdentity, McpCandidateInventory, McpCapabilities, McpDynamicCatalogue,
-    McpDynamicFamily, McpFuture, McpOperation, McpOperationFactory, McpRegistryCandidate,
+    McpCandidateIdentity, McpCandidateInventory, McpCapabilities, McpCollapsedCatalogue,
+    McpFuture, McpOperation, McpOperationFactory, McpRegistryCandidate,
     McpRegistryController, McpRegistryRefresh, McpServerAdmission, McpTransportMaterial,
     RegistryScope, RegistryTrigger,
 };
@@ -37,10 +40,38 @@ impl McpOperationFactory for FakeFactory {
         _: Arc<McpServerAdmission>,
         operation: McpOperation,
     ) -> Result<PreparedCall, ToolError> {
+        let invocation_count = operation.invocations().len();
         self.prepares
             .lock()
             .expect("prepares")
-            .push(operation.invocations().len());
+            .push(invocation_count);
+        if invocation_count == 2 {
+            let [(outer, outer_digest), (inner, inner_digest)] = operation.invocations() else {
+                unreachable!("the count was checked above")
+            };
+            assert_eq!(outer, &ForeignToolId::new("alpha", "call_tool").expect("outer"));
+            assert_eq!(inner, &ForeignToolId::new("alpha", "weather").expect("inner"));
+            let request = HttpRequest::new(
+                "POST",
+                "/mcp",
+                vec![HttpHeader::new("accept", b"application/json".to_vec()).expect("header")],
+                br#"{"jsonrpc":"2.0","method":"tools/call"}"#.to_vec(),
+            )
+            .expect("request");
+            let route = HttpRoute::new(
+                HttpScheme::Https,
+                NetworkTarget::new("mcp.example", 443).expect("target"),
+            )
+            .expect("route");
+            return Ok(PreparedCall::foreign_dispatch(
+                outer.clone(),
+                outer_digest.clone(),
+                inner.clone(),
+                inner_digest.clone(),
+                ForeignTransportTarget::http(route),
+                &request,
+            ));
+        }
         Ok(PreparedCall::new(
             "mcp-operation",
             vec![Op::Read {
@@ -223,13 +254,13 @@ fn dynamic_candidate(
     admission: Arc<McpServerAdmission>,
     factory: Arc<FakeFactory>,
 ) -> McpAdmittedCandidate {
-    let wrapper = json!({"type":"object","properties":{"name":{"type":"string"},"arguments":{"type":"object"}},"required":["name","arguments"],"additionalProperties":false});
+    let wrapper = json!({"type":"object","properties":{"tool_name":{"type":"string"},"arguments":{"type":"object"}},"required":["tool_name","arguments"],"additionalProperties":false});
     let inner = descriptor(
         "weather",
         json!({"type":"object","properties":{"city":{"type":"string"}},"required":["city"],"additionalProperties":false}),
     );
     let catalogue =
-        McpDynamicCatalogue::new(McpDynamicFamily::standalone(), vec![inner]).expect("catalogue");
+        McpCollapsedCatalogue::new(vec![inner]).expect("catalogue");
     McpAdmittedCandidate::new(
         admission,
         McpCandidateIdentity::validated("alpha"),
@@ -237,14 +268,14 @@ fn dynamic_candidate(
             McpCapabilities::tools(),
             vec![
                 descriptor(
-                    "list_tools",
-                    json!({"type":"object","additionalProperties":false}),
+                    "search_tools",
+                    json!({"type":"object","properties":{"query":{"type":"string"},"limit":{"type":"integer","minimum":1}},"required":["query"],"additionalProperties":false}),
                 ),
                 descriptor(
-                    "describe_tool",
-                    json!({"type":"object","additionalProperties":false}),
+                    "get_tool_schema",
+                    json!({"type":"object","properties":{"tool_name":{"type":"string"}},"required":["tool_name"],"additionalProperties":false}),
                 ),
-                descriptor("execute_tool", wrapper),
+                descriptor("call_tool", wrapper),
             ],
             Vec::new(),
             Vec::new(),
@@ -379,21 +410,28 @@ fn dynamic_capture_validates_inner_schema_and_executes_one_selected_call() {
         .capture()
         .tools()
         .iter()
-        .find(|tool| tool.descriptor().name == "execute_tool")
-        .expect("execute_tool");
+        .find(|tool| tool.descriptor().name == "call_tool")
+        .expect("call_tool");
     let fs = ego_core::permit::fake::FakeFs::default();
     let ctx = ego_core::permit::PrepareCtx {
         cwd: ego_core::permit::CanonPath::new("/fixture"),
         resolver: &fs,
     };
     let call = tool
-        .prepare(json!({"name":"weather","arguments":{"city":"Rome"}}), &ctx)
+        .prepare(json!({"tool_name":"weather","arguments":{"city":"Rome"}}), &ctx)
         .expect("valid");
     assert_eq!(factory.prepares.lock().expect("prepares").as_slice(), &[2]);
     assert!(
-        tool.prepare(json!({"name":"weather","arguments":{"city":7}}), &ctx)
+        tool.prepare(json!({"tool_name":"weather","arguments":{"city":7}}), &ctx)
             .is_err()
     );
+    for management in ["search_tools", "get_tool_schema", "call_tool"] {
+        assert!(
+            tool.prepare(json!({"tool_name":management,"arguments":{}}), &ctx)
+                .is_err(),
+            "management tool {management} cannot recurse through call_tool"
+        );
+    }
     futures::executor::block_on(tool.execute(call, &NoIo)).expect("execute");
     assert_eq!(factory.executions.load(Ordering::SeqCst), 1);
 }

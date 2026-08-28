@@ -18,13 +18,12 @@ use ego_core::turn::{
     McpRegistryJournalError, RegisteredTool, ToolCatalogueError,
 };
 use rmcp::model::{Prompt, Resource};
-use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 use crate::dynamic::McpToolDefinition;
 use crate::{
-    McpDuplexEffectsFactory, McpDynamicCatalogue, McpDynamicFamily, McpError, McpFailure,
-    McpFuture, McpHttpEffects, McpInputRequiredRecorder, McpOperationFactory,
+    McpCollapsedBootstrap, McpCollapsedCatalogue, McpDuplexEffectsFactory, McpError,
+    McpFailure, McpFuture, McpHttpEffects, McpInputRequiredRecorder, McpOperationFactory,
     McpRuntimeCandidateAdmission, McpServerAdmission,
 };
 
@@ -362,7 +361,7 @@ pub struct McpCandidateInventory {
     resources: Vec<Resource>,
     prompts: Vec<Prompt>,
     cache: McpCacheMetadata,
-    dynamic: Option<McpDynamicCatalogue>,
+    collapsed: Option<McpCollapsedCatalogue>,
 }
 
 impl McpCandidateInventory {
@@ -372,7 +371,7 @@ impl McpCandidateInventory {
         resources: Vec<Resource>,
         prompts: Vec<Prompt>,
         cache: McpCacheMetadata,
-        dynamic: Option<McpDynamicCatalogue>,
+        collapsed: Option<McpCollapsedCatalogue>,
     ) -> Self {
         Self {
             capabilities,
@@ -380,7 +379,7 @@ impl McpCandidateInventory {
             resources,
             prompts,
             cache,
-            dynamic,
+            collapsed,
         }
     }
 }
@@ -395,7 +394,7 @@ pub struct McpAdmittedCandidate {
     resources: Arc<[Resource]>,
     prompts: Arc<[Prompt]>,
     cache: McpCacheMetadata,
-    dynamic_family: Option<McpDynamicFamily>,
+    collapsed_bootstrap: Option<McpCollapsedBootstrap>,
     factory: Arc<dyn McpOperationFactory>,
 }
 
@@ -421,26 +420,26 @@ impl McpAdmittedCandidate {
             resources,
             prompts,
             cache,
-            dynamic,
+            collapsed,
         } = inventory;
         validate_candidate_contents(&capabilities, &tools, &resources, &prompts)?;
-        let dynamic_family = McpDynamicFamily::detect(&tools)
+        let collapsed_bootstrap = McpCollapsedBootstrap::detect(&tools)
             .map_err(|error| McpRegistryError::InvalidCandidate(error.to_string()))?;
-        match (&dynamic_family, &dynamic) {
-            (Some(detected), Some(catalogue)) if detected == catalogue.family() => {}
+        match (&collapsed_bootstrap, &collapsed) {
+            (Some(_), Some(_)) => {}
             (Some(_), None) => {}
             (None, None) => {}
             _ => {
                 return Err(McpRegistryError::InvalidCandidate(
-                    "dynamic MCP catalogue does not match the detected family".to_owned(),
+                    "collapsed MCP catalogue has no compatible bootstrap".to_owned(),
                 ));
             }
         }
         let descriptors: Arc<[GeneratorToolDescriptor]> = tools.into();
         let definitions = compile_candidate_tool_definitions(
             &descriptors,
-            dynamic_family.as_ref(),
-            dynamic.as_ref(),
+            collapsed_bootstrap.as_ref(),
+            collapsed.as_ref(),
         )?;
         let mut names = std::collections::BTreeSet::new();
         for definition in &definitions {
@@ -460,7 +459,7 @@ impl McpAdmittedCandidate {
             resources: resources.into(),
             prompts: prompts.into(),
             cache,
-            dynamic_family,
+            collapsed_bootstrap,
             factory,
         })
     }
@@ -468,14 +467,15 @@ impl McpAdmittedCandidate {
 
 fn compile_candidate_tool_definitions(
     descriptors: &[GeneratorToolDescriptor],
-    dynamic_family: Option<&McpDynamicFamily>,
-    dynamic: Option<&McpDynamicCatalogue>,
+    collapsed_bootstrap: Option<&McpCollapsedBootstrap>,
+    collapsed: Option<&McpCollapsedCatalogue>,
 ) -> Result<Vec<McpToolDefinition>, McpRegistryError> {
     let mut definitions = Vec::new();
     for descriptor in descriptors {
-        let definition = match dynamic_family {
-            Some(_) if descriptor.name == "execute_tool" => dynamic
-                .map(|catalogue| McpToolDefinition::dynamic(descriptor.clone(), catalogue.clone())),
+        let definition = match collapsed_bootstrap {
+            Some(bootstrap) if descriptor.name == bootstrap.dispatch_name() => collapsed.map(
+                |catalogue| McpToolDefinition::collapsed(descriptor.clone(), catalogue.clone()),
+            ),
             _ => Some(McpToolDefinition::direct(descriptor.clone())),
         };
         if let Some(definition) = definition {
@@ -527,7 +527,7 @@ struct AdmittedServerSlice {
     resources: Arc<[Resource]>,
     prompts: Arc<[Prompt]>,
     cache: McpCacheMetadata,
-    dynamic_family: Option<McpDynamicFamily>,
+    collapsed_bootstrap: Option<McpCollapsedBootstrap>,
     factory: Arc<dyn McpOperationFactory>,
 }
 
@@ -543,22 +543,25 @@ impl AdmittedServerSlice {
             resources: candidate.resources,
             prompts: candidate.prompts,
             cache: candidate.cache,
-            dynamic_family: candidate.dynamic_family,
+            collapsed_bootstrap: candidate.collapsed_bootstrap,
             factory: candidate.factory,
         }
     }
 
-    fn with_dynamic_catalogue(
+    fn with_collapsed_catalogue(
         &self,
-        catalogue: McpDynamicCatalogue,
+        catalogue: McpCollapsedCatalogue,
     ) -> Result<Self, McpRegistryError> {
-        let family = self.dynamic_family.as_ref().ok_or_else(|| {
+        let bootstrap = self.collapsed_bootstrap.as_ref().ok_or_else(|| {
             McpRegistryError::InvalidCandidate(
-                "described tools target a non-dynamic MCP server".to_owned(),
+                "tool schema targets a non-collapsed MCP server".to_owned(),
             )
         })?;
-        let tools =
-            compile_candidate_tool_definitions(&self.descriptors, Some(family), Some(&catalogue))?;
+        let tools = compile_candidate_tool_definitions(
+            &self.descriptors,
+            Some(bootstrap),
+            Some(&catalogue),
+        )?;
         Ok(Self {
             admission: Arc::clone(&self.admission),
             identity: self.identity.clone(),
@@ -569,7 +572,7 @@ impl AdmittedServerSlice {
             resources: Arc::clone(&self.resources),
             prompts: Arc::clone(&self.prompts),
             cache: self.cache.clone(),
-            dynamic_family: self.dynamic_family.clone(),
+            collapsed_bootstrap: self.collapsed_bootstrap,
             factory: Arc::clone(&self.factory),
         })
     }
@@ -582,7 +585,7 @@ pub struct McpCapturedServer {
     provenance: McpConfigProvenance,
     capabilities: McpCapabilities,
     cache: McpCacheMetadata,
-    dynamic_family: Option<McpDynamicFamily>,
+    collapsed_bootstrap: Option<McpCollapsedBootstrap>,
     factory: Arc<dyn McpOperationFactory>,
 }
 
@@ -607,8 +610,8 @@ impl McpCapturedServer {
         &self.cache
     }
 
-    pub fn dynamic_family(&self) -> Option<&McpDynamicFamily> {
-        self.dynamic_family.as_ref()
+    pub fn collapsed_bootstrap(&self) -> Option<&McpCollapsedBootstrap> {
+        self.collapsed_bootstrap.as_ref()
     }
 
     pub fn operation_factory(&self) -> Arc<dyn McpOperationFactory> {
@@ -622,114 +625,63 @@ impl From<McpCapturedServer> for Arc<McpServerAdmission> {
     }
 }
 
-pub(crate) struct McpDescribedToolsCommand {
+pub(crate) struct McpToolSchemaCommand {
     server_admission: Arc<McpServerAdmission>,
     generation: String,
     admission_fingerprint: McpAdmissionFingerprint,
-    requested_names: Vec<String>,
+    requested_name: String,
     structured_content: serde_json::Value,
 }
 
-impl McpDescribedToolsCommand {
+impl McpToolSchemaCommand {
     pub(crate) fn new(
         server: impl Into<Arc<McpServerAdmission>>,
         generation: String,
         admission_fingerprint: McpAdmissionFingerprint,
-        requested_names: Vec<String>,
+        requested_name: String,
         structured_content: serde_json::Value,
     ) -> Self {
         Self {
             server_admission: server.into(),
             generation,
             admission_fingerprint,
-            requested_names,
+            requested_name,
             structured_content,
         }
     }
 }
 
-pub(crate) trait McpDescribedToolsAdmission: Send + Sync {
+pub(crate) trait McpToolSchemaAdmission: Send + Sync {
     fn reconcile(
         &self,
-        command: McpDescribedToolsCommand,
+        command: McpToolSchemaCommand,
     ) -> McpFuture<'static, Result<(), McpError>>;
 }
 
-struct ControllerDescribedToolsAdmission {
+struct ControllerToolSchemaAdmission {
     controller: Weak<McpRegistryController>,
 }
 
-impl McpDescribedToolsAdmission for ControllerDescribedToolsAdmission {
+impl McpToolSchemaAdmission for ControllerToolSchemaAdmission {
     fn reconcile(
         &self,
-        command: McpDescribedToolsCommand,
+        command: McpToolSchemaCommand,
     ) -> McpFuture<'static, Result<(), McpError>> {
         let controller = self.controller.clone();
         Box::pin(async move {
             let controller = controller.upgrade().ok_or_else(|| {
                 McpError::new(
                     McpFailure::Authority,
-                    "dynamic MCP registry controller is unavailable",
+                    "collapsed MCP registry controller is unavailable",
                 )
             })?;
             controller
-                .reconcile_described_tools(command)
+                .reconcile_tool_schema(command)
                 .await
                 .map(|_| ())
                 .map_err(|error| McpError::new(McpFailure::Authority, error.to_string()))
         })
     }
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct DescribedTool {
-    name: String,
-    #[serde(default)]
-    description: String,
-    input_schema: serde_json::Value,
-}
-
-impl DescribedTool {
-    fn into_descriptor(self) -> GeneratorToolDescriptor {
-        GeneratorToolDescriptor {
-            name: self.name,
-            description: self.description,
-            parameters: self.input_schema,
-        }
-    }
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct DescribedTools {
-    tools: Vec<DescribedTool>,
-}
-
-fn decode_described_tools(
-    family: &McpDynamicFamily,
-    structured_content: serde_json::Value,
-) -> Result<Vec<GeneratorToolDescriptor>, McpRegistryError> {
-    let tools = match family.describe_name() {
-        "describe_tool" => vec![
-            serde_json::from_value::<DescribedTool>(structured_content)
-                .map_err(|error| McpRegistryError::InvalidCandidate(error.to_string()))?,
-        ],
-        "describe_tools" => {
-            serde_json::from_value::<DescribedTools>(structured_content)
-                .map_err(|error| McpRegistryError::InvalidCandidate(error.to_string()))?
-                .tools
-        }
-        _ => {
-            return Err(McpRegistryError::InvalidCandidate(
-                "unsupported dynamic MCP describe operation".to_owned(),
-            ));
-        }
-    };
-    Ok(tools
-        .into_iter()
-        .map(DescribedTool::into_descriptor)
-        .collect())
 }
 
 #[derive(Clone)]
@@ -1274,8 +1226,8 @@ impl McpRegistryController {
         }
         journal.replay()?;
         Ok(Arc::new_cyclic(move |controller| {
-            let described: Arc<dyn McpDescribedToolsAdmission> =
-                Arc::new(ControllerDescribedToolsAdmission {
+            let schemas: Arc<dyn McpToolSchemaAdmission> =
+                Arc::new(ControllerToolSchemaAdmission {
                     controller: controller.clone(),
                 });
             let admission: Arc<dyn McpCandidateAdmission> =
@@ -1283,7 +1235,7 @@ impl McpRegistryController {
                     Arc::clone(&http_management),
                     Arc::clone(&stdio_management),
                     Arc::clone(&continuations),
-                    described,
+                    schemas,
                     max_sse_event_size,
                     timeout,
                 ));
@@ -1398,9 +1350,9 @@ impl McpRegistryController {
         )
     }
 
-    pub(crate) async fn reconcile_described_tools(
+    pub(crate) async fn reconcile_tool_schema(
         &self,
-        command: McpDescribedToolsCommand,
+        command: McpToolSchemaCommand,
     ) -> Result<McpRegistryPublication, McpRegistryError> {
         let _serial = self.reconcile.lock().await;
         let (predecessor, prior_status) = self.current_state()?;
@@ -1408,39 +1360,39 @@ impl McpRegistryController {
             || command.admission_fingerprint.generation() != command.generation.as_str()
         {
             return Err(McpRegistryError::InvalidCandidate(
-                "dynamic describe source generation is stale".to_owned(),
+                "collapsed schema lookup source generation is stale".to_owned(),
             ));
         }
         let name = command.server_admission.name().clone();
         let server = predecessor.servers.get(&name).ok_or_else(|| {
             McpRegistryError::InvalidCandidate(
-                "dynamic describe source server is not admitted".to_owned(),
+                "collapsed schema lookup source server is not admitted".to_owned(),
             )
         })?;
         if !Arc::ptr_eq(&server.admission, &command.server_admission) {
             return Err(McpRegistryError::InvalidCandidate(
-                "dynamic describe changed its live server admission".to_owned(),
+                "collapsed schema lookup changed its live server admission".to_owned(),
             ));
         }
-        let family = server.dynamic_family.as_ref().ok_or_else(|| {
+        let bootstrap = server.collapsed_bootstrap.as_ref().ok_or_else(|| {
             McpRegistryError::InvalidCandidate(
-                "described tools target a non-dynamic MCP server".to_owned(),
+                "tool schema targets a non-collapsed MCP server".to_owned(),
             )
         })?;
-        let describe_name = family.describe_name();
-        let describe = server
+        let lookup_name = bootstrap.lookup_name();
+        let lookup = server
             .tools
             .iter()
-            .find(|definition| definition.name() == describe_name)
+            .find(|definition| definition.name() == lookup_name)
             .ok_or_else(|| {
                 McpRegistryError::InvalidCandidate(
-                    "dynamic describe operation is not admitted".to_owned(),
+                    "collapsed schema lookup operation is not admitted".to_owned(),
                 )
             })?;
         let expected = McpAdmissionFingerprint::new(
             predecessor.generation.to_string(),
-            format!("{name}/{describe_name}"),
-            describe.admission_schema_fingerprint(),
+            format!("{name}/{lookup_name}"),
+            lookup.admission_schema_fingerprint(),
         )
         .map_err(|error| McpRegistryError::InvalidCandidate(error.to_string()))?;
         if command.admission_fingerprint.generation() != expected.generation()
@@ -1448,22 +1400,20 @@ impl McpRegistryController {
             || command.admission_fingerprint.schema() != expected.schema()
         {
             return Err(McpRegistryError::InvalidCandidate(
-                "dynamic describe admission fingerprint is stale".to_owned(),
+                "collapsed schema lookup admission fingerprint is stale".to_owned(),
             ));
         }
-        let described = decode_described_tools(family, command.structured_content)?;
         let previous = server
             .tools
             .iter()
-            .find_map(McpToolDefinition::dynamic_catalogue);
-        let catalogue = McpDynamicCatalogue::reconcile(
-            family.clone(),
+            .find_map(McpToolDefinition::collapsed_catalogue);
+        let catalogue = McpCollapsedCatalogue::reconcile_structured_content(
             previous,
-            &command.requested_names,
-            described,
+            &command.requested_name,
+            command.structured_content,
         )
         .map_err(|error| McpRegistryError::InvalidCandidate(error.to_string()))?;
-        let successor_server = Arc::new(server.with_dynamic_catalogue(catalogue)?);
+        let successor_server = Arc::new(server.with_collapsed_catalogue(catalogue)?);
         let request_id = format!(
             "request-{}",
             self.next_request.fetch_add(1, Ordering::Relaxed)
@@ -1635,7 +1585,7 @@ impl McpRegistryController {
                 provenance: server.provenance.clone(),
                 capabilities: server.capabilities.clone(),
                 cache: server.cache.clone(),
-                dynamic_family: server.dynamic_family.clone(),
+                collapsed_bootstrap: server.collapsed_bootstrap,
                 factory: Arc::clone(&server.factory),
             })
             .collect::<Vec<_>>();
@@ -1884,7 +1834,7 @@ fn descriptor_fingerprint(value: &impl serde::Serialize) -> Result<String, McpRe
 }
 
 #[cfg(test)]
-mod staged_dynamic_red {
+mod collapsed_mcp_red {
     use std::collections::VecDeque;
     use std::sync::{Arc, Mutex};
 
@@ -1900,7 +1850,7 @@ mod staged_dynamic_red {
 
     use super::*;
 
-    const SERVER: &str = "dynamic";
+    const SERVER: &str = "collapsed";
     fn descriptor(name: &str, schema: Value) -> ToolDescriptor {
         ToolDescriptor {
             name: name.to_owned(),
@@ -1913,18 +1863,28 @@ mod staged_dynamic_red {
         vec![
             descriptor(
                 "search_tools",
-                json!({"type":"object","additionalProperties":false}),
-            ),
-            descriptor(
-                "describe_tools",
-                json!({"type":"object","additionalProperties":false}),
-            ),
-            descriptor(
-                "execute_tool",
                 json!({
                     "type":"object",
-                    "properties":{"name":{"type":"string"},"arguments":{"type":"object"}},
-                    "required":["name","arguments"],
+                    "properties":{"query":{"type":"string"},"limit":{"type":"integer","minimum":1}},
+                    "required":["query"],
+                    "additionalProperties":false
+                }),
+            ),
+            descriptor(
+                "get_tool_schema",
+                json!({
+                    "type":"object",
+                    "properties":{"tool_name":{"type":"string"}},
+                    "required":["tool_name"],
+                    "additionalProperties":false
+                }),
+            ),
+            descriptor(
+                "call_tool",
+                json!({
+                    "type":"object",
+                    "properties":{"tool_name":{"type":"string"},"arguments":{"type":"object"}},
+                    "required":["tool_name","arguments"],
                     "additionalProperties":false
                 }),
             ),
@@ -1952,7 +1912,7 @@ mod staged_dynamic_red {
             _admission: Arc<McpServerAdmission>,
             _operation: crate::McpOperation,
         ) -> Result<PreparedCall, ToolError> {
-            Ok(PreparedCall::new("dynamic-test", Vec::new()))
+            Ok(PreparedCall::new("collapsed-test", Vec::new()))
         }
 
         fn execute<'a>(
@@ -1963,7 +1923,7 @@ mod staged_dynamic_red {
         ) -> BoxFuture<'a, Result<ToolExecution, ToolError>> {
             Box::pin(async {
                 Ok(ToolExecution::Complete(
-                    ego_core::permit::ToolResult::builtin("dynamic-test"),
+                    ego_core::permit::ToolResult::builtin("collapsed-test"),
                 ))
             })
         }
@@ -2037,7 +1997,7 @@ mod staged_dynamic_red {
 
     fn candidate(
         server_admission: Arc<McpServerAdmission>,
-        catalogue: Option<McpDynamicCatalogue>,
+        catalogue: Option<McpCollapsedCatalogue>,
     ) -> McpAdmittedCandidate {
         McpAdmittedCandidate::new(
             Arc::clone(&server_admission),
@@ -2067,6 +2027,15 @@ mod staged_dynamic_red {
             RegistryScope::All,
         )
         .expect("refresh")
+    }
+
+    fn remove_refresh(admission: &Arc<McpServerAdmission>) -> McpRegistryRefresh {
+        McpRegistryRefresh::new(
+            Vec::new(),
+            RegistryTrigger::Remove,
+            RegistryScope::Server(admission.name().clone()),
+        )
+        .expect("remove refresh")
     }
 
     async fn bootstrap_named(
@@ -2104,32 +2073,28 @@ mod staged_dynamic_red {
     }
 
     fn fingerprint_for(server: &str, generation: &str) -> McpAdmissionFingerprint {
-        let describe_schema = management()
+        let lookup_schema = management()
             .into_iter()
-            .find(|tool| tool.name == "describe_tools")
-            .expect("describe descriptor");
-        let describe_schema = crate::dynamic::schema_fingerprint(&describe_schema.parameters)
-            .expect("describe schema fingerprint");
+            .find(|tool| tool.name == "get_tool_schema")
+            .expect("get_tool_schema descriptor");
+        let lookup_schema = crate::dynamic::schema_fingerprint(&lookup_schema.parameters)
+            .expect("lookup schema fingerprint");
         McpAdmissionFingerprint::new(
             generation,
-            format!("{server}/describe_tools"),
-            describe_schema,
+            format!("{server}/get_tool_schema"),
+            lookup_schema,
         )
-        .expect("describe fingerprint")
+        .expect("lookup fingerprint")
     }
 
     fn fingerprint(generation: &str) -> McpAdmissionFingerprint {
         fingerprint_for(SERVER, generation)
     }
 
-    fn described_tools(tools: Vec<Value>) -> Value {
-        json!({"tools": tools})
-    }
-
-    fn described(name: &str, schema: Value) -> Value {
+    fn schema_definition(name: &str, schema: Value) -> Value {
         json!({
             "name": name,
-            "description": format!("{name} described"),
+            "description": format!("{name} definition"),
             "inputSchema": schema
         })
     }
@@ -2137,15 +2102,15 @@ mod staged_dynamic_red {
     fn command(
         capture: &McpRegistryCapture,
         generation: &str,
-        requested: &[&str],
-        content: Value,
-    ) -> McpDescribedToolsCommand {
-        McpDescribedToolsCommand::new(
+        requested: &str,
+        structured_content: Value,
+    ) -> McpToolSchemaCommand {
+        McpToolSchemaCommand::new(
             capture.servers()[0].clone(),
             generation.to_owned(),
             fingerprint(generation),
-            requested.iter().map(|name| (*name).to_owned()).collect(),
-            content,
+            requested.to_owned(),
+            structured_content,
         )
     }
 
@@ -2159,12 +2124,18 @@ mod staged_dynamic_red {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn detected_dynamic_family_bootstraps_management_without_execute_tool() {
+    async fn collapsed_bootstrap_publishes_management_without_call_tool() {
+        let bootstrap_contract =
+            McpCollapsedBootstrap::new(management()).expect("collapsed bootstrap");
+        assert_eq!(
+            bootstrap_contract.tool_names().collect::<Vec<_>>(),
+            vec!["get_tool_schema", "search_tools"]
+        );
         let (controller, _admission, publication) = bootstrap().await;
         assert_eq!(publication.generation(), "generation-1");
         assert_eq!(
             publication.admitted_tools(),
-            &["describe_tools".to_owned(), "search_tools".to_owned()]
+            &["get_tool_schema".to_owned(), "search_tools".to_owned()]
         );
         assert!(
             !controller
@@ -2172,37 +2143,37 @@ mod staged_dynamic_red {
                 .expect("capture")
                 .tools()
                 .iter()
-                .any(|tool| tool.descriptor().name == "execute_tool")
+                .any(|tool| tool.descriptor().name == "call_tool")
         );
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn successful_describe_publishes_n_plus_one_and_preserves_old_capture() {
+    async fn exact_schema_lookup_publishes_n_plus_one_and_preserves_old_capture() {
         let (controller, _admission, first) = bootstrap().await;
         let old_capture = first.capture().clone();
         let command = command(
             first.capture(),
             "generation-1",
-            &["weather"],
-            described_tools(vec![described("weather", weather_schema())]),
+            "weather",
+            schema_definition("weather", weather_schema()),
         );
         let second = controller
-            .reconcile_described_tools(command)
+            .reconcile_tool_schema(command)
             .await
-            .expect("describe reconciliation");
+            .expect("schema reconciliation");
         assert_eq!(second.generation(), "generation-2");
         assert_eq!(second.predecessor(), Some("generation-1"));
         assert!(
             second
                 .admitted_tools()
                 .iter()
-                .any(|name| name == "execute_tool")
+                .any(|name| name == "call_tool")
         );
         assert!(
             !old_capture
                 .tools()
                 .iter()
-                .any(|tool| tool.descriptor().name == "execute_tool")
+                .any(|tool| tool.descriptor().name == "call_tool")
         );
         assert!(
             second
@@ -2214,29 +2185,32 @@ mod staged_dynamic_red {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn repeated_exact_describe_replaces_and_merges_only_requested_tools_deterministically() {
+    async fn repeated_exact_schema_replaces_and_merges_only_requested_tools_deterministically() {
         let (controller, _admission, first) = bootstrap().await;
         let first = controller
-            .reconcile_described_tools(command(
+            .reconcile_tool_schema(command(
                 first.capture(),
                 "generation-1",
-                &["weather", "calendar"],
-                described_tools(vec![
-                    described(
-                        "calendar",
-                        json!({"type":"object","additionalProperties":false}),
-                    ),
-                    described("weather", weather_schema()),
-                ]),
+                "weather",
+                schema_definition("weather", weather_schema()),
             ))
             .await
-            .expect("first describe");
+            .expect("first schema lookup");
         let second = controller
-            .reconcile_described_tools(command(
+            .reconcile_tool_schema(command(
                 first.capture(),
                 "generation-2",
-                &["weather"],
-                described_tools(vec![described(
+                "calendar",
+                schema_definition("calendar", json!({"type":"object","additionalProperties":false})),
+            ))
+            .await
+            .expect("second schema lookup");
+        let third = controller
+            .reconcile_tool_schema(command(
+                second.capture(),
+                "generation-3",
+                "weather",
+                schema_definition(
                     "weather",
                     json!({
                         "type":"object",
@@ -2244,12 +2218,13 @@ mod staged_dynamic_red {
                         "required":["city","units"],
                         "additionalProperties":false
                     }),
-                )]),
+                ),
             ))
             .await
-            .expect("replacement describe");
+            .expect("replacement schema lookup");
         assert_eq!(first.generation(), "generation-2");
         assert_eq!(second.generation(), "generation-3");
+        assert_eq!(third.generation(), "generation-4");
         let snapshot = controller.current_snapshot().expect("snapshot");
         let server = snapshot
             .servers
@@ -2258,60 +2233,75 @@ mod staged_dynamic_red {
         let execute = server
             .tools
             .iter()
-            .find(|tool| tool.name() == "execute_tool")
-            .expect("execute wrapper");
-        let catalogue = execute.dynamic_catalogue().expect("catalogue");
+            .find(|tool| tool.name() == "call_tool")
+            .expect("call_tool wrapper");
+        let catalogue = execute.collapsed_catalogue().expect("catalogue");
         assert_eq!(
             catalogue.tool_names().collect::<Vec<_>>(),
-            vec!["calendar", "weather"]
+            vec!["call_tool", "calendar", "weather"]
         );
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn stale_or_invalid_describe_is_rejected_without_publication() {
+    async fn stale_or_invalid_schema_is_rejected_without_publication() {
         let cases = [
             (
+                "empty definition",
+                "weather",
+                json!({}),
+                "generation-1",
+            ),
+            (
                 "stale generation",
-                vec!["weather"],
-                described_tools(vec![described("weather", weather_schema())]),
+                "weather",
+                schema_definition("weather", weather_schema()),
                 "generation-0",
             ),
             (
                 "missing requested",
-                vec!["weather", "calendar"],
-                described_tools(vec![described("weather", weather_schema())]),
+                "calendar",
+                schema_definition("weather", weather_schema()),
                 "generation-1",
             ),
             (
                 "duplicate descriptor",
-                vec!["weather"],
-                described_tools(vec![
-                    described("weather", weather_schema()),
-                    described("weather", weather_schema()),
-                ]),
+                "weather",
+                json!({"name":"weather","description":"weather definition","inputSchema":weather_schema(),"extra":true}),
                 "generation-1",
             ),
             (
                 "management descriptor",
-                vec!["search_tools"],
-                described_tools(vec![described("search_tools", json!({"type":"object"}))]),
+                "search_tools",
+                schema_definition("search_tools", json!({"type":"object"})),
+                "generation-1",
+            ),
+            (
+                "lookup management descriptor",
+                "get_tool_schema",
+                schema_definition("get_tool_schema", json!({"type":"object"})),
+                "generation-1",
+            ),
+            (
+                "dispatch management descriptor",
+                "call_tool",
+                schema_definition("call_tool", json!({"type":"object"})),
                 "generation-1",
             ),
             (
                 "unexpected descriptor",
-                vec!["weather"],
-                described_tools(vec![described("calendar", json!({"type":"object"}))]),
+                "weather",
+                schema_definition("calendar", json!({"type":"object"})),
                 "generation-1",
             ),
             (
                 "invalid schema",
-                vec!["weather"],
-                described_tools(vec![described("weather", json!({"type":7}))]),
+                "weather",
+                schema_definition("weather", json!({"type":7})),
                 "generation-1",
             ),
             (
                 "protocol error",
-                vec!["weather"],
+                "weather",
                 json!({"isError":true,"content":[{"type":"text","text":"failed"}]}),
                 "generation-1",
             ),
@@ -2319,9 +2309,9 @@ mod staged_dynamic_red {
         for (label, requested, content, generation) in cases {
             let (controller, _admission, first) = bootstrap().await;
             let before = controller.publication();
-            let command = command(first.capture(), generation, &requested, content);
+            let command = command(first.capture(), generation, requested, content);
             assert!(
-                controller.reconcile_described_tools(command).await.is_err(),
+                controller.reconcile_tool_schema(command).await.is_err(),
                 "{label} was accepted"
             );
             assert_eq!(
@@ -2338,31 +2328,51 @@ mod staged_dynamic_red {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn stale_server_and_admission_fingerprint_are_rejected_without_publication() {
+    async fn stale_server_and_lookup_fingerprint_are_rejected_without_publication() {
         let (controller, _admission, first) = bootstrap().await;
         let (_other_controller, _other_admission, other) = bootstrap_named("other").await;
-        let stale = McpDescribedToolsCommand::new(
+        let stale = McpToolSchemaCommand::new(
             other.capture().servers()[0].clone(),
             "generation-1".to_owned(),
             fingerprint_for("other", "generation-1"),
-            vec!["weather".to_owned()],
-            described_tools(vec![described("weather", weather_schema())]),
+            "weather".to_owned(),
+            schema_definition("weather", weather_schema()),
         );
-        assert!(controller.reconcile_described_tools(stale).await.is_err());
+        assert!(controller.reconcile_tool_schema(stale).await.is_err());
         let before = controller.publication();
-        let stale = McpDescribedToolsCommand::new(
+        let stale = McpToolSchemaCommand::new(
             first.capture().servers()[0].clone(),
             "generation-1".to_owned(),
             McpAdmissionFingerprint::new(
                 "generation-1",
-                format!("{SERVER}/describe_tools"),
+                format!("{SERVER}/get_tool_schema"),
                 "sha256:stale",
             )
             .expect("stale fingerprint"),
-            vec!["weather".to_owned()],
-            described_tools(vec![described("weather", weather_schema())]),
+            "weather".to_owned(),
+            schema_definition("weather", weather_schema()),
         );
-        assert!(controller.reconcile_described_tools(stale).await.is_err());
+        assert!(controller.reconcile_tool_schema(stale).await.is_err());
         assert_eq!(controller.publication().generation(), before.generation());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn removal_withdraws_collapsed_tools_while_invalid_refresh_keeps_last_good() {
+        let (controller, admission, first) = bootstrap().await;
+        let before = controller.publication();
+        let invalid = command(
+            first.capture(),
+            "generation-1",
+            "weather",
+            json!({"name":"weather","description":"weather definition","inputSchema":{"type":7}}),
+        );
+        assert!(controller.reconcile_tool_schema(invalid).await.is_err());
+        assert_eq!(controller.publication().generation(), before.generation());
+        let removed = controller
+            .reconcile(remove_refresh(&admission))
+            .await
+            .expect("remove refresh");
+        assert!(removed.admitted_tools().is_empty());
+        assert!(removed.capture().tools().is_empty());
     }
 }
