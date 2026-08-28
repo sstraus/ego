@@ -13,7 +13,10 @@ fn single_multiple_free_and_numbered_fallback_are_terminal_only_controls() {
 
     let mut free = Selector::free_text();
     free.insert("typed answer");
-    assert_eq!(free.key(SelectorKey::Enter).selected(), Some("typed answer"));
+    assert_eq!(
+        free.key(SelectorKey::Enter).selected(),
+        Some("typed answer")
+    );
 }
 
 #[test]

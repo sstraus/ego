@@ -10,9 +10,7 @@ use ego_core::config::{
 };
 use ego_core::generator::types::ThinkingLevel;
 use ego_tools::config::OsUserConfigStore;
-use ego_tools::store::{
-    AtomicReplacePublication, OsIo, SNAPSHOT_VERSION, StoreIo,
-};
+use ego_tools::store::{AtomicReplacePublication, OsIo, SNAPSHOT_VERSION, StoreIo};
 use tempfile::TempDir;
 
 struct FaultIo {
@@ -105,12 +103,15 @@ fn transaction_locks_read_edit_strict_reparse_replace_and_unlocks_after_replace(
     let io = FaultIo::new();
     let store = OsUserConfigStore::new(&io, &path);
 
-    assert_eq!(store
-        .mutate(UserConfigMutation::ModelAndThinking {
-            model: "openai/new".into(),
-            thinking: ThinkingLevel::High,
-        })
-        .unwrap(), UserConfigPublication::PublishedDurably);
+    assert_eq!(
+        store
+            .mutate(UserConfigMutation::ModelAndThinking {
+                model: "openai/new".into(),
+                thinking: ThinkingLevel::High,
+            })
+            .unwrap(),
+        UserConfigPublication::PublishedDurably
+    );
     let text = std::fs::read_to_string(&path).unwrap();
     assert!(text.contains("# keep this comment"));
     assert!(text.contains("model = 'openai/new'"));
@@ -153,7 +154,11 @@ fn unknown_or_duplicate_segment_names_fail_before_any_replace() {
         vec!["not-a-segment".into()],
         vec!["model".into(), "model".into()],
     ] {
-        assert!(store.mutate(UserConfigMutation::Statusline { segments }).is_err());
+        assert!(
+            store
+                .mutate(UserConfigMutation::Statusline { segments })
+                .is_err()
+        );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
     }
 }
@@ -168,12 +173,14 @@ fn replace_failure_preserves_disk_authority() {
     io.fail_before_publish
         .store(true, std::sync::atomic::Ordering::SeqCst);
 
-    assert!(store
-        .mutate(UserConfigMutation::ModelAndThinking {
-            model: "openai/new".into(),
-            thinking: ThinkingLevel::High,
-        })
-        .is_err());
+    assert!(
+        store
+            .mutate(UserConfigMutation::ModelAndThinking {
+                model: "openai/new".into(),
+                thinking: ThinkingLevel::High,
+            })
+            .is_err()
+    );
     assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
 }
 

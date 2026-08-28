@@ -15,11 +15,19 @@ fn result_metadata_preserves_ttl_and_cache_scope_without_guessing_scope() {
     assert_eq!(public.ttl_ms(), Some(1_000));
     assert_eq!(public.cache_scope(), CacheScope::Public);
 
-    let immediate = McpResultMetadata::new(Some(0), CacheScope::Public).expect("immediate stale metadata");
+    let immediate =
+        McpResultMetadata::new(Some(0), CacheScope::Public).expect("immediate stale metadata");
     assert_eq!(immediate.ttl_ms(), Some(0));
-    let result = McpToolResult::new(br#"{"resultType":"complete","content":[{"type":"text","text":"safe"}]}"#)
-        .expect("tool result");
-    assert!(result.body().windows(b"resultType".len()).any(|window| window == b"resultType"));
+    let result = McpToolResult::new(
+        br#"{"resultType":"complete","content":[{"type":"text","text":"safe"}]}"#,
+    )
+    .expect("tool result");
+    assert!(
+        result
+            .body()
+            .windows(b"resultType".len())
+            .any(|window| window == b"resultType")
+    );
 }
 
 #[test]

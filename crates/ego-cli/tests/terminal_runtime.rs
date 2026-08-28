@@ -10,10 +10,15 @@ fn meta_p_and_typed_model_slash_share_one_action_id_in_the_registry() {
     let shortcut = registry
         .resolve_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::META))
         .expect("Meta-P is registered");
-    let slash = registry.resolve_slash("/model").expect("/model is registered");
+    let slash = registry
+        .resolve_slash("/model")
+        .expect("/model is registered");
     assert_eq!(shortcut, ActionId::Model);
     assert_eq!(shortcut, slash);
-    assert_eq!(registry.classify(registry.submit("/model", InputOrigin::Typed)), Dispatch::Action(ActionId::Model));
+    assert_eq!(
+        registry.classify(registry.submit("/model", InputOrigin::Typed)),
+        Dispatch::Action(ActionId::Model)
+    );
 }
 
 #[test]
