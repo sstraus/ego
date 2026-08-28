@@ -154,13 +154,16 @@ struct MemoryDuplex {
     evidence: Arc<Mutex<Vec<&'static str>>>,
 }
 
+type DuplexEvidence = Arc<Mutex<Vec<&'static str>>>;
+type DuplexOutput = Arc<Mutex<Vec<u8>>>;
+
 impl MemoryDuplex {
-    fn with_evidence() -> (Self, Arc<Mutex<Vec<&'static str>>>) {
+    fn with_evidence() -> (Self, DuplexEvidence) {
         let (duplex, evidence, _) = Self::with_input(Vec::new());
         (duplex, evidence)
     }
 
-    fn with_input(input: Vec<u8>) -> (Self, Arc<Mutex<Vec<&'static str>>>, Arc<Mutex<Vec<u8>>>) {
+    fn with_input(input: Vec<u8>) -> (Self, DuplexEvidence, DuplexOutput) {
         let evidence = Arc::new(Mutex::new(Vec::new()));
         let output = Arc::new(Mutex::new(Vec::new()));
         (
@@ -187,7 +190,7 @@ impl AsyncRead for MemoryDuplex {
 
 impl AsyncWrite for MemoryDuplex {
     fn poll_write(
-        mut self: std::pin::Pin<&mut Self>,
+        self: std::pin::Pin<&mut Self>,
         _cx: &mut std::task::Context<'_>,
         bytes: &[u8],
     ) -> std::task::Poll<std::io::Result<usize>> {
