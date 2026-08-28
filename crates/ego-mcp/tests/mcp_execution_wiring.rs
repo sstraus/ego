@@ -10,7 +10,9 @@ use std::sync::{
 use futures::future::BoxFuture;
 use serde_json::{Value, json};
 
-use ego_core::config::{McpServerConfig, Source, Trust};
+use ego_core::config::{
+    McpConfigProvenance, McpServerConfig, ResolvedMcpConfig, ResolvedMcpEntry, Source, Trust,
+};
 use ego_core::generator::types::ToolDescriptor;
 use ego_core::mcp::ToolExecution;
 use ego_core::permit::{GuardedIo, Op, PreparedCall, ToolError, ToolResult};
@@ -18,8 +20,9 @@ use ego_core::turn::{McpRegistryEvent, McpRegistryJournal, McpRegistryJournalErr
 use ego_mcp::{
     McpAdmittedCandidate, McpCacheMetadata, McpCandidateAdmission, McpCandidateError,
     McpCandidateIdentity, McpCandidateInventory, McpCapabilities, McpDynamicCatalogue,
-    McpDynamicFamily, McpFuture, McpOperation, McpOperationFactory, McpRegistryController,
-    McpRegistryRefresh, RegistryScope, RegistryTrigger,
+    McpDynamicFamily, McpFuture, McpOperation, McpOperationFactory, McpRegistryCandidate,
+    McpRegistryController, McpRegistryRefresh, McpServerAdmission, McpTransportMaterial,
+    RegistryScope, RegistryTrigger,
 };
 
 #[derive(Default)]
@@ -31,7 +34,7 @@ struct FakeFactory {
 impl McpOperationFactory for FakeFactory {
     fn prepare(
         &self,
-        _: &McpServerConfig,
+        _: Arc<McpServerAdmission>,
         operation: McpOperation,
     ) -> Result<PreparedCall, ToolError> {
         self.prepares
@@ -48,7 +51,7 @@ impl McpOperationFactory for FakeFactory {
 
     fn execute<'a>(
         &'a self,
-        _: &'a McpServerConfig,
+        _: Arc<McpServerAdmission>,
         _: PreparedCall,
         _: &'a dyn GuardedIo,
     ) -> BoxFuture<'a, Result<ToolExecution, ToolError>> {
@@ -125,9 +128,6 @@ impl GuardedIo for NoIo {
     }
 }
 
-fn stdio() -> McpServerConfig {
-    McpServerConfig::stdio("mcp-fixture".into(), Vec::new(), None, Vec::new()).expect("stdio")
-}
 fn descriptor(name: &str, parameters: Value) -> ToolDescriptor {
     ToolDescriptor {
         name: name.into(),
@@ -145,17 +145,65 @@ fn config() -> ego_core::config::ResolvedMcpConfig {
         .expect("config")
         .mcp
 }
-fn empty_config() -> ego_core::config::ResolvedMcpConfig {
-    ego_core::config::resolve(&[], Trust::Trusted, None)
-        .expect("config")
-        .mcp
+fn materialize_admissions(
+    config: &ResolvedMcpConfig,
+) -> Vec<(Arc<McpServerAdmission>, McpConfigProvenance)> {
+    config
+        .entries()
+        .iter()
+        .filter_map(|(name, entry)| match entry {
+            ResolvedMcpEntry::Configured { server, provenance } => {
+                let material = match server {
+                    McpServerConfig::Stdio(_) => McpTransportMaterial::stdio(Vec::new()),
+                    McpServerConfig::Http(_) => McpTransportMaterial::http(Vec::new()),
+                };
+                Some((
+                    Arc::new(
+                        McpServerAdmission::new(name.clone(), server.clone(), material)
+                            .expect("admission"),
+                    ),
+                    provenance.clone(),
+                ))
+            }
+            ResolvedMcpEntry::Tombstone { .. } => None,
+        })
+        .collect()
 }
 
-fn static_candidate(factory: Arc<FakeFactory>) -> McpAdmittedCandidate {
+fn alpha_admission() -> (Arc<McpServerAdmission>, McpConfigProvenance) {
+    materialize_admissions(&config())
+        .into_iter()
+        .next()
+        .expect("alpha admission")
+}
+
+fn refresh_for(
+    admission: &Arc<McpServerAdmission>,
+    provenance: &McpConfigProvenance,
+    trigger: RegistryTrigger,
+) -> McpRegistryRefresh {
+    McpRegistryRefresh::new(
+        vec![McpRegistryCandidate::ready(
+            Arc::clone(admission),
+            provenance.clone(),
+        )],
+        trigger,
+        RegistryScope::All,
+    )
+    .expect("refresh")
+}
+
+fn empty_refresh(trigger: RegistryTrigger) -> McpRegistryRefresh {
+    McpRegistryRefresh::new(Vec::new(), trigger, RegistryScope::All).expect("empty refresh")
+}
+
+fn static_candidate(
+    admission: Arc<McpServerAdmission>,
+    factory: Arc<FakeFactory>,
+) -> McpAdmittedCandidate {
     McpAdmittedCandidate::new(
-        "alpha".into(),
+        admission,
         McpCandidateIdentity::validated("alpha"),
-        stdio(),
         McpCandidateInventory::new(
             McpCapabilities::tools(),
             vec![descriptor(
@@ -171,7 +219,10 @@ fn static_candidate(factory: Arc<FakeFactory>) -> McpAdmittedCandidate {
     )
     .expect("candidate")
 }
-fn dynamic_candidate(factory: Arc<FakeFactory>) -> McpAdmittedCandidate {
+fn dynamic_candidate(
+    admission: Arc<McpServerAdmission>,
+    factory: Arc<FakeFactory>,
+) -> McpAdmittedCandidate {
     let wrapper = json!({"type":"object","properties":{"name":{"type":"string"},"arguments":{"type":"object"}},"required":["name","arguments"],"additionalProperties":false});
     let inner = descriptor(
         "weather",
@@ -180,9 +231,8 @@ fn dynamic_candidate(factory: Arc<FakeFactory>) -> McpAdmittedCandidate {
     let catalogue =
         McpDynamicCatalogue::new(McpDynamicFamily::standalone(), vec![inner]).expect("catalogue");
     McpAdmittedCandidate::new(
-        "alpha".into(),
+        admission,
         McpCandidateIdentity::validated("alpha"),
-        stdio(),
         McpCandidateInventory::new(
             McpCapabilities::tools(),
             vec![
@@ -263,15 +313,19 @@ impl McpCandidateAdmission for FakeAdmission {
 #[test]
 fn published_capture_retains_old_operation_until_capture_drop() {
     let factory = Arc::new(FakeFactory::default());
+    let (admission, provenance) = alpha_admission();
     let controller = McpRegistryController::new(
         Arc::new(FakeJournal::default()),
-        Arc::new(FakeAdmission::one(static_candidate(Arc::clone(&factory)))),
+        Arc::new(FakeAdmission::one(static_candidate(
+            Arc::clone(&admission),
+            Arc::clone(&factory),
+        ))),
     )
     .expect("controller");
-    let first = futures::executor::block_on(controller.reconcile(McpRegistryRefresh::new(
-        config(),
+    let first = futures::executor::block_on(controller.reconcile(refresh_for(
+        &admission,
+        &provenance,
         RegistryTrigger::Add,
-        RegistryScope::All,
     )))
     .expect("G1");
     let capture = first.capture().clone();
@@ -281,12 +335,8 @@ fn published_capture_retains_old_operation_until_capture_drop() {
         .find(|tool| tool.descriptor().name == "weather")
         .cloned()
         .expect("weather");
-    futures::executor::block_on(controller.reconcile(McpRegistryRefresh::new(
-        empty_config(),
-        RegistryTrigger::Remove,
-        RegistryScope::All,
-    )))
-    .expect("G2");
+    futures::executor::block_on(controller.reconcile(empty_refresh(RegistryTrigger::Remove)))
+        .expect("G2");
     let fs = ego_core::permit::fake::FakeFs::default();
     let ctx = ego_core::permit::PrepareCtx {
         cwd: ego_core::permit::CanonPath::new("/fixture"),
@@ -310,15 +360,19 @@ fn published_capture_retains_old_operation_until_capture_drop() {
 #[test]
 fn dynamic_capture_validates_inner_schema_and_executes_one_selected_call() {
     let factory = Arc::new(FakeFactory::default());
+    let (admission, provenance) = alpha_admission();
     let controller = McpRegistryController::new(
         Arc::new(FakeJournal::default()),
-        Arc::new(FakeAdmission::one(dynamic_candidate(Arc::clone(&factory)))),
+        Arc::new(FakeAdmission::one(dynamic_candidate(
+            Arc::clone(&admission),
+            Arc::clone(&factory),
+        ))),
     )
     .expect("controller");
-    let publication = futures::executor::block_on(controller.reconcile(McpRegistryRefresh::new(
-        config(),
+    let publication = futures::executor::block_on(controller.reconcile(refresh_for(
+        &admission,
+        &provenance,
         RegistryTrigger::Add,
-        RegistryScope::All,
     )))
     .expect("G1");
     let tool = publication
@@ -347,23 +401,23 @@ fn dynamic_capture_validates_inner_schema_and_executes_one_selected_call() {
 #[test]
 fn captured_operation_is_empty_after_successor_removes_server() {
     let factory = Arc::new(FakeFactory::default());
+    let (admission, provenance) = alpha_admission();
     let controller = McpRegistryController::new(
         Arc::new(FakeJournal::default()),
-        Arc::new(FakeAdmission::one(static_candidate(factory))),
+        Arc::new(FakeAdmission::one(static_candidate(
+            Arc::clone(&admission),
+            factory,
+        ))),
     )
     .expect("controller");
-    futures::executor::block_on(controller.reconcile(McpRegistryRefresh::new(
-        config(),
+    futures::executor::block_on(controller.reconcile(refresh_for(
+        &admission,
+        &provenance,
         RegistryTrigger::Add,
-        RegistryScope::All,
     )))
     .expect("G1");
-    futures::executor::block_on(controller.reconcile(McpRegistryRefresh::new(
-        empty_config(),
-        RegistryTrigger::Reload,
-        RegistryScope::All,
-    )))
-    .expect("G2");
+    futures::executor::block_on(controller.reconcile(empty_refresh(RegistryTrigger::Reload)))
+        .expect("G2");
     assert!(
         controller
             .publication()

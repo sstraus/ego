@@ -45,6 +45,7 @@ use crate::generator::capabilities::ModelCapabilities;
 use crate::question::Elicitor;
 use crate::sink::EventSink;
 use crate::store::session_store::{SessionEntry, SessionStore, StoreError};
+use crate::turn::AdmittedToolSource;
 
 impl SessionId {
     /// Raw UUID for exact rooted identity comparisons and protocol projection.
@@ -875,6 +876,8 @@ pub trait EventSinkFactory: Send + Sync {
 pub struct RunExecutionBindings {
     pub sink_factory: Arc<dyn EventSinkFactory>,
     pub elicitor: Option<Arc<dyn Elicitor>>,
+    admitted_tools: Option<Arc<dyn AdmittedToolSource>>,
+    mcp_errors: Arc<[String]>,
 }
 
 impl RunExecutionBindings {
@@ -885,7 +888,34 @@ impl RunExecutionBindings {
         Self {
             sink_factory,
             elicitor,
+            admitted_tools: None,
+            mcp_errors: Arc::from([]),
         }
+    }
+
+    /// Attach the live admitted MCP source owned by this execution context.
+    pub fn with_mcp(
+        mut self,
+        admitted_tools: Arc<dyn AdmittedToolSource>,
+        mcp_errors: Vec<String>,
+    ) -> Self {
+        self.admitted_tools = Some(admitted_tools);
+        self.mcp_errors = Arc::from(mcp_errors);
+        self
+    }
+
+    /// Attach sanitized MCP diagnostics when no server was admitted.
+    pub fn with_mcp_errors(mut self, mcp_errors: Vec<String>) -> Self {
+        self.mcp_errors = Arc::from(mcp_errors);
+        self
+    }
+
+    pub fn admitted_tools(&self) -> Option<Arc<dyn AdmittedToolSource>> {
+        self.admitted_tools.as_ref().map(Arc::clone)
+    }
+
+    pub fn mcp_errors(&self) -> &[String] {
+        &self.mcp_errors
     }
 }
 

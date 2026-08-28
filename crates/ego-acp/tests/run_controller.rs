@@ -17,7 +17,9 @@ use futures::future::{self, BoxFuture};
 use futures::{SinkExt, StreamExt};
 
 use ego_acp::question::{AcpQuestionAdapter, CapabilityCapture};
-use ego_acp::serve::RunBindingsBuilder;
+use ego_acp::serve::{
+    McpSessionAdmissionError, McpSessionAdmitter, RunBindingsBuilder, SessionMcpAdmission,
+};
 use ego_core::config::ModelRef;
 use ego_core::event::domain::DomainEvent;
 use ego_core::event::id::SessionId;
@@ -33,6 +35,18 @@ use ego_core::run::{
 };
 use ego_core::sink::{EventSink, NullSink};
 use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
+
+struct NoMcpAdmitter;
+
+impl McpSessionAdmitter for NoMcpAdmitter {
+    fn admit(
+        &self,
+        _servers: Vec<v1::McpServer>,
+    ) -> BoxFuture<'static, Result<Option<Arc<dyn SessionMcpAdmission>>, McpSessionAdmissionError>>
+    {
+        Box::pin(future::ready(Ok(None)))
+    }
+}
 
 #[derive(Default)]
 struct AcpStore {
@@ -702,8 +716,15 @@ impl Connected {
             to_agent,
             from_agent: from_agent_rx,
             agent: tokio::spawn(
-                ego_acp::serve::agent(controller, roots, spawner, ids, bindings_builder)
-                    .connect_to(transport),
+                ego_acp::serve::agent(
+                    controller,
+                    roots,
+                    spawner,
+                    ids,
+                    bindings_builder,
+                    Arc::new(NoMcpAdmitter) as Arc<dyn McpSessionAdmitter>,
+                )
+                .connect_to(transport),
             ),
             next_id: 1,
         }

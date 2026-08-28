@@ -11,6 +11,7 @@ pub mod exec;
 pub mod fs;
 pub mod http;
 pub mod instructions;
+pub mod mcp;
 pub mod mcp_continuation;
 pub mod mcp_registry;
 pub mod model_catalogue_cache;

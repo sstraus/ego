@@ -9,10 +9,19 @@ use ego_core::permit::{
     CanonPath, Confinement, ExecObservation, GuardedHttp, RunConfinement, TransportError,
     TransportFailure,
 };
+use ego_core::suspension::ContinuationJournal;
 use ego_core::turn::CancelToken;
+use ego_core::turn::McpRegistryJournal;
+use ego_mcp::{
+    DurableMcpInputRequiredRecorder, MCP_DEFAULT_MAX_SSE_EVENT_SIZE, MCP_DEFAULT_OPERATION_TIMEOUT,
+    McpDuplexEffectsFactory, McpHttpEffects, McpInputRequiredRecorder, McpRegistryController,
+};
 use ego_tools::exec::{ExecLimits, ExecRunConfig, HttpCallTimeout, ProcessError, RunEffectPorts};
 use ego_tools::http::SystemResolver;
-use ego_tools::store::SessionEvidenceStore;
+use ego_tools::mcp::{RunMcpDuplexEffectsFactory, RunMcpHttpEffects};
+use ego_tools::mcp_continuation::JsonlContinuationJournal;
+use ego_tools::mcp_registry::JsonlMcpRegistryJournal;
+use ego_tools::store::{OsIo, SessionEvidenceStore};
 use futures::future::BoxFuture;
 
 const COMMAND_EVIDENCE_CAPACITY: u64 = 64 * 1024 * 1024;
@@ -94,6 +103,7 @@ pub(crate) async fn run_effect_ports(
 /// Complete lifetime owner for an online command that has no durable session.
 pub(crate) struct CommandHttpScope {
     _evidence_directory: tempfile::TempDir,
+    ports: Arc<RunEffectPorts>,
     http: Arc<dyn Http>,
 }
 
@@ -117,14 +127,68 @@ impl CommandHttpScope {
         let (ports, _) = run_effect_ports(confinement, evidence, cancel, None)
             .await
             .map_err(|error| error.to_string())?;
-        let http = Arc::new(ProviderHttpAdapter::new(ports)) as Arc<dyn Http>;
+        let http = Arc::new(ProviderHttpAdapter::new(Arc::clone(&ports))) as Arc<dyn Http>;
         Ok(Self {
             _evidence_directory: evidence_directory,
+            ports,
             http,
         })
     }
 
     pub(crate) fn http(&self) -> &Arc<dyn Http> {
         &self.http
+    }
+
+    /// The same complete command-lifetime effect authority, exposed for
+    /// foreign protocol adapters that implement their own consumer ports.
+    pub(crate) fn ports(&self) -> &Arc<RunEffectPorts> {
+        &self.ports
+    }
+}
+
+/// One process-lifetime MCP authority and the OS effects it borrows from.
+/// The effect scope is retained beside the controller so neither its evidence
+/// directory nor guarded process/network handles can disappear first.
+pub struct McpProcessScope {
+    _effects: CommandHttpScope,
+    controller: Arc<McpRegistryController>,
+}
+
+impl McpProcessScope {
+    pub async fn online(cancel: CancelToken) -> Result<Self, String> {
+        let effects = CommandHttpScope::online(cancel).await?;
+        let root = crate::config::ego_home()
+            .ok_or_else(|| "MCP needs EGO_HOME or HOME for its machine journals".to_owned())?
+            .join("mcp");
+        let journal = Arc::new(JsonlMcpRegistryJournal::new(&root, Box::new(OsIo)))
+            as Arc<dyn McpRegistryJournal>;
+        let continuation_journal =
+            Arc::new(JsonlContinuationJournal::open(&root).map_err(|error| {
+                format!("MCP continuation journal could not be opened: {error}")
+            })?) as Arc<dyn ContinuationJournal>;
+        let continuations = Arc::new(DurableMcpInputRequiredRecorder::new(continuation_journal))
+            as Arc<dyn McpInputRequiredRecorder>;
+        let http = Arc::new(RunMcpHttpEffects::new(Arc::clone(effects.ports())))
+            as Arc<dyn McpHttpEffects>;
+        let stdio = Arc::new(RunMcpDuplexEffectsFactory::new(
+            effects.ports().duplex_handle(),
+        )) as Arc<dyn McpDuplexEffectsFactory>;
+        let controller = McpRegistryController::new_runtime(
+            journal,
+            http,
+            stdio,
+            continuations,
+            MCP_DEFAULT_MAX_SSE_EVENT_SIZE,
+            MCP_DEFAULT_OPERATION_TIMEOUT,
+        )
+        .map_err(|error| format!("MCP registry authority could not be opened: {error}"))?;
+        Ok(Self {
+            _effects: effects,
+            controller,
+        })
+    }
+
+    pub fn controller(&self) -> &Arc<McpRegistryController> {
+        &self.controller
     }
 }

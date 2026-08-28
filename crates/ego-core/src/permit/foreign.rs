@@ -14,6 +14,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest as _, Sha256};
 
 use super::{CanonPath, EnvName, EnvPolicy, SpawnSpec, ToolResult};
+use crate::credentials::SecretMaterial;
 use crate::generator::attempt::DeliveryCertainty;
 use crate::store::evidence::{EvidenceError, EvidenceRead};
 
@@ -216,7 +217,15 @@ impl HttpRequestDigest {
         hasher.update((request.headers.len() as u128).to_be_bytes());
         for header in &request.headers {
             hash_http_frame(&mut hasher, header.name.as_bytes());
-            hash_http_frame(&mut hasher, &header.value);
+            match &header.value {
+                HttpHeaderValue::Public(value) => {
+                    hash_http_frame(&mut hasher, value);
+                }
+                HttpHeaderValue::Secret(_) => {
+                    hash_http_frame(&mut hasher, b"ego.http-header.secret");
+                    hash_http_frame(&mut hasher, b"");
+                }
+            }
         }
         hash_http_frame(&mut hasher, &request.body);
         Self(hasher.finalize().into())
@@ -410,6 +419,7 @@ enum EnvWire {
     Inherited,
     AllowOnly(Vec<String>),
     InheritedExcept(Vec<String>),
+    Exact(Vec<String>),
 }
 
 impl Serialize for Subject {
@@ -433,6 +443,12 @@ impl Serialize for Subject {
                             .collect(),
                     ),
                     EnvPolicy::InheritedExcept(names) => EnvWire::InheritedExcept(
+                        names
+                            .iter()
+                            .map(|name| encode_native(name.as_os_str()))
+                            .collect(),
+                    ),
+                    EnvPolicy::Exact { names, .. } => EnvWire::Exact(
                         names
                             .iter()
                             .map(|name| encode_native(name.as_os_str()))
@@ -533,6 +549,11 @@ impl<'de> Deserialize<'de> for Subject {
                     EnvWire::InheritedExcept(names) => EnvPolicy::InheritedExcept(
                         decode_env(names).map_err(serde::de::Error::custom)?,
                     ),
+                    EnvWire::Exact(_) => {
+                        return Err(serde::de::Error::custom(
+                            "exact process environment values are live authority and cannot be recovered",
+                        ));
+                    }
                 };
                 SpawnSpec::new(argv, cwd, timeout, env)
                     .map(Self::Process)
@@ -804,34 +825,93 @@ pub trait Resolver: Send + Sync {
     ) -> BoxFuture<'static, Result<DnsResolution, TransportError>>;
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct HttpHeader {
     name: String,
-    value: Vec<u8>,
+    value: HttpHeaderValue,
+}
+
+#[derive(Clone)]
+enum HttpHeaderValue {
+    Public(Vec<u8>),
+    Secret(Arc<SecretMaterial>),
 }
 
 impl HttpHeader {
     pub fn new(name: &str, value: Vec<u8>) -> Result<Self, ForeignValueError> {
-        if name.is_empty()
-            || !name
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-            || value.iter().any(|byte| matches!(byte, b'\r' | b'\n' | 0))
-        {
-            return Err(ForeignValueError::InvalidTransport);
-        }
+        validate_header(name, &value)?;
         Ok(Self {
             name: name.to_ascii_lowercase(),
-            value,
+            value: HttpHeaderValue::Public(value),
         })
     }
+
+    pub fn secret(name: &str, value: SecretMaterial) -> Result<Self, ForeignValueError> {
+        validate_header(name, value.expose_secret_bytes())?;
+        Ok(Self {
+            name: name.to_ascii_lowercase(),
+            value: HttpHeaderValue::Secret(Arc::new(value)),
+        })
+    }
+
     pub fn name(&self) -> &str {
         &self.name
     }
+
+    /// Expose bytes only to the HTTP execution adapter.
     pub fn value(&self) -> &[u8] {
-        &self.value
+        match &self.value {
+            HttpHeaderValue::Public(value) => value,
+            HttpHeaderValue::Secret(value) => value.expose_secret_bytes(),
+        }
+    }
+
+    pub fn is_secret(&self) -> bool {
+        matches!(&self.value, HttpHeaderValue::Secret(_))
     }
 }
+
+fn validate_header(name: &str, value: &[u8]) -> Result<(), ForeignValueError> {
+    if name.is_empty()
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        || value.iter().any(|byte| matches!(byte, b'\r' | b'\n' | 0))
+    {
+        return Err(ForeignValueError::InvalidTransport);
+    }
+    Ok(())
+}
+
+impl fmt::Debug for HttpHeader {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let value: &dyn fmt::Debug = match &self.value {
+            HttpHeaderValue::Public(value) => value,
+            HttpHeaderValue::Secret(_) => &"[REDACTED]",
+        };
+        formatter
+            .debug_struct("HttpHeader")
+            .field("name", &self.name)
+            .field("value", value)
+            .finish()
+    }
+}
+
+impl PartialEq for HttpHeader {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+            && match (&self.value, &other.value) {
+                (HttpHeaderValue::Public(left), HttpHeaderValue::Public(right)) => left == right,
+                (HttpHeaderValue::Secret(left), HttpHeaderValue::Secret(right)) => {
+                    left.expose_secret_bytes() == right.expose_secret_bytes()
+                }
+                (HttpHeaderValue::Public(_), HttpHeaderValue::Secret(_))
+                | (HttpHeaderValue::Secret(_), HttpHeaderValue::Public(_)) => false,
+            }
+    }
+}
+
+impl Eq for HttpHeader {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HttpRequest {
@@ -880,6 +960,11 @@ impl HttpRequest {
 }
 
 pub type HttpBody = BoxStream<'static, Result<Vec<u8>, TransportError>>;
+
+pub enum OneHopPayload {
+    Response(HttpBody),
+    Redirect(Vec<u8>),
+}
 
 pub enum OneHopResponse {
     #[non_exhaustive]
@@ -937,6 +1022,23 @@ impl OneHopResponse {
         match self {
             Self::Response { body, .. } => Some(body),
             Self::Redirect { .. } => None,
+        }
+    }
+
+    pub fn into_parts(self) -> (u16, Vec<HttpHeader>, OneHopPayload, DeliveryCertainty) {
+        match self {
+            Self::Response {
+                status,
+                headers,
+                body,
+                delivery,
+            } => (status, headers, OneHopPayload::Response(body), delivery),
+            Self::Redirect {
+                status,
+                headers,
+                location,
+                delivery,
+            } => (status, headers, OneHopPayload::Redirect(location), delivery),
         }
     }
 }

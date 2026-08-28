@@ -3,7 +3,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use ego_core::config::McpServerConfig;
 use ego_core::generator::types::ToolDescriptor as GeneratorToolDescriptor;
 use ego_core::mcp::{McpAdmissionFingerprint, McpOperationKind, McpSubject, ToolExecution};
 use ego_core::permit::{
@@ -15,7 +14,7 @@ use jsonschema::Validator;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-use crate::{McpError, McpFailure};
+use crate::{McpError, McpFailure, McpServerAdmission};
 
 const EXECUTE_TOOL: &str = "execute_tool";
 
@@ -89,6 +88,47 @@ impl McpDynamicFamily {
             }
             DynamicKind::Gram => &["search_tools", "describe_tools", EXECUTE_TOOL],
         }
+    }
+
+    pub(crate) fn describe_name(&self) -> &'static str {
+        match self.kind {
+            DynamicKind::Standalone => "describe_tool",
+            DynamicKind::Gram => "describe_tools",
+        }
+    }
+
+    pub(crate) fn requested_names(&self, parameters: &Value) -> Result<Vec<String>, McpError> {
+        let object = parameters
+            .as_object()
+            .ok_or_else(|| invalid("dynamic describe parameters are not an object"))?;
+        let names = match self.kind {
+            DynamicKind::Standalone => vec![
+                object
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .filter(|name| !name.trim().is_empty())
+                    .ok_or_else(|| invalid("dynamic describe has no requested tool name"))?
+                    .to_owned(),
+            ],
+            DynamicKind::Gram => object
+                .get("tool_names")
+                .and_then(Value::as_array)
+                .filter(|names| !names.is_empty())
+                .ok_or_else(|| invalid("dynamic describe has no requested tool names"))?
+                .iter()
+                .map(|name| {
+                    name.as_str()
+                        .filter(|name| !name.trim().is_empty())
+                        .map(str::to_owned)
+                        .ok_or_else(|| invalid("dynamic describe tool name is invalid"))
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        };
+        let unique = names.iter().collect::<BTreeSet<_>>();
+        if unique.len() != names.len() {
+            return Err(invalid("dynamic describe tool names are duplicated"));
+        }
+        Ok(names)
     }
 
     fn compile_wrapper(&self, schema: &Value) -> Result<Validator, McpError> {
@@ -175,6 +215,70 @@ impl McpDynamicCatalogue {
     pub fn tool_names(&self) -> impl Iterator<Item = &str> {
         self.inner.keys().map(String::as_str)
     }
+
+    pub(crate) fn reconcile(
+        family: McpDynamicFamily,
+        previous: Option<&Self>,
+        requested: &[String],
+        tools: Vec<GeneratorToolDescriptor>,
+    ) -> Result<Self, McpError> {
+        if requested.is_empty() {
+            return Err(invalid("dynamic describe requested no tools"));
+        }
+        if previous.is_some_and(|catalogue| catalogue.family != family) {
+            return Err(invalid("dynamic catalogue family changed"));
+        }
+        let management = family
+            .management_names()
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let requested_count = requested.len();
+        let requested = requested
+            .iter()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        if requested.is_empty()
+            || requested.len() != requested_count
+            || requested.len() != tools.len()
+            || requested
+                .iter()
+                .any(|name| name.trim().is_empty() || management.contains(*name))
+        {
+            return Err(invalid(
+                "dynamic described tool set does not match its request",
+            ));
+        }
+        let mut inner = previous
+            .map(|catalogue| catalogue.inner.as_ref().clone())
+            .unwrap_or_default();
+        let mut described = BTreeSet::new();
+        for tool in tools {
+            if !requested.contains(tool.name.as_str())
+                || !described.insert(tool.name.clone())
+                || management.contains(tool.name.as_str())
+                || !tool.parameters.is_object()
+            {
+                return Err(invalid(
+                    "dynamic described tool set does not match its request",
+                ));
+            }
+            let compiled = Arc::new(CompiledSchema::new(tool.parameters, "dynamic inner tool")?);
+            inner.insert(tool.name, compiled);
+        }
+        if described.len() != requested.len() {
+            return Err(invalid(
+                "dynamic described tool set does not match its request",
+            ));
+        }
+        if inner.is_empty() {
+            return Err(protocol("dynamic MCP catalogue is empty"));
+        }
+        Ok(Self {
+            family,
+            inner: Arc::new(inner),
+        })
+    }
 }
 
 /// One semantic operation, built by a captured tool after schema validation.
@@ -212,13 +316,13 @@ impl McpOperation {
 pub trait McpOperationFactory: Send + Sync {
     fn prepare(
         &self,
-        config: &McpServerConfig,
+        admission: Arc<McpServerAdmission>,
         operation: McpOperation,
     ) -> Result<PreparedCall, ToolError>;
 
     fn execute<'a>(
         &'a self,
-        config: &'a McpServerConfig,
+        admission: Arc<McpServerAdmission>,
         call: PreparedCall,
         io: &'a dyn GuardedIo,
     ) -> BoxFuture<'a, Result<ToolExecution, ToolError>>;
@@ -269,7 +373,11 @@ impl McpToolDefinition {
         &self.descriptor.name
     }
 
-    fn admission_schema_fingerprint(&self) -> String {
+    pub(crate) fn dynamic_catalogue(&self) -> Option<&McpDynamicCatalogue> {
+        self.dynamic.as_ref()
+    }
+
+    pub(crate) fn admission_schema_fingerprint(&self) -> String {
         let Some(dynamic) = &self.dynamic else {
             return self.outer.fingerprint.to_string();
         };
@@ -288,7 +396,7 @@ impl McpToolDefinition {
         &self,
         server: &str,
         generation: &str,
-        config: Arc<McpServerConfig>,
+        server_admission: Arc<McpServerAdmission>,
         factory: Arc<dyn McpOperationFactory>,
     ) -> Result<Arc<dyn Tool>, McpError> {
         let admission = McpAdmissionFingerprint::new(
@@ -306,7 +414,7 @@ impl McpToolDefinition {
                 schema,
             },
             server: Arc::from(server),
-            config,
+            server_admission,
             factory,
             admission,
             outer: Arc::clone(&self.outer),
@@ -319,7 +427,7 @@ impl McpToolDefinition {
 pub struct McpCapturedTool {
     descriptor: ToolDescriptor,
     server: Arc<str>,
-    config: Arc<McpServerConfig>,
+    server_admission: Arc<McpServerAdmission>,
     factory: Arc<dyn McpOperationFactory>,
     admission: McpAdmissionFingerprint,
     outer: Arc<CompiledSchema>,
@@ -378,7 +486,8 @@ impl Tool for McpCapturedTool {
 
     fn prepare(&self, params: Value, _ctx: &PrepareCtx<'_>) -> Result<PreparedCall, ToolError> {
         let operation = self.operation(&params)?;
-        self.factory.prepare(&self.config, operation)
+        self.factory
+            .prepare(Arc::clone(&self.server_admission), operation)
     }
 
     fn execute<'a>(
@@ -386,7 +495,8 @@ impl Tool for McpCapturedTool {
         call: PreparedCall,
         io: &'a dyn GuardedIo,
     ) -> BoxFuture<'a, Result<ToolExecution, ToolError>> {
-        self.factory.execute(&self.config, call, io)
+        self.factory
+            .execute(Arc::clone(&self.server_admission), call, io)
     }
 }
 
@@ -410,7 +520,7 @@ fn validate(validator: &Validator, value: &Value, subject: &str) -> Result<(), M
     }
 }
 
-fn schema_fingerprint(schema: &Value) -> Result<String, McpError> {
+pub(crate) fn schema_fingerprint(schema: &Value) -> Result<String, McpError> {
     let bytes = serde_json::to_vec(schema)?;
     Ok(format!("sha256:{:x}", Sha256::digest(bytes)))
 }

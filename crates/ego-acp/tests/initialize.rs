@@ -117,12 +117,13 @@ async fn a_version_below_ours_is_refused_with_a_sentence_naming_ours() {
     );
 }
 
-/// The capabilities answered are the ones this build has, which is none.
+/// The capabilities answered are the ones this build has: Streamable HTTP MCP
+/// is supported, while SSE, ACP-over-MCP, and session loading are not.
 ///
-/// A capability advertised is a request invited. `AgentCapabilities::new()` is
-/// every flag off, and this pins that the response says so rather than
-/// defaulting to something a client would then rely on — `loadSession` in
-/// particular, because a client that believes it can replay a session and
+/// A capability advertised is a request invited, so this pins that every
+/// response field says what the implementation can actually honor rather
+/// than defaulting to something a client would then rely on — `loadSession`
+/// in particular, because a client that believes it can replay a session and
 /// cannot is a client showing an empty transcript for a session that has one.
 #[tokio::test]
 async fn nothing_is_advertised_that_this_build_cannot_do() {
@@ -143,4 +144,12 @@ async fn nothing_is_advertised_that_this_build_cannot_do() {
             "`{claimed}` is advertised and this build does not have it: {response}"
         );
     }
+
+    let mcp = capabilities
+        .get("mcpCapabilities")
+        .and_then(serde_json::Value::as_object)
+        .expect("an initialize response states MCP capabilities");
+    assert_eq!(mcp.get("http"), Some(&serde_json::json!(true)));
+    assert_eq!(mcp.get("sse"), Some(&serde_json::json!(false)));
+    assert!(!mcp.contains_key("acp"));
 }

@@ -1,8 +1,9 @@
-//! Process-wide MCP configuration management.
+//! Process-wide MCP management through one live registry authority.
 //!
-//! This module composes core's resolved configuration policy with the OS
-//! adapter for the core-owned user-config transaction. It owns no protocol
-//! connection, admission snapshot, health probe, or OAuth behavior.
+//! Configuration mutation remains core's atomic transaction. Admission,
+//! health, authorization, and captured inventory are projected directly from
+//! the controller supplied by process composition; this module owns no second
+//! reducer or cached protocol state.
 
 use std::sync::Arc;
 
@@ -11,6 +12,10 @@ use ego_core::config::{
     UserConfigMutation, UserConfigPublication, UserConfigStore, UserMcpSlot,
 };
 use ego_core::run::RunTermination;
+use ego_mcp::{
+    McpCacheFreshness, McpFailure, McpRegistryController, McpRegistryRefresh, McpRegistryStatus,
+    McpServerState, McpServerStatus, RegistryScope, RegistryTrigger,
+};
 use ego_tools::config::OsUserConfigStore;
 use ego_tools::store::OsIo;
 use serde::Serialize;
@@ -19,20 +24,58 @@ use crate::cli::{McpAction, McpArgs, UsageError};
 use crate::config::{self, McpManagementConfig};
 use crate::output::Stdout;
 
-/// Execute the configuration-only MCP management surface.
-pub fn execute(args: &McpArgs, out: &Stdout) -> RunTermination {
-    match execute_inner(args, out) {
+/// Execute MCP management through the process's sole live registry authority.
+pub async fn execute(
+    args: &McpArgs,
+    out: &Stdout,
+    controller: &Arc<McpRegistryController>,
+) -> RunTermination {
+    match execute_inner(args, out, controller).await {
         Ok(()) => RunTermination::Done,
         Err(termination) => termination,
     }
 }
 
-fn execute_inner(args: &McpArgs, out: &Stdout) -> Result<(), RunTermination> {
+async fn execute_inner(
+    args: &McpArgs,
+    out: &Stdout,
+    controller: &Arc<McpRegistryController>,
+) -> Result<(), RunTermination> {
     match &args.action {
-        McpAction::Add { name, server } => add(name, server, out),
-        McpAction::Remove { name } => remove(name, out),
-        McpAction::List { json } => list(*json, out),
+        McpAction::Add { name, server } => add(name, server, out, controller).await,
+        McpAction::Remove { name } => remove(name, out, controller).await,
+        McpAction::List { json } => list(*json, out, controller).await,
+        McpAction::Login { name } => login(name),
+        McpAction::Reload { name } => reload(name.as_ref(), out, controller).await,
     }
+}
+
+fn login(_name: &McpServerName) -> Result<(), RunTermination> {
+    Err(RunTermination::Failed {
+        message: "MCP login is deployment-unavailable: the project CIMD client metadata origin and loopback redirect have not been published"
+            .to_owned(),
+    })
+}
+
+async fn reload(
+    name: Option<&McpServerName>,
+    out: &Stdout,
+    controller: &Arc<McpRegistryController>,
+) -> Result<(), RunTermination> {
+    let config = management_config()?;
+    if let Some(name) = name
+        && config.effective.mcp.configured(name).is_none()
+    {
+        return Err(usage(UsageError(format!(
+            "MCP server `{name}` is not configured"
+        ))));
+    }
+    let scope = name
+        .cloned()
+        .map_or(RegistryScope::All, RegistryScope::Server);
+    let status = reconcile(&config, controller, RegistryTrigger::Reload, scope).await?;
+    render_status(&status, out);
+    Ok(())
 }
 
 fn management_config() -> Result<McpManagementConfig, RunTermination> {
@@ -57,7 +100,12 @@ fn publish(
         })
 }
 
-fn add(name: &McpServerName, server: &McpServerConfig, out: &Stdout) -> Result<(), RunTermination> {
+async fn add(
+    name: &McpServerName,
+    server: &McpServerConfig,
+    out: &Stdout,
+    controller: &Arc<McpRegistryController>,
+) -> Result<(), RunTermination> {
     let before = management_config()?;
     let slot = before.selected_user_slot();
     let publication = publish(
@@ -70,10 +118,18 @@ fn add(name: &McpServerName, server: &McpServerConfig, out: &Stdout) -> Result<(
         },
     )?;
     let after = resolve_after_publication(&publication)?;
+    let status = reconcile(
+        &after,
+        controller,
+        RegistryTrigger::Add,
+        RegistryScope::Server(name.clone()),
+    )
+    .await?;
     out.line(&format!(
-        "{}; set MCP server `{name}`; {}; admission not observed",
+        "{}; set MCP server `{name}`; {}; {}",
         publication_text(&publication),
-        effective_text(&after, name)
+        effective_text(&after, name),
+        server_status_text(&status, name)
     ));
     Ok(())
 }
@@ -85,19 +141,31 @@ enum Removal {
     SystemMask,
 }
 
-fn remove(name: &McpServerName, out: &Stdout) -> Result<(), RunTermination> {
+async fn remove(
+    name: &McpServerName,
+    out: &Stdout,
+    controller: &Arc<McpRegistryController>,
+) -> Result<(), RunTermination> {
     let before = management_config()?;
     let (mutation, removal) = removal_mutation(&before, name)?;
     let publication = publish(&before, mutation)?;
     let after = resolve_after_publication(&publication)?;
+    let status = reconcile(
+        &after,
+        controller,
+        RegistryTrigger::Remove,
+        RegistryScope::Server(name.clone()),
+    )
+    .await?;
     let consequence = match removal {
         Removal::Entry => format!("removed user entry; {}", effective_text(&after, name)),
         Removal::Tombstone => format!("removed user tombstone; {}", reveal_text(&after, name)),
         Removal::SystemMask => format!("masked system entry; {}", effective_text(&after, name)),
     };
     out.line(&format!(
-        "{}; {consequence}; admission not observed",
-        publication_text(&publication)
+        "{}; {consequence}; {}",
+        publication_text(&publication),
+        server_status_text(&status, name)
     ));
     Ok(())
 }
@@ -238,16 +306,79 @@ fn provenance_text(provenance: &McpConfigProvenance) -> String {
     }
 }
 
-fn list(json: bool, out: &Stdout) -> Result<(), RunTermination> {
+async fn reconcile(
+    config: &McpManagementConfig,
+    controller: &Arc<McpRegistryController>,
+    trigger: RegistryTrigger,
+    scope: RegistryScope,
+) -> Result<McpRegistryStatus, RunTermination> {
+    let admissions =
+        ego_tools::mcp::materialize_admissions(config::configured_mcp(&config.effective));
+    let refresh = McpRegistryRefresh::new(admissions, trigger, scope).map_err(|error| {
+        RunTermination::Failed {
+            message: error.to_string(),
+        }
+    })?;
+    controller
+        .reconcile(refresh)
+        .await
+        .map_err(|error| RunTermination::Failed {
+            message: error.to_string(),
+        })?;
+    Ok(controller.status())
+}
+
+fn render_status(status: &McpRegistryStatus, out: &Stdout) {
+    if status.servers().is_empty() {
+        out.line("no MCP servers are admitted");
+    } else {
+        for server in status.servers() {
+            out.line(&format!(
+                "{}\t{}",
+                server.name(),
+                server_state_text(server.state())
+            ));
+        }
+    }
+}
+
+fn server_status_text(status: &McpRegistryStatus, name: &McpServerName) -> &'static str {
+    status
+        .server(name)
+        .map(|server| server_state_text(server.state()))
+        .unwrap_or("absent")
+}
+
+fn server_state_text(state: McpServerState) -> &'static str {
+    match state {
+        McpServerState::Admitted => "admitted",
+        McpServerState::Degraded => "degraded",
+        McpServerState::AuthorizationRequired => "authorization_required",
+        McpServerState::Absent => "absent",
+    }
+}
+
+async fn list(
+    json: bool,
+    out: &Stdout,
+    controller: &Arc<McpRegistryController>,
+) -> Result<(), RunTermination> {
     let config = management_config()?;
-    let listing = Listing::from_config(&config);
+    let status = reconcile(
+        &config,
+        controller,
+        RegistryTrigger::ConfigChanged,
+        RegistryScope::All,
+    )
+    .await?;
+    let listing = Listing::from_config(&config, &status);
     if json {
         let rendered = serde_json::to_string(&listing).map_err(|error| RunTermination::Failed {
             message: format!("the MCP configuration listing could not be rendered: {error}"),
         })?;
         out.line(&rendered);
     } else if listing.servers.is_empty() {
-        out.line("no MCP servers are configured; admission not observed");
+        out.line("no MCP servers are configured or admitted");
     } else {
         for server in listing.servers {
             let state = if server.configured {
@@ -255,10 +386,16 @@ fn list(json: bool, out: &Stdout) -> Result<(), RunTermination> {
             } else {
                 "masked"
             };
+            let diagnostic = server
+                .diagnostic
+                .as_ref()
+                .map(|diagnostic| format!("\t{}: {}", diagnostic.class, diagnostic.message))
+                .unwrap_or_default();
             out.line(&format!(
-                "{}\t{state}\t{}\tadmission not observed",
+                "{}\t{state}\t{}\t{}{diagnostic}",
                 server.name,
-                server.provenance.text()
+                server.provenance.text(),
+                server.health,
             ));
         }
     }
@@ -271,13 +408,13 @@ struct Listing {
 }
 
 impl Listing {
-    fn from_config(config: &McpManagementConfig) -> Self {
+    fn from_config(config: &McpManagementConfig, status: &McpRegistryStatus) -> Self {
         let servers = config
             .effective
             .mcp
             .entries()
             .iter()
-            .map(|(name, entry)| ServerReport::new(name, entry))
+            .map(|(name, entry)| ServerReport::new(name, entry, status))
             .collect();
         Self { servers }
     }
@@ -289,18 +426,40 @@ struct ServerReport {
     configured: bool,
     admitted: bool,
     health: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    generation: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    capabilities: Option<CapabilitiesReport>,
+    cache: CacheReport,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    authorization: Option<AuthorizationReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    diagnostic: Option<DiagnosticReport>,
     provenance: ProvenanceReport,
     configuration: Option<ConfigurationReport>,
 }
 
 impl ServerReport {
-    fn new(name: &McpServerName, entry: &ResolvedMcpEntry) -> Self {
+    fn new(name: &McpServerName, entry: &ResolvedMcpEntry, status: &McpRegistryStatus) -> Self {
+        let health = status
+            .server(name)
+            .map(|server| server_state_text(server.state()))
+            .unwrap_or("absent");
+        let projection = RegistryStatusReport::new(status.server(name));
         match entry {
             ResolvedMcpEntry::Configured { server, provenance } => Self {
                 name: name.to_string(),
                 configured: true,
-                admitted: false,
-                health: "not_observed",
+                admitted: matches!(
+                    status.server(name).map(|server| server.state()),
+                    Some(McpServerState::Admitted)
+                ),
+                health,
+                generation: projection.generation,
+                capabilities: projection.capabilities,
+                cache: projection.cache,
+                authorization: projection.authorization,
+                diagnostic: projection.diagnostic,
                 provenance: ProvenanceReport::new(provenance),
                 configuration: Some(ConfigurationReport::new(server)),
             },
@@ -308,11 +467,119 @@ impl ServerReport {
                 name: name.to_string(),
                 configured: false,
                 admitted: false,
-                health: "not_observed",
+                health,
+                generation: projection.generation,
+                capabilities: projection.capabilities,
+                cache: projection.cache,
+                authorization: projection.authorization,
+                diagnostic: projection.diagnostic,
                 provenance: ProvenanceReport::new(provenance),
                 configuration: None,
             },
         }
+    }
+}
+
+struct RegistryStatusReport {
+    generation: Option<String>,
+    capabilities: Option<CapabilitiesReport>,
+    cache: CacheReport,
+    authorization: Option<AuthorizationReport>,
+    diagnostic: Option<DiagnosticReport>,
+}
+
+impl RegistryStatusReport {
+    fn new(status: Option<&McpServerStatus>) -> Self {
+        Self {
+            generation: status
+                .and_then(McpServerStatus::generation)
+                .map(str::to_owned),
+            capabilities: status
+                .and_then(McpServerStatus::capabilities)
+                .map(CapabilitiesReport::new),
+            cache: CacheReport {
+                freshness: status
+                    .map(|server| cache_freshness_text(server.cache_freshness()))
+                    .unwrap_or("uncached"),
+                source_revision: status
+                    .and_then(McpServerStatus::cache_source_revision)
+                    .map(str::to_owned),
+            },
+            authorization: status
+                .and_then(McpServerStatus::authorization)
+                .map(|authorization| AuthorizationReport {
+                    issuer: authorization.issuer().to_owned(),
+                    protected_resource: authorization.protected_resource().to_owned(),
+                    scopes: authorization.scopes().to_vec(),
+                    request_correlation: authorization.request_correlation().to_owned(),
+                }),
+            diagnostic: status
+                .and_then(McpServerStatus::diagnostic)
+                .map(|diagnostic| DiagnosticReport {
+                    class: failure_text(diagnostic.failure()),
+                    message: diagnostic.message().to_owned(),
+                }),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct CapabilitiesReport {
+    tools: bool,
+    resources: bool,
+    prompts: bool,
+}
+
+impl CapabilitiesReport {
+    fn new(capabilities: &ego_mcp::McpCapabilities) -> Self {
+        Self {
+            tools: capabilities.has_tools(),
+            resources: capabilities.has_resources(),
+            prompts: capabilities.has_prompts(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct CacheReport {
+    freshness: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_revision: Option<String>,
+}
+
+#[derive(Serialize)]
+struct AuthorizationReport {
+    issuer: String,
+    protected_resource: String,
+    scopes: Vec<String>,
+    request_correlation: String,
+}
+
+#[derive(Serialize)]
+struct DiagnosticReport {
+    class: &'static str,
+    message: String,
+}
+
+fn cache_freshness_text(freshness: McpCacheFreshness) -> &'static str {
+    match freshness {
+        McpCacheFreshness::Fresh => "fresh",
+        McpCacheFreshness::Expired => "expired",
+        McpCacheFreshness::Uncached => "uncached",
+    }
+}
+
+fn failure_text(failure: McpFailure) -> &'static str {
+    match failure {
+        McpFailure::Absent => "absent",
+        McpFailure::InvalidValue => "invalid_value",
+        McpFailure::InvalidResponse => "invalid_response",
+        McpFailure::Authority => "authority",
+        McpFailure::Transport => "transport",
+        McpFailure::Protocol => "protocol",
+        McpFailure::Authorization => "authorization",
+        McpFailure::Credential => "credential",
+        McpFailure::Cancelled => "cancelled",
     }
 }
 

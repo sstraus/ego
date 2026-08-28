@@ -366,7 +366,7 @@ impl ActionRegistry {
                 "Inspect effective permission rules",
             )
             .unavailable("the interactive permission controller"),
-            enabled(Mcp, "mcp", "Inspect admitted MCP connections").unavailable("the MCP client"),
+            enabled(Mcp, "mcp", "Inspect admitted MCP connections"),
             enabled(Sessions, "sessions", "Browse durable sessions")
                 .unavailable("the session browser"),
             enabled(Fork, "fork", "Fork a durable session").unavailable("durable session replay"),
@@ -378,8 +378,7 @@ impl ActionRegistry {
             enabled(Statusline, "statusline", "Configure the native status line"),
             enabled(Export, "export", "Export sanitized session data")
                 .unavailable("the session exporter"),
-            enabled(Doctor, "doctor", "Diagnose local subsystem health")
-                .unavailable("the diagnostics service"),
+            enabled(Doctor, "doctor", "Diagnose local subsystem health"),
             enabled(Quit, "quit", "Exit the interactive session"),
             enabled(New, "new", "Create a durable session")
                 .unavailable("the interactive session service"),
@@ -387,8 +386,7 @@ impl ActionRegistry {
                 .unavailable("session metadata"),
             enabled(Goal, "goal", "Manage the persistent goal lifecycle")
                 .unavailable("the goal service"),
-            enabled(Tools, "tools", "Inspect available tools")
-                .unavailable("the admitted tool registry"),
+            enabled(Tools, "tools", "Inspect available tools"),
             enabled(Skills, "skills", "List or invoke admitted skills")
                 .unavailable("the skill catalogue"),
             enabled(Hooks, "hooks", "Inspect admitted hooks").unavailable("the hook catalogue"),

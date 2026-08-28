@@ -3,7 +3,10 @@ use std::time::Instant;
 
 use ego_core::config::McpServerName;
 use ego_core::generator::attempt::DeliveryCertainty;
-use ego_core::permit::{HttpBody, HttpHeader, HttpRequest, HttpRoute, HttpScheme, NetworkTarget};
+use ego_core::permit::{
+    HttpBody, HttpHeader, HttpRequest, HttpRoute, HttpScheme, NetworkTarget, OneHopPayload,
+    OneHopResponse,
+};
 use futures::StreamExt;
 use sha2::{Digest, Sha256};
 use url::Url;
@@ -28,6 +31,24 @@ pub enum McpHttpResponse {
 }
 
 impl McpHttpResponse {
+    pub fn from_one_hop(response: OneHopResponse) -> Self {
+        let (status, headers, payload, delivery) = response.into_parts();
+        match payload {
+            OneHopPayload::Response(body) => Self::Response {
+                status,
+                headers,
+                body,
+                delivery,
+            },
+            OneHopPayload::Redirect(location) => Self::Redirect {
+                status,
+                headers,
+                location,
+                delivery,
+            },
+        }
+    }
+
     pub fn response(
         status: u16,
         headers: Vec<HttpHeader>,

@@ -5,7 +5,9 @@ use std::time::Instant;
 
 use ego_core::config::McpServerName;
 use ego_core::generator::attempt::DeliveryCertainty;
-use ego_core::permit::{DuplexHandle, HttpRequest, HttpRoute, PreparedConnect};
+use ego_core::permit::{
+    DuplexHandle, HttpHeader, HttpRequest, HttpRoute, PreparedConnect, SpawnSpec,
+};
 
 use crate::{McpError, McpFailure, McpHttpResponse};
 
@@ -137,6 +139,23 @@ impl PreparedMcpHttpCall {
         self.deadline
     }
 
+    pub(crate) fn with_headers(mut self, headers: &[HttpHeader]) -> Result<Self, McpError> {
+        if headers.is_empty() {
+            return Ok(self);
+        }
+        let mut combined = self.request.headers().to_vec();
+        combined.extend_from_slice(headers);
+        self.request = HttpRequest::new(
+            self.request.method(),
+            self.request.path(),
+            combined,
+            self.request.body().to_vec(),
+        )
+        .map_err(|error| McpError::new(McpFailure::InvalidValue, error.to_string()))?;
+        self.connect = PreparedConnect::new(self.route.target().clone(), &self.request);
+        Ok(self)
+    }
+
     pub fn into_parts(self) -> McpPreparedHttpParts {
         McpPreparedHttpParts {
             request_id: self.request_id,
@@ -189,4 +208,13 @@ pub trait McpDuplexEffects: Send {
         self: Box<Self>,
         server: McpServerName,
     ) -> McpFuture<'static, Result<DuplexHandle, McpError>>;
+}
+
+/// Consumer-owned factory for one fresh management/discovery duplex.
+pub trait McpDuplexEffectsFactory: Send + Sync {
+    fn create(
+        &self,
+        server: McpServerName,
+        spec: SpawnSpec,
+    ) -> Result<Box<dyn McpDuplexEffects>, McpError>;
 }

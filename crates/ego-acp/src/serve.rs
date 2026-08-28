@@ -1,6 +1,6 @@
 //! The inbound ACP adapter over core's rooted run controller.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::future::Future;
 use std::path::Path;
@@ -24,6 +24,7 @@ use ego_core::run::{
 };
 use ego_core::sink::EventSink;
 use ego_core::store::session_store::SessionStore;
+use ego_core::turn::AdmittedToolSource;
 
 /// Failure to turn an untrusted protocol path into a canonical run root.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,6 +52,43 @@ pub trait RootResolver: Send + Sync {
 /// Runtime owner for execution that must outlive the ACP connection.
 pub trait ExecutionSpawner: Send + Sync {
     fn spawn(&self, execution: Pin<Box<dyn Future<Output = ()> + Send + 'static>>);
+}
+
+/// A sanitized failure from the session-scoped MCP admission boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpSessionAdmissionError(String);
+
+impl McpSessionAdmissionError {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self(message.into())
+    }
+}
+
+impl fmt::Display for McpSessionAdmissionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for McpSessionAdmissionError {}
+
+/// Live MCP authority retained for exactly one ACP connection session.
+pub trait SessionMcpAdmission: Send + Sync {
+    fn admitted_tools(&self) -> Arc<dyn AdmittedToolSource>;
+    fn mcp_errors(&self) -> &[String];
+}
+
+pub type McpSessionAdmissionFuture = Pin<
+    Box<
+        dyn Future<Output = Result<Option<Arc<dyn SessionMcpAdmission>>, McpSessionAdmissionError>>
+            + Send
+            + 'static,
+    >,
+>;
+
+/// Consumer-owned boundary that atomically admits one ACP session's servers.
+pub trait McpSessionAdmitter: Send + Sync {
+    fn admit(&self, servers: Vec<v1::McpServer>) -> McpSessionAdmissionFuture;
 }
 
 /// Builds live execution bindings from the connection that accepted a prompt.
@@ -102,6 +140,8 @@ impl RunBindingsBuilder for AcpRunBindingsBuilder {
 
 fn capabilities() -> v1::AgentCapabilities {
     v1::AgentCapabilities::new()
+        .load_session(false)
+        .mcp_capabilities(v1::McpCapabilities::new().http(true).sse(false))
 }
 
 struct Registered {
@@ -110,12 +150,14 @@ struct Registered {
     run: Option<(ego_core::run::RunId, ego_core::run::RunRevision)>,
     busy: bool,
     active_cancel: Option<CancelKey>,
+    mcp: Option<Arc<dyn SessionMcpAdmission>>,
 }
 
 struct PromptCorrelation {
     root: RunRoot,
     request_id: RequestId,
     run: Option<(ego_core::run::RunId, ego_core::run::RunRevision)>,
+    mcp: Option<Arc<dyn SessionMcpAdmission>>,
 }
 
 enum BeginPrompt {
@@ -128,7 +170,13 @@ enum BeginPrompt {
 struct Sessions(Arc<Mutex<HashMap<v1::SessionId, Registered>>>);
 
 impl Sessions {
-    fn open(&self, id: v1::SessionId, root: RunRoot, start_request: RequestId) {
+    fn open(
+        &self,
+        id: v1::SessionId,
+        root: RunRoot,
+        start_request: RequestId,
+        mcp: Option<Arc<dyn SessionMcpAdmission>>,
+    ) {
         self.lock().insert(
             id,
             Registered {
@@ -137,6 +185,7 @@ impl Sessions {
                 run: None,
                 busy: false,
                 active_cancel: None,
+                mcp,
             },
         );
     }
@@ -159,6 +208,7 @@ impl Sessions {
             root: session.root.clone(),
             request_id,
             run: session.run,
+            mcp: session.mcp.as_ref().map(Arc::clone),
         })
     }
 
@@ -201,6 +251,95 @@ impl Sessions {
             .lock()
             .expect("a poisoned lock means an ACP handler panicked mid-session")
     }
+}
+
+fn validate_mcp_servers(servers: &[v1::McpServer]) -> Result<(), McpSessionAdmissionError> {
+    let mut names = BTreeSet::new();
+    for server in servers {
+        let name = match server {
+            v1::McpServer::Stdio(server) => {
+                if !server.command.is_absolute() {
+                    return Err(McpSessionAdmissionError::new(
+                        "an ACP stdio MCP command must be an absolute path",
+                    ));
+                }
+                let mut names = BTreeSet::new();
+                for binding in &server.env {
+                    binding
+                        .name
+                        .parse::<ego_core::config::McpEnvironmentName>()
+                        .map_err(|error| McpSessionAdmissionError::new(error.to_string()))?;
+                    if !names.insert(binding.name.to_ascii_lowercase()) {
+                        return Err(McpSessionAdmissionError::new(
+                            "an ACP stdio MCP server contains duplicate environment names",
+                        ));
+                    }
+                }
+                &server.name
+            }
+            v1::McpServer::Http(server) => {
+                let url = server
+                    .url
+                    .parse::<ego_core::config::McpHttpUrl>()
+                    .map_err(|error| McpSessionAdmissionError::new(error.to_string()))?;
+                ego_core::config::McpServerConfig::http(
+                    url.as_url().clone(),
+                    ego_core::config::McpHttpAuth::None,
+                    false,
+                )
+                .map_err(|error| McpSessionAdmissionError::new(error.to_string()))?;
+                let mut names = BTreeSet::new();
+                for header in &server.headers {
+                    ego_core::permit::HttpHeader::secret(
+                        &header.name,
+                        ego_core::credentials::SecretMaterial::new(
+                            header.value.as_bytes().to_vec(),
+                        ),
+                    )
+                    .map_err(|error| McpSessionAdmissionError::new(error.to_string()))?;
+                    let normalized = header.name.to_ascii_lowercase();
+                    if matches!(
+                        normalized.as_str(),
+                        "host"
+                            | "content-length"
+                            | "transfer-encoding"
+                            | "connection"
+                            | "accept"
+                            | "content-type"
+                            | "mcp-session-id"
+                    ) {
+                        return Err(McpSessionAdmissionError::new(
+                            "an ACP HTTP MCP server contains a wire-owned header",
+                        ));
+                    }
+                    if !names.insert(normalized) {
+                        return Err(McpSessionAdmissionError::new(
+                            "an ACP HTTP MCP server contains duplicate header names",
+                        ));
+                    }
+                }
+                &server.name
+            }
+            v1::McpServer::Sse(_) => {
+                return Err(McpSessionAdmissionError::new(
+                    "this build does not support MCP over SSE",
+                ));
+            }
+            _ => {
+                return Err(McpSessionAdmissionError::new(
+                    "this build does not support the supplied MCP transport",
+                ));
+            }
+        };
+        name.parse::<ego_core::config::McpServerName>()
+            .map_err(|error| McpSessionAdmissionError::new(error.to_string()))?;
+        if !names.insert(name.to_ascii_lowercase()) {
+            return Err(McpSessionAdmissionError::new(
+                "an ACP session contains duplicate MCP server names",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn prompt_text(blocks: &[v1::ContentBlock]) -> Result<String, String> {
@@ -254,6 +393,7 @@ pub fn agent<S, E, C, I>(
     spawner: Arc<dyn ExecutionSpawner>,
     ids: Arc<dyn IdSource>,
     bindings_builder: Arc<dyn RunBindingsBuilder>,
+    mcp_admitter: Arc<dyn McpSessionAdmitter>,
 ) -> AgentProtocolRouter
 where
     S: SessionStore + 'static,
@@ -261,9 +401,14 @@ where
     C: Clock + 'static,
     I: IdSource + 'static,
 {
-    Agent
-        .protocol_router()
-        .with_v1(v1_agent(controller, roots, spawner, ids, bindings_builder))
+    Agent.protocol_router().with_v1(v1_agent(
+        controller,
+        roots,
+        spawner,
+        ids,
+        bindings_builder,
+        mcp_admitter,
+    ))
 }
 
 fn v1_agent<S, E, C, I>(
@@ -272,6 +417,7 @@ fn v1_agent<S, E, C, I>(
     spawner: Arc<dyn ExecutionSpawner>,
     ids: Arc<dyn IdSource>,
     bindings_builder: Arc<dyn RunBindingsBuilder>,
+    mcp_admitter: Arc<dyn McpSessionAdmitter>,
 ) -> impl agent_client_protocol::ConnectTo<Client>
 where
     S: SessionStore + 'static,
@@ -317,11 +463,12 @@ where
                 let sessions = sessions.clone();
                 let roots = Arc::clone(&roots);
                 let ids = Arc::clone(&ids);
+                let mcp_admitter = Arc::clone(&mcp_admitter);
                 async move |request: v1::NewSessionRequest, responder, _cx| {
-                    if !request.mcp_servers.is_empty() {
-                        return responder.respond_with_error(Error::invalid_params().data(
-                            "this build has no MCP client, so the servers named here would be accepted and never connected to",
-                        ));
+                    if let Err(error) = validate_mcp_servers(&request.mcp_servers) {
+                        return responder.respond_with_error(
+                            Error::invalid_params().data(error.to_string()),
+                        );
                     }
                     let root = match roots.resolve(&request.cwd) {
                         Ok(root) => root,
@@ -331,10 +478,30 @@ where
                             );
                         }
                     };
+                    let supplied_mcp = !request.mcp_servers.is_empty();
+                    let mcp = match mcp_admitter.admit(request.mcp_servers).await {
+                        Ok(Some(admission)) if supplied_mcp => Some(admission),
+                        Ok(Some(_)) => {
+                            return responder.respond_with_error(Error::invalid_params().data(
+                                "an empty ACP MCP selection unexpectedly produced live authority",
+                            ));
+                        }
+                        Ok(None) if !supplied_mcp => None,
+                        Ok(None) => {
+                            return responder.respond_with_error(Error::invalid_params().data(
+                                "the supplied MCP servers did not produce live session authority",
+                            ));
+                        }
+                        Err(error) => {
+                            return responder.respond_with_error(
+                                Error::invalid_params().data(error.to_string()),
+                            );
+                        }
+                    };
                     let start_request = RequestId::from_uuid(ids.next_uuid());
                     let session = RequestId::session_id(start_request);
                     let id = v1::SessionId::new(session.to_string());
-                    sessions.open(id.clone(), root, start_request);
+                    sessions.open(id.clone(), root, start_request, mcp);
                     responder.respond(v1::NewSessionResponse::new(id))
                 }
             },
@@ -399,6 +566,13 @@ where
                         .lock()
                         .expect("initialize capability lock poisoned");
                     let bindings = bindings_builder.build(cx.clone(), id.clone(), capabilities);
+                    let bindings = match correlation.mcp.as_ref() {
+                        Some(mcp) => bindings.with_mcp(
+                            mcp.admitted_tools(),
+                            mcp.mcp_errors().to_vec(),
+                        ),
+                        None => bindings,
+                    };
                     let outcome = match correlation.run {
                         None => {
                             controller

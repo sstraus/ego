@@ -2,7 +2,10 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use ego_acp::serve::{AcpRunBindingsBuilder, ExecutionSpawner, RootResolver};
+use ego_acp::serve::{
+    AcpRunBindingsBuilder, ExecutionSpawner, McpSessionAdmissionError, McpSessionAdmitter,
+    RootResolver, SessionMcpAdmission,
+};
 use ego_core::config::ModelRef;
 use ego_core::event::domain::DomainEvent;
 use ego_core::event::id::SessionId;
@@ -238,5 +241,50 @@ where
         Arc::new(TestSpawner),
         ids,
         Arc::new(AcpRunBindingsBuilder),
+        Arc::new(RejectingMcpAdmitter),
+    )
+}
+
+#[derive(Default)]
+struct RejectingMcpAdmitter;
+
+impl McpSessionAdmitter for RejectingMcpAdmitter {
+    fn admit(
+        &self,
+        _servers: Vec<agent_client_protocol_schema::v1::McpServer>,
+    ) -> BoxFuture<'static, Result<Option<Arc<dyn SessionMcpAdmission>>, McpSessionAdmissionError>>
+    {
+        Box::pin(future::ready(Ok(None)))
+    }
+}
+
+#[allow(dead_code)]
+pub fn agent_with_mcp<S, E, C, I>(
+    store: Arc<S>,
+    executor: Arc<E>,
+    clock: Arc<C>,
+    ids: Arc<I>,
+    admitter: Arc<dyn McpSessionAdmitter>,
+) -> agent_client_protocol::AgentProtocolRouter
+where
+    S: SessionStore + 'static,
+    E: RunExecutor + 'static,
+    C: Clock + 'static,
+    I: IdSource + 'static,
+{
+    let controller = Arc::new(RunController::new(
+        store,
+        executor,
+        clock,
+        Arc::clone(&ids),
+        RunRetention::new(std::num::NonZeroUsize::new(2).expect("retention")).expect("retention"),
+    ));
+    ego_acp::serve::agent(
+        controller,
+        Arc::new(TestRoots),
+        Arc::new(TestSpawner),
+        ids,
+        Arc::new(AcpRunBindingsBuilder),
+        admitter,
     )
 }

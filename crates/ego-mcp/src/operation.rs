@@ -12,8 +12,8 @@ use ego_core::mcp::{
 };
 use ego_core::permit::{
     Authorized, CanonPath, DuplexEnd, DuplexHandle, EnvPolicy, ForeignTransportTarget, GuardedIo,
-    HttpRoute, InvocationDigest, McpHttpClaim, OneHopResponse, PreparedCall, SpawnSpec, ToolError,
-    ToolResult,
+    HttpHeader, HttpRoute, InvocationDigest, McpHttpClaim, OneHopResponse, PreparedCall, SpawnSpec,
+    ToolError, ToolResult,
 };
 use ego_core::suspension::{
     ContinuationError, ContinuationJournal, OpenedContinuation, PreparedResume,
@@ -27,19 +27,26 @@ use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::dynamic::{McpOperation, McpOperationFactory};
+use crate::dynamic::{McpDynamicFamily, McpOperation, McpOperationFactory};
 use crate::http::AdmittedMcpHttpProfile;
+use crate::registry::{McpDescribedToolsAdmission, McpDescribedToolsCommand};
 use crate::state::{compile_schema, validate_answer};
 use crate::{
     McpClient, McpClientOptions, McpDuplexEffects, McpError, McpFailure, McpFuture, McpHttpEffects,
     McpHttpEnd, McpHttpPurpose, McpHttpResponse, McpHttpSettlement, McpManualOutcome,
-    McpPreparedHttpParts, McpRequestId, PreparedMcpHttpCall,
+    McpPreparedHttpParts, McpRequestId, McpServerAdmission, PreparedMcpHttpCall,
 };
 
 #[derive(Clone, Copy)]
 struct OperationLimits {
     max_sse_event_size: usize,
     timeout: Duration,
+}
+
+#[derive(Clone)]
+struct DynamicDescribeAdmission {
+    family: McpDynamicFamily,
+    admission: Arc<dyn McpDescribedToolsAdmission>,
 }
 
 impl OperationLimits {
@@ -73,6 +80,7 @@ pub struct McpHttpOperationFactory {
     management: Arc<dyn McpHttpEffects>,
     continuations: Arc<dyn McpInputRequiredRecorder>,
     limits: OperationLimits,
+    dynamic: Option<DynamicDescribeAdmission>,
 }
 
 /// Consumer-owned persistence boundary used before an input-required outcome
@@ -184,6 +192,23 @@ impl McpHttpOperationFactory {
             management,
             continuations,
             limits: OperationLimits::new(max_sse_event_size, timeout)?,
+            dynamic: None,
+        })
+    }
+
+    pub(crate) fn runtime(
+        management: Arc<dyn McpHttpEffects>,
+        continuations: Arc<dyn McpInputRequiredRecorder>,
+        max_sse_event_size: usize,
+        timeout: Duration,
+        family: Option<McpDynamicFamily>,
+        admission: Arc<dyn McpDescribedToolsAdmission>,
+    ) -> Result<Self, McpError> {
+        Ok(Self {
+            management,
+            continuations,
+            limits: OperationLimits::new(max_sse_event_size, timeout)?,
+            dynamic: family.map(|family| DynamicDescribeAdmission { family, admission }),
         })
     }
 }
@@ -191,10 +216,10 @@ impl McpHttpOperationFactory {
 impl McpOperationFactory for McpHttpOperationFactory {
     fn prepare(
         &self,
-        config: &McpServerConfig,
+        admission: Arc<McpServerAdmission>,
         operation: McpOperation,
     ) -> Result<PreparedCall, ToolError> {
-        let McpServerConfig::Http(config) = config else {
+        let McpServerConfig::Http(config) = admission.config() else {
             return Err(prepare_error("HTTP MCP factory received stdio config"));
         };
         prepare_http(config, operation).map_err(mcp_prepare_error)
@@ -202,24 +227,18 @@ impl McpOperationFactory for McpHttpOperationFactory {
 
     fn execute<'a>(
         &'a self,
-        config: &'a McpServerConfig,
+        admission: Arc<McpServerAdmission>,
         call: PreparedCall,
         io: &'a dyn GuardedIo,
     ) -> futures::future::BoxFuture<'a, Result<ToolExecution, ToolError>> {
         Box::pin(async move {
-            let McpServerConfig::Http(config) = config else {
+            let McpServerConfig::Http(config) = admission.config() else {
                 return Err(execution_error("HTTP MCP factory received stdio config"));
             };
-            execute_http(
-                config,
-                call,
-                io,
-                Arc::clone(&self.management),
-                Arc::clone(&self.continuations),
-                self.limits,
-            )
-            .await
-            .map_err(mcp_execution_error)
+            let config = config.clone();
+            execute_http(&config, call, io, self, admission)
+                .await
+                .map_err(mcp_execution_error)
         })
     }
 }
@@ -228,6 +247,7 @@ impl McpOperationFactory for McpHttpOperationFactory {
 pub struct McpStdioOperationFactory {
     continuations: Arc<dyn McpInputRequiredRecorder>,
     limits: OperationLimits,
+    dynamic: Option<DynamicDescribeAdmission>,
 }
 
 impl McpStdioOperationFactory {
@@ -239,6 +259,21 @@ impl McpStdioOperationFactory {
         Ok(Self {
             continuations,
             limits: OperationLimits::new(max_sse_event_size, timeout)?,
+            dynamic: None,
+        })
+    }
+
+    pub(crate) fn runtime(
+        continuations: Arc<dyn McpInputRequiredRecorder>,
+        max_sse_event_size: usize,
+        timeout: Duration,
+        family: Option<McpDynamicFamily>,
+        admission: Arc<dyn McpDescribedToolsAdmission>,
+    ) -> Result<Self, McpError> {
+        Ok(Self {
+            continuations,
+            limits: OperationLimits::new(max_sse_event_size, timeout)?,
+            dynamic: family.map(|family| DynamicDescribeAdmission { family, admission }),
         })
     }
 }
@@ -246,31 +281,35 @@ impl McpStdioOperationFactory {
 impl McpOperationFactory for McpStdioOperationFactory {
     fn prepare(
         &self,
-        config: &McpServerConfig,
+        admission: Arc<McpServerAdmission>,
         operation: McpOperation,
     ) -> Result<PreparedCall, ToolError> {
-        let McpServerConfig::Stdio(config) = config else {
+        let McpServerConfig::Stdio(config) = admission.config() else {
             return Err(prepare_error("stdio MCP factory received HTTP config"));
         };
-        prepare_stdio(config, operation, self.limits.timeout).map_err(mcp_prepare_error)
+        prepare_stdio(admission.as_ref(), config, operation, self.limits.timeout)
+            .map_err(mcp_prepare_error)
     }
 
     fn execute<'a>(
         &'a self,
-        config: &'a McpServerConfig,
+        admission: Arc<McpServerAdmission>,
         call: PreparedCall,
         io: &'a dyn GuardedIo,
     ) -> futures::future::BoxFuture<'a, Result<ToolExecution, ToolError>> {
         Box::pin(async move {
-            let McpServerConfig::Stdio(config) = config else {
+            let McpServerConfig::Stdio(config) = admission.config() else {
                 return Err(execution_error("stdio MCP factory received HTTP config"));
             };
+            let config = config.clone();
             execute_stdio(
-                config,
+                &config,
                 call,
                 io,
                 Arc::clone(&self.continuations),
                 self.limits,
+                admission,
+                self.dynamic.clone(),
             )
             .await
             .map_err(mcp_execution_error)
@@ -298,18 +337,12 @@ fn prepare_http(config: &McpHttpConfig, operation: McpOperation) -> Result<Prepa
 }
 
 fn prepare_stdio(
+    admission: &McpServerAdmission,
     config: &McpStdioConfig,
     operation: McpOperation,
     timeout: Duration,
 ) -> Result<PreparedCall, McpError> {
-    let mut argv = Vec::with_capacity(config.args.len() + 1);
-    argv.push(OsString::from(&config.command));
-    argv.extend(config.args.iter().map(OsString::from));
-    let cwd = config.cwd.clone().map(CanonPath::new);
-    let env = EnvPolicy::allow_only(config.inherit_env.iter().map(|name| name.as_str()))
-        .map_err(|error| McpError::new(McpFailure::InvalidValue, error.to_string()))?;
-    let spec = SpawnSpec::new(argv, cwd, Some(timeout), env)
-        .map_err(|error| McpError::new(McpFailure::InvalidValue, error.to_string()))?;
+    let spec = stdio_spawn_spec(admission, config, timeout)?;
     let fingerprint = stdio_transport_fingerprint(config, operation.admission(), &spec);
     PreparedCall::mcp_stdio(
         operation.subject().clone(),
@@ -324,13 +357,38 @@ fn prepare_stdio(
     .map_err(|error| McpError::new(McpFailure::InvalidValue, error.to_string()))
 }
 
+pub(crate) fn stdio_spawn_spec(
+    admission: &McpServerAdmission,
+    config: &McpStdioConfig,
+    timeout: Duration,
+) -> Result<SpawnSpec, McpError> {
+    let mut argv = Vec::with_capacity(config.args.len() + 1);
+    argv.push(OsString::from(&config.command));
+    argv.extend(config.args.iter().map(OsString::from));
+    let cwd = config.cwd.clone().map(CanonPath::new);
+    let environment = admission
+        .stdio_environment()
+        .ok_or_else(|| {
+            McpError::new(
+                McpFailure::Authority,
+                "stdio MCP admission has no environment material",
+            )
+        })?
+        .iter()
+        .map(|binding| binding.explicit_binding())
+        .collect::<Result<Vec<_>, McpError>>()?;
+    let env = EnvPolicy::exact(environment)
+        .map_err(|error| McpError::new(McpFailure::InvalidValue, error.to_string()))?;
+    SpawnSpec::new(argv, cwd, Some(timeout), env)
+        .map_err(|error| McpError::new(McpFailure::InvalidValue, error.to_string()))
+}
+
 async fn execute_http(
     config: &McpHttpConfig,
     call: PreparedCall,
     io: &dyn GuardedIo,
-    management: Arc<dyn McpHttpEffects>,
-    continuations: Arc<dyn McpInputRequiredRecorder>,
-    limits: OperationLimits,
+    factory: &McpHttpOperationFactory,
+    admission: Arc<McpServerAdmission>,
 ) -> Result<ToolExecution, McpError> {
     let envelope = call
         .mcp_envelope()
@@ -352,16 +410,18 @@ async fn execute_http(
         return Err(authority("guarded MCP HTTP claim changed its envelope"));
     }
     let broker = Arc::new(SplitMcpHttpEffects::new(
-        management,
+        Arc::clone(&factory.management),
         claim,
         server.clone(),
         profile.fingerprint(),
         route,
         envelope.clone(),
         expected_wire_params,
+        admission_headers(admission.as_ref())?,
     ));
     let effects: Arc<dyn McpHttpEffects> = broker.clone();
-    let mut client = McpClient::connect_http(server, config.clone(), limits.options()?, effects)?;
+    let mut client =
+        McpClient::connect_http(server, config.clone(), factory.limits.options()?, effects)?;
     if let Err(error) = client.discover().await {
         let _ = client.settle().await;
         return Err(error);
@@ -373,14 +433,20 @@ async fn execute_http(
     let selected = broker
         .selected_settlement()?
         .ok_or_else(|| protocol("selected MCP HTTP operation was not settled"))?;
-    project_outcome(
+    let described =
+        described_tools_command(&outcome, &envelope, admission, factory.dynamic.as_ref())?;
+    let execution = project_outcome(
         outcome,
         &envelope,
         io,
-        continuations.as_ref(),
+        factory.continuations.as_ref(),
         selected.delivery(),
         cancellation_from_http(selected.end()),
-    )
+    )?;
+    if let (Some(dynamic), Some(command)) = (factory.dynamic.as_ref(), described) {
+        dynamic.admission.reconcile(command).await?;
+    }
+    Ok(execution)
 }
 
 async fn execute_stdio(
@@ -389,6 +455,8 @@ async fn execute_stdio(
     io: &dyn GuardedIo,
     continuations: Arc<dyn McpInputRequiredRecorder>,
     limits: OperationLimits,
+    admission: Arc<McpServerAdmission>,
+    dynamic: Option<DynamicDescribeAdmission>,
 ) -> Result<ToolExecution, McpError> {
     let envelope = call
         .mcp_envelope()
@@ -429,14 +497,19 @@ async fn execute_stdio(
     let duplex = settlement
         .duplex()
         .ok_or_else(|| protocol("selected MCP stdio operation has no settlement"))?;
-    project_outcome(
+    let described = described_tools_command(&outcome, &envelope, admission, dynamic.as_ref())?;
+    let execution = project_outcome(
         outcome,
         &envelope,
         io,
         continuations.as_ref(),
         duplex.delivery(),
         cancellation_from_duplex(duplex),
-    )
+    )?;
+    if let (Some(dynamic), Some(command)) = (dynamic, described) {
+        dynamic.admission.reconcile(command).await?;
+    }
+    Ok(execution)
 }
 
 enum OperationRequest {
@@ -528,6 +601,49 @@ fn map_manual<T>(
         McpManualOutcome::Complete(result) => OperationOutcome::Complete(complete(result)),
         McpManualOutcome::InputRequired(required) => OperationOutcome::InputRequired(required),
     }
+}
+
+fn described_tools_command(
+    outcome: &OperationOutcome,
+    envelope: &ego_core::permit::McpPreparedEnvelope,
+    server_admission: Arc<McpServerAdmission>,
+    dynamic: Option<&DynamicDescribeAdmission>,
+) -> Result<Option<McpDescribedToolsCommand>, McpError> {
+    let Some(dynamic) = dynamic else {
+        return Ok(None);
+    };
+    let McpSubject::Tool { name, .. } = envelope.subject() else {
+        return Ok(None);
+    };
+    if name != dynamic.family.describe_name() {
+        return Ok(None);
+    }
+    let OperationOutcome::Complete(CompleteResult::Tool(result)) = outcome else {
+        return Ok(None);
+    };
+    if result.is_error == Some(true)
+        || !result
+            .result_type
+            .as_ref()
+            .is_some_and(rmcp::model::ResultType::is_complete)
+    {
+        return Err(protocol(
+            "dynamic describe did not return a successful complete result",
+        ));
+    }
+    let structured_content = result
+        .structured_content
+        .clone()
+        .ok_or_else(|| protocol("dynamic describe result has no structuredContent"))?;
+    let parameters: Value = serde_json::from_slice(envelope.parameters())?;
+    let requested_names = dynamic.family.requested_names(&parameters)?;
+    Ok(Some(McpDescribedToolsCommand::new(
+        server_admission,
+        envelope.admission().generation().to_owned(),
+        envelope.admission().clone(),
+        requested_names,
+        structured_content,
+    )))
 }
 
 fn project_outcome(
@@ -711,6 +827,7 @@ struct SplitMcpHttpEffects {
     route: HttpRoute,
     envelope: ego_core::permit::McpPreparedEnvelope,
     expected_wire_params: Value,
+    headers: Arc<[HttpHeader]>,
 }
 
 enum HttpLane {
@@ -728,6 +845,7 @@ impl SplitMcpHttpEffects {
         route: HttpRoute,
         envelope: ego_core::permit::McpPreparedEnvelope,
         expected_wire_params: Value,
+        headers: Vec<HttpHeader>,
     ) -> Self {
         Self {
             management,
@@ -742,6 +860,7 @@ impl SplitMcpHttpEffects {
             route,
             envelope,
             expected_wire_params,
+            headers: headers.into(),
         }
     }
 
@@ -838,6 +957,10 @@ impl McpHttpEffects for SplitMcpHttpEffects {
         &self,
         call: PreparedMcpHttpCall,
     ) -> McpFuture<'static, Result<McpHttpResponse, McpError>> {
+        let call = match call.with_headers(&self.headers) {
+            Ok(call) => call,
+            Err(error) => return Box::pin(future::ready(Err(error))),
+        };
         let lane = match self.lane(&call) {
             Ok(lane) => lane,
             Err(error) => return Box::pin(future::ready(Err(error))),
@@ -1039,6 +1162,23 @@ fn cancellation_from_duplex(
         }
         DuplexEnd::Interrupted => CancellationClassification::Uncertain,
     }
+}
+
+fn admission_headers(admission: &McpServerAdmission) -> Result<Vec<HttpHeader>, McpError> {
+    admission
+        .http_headers()
+        .ok_or_else(|| authority("HTTP MCP admission has no header material"))?
+        .iter()
+        .map(|binding| {
+            HttpHeader::secret(
+                binding.name(),
+                ego_core::credentials::SecretMaterial::new(
+                    binding.value().expose_secret_bytes().to_vec(),
+                ),
+            )
+            .map_err(|error| McpError::new(McpFailure::InvalidValue, error.to_string()))
+        })
+        .collect()
 }
 
 fn server_name(value: &str) -> Result<McpServerName, McpError> {

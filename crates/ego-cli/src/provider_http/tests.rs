@@ -42,9 +42,12 @@ const LOGICAL_HOST: &str = "provider.test";
 const SECOND_HOST: &str = "other-provider.test";
 const BODY: &[u8] = b"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
 
+type ResolverObservation = (NetworkTarget, Option<Instant>);
+type SharedResolverLog = Arc<Mutex<Vec<ResolverObservation>>>;
+
 #[derive(Clone, Default)]
 struct RecordingResolver {
-    deadlines: Arc<Mutex<Vec<(NetworkTarget, Option<Instant>)>>>,
+    deadlines: SharedResolverLog,
 }
 
 impl Resolver for RecordingResolver {

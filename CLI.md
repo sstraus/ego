@@ -32,10 +32,10 @@ ego ls                        list sessions (this workspace; --all for every one
 ego fork <ID>                 branch a session
 ego export <ID>               render a session (--format md|json|jsonl)
 ego mcp add NAME --stdio [--cwd DIR] [--inherit-env NAME]... -- COMMAND [ARG]...
-ego mcp add NAME --http URL [--auth none|oauth] [--allow-insecure-loopback]
-ego mcp rm NAME | ls [--json]
-                              strict configuration management; admission is
-                              reported as not observed
+        add NAME --http URL [--auth none|oauth] [--allow-insecure-loopback]
+        rm NAME | ls [--json] | login NAME | reload [NAME]
+                              shared configuration and live admission service;
+                              login refuses until product CIMD is published
 ego mcp-server --max-concurrent-runs N --retained-requests N
                --max-resource-bytes N [-C DIR] [--session-dir DIR]
                               serve ego AS an MCP server on stdio: scoped
@@ -100,7 +100,7 @@ omitted when empty: two states, identical bytes.
 | `ego ls` | **yes** | this workspace by default, `--all` for the whole store; `--output json\|jsonl` per §4.6 |
 | `ego fork` | no | session forking (**M3**), which needs the branch point to be nameable in the log rather than just a file copy |
 | `ego export` | no | replay and export with `--sanitize` (**M3**). The projection exists; the redaction contract that makes an exported session safe to hand over does not |
-| `ego mcp` | **yes** | strict configuration-only `add`, `rm`, and `ls [--json]` through the atomic user-config transaction. Listing separates configured or masked provenance from runtime admission and reports admission as not observed; login, reload, and invocation attachment remain pending the admitted registry projection |
+| `ego mcp` | **yes** | `add`, `rm`, `ls [--json]`, and `reload [NAME]` use one live admitted registry and truthful health projection. `login NAME` is typed but refuses before network access until the product CIMD origin and loopback redirect are published |
 | `ego mcp-server` | **yes** | serves scoped `run`/`continue`/`cancel`/`status` tools and sanitized summary/output resources on stdio. `--max-concurrent-runs`, `--retained-requests`, and `--max-resource-bytes` are required non-zero deployment bounds; `-C`/the current directory is the sole canonical root and stdout remains protocol-only |
 | `ego auth` | **yes** | `login\|logout\|status [PROVIDER]`; credentials live in one locked `$EGO_HOME/auth.json`, while TOML commands and discovered auth plugins can supply login tokens |
 | `ego models` | **yes** | prints the shared current-model catalogue as deterministic text or versioned JSON; `--provider` filters both model and source rows, and `--refresh` updates authoritative discovered slices without promoting cached display facts into generation authority |
@@ -255,11 +255,11 @@ and line that said it.
 | `--sandbox` | **yes** | `ro\|workspace\|off`, default `workspace`, enforced by the measured platform backend before a prepared process can launch; an unavailable required capability fails closed |
 | `-f`, `--file`, `--var` | no | waiting on executable agent files (**M4**). §5 is a design, not a feature: the shebang form runs nothing today |
 | `--attach` | no | waiting on a non-text content block — the conversation model carries text, tool calls and tool results, so an image has nothing to be sent in |
-| `--mcp` | no | waiting on the MCP client (**M2**). `mcp_errors` exists on `session.started`, but no flag attaches a server |
+| `--mcp` | **yes** | repeatable ordered selection of effective `NAME` entries and strict invocation-scoped `@FILE` entries; the selected live admission is shared by dispatch, `/tools`, `/doctor`, and deterministic `mcp_errors` |
 | `--retry`, `--fallback` | no | waiting on a retry seam. Delivery certainty is implemented and enforced; a generation owns its reservation for its whole life, so re-issuing one changes the attempt contract rather than adding a loop |
 | `-v`, `--verbose` | no | waiting on a **decision**, not a subsystem — the only such entry. §4.7 says exactly what `-q` suppresses and nothing anywhere says what `-v` adds. It was marked **yes** beside `--no-color` until 2026-08-23 while being parsed and read by nothing, which is `--no-color`'s own defect sitting in `--no-color`'s own row. The obvious answer, turning up `tracing`, is not obvious: this build installs no subscriber at all, so every `tracing::warn!` in the workspace already goes nowhere, and adding one puts a second writer on the stream §4.7's marks and notification own (R12) |
 
-**Ten documented flag spellings do not ship.** That is the gap this table
+**Nine documented flag spellings do not ship.** That is the gap this table
 exists to stop being invisible, and it is not a defect list — every one of them
 refuses by name and says what it is waiting on. The defect would be §3 reading,
 to someone who has not run the binary, as though all of it worked.

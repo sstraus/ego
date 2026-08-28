@@ -88,7 +88,9 @@ fn list_dispatch_distinguishes_configured_from_admitted_state() {
         .expect("remote appears in configured listing");
     assert_eq!(remote["configured"], true);
     assert_eq!(remote["admitted"], false);
-    assert_eq!(remote["health"], "not_observed");
+    assert_eq!(remote["health"], "absent");
+    assert_eq!(remote["diagnostic"]["class"], "authority");
+    assert!(remote.get("authorization").is_none());
     assert_eq!(remote["provenance"]["source"], "user");
     assert_eq!(remote["provenance"]["slot"], "base");
     assert_eq!(remote["configuration"]["transport"], "http");

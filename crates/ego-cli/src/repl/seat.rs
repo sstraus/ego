@@ -44,8 +44,10 @@ use ego_core::question::{
 };
 use ego_core::state::SessionState;
 use ego_core::turn::{
-    CancelToken, InteractiveControl, InteractiveIngress, QueueStatus, interactive_control,
+    CancelToken, InteractiveControl, InteractiveIngress, QueueStatus, RegisteredTool,
+    interactive_control,
 };
+use ego_mcp::McpRegistryController;
 
 const CHANNEL_CAPACITY: usize = 1;
 pub(super) const ACTION_COMMAND: &str = "ego:action:";
@@ -76,8 +78,17 @@ enum SurfaceActionEffect {
     Help,
     Clear,
     Statusline,
+    Mcp,
+    Tools,
+    Doctor,
     Quit,
     Version,
+}
+
+#[derive(Clone)]
+struct McpSurfaceActions {
+    registry: Arc<McpRegistryController>,
+    native_tools: Arc<[RegisteredTool]>,
 }
 
 struct SurfaceActionSink {
@@ -91,6 +102,9 @@ impl ActionSink for SurfaceActionSink {
             ActionId::Help => SurfaceActionEffect::Help,
             ActionId::Clear => SurfaceActionEffect::Clear,
             ActionId::Statusline => SurfaceActionEffect::Statusline,
+            ActionId::Mcp => SurfaceActionEffect::Mcp,
+            ActionId::Tools => SurfaceActionEffect::Tools,
+            ActionId::Doctor => SurfaceActionEffect::Doctor,
             ActionId::Quit => SurfaceActionEffect::Quit,
             ActionId::Version => SurfaceActionEffect::Version,
             _ => {
@@ -203,6 +217,7 @@ struct SurfaceStatus {
     model_selection: Option<Arc<GenerationSelection>>,
     question_selector: Option<Arc<Mutex<Selector>>>,
     cursor_selectors: bool,
+    mcp_actions: Option<McpSurfaceActions>,
     surface_effect: Arc<Mutex<Option<SurfaceActionEffect>>>,
 }
 
@@ -225,6 +240,7 @@ impl Default for SurfaceStatus {
             model_selection: None,
             question_selector: None,
             cursor_selectors: false,
+            mcp_actions: None,
             surface_effect: Arc::new(Mutex::new(None)),
         }
     }
@@ -686,12 +702,15 @@ impl Seat {
         }
     }
 
-    /// Install one complete local-action topology around the shared picker.
+    /// Install one complete local-action topology around the shared picker and
+    /// live MCP registry authority.
     pub fn install_model_picker(
         &self,
         picker: Arc<Mutex<ModelPicker>>,
         selection: Arc<GenerationSelection>,
         config_store: Arc<dyn UserConfigStore>,
+        mcp_registry: Arc<McpRegistryController>,
+        native_tools: Vec<RegisteredTool>,
     ) -> Result<(), CompositeActionSinkError> {
         let SeatKind::Live(live) = &self.kind else {
             return Ok(());
@@ -714,6 +733,9 @@ impl Seat {
             ActionId::Help,
             ActionId::Clear,
             ActionId::Statusline,
+            ActionId::Mcp,
+            ActionId::Tools,
+            ActionId::Doctor,
             ActionId::Quit,
             ActionId::Version,
         ] {
@@ -735,6 +757,10 @@ impl Seat {
             status.model_picker = Some(picker);
             status.model_selection = Some(selection);
             status.config_store = Some(config_store);
+            status.mcp_actions = Some(McpSurfaceActions {
+                registry: mcp_registry,
+                native_tools: native_tools.into(),
+            });
             status.surface_effect = surface_effect;
         }
         *actions.sink.lock().expect("local action sink lock") = sink;
@@ -1512,6 +1538,63 @@ fn apply_surface_effect(
             };
             configure_statusline(status, segments);
             return None;
+        }
+        SurfaceActionEffect::Mcp => {
+            let actions = status
+                .lock()
+                .expect("surface status lock")
+                .mcp_actions
+                .clone()
+                .expect("the enabled MCP action has an installed handler");
+            let registry_status = actions.registry.status();
+            let notice = if registry_status.servers().is_empty() {
+                "mcp: no admitted servers".to_string()
+            } else {
+                format!("mcp: {:?}", registry_status.servers())
+            };
+            status.lock().expect("surface status lock").notice = Some(notice);
+        }
+        SurfaceActionEffect::Tools => {
+            let actions = status
+                .lock()
+                .expect("surface status lock")
+                .mcp_actions
+                .clone()
+                .expect("the enabled tools action has an installed handler");
+            let notice = match actions.registry.capture() {
+                Ok(captured) => {
+                    let native = actions
+                        .native_tools
+                        .iter()
+                        .map(|tool| format!("native/{}", tool.descriptor().name));
+                    let foreign = captured.tools().iter().map(|tool| {
+                        format!("mcp:{}/{}", captured.generation(), tool.descriptor().name)
+                    });
+                    let catalogue = native.chain(foreign).collect::<Vec<_>>();
+                    if catalogue.is_empty() {
+                        "tools: none".to_string()
+                    } else {
+                        format!("tools: {}", catalogue.join(" "))
+                    }
+                }
+                Err(_) => "tools: the admitted tool catalogue is unavailable".to_string(),
+            };
+            status.lock().expect("surface status lock").notice = Some(notice);
+        }
+        SurfaceActionEffect::Doctor => {
+            let actions = status
+                .lock()
+                .expect("surface status lock")
+                .mcp_actions
+                .clone()
+                .expect("the enabled doctor action has an installed handler");
+            let registry_status = actions.registry.status();
+            let diagnostics = registry_status.mcp_errors();
+            status.lock().expect("surface status lock").notice = Some(if diagnostics.is_empty() {
+                "doctor: MCP healthy".to_string()
+            } else {
+                format!("doctor: {}", diagnostics.join(" | "))
+            });
         }
         SurfaceActionEffect::Quit => {
             let (drafts, queue) = {

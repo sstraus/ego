@@ -2,7 +2,9 @@
 
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Instant;
 
 use ego_core::permit::{
@@ -11,7 +13,7 @@ use ego_core::permit::{
 };
 use ego_core::turn::CancelToken;
 use futures::future::BoxFuture;
-use futures::{SinkExt as _, StreamExt as _};
+use futures::{SinkExt as _, Stream, StreamExt as _};
 
 use crate::exec::{HttpCallTimeout, runtime_handle};
 
@@ -174,9 +176,11 @@ impl OneHop for OneShotHttpTransport {
         }
 
         let cancel = self.cancel.clone();
-        let task = runtime_handle().spawn(execute_one_hop(connect, request, cancel, deadline));
+        let mut task = AbortOnDrop(
+            runtime_handle().spawn(execute_one_hop(connect, request, cancel, deadline)),
+        );
         Box::pin(async move {
-            task.await.map_err(|error| {
+            (&mut task.0).await.map_err(|error| {
                 possibly_sent(TransportFailure::Exchange(format!(
                     "HTTP task failed: {error}"
                 )))
@@ -276,7 +280,7 @@ async fn execute_one_hop(
     }
 
     let (mut sender, receiver) = futures::channel::mpsc::channel(1);
-    runtime_handle().spawn(async move {
+    let task = AbortOnDrop(runtime_handle().spawn(async move {
         let mut body = response.bytes_stream();
         loop {
             let next = tokio::select! {
@@ -312,12 +316,28 @@ async fn execute_one_hop(
                 None => return,
             }
         }
-    });
+    }));
     Ok(OneHopResponse::streaming_response(
         status,
         headers,
-        Box::pin(receiver),
+        Box::pin(OwnedResponseBody {
+            receiver,
+            _task: task,
+        }),
     ))
+}
+
+struct OwnedResponseBody {
+    receiver: futures::channel::mpsc::Receiver<Result<Vec<u8>, TransportError>>,
+    _task: AbortOnDrop<()>,
+}
+
+impl Stream for OwnedResponseBody {
+    type Item = Result<Vec<u8>, TransportError>;
+
+    fn poll_next(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        Pin::new(&mut self.receiver).poll_next(context)
+    }
 }
 
 fn response_headers(

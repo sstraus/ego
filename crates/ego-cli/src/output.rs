@@ -380,6 +380,12 @@ impl<'a> TextSink<'a> {
 impl EventSink for TextSink<'_> {
     fn publish(&self, event: &PublicEvent, _state: &SessionState) {
         match event {
+            PublicEvent::SessionStarted { mcp_errors, .. } => {
+                for error in mcp_errors {
+                    self.finish();
+                    self.out.note(&format!("MCP: {error}"));
+                }
+            }
             // `AgentMessage` and not "either message kind": stdout is the
             // answer, and a user prompt is what the caller already typed. It
             // never arrives as a delta anyway — `UserPrompt` projects to one
@@ -460,6 +466,10 @@ pub struct Report {
     pub result: serde_json::Value,
     pub ok: bool,
     pub exit_reason: &'static str,
+    /// Stable sanitized MCP startup diagnostics, absent when every selected
+    /// server was admitted.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub mcp_errors: Vec<String>,
     /// The action a permission-refused run was denied. §4.4 requires it: a
     /// script handed exit 3 and no subject has been told nothing.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -516,6 +526,7 @@ impl Report {
             result,
             ok: matches!(termination, RunTermination::Done),
             exit_reason: termination.exit_reason(),
+            mcp_errors: Vec::new(),
             denied,
             denied_by,
             turns: state.turns.len(),

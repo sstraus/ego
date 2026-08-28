@@ -813,7 +813,6 @@ fn a_command_line_that_cannot_be_honoured_exits_two_saying_why() {
 fn a_documented_flag_without_its_subsystem_is_refused_by_name() {
     for (flag, value) in [
         ("--attach", Some("diagram.png")),
-        ("--mcp", Some("github")),
         ("--retry", Some("3")),
         ("--fallback", Some("openai/gpt-5.1")),
         ("--var", Some("severity=major")),

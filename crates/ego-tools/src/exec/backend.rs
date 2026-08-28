@@ -106,9 +106,20 @@ pub(crate) fn prefixed_command(
     if let Some(cwd) = spec.cwd() {
         command.current_dir(cwd.as_path());
     }
-    let snapshot = std::env::vars_os()
-        .filter(|(name, _)| admitted_name(name, spec.env_policy()))
-        .collect::<Vec<_>>();
+    let snapshot = match spec.env_policy() {
+        EnvPolicy::Exact { bindings, .. } => bindings
+            .iter()
+            .map(|binding| {
+                binding
+                    .value_os_string()
+                    .map(|value| (binding.name().as_os_str().to_os_string(), value))
+                    .map_err(|error| ProcessError::Invariant(error.to_string()))
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        policy => std::env::vars_os()
+            .filter(|(name, _)| admitted_name(name, policy))
+            .collect::<Vec<_>>(),
+    };
     command.env_clear();
     command.envs(snapshot);
     Ok(command)
@@ -119,6 +130,7 @@ fn admitted_name(name: &OsStr, policy: &EnvPolicy) -> bool {
         EnvPolicy::Inherited => true,
         EnvPolicy::AllowOnly(names) => contains_name(names, name),
         EnvPolicy::InheritedExcept(names) => !contains_name(names, name),
+        EnvPolicy::Exact { .. } => false,
     }
 }
 

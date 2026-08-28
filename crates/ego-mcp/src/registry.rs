@@ -3,12 +3,10 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
-use std::time::Instant;
+use std::sync::{Arc, RwLock, Weak};
+use std::time::{Duration, Instant};
 
-use ego_core::config::{
-    McpConfigProvenance, McpServerConfig, McpServerName, ResolvedMcpConfig, ResolvedMcpEntry,
-};
+use ego_core::config::{McpConfigProvenance, McpServerConfig, McpServerName};
 use ego_core::generator::types::ToolDescriptor as GeneratorToolDescriptor;
 use ego_core::mcp::{
     CacheScope, ContextEntry, ContextError, ContextSensitivity, ContextSnapshot, ContextSource,
@@ -20,10 +18,15 @@ use ego_core::turn::{
     McpRegistryJournalError, RegisteredTool, ToolCatalogueError,
 };
 use rmcp::model::{Prompt, Resource};
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 use crate::dynamic::McpToolDefinition;
-use crate::{McpDynamicCatalogue, McpDynamicFamily, McpFuture, McpOperationFactory};
+use crate::{
+    McpDuplexEffectsFactory, McpDynamicCatalogue, McpDynamicFamily, McpError, McpFailure,
+    McpFuture, McpHttpEffects, McpInputRequiredRecorder, McpOperationFactory,
+    McpRuntimeCandidateAdmission, McpServerAdmission,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RegistryTrigger {
@@ -76,23 +79,103 @@ impl RegistryScope {
 }
 
 #[derive(Clone)]
+pub struct McpRegistryCandidate {
+    provenance: McpConfigProvenance,
+    materialization: CandidateMaterialization,
+}
+
+#[derive(Clone)]
+enum CandidateMaterialization {
+    Ready(Arc<McpServerAdmission>),
+    Rejected {
+        name: McpServerName,
+        config: McpServerConfig,
+        failure: McpFailure,
+    },
+}
+
+impl McpRegistryCandidate {
+    pub fn ready(admission: Arc<McpServerAdmission>, provenance: McpConfigProvenance) -> Self {
+        Self {
+            provenance,
+            materialization: CandidateMaterialization::Ready(admission),
+        }
+    }
+
+    pub fn rejected(
+        name: McpServerName,
+        config: McpServerConfig,
+        provenance: McpConfigProvenance,
+        failure: McpFailure,
+    ) -> Self {
+        Self {
+            provenance,
+            materialization: CandidateMaterialization::Rejected {
+                name,
+                config,
+                failure,
+            },
+        }
+    }
+
+    pub fn name(&self) -> &McpServerName {
+        match &self.materialization {
+            CandidateMaterialization::Ready(admission) => admission.name(),
+            CandidateMaterialization::Rejected { name, .. } => name,
+        }
+    }
+
+    pub fn config(&self) -> &McpServerConfig {
+        match &self.materialization {
+            CandidateMaterialization::Ready(admission) => admission.config(),
+            CandidateMaterialization::Rejected { config, .. } => config,
+        }
+    }
+
+    pub fn provenance(&self) -> &McpConfigProvenance {
+        &self.provenance
+    }
+}
+
+#[derive(Clone)]
 pub struct McpRegistryRefresh {
-    config: ResolvedMcpConfig,
+    candidates: Vec<McpRegistryCandidate>,
     trigger: RegistryTrigger,
     scope: RegistryScope,
 }
 
 impl McpRegistryRefresh {
-    pub fn new(config: ResolvedMcpConfig, trigger: RegistryTrigger, scope: RegistryScope) -> Self {
-        Self {
-            config,
+    pub fn new(
+        mut candidates: Vec<McpRegistryCandidate>,
+        trigger: RegistryTrigger,
+        scope: RegistryScope,
+    ) -> Result<Self, McpRegistryError> {
+        if candidates
+            .iter()
+            .any(|candidate| candidate.config().validate().is_err())
+        {
+            return Err(McpRegistryError::InvalidCandidate(
+                "invalid MCP registry candidate configuration".to_owned(),
+            ));
+        }
+        candidates.sort_by(|left, right| left.name().cmp(right.name()));
+        if candidates
+            .windows(2)
+            .any(|pair| pair[0].name() == pair[1].name())
+        {
+            return Err(McpRegistryError::InvalidCandidate(
+                "duplicate MCP registry candidate name".to_owned(),
+            ));
+        }
+        Ok(Self {
+            candidates,
             trigger,
             scope,
-        }
+        })
     }
 
-    pub fn config(&self) -> &ResolvedMcpConfig {
-        &self.config
+    pub fn candidates(&self) -> &[McpRegistryCandidate] {
+        &self.candidates
     }
 
     pub fn trigger(&self) -> RegistryTrigger {
@@ -107,8 +190,7 @@ impl McpRegistryRefresh {
 #[derive(Clone)]
 pub struct McpCandidateRequest {
     config_revision: u64,
-    name: McpServerName,
-    server: McpServerConfig,
+    admission: Arc<McpServerAdmission>,
     provenance: McpConfigProvenance,
 }
 
@@ -117,12 +199,16 @@ impl McpCandidateRequest {
         self.config_revision
     }
 
-    pub fn name(&self) -> &str {
-        self.name.as_str()
+    pub fn admission(&self) -> Arc<McpServerAdmission> {
+        Arc::clone(&self.admission)
     }
 
-    pub fn server(&self) -> &McpServerConfig {
-        &self.server
+    pub fn name(&self) -> &McpServerName {
+        self.admission.name()
+    }
+
+    pub fn config(&self) -> &McpServerConfig {
+        self.admission.config()
     }
 
     pub fn provenance(&self) -> &McpConfigProvenance {
@@ -150,11 +236,53 @@ pub enum McpCandidateError {
 }
 
 impl McpCandidateError {
-    fn cause(&self) -> String {
+    pub fn failure(&self) -> McpFailure {
         match self {
-            Self::Invalid { cause } => cause.clone(),
-            Self::AuthorizationRequired { .. } => "authorization required".to_owned(),
+            Self::Invalid { .. } => McpFailure::InvalidValue,
+            Self::AuthorizationRequired { .. } => McpFailure::Authorization,
         }
+    }
+}
+
+struct CandidateFailure {
+    failure: McpFailure,
+    authorization: Option<CandidateAuthorizationFailure>,
+}
+
+struct CandidateAuthorizationFailure {
+    issuer: String,
+    protected_resource: String,
+    scopes: Vec<String>,
+}
+
+impl CandidateFailure {
+    fn materialization(failure: McpFailure) -> Self {
+        Self {
+            failure,
+            authorization: None,
+        }
+    }
+
+    fn admission(error: McpCandidateError) -> Self {
+        match error {
+            McpCandidateError::Invalid { .. } => Self::materialization(McpFailure::InvalidValue),
+            McpCandidateError::AuthorizationRequired {
+                issuer,
+                protected_resource,
+                scopes,
+            } => Self {
+                failure: McpFailure::Authorization,
+                authorization: Some(CandidateAuthorizationFailure {
+                    issuer,
+                    protected_resource,
+                    scopes,
+                }),
+            },
+        }
+    }
+
+    fn sanitized_cause(&self) -> &'static str {
+        failure_message(self.failure)
     }
 }
 
@@ -259,10 +387,10 @@ impl McpCandidateInventory {
 
 #[derive(Clone)]
 pub struct McpAdmittedCandidate {
-    name: Arc<str>,
+    admission: Arc<McpServerAdmission>,
     identity: McpCandidateIdentity,
     capabilities: McpCapabilities,
-    config: Arc<McpServerConfig>,
+    descriptors: Arc<[GeneratorToolDescriptor]>,
     tools: Arc<[McpToolDefinition]>,
     resources: Arc<[Resource]>,
     prompts: Arc<[Prompt]>,
@@ -273,18 +401,18 @@ pub struct McpAdmittedCandidate {
 
 impl McpAdmittedCandidate {
     pub fn new(
-        name: String,
+        admission: Arc<McpServerAdmission>,
         identity: McpCandidateIdentity,
-        config: McpServerConfig,
         inventory: McpCandidateInventory,
         factory: Arc<dyn McpOperationFactory>,
     ) -> Result<Self, McpRegistryError> {
-        if name.is_empty() || identity.as_str().is_empty() || name != identity.as_str() {
+        if identity.as_str().is_empty() || admission.name().as_str() != identity.as_str() {
             return Err(McpRegistryError::InvalidCandidate(
                 "MCP candidate identity does not match its configured name".to_owned(),
             ));
         }
-        config
+        admission
+            .config()
             .validate()
             .map_err(|error| McpRegistryError::InvalidCandidate(error.to_string()))?;
         let McpCandidateInventory {
@@ -300,44 +428,20 @@ impl McpAdmittedCandidate {
             .map_err(|error| McpRegistryError::InvalidCandidate(error.to_string()))?;
         match (&dynamic_family, &dynamic) {
             (Some(detected), Some(catalogue)) if detected == catalogue.family() => {}
+            (Some(_), None) => {}
             (None, None) => {}
-            (Some(_), None) => {
-                return Err(McpRegistryError::InvalidCandidate(
-                    "dynamic MCP family has no admitted inner catalogue".to_owned(),
-                ));
-            }
             _ => {
                 return Err(McpRegistryError::InvalidCandidate(
                     "dynamic MCP catalogue does not match the detected family".to_owned(),
                 ));
             }
         }
-        let mut definitions = Vec::new();
-        for descriptor in tools {
-            let definition = if let Some(catalogue) = &dynamic {
-                if catalogue
-                    .family()
-                    .management_names()
-                    .contains(&descriptor.name.as_str())
-                {
-                    if descriptor.name == "execute_tool" {
-                        Some(McpToolDefinition::dynamic(descriptor, catalogue.clone()))
-                    } else {
-                        None
-                    }
-                } else {
-                    Some(McpToolDefinition::direct(descriptor))
-                }
-            } else {
-                Some(McpToolDefinition::direct(descriptor))
-            };
-            if let Some(definition) = definition {
-                definitions.push(
-                    definition
-                        .map_err(|error| McpRegistryError::InvalidCandidate(error.to_string()))?,
-                );
-            }
-        }
+        let descriptors: Arc<[GeneratorToolDescriptor]> = tools.into();
+        let definitions = compile_candidate_tool_definitions(
+            &descriptors,
+            dynamic_family.as_ref(),
+            dynamic.as_ref(),
+        )?;
         let mut names = std::collections::BTreeSet::new();
         for definition in &definitions {
             if !names.insert(definition.name().to_owned()) {
@@ -348,10 +452,10 @@ impl McpAdmittedCandidate {
             }
         }
         Ok(Self {
-            name: Arc::from(name),
+            admission,
             identity,
             capabilities,
-            config: Arc::new(config),
+            descriptors,
             tools: definitions.into(),
             resources: resources.into(),
             prompts: prompts.into(),
@@ -360,6 +464,28 @@ impl McpAdmittedCandidate {
             factory,
         })
     }
+}
+
+fn compile_candidate_tool_definitions(
+    descriptors: &[GeneratorToolDescriptor],
+    dynamic_family: Option<&McpDynamicFamily>,
+    dynamic: Option<&McpDynamicCatalogue>,
+) -> Result<Vec<McpToolDefinition>, McpRegistryError> {
+    let mut definitions = Vec::new();
+    for descriptor in descriptors {
+        let definition = match dynamic_family {
+            Some(_) if descriptor.name == "execute_tool" => dynamic
+                .map(|catalogue| McpToolDefinition::dynamic(descriptor.clone(), catalogue.clone())),
+            _ => Some(McpToolDefinition::direct(descriptor.clone())),
+        };
+        if let Some(definition) = definition {
+            definitions.push(
+                definition
+                    .map_err(|error| McpRegistryError::InvalidCandidate(error.to_string()))?,
+            );
+        }
+    }
+    Ok(definitions)
 }
 
 #[derive(Debug)]
@@ -392,10 +518,11 @@ impl From<McpRegistryJournalError> for McpRegistryError {
 }
 
 struct AdmittedServerSlice {
+    admission: Arc<McpServerAdmission>,
     identity: McpCandidateIdentity,
     provenance: McpConfigProvenance,
     capabilities: McpCapabilities,
-    config: Arc<McpServerConfig>,
+    descriptors: Arc<[GeneratorToolDescriptor]>,
     tools: Arc<[McpToolDefinition]>,
     resources: Arc<[Resource]>,
     prompts: Arc<[Prompt]>,
@@ -407,10 +534,11 @@ struct AdmittedServerSlice {
 impl AdmittedServerSlice {
     fn from_candidate(candidate: McpAdmittedCandidate, provenance: McpConfigProvenance) -> Self {
         Self {
+            admission: candidate.admission,
             identity: candidate.identity,
             provenance,
             capabilities: candidate.capabilities,
-            config: candidate.config,
+            descriptors: candidate.descriptors,
             tools: candidate.tools,
             resources: candidate.resources,
             prompts: candidate.prompts,
@@ -419,14 +547,40 @@ impl AdmittedServerSlice {
             factory: candidate.factory,
         }
     }
+
+    fn with_dynamic_catalogue(
+        &self,
+        catalogue: McpDynamicCatalogue,
+    ) -> Result<Self, McpRegistryError> {
+        let family = self.dynamic_family.as_ref().ok_or_else(|| {
+            McpRegistryError::InvalidCandidate(
+                "described tools target a non-dynamic MCP server".to_owned(),
+            )
+        })?;
+        let tools =
+            compile_candidate_tool_definitions(&self.descriptors, Some(family), Some(&catalogue))?;
+        Ok(Self {
+            admission: Arc::clone(&self.admission),
+            identity: self.identity.clone(),
+            provenance: self.provenance.clone(),
+            capabilities: self.capabilities.clone(),
+            descriptors: Arc::clone(&self.descriptors),
+            tools: tools.into(),
+            resources: Arc::clone(&self.resources),
+            prompts: Arc::clone(&self.prompts),
+            cache: self.cache.clone(),
+            dynamic_family: self.dynamic_family.clone(),
+            factory: Arc::clone(&self.factory),
+        })
+    }
 }
 
 #[derive(Clone)]
 pub struct McpCapturedServer {
+    admission: Arc<McpServerAdmission>,
     identity: McpCandidateIdentity,
     provenance: McpConfigProvenance,
     capabilities: McpCapabilities,
-    config: Arc<McpServerConfig>,
     cache: McpCacheMetadata,
     dynamic_family: Option<McpDynamicFamily>,
     factory: Arc<dyn McpOperationFactory>,
@@ -445,8 +599,8 @@ impl McpCapturedServer {
         &self.capabilities
     }
 
-    pub fn config(&self) -> &McpServerConfig {
-        &self.config
+    pub fn admission(&self) -> &McpServerAdmission {
+        &self.admission
     }
 
     pub fn cache(&self) -> &McpCacheMetadata {
@@ -462,13 +616,129 @@ impl McpCapturedServer {
     }
 }
 
+impl From<McpCapturedServer> for Arc<McpServerAdmission> {
+    fn from(server: McpCapturedServer) -> Self {
+        server.admission
+    }
+}
+
+pub(crate) struct McpDescribedToolsCommand {
+    server_admission: Arc<McpServerAdmission>,
+    generation: String,
+    admission_fingerprint: McpAdmissionFingerprint,
+    requested_names: Vec<String>,
+    structured_content: serde_json::Value,
+}
+
+impl McpDescribedToolsCommand {
+    pub(crate) fn new(
+        server: impl Into<Arc<McpServerAdmission>>,
+        generation: String,
+        admission_fingerprint: McpAdmissionFingerprint,
+        requested_names: Vec<String>,
+        structured_content: serde_json::Value,
+    ) -> Self {
+        Self {
+            server_admission: server.into(),
+            generation,
+            admission_fingerprint,
+            requested_names,
+            structured_content,
+        }
+    }
+}
+
+pub(crate) trait McpDescribedToolsAdmission: Send + Sync {
+    fn reconcile(
+        &self,
+        command: McpDescribedToolsCommand,
+    ) -> McpFuture<'static, Result<(), McpError>>;
+}
+
+struct ControllerDescribedToolsAdmission {
+    controller: Weak<McpRegistryController>,
+}
+
+impl McpDescribedToolsAdmission for ControllerDescribedToolsAdmission {
+    fn reconcile(
+        &self,
+        command: McpDescribedToolsCommand,
+    ) -> McpFuture<'static, Result<(), McpError>> {
+        let controller = self.controller.clone();
+        Box::pin(async move {
+            let controller = controller.upgrade().ok_or_else(|| {
+                McpError::new(
+                    McpFailure::Authority,
+                    "dynamic MCP registry controller is unavailable",
+                )
+            })?;
+            controller
+                .reconcile_described_tools(command)
+                .await
+                .map(|_| ())
+                .map_err(|error| McpError::new(McpFailure::Authority, error.to_string()))
+        })
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DescribedTool {
+    name: String,
+    #[serde(default)]
+    description: String,
+    input_schema: serde_json::Value,
+}
+
+impl DescribedTool {
+    fn into_descriptor(self) -> GeneratorToolDescriptor {
+        GeneratorToolDescriptor {
+            name: self.name,
+            description: self.description,
+            parameters: self.input_schema,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DescribedTools {
+    tools: Vec<DescribedTool>,
+}
+
+fn decode_described_tools(
+    family: &McpDynamicFamily,
+    structured_content: serde_json::Value,
+) -> Result<Vec<GeneratorToolDescriptor>, McpRegistryError> {
+    let tools = match family.describe_name() {
+        "describe_tool" => vec![
+            serde_json::from_value::<DescribedTool>(structured_content)
+                .map_err(|error| McpRegistryError::InvalidCandidate(error.to_string()))?,
+        ],
+        "describe_tools" => {
+            serde_json::from_value::<DescribedTools>(structured_content)
+                .map_err(|error| McpRegistryError::InvalidCandidate(error.to_string()))?
+                .tools
+        }
+        _ => {
+            return Err(McpRegistryError::InvalidCandidate(
+                "unsupported dynamic MCP describe operation".to_owned(),
+            ));
+        }
+    };
+    Ok(tools
+        .into_iter()
+        .map(DescribedTool::into_descriptor)
+        .collect())
+}
+
 #[derive(Clone)]
 pub struct McpCapturedContextOperation {
     entry: ContextEntry,
     subject: McpSubject,
     operation: McpOperationKind,
     admission: McpAdmissionFingerprint,
-    config: Arc<McpServerConfig>,
+    server_admission: Arc<McpServerAdmission>,
     factory: Arc<dyn McpOperationFactory>,
 }
 
@@ -489,8 +759,8 @@ impl McpCapturedContextOperation {
         &self.admission
     }
 
-    pub fn config(&self) -> &McpServerConfig {
-        &self.config
+    pub fn server_admission(&self) -> Arc<McpServerAdmission> {
+        Arc::clone(&self.server_admission)
     }
 
     pub fn operation_factory(&self) -> Arc<dyn McpOperationFactory> {
@@ -590,28 +860,316 @@ impl AdmittedRegistrySnapshot {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum McpServerState {
+    Admitted,
+    Degraded,
+    AuthorizationRequired,
+    Absent,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum McpCacheFreshness {
+    Uncached,
+    Fresh,
+    Expired,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct McpAuthorizationStatus {
+    issuer: String,
+    protected_resource: String,
+    scopes: Arc<[String]>,
+    request_correlation: Arc<str>,
+}
+
+impl McpAuthorizationStatus {
+    pub fn issuer(&self) -> &str {
+        &self.issuer
+    }
+
+    pub fn protected_resource(&self) -> &str {
+        &self.protected_resource
+    }
+
+    pub fn scopes(&self) -> &[String] {
+        &self.scopes
+    }
+
+    pub fn request_correlation(&self) -> &str {
+        &self.request_correlation
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct McpServerDiagnostic {
+    failure: McpFailure,
+    message: Arc<str>,
+}
+
+impl McpServerDiagnostic {
+    pub fn failure(&self) -> McpFailure {
+        self.failure
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct McpServerStatus {
+    name: McpServerName,
+    state: McpServerState,
+    last_good_generation: Option<Arc<str>>,
+    capabilities: Option<McpCapabilities>,
+    cache_source_revision: Option<Arc<str>>,
+    cache_expires_at: Option<Instant>,
+    cache_freshness: McpCacheFreshness,
+    authorization: Option<McpAuthorizationStatus>,
+    diagnostic: Option<McpServerDiagnostic>,
+}
+
+impl McpServerStatus {
+    pub fn name(&self) -> &McpServerName {
+        &self.name
+    }
+
+    pub fn state(&self) -> McpServerState {
+        self.state
+    }
+
+    pub fn generation(&self) -> Option<&str> {
+        self.last_good_generation.as_deref()
+    }
+
+    pub fn capabilities(&self) -> Option<&McpCapabilities> {
+        self.capabilities.as_ref()
+    }
+
+    pub fn cache_freshness(&self) -> McpCacheFreshness {
+        self.cache_freshness
+    }
+
+    pub fn cache_source_revision(&self) -> Option<&str> {
+        self.cache_source_revision.as_deref()
+    }
+
+    pub fn authorization(&self) -> Option<&McpAuthorizationStatus> {
+        self.authorization.as_ref()
+    }
+
+    pub fn diagnostic(&self) -> Option<&McpServerDiagnostic> {
+        self.diagnostic.as_ref()
+    }
+
+    fn refresh_cache_freshness(&mut self, now: Instant) {
+        self.cache_freshness = cache_freshness(
+            self.cache_source_revision.as_deref(),
+            self.cache_expires_at,
+            now,
+        );
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct McpRegistryStatus {
-    admitted: Vec<String>,
-    degraded: Vec<String>,
-    absent: Vec<String>,
+    servers: Arc<[McpServerStatus]>,
 }
 
 impl McpRegistryStatus {
-    pub fn admitted(&self) -> &[String] {
-        &self.admitted
+    pub fn servers(&self) -> &[McpServerStatus] {
+        &self.servers
     }
 
-    pub fn degraded(&self) -> &[String] {
-        &self.degraded
-    }
-
-    pub fn absent(&self) -> &[String] {
-        &self.absent
+    pub fn server(&self, name: &McpServerName) -> Option<&McpServerStatus> {
+        self.servers
+            .binary_search_by(|status| status.name.cmp(name))
+            .ok()
+            .map(|index| &self.servers[index])
     }
 
     pub fn is_degraded(&self) -> bool {
-        !self.degraded.is_empty()
+        self.servers
+            .iter()
+            .any(|server| server.state != McpServerState::Admitted)
+    }
+
+    pub fn mcp_errors(&self) -> Vec<String> {
+        self.servers
+            .iter()
+            .filter_map(|server| {
+                server.diagnostic.as_ref().map(|diagnostic| {
+                    format!("MCP server `{}`: {}", server.name, diagnostic.message)
+                })
+            })
+            .collect()
+    }
+
+    fn refreshed_at(&self, now: Instant) -> Self {
+        let mut servers = self.servers.to_vec();
+        for server in &mut servers {
+            server.refresh_cache_freshness(now);
+        }
+        Self {
+            servers: servers.into(),
+        }
+    }
+}
+
+fn cache_freshness(
+    source_revision: Option<&str>,
+    expires_at: Option<Instant>,
+    now: Instant,
+) -> McpCacheFreshness {
+    if source_revision.is_none() && expires_at.is_none() {
+        McpCacheFreshness::Uncached
+    } else if expires_at.is_some_and(|expires_at| expires_at <= now) {
+        McpCacheFreshness::Expired
+    } else {
+        McpCacheFreshness::Fresh
+    }
+}
+
+fn status_from_snapshot(
+    snapshot: &AdmittedRegistrySnapshot,
+    overrides: BTreeMap<McpServerName, McpServerStatus>,
+    now: Instant,
+) -> McpRegistryStatus {
+    let mut servers = snapshot
+        .servers
+        .iter()
+        .map(|(name, server)| {
+            (
+                name.clone(),
+                McpServerStatus {
+                    name: name.clone(),
+                    state: McpServerState::Admitted,
+                    last_good_generation: Some(Arc::clone(&snapshot.generation)),
+                    capabilities: Some(server.capabilities.clone()),
+                    cache_source_revision: server.cache.source_revision.clone(),
+                    cache_expires_at: server.cache.expires_at,
+                    cache_freshness: cache_freshness(
+                        server.cache.source_revision(),
+                        server.cache.expires_at,
+                        now,
+                    ),
+                    authorization: None,
+                    diagnostic: None,
+                },
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    servers.extend(overrides);
+    McpRegistryStatus {
+        servers: servers.into_values().collect::<Vec<_>>().into(),
+    }
+}
+
+fn failed_server_status(
+    name: &McpServerName,
+    failure: &CandidateFailure,
+    request_id: &str,
+    predecessor: &AdmittedRegistrySnapshot,
+    now: Instant,
+) -> McpServerStatus {
+    let retained = predecessor.servers.get(name);
+    let authorization = failure.authorization.as_ref().map(|authorization| {
+        let mut scopes = authorization.scopes.clone();
+        scopes.sort();
+        scopes.dedup();
+        McpAuthorizationStatus {
+            issuer: authorization.issuer.clone(),
+            protected_resource: authorization.protected_resource.clone(),
+            scopes: scopes.into(),
+            request_correlation: Arc::from(request_id),
+        }
+    });
+    let cache_source_revision = retained.and_then(|server| server.cache.source_revision.clone());
+    let cache_expires_at = retained.and_then(|server| server.cache.expires_at);
+    McpServerStatus {
+        name: name.clone(),
+        state: if authorization.is_some() {
+            McpServerState::AuthorizationRequired
+        } else if retained.is_some() {
+            McpServerState::Degraded
+        } else {
+            McpServerState::Absent
+        },
+        last_good_generation: retained.map(|_| Arc::clone(&predecessor.generation)),
+        capabilities: retained.map(|server| server.capabilities.clone()),
+        cache_freshness: cache_freshness(cache_source_revision.as_deref(), cache_expires_at, now),
+        cache_source_revision,
+        cache_expires_at,
+        authorization,
+        diagnostic: Some(McpServerDiagnostic {
+            failure: failure.failure,
+            message: Arc::from(failure.sanitized_cause()),
+        }),
+    }
+}
+
+fn failed_publication_status(
+    predecessor: &AdmittedRegistrySnapshot,
+    attempted_servers: Vec<McpServerName>,
+    now: Instant,
+) -> McpRegistryStatus {
+    let mut servers = BTreeMap::new();
+    for (name, server) in &predecessor.servers {
+        servers.insert(
+            name.clone(),
+            McpServerStatus {
+                name: name.clone(),
+                state: McpServerState::Degraded,
+                last_good_generation: Some(Arc::clone(&predecessor.generation)),
+                capabilities: Some(server.capabilities.clone()),
+                cache_source_revision: server.cache.source_revision.clone(),
+                cache_expires_at: server.cache.expires_at,
+                cache_freshness: cache_freshness(
+                    server.cache.source_revision(),
+                    server.cache.expires_at,
+                    now,
+                ),
+                authorization: None,
+                diagnostic: Some(McpServerDiagnostic {
+                    failure: McpFailure::Protocol,
+                    message: Arc::from("registry publication failed"),
+                }),
+            },
+        );
+    }
+    for name in attempted_servers {
+        servers.entry(name.clone()).or_insert(McpServerStatus {
+            name,
+            state: McpServerState::Absent,
+            last_good_generation: None,
+            capabilities: None,
+            cache_source_revision: None,
+            cache_expires_at: None,
+            cache_freshness: McpCacheFreshness::Uncached,
+            authorization: None,
+            diagnostic: Some(McpServerDiagnostic {
+                failure: McpFailure::Protocol,
+                message: Arc::from("registry publication failed"),
+            }),
+        });
+    }
+    McpRegistryStatus {
+        servers: servers.into_values().collect::<Vec<_>>().into(),
+    }
+}
+
+fn failure_message(failure: McpFailure) -> &'static str {
+    match failure {
+        McpFailure::Absent => "server is unavailable",
+        McpFailure::InvalidValue => "server configuration is invalid",
+        McpFailure::InvalidResponse => "server returned an invalid response",
+        McpFailure::Authority => "server authority was rejected",
+        McpFailure::Transport => "server transport is unavailable",
+        McpFailure::Protocol => "server protocol failed",
+        McpFailure::Authorization => "authorization is required",
+        McpFailure::Credential => "server credential is unavailable",
+        McpFailure::Cancelled => "server admission was cancelled",
     }
 }
 
@@ -701,6 +1259,47 @@ impl McpRegistryController {
         }))
     }
 
+    pub fn new_runtime(
+        journal: Arc<dyn McpRegistryJournal>,
+        http_management: Arc<dyn McpHttpEffects>,
+        stdio_management: Arc<dyn McpDuplexEffectsFactory>,
+        continuations: Arc<dyn McpInputRequiredRecorder>,
+        max_sse_event_size: usize,
+        timeout: Duration,
+    ) -> Result<Arc<Self>, McpRegistryError> {
+        if max_sse_event_size == 0 || timeout.is_zero() {
+            return Err(McpRegistryError::InvalidCandidate(
+                "invalid MCP runtime limits".to_owned(),
+            ));
+        }
+        journal.replay()?;
+        Ok(Arc::new_cyclic(move |controller| {
+            let described: Arc<dyn McpDescribedToolsAdmission> =
+                Arc::new(ControllerDescribedToolsAdmission {
+                    controller: controller.clone(),
+                });
+            let admission: Arc<dyn McpCandidateAdmission> =
+                Arc::new(McpRuntimeCandidateAdmission::new(
+                    Arc::clone(&http_management),
+                    Arc::clone(&stdio_management),
+                    Arc::clone(&continuations),
+                    described,
+                    max_sse_event_size,
+                    timeout,
+                ));
+            Self {
+                journal,
+                admission,
+                reconcile: tokio::sync::Mutex::new(()),
+                state: Arc::new(RwLock::new(PublishedState {
+                    snapshot: Arc::new(AdmittedRegistrySnapshot::empty()),
+                    status: McpRegistryStatus::default(),
+                })),
+                next_request: AtomicU64::new(1),
+            }
+        }))
+    }
+
     pub async fn reconcile(
         &self,
         refresh: McpRegistryRefresh,
@@ -715,67 +1314,181 @@ impl McpRegistryController {
             refresh.trigger.as_str().to_owned(),
             refresh.scope.journal_value(),
         )?;
-        let predecessor = self.current_snapshot()?;
+        let (predecessor, prior_status) = self.current_state()?;
         let mut successor = if matches!(&refresh.scope, RegistryScope::All) {
             BTreeMap::new()
         } else {
             predecessor.servers.clone()
         };
+        let mut status_overrides = match &refresh.scope {
+            RegistryScope::All => BTreeMap::new(),
+            RegistryScope::Server(selected) => prior_status
+                .servers()
+                .iter()
+                .filter(|status| status.name() != selected)
+                .cloned()
+                .map(|status| (status.name().clone(), status))
+                .collect(),
+        };
 
-        for (name, entry) in refresh.config.entries() {
+        for candidate in refresh.candidates() {
+            let name = candidate.name();
             if !refresh.scope.includes(name) {
                 continue;
             }
-            match entry {
-                ResolvedMcpEntry::Tombstone { .. } => {
-                    successor.remove(name);
+            let failure = match &candidate.materialization {
+                CandidateMaterialization::Rejected { failure, .. } => {
+                    Some(CandidateFailure::materialization(*failure))
                 }
-                ResolvedMcpEntry::Configured { server, provenance } => {
+                CandidateMaterialization::Ready(admission) => {
                     let request = McpCandidateRequest {
                         config_revision,
-                        name: name.clone(),
-                        server: server.clone(),
-                        provenance: provenance.clone(),
+                        admission: Arc::clone(admission),
+                        provenance: candidate.provenance.clone(),
                     };
                     match self.admission.admit(request).await {
-                        Ok(candidate) => {
-                            if candidate.name.as_ref() != name.as_str()
-                                || candidate.config.as_ref() != server
-                            {
-                                return self.fail_refresh(
-                                    &request_id,
-                                    name,
-                                    McpCandidateError::Invalid {
-                                        cause:
-                                            "candidate identity or config changed during admission"
-                                                .to_owned(),
-                                    },
-                                    &predecessor,
-                                );
-                            }
+                        Ok(admitted) if Arc::ptr_eq(&admitted.admission, admission) => {
                             successor.insert(
                                 name.clone(),
                                 Arc::new(AdmittedServerSlice::from_candidate(
-                                    candidate,
-                                    provenance.clone(),
+                                    admitted,
+                                    candidate.provenance.clone(),
                                 )),
                             );
+                            None
                         }
-                        Err(error) => {
-                            return self.fail_refresh(&request_id, name, error, &predecessor);
-                        }
+                        Ok(_) => Some(CandidateFailure::admission(McpCandidateError::Invalid {
+                            cause: "candidate changed its live admission authority".to_owned(),
+                        })),
+                        Err(error) => Some(CandidateFailure::admission(error)),
                     }
                 }
+            };
+
+            if let Some(failure) = failure {
+                self.record_candidate_failure(&request_id, name, &failure, &predecessor)?;
+                if let Some(retained) = predecessor.servers.get(name) {
+                    successor.insert(name.clone(), Arc::clone(retained));
+                } else {
+                    successor.remove(name);
+                }
+                status_overrides.insert(
+                    name.clone(),
+                    failed_server_status(name, &failure, &request_id, &predecessor, Instant::now()),
+                );
             }
         }
 
         if let RegistryScope::Server(name) = &refresh.scope
-            && refresh.config.entry(name).is_none()
+            && !refresh
+                .candidates()
+                .iter()
+                .any(|candidate| candidate.name() == name)
         {
             successor.remove(name);
+            status_overrides.remove(name);
         }
 
-        self.publish(&request_id, config_revision, predecessor, successor)
+        self.publish(
+            &request_id,
+            config_revision,
+            predecessor,
+            successor,
+            status_overrides,
+        )
+    }
+
+    pub(crate) async fn reconcile_described_tools(
+        &self,
+        command: McpDescribedToolsCommand,
+    ) -> Result<McpRegistryPublication, McpRegistryError> {
+        let _serial = self.reconcile.lock().await;
+        let (predecessor, prior_status) = self.current_state()?;
+        if command.generation.as_str() != predecessor.generation.as_ref()
+            || command.admission_fingerprint.generation() != command.generation.as_str()
+        {
+            return Err(McpRegistryError::InvalidCandidate(
+                "dynamic describe source generation is stale".to_owned(),
+            ));
+        }
+        let name = command.server_admission.name().clone();
+        let server = predecessor.servers.get(&name).ok_or_else(|| {
+            McpRegistryError::InvalidCandidate(
+                "dynamic describe source server is not admitted".to_owned(),
+            )
+        })?;
+        if !Arc::ptr_eq(&server.admission, &command.server_admission) {
+            return Err(McpRegistryError::InvalidCandidate(
+                "dynamic describe changed its live server admission".to_owned(),
+            ));
+        }
+        let family = server.dynamic_family.as_ref().ok_or_else(|| {
+            McpRegistryError::InvalidCandidate(
+                "described tools target a non-dynamic MCP server".to_owned(),
+            )
+        })?;
+        let describe_name = family.describe_name();
+        let describe = server
+            .tools
+            .iter()
+            .find(|definition| definition.name() == describe_name)
+            .ok_or_else(|| {
+                McpRegistryError::InvalidCandidate(
+                    "dynamic describe operation is not admitted".to_owned(),
+                )
+            })?;
+        let expected = McpAdmissionFingerprint::new(
+            predecessor.generation.to_string(),
+            format!("{name}/{describe_name}"),
+            describe.admission_schema_fingerprint(),
+        )
+        .map_err(|error| McpRegistryError::InvalidCandidate(error.to_string()))?;
+        if command.admission_fingerprint.generation() != expected.generation()
+            || command.admission_fingerprint.operation() != expected.operation()
+            || command.admission_fingerprint.schema() != expected.schema()
+        {
+            return Err(McpRegistryError::InvalidCandidate(
+                "dynamic describe admission fingerprint is stale".to_owned(),
+            ));
+        }
+        let described = decode_described_tools(family, command.structured_content)?;
+        let previous = server
+            .tools
+            .iter()
+            .find_map(McpToolDefinition::dynamic_catalogue);
+        let catalogue = McpDynamicCatalogue::reconcile(
+            family.clone(),
+            previous,
+            &command.requested_names,
+            described,
+        )
+        .map_err(|error| McpRegistryError::InvalidCandidate(error.to_string()))?;
+        let successor_server = Arc::new(server.with_dynamic_catalogue(catalogue)?);
+        let request_id = format!(
+            "request-{}",
+            self.next_request.fetch_add(1, Ordering::Relaxed)
+        );
+        let config_revision = self.journal.begin_refresh(
+            request_id.clone(),
+            RegistryTrigger::ToolsListChanged.as_str().to_owned(),
+            Some(name.to_string()),
+        )?;
+        let status_overrides = prior_status
+            .servers()
+            .iter()
+            .filter(|status| status.name() != &name)
+            .cloned()
+            .map(|status| (status.name().clone(), status))
+            .collect();
+        let mut successor = predecessor.servers.clone();
+        successor.insert(name, successor_server);
+        self.publish(
+            &request_id,
+            config_revision,
+            predecessor,
+            successor,
+            status_overrides,
+        )
     }
 
     pub fn publication(&self) -> McpRegistryPublication {
@@ -787,7 +1500,7 @@ impl McpRegistryController {
     pub fn status(&self) -> McpRegistryStatus {
         self.state.read().map_or_else(
             |_| McpRegistryStatus::default(),
-            |state| state.status.clone(),
+            |state| state.status.refreshed_at(Instant::now()),
         )
     }
 
@@ -809,25 +1522,29 @@ impl McpRegistryController {
             .map_err(|_| McpRegistryError::PublicationUnavailable)
     }
 
-    fn fail_refresh(
+    fn current_state(
+        &self,
+    ) -> Result<(Arc<AdmittedRegistrySnapshot>, McpRegistryStatus), McpRegistryError> {
+        self.state
+            .read()
+            .map(|state| (Arc::clone(&state.snapshot), state.status.clone()))
+            .map_err(|_| McpRegistryError::PublicationUnavailable)
+    }
+
+    fn record_candidate_failure(
         &self,
         request_id: &str,
         server: &McpServerName,
-        error: McpCandidateError,
+        failure: &CandidateFailure,
         predecessor: &Arc<AdmittedRegistrySnapshot>,
-    ) -> Result<McpRegistryPublication, McpRegistryError> {
-        if let McpCandidateError::AuthorizationRequired {
-            issuer,
-            protected_resource,
-            scopes,
-        } = &error
-        {
+    ) -> Result<(), McpRegistryError> {
+        if let Some(authorization) = &failure.authorization {
             self.journal
                 .append(McpRegistryEvent::AuthorizationRequired {
                     server: server.to_string(),
-                    issuer: issuer.clone(),
-                    protected_resource: protected_resource.clone(),
-                    scopes: scopes.clone(),
+                    issuer: authorization.issuer.clone(),
+                    protected_resource: authorization.protected_resource.clone(),
+                    scopes: authorization.scopes.clone(),
                     request_correlation: request_id.to_owned(),
                 })?;
         }
@@ -837,36 +1554,10 @@ impl McpRegistryController {
             .then(|| predecessor.generation.to_string());
         self.journal.append(McpRegistryEvent::RefreshFailed {
             request_id: request_id.to_owned(),
-            cause: error.cause(),
-            retained_generation: retained.clone(),
+            cause: failure.sanitized_cause().to_owned(),
+            retained_generation: retained,
         })?;
-        let mut state = self
-            .state
-            .write()
-            .map_err(|_| McpRegistryError::PublicationUnavailable)?;
-        if retained.is_some() {
-            if !state
-                .status
-                .degraded
-                .iter()
-                .any(|name| name == server.as_str())
-            {
-                state.status.degraded.push(server.to_string());
-                state.status.degraded.sort();
-            }
-        } else if !state
-            .status
-            .absent
-            .iter()
-            .any(|name| name == server.as_str())
-        {
-            state.status.absent.push(server.to_string());
-            state.status.absent.sort();
-        }
-        Err(McpRegistryError::Candidate {
-            server: server.to_string(),
-            cause: error.cause(),
-        })
+        Ok(())
     }
 
     fn publish(
@@ -875,6 +1566,7 @@ impl McpRegistryController {
         config_revision: u64,
         predecessor: Arc<AdmittedRegistrySnapshot>,
         servers: BTreeMap<McpServerName, Arc<AdmittedServerSlice>>,
+        status_overrides: BTreeMap<McpServerName, McpServerStatus>,
     ) -> Result<McpRegistryPublication, McpRegistryError> {
         let number = match predecessor.number.checked_add(1) {
             Some(number) => number,
@@ -894,7 +1586,7 @@ impl McpRegistryController {
                 let tool = match definition.capture(
                     name.as_str(),
                     &generation,
-                    Arc::clone(&server.config),
+                    Arc::clone(&server.admission),
                     Arc::clone(&server.factory),
                 ) {
                     Ok(tool) => tool,
@@ -938,10 +1630,10 @@ impl McpRegistryController {
         let captured_servers = servers
             .values()
             .map(|server| McpCapturedServer {
+                admission: Arc::clone(&server.admission),
                 identity: server.identity.clone(),
                 provenance: server.provenance.clone(),
                 capabilities: server.capabilities.clone(),
-                config: Arc::clone(&server.config),
                 cache: server.cache.clone(),
                 dynamic_family: server.dynamic_family.clone(),
                 factory: Arc::clone(&server.factory),
@@ -972,19 +1664,15 @@ impl McpRegistryController {
             .state
             .write()
             .map_err(|_| McpRegistryError::PublicationUnavailable)?;
+        state.status = status_from_snapshot(&snapshot, status_overrides, Instant::now());
         state.snapshot = snapshot;
-        state.status = McpRegistryStatus {
-            admitted: publication.admitted_servers.clone(),
-            degraded: Vec::new(),
-            absent: Vec::new(),
-        };
         Ok(publication)
     }
 
     fn fail_publication<'a>(
         &self,
         request_id: &str,
-        cause: String,
+        _cause: String,
         predecessor: &Arc<AdmittedRegistrySnapshot>,
         attempted_servers: impl Iterator<Item = &'a McpServerName>,
     ) -> Result<McpRegistryPublication, McpRegistryError> {
@@ -992,33 +1680,19 @@ impl McpRegistryController {
             (predecessor.number > 0).then(|| predecessor.generation.to_string());
         self.journal.append(McpRegistryEvent::RefreshFailed {
             request_id: request_id.to_owned(),
-            cause: cause.clone(),
+            cause: "registry publication failed".to_owned(),
             retained_generation,
         })?;
 
-        let attempted_servers = attempted_servers
-            .map(ToString::to_string)
-            .collect::<Vec<_>>();
+        let attempted_servers = attempted_servers.cloned().collect::<Vec<_>>();
         let mut state = self
             .state
             .write()
             .map_err(|_| McpRegistryError::PublicationUnavailable)?;
-        state.status.admitted = predecessor
-            .servers
-            .keys()
-            .map(ToString::to_string)
-            .collect();
-        state.status.degraded = state.status.admitted.clone();
-        state.status.absent = attempted_servers
-            .into_iter()
-            .filter(|name| {
-                !predecessor
-                    .servers
-                    .keys()
-                    .any(|server| server.as_str() == name.as_str())
-            })
-            .collect();
-        Err(McpRegistryError::InvalidCandidate(cause))
+        state.status = failed_publication_status(predecessor, attempted_servers, Instant::now());
+        Err(McpRegistryError::InvalidCandidate(
+            "registry publication failed".to_owned(),
+        ))
     }
 }
 
@@ -1151,7 +1825,7 @@ fn capture_contexts(
                 subject,
                 operation: McpOperationKind::ReadResource,
                 admission,
-                config: Arc::clone(&server.config),
+                server_admission: Arc::clone(&server.admission),
                 factory: Arc::clone(&server.factory),
             });
         }
@@ -1195,7 +1869,7 @@ fn capture_contexts(
                 subject,
                 operation: McpOperationKind::GetPrompt,
                 admission,
-                config: Arc::clone(&server.config),
+                server_admission: Arc::clone(&server.admission),
                 factory: Arc::clone(&server.factory),
             });
         }
@@ -1207,4 +1881,488 @@ fn descriptor_fingerprint(value: &impl serde::Serialize) -> Result<String, McpRe
     let bytes = serde_json::to_vec(value)
         .map_err(|error| McpRegistryError::InvalidCandidate(error.to_string()))?;
     Ok(format!("sha256:{:x}", Sha256::digest(bytes)))
+}
+
+#[cfg(test)]
+mod staged_dynamic_red {
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Mutex};
+
+    use futures::future::BoxFuture;
+    use rmcp::model::Prompt;
+    use serde_json::{Value, json};
+
+    use ego_core::config::{McpConfigProvenance, McpServerConfig, Source};
+    use ego_core::generator::types::ToolDescriptor;
+    use ego_core::mcp::ToolExecution;
+    use ego_core::permit::{GuardedIo, PreparedCall, ToolError};
+    use ego_core::turn::{McpRegistryEvent, McpRegistryJournal, McpRegistryJournalError};
+
+    use super::*;
+
+    const SERVER: &str = "dynamic";
+    fn descriptor(name: &str, schema: Value) -> ToolDescriptor {
+        ToolDescriptor {
+            name: name.to_owned(),
+            description: format!("{name} fixture"),
+            parameters: schema,
+        }
+    }
+
+    fn management() -> Vec<ToolDescriptor> {
+        vec![
+            descriptor(
+                "search_tools",
+                json!({"type":"object","additionalProperties":false}),
+            ),
+            descriptor(
+                "describe_tools",
+                json!({"type":"object","additionalProperties":false}),
+            ),
+            descriptor(
+                "execute_tool",
+                json!({
+                    "type":"object",
+                    "properties":{"name":{"type":"string"},"arguments":{"type":"object"}},
+                    "required":["name","arguments"],
+                    "additionalProperties":false
+                }),
+            ),
+        ]
+    }
+
+    fn admission(name: &str) -> Arc<McpServerAdmission> {
+        Arc::new(
+            McpServerAdmission::new(
+                name.parse().expect("server name"),
+                McpServerConfig::stdio(format!("mcp-{name}"), Vec::new(), None, Vec::new())
+                    .expect("stdio config"),
+                crate::McpTransportMaterial::stdio(Vec::new()),
+            )
+            .expect("admission"),
+        )
+    }
+
+    #[derive(Default)]
+    struct Factory;
+
+    impl McpOperationFactory for Factory {
+        fn prepare(
+            &self,
+            _admission: Arc<McpServerAdmission>,
+            _operation: crate::McpOperation,
+        ) -> Result<PreparedCall, ToolError> {
+            Ok(PreparedCall::new("dynamic-test", Vec::new()))
+        }
+
+        fn execute<'a>(
+            &'a self,
+            _admission: Arc<McpServerAdmission>,
+            _call: PreparedCall,
+            _io: &'a dyn GuardedIo,
+        ) -> BoxFuture<'a, Result<ToolExecution, ToolError>> {
+            Box::pin(async {
+                Ok(ToolExecution::Complete(
+                    ego_core::permit::ToolResult::builtin("dynamic-test"),
+                ))
+            })
+        }
+    }
+
+    enum Outcome {
+        Candidate(McpAdmittedCandidate),
+    }
+
+    #[derive(Default)]
+    struct Admission {
+        outcomes: Mutex<VecDeque<Outcome>>,
+    }
+
+    impl Admission {
+        fn push(&self, outcome: Outcome) {
+            self.outcomes.lock().expect("outcomes").push_back(outcome);
+        }
+    }
+
+    impl McpCandidateAdmission for Admission {
+        fn admit(
+            &self,
+            _request: McpCandidateRequest,
+        ) -> McpFuture<'static, Result<McpAdmittedCandidate, McpCandidateError>> {
+            let outcome = self.outcomes.lock().expect("outcomes").pop_front();
+            Box::pin(async move {
+                match outcome.expect("candidate outcome") {
+                    Outcome::Candidate(candidate) => Ok(candidate),
+                }
+            })
+        }
+    }
+
+    #[derive(Default)]
+    struct Journal {
+        events: Mutex<Vec<McpRegistryEvent>>,
+        revision: Mutex<u64>,
+    }
+
+    impl McpRegistryJournal for Journal {
+        fn append(&self, event: McpRegistryEvent) -> Result<(), McpRegistryJournalError> {
+            self.events.lock().expect("events").push(event);
+            Ok(())
+        }
+
+        fn replay(&self) -> Result<Vec<McpRegistryEvent>, McpRegistryJournalError> {
+            Ok(self.events.lock().expect("events").clone())
+        }
+
+        fn begin_refresh(
+            &self,
+            request_id: String,
+            trigger: String,
+            server_scope: Option<String>,
+        ) -> Result<u64, McpRegistryJournalError> {
+            let mut revision = self.revision.lock().expect("revision");
+            *revision += 1;
+            self.events
+                .lock()
+                .expect("events")
+                .push(McpRegistryEvent::RefreshRequested {
+                    request_id,
+                    trigger,
+                    server_scope,
+                    config_revision: *revision,
+                });
+            Ok(*revision)
+        }
+    }
+
+    fn candidate(
+        server_admission: Arc<McpServerAdmission>,
+        catalogue: Option<McpDynamicCatalogue>,
+    ) -> McpAdmittedCandidate {
+        McpAdmittedCandidate::new(
+            Arc::clone(&server_admission),
+            McpCandidateIdentity::validated(server_admission.name().as_str()),
+            McpCandidateInventory::new(
+                McpCapabilities::tools(),
+                management(),
+                Vec::new(),
+                Vec::<Prompt>::new(),
+                McpCacheMetadata::default(),
+                catalogue,
+            ),
+            Arc::new(Factory),
+        )
+        .expect("candidate")
+    }
+
+    fn refresh(admission: &Arc<McpServerAdmission>) -> McpRegistryRefresh {
+        McpRegistryRefresh::new(
+            vec![McpRegistryCandidate::ready(
+                Arc::clone(admission),
+                McpConfigProvenance::Layer {
+                    source: Source::User,
+                },
+            )],
+            RegistryTrigger::Reload,
+            RegistryScope::All,
+        )
+        .expect("refresh")
+    }
+
+    async fn bootstrap_named(
+        name: &str,
+    ) -> (
+        Arc<McpRegistryController>,
+        Arc<McpServerAdmission>,
+        McpRegistryPublication,
+    ) {
+        let server_admission = admission(name);
+        let candidate_admission = Arc::new(Admission::default());
+        candidate_admission.push(Outcome::Candidate(candidate(
+            Arc::clone(&server_admission),
+            None,
+        )));
+        let journal = Arc::new(Journal::default());
+        let controller = McpRegistryController::new(
+            Arc::clone(&journal) as Arc<dyn McpRegistryJournal>,
+            Arc::clone(&candidate_admission) as Arc<dyn McpCandidateAdmission>,
+        )
+        .expect("controller");
+        let publication = controller
+            .reconcile(refresh(&server_admission))
+            .await
+            .expect("bootstrap");
+        (controller, server_admission, publication)
+    }
+
+    async fn bootstrap() -> (
+        Arc<McpRegistryController>,
+        Arc<McpServerAdmission>,
+        McpRegistryPublication,
+    ) {
+        bootstrap_named(SERVER).await
+    }
+
+    fn fingerprint_for(server: &str, generation: &str) -> McpAdmissionFingerprint {
+        let describe_schema = management()
+            .into_iter()
+            .find(|tool| tool.name == "describe_tools")
+            .expect("describe descriptor");
+        let describe_schema = crate::dynamic::schema_fingerprint(&describe_schema.parameters)
+            .expect("describe schema fingerprint");
+        McpAdmissionFingerprint::new(
+            generation,
+            format!("{server}/describe_tools"),
+            describe_schema,
+        )
+        .expect("describe fingerprint")
+    }
+
+    fn fingerprint(generation: &str) -> McpAdmissionFingerprint {
+        fingerprint_for(SERVER, generation)
+    }
+
+    fn described_tools(tools: Vec<Value>) -> Value {
+        json!({"tools": tools})
+    }
+
+    fn described(name: &str, schema: Value) -> Value {
+        json!({
+            "name": name,
+            "description": format!("{name} described"),
+            "inputSchema": schema
+        })
+    }
+
+    fn command(
+        capture: &McpRegistryCapture,
+        generation: &str,
+        requested: &[&str],
+        content: Value,
+    ) -> McpDescribedToolsCommand {
+        McpDescribedToolsCommand::new(
+            capture.servers()[0].clone(),
+            generation.to_owned(),
+            fingerprint(generation),
+            requested.iter().map(|name| (*name).to_owned()).collect(),
+            content,
+        )
+    }
+
+    fn weather_schema() -> Value {
+        json!({
+            "type":"object",
+            "properties":{"city":{"type":"string"}},
+            "required":["city"],
+            "additionalProperties":false
+        })
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn detected_dynamic_family_bootstraps_management_without_execute_tool() {
+        let (controller, _admission, publication) = bootstrap().await;
+        assert_eq!(publication.generation(), "generation-1");
+        assert_eq!(
+            publication.admitted_tools(),
+            &["describe_tools".to_owned(), "search_tools".to_owned()]
+        );
+        assert!(
+            !controller
+                .capture()
+                .expect("capture")
+                .tools()
+                .iter()
+                .any(|tool| tool.descriptor().name == "execute_tool")
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn successful_describe_publishes_n_plus_one_and_preserves_old_capture() {
+        let (controller, _admission, first) = bootstrap().await;
+        let old_capture = first.capture().clone();
+        let command = command(
+            first.capture(),
+            "generation-1",
+            &["weather"],
+            described_tools(vec![described("weather", weather_schema())]),
+        );
+        let second = controller
+            .reconcile_described_tools(command)
+            .await
+            .expect("describe reconciliation");
+        assert_eq!(second.generation(), "generation-2");
+        assert_eq!(second.predecessor(), Some("generation-1"));
+        assert!(
+            second
+                .admitted_tools()
+                .iter()
+                .any(|name| name == "execute_tool")
+        );
+        assert!(
+            !old_capture
+                .tools()
+                .iter()
+                .any(|tool| tool.descriptor().name == "execute_tool")
+        );
+        assert!(
+            second
+                .capture()
+                .servers()
+                .iter()
+                .all(|server| server.admission().name().as_str() == SERVER)
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn repeated_exact_describe_replaces_and_merges_only_requested_tools_deterministically() {
+        let (controller, _admission, first) = bootstrap().await;
+        let first = controller
+            .reconcile_described_tools(command(
+                first.capture(),
+                "generation-1",
+                &["weather", "calendar"],
+                described_tools(vec![
+                    described(
+                        "calendar",
+                        json!({"type":"object","additionalProperties":false}),
+                    ),
+                    described("weather", weather_schema()),
+                ]),
+            ))
+            .await
+            .expect("first describe");
+        let second = controller
+            .reconcile_described_tools(command(
+                first.capture(),
+                "generation-2",
+                &["weather"],
+                described_tools(vec![described(
+                    "weather",
+                    json!({
+                        "type":"object",
+                        "properties":{"city":{"type":"string"},"units":{"type":"string"}},
+                        "required":["city","units"],
+                        "additionalProperties":false
+                    }),
+                )]),
+            ))
+            .await
+            .expect("replacement describe");
+        assert_eq!(first.generation(), "generation-2");
+        assert_eq!(second.generation(), "generation-3");
+        let snapshot = controller.current_snapshot().expect("snapshot");
+        let server = snapshot
+            .servers
+            .get(&SERVER.parse().expect("server name"))
+            .expect("server");
+        let execute = server
+            .tools
+            .iter()
+            .find(|tool| tool.name() == "execute_tool")
+            .expect("execute wrapper");
+        let catalogue = execute.dynamic_catalogue().expect("catalogue");
+        assert_eq!(
+            catalogue.tool_names().collect::<Vec<_>>(),
+            vec!["calendar", "weather"]
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn stale_or_invalid_describe_is_rejected_without_publication() {
+        let cases = [
+            (
+                "stale generation",
+                vec!["weather"],
+                described_tools(vec![described("weather", weather_schema())]),
+                "generation-0",
+            ),
+            (
+                "missing requested",
+                vec!["weather", "calendar"],
+                described_tools(vec![described("weather", weather_schema())]),
+                "generation-1",
+            ),
+            (
+                "duplicate descriptor",
+                vec!["weather"],
+                described_tools(vec![
+                    described("weather", weather_schema()),
+                    described("weather", weather_schema()),
+                ]),
+                "generation-1",
+            ),
+            (
+                "management descriptor",
+                vec!["search_tools"],
+                described_tools(vec![described("search_tools", json!({"type":"object"}))]),
+                "generation-1",
+            ),
+            (
+                "unexpected descriptor",
+                vec!["weather"],
+                described_tools(vec![described("calendar", json!({"type":"object"}))]),
+                "generation-1",
+            ),
+            (
+                "invalid schema",
+                vec!["weather"],
+                described_tools(vec![described("weather", json!({"type":7}))]),
+                "generation-1",
+            ),
+            (
+                "protocol error",
+                vec!["weather"],
+                json!({"isError":true,"content":[{"type":"text","text":"failed"}]}),
+                "generation-1",
+            ),
+        ];
+        for (label, requested, content, generation) in cases {
+            let (controller, _admission, first) = bootstrap().await;
+            let before = controller.publication();
+            let command = command(first.capture(), generation, &requested, content);
+            assert!(
+                controller.reconcile_described_tools(command).await.is_err(),
+                "{label} was accepted"
+            );
+            assert_eq!(
+                controller.publication().generation(),
+                before.generation(),
+                "{label}"
+            );
+            assert_eq!(
+                controller.publication().admitted_tools(),
+                before.admitted_tools(),
+                "{label}"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn stale_server_and_admission_fingerprint_are_rejected_without_publication() {
+        let (controller, _admission, first) = bootstrap().await;
+        let (_other_controller, _other_admission, other) = bootstrap_named("other").await;
+        let stale = McpDescribedToolsCommand::new(
+            other.capture().servers()[0].clone(),
+            "generation-1".to_owned(),
+            fingerprint_for("other", "generation-1"),
+            vec!["weather".to_owned()],
+            described_tools(vec![described("weather", weather_schema())]),
+        );
+        assert!(controller.reconcile_described_tools(stale).await.is_err());
+        let before = controller.publication();
+        let stale = McpDescribedToolsCommand::new(
+            first.capture().servers()[0].clone(),
+            "generation-1".to_owned(),
+            McpAdmissionFingerprint::new(
+                "generation-1",
+                format!("{SERVER}/describe_tools"),
+                "sha256:stale",
+            )
+            .expect("stale fingerprint"),
+            vec!["weather".to_owned()],
+            described_tools(vec![described("weather", weather_schema())]),
+        );
+        assert!(controller.reconcile_described_tools(stale).await.is_err());
+        assert_eq!(controller.publication().generation(), before.generation());
+    }
 }

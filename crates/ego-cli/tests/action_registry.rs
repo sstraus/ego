@@ -3,7 +3,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ego_cli::repl::actions::{
     ActionDispatch, ActionId, ActionKind, ActionRegistration, ActionRegistry, ActionSink,
-    Availability, Dispatch, InputOrigin, LocalAction, LocalActionOutcome,
+    Availability, CompositeActionSink, Dispatch, InputOrigin, LocalAction, LocalActionOutcome,
 };
 use ego_cli::repl::selector::{Selector, SelectorKey, SelectorKind};
 
@@ -93,16 +93,12 @@ fn construction_rejects_duplicate_ids_names_aliases_and_shortcuts() {
 }
 
 #[test]
-fn unavailable_actions_name_the_exact_missing_owner() {
+fn mcp_tools_and_doctor_are_enabled_when_the_shared_handlers_are_installed() {
     let registry = ActionRegistry::final_surface();
-    let unavailable = registry.availability(ActionId::Mcp);
-    assert_eq!(
-        unavailable,
-        Availability::Disabled {
-            owner: "the MCP client",
-        }
-    );
-    assert!(registry.help(ActionId::Mcp).disabled_reason().is_some());
+    for id in [ActionId::Mcp, ActionId::Tools, ActionId::Doctor] {
+        assert_eq!(registry.availability(id), Availability::Enabled);
+        assert!(registry.help(id).disabled_reason().is_none());
+    }
 }
 
 #[test]
@@ -182,6 +178,29 @@ fn dispatch_reaches_the_injected_local_sink_and_prompt_ingress_without_handler_p
         ActionDispatch::Prompt(ego_cli::repl::actions::PromptPayload {
             id: ActionId::Version
         })
+    );
+}
+
+#[test]
+fn tools_slash_dispatch_uses_the_shared_handler_and_preserves_catalogue_identity() {
+    let registry = ActionRegistry::final_surface();
+    assert_eq!(registry.resolve_slash("/tools"), Some(ActionId::Tools));
+    assert_eq!(
+        registry.availability(ActionId::Tools),
+        Availability::Enabled
+    );
+
+    let displayed = registry.snapshot();
+    let selection = registry
+        .select(ActionId::Tools, &displayed)
+        .expect("/tools is selectable when its shared handler is installed");
+    let mut sink = CompositeActionSink::new();
+    let recording = RecordingSink { calls: Vec::new() };
+    sink.register(ActionId::Tools, Box::new(recording))
+        .expect("the /tools handler is registered once");
+    assert_eq!(
+        registry.dispatch_to(selection, &displayed, false, &mut sink),
+        ActionDispatch::Local(LocalActionOutcome::Completed)
     );
 }
 

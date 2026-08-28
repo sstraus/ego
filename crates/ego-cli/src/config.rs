@@ -12,11 +12,13 @@
 use std::path::{Path, PathBuf};
 
 use ego_core::config::{
-    AuthProviderLayer, ConfigError, ConfigLayer, Effective, McpLayerEntry, McpServerName, Source,
-    Sourced, Trust, UserMcpSlot, resolve,
+    AuthProviderLayer, ConfigError, ConfigLayer, Effective, McpConfigProvenance,
+    McpEnvironmentName, McpHttpAuth, McpHttpConfig, McpHttpUrl, McpLayerEntry, McpServerConfig,
+    McpServerName, ResolvedMcpEntry, Source, Sourced, Trust, UserMcpSlot, resolve,
 };
+use serde::Deserialize;
 
-use crate::cli::{Args, UsageError};
+use crate::cli::{Args, McpSelector, UsageError};
 
 /// The system layer: an administrator's fleet defaults and the only source of
 /// non-relaxable ceilings.
@@ -187,6 +189,152 @@ impl FrozenRunConfig {
 
     pub(crate) fn profile(&self) -> Option<&str> {
         self.profile.as_deref()
+    }
+}
+
+/// Resolve the explicit invocation MCP selection before any session or
+/// provider exists. Input order decides which diagnostic wins; the returned
+/// authority is canonical by server name.
+pub(crate) fn selected_mcp(
+    args: &Args,
+    effective: &Effective,
+    cwd: &Path,
+) -> Result<Vec<(McpServerName, McpServerConfig, McpConfigProvenance)>, UsageError> {
+    let mut selected = Vec::with_capacity(args.mcp.len());
+    let mut names = std::collections::BTreeSet::new();
+    for selector in &args.mcp {
+        let (name, server, provenance) = match selector {
+            McpSelector::Named(name) => match effective.mcp.entry(name) {
+                Some(ResolvedMcpEntry::Configured { server, provenance }) => {
+                    (name.clone(), server.clone(), provenance.clone())
+                }
+                Some(ResolvedMcpEntry::Tombstone { provenance }) => {
+                    return Err(UsageError(format!(
+                        "MCP server `{name}` is masked by {}",
+                        mcp_provenance(provenance)
+                    )));
+                }
+                None => {
+                    return Err(UsageError(format!("MCP server `{name}` is not configured")));
+                }
+            },
+            McpSelector::File(path) => {
+                let path = if path.is_absolute() {
+                    path.clone()
+                } else {
+                    cwd.join(path)
+                };
+                let bytes = std::fs::read(&path).map_err(|error| {
+                    UsageError(format!(
+                        "MCP invocation file {} could not be read: {error}",
+                        path.display()
+                    ))
+                })?;
+                let decoded: InvocationMcpServer =
+                    serde_json::from_slice(&bytes).map_err(|error| {
+                        UsageError(format!(
+                            "MCP invocation file {} is not one strict server object: {error}",
+                            path.display()
+                        ))
+                    })?;
+                let (name, server) = decoded.into_config()?;
+                if effective.mcp.entry(&name).is_some() {
+                    return Err(UsageError(format!(
+                        "MCP invocation server `{name}` collides with effective configuration"
+                    )));
+                }
+                (
+                    name,
+                    server,
+                    McpConfigProvenance::Layer {
+                        source: Source::Flags,
+                    },
+                )
+            }
+        };
+        if !names.insert(name.clone()) {
+            return Err(UsageError(format!(
+                "MCP server `{name}` was selected more than once"
+            )));
+        }
+        selected.push((name, server, provenance));
+    }
+    selected.sort_by(|left, right| left.0.cmp(&right.0));
+    Ok(selected)
+}
+
+/// Canonical configured entries from an already resolved effective view.
+/// OS-owned live materialization happens in `ego-tools`.
+pub(crate) fn configured_mcp(
+    effective: &Effective,
+) -> Vec<(McpServerName, McpServerConfig, McpConfigProvenance)> {
+    effective
+        .mcp
+        .entries()
+        .iter()
+        .filter_map(|(name, entry)| match entry {
+            ResolvedMcpEntry::Configured { server, provenance } => {
+                Some((name.clone(), server.clone(), provenance.clone()))
+            }
+            ResolvedMcpEntry::Tombstone { .. } => None,
+        })
+        .collect()
+}
+
+fn mcp_provenance(provenance: &McpConfigProvenance) -> String {
+    match provenance {
+        McpConfigProvenance::Layer { source } => format!("the {source} layer"),
+        McpConfigProvenance::Profile { source, name } => {
+            format!("the {source} profile `{name}`")
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "transport", rename_all = "lowercase", deny_unknown_fields)]
+enum InvocationMcpServer {
+    Stdio {
+        name: McpServerName,
+        command: String,
+        #[serde(default)]
+        args: Vec<String>,
+        #[serde(default)]
+        cwd: Option<PathBuf>,
+        #[serde(default)]
+        inherit_env: Vec<McpEnvironmentName>,
+    },
+    Http {
+        name: McpServerName,
+        url: McpHttpUrl,
+        #[serde(default)]
+        auth: McpHttpAuth,
+        #[serde(default)]
+        allow_insecure_loopback: bool,
+    },
+}
+
+impl InvocationMcpServer {
+    fn into_config(self) -> Result<(McpServerName, McpServerConfig), UsageError> {
+        match self {
+            Self::Stdio {
+                name,
+                command,
+                args,
+                cwd,
+                inherit_env,
+            } => McpServerConfig::stdio(command, args, cwd, inherit_env)
+                .map(|server| (name, server))
+                .map_err(|error| UsageError(error.to_string())),
+            Self::Http {
+                name,
+                url,
+                auth,
+                allow_insecure_loopback,
+            } => McpHttpConfig::new(url, auth, allow_insecure_loopback)
+                .map(McpServerConfig::Http)
+                .map(|server| (name, server))
+                .map_err(|error| UsageError(error.to_string())),
+        }
     }
 }
 

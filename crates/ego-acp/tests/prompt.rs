@@ -26,6 +26,7 @@ use std::sync::{Arc, Mutex};
 use agent_client_protocol::{ConnectTo, Lines};
 use agent_client_protocol_schema::{ProtocolVersion, v1};
 use ego_acp::project::project_acp_v1;
+use ego_acp::serve::{McpSessionAdmissionError, McpSessionAdmitter, SessionMcpAdmission};
 use ego_core::config::ModelRef;
 use ego_core::event::domain::{CancelCause, DomainEvent};
 use ego_core::event::id::{ItemId, SessionId, TurnId};
@@ -42,6 +43,7 @@ use ego_core::run::{
 use ego_core::state::SessionState;
 use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
 use ego_core::turn::CancelToken;
+use ego_core::turn::{AdmittedToolSource, CapturedToolCatalogue, ToolCatalogueError};
 use futures::channel::mpsc;
 use futures::future::{self, BoxFuture};
 use futures::stream::BoxStream;
@@ -154,11 +156,16 @@ enum PromptMode {
     Block(BlockingState),
 }
 
+type RecordedMcpCapture = (usize, Vec<String>);
+type RecordedMcpSource = Option<RecordedMcpCapture>;
+type SharedMcpSourceLog = Arc<Mutex<Vec<RecordedMcpSource>>>;
+
 #[derive(Clone)]
 struct PromptExecutor {
     mode: PromptMode,
     turns: Arc<Mutex<Vec<(String, PathBuf)>>>,
     roots: Arc<Mutex<HashMap<RunId, RunRoot>>>,
+    mcp_sources: SharedMcpSourceLog,
 }
 
 struct PromptAuthority {
@@ -174,6 +181,7 @@ impl PromptExecutor {
             mode: PromptMode::Publish,
             turns: Arc::new(Mutex::new(Vec::new())),
             roots: Arc::new(Mutex::new(HashMap::new())),
+            mcp_sources: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -182,11 +190,16 @@ impl PromptExecutor {
             mode: PromptMode::Block(BlockingState::default()),
             turns: Arc::new(Mutex::new(Vec::new())),
             roots: Arc::new(Mutex::new(HashMap::new())),
+            mcp_sources: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
     fn turns(&self) -> Vec<(String, PathBuf)> {
         self.turns.lock().expect("prompt turns").clone()
+    }
+
+    fn mcp_sources(&self) -> Vec<RecordedMcpSource> {
+        self.mcp_sources.lock().expect("prompt MCP sources").clone()
     }
 
     async fn turn_began(&self) {
@@ -208,6 +221,91 @@ impl PromptExecutor {
             PromptMode::Block(blocking) => blocking.ran.lock().expect("prompt runs").clone(),
             PromptMode::Publish => panic!("publishing executor has no blocking turn"),
         }
+    }
+}
+
+#[derive(Default)]
+struct NoMcpAdmitter;
+
+impl McpSessionAdmitter for NoMcpAdmitter {
+    fn admit(
+        &self,
+        _servers: Vec<v1::McpServer>,
+    ) -> BoxFuture<'static, Result<Option<Arc<dyn SessionMcpAdmission>>, McpSessionAdmissionError>>
+    {
+        Box::pin(future::ready(Ok(None)))
+    }
+}
+
+#[derive(Default)]
+struct RecordingMcpSource;
+
+impl AdmittedToolSource for RecordingMcpSource {
+    fn capture(&self) -> Result<CapturedToolCatalogue, ToolCatalogueError> {
+        CapturedToolCatalogue::new("acp-test-generation", Vec::new())
+    }
+}
+
+struct RecordingMcpAdmission {
+    source: Arc<dyn AdmittedToolSource>,
+    errors: Vec<String>,
+}
+
+impl SessionMcpAdmission for RecordingMcpAdmission {
+    fn admitted_tools(&self) -> Arc<dyn AdmittedToolSource> {
+        Arc::clone(&self.source)
+    }
+
+    fn mcp_errors(&self) -> &[String] {
+        &self.errors
+    }
+}
+
+#[derive(Clone, Default)]
+struct RecordingMcpAdmitter {
+    requests: Arc<Mutex<Vec<Vec<v1::McpServer>>>>,
+    source: Arc<RecordingMcpSource>,
+}
+
+impl RecordingMcpAdmitter {
+    fn requests(&self) -> Vec<Vec<v1::McpServer>> {
+        self.requests
+            .lock()
+            .expect("MCP admission requests")
+            .clone()
+    }
+}
+
+impl McpSessionAdmitter for RecordingMcpAdmitter {
+    fn admit(
+        &self,
+        servers: Vec<v1::McpServer>,
+    ) -> BoxFuture<'static, Result<Option<Arc<dyn SessionMcpAdmission>>, McpSessionAdmissionError>>
+    {
+        self.requests
+            .lock()
+            .expect("MCP admission requests")
+            .push(servers);
+        let admission = RecordingMcpAdmission {
+            source: Arc::clone(&self.source) as Arc<dyn AdmittedToolSource>,
+            errors: vec!["safe MCP diagnostic".to_owned()],
+        };
+        let admission: Arc<dyn SessionMcpAdmission> = Arc::new(admission);
+        Box::pin(future::ready(Ok(Some(admission))))
+    }
+}
+
+struct FailingMcpAdmitter;
+
+impl McpSessionAdmitter for FailingMcpAdmitter {
+    fn admit(
+        &self,
+        _servers: Vec<v1::McpServer>,
+    ) -> BoxFuture<'static, Result<Option<Arc<dyn SessionMcpAdmission>>, McpSessionAdmissionError>>
+    {
+        Box::pin(future::ready(Err(McpSessionAdmissionError::new(
+            "MCP admission failed safely",
+        ))))
     }
 }
 
@@ -280,9 +378,18 @@ impl RunExecutor for PromptExecutor {
             .expect("started prompt root");
         let prompt = prompt.to_owned();
         let turns = Arc::clone(&self.turns);
+        let mcp_sources = Arc::clone(&self.mcp_sources);
         Box::pin(async move {
             match mode {
                 PromptMode::Publish => {
+                    mcp_sources.lock().expect("prompt MCP sources").push(
+                        bindings.admitted_tools().map(|source| {
+                            (
+                                Arc::as_ptr(&source).cast::<()>() as usize,
+                                bindings.mcp_errors().to_vec(),
+                            )
+                        }),
+                    );
                     turns
                         .lock()
                         .expect("prompt turns")
@@ -438,6 +545,10 @@ struct Connected {
 
 impl Connected {
     fn to(executor: PromptExecutor) -> Self {
+        Self::to_with_admitter(executor, Arc::new(NoMcpAdmitter))
+    }
+
+    fn to_with_admitter(executor: PromptExecutor, admitter: Arc<dyn McpSessionAdmitter>) -> Self {
         let (to_agent, to_agent_rx) = mpsc::unbounded::<String>();
         let (from_agent, from_agent_rx) = mpsc::unbounded::<String>();
         let transport = Lines::new(
@@ -447,11 +558,12 @@ impl Connected {
         let store = Arc::new(PromptStore::default());
         let executor = Arc::new(executor);
         let ids = Arc::new(PromptIds::default());
-        let agent = support::agent_with(
+        let agent = support::agent_with_mcp(
             store,
             Arc::clone(&executor),
             Arc::new(PromptClock),
             Arc::clone(&ids),
+            admitter,
         );
         Connected {
             to_agent,
@@ -988,14 +1100,15 @@ async fn a_session_accepts_another_prompt_once_its_turn_has_ended() {
     connection.finish().await;
 }
 
-/// `session/new` refuses MCP servers rather than accepting ones it will never
-/// connect to.
-///
-/// A client that names a server and is told nothing would attribute every
-/// missing tool to the agent being bad at using them.
+/// `session/new` admits supplied MCP servers into the session-scoped registry.
+/// The server must not advertise capabilities that this request did not
+/// implement merely because the host supplied an MCP entry.
 #[tokio::test]
-async fn session_new_refuses_mcp_servers_this_build_cannot_connect_to() {
-    let mut connection = Connected::to(PromptExecutor::publishing());
+async fn session_new_accepts_mcp_servers_without_advertising_unsupported_capabilities() {
+    let mut connection = Connected::to_with_admitter(
+        PromptExecutor::publishing(),
+        Arc::new(RecordingMcpAdmitter::default()) as Arc<dyn McpSessionAdmitter>,
+    );
     let (initialized, _) = connection
         .request(
             "initialize",
@@ -1012,15 +1125,288 @@ async fn session_new_refuses_mcp_servers_this_build_cannot_connect_to() {
             "session/new",
             serde_json::json!({
                 "cwd": "/tmp/ws",
-                "mcpServers": [{ "name": "files", "command": "/bin/true", "args": [], "env": [] }],
+                "mcpServers": [{
+                    "name": "files",
+                    "command": "/bin/true",
+                    "args": [],
+                    "env": [{ "name": "TOKEN", "value": "session-secret" }]
+                }],
             }),
         )
         .await;
 
     assert!(
-        response.get("error").is_some(),
-        "a server was accepted that nothing will connect to: {response}"
+        response.get("result").is_some(),
+        "MCP session was refused: {response}"
+    );
+    let capabilities = initialized["result"]["agentCapabilities"]
+        .as_object()
+        .expect("agent capabilities object");
+    let mcp = capabilities
+        .get("mcpCapabilities")
+        .and_then(serde_json::Value::as_object)
+        .expect("MCP capabilities object");
+    assert_eq!(mcp.get("http"), Some(&serde_json::json!(true)));
+    assert_eq!(mcp.get("sse"), Some(&serde_json::json!(false)));
+    assert!(
+        !mcp.contains_key("acp"),
+        "ACP-over-MCP capability is unsupported"
+    );
+    assert_eq!(
+        capabilities.get("loadSession"),
+        Some(&serde_json::json!(false))
     );
 
+    connection.finish().await;
+}
+
+#[tokio::test]
+async fn session_new_retains_stdio_and_http_transport_material_losslessly() {
+    let mut connection = Connected::to_with_admitter(
+        PromptExecutor::publishing(),
+        Arc::new(RecordingMcpAdmitter::default()) as Arc<dyn McpSessionAdmitter>,
+    );
+    let (initialized, _) = connection
+        .request(
+            "initialize",
+            serde_json::json!({
+                "protocolVersion": ProtocolVersion::V1.as_u16(),
+                "clientCapabilities": {},
+            }),
+        )
+        .await;
+    assert!(initialized.get("result").is_some());
+
+    let (response, _) = connection
+        .request(
+            "session/new",
+            serde_json::json!({
+                "cwd": "/tmp/ws",
+                "mcpServers": [
+                    {
+                        "name": "files",
+                        "command": "/bin/true",
+                        "args": ["--stdio"],
+                        "env": [{ "name": "TOKEN", "value": "session-secret" }]
+                    },
+                    {
+                        "type": "http",
+                        "name": "remote",
+                        "url": "https://mcp.example.test/mcp",
+                        "headers": [{ "name": "Authorization", "value": "Bearer session-secret" }]
+                    }
+                ],
+            }),
+        )
+        .await;
+    assert!(
+        response.get("result").is_some(),
+        "MCP session was refused: {response}"
+    );
+    assert!(response["result"]["sessionId"].is_string());
+
+    connection.finish().await;
+}
+
+#[tokio::test]
+async fn invalid_supplied_mcp_servers_are_rejected_atomically_before_session_insert() {
+    let invalid_servers = [
+        serde_json::json!({
+            "type": "sse",
+            "name": "events",
+            "url": "https://mcp.example.test/events",
+            "headers": []
+        }),
+        serde_json::json!({
+            "name": "duplicate-env",
+            "command": "/bin/true",
+            "args": [],
+            "env": [
+                { "name": "TOKEN", "value": "one" },
+                { "name": "token", "value": "two" }
+            ]
+        }),
+        serde_json::json!({
+            "type": "http",
+            "name": "forbidden-header",
+            "url": "https://mcp.example.test/mcp",
+            "headers": [{ "name": "Host", "value": "evil.example" }]
+        }),
+        serde_json::json!({
+            "type": "future-transport",
+            "name": "future",
+            "url": "https://mcp.example.test/mcp"
+        }),
+    ];
+
+    for server in invalid_servers {
+        let mut connection = Connected::to_with_admitter(
+            PromptExecutor::publishing(),
+            Arc::new(RecordingMcpAdmitter::default()) as Arc<dyn McpSessionAdmitter>,
+        );
+        let (initialized, _) = connection
+            .request(
+                "initialize",
+                serde_json::json!({
+                    "protocolVersion": ProtocolVersion::V1.as_u16(),
+                    "clientCapabilities": {},
+                }),
+            )
+            .await;
+        assert!(initialized.get("result").is_some());
+        let (response, _) = connection
+            .request(
+                "session/new",
+                serde_json::json!({ "cwd": "/tmp/ws", "mcpServers": [server] }),
+            )
+            .await;
+        assert!(
+            response.get("error").is_some() && response.get("result").is_none(),
+            "invalid MCP server was accepted and a session may have been inserted: {response}"
+        );
+        connection.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn supplied_mcp_authority_survives_prompt_continuations() {
+    let host = PromptExecutor::publishing();
+    let admitter = RecordingMcpAdmitter::default();
+    let mut connection = Connected::to_with_admitter(
+        host.clone(),
+        Arc::new(admitter.clone()) as Arc<dyn McpSessionAdmitter>,
+    );
+
+    let (initialized, _) = connection
+        .request(
+            "initialize",
+            serde_json::json!({
+                "protocolVersion": ProtocolVersion::V1.as_u16(),
+                "clientCapabilities": {},
+            }),
+        )
+        .await;
+    assert!(initialized.get("result").is_some());
+
+    let (opened, _) = connection
+        .request(
+            "session/new",
+            serde_json::json!({
+                "cwd": "/tmp/ws",
+                "mcpServers": [
+                    {
+                        "name": "files",
+                        "command": "/bin/true",
+                        "args": ["--stdio"],
+                        "env": [{ "name": "TOKEN", "value": "session-secret" }]
+                    },
+                    {
+                        "type": "http",
+                        "name": "remote",
+                        "url": "https://mcp.example.test/mcp",
+                        "headers": [{ "name": "Authorization", "value": "Bearer session-secret" }]
+                    }
+                ],
+            }),
+        )
+        .await;
+    let session = opened["result"]["sessionId"]
+        .as_str()
+        .unwrap_or_else(|| panic!("session/new was refused: {opened}"))
+        .to_owned();
+
+    for text in ["first", "second"] {
+        let (response, _) = connection
+            .request(
+                "session/prompt",
+                serde_json::json!({
+                    "sessionId": session,
+                    "prompt": [{ "type": "text", "text": text }],
+                }),
+            )
+            .await;
+        assert_eq!(response["result"]["stopReason"], "end_turn");
+    }
+
+    let requests = admitter.requests();
+    assert_eq!(
+        requests.len(),
+        1,
+        "admission must happen once per ACP session"
+    );
+    assert_eq!(requests[0].len(), 2);
+    let stdio = serde_json::to_value(&requests[0][0]).expect("stdio server serializes");
+    assert_eq!(stdio["name"], "files");
+    assert_eq!(stdio["command"], "/bin/true");
+    assert_eq!(stdio["env"][0]["name"], "TOKEN");
+    assert_eq!(stdio["env"][0]["value"], "session-secret");
+    let http = serde_json::to_value(&requests[0][1]).expect("HTTP server serializes");
+    assert_eq!(http["name"], "remote");
+    assert_eq!(http["url"], "https://mcp.example.test/mcp");
+    assert_eq!(http["headers"][0]["name"], "Authorization");
+    assert_eq!(http["headers"][0]["value"], "Bearer session-secret");
+
+    let bindings = host.mcp_sources();
+    assert_eq!(bindings.len(), 2, "both prompts must carry MCP bindings");
+    assert_eq!(
+        bindings[0], bindings[1],
+        "continuations changed live authority"
+    );
+    assert_eq!(
+        bindings[0].as_ref().map(|(_, errors)| errors.as_slice()),
+        Some(["safe MCP diagnostic".to_owned()].as_slice()),
+        "continuations lost the admitted safe diagnostics"
+    );
+
+    connection.finish().await;
+}
+
+#[tokio::test]
+async fn mcp_admission_failure_leaves_session_unknown_and_uninserted() {
+    let mut connection = Connected::to_with_admitter(
+        PromptExecutor::publishing(),
+        Arc::new(FailingMcpAdmitter) as Arc<dyn McpSessionAdmitter>,
+    );
+    let (initialized, _) = connection
+        .request(
+            "initialize",
+            serde_json::json!({
+                "protocolVersion": ProtocolVersion::V1.as_u16(),
+                "clientCapabilities": {},
+            }),
+        )
+        .await;
+    assert!(initialized.get("result").is_some());
+
+    let (rejected, _) = connection
+        .request(
+            "session/new",
+            serde_json::json!({
+                "cwd": "/tmp/ws",
+                "mcpServers": [{
+                    "name": "files",
+                    "command": "/bin/true",
+                    "args": [],
+                    "env": []
+                }],
+            }),
+        )
+        .await;
+    assert!(rejected.get("error").is_some());
+    assert!(rejected.get("result").is_none());
+
+    let (unknown, _) = connection
+        .request(
+            "session/prompt",
+            serde_json::json!({
+                "sessionId": "00000000-0000-0000-0000-000000000000",
+                "prompt": [{ "type": "text", "text": "must not run" }],
+            }),
+        )
+        .await;
+    let data = unknown["error"]["data"]
+        .as_str()
+        .unwrap_or_else(|| panic!("failed admission inserted a session: {unknown}"));
+    assert!(data.contains("session/new"));
     connection.finish().await;
 }

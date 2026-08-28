@@ -28,8 +28,8 @@ pub use foreign::{
     CleanupCertainty, DnsResolution, DuplexEnd, DuplexHandle, DuplexSession, DuplexSettlement,
     DuplexSpawner, ForeignToolId, ForeignTransportTarget, ForeignValueError, GuardedHttp, HttpBody,
     HttpHeader, HttpRequest, HttpRequestDigest, HttpRoute, HttpScheme, InvocationDigest,
-    NetworkTarget, OneHop, OneHopResponse, PreparedConnect, ResolvedConnect, Resolver, Subject,
-    TransportError, TransportFailure,
+    NetworkTarget, OneHop, OneHopPayload, OneHopResponse, PreparedConnect, ResolvedConnect,
+    Resolver, Subject, TransportError, TransportFailure,
 };
 pub use fs::{Fs, FsError, GuardedEffects, GuardedIo, IoDenied, McpHttpClaim, PathResolver};
 pub use grant::{
@@ -42,8 +42,9 @@ pub use scan::{Entry, EntryKind, Found, LineMatcher, Match, Scan, ScanLimits, Sc
 pub use scope::Scope;
 pub use spawn::{
     BackendIdentity, Confinement, ConfinementParseError, EnvName, EnvNameError, EnvPolicy,
-    ExecCaps, ExecObservation, ExecRequirements, MissingExecCaps, PolicyDigest, PolicyDigestError,
-    ProcessError, ProcessExecutor, RunConfinement, RunConfinementError, SpawnSpec, SpawnSpecError,
+    ExecCaps, ExecObservation, ExecRequirements, ExplicitEnvBinding, ExplicitEnvValueError,
+    MissingExecCaps, PolicyDigest, PolicyDigestError, ProcessError, ProcessExecutor,
+    RunConfinement, RunConfinementError, SpawnSpec, SpawnSpecError,
 };
 pub use tool::{
     MAX_TOOL_ERROR_DIAGNOSTIC_BYTES, PrepareCtx, StreamProvenance, Tool, ToolContentBlock,

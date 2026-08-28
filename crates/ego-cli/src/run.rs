@@ -44,10 +44,11 @@ use ego_core::state::{ItemKind, QuestionContinuation, SessionState};
 use ego_core::store::run_artifact::{PublishedRunArtifact, RunArtifactStore};
 use ego_core::store::session_store::{SessionMeta, SessionStore};
 use ego_core::turn::{
-    CancelToken, GenerationRuntime, InteractiveControl, Journal, JudgeContext, QueueStatus,
-    RegisteredTool, Session, ToolEffectPorts, Tools, TurnConfig, TurnLoop, TurnOutcome,
-    interactive_control,
+    AdmittedToolSource, CancelToken, GenerationRuntime, InteractiveControl, Journal, JudgeContext,
+    QueueStatus, RegisteredTool, Session, ToolEffectPorts, Tools, TurnConfig, TurnLoop,
+    TurnOutcome, interactive_control,
 };
+use ego_mcp::McpRegistryController;
 use ego_tools::clock::SystemClock;
 use ego_tools::config::OsUserConfigStore;
 use ego_tools::exec::{ProcessError, RunEffectPorts};
@@ -183,6 +184,8 @@ pub struct Ended {
     /// The final answer: the validated document under `--schema`, the last
     /// assistant message otherwise, and the empty string when there was none.
     pub result: Value,
+    /// One canonical, sanitized projection of MCP startup failures.
+    pub mcp_errors: Vec<String>,
 }
 
 impl Ended {
@@ -193,13 +196,26 @@ impl Ended {
             session: SessionId::new(),
             state: SessionState::default(),
             result: Value::String(String::new()),
+            mcp_errors: Vec::new(),
         }
     }
 }
 
-/// Run `args` to completion, publishing where `--output` says, and say how it
-/// ended.
-pub async fn run(args: Args, out: &Stdout, cancel: CancelToken) -> Ended {
+pub async fn run_with_mcp_registry(
+    args: Args,
+    out: &Stdout,
+    cancel: CancelToken,
+    registry: Arc<McpRegistryController>,
+) -> Ended {
+    run_process(args, out, cancel, registry).await
+}
+
+async fn run_process(
+    args: Args,
+    out: &Stdout,
+    cancel: CancelToken,
+    mcp_registry: Arc<McpRegistryController>,
+) -> Ended {
     let output = args.output;
     let quiet = args.quiet;
     // The one place the terminal is asked what it is. §4.5's "stdout is
@@ -225,7 +241,7 @@ pub async fn run(args: Args, out: &Stdout, cancel: CancelToken) -> Ended {
     let announce = Announce::new(out, capabilities, quiet);
     announce.opening(args.prompt.as_deref());
 
-    let ended = run_with(args, |_| sink, cancel).await;
+    let ended = run_with_registry(args, |_| sink, cancel, mcp_registry).await;
 
     // Draws the last block and closes the last line. A no-op unless text mode
     // has something outstanding, which is why it can run on the refusal path
@@ -237,11 +253,21 @@ pub async fn run(args: Args, out: &Stdout, cancel: CancelToken) -> Ended {
     ended
 }
 
-/// Talk to the model until the person stops, then say how it ended.
-///
-/// The mirror of [`run`] for a session driven from a keyboard: one session,
-/// one lease, many turns, and fresh authority at every generation boundary.
-pub async fn interactive(args: Args, out: &Stdout, cancel: CancelToken) -> Ended {
+pub async fn interactive_with_mcp_registry(
+    args: Args,
+    out: &Stdout,
+    cancel: CancelToken,
+    registry: Arc<McpRegistryController>,
+) -> Ended {
+    interactive_process(args, out, cancel, registry).await
+}
+
+async fn interactive_process(
+    args: Args,
+    out: &Stdout,
+    cancel: CancelToken,
+    mcp_registry: Arc<McpRegistryController>,
+) -> Ended {
     // A machine-readable stream has no reader here. `--output json` is a
     // single document at completion and a conversation has no completion, so
     // the flag is refused by name rather than quietly producing a stream
@@ -279,6 +305,7 @@ pub async fn interactive(args: Args, out: &Stdout, cancel: CancelToken) -> Ended
             capabilities,
             quiet,
             &output,
+            mcp_registry,
         )
         .await;
         output.finish();
@@ -287,7 +314,16 @@ pub async fn interactive(args: Args, out: &Stdout, cancel: CancelToken) -> Ended
         seat.join();
         ended
     } else {
-        interactive_through(args, cancel, Arc::clone(&seat), capabilities, quiet, out).await
+        interactive_through(
+            args,
+            cancel,
+            Arc::clone(&seat),
+            capabilities,
+            quiet,
+            out,
+            mcp_registry,
+        )
+        .await
     }
 }
 
@@ -298,6 +334,7 @@ async fn interactive_through(
     capabilities: Capabilities,
     quiet: bool,
     output: &dyn TextOutput,
+    mcp_registry: Arc<McpRegistryController>,
 ) -> Ended {
     let text_sink = TextSink::new(output, quiet, capabilities);
     let announce = Announce::new(output, capabilities, quiet);
@@ -316,13 +353,16 @@ async fn interactive_through(
         args,
         |_| &text_sink as &dyn EventSink,
         cancel,
-        Driver::Interactive {
-            seat: interactive_seat,
-            between: &between,
+        RunHost {
+            driver: Driver::Interactive {
+                seat: interactive_seat,
+                between: &between,
+            },
+            elicitor: Some(elicitor),
+            status: Some(status),
+            diagnostics: output,
+            mcp_registry,
         },
-        Some(elicitor),
-        Some(status),
-        output,
     )
     .await
     {
@@ -501,7 +541,7 @@ fn duration(elapsed: Duration) -> String {
 /// Run `args` to completion, publishing through the sink `destination` builds.
 ///
 /// The destination of the event stream is a *parameter* of a run, not a
-/// consequence of `--output`. [`run`] derives one from the flag because that is
+/// consequence of `--output`. [`run_with_mcp_registry`] derives one from the flag because that is
 /// what the flag is for; `ego acp` supplies one that turns each event into a
 /// `session/update` notification, and it is the same run underneath — one
 /// implementation of a turn, two places its events go.
@@ -514,40 +554,23 @@ fn duration(elapsed: Duration) -> String {
 /// resolution done twice with two chances to disagree. `destination` is
 /// therefore called once, at the point the answer exists. A caller that does
 /// not care ignores the argument: `|_| sink`.
-pub async fn run_with<S: EventSink>(
+async fn run_with_registry<S: EventSink>(
     args: Args,
     destination: impl FnOnce(&ModelCapabilities) -> S,
     cancel: CancelToken,
-) -> Ended {
-    match execute(args, destination, cancel, Driver::Once, None, None, &Stderr).await {
-        Ok(ended) => ended,
-        Err(refusal) => Ended::refused(refusal),
-    }
-}
-
-/// The same run, driven by a person instead of by argv.
-///
-/// Everything before the first turn is identical — startup preflight, one
-/// session, one lease — which is why this is a driver and not a second
-/// pipeline. `session::open` replays the log from disk, so opening one per
-/// typed line would make a conversation get slower the longer it went on.
-pub async fn converse<S: EventSink>(
-    args: Args,
-    destination: impl FnOnce(&ModelCapabilities) -> S,
-    cancel: CancelToken,
-    seat: Arc<dyn InteractiveSeat>,
-    elicitor: Option<Arc<dyn Elicitor>>,
-    diagnostics: &dyn Diagnostics,
-    between: &(dyn Fn() + Send + Sync),
+    mcp_registry: Arc<McpRegistryController>,
 ) -> Ended {
     match execute(
         args,
         destination,
         cancel,
-        Driver::Interactive { seat, between },
-        elicitor,
-        None,
-        diagnostics,
+        RunHost {
+            driver: Driver::Once,
+            elicitor: None,
+            status: None,
+            diagnostics: &Stderr,
+            mcp_registry,
+        },
     )
     .await
     {
@@ -1083,24 +1106,24 @@ struct GenerationPreflight {
     proof_evidence: SessionEvidenceStore,
 }
 
-async fn generation_preflight(
+struct GenerationPreflightInput<'a> {
     session_id: SessionId,
-    confinement: &RunConfinement,
-    effective: &Effective,
+    confinement: &'a RunConfinement,
+    effective: &'a Effective,
     slug: String,
-    cancel: &CancelToken,
+    cancel: &'a CancelToken,
     run_deadline: Option<std::time::Instant>,
+    mcp_registry: Option<Arc<McpRegistryController>>,
+    native_tools: &'a [RegisteredTool],
+}
+
+async fn generation_preflight(
+    input: GenerationPreflightInput<'_>,
     status: &mut Option<InteractiveStatus>,
 ) -> Result<GenerationPreflight, RunTermination> {
-    let mut running = Box::pin(generation_preflight_inner(
-        session_id,
-        confinement,
-        effective,
-        slug,
-        cancel,
-        run_deadline,
-        status,
-    ));
+    let run_deadline = input.run_deadline;
+    let cancel = input.cancel;
+    let mut running = Box::pin(generation_preflight_inner(input, status));
     tokio::select! {
         biased;
         cause = stop_signal(run_deadline) => {
@@ -1122,14 +1145,19 @@ async fn generation_preflight(
 }
 
 async fn generation_preflight_inner(
-    session_id: SessionId,
-    confinement: &RunConfinement,
-    effective: &Effective,
-    slug: String,
-    cancel: &CancelToken,
-    run_deadline: Option<std::time::Instant>,
+    input: GenerationPreflightInput<'_>,
     status: &mut Option<InteractiveStatus>,
 ) -> Result<GenerationPreflight, RunTermination> {
+    let GenerationPreflightInput {
+        session_id,
+        confinement,
+        effective,
+        slug,
+        cancel,
+        run_deadline,
+        mcp_registry,
+        native_tools,
+    } = input;
     let proof_directory = tempfile::tempdir().map_err(|error| RunTermination::Failed {
         message: format!("could not create the sandbox proof store: {error}"),
     })?;
@@ -1198,6 +1226,13 @@ async fn generation_preflight_inner(
                 Arc::clone(&picker),
                 Arc::clone(&selection),
                 Arc::clone(&config_store),
+                mcp_registry
+                    .as_ref()
+                    .map(Arc::clone)
+                    .ok_or_else(|| RunTermination::Failed {
+                        message: "interactive MCP registry authority is unavailable".to_owned(),
+                    })?,
+                native_tools.to_vec(),
             )
             .map_err(|error| RunTermination::Failed {
                 message: format!("interactive actions could not be installed: {error}"),
@@ -1291,6 +1326,7 @@ async fn drive_headless_turn(
     config: TurnConfig,
     turns: &Turns<'_>,
     registry: &[RegisteredTool],
+    admitted_tools: Option<Arc<dyn AdmittedToolSource>>,
     policy: &PolicyEngine,
     cwd: &Path,
     confinement: &RunConfinement,
@@ -1321,19 +1357,27 @@ async fn drive_headless_turn(
         config,
     };
     let fs = OsFs;
-    let tools = Tools::from_registry(
-        registry,
-        policy,
-        ToolEffectPorts::new(
-            &fs,
-            ports.process(),
-            active.evidence(),
-            ports.resolver_handle(),
-            ports.one_hop_handle(),
-            ports.duplex_handle(),
-        ),
-        CanonPath::new(cwd),
+    let effect_ports = ToolEffectPorts::new(
+        &fs,
+        ports.process(),
+        active.evidence(),
+        ports.resolver_handle(),
+        ports.one_hop_handle(),
+        ports.duplex_handle(),
     );
+    let tools = match admitted_tools {
+        Some(source) => Tools::from_registry_with_source(
+            registry,
+            source,
+            policy,
+            effect_ports,
+            CanonPath::new(cwd),
+        )
+        .map_err(|error| RunTermination::Failed {
+            message: format!("the admitted MCP tool catalogue is invalid: {error}"),
+        })?,
+        None => Tools::from_registry(registry, policy, effect_ports, CanonPath::new(cwd)),
+    };
     let loop_ = TurnLoop::new(session, runtime, tools);
     let loop_ = match elicitor {
         Some(elicitor) => loop_.with_elicitor(elicitor),
@@ -1457,12 +1501,16 @@ impl CliPrepared {
             proof_directory,
             proof_evidence,
         } = generation_preflight(
-            request.run_id.session_id(),
-            &confinement,
-            &effective,
-            slug,
-            &proof_cancel,
-            run_deadline,
+            GenerationPreflightInput {
+                session_id: request.run_id.session_id(),
+                confinement: &confinement,
+                effective: &effective,
+                slug,
+                cancel: &proof_cancel,
+                run_deadline,
+                mcp_registry: None,
+                native_tools: &registry,
+            },
             &mut no_status,
         )
         .await?;
@@ -1517,6 +1565,8 @@ impl CliPrepared {
         drop(self.proof_evidence);
         let mut active = ActiveSession::durable(opened, opening.clone(), EVIDENCE_CAP)
             .map_err(|error| RunExecutorError::new(error.to_string()))?;
+        let mcp_errors = bindings.mcp_errors().to_vec();
+        let admitted_tools = bindings.admitted_tools();
         let sink = bindings.sink_factory.create(&self.capabilities);
         sink.publish(
             &PublicEvent::SessionStarted {
@@ -1527,7 +1577,7 @@ impl CliPrepared {
                     self.system.is_some(),
                     self.compiled.is_some(),
                 ),
-                mcp_errors: Vec::new(),
+                mcp_errors,
                 hook_errors: Vec::new(),
                 instructions: self
                     .system
@@ -1565,6 +1615,7 @@ impl CliPrepared {
             config,
             &turns,
             &self.registry,
+            admitted_tools,
             &policy,
             &self.cwd,
             &self.confinement,
@@ -1747,6 +1798,7 @@ fn protocol_args(session_dir: Option<PathBuf>) -> Args {
         max_turns: None,
         timeout: None,
         tools: None,
+        mcp: Vec::new(),
         directory: None,
         set: Vec::new(),
         profile: None,
@@ -1932,17 +1984,41 @@ async fn execute<S: EventSink>(
     args: Args,
     destination: impl FnOnce(&ModelCapabilities) -> S,
     cancel: CancelToken,
-    driver: Driver<'_>,
-    elicitor: Option<Arc<dyn Elicitor>>,
-    mut status: Option<InteractiveStatus>,
-    diagnostics: &dyn Diagnostics,
+    host: RunHost<'_>,
 ) -> Result<Ended, RunTermination> {
+    let RunHost {
+        driver,
+        elicitor,
+        mut status,
+        diagnostics,
+        mcp_registry,
+    } = host;
     let usage = |err: UsageError| RunTermination::UsageError {
         message: err.to_string(),
     };
 
     let settings =
         settings(&args, |root| run_trust(&args, &driver, root), diagnostics).map_err(usage)?;
+    let selected_mcp =
+        config::selected_mcp(&args, &settings.effective, &settings.cwd).map_err(usage)?;
+    let selected_mcp = ego_tools::mcp::materialize_admissions(selected_mcp);
+    let refresh = ego_mcp::McpRegistryRefresh::new(
+        selected_mcp,
+        ego_mcp::RegistryTrigger::ConfigChanged,
+        ego_mcp::RegistryScope::All,
+    )
+    .map_err(|error| RunTermination::Failed {
+        message: error.to_string(),
+    })?;
+    mcp_registry
+        .reconcile(refresh)
+        .await
+        .map_err(|error| RunTermination::Failed {
+            message: error.to_string(),
+        })?;
+    let mcp_status = mcp_registry.status();
+    let mcp_errors = mcp_status.mcp_errors();
+    let admitted_tools = Some(mcp_registry.admitted_tools());
     let Chosen {
         store: jsonl_store,
         id: session_id,
@@ -2002,12 +2078,16 @@ async fn execute<S: EventSink>(
         proof_directory,
         proof_evidence,
     } = generation_preflight(
-        session_id,
-        &confinement,
-        &effective,
-        slug,
-        &cancel,
-        run_deadline,
+        GenerationPreflightInput {
+            session_id,
+            confinement: &confinement,
+            effective: &effective,
+            slug,
+            cancel: &cancel,
+            run_deadline,
+            mcp_registry: Some(Arc::clone(&mcp_registry)),
+            native_tools: &registry,
+        },
         &mut status,
     )
     .await?;
@@ -2083,7 +2163,7 @@ async fn execute<S: EventSink>(
             v: PUBLIC_EVENT_VERSION,
             session: active.id(),
             capabilities: capabilities(&registry, system.is_some(), compiled.is_some()),
-            mcp_errors: Vec::new(),
+            mcp_errors: mcp_errors.clone(),
             hook_errors: Vec::new(),
             instructions: system
                 .as_ref()
@@ -2155,19 +2235,29 @@ async fn execute<S: EventSink>(
                 gate: &mut gate,
                 config: config.clone(),
             };
-            let tools = Tools::from_registry(
-                &registry,
-                &policy,
-                ToolEffectPorts::new(
-                    &fs,
-                    $ports.process(),
-                    $active.evidence(),
-                    $ports.resolver_handle(),
-                    $ports.one_hop_handle(),
-                    $ports.duplex_handle(),
-                ),
-                CanonPath::new(&cwd),
+            let effect_ports = ToolEffectPorts::new(
+                &fs,
+                $ports.process(),
+                $active.evidence(),
+                $ports.resolver_handle(),
+                $ports.one_hop_handle(),
+                $ports.duplex_handle(),
             );
+            let tools = match admitted_tools.as_ref() {
+                Some(source) => Tools::from_registry_with_source(
+                    &registry,
+                    Arc::clone(source),
+                    &policy,
+                    effect_ports,
+                    CanonPath::new(&cwd),
+                )
+                .map_err(|error| RunTermination::Failed {
+                    message: format!("the admitted MCP tool catalogue is invalid: {error}"),
+                })?,
+                None => {
+                    Tools::from_registry(&registry, &policy, effect_ports, CanonPath::new(&cwd))
+                }
+            };
             let loop_ = TurnLoop::new(session, runtime, tools);
             let loop_ = match elicitor.as_ref() {
                 Some(elicitor) => loop_.with_elicitor(Arc::clone(elicitor)),
@@ -2208,6 +2298,7 @@ async fn execute<S: EventSink>(
                 config.clone(),
                 &turns,
                 &registry,
+                admitted_tools.clone(),
                 &policy,
                 &cwd,
                 &confinement,
@@ -2224,6 +2315,7 @@ async fn execute<S: EventSink>(
                 session: active.id(),
                 state,
                 result,
+                mcp_errors: mcp_errors.clone(),
             })
         }
         Driver::Interactive { seat, between } => {
@@ -2234,6 +2326,7 @@ async fn execute<S: EventSink>(
                 session: active.id(),
                 state: state.clone(),
                 result: Value::String(String::new()),
+                mcp_errors: mcp_errors.clone(),
             };
 
             // `ego "explain this failing test"` seeds the first turn; `ego`
@@ -2423,7 +2516,7 @@ async fn execute<S: EventSink>(
                                         config.system.is_some(),
                                         compiled.is_some(),
                                     ),
-                                    mcp_errors: Vec::new(),
+                                    mcp_errors: mcp_errors.clone(),
                                     hook_errors: Vec::new(),
                                     instructions: config
                                         .system
@@ -2447,6 +2540,7 @@ async fn execute<S: EventSink>(
                                     session: active.id(),
                                     state: state.clone(),
                                     result: Value::String(String::new()),
+                                    mcp_errors: mcp_errors.clone(),
                                 };
                                 break;
                             }
@@ -2549,6 +2643,7 @@ async fn execute<S: EventSink>(
                     session: active.id(),
                     state: state.clone(),
                     result,
+                    mcp_errors: mcp_errors.clone(),
                 };
 
                 // The person's own cancellations end a turn; the process's end
@@ -2582,6 +2677,14 @@ enum Driver<'a> {
         /// knows no more is coming, and between turns is when it knows.
         between: &'a (dyn Fn() + Send + Sync),
     },
+}
+
+struct RunHost<'a> {
+    driver: Driver<'a>,
+    elicitor: Option<Arc<dyn Elicitor>>,
+    status: Option<InteractiveStatus>,
+    diagnostics: &'a dyn Diagnostics,
+    mcp_registry: Arc<McpRegistryController>,
 }
 
 struct InteractiveStatus {
@@ -3018,12 +3121,14 @@ fn render<T: serde::Serialize>(out: &Stdout, value: &T, what: &str) -> Result<()
 
 /// The result of a run, rendered for `--output json` (`CLI.md` §4.1).
 pub fn report(ended: &Ended) -> Report {
-    Report::of(
+    let mut report = Report::of(
         ended.session,
         &ended.state,
         &ended.termination,
         ended.result.clone(),
-    )
+    );
+    report.mcp_errors = ended.mcp_errors.clone();
+    report
 }
 
 /// The one line text mode owes at the end when something went wrong.

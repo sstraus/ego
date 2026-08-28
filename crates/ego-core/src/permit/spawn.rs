@@ -3,6 +3,7 @@
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use futures::future::BoxFuture;
@@ -10,6 +11,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::CanonPath;
 use super::tool::{StreamProvenance, ToolContentBlock, ToolResult};
+use crate::credentials::SecretMaterial;
 use crate::store::evidence::EvidenceError;
 
 /// A validated, host-native environment variable name.
@@ -78,6 +80,157 @@ impl fmt::Display for EnvNameError {
 
 impl std::error::Error for EnvNameError {}
 
+/// One exact child environment entry whose value exists only in live effect authority.
+#[derive(Clone)]
+pub struct ExplicitEnvBinding {
+    name: EnvName,
+    value: Arc<SecretMaterial>,
+    encoding: ExplicitEnvEncoding,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExplicitEnvEncoding {
+    Utf8,
+    Native,
+}
+
+impl ExplicitEnvBinding {
+    pub fn new(name: EnvName, value: SecretMaterial) -> Self {
+        Self {
+            name,
+            value: Arc::new(value),
+            encoding: ExplicitEnvEncoding::Utf8,
+        }
+    }
+
+    pub fn from_native(name: EnvName, value: OsString) -> Result<Self, ExplicitEnvValueError> {
+        Ok(Self {
+            name,
+            value: Arc::new(SecretMaterial::new(encode_native_value(value)?)),
+            encoding: ExplicitEnvEncoding::Native,
+        })
+    }
+
+    pub fn name(&self) -> &EnvName {
+        &self.name
+    }
+
+    /// Expose the value only to the adapter constructing the child process.
+    pub fn expose_value(&self) -> &SecretMaterial {
+        self.value.as_ref()
+    }
+
+    /// Decode the live value according to the representation admitted by its
+    /// producer. Native bytes are inverted only for values produced by
+    /// `OsString::into_encoded_bytes`; foreign UTF-8 is validated first.
+    pub fn value_os_string(&self) -> Result<OsString, ExplicitEnvValueError> {
+        match self.encoding {
+            ExplicitEnvEncoding::Utf8 => {
+                let value = std::str::from_utf8(self.value.expose_secret_bytes())
+                    .map_err(|_| ExplicitEnvValueError::InvalidUtf8)?;
+                Ok(OsString::from(value))
+            }
+            ExplicitEnvEncoding::Native => decode_native_value(self.value.expose_secret_bytes()),
+        }
+    }
+}
+
+#[cfg(unix)]
+fn encode_native_value(value: OsString) -> Result<Vec<u8>, ExplicitEnvValueError> {
+    use std::os::unix::ffi::OsStringExt as _;
+
+    Ok(value.into_vec())
+}
+
+#[cfg(unix)]
+fn decode_native_value(bytes: &[u8]) -> Result<OsString, ExplicitEnvValueError> {
+    use std::os::unix::ffi::OsStringExt as _;
+
+    Ok(OsString::from_vec(bytes.to_vec()))
+}
+
+#[cfg(windows)]
+fn encode_native_value(value: OsString) -> Result<Vec<u8>, ExplicitEnvValueError> {
+    use std::os::windows::ffi::OsStrExt as _;
+
+    Ok(value
+        .encode_wide()
+        .flat_map(u16::to_le_bytes)
+        .collect::<Vec<_>>())
+}
+
+#[cfg(windows)]
+fn decode_native_value(bytes: &[u8]) -> Result<OsString, ExplicitEnvValueError> {
+    use std::os::windows::ffi::OsStringExt as _;
+
+    let mut chunks = bytes.chunks_exact(2);
+    let units = chunks
+        .by_ref()
+        .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+        .collect::<Vec<_>>();
+    if !chunks.remainder().is_empty() {
+        return Err(ExplicitEnvValueError::InvalidNativeEncoding);
+    }
+    Ok(OsString::from_wide(&units))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn encode_native_value(value: OsString) -> Result<Vec<u8>, ExplicitEnvValueError> {
+    value
+        .into_string()
+        .map(String::into_bytes)
+        .map_err(|_| ExplicitEnvValueError::InvalidNativeEncoding)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn decode_native_value(bytes: &[u8]) -> Result<OsString, ExplicitEnvValueError> {
+    String::from_utf8(bytes.to_vec())
+        .map(OsString::from)
+        .map_err(|_| ExplicitEnvValueError::InvalidNativeEncoding)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExplicitEnvValueError {
+    InvalidUtf8,
+    InvalidNativeEncoding,
+}
+
+impl fmt::Display for ExplicitEnvValueError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidUtf8 => {
+                formatter.write_str("explicit environment value is not valid UTF-8")
+            }
+            Self::InvalidNativeEncoding => {
+                formatter.write_str("explicit native environment value is invalid")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ExplicitEnvValueError {}
+
+impl fmt::Debug for ExplicitEnvBinding {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ExplicitEnvBinding")
+            .field("name", &self.name)
+            .field("value", &"[REDACTED]")
+            .field("encoding", &self.encoding)
+            .finish()
+    }
+}
+
+impl PartialEq for ExplicitEnvBinding {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+            && self.encoding == other.encoding
+            && self.value.expose_secret_bytes() == other.value.expose_secret_bytes()
+    }
+}
+
+impl Eq for ExplicitEnvBinding {}
+
 /// How a child derives its environment from the host at spawn time.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum EnvPolicy {
@@ -88,6 +241,11 @@ pub enum EnvPolicy {
     AllowOnly(Vec<EnvName>),
     /// Inherit every variable except the named variables.
     InheritedExcept(Vec<EnvName>),
+    /// Install only these explicit, zeroized values.
+    Exact {
+        names: Vec<EnvName>,
+        bindings: Vec<ExplicitEnvBinding>,
+    },
 }
 
 impl EnvPolicy {
@@ -107,11 +265,29 @@ impl EnvPolicy {
         canonical_names(names).map(Self::InheritedExcept)
     }
 
+    pub fn exact(mut bindings: Vec<ExplicitEnvBinding>) -> Result<Self, EnvNameError> {
+        bindings.sort_by(|left, right| left.name.cmp(&right.name));
+        bindings.dedup_by(|left, right| left.name == right.name);
+        let names = bindings
+            .iter()
+            .map(|binding| binding.name.clone())
+            .collect();
+        Ok(Self::Exact { names, bindings })
+    }
+
     /// The canonical name list, empty for an unfiltered inherited environment.
     pub fn names(&self) -> &[EnvName] {
         match self {
             Self::Inherited => &[],
             Self::AllowOnly(names) | Self::InheritedExcept(names) => names,
+            Self::Exact { names, .. } => names,
+        }
+    }
+
+    pub fn exact_bindings(&self) -> &[ExplicitEnvBinding] {
+        match self {
+            Self::Exact { bindings, .. } => bindings,
+            Self::Inherited | Self::AllowOnly(_) | Self::InheritedExcept(_) => &[],
         }
     }
 }

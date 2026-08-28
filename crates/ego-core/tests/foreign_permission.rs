@@ -7,16 +7,18 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Instant;
 
+use futures::StreamExt;
 use futures::future::{self, BoxFuture};
 use futures::io::{AsyncRead, AsyncWrite};
 
 use ego_core::config::{ConfigLayer, Mode, Ruleset, Source};
+use ego_core::generator::attempt::DeliveryCertainty;
 use ego_core::permit::{
     CanonPath, DuplexHandle, DuplexSession, DuplexSpawner, EnvPolicy, Fs, FsError, GuardedEffects,
     GuardedHttp, HttpHeader, HttpRequest, HttpRequestDigest, HttpRoute, HttpScheme, NetworkTarget,
-    OneHop, PathResolver, PolicyEngine, PreparedCall, PreparedConnect, ProcessError,
-    ProcessExecutor, Resolver, Scan, ScanRequest, SpawnSpec, Subject, ToolResult, TransportError,
-    TransportFailure,
+    OneHop, OneHopPayload, OneHopResponse, PathResolver, PolicyEngine, PreparedCall,
+    PreparedConnect, ProcessError, ProcessExecutor, Resolver, Scan, ScanRequest, SpawnSpec,
+    Subject, ToolResult, TransportError, TransportFailure,
 };
 use ego_core::store::evidence::{
     EvidenceError, EvidencePage, EvidenceRead, EvidenceStore, EvidenceWriter,
@@ -852,4 +854,42 @@ fn network_target_ipv6_literals_are_canonical_ip_targets() {
         assert_eq!(target.ip(), Some(IpAddr::V6(expected_ip)));
         assert_eq!(target.to_string(), format!("[{expected_ip}]:443"));
     }
+}
+
+#[test]
+fn one_hop_response_into_parts_preserves_owned_parts_and_closed_body_kind() {
+    futures::executor::block_on(async {
+        let headers = vec![HttpHeader::new("x-trace", b"owned".to_vec()).expect("header")];
+        let (status, returned_headers, payload, delivery) = OneHopResponse::streaming_response(
+            206,
+            headers.clone(),
+            Box::pin(futures::stream::once(futures::future::ready(Ok(
+                b"stream-body".to_vec(),
+            )))),
+        )
+        .into_parts();
+        assert_eq!(status, 206);
+        assert_eq!(returned_headers, headers);
+        assert_eq!(delivery, DeliveryCertainty::PossiblySent);
+        let OneHopPayload::Response(mut stream) = payload else {
+            panic!("streaming response returned a redirect payload");
+        };
+        assert_eq!(
+            stream.next().await.expect("body chunk").expect("body"),
+            b"stream-body"
+        );
+        assert!(stream.next().await.is_none());
+
+        let headers = vec![HttpHeader::new("x-trace", b"redirect".to_vec()).expect("header")];
+        let (status, returned_headers, payload, delivery) =
+            OneHopResponse::redirect(307, headers.clone(), b"https://example.test/next".to_vec())
+                .into_parts();
+        assert_eq!(status, 307);
+        assert_eq!(returned_headers, headers);
+        assert_eq!(delivery, DeliveryCertainty::PossiblySent);
+        let OneHopPayload::Redirect(location) = payload else {
+            panic!("redirect returned a streaming payload");
+        };
+        assert_eq!(location, b"https://example.test/next");
+    });
 }

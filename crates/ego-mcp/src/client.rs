@@ -13,8 +13,9 @@ use http::{HeaderName, HeaderValue};
 use rmcp::model::{
     CallToolRequestParams, CallToolResult, CancelledNotificationParam, ClientCapabilities,
     ClientInfo, ClientJsonRpcMessage, ClientRequest, GetPromptRequestParams, GetPromptResult,
-    Implementation, ListToolsRequest, PaginatedRequestParams, ProtocolVersion,
-    ReadResourceRequestParams, ReadResourceResult, ServerJsonRpcMessage, ServerResult,
+    Implementation, ListPromptsRequest, ListResourcesRequest, ListToolsRequest,
+    PaginatedRequestParams, Prompt, ProtocolVersion, ReadResourceRequestParams, ReadResourceResult,
+    Resource, ServerCapabilities, ServerJsonRpcMessage, ServerResult,
 };
 use rmcp::service::{PeerRequestOptions, RunningService};
 use rmcp::transport::common::client_side_sse::NeverRetry;
@@ -616,6 +617,19 @@ pub struct McpClient {
     state: ClientState,
 }
 
+pub(crate) struct McpClientInventory {
+    pub(crate) capabilities: ServerCapabilities,
+    pub(crate) tools: Vec<ToolDescriptor>,
+    pub(crate) resources: Vec<Resource>,
+    pub(crate) prompts: Vec<Prompt>,
+    pub(crate) expires_at: Option<Instant>,
+}
+
+struct CurrentList<T> {
+    items: Vec<T>,
+    minimum_ttl_ms: Option<u64>,
+}
+
 impl McpClient {
     pub fn connect_http(
         server: McpServerName,
@@ -743,22 +757,91 @@ impl McpClient {
         }
     }
 
-    pub async fn list_tools(&self) -> Result<Vec<ToolDescriptor>, McpError> {
+    pub async fn list_tools(&mut self) -> Result<Vec<ToolDescriptor>, McpError> {
         if self.control.cancelled.load(Ordering::Acquire) {
             return Err(McpError::new(
                 McpFailure::Cancelled,
                 "MCP client was cancelled",
             ));
         }
-        let ClientState::Running { service, .. } = &self.state else {
+        if !matches!(&self.state, ClientState::Running { .. }) {
             return Err(McpError::new(
                 McpFailure::Protocol,
                 "MCP client has not discovered its server",
             ));
-        };
+        }
         self.claim_operation()?;
-        let tools = self.list_current_tools(service).await?;
-        Ok(project_tools(tools))
+        let options = self.options;
+        let control = Arc::clone(&self.control);
+        let service = self.running_service_mut()?;
+        let tools = Self::list_current_tools(service, options, control).await?;
+        Ok(project_tools(tools.items))
+    }
+
+    pub(crate) async fn inventory(&mut self) -> Result<McpClientInventory, McpError> {
+        if self.control.cancelled.load(Ordering::Acquire) {
+            return Err(McpError::new(
+                McpFailure::Cancelled,
+                "MCP client was cancelled",
+            ));
+        }
+        if !matches!(&self.state, ClientState::Running { .. }) {
+            return Err(McpError::new(
+                McpFailure::Protocol,
+                "MCP client has not discovered its server",
+            ));
+        }
+        self.claim_operation()?;
+        let options = self.options;
+        let control = Arc::clone(&self.control);
+        let service = self.running_service_mut()?;
+        let capabilities = service
+            .peer_info()
+            .map(|peer| peer.capabilities.clone())
+            .ok_or_else(|| {
+                McpError::new(
+                    McpFailure::Protocol,
+                    "MCP discovery returned no server capabilities",
+                )
+            })?;
+        let tools = if capabilities.tools.is_some() {
+            Self::list_current_tools(service, options, Arc::clone(&control)).await?
+        } else {
+            CurrentList::empty()
+        };
+        let resources = if capabilities.resources.is_some() {
+            Self::list_current_resources(service, options, Arc::clone(&control)).await?
+        } else {
+            CurrentList::empty()
+        };
+        let prompts = if capabilities.prompts.is_some() {
+            Self::list_current_prompts(service, options, control).await?
+        } else {
+            CurrentList::empty()
+        };
+        let minimum_ttl_ms = [
+            tools.minimum_ttl_ms,
+            resources.minimum_ttl_ms,
+            prompts.minimum_ttl_ms,
+        ]
+        .into_iter()
+        .flatten()
+        .min();
+        let expires_at = minimum_ttl_ms
+            .map(std::time::Duration::from_millis)
+            .map(|ttl| {
+                Instant::now().checked_add(ttl).ok_or_else(|| {
+                    McpError::new(McpFailure::InvalidValue, "MCP cache expiry overflowed")
+                })
+            })
+            .transpose()?;
+        Ok(McpClientInventory {
+            capabilities,
+            tools: project_tools(tools.items),
+            resources: resources.items,
+            prompts: prompts.items,
+            expires_at,
+        })
     }
 
     /// Perform one manual tools/call round. Input-required is returned to the
@@ -837,63 +920,157 @@ impl McpClient {
     }
 
     async fn list_current_tools(
-        &self,
-        service: &RunningService<RoleClient, ClientInfo>,
-    ) -> Result<Vec<rmcp::model::Tool>, McpError> {
+        service: &mut RunningService<RoleClient, ClientInfo>,
+        options: McpClientOptions,
+        control: Arc<ClientControl>,
+    ) -> Result<CurrentList<rmcp::model::Tool>, McpError> {
         let mut tools = Vec::new();
         let mut cursor = None;
+        let mut minimum_ttl_ms = None;
+        let mut cache_scope = None;
         loop {
             let request = ClientRequest::ListToolsRequest(ListToolsRequest {
                 method: Default::default(),
                 params: Some(PaginatedRequestParams::default().with_cursor(cursor)),
                 extensions: Default::default(),
             });
-            let handle = service
-                .send_cancellable_request(
-                    request,
-                    PeerRequestOptions::with_timeout(
-                        self.options
-                            .deadline
-                            .saturating_duration_since(Instant::now()),
-                    ),
-                )
-                .await
-                .map_err(|error| McpError::new(McpFailure::Protocol, error.to_string()))?;
-            let request_id = handle.id.clone();
-            let response = tokio::select! {
-                response = handle.await_response() => response.map_err(|error| {
-                    McpError::new(McpFailure::Protocol, error.to_string())
-                })?,
-                () = wait_cancelled(Arc::clone(&self.control)) => {
-                    let _ = service.notify_cancelled(CancelledNotificationParam::new(
-                        Some(request_id),
-                        Some("MCP client operation cancelled".to_owned()),
-                    )).await;
-                    return Err(McpError::new(McpFailure::Cancelled, "MCP client was cancelled"));
-                }
-            };
+            let response =
+                Self::send_current_request(service, request, options, Arc::clone(&control)).await?;
             let ServerResult::ListToolsResult(result) = response else {
                 return Err(McpError::new(
                     McpFailure::Protocol,
                     "MCP server returned an unexpected tools/list response",
                 ));
             };
-            if !result
-                .result_type
-                .as_ref()
-                .is_some_and(rmcp::model::ResultType::is_complete)
-                || result.ttl_ms.is_none()
-                || result.cache_scope.is_none()
-            {
-                return Err(McpError::new(
-                    McpFailure::Protocol,
-                    "current tools/list result requires resultType, ttlMs, and cacheScope",
-                ));
-            }
+            observe_current_list_page(
+                result.result_type.as_ref(),
+                result.ttl_ms,
+                result.cache_scope,
+                &mut minimum_ttl_ms,
+                &mut cache_scope,
+                "tools/list",
+            )?;
             tools.extend(result.tools);
             cursor = result.next_cursor;
             if cursor.is_none() {
-                return Ok(tools);
+                return Ok(CurrentList {
+                    items: tools,
+                    minimum_ttl_ms,
+                });
+            }
+        }
+    }
+
+    async fn list_current_resources(
+        service: &mut RunningService<RoleClient, ClientInfo>,
+        options: McpClientOptions,
+        control: Arc<ClientControl>,
+    ) -> Result<CurrentList<Resource>, McpError> {
+        let mut resources = Vec::new();
+        let mut cursor = None;
+        let mut minimum_ttl_ms = None;
+        let mut cache_scope = None;
+        loop {
+            let request = ClientRequest::ListResourcesRequest(ListResourcesRequest {
+                method: Default::default(),
+                params: Some(PaginatedRequestParams::default().with_cursor(cursor)),
+                extensions: Default::default(),
+            });
+            let response =
+                Self::send_current_request(service, request, options, Arc::clone(&control)).await?;
+            let ServerResult::ListResourcesResult(result) = response else {
+                return Err(McpError::new(
+                    McpFailure::Protocol,
+                    "MCP server returned an unexpected resources/list response",
+                ));
+            };
+            observe_current_list_page(
+                result.result_type.as_ref(),
+                result.ttl_ms,
+                result.cache_scope,
+                &mut minimum_ttl_ms,
+                &mut cache_scope,
+                "resources/list",
+            )?;
+            resources.extend(result.resources);
+            cursor = result.next_cursor;
+            if cursor.is_none() {
+                return Ok(CurrentList {
+                    items: resources,
+                    minimum_ttl_ms,
+                });
+            }
+        }
+    }
+
+    async fn list_current_prompts(
+        service: &mut RunningService<RoleClient, ClientInfo>,
+        options: McpClientOptions,
+        control: Arc<ClientControl>,
+    ) -> Result<CurrentList<Prompt>, McpError> {
+        let mut prompts = Vec::new();
+        let mut cursor = None;
+        let mut minimum_ttl_ms = None;
+        let mut cache_scope = None;
+        loop {
+            let request = ClientRequest::ListPromptsRequest(ListPromptsRequest {
+                method: Default::default(),
+                params: Some(PaginatedRequestParams::default().with_cursor(cursor)),
+                extensions: Default::default(),
+            });
+            let response =
+                Self::send_current_request(service, request, options, Arc::clone(&control)).await?;
+            let ServerResult::ListPromptsResult(result) = response else {
+                return Err(McpError::new(
+                    McpFailure::Protocol,
+                    "MCP server returned an unexpected prompts/list response",
+                ));
+            };
+            observe_current_list_page(
+                result.result_type.as_ref(),
+                result.ttl_ms,
+                result.cache_scope,
+                &mut minimum_ttl_ms,
+                &mut cache_scope,
+                "prompts/list",
+            )?;
+            prompts.extend(result.prompts);
+            cursor = result.next_cursor;
+            if cursor.is_none() {
+                return Ok(CurrentList {
+                    items: prompts,
+                    minimum_ttl_ms,
+                });
+            }
+        }
+    }
+
+    async fn send_current_request(
+        service: &mut RunningService<RoleClient, ClientInfo>,
+        request: ClientRequest,
+        options: McpClientOptions,
+        control: Arc<ClientControl>,
+    ) -> Result<ServerResult, McpError> {
+        let handle = service
+            .send_cancellable_request(
+                request,
+                PeerRequestOptions::with_timeout(
+                    options.deadline.saturating_duration_since(Instant::now()),
+                ),
+            )
+            .await
+            .map_err(|error| McpError::new(McpFailure::Protocol, error.to_string()))?;
+        let request_id = handle.id.clone();
+        tokio::select! {
+            response = handle.await_response() => response.map_err(|error| {
+                McpError::new(McpFailure::Protocol, error.to_string())
+            }),
+            () = wait_cancelled(control) => {
+                let _ = service.notify_cancelled(CancelledNotificationParam::new(
+                    Some(request_id),
+                    Some("MCP client operation cancelled".to_owned()),
+                )).await;
+                Err(McpError::new(McpFailure::Cancelled, "MCP client was cancelled"))
             }
         }
     }
@@ -948,6 +1125,52 @@ impl McpClient {
 pub struct McpClientSettlement {
     http: Vec<McpHttpSettlement>,
     duplex: Option<DuplexSettlement>,
+}
+
+impl<T> CurrentList<T> {
+    fn empty() -> Self {
+        Self {
+            items: Vec::new(),
+            minimum_ttl_ms: None,
+        }
+    }
+}
+
+fn observe_current_list_page(
+    result_type: Option<&rmcp::model::ResultType>,
+    ttl_ms: Option<u64>,
+    scope: Option<rmcp::model::CacheScope>,
+    minimum_ttl_ms: &mut Option<u64>,
+    cache_scope: &mut Option<rmcp::model::CacheScope>,
+    operation: &str,
+) -> Result<(), McpError> {
+    if !result_type.is_some_and(rmcp::model::ResultType::is_complete) {
+        return Err(McpError::new(
+            McpFailure::Protocol,
+            format!("current {operation} result has no complete resultType"),
+        ));
+    }
+    let ttl_ms = ttl_ms.ok_or_else(|| {
+        McpError::new(
+            McpFailure::Protocol,
+            format!("current {operation} result has no ttlMs"),
+        )
+    })?;
+    let scope = scope.ok_or_else(|| {
+        McpError::new(
+            McpFailure::Protocol,
+            format!("current {operation} result has no cacheScope"),
+        )
+    })?;
+    if cache_scope.as_ref().is_some_and(|known| *known != scope) {
+        return Err(McpError::new(
+            McpFailure::Protocol,
+            format!("current {operation} pagination changed cacheScope"),
+        ));
+    }
+    *cache_scope = Some(scope);
+    *minimum_ttl_ms = Some((*minimum_ttl_ms).map_or(ttl_ms, |known| known.min(ttl_ms)));
+    Ok(())
 }
 
 fn project_tools(tools: Vec<rmcp::model::Tool>) -> Vec<ToolDescriptor> {

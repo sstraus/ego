@@ -42,13 +42,16 @@ const TABLE: &str = r#"{
 
 const ETAG: &str = "\"8cc8759e\"";
 
+type ProviderReply = (u16, String, Option<String>);
+type SharedProviderReply = Arc<Mutex<Option<ProviderReply>>>;
+
 /// A transport that records every request and answers a fixed script.
 ///
 /// Local rather than shared with `ego-ai`'s stub: what these tests assert is
 /// *how many times the network was touched*, often zero, and a counter is the
 /// whole apparatus that needs.
 struct Wire {
-    answer: Arc<Mutex<Option<(u16, String, Option<String>)>>>,
+    answer: SharedProviderReply,
     calls: Arc<Mutex<u32>>,
 }
 
@@ -86,7 +89,7 @@ impl Http for Wire {
 }
 
 struct WireCall {
-    answer: Arc<Mutex<Option<(u16, String, Option<String>)>>>,
+    answer: SharedProviderReply,
     calls: Arc<Mutex<u32>>,
 }
 

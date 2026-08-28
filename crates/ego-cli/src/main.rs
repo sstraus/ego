@@ -38,123 +38,191 @@ async fn ordinary_main() -> std::process::ExitCode {
     let cancel = CancelToken::new();
     let out = Stdout::new(cancel.clone());
 
-    let ended = match cli::parse(std::env::args().collect()) {
-        Ok(Invocation::Auth(args)) => {
-            let mut running = Box::pin(ego_cli::auth::execute(&args, &cancel));
-            let termination = tokio::select! {
-                biased;
-                cause = run::stop_signal(None) => {
-                    cancel.cancel(cause);
-                    let _ = running.as_mut().await;
-                    run::cancelled_termination(&cancel)
-                }
-                result = &mut running => {
-                    if cancel.is_cancelled() {
-                        run::cancelled_termination(&cancel)
-                    } else {
-                        match result {
-                            Ok(text) => {
-                                out.write(&text);
-                                RunTermination::Done
-                            }
-                            Err(err) => RunTermination::UsageError {
-                                message: err.to_string(),
-                            },
-                        }
-                    }
-                }
-            };
-            Ended {
-                termination,
-                session: ego_core::event::id::SessionId::new(),
-                state: ego_core::state::SessionState::default(),
-                result: serde_json::Value::String(String::new()),
-            }
-        }
-        // Configuration management has no session and observes no admitted
-        // protocol snapshot. It reports only the durable user-config outcome.
-        Ok(Invocation::Mcp(args)) => Ended {
-            termination: ego_cli::mcp::execute(&args, &out),
-            session: ego_core::event::id::SessionId::new(),
-            state: ego_core::state::SessionState::default(),
-            result: serde_json::Value::String(String::new()),
-        },
-        // `ls` starts no session and takes no turn, so it has no `Ended` to
-        // report — only a termination. The two absent fields are stated as
-        // what they are rather than filled with a session id nothing wrote.
-        Ok(Invocation::Ls(args)) => Ended {
-            termination: run::ls(&args, &out),
-            session: ego_core::event::id::SessionId::new(),
-            state: ego_core::state::SessionState::default(),
-            result: serde_json::Value::String(String::new()),
-        },
-        Ok(Invocation::Models(args)) => {
-            let termination = match ego_cli::models::execute(&args, &cancel).await {
-                Ok(rendered) => {
-                    out.line(&rendered);
-                    RunTermination::Done
-                }
-                Err(termination) => termination,
-            };
-            Ended {
-                termination,
-                session: ego_core::event::id::SessionId::new(),
-                state: ego_core::state::SessionState::default(),
-                result: serde_json::Value::String(String::new()),
-            }
-        }
-        // `acp` serves many sessions over one connection, so there is no single
-        // one to report — the same shape of absence `ls` has, for the opposite
-        // reason. Its termination says whether the connection ended cleanly.
-        Ok(Invocation::Acp(args)) => Ended {
-            termination: ego_cli::acp::serve(&args).await,
-            session: ego_core::event::id::SessionId::new(),
-            state: ego_core::state::SessionState::default(),
-            result: serde_json::Value::String(String::new()),
-        },
-        // `mcp-server` owns stdout as its JSON-RPC transport and serves many
-        // rooted runs, so the ordinary process projection must stay silent.
-        Ok(Invocation::McpServer(args)) => Ended {
-            termination: ego_cli::mcp_server::serve(&args).await,
-            session: ego_core::event::id::SessionId::new(),
-            state: ego_core::state::SessionState::default(),
-            result: serde_json::Value::String(String::new()),
-        },
-        // `--help` and `--version`. On **stdout** and exit 0, because the
-        // question was answered: `CLI.md` §4.3's exit 2 is a usage error, and
-        // asking what a command does is not misusing it. The text is written
-        // whole rather than through `out.line`, which appends a newline clap's
-        // rendering already has.
-        Ok(Invocation::Answered(text)) => {
-            out.write(&text);
-            Ended {
-                termination: RunTermination::Done,
-                session: ego_core::event::id::SessionId::new(),
-                state: ego_core::state::SessionState::default(),
-                result: serde_json::Value::String(String::new()),
-            }
-        }
-        Ok(Invocation::Interactive(args)) => run::interactive(*args, &out, cancel).await,
-        Ok(Invocation::Run(args) | Invocation::Resume(args)) => {
-            let json = args.output == cli::Output::Json;
-            let ended = run::run(*args, &out, cancel).await;
-            if json {
-                let report = run::report(&ended);
-                match serde_json::to_string(&report) {
-                    Ok(line) => out.line(&line),
-                    Err(err) => output::note(&format!("the result could not be rendered: {err}")),
-                }
-            }
-            ended
-        }
-        Err(usage) => Ended {
-            termination: RunTermination::UsageError {
-                message: usage.to_string(),
+    let invocation = cli::parse(std::env::args().collect());
+    let needs_mcp_runtime = matches!(
+        &invocation,
+        Ok(Invocation::Mcp(_)
+            | Invocation::Interactive(_)
+            | Invocation::Run(_)
+            | Invocation::Resume(_))
+    );
+    let mcp = if needs_mcp_runtime {
+        Some(ego_cli::provider_http::McpProcessScope::online(cancel.clone()).await)
+    } else {
+        None
+    };
+
+    let ended = if let Some(Err(error)) = mcp.as_ref() {
+        Ended {
+            termination: RunTermination::Failed {
+                message: error.clone(),
             },
             session: ego_core::event::id::SessionId::new(),
             state: ego_core::state::SessionState::default(),
             result: serde_json::Value::String(String::new()),
-        },
+            mcp_errors: Vec::new(),
+        }
+    } else {
+        match invocation {
+            Ok(Invocation::Auth(args)) => {
+                let mut running = Box::pin(ego_cli::auth::execute(&args, &cancel));
+                let termination = tokio::select! {
+                    biased;
+                    cause = run::stop_signal(None) => {
+                        cancel.cancel(cause);
+                        let _ = running.as_mut().await;
+                        run::cancelled_termination(&cancel)
+                    }
+                    result = &mut running => {
+                        if cancel.is_cancelled() {
+                            run::cancelled_termination(&cancel)
+                        } else {
+                            match result {
+                                Ok(text) => {
+                                    out.write(&text);
+                                    RunTermination::Done
+                                }
+                                Err(err) => RunTermination::UsageError {
+                                    message: err.to_string(),
+                                },
+                            }
+                        }
+                    }
+                };
+                Ended {
+                    termination,
+                    session: ego_core::event::id::SessionId::new(),
+                    state: ego_core::state::SessionState::default(),
+                    result: serde_json::Value::String(String::new()),
+                    mcp_errors: Vec::new(),
+                }
+            }
+            // Configuration management has no session, but it reconciles and
+            // projects the same process authority used by runs.
+            Ok(Invocation::Mcp(args)) => Ended {
+                termination: ego_cli::mcp::execute(
+                    &args,
+                    &out,
+                    mcp.as_ref()
+                        .and_then(|runtime| runtime.as_ref().ok())
+                        .expect("MCP invocation constructed its runtime")
+                        .controller(),
+                )
+                .await,
+                session: ego_core::event::id::SessionId::new(),
+                state: ego_core::state::SessionState::default(),
+                result: serde_json::Value::String(String::new()),
+                mcp_errors: Vec::new(),
+            },
+            // `ls` starts no session and takes no turn, so it has no `Ended` to
+            // report — only a termination. The two absent fields are stated as
+            // what they are rather than filled with a session id nothing wrote.
+            Ok(Invocation::Ls(args)) => Ended {
+                termination: run::ls(&args, &out),
+                session: ego_core::event::id::SessionId::new(),
+                state: ego_core::state::SessionState::default(),
+                result: serde_json::Value::String(String::new()),
+                mcp_errors: Vec::new(),
+            },
+            Ok(Invocation::Models(args)) => {
+                let termination = match ego_cli::models::execute(&args, &cancel).await {
+                    Ok(rendered) => {
+                        out.line(&rendered);
+                        RunTermination::Done
+                    }
+                    Err(termination) => termination,
+                };
+                Ended {
+                    termination,
+                    session: ego_core::event::id::SessionId::new(),
+                    state: ego_core::state::SessionState::default(),
+                    result: serde_json::Value::String(String::new()),
+                    mcp_errors: Vec::new(),
+                }
+            }
+            // `acp` serves many sessions over one connection, so there is no single
+            // one to report — the same shape of absence `ls` has, for the opposite
+            // reason. Its termination says whether the connection ended cleanly.
+            Ok(Invocation::Acp(args)) => Ended {
+                termination: ego_cli::acp::serve(&args).await,
+                session: ego_core::event::id::SessionId::new(),
+                state: ego_core::state::SessionState::default(),
+                result: serde_json::Value::String(String::new()),
+                mcp_errors: Vec::new(),
+            },
+            // `mcp-server` owns stdout as its JSON-RPC transport and serves many
+            // rooted runs, so the ordinary process projection must stay silent.
+            Ok(Invocation::McpServer(args)) => Ended {
+                termination: ego_cli::mcp_server::serve(&args).await,
+                session: ego_core::event::id::SessionId::new(),
+                state: ego_core::state::SessionState::default(),
+                result: serde_json::Value::String(String::new()),
+                mcp_errors: Vec::new(),
+            },
+            // `--help` and `--version`. On **stdout** and exit 0, because the
+            // question was answered: `CLI.md` §4.3's exit 2 is a usage error, and
+            // asking what a command does is not misusing it. The text is written
+            // whole rather than through `out.line`, which appends a newline clap's
+            // rendering already has.
+            Ok(Invocation::Answered(text)) => {
+                out.write(&text);
+                Ended {
+                    termination: RunTermination::Done,
+                    session: ego_core::event::id::SessionId::new(),
+                    state: ego_core::state::SessionState::default(),
+                    result: serde_json::Value::String(String::new()),
+                    mcp_errors: Vec::new(),
+                }
+            }
+            Ok(Invocation::Interactive(args)) => {
+                run::interactive_with_mcp_registry(
+                    *args,
+                    &out,
+                    cancel,
+                    std::sync::Arc::clone(
+                        mcp.as_ref()
+                            .and_then(|runtime| runtime.as_ref().ok())
+                            .expect("interactive invocation constructed its MCP runtime")
+                            .controller(),
+                    ),
+                )
+                .await
+            }
+            Ok(Invocation::Run(args) | Invocation::Resume(args)) => {
+                let json = args.output == cli::Output::Json;
+                let ended = run::run_with_mcp_registry(
+                    *args,
+                    &out,
+                    cancel,
+                    std::sync::Arc::clone(
+                        mcp.as_ref()
+                            .and_then(|runtime| runtime.as_ref().ok())
+                            .expect("run invocation constructed its MCP runtime")
+                            .controller(),
+                    ),
+                )
+                .await;
+                if json {
+                    let report = run::report(&ended);
+                    match serde_json::to_string(&report) {
+                        Ok(line) => out.line(&line),
+                        Err(err) => {
+                            output::note(&format!("the result could not be rendered: {err}"))
+                        }
+                    }
+                }
+                ended
+            }
+            Err(usage) => Ended {
+                termination: RunTermination::UsageError {
+                    message: usage.to_string(),
+                },
+                session: ego_core::event::id::SessionId::new(),
+                state: ego_core::state::SessionState::default(),
+                result: serde_json::Value::String(String::new()),
+                mcp_errors: Vec::new(),
+            },
+        }
     };
 
     run::diagnose(&ended.termination, out.broken());

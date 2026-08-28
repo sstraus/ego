@@ -347,6 +347,7 @@ impl From<&EnvPolicy> for CanonicalEnvironment {
             EnvPolicy::Inherited => "inherited",
             EnvPolicy::AllowOnly(_) => "allow_only",
             EnvPolicy::InheritedExcept(_) => "inherited_except",
+            EnvPolicy::Exact { .. } => "exact",
         };
         Self {
             policy: kind,

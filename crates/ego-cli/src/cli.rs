@@ -120,10 +120,6 @@ const UNAVAILABLE: &[Unavailable] = &[
                      results, so an image has no representation to be sent in",
     },
     Unavailable {
-        flags: &["--mcp"],
-        waiting_on: "the MCP client",
-    },
-    Unavailable {
         flags: &["-v", "--verbose"],
         waiting_on: "a decision about what it shows. Every other entry here \
                      waits on a subsystem; this one waits on a meaning. \
@@ -194,6 +190,13 @@ pub const UNBUILT: &[(&str, &str)] = &[
          over does not",
     ),
     (
+        "hooks",
+        "the strict hook catalogue and runner (**M4**). This build has no \
+         admitted hook snapshot to inspect; `docs/21-claude-hook-parity.md` \
+         defines the final stable Claude-compatible lifecycle and read-only \
+         projection",
+    ),
+    (
         "config",
         "a config writer. The loader is strict and read-only, and nothing in \
          this build writes a config file — `-c/--set` overrides one run",
@@ -213,9 +216,9 @@ pub const UNBUILT: &[(&str, &str)] = &[
     ),
     (
         "doctor",
-        "most of what it would diagnose: the credential store, the MCP client \
-         and the sandbox backend are each waiting on their own milestone, and a \
-         report on three absent subsystems is not a diagnosis",
+        "a diagnostic contract and its actionable probes. Authentication, \
+         model resolution, and sandbox execution now exist, but this build has \
+         no unified health report and its MCP client is still unbuilt",
     ),
 ];
 
@@ -366,6 +369,15 @@ pub struct McpServerArgs {
     pub max_resource_bytes: NonZeroUsize,
 }
 
+/// One explicitly selected MCP server for a run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum McpSelector {
+    /// A server selected from effective configuration.
+    Named(McpServerName),
+    /// A strict invocation-scoped JSON server object, decoded during composition.
+    File(PathBuf),
+}
+
 /// The exact semantic payload of `ego mcp`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpArgs {
@@ -383,6 +395,12 @@ pub enum McpAction {
     },
     List {
         json: bool,
+    },
+    Login {
+        name: McpServerName,
+    },
+    Reload {
+        name: Option<McpServerName>,
     },
 }
 
@@ -427,6 +445,8 @@ pub struct Args {
     pub max_turns: Option<u32>,
     pub timeout: Option<String>,
     pub tools: Option<Vec<String>>,
+    /// Ordered effective-name and invocation-file MCP selections.
+    pub mcp: Vec<McpSelector>,
     pub directory: Option<PathBuf>,
     pub set: Vec<String>,
     pub profile: Option<String>,
@@ -617,6 +637,10 @@ enum McpSubcommand {
         #[arg(long)]
         json: bool,
     },
+    /// Authorize one configured HTTP server through the product CIMD binding.
+    Login { name: String },
+    /// Reconcile every configured server, or one named server.
+    Reload { name: Option<String> },
 }
 
 #[derive(Debug, ClapArgs)]
@@ -781,6 +805,15 @@ struct Flags {
     #[arg(long, conflicts_with = "tools")]
     no_tools: bool,
 
+    /// Attach a named effective or strict invocation-scoped JSON MCP server.
+    #[arg(
+        long,
+        value_name = "NAME|@FILE",
+        action = ArgAction::Append,
+        value_parser = parse_mcp_selector
+    )]
+    mcp: Vec<McpSelector>,
+
     /// Permission mode: plan|default|auto|edits|yolo.
     #[arg(long, value_parser = parse_mode, group = "mode-choice")]
     mode: Option<Mode>,
@@ -848,6 +881,19 @@ fn parse_thinking(value: &str) -> Result<ThinkingLevel, String> {
             "`{other}` is not a thinking level: off|minimal|low|medium|high|xhigh|max"
         )),
     }
+}
+
+fn parse_mcp_selector(value: &str) -> Result<McpSelector, String> {
+    if let Some(path) = value.strip_prefix('@') {
+        if path.is_empty() {
+            return Err("an MCP file selector requires a path after `@`".to_string());
+        }
+        return Ok(McpSelector::File(PathBuf::from(path)));
+    }
+    value
+        .parse::<McpServerName>()
+        .map(McpSelector::Named)
+        .map_err(|error| error.to_string())
 }
 
 fn parse_mcp_name(value: String) -> Result<McpServerName, UsageError> {
@@ -921,6 +967,18 @@ fn into_mcp_args(
         McpSubcommand::List { json } => {
             reject_mcp_separator(separator_tail)?;
             McpAction::List { json }
+        }
+        McpSubcommand::Login { name } => {
+            reject_mcp_separator(separator_tail)?;
+            McpAction::Login {
+                name: parse_mcp_name(name)?,
+            }
+        }
+        McpSubcommand::Reload { name } => {
+            reject_mcp_separator(separator_tail)?;
+            McpAction::Reload {
+                name: name.map(parse_mcp_name).transpose()?,
+            }
         }
     };
     Ok(McpArgs { action })
@@ -1129,9 +1187,7 @@ pub fn parse(argv: Vec<String>) -> Result<Invocation, UsageError> {
             Parsed::Answered(text) => Ok(Invocation::Answered(text)),
             Parsed::Command(parsed) => {
                 let args = into_resume_args(parsed)?;
-                if args.prompt.is_none()
-                    && args.stdin == Stdin::Ambient
-                    && args.answers.is_empty()
+                if args.prompt.is_none() && args.stdin == Stdin::Ambient && args.answers.is_empty()
                 {
                     Ok(Invocation::Interactive(Box::new(args)))
                 } else {
@@ -1325,6 +1381,7 @@ fn into_args(command: RunCommand) -> Result<Args, UsageError> {
         } else {
             flags.tools
         },
+        mcp: flags.mcp,
         directory: flags.common.places.directory,
         set: flags.set,
         profile: flags.profile,
