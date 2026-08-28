@@ -20,6 +20,7 @@ struct LocalPeer {
     accepted: Arc<AtomicBool>,
     headers_sent: Arc<AtomicBool>,
     first_event_sent: Arc<AtomicBool>,
+    first_body_poll: Arc<AtomicBool>,
     peer_dropped: Arc<AtomicBool>,
     body_dropped: Arc<AtomicBool>,
     active_tasks: Arc<AtomicUsize>,
@@ -32,6 +33,7 @@ impl LocalPeer {
             accepted: Arc::new(AtomicBool::new(false)),
             headers_sent: Arc::new(AtomicBool::new(false)),
             first_event_sent: Arc::new(AtomicBool::new(false)),
+            first_body_poll: Arc::new(AtomicBool::new(false)),
             peer_dropped: Arc::new(AtomicBool::new(false)),
             body_dropped: Arc::new(AtomicBool::new(false)),
             active_tasks: Arc::new(AtomicUsize::new(0)),
@@ -215,20 +217,28 @@ impl McpHttpEffects for PeerBroker {
             })?;
             *active.lock().expect("active stream") = None;
             let body_dropped = Arc::clone(&peer.body_dropped);
+            let first_body_poll = Arc::clone(&peer.first_body_poll);
             let body = futures::stream::unfold(
                 Some(BodyState::First(first_event, BodyDropProbe(body_dropped))),
-                |state| async move {
-                    match state? {
-                        BodyState::First(chunk, probe) => Some((
-                            Ok::<Vec<u8>, TransportError>(chunk),
-                            Some(BodyState::Pending(probe)),
-                        )),
-                        BodyState::Pending(probe) => {
-                            futures::future::pending::<()>().await;
-                            Some((
-                                Ok::<Vec<u8>, TransportError>(Vec::new()),
-                                Some(BodyState::Pending(probe)),
-                            ))
+                move |state| {
+                    let first_body_poll = Arc::clone(&first_body_poll);
+                    async move {
+                        match state? {
+                            BodyState::First(chunk, probe) => {
+                                first_body_poll.store(true, Ordering::Release);
+                                futures::future::pending::<()>().await;
+                                Some((
+                                    Ok::<Vec<u8>, TransportError>(chunk),
+                                    Some(BodyState::Pending(probe)),
+                                ))
+                            }
+                            BodyState::Pending(probe) => {
+                                futures::future::pending::<()>().await;
+                                Some((
+                                    Ok::<Vec<u8>, TransportError>(Vec::new()),
+                                    Some(BodyState::Pending(probe)),
+                                ))
+                            }
                         }
                     }
                 },
@@ -368,7 +378,7 @@ fn real_peer_cancel_after_one_sse_event_closes_body_and_preserves_possible_deliv
             .expect("runtime")
             .block_on(client.discover())
     });
-    while !peer.first_event_sent.load(Ordering::Acquire) {
+    while !peer.first_body_poll.load(Ordering::Acquire) {
         thread::yield_now();
     }
     cancellation.cancel();
