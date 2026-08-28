@@ -150,18 +150,27 @@ impl McpDuplexEffects for FakeDuplex {
 
 struct MemoryDuplex {
     inner: Cursor<Vec<u8>>,
+    output: Arc<Mutex<Vec<u8>>>,
     evidence: Arc<Mutex<Vec<&'static str>>>,
 }
 
 impl MemoryDuplex {
     fn with_evidence() -> (Self, Arc<Mutex<Vec<&'static str>>>) {
+        let (duplex, evidence, _) = Self::with_input(Vec::new());
+        (duplex, evidence)
+    }
+
+    fn with_input(input: Vec<u8>) -> (Self, Arc<Mutex<Vec<&'static str>>>, Arc<Mutex<Vec<u8>>>) {
         let evidence = Arc::new(Mutex::new(Vec::new()));
+        let output = Arc::new(Mutex::new(Vec::new()));
         (
             Self {
-                inner: Cursor::new(Vec::new()),
+                inner: Cursor::new(input),
+                output: Arc::clone(&output),
                 evidence: Arc::clone(&evidence),
             },
             evidence,
+            output,
         )
     }
 }
@@ -179,10 +188,14 @@ impl AsyncRead for MemoryDuplex {
 impl AsyncWrite for MemoryDuplex {
     fn poll_write(
         mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
+        _cx: &mut std::task::Context<'_>,
         bytes: &[u8],
     ) -> std::task::Poll<std::io::Result<usize>> {
-        std::pin::Pin::new(&mut self.inner).poll_write(cx, bytes)
+        self.output
+            .lock()
+            .expect("duplex output")
+            .extend_from_slice(bytes);
+        std::task::Poll::Ready(Ok(bytes.len()))
     }
 
     fn poll_flush(
@@ -705,6 +718,27 @@ async fn server_adapter_owns_rmcp_and_exposes_only_scoped_port_values() {
         .await
         .expect("server EOF has a truthful settlement");
     assert_eq!(settlement.cleanup(), &CleanupCertainty::Complete);
+    assert_eq!(
+        evidence.lock().expect("duplex evidence").as_slice(),
+        &["settle"]
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn server_uses_the_current_protocol_revision_for_an_unsupported_request() {
+    let mut request = br#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"unsupported-client","version":"1.0"}}}"#.to_vec();
+    request.push(b'\n');
+    let (duplex, evidence, output) = MemoryDuplex::with_input(request);
+    let port: Arc<dyn McpServerPort> = Arc::new(ServerPort);
+    let duplex: ego_core::permit::DuplexHandle = Box::new(duplex);
+
+    serve_stdio(port, duplex)
+        .await
+        .expect("server EOF has a truthful settlement");
+
+    let output = output.lock().expect("duplex output");
+    let response: serde_json::Value = serde_json::from_slice(&output).expect("JSON response");
+    assert_eq!(response["result"]["protocolVersion"], "2026-07-28");
     assert_eq!(
         evidence.lock().expect("duplex evidence").as_slice(),
         &["settle"]

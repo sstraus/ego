@@ -100,10 +100,7 @@ fn collapsed_bootstrap_rejects_retired_alias_families_and_invalid_schema_results
         json!({"structuredContent":{"name":"weather","description":"extra","inputSchema":{"type":"object"},"extra":true}}),
         json!({"structuredContent":{"name":"weather","description":"duplicate","inputSchema":{"type":7}}}),
     ] {
-        assert!(
-            McpCollapsedCatalogue::from_schema_response(bootstrap, "weather", result)
-                .is_err()
-        );
+        assert!(McpCollapsedCatalogue::from_schema_response(bootstrap, "weather", result).is_err());
     }
 }
 

@@ -105,6 +105,7 @@ impl ServerHandler for ServerAdapter {
                 .enable_resources()
                 .build(),
         )
+        .with_protocol_version(ProtocolVersion::V_2026_07_28)
         .with_server_info(Implementation::new(
             self.name.to_string(),
             env!("CARGO_PKG_VERSION"),
