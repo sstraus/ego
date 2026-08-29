@@ -28,20 +28,26 @@ fn request(id: usize, method: &str) -> String {
             "jsonrpc": "2.0",
             "id": id,
             "method": method,
-            "params": {
-                "_meta": {
-                    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
-                    "io.modelcontextprotocol/clientInfo": {
-                        "name": "ego-test",
-                        "version": "0.1.0"
-                    },
-                    "io.modelcontextprotocol/clientCapabilities": {
-                        "roots": {"listChanged": true},
-                        "elicitation": {}
-                    }
-                }
-            }
+            "params": {}
         })
+    )
+}
+
+fn initialize_request() -> String {
+    format!(
+        "{}\n",
+        serde_json::json!({
+            "jsonrpc": "2.0", "id": 99, "method": "initialize",
+            "params": {"protocolVersion": "2025-11-25", "capabilities": {},
+                "clientInfo": {"name": "claude", "version": "1.0"}}
+        })
+    )
+}
+
+fn initialized_notification() -> String {
+    format!(
+        "{}\n",
+        serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized"})
     )
 }
 
@@ -121,7 +127,9 @@ fn mcp_server_processes_three_requests_before_piped_stdin_eof() {
     let mut stdin = child.stdin.take().expect("piped MCP stdin");
     let responses = stdout_lines(child.stdout.take().expect("piped MCP stdout"));
 
-    let mut input = request(0, "resources/list");
+    let mut input = initialize_request();
+    input.push_str(&initialized_notification());
+    input.push_str(&request(0, "resources/list"));
     input.push_str(&request(1, "tools/list"));
     input.push_str(&request(2, "resources/list"));
     stdin
@@ -132,8 +140,8 @@ fn mcp_server_processes_three_requests_before_piped_stdin_eof() {
     let mut lines = Vec::new();
     let mut timed_out = false;
     let mut stdout_error = None;
-    for _ in 0..3 {
-        match responses.recv_timeout(Duration::from_secs(1)) {
+    for _ in 0..4 {
+        match responses.recv_timeout(Duration::from_secs(3)) {
             Ok(Ok(line)) => lines.push(line),
             Ok(Err(error)) => {
                 timed_out = true;
@@ -170,11 +178,11 @@ fn mcp_server_processes_three_requests_before_piped_stdin_eof() {
             .iter()
             .map(|response| response["id"].as_u64().expect("response id"))
             .collect::<BTreeSet<_>>(),
-        BTreeSet::from([0, 1, 2])
+        BTreeSet::from([0, 1, 2, 99])
     );
     // Concurrent JSON-RPC handlers may complete in any order; the ID set is
     // the contract, and each payload is selected by its own ID below.
-    assert_eq!(responses.len(), 3, "one response per request");
+    assert_eq!(responses.len(), 4, "one response per request");
     let response_for = |id| {
         responses
             .iter()
@@ -214,4 +222,62 @@ fn mcp_server_processes_three_requests_before_piped_stdin_eof() {
             .collect::<Vec<_>>(),
         EXPECTED_RESOURCES.to_vec()
     );
+}
+
+#[test]
+fn mcp_server_negotiates_claude_protocol_revision() {
+    let fixture = TempDir::new().expect("temporary MCP fixture");
+    let home = fixture.path().join("ego-home");
+    let workspace = fixture.path().join("workspace");
+    let sessions = workspace.join("sessions");
+    std::fs::create_dir_all(&home).expect("MCP home");
+    std::fs::create_dir_all(&sessions).expect("MCP sessions");
+    std::fs::write(
+        home.join("config.toml"),
+        "model = \"ollama/qwen3\"\nthinking = \"off\"\nbudget = \"4k\"\n",
+    )
+    .expect("isolated MCP config");
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ego"))
+        .env_clear()
+        .env("HOME", &home)
+        .env("EGO_HOME", &home)
+        .env("EGO_MODEL", "ollama/qwen3")
+        .env("OLLAMA_HOST", "127.0.0.1:1")
+        .env("PATH", "/usr/bin:/bin")
+        .current_dir(&workspace)
+        .args([
+            "mcp-server",
+            "-C",
+            workspace.to_str().expect("workspace path"),
+            "--session-dir",
+            sessions.to_str().expect("session path"),
+            "--max-concurrent-runs",
+            "1",
+            "--retained-requests",
+            "4",
+            "--max-resource-bytes",
+            "65536",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("the ego binary was built");
+    let mut stdin = child.stdin.take().expect("piped MCP stdin");
+    let responses = stdout_lines(child.stdout.take().expect("piped MCP stdout"));
+    let initialize = serde_json::json!({
+        "jsonrpc": "2.0", "id": 0, "method": "initialize",
+        "params": {"protocolVersion": "2025-11-25", "capabilities": {},
+            "clientInfo": {"name": "claude", "version": "1.0"}}
+    });
+    writeln!(stdin, "{initialize}").expect("initialize request is written");
+    stdin.flush().expect("initialize request is flushed");
+    let response = responses
+        .recv_timeout(Duration::from_secs(3))
+        .expect("initialize response before stdin EOF")
+        .expect("stdout response");
+    drop(stdin);
+    let _ = reap(&mut child);
+    let response: Value = serde_json::from_str(&response).expect("complete JSON-RPC response");
+    assert_eq!(response["result"]["protocolVersion"], "2025-11-25");
 }

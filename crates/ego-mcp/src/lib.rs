@@ -1,4 +1,7 @@
-//! Current MCP 2026-07-28 protocol ownership and guarded transport adapters.
+//! MCP protocol ownership and guarded transport adapters.
+//!
+//! Outbound clients select 2026-07-28. The Claude-facing inbound stdio server
+//! selects 2025-11-25 until Claude supports the newer protocol era.
 
 mod admission;
 mod client;

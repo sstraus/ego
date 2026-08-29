@@ -728,7 +728,7 @@ async fn server_adapter_owns_rmcp_and_exposes_only_scoped_port_values() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn server_uses_the_current_protocol_revision_for_an_unsupported_request() {
+async fn server_negotiates_the_supported_protocol_revision_for_an_older_request() {
     let mut request = br#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"unsupported-client","version":"1.0"}}}"#.to_vec();
     request.push(b'\n');
     let (duplex, evidence, output) = MemoryDuplex::with_input(request);
@@ -741,7 +741,7 @@ async fn server_uses_the_current_protocol_revision_for_an_unsupported_request() 
 
     let output = output.lock().expect("duplex output");
     let response: serde_json::Value = serde_json::from_slice(&output).expect("JSON response");
-    assert_eq!(response["result"]["protocolVersion"], "2026-07-28");
+    assert_eq!(response["result"]["protocolVersion"], "2025-11-25");
     assert_eq!(
         evidence.lock().expect("duplex evidence").as_slice(),
         &["settle"]

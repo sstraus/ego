@@ -95,7 +95,7 @@ struct ServerAdapter {
 
 impl ServerHandler for ServerAdapter {
     fn supported_protocol_versions(&self) -> Cow<'static, [ProtocolVersion]> {
-        Cow::Owned(vec![ProtocolVersion::V_2026_07_28])
+        Cow::Owned(vec![ProtocolVersion::V_2025_11_25])
     }
 
     fn get_info(&self) -> ServerInfo {
@@ -105,7 +105,7 @@ impl ServerHandler for ServerAdapter {
                 .enable_resources()
                 .build(),
         )
-        .with_protocol_version(ProtocolVersion::V_2026_07_28)
+        .with_protocol_version(ProtocolVersion::V_2025_11_25)
         .with_server_info(Implementation::new(
             self.name.to_string(),
             env!("CARGO_PKG_VERSION"),
