@@ -11,14 +11,18 @@ use std::fs::{self, OpenOptions};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use ego_core::compact::{CompactionLineage, CompactionPublication};
 use ego_core::event::domain::{DomainEvent, EventKind};
 use ego_core::event::hook::HookCatalogueEvidence;
 use ego_core::event::id::{Producer, Seq, SessionId};
 use ego_core::event::time::Timestamp;
 use ego_core::permit::ExecObservation;
 use ego_core::run::{RunAppend, RunCommand, RunRevision, RunTransaction};
+use ego_core::session::{
+    ReplaySource, ReplaySourceError, SessionBlobSource, SessionLineage, TargetPublication,
+    TargetSeed,
+};
 use ego_core::state::SessionState;
+use ego_core::store::blob::{BlobError, BlobStore};
 use ego_core::store::codec::{
     CODEC_VERSION, CodecError, Header, StoreLine, decode_line, encode_header, encode_record,
 };
@@ -26,6 +30,7 @@ use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, St
 use fd_lock::RwLock;
 use futures::stream::{self, BoxStream};
 
+use super::blob::SessionBlobStore;
 use super::io::{AtomicReplacePublication, StoreIo, tmp_path_for};
 use super::snapshot::{SNAPSHOT_VERSION, Snapshot, SnapshotRejection, validate};
 
@@ -51,7 +56,7 @@ struct LogManifestFacts {
     workspace_root: PathBuf,
     last_ts: Option<Timestamp>,
     model: Option<String>,
-    lineage: Option<CompactionLineage>,
+    lineage: Option<SessionLineage>,
     execution: Option<ExecObservation>,
     hooks: HookCatalogueEvidence,
 }
@@ -339,11 +344,14 @@ fn log_manifest_facts(log: &[u8]) -> Option<LogManifestFacts> {
                         prompt_revision,
                         ..
                     } => {
-                        lineage = Some(CompactionLineage {
+                        lineage = Some(SessionLineage::Compaction {
                             source,
                             source_seq,
                             prompt_revision,
                         })
+                    }
+                    EventKind::Forked { source, at_seq } => {
+                        lineage = Some(SessionLineage::Fork { source, at_seq })
                     }
                     EventKind::ExecutionObserved { observation } => execution = Some(observation),
                     EventKind::HookCatalogueAdmitted { descriptors } => hooks = descriptors,
@@ -497,40 +505,62 @@ impl JsonlStore {
         })
     }
 
-    /// Publish the complete first log image for a clean compaction target.
+    /// Publish the complete first log image for a typed target.
     ///
     /// The phase-aware replace is the authority boundary: before rename the
     /// source may remain active and retry; after rename the target is visible
     /// and must be selected even when the directory durability barrier or the
     /// derived manifest cache reports a failure.
-    pub(super) fn publish_compaction_seed(
-        &self,
-        id: &SessionId,
-        seed: &DomainEvent,
-    ) -> CompactionPublication {
-        self.with_events_lock(id, || {
-            Ok(self.publish_compaction_seed_already_locked(id, seed))
-        })
-        .unwrap_or_else(|error| CompactionPublication::NotPublished {
-            diagnostic: format!("the compaction target lock could not be acquired: {error}"),
-        })
+    pub(super) fn publish_target(&self, id: &SessionId, seed: &TargetSeed) -> TargetPublication {
+        self.with_events_lock(id, || Ok(self.publish_target_already_locked(id, seed)))
+            .unwrap_or_else(|error| TargetPublication::NotPublished {
+                diagnostic: format!("the target lock could not be acquired: {error}"),
+            })
     }
 
-    fn publish_compaction_seed_already_locked(
+    fn publish_target_already_locked(
         &self,
         id: &SessionId,
-        seed: &DomainEvent,
-    ) -> CompactionPublication {
+        seed: &TargetSeed,
+    ) -> TargetPublication {
+        let event = seed.event();
         let mut first = Seq::ZERO;
         first.next();
-        let valid_seed = seed.env.seq == first
-            && seed.env.item.is_some()
-            && seed.env.parent.is_none()
-            && seed.env.producer == Producer::Main
-            && matches!(seed.kind, EventKind::CompactionSeeded { .. });
+        let valid_kind = match (&event.kind, seed.lineage()) {
+            (
+                EventKind::Forked { source, at_seq },
+                SessionLineage::Fork {
+                    source: lineage_source,
+                    at_seq: lineage_seq,
+                },
+            ) => event.env.item.is_none() && *source == lineage_source && *at_seq == lineage_seq,
+            (
+                EventKind::CompactionSeeded {
+                    source,
+                    source_seq,
+                    prompt_revision,
+                    ..
+                },
+                SessionLineage::Compaction {
+                    source: lineage_source,
+                    source_seq: lineage_seq,
+                    prompt_revision: lineage_revision,
+                },
+            ) => {
+                event.env.item.is_some()
+                    && *source == lineage_source
+                    && *source_seq == lineage_seq
+                    && *prompt_revision == lineage_revision
+            }
+            _ => false,
+        };
+        let valid_seed = event.env.seq == first
+            && event.env.parent.is_none()
+            && event.env.producer == Producer::Main
+            && valid_kind;
         if !valid_seed {
-            return CompactionPublication::NotPublished {
-                diagnostic: "a compaction target requires one canonical sequence-1 seed event"
+            return TargetPublication::NotPublished {
+                diagnostic: "a target requires one canonical typed sequence-1 seed event"
                     .to_string(),
             };
         }
@@ -539,25 +569,25 @@ impl JsonlStore {
         match self.io.exists(&log_path) {
             Ok(false) => {}
             Ok(true) => {
-                return CompactionPublication::NotPublished {
-                    diagnostic: "the compaction target already has an event log".to_string(),
+                return TargetPublication::NotPublished {
+                    diagnostic: "the target already has an event log".to_string(),
                 };
             }
             Err(error) => {
-                return CompactionPublication::NotPublished {
-                    diagnostic: format!("the compaction target could not be inspected: {error}"),
+                return TargetPublication::NotPublished {
+                    diagnostic: format!("the target could not be inspected: {error}"),
                 };
             }
         }
 
-        let header = Header::new(*id, seed.env.ts, self.workspace.clone());
+        let header = Header::new(*id, event.env.ts, self.workspace.clone());
         let mut log = encode_header(&header);
         log.push(b'\n');
-        let record = match encode_record(first, seed) {
+        let record = match encode_record(first, &SessionEntry::Event(event.clone())) {
             Ok(record) => record,
             Err(error) => {
-                return CompactionPublication::NotPublished {
-                    diagnostic: format!("the compaction seed could not be encoded: {error}"),
+                return TargetPublication::NotPublished {
+                    diagnostic: format!("the target seed could not be encoded: {error}"),
                 };
             }
         };
@@ -567,19 +597,19 @@ impl JsonlStore {
         let publication = match self.io.replace_atomic_publication(&log_path, &log) {
             Ok(publication) => publication,
             Err(error) => {
-                return CompactionPublication::NotPublished {
-                    diagnostic: format!("the compaction target was not published: {error}"),
+                return TargetPublication::NotPublished {
+                    diagnostic: format!("the target was not published: {error}"),
                 };
             }
         };
 
         let manifest_diagnostic = self
-            .write_manifest(id, seed, true)
+            .write_manifest(id, event, true)
             .err()
             .map(|error| format!("manifest cache update failed: {error}"));
         match publication {
             super::io::AtomicReplacePublication::PublishedDurably => {
-                CompactionPublication::PublishedDurably {
+                TargetPublication::PublishedDurably {
                     diagnostic: manifest_diagnostic,
                 }
             }
@@ -588,7 +618,7 @@ impl JsonlStore {
                     Some(manifest) => format!("{diagnostic}; {manifest}"),
                     None => diagnostic,
                 };
-                CompactionPublication::PublishedDurabilityUncertain { diagnostic }
+                TargetPublication::PublishedDurabilityUncertain { diagnostic }
             }
         }
     }
@@ -983,10 +1013,14 @@ impl JsonlStore {
                     source_seq,
                     prompt_revision,
                     ..
-                } => Some(CompactionLineage {
+                } => Some(SessionLineage::Compaction {
                     source: *source,
                     source_seq: *source_seq,
                     prompt_revision: *prompt_revision,
+                }),
+                EventKind::Forked { source, at_seq } => Some(SessionLineage::Fork {
+                    source: *source,
+                    at_seq: *at_seq,
                 }),
                 _ => previous
                     .as_ref()
@@ -1415,5 +1449,142 @@ impl SessionStore for JsonlStore {
             metas.push(manifest.meta);
         }
         Ok(metas)
+    }
+}
+
+impl ReplaySource for JsonlStore {
+    fn lineage(&self, session: &SessionId) -> Result<Option<SessionLineage>, ReplaySourceError> {
+        let Some(entries) = ReplaySource::entries(self, session)? else {
+            return Ok(None);
+        };
+        let mut events = entries.into_iter().filter_map(|entry| match entry {
+            SessionEntry::Event(event) => Some(event),
+            SessionEntry::RunTransaction(_) => None,
+        });
+        let Some(first_event) = events.next() else {
+            return Ok(None);
+        };
+        let mut first = Seq::ZERO;
+        first.next();
+        let lineage = match first_event.kind {
+            EventKind::CompactionSeeded {
+                source,
+                source_seq,
+                prompt_revision,
+                ..
+            } => Some(SessionLineage::Compaction {
+                source,
+                source_seq,
+                prompt_revision,
+            }),
+            EventKind::Forked { source, at_seq } => Some(SessionLineage::Fork { source, at_seq }),
+            _ => None,
+        };
+        if lineage.is_some() && first_event.env.seq != first {
+            return Err(ReplaySourceError::CorruptSession {
+                session: *session,
+                reason: "lineage is not the semantic sequence-1 event".to_string(),
+            });
+        }
+        if events.any(|event| {
+            matches!(
+                event.kind,
+                EventKind::CompactionSeeded { .. } | EventKind::Forked { .. }
+            )
+        }) {
+            return Err(ReplaySourceError::CorruptSession {
+                session: *session,
+                reason: "lineage is not the unique first semantic event".to_string(),
+            });
+        }
+        Ok(lineage)
+    }
+
+    fn entries(&self, session: &SessionId) -> Result<Option<Vec<SessionEntry>>, ReplaySourceError> {
+        let bytes = self.io.read(&self.log_path(session)).map_err(|error| {
+            ReplaySourceError::Unavailable {
+                session: *session,
+                reason: error.to_string(),
+            }
+        })?;
+        let Some(bytes) = bytes else {
+            return Ok(None);
+        };
+        let (header, start) = decoded_header(&bytes)
+            .map_err(|error| ReplaySourceError::CorruptSession {
+                session: *session,
+                reason: error.to_string(),
+            })?
+            .ok_or_else(|| ReplaySourceError::CorruptSession {
+                session: *session,
+                reason: "session log has no complete header".to_string(),
+            })?;
+        if header.v != CODEC_VERSION || header.session != *session {
+            return Err(ReplaySourceError::CorruptSession {
+                session: *session,
+                reason: "session log header has the wrong codec or identity".to_string(),
+            });
+        }
+
+        let mut entries = Vec::new();
+        let mut expected = Seq::ZERO;
+        for line in split_lines(&bytes[start..]) {
+            let position = expected.next();
+            let record = match decode_line(line) {
+                Ok(StoreLine::Record(record)) if record.seq == position => record,
+                Ok(StoreLine::Record(record)) => {
+                    return Err(ReplaySourceError::CorruptSession {
+                        session: *session,
+                        reason: format!(
+                            "physical position {:?} followed {:?}",
+                            record.seq, expected
+                        ),
+                    });
+                }
+                Ok(StoreLine::Unknown(_)) => {
+                    return Err(ReplaySourceError::UnknownEntry {
+                        session: *session,
+                        position,
+                    });
+                }
+                Ok(StoreLine::Header(_)) => {
+                    return Err(ReplaySourceError::CorruptSession {
+                        session: *session,
+                        reason: "session log contains a second header".to_string(),
+                    });
+                }
+                Err(error) => {
+                    return Err(ReplaySourceError::CorruptSession {
+                        session: *session,
+                        reason: error.to_string(),
+                    });
+                }
+            };
+            let entry =
+                serde_json::from_str::<SessionEntry>(record.payload.get()).map_err(|_| {
+                    ReplaySourceError::UnknownEntry {
+                        session: *session,
+                        position: record.seq,
+                    }
+                })?;
+            entries.push(entry);
+        }
+        Ok(Some(entries))
+    }
+}
+
+impl SessionBlobSource for JsonlStore {
+    fn read(
+        &self,
+        session: &SessionId,
+        reference: &ego_core::store::blob::BlobRef,
+    ) -> Result<Vec<u8>, BlobError> {
+        let blobs = SessionBlobStore::unleased_with_io(
+            &self.root,
+            *session,
+            reference.bytes.max(1),
+            Arc::clone(&self.io),
+        )?;
+        BlobStore::read(&blobs, reference)
     }
 }

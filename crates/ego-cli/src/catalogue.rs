@@ -10,8 +10,8 @@
 
 use std::path::Path;
 
-use ego_core::compact::CompactionLineage;
 use ego_core::event::id::SessionId;
+use ego_core::session::SessionLineage;
 use ego_core::store::session_store::{SessionMeta, SessionStore, StoreError};
 use serde::Serialize;
 
@@ -23,7 +23,7 @@ use crate::cli::UsageError;
 /// stream a run publishes; this versions a catalogue listing, and the two
 /// change for unrelated reasons — sharing a number would make a new event
 /// field bump a contract that did not move.
-pub const CATALOGUE_VERSION: u32 = 2;
+pub const CATALOGUE_VERSION: u32 = 3;
 
 /// The sessions belonging to `root`, most recently updated first.
 pub fn in_workspace(metas: Vec<SessionMeta>, root: &Path) -> Vec<SessionMeta> {
@@ -118,7 +118,7 @@ pub struct Row {
     pub updated: u64,
     pub title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub lineage: Option<CompactionLineage>,
+    pub lineage: Option<SessionLineage>,
 }
 
 impl Row {

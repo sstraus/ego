@@ -43,6 +43,16 @@ impl SessionBlobStore {
         )
     }
 
+    /// Open an unleased read handle through the enclosing session adapter's I/O.
+    pub(super) fn unleased_with_io(
+        sessions_root: &Path,
+        session: SessionId,
+        hard_cap: u64,
+        io: Arc<dyn StoreIo>,
+    ) -> Result<Self, BlobError> {
+        Self::construct(sessions_root.join(session.to_string()), hard_cap, io, None)
+    }
+
     /// Open through the session writer's held lease and recover stale staging.
     pub(super) fn with_io(
         session_directory: PathBuf,

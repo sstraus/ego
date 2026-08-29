@@ -1,10 +1,10 @@
 //! RED contract for regression case's target-session durability boundary.
 
-use ego_core::compact::{COMPACTION_PROMPT_REVISION, CompactionPublication, CompactionTargetStore};
 use ego_core::cost::{CostDelta, UnknownCost};
 use ego_core::event::domain::{DomainEvent, Envelope, EventKind};
-use ego_core::event::id::{EventId, ItemId, Producer, Seq, SessionId, TurnId};
+use ego_core::event::id::{EventId, Producer, Seq, SessionId, TurnId};
 use ego_core::event::time::Timestamp;
+use ego_core::session::{TargetPublication, TargetSeed, TargetStore};
 use ego_core::state::Usage;
 use ego_core::store::session_store::{SessionEntry, SessionStore};
 use ego_tools::store::{AtomicReplacePublication, JsonlStore, OsIo, StoreIo};
@@ -14,8 +14,6 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tempfile::tempdir;
-
-const CHECKPOINT: &str = "# Objective\nContinue.\n# Binding constraints and preferences\nKeep safety.\n# Completed work and evidence\nTests exist.\n# Work in progress\nCompaction.\n# Decisions and rationale\nNew id.\n# Blockers and uncertainty\nNone known.\n# Ordered next steps\nValidate.\n# Critical references\nSPEC.md";
 
 const ALWAYS_ALIVE: &dyn Fn(u32) -> bool = &|_| true;
 
@@ -70,31 +68,15 @@ fn event(kind: EventKind) -> DomainEvent {
     }
 }
 
-fn seed(source: SessionId, source_seq: Seq) -> DomainEvent {
-    let mut seed = event(EventKind::CompactionSeeded {
-        source,
-        source_seq,
-        prompt_revision: COMPACTION_PROMPT_REVISION,
-        checkpoint: CHECKPOINT.to_string(),
-    });
-    seed.env.seq = seq(1);
-    seed.env.item = Some(ItemId::new());
-    seed
+fn seed(source: SessionId, at_seq: Seq) -> TargetSeed {
+    TargetSeed::fork(source, at_seq, Timestamp::from_millis(1_000))
 }
 
-fn assert_lineage_fields(
-    lineage: &impl serde::Serialize,
-    source: SessionId,
-    source_seq: Seq,
-    prompt_revision: u32,
-) {
+fn assert_lineage_fields(lineage: &impl serde::Serialize, source: SessionId, at_seq: Seq) {
     let value = serde_json::to_value(lineage).expect("typed lineage serialises");
+    assert_eq!(value["kind"], "fork");
     assert_eq!(value["source"], serde_json::to_value(source).unwrap());
-    assert_eq!(
-        value["source_seq"],
-        serde_json::to_value(source_seq).unwrap()
-    );
-    assert_eq!(value["prompt_revision"], prompt_revision);
+    assert_eq!(value["at_seq"], serde_json::to_value(at_seq).unwrap());
 }
 
 struct FailingAppendIo;
@@ -241,7 +223,7 @@ impl StoreIo for ManifestCacheFailureIo {
 }
 
 #[test]
-fn target_seed_is_durable_before_publication_and_carries_one_checkpoint_only() {
+fn target_seed_is_durable_before_publication_and_carries_one_lineage_event() {
     let root = tempdir().expect("temporary session root");
     let store = JsonlStore::new(root.path(), "/ws", Box::new(OsIo));
     let target = SessionId::new();
@@ -249,10 +231,10 @@ fn target_seed_is_durable_before_publication_and_carries_one_checkpoint_only() {
     let open = store
         .open_writer(&target, lease_inputs())
         .expect("target writer lease");
-    let publication = open.writer.publish_compaction_seed(&seed(source, seq(7)));
+    let publication = open.writer.publish_target(&seed(source, seq(7)));
     assert_eq!(
         publication,
-        CompactionPublication::PublishedDurably { diagnostic: None }
+        TargetPublication::PublishedDurably { diagnostic: None }
     );
 
     let events = read_all(&store, &target);
@@ -262,16 +244,13 @@ fn target_seed_is_durable_before_publication_and_carries_one_checkpoint_only() {
         "the seed is the target's first semantic event"
     );
     assert_eq!(events[0].env.seq, seq(1));
-    assert!(events[0].env.item.is_some());
+    assert!(events[0].env.item.is_none());
     assert_eq!(events[0].env.parent, None);
     assert_eq!(events[0].env.producer, Producer::Main);
     assert!(matches!(
         &events[0].kind,
-        EventKind::CompactionSeeded { source: actual, source_seq, prompt_revision, checkpoint }
-            if *actual == source
-                && *source_seq == seq(7)
-                && *prompt_revision == COMPACTION_PROMPT_REVISION
-                && checkpoint == CHECKPOINT
+        EventKind::Forked { source: actual, at_seq }
+            if *actual == source && *at_seq == seq(7)
     ));
     drop(open);
 }
@@ -286,13 +265,16 @@ fn reopening_after_target_seed_recovers_lineage_without_source_history_or_totals
         .open_writer(&target, lease_inputs())
         .expect("target writer lease");
     assert_eq!(
-        open.writer.publish_compaction_seed(&seed(source, seq(41))),
-        CompactionPublication::PublishedDurably { diagnostic: None }
+        open.writer.publish_target(&seed(source, seq(41))),
+        TargetPublication::PublishedDurably { diagnostic: None }
     );
     drop(open);
 
     let resumed = store.resume(&target).expect("target resumes");
-    assert_eq!(resumed.0.items.len(), 1);
+    assert!(
+        resumed.0.items.is_empty(),
+        "a fork seed carries no target item"
+    );
     assert_eq!(
         resumed.0.usage.total_tokens(),
         0,
@@ -300,9 +282,9 @@ fn reopening_after_target_seed_recovers_lineage_without_source_history_or_totals
     );
     assert!(
         resumed.0.compactions.is_empty(),
-        "legacy in-place compaction is absent"
+        "in-place compaction is absent"
     );
-    assert!(resumed.0.forks.is_empty(), "a seed is not a fork");
+    assert_eq!(resumed.0.forks.len(), 1, "a fork seed records one fork");
     assert_lineage_fields(
         resumed
             .0
@@ -311,7 +293,6 @@ fn reopening_after_target_seed_recovers_lineage_without_source_history_or_totals
             .expect("resume exposes typed lineage"),
         source,
         seq(41),
-        COMPACTION_PROMPT_REVISION,
     );
 
     let listed = store.list().expect("target is listable");
@@ -326,42 +307,13 @@ fn reopening_after_target_seed_recovers_lineage_without_source_history_or_totals
             .expect("catalogue exposes typed lineage"),
         source,
         seq(41),
-        COMPACTION_PROMPT_REVISION,
     );
 }
 
 #[test]
-fn malformed_seed_and_existing_target_are_refused_without_publication() {
+fn existing_target_is_refused_without_publication() {
     let root = tempdir().expect("temporary session root");
     let store = JsonlStore::new(root.path(), "/ws", Box::new(OsIo));
-    let malformed_target = SessionId::new();
-    let malformed = store
-        .open_writer(&malformed_target, lease_inputs())
-        .expect("malformed target writer lease");
-    let publication = malformed
-        .writer
-        .publish_compaction_seed(&event(EventKind::UserPrompt {
-            text: "not a checkpoint seed".to_string(),
-            images: Vec::new(),
-            queued_prompt: None,
-        }));
-    assert!(matches!(
-        publication,
-        CompactionPublication::NotPublished { .. }
-    ));
-    assert!(!publication.switch_target());
-    assert!(publication.retry_safe());
-    let mut wrong_seq = seed(SessionId::new(), seq(2));
-    wrong_seq.env.seq = Seq::default();
-    let publication = malformed.writer.publish_compaction_seed(&wrong_seq);
-    assert!(matches!(
-        publication,
-        CompactionPublication::NotPublished { .. }
-    ));
-    assert!(!publication.switch_target());
-    assert!(publication.retry_safe());
-    drop(malformed);
-
     let target = SessionId::new();
     let first = store
         .open_writer(&target, lease_inputs())
@@ -369,7 +321,7 @@ fn malformed_seed_and_existing_target_are_refused_without_publication() {
     assert!(
         first
             .writer
-            .publish_compaction_seed(&seed(SessionId::new(), seq(3)))
+            .publish_target(&seed(SessionId::new(), seq(3)))
             .switch_target()
     );
     drop(first);
@@ -378,10 +330,10 @@ fn malformed_seed_and_existing_target_are_refused_without_publication() {
         .expect("existing target writer lease");
     let publication = existing
         .writer
-        .publish_compaction_seed(&seed(SessionId::new(), seq(4)));
+        .publish_target(&seed(SessionId::new(), seq(4)));
     assert!(matches!(
         publication,
-        CompactionPublication::NotPublished { .. }
+        TargetPublication::NotPublished { .. }
     ));
     assert!(!publication.switch_target());
     assert!(publication.retry_safe());
@@ -390,27 +342,27 @@ fn malformed_seed_and_existing_target_are_refused_without_publication() {
 #[test]
 fn publication_outcomes_are_exhaustive_and_retry_policy_is_explicit() {
     let outcomes = [
-        CompactionPublication::NotPublished {
+        TargetPublication::NotPublished {
             diagnostic: "target append refused".to_string(),
         },
-        CompactionPublication::PublishedDurably { diagnostic: None },
-        CompactionPublication::PublishedDurabilityUncertain {
+        TargetPublication::PublishedDurably { diagnostic: None },
+        TargetPublication::PublishedDurabilityUncertain {
             diagnostic: "parent directory barrier failed".to_string(),
         },
     ];
     for outcome in &outcomes {
         match outcome {
-            CompactionPublication::NotPublished { diagnostic } => {
+            TargetPublication::NotPublished { diagnostic } => {
                 assert!(!diagnostic.is_empty());
                 assert!(!outcome.switch_target());
                 assert!(outcome.retry_safe());
             }
-            CompactionPublication::PublishedDurably { diagnostic } => {
+            TargetPublication::PublishedDurably { diagnostic } => {
                 assert!(diagnostic.is_none());
                 assert!(outcome.switch_target());
                 assert!(!outcome.retry_safe());
             }
-            CompactionPublication::PublishedDurabilityUncertain { diagnostic } => {
+            TargetPublication::PublishedDurabilityUncertain { diagnostic } => {
                 assert!(!diagnostic.is_empty());
                 assert!(outcome.switch_target());
                 assert!(!outcome.retry_safe());
@@ -428,12 +380,10 @@ fn prepublication_target_failure_is_not_published_and_is_retry_safe() {
         .open_writer(&target, lease_inputs())
         .expect("target writer lease");
 
-    let publication = open
-        .writer
-        .publish_compaction_seed(&seed(SessionId::new(), seq(5)));
+    let publication = open.writer.publish_target(&seed(SessionId::new(), seq(5)));
     assert!(matches!(
         publication,
-        CompactionPublication::NotPublished { .. }
+        TargetPublication::NotPublished { .. }
     ));
     assert!(!publication.switch_target());
     assert!(publication.retry_safe());
@@ -447,12 +397,10 @@ fn post_rename_durability_uncertainty_publishes_target_and_forbids_retry() {
     let open = store
         .open_writer(&target, lease_inputs())
         .expect("target writer lease");
-    let publication = open
-        .writer
-        .publish_compaction_seed(&seed(SessionId::new(), seq(8)));
+    let publication = open.writer.publish_target(&seed(SessionId::new(), seq(8)));
     assert!(matches!(
         publication,
-        CompactionPublication::PublishedDurabilityUncertain { ref diagnostic }
+        TargetPublication::PublishedDurabilityUncertain { ref diagnostic }
             if diagnostic.contains("parent directory barrier failed")
     ));
     assert!(publication.switch_target());
@@ -473,12 +421,10 @@ fn authoritative_log_survives_manifest_cache_failure_with_diagnostic() {
     let open = store
         .open_writer(&target, lease_inputs())
         .expect("target writer lease");
-    let publication = open
-        .writer
-        .publish_compaction_seed(&seed(SessionId::new(), seq(9)));
+    let publication = open.writer.publish_target(&seed(SessionId::new(), seq(9)));
     assert!(matches!(
         publication,
-        CompactionPublication::PublishedDurably {
+        TargetPublication::PublishedDurably {
             diagnostic: Some(ref diagnostic)
         } if diagnostic.contains("manifest")
     ));
@@ -501,9 +447,8 @@ fn crash_before_the_seed_line_is_recovered_as_an_unusable_target() {
         .open_writer(&target, lease_inputs())
         .expect("target writer lease");
     assert_eq!(
-        open.writer
-            .publish_compaction_seed(&seed(SessionId::new(), seq(2))),
-        CompactionPublication::PublishedDurably { diagnostic: None }
+        open.writer.publish_target(&seed(SessionId::new(), seq(2))),
+        TargetPublication::PublishedDurably { diagnostic: None }
     );
     drop(open);
     let id = serde_json::to_value(target)
@@ -547,8 +492,8 @@ fn source_totals_are_not_silently_carried_into_the_fresh_target() {
         .open_writer(&target, lease_inputs())
         .expect("target writer lease");
     assert_eq!(
-        open.writer.publish_compaction_seed(&seed(source, seq(1))),
-        CompactionPublication::PublishedDurably { diagnostic: None }
+        open.writer.publish_target(&seed(source, seq(1))),
+        TargetPublication::PublishedDurably { diagnostic: None }
     );
     drop(open);
 

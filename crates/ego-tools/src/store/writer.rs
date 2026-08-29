@@ -25,11 +25,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use ego_core::compact::{CompactionPublication, CompactionTargetStore};
 use ego_core::event::domain::DomainEvent;
 use ego_core::event::id::SessionId;
 use ego_core::event::time::Timestamp;
 use ego_core::run::{RunAppend, RunRevision, RunTransaction};
+use ego_core::session::{
+    ReplaySource, ReplaySourceError, SessionBlobSource, SessionLineage, TargetPublication,
+    TargetSeed, TargetStore,
+};
 use ego_core::state::SessionState;
 use ego_core::store::blob::BlobRef;
 use ego_core::store::evidence::EvidenceError;
@@ -189,7 +192,7 @@ impl SessionStore for SessionWriter<'_> {
         id: &SessionId,
     ) -> Result<BoxStream<'static, Result<SessionEntry, StoreError>>, StoreError> {
         self.check(id)?;
-        self.store.read(id)
+        SessionStore::read(self.store, id)
     }
 
     fn compare_and_append_run(
@@ -208,9 +211,29 @@ impl SessionStore for SessionWriter<'_> {
     }
 }
 
-impl CompactionTargetStore for SessionWriter<'_> {
-    fn publish_compaction_seed(&self, seed: &DomainEvent) -> CompactionPublication {
-        self.store.publish_compaction_seed(&self.id, seed)
+impl TargetStore for SessionWriter<'_> {
+    fn publish_target(&self, seed: &TargetSeed) -> TargetPublication {
+        self.store.publish_target(&self.id, seed)
+    }
+}
+
+impl ReplaySource for SessionWriter<'_> {
+    fn lineage(&self, session: &SessionId) -> Result<Option<SessionLineage>, ReplaySourceError> {
+        self.store.lineage(session)
+    }
+
+    fn entries(&self, session: &SessionId) -> Result<Option<Vec<SessionEntry>>, ReplaySourceError> {
+        self.store.entries(session)
+    }
+}
+
+impl SessionBlobSource for SessionWriter<'_> {
+    fn read(
+        &self,
+        session: &SessionId,
+        reference: &BlobRef,
+    ) -> Result<Vec<u8>, ego_core::store::blob::BlobError> {
+        SessionBlobSource::read(self.store, session, reference)
     }
 }
 

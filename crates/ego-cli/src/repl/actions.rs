@@ -367,9 +367,8 @@ impl ActionRegistry {
             )
             .unavailable("the interactive permission controller"),
             enabled(Mcp, "mcp", "Inspect admitted MCP connections"),
-            enabled(Sessions, "sessions", "Browse durable sessions")
-                .unavailable("the session browser"),
-            enabled(Fork, "fork", "Fork a durable session").unavailable("durable session replay"),
+            enabled(Sessions, "sessions", "Browse durable sessions"),
+            enabled(Fork, "fork", "Fork a durable session"),
             enabled(Compact, "compact", "Compact the active context")
                 .unavailable("the compaction service"),
             enabled(Clear, "clear", "Clear composer and menu state"),
@@ -380,8 +379,7 @@ impl ActionRegistry {
                 .unavailable("the session exporter"),
             enabled(Doctor, "doctor", "Diagnose local subsystem health"),
             enabled(Quit, "quit", "Exit the interactive session"),
-            enabled(New, "new", "Create a durable session")
-                .unavailable("the interactive session service"),
+            enabled(New, "new", "Create a durable session"),
             enabled(Name, "name", "Set durable session display metadata")
                 .unavailable("session metadata"),
             enabled(Goal, "goal", "Manage the persistent goal lifecycle")

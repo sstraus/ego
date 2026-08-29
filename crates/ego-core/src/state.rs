@@ -8,7 +8,6 @@ use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
-use crate::compact::CompactionLineage;
 use crate::cost::{CostDelta, CumulativeCost};
 use crate::event::domain::{DomainEvent, EventKind, ExitReason, OccupancyProvenance};
 use crate::event::hook::{
@@ -22,6 +21,7 @@ use crate::generator::attempt::{AttemptRef, DeliveryCertainty, Outcome, UsageRep
 use crate::generator::types::{ImageRef, ReasoningState};
 use crate::permit::{ToolResult, ToolResultProvenance};
 use crate::question::{QuestionAnswer, QuestionError, QuestionOutcome, QuestionRequest};
+use crate::session::SessionLineage;
 use crate::store::blob::BlobRef;
 
 /// Token counts, split by the categories providers price separately.
@@ -738,9 +738,9 @@ pub struct SessionState {
     /// the caller's replay order and never reorders, clamps or rejects on
     /// this value — see `Seq`'s and `Timestamp`'s doc comments.
     pub last_seq: Seq,
-    /// The source boundary that created this clean checkpoint-seeded session.
+    /// The tagged source boundary that created this fork or compaction target.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lineage: Option<CompactionLineage>,
+    pub lineage: Option<SessionLineage>,
     /// Per-turn state, keyed by turn id.
     pub turns: HashMap<TurnId, TurnState>,
     /// Per-item state, keyed by item id.
@@ -1433,7 +1433,7 @@ impl SessionState {
                 prompt_revision,
                 checkpoint,
             } => {
-                self.lineage = Some(CompactionLineage {
+                self.lineage = Some(SessionLineage::Compaction {
                     source: *source,
                     source_seq: *source_seq,
                     prompt_revision: *prompt_revision,
@@ -1445,10 +1445,16 @@ impl SessionState {
                 }
             }
             EventKind::Compacted { summary } => self.compactions.push(summary.clone()),
-            EventKind::Forked { source, at_seq } => self.forks.push(ForkRecord {
-                source: *source,
-                at_seq: *at_seq,
-            }),
+            EventKind::Forked { source, at_seq } => {
+                self.lineage = Some(SessionLineage::Fork {
+                    source: *source,
+                    at_seq: *at_seq,
+                });
+                self.forks.push(ForkRecord {
+                    source: *source,
+                    at_seq: *at_seq,
+                });
+            }
             EventKind::HookCatalogueAdmitted { descriptors } => {
                 self.hook_catalogue = descriptors.clone();
             }

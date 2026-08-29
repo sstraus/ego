@@ -124,6 +124,7 @@ async fn ordinary_main() -> std::process::ExitCode {
                 result: serde_json::Value::String(String::new()),
                 mcp_errors: Vec::new(),
             },
+            Ok(Invocation::Fork(args)) => run::fork(&args, &out),
             Ok(Invocation::Models(args)) => {
                 let termination = match ego_cli::models::execute(&args, &cancel).await {
                     Ok(rendered) => {

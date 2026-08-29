@@ -9,11 +9,11 @@ use futures::stream::BoxStream;
 use serde::{Deserialize, Serialize};
 
 use super::codec::CodecError;
-use crate::compact::CompactionLineage;
 use crate::event::domain::DomainEvent;
 use crate::event::id::SessionId;
 use crate::event::time::Timestamp;
 use crate::run::{RunAppend, RunRevision, RunTransaction};
+use crate::session::SessionLineage;
 
 /// One durable item in a session's single ordered append-only stream.
 ///
@@ -60,7 +60,7 @@ pub struct SessionMeta {
     pub updated: Timestamp,
     pub title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lineage: Option<CompactionLineage>,
+    pub lineage: Option<SessionLineage>,
 }
 
 /// A `SessionStore` failure.

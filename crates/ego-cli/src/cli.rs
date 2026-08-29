@@ -51,6 +51,8 @@ pub enum Invocation {
     Resume(Box<Args>),
     /// `ego ls` — the catalogue, this workspace's by default.
     Ls(Box<LsArgs>),
+    /// `ego fork ID` — create a target at the source's latest durable idle boundary.
+    Fork(Box<ForkArgs>),
     /// `ego models` — the shared model catalogue snapshot.
     Models(Box<ModelsArgs>),
     /// `ego acp` — serve the Agent Client Protocol on stdio, until the host
@@ -143,6 +145,7 @@ const UNAVAILABLE: &[Unavailable] = &[
 pub const BUILT: &[&str] = &[
     "run",
     "resume",
+    "fork",
     "ls",
     "models",
     "acp",
@@ -169,11 +172,6 @@ pub const BUILT: &[&str] = &[
 /// places the work, and from the code where it does not — a subsystem that
 /// table does not place still gets a reason, never a milestone invented for it.
 pub const UNBUILT: &[(&str, &str)] = &[
-    (
-        "fork",
-        "session forking (**M3**), which needs the branch point to be nameable \
-         in the log rather than just a file copy",
-    ),
     (
         "export",
         "replay and export with `--sanitize` (**M3**). The projection exists; \
@@ -327,6 +325,15 @@ pub enum SessionChoice {
 pub struct LsArgs {
     /// Every session in the store, not just this workspace's (`CLI.md` §2).
     pub all: bool,
+    pub session_dir: Option<PathBuf>,
+    pub directory: Option<PathBuf>,
+    pub output: Output,
+}
+
+/// The exact `ego fork ID` request and its shared store/workspace/output flags.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForkArgs {
+    pub source: SessionId,
     pub session_dir: Option<PathBuf>,
     pub directory: Option<PathBuf>,
     pub output: Output,
@@ -510,6 +517,20 @@ struct LsCommand {
     /// Every session in the store, not just this workspace's.
     #[arg(long)]
     all: bool,
+
+    #[command(flatten)]
+    common: Common,
+}
+
+/// `ego fork ID` — the source boundary is always its latest durable idle event.
+#[derive(Debug, Parser)]
+#[command(
+    name = "ego fork",
+    about = "Fork a session at its latest durable idle boundary.",
+    disable_help_subcommand = true
+)]
+struct ForkCommand {
+    source: String,
 
     #[command(flatten)]
     common: Common,
@@ -1083,6 +1104,7 @@ fn overview(program: &str) -> String {
         let about = match *name {
             "run" => "Run an agent from a prompt, headless",
             "resume" => "Continue a session; no ID = latest in this workspace",
+            "fork" => "Fork a session at its latest durable idle boundary",
             "ls" => "List sessions (this workspace; --all for every one)",
             "models" => "List the shared model catalogue",
             "acp" => "Serve the Agent Client Protocol on stdio",
@@ -1232,6 +1254,20 @@ pub fn parse(argv: Vec<String>) -> Result<Invocation, UsageError> {
                 directory: parsed.common.places.directory,
                 output: parsed.common.output,
             }))),
+        },
+        Some("fork") => match clap_or_answer::<ForkCommand>(&tokens)? {
+            Parsed::Answered(text) => Ok(Invocation::Answered(text)),
+            Parsed::Command(parsed) => {
+                let source = SessionId::from_str(&parsed.source).map_err(|error| {
+                    UsageError(format!("`{}` is not a session id: {error}", parsed.source))
+                })?;
+                Ok(Invocation::Fork(Box::new(ForkArgs {
+                    source,
+                    session_dir: parsed.common.places.session_dir,
+                    directory: parsed.common.places.directory,
+                    output: parsed.common.output,
+                })))
+            }
         },
         Some("models") => match clap_or_answer::<ModelsCommand>(&tokens)? {
             Parsed::Answered(text) => Ok(Invocation::Answered(text)),

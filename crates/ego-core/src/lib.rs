@@ -23,6 +23,7 @@ pub mod permit;
 pub mod public;
 pub mod question;
 pub mod run;
+pub mod session;
 pub mod sink;
 pub mod state;
 pub mod store;

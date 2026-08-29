@@ -1,22 +1,19 @@
 //! Prompted compaction into a clean checkpoint-seeded session.
 
-mod port;
-
 use std::fmt;
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::budget::BudgetDenied;
-use crate::event::domain::{CancelCause, DomainEvent, Envelope, EventKind, GenerationRole};
-use crate::event::id::{EventId, ItemId, Producer, Seq, SessionId, TurnId};
+use crate::event::domain::{CancelCause, GenerationRole};
+use crate::event::id::{Seq, SessionId};
 use crate::event::time::Timestamp;
 use crate::generation_model_source::GenerationModelError;
 use crate::generator::capabilities::CapabilityGap;
 use crate::generator::port::RequestExpressibilityError;
 use crate::generator::types::{GenRequest, HistoryError, StopReason};
+use crate::session::TargetSeed;
 use crate::store::session_store::StoreError;
-
-pub use port::{CompactionPublication, CompactionTargetStore};
 
 pub const COMPACTION_PROMPT_REVISION: u32 = 1;
 
@@ -137,13 +134,6 @@ impl fmt::Display for CheckpointError {
 
 impl std::error::Error for CheckpointError {}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CompactionLineage {
-    pub source: SessionId,
-    pub source_seq: Seq,
-    pub prompt_revision: u32,
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct PreparedCompaction {
     pub(crate) source: SessionId,
@@ -173,26 +163,14 @@ impl PreparedCompaction {
         &self.baseline
     }
 
-    pub fn seed_event(&self, at: Timestamp) -> DomainEvent {
-        let mut seq = Seq::ZERO;
-        seq.next();
-        DomainEvent {
-            env: Envelope {
-                seq,
-                id: EventId::new(),
-                turn: TurnId::new(),
-                item: Some(ItemId::new()),
-                parent: None,
-                ts: at,
-                producer: Producer::Main,
-            },
-            kind: EventKind::CompactionSeeded {
-                source: self.source,
-                source_seq: self.source_seq,
-                prompt_revision: COMPACTION_PROMPT_REVISION,
-                checkpoint: self.checkpoint.text().to_string(),
-            },
-        }
+    pub fn target_seed(&self, at: Timestamp) -> TargetSeed {
+        TargetSeed::compaction(
+            self.source,
+            self.source_seq,
+            COMPACTION_PROMPT_REVISION,
+            self.checkpoint.text().to_string(),
+            at,
+        )
     }
 }
 

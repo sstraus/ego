@@ -974,25 +974,26 @@ fn prepared_seed_event_starts_at_seq_one_with_fresh_target_identity() {
     let source = prepared.source();
     let source_seq = prepared.source_seq();
     let checkpoint_text = prepared.checkpoint().text().to_string();
-    let seed = prepared.seed_event(Timestamp::from_millis(10_000));
+    let seed = prepared.target_seed(Timestamp::from_millis(10_000));
+    let event = seed.event();
 
-    assert_eq!(seed.env.seq, seq(1));
-    assert!(seed.env.item.is_some());
-    assert!(seed.env.turn != TurnId::default());
-    assert!(seed.env.id != EventId::default());
-    assert_eq!(seed.env.parent, None);
-    assert_eq!(seed.env.producer, Producer::Main);
+    assert_eq!(event.env.seq, seq(1));
+    assert!(event.env.item.is_some());
+    assert!(event.env.turn != TurnId::default());
+    assert!(event.env.id != EventId::default());
+    assert_eq!(event.env.parent, None);
+    assert_eq!(event.env.producer, Producer::Main);
     assert!(matches!(
-        seed.kind,
+        &event.kind,
         EventKind::CompactionSeeded {
             source: actual,
             source_seq: actual_seq,
             prompt_revision,
             checkpoint
-        } if actual == source
-            && actual_seq == source_seq
-            && prompt_revision == COMPACTION_PROMPT_REVISION
-            && checkpoint == checkpoint_text
+        } if *actual == source
+            && *actual_seq == source_seq
+            && *prompt_revision == COMPACTION_PROMPT_REVISION
+            && *checkpoint == checkpoint_text
     ));
 }
 

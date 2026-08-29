@@ -12,6 +12,7 @@ use ego_core::event::domain::DomainEvent;
 use ego_core::event::id::SessionId;
 use ego_core::event::time::{Clock, Timestamp};
 use ego_core::run::{RunAppend, RunRevision, RunTransaction};
+use ego_core::session::{ReplayContext, ReplayedContext, TargetSeed};
 use ego_core::state::SessionState;
 use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
 use ego_tools::store::SessionEvidenceStore;
@@ -252,6 +253,7 @@ pub struct ActiveSession<'a> {
     state: SessionState,
     opened: Opened<'a>,
     evidence: SessionEvidenceStore,
+    replayed: Option<ReplayedContext>,
     _ephemeral_owner: Option<TempDir>,
 }
 
@@ -270,11 +272,15 @@ impl<'a> ActiveSession<'a> {
             .writer
             .evidence_store(evidence_cap)
             .map_err(|error| error.to_string())?;
+        let replayed = ReplayContext::new(&open.writer, &open.writer)
+            .replay(&id)
+            .map_err(|error| error.to_string())?;
         Ok(Self {
             id,
             state,
             opened,
             evidence,
+            replayed: Some(replayed),
             _ephemeral_owner: None,
         })
     }
@@ -290,6 +296,7 @@ impl<'a> ActiveSession<'a> {
             state,
             opened: Opened::Ephemeral(NullStore),
             evidence,
+            replayed: None,
             _ephemeral_owner: Some(owner),
         }
     }
@@ -314,16 +321,33 @@ impl<'a> ActiveSession<'a> {
         &self.evidence
     }
 
-    pub fn publish_compaction_seed(
+    pub(crate) fn replayed(&self) -> Option<&ReplayedContext> {
+        self.replayed.as_ref()
+    }
+
+    pub(crate) fn replay_seed(&self, seed: &TargetSeed) -> Result<ReplayedContext, String> {
+        let Opened::Durable(open) = &self.opened else {
+            return Err("an ephemeral session cannot be a fork source".to_string());
+        };
+        ReplayContext::new(&open.writer, &open.writer)
+            .replay_lineage(seed.lineage())
+            .map_err(|error| error.to_string())
+    }
+
+    pub(crate) fn replace_replayed(&mut self, replayed: ReplayedContext) {
+        self.replayed = Some(replayed);
+    }
+
+    pub fn publish_target(
         &self,
-        seed: &DomainEvent,
-    ) -> ego_core::compact::CompactionPublication {
-        use ego_core::compact::CompactionTargetStore;
+        seed: &ego_core::session::TargetSeed,
+    ) -> ego_core::session::TargetPublication {
+        use ego_core::session::TargetStore;
 
         match &self.opened {
-            Opened::Durable(open) => open.writer.publish_compaction_seed(seed),
-            Opened::Ephemeral(_) => ego_core::compact::CompactionPublication::NotPublished {
-                diagnostic: "compaction target is not durable".to_string(),
+            Opened::Durable(open) => open.writer.publish_target(seed),
+            Opened::Ephemeral(_) => ego_core::session::TargetPublication::NotPublished {
+                diagnostic: "the target is not durable".to_string(),
             },
         }
     }
@@ -338,12 +362,12 @@ impl<'a> ActiveSession<'a> {
     pub fn apply_publication(
         &mut self,
         target: ActiveSession<'a>,
-        publication: &ego_core::compact::CompactionPublication,
+        publication: &ego_core::session::TargetPublication,
     ) -> bool {
         match publication {
-            ego_core::compact::CompactionPublication::NotPublished { .. } => false,
-            ego_core::compact::CompactionPublication::PublishedDurably { .. }
-            | ego_core::compact::CompactionPublication::PublishedDurabilityUncertain { .. } => {
+            ego_core::session::TargetPublication::NotPublished { .. } => false,
+            ego_core::session::TargetPublication::PublishedDurably { .. }
+            | ego_core::session::TargetPublication::PublishedDurabilityUncertain { .. } => {
                 *self = target;
                 true
             }
@@ -360,8 +384,8 @@ pub fn now(clock: &dyn Clock) -> Timestamp {
 #[cfg(test)]
 mod compaction {
     use super::*;
-    use ego_core::compact::CompactionPublication;
     use ego_core::event::time::Clock;
+    use ego_core::session::TargetPublication;
     use ego_tools::store::SessionEvidenceStore;
     use tempfile::{TempDir, tempdir};
 
@@ -416,7 +440,7 @@ mod compaction {
 
         assert!(!active.apply_publication(
             target_owner,
-            &CompactionPublication::NotPublished {
+            &TargetPublication::NotPublished {
                 diagnostic: "human declined compaction".to_string(),
             },
         ));
@@ -436,7 +460,7 @@ mod compaction {
 
         assert!(!active.apply_publication(
             target_owner,
-            &CompactionPublication::NotPublished {
+            &TargetPublication::NotPublished {
                 diagnostic: "target append failed".to_string(),
             },
         ));
@@ -446,8 +470,8 @@ mod compaction {
     #[test]
     fn both_published_outcomes_replace_id_state_store_and_evidence() {
         for publication in [
-            CompactionPublication::PublishedDurably { diagnostic: None },
-            CompactionPublication::PublishedDurabilityUncertain {
+            TargetPublication::PublishedDurably { diagnostic: None },
+            TargetPublication::PublishedDurabilityUncertain {
                 diagnostic: "fsync result was lost".to_string(),
             },
         ] {
@@ -476,7 +500,7 @@ mod compaction {
 
         assert!(active.apply_publication(
             target_owner,
-            &CompactionPublication::PublishedDurably { diagnostic: None },
+            &TargetPublication::PublishedDurably { diagnostic: None },
         ));
         let activation_succeeded = false;
         assert!(!activation_succeeded);

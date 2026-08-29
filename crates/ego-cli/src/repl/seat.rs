@@ -75,6 +75,9 @@ struct Actions {
 #[derive(Debug, Clone, Copy)]
 enum SurfaceActionEffect {
     Compact,
+    Fork,
+    Sessions,
+    New,
     Help,
     Clear,
     Statusline,
@@ -99,6 +102,9 @@ impl ActionSink for SurfaceActionSink {
     fn invoke(&mut self, action: LocalAction) -> LocalActionOutcome {
         let effect = match action.id {
             ActionId::Compact => SurfaceActionEffect::Compact,
+            ActionId::Fork => SurfaceActionEffect::Fork,
+            ActionId::Sessions => SurfaceActionEffect::Sessions,
+            ActionId::New => SurfaceActionEffect::New,
             ActionId::Help => SurfaceActionEffect::Help,
             ActionId::Clear => SurfaceActionEffect::Clear,
             ActionId::Statusline => SurfaceActionEffect::Statusline,
@@ -730,6 +736,9 @@ impl Seat {
         }));
         for action in [
             ActionId::Compact,
+            ActionId::Fork,
+            ActionId::Sessions,
+            ActionId::New,
             ActionId::Help,
             ActionId::Clear,
             ActionId::Statusline,
@@ -1466,6 +1475,15 @@ fn apply_surface_effect(
     match effect {
         SurfaceActionEffect::Compact => {
             return Some(Line::HostCommand(HostCommand::Action(ActionId::Compact)));
+        }
+        SurfaceActionEffect::Fork => {
+            return Some(Line::HostCommand(HostCommand::Action(ActionId::Fork)));
+        }
+        SurfaceActionEffect::Sessions => {
+            return Some(Line::HostCommand(HostCommand::Action(ActionId::Sessions)));
+        }
+        SurfaceActionEffect::New => {
+            return Some(Line::HostCommand(HostCommand::Action(ActionId::New)));
         }
         SurfaceActionEffect::Help => {
             let help = {

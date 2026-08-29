@@ -59,7 +59,7 @@ use serde_json::Value;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::budget;
-use crate::cli::{Args, ModelsArgs, Output, ResumeAnswer, SessionChoice, UsageError};
+use crate::cli::{Args, ForkArgs, ModelsArgs, Output, ResumeAnswer, SessionChoice, UsageError};
 use crate::model_picker::ModelPicker;
 use crate::models;
 use crate::output::{
@@ -1439,6 +1439,10 @@ async fn drive_headless_turn(
         None => Tools::from_registry(registry, policy, effect_ports, CanonPath::new(cwd)),
     };
     let loop_ = TurnLoop::new(session, runtime, tools);
+    let loop_ = match active.replayed() {
+        Some(replayed) => loop_.with_ancestor_conversation(replayed.conversation().clone()),
+        None => loop_,
+    };
     let loop_ = match elicitor {
         Some(elicitor) => loop_.with_elicitor(elicitor),
         None => loop_,
@@ -2326,6 +2330,10 @@ async fn execute<S: EventSink>(
                 }
             };
             let loop_ = TurnLoop::new(session, runtime, tools);
+            let loop_ = match $active.replayed() {
+                Some(replayed) => loop_.with_ancestor_conversation(replayed.conversation().clone()),
+                None => loop_,
+            };
             let loop_ = match elicitor.as_ref() {
                 Some(elicitor) => loop_.with_elicitor(Arc::clone(elicitor)),
                 None => loop_,
@@ -2445,6 +2453,229 @@ async fn execute<S: EventSink>(
                             continue;
                         }
                         repl::Line::HostCommand(repl::HostCommand::Action(
+                            repl::actions::ActionId::Sessions,
+                        )) => {
+                            let Some(store) = jsonl_store.as_ref() else {
+                                diagnostics
+                                    .note("an ephemeral run has no durable session catalogue");
+                                continue;
+                            };
+                            match crate::catalogue::listing(store, &root, false) {
+                                Ok(metas) => diagnostics
+                                    .note(&crate::catalogue::table(&metas, false).join("\n")),
+                                Err(error) => diagnostics.note(&format!(
+                                    "the session catalogue could not be read: {error}"
+                                )),
+                            }
+                            continue;
+                        }
+                        repl::Line::HostCommand(repl::HostCommand::Action(
+                            repl::actions::ActionId::New,
+                        )) => {
+                            if !active.is_durable() {
+                                diagnostics.note(
+                                    "an ephemeral run cannot switch to a durable new session",
+                                );
+                                continue;
+                            }
+                            if pending_work {
+                                diagnostics.note(
+                                    "a new session cannot be selected while source work is pending",
+                                );
+                                continue;
+                            }
+                            let Some(store) = jsonl_store.as_ref() else {
+                                unreachable!("durable active sessions have a JSONL store");
+                            };
+                            let target = SessionId::new();
+                            let target_opened = match session::open(store, &target, &clock) {
+                                Ok(opened) => opened,
+                                Err(error) => {
+                                    diagnostics.note(&format!(
+                                        "the new session could not be opened: {error}"
+                                    ));
+                                    continue;
+                                }
+                            };
+                            let target_owner = match ActiveSession::durable(
+                                target_opened,
+                                SessionState::default(),
+                                EVIDENCE_CAP,
+                            ) {
+                                Ok(owner) => owner,
+                                Err(error) => {
+                                    diagnostics.note(&format!(
+                                        "the new session evidence could not be opened: {error}"
+                                    ));
+                                    continue;
+                                }
+                            };
+                            if !seat.activate_session(target) {
+                                diagnostics.note("the terminal could not activate the new session");
+                                continue;
+                            }
+                            active = target_owner;
+                            state = active.state().clone();
+                            last.session = active.id();
+                            last.state = state.clone();
+                            last.result = Value::String(String::new());
+                            sink.publish(
+                                &PublicEvent::SessionStarted {
+                                    v: PUBLIC_EVENT_VERSION,
+                                    session: active.id(),
+                                    capabilities: capabilities(
+                                        &registry,
+                                        config.system.is_some(),
+                                        compiled.is_some(),
+                                    ),
+                                    mcp_errors: mcp_errors.clone(),
+                                    hook_errors: Vec::new(),
+                                    instructions: config
+                                        .system
+                                        .as_ref()
+                                        .map(|prompt| prompt.sources.clone())
+                                        .unwrap_or_default(),
+                                },
+                                &state,
+                            );
+                            if let Some(status) = status.as_ref()
+                                && status.human
+                            {
+                                match selection.snapshot() {
+                                    Ok(selected) => status.seat.refresh_status(&state, selected),
+                                    Err(error) => diagnostics.note(&format!(
+                                        "the new session status selection could not be refreshed: {error}"
+                                    )),
+                                }
+                            }
+                            continue;
+                        }
+                        repl::Line::HostCommand(repl::HostCommand::Action(
+                            repl::actions::ActionId::Fork,
+                        )) => {
+                            if !active.is_durable() {
+                                diagnostics.note("an ephemeral session cannot be forked");
+                                continue;
+                            }
+                            if pending_work {
+                                diagnostics.note(
+                                    "the session cannot be forked while source work is pending",
+                                );
+                                continue;
+                            }
+                            let prepared = match ego_core::session::PreparedFork::new(
+                                active.id(),
+                                &state,
+                                session::now(&clock),
+                            ) {
+                                Ok(prepared) => prepared,
+                                Err(error) => {
+                                    diagnostics
+                                        .note(&format!("the session cannot be forked: {error}"));
+                                    continue;
+                                }
+                            };
+                            let replayed = match active.replay_seed(prepared.seed()) {
+                                Ok(replayed) => replayed,
+                                Err(error) => {
+                                    diagnostics.note(&format!(
+                                        "the fork source context could not be replayed: {error}"
+                                    ));
+                                    continue;
+                                }
+                            };
+                            let Some(store) = jsonl_store.as_ref() else {
+                                unreachable!("durable active sessions have a JSONL store");
+                            };
+                            let target = SessionId::new();
+                            let target_opened = match session::open(store, &target, &clock) {
+                                Ok(opened) => opened,
+                                Err(error) => {
+                                    diagnostics.note(&format!(
+                                        "the fork target could not be opened: {error}"
+                                    ));
+                                    continue;
+                                }
+                            };
+                            let target_state =
+                                SessionState::replay([prepared.seed().event().clone()]);
+                            let mut target_owner = match ActiveSession::durable(
+                                target_opened,
+                                target_state,
+                                EVIDENCE_CAP,
+                            ) {
+                                Ok(owner) => owner,
+                                Err(error) => {
+                                    diagnostics.note(&format!(
+                                        "the fork target evidence could not be opened: {error}"
+                                    ));
+                                    continue;
+                                }
+                            };
+                            target_owner.replace_replayed(replayed);
+                            let publication = target_owner.publish_target(prepared.seed());
+                            let diagnostic = publication.diagnostic().map(str::to_string);
+                            if !active.apply_publication(target_owner, &publication) {
+                                diagnostics.note(&format!(
+                                    "the fork target was not published: {}",
+                                    diagnostic.as_deref().unwrap_or("publication was refused")
+                                ));
+                                continue;
+                            }
+                            state = active.state().clone();
+                            last.session = active.id();
+                            last.state = state.clone();
+                            last.result = Value::String(String::new());
+                            if let Some(diagnostic) = diagnostic {
+                                diagnostics.note(&format!(
+                                    "fork target {} is authoritative with a durability warning: {diagnostic}",
+                                    active.id()
+                                ));
+                            }
+                            sink.publish(
+                                &PublicEvent::SessionStarted {
+                                    v: PUBLIC_EVENT_VERSION,
+                                    session: active.id(),
+                                    capabilities: capabilities(
+                                        &registry,
+                                        config.system.is_some(),
+                                        compiled.is_some(),
+                                    ),
+                                    mcp_errors: mcp_errors.clone(),
+                                    hook_errors: Vec::new(),
+                                    instructions: config
+                                        .system
+                                        .as_ref()
+                                        .map(|prompt| prompt.sources.clone())
+                                        .unwrap_or_default(),
+                                },
+                                &state,
+                            );
+                            if let Some(event) = project_public(prepared.seed().event()) {
+                                sink.publish(&event, &state);
+                            }
+                            if !seat.activate_session(active.id()) {
+                                last.termination = RunTermination::Failed {
+                                    message: format!(
+                                        "session {} was published but the terminal could not activate it",
+                                        active.id()
+                                    ),
+                                };
+                                break;
+                            }
+                            if let Some(status) = status.as_ref()
+                                && status.human
+                            {
+                                match selection.snapshot() {
+                                    Ok(selected) => status.seat.refresh_status(&state, selected),
+                                    Err(error) => diagnostics.note(&format!(
+                                        "the forked session status selection could not be refreshed: {error}"
+                                    )),
+                                }
+                            }
+                            continue;
+                        }
+                        repl::Line::HostCommand(repl::HostCommand::Action(
                             repl::actions::ActionId::Compact,
                         )) => {
                             if compaction_availability(&active, pending_work)
@@ -2542,8 +2773,8 @@ async fn execute<S: EventSink>(
                                     continue;
                                 }
                             };
-                            let seed = prepared.seed_event(session::now(&clock));
-                            let target_state = SessionState::replay([seed.clone()]);
+                            let seed = prepared.target_seed(session::now(&clock));
+                            let target_state = SessionState::replay([seed.event().clone()]);
                             let target_owner = match ActiveSession::durable(
                                 target_opened,
                                 target_state,
@@ -2557,7 +2788,7 @@ async fn execute<S: EventSink>(
                                     continue;
                                 }
                             };
-                            let publication = target_owner.publish_compaction_seed(&seed);
+                            let publication = target_owner.publish_target(&seed);
                             let diagnostic = publication.diagnostic().map(str::to_string);
                             if !active.apply_publication(target_owner, &publication) {
                                 if let Some(diagnostic) = diagnostic {
@@ -2571,6 +2802,9 @@ async fn execute<S: EventSink>(
                             registry = target_registry;
                             config.system = target_system;
                             state = active.state().clone();
+                            last.session = active.id();
+                            last.state = state.clone();
+                            last.result = Value::String(String::new());
                             if let Some(diagnostic) = diagnostic {
                                 diagnostics.note(&format!(
                                     "compaction target is authoritative with a durability warning: {diagnostic}"
@@ -2595,7 +2829,7 @@ async fn execute<S: EventSink>(
                                 },
                                 &state,
                             );
-                            if let Some(event) = project_public(&seed) {
+                            if let Some(event) = project_public(seed.event()) {
                                 sink.publish(&event, &state);
                             }
                             if !seat.activate_session(active.id()) {
@@ -3131,6 +3365,106 @@ pub fn ls(args: &crate::cli::LsArgs, out: &Stdout) -> RunTermination {
         Ok(()) => RunTermination::Done,
         Err(termination) => termination,
     }
+}
+
+/// `ego fork ID`: publish one clean target at the source's latest idle event.
+pub fn fork(args: &ForkArgs, out: &Stdout) -> Ended {
+    match forked(args, out) {
+        Ok(ended) => ended,
+        Err(termination) => Ended::refused(termination),
+    }
+}
+
+fn forked(args: &ForkArgs, out: &Stdout) -> Result<Ended, RunTermination> {
+    let usage = |error: UsageError| RunTermination::UsageError {
+        message: error.to_string(),
+    };
+    let root = workspace(args.directory.as_ref()).map_err(usage)?;
+    let store_root = rooted_path(
+        &root,
+        session::store_root(args.session_dir.as_ref()).map_err(usage)?,
+    );
+    let store = session::jsonl(store_root, root.clone());
+    let source = crate::catalogue::resolve(&store, &root, Some(args.source)).map_err(usage)?;
+    let clock = SystemClock;
+    let opened =
+        session::open(&store, &source, &clock).map_err(|error| RunTermination::Failed {
+            message: format!("the fork source could not be opened: {error}"),
+        })?;
+    let opened = Opened::Durable(Box::new(opened));
+    if let Some(note_text) = opened.repair_note() {
+        out.note(&note_text);
+    }
+    let Opened::Durable(opened) = opened else {
+        unreachable!("the source was opened durably");
+    };
+    fork_opened(args, out, &store, source, *opened, &clock)
+}
+
+fn fork_opened(
+    args: &ForkArgs,
+    out: &Stdout,
+    store: &JsonlStore,
+    source: SessionId,
+    opened: ego_tools::store::OpenSession<'_>,
+    clock: &SystemClock,
+) -> Result<Ended, RunTermination> {
+    let source_state = opened.state.clone();
+    let prepared = ego_core::session::PreparedFork::new(source, &source_state, session::now(clock))
+        .map_err(|error| RunTermination::Failed {
+            message: format!("the fork source is not idle: {error}"),
+        })?;
+    let replayed = ego_core::session::ReplayContext::new(&opened.writer, &opened.writer)
+        .replay_lineage(prepared.seed().lineage())
+        .map_err(|error| RunTermination::Failed {
+            message: format!("the fork source context could not be replayed: {error}"),
+        })?;
+
+    let target = SessionId::new();
+    let target_opened =
+        session::open(store, &target, clock).map_err(|error| RunTermination::Failed {
+            message: format!("the fork target could not be opened: {error}"),
+        })?;
+    let publication = {
+        use ego_core::session::TargetStore;
+        target_opened.writer.publish_target(prepared.seed())
+    };
+    let diagnostic = publication.diagnostic().map(str::to_string);
+    if !publication.switch_target() {
+        return Err(RunTermination::Failed {
+            message: format!(
+                "the fork target was not published: {}",
+                diagnostic.as_deref().unwrap_or("publication was refused")
+            ),
+        });
+    }
+    drop(replayed);
+    if let Some(diagnostic) = diagnostic {
+        out.note(&format!(
+            "fork target {} is authoritative with a durability warning: {diagnostic}",
+            target
+        ));
+    }
+
+    let target_state = SessionState::replay([prepared.seed().event().clone()]);
+    let mut ended = Ended {
+        termination: RunTermination::Done,
+        session: target,
+        state: target_state,
+        result: Value::String(target.to_string()),
+        mcp_errors: Vec::new(),
+    };
+    let rendered = match args.output {
+        Output::Text => {
+            out.line(&target.to_string());
+            Ok(())
+        }
+        Output::Json | Output::Jsonl => render(out, &report(&ended), "the fork result"),
+    };
+    if let Err(termination) = rendered {
+        ended.termination = termination;
+    }
+    Ok(ended)
 }
 
 /// [`ls`], with the endings as an error so each step can be one line.

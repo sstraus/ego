@@ -433,6 +433,7 @@ pub struct TurnLoop<'a> {
     judge: Option<JudgeContext>,
     execution_observation: Option<ExecObservation>,
     tools: Tools<'a>,
+    ancestor: Option<Conversation>,
     cancel: CancelToken,
     control: Option<&'a mut InteractiveControl>,
     elicitor: Option<Arc<dyn Elicitor>>,
@@ -461,6 +462,7 @@ impl<'a> TurnLoop<'a> {
             judge: None,
             execution_observation: None,
             tools,
+            ancestor: None,
             cancel: session.cancel,
             control: None,
             elicitor: None,
@@ -490,6 +492,12 @@ impl<'a> TurnLoop<'a> {
     /// Attach the session's sole human-input adapter.
     pub fn with_elicitor(mut self, elicitor: Arc<dyn Elicitor>) -> Self {
         self.elicitor = Some(elicitor);
+        self
+    }
+
+    /// Attach ancestor-only provider history resolved by [`crate::session::ReplayContext`].
+    pub fn with_ancestor_conversation(mut self, ancestor: Conversation) -> Self {
+        self.ancestor = Some(ancestor);
         self
     }
 
@@ -577,6 +585,9 @@ impl<'a> TurnLoop<'a> {
         let (history, repairs) =
             conversation_from_with_blobs(self.journal.state(), self.tools.blob_store())
                 .map_err(CompactionError::History)?;
+        let history = self
+            .with_ancestor(history)
+            .map_err(CompactionError::History)?;
         if !repairs.is_empty() {
             tracing::warn!(?repairs, "source history was repaired for compaction");
         }
@@ -1351,10 +1362,12 @@ impl<'a> TurnLoop<'a> {
         // here — the log is never rewritten, so the run ends visibly at the
         // provider's exit code rather than resuming a session with a hole in
         // it (ADR §6).
-        let (history, repairs) = match conversation_from_with_blobs(
-            self.journal.state(),
-            self.tools.blob_store(),
-        ) {
+        let rebuilt = conversation_from_with_blobs(self.journal.state(), self.tools.blob_store())
+            .and_then(|(history, repairs)| {
+                self.with_ancestor(history)
+                    .map(|history| (history, repairs))
+            });
+        let (history, repairs) = match rebuilt {
             Ok(rebuilt) => rebuilt,
             // `Provider` is the exit even though the history on disk is what
             // broke and no provider was asked: §4.3's exit 4 is "the run could
@@ -1648,6 +1661,19 @@ impl<'a> TurnLoop<'a> {
         messages.insert(0, Message::text(Role::System, &system.text));
         Conversation::new(messages)
             .expect("a text message adds no call and answers none, so a valid history stays valid")
+    }
+
+    /// Prefix target-local history with its already-validated ancestor history.
+    fn with_ancestor(
+        &self,
+        history: Conversation,
+    ) -> Result<Conversation, crate::generator::types::HistoryError> {
+        let Some(ancestor) = self.ancestor.as_ref() else {
+            return Ok(history);
+        };
+        let mut messages: Vec<Message> = ancestor.clone().into();
+        messages.extend(Vec::<Message>::from(history));
+        Conversation::new(messages)
     }
 
     /// Turn one generation's stream into log entries.
