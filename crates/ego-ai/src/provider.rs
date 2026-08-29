@@ -22,18 +22,16 @@ use url::Url;
 
 use crate::http::AdmittedHttpProfile;
 use crate::resolver::{
-    ModelResolver, OllamaDaemon, SubscriptionSupplied, Supplied, XaiLanguageModels,
+    KimiManaged, ModelResolver, OllamaDaemon, SubscriptionSupplied, Supplied, XaiLanguageModels,
 };
-use crate::wire::WireFormat;
 use crate::wire::anthropic_messages::AnthropicMessages;
 use crate::wire::gemini_interactions::GeminiInteractions;
 use crate::wire::github_copilot_completions::GithubCopilotCompletions;
+use crate::wire::minimax_anthropic::MiniMaxAnthropic;
 use crate::wire::nous_portal::NousPortal;
-use crate::wire::ollama::Ollama;
 use crate::wire::openai_codex_responses::OpenAiCodexResponses;
 use crate::wire::openai_completions::OpenAiCompletions;
 use crate::wire::provider_cost::{OpenRouterUsd, ProviderCost, XaiUsdTicks};
-use crate::wire::qwen_portal::QwenPortal;
 use crate::wire::xai_responses::XaiResponses;
 
 /// A credential. Prints as `<redacted>`, in every formatter, forever.
@@ -339,19 +337,6 @@ pub struct ProviderRow {
     /// Non-secret identity headers declared by this profile. Credential and
     /// wire-format headers are excluded and validated at configuration load.
     pub extra_headers: Vec<(String, String)>,
-    /// Which API shape this provider speaks.
-    ///
-    /// A `&'static dyn` and not an `Arc<dyn>` like [`cost`](Self::cost),
-    /// because the two are different kinds of thing. A cost decoder is chosen
-    /// per row and could in principle be built from configuration; a mapping
-    /// is code, every value of it is a unit struct with no state, and there
-    /// are exactly as many as this crate compiles. A `&'static` says that.
-    ///
-    /// This is the field `wire/mod.rs` used to argue against: a row that named
-    /// a format it could not select would have been a `WireFormat` trait in
-    /// disguise. It can select one now — that is precisely what the ADR
-    /// unblocked — so the field is the trait in the open.
-    pub wire: &'static dyn WireFormat,
     /// What turns one of this provider's model ids into the facts a turn
     /// needs.
     ///
@@ -409,7 +394,6 @@ pub const ANTHROPIC_BASE: &str = "https://api.anthropic.com/v1/";
 pub const ANTHROPIC_KEY_VAR: &str = "ANTHROPIC_API_KEY";
 pub const GITHUB_COPILOT_BASE: &str = "https://api.individual.githubcopilot.com/";
 pub const KIMI_CODING_BASE: &str = "https://api.kimi.com/coding/v1/";
-pub const QWEN_OAUTH_BASE: &str = "https://portal.qwen.ai/v1/";
 pub const MINIMAX_OAUTH_BASE: &str = "https://api.minimax.io/anthropic/v1/";
 pub const NOUS_BASE: &str = "https://inference-api.nousresearch.com/v1/";
 /// The base Google serves the Gemini developer API under.
@@ -427,20 +411,26 @@ pub const GEMINI_KEY_VAR: &str = "GEMINI_API_KEY";
 const READ_ON: &str = "2026-08-21";
 const XAI_RESPONSES_READ_ON: &str = "2026-08-24";
 
-static OPENAI_CODEX_SUBSCRIPTION: SubscriptionSupplied =
-    SubscriptionSupplied::new("ego/builtin/openai-codex-subscription/v1");
-static GITHUB_COPILOT_SUBSCRIPTION: SubscriptionSupplied =
-    SubscriptionSupplied::new("ego/builtin/github-copilot-subscription/v1");
+static OPENAI_SUPPLIED: Supplied = Supplied::new(&OpenAiCompletions);
+static ANTHROPIC_SUPPLIED: Supplied = Supplied::new(&AnthropicMessages);
+static GEMINI_SUPPLIED: Supplied = Supplied::new(&GeminiInteractions);
+static XAI_LANGUAGE_MODELS: XaiLanguageModels = XaiLanguageModels::new(&OpenAiCompletions);
+static OPENAI_CODEX_SUBSCRIPTION: SubscriptionSupplied = SubscriptionSupplied::new(
+    "ego/builtin/openai-codex-subscription/v1",
+    &OpenAiCodexResponses,
+);
+static GITHUB_COPILOT_SUBSCRIPTION: SubscriptionSupplied = SubscriptionSupplied::new(
+    "ego/builtin/github-copilot-subscription/v1",
+    &GithubCopilotCompletions,
+);
 static XAI_OAUTH_SUBSCRIPTION: SubscriptionSupplied =
-    SubscriptionSupplied::new("ego/builtin/xai-oauth-subscription/v1");
-static KIMI_CODING_SUBSCRIPTION: SubscriptionSupplied =
-    SubscriptionSupplied::new("ego/builtin/kimi-coding-subscription/v1");
-static QWEN_OAUTH_SUBSCRIPTION: SubscriptionSupplied =
-    SubscriptionSupplied::new("ego/builtin/qwen-oauth-subscription/v1");
-static MINIMAX_OAUTH_SUBSCRIPTION: SubscriptionSupplied =
-    SubscriptionSupplied::new("ego/builtin/minimax-oauth-subscription/v1");
+    SubscriptionSupplied::new("ego/builtin/xai-oauth-subscription/v1", &XaiResponses);
+static MINIMAX_OAUTH_SUBSCRIPTION: SubscriptionSupplied = SubscriptionSupplied::new(
+    "ego/builtin/minimax-oauth-subscription/v1",
+    &MiniMaxAnthropic,
+);
 static NOUS_SUBSCRIPTION: SubscriptionSupplied =
-    SubscriptionSupplied::new("ego/builtin/nous-subscription/v1");
+    SubscriptionSupplied::new("ego/builtin/nous-subscription/v1", &NousPortal);
 
 /// A URL made safe to [`Url::join`] a mapping's path onto.
 ///
@@ -500,8 +490,7 @@ impl ProviderRow {
             base,
             http_profile,
             extra_headers: Vec::new(),
-            wire: &OpenAiCompletions,
-            resolver: &Supplied,
+            resolver: &OPENAI_SUPPLIED,
             credential: CredentialStrategy::BearerFromEnv {
                 var: OPENAI_KEY_VAR.to_string(),
             },
@@ -552,7 +541,6 @@ impl ProviderRow {
             base,
             http_profile,
             extra_headers: Vec::new(),
-            wire: &Ollama,
             resolver: &OllamaDaemon,
             credential: CredentialStrategy::None,
             // A daemon serving its own weights charges nothing and states
@@ -588,8 +576,7 @@ impl ProviderRow {
             base,
             http_profile,
             extra_headers: Vec::new(),
-            wire: &OpenAiCompletions,
-            resolver: &XaiLanguageModels,
+            resolver: &XAI_LANGUAGE_MODELS,
             credential: CredentialStrategy::BearerFromEnv {
                 var: XAI_KEY_VAR.to_string(),
             },
@@ -615,7 +602,6 @@ impl ProviderRow {
                 ("originator".to_string(), "ego".to_string()),
                 ("user-agent".to_string(), "ego".to_string()),
             ],
-            wire: &OpenAiCodexResponses,
             resolver: &OPENAI_CODEX_SUBSCRIPTION,
             credential: CredentialStrategy::OAuth {
                 provider: "openai-codex".to_string(),
@@ -648,7 +634,6 @@ impl ProviderRow {
                     "vscode-chat".to_string(),
                 ),
             ],
-            wire: &GithubCopilotCompletions,
             resolver: &GITHUB_COPILOT_SUBSCRIPTION,
             credential: CredentialStrategy::OAuth {
                 provider: "github-copilot".to_string(),
@@ -667,7 +652,6 @@ impl ProviderRow {
             base,
             http_profile,
             extra_headers: Vec::new(),
-            wire: &XaiResponses,
             resolver: &XAI_OAUTH_SUBSCRIPTION,
             credential: CredentialStrategy::OAuth {
                 provider: "xai-oauth".to_string(),
@@ -689,29 +673,9 @@ impl ProviderRow {
             base,
             http_profile,
             extra_headers: Vec::new(),
-            wire: &AnthropicMessages,
-            resolver: &KIMI_CODING_SUBSCRIPTION,
+            resolver: &KimiManaged,
             credential: CredentialStrategy::OAuth {
                 provider: "kimi-coding".to_string(),
-            },
-            cost: None,
-        }
-    }
-
-    pub fn qwen_oauth_default() -> Self {
-        let (base, http_profile) = admitted_base(
-            "qwen-oauth",
-            Url::parse(QWEN_OAUTH_BASE).expect("a constant this file controls"),
-        );
-        ProviderRow {
-            id: "qwen-oauth".to_string(),
-            base,
-            http_profile,
-            extra_headers: Vec::new(),
-            wire: &QwenPortal,
-            resolver: &QWEN_OAUTH_SUBSCRIPTION,
-            credential: CredentialStrategy::OAuth {
-                provider: "qwen-oauth".to_string(),
             },
             cost: None,
         }
@@ -727,7 +691,6 @@ impl ProviderRow {
             base,
             http_profile,
             extra_headers: Vec::new(),
-            wire: &AnthropicMessages,
             resolver: &MINIMAX_OAUTH_SUBSCRIPTION,
             credential: CredentialStrategy::OAuth {
                 provider: "minimax-oauth".to_string(),
@@ -746,7 +709,6 @@ impl ProviderRow {
             base,
             http_profile,
             extra_headers: Vec::new(),
-            wire: &NousPortal,
             resolver: &NOUS_SUBSCRIPTION,
             credential: CredentialStrategy::OAuth {
                 provider: "nous".to_string(),
@@ -783,8 +745,7 @@ impl ProviderRow {
             base,
             http_profile,
             extra_headers: Vec::new(),
-            wire: &OpenAiCompletions,
-            resolver: &Supplied,
+            resolver: &OPENAI_SUPPLIED,
             credential: CredentialStrategy::OAuthOrEnv {
                 provider: "openrouter".to_string(),
                 var: OPENROUTER_KEY_VAR.to_string(),
@@ -819,8 +780,7 @@ impl ProviderRow {
             base,
             http_profile,
             extra_headers: Vec::new(),
-            wire: &AnthropicMessages,
-            resolver: &Supplied,
+            resolver: &ANTHROPIC_SUPPLIED,
             credential: CredentialStrategy::Anthropic {
                 provider: "anthropic".to_string(),
                 api_key_var: ANTHROPIC_KEY_VAR.to_string(),
@@ -861,8 +821,7 @@ impl ProviderRow {
             base,
             http_profile,
             extra_headers: Vec::new(),
-            wire: &GeminiInteractions,
-            resolver: &Supplied,
+            resolver: &GEMINI_SUPPLIED,
             credential: CredentialStrategy::HeaderFromEnv {
                 header: "x-goog-api-key".to_string(),
                 var: GEMINI_KEY_VAR.to_string(),

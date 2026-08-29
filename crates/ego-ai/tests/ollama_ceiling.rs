@@ -52,6 +52,8 @@
 
 use ego_ai::http::{HttpError, HttpResponse};
 use ego_ai::provider::ProviderRow;
+use ego_ai::wire::WireFormat;
+use ego_ai::wire::ollama::Ollama;
 use ego_ai::wire::openai_completions;
 use ego_core::generator::port::AiEvent;
 use ego_core::generator::types::{
@@ -82,7 +84,8 @@ fn recorded(request: &str) -> serde_json::Value {
 /// and it would assert less: the claim `wire::ollama` makes is that Ollama's
 /// responses need no decoder of their own, and a test that reaches past the
 /// row to the family's decoder is a test that assumes that claim instead of
-/// checking it. Going through `row.wire` means replacing the delegation with
+/// checking it. Going through the row's explicit `Ollama` mapping means
+/// replacing the delegation with
 /// anything else — an empty stream, a second decoder that drifts — fails here.
 ///
 /// Chunked at seven bytes so the SSE framing is exercised across boundaries
@@ -94,7 +97,7 @@ async fn replay(transcript: &'static str) -> Vec<AiEvent> {
         .map(|chunk| Ok(bytes::Bytes::copy_from_slice(chunk)))
         .collect();
     let row = ProviderRow::ollama_default();
-    row.wire
+    Ollama
         .decode(
             Ok(HttpResponse {
                 status: 200,
@@ -176,7 +179,7 @@ async fn ollama_honours_max_tokens_and_ignores_max_completion_tokens() {
 /// `2026-08-21-a-shared-shape-is-not-a-shared-contract.md` §8 closed that, and
 /// this is the same guard pointed at the same seam from the other side.
 ///
-/// It goes through `ProviderRow::ollama_default().wire` rather than calling
+/// It goes through `ProviderRow::ollama_default()` plus its explicit mapping rather than calling
 /// `wire::ollama::request_body` directly, because the claim under test is
 /// about the *profile*: pointing the row back at the family would then fail
 /// here rather than pass against a mapping nothing selects.
@@ -198,8 +201,7 @@ fn the_ceiling_the_ollama_profile_sends_is_the_one_this_daemon_reads() {
 
     let row = ProviderRow::ollama_default();
     let target = ego_ai::wire::RequestTarget::new(row.base(), &[]);
-    let request = row
-        .wire
+    let request = Ollama
         .build_request(&target, &req)
         .expect("this request is expressible");
     let adapted: serde_json::Value =

@@ -669,6 +669,7 @@ mod store {
             turn,
             EventKind::UserPrompt {
                 text: "hi".to_string(),
+                images: Vec::new(),
                 queued_prompt: None,
             },
         );
@@ -709,6 +710,7 @@ mod store {
             turn,
             EventKind::UserPrompt {
                 text: "hi".to_string(),
+                images: Vec::new(),
                 queued_prompt: None,
             },
             5_000,
@@ -744,6 +746,7 @@ mod store {
                         turn,
                         EventKind::UserPrompt {
                             text: text.to_string(),
+                            images: Vec::new(),
                             queued_prompt: None,
                         },
                     ),
@@ -812,6 +815,7 @@ mod store {
                         turn,
                         EventKind::UserPrompt {
                             text: marker.to_string(),
+                            images: Vec::new(),
                             queued_prompt: None,
                         },
                     ),
@@ -838,6 +842,7 @@ mod store {
                 e.kind,
                 EventKind::UserPrompt {
                     text: "first-event-marker".to_string(),
+                    images: Vec::new(),
                     queued_prompt: None,
                 }
             ),
@@ -856,6 +861,7 @@ mod store {
                 e.kind,
                 EventKind::UserPrompt {
                     text: "third-event-marker".to_string(),
+                    images: Vec::new(),
                     queued_prompt: None,
                 }
             ),
@@ -888,6 +894,7 @@ mod store {
                     turn,
                     EventKind::UserPrompt {
                         text: "hi".to_string(),
+                        images: Vec::new(),
                         queued_prompt: None,
                     },
                 ),
@@ -921,6 +928,7 @@ mod store {
                     EventKind::PromptQueued {
                         id: queued,
                         text: "follow up".to_owned(),
+                        images: Vec::new(),
                     },
                 ),
             )
@@ -955,6 +963,7 @@ mod store {
                     turn,
                     EventKind::UserPrompt {
                         text: "follow up".to_owned(),
+                        images: Vec::new(),
                         queued_prompt: Some(queued),
                     },
                 ),
@@ -992,12 +1001,14 @@ mod store {
             EventKind::PromptQueued {
                 id: QueuedPromptId::new(),
                 text: "accepted only after fsync".to_owned(),
+                images: Vec::new(),
             },
             EventKind::PromptDeliveryExpedited {
                 through: QueuedPromptId::new(),
             },
             EventKind::UserPrompt {
                 text: "consumed only after fsync".to_owned(),
+                images: Vec::new(),
                 queued_prompt: Some(QueuedPromptId::new()),
             },
         ] {
@@ -1102,6 +1113,7 @@ mod store {
                     turn,
                     EventKind::UserPrompt {
                         text: "hi".to_string(),
+                        images: Vec::new(),
                         queued_prompt: None,
                     },
                     1_000,
@@ -1183,6 +1195,7 @@ mod store {
                     turn,
                     EventKind::UserPrompt {
                         text: "hi".to_string(),
+                        images: Vec::new(),
                         queued_prompt: None,
                     },
                 ),
@@ -1223,6 +1236,7 @@ mod store {
                         turn,
                         EventKind::UserPrompt {
                             text: "hi".to_string(),
+                            images: Vec::new(),
                             queued_prompt: None,
                         },
                     ),
@@ -1278,6 +1292,7 @@ mod store {
                     turn,
                     EventKind::UserPrompt {
                         text: "hi".to_string(),
+                        images: Vec::new(),
                         queued_prompt: None,
                     },
                 ),

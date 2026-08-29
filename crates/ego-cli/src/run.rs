@@ -26,8 +26,7 @@ use ego_core::generation_model_source::{
     GenerationModelError, GenerationModelErrorClass, GenerationProfile, GenerationRole,
 };
 use ego_core::generator::capabilities::ModelCapabilities;
-use ego_core::generator::types::ThinkingLevel;
-use ego_core::generator::types::ToolDescriptor;
+use ego_core::generator::types::{ImageRef, ThinkingLevel, ToolDescriptor};
 use ego_core::permit::judge::{JudgeConfig, JudgeInput};
 use ego_core::permit::{
     CanonPath, Change, Escalation, ExecCaps, ExecObservation, HumanApprover, Op, OpName,
@@ -70,7 +69,7 @@ use crate::provider_http::{ProviderHttpAdapter, run_effect_ports};
 use crate::render::caps::{Capabilities, Environment, OscProfile, Terminal};
 use crate::render::osc::{Osc, Progress, State};
 use crate::session::{self, ActiveSession, Opened};
-use crate::{config, model, prompt, repl, schema};
+use crate::{attachment, config, model, prompt, repl, schema};
 
 /// The currency a session settles in.
 ///
@@ -939,7 +938,13 @@ fn materials(
     seeded: bool,
     diagnostics: &dyn Diagnostics,
 ) -> Result<Materials, UsageError> {
-    let text = if seeded {
+    let text = if let Some(agent_file) = &args.agent_file {
+        if seeded {
+            prompt::seed_agent_file(agent_file.body(), args.stdin, &prompt::ProcessStdin)?
+        } else {
+            prompt::assemble_agent_file(agent_file.body(), args.stdin, &prompt::ProcessStdin)?
+        }
+    } else if seeded {
         prompt::seed(args.prompt.as_deref(), args.stdin, &prompt::ProcessStdin)?
     } else {
         prompt::assemble(args.prompt.as_deref(), args.stdin, &prompt::ProcessStdin)?
@@ -953,11 +958,22 @@ fn prepared_materials(
     text: String,
     diagnostics: &dyn Diagnostics,
 ) -> Result<Materials, UsageError> {
-    let compiled = match args.schema.as_deref() {
-        Some(spec) => Some(schema::Schema::compile(&rooted_at_file(
-            spec,
-            &settings.cwd,
-        )?)?),
+    let schema_spec = args.schema.as_deref().map(|spec| (spec, None)).or_else(|| {
+        args.agent_file
+            .as_ref()
+            .and_then(|file| file.schema().map(|spec| (spec, Some(file.path()))))
+    });
+    let compiled = match schema_spec {
+        Some((spec, origin)) => {
+            let source = rooted_at_file(spec, &settings.cwd).map_err(|error| match origin {
+                Some(agent_file) => UsageError(format!(
+                    "agent file {} selected a schema that could not be read: {error}",
+                    agent_file.display()
+                )),
+                None => error,
+            })?;
+            Some(schema::Schema::compile(&source)?)
+        }
         None => None,
     };
     let system = instructions(
@@ -1300,6 +1316,39 @@ async fn effect_scope(
     })
 }
 
+async fn acquire_attachments(
+    specs: &[String],
+    source: &Arc<model::CliGenerationModelSource>,
+    ports: &Arc<RunEffectPorts>,
+    cancel: &CancelToken,
+    run_deadline: Option<std::time::Instant>,
+    cwd: &Path,
+    blobs: &dyn ego_core::store::blob::BlobStore,
+) -> Result<Vec<ImageRef>, RunTermination> {
+    if specs.is_empty() {
+        return Ok(Vec::new());
+    }
+    let http = Arc::new(ProviderHttpAdapter::new(Arc::clone(ports))) as Arc<dyn ego_ai::http::Http>;
+    let profile = source
+        .bind(http, cancel.clone(), run_deadline)
+        .resolve(GenerationRole::Main)
+        .await
+        .map_err(generation_refusal)?;
+    attachment::acquire(
+        specs,
+        &profile.capabilities,
+        profile.identity.0.as_str(),
+        &profile.request_model,
+        cwd,
+        ports.as_ref(),
+        blobs,
+    )
+    .await
+    .map_err(|error| RunTermination::UsageError {
+        message: error.to_string(),
+    })
+}
+
 /// Map the first latched cancellation cause to the CLI termination contract.
 pub fn cancelled_termination(cancel: &CancelToken) -> RunTermination {
     match cancel.cause() {
@@ -1333,6 +1382,7 @@ async fn drive_headless_turn(
     run_deadline: Option<std::time::Instant>,
     elicitor: Option<Arc<dyn Elicitor>>,
     judge_enabled: bool,
+    attachment_specs: &[String],
     input: HeadlessInput<'_>,
     diagnostics: &dyn Diagnostics,
 ) -> Result<(RunTermination, SessionState, Value), RunTermination> {
@@ -1340,6 +1390,16 @@ async fn drive_headless_turn(
     let mut gate = budget::gate(&effective.ceilings, effective.clamped.money, currency);
     let (ports, observation) =
         effect_scope(confinement, active.evidence(), cancel, run_deadline).await?;
+    let images = acquire_attachments(
+        attachment_specs,
+        &source,
+        &ports,
+        cancel,
+        run_deadline,
+        cwd,
+        active.evidence().blob_store(),
+    )
+    .await?;
     let execution_capabilities = observation.capabilities();
     let http =
         Arc::new(ProviderHttpAdapter::new(Arc::clone(&ports))) as Arc<dyn ego_ai::http::Http>;
@@ -1393,7 +1453,11 @@ async fn drive_headless_turn(
     }
     .with_execution_observation(observation);
     let (termination, result) = match input {
-        HeadlessInput::Prompt(prompt) => turns.drive(&mut loop_, prompt, cancel, diagnostics).await,
+        HeadlessInput::Prompt(prompt) => {
+            turns
+                .drive_with_images(&mut loop_, prompt, images, cancel, diagnostics)
+                .await
+        }
         HeadlessInput::Resumed(turn) => {
             turns
                 .drive_resumed(&mut loop_, turn, cancel, diagnostics)
@@ -1622,6 +1686,7 @@ impl CliPrepared {
             self.run_deadline,
             bindings.elicitor,
             self.judge_enabled,
+            &[],
             HeadlessInput::Prompt(prompt),
             &Stderr,
         )
@@ -1776,6 +1841,8 @@ pub(crate) struct CliMcpRunPolicy {
 fn protocol_args(session_dir: Option<PathBuf>) -> Args {
     Args {
         prompt: None,
+        agent_file: None,
+        attach: Vec::new(),
         stdin: crate::cli::Stdin::Ambient,
         model: None,
         offline: false,
@@ -2305,6 +2372,7 @@ async fn execute<S: EventSink>(
                 run_deadline,
                 elicitor,
                 judge_enabled,
+                &args.attach,
                 input,
                 diagnostics,
             )
@@ -2334,6 +2402,7 @@ async fn execute<S: EventSink>(
             // is a first thing to say, not a different mode.
             let mut seeded = (!text.trim().is_empty()).then(|| text.clone());
             let mut resumed = resume.as_ref().map(|continuation| continuation.turn);
+            let mut pending_attachments = args.attach.clone();
 
             loop {
                 let resumed_turn = resumed.take();
@@ -2567,6 +2636,22 @@ async fn execute<S: EventSink>(
                 let (ports, observation) =
                     effect_scope(&confinement, active.evidence(), &turn_cancel, run_deadline)
                         .await?;
+                let images = if asked.is_some() && !pending_attachments.is_empty() {
+                    let images = acquire_attachments(
+                        &pending_attachments,
+                        &source,
+                        &ports,
+                        &turn_cancel,
+                        run_deadline,
+                        &cwd,
+                        active.evidence().blob_store(),
+                    )
+                    .await?;
+                    pending_attachments.clear();
+                    images
+                } else {
+                    Vec::new()
+                };
                 let mut loop_ = build!(active, state, &turn_cancel, ports, observation)
                     .with_interactive_control(&mut control);
                 let driven = match resumed_turn {
@@ -2579,7 +2664,13 @@ async fn execute<S: EventSink>(
                     None => match asked {
                         Some(asked) => {
                             let (termination, result) = turns
-                                .drive(&mut loop_, &asked, &turn_cancel, diagnostics)
+                                .drive_with_images(
+                                    &mut loop_,
+                                    &asked,
+                                    images,
+                                    &turn_cancel,
+                                    diagnostics,
+                                )
                                 .await;
                             Some((termination, result))
                         }
@@ -2779,14 +2870,15 @@ impl Turns<'_> {
             .is_some_and(|deadline| std::time::Instant::now() >= deadline)
     }
 
-    async fn drive(
+    async fn drive_with_images(
         &self,
         loop_: &mut TurnLoop<'_>,
         first: &str,
+        images: Vec<ImageRef>,
         cancel: &CancelToken,
         diagnostics: &dyn Diagnostics,
     ) -> (RunTermination, Value) {
-        self.drive_from(loop_, first, None, cancel, diagnostics)
+        self.drive_from(loop_, first, images, None, cancel, diagnostics)
             .await
     }
 
@@ -2797,7 +2889,7 @@ impl Turns<'_> {
         cancel: &CancelToken,
         diagnostics: &dyn Diagnostics,
     ) -> (RunTermination, Value) {
-        self.drive_from(loop_, "", Some(turn), cancel, diagnostics)
+        self.drive_from(loop_, "", Vec::new(), Some(turn), cancel, diagnostics)
             .await
     }
 
@@ -2805,6 +2897,7 @@ impl Turns<'_> {
         &self,
         loop_: &mut TurnLoop<'_>,
         first: &str,
+        mut images: Vec<ImageRef>,
         mut resumed: Option<ego_core::event::id::TurnId>,
         cancel: &CancelToken,
         diagnostics: &dyn Diagnostics,
@@ -2819,7 +2912,10 @@ impl Turns<'_> {
             }
             let outcome = match resumed.take() {
                 Some(turn) => self.one_resumed(loop_, turn, cancel).await,
-                None => self.one(loop_, &prompt, cancel).await,
+                None => {
+                    self.one(loop_, &prompt, std::mem::take(&mut images), cancel)
+                        .await
+                }
             };
             let outcome = match outcome {
                 Ok(outcome) => outcome,
@@ -2884,10 +2980,11 @@ impl Turns<'_> {
         &self,
         loop_: &mut TurnLoop<'_>,
         prompt: &str,
+        images: Vec<ImageRef>,
         cancel: &CancelToken,
     ) -> Result<TurnOutcome, RunTermination> {
         let (outcome, stopped) = {
-            let mut running = Box::pin(loop_.run(prompt));
+            let mut running = Box::pin(loop_.run_with_images(prompt, images));
             let mut stopped = false;
             loop {
                 if stopped {

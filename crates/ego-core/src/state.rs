@@ -19,9 +19,10 @@ use crate::event::id::{
     AttemptId, EventId, GenerationId, ItemId, Producer, QueuedPromptId, Seq, SessionId, TurnId,
 };
 use crate::generator::attempt::{AttemptRef, DeliveryCertainty, Outcome, UsageReport};
-use crate::generator::types::ReasoningState;
-use crate::permit::ToolResult;
+use crate::generator::types::{ImageRef, ReasoningState};
+use crate::permit::{ToolResult, ToolResultProvenance};
 use crate::question::{QuestionAnswer, QuestionError, QuestionOutcome, QuestionRequest};
+use crate::store::blob::BlobRef;
 
 /// Token counts, split by the categories providers price separately.
 ///
@@ -277,6 +278,9 @@ pub struct ItemState {
     /// Message and reasoning text, plus any still-streaming tool delta. A
     /// completed tool's semantic result lives in [`Self::tool_result`].
     pub text: String,
+    /// Ordered durable image metadata for a user prompt.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<ImageRef>,
     /// The final evidence returned by a completed tool call.
     pub tool_result: Option<ToolResult>,
     /// A reasoning item's opaque continuation state, once its block closed.
@@ -320,6 +324,7 @@ impl ItemState {
             tool_name: None,
             args: String::new(),
             text: String::new(),
+            images: Vec::new(),
             tool_result: None,
             reasoning_state: None,
             completed: false,
@@ -689,6 +694,8 @@ pub struct Refusal {
 pub struct QueuedPrompt {
     id: QueuedPromptId,
     text: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    images: Vec<ImageRef>,
     turn: TurnId,
     seq: Seq,
 }
@@ -708,6 +715,10 @@ impl QueuedPrompt {
 
     pub fn text(&self) -> &str {
         &self.text
+    }
+
+    pub fn images(&self) -> &[ImageRef] {
+        &self.images
     }
 
     pub fn turn(&self) -> TurnId {
@@ -1107,7 +1118,13 @@ impl SessionState {
         has_user_prompt && !completed
     }
 
-    fn accept_prompt(&mut self, ev: &DomainEvent, id: QueuedPromptId, text: &str) {
+    fn accept_prompt(
+        &mut self,
+        ev: &DomainEvent,
+        id: QueuedPromptId,
+        text: &str,
+        images: &[ImageRef],
+    ) {
         if self
             .queued_prompt_ledger
             .iter()
@@ -1118,6 +1135,7 @@ impl SessionState {
         self.queued_prompt_ledger.push(QueuedPrompt {
             id,
             text: text.to_string(),
+            images: images.to_vec(),
             turn: ev.env.turn,
             seq: ev.env.seq,
         });
@@ -1174,6 +1192,39 @@ impl SessionState {
         &self.hook_settlements
     }
 
+    /// Every structured reference the current snapshot keeps reachable.
+    ///
+    /// Semantic traversal belongs in core. The filesystem adapter receives
+    /// only generic references and never learns about event variants.
+    pub fn blob_references(&self) -> Vec<BlobRef> {
+        let mut references = Vec::new();
+        for prompt in &self.queued_prompt_ledger {
+            references.extend(prompt.images.iter().map(|image| image.reference().clone()));
+        }
+        for item in self.items.values() {
+            references.extend(item.images.iter().map(|image| image.reference().clone()));
+            if let Some(result) = &item.tool_result {
+                references.extend(
+                    result
+                        .content
+                        .iter()
+                        .filter_map(|block| block.evidence_reference())
+                        .map(|reference| reference.blob_ref()),
+                );
+                if let ToolResultProvenance::Foreign { result } = result.provenance() {
+                    references.push(result.evidence_reference().blob_ref());
+                }
+            }
+        }
+        references.extend(
+            self.hook_settlements
+                .iter()
+                .filter_map(|settlement| settlement.result().feedback())
+                .map(|feedback| feedback.reference().blob_ref()),
+        );
+        references
+    }
+
     /// Apply one domain event to the state.
     ///
     /// Pure and sync: no I/O, no wall-clock reads, no randomness. Total: no
@@ -1202,10 +1253,13 @@ impl SessionState {
         self.known_events.insert(ev.env.id);
 
         match &ev.kind {
-            EventKind::PromptQueued { id, text } => self.accept_prompt(ev, *id, text),
+            EventKind::PromptQueued { id, text, images } => {
+                self.accept_prompt(ev, *id, text, images)
+            }
             EventKind::PromptDeliveryExpedited { through } => self.expedite_prompt(*through),
             EventKind::UserPrompt {
                 text,
+                images,
                 queued_prompt,
             } => {
                 if let Some(id) = queued_prompt {
@@ -1213,6 +1267,7 @@ impl SessionState {
                 }
                 if let Some(item) = self.item_mut(ev, ItemKind::UserPrompt) {
                     item.text = text.clone();
+                    item.images = images.clone();
                 }
             }
             EventKind::AssistantDelta { text } => {

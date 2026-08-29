@@ -21,7 +21,6 @@ const ANTHROPIC_CLIENT: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 const COPILOT_CLIENT: &str = "Iv1.b507a08c87ecfe98";
 const XAI_CLIENT: &str = "b1a00492-073a-47ea-816f-4c329264a828";
 const KIMI_CLIENT: &str = "17e5f671-d194-4dfb-9706-5516cb48c098";
-const QWEN_CLIENT: &str = "f0304373b74a44d2b584a3fb70ca9e56";
 const MINIMAX_CLIENT: &str = "78257093-7e40-4613-99e0-527b14b39113";
 // Nous publishes the Hermes CLI id for its portal and no ego-specific client
 // registration path. This is the one declared foreign client identity.
@@ -38,7 +37,6 @@ pub enum BuiltInFlow {
     GitHubCopilot,
     Xai,
     KimiCoding,
-    Qwen,
     MiniMax,
     Nous,
     OpenRouter,
@@ -50,7 +48,6 @@ const FLOWS: &[BuiltInFlow] = &[
     BuiltInFlow::GitHubCopilot,
     BuiltInFlow::Xai,
     BuiltInFlow::KimiCoding,
-    BuiltInFlow::Qwen,
     BuiltInFlow::MiniMax,
     BuiltInFlow::Nous,
     BuiltInFlow::OpenRouter,
@@ -68,7 +65,6 @@ impl BuiltInFlow {
             Self::GitHubCopilot => "github-copilot",
             Self::Xai => "xai-oauth",
             Self::KimiCoding => "kimi-coding",
-            Self::Qwen => "qwen-oauth",
             Self::MiniMax => "minimax-oauth",
             Self::Nous => "nous",
             Self::OpenRouter => "openrouter",
@@ -76,7 +72,7 @@ impl BuiltInFlow {
     }
 
     fn http_profile(self) -> &'static AdmittedHttpProfile {
-        static PROFILES: OnceLock<[AdmittedHttpProfile; 9]> = OnceLock::new();
+        static PROFILES: OnceLock<[AdmittedHttpProfile; 8]> = OnceLock::new();
         &PROFILES.get_or_init(|| {
             [
                 oauth_profile("openai-codex", &["https://auth.openai.com/"]),
@@ -87,7 +83,6 @@ impl BuiltInFlow {
                 ),
                 oauth_profile("xai-oauth", &["https://auth.x.ai/"]),
                 oauth_profile("kimi-coding", &["https://auth.kimi.com/"]),
-                oauth_profile("qwen-oauth", &["https://chat.qwen.ai/"]),
                 oauth_profile("minimax-oauth", &["https://api.minimax.io/"]),
                 oauth_profile("nous", &["https://portal.nousresearch.com/"]),
                 oauth_profile("openrouter", &["https://openrouter.ai/"]),
@@ -98,10 +93,9 @@ impl BuiltInFlow {
             Self::GitHubCopilot => 2,
             Self::Xai => 3,
             Self::KimiCoding => 4,
-            Self::Qwen => 5,
-            Self::MiniMax => 6,
-            Self::Nous => 7,
-            Self::OpenRouter => 8,
+            Self::MiniMax => 5,
+            Self::Nous => 6,
+            Self::OpenRouter => 7,
         }]
     }
 
@@ -112,7 +106,6 @@ impl BuiltInFlow {
             Self::GitHubCopilot => Some(COPILOT_CLIENT),
             Self::Xai => Some(XAI_CLIENT),
             Self::KimiCoding => Some(KIMI_CLIENT),
-            Self::Qwen => Some(QWEN_CLIENT),
             Self::MiniMax => Some(MINIMAX_CLIENT),
             Self::Nous => Some(NOUS_CLIENT),
             Self::OpenRouter => None,
@@ -126,7 +119,6 @@ impl BuiltInFlow {
             Self::GitHubCopilot => "https://github.com/login/oauth/access_token",
             Self::Xai => "https://auth.x.ai/oauth2/token",
             Self::KimiCoding => "https://auth.kimi.com/api/oauth/token",
-            Self::Qwen => "https://chat.qwen.ai/api/v1/oauth2/token",
             Self::MiniMax => "https://api.minimax.io/oauth/token",
             Self::Nous => "https://portal.nousresearch.com/api/oauth/token",
             Self::OpenRouter => "https://openrouter.ai/api/v1/auth/keys",
@@ -162,10 +154,6 @@ impl BuiltInFlow {
                 "https://portal.nousresearch.com/api/oauth/device/code",
                 &[("client_id", NOUS_CLIENT), ("scope", "inference:invoke")],
             ),
-            Self::Qwen => Err(FlowError::UnsupportedGrant {
-                provider: self.id().to_string(),
-                grant: "device code without PKCE challenge".to_string(),
-            }),
             _ => Err(FlowError::UnsupportedGrant {
                 provider: self.id().to_string(),
                 grant: "device code".to_string(),
@@ -175,20 +163,9 @@ impl BuiltInFlow {
 
     pub fn device_authorization_request_with_pkce(
         self,
-        challenge: &str,
+        _challenge: &str,
     ) -> Result<HttpRequest, FlowError> {
-        if self != Self::Qwen {
-            return self.device_authorization_request();
-        }
-        form_request(
-            "https://chat.qwen.ai/api/v1/oauth2/device/code",
-            &[
-                ("client_id", QWEN_CLIENT),
-                ("scope", "openid profile email model.completion"),
-                ("code_challenge", challenge),
-                ("code_challenge_method", "S256"),
-            ],
-        )
+        self.device_authorization_request()
     }
 
     pub fn authorization_url(
@@ -346,20 +323,9 @@ impl BuiltInFlow {
     pub fn device_poll_request_with_pkce(
         self,
         device_code: &str,
-        verifier: &str,
+        _verifier: &str,
     ) -> Result<HttpRequest, FlowError> {
-        if self != Self::Qwen {
-            return self.device_poll_request(device_code, None);
-        }
-        form_request(
-            self.token_url(),
-            &[
-                ("grant_type", DEVICE_GRANT),
-                ("client_id", QWEN_CLIENT),
-                ("device_code", device_code),
-                ("code_verifier", verifier),
-            ],
-        )
+        self.device_poll_request(device_code, None)
     }
 
     pub fn login_request(self, grant: LoginGrant<'_>) -> Result<HttpRequest, FlowError> {

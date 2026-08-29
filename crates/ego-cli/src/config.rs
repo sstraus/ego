@@ -159,6 +159,9 @@ pub fn layers(
     trust: Trust,
 ) -> Result<Vec<Sourced<ConfigLayer>>, UsageError> {
     let mut found = base_layers(workspace, trust)?;
+    if let Some(agent_file) = &args.agent_file {
+        found.push(agent_file.layer()?);
+    }
     found.push(args_layer(args)?);
     Ok(found)
 }
@@ -182,6 +185,9 @@ impl FrozenRunConfig {
 
     pub(crate) fn resolve(&self, args: &Args) -> Result<Effective, UsageError> {
         let mut layers = self.layers.clone();
+        if let Some(agent_file) = &args.agent_file {
+            layers.push(agent_file.layer()?);
+        }
         layers.push(args_layer(args)?);
         resolve(&layers, self.trust, self.profile.as_deref())
             .map_err(|error| UsageError(error.to_string()))

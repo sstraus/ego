@@ -51,6 +51,7 @@ pub const PATH: &str = "codex/responses";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Inexpressible {
     ReasoningStateNotCarriable,
+    ImageInputUnproved,
 }
 
 impl std::fmt::Display for Inexpressible {
@@ -60,6 +61,10 @@ impl std::fmt::Display for Inexpressible {
                 f,
                 "openai-codex-responses has no field for opaque reasoning \
                  state, so carrying it over would mean dropping it"
+            ),
+            Inexpressible::ImageInputUnproved => write!(
+                f,
+                "image input is unknown for the private openai-codex-responses contract"
             ),
         }
     }
@@ -150,6 +155,7 @@ fn input_items(messages: &[Message]) -> Vec<Value> {
         for block in &message.content {
             match block {
                 ContentBlock::Reasoning { .. } => {}
+                ContentBlock::Image { .. } => {}
                 ContentBlock::Text { text } => match message.role {
                     Role::User => items.push(serde_json::json!({
                         "role": "user",
@@ -186,6 +192,9 @@ fn input_items(messages: &[Message]) -> Vec<Value> {
 }
 
 pub fn request_body(req: &GenRequest) -> Result<Vec<u8>, Inexpressible> {
+    if super::request_has_images(req) {
+        return Err(Inexpressible::ImageInputUnproved);
+    }
     if carries_reasoning(req) {
         return Err(Inexpressible::ReasoningStateNotCarriable);
     }

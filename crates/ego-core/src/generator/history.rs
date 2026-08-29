@@ -11,6 +11,7 @@
 
 use super::types::{ContentBlock, Conversation, HistoryError, Message, Role};
 use crate::state::{ItemKind, ItemState, SessionState};
+use crate::store::blob::BlobStore;
 
 /// Something the rebuild had to do to make the history sendable.
 ///
@@ -61,6 +62,21 @@ const TORN: &str = "the tool call did not complete: the session ended before its
 pub fn conversation_from(
     state: &SessionState,
 ) -> Result<(Conversation, Vec<Repair>), HistoryError> {
+    conversation_from_inner(state, None)
+}
+
+/// Rebuild and hydrate every durable image through the session blob port.
+pub fn conversation_from_with_blobs(
+    state: &SessionState,
+    blobs: &dyn BlobStore,
+) -> Result<(Conversation, Vec<Repair>), HistoryError> {
+    conversation_from_inner(state, Some(blobs))
+}
+
+fn conversation_from_inner(
+    state: &SessionState,
+    blobs: Option<&dyn BlobStore>,
+) -> Result<(Conversation, Vec<Repair>), HistoryError> {
     let mut items: Vec<&ItemState> = state.items.values().collect();
     // By `seq`, not by `ItemId` — see `ItemState::seq`.
     items.sort_by_key(|item| item.seq);
@@ -109,6 +125,45 @@ pub fn conversation_from(
                 }
             }
             ItemKind::UserPrompt => {
+                if item.images.len() > super::types::MAX_IMAGES_PER_PROMPT {
+                    return Err(HistoryError::ImagePromptInvalid {
+                        cause: format!(
+                            "{} images exceed the {}-image product limit",
+                            item.images.len(),
+                            super::types::MAX_IMAGES_PER_PROMPT
+                        ),
+                    });
+                }
+                let total = item.images.iter().try_fold(0_u64, |total, image| {
+                    total.checked_add(image.reference().bytes)
+                });
+                if total.is_none_or(|total| total > super::types::MAX_TOTAL_IMAGE_BYTES) {
+                    return Err(HistoryError::ImagePromptInvalid {
+                        cause: format!(
+                            "aggregate image bytes exceed the {}-byte product limit",
+                            super::types::MAX_TOTAL_IMAGE_BYTES
+                        ),
+                    });
+                }
+                for durable in &item.images {
+                    let blobs = blobs.ok_or_else(|| HistoryError::ImageBlobStoreRequired {
+                        reference: durable.reference().to_string(),
+                    })?;
+                    let bytes = blobs.read(durable.reference()).map_err(|error| {
+                        HistoryError::ImageUnavailable {
+                            reference: durable.reference().to_string(),
+                            cause: error.to_string(),
+                        }
+                    })?;
+                    let image =
+                        durable
+                            .hydrate(bytes)
+                            .map_err(|error| HistoryError::ImageUnavailable {
+                                reference: durable.reference().to_string(),
+                                cause: error.to_string(),
+                            })?;
+                    push(&mut messages, Role::User, ContentBlock::Image { image });
+                }
                 push(&mut messages, Role::User, text_block(&item.text));
             }
             ItemKind::Assistant => {

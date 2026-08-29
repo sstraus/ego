@@ -1,0 +1,3 @@
+: schema-derived from Kimi's current beta Messages stream
+event: error
+data: {"type":"error","error":{"type":"invalid_request_error","message":"request refused"}}

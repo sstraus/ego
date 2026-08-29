@@ -17,15 +17,15 @@ use ego_core::config::{
     UserConfigStore,
 };
 use ego_core::generator::capabilities::{
-    CacheRetention, CancelSemantics, ModelCapabilities, ReasoningCarryover, ReasoningEffortSupport,
-    Transport,
+    CacheRetention, CancelSemantics, ImageInputSupport, ModelCapabilities, ReasoningCarryover,
+    ReasoningEffortSupport, Transport,
 };
 use ego_core::generator::types::ThinkingLevel;
 use ego_core::public::MeteringKind;
 
 fn capabilities() -> ModelCapabilities {
     ModelCapabilities {
-        schema_version: 1,
+        schema_version: ModelCapabilities::SCHEMA_VERSION,
         max_context_tokens: Some(128_000),
         max_output_tokens: Some(16_000),
         max_tools: Some(128),
@@ -36,6 +36,7 @@ fn capabilities() -> ModelCapabilities {
         cancel: CancelSemantics::Cooperative,
         cache: CacheRetention::Short,
         transport: Transport::Sse,
+        image_input: ImageInputSupport::Unknown,
     }
 }
 

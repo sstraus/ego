@@ -31,6 +31,7 @@ use url::Url;
 use crate::http::Http;
 use crate::provider::{MissingCredential, ProviderRow, ResolvedCredential};
 use crate::resolver::Resolution;
+use crate::wire::WireFormat;
 use crate::wire::provider_cost::ProviderCost;
 
 /// The provider id of the hosted row this milestone ships.
@@ -65,6 +66,7 @@ pub struct ResolvedModel {
     /// provider, never the whole slug.
     pub model: String,
     pub row: ProviderRow,
+    pub wire: &'static dyn WireFormat,
     pub capabilities: ModelCapabilities,
     pub metering: Metering,
     /// What this build knows the row costs, which may be nothing.
@@ -691,6 +693,8 @@ pub enum ResolveError {
     HostedModelNotConfigured { slug: String },
     /// The provider needs a credential that is not set.
     MissingCredential(MissingCredential),
+    /// The provider received a credential but rejected its account authority.
+    RejectedCredential { provider: String, status: u16 },
     /// The daemon does not list that model.
     NotInstalled {
         model: String,
@@ -738,6 +742,10 @@ impl fmt::Display for ResolveError {
                  output ceiling have to be supplied"
             ),
             ResolveError::MissingCredential(missing) => write!(f, "{missing}"),
+            ResolveError::RejectedCredential { provider, status } => write!(
+                f,
+                "provider `{provider}` rejected its credential with HTTP {status}; run `ego auth login {provider}`"
+            ),
             ResolveError::NotInstalled { model, installed } => write!(
                 f,
                 "the daemon does not serve `{model}`; it serves: {}",
@@ -986,7 +994,11 @@ impl Catalogue {
     /// because [`Supplied`](crate::resolver::Supplied) is what calls it and
     /// because a test that wants the supplied half alone should not have to
     /// build a transport to reach it.
-    pub fn resolve_hosted(&self, slug: &ModelSlug) -> Result<ResolvedModel, ResolveError> {
+    pub fn resolve_hosted(
+        &self,
+        slug: &ModelSlug,
+        wire: &'static dyn WireFormat,
+    ) -> Result<ResolvedModel, ResolveError> {
         let row = self.row(&slug.provider)?;
         let key = slug.to_string();
         let hosted = self
@@ -996,6 +1008,7 @@ impl Catalogue {
         Ok(ResolvedModel {
             model: slug.model.clone(),
             row: row.clone(),
+            wire,
             capabilities: hosted.capabilities.clone(),
             metering: hosted.metering.clone(),
             rates: hosted.rates.clone(),

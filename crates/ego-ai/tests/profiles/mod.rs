@@ -17,10 +17,18 @@ use std::path::PathBuf;
 
 use ego_ai::http::HttpRequest;
 use ego_ai::provider::{
-    ANTHROPIC_BASE, GEMINI_BASE, GITHUB_COPILOT_BASE, KIMI_CODING_BASE, MINIMAX_OAUTH_BASE,
-    NOUS_BASE, OLLAMA_BASE, OPENAI_BASE, OPENAI_CODEX_BASE, OPENROUTER_BASE, ProviderRow,
-    QWEN_OAUTH_BASE, XAI_BASE,
+    ANTHROPIC_BASE, GEMINI_BASE, GITHUB_COPILOT_BASE, MINIMAX_OAUTH_BASE, NOUS_BASE, OLLAMA_BASE,
+    OPENAI_BASE, OPENAI_CODEX_BASE, OPENROUTER_BASE, ProviderRow, XAI_BASE,
 };
+use ego_ai::wire::WireFormat;
+use ego_ai::wire::anthropic_messages::AnthropicMessages;
+use ego_ai::wire::gemini_interactions::GeminiInteractions;
+use ego_ai::wire::github_copilot_completions::GithubCopilotCompletions;
+use ego_ai::wire::nous_portal::NousPortal;
+use ego_ai::wire::ollama::Ollama;
+use ego_ai::wire::openai_codex_responses::OpenAiCodexResponses;
+use ego_ai::wire::openai_completions::OpenAiCompletions;
+use ego_ai::wire::xai_responses::XaiResponses;
 use ego_core::budget::{Metering, SettlementSource};
 use ego_core::generator::types::{
     Conversation, GenRequest, Message, Role, ThinkingLevel, ToolDescriptor,
@@ -58,6 +66,10 @@ pub struct Profile {
     pub model: &'static str,
     /// The row under test, built the way the product builds it.
     pub row: fn() -> ProviderRow,
+    /// The explicit mapping used by this offline fixture profile. Dynamic
+    /// managed rows are resolved by the provider contract suite; this field
+    /// keeps conformance fixtures honest without putting a wire on a row.
+    pub wire: &'static dyn WireFormat,
     /// Where this profile's fixtures came from.
     pub provenance: Provenance,
     /// The exact schema, recording, or pinned client revision behind the
@@ -129,6 +141,7 @@ pub const OLLAMA: Profile = Profile {
     base: OLLAMA_BASE,
     model: "gemma4:12b-mlx",
     row: ProviderRow::ollama_default,
+    wire: &Ollama,
     provenance: Provenance::Recorded,
     source: OLLAMA_BASE,
     subscription: false,
@@ -149,6 +162,7 @@ pub const OPENAI: Profile = Profile {
     base: OPENAI_BASE,
     model: "gpt-5.1",
     row: ProviderRow::openai,
+    wire: &OpenAiCompletions,
     provenance: Provenance::VendorSchemaDerived,
     source: "the OpenAI Chat Completions streaming specification",
     subscription: false,
@@ -175,6 +189,7 @@ pub const XAI: Profile = Profile {
     base: XAI_BASE,
     model: "grok-4",
     row: ProviderRow::xai_default,
+    wire: &OpenAiCompletions,
     provenance: Provenance::VendorSchemaDerived,
     source: "the xAI Chat Completions streaming specification",
     subscription: false,
@@ -207,6 +222,7 @@ pub const OPENROUTER: Profile = Profile {
     base: OPENROUTER_BASE,
     model: "z-ai/glm-4.7",
     row: ProviderRow::openrouter_default,
+    wire: &OpenAiCompletions,
     provenance: Provenance::VendorSchemaDerived,
     source: "the OpenRouter Chat Completions streaming specification",
     subscription: false,
@@ -234,6 +250,7 @@ pub const ANTHROPIC: Profile = Profile {
     base: ANTHROPIC_BASE,
     model: "claude-opus-5",
     row: ProviderRow::anthropic_default,
+    wire: &AnthropicMessages,
     provenance: Provenance::VendorSchemaDerived,
     source: "the Anthropic Messages API streaming specification",
     subscription: false,
@@ -257,6 +274,7 @@ pub const GEMINI: Profile = Profile {
     base: GEMINI_BASE,
     model: "gemini-3.7-flash",
     row: ProviderRow::gemini_default,
+    wire: &GeminiInteractions,
     provenance: Provenance::VendorSchemaDerived,
     source: "the Gemini Interactions API streaming specification",
     subscription: false,
@@ -275,6 +293,7 @@ pub const OPENAI_CODEX: Profile = Profile {
     base: OPENAI_CODEX_BASE,
     model: "gpt-5.6-sol",
     row: ProviderRow::openai_codex_default,
+    wire: &OpenAiCodexResponses,
     provenance: Provenance::CapturedClientDerived,
     source: PI_SOURCE,
     subscription: true,
@@ -287,6 +306,7 @@ pub const GITHUB_COPILOT: Profile = Profile {
     base: GITHUB_COPILOT_BASE,
     model: "gpt-4.1",
     row: ProviderRow::github_copilot_default,
+    wire: &GithubCopilotCompletions,
     provenance: Provenance::CapturedClientDerived,
     source: PI_SOURCE,
     subscription: true,
@@ -299,32 +319,9 @@ pub const XAI_OAUTH: Profile = Profile {
     base: XAI_BASE,
     model: "grok-4.6",
     row: ProviderRow::xai_oauth_default,
+    wire: &XaiResponses,
     provenance: Provenance::VendorSchemaDerived,
     source: "docs.x.ai Responses, streaming, function-calling, reasoning and cost-tracking (read 2026-08-24)",
-    subscription: true,
-    error_message_at: NESTED,
-};
-
-pub const KIMI_CODING: Profile = Profile {
-    id: "kimi-coding",
-    thinking: ThinkingLevel::Off,
-    base: KIMI_CODING_BASE,
-    model: "kimi-for-coding",
-    row: ProviderRow::kimi_coding_default,
-    provenance: Provenance::CapturedClientDerived,
-    source: PI_SOURCE,
-    subscription: true,
-    error_message_at: NESTED,
-};
-
-pub const QWEN_OAUTH: Profile = Profile {
-    id: "qwen-oauth",
-    thinking: ThinkingLevel::Off,
-    base: QWEN_OAUTH_BASE,
-    model: "qwen3-coder-plus",
-    row: ProviderRow::qwen_oauth_default,
-    provenance: Provenance::CapturedClientDerived,
-    source: HERMES_SOURCE,
     subscription: true,
     error_message_at: NESTED,
 };
@@ -335,6 +332,7 @@ pub const MINIMAX_OAUTH: Profile = Profile {
     base: MINIMAX_OAUTH_BASE,
     model: "MiniMax-M2.7",
     row: ProviderRow::minimax_oauth_default,
+    wire: &AnthropicMessages,
     provenance: Provenance::CapturedClientDerived,
     source: HERMES_SOURCE,
     subscription: true,
@@ -347,6 +345,7 @@ pub const NOUS: Profile = Profile {
     base: NOUS_BASE,
     model: "hermes-3-70b",
     row: ProviderRow::nous_default,
+    wire: &NousPortal,
     provenance: Provenance::CapturedClientDerived,
     source: HERMES_SOURCE,
     subscription: true,
@@ -357,8 +356,6 @@ pub const SUBSCRIPTION: &[&Profile] = &[
     &OPENAI_CODEX,
     &GITHUB_COPILOT,
     &XAI_OAUTH,
-    &KIMI_CODING,
-    &QWEN_OAUTH,
     &MINIMAX_OAUTH,
     &NOUS,
 ];
@@ -373,8 +370,6 @@ pub const ALL: &[&Profile] = &[
     &OPENAI_CODEX,
     &GITHUB_COPILOT,
     &XAI_OAUTH,
-    &KIMI_CODING,
-    &QWEN_OAUTH,
     &MINIMAX_OAUTH,
     &NOUS,
 ];

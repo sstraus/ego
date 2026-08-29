@@ -16,6 +16,8 @@
 pub(crate) const DISPLAY_NAME: &str = "εgo";
 
 pub mod acp;
+pub(crate) mod agent_file;
+pub(crate) mod attachment;
 pub mod auth;
 pub mod budget;
 pub mod catalogue;

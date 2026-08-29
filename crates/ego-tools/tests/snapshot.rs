@@ -145,6 +145,7 @@ mod snapshot {
             Some(item_msg),
             EventKind::UserPrompt {
                 text: "list the files".to_string(),
+                images: Vec::new(),
                 queued_prompt: None,
             },
             None,

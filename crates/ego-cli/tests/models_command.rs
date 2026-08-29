@@ -197,6 +197,43 @@ fn empty_ollama_refresh_is_available_and_cache_first_reuses_empty_slice() {
 }
 
 #[test]
+fn kimi_refresh_without_credential_returns_an_unavailable_snapshot_without_transport() {
+    let stub = Stub::start(Plan::default());
+    let result = Ego::against(&stub)
+        .subcommand("models")
+        .args(["--provider", "kimi-coding", "--refresh", "--json"])
+        .run();
+
+    assert_eq!(result.code, Some(0));
+    assert!(result.stderr.is_empty());
+    let snapshot: serde_json::Value = serde_json::from_str(&result.stdout).unwrap();
+    assert_eq!(snapshot["v"], 1);
+    assert_eq!(snapshot["models"].as_array().unwrap().len(), 0);
+    assert_eq!(
+        snapshot["sources"],
+        serde_json::json!([
+            {
+                "provider": "kimi-coding",
+                "provenance": {
+                    "source": "discovered",
+                    "provider": "kimi-coding"
+                },
+                "freshness": "current",
+                "availability": {
+                    "status": "unavailable",
+                    "cause": "missing_credential",
+                    "message": "no stored subscription credential: run `ego auth login kimi-coding`"
+                }
+            }
+        ])
+    );
+    assert!(
+        stub.requests().is_empty(),
+        "missing credentials must fail before transport"
+    );
+}
+
+#[test]
 fn unknown_provider_exits_two_before_any_transport() {
     for provider in ["not-admitted", "xai", "gemini"] {
         let stub = Stub::start(Plan {

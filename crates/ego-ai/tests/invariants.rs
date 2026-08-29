@@ -43,6 +43,7 @@ use ego_ai::catalogue::{self, Catalogue, HostedModel, ModelSlug, SuppliedAuthori
 use ego_ai::generator::WireGenerator;
 use ego_ai::http::{Http, HttpCall, HttpError, HttpRequest, HttpResponse, PreparedHttpCall};
 use ego_ai::provider::{CredentialStrategy, ProviderRow};
+use ego_ai::wire::openai_completions::OpenAiCompletions;
 use ego_ai::wire::provider_cost::ProviderCost;
 use ego_ai::wire::{RequestRefused, RequestTarget, WireFormat};
 use ego_core::budget::{BudgetGate, PricingQuote};
@@ -56,8 +57,8 @@ use ego_core::generation_model_source::{
 };
 use ego_core::generator::attempt::DeliveryCertainty;
 use ego_core::generator::capabilities::{
-    CacheRetention, CancelSemantics, ModelCapabilities, ReasoningCarryover, ReasoningEffortSupport,
-    Transport,
+    CacheRetention, CancelSemantics, ImageInputSupport, ModelCapabilities, ReasoningCarryover,
+    ReasoningEffortSupport, Transport,
 };
 use ego_core::generator::port::AiEvent;
 use ego_core::generator::types::{ErrorKind, GenRequest, StopReason, ThinkingLevel};
@@ -69,6 +70,7 @@ use ego_core::permit::{HttpHeader, OneHopResponse, TransportError, TransportFail
 use ego_core::run::{RunAppend, RunRevision, RunTransaction};
 use ego_core::sink::NullSink;
 use ego_core::state::{ItemKind, SessionState, Usage};
+use ego_core::store::blob::{BlobError, BlobPage, BlobRead, BlobRef, BlobStore, BlobWriter};
 use ego_core::store::evidence::{
     EvidenceError, EvidencePage, EvidenceRead, EvidenceStore, EvidenceWriter,
 };
@@ -118,7 +120,7 @@ fn quote() -> PricingQuote {
 
 fn caps() -> ModelCapabilities {
     ModelCapabilities {
-        schema_version: 1,
+        schema_version: ModelCapabilities::SCHEMA_VERSION,
         max_context_tokens: Some(200_000),
         max_output_tokens: Some(64_000),
         max_tools: Some(128),
@@ -129,6 +131,7 @@ fn caps() -> ModelCapabilities {
         cancel: CancelSemantics::Cooperative,
         cache: CacheRetention::Short,
         transport: Transport::Sse,
+        image_input: ImageInputSupport::Unknown,
     }
 }
 
@@ -202,6 +205,31 @@ impl ProcessExecutor for NoProcess {
 
 struct NoEvidence;
 
+impl BlobStore for NoEvidence {
+    fn begin(&self) -> Result<Box<dyn BlobWriter>, BlobError> {
+        Err(BlobError::Limit { limit: 0 })
+    }
+
+    fn read(&self, reference: &BlobRef) -> Result<Vec<u8>, BlobError> {
+        Err(BlobError::NotFound {
+            reference: reference.id.clone(),
+        })
+    }
+
+    fn read_page<'a>(
+        &'a self,
+        request: &'a BlobRead,
+    ) -> BoxFuture<'a, Result<BlobPage, BlobError>> {
+        Box::pin(future::ready(Err(BlobError::NotFound {
+            reference: request.reference.id.clone(),
+        })))
+    }
+
+    fn collect_garbage(&self, _reachable: &[BlobRef]) -> Result<usize, BlobError> {
+        Ok(0)
+    }
+}
+
 struct SingleGenerationSource {
     profile: GenerationProfile,
 }
@@ -225,6 +253,10 @@ impl GenerationModelSource for SingleGenerationSource {
 }
 
 impl EvidenceStore for NoEvidence {
+    fn blob_store(&self) -> &dyn BlobStore {
+        self
+    }
+
     fn begin(&self) -> Result<Box<dyn EvidenceWriter>, EvidenceError> {
         Err(EvidenceError::Limit { limit: 0 })
     }
@@ -299,6 +331,7 @@ impl HttpCall for StubCall {
 async fn one_turn(
     slug: &str,
     row: ProviderRow,
+    wire: &'static dyn WireFormat,
     transcript: impl Into<String>,
 ) -> (ExitReason, SessionState) {
     let slug = ModelSlug::parse(slug).expect("a constant this file controls");
@@ -307,7 +340,7 @@ async fn one_turn(
     // the generator is generic.
     let catalogue = Catalogue::new([row]).with_hosted(&slug.to_string(), hosted());
     let resolved = catalogue
-        .resolve_hosted(&slug)
+        .resolve_hosted(&slug, wire)
         .expect("the row and its model were both configured above");
     let credential = resolved
         .row
@@ -316,7 +349,12 @@ async fn one_turn(
         .expect("every variable is set on this fake machine");
 
     let http: Arc<dyn Http> = StubHttp::replaying(transcript);
-    let generator = Arc::new(WireGenerator::new(resolved.row.clone(), http, credential));
+    let generator = Arc::new(WireGenerator::new(
+        resolved.row.clone(),
+        resolved.wire,
+        http,
+        credential,
+    ));
     let store = MemStore::default();
     let clock = FixedClock;
     let policy = PolicyEngine::new(CanonPath::new("/ws"), Mode::Default, Ruleset::default());
@@ -413,7 +451,13 @@ async fn a_provider_on_a_supported_dialect_is_configuration_and_nothing_else() {
     let acme =
         ProviderRow::openai_at(Url::parse("https://api.acme.example/v1/").expect("a valid url"));
 
-    let (exit, state) = one_turn("openai/wonder-1", acme, FAMILY_TRANSCRIPT).await;
+    let (exit, state) = one_turn(
+        "openai/wonder-1",
+        acme,
+        &OpenAiCompletions,
+        FAMILY_TRANSCRIPT,
+    )
+    .await;
 
     settled(
         exit,
@@ -642,7 +686,6 @@ fn beacon_row() -> ProviderRow {
     let mut row =
         ProviderRow::openai_at(Url::parse("https://beacon.example/v1/").expect("a valid url"));
     row.credential = CredentialStrategy::None;
-    row.wire = &Beacon;
     row
 }
 
@@ -653,7 +696,13 @@ fn beacon_row() -> ProviderRow {
 /// is the point: the ledger priced a report it had never seen the shape of.
 #[tokio::test]
 async fn a_new_protocol_is_an_adapter_and_its_registration() {
-    let (exit, state) = one_turn("openai/lighthouse", beacon_row(), beacon_transcript()).await;
+    let (exit, state) = one_turn(
+        "openai/lighthouse",
+        beacon_row(),
+        &Beacon,
+        beacon_transcript(),
+    )
+    .await;
 
     settled(
         exit,
@@ -685,7 +734,7 @@ async fn a_stranger_protocols_own_error_shape_ends_the_turn() {
         r#"{"halt":{"why":"the beacon is dark","permanent":false}}"#,
     ]);
 
-    let (exit, state) = one_turn("openai/lighthouse", beacon_row(), transcript).await;
+    let (exit, state) = one_turn("openai/lighthouse", beacon_row(), &Beacon, transcript).await;
 
     assert_eq!(exit, ExitReason::Provider);
     assert_eq!(answer(&state), "Due ");
@@ -709,7 +758,7 @@ async fn a_cut_stream_settles_against_the_last_report_the_mapping_held() {
         r#"{"say":{"text":"file — perché no? 😀","seen":{"prompt":900,"from_cache":400,"emitted":250}}}"#,
     ]);
 
-    let (exit, state) = one_turn("openai/lighthouse", beacon_row(), transcript).await;
+    let (exit, state) = one_turn("openai/lighthouse", beacon_row(), &Beacon, transcript).await;
 
     assert_eq!(exit, ExitReason::Provider);
     assert_eq!(answer(&state), "Due file — perché no? 😀");

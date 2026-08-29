@@ -28,8 +28,8 @@ use ego_ai::provider::ProviderRow;
 use ego_core::budget::{PricingQuote, ResolvedRates};
 use ego_core::cost::{Amount, CurrencyCode, PricingRevision, RateSource};
 use ego_core::generator::capabilities::{
-    CacheRetention, CancelSemantics, ModelCapabilities, ReasoningCarryover, ReasoningEffortSupport,
-    Transport,
+    CacheRetention, CancelSemantics, ImageInputSupport, ModelCapabilities, ReasoningCarryover,
+    ReasoningEffortSupport, Transport,
 };
 use futures::executor::block_on;
 use url::Url;
@@ -142,7 +142,7 @@ fn row() -> ProviderRow {
 
 fn caps(max_context_tokens: Option<u64>) -> ModelCapabilities {
     ModelCapabilities {
-        schema_version: 1,
+        schema_version: ModelCapabilities::SCHEMA_VERSION,
         max_context_tokens,
         max_output_tokens: Some(32_000),
         max_tools: None,
@@ -153,6 +153,7 @@ fn caps(max_context_tokens: Option<u64>) -> ModelCapabilities {
         cancel: CancelSemantics::Cooperative,
         cache: CacheRetention::Short,
         transport: Transport::Sse,
+        image_input: ImageInputSupport::Unknown,
     }
 }
 

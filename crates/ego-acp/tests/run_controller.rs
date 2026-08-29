@@ -25,8 +25,8 @@ use ego_core::event::domain::DomainEvent;
 use ego_core::event::id::SessionId;
 use ego_core::event::time::{Clock, Timestamp};
 use ego_core::generator::capabilities::{
-    CacheRetention, CancelSemantics, ModelCapabilities, ReasoningCarryover, ReasoningEffortSupport,
-    Transport,
+    CacheRetention, CancelSemantics, ImageInputSupport, ModelCapabilities, ReasoningCarryover,
+    ReasoningEffortSupport, Transport,
 };
 use ego_core::run::{
     EventSinkFactory, IdSource, RequestId, RunAppend, RunController, RunExecutionBindings,
@@ -101,7 +101,7 @@ struct RecordingSinkFactory {
 
 fn capabilities() -> ModelCapabilities {
     ModelCapabilities {
-        schema_version: 1,
+        schema_version: ModelCapabilities::SCHEMA_VERSION,
         max_context_tokens: Some(200_000),
         max_output_tokens: Some(64_000),
         max_tools: Some(128),
@@ -112,6 +112,7 @@ fn capabilities() -> ModelCapabilities {
         cancel: CancelSemantics::Cooperative,
         cache: CacheRetention::Short,
         transport: Transport::Sse,
+        image_input: ImageInputSupport::Unknown,
     }
 }
 

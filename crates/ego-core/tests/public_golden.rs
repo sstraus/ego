@@ -137,6 +137,7 @@ mod public_golden {
                 Some(item_user_1),
                 EventKind::UserPrompt {
                     text: "list the files".to_string(),
+                    images: Vec::new(),
                     queued_prompt: None,
                 },
             ),
@@ -358,6 +359,7 @@ mod public_golden {
                 Some(item_user_2),
                 EventKind::UserPrompt {
                     text: "thanks".to_string(),
+                    images: Vec::new(),
                     queued_prompt: None,
                 },
             ),

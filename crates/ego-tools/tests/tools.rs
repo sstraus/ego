@@ -46,6 +46,7 @@ use ego_core::permit::{
 use ego_core::run::DeniedBy;
 use ego_core::sink::CollectingSink;
 use ego_core::state::SessionState;
+use ego_core::store::blob::{BlobError, BlobPage, BlobRead, BlobRef, BlobStore, BlobWriter};
 use ego_core::store::evidence::{
     EvidenceError, EvidencePage, EvidenceRead, EvidenceStore, EvidenceWriter,
 };
@@ -112,7 +113,36 @@ impl DuplexSpawner for NoDuplex {
 
 struct NoEvidence;
 
+impl BlobStore for NoEvidence {
+    fn begin(&self) -> Result<Box<dyn BlobWriter>, BlobError> {
+        Err(BlobError::Limit { limit: 0 })
+    }
+
+    fn read(&self, reference: &BlobRef) -> Result<Vec<u8>, BlobError> {
+        Err(BlobError::NotFound {
+            reference: reference.id.clone(),
+        })
+    }
+
+    fn read_page<'a>(
+        &'a self,
+        request: &'a BlobRead,
+    ) -> BoxFuture<'a, Result<BlobPage, BlobError>> {
+        Box::pin(futures::future::ready(Err(BlobError::NotFound {
+            reference: request.reference.id.clone(),
+        })))
+    }
+
+    fn collect_garbage(&self, _reachable: &[BlobRef]) -> Result<usize, BlobError> {
+        Ok(0)
+    }
+}
+
 impl EvidenceStore for NoEvidence {
+    fn blob_store(&self) -> &dyn BlobStore {
+        self
+    }
+
     fn begin(&self) -> Result<Box<dyn EvidenceWriter>, EvidenceError> {
         Err(EvidenceError::Limit { limit: 0 })
     }
@@ -1896,7 +1926,7 @@ mod end_to_end {
 
     fn caps() -> ModelCapabilities {
         ModelCapabilities {
-            schema_version: 1,
+            schema_version: ModelCapabilities::SCHEMA_VERSION,
             max_context_tokens: Some(200_000),
             max_output_tokens: Some(64_000),
             max_tools: Some(128),
@@ -1907,6 +1937,7 @@ mod end_to_end {
             cancel: CancelSemantics::Cooperative,
             cache: CacheRetention::Short,
             transport: Transport::Sse,
+            image_input: ego_core::generator::capabilities::ImageInputSupport::Unknown,
         }
     }
 }

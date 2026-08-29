@@ -40,6 +40,7 @@ publish = false
 [workspace.dependencies]
 ego-core = { path = "crates/ego-core" }
 ego-mcp = { path = "crates/ego-mcp" }
+yaml-rust2 = "0.12.0"
 
 [workspace.lints.rust]
 unsafe_code = "deny"

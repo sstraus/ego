@@ -20,12 +20,13 @@ use ego_ai::catalogue::{
 use ego_ai::ollama;
 use ego_ai::provider::ProviderRow;
 use ego_ai::resolver::{OllamaDaemon, Supplied};
+use ego_ai::wire::openai_completions::OpenAiCompletions;
 use ego_ai::wire::provider_cost::{ProviderCost, XaiUsdTicks};
 use ego_core::budget::{Metering, PricingQuote, ResolvedRates, SettlementSource};
 use ego_core::cost::{CurrencyCode, MeteringRevision, PricingRevision, RateSource, UnknownCost};
 use ego_core::generator::capabilities::{
-    CacheRetention, CancelSemantics, ModelCapabilities, ReasoningCarryover, ReasoningEffortSupport,
-    Transport,
+    CacheRetention, CancelSemantics, ImageInputSupport, ModelCapabilities, ReasoningCarryover,
+    ReasoningEffortSupport, Transport,
 };
 use ego_core::generator::types::{Conversation, GenRequest, ThinkingLevel};
 use futures::executor::block_on;
@@ -85,7 +86,7 @@ fn hosted_quote() -> PricingQuote {
 
 fn hosted_caps() -> ModelCapabilities {
     ModelCapabilities {
-        schema_version: 1,
+        schema_version: ModelCapabilities::SCHEMA_VERSION,
         max_context_tokens: Some(200_000),
         max_output_tokens: Some(64_000),
         max_tools: None,
@@ -96,8 +97,11 @@ fn hosted_caps() -> ModelCapabilities {
         cancel: CancelSemantics::Cooperative,
         cache: CacheRetention::Long,
         transport: Transport::Sse,
+        image_input: ImageInputSupport::Unknown,
     }
 }
+
+static SUPPLIED_OPENAI: Supplied = Supplied::new(&OpenAiCompletions);
 
 fn request() -> GenRequest {
     GenRequest {
@@ -165,7 +169,7 @@ fn a_hosted_model_with_no_supplied_capabilities_is_refused_by_name() {
     let slug = ModelSlug::parse("openai/gpt-5.6").unwrap();
 
     let refused = catalogue
-        .resolve_hosted(&slug)
+        .resolve_hosted(&slug, &OpenAiCompletions)
         .expect_err("no figures were supplied for it");
 
     assert_eq!(
@@ -193,7 +197,10 @@ fn a_supplied_hosted_model_resolves_to_exactly_what_was_supplied() {
     );
 
     let resolved = catalogue
-        .resolve_hosted(&ModelSlug::parse("openai/gpt-5.6").unwrap())
+        .resolve_hosted(
+            &ModelSlug::parse("openai/gpt-5.6").unwrap(),
+            &OpenAiCompletions,
+        )
         .expect("it was supplied");
 
     assert_eq!(resolved.model, "gpt-5.6", "the provider half is not sent");
@@ -223,7 +230,10 @@ fn a_hosted_row_with_capabilities_and_no_rates_resolves() {
     );
 
     let resolved = catalogue
-        .resolve_hosted(&ModelSlug::parse("openai/gpt-5.6").unwrap())
+        .resolve_hosted(
+            &ModelSlug::parse("openai/gpt-5.6").unwrap(),
+            &OpenAiCompletions,
+        )
         .expect("a shape was supplied, which is all a run without a ceiling needs");
 
     assert_eq!(
@@ -256,7 +266,10 @@ fn a_hosted_model_is_not_quietly_free() {
         },
     );
     let resolved = catalogue
-        .resolve_hosted(&ModelSlug::parse("openai/gpt-5.6").unwrap())
+        .resolve_hosted(
+            &ModelSlug::parse("openai/gpt-5.6").unwrap(),
+            &OpenAiCompletions,
+        )
         .expect("it was supplied");
 
     let bound = resolved
@@ -666,7 +679,10 @@ fn a_subscription_hosted_row_resolves_to_the_subscription_that_was_supplied() {
     );
 
     let resolved = catalogue
-        .resolve_hosted(&ModelSlug::parse("openai/gpt-5.6").unwrap())
+        .resolve_hosted(
+            &ModelSlug::parse("openai/gpt-5.6").unwrap(),
+            &OpenAiCompletions,
+        )
         .expect("it was supplied");
 
     assert_eq!(resolved.metering, subscription("acme/pro-plan/2026-08"));
@@ -761,7 +777,10 @@ fn a_provider_reported_row_still_carries_the_table_that_bounds_it() {
         },
     );
     let resolved = catalogue
-        .resolve_hosted(&ModelSlug::parse("openai/gpt-5.6").unwrap())
+        .resolve_hosted(
+            &ModelSlug::parse("openai/gpt-5.6").unwrap(),
+            &OpenAiCompletions,
+        )
         .expect("it was supplied");
     assert_eq!(resolved.metering, metering);
     assert!(
@@ -799,7 +818,10 @@ fn a_provider_reported_row_with_no_rates_has_no_bound_and_is_not_an_error() {
     );
 
     let resolved = catalogue
-        .resolve_hosted(&ModelSlug::parse("openai/gpt-5.6").unwrap())
+        .resolve_hosted(
+            &ModelSlug::parse("openai/gpt-5.6").unwrap(),
+            &OpenAiCompletions,
+        )
         .expect("it was supplied");
 
     assert_eq!(
@@ -912,7 +934,7 @@ fn a_row_that_is_not_called_ollama_can_still_be_a_daemon() {
 fn a_row_called_ollama_that_names_the_supplied_resolver_asks_nothing() {
     let (http, stub) = unasked();
     let mut supplied_locally = local_row();
-    supplied_locally.resolver = &Supplied;
+    supplied_locally.resolver = &SUPPLIED_OPENAI;
     let catalogue = Catalogue::new([supplied_locally]).with_hosted(
         "ollama/gemma4:e4b-mlx",
         HostedModel {

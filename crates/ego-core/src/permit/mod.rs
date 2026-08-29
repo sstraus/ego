@@ -46,6 +46,7 @@ pub use spawn::{
     MissingExecCaps, PolicyDigest, PolicyDigestError, ProcessError, ProcessExecutor,
     RunConfinement, RunConfinementError, SpawnSpec, SpawnSpecError,
 };
+pub(crate) use tool::ToolResultProvenance;
 pub use tool::{
     MAX_TOOL_ERROR_DIAGNOSTIC_BYTES, PrepareCtx, StreamProvenance, Tool, ToolContentBlock,
     ToolDescriptor, ToolError, ToolOutputEncoding, ToolOutputProvenance, ToolResult, Typed,

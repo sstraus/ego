@@ -41,7 +41,7 @@ use crate::event::id::{
 use crate::event::time::Clock;
 use crate::generation_model_source::{GenerationModelErrorClass, GenerationModelSource};
 use crate::generator::attempt::{AttemptStream, GenerationAttempt, UsageReport, settled_cost};
-use crate::generator::history::conversation_from;
+use crate::generator::history::conversation_from_with_blobs;
 use crate::generator::port::AiEvent;
 use crate::generator::types::{
     Conversation, ErrorKind, GenRequest, Message, Role, StopReason, ToolDescriptor,
@@ -289,7 +289,16 @@ fn apply_intent(
     match intent {
         ControlIntent::Submit { text, reply } => {
             let id = QueuedPromptId::new();
-            match journal.append(turn, None, None, EventKind::PromptQueued { id, text }) {
+            match journal.append(
+                turn,
+                None,
+                None,
+                EventKind::PromptQueued {
+                    id,
+                    text,
+                    images: Vec::new(),
+                },
+            ) {
                 Ok(_) => {
                     control.refresh(journal.state().queue_status());
                     let _ = reply.send(Ok(control.status()));
@@ -566,7 +575,8 @@ impl<'a> TurnLoop<'a> {
         target_tools: Vec<ToolDescriptor>,
     ) -> Result<PreparedCompaction, CompactionError> {
         let (history, repairs) =
-            conversation_from(self.journal.state()).map_err(CompactionError::History)?;
+            conversation_from_with_blobs(self.journal.state(), self.tools.blob_store())
+                .map_err(CompactionError::History)?;
         if !repairs.is_empty() {
             tracing::warn!(?repairs, "source history was repaired for compaction");
         }
@@ -773,7 +783,21 @@ impl<'a> TurnLoop<'a> {
         reason = "TurnAbandoned carries the exact durable session state by contract"
     )]
     pub async fn run(&mut self, prompt: &str) -> Result<TurnOutcome, TurnAbandoned> {
-        self.run_prompts(vec![(prompt.to_string(), None)]).await
+        self.run_with_images(prompt, Vec::new()).await
+    }
+
+    /// Run one turn whose first user message carries durable image refs.
+    #[expect(
+        clippy::result_large_err,
+        reason = "TurnAbandoned carries the exact durable session state by contract"
+    )]
+    pub async fn run_with_images(
+        &mut self,
+        prompt: &str,
+        images: Vec<crate::generator::types::ImageRef>,
+    ) -> Result<TurnOutcome, TurnAbandoned> {
+        self.run_prompts(vec![(prompt.to_string(), images, None)])
+            .await
     }
 
     /// Settle one durable pending question and continue its original turn.
@@ -939,7 +963,13 @@ impl<'a> TurnLoop<'a> {
             .state()
             .unacknowledged_prompts()
             .into_iter()
-            .map(|prompt| (prompt.text().to_string(), Some(prompt.id())))
+            .map(|prompt| {
+                (
+                    prompt.text().to_string(),
+                    prompt.images().to_vec(),
+                    Some(prompt.id()),
+                )
+            })
             .collect();
         if prompts.is_empty() {
             self.close_control();
@@ -954,7 +984,11 @@ impl<'a> TurnLoop<'a> {
     )]
     async fn run_prompts(
         &mut self,
-        prompts: Vec<(String, Option<crate::event::id::QueuedPromptId>)>,
+        prompts: Vec<(
+            String,
+            Vec<crate::generator::types::ImageRef>,
+            Option<crate::event::id::QueuedPromptId>,
+        )>,
     ) -> Result<TurnOutcome, TurnAbandoned> {
         let turn = TurnId::new();
         if let Some(observation) = self.execution_observation.take()
@@ -1035,15 +1069,20 @@ impl<'a> TurnLoop<'a> {
     async fn drive(
         &mut self,
         turn: TurnId,
-        prompts: &[(String, Option<crate::event::id::QueuedPromptId>)],
+        prompts: &[(
+            String,
+            Vec<crate::generator::types::ImageRef>,
+            Option<crate::event::id::QueuedPromptId>,
+        )],
     ) -> Result<DriveOutcome, StoreError> {
-        for (text, queued_prompt) in prompts {
+        for (text, images, queued_prompt) in prompts {
             self.journal.append(
                 turn,
                 Some(ItemId::new()),
                 None,
                 EventKind::UserPrompt {
                     text: text.clone(),
+                    images: images.clone(),
                     queued_prompt: *queued_prompt,
                 },
             )?;
@@ -1261,15 +1300,22 @@ impl<'a> TurnLoop<'a> {
             .unacknowledged_prompts()
             .into_iter()
             .filter(|prompt| prompt.turn() == turn)
-            .map(|prompt| (prompt.id(), prompt.text().to_string()))
+            .map(|prompt| {
+                (
+                    prompt.id(),
+                    prompt.text().to_string(),
+                    prompt.images().to_vec(),
+                )
+            })
             .collect();
-        for (id, text) in &pending {
+        for (id, text, images) in &pending {
             self.journal.append(
                 turn,
                 Some(ItemId::new()),
                 None,
                 EventKind::UserPrompt {
                     text: text.clone(),
+                    images: images.clone(),
                     queued_prompt: Some(*id),
                 },
             )?;
@@ -1305,7 +1351,10 @@ impl<'a> TurnLoop<'a> {
         // here — the log is never rewritten, so the run ends visibly at the
         // provider's exit code rather than resuming a session with a hole in
         // it (ADR §6).
-        let (history, repairs) = match conversation_from(self.journal.state()) {
+        let (history, repairs) = match conversation_from_with_blobs(
+            self.journal.state(),
+            self.tools.blob_store(),
+        ) {
             Ok(rebuilt) => rebuilt,
             // `Provider` is the exit even though the history on disk is what
             // broke and no provider was asked: §4.3's exit 4 is "the run could

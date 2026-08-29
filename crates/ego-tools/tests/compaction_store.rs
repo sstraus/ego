@@ -342,6 +342,7 @@ fn malformed_seed_and_existing_target_are_refused_without_publication() {
         .writer
         .publish_compaction_seed(&event(EventKind::UserPrompt {
             text: "not a checkpoint seed".to_string(),
+            images: Vec::new(),
             queued_prompt: None,
         }));
     assert!(matches!(

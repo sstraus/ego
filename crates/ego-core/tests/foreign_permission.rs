@@ -24,6 +24,8 @@ use ego_core::store::evidence::{
     EvidenceError, EvidencePage, EvidenceRead, EvidenceStore, EvidenceWriter,
 };
 
+mod common;
+
 fn rules(allow: &[&str], deny: &[&str]) -> Ruleset {
     let render = |values: &[&str]| {
         values
@@ -300,6 +302,10 @@ impl ProcessExecutor for NoProcess {
 }
 struct NoEvidence;
 impl EvidenceStore for NoEvidence {
+    fn blob_store(&self) -> &dyn ego_core::store::blob::BlobStore {
+        &common::EMPTY_BLOB_STORE
+    }
+
     fn begin(&self) -> Result<Box<dyn EvidenceWriter>, EvidenceError> {
         Err(EvidenceError::Limit { limit: 0 })
     }

@@ -8,10 +8,225 @@
 //! than letting a switch proceed and silently drop or mistranslate state.
 
 use std::collections::BTreeSet;
+use std::num::{NonZeroU32, NonZeroU64};
 
+use serde::ser::SerializeMap;
 use serde::{Deserialize, Serialize};
 
-use super::types::{ContentBlock, GenRequest, ReasoningState, ThinkingLevel};
+use super::types::{
+    ContentBlock, GenRequest, ImageMediaType, MAX_IMAGE_BYTES, MAX_IMAGE_EDGE, MAX_IMAGE_PIXELS,
+    MAX_IMAGES_PER_PROMPT, MAX_TOTAL_IMAGE_BYTES, ReasoningState, ThinkingLevel,
+};
+
+/// Per-model image limits, always bounded by the product's absolute limits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageLimits {
+    accepted_media_types: BTreeSet<ImageMediaType>,
+    max_images: Option<NonZeroU32>,
+    max_bytes_per_image: Option<NonZeroU64>,
+    max_total_bytes: Option<NonZeroU64>,
+    max_width: Option<NonZeroU32>,
+    max_height: Option<NonZeroU32>,
+    max_pixels: Option<NonZeroU64>,
+}
+
+impl ImageLimits {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        accepted_media_types: BTreeSet<ImageMediaType>,
+        max_images: Option<NonZeroU32>,
+        max_bytes_per_image: Option<NonZeroU64>,
+        max_total_bytes: Option<NonZeroU64>,
+        max_width: Option<NonZeroU32>,
+        max_height: Option<NonZeroU32>,
+        max_pixels: Option<NonZeroU64>,
+    ) -> Result<Self, String> {
+        if accepted_media_types.is_empty() {
+            return Err("supported image input must name at least one media type".to_string());
+        }
+        validate_limit(
+            max_images.map(|value| u64::from(value.get())),
+            MAX_IMAGES_PER_PROMPT as u64,
+            "max_images",
+        )?;
+        validate_limit(
+            max_bytes_per_image.map(NonZeroU64::get),
+            MAX_IMAGE_BYTES,
+            "max_bytes_per_image",
+        )?;
+        validate_limit(
+            max_total_bytes.map(NonZeroU64::get),
+            MAX_TOTAL_IMAGE_BYTES,
+            "max_total_bytes",
+        )?;
+        validate_limit(
+            max_width.map(|value| u64::from(value.get())),
+            u64::from(MAX_IMAGE_EDGE),
+            "max_width",
+        )?;
+        validate_limit(
+            max_height.map(|value| u64::from(value.get())),
+            u64::from(MAX_IMAGE_EDGE),
+            "max_height",
+        )?;
+        validate_limit(
+            max_pixels.map(NonZeroU64::get),
+            MAX_IMAGE_PIXELS,
+            "max_pixels",
+        )?;
+        Ok(Self {
+            accepted_media_types,
+            max_images,
+            max_bytes_per_image,
+            max_total_bytes,
+            max_width,
+            max_height,
+            max_pixels,
+        })
+    }
+
+    pub fn accepted_media_types(&self) -> &BTreeSet<ImageMediaType> {
+        &self.accepted_media_types
+    }
+    pub const fn max_images(&self) -> Option<NonZeroU32> {
+        self.max_images
+    }
+    pub const fn max_bytes_per_image(&self) -> Option<NonZeroU64> {
+        self.max_bytes_per_image
+    }
+    pub const fn max_total_bytes(&self) -> Option<NonZeroU64> {
+        self.max_total_bytes
+    }
+    pub const fn max_width(&self) -> Option<NonZeroU32> {
+        self.max_width
+    }
+    pub const fn max_height(&self) -> Option<NonZeroU32> {
+        self.max_height
+    }
+    pub const fn max_pixels(&self) -> Option<NonZeroU64> {
+        self.max_pixels
+    }
+}
+
+fn validate_limit(value: Option<u64>, product: u64, name: &str) -> Result<(), String> {
+    if value.is_some_and(|value| value > product) {
+        return Err(format!("{name} cannot exceed the product limit {product}"));
+    }
+    Ok(())
+}
+
+/// Whether this exact model accepts image input.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum ImageInputSupport {
+    #[default]
+    Unknown,
+    Unsupported,
+    Supported(ImageLimits),
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum ImageInputStateWire {
+    Unknown,
+    Unsupported,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SupportedImageInputWire {
+    kind: SupportedImageKind,
+    accepted_media_types: BTreeSet<ImageMediaType>,
+    max_images: Option<NonZeroU32>,
+    max_bytes_per_image: Option<NonZeroU64>,
+    max_total_bytes: Option<NonZeroU64>,
+    max_width: Option<NonZeroU32>,
+    max_height: Option<NonZeroU32>,
+    max_pixels: Option<NonZeroU64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum SupportedImageKind {
+    Supported,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ImageInputWire {
+    State(ImageInputStateWire),
+    Supported(SupportedImageInputWire),
+}
+
+impl<'de> Deserialize<'de> for ImageInputSupport {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        match ImageInputWire::deserialize(deserializer)? {
+            ImageInputWire::State(ImageInputStateWire::Unknown) => Ok(Self::Unknown),
+            ImageInputWire::State(ImageInputStateWire::Unsupported) => Ok(Self::Unsupported),
+            ImageInputWire::Supported(wire) => {
+                let SupportedImageInputWire {
+                    kind: SupportedImageKind::Supported,
+                    accepted_media_types,
+                    max_images,
+                    max_bytes_per_image,
+                    max_total_bytes,
+                    max_width,
+                    max_height,
+                    max_pixels,
+                } = wire;
+                ImageLimits::new(
+                    accepted_media_types,
+                    max_images,
+                    max_bytes_per_image,
+                    max_total_bytes,
+                    max_width,
+                    max_height,
+                    max_pixels,
+                )
+                .map(Self::Supported)
+                .map_err(serde::de::Error::custom)
+            }
+        }
+    }
+}
+
+impl Serialize for ImageInputSupport {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Self::Unknown => serializer.serialize_str("unknown"),
+            Self::Unsupported => serializer.serialize_str("unsupported"),
+            Self::Supported(limits) => {
+                let mut map = serializer.serialize_map(None)?;
+                map.serialize_entry("kind", "supported")?;
+                map.serialize_entry("accepted_media_types", &limits.accepted_media_types)?;
+                if let Some(value) = limits.max_images {
+                    map.serialize_entry("max_images", &value)?;
+                }
+                if let Some(value) = limits.max_bytes_per_image {
+                    map.serialize_entry("max_bytes_per_image", &value)?;
+                }
+                if let Some(value) = limits.max_total_bytes {
+                    map.serialize_entry("max_total_bytes", &value)?;
+                }
+                if let Some(value) = limits.max_width {
+                    map.serialize_entry("max_width", &value)?;
+                }
+                if let Some(value) = limits.max_height {
+                    map.serialize_entry("max_height", &value)?;
+                }
+                if let Some(value) = limits.max_pixels {
+                    map.serialize_entry("max_pixels", &value)?;
+                }
+                map.end()
+            }
+        }
+    }
+}
 
 /// Every reasoning state `req`'s history carries, in the order it carries
 /// them.
@@ -171,6 +386,9 @@ pub struct ModelCapabilities {
     pub cancel: CancelSemantics,
     pub cache: CacheRetention,
     pub transport: Transport,
+    /// Exact image-input facts. Missing older fields fail closed.
+    #[serde(default)]
+    pub image_input: ImageInputSupport,
 }
 
 /// One way a `GenRequest` does not fit a model's capabilities.
@@ -183,21 +401,63 @@ pub struct ModelCapabilities {
 /// being switched to.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CapabilityGap {
+    ImageInputUnknown,
+    ImageInputUnsupported,
+    ImageMediaTypeUnsupported {
+        index: usize,
+        media_type: ImageMediaType,
+    },
+    TooManyImages {
+        requested: usize,
+        max: u32,
+    },
+    ImageTooLarge {
+        index: usize,
+        bytes: u64,
+        max: u64,
+    },
+    TotalImageBytesTooLarge {
+        requested: u64,
+        max: u64,
+    },
+    ImageTooWide {
+        index: usize,
+        width: u32,
+        max: u32,
+    },
+    ImageTooHigh {
+        index: usize,
+        height: u32,
+        max: u32,
+    },
+    ImageTooManyPixels {
+        index: usize,
+        pixels: u64,
+        max: u64,
+    },
     /// `req` carries reasoning state the model can't accept.
     ReasoningStateCarryoverUnsupported,
     /// `req` requires parallel tool calls the model doesn't support.
     ParallelToolCallsUnsupported,
     /// `req` offers more tools than the model accepts in one request.
-    TooManyTools { requested: usize, max: u32 },
+    TooManyTools {
+        requested: usize,
+        max: u32,
+    },
     /// `req` asks for more output tokens than the model allows.
-    OutputTooLarge { requested: u64, max: u64 },
+    OutputTooLarge {
+        requested: u64,
+        max: u64,
+    },
     /// Nobody ever stated which reasoning efforts this model accepts, so
     /// sending one would be a guess. Distinct from
     /// [`ReasoningEffortUnsupported`] because the answer is "re-resolve this
     /// model", not "ask for a different level".
     ///
     /// [`ReasoningEffortUnsupported`]: CapabilityGap::ReasoningEffortUnsupported
-    ReasoningEffortUnstated { requested: ThinkingLevel },
+    ReasoningEffortUnstated {
+        requested: ThinkingLevel,
+    },
     /// The model states what it accepts, and `req` asked for something else.
     /// Both sides travel, so the refusal can name the levels that would work.
     ReasoningEffortUnsupported {
@@ -210,7 +470,10 @@ pub enum CapabilityGap {
     /// Reached only under [`ReasoningCarryover::SameProviderOnly`]:
     /// `Unsupported` refuses any carried state before the dialects are
     /// consulted, and `Portable` accepts every dialect by definition.
-    ReasoningStateDialectMismatch { carried: String, accepted: String },
+    ReasoningStateDialectMismatch {
+        carried: String,
+        accepted: String,
+    },
     /// `req` carries reasoning state and nobody ever stated which dialect
     /// this model speaks, so whether the state is replayable is unknown.
     ///
@@ -224,7 +487,9 @@ pub enum CapabilityGap {
     /// [`ReasoningStateDialectMismatch`]: CapabilityGap::ReasoningStateDialectMismatch
     /// [`ReasoningEffortUnstated`]: CapabilityGap::ReasoningEffortUnstated
     /// [`ReasoningEffortUnsupported`]: CapabilityGap::ReasoningEffortUnsupported
-    ReasoningStateDialectUnstated { carried: String },
+    ReasoningStateDialectUnstated {
+        carried: String,
+    },
 }
 
 /// What the caller is told. Every gap names both what was asked for and what
@@ -233,6 +498,35 @@ pub enum CapabilityGap {
 impl std::fmt::Display for CapabilityGap {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::ImageInputUnknown => {
+                write!(f, "unknown image input support; resolve the model again")
+            }
+            Self::ImageInputUnsupported => write!(f, "unsupported image input for this model"),
+            Self::ImageMediaTypeUnsupported { index, media_type } => write!(
+                f,
+                "image {index} media type {media_type:?} is not accepted by this model"
+            ),
+            Self::TooManyImages { requested, max } => write!(
+                f,
+                "{requested} images supplied, but at most {max} are accepted"
+            ),
+            Self::ImageTooLarge { index, bytes, max } => write!(
+                f,
+                "image {index} has {bytes} bytes, above the {max}-byte limit"
+            ),
+            Self::TotalImageBytesTooLarge { requested, max } => write!(
+                f,
+                "total image input has {requested} bytes, above the {max}-byte limit"
+            ),
+            Self::ImageTooWide { index, width, max } => {
+                write!(f, "image {index} width {width} exceeds {max}")
+            }
+            Self::ImageTooHigh { index, height, max } => {
+                write!(f, "image {index} height {height} exceeds {max}")
+            }
+            Self::ImageTooManyPixels { index, pixels, max } => {
+                write!(f, "image {index} has {pixels} pixels, above {max}")
+            }
             Self::ReasoningStateCarryoverUnsupported => {
                 write!(
                     f,
@@ -299,7 +593,7 @@ impl ModelCapabilities {
     ///
     /// [`reasoning_efforts`]: ModelCapabilities::reasoning_efforts
     /// [`reasoning_state_dialect`]: ModelCapabilities::reasoning_state_dialect
-    pub const SCHEMA_VERSION: u32 = 3;
+    pub const SCHEMA_VERSION: u32 = 4;
 
     /// Every way `req` does not fit *this* model — empty means it can be
     /// sent. Checked after the model resolves and before the budget gate
@@ -308,6 +602,97 @@ impl ModelCapabilities {
     /// sent.
     pub fn request_gaps(&self, req: &GenRequest) -> Vec<CapabilityGap> {
         let mut gaps = Vec::new();
+
+        let images: Vec<_> = req
+            .messages
+            .messages()
+            .iter()
+            .flat_map(|message| &message.content)
+            .filter_map(|block| match block {
+                ContentBlock::Image { image } => Some(image),
+                _ => None,
+            })
+            .collect();
+        if !images.is_empty() {
+            match &self.image_input {
+                ImageInputSupport::Unknown => gaps.push(CapabilityGap::ImageInputUnknown),
+                ImageInputSupport::Unsupported => gaps.push(CapabilityGap::ImageInputUnsupported),
+                ImageInputSupport::Supported(limits) => {
+                    for (offset, image) in images.iter().enumerate() {
+                        let index = offset + 1;
+                        if !limits.accepted_media_types.contains(&image.media_type()) {
+                            gaps.push(CapabilityGap::ImageMediaTypeUnsupported {
+                                index,
+                                media_type: image.media_type(),
+                            });
+                        }
+                    }
+                    let max_images = limits
+                        .max_images
+                        .map_or(MAX_IMAGES_PER_PROMPT as u32, NonZeroU32::get);
+                    if images.len() > max_images as usize {
+                        gaps.push(CapabilityGap::TooManyImages {
+                            requested: images.len(),
+                            max: max_images,
+                        });
+                    }
+                    let max_per_image = limits
+                        .max_bytes_per_image
+                        .map_or(MAX_IMAGE_BYTES, NonZeroU64::get);
+                    let mut total = 0_u64;
+                    for (offset, image) in images.iter().enumerate() {
+                        let index = offset + 1;
+                        let bytes = u64::try_from(image.bytes().len()).unwrap_or(u64::MAX);
+                        total = total.saturating_add(bytes);
+                        if bytes > max_per_image {
+                            gaps.push(CapabilityGap::ImageTooLarge {
+                                index,
+                                bytes,
+                                max: max_per_image,
+                            });
+                        }
+                    }
+                    let max_total = limits
+                        .max_total_bytes
+                        .map_or(MAX_TOTAL_IMAGE_BYTES, NonZeroU64::get);
+                    if total > max_total {
+                        gaps.push(CapabilityGap::TotalImageBytesTooLarge {
+                            requested: total,
+                            max: max_total,
+                        });
+                    }
+                    let max_width = limits.max_width.map_or(MAX_IMAGE_EDGE, NonZeroU32::get);
+                    let max_height = limits.max_height.map_or(MAX_IMAGE_EDGE, NonZeroU32::get);
+                    let max_pixels = limits.max_pixels.map_or(MAX_IMAGE_PIXELS, NonZeroU64::get);
+                    for (offset, image) in images.iter().enumerate() {
+                        let index = offset + 1;
+                        if image.width() > max_width {
+                            gaps.push(CapabilityGap::ImageTooWide {
+                                index,
+                                width: image.width(),
+                                max: max_width,
+                            });
+                        }
+                        if image.height() > max_height {
+                            gaps.push(CapabilityGap::ImageTooHigh {
+                                index,
+                                height: image.height(),
+                                max: max_height,
+                            });
+                        }
+                        let pixels =
+                            u64::from(image.width()).saturating_mul(u64::from(image.height()));
+                        if pixels > max_pixels {
+                            gaps.push(CapabilityGap::ImageTooManyPixels {
+                                index,
+                                pixels,
+                                max: max_pixels,
+                            });
+                        }
+                    }
+                }
+            }
+        }
 
         // Read off the conversation rather than a field beside it: the state
         // is positional, so the block list is the only place it can live, and

@@ -498,6 +498,7 @@ mod codec {
                 env: envelope(GOLDEN_EVENT_1, None),
                 kind: EventKind::UserPrompt {
                     text: "list the files".to_string(),
+                    images: Vec::new(),
                     queued_prompt: None,
                 },
             },

@@ -55,6 +55,8 @@ use futures::stream::BoxStream;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
+mod common;
+
 struct NoResolver;
 
 impl Resolver for NoResolver {
@@ -144,6 +146,7 @@ fn main_checkpoint_baseline_uses_existing_gaps_and_expressibility_ports_only() {
         cancel: CancelSemantics::Cooperative,
         cache: CacheRetention::None,
         transport: Transport::Sse,
+        image_input: ego_core::generator::capabilities::ImageInputSupport::Unknown,
     };
     assert!(capabilities.request_gaps(&request).is_empty());
     FakeGenerator::new(Vec::<Vec<_>>::new())
@@ -470,6 +473,7 @@ fn canonical_checkpoints_are_exercised_across_a_practical_size_sweep() {
         cancel: CancelSemantics::Cooperative,
         cache: CacheRetention::None,
         transport: Transport::Sse,
+        image_input: ego_core::generator::capabilities::ImageInputSupport::Unknown,
     };
     for extra_bytes in [0, 64, 256, 1_024, 4_096, 16_384] {
         let mut candidate = checkpoint();
@@ -609,6 +613,10 @@ impl ProcessExecutor for CompactionNoProcess {
 struct CompactionNoEvidence;
 
 impl EvidenceStore for CompactionNoEvidence {
+    fn blob_store(&self) -> &dyn ego_core::store::blob::BlobStore {
+        &common::EMPTY_BLOB_STORE
+    }
+
     fn begin(&self) -> Result<Box<dyn EvidenceWriter>, EvidenceError> {
         Err(EvidenceError::Limit { limit: 0 })
     }
@@ -702,6 +710,7 @@ fn compaction_profile(
                 cancel: CancelSemantics::Cooperative,
                 cache: CacheRetention::None,
                 transport: Transport::Sse,
+                image_input: ego_core::generator::capabilities::ImageInputSupport::Unknown,
             },
             metering: Metering::Unmetered {
                 revision: MeteringRevision("regression_case".to_string()),
@@ -817,6 +826,7 @@ fn busy_state(busy: &CompactionBusy) -> SessionState {
             EventKind::PromptQueued {
                 id: ego_core::event::id::QueuedPromptId::new(),
                 text: "queued".to_string(),
+                images: Vec::new(),
             },
         ),
         CompactionBusy::PendingQuestion => event(

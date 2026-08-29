@@ -104,7 +104,6 @@ pub(crate) fn rows(
         ProviderRow::github_copilot_default(),
         ProviderRow::xai_oauth_default(),
         ProviderRow::kimi_coding_default(),
-        ProviderRow::qwen_oauth_default(),
         ProviderRow::minimax_oauth_default(),
         ProviderRow::nous_default(),
         ProviderRow::openrouter_default(),
@@ -332,6 +331,7 @@ impl CliGenerationModelSource {
         let request_model = resolved.model.clone();
         let generator: Arc<dyn Generator> = Arc::new(ego_ai::generator::WireGenerator::new(
             resolved.row,
+            resolved.wire,
             Arc::clone(http),
             credential,
         ));
@@ -417,6 +417,79 @@ pub fn is_provider_failure(err: &ResolveError) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ego_ai::catalogue::{HostedModel, SuppliedAuthority, subscription};
+    use ego_ai::http::{HttpCall, PreparedHttpCall};
+    use ego_ai::provider::{Credentials, MissingCredential, Secret};
+    use ego_ai::wire::RequestTarget;
+    use ego_core::generator::capabilities::{
+        CacheRetention, CancelSemantics, ImageInputSupport, ModelCapabilities, ReasoningCarryover,
+        ReasoningEffortSupport, Transport,
+    };
+    use ego_core::generator::types::{Conversation, GenRequest, Message, Role, ThinkingLevel};
+    use ego_core::permit::{OneHopResponse, TransportError, TransportFailure};
+    use futures::future::BoxFuture;
+
+    struct CodexCredentials;
+
+    impl Credentials for CodexCredentials {
+        fn secret(&self, var: &str) -> Result<Secret, MissingCredential> {
+            (var == "oauth:openai-codex")
+                .then_some(
+                    "head.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdF8xIn19.sig"
+                        .into(),
+                )
+                .ok_or_else(|| MissingCredential {
+                    var: var.to_owned(),
+                })
+        }
+    }
+
+    struct NoHttp;
+
+    impl ego_ai::http::Http for NoHttp {
+        fn begin_call(&self) -> Box<dyn HttpCall> {
+            Box::new(NoHttpCall)
+        }
+    }
+
+    struct NoHttpCall;
+
+    impl HttpCall for NoHttpCall {
+        fn execute(
+            &mut self,
+            _call: PreparedHttpCall,
+        ) -> BoxFuture<'static, Result<OneHopResponse, TransportError>> {
+            Box::pin(async {
+                Err(TransportError::definitely_unsent(
+                    TransportFailure::Exchange(
+                        "the subscription resolver must not ask HTTP".into(),
+                    ),
+                ))
+            })
+        }
+    }
+
+    fn codex_hosted() -> HostedModel {
+        HostedModel {
+            capabilities: ModelCapabilities {
+                schema_version: ModelCapabilities::SCHEMA_VERSION,
+                max_context_tokens: Some(200_000),
+                max_output_tokens: Some(64_000),
+                max_tools: Some(128),
+                supports_parallel_tool_calls: true,
+                reasoning_carryover: ReasoningCarryover::Portable,
+                reasoning_efforts: ReasoningEffortSupport::Any,
+                reasoning_state_dialect: None,
+                cancel: CancelSemantics::Cooperative,
+                cache: CacheRetention::Short,
+                transport: Transport::Sse,
+                image_input: ImageInputSupport::Unknown,
+            },
+            authority: SuppliedAuthority::System,
+            metering: subscription("ego/test/codex-subscription/v1"),
+            rates: None,
+        }
+    }
 
     fn selectable() -> Vec<String> {
         rows(&Default::default())
@@ -430,8 +503,48 @@ mod tests {
     fn codex_login_never_turns_into_a_chat_completions_row() {
         let row = ProviderRow::openai_codex_default();
         assert_eq!(row.id(), "openai-codex");
-        assert_eq!(format!("{:?}", row.wire), "OpenAiCodexResponses");
-        assert_ne!(format!("{:?}", row.wire), "OpenAiCompletions");
+
+        let catalogue =
+            Catalogue::new(vec![row.clone()]).with_hosted("openai-codex/gpt-5", codex_hosted());
+        let slug = ModelSlug::parse("openai-codex/gpt-5").expect("valid Codex model slug");
+        let credential = row
+            .credential
+            .resolve(&CodexCredentials)
+            .expect("Codex fixture credential");
+        let http: Arc<dyn Http> = Arc::new(NoHttp);
+        let resolved = futures::executor::block_on(catalogue.resolve(&slug, &http, &credential))
+            .expect("Codex subscription model resolves");
+        let headers = credential.headers();
+        let target = RequestTarget::new(resolved.row.base(), &headers);
+        let request = GenRequest {
+            model: resolved.model.clone(),
+            messages: Conversation::new(vec![Message::text(Role::User, "hello")])
+                .expect("valid Codex conversation"),
+            tools: Vec::new(),
+            thinking: ThinkingLevel::Off,
+            max_output_tokens: Some(16),
+            parallel_tool_calls: false,
+        };
+        let built = resolved
+            .wire
+            .build_request(&target, &request)
+            .expect("Codex Responses request is expressible");
+        assert_eq!(
+            built.url.as_str(),
+            "https://chatgpt.com/backend-api/codex/responses"
+        );
+        let body: serde_json::Value = serde_json::from_slice(
+            built
+                .body
+                .as_deref()
+                .expect("Codex request has a JSON body"),
+        )
+        .expect("Codex request body is JSON");
+        assert!(body.get("input").is_some(), "Codex uses Responses input");
+        assert!(
+            body.get("messages").is_none(),
+            "Codex must not use Chat Completions messages"
+        );
         assert!(unavailable_mapping("openai-codex").is_none());
     }
 
@@ -482,7 +595,6 @@ mod tests {
                 "github-copilot",
                 "xai-oauth",
                 "kimi-coding",
-                "qwen-oauth",
                 "minimax-oauth",
                 "nous",
                 "openrouter",

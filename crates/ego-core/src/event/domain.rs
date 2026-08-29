@@ -11,10 +11,11 @@ use super::id::{EventId, ItemId, Producer, QueuedPromptId, Seq, SessionId, TurnI
 use super::time::Timestamp;
 use crate::cost::CostDelta;
 use crate::generator::attempt::{AttemptRef, Outcome};
-use crate::generator::types::{ErrorKind, ReasoningState};
-use crate::permit::{Authority, Escalation, ExecObservation, ToolResult};
+use crate::generator::types::{ErrorKind, ImageRef, ReasoningState};
+use crate::permit::{Authority, Escalation, ExecObservation, ToolResult, ToolResultProvenance};
 use crate::question::{QuestionOutcome, QuestionRequest};
 use crate::state::Usage;
+use crate::store::blob::BlobRef;
 
 /// The full envelope every `DomainEvent` carries, per ARCH §1: a monotonic
 /// sequence number, stable session/turn/item identity, a causal parent, an
@@ -173,12 +174,20 @@ pub enum EventKind {
     /// Input accepted for later delivery. Its envelope turn determines on
     /// replay whether it was accepted as a busy-turn steer or at an ordinary
     /// queue boundary.
-    PromptQueued { id: QueuedPromptId, text: String },
+    PromptQueued {
+        id: QueuedPromptId,
+        text: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<ImageRef>,
+    },
     /// A durable request to expedite the FIFO prefix ending at `through`.
     PromptDeliveryExpedited { through: QueuedPromptId },
     /// The user submitted a prompt.
     UserPrompt {
         text: String,
+        /// Ordered immutable image metadata; bytes live in the session CAS.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<ImageRef>,
         /// The queue acceptance this conversation item consumes. Absent on
         /// ordinary direct prompts and on records written before queues.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -405,6 +414,35 @@ pub enum EventKind {
 }
 
 impl EventKind {
+    /// Structured blob references carried by this durable event.
+    pub fn blob_references(&self) -> Vec<BlobRef> {
+        let mut references = Vec::new();
+        match self {
+            Self::PromptQueued { images, .. } | Self::UserPrompt { images, .. } => {
+                references.extend(images.iter().map(|image| image.reference().clone()));
+            }
+            Self::ToolCallCompleted { result, .. } => {
+                references.extend(
+                    result
+                        .content
+                        .iter()
+                        .filter_map(|block| block.evidence_reference())
+                        .map(|reference| reference.blob_ref()),
+                );
+                if let ToolResultProvenance::Foreign { result } = result.provenance() {
+                    references.push(result.evidence_reference().blob_ref());
+                }
+            }
+            Self::HookInvocationSettled { result, .. } => {
+                if let Some(feedback) = result.feedback() {
+                    references.push(feedback.reference().blob_ref());
+                }
+            }
+            _ => {}
+        }
+        references
+    }
+
     /// A short, stable name for the variant — used as a tracing span field
     /// so `apply` spans are queryable by kind without formatting the (often
     /// large) payload.

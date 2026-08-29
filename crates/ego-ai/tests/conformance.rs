@@ -47,7 +47,13 @@ impl ego_ai::provider::Credentials for Configured {
 const SECRET: &str = "sk-conformance-secret";
 
 /// The events this profile's mapping produces for one response.
-async fn decode(row: &ProviderRow, status: u16, body: &str, content_type: &str) -> Vec<AiEvent> {
+async fn decode(
+    profile: &Profile,
+    row: &ProviderRow,
+    status: u16,
+    body: &str,
+    content_type: &str,
+) -> Vec<AiEvent> {
     // Chunked small, so a decoder that assumed a frame arrives whole fails
     // here rather than against a real socket.
     let chunks: Vec<Result<bytes::Bytes, HttpError>> = body
@@ -55,7 +61,8 @@ async fn decode(row: &ProviderRow, status: u16, body: &str, content_type: &str) 
         .chunks(7)
         .map(|chunk| Ok(bytes::Bytes::copy_from_slice(chunk)))
         .collect();
-    row.wire
+    profile
+        .wire
         .decode(
             Ok(HttpResponse {
                 status,
@@ -74,7 +81,7 @@ async fn decode(row: &ProviderRow, status: u16, body: &str, content_type: &str) 
 async fn stream_events(profile: &Profile, name: &str) -> Vec<AiEvent> {
     let row = (profile.row)();
     let transcript = read(profile, "stream", name);
-    decode(&row, 200, &transcript, "text/event-stream").await
+    decode(profile, &row, 200, &transcript, "text/event-stream").await
 }
 
 fn stops(events: &[AiEvent]) -> Vec<StopReason> {
@@ -140,7 +147,7 @@ async fn check_1_the_request_each_profile_builds_is_the_one_it_committed() {
             headers.push((name.clone(), value.clone()));
         }
         let target = RequestTarget::new(credential.base_override().unwrap_or(row.base()), &headers);
-        let built = row
+        let built = profile
             .wire
             .build_request(&target, &req)
             .unwrap_or_else(|refused| panic!("{}: {refused}", profile.id));
@@ -206,7 +213,7 @@ async fn check_3_subscription_stream_errors_are_terminal_once() {
         let row = (profile.row)();
         for name in ["in_band.sse", "terminal.sse"] {
             let transcript = read(profile, "stream-error", name);
-            let events = decode(&row, 200, &transcript, "text/event-stream").await;
+            let events = decode(profile, &row, 200, &transcript, "text/event-stream").await;
             assert!(
                 events
                     .iter()
@@ -336,7 +343,7 @@ async fn check_3_a_refusal_is_three_events_and_repeats_the_provider() {
                 .trim_end_matches(".json")
                 .parse()
                 .unwrap_or_else(|err| panic!("{}: {name} is not a status ({err})", profile.id));
-            let events = decode(&row, status, &body, "application/json").await;
+            let events = decode(profile, &row, status, &body, "application/json").await;
 
             assert_eq!(
                 events.first(),
@@ -614,8 +621,6 @@ fn every_profile_has_all_four_families() {
             "openai-codex",
             "github-copilot",
             "xai-oauth",
-            "kimi-coding",
-            "qwen-oauth",
             "minimax-oauth",
             "nous",
         ],

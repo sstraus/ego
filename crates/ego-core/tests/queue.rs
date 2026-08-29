@@ -61,6 +61,7 @@ fn prompt_queued_has_the_final_durable_shape() {
     let encoded = serde_json::to_value(EventKind::PromptQueued {
         id,
         text: "inspect the failing test".to_owned(),
+        images: Vec::new(),
     })
     .expect("prompt acceptance is serialisable");
 
@@ -93,6 +94,7 @@ fn expedited_intent_names_the_fifo_tail_and_is_not_a_boolean() {
 fn ordinary_user_prompts_carry_no_queue_correlation() {
     let kind = EventKind::UserPrompt {
         text: "ordinary prompt".to_owned(),
+        images: Vec::new(),
         queued_prompt: None,
     };
 
@@ -107,6 +109,7 @@ fn delivered_user_prompts_carry_exactly_one_queue_id() {
     let id = QueuedPromptId::new();
     let kind = EventKind::UserPrompt {
         text: "steer now".to_owned(),
+        images: Vec::new(),
         queued_prompt: Some(id),
     };
 
@@ -124,10 +127,12 @@ fn replay_preserves_multiple_acceptances_in_fifo_sequence_order() {
         EventKind::PromptQueued {
             id: first,
             text: "first steer".to_owned(),
+            images: Vec::new(),
         },
         EventKind::PromptQueued {
             id: second,
             text: "second steer".to_owned(),
+            images: Vec::new(),
         },
     ]);
 
@@ -147,6 +152,7 @@ fn replay_does_not_invent_a_pending_or_queued_class() {
     let state = replay([EventKind::PromptQueued {
         id,
         text: "idle prompt".to_owned(),
+        images: Vec::new(),
     }]);
 
     // PromptQueued is intentionally class-free.  The live coordinator
@@ -170,10 +176,12 @@ fn expedited_tail_is_monotonic_and_repeated_esc_is_idempotent() {
         EventKind::PromptQueued {
             id: first,
             text: "first".to_owned(),
+            images: Vec::new(),
         },
         EventKind::PromptQueued {
             id: second,
             text: "second".to_owned(),
+            images: Vec::new(),
         },
         EventKind::PromptDeliveryExpedited { through: first },
         EventKind::PromptDeliveryExpedited { through: first },
@@ -193,13 +201,16 @@ fn crash_before_correlated_ack_replays_the_prompt_once() {
         EventKind::PromptQueued {
             id: first,
             text: "first".to_owned(),
+            images: Vec::new(),
         },
         EventKind::PromptQueued {
             id: second,
             text: "second".to_owned(),
+            images: Vec::new(),
         },
         EventKind::UserPrompt {
             text: "first".to_owned(),
+            images: Vec::new(),
             queued_prompt: Some(first),
         },
     ]);
@@ -221,13 +232,16 @@ fn crash_after_correlated_ack_does_not_replay_the_prompt() {
         EventKind::PromptQueued {
             id,
             text: "once".to_owned(),
+            images: Vec::new(),
         },
         EventKind::UserPrompt {
             text: "once".to_owned(),
+            images: Vec::new(),
             queued_prompt: Some(id),
         },
         EventKind::UserPrompt {
             text: "once".to_owned(),
+            images: Vec::new(),
             queued_prompt: Some(id),
         },
     ]);
@@ -244,17 +258,21 @@ fn a_delivery_batch_keeps_each_prompt_correlated_and_fifo() {
         EventKind::PromptQueued {
             id: first,
             text: "first".to_owned(),
+            images: Vec::new(),
         },
         EventKind::PromptQueued {
             id: second,
             text: "second".to_owned(),
+            images: Vec::new(),
         },
         EventKind::UserPrompt {
             text: "first".to_owned(),
+            images: Vec::new(),
             queued_prompt: Some(first),
         },
         EventKind::UserPrompt {
             text: "second".to_owned(),
+            images: Vec::new(),
             queued_prompt: Some(second),
         },
     ]);
@@ -277,6 +295,7 @@ fn queue_text_is_not_a_tool_result_or_a_call_result_boundary() {
             EventKind::PromptQueued {
                 id,
                 text: "follow up".to_owned(),
+                images: Vec::new(),
             },
         ),
         (
@@ -298,6 +317,7 @@ fn queue_text_is_not_a_tool_result_or_a_call_result_boundary() {
             Some(prompt_item),
             EventKind::UserPrompt {
                 text: "follow up".to_owned(),
+                images: Vec::new(),
                 queued_prompt: Some(id),
             },
         ),
@@ -325,6 +345,7 @@ fn a_no_tool_final_still_leaves_the_follow_up_replayable_until_consumed() {
         EventKind::PromptQueued {
             id,
             text: "answer this next".to_owned(),
+            images: Vec::new(),
         },
         EventKind::AssistantMessage {
             text: "final answer".to_owned(),
@@ -349,6 +370,7 @@ fn the_prompt_ledger_retains_accounting_across_labelled_interruption_phases() {
             EventKind::PromptQueued {
                 id,
                 text: format!("interrupt during {phase}"),
+                images: Vec::new(),
             },
             EventKind::PromptDeliveryExpedited { through: id },
         ]);
@@ -379,6 +401,7 @@ fn queue_status_replays_active_completed_and_expedited_turns_exactly_once() {
             Some(ItemId::new()),
             EventKind::UserPrompt {
                 text: "initial prompt".to_owned(),
+                images: Vec::new(),
                 queued_prompt: None,
             },
         ),
@@ -389,6 +412,7 @@ fn queue_status_replays_active_completed_and_expedited_turns_exactly_once() {
             EventKind::PromptQueued {
                 id: expedited_id,
                 text: "busy steer".to_owned(),
+                images: Vec::new(),
             },
         ),
         event(
@@ -415,6 +439,7 @@ fn queue_status_replays_active_completed_and_expedited_turns_exactly_once() {
             EventKind::PromptQueued {
                 id: ordinary_id,
                 text: "idle prompt".to_owned(),
+                images: Vec::new(),
             },
         ),
     ];
@@ -446,6 +471,7 @@ fn queue_status_replays_active_completed_and_expedited_turns_exactly_once() {
         Some(ItemId::new()),
         EventKind::UserPrompt {
             text: "busy steer".to_owned(),
+            images: Vec::new(),
             queued_prompt: Some(expedited_id),
         },
     );

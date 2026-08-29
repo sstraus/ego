@@ -6,7 +6,10 @@
 //! Both were read 2026-08-24.
 
 use ego_ai::provider::{KIMI_CODING_BASE, ProviderRow};
+use ego_ai::wire::anthropic_messages::AnthropicMessages;
 use ego_ai::wire::github_copilot_completions::GithubCopilotCompletions;
+use ego_ai::wire::kimi_anthropic::KimiAnthropic;
+use ego_ai::wire::nous_portal::NousPortal;
 use ego_ai::wire::{RequestTarget, WireFormat};
 use ego_core::generator::types::{
     ContentBlock, Conversation, GenRequest, Message, Role, ThinkingLevel, ToolDescriptor,
@@ -23,10 +26,14 @@ fn request(messages: Vec<Message>) -> GenRequest {
     }
 }
 
-fn built_body(row: &ProviderRow, request: &GenRequest) -> serde_json::Value {
+fn built_body(
+    row: &ProviderRow,
+    wire: &'static dyn WireFormat,
+    request: &GenRequest,
+) -> serde_json::Value {
     let headers = vec![("authorization".to_string(), "Bearer test".to_string())];
     let target = RequestTarget::new(row.base(), &headers);
-    let built = row.wire.build_request(&target, request).unwrap();
+    let built = wire.build_request(&target, request).unwrap();
     serde_json::from_slice(built.body.as_deref().expect("a JSON body")).unwrap()
 }
 
@@ -34,16 +41,15 @@ fn built_body(row: &ProviderRow, request: &GenRequest) -> serde_json::Value {
 fn kimi_coding_uses_the_current_coding_v1_anthropic_contract() {
     assert_eq!(KIMI_CODING_BASE, "https://api.kimi.com/coding/v1/");
     let row = ProviderRow::kimi_coding_default();
-    assert_eq!(format!("{:?}", row.wire), "AnthropicMessages");
+    assert_eq!(format!("{:?}", KimiAnthropic), "KimiAnthropic");
     let headers = vec![("authorization".to_string(), "Bearer test".to_string())];
     let target = RequestTarget::new(row.base(), &headers);
-    let built = row
-        .wire
+    let built = KimiAnthropic
         .build_request(&target, &request(vec![Message::text(Role::User, "say ok")]))
         .unwrap();
     assert_eq!(
         built.url.as_str(),
-        "https://api.kimi.com/coding/v1/messages"
+        "https://api.kimi.com/coding/v1/messages?beta=true"
     );
     assert!(
         built
@@ -56,7 +62,10 @@ fn kimi_coding_uses_the_current_coding_v1_anthropic_contract() {
 #[test]
 fn copilot_sets_current_dynamic_headers_without_changing_shared_chat_bytes() {
     let row = ProviderRow::github_copilot_default();
-    assert_eq!(format!("{:?}", row.wire), "GithubCopilotCompletions");
+    assert_eq!(
+        format!("{:?}", GithubCopilotCompletions),
+        "GithubCopilotCompletions"
+    );
     let headers = vec![("authorization".to_string(), "Bearer test".to_string())];
 
     for (messages, initiator) in [
@@ -102,39 +111,21 @@ fn copilot_sets_current_dynamic_headers_without_changing_shared_chat_bytes() {
 }
 
 #[test]
-fn qwen_portal_normalises_message_parts_and_marks_the_system_cache_breakpoint() {
-    let row = ProviderRow::qwen_oauth_default();
-    assert_eq!(format!("{:?}", row.wire), "QwenPortal");
-    let body = built_body(
-        &row,
-        &request(vec![
-            Message::text(Role::System, "be brief"),
-            Message::text(Role::User, "say ok"),
-        ]),
-    );
-    assert_eq!(body["vl_high_resolution_images"], true);
-    assert_eq!(body["messages"][0]["content"][0]["type"], "text");
-    assert_eq!(body["messages"][0]["content"][0]["text"], "be brief");
-    assert_eq!(
-        body["messages"][0]["content"][0]["cache_control"],
-        serde_json::json!({"type": "ephemeral"})
-    );
-    assert_eq!(body["messages"][1]["content"][0]["type"], "text");
-    assert_eq!(body["messages"][1]["content"][0]["text"], "say ok");
-}
-
-#[test]
 fn minimax_oauth_and_nous_select_only_the_captured_current_shapes() {
     let minimax = ProviderRow::minimax_oauth_default();
-    assert_eq!(format!("{:?}", minimax.wire), "AnthropicMessages");
+    assert_eq!(format!("{:?}", AnthropicMessages), "AnthropicMessages");
     assert_eq!(
         minimax.base().as_str(),
         "https://api.minimax.io/anthropic/v1/"
     );
 
     let nous = ProviderRow::nous_default();
-    assert_eq!(format!("{:?}", nous.wire), "NousPortal");
-    let body = built_body(&nous, &request(vec![Message::text(Role::User, "say ok")]));
+    assert_eq!(format!("{:?}", NousPortal), "NousPortal");
+    let body = built_body(
+        &nous,
+        &NousPortal,
+        &request(vec![Message::text(Role::User, "say ok")]),
+    );
     assert_eq!(body["model"], "gpt-4.1");
     assert!(body.get("messages").is_some());
     assert!(body.get("input").is_none());
@@ -155,10 +146,14 @@ fn captured_chat_clients_do_not_invent_a_parallel_tool_calls_field() {
 
     for row in [
         ProviderRow::github_copilot_default(),
-        ProviderRow::qwen_oauth_default(),
         ProviderRow::nous_default(),
     ] {
-        let body = built_body(&row, &req);
+        let wire: &'static dyn WireFormat = if row.id() == "github-copilot" {
+            &GithubCopilotCompletions
+        } else {
+            &NousPortal
+        };
+        let body = built_body(&row, wire, &req);
         assert!(body.get("tools").is_some(), "{} dropped tools", row.id());
         assert!(
             body.get("parallel_tool_calls").is_none(),

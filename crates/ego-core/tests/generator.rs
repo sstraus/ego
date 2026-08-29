@@ -78,7 +78,7 @@ mod generator {
 
     fn capabilities(reasoning_carryover: ReasoningCarryover) -> ModelCapabilities {
         ModelCapabilities {
-            schema_version: 1,
+            schema_version: ModelCapabilities::SCHEMA_VERSION,
             max_context_tokens: Some(200_000),
             max_output_tokens: Some(64_000),
             max_tools: Some(128),
@@ -89,6 +89,7 @@ mod generator {
             cancel: CancelSemantics::Cooperative,
             cache: CacheRetention::Short,
             transport: Transport::Sse,
+            image_input: ego_core::generator::capabilities::ImageInputSupport::Unknown,
         }
     }
 

@@ -593,7 +593,6 @@ fn login_methods(flow: BuiltInFlow, tty: bool, force_device: bool) -> Vec<LoginM
             | BuiltInFlow::GitHubCopilot
             | BuiltInFlow::Xai
             | BuiltInFlow::KimiCoding
-            | BuiltInFlow::Qwen
             | BuiltInFlow::MiniMax
             | BuiltInFlow::Nous
     );
@@ -660,13 +659,7 @@ async fn device_login(
     flow: BuiltInFlow,
     http: &dyn ego_ai::http::Http,
 ) -> Result<OAuthToken, AuthError> {
-    let verifier = verifier();
-    let start = if flow == BuiltInFlow::Qwen {
-        flow.device_authorization_request_with_pkce(&oauth::pkce_challenge(&verifier))
-    } else {
-        flow.device_authorization_request()
-    }
-    .map_err(flow_error)?;
+    let start = flow.device_authorization_request().map_err(flow_error)?;
     let response = oauth::execute(http, flow, start)
         .await
         .map_err(flow_error)?;
@@ -682,12 +675,9 @@ async fn device_login(
     let mut interval = device.interval_seconds.max(1);
     while std::time::Instant::now() < deadline {
         tokio::time::sleep(Duration::from_secs(interval)).await;
-        let request = if flow == BuiltInFlow::Qwen {
-            flow.device_poll_request_with_pkce(&device.device_code, &verifier)
-        } else {
-            flow.device_poll_request(&device.device_code, Some(&device.user_code))
-        }
-        .map_err(flow_error)?;
+        let request = flow
+            .device_poll_request(&device.device_code, Some(&device.user_code))
+            .map_err(flow_error)?;
         let response = oauth::execute(http, flow, request)
             .await
             .map_err(flow_error)?;

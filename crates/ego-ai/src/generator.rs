@@ -21,16 +21,15 @@ use futures::{StreamExt, stream};
 use crate::http::{AdmittedHttpProfile, Http};
 use crate::provider::{ProviderRow, ResolvedCredential};
 use crate::wire;
+use crate::wire::WireFormat;
 
 /// A [`Generator`] that sends a profile's own wire format over an [`Http`].
 ///
-/// It no longer names a mapping. The row does — `row.wire` — so this type is
-/// the same code for every one of the six providers, and adding a seventh
-/// changes nothing here. That is the ADR §5 test in its narrowest form: if
-/// adding a provider made this file grow, the seam would be in the wrong
-/// place.
+/// The resolved model supplies the mapping beside the row, so dynamic model
+/// authorities cannot expose a plausible protocol before resolution.
 pub struct WireGenerator {
     row: ProviderRow,
+    wire: &'static dyn WireFormat,
     profile: AdmittedHttpProfile,
     /// `Arc`, not a borrow, and that is forced rather than preferred:
     /// [`AttemptStream::new`] takes a `BoxStream<'static, _>`, so the future
@@ -55,7 +54,12 @@ pub struct WireGenerator {
 }
 
 impl WireGenerator {
-    pub fn new(row: ProviderRow, http: Arc<dyn Http>, credential: ResolvedCredential) -> Self {
+    pub fn new(
+        row: ProviderRow,
+        wire: &'static dyn WireFormat,
+        http: Arc<dyn Http>,
+        credential: ResolvedCredential,
+    ) -> Self {
         let profile = match credential.base_override() {
             Some(base) => AdmittedHttpProfile::from_urls(row.id(), std::slice::from_ref(base))
                 .expect("a resolved provider base is an admitted HTTP route"),
@@ -63,6 +67,7 @@ impl WireGenerator {
         };
         WireGenerator {
             row,
+            wire,
             profile,
             http,
             credential,
@@ -85,7 +90,7 @@ impl WireGenerator {
         }
         let base = self.credential.base_override().unwrap_or(self.row.base());
         let target = wire::RequestTarget::new(base, &headers);
-        self.row.wire.build_request(&target, req)
+        self.wire.build_request(&target, req)
     }
 }
 
@@ -136,7 +141,7 @@ impl Generator for WireGenerator {
         // `match` on the provider id inside a wire format is the special case
         // the metering ADR §8 forbids.
         let cost = self.row.cost.clone();
-        let wire = self.row.wire;
+        let wire = self.wire;
         let inner = stream::once(async move { profile.execute(http.as_ref(), request).await })
             .flat_map(move |response| wire.decode(response, cost.clone()))
             .boxed();

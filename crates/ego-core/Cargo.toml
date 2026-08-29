@@ -15,6 +15,8 @@ futures = "0.3.34"
 # by how an editor encoded a character would not be revocable from a config
 # file written on another machine. Pure computation.
 idna = "1"
+# Full bounded PNG validation. Pure computation; exact source bytes are retained.
+png = "0.18.1"
 schemars = "1.2.2"
 serde = { version = "1.0.229", features = ["derive"] }
 # Instruction-file digests (docs/decisions/2026-08-21-instructions-a-workspace-

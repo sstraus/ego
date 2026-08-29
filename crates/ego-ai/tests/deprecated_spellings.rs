@@ -54,8 +54,9 @@
 use ego_ai::provider::XAI_BASE;
 use ego_ai::wire::{
     RequestTarget, WireFormat, anthropic_messages, gemini_interactions,
-    github_copilot_completions::GithubCopilotCompletions, nous_portal::NousPortal, ollama,
-    openai_codex_responses, openai_completions, qwen_portal, xai_responses,
+    github_copilot_completions::GithubCopilotCompletions, kimi_anthropic, kimi_openai,
+    minimax_anthropic, nous_portal::NousPortal, ollama, openai_codex_responses, openai_completions,
+    xai_responses,
 };
 use ego_core::generator::types::{
     ContentBlock, Conversation, GenRequest, Message, Role, ThinkingLevel, ToolDescriptor,
@@ -76,8 +77,10 @@ const OLLAMA: &str = "wire::ollama";
 const ANTHROPIC_MESSAGES: &str = "wire::anthropic_messages";
 const GEMINI_INTERACTIONS: &str = "wire::gemini_interactions";
 const GITHUB_COPILOT_COMPLETIONS: &str = "wire::github_copilot_completions";
+const KIMI_ANTHROPIC: &str = "wire::kimi_anthropic";
+const KIMI_OPENAI: &str = "wire::kimi_openai";
+const MINIMAX_ANTHROPIC: &str = "wire::minimax_anthropic";
 const NOUS_PORTAL: &str = "wire::nous_portal";
-const QWEN_PORTAL: &str = "wire::qwen_portal";
 
 /// One spelling a vendor has retired, and the mapping forbidden to send it.
 struct Retired {
@@ -273,8 +276,19 @@ fn bodies() -> Vec<(&'static str, serde_json::Value)> {
                 .and_then(|built| built.body.ok_or_else(|| "request has no body".to_string())),
         ),
         (
-            QWEN_PORTAL,
-            qwen_portal::request_body(&req).map_err(|why| format!("{why:?}")),
+            KIMI_ANTHROPIC,
+            kimi_anthropic::request_body(&req).map_err(|why| format!("{why:?}")),
+        ),
+        (
+            KIMI_OPENAI,
+            kimi_openai::request_body(&req).map_err(|why| format!("{why:?}")),
+        ),
+        (
+            MINIMAX_ANTHROPIC,
+            minimax_anthropic::MiniMaxAnthropic
+                .build_request(&target, &req)
+                .map_err(|why| format!("{why:?}"))
+                .and_then(|built| built.body.ok_or_else(|| "request has no body".to_string())),
         ),
         (
             NOUS_PORTAL,
@@ -423,7 +437,7 @@ const NOT_A_MAPPING: &[&str] = &[
 /// cannot catch this: it asks that each *table entry* names a real mapping,
 /// which stays true no matter how many mappings the table has never heard of.
 /// This is the direction that bites. It caught the live case — `bodies()`
-/// listed two mappings and the module doc said "there is no third" while
+/// listed an incomplete mapping set while
 /// `anthropic_messages` and `gemini_interactions` had been serialising
 /// requests unwalked, so `AGENTS.md`'s "current models only" was enforced on
 /// half the build.

@@ -15,13 +15,14 @@ use super::ProviderHttpAdapter;
 use ego_ai::generator::WireGenerator;
 use ego_ai::http::{Http, HttpCall, PreparedHttpCall};
 use ego_ai::provider::{Credentials, MissingCredential, ProviderRow, ResolvedCredential, Secret};
+use ego_ai::wire::openai_completions::OpenAiCompletions;
 use ego_core::budget::{BudgetGate, Metering};
 use ego_core::cost::CurrencyCode;
 use ego_core::event::id::{GenerationId, SessionId};
 use ego_core::generator::attempt::GenerationAttempt;
 use ego_core::generator::capabilities::{
-    CacheRetention, CancelSemantics, ModelCapabilities, ReasoningCarryover, ReasoningEffortSupport,
-    Transport,
+    CacheRetention, CancelSemantics, ImageInputSupport, ModelCapabilities, ReasoningCarryover,
+    ReasoningEffortSupport, Transport,
 };
 use ego_core::generator::port::{AiEvent, Generator};
 use ego_core::generator::types::{
@@ -110,7 +111,7 @@ fn request() -> GenRequest {
 
 fn capabilities() -> ModelCapabilities {
     ModelCapabilities {
-        schema_version: 1,
+        schema_version: ModelCapabilities::SCHEMA_VERSION,
         max_context_tokens: Some(8_192),
         max_output_tokens: Some(128),
         max_tools: Some(8),
@@ -121,6 +122,7 @@ fn capabilities() -> ModelCapabilities {
         cancel: CancelSemantics::Cooperative,
         cache: CacheRetention::Short,
         transport: Transport::Sse,
+        image_input: ImageInputSupport::Unknown,
     }
 }
 
@@ -206,7 +208,7 @@ async fn capture_prepared(row: ProviderRow) -> PreparedHttpCall {
     let http = Arc::new(CaptureHttp {
         calls: Arc::clone(&calls),
     }) as Arc<dyn Http>;
-    let generator = WireGenerator::new(row.clone(), http, credential(&row));
+    let generator = WireGenerator::new(row.clone(), &OpenAiCompletions, http, credential(&row));
     let req = request();
     let metering = ego_ai::catalogue::unmetered();
     let mut gate = BudgetGate::unlimited(CurrencyCode::new("USD").expect("USD"));
@@ -294,7 +296,7 @@ async fn one_logical_call_uses_one_deadline_across_a_redirect() {
     let adapter = Arc::new(ProviderHttpAdapter::new(Arc::clone(&ports.ports))) as Arc<dyn Http>;
     let provider = provider_row(LOGICAL_HOST, port);
     let provider_credential = credential(&provider);
-    let generator = WireGenerator::new(provider, adapter, provider_credential);
+    let generator = WireGenerator::new(provider, &OpenAiCompletions, adapter, provider_credential);
     let req = request();
     let metering = ego_ai::catalogue::unmetered();
     let mut gate = BudgetGate::unlimited(CurrencyCode::new("USD").expect("USD"));

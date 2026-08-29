@@ -1,0 +1,44 @@
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "kimi-default",
+      "context_length": 131072,
+      "supports_reasoning": true,
+      "supports_image_in": true,
+      "supports_video_in": false,
+      "supports_tool_use": true,
+      "supports_thinking_type": "both",
+      "think_efforts": {
+        "support": true,
+        "valid_efforts": ["low", "high", "max"],
+        "default_effort": "high"
+      },
+      "display_name": "Kimi Default"
+    },
+    {
+      "id": "kimi-explicit",
+      "context_length": 65536,
+      "supports_reasoning": true,
+      "supports_image_in": false,
+      "supports_video_in": false,
+      "supports_tool_use": true,
+      "protocol": "kimi"
+    },
+    {
+      "id": "kimi-anthropic",
+      "context_length": 131072,
+      "supports_reasoning": true,
+      "supports_image_in": true,
+      "supports_video_in": false,
+      "supports_tool_use": true,
+      "supports_thinking_type": "both",
+      "think_efforts": {
+        "support": true,
+        "valid_efforts": ["low", "high"],
+        "default_effort": "high"
+      },
+      "protocol": "anthropic"
+    }
+  ]
+}

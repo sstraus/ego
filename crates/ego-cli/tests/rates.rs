@@ -20,13 +20,14 @@ use std::time::Duration;
 use ego_ai::catalogue::{ResolvedModel, tabulated, unmetered};
 use ego_ai::http::{Http, HttpCall, PreparedHttpCall};
 use ego_ai::provider::ProviderRow;
+use ego_ai::wire::openai_completions::OpenAiCompletions;
 use ego_cli::budget::{NoRates, TableSource};
 use ego_core::budget::{BudgetGate, Ledger, Metering};
 use ego_core::cost::{CurrencyCode, Money, RateSource};
 use ego_core::event::time::Timestamp;
 use ego_core::generator::capabilities::{
-    CacheRetention, CancelSemantics, ModelCapabilities, ReasoningCarryover, ReasoningEffortSupport,
-    Transport,
+    CacheRetention, CancelSemantics, ImageInputSupport, ModelCapabilities, ReasoningCarryover,
+    ReasoningEffortSupport, Transport,
 };
 use ego_core::permit::{HttpHeader, OneHopResponse, TransportError, TransportFailure};
 use ego_tools::pricing::PricingCache;
@@ -120,7 +121,7 @@ impl HttpCall for WireCall {
 
 fn caps() -> ModelCapabilities {
     ModelCapabilities {
-        schema_version: 1,
+        schema_version: ModelCapabilities::SCHEMA_VERSION,
         max_context_tokens: Some(200_000),
         max_output_tokens: Some(64_000),
         max_tools: Some(128),
@@ -131,6 +132,7 @@ fn caps() -> ModelCapabilities {
         cancel: CancelSemantics::Cooperative,
         cache: CacheRetention::Short,
         transport: Transport::Sse,
+        image_input: ImageInputSupport::Unknown,
     }
 }
 
@@ -139,6 +141,7 @@ fn model(metering: Metering) -> ResolvedModel {
     ResolvedModel {
         model: "gpt-5".to_string(),
         row: ProviderRow::openai(),
+        wire: &OpenAiCompletions,
         capabilities: caps(),
         metering,
         rates: None,

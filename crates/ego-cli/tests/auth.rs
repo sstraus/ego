@@ -177,7 +177,6 @@ fn every_selectable_subscription_row_resolves_from_the_one_store_or_names_login(
         ProviderRow::github_copilot_default(),
         ProviderRow::xai_oauth_default(),
         ProviderRow::kimi_coding_default(),
-        ProviderRow::qwen_oauth_default(),
         ProviderRow::minimax_oauth_default(),
         ProviderRow::nous_default(),
         ProviderRow::anthropic_default(),

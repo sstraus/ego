@@ -12,6 +12,8 @@ pub enum Source {
     Project,
     Local,
     Env,
+    #[serde(rename = "agent-file")]
+    AgentFile,
     Flags,
 }
 
@@ -23,12 +25,13 @@ impl Source {
     /// sorting.
     ///
     /// [`OriginSet`]: super::OriginSet
-    pub const ALL: [Source; 6] = [
+    pub const ALL: [Source; 7] = [
         Source::System,
         Source::User,
         Source::Project,
         Source::Local,
         Source::Env,
+        Source::AgentFile,
         Source::Flags,
     ];
 
@@ -41,7 +44,8 @@ impl Source {
             Source::Project => 2,
             Source::Local => 3,
             Source::Env => 4,
-            Source::Flags => 5,
+            Source::AgentFile => 5,
+            Source::Flags => 6,
         }
     }
 }
@@ -54,6 +58,7 @@ impl std::fmt::Display for Source {
             Source::Project => "project",
             Source::Local => "local",
             Source::Env => "env",
+            Source::AgentFile => "agent-file",
             Source::Flags => "flags",
         };
         write!(f, "{name}")

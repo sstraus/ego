@@ -1,0 +1,16 @@
+{
+  "model": "kimi-default",
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="}},
+        {"type": "text", "text": "describe"}
+      ]
+    }
+  ],
+  "stream": true,
+  "stream_options": {"include_usage": true},
+  "thinking": {"type": "disabled"},
+  "max_completion_tokens": 128
+}

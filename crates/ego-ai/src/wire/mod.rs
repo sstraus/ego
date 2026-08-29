@@ -18,12 +18,14 @@
 pub mod anthropic_messages;
 pub mod gemini_interactions;
 pub mod github_copilot_completions;
+pub mod kimi_anthropic;
+pub mod kimi_openai;
+pub mod minimax_anthropic;
 pub mod nous_portal;
 pub mod ollama;
 pub mod openai_codex_responses;
 pub mod openai_completions;
 pub mod provider_cost;
-pub mod qwen_portal;
 pub mod sse;
 pub mod xai_responses;
 
@@ -32,13 +34,21 @@ use std::sync::Arc;
 
 use ego_core::generator::attempt::DeliveryCertainty;
 use ego_core::generator::port::AiEvent;
-use ego_core::generator::types::{ErrorKind, GenRequest, StopReason};
+use ego_core::generator::types::{ContentBlock, ErrorKind, GenRequest, StopReason};
 use futures::stream::{self, BoxStream, StreamExt};
 use serde::Deserialize;
 use url::Url;
 
 use crate::http::{HttpError, HttpRequest, HttpResponse, Method};
 use provider_cost::ProviderCost;
+
+pub(crate) fn request_has_images(req: &GenRequest) -> bool {
+    req.messages
+        .messages()
+        .iter()
+        .flat_map(|message| &message.content)
+        .any(|block| matches!(block, ContentBlock::Image { .. }))
+}
 
 /// One API shape: how a [`GenRequest`] becomes bytes, and how the bytes become
 /// [`AiEvent`]s.

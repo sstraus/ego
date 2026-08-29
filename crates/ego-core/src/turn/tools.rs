@@ -14,6 +14,7 @@ use crate::permit::{
     Authorized, CanonPath, Classification, DuplexSpawner, Fs, GuardedEffects, OneHop, Pending,
     PolicyEngine, PrepareCtx, PreparedCall, ProcessExecutor, Resolution, Resolver, Tool, ToolError,
 };
+use crate::store::blob::BlobStore;
 use crate::store::evidence::EvidenceStore;
 use crate::suspension::ResumeSealer;
 
@@ -168,6 +169,10 @@ impl<'a> Tools<'a> {
     pub fn with_resume(mut self, resume: std::sync::Arc<ResumeSealer>) -> Self {
         self.resume = Some(resume);
         self
+    }
+
+    pub(crate) fn blob_store(&self) -> &dyn BlobStore {
+        self.effects.evidence.blob_store()
     }
 
     pub(crate) fn capture(&self) -> Result<GenerationToolCatalogue, ToolCatalogueError> {

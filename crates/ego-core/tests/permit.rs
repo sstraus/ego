@@ -49,6 +49,10 @@ mod permit {
     struct NoEvidence;
 
     impl EvidenceStore for NoEvidence {
+        fn blob_store(&self) -> &dyn ego_core::store::blob::BlobStore {
+            &common::EMPTY_BLOB_STORE
+        }
+
         fn begin(&self) -> Result<Box<dyn EvidenceWriter>, EvidenceError> {
             Err(EvidenceError::Limit { limit: 0 })
         }

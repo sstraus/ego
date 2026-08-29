@@ -33,6 +33,8 @@ use ego_core::event::id::{ItemId, SessionId};
 use ego_core::generator::types::ThinkingLevel;
 use ego_core::permit::Confinement;
 
+use crate::agent_file::{self, AgentFile};
+
 /// What the process was asked to do.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Invocation {
@@ -108,17 +110,6 @@ struct Unavailable {
 /// `ARCHITECTURE.md`'s milestone table (line 424 onwards) is the source for
 /// every `waiting_on` here: these are subsystems, and the sentence says which.
 const UNAVAILABLE: &[Unavailable] = &[
-    Unavailable {
-        flags: &["-f", "--file", "--var"],
-        waiting_on: "executable agent files (`CLI.md` §5): YAML frontmatter, \
-                     `{{placeholder}}` variables and a versioned format",
-    },
-    Unavailable {
-        flags: &["--attach"],
-        waiting_on: "a non-text content block. The provider-neutral \
-                     conversation model carries text, tool calls and tool \
-                     results, so an image has no representation to be sent in",
-    },
     Unavailable {
         flags: &["-v", "--verbose"],
         waiting_on: "a decision about what it shows. Every other entry here \
@@ -408,6 +399,8 @@ pub enum McpAction {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Args {
     pub prompt: Option<String>,
+    pub(crate) agent_file: Option<AgentFile>,
+    pub(crate) attach: Vec<String>,
     pub stdin: Stdin,
     pub model: Option<String>,
     pub offline: bool,
@@ -730,6 +723,22 @@ struct Places {
 
 #[derive(Debug, ClapArgs)]
 struct Flags {
+    /// Read the instruction and its invocation configuration from an agent file.
+    #[arg(short = 'f', long = "file", value_name = "FILE")]
+    file: Option<PathBuf>,
+
+    /// Supply one declared agent-file template variable.
+    #[arg(long = "var", value_name = "KEY=VALUE", action = ArgAction::Append)]
+    vars: Vec<String>,
+
+    /// Add exact image bytes as ordered context before the prompt text.
+    #[arg(
+        long = "attach",
+        value_name = "IMAGE_PATH|HTTPS_IMAGE_URL",
+        action = ArgAction::Append
+    )]
+    attach: Vec<String>,
+
     /// provider/model slug, e.g. ollama/qwen3
     #[arg(short = 'm', long)]
     model: Option<String>,
@@ -1187,7 +1196,10 @@ pub fn parse(argv: Vec<String>) -> Result<Invocation, UsageError> {
             Parsed::Answered(text) => Ok(Invocation::Answered(text)),
             Parsed::Command(parsed) => {
                 let args = into_resume_args(parsed)?;
-                if args.prompt.is_none() && args.stdin == Stdin::Ambient && args.answers.is_empty()
+                if args.prompt.is_none()
+                    && args.agent_file.is_none()
+                    && args.stdin == Stdin::Ambient
+                    && args.answers.is_empty()
                 {
                     Ok(Invocation::Interactive(Box::new(args)))
                 } else {
@@ -1311,6 +1323,30 @@ fn into_resume_args(command: ResumeCommand) -> Result<Args, UsageError> {
 fn into_args(command: RunCommand) -> Result<Args, UsageError> {
     let RunCommand { prompt, flags } = command;
 
+    if flags.file.is_some() && prompt.is_some() {
+        return Err(UsageError(
+            "an argv prompt and an agent file are competing instruction inputs: \
+             drop the prompt to use --file, or drop --file to use the argv prompt"
+                .to_string(),
+        ));
+    }
+    if flags.file.is_none() && !flags.vars.is_empty() {
+        return Err(UsageError(
+            "--var applies only to an agent file: add --file FILE or drop --var".to_string(),
+        ));
+    }
+    let agent_file = flags
+        .file
+        .as_ref()
+        .map(|path| {
+            let path = match (&flags.common.places.directory, path.is_absolute()) {
+                (_, true) | (None, false) => path.clone(),
+                (Some(directory), false) => directory.join(path),
+            };
+            agent_file::load(&path, &flags.vars)
+        })
+        .transpose()?;
+
     // §4.5's applicability conflict, and the one the instructions ADR said
     // belonged here rather than in the loader: from a resolved posture alone,
     // "the user demanded bare" and "the workspace is untrusted" are the same
@@ -1352,6 +1388,8 @@ fn into_args(command: RunCommand) -> Result<Args, UsageError> {
 
     Ok(Args {
         prompt,
+        agent_file,
+        attach: flags.attach,
         stdin,
         model: flags.model,
         offline: flags.offline,

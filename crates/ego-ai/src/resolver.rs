@@ -47,6 +47,7 @@ use futures::future::BoxFuture;
 use crate::catalogue::{Catalogue, ModelDiscoveryReport, ModelSlug, ResolveError, ResolvedModel};
 use crate::http::Http;
 use crate::provider::{ProviderRow, ResolvedCredential};
+use crate::wire::WireFormat;
 use ego_core::public::MeteringKind;
 
 /// Everything a resolver may look at, and nothing else.
@@ -98,6 +99,13 @@ pub struct Enumeration<'a> {
     pub catalogue: &'a Catalogue,
     pub row: &'a ProviderRow,
     pub http: &'a Arc<dyn Http>,
+    pub credential: Option<&'a ResolvedCredential>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolverCredentialRequirement {
+    None,
+    Required,
 }
 
 /// How a provider's models are turned into the facts a turn needs.
@@ -106,6 +114,10 @@ pub struct Enumeration<'a> {
 /// rather than an `async fn`. That is the same shape [`Http`] uses and for the
 /// same reason.
 pub trait ModelResolver: Send + Sync + fmt::Debug {
+    fn enumeration_credential(&self) -> ResolverCredentialRequirement {
+        ResolverCredentialRequirement::None
+    }
+
     fn resolve<'a>(
         &'a self,
         at: &'a Resolution<'a>,
@@ -123,7 +135,15 @@ pub trait ModelResolver: Send + Sync + fmt::Debug {
 /// price or ceilings is discoverable from its API, so what this build knows is
 /// what it was told.
 #[derive(Debug)]
-pub struct Supplied;
+pub struct Supplied {
+    wire: &'static dyn WireFormat,
+}
+
+impl Supplied {
+    pub const fn new(wire: &'static dyn WireFormat) -> Self {
+        Self { wire }
+    }
+}
 
 impl ModelResolver for Supplied {
     fn resolve<'a>(
@@ -132,7 +152,9 @@ impl ModelResolver for Supplied {
     ) -> BoxFuture<'a, Result<ResolvedModel, ResolveError>> {
         // Ready rather than an `async` block: this opens nothing and waits for
         // nothing, and a future that is already done says so.
-        Box::pin(std::future::ready(at.catalogue.resolve_hosted(at.slug)))
+        Box::pin(std::future::ready(
+            at.catalogue.resolve_hosted(at.slug, self.wire),
+        ))
     }
 
     fn enumerate<'a>(
@@ -150,11 +172,12 @@ impl ModelResolver for Supplied {
 #[derive(Debug)]
 pub struct SubscriptionSupplied {
     revision: &'static str,
+    wire: &'static dyn WireFormat,
 }
 
 impl SubscriptionSupplied {
-    pub const fn new(revision: &'static str) -> Self {
-        Self { revision }
+    pub const fn new(revision: &'static str, wire: &'static dyn WireFormat) -> Self {
+        Self { revision, wire }
     }
 }
 
@@ -164,7 +187,7 @@ impl ModelResolver for SubscriptionSupplied {
         at: &'a Resolution<'a>,
     ) -> BoxFuture<'a, Result<ResolvedModel, ResolveError>> {
         Box::pin(async move {
-            let mut resolved = at.catalogue.resolve_hosted(at.slug)?;
+            let mut resolved = at.catalogue.resolve_hosted(at.slug, self.wire)?;
             resolved.metering = crate::catalogue::subscription(self.revision);
             resolved.rates = None;
             Ok(resolved)
@@ -206,6 +229,40 @@ impl ModelResolver for OllamaDaemon {
     }
 }
 
+#[derive(Debug)]
+pub struct KimiManaged;
+
+impl ModelResolver for KimiManaged {
+    fn enumeration_credential(&self) -> ResolverCredentialRequirement {
+        ResolverCredentialRequirement::Required
+    }
+
+    fn resolve<'a>(
+        &'a self,
+        at: &'a Resolution<'a>,
+    ) -> BoxFuture<'a, Result<ResolvedModel, ResolveError>> {
+        Box::pin(crate::kimi::resolve(
+            at.row,
+            &at.slug.model,
+            at.http,
+            at.credential,
+        ))
+    }
+
+    fn enumerate<'a>(
+        &'a self,
+        at: &'a Enumeration<'a>,
+    ) -> BoxFuture<'a, Result<ModelDiscoveryReport, String>> {
+        let Some(credential) = at.credential else {
+            return Box::pin(std::future::ready(Err(format!(
+                "{} model discovery requires its resolved credential",
+                at.row.id()
+            ))));
+        };
+        Box::pin(crate::kimi::enumerate(at.row, at.http, credential))
+    }
+}
+
 /// Capabilities from what was supplied, price from xAI's own table.
 ///
 /// `crate::xai` is the argument: xAI publishes `GET /v1/language-models` **per
@@ -217,7 +274,15 @@ impl ModelResolver for OllamaDaemon {
 /// The two halves run in that order, and it is not cosmetic: a slug with no
 /// supplied capabilities fails here, before a request is sent.
 #[derive(Debug)]
-pub struct XaiLanguageModels;
+pub struct XaiLanguageModels {
+    wire: &'static dyn WireFormat,
+}
+
+impl XaiLanguageModels {
+    pub const fn new(wire: &'static dyn WireFormat) -> Self {
+        Self { wire }
+    }
+}
 
 impl ModelResolver for XaiLanguageModels {
     fn resolve<'a>(
@@ -225,7 +290,7 @@ impl ModelResolver for XaiLanguageModels {
         at: &'a Resolution<'a>,
     ) -> BoxFuture<'a, Result<ResolvedModel, ResolveError>> {
         Box::pin(async move {
-            let supplied = at.catalogue.resolve_hosted(at.slug)?;
+            let supplied = at.catalogue.resolve_hosted(at.slug, self.wire)?;
             crate::xai::price(supplied, at.http, at.credential).await
         })
     }

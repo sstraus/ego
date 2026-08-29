@@ -805,18 +805,15 @@ fn a_command_line_that_cannot_be_honoured_exits_two_saying_why() {
     }
 }
 
-/// §4.5's applicability matrix: a flag `CLI.md` §3 documents whose subsystem
-/// this build does not have is refused **by name**, naming what it waits on.
-/// Sandbox is implemented and has its own parsing, precedence, and enforcement
-/// contract; this matrix therefore covers only the still-unavailable flags.
+/// §4.5's applicability matrix: the retry flags `CLI.md` §3 documents whose
+/// subsystem this build does not have are refused **by name**, naming what
+/// they wait on. Sandbox is implemented and has its own parsing, precedence,
+/// and enforcement contract; `-v`/`--verbose` has a dedicated test below.
 #[test]
 fn a_documented_flag_without_its_subsystem_is_refused_by_name() {
     for (flag, value) in [
-        ("--attach", Some("diagram.png")),
         ("--retry", Some("3")),
         ("--fallback", Some("openai/gpt-5.1")),
-        ("--var", Some("severity=major")),
-        ("-f", Some("review.ego")),
     ] {
         let mut ego = Ego::nowhere().args(["--model", "ollama/qwen3"]).arg(flag);
         if let Some(value) = value {

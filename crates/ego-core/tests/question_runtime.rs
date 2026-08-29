@@ -39,6 +39,8 @@ use ego_core::state::{ItemKind, SessionState};
 use ego_core::store::evidence::{
     EvidenceError, EvidencePage, EvidenceRead, EvidenceStore, EvidenceWriter,
 };
+
+mod common;
 use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
 use ego_core::turn::{
     CancelToken, GenerationRuntime, RegisteredTool, Session, ToolEffectPorts, Tools, TurnConfig,
@@ -184,6 +186,10 @@ impl ProcessExecutor for NoProcess {
 struct NoEvidence;
 
 impl EvidenceStore for NoEvidence {
+    fn blob_store(&self) -> &dyn ego_core::store::blob::BlobStore {
+        &common::EMPTY_BLOB_STORE
+    }
+
     fn begin(&self) -> Result<Box<dyn EvidenceWriter>, EvidenceError> {
         Err(EvidenceError::Limit { limit: 0 })
     }
@@ -246,7 +252,7 @@ impl GenerationModelSource for FixedSource {
             thinking: ego_core::generator::types::ThinkingLevel::Off,
             generator: self.generator.clone(),
             capabilities: ModelCapabilities {
-                schema_version: 1,
+                schema_version: ModelCapabilities::SCHEMA_VERSION,
                 max_context_tokens: Some(10_000),
                 max_output_tokens: Some(1_000),
                 max_tools: Some(16),
@@ -257,6 +263,7 @@ impl GenerationModelSource for FixedSource {
                 cancel: CancelSemantics::Cooperative,
                 cache: CacheRetention::Short,
                 transport: Transport::Sse,
+                image_input: ego_core::generator::capabilities::ImageInputSupport::Unknown,
             },
             metering: Metering::Unmetered {
                 revision: MeteringRevision("question-runtime".into()),

@@ -36,6 +36,7 @@ use std::sync::{Arc, Mutex};
 
 use ego_ai::http::{Http, HttpCall, PreparedHttpCall};
 use ego_ai::provider::{ProviderRow, ResolvedCredential};
+use ego_ai::wire::openai_completions::OpenAiCompletions;
 use ego_ai::wire::provider_cost::{
     OPENROUTER_COST_FIELD, OpenRouterUsd, ProviderCost, XAI_COST_FIELD, XaiUsdTicks,
 };
@@ -48,8 +49,8 @@ use ego_core::cost::{
 use ego_core::event::id::GenerationId;
 use ego_core::generator::attempt::{GenerationAttempt, Settlement, UsageReport, settled_cost};
 use ego_core::generator::capabilities::{
-    CacheRetention, CancelSemantics, ModelCapabilities, ReasoningCarryover, ReasoningEffortSupport,
-    Transport,
+    CacheRetention, CancelSemantics, ImageInputSupport, ModelCapabilities, ReasoningCarryover,
+    ReasoningEffortSupport, Transport,
 };
 use ego_core::generator::port::{AiEvent, Generator};
 use ego_core::generator::types::{Conversation, GenRequest, Message, Role, ThinkingLevel};
@@ -176,7 +177,7 @@ fn quote() -> PricingQuote {
 
 fn caps() -> ModelCapabilities {
     ModelCapabilities {
-        schema_version: 1,
+        schema_version: ModelCapabilities::SCHEMA_VERSION,
         max_context_tokens: Some(200_000),
         max_output_tokens: Some(64_000),
         max_tools: Some(128),
@@ -187,6 +188,7 @@ fn caps() -> ModelCapabilities {
         cancel: CancelSemantics::Cooperative,
         cache: CacheRetention::Long,
         transport: Transport::Sse,
+        image_input: ImageInputSupport::Unknown,
     }
 }
 
@@ -313,6 +315,7 @@ async fn settle_through_core(
     let credential = creds(&row);
     let generator = WireGenerator::new(
         row,
+        &OpenAiCompletions,
         StubHttp::new(transcript(usage)) as Arc<dyn Http>,
         credential,
     );
@@ -557,6 +560,7 @@ async fn a_row_with_no_cost_decoder_settles_from_its_table_as_it_always_did() {
     let credential = creds(&plain);
     let generator = WireGenerator::new(
         plain,
+        &OpenAiCompletions,
         StubHttp::new(transcript(XAI_USAGE)) as Arc<dyn Http>,
         credential,
     );

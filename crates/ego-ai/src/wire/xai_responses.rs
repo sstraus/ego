@@ -16,7 +16,7 @@ use std::sync::Arc;
 use ego_core::cost::Money;
 use ego_core::generator::port::AiEvent;
 use ego_core::generator::types::{
-    ContentBlock, ErrorKind, GenRequest, Role, StopReason, ThinkingLevel,
+    ContentBlock, ErrorKind, GenRequest, ImageMediaType, Role, StopReason, ThinkingLevel,
 };
 use ego_core::state::Usage;
 use futures::stream::BoxStream;
@@ -58,6 +58,9 @@ pub const PATH: &str = "responses";
 pub enum Inexpressible {
     ReasoningStateNotCarriable,
     ReasoningEffortNotSupported(ThinkingLevel),
+    ImageMediaTypeNotSupported(ImageMediaType),
+    ImageTooLarge { bytes: usize },
+    ImageRoleNotSupported,
 }
 
 impl std::fmt::Display for Inexpressible {
@@ -71,6 +74,17 @@ impl std::fmt::Display for Inexpressible {
                 f,
                 "xai-responses cannot express {level:?} on the current grok-4.6 reasoning contract; use low, medium, high, or xhigh"
             ),
+            Self::ImageMediaTypeNotSupported(media_type) => write!(
+                f,
+                "xai-responses image input accepts JPEG and PNG, not {media_type:?}"
+            ),
+            Self::ImageTooLarge { bytes } => write!(
+                f,
+                "xai-responses image input is limited to 20 MiB, but this image has {bytes} bytes"
+            ),
+            Self::ImageRoleNotSupported => {
+                write!(f, "xai-responses accepts image input only in user messages")
+            }
         }
     }
 }
@@ -130,12 +144,85 @@ fn carries_reasoning(req: &GenRequest) -> bool {
         .any(|block| matches!(block, ContentBlock::Reasoning { .. }))
 }
 
-fn input_items(req: &GenRequest) -> Vec<Value> {
+const MAX_IMAGE_BYTES: usize = 20 * 1024 * 1024;
+
+fn input_items(req: &GenRequest) -> Result<Vec<Value>, Inexpressible> {
     let mut items = Vec::new();
     for message in req.messages.messages() {
+        if message.role == Role::User
+            && message
+                .content
+                .iter()
+                .any(|block| matches!(block, ContentBlock::Image { .. }))
+        {
+            let mut content = Vec::new();
+            for block in &message.content {
+                if let ContentBlock::Image { image } = block {
+                    if !matches!(
+                        image.media_type(),
+                        ImageMediaType::Jpeg | ImageMediaType::Png
+                    ) {
+                        return Err(Inexpressible::ImageMediaTypeNotSupported(
+                            image.media_type(),
+                        ));
+                    }
+                    if image.bytes().len() > MAX_IMAGE_BYTES {
+                        return Err(Inexpressible::ImageTooLarge {
+                            bytes: image.bytes().len(),
+                        });
+                    }
+                    content.push(serde_json::json!({
+                        "type": "input_image",
+                        "image_url": super::openai_completions::image_data_url(image),
+                    }));
+                }
+            }
+            for block in &message.content {
+                if let ContentBlock::Text { text } = block {
+                    content.push(serde_json::json!({
+                        "type": "input_text",
+                        "text": text,
+                    }));
+                }
+            }
+            items.push(serde_json::json!({
+                "role": "user",
+                "content": content,
+            }));
+            for block in &message.content {
+                match block {
+                    ContentBlock::ToolUse {
+                        call_id,
+                        name,
+                        args,
+                    } => {
+                        items.push(serde_json::json!({
+                            "type": "function_call",
+                            "call_id": call_id,
+                            "name": name,
+                            "arguments": args,
+                        }));
+                    }
+                    ContentBlock::ToolResult {
+                        call_id, output, ..
+                    } => {
+                        items.push(serde_json::json!({
+                            "type": "function_call_output",
+                            "call_id": call_id,
+                            "output": output,
+                        }));
+                    }
+                    ContentBlock::Image { .. }
+                    | ContentBlock::Text { .. }
+                    | ContentBlock::Reasoning { .. } => {}
+                }
+            }
+            continue;
+        }
         for block in &message.content {
             match block {
                 ContentBlock::Reasoning { .. } => {}
+                ContentBlock::Image { .. } => return Err(Inexpressible::ImageRoleNotSupported),
                 ContentBlock::Text { text } => match message.role {
                     Role::System | Role::User => items.push(serde_json::json!({
                         "role": match message.role { Role::System => "system", _ => "user" },
@@ -167,7 +254,7 @@ fn input_items(req: &GenRequest) -> Vec<Value> {
             }
         }
     }
-    items
+    Ok(items)
 }
 
 pub fn request_body(req: &GenRequest) -> Result<Vec<u8>, Inexpressible> {
@@ -188,7 +275,7 @@ pub fn request_body(req: &GenRequest) -> Result<Vec<u8>, Inexpressible> {
         model: &req.model,
         stream: true,
         store: false,
-        input: input_items(req),
+        input: input_items(req)?,
         parallel_tool_calls: (!tools.is_empty()).then_some(req.parallel_tool_calls),
         tools,
         reasoning: WireReasoning {

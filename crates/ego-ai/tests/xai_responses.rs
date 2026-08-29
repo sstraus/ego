@@ -317,7 +317,7 @@ async fn non_2xx_uses_the_shared_three_event_failure_contract() {
 #[test]
 fn xai_oauth_row_selects_xai_responses_and_cost_ticks() {
     let row = ProviderRow::xai_oauth_default();
-    assert_eq!(format!("{:?}", row.wire), "XaiResponses");
+    assert_eq!(format!("{:?}", XaiResponses), "XaiResponses");
     assert_eq!(row.base().as_str(), "https://api.x.ai/v1/");
     assert_eq!(
         row.cost

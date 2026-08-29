@@ -53,8 +53,8 @@ use ego_core::event::id::{
 use ego_core::event::time::Timestamp;
 use ego_core::generator::attempt::{AttemptRef, DeliveryCertainty, Outcome, UsageReport};
 use ego_core::generator::capabilities::{
-    CacheRetention, CancelSemantics, ModelCapabilities, ReasoningCarryover, ReasoningEffortSupport,
-    Transport,
+    CacheRetention, CancelSemantics, ImageInputSupport, ModelCapabilities, ReasoningCarryover,
+    ReasoningEffortSupport, Transport,
 };
 use ego_core::generator::types::{ErrorKind, ReasoningState, StopReason};
 use ego_core::permit::{Authority, CanonPath, Escalation, OpName, ToolResult};
@@ -171,6 +171,7 @@ mod acp_golden {
                 Some(item_user_1),
                 EventKind::UserPrompt {
                     text: "list the files".to_string(),
+                    images: Vec::new(),
                     queued_prompt: None,
                 },
             ),
@@ -340,6 +341,7 @@ mod acp_golden {
                 Some(item_user_2),
                 EventKind::UserPrompt {
                     text: "thanks".to_string(),
+                    images: Vec::new(),
                     queued_prompt: None,
                 },
             ),
@@ -379,12 +381,14 @@ mod acp_golden {
             EventKind::PromptQueued {
                 id: QueuedPromptId::new(),
                 text: String::new(),
+                images: Vec::new(),
             },
             EventKind::PromptDeliveryExpedited {
                 through: QueuedPromptId::new(),
             },
             EventKind::UserPrompt {
                 text: String::new(),
+                images: Vec::new(),
                 queued_prompt: None,
             },
             EventKind::AssistantDelta {
@@ -575,7 +579,7 @@ mod acp_golden {
     /// update entirely.
     fn caps(max_context_tokens: Option<u64>) -> ModelCapabilities {
         ModelCapabilities {
-            schema_version: 1,
+            schema_version: ModelCapabilities::SCHEMA_VERSION,
             max_context_tokens,
             max_output_tokens: Some(64_000),
             max_tools: Some(128),
@@ -586,6 +590,7 @@ mod acp_golden {
             cancel: CancelSemantics::Cooperative,
             cache: CacheRetention::Short,
             transport: Transport::Sse,
+            image_input: ImageInputSupport::Unknown,
         }
     }
 
@@ -971,6 +976,7 @@ mod acp_golden {
         let kinds = [
             EventKind::UserPrompt {
                 text: "orphaned".to_string(),
+                images: Vec::new(),
                 queued_prompt: None,
             },
             EventKind::AssistantDelta {
@@ -1007,6 +1013,7 @@ mod acp_golden {
         let kinds = [
             EventKind::UserPrompt {
                 text: "orphaned".to_string(),
+                images: Vec::new(),
                 queued_prompt: None,
             },
             EventKind::AssistantDelta {

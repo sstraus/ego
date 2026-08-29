@@ -31,6 +31,7 @@ use ego_core::event::id::SessionId;
 use ego_core::event::time::Timestamp;
 use ego_core::run::{RunAppend, RunRevision, RunTransaction};
 use ego_core::state::SessionState;
+use ego_core::store::blob::BlobRef;
 use ego_core::store::evidence::EvidenceError;
 use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
 use futures::stream::BoxStream;
@@ -131,6 +132,8 @@ pub struct SessionWriter<'a> {
     id: SessionId,
     /// Released on drop, which is the whole point. Never read.
     _lease: Arc<Lease>,
+    /// References derived from the repaired log and accepted snapshot state.
+    reachable_blobs: Vec<BlobRef>,
 }
 
 impl SessionWriter<'_> {
@@ -141,12 +144,26 @@ impl SessionWriter<'_> {
 
     /// Bind complete tool evidence to this lease-held session.
     pub fn evidence_store(&self, hard_cap: u64) -> Result<SessionEvidenceStore, EvidenceError> {
-        SessionEvidenceStore::with_io(
+        let store = SessionEvidenceStore::with_io(
             self.store.session_dir(&self.id),
             hard_cap,
             Arc::clone(&self.store.io),
-            Some(Arc::clone(&self._lease)),
-        )
+            Arc::clone(&self._lease),
+        )?;
+        let mut reachable = self.reachable_blobs.clone();
+        match self.store.read_events(&self.id) {
+            Ok(events) => {
+                reachable.extend(events.iter().flat_map(|event| event.kind.blob_references()))
+            }
+            Err(StoreError::NotFound) => {}
+            Err(error) => {
+                return Err(EvidenceError::Io {
+                    message: error.to_string(),
+                });
+            }
+        }
+        store.collect_garbage(&reachable)?;
+        Ok(store)
     }
 
     fn check(&self, asked: &SessionId) -> Result<(), StoreError> {
@@ -248,6 +265,16 @@ impl JsonlStore {
             Err(source) => return Err(OpenError::Resume { source, repair }),
         };
 
+        let mut reachable_blobs = match self.read_events(id) {
+            Ok(events) => events
+                .iter()
+                .flat_map(|event| event.kind.blob_references())
+                .collect(),
+            Err(StoreError::NotFound) => Vec::new(),
+            Err(source) => return Err(OpenError::Resume { source, repair }),
+        };
+        reachable_blobs.extend(state.blob_references());
+
         Ok(OpenSession {
             state,
             repair,
@@ -256,6 +283,7 @@ impl JsonlStore {
                 store: self,
                 id: *id,
                 _lease: Arc::new(held),
+                reachable_blobs,
             },
         })
     }

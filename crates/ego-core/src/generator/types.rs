@@ -7,8 +7,443 @@
 //! a message is a list of blocks rather than a string plus an optional id.
 
 use std::collections::BTreeMap;
+use std::io::Cursor;
 
 use serde::{Deserialize, Serialize};
+
+use crate::store::blob::BlobRef;
+
+pub const MAX_IMAGES_PER_PROMPT: usize = 100;
+pub const MAX_IMAGE_BYTES: u64 = 64 * 1024 * 1024;
+pub const MAX_TOTAL_IMAGE_BYTES: u64 = 64 * 1024 * 1024;
+pub const MAX_IMAGE_EDGE: u32 = 16_384;
+pub const MAX_IMAGE_PIXELS: u64 = 100_000_000;
+
+/// The closed set of exact image encodings the provider-neutral model admits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ImageMediaType {
+    Jpeg,
+    Png,
+    Gif,
+    Webp,
+}
+
+impl ImageMediaType {
+    pub const fn mime(self) -> &'static str {
+        match self {
+            Self::Jpeg => "image/jpeg",
+            Self::Png => "image/png",
+            Self::Gif => "image/gif",
+            Self::Webp => "image/webp",
+        }
+    }
+}
+
+/// Exact immutable bytes plus dimensions proved from those bytes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Image {
+    bytes: Box<[u8]>,
+    media_type: ImageMediaType,
+    width: u32,
+    height: u32,
+}
+
+impl Image {
+    pub fn new(bytes: Vec<u8>, media_type: ImageMediaType) -> Result<Self, ImageError> {
+        validate_image_byte_bounds(bytes.len())?;
+        let (width, height) = decoded_dimensions(&bytes, media_type)?;
+        validate_image_dimension_bounds(width, height)?;
+        Ok(Self {
+            bytes: bytes.into_boxed_slice(),
+            media_type,
+            width,
+            height,
+        })
+    }
+
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    pub const fn media_type(&self) -> ImageMediaType {
+        self.media_type
+    }
+
+    pub const fn width(&self) -> u32 {
+        self.width
+    }
+
+    pub const fn height(&self) -> u32 {
+        self.height
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ImageWire {
+    bytes: Vec<u8>,
+    media_type: ImageMediaType,
+    width: u32,
+    height: u32,
+}
+
+impl<'de> Deserialize<'de> for Image {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = ImageWire::deserialize(deserializer)?;
+        let image = Self::new(wire.bytes, wire.media_type).map_err(serde::de::Error::custom)?;
+        if image.width != wire.width || image.height != wire.height {
+            return Err(serde::de::Error::custom(format!(
+                "image declares {}x{} but its bytes decode as {}x{}",
+                wire.width, wire.height, image.width, image.height
+            )));
+        }
+        Ok(image)
+    }
+}
+
+/// Durable image metadata. Acquisition origins and bytes never enter it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImageRef {
+    reference: BlobRef,
+    media_type: ImageMediaType,
+    width: u32,
+    height: u32,
+}
+
+impl ImageRef {
+    pub fn new(
+        reference: BlobRef,
+        media_type: ImageMediaType,
+        width: u32,
+        height: u32,
+    ) -> Result<Self, ImageError> {
+        if reference.bytes == 0 {
+            return Err(ImageError::Empty);
+        }
+        validate_image_bounds(
+            usize::try_from(reference.bytes).unwrap_or(usize::MAX),
+            width,
+            height,
+        )?;
+        Ok(Self {
+            reference,
+            media_type,
+            width,
+            height,
+        })
+    }
+
+    pub fn hydrate(&self, bytes: Vec<u8>) -> Result<Image, ImageError> {
+        let image = Image::new(bytes, self.media_type)?;
+        if image.width != self.width || image.height != self.height {
+            return Err(ImageError::DimensionMismatch {
+                declared_width: self.width,
+                declared_height: self.height,
+                decoded_width: image.width,
+                decoded_height: image.height,
+            });
+        }
+        Ok(image)
+    }
+
+    pub fn reference(&self) -> &BlobRef {
+        &self.reference
+    }
+    pub const fn media_type(&self) -> ImageMediaType {
+        self.media_type
+    }
+    pub const fn width(&self) -> u32 {
+        self.width
+    }
+    pub const fn height(&self) -> u32 {
+        self.height
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ImageRefWire {
+    reference: BlobRef,
+    media_type: ImageMediaType,
+    width: u32,
+    height: u32,
+}
+
+impl<'de> Deserialize<'de> for ImageRef {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = ImageRefWire::deserialize(deserializer)?;
+        Self::new(wire.reference, wire.media_type, wire.width, wire.height)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImageError {
+    Empty,
+    TooLarge {
+        bytes: u64,
+    },
+    InvalidEncoding {
+        media_type: ImageMediaType,
+    },
+    AnimatedGif,
+    InvalidDimensions {
+        width: u32,
+        height: u32,
+    },
+    TooManyPixels {
+        pixels: u64,
+    },
+    DimensionMismatch {
+        declared_width: u32,
+        declared_height: u32,
+        decoded_width: u32,
+        decoded_height: u32,
+    },
+}
+
+impl std::fmt::Display for ImageError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Empty => write!(f, "an image cannot be empty"),
+            Self::TooLarge { bytes } => write!(
+                f,
+                "image has {bytes} bytes, above the {MAX_IMAGE_BYTES}-byte product limit"
+            ),
+            Self::InvalidEncoding { media_type } => {
+                write!(f, "bytes are not a valid {media_type:?} image")
+            }
+            Self::AnimatedGif => write!(f, "animated GIF input is not supported"),
+            Self::InvalidDimensions { width, height } => write!(
+                f,
+                "image dimensions {width}x{height} are outside the 1..={MAX_IMAGE_EDGE} product bound"
+            ),
+            Self::TooManyPixels { pixels } => write!(
+                f,
+                "image has {pixels} pixels, above the {MAX_IMAGE_PIXELS}-pixel product limit"
+            ),
+            Self::DimensionMismatch {
+                declared_width,
+                declared_height,
+                decoded_width,
+                decoded_height,
+            } => write!(
+                f,
+                "image declares {declared_width}x{declared_height} but its bytes decode as {decoded_width}x{decoded_height}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ImageError {}
+
+fn validate_image_bounds(bytes: usize, width: u32, height: u32) -> Result<(), ImageError> {
+    validate_image_byte_bounds(bytes)?;
+    validate_image_dimension_bounds(width, height)
+}
+
+fn validate_image_byte_bounds(bytes: usize) -> Result<(), ImageError> {
+    let bytes = u64::try_from(bytes).unwrap_or(u64::MAX);
+    if bytes == 0 {
+        return Err(ImageError::Empty);
+    }
+    if bytes > MAX_IMAGE_BYTES {
+        return Err(ImageError::TooLarge { bytes });
+    }
+    Ok(())
+}
+
+fn validate_image_dimension_bounds(width: u32, height: u32) -> Result<(), ImageError> {
+    if width == 0 || height == 0 || width > MAX_IMAGE_EDGE || height > MAX_IMAGE_EDGE {
+        return Err(ImageError::InvalidDimensions { width, height });
+    }
+    let pixels = u64::from(width)
+        .checked_mul(u64::from(height))
+        .ok_or(ImageError::TooManyPixels { pixels: u64::MAX })?;
+    if pixels > MAX_IMAGE_PIXELS {
+        return Err(ImageError::TooManyPixels { pixels });
+    }
+    Ok(())
+}
+
+fn decoded_dimensions(bytes: &[u8], media_type: ImageMediaType) -> Result<(u32, u32), ImageError> {
+    let invalid = || ImageError::InvalidEncoding { media_type };
+    match media_type {
+        ImageMediaType::Png => png_dimensions(bytes, media_type),
+        ImageMediaType::Jpeg => jpeg_dimensions(bytes).ok_or_else(invalid),
+        ImageMediaType::Gif => gif_dimensions(bytes).map_err(|animated| {
+            if animated {
+                ImageError::AnimatedGif
+            } else {
+                invalid()
+            }
+        }),
+        ImageMediaType::Webp => webp_dimensions(bytes).ok_or_else(invalid),
+    }
+}
+
+fn png_dimensions(bytes: &[u8], media_type: ImageMediaType) -> Result<(u32, u32), ImageError> {
+    let invalid = || ImageError::InvalidEncoding { media_type };
+    let limits = png::Limits {
+        bytes: usize::try_from(MAX_IMAGE_BYTES).expect("the image byte cap fits in usize"),
+    };
+    let decoder = png::Decoder::new_with_limits(Cursor::new(bytes), limits);
+    let mut reader = decoder.read_info().map_err(|_| invalid())?;
+    let dimensions = (reader.info().width, reader.info().height);
+
+    // Refuse impossible dimensions before consuming compressed pixel data.
+    // `finish` then validates the complete IDAT stream and every remaining
+    // chunk through IEND without allocating a decoded frame buffer.
+    validate_image_dimension_bounds(dimensions.0, dimensions.1)?;
+    reader.finish().map_err(|_| invalid())?;
+    Ok(dimensions)
+}
+
+fn jpeg_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    if bytes.len() < 4 || !bytes.starts_with(&[0xff, 0xd8]) || !bytes.ends_with(&[0xff, 0xd9]) {
+        return None;
+    }
+    let mut at = 2;
+    while at + 3 < bytes.len() {
+        if bytes[at] != 0xff {
+            return None;
+        }
+        while at < bytes.len() && bytes[at] == 0xff {
+            at += 1;
+        }
+        let marker = *bytes.get(at)?;
+        at += 1;
+        if marker == 0xd9 || marker == 0xda {
+            break;
+        }
+        if marker == 0x01 || (0xd0..=0xd7).contains(&marker) {
+            continue;
+        }
+        let length = u16::from_be_bytes(bytes.get(at..at + 2)?.try_into().ok()?) as usize;
+        if length < 2 || at.checked_add(length)? > bytes.len() {
+            return None;
+        }
+        let is_sof = matches!(marker, 0xc0..=0xcf) && !matches!(marker, 0xc4 | 0xc8 | 0xcc);
+        if is_sof {
+            if length < 7 {
+                return None;
+            }
+            let height = u16::from_be_bytes(bytes[at + 3..at + 5].try_into().ok()?) as u32;
+            let width = u16::from_be_bytes(bytes[at + 5..at + 7].try_into().ok()?) as u32;
+            return Some((width, height));
+        }
+        at += length;
+    }
+    None
+}
+
+fn gif_dimensions(bytes: &[u8]) -> Result<(u32, u32), bool> {
+    if bytes.len() < 14 || (!bytes.starts_with(b"GIF87a") && !bytes.starts_with(b"GIF89a")) {
+        return Err(false);
+    }
+    let width = u16::from_le_bytes([bytes[6], bytes[7]]) as u32;
+    let height = u16::from_le_bytes([bytes[8], bytes[9]]) as u32;
+    let packed = bytes[10];
+    let mut at = 13
+        + if packed & 0x80 != 0 {
+            3 * (1usize << (usize::from(packed & 7) + 1))
+        } else {
+            0
+        };
+    let mut frames = 0;
+    while at < bytes.len() {
+        match bytes[at] {
+            0x3b => {
+                return if frames == 1 {
+                    Ok((width, height))
+                } else {
+                    Err(false)
+                };
+            }
+            0x21 => {
+                at = at.checked_add(2).ok_or(false)?;
+                skip_gif_sub_blocks(bytes, &mut at)?;
+            }
+            0x2c => {
+                frames += 1;
+                if frames > 1 {
+                    return Err(true);
+                }
+                if at + 10 > bytes.len() {
+                    return Err(false);
+                }
+                let local = bytes[at + 9];
+                at += 10;
+                if local & 0x80 != 0 {
+                    at = at
+                        .checked_add(3 * (1usize << (usize::from(local & 7) + 1)))
+                        .ok_or(false)?;
+                }
+                at = at.checked_add(1).ok_or(false)?;
+                skip_gif_sub_blocks(bytes, &mut at)?;
+            }
+            _ => return Err(false),
+        }
+    }
+    Err(false)
+}
+
+fn skip_gif_sub_blocks(bytes: &[u8], at: &mut usize) -> Result<(), bool> {
+    loop {
+        let length = usize::from(*bytes.get(*at).ok_or(false)?);
+        *at += 1;
+        if length == 0 {
+            return Ok(());
+        }
+        *at = (*at).checked_add(length).ok_or(false)?;
+        if *at > bytes.len() {
+            return Err(false);
+        }
+    }
+}
+
+fn webp_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    if bytes.len() < 20 || &bytes[..4] != b"RIFF" || &bytes[8..12] != b"WEBP" {
+        return None;
+    }
+    let declared = u32::from_le_bytes(bytes[4..8].try_into().ok()?) as usize;
+    if declared.checked_add(8)? != bytes.len() {
+        return None;
+    }
+    let kind = &bytes[12..16];
+    let length = u32::from_le_bytes(bytes[16..20].try_into().ok()?) as usize;
+    let payload = bytes.get(20..20usize.checked_add(length)?)?;
+    match kind {
+        b"VP8 " if payload.len() >= 10 && payload[3..6] == [0x9d, 0x01, 0x2a] => {
+            let width = u16::from_le_bytes([payload[6], payload[7]]) & 0x3fff;
+            let height = u16::from_le_bytes([payload[8], payload[9]]) & 0x3fff;
+            Some((u32::from(width), u32::from(height)))
+        }
+        b"VP8L" if payload.len() >= 5 && payload[0] == 0x2f => {
+            let bits = u32::from_le_bytes([payload[1], payload[2], payload[3], payload[4]]);
+            Some(((bits & 0x3fff) + 1, ((bits >> 14) & 0x3fff) + 1))
+        }
+        b"VP8X" if payload.len() >= 10 => {
+            let width = u32::from(payload[4])
+                | (u32::from(payload[5]) << 8)
+                | (u32::from(payload[6]) << 16);
+            let height = u32::from(payload[7])
+                | (u32::from(payload[8]) << 8)
+                | (u32::from(payload[9]) << 16);
+            Some((width + 1, height + 1))
+        }
+        _ => None,
+    }
+}
 
 /// Reasoning effort, pi's scale (`docs/02-pi.md` §2) plus `Off`: pi actually
 /// carries two related types (`ThinkingLevel` without `off`, and
@@ -142,6 +577,8 @@ pub enum Role {
 pub enum ContentBlock {
     /// Visible text.
     Text { text: String },
+    /// Exact image bytes. Only a user-authored message may carry this block.
+    Image { image: Image },
     /// Reasoning the model produced, kept only so it can be handed back.
     ///
     /// Carries no text: what a human reads rides `AiEvent::ReasoningDelta`
@@ -224,6 +661,14 @@ impl Message {
 /// Why a list of messages is not a conversation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HistoryError {
+    /// Images are input, never system instructions or model output.
+    ImageFromNonUser,
+    /// Durable image metadata exists but no session blob port was supplied.
+    ImageBlobStoreRequired { reference: String },
+    /// A referenced blob was absent, corrupt, or invalid as the recorded image.
+    ImageUnavailable { reference: String, cause: String },
+    /// Durable image metadata exceeds a prompt-wide product bound.
+    ImagePromptInvalid { cause: String },
     /// A result names a call that no earlier message made.
     ResultWithoutCall { call_id: String },
     /// Two results name one call.
@@ -245,6 +690,17 @@ pub enum HistoryError {
 impl std::fmt::Display for HistoryError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            HistoryError::ImageFromNonUser => write!(f, "only user messages may contain images"),
+            HistoryError::ImageBlobStoreRequired { reference } => write!(
+                f,
+                "image blob {reference} requires the session blob store for replay"
+            ),
+            HistoryError::ImageUnavailable { reference, cause } => {
+                write!(f, "image blob {reference} cannot be replayed: {cause}")
+            }
+            HistoryError::ImagePromptInvalid { cause } => {
+                write!(f, "durable image prompt cannot be replayed: {cause}")
+            }
             HistoryError::ResultWithoutCall { call_id } => {
                 write!(f, "a result answers {call_id}, which nothing called")
             }
@@ -310,6 +766,10 @@ impl Conversation {
                 // invariants are about. Reasoning is ordered, and the block
                 // list is what carries that; nothing here needs to know it.
                 ContentBlock::Text { .. } | ContentBlock::Reasoning { .. } => {}
+                ContentBlock::Image { .. } if role != Role::User => {
+                    return Err(HistoryError::ImageFromNonUser);
+                }
+                ContentBlock::Image { .. } => {}
                 ContentBlock::ToolUse { call_id, .. } => {
                     if role != Role::Assistant {
                         return Err(HistoryError::CallFromNonAssistant {

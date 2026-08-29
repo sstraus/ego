@@ -29,7 +29,6 @@ fn the_closed_set_is_the_union_requested_by_the_implementation_spec() {
             "github-copilot",
             "xai-oauth",
             "kimi-coding",
-            "qwen-oauth",
             "minimax-oauth",
             "nous",
             "openrouter",
@@ -213,13 +212,7 @@ fn rfc_device_flows_name_the_provider_endpoints_and_clients() {
 
 #[test]
 fn device_authorization_fixtures_supply_every_value_the_cli_polls_with() {
-    for id in [
-        "github-copilot",
-        "xai-oauth",
-        "kimi-coding",
-        "qwen-oauth",
-        "nous",
-    ] {
+    for id in ["github-copilot", "xai-oauth", "kimi-coding", "nous"] {
         let device = built_in(id)
             .unwrap()
             .read_device_authorization(TokenStatus::new(
@@ -289,17 +282,6 @@ fn pkce_and_user_code_flows_post_their_vendor_contracts() {
         )
         .unwrap();
     assert_eq!(user_code.user_code, "MINIMAX-CODE");
-
-    let qwen = built_in("qwen-oauth")
-        .unwrap()
-        .device_authorization_request_with_pkce("challenge")
-        .unwrap();
-    assert_eq!(
-        qwen.url.as_str(),
-        "https://chat.qwen.ai/api/v1/oauth2/device/code"
-    );
-    let body = String::from_utf8(qwen.body.unwrap()).unwrap();
-    assert!(body.contains("code_challenge=challenge"));
 }
 
 #[test]
@@ -399,58 +381,31 @@ fn anthropic_oat_and_api_keys_have_distinct_presentations() {
 }
 
 #[test]
-fn subscription_rows_have_distinct_ids_endpoints_and_mappings() {
+fn subscription_rows_have_distinct_ids_and_endpoints() {
     let rows = [
         ProviderRow::openai_codex_default(),
         ProviderRow::github_copilot_default(),
         ProviderRow::xai_oauth_default(),
         ProviderRow::kimi_coding_default(),
-        ProviderRow::qwen_oauth_default(),
         ProviderRow::minimax_oauth_default(),
         ProviderRow::nous_default(),
     ];
     let actual: Vec<_> = rows
         .iter()
-        .map(|row| (row.id(), row.base().as_str(), format!("{:?}", row.wire)))
+        .map(|row| (row.id(), row.base().as_str()))
         .collect();
     assert_eq!(
         actual,
         [
-            (
-                "openai-codex",
-                "https://chatgpt.com/backend-api/",
-                "OpenAiCodexResponses".to_string()
-            ),
+            ("openai-codex", "https://chatgpt.com/backend-api/"),
             (
                 "github-copilot",
-                "https://api.individual.githubcopilot.com/",
-                "GithubCopilotCompletions".to_string()
+                "https://api.individual.githubcopilot.com/"
             ),
-            (
-                "xai-oauth",
-                "https://api.x.ai/v1/",
-                "XaiResponses".to_string()
-            ),
-            (
-                "kimi-coding",
-                "https://api.kimi.com/coding/v1/",
-                "AnthropicMessages".to_string()
-            ),
-            (
-                "qwen-oauth",
-                "https://portal.qwen.ai/v1/",
-                "QwenPortal".to_string()
-            ),
-            (
-                "minimax-oauth",
-                "https://api.minimax.io/anthropic/v1/",
-                "AnthropicMessages".to_string()
-            ),
-            (
-                "nous",
-                "https://inference-api.nousresearch.com/v1/",
-                "NousPortal".to_string()
-            ),
+            ("xai-oauth", "https://api.x.ai/v1/"),
+            ("kimi-coding", "https://api.kimi.com/coding/v1/"),
+            ("minimax-oauth", "https://api.minimax.io/anthropic/v1/"),
+            ("nous", "https://inference-api.nousresearch.com/v1/"),
         ]
     );
     assert!(
@@ -465,6 +420,10 @@ fn subscription_rows_have_distinct_ids_endpoints_and_mappings() {
     );
     for row in &rows {
         let resolver = format!("{:?}", row.resolver);
+        if row.id() == "kimi-coding" {
+            assert_eq!(resolver, "KimiManaged", "{}: {resolver}", row.id());
+            continue;
+        }
         assert!(
             resolver.contains("SubscriptionSupplied"),
             "{}: {resolver}",
@@ -485,7 +444,6 @@ fn every_selectable_subscription_row_names_login_when_all_sources_are_missing() 
         ProviderRow::github_copilot_default(),
         ProviderRow::xai_oauth_default(),
         ProviderRow::kimi_coding_default(),
-        ProviderRow::qwen_oauth_default(),
         ProviderRow::minimax_oauth_default(),
         ProviderRow::nous_default(),
         ProviderRow::anthropic_default(),

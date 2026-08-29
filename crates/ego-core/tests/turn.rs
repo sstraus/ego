@@ -611,7 +611,7 @@ mod turn {
 
     fn caps() -> ModelCapabilities {
         ModelCapabilities {
-            schema_version: 1,
+            schema_version: ModelCapabilities::SCHEMA_VERSION,
             max_context_tokens: Some(200_000),
             max_output_tokens: Some(64_000),
             max_tools: Some(128),
@@ -622,6 +622,7 @@ mod turn {
             cancel: CancelSemantics::Cooperative,
             cache: CacheRetention::Short,
             transport: Transport::Sse,
+            image_input: ego_core::generator::capabilities::ImageInputSupport::Unknown,
         }
     }
 
@@ -665,6 +666,10 @@ mod turn {
     struct NoEvidence;
 
     impl EvidenceStore for NoEvidence {
+        fn blob_store(&self) -> &dyn ego_core::store::blob::BlobStore {
+            &common::EMPTY_BLOB_STORE
+        }
+
         fn begin(&self) -> Result<Box<dyn EvidenceWriter>, EvidenceError> {
             Err(EvidenceError::Limit { limit: 0 })
         }
@@ -1444,10 +1449,12 @@ mod turn {
             seeded(EventKind::PromptQueued {
                 id: first,
                 text: "first recovery prompt".to_owned(),
+                images: Vec::new(),
             }),
             seeded(EventKind::PromptQueued {
                 id: second,
                 text: "second recovery prompt".to_owned(),
+                images: Vec::new(),
             }),
         ];
         let fx = Fixture::new(vec![]);
@@ -2095,14 +2102,17 @@ mod turn {
             seeded(EventKind::PromptQueued {
                 id: first,
                 text: "first remains pending".to_owned(),
+                images: Vec::new(),
             }),
             seeded(EventKind::PromptQueued {
                 id: second,
                 text: "second was delivered".to_owned(),
+                images: Vec::new(),
             }),
             seeded(EventKind::PromptDeliveryExpedited { through: second }),
             seeded(EventKind::UserPrompt {
                 text: "second was delivered".to_owned(),
+                images: Vec::new(),
                 queued_prompt: Some(second),
             }),
         ];

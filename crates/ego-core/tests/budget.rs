@@ -91,7 +91,7 @@ mod budget {
 
     fn caps(max_context_tokens: Option<u64>, max_output_tokens: Option<u64>) -> ModelCapabilities {
         ModelCapabilities {
-            schema_version: 1,
+            schema_version: ModelCapabilities::SCHEMA_VERSION,
             max_context_tokens,
             max_output_tokens,
             max_tools: Some(128),
@@ -102,6 +102,7 @@ mod budget {
             cancel: CancelSemantics::Cooperative,
             cache: CacheRetention::Short,
             transport: Transport::Sse,
+            image_input: ego_core::generator::capabilities::ImageInputSupport::Unknown,
         }
     }
 

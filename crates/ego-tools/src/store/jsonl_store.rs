@@ -591,7 +591,7 @@ impl JsonlStore {
     /// of totality here, and it is stated rather than dressed up: replay must
     /// not abort on one bad byte, but the honest report of *which* lines
     /// failed lives on `read`, where the contract puts it.
-    fn read_events(&self, id: &SessionId) -> Result<Vec<DomainEvent>, StoreError> {
+    pub(super) fn read_events(&self, id: &SessionId) -> Result<Vec<DomainEvent>, StoreError> {
         let stream = SessionStore::read(self, id)?;
         Ok(futures::executor::block_on(async {
             use futures::StreamExt;

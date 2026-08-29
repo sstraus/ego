@@ -115,6 +115,7 @@ mod reducer {
             Some(msg_item),
             EventKind::UserPrompt {
                 text: "list the files".to_string(),
+                images: Vec::new(),
                 queued_prompt: None,
             }
         );
@@ -351,6 +352,7 @@ mod reducer {
             None,
             EventKind::UserPrompt {
                 text: "hi".to_string(),
+                images: Vec::new(),
                 queued_prompt: None,
             },
         );
@@ -436,6 +438,7 @@ mod reducer {
             None,
             EventKind::UserPrompt {
                 text: "primer".to_string(),
+                images: Vec::new(),
                 queued_prompt: None,
             },
         );
@@ -453,6 +456,7 @@ mod reducer {
                 "user_prompt",
                 EventKind::UserPrompt {
                     text: String::new(),
+                    images: Vec::new(),
                     queued_prompt: None,
                 },
             ),

@@ -9,6 +9,39 @@
 //! sign of unused code.
 #![allow(dead_code)]
 
+use ego_core::store::blob::{BlobError, BlobPage, BlobRead, BlobRef, BlobStore, BlobWriter};
+use futures::future::BoxFuture;
+
+/// A no-op blob backend for tests whose contract does not use attachments.
+pub static EMPTY_BLOB_STORE: EmptyBlobStore = EmptyBlobStore;
+
+pub struct EmptyBlobStore;
+
+impl BlobStore for EmptyBlobStore {
+    fn begin(&self) -> Result<Box<dyn BlobWriter>, BlobError> {
+        Err(BlobError::Limit { limit: 0 })
+    }
+
+    fn read(&self, reference: &BlobRef) -> Result<Vec<u8>, BlobError> {
+        Err(BlobError::NotFound {
+            reference: reference.id.clone(),
+        })
+    }
+
+    fn read_page<'a>(
+        &'a self,
+        request: &'a BlobRead,
+    ) -> BoxFuture<'a, Result<BlobPage, BlobError>> {
+        Box::pin(futures::future::ready(Err(BlobError::NotFound {
+            reference: request.reference.id.clone(),
+        })))
+    }
+
+    fn collect_garbage(&self, _reachable: &[BlobRef]) -> Result<usize, BlobError> {
+        Ok(0)
+    }
+}
+
 /// Deserialise a fixed UUID literal into any of the id newtypes, via their
 /// already-derived (and already-public) `Deserialize` impl. This gets
 /// deterministic, golden-comparable ids without adding a constructor to

@@ -205,7 +205,8 @@ ceilings come only from an administrator's `/etc/ego`.
 **Attachments and tools**
 
 ```
-    --attach PATH|URL   repeatable; files, images, URLs as context
+    --attach IMAGE_PATH|HTTPS_IMAGE_URL
+                        repeatable; exact image bytes as context
     --tools LIST        restrict builtin tools;  --no-tools for pure generation
     --mcp NAME|@cfg.json  attach a named effective or strict explicitly named
                           JSON MCP server for this invocation (repeatable)
@@ -502,6 +503,7 @@ family as skills; `--var` fills `{{placeholders}}`; shebang makes it a program:
 ```
 #!/usr/bin/env -S ego run -f
 ---
+version: 1
 model: anthropic/claude-sonnet-5
 mode: edits
 sandbox: workspace
@@ -518,10 +520,16 @@ chmod +x review.ego
 ./review.ego --var severity=major | jq '.result.findings'
 ```
 
-Frontmatter keys mirror the CLI flags one-to-one — the file *is* a saved
-command line plus a prompt. Nothing else examined has this as a first-class,
-executable unit (Claude Code's slash commands are REPL-only; pi's prompt
-templates are not executables).
+Version 1 is closed to `version`, `model`, `mode`, `sandbox`, `allow`,
+`schema`, and `vars`; unknown fields and versions refuse. Those operational
+keys mirror their CLI flags one-to-one — the file *is* a saved command line
+plus a prompt, not an untyped map of every present or future flag. The one
+strict bounded YAML envelope is shared with skills; the complete format,
+limits, variable equality, relative-path, and failure contract is
+`docs/decisions/2026-08-29-agent-files-share-one-strict-yaml-envelope.md`.
+Nothing else examined has this as a first-class, executable unit (Claude
+Code's slash commands are REPL-only; pi's prompt templates are not
+executables).
 
 ### 5.1 Skills are in-session capabilities, not agent files
 
@@ -596,7 +604,8 @@ pasted as text.
 
 That works where ego runs on the machine that owns the pasteboard. Over SSH
 there is usually no pasteboard to read, and Ctrl+V falls through to text — the
-image is attached by naming it instead (`--attach PATH|URL`, §3). Stated here
+image is attached by naming it instead
+(`--attach IMAGE_PATH|HTTPS_IMAGE_URL`, §3). Stated here
 because it is a limit of where the clipboard lives, not a limit ego can lift:
 no CLI on the far end of a PTY can reach the pasteboard in front of the person
 typing.

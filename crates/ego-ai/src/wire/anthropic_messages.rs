@@ -63,6 +63,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use base64::Engine as _;
 use ego_core::generator::port::AiEvent;
 use ego_core::generator::types::{
     ContentBlock, ErrorKind, GenRequest, Message, ReasoningState, Role, StopReason, ThinkingLevel,
@@ -300,6 +301,11 @@ enum WireBlock<'a> {
         kind: &'static str,
         text: &'a str,
     },
+    Image {
+        #[serde(rename = "type")]
+        kind: &'static str,
+        source: ImageSource,
+    },
     ToolUse {
         #[serde(rename = "type")]
         kind: &'static str,
@@ -322,6 +328,14 @@ enum WireBlock<'a> {
     },
     /// A block the provider minted, going back exactly as it arrived.
     Replayed(&'a RawValue),
+}
+
+#[derive(Debug, Serialize)]
+struct ImageSource {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    media_type: &'static str,
+    data: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -401,6 +415,14 @@ fn project(messages: &[Message]) -> Result<(Option<String>, Vec<WireMessage<'_>>
 fn wire_block(block: &ContentBlock) -> Result<WireBlock<'_>, Inexpressible> {
     Ok(match block {
         ContentBlock::Text { text } => WireBlock::Text { kind: "text", text },
+        ContentBlock::Image { image } => WireBlock::Image {
+            kind: "image",
+            source: ImageSource {
+                kind: "base64",
+                media_type: image.media_type().mime(),
+                data: base64::engine::general_purpose::STANDARD.encode(image.bytes()),
+            },
+        },
         ContentBlock::Reasoning { state } => {
             if state.dialect != DIALECT {
                 return Err(Inexpressible::ReasoningStateFromAnotherDialect {

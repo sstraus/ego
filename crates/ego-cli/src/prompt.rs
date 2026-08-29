@@ -105,6 +105,42 @@ pub fn assemble(
     }
 }
 
+/// Assemble an agent-file body with the same stdin context rule as argv.
+///
+/// Unlike an argv prompt, the versioned file body is an exact artifact: it is
+/// not trimmed or otherwise normalized after its declared substitutions.
+pub(crate) fn assemble_agent_file(
+    body: &str,
+    mode: Stdin,
+    stdin: &dyn StdinSource,
+) -> Result<String, UsageError> {
+    if mode == Stdin::IsThePrompt {
+        return Err(UsageError(
+            "an agent file and `-` are competing instruction inputs: drop `-` \
+             to use the file, or drop --file to read the prompt from stdin"
+                .to_string(),
+        ));
+    }
+    if body.is_empty() {
+        return Err(UsageError(
+            "the agent-file prompt body is empty: there is nothing to ask".to_string(),
+        ));
+    }
+    if stdin.is_terminal() {
+        return Ok(body.to_string());
+    }
+    let context = stdin
+        .read()
+        .map_err(|err| UsageError(format!("the prompt could not be read from stdin: {err}")))?;
+    if context.trim().is_empty() {
+        return Ok(body.to_string());
+    }
+    Ok(format!(
+        "{body}\n\n{FENCE} piped input {FENCE}\n{}\n{FENCE}",
+        context.trim_end()
+    ))
+}
+
 /// The prompt an interactive session *starts* with, which it is allowed not to
 /// have.
 ///
@@ -130,6 +166,18 @@ pub fn seed(
             .map_err(|err| UsageError(format!("the prompt could not be read from stdin: {err}")));
     }
     assemble(argv, mode, stdin)
+}
+
+/// The interactive twin of [`assemble_agent_file`].
+///
+/// A file always supplies an instruction, so the promptless interactive
+/// exception does not apply.
+pub(crate) fn seed_agent_file(
+    body: &str,
+    mode: Stdin,
+    stdin: &dyn StdinSource,
+) -> Result<String, UsageError> {
+    assemble_agent_file(body, mode, stdin)
 }
 
 fn non_empty(text: &str, why: &str) -> Result<String, UsageError> {

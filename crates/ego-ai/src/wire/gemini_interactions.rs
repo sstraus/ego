@@ -110,6 +110,8 @@ pub enum Inexpressible {
     ArgumentsNotJson { call_id: String },
     /// A system turn carrying something that is not text.
     SystemTurnIsTextOnly,
+    /// This compiled candidate has no selectable model-capability authority.
+    ImageInputUnproved,
 }
 
 impl std::fmt::Display for Inexpressible {
@@ -141,6 +143,10 @@ impl std::fmt::Display for Inexpressible {
                 f,
                 "a system turn carried something other than text, and \
                  system_instruction is a plain string on this API"
+            ),
+            Inexpressible::ImageInputUnproved => write!(
+                f,
+                "image input is not admitted for the unselectable Gemini Interactions candidate"
             ),
         }
     }
@@ -272,6 +278,7 @@ fn project<'a>(messages: &'a [Message]) -> Result<(Option<String>, Vec<Step<'a>>
         for block in &message.content {
             match block {
                 ContentBlock::Text { text } => pending.push(text_content(text)),
+                ContentBlock::Image { .. } => return Err(Inexpressible::ImageInputUnproved),
                 ContentBlock::Reasoning { state } => {
                     flush(turn, &mut pending, &mut steps);
                     if state.dialect != DIALECT {

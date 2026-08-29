@@ -20,7 +20,7 @@ use crate::http::{HttpError, HttpRequest, HttpResponse};
 
 use super::openai_completions;
 use super::provider_cost::ProviderCost;
-use super::{RequestRefused, RequestTarget, WireFormat};
+use super::{RequestRefused, RequestTarget, WireFormat, request_has_images};
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct GithubCopilotCompletions;
@@ -31,6 +31,11 @@ impl WireFormat for GithubCopilotCompletions {
         target: &RequestTarget<'_>,
         req: &GenRequest,
     ) -> Result<HttpRequest, RequestRefused> {
+        if request_has_images(req) {
+            return Err(RequestRefused::new(
+                "image input is unknown for the private GitHub Copilot Chat contract",
+            ));
+        }
         let body = openai_completions::captured_client_request_body(req)
             .map_err(|refused| RequestRefused::new(refused.to_string()))?;
         let mut built = target.post_json(openai_completions::PATH, body);

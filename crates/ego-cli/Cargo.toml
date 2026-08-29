@@ -59,6 +59,7 @@ url = "2.5.8"
 # OAuth PKCE verifiers and state must be unpredictable. Session ids this build
 # mints remain `SessionId::new`'s v7.
 uuid = { version = "1.24.1", features = ["v4", "v5"] }
+yaml-rust2.workspace = true
 # The reading half of the terminal surface. `default-features = false` drops
 # `helix`, the only default: this build binds Emacs keys, and an edit mode
 # nobody selects is a keymap that can still shadow one we chose. Notably

@@ -197,6 +197,9 @@ fn reasoning_state_is_refused_rather_than_dropped() {
 #[test]
 fn the_row_selects_this_mapping_not_completions() {
     let row = ProviderRow::openai_codex_default();
-    assert_eq!(format!("{:?}", row.wire), "OpenAiCodexResponses");
+    assert_eq!(
+        format!("{:?}", OpenAiCodexResponses),
+        "OpenAiCodexResponses"
+    );
     assert_eq!(row.base().as_str(), "https://chatgpt.com/backend-api/");
 }

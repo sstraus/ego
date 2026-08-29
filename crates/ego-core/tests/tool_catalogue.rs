@@ -35,6 +35,8 @@ use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 use serde::{Deserialize, Serialize};
 
+mod common;
+
 #[derive(Default)]
 struct SourceState {
     captures: usize,
@@ -188,6 +190,10 @@ impl SessionStore for MemoryStore {
 struct NoEvidence;
 
 impl EvidenceStore for NoEvidence {
+    fn blob_store(&self) -> &dyn ego_core::store::blob::BlobStore {
+        &common::EMPTY_BLOB_STORE
+    }
+
     fn begin(&self) -> Result<Box<dyn EvidenceWriter>, EvidenceError> {
         Err(EvidenceError::Limit { limit: 0 })
     }
@@ -269,7 +275,7 @@ impl ego_core::generation_model_source::GenerationModelSource for TestGeneration
         >,
     > {
         let capabilities = ego_core::generator::capabilities::ModelCapabilities {
-            schema_version: 1,
+            schema_version: ego_core::generator::capabilities::ModelCapabilities::SCHEMA_VERSION,
             max_context_tokens: Some(8_192),
             max_output_tokens: Some(256),
             max_tools: Some(32),
@@ -280,6 +286,7 @@ impl ego_core::generation_model_source::GenerationModelSource for TestGeneration
             cancel: ego_core::generator::capabilities::CancelSemantics::Cooperative,
             cache: ego_core::generator::capabilities::CacheRetention::Short,
             transport: ego_core::generator::capabilities::Transport::Sse,
+            image_input: ego_core::generator::capabilities::ImageInputSupport::Unknown,
         };
         Box::pin(futures::future::ready(Ok(
             ego_core::generation_model_source::GenerationProfile {

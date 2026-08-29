@@ -23,15 +23,17 @@ use ego_ai::http::{
     Http, HttpCall, HttpError, HttpRequest, HttpResponse, Method, PreparedHttpCall,
 };
 use ego_ai::provider::{CredentialStrategy, ProviderRow, ResolvedCredential};
-use ego_ai::wire::RequestTarget;
+use ego_ai::wire::github_copilot_completions::GithubCopilotCompletions;
+use ego_ai::wire::openai_completions::OpenAiCompletions;
 use ego_ai::wire::openai_completions::request_body;
+use ego_ai::wire::{RequestTarget, WireFormat};
 use ego_core::budget::{BudgetGate, Metering, PricingQuote, SettlementSource};
 use ego_core::cost::{Amount, CurrencyCode, Money, PricingRevision};
 use ego_core::event::id::GenerationId;
 use ego_core::generator::attempt::{DeliveryCertainty, GenerationAttempt};
 use ego_core::generator::capabilities::{
-    CacheRetention, CancelSemantics, ModelCapabilities, ReasoningCarryover, ReasoningEffortSupport,
-    Transport,
+    CacheRetention, CancelSemantics, ImageInputSupport, ModelCapabilities, ReasoningCarryover,
+    ReasoningEffortSupport, Transport,
 };
 use ego_core::generator::port::{AiEvent, Generator};
 use ego_core::generator::types::{
@@ -85,7 +87,7 @@ fn metered() -> Metering {
 
 fn caps() -> ModelCapabilities {
     ModelCapabilities {
-        schema_version: 1,
+        schema_version: ModelCapabilities::SCHEMA_VERSION,
         max_context_tokens: Some(200_000),
         max_output_tokens: Some(64_000),
         max_tools: Some(128),
@@ -96,6 +98,7 @@ fn caps() -> ModelCapabilities {
         cancel: CancelSemantics::Cooperative,
         cache: CacheRetention::Short,
         transport: Transport::Sse,
+        image_input: ImageInputSupport::Unknown,
     }
 }
 
@@ -139,10 +142,15 @@ fn row() -> ProviderRow {
 /// The fixture row, over `http`, on a machine where the key is configured.
 ///
 /// Every test below the credential section wants that machine — the
-/// credential is not what they are about — so the three-argument constructor
+/// credential is not what they are about — so the four-argument constructor
 /// is spelled once here rather than at each call site.
 fn generator(http: Arc<dyn Http>) -> WireGenerator {
-    WireGenerator::new(row(), http, credential(&FakeCredentials::holding(KEY)))
+    WireGenerator::new(
+        row(),
+        &OpenAiCompletions,
+        http,
+        credential(&FakeCredentials::holding(KEY)),
+    )
 }
 
 /// The fixture row's credential, resolved.
@@ -340,11 +348,15 @@ async fn ensure_expressible_and_generate_share_headers_base_and_wire_body() {
         headers.push((name.clone(), value.clone()));
     }
     let target = RequestTarget::new(resolved.base_override().unwrap_or(profile.base()), &headers);
-    let expected = profile
-        .wire
+    let expected = GithubCopilotCompletions
         .build_request(&target, &req)
         .expect("the fixture request is expressible");
-    let generator = WireGenerator::new(profile, Arc::clone(&http) as Arc<dyn Http>, resolved);
+    let generator = WireGenerator::new(
+        profile,
+        &GithubCopilotCompletions,
+        Arc::clone(&http) as Arc<dyn Http>,
+        resolved,
+    );
 
     assert!(
         generator.ensure_expressible(&req).is_ok(),
@@ -706,6 +718,7 @@ async fn profile_extra_headers_reach_the_request_without_becoming_credentials() 
     ];
     let generator = WireGenerator::new(
         profile,
+        &OpenAiCompletions,
         Arc::clone(&http) as Arc<dyn Http>,
         credential(&FakeCredentials::holding(KEY)),
     );
@@ -733,8 +746,8 @@ async fn profile_extra_headers_reach_the_request_without_becoming_credentials() 
 /// It exists only here. A second *production* mapping arrives with the
 /// provider that needs it — Anthropic's Messages API — and inventing one early
 /// would be the stub `AGENTS.md` forbids. But the property this proves is not
-/// Anthropic's: it is that `WireGenerator` reads `row.wire` rather than naming
-/// a mapping, and a fake is the only way to state that before a second real
+/// Anthropic's: it is that `WireGenerator` uses the mapping supplied by the
+/// resolved model rather than naming one internally, and a fake is the only way to state that before a second real
 /// one exists. Hardcoding `OpenAiCompletions` back into the generator leaves
 /// every other test in this file green and fails exactly these two.
 #[derive(Debug)]
@@ -775,17 +788,12 @@ impl ego_ai::wire::WireFormat for MarkerFormat {
     }
 }
 
-fn marker_row() -> ProviderRow {
-    let mut row = row();
-    row.wire = &MarkerFormat;
-    row
-}
-
 #[tokio::test]
 async fn the_request_sent_is_the_one_the_rows_mapping_built() {
     let http = StubHttp::responding(200, TEXT_TRANSCRIPT);
     let generator = WireGenerator::new(
-        marker_row(),
+        row(),
+        &MarkerFormat,
         Arc::clone(&http) as Arc<dyn Http>,
         credential(&FakeCredentials::holding(KEY)),
     );
@@ -814,7 +822,8 @@ async fn the_request_sent_is_the_one_the_rows_mapping_built() {
 async fn the_events_returned_are_the_ones_the_rows_mapping_decoded() {
     let http = StubHttp::responding(200, TEXT_TRANSCRIPT);
     let generator = WireGenerator::new(
-        marker_row(),
+        row(),
+        &MarkerFormat,
         http as Arc<dyn Http>,
         credential(&FakeCredentials::holding(KEY)),
     );

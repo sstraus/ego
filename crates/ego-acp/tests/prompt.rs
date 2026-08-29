@@ -32,8 +32,8 @@ use ego_core::event::domain::{CancelCause, DomainEvent};
 use ego_core::event::id::{ItemId, SessionId, TurnId};
 use ego_core::event::time::{Clock, Timestamp};
 use ego_core::generator::capabilities::{
-    CacheRetention, CancelSemantics, ModelCapabilities, ReasoningCarryover, ReasoningEffortSupport,
-    Transport,
+    CacheRetention, CancelSemantics, ImageInputSupport, ModelCapabilities, ReasoningCarryover,
+    ReasoningEffortSupport, Transport,
 };
 use ego_core::public::{ItemKind, PublicEvent};
 use ego_core::run::{
@@ -59,7 +59,7 @@ mod support;
 /// would suppress exactly the update whose delivery this file is checking.
 fn caps() -> ModelCapabilities {
     ModelCapabilities {
-        schema_version: 1,
+        schema_version: ModelCapabilities::SCHEMA_VERSION,
         max_context_tokens: Some(200_000),
         max_output_tokens: Some(64_000),
         max_tools: Some(128),
@@ -70,6 +70,7 @@ fn caps() -> ModelCapabilities {
         cancel: CancelSemantics::Cooperative,
         cache: CacheRetention::Short,
         transport: Transport::Sse,
+        image_input: ImageInputSupport::Unknown,
     }
 }
 

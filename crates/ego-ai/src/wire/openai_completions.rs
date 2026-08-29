@@ -74,10 +74,11 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use base64::Engine as _;
 use ego_core::cost::Money;
 use ego_core::generator::port::AiEvent;
 use ego_core::generator::types::{
-    ContentBlock, ErrorKind, GenRequest, Message, Role, StopReason, ThinkingLevel,
+    ContentBlock, ErrorKind, GenRequest, Image, Message, Role, StopReason, ThinkingLevel,
 };
 use ego_core::state::Usage;
 use futures::stream::BoxStream;
@@ -252,11 +253,30 @@ struct StreamOptions {
 struct WireMessage<'a> {
     role: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
-    content: Option<String>,
+    content: Option<WireContent>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tool_calls: Vec<WireToolCall<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_call_id: Option<&'a str>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+enum WireContent {
+    Text(String),
+    Parts(Vec<WireContentPart>),
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum WireContentPart {
+    ImageUrl { image_url: WireImageUrl },
+    Text { text: String },
+}
+
+#[derive(Debug, Serialize)]
+struct WireImageUrl {
+    url: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -315,7 +335,8 @@ fn reasoning_effort(level: ThinkingLevel) -> &'static str {
 /// result answers an earlier call exactly once), so there is nothing left
 /// here to refuse.
 ///
-/// Two block kinds change shape on the way out. A tool result becomes its own
+/// Three block kinds change shape on the way out. Images become inline data
+/// URL parts ahead of the turn's text. A tool result becomes its own
 /// `role: "tool"` message rather than staying inside the turn that carried it
 /// — this format has a role for it where anthropic-messages has a block —
 /// which is why the walk is per *block* and flushes in block order rather
@@ -333,6 +354,7 @@ fn wire_messages(messages: &[Message]) -> Vec<WireMessage<'_>> {
         };
         // The turn's own message, built up until a tool result interrupts it.
         let mut text = String::new();
+        let mut images = Vec::new();
         let mut tool_calls = Vec::new();
         for block in &message.content {
             match block {
@@ -341,6 +363,7 @@ fn wire_messages(messages: &[Message]) -> Vec<WireMessage<'_>> {
                 // nowhere to put it. Dropped rather than refused a second
                 // time so that the refusal stays in one place.
                 ContentBlock::Reasoning { .. } => {}
+                ContentBlock::Image { image } => images.push(image_data_url(image)),
                 ContentBlock::Text { text: chunk } => {
                     if !text.is_empty() {
                         text.push('\n');
@@ -362,17 +385,17 @@ fn wire_messages(messages: &[Message]) -> Vec<WireMessage<'_>> {
                 ContentBlock::ToolResult {
                     call_id, output, ..
                 } => {
-                    flush(&mut wire, role, &mut text, &mut tool_calls);
+                    flush(&mut wire, role, &mut images, &mut text, &mut tool_calls);
                     wire.push(WireMessage {
                         role: "tool",
-                        content: Some(output.clone()),
+                        content: Some(WireContent::Text(output.clone())),
                         tool_calls: Vec::new(),
                         tool_call_id: Some(call_id),
                     });
                 }
             }
         }
-        flush(&mut wire, role, &mut text, &mut tool_calls);
+        flush(&mut wire, role, &mut images, &mut text, &mut tool_calls);
     }
     wire
 }
@@ -386,13 +409,31 @@ fn wire_messages(messages: &[Message]) -> Vec<WireMessage<'_>> {
 fn flush<'a>(
     wire: &mut Vec<WireMessage<'a>>,
     role: &'static str,
+    images: &mut Vec<String>,
     text: &mut String,
     tool_calls: &mut Vec<WireToolCall<'a>>,
 ) {
-    if text.is_empty() && tool_calls.is_empty() {
+    if images.is_empty() && text.is_empty() && tool_calls.is_empty() {
         return;
     }
-    let content = (!text.is_empty() || tool_calls.is_empty()).then(|| std::mem::take(text));
+    let content = if images.is_empty() {
+        (!text.is_empty() || tool_calls.is_empty()).then(|| WireContent::Text(std::mem::take(text)))
+    } else {
+        let mut parts = Vec::with_capacity(images.len() + if text.is_empty() { 0 } else { 1 });
+        parts.extend(
+            std::mem::take(images)
+                .into_iter()
+                .map(|url| WireContentPart::ImageUrl {
+                    image_url: WireImageUrl { url },
+                }),
+        );
+        if !text.is_empty() {
+            parts.push(WireContentPart::Text {
+                text: std::mem::take(text),
+            });
+        }
+        Some(WireContent::Parts(parts))
+    };
     text.clear();
     wire.push(WireMessage {
         role,
@@ -400,6 +441,14 @@ fn flush<'a>(
         tool_calls: std::mem::take(tool_calls),
         tool_call_id: None,
     });
+}
+
+pub(crate) fn image_data_url(image: &Image) -> String {
+    format!(
+        "data:{};base64,{}",
+        image.media_type().mime(),
+        base64::engine::general_purpose::STANDARD.encode(image.bytes())
+    )
 }
 
 /// The exact JSON bytes this format would send for `req`.
@@ -417,7 +466,7 @@ pub fn request_body(req: &GenRequest) -> Result<Vec<u8>, Inexpressible> {
 
 /// The captured Pi/Hermes client projection for compatible endpoints.
 ///
-/// Copilot, Qwen Portal, and Nous Portal agree on two omissions: they do not
+/// Copilot and Nous Portal agree on two omissions: they do not
 /// send a reasoning field when thinking is off, and their pinned clients do
 /// not send `parallel_tool_calls`. Keeping those omissions in one helper pins
 /// the shared bytes without claiming that any provider was recorded live.
@@ -530,6 +579,8 @@ struct Choice {
     delta: Delta,
     #[serde(default)]
     finish_reason: Option<String>,
+    #[serde(default)]
+    usage: Option<Box<RawValue>>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -955,6 +1006,11 @@ impl StreamDecoder {
             self.consume_delta(&choice.delta, out);
             if let Some(reason) = &choice.finish_reason {
                 self.consume_finish_reason(reason, out);
+            }
+            if chunk.usage.is_none()
+                && let Some(raw) = &choice.usage
+            {
+                self.consume_usage(raw);
             }
         }
         if let Some(raw) = &chunk.usage {

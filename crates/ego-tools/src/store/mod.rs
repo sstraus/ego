@@ -4,6 +4,7 @@
 //! where the real I/O behind `ego-core`'s `SessionStore` port lives, because
 //! `ego-core` opens no files.
 
+mod blob;
 mod evidence;
 mod io;
 mod jsonl_store;
@@ -12,6 +13,7 @@ mod run_artifact;
 mod snapshot;
 mod writer;
 
+pub use blob::SessionBlobStore;
 pub use evidence::SessionEvidenceStore;
 #[cfg(feature = "test-support")]
 pub use io::NonDurableOsIo;

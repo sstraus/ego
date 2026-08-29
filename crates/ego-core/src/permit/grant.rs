@@ -1691,6 +1691,7 @@ mod tests {
         ProcessError, ProcessExecutor, ResolvedConnect, Resolver, Tool, ToolError, ToolResult,
         TransportError, TransportFailure, Typed,
     };
+    use crate::store::blob::{BlobError, BlobPage, BlobRead, BlobRef, BlobStore, BlobWriter};
     use crate::store::evidence::{EvidenceError, EvidencePage, EvidenceStore, EvidenceWriter};
 
     struct NoProcess;
@@ -1708,7 +1709,36 @@ mod tests {
 
     struct NoEvidence;
 
+    impl BlobStore for NoEvidence {
+        fn begin(&self) -> Result<Box<dyn BlobWriter>, BlobError> {
+            Err(BlobError::Limit { limit: 0 })
+        }
+
+        fn read(&self, reference: &BlobRef) -> Result<Vec<u8>, BlobError> {
+            Err(BlobError::NotFound {
+                reference: reference.id.clone(),
+            })
+        }
+
+        fn read_page<'a>(
+            &'a self,
+            request: &'a BlobRead,
+        ) -> BoxFuture<'a, Result<BlobPage, BlobError>> {
+            Box::pin(future::ready(Err(BlobError::NotFound {
+                reference: request.reference.id.clone(),
+            })))
+        }
+
+        fn collect_garbage(&self, _reachable: &[BlobRef]) -> Result<usize, BlobError> {
+            Ok(0)
+        }
+    }
+
     impl EvidenceStore for NoEvidence {
+        fn blob_store(&self) -> &dyn BlobStore {
+            self
+        }
+
         fn begin(&self) -> Result<Box<dyn EvidenceWriter>, EvidenceError> {
             Err(EvidenceError::Limit { limit: 0 })
         }

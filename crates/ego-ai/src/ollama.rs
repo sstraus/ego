@@ -36,10 +36,10 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use ego_core::generator::capabilities::{
-    CacheRetention, CancelSemantics, ModelCapabilities, ReasoningCarryover, ReasoningEffortSupport,
-    Transport,
+    CacheRetention, CancelSemantics, ImageInputSupport, ImageLimits, ModelCapabilities,
+    ReasoningCarryover, ReasoningEffortSupport, Transport,
 };
-use ego_core::generator::types::ThinkingLevel;
+use ego_core::generator::types::{ImageMediaType, ThinkingLevel};
 use serde::Deserialize;
 
 use crate::catalogue::{
@@ -104,6 +104,7 @@ pub async fn resolve(
     Ok(ResolvedModel {
         model: model.to_string(),
         row: row.clone(),
+        wire: &crate::wire::ollama::Ollama,
         capabilities: capabilities_from(&tag, Some(context)),
         metering: unmetered(),
         // Nobody publishes a price for weights the daemon serves itself, and
@@ -389,12 +390,34 @@ async fn load(row: &ProviderRow, model: &str, http: &Arc<dyn Http>) -> Result<()
 /// that happens.
 fn capabilities_from(tag: &Tag, served_context: Option<u64>) -> ModelCapabilities {
     let thinks = tag.capabilities.iter().any(|cap| cap == "thinking");
+    let sees_images = tag.capabilities.iter().any(|cap| cap == "vision");
     ModelCapabilities {
         schema_version: ModelCapabilities::SCHEMA_VERSION,
         max_context_tokens: served_context,
         max_output_tokens: None,
         max_tools: None,
         supports_parallel_tool_calls: false,
+        image_input: if sees_images {
+            ImageInputSupport::Supported(
+                ImageLimits::new(
+                    BTreeSet::from([
+                        ImageMediaType::Jpeg,
+                        ImageMediaType::Png,
+                        ImageMediaType::Gif,
+                        ImageMediaType::Webp,
+                    ]),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .expect("Ollama vision media types are non-empty"),
+            )
+        } else {
+            ImageInputSupport::Unsupported
+        },
         // A local daemon holds no reasoning state across requests and has no
         // provider-side conversation to carry it in, so state produced
         // elsewhere cannot be replayed into it. A model that cannot think at

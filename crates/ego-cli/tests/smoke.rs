@@ -56,8 +56,8 @@ use ego_core::cost::{Amount, CurrencyCode, Money, PricingRevision};
 use ego_core::event::id::SessionId;
 use ego_core::generator::attempt::GenerationAttempt;
 use ego_core::generator::capabilities::{
-    CacheRetention, CancelSemantics, ModelCapabilities, ReasoningCarryover, ReasoningEffortSupport,
-    Transport,
+    CacheRetention, CancelSemantics, ImageInputSupport, ModelCapabilities, ReasoningCarryover,
+    ReasoningEffortSupport, Transport,
 };
 use ego_core::generator::port::{AiEvent, Generator};
 use ego_core::generator::types::{GenRequest, StopReason};
@@ -72,9 +72,8 @@ use futures::future::BoxFuture;
 #[path = "../../ego-ai/tests/profiles/mod.rs"]
 mod profiles;
 use profiles::{
-    ANTHROPIC, GEMINI, GITHUB_COPILOT, KIMI_CODING, MINIMAX_OAUTH, NOUS, OLLAMA, OPENAI,
-    OPENAI_CODEX, OPENROUTER, Profile, QWEN_OAUTH, TOOL_CEILING, XAI_OAUTH, canonical,
-    request_fixture, tool_calling, write,
+    ANTHROPIC, GEMINI, GITHUB_COPILOT, MINIMAX_OAUTH, NOUS, OLLAMA, OPENAI, OPENAI_CODEX,
+    OPENROUTER, Profile, TOOL_CEILING, XAI_OAUTH, canonical, request_fixture, tool_calling, write,
 };
 
 /// The variable that turns any of this on, and the only thing it is for.
@@ -143,7 +142,7 @@ fn pessimistic_quote() -> PricingQuote {
 /// a spending bound must never err in.
 fn caps() -> ModelCapabilities {
     ModelCapabilities {
-        schema_version: 1,
+        schema_version: ModelCapabilities::SCHEMA_VERSION,
         max_context_tokens: Some(8_192),
         max_output_tokens: Some(TOOL_CEILING),
         max_tools: Some(8),
@@ -154,6 +153,7 @@ fn caps() -> ModelCapabilities {
         cancel: CancelSemantics::Cooperative,
         cache: CacheRetention::Short,
         transport: Transport::Sse,
+        image_input: ImageInputSupport::Unknown,
     }
 }
 
@@ -161,7 +161,12 @@ fn caps() -> ModelCapabilities {
 ///
 /// Built through the row's own mapping, so what the provider is asked to
 /// accept is exactly what the product would send — the whole point of check 5.
-fn built(row: &ProviderRow, creds: &dyn Credentials, req: &GenRequest) -> HttpRequest {
+fn built(
+    row: &ProviderRow,
+    wire: &'static dyn ego_ai::wire::WireFormat,
+    creds: &dyn Credentials,
+    req: &GenRequest,
+) -> HttpRequest {
     let credential = row
         .credential
         .resolve(creds)
@@ -172,8 +177,7 @@ fn built(row: &ProviderRow, creds: &dyn Credentials, req: &GenRequest) -> HttpRe
         headers.push((name.clone(), value.clone()));
     }
     let target = RequestTarget::new(credential.base_override().unwrap_or(row.base()), &headers);
-    row.wire
-        .build_request(&target, req)
+    wire.build_request(&target, req)
         .unwrap_or_else(|refused| panic!("{}: {refused}", row.id()))
 }
 
@@ -309,12 +313,13 @@ fn attempt_for(gate: &mut BudgetGate, req: &GenRequest, metering: &Metering) -> 
 /// raw response body retained for the optional live recording.
 async fn send(
     row: &ProviderRow,
+    wire: &'static dyn ego_ai::wire::WireFormat,
     creds: &dyn Credentials,
     req: GenRequest,
     metering: &Metering,
     http: Arc<dyn Http>,
 ) -> (Option<u16>, String, Vec<AiEvent>, String) {
-    let request = built(row, creds, &req);
+    let request = built(row, wire, creds, &req);
     let request_json = request_fixture(&request);
     let credential = row
         .credential
@@ -325,7 +330,7 @@ async fn send(
         inner: http,
         observed: Arc::clone(&observed),
     };
-    let generator = WireGenerator::new(row.clone(), Arc::new(recording), credential);
+    let generator = WireGenerator::new(row.clone(), wire, Arc::new(recording), credential);
     let mut gate = BudgetGate::new(usd("0.05"));
     let attempt = attempt_for(&mut gate, &req, metering);
     let events: Vec<AiEvent> = generator.generate(req, attempt).collect().await;
@@ -383,6 +388,7 @@ async fn smoke(profile: &Profile, when: &str) {
     bounded(&req, &profile.metering());
     let (status, transcript, events, request_json) = send(
         &row,
+        profile.wire,
         creds.as_ref(),
         req,
         &profile.metering(),
@@ -435,6 +441,7 @@ async fn smoke(profile: &Profile, when: &str) {
     bounded(&tools, &profile.metering());
     let (status, tool_transcript, _, _) = send(
         &row,
+        profile.wire,
         creds.as_ref(),
         tools,
         &profile.metering(),
@@ -458,8 +465,15 @@ async fn smoke(profile: &Profile, when: &str) {
         model: "this-model-does-not-exist".to_string(),
         ..canonical(profile)
     };
-    let (status, error_body, _, _) =
-        send(&row, creds.as_ref(), absent, &profile.metering(), http).await;
+    let (status, error_body, _, _) = send(
+        &row,
+        profile.wire,
+        creds.as_ref(),
+        absent,
+        &profile.metering(),
+        http,
+    )
+    .await;
     let status = status.expect("the provider answered the invalid model");
     assert_ne!(
         status, 200,
@@ -600,18 +614,6 @@ async fn github_copilot_accepts_the_body_this_build_sends() {
 #[ignore = "sends a real subscription request; set EGO_SMOKE=xai-oauth"]
 async fn xai_oauth_accepts_the_body_this_build_sends() {
     smoke(&XAI_OAUTH, &today()).await;
-}
-
-#[tokio::test]
-#[ignore = "sends a real subscription request; set EGO_SMOKE=kimi-coding"]
-async fn kimi_coding_accepts_the_body_this_build_sends() {
-    smoke(&KIMI_CODING, &today()).await;
-}
-
-#[tokio::test]
-#[ignore = "sends a real subscription request; set EGO_SMOKE=qwen-oauth"]
-async fn qwen_oauth_accepts_the_body_this_build_sends() {
-    smoke(&QWEN_OAUTH, &today()).await;
 }
 
 #[tokio::test]

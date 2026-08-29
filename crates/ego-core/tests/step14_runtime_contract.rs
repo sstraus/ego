@@ -28,6 +28,8 @@ use ego_core::public::project_public;
 use ego_core::state::SessionState;
 use ego_core::store::evidence::{EvidenceId, EvidenceRead, EvidenceRef};
 
+mod common;
+
 fn workspace() -> CanonPath {
     CanonPath::new(std::fs::canonicalize(std::env::current_dir().unwrap()).unwrap())
 }
@@ -553,6 +555,10 @@ mod turn_execution_observation {
     struct NoEvidence;
 
     impl EvidenceStore for NoEvidence {
+        fn blob_store(&self) -> &dyn ego_core::store::blob::BlobStore {
+            &common::EMPTY_BLOB_STORE
+        }
+
         fn begin(&self) -> Result<Box<dyn EvidenceWriter>, EvidenceError> {
             Err(EvidenceError::Limit { limit: 0 })
         }
@@ -652,7 +658,7 @@ mod turn_execution_observation {
                 thinking: ThinkingLevel::Off,
                 generator: self.generator.clone(),
                 capabilities: ModelCapabilities {
-                    schema_version: 1,
+                    schema_version: ModelCapabilities::SCHEMA_VERSION,
                     max_context_tokens: Some(10_000),
                     max_output_tokens: Some(1_000),
                     max_tools: Some(16),
@@ -663,6 +669,7 @@ mod turn_execution_observation {
                     cancel: CancelSemantics::Cooperative,
                     cache: CacheRetention::Short,
                     transport: Transport::Sse,
+                    image_input: ego_core::generator::capabilities::ImageInputSupport::Unknown,
                 },
                 metering: Metering::Unmetered {
                     revision: MeteringRevision(String::from("test")),

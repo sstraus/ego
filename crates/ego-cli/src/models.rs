@@ -9,7 +9,7 @@ use ego_ai::catalogue::{
     ModelDiscoverySource, ModelFactProvenance,
 };
 use ego_ai::provider::{EnvCredentials, ProviderRow};
-use ego_ai::resolver::Enumeration;
+use ego_ai::resolver::{Enumeration, ResolverCredentialRequirement};
 use ego_core::ceiling::Ceilings;
 use ego_core::event::time::Clock;
 use ego_core::generator::capabilities::ReasoningEffortSupport;
@@ -76,6 +76,8 @@ pub async fn build_catalogue_snapshot(
     let mut current_discovered = BTreeSet::new();
     let mut current_discovered_sources = BTreeSet::new();
     let mut current_source_failures = BTreeMap::new();
+    let mut missing_enumeration_credentials = BTreeMap::new();
+    let mut resolved_enumeration_credentials = BTreeSet::new();
 
     if needs_observation {
         let lease = cache_store
@@ -95,12 +97,39 @@ pub async fn build_catalogue_snapshot(
             if !observe {
                 continue;
             }
+            let credential = match row.resolver.enumeration_credential() {
+                ResolverCredentialRequirement::None => None,
+                ResolverCredentialRequirement::Required => {
+                    let credentials = crate::auth::request_credentials(
+                        row.id(),
+                        auth.get(row.id())
+                            .and_then(|provider| provider.credential_command.as_deref()),
+                        http.as_ref(),
+                    )
+                    .await
+                    .map_err(|error| RunTermination::Provider {
+                        message: error.to_string(),
+                    })?;
+                    match row.credential.resolve(credentials.as_ref()) {
+                        Ok(credential) => {
+                            resolved_enumeration_credentials.insert(row.id().to_owned());
+                            Some(credential)
+                        }
+                        Err(error) => {
+                            missing_enumeration_credentials
+                                .insert(row.id().to_owned(), error.to_string());
+                            continue;
+                        }
+                    }
+                }
+            };
             let report = row
                 .resolver
                 .enumerate(&Enumeration {
                     catalogue: &catalogue,
                     row,
                     http,
+                    credential: credential.as_ref(),
                 })
                 .await
                 .map_err(|message| RunTermination::Failed { message })?;
@@ -151,7 +180,32 @@ pub async fn build_catalogue_snapshot(
     let mut models = supplied_entries;
     let mut sources = supplied_sources;
     for row in &selected {
+        let missing_credential = missing_enumeration_credentials
+            .get(row.id())
+            .map(|message| missing_credential(message.clone()))
+            .or_else(|| {
+                (row.resolver.enumeration_credential() == ResolverCredentialRequirement::Required
+                    && !resolved_enumeration_credentials.contains(row.id()))
+                .then(|| credential_for(row))
+                .filter(|availability| {
+                    matches!(
+                        availability,
+                        ModelAvailability::Unavailable {
+                            cause: ModelAvailabilityCause::MissingCredential,
+                            ..
+                        }
+                    )
+                })
+            });
         let Some(slice) = cache.providers.get(row.id()) else {
+            if let Some(availability) = missing_credential {
+                sources.push(ModelCatalogueSourceStatus {
+                    provider: row.id().to_owned(),
+                    provenance: ModelFactProvenance::discovered(row.id().to_owned()),
+                    freshness: FactFreshness::Current,
+                    availability,
+                });
+            }
             continue;
         };
         project_cached(
@@ -160,6 +214,7 @@ pub async fn build_catalogue_snapshot(
             &current_discovered,
             &current_discovered_sources,
             current_source_failures.get(row.id()),
+            missing_credential.as_ref(),
             &mut models,
             &mut sources,
         );
@@ -272,12 +327,24 @@ fn credential_for(row: &ProviderRow) -> ModelAvailability {
     }
 }
 
+fn missing_credential(message: String) -> ModelAvailability {
+    ModelAvailability::Unavailable {
+        cause: ModelAvailabilityCause::MissingCredential,
+        message,
+    }
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "cached projection keeps independent freshness, failure, credential, and output channels explicit"
+)]
 fn project_cached(
     row: &ProviderRow,
     slice: &CachedDiscoverySlice,
     current: &BTreeSet<ego_ai::catalogue::ModelSlug>,
     current_sources: &BTreeSet<String>,
     current_source_failure: Option<&ModelDiscoveryFailure>,
+    credential_unavailability: Option<&ModelAvailability>,
     models: &mut Vec<ModelCatalogueEntry>,
     sources: &mut Vec<ModelCatalogueSourceStatus>,
 ) {
@@ -292,10 +359,12 @@ fn project_cached(
             } else {
                 FactFreshness::Cached
             },
-            availability: cached
-                .failure
-                .as_ref()
-                .map_or(ModelAvailability::Available, discovery_unavailable),
+            availability: credential_unavailability.cloned().unwrap_or_else(|| {
+                cached
+                    .failure
+                    .as_ref()
+                    .map_or(ModelAvailability::Available, discovery_unavailable)
+            }),
         });
     }
     let failure = current_source_failure.or(slice.source_failure.as_ref());
@@ -307,7 +376,9 @@ fn project_cached(
         } else {
             FactFreshness::Cached
         },
-        availability: failure.map_or(ModelAvailability::Available, discovery_unavailable),
+        availability: credential_unavailability
+            .cloned()
+            .unwrap_or_else(|| failure.map_or(ModelAvailability::Available, discovery_unavailable)),
     });
 }
 

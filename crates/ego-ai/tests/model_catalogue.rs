@@ -7,8 +7,8 @@ use ego_ai::catalogue::{
     ModelSlug, SuppliedAuthority,
 };
 use ego_core::generator::capabilities::{
-    CacheRetention, CancelSemantics, ModelCapabilities, ReasoningCarryover, ReasoningEffortSupport,
-    Transport,
+    CacheRetention, CancelSemantics, ImageInputSupport, ModelCapabilities, ReasoningCarryover,
+    ReasoningEffortSupport, Transport,
 };
 use ego_core::public::MeteringKind;
 use futures::executor::block_on;
@@ -18,7 +18,7 @@ use support::{server, unasked};
 
 fn capabilities() -> ModelCapabilities {
     ModelCapabilities {
-        schema_version: 2,
+        schema_version: ModelCapabilities::SCHEMA_VERSION,
         max_context_tokens: None,
         max_output_tokens: None,
         max_tools: None,
@@ -29,6 +29,7 @@ fn capabilities() -> ModelCapabilities {
         cancel: CancelSemantics::Cooperative,
         cache: CacheRetention::None,
         transport: Transport::Sse,
+        image_input: ImageInputSupport::Unknown,
     }
 }
 
@@ -368,6 +369,7 @@ fn resolver_selected_supplied_enumeration_uses_facts_without_transport() {
         catalogue: &catalogue,
         row,
         http: &http,
+        credential: None,
     }))
     .unwrap();
     assert_eq!(report.models().len(), 1);
@@ -401,6 +403,7 @@ fn resolver_selected_subscription_enumeration_projects_subscription_metering() {
         catalogue: &catalogue,
         row,
         http: &http,
+        credential: None,
     }))
     .unwrap();
     assert_eq!(report.models().len(), 1);
@@ -432,6 +435,7 @@ fn resolver_selected_ollama_enumeration_uses_tags_only_and_leaves_ceilings_unkno
         catalogue: &catalogue,
         row,
         http: &http,
+        credential: None,
     }))
     .unwrap();
     assert_eq!(report.models().len(), 1);

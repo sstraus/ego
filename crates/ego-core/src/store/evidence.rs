@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use futures::future::BoxFuture;
 
 use crate::digest::is_lower_sha256;
+use crate::store::blob::{BlobId, BlobRef, BlobStore};
 
 /// The one model-visible retrieval bound. Callers choose an original-byte
 /// offset, never a page size.
@@ -200,6 +201,22 @@ impl EvidenceRef {
     pub fn new(id: EvidenceId, bytes: u64) -> Self {
         Self { id, bytes }
     }
+
+    /// The generic session-blob identity behind this tool-evidence value.
+    pub fn blob_ref(&self) -> BlobRef {
+        BlobRef::new(
+            BlobId::parse(self.id.as_str()).expect("an evidence id is already a validated SHA-256"),
+            self.bytes,
+        )
+    }
+
+    pub fn from_blob(reference: BlobRef) -> Self {
+        Self {
+            id: EvidenceId::parse(reference.id.as_str())
+                .expect("a blob id is already a validated SHA-256"),
+            bytes: reference.bytes,
+        }
+    }
 }
 
 impl std::fmt::Display for EvidenceRef {
@@ -334,6 +351,9 @@ pub trait EvidenceWriter: Send {
 
 /// Complete evidence for one already-bound session.
 pub trait EvidenceStore: Send + Sync {
+    /// The generic CAS this semantic evidence view is backed by.
+    fn blob_store(&self) -> &dyn BlobStore;
+
     fn begin(&self) -> Result<Box<dyn EvidenceWriter>, EvidenceError>;
 
     fn read_page<'a>(

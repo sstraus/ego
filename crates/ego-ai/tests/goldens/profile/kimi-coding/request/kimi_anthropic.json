@@ -1,0 +1,24 @@
+{
+  "model": "kimi-anthropic",
+  "messages": [
+    {
+      "role": "user",
+      "content": [{"type": "text", "text": "say ok"}]
+    }
+  ],
+  "tools": [
+    {
+      "name": "read_file",
+      "description": "Read one file.",
+      "input_schema": {
+        "type": "object",
+        "properties": {"path": {"type": "string"}},
+        "required": ["path"]
+      }
+    }
+  ],
+  "tool_choice": {"type": "auto", "disable_parallel_tool_use": true},
+  "max_tokens": 128,
+  "stream": true,
+  "thinking": {"type": "disabled"}
+}
