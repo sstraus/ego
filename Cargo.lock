@@ -1038,6 +1038,7 @@ dependencies = [
  "tempfile",
  "terminal_size",
  "tokio",
+ "tokio-util",
  "toml",
  "tracing",
  "unicode-segmentation",

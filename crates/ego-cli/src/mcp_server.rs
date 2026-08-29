@@ -25,7 +25,8 @@ use ego_mcp::{
 use ego_tools::clock::SystemClock;
 use ego_tools::store::JsonlStore;
 use futures::future::BoxFuture;
-use futures::io::{AllowStdIo, AsyncRead, AsyncWrite};
+use futures::io::{AsyncRead, AsyncWrite};
+use tokio_util::compat::{Compat, TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use crate::cli::McpServerArgs;
 use crate::{run, session};
@@ -186,16 +187,16 @@ impl IdSource for UuidIds {
 }
 
 struct ProcessStdio {
-    input: AllowStdIo<std::io::Stdin>,
-    output: AllowStdIo<std::io::Stdout>,
+    input: Compat<tokio::io::Stdin>,
+    output: Compat<tokio::io::Stdout>,
     delivered: bool,
 }
 
 impl ProcessStdio {
     fn new() -> Self {
         Self {
-            input: AllowStdIo::new(std::io::stdin()),
-            output: AllowStdIo::new(std::io::stdout()),
+            input: tokio::io::stdin().compat(),
+            output: tokio::io::stdout().compat_write(),
             delivered: false,
         }
     }

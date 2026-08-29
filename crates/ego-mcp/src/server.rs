@@ -13,7 +13,7 @@ use rmcp::model::{
 use rmcp::service::{RequestContext, RoleServer};
 use rmcp::{ServerHandler, ServiceExt};
 use serde_json::Map;
-use tokio_util::compat::FuturesAsyncReadCompatExt;
+use tokio_util::compat::{FuturesAsyncReadCompatExt, FuturesAsyncWriteCompatExt};
 
 use crate::{McpError, McpFailure, McpFuture};
 
@@ -197,6 +197,7 @@ impl ServerHandler for ServerAdapter {
     }
 }
 
+#[derive(Clone)]
 struct SharedDuplex {
     inner: Arc<Mutex<Option<DuplexHandle>>>,
 }
@@ -256,10 +257,10 @@ pub async fn serve_stdio(
     duplex: DuplexHandle,
 ) -> Result<DuplexSettlement, McpError> {
     let inner = Arc::new(Mutex::new(Some(duplex)));
-    let transport = SharedDuplex {
+    let shared = SharedDuplex {
         inner: Arc::clone(&inner),
-    }
-    .compat();
+    };
+    let transport = (shared.clone().compat(), shared.compat_write());
     let adapter = ServerAdapter {
         name: Arc::from("ego"),
         port,
