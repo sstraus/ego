@@ -31,11 +31,11 @@ use crate::event::time::Timestamp;
 /// `docs/decisions/2026-08-21-a-header-the-repair-must-not-delete.md` §3 —
 /// actually compared when one is read.
 ///
-/// v7 replaces the unshipped `HookFired` placeholder with the final admitted
-/// catalogue and invocation start/settlement evidence. A v6 log is refused,
-/// not decoded through a compatibility shape that could invent hook identity
-/// or external-delivery certainty.
-pub const CODEC_VERSION: u32 = 7;
+/// v8 makes `StoreRecord::seq` the contiguous physical position of every
+/// record in the single session stream. Event sequence numbers and run
+/// revisions remain semantic counters inside the payload and no longer
+/// compete for the record-order field.
+pub const CODEC_VERSION: u32 = 8;
 
 /// The fixed xxhash64 seed for record checksums. Part of the codec v1
 /// contract: changing it would silently invalidate every checksum already
@@ -47,8 +47,8 @@ const CHECKSUM_SEED: u64 = 0;
 ///
 /// Named `Header` and not `HeaderV1`: [`CODEC_VERSION`] is the version, and a
 /// type suffix reading `V1` while `v` read `4` was already two numbers for one
-/// fact. There is exactly one header shape any build understands, because a
-/// log at another version is refused rather than parsed.
+/// fact. There is exactly one header shape; the filesystem adapter decides
+/// whether a previous version can be migrated before current writers use it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Header {
     /// The codec version this log was written with.
@@ -92,6 +92,11 @@ impl Header {
 }
 
 /// A durable record: `{seq, checksum, payload}`.
+///
+/// `seq` is the adapter-owned, one-based physical position in the complete
+/// session stream. It is deliberately independent of a `DomainEvent`'s
+/// envelope sequence and a `RunTransaction`'s revision, both of which remain
+/// semantic counters inside `payload`.
 ///
 /// `checksum` is the xxhash64 (seed [`CHECKSUM_SEED`]) of `seq` **and**
 /// `payload`'s canonical JSON bytes — the exact bytes of each value as they

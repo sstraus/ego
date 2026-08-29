@@ -86,14 +86,14 @@ mod codec {
     /// to be a deliberate edit here, not a constant quietly following the
     /// code that changed it.
     #[test]
-    fn codec_header_carries_codec_version_7() {
+    fn codec_header_carries_codec_version_8() {
         let h = header();
-        assert_eq!(h.v, 7);
-        assert_eq!(CODEC_VERSION, 7);
+        assert_eq!(h.v, 8);
+        assert_eq!(CODEC_VERSION, 8);
 
         let bytes = encode_header(&h);
         match decode_line(&bytes).unwrap() {
-            StoreLine::Header(decoded) => assert_eq!(decoded.v, 7),
+            StoreLine::Header(decoded) => assert_eq!(decoded.v, 8),
             other => panic!("expected Header, got {other:?}"),
         }
     }

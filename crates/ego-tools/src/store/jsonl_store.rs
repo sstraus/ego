@@ -29,6 +29,10 @@ use futures::stream::{self, BoxStream};
 use super::io::{AtomicReplacePublication, StoreIo, tmp_path_for};
 use super::snapshot::{SNAPSHOT_VERSION, Snapshot, SnapshotRejection, validate};
 
+/// The only on-disk log version this build migrates. Writers emit only v8;
+/// this constant names the single v7 -> v8 ownership transition.
+const MIGRATABLE_CODEC_VERSION: u32 = 7;
+
 /// Filesystem-private cache projection. The public store port exposes only
 /// [`SessionMeta`]; execution and admitted-hook evidence remain internal log
 /// facts, projected here only for bounded catalogue reads and recovery.
@@ -50,6 +54,13 @@ struct LogManifestFacts {
     lineage: Option<CompactionLineage>,
     execution: Option<ExecObservation>,
     hooks: HookCatalogueEvidence,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RunLogState {
+    revision: Option<RunRevision>,
+    last_position: Seq,
+    has_event: bool,
 }
 
 /// What [`JsonlStore::recover`] actually had to repair.
@@ -99,19 +110,26 @@ impl Repair {
 /// refusing it would leave a brand-new session permanently unopenable over
 /// bytes that never held an event. Every other damaged header has a
 /// terminated line, and therefore may have records beneath it.
-fn header_end(bytes: &[u8]) -> Result<Option<usize>, StoreError> {
+fn decoded_header(bytes: &[u8]) -> Result<Option<(Header, usize)>, StoreError> {
     let Some(offset) = bytes.iter().position(|&b| b == b'\n') else {
         return Ok(None);
     };
     match decode_line(&bytes[..offset]) {
-        Ok(StoreLine::Header(header)) if header.v == CODEC_VERSION => Ok(Some(offset + 1)),
-        // ADR §3. Nothing compared `v` before, so a log written by a later
-        // build was read as though it were this version's.
-        Ok(StoreLine::Header(header)) => Err(StoreError::UnsupportedLog { found: header.v }),
+        Ok(StoreLine::Header(header)) => Ok(Some((header, offset + 1))),
         Ok(StoreLine::Record(_) | StoreLine::Unknown(_)) => Err(StoreError::MissingHeader),
         Err(e) => Err(StoreError::UnreadableHeader {
             reason: e.to_string(),
         }),
+    }
+}
+
+fn header_end(bytes: &[u8]) -> Result<Option<usize>, StoreError> {
+    match decoded_header(bytes)? {
+        Some((header, end)) if header.v == CODEC_VERSION => Ok(Some(end)),
+        // ADR §3. Nothing compared `v` before, so a log written by a later
+        // build was read as though it were this version's.
+        Some((header, _)) => Err(StoreError::UnsupportedLog { found: header.v }),
+        None => Ok(None),
     }
 }
 
@@ -155,6 +173,103 @@ fn valid_prefix(bytes: &[u8], start: usize) -> (usize, usize) {
         0
     };
     (end, dropped)
+}
+
+fn invalid_log(message: impl Into<String>) -> StoreError {
+    StoreError::Io(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        message.into(),
+    ))
+}
+
+fn accept_physical_position(current: &mut Seq, actual: Seq) -> Result<(), StoreError> {
+    let expected = current.next();
+    if actual != expected {
+        return Err(invalid_log(format!(
+            "session record position is not contiguous: expected {expected:?}, found {actual:?}"
+        )));
+    }
+    Ok(())
+}
+
+/// Validate the positions this codec can see. An unknown v8 record is kept
+/// verbatim by recovery; because its position is opaque to this build, later
+/// records cannot be ordered relative to it and validation stops there.
+fn validate_physical_positions<'a>(
+    lines: impl Iterator<Item = &'a [u8]>,
+) -> Result<(), StoreError> {
+    let mut current = Seq::ZERO;
+    for line in lines {
+        match decode_line(line) {
+            Ok(StoreLine::Record(record)) => {
+                accept_physical_position(&mut current, record.seq)?;
+            }
+            Ok(StoreLine::Unknown(_)) => break,
+            Ok(StoreLine::Header(_)) => {
+                return Err(invalid_log(
+                    "unexpected header record past the log's first line",
+                ));
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
+fn migrate_v7_image(
+    bytes: &[u8],
+    mut header: Header,
+    start: usize,
+) -> Result<(Vec<u8>, usize, usize), StoreError> {
+    // A future line remains someone else's bytes even when an earlier line is
+    // corrupt. Refuse before constructing or publishing any replacement.
+    let mut cursor = start;
+    while cursor < bytes.len() {
+        let Some(offset) = bytes[cursor..].iter().position(|byte| *byte == b'\n') else {
+            break;
+        };
+        if matches!(
+            decode_line(&bytes[cursor..cursor + offset]),
+            Ok(StoreLine::Unknown(_))
+        ) {
+            return Err(invalid_log(
+                "cannot migrate a v7 log containing an unknown record",
+            ));
+        }
+        cursor += offset + 1;
+    }
+
+    let (valid_len, dropped_lines) = valid_prefix(bytes, start);
+    header.v = CODEC_VERSION;
+    let mut migrated = encode_header(&header);
+    migrated.push(b'\n');
+    let mut position = Seq::ZERO;
+    for line in bytes[start..valid_len]
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+    {
+        let record = match decode_line(line)? {
+            StoreLine::Record(record) => record,
+            StoreLine::Unknown(_) => {
+                return Err(invalid_log(
+                    "cannot migrate a v7 log containing an unknown record",
+                ));
+            }
+            StoreLine::Header(_) => {
+                return Err(invalid_log(
+                    "unexpected header record past the log's first line",
+                ));
+            }
+        };
+        serde_json::from_str::<SessionEntry>(record.payload.get())
+            .map_err(|error| CodecError::Malformed(error.to_string()))?;
+        let next = position.next();
+        // RawValue's Serialize implementation re-emits the exact payload JSON;
+        // only the adapter-owned physical position and checksum change.
+        migrated.extend_from_slice(&encode_record(next, &record.payload)?);
+        migrated.push(b'\n');
+    }
+    Ok((migrated, valid_len, dropped_lines))
 }
 
 /// A `SessionId`'s value, as a plain hyphenated UUID string.
@@ -334,18 +449,16 @@ impl JsonlStore {
         operation()
     }
 
-    fn current_run_revision_from_lines<'a>(
+    fn run_log_state_from_lines<'a>(
         &self,
         lines: impl Iterator<Item = &'a [u8]>,
-    ) -> Result<Option<RunRevision>, StoreError> {
-        let mut current = None;
+    ) -> Result<RunLogState, StoreError> {
+        let mut revision = None;
+        let mut last_position = Seq::ZERO;
+        let mut has_event = false;
         for line in lines {
-            let entry = match decode_line(line) {
-                Ok(StoreLine::Record(record)) => {
-                    serde_json::from_str::<SessionEntry>(record.payload.get()).map_err(|error| {
-                        StoreError::Codec(CodecError::Malformed(error.to_string()))
-                    })?
-                }
+            let record = match decode_line(line) {
+                Ok(StoreLine::Record(record)) => record,
                 Ok(StoreLine::Header(_)) => {
                     return Err(StoreError::Codec(CodecError::Malformed(
                         "unexpected header record past the log's first line".to_string(),
@@ -358,21 +471,26 @@ impl JsonlStore {
                 }
                 Err(error) => return Err(error.into()),
             };
+            accept_physical_position(&mut last_position, record.seq)?;
+            let entry = serde_json::from_str::<SessionEntry>(record.payload.get())
+                .map_err(|error| StoreError::Codec(CodecError::Malformed(error.to_string())))?;
             let SessionEntry::RunTransaction(transaction) = entry else {
+                has_event = true;
                 continue;
             };
-            let expected = current
+            let expected = revision
                 .map(RunRevision::next)
                 .unwrap_or_else(|| RunRevision::new(1));
             if transaction.revision() != expected {
-                return Err(StoreError::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "run transaction revisions are not contiguous",
-                )));
+                return Err(invalid_log("run transaction revisions are not contiguous"));
             }
-            current = Some(transaction.revision());
+            revision = Some(transaction.revision());
         }
-        Ok(current)
+        Ok(RunLogState {
+            revision,
+            last_position,
+            has_event,
+        })
     }
 
     /// Publish the complete first log image for a clean compaction target.
@@ -431,7 +549,7 @@ impl JsonlStore {
         let header = Header::new(*id, seed.env.ts, self.workspace.clone());
         let mut log = encode_header(&header);
         log.push(b'\n');
-        let record = match encode_record(seed.env.seq, seed) {
+        let record = match encode_record(first, seed) {
             Ok(record) => record,
             Err(error) => {
                 return CompactionPublication::NotPublished {
@@ -668,9 +786,37 @@ impl JsonlStore {
         // tail. An error here leaves the bytes exactly as they were found.
         // `None` is the interrupted first append — see `header_end` — where
         // truncating to nothing is right because there is nothing under it.
-        let start = header_end(&bytes)?.unwrap_or(0);
+        let decoded = decoded_header(&bytes)?;
+        let start = decoded.as_ref().map(|(_, end)| *end).unwrap_or(0);
+
+        if let Some((header, _)) = decoded.as_ref() {
+            if header.v == MIGRATABLE_CODEC_VERSION {
+                let (migrated, valid_len, dropped_lines) =
+                    migrate_v7_image(&bytes, header.clone(), start)?;
+                if valid_len < bytes.len() {
+                    repair.truncated_bytes = (bytes.len() - valid_len) as u64;
+                    repair.dropped_lines = dropped_lines;
+                }
+                // One atomic publication both removes any torn v7 tail and
+                // installs the v8 header/physical positions. No v8 writer ever
+                // appends under a v7 header.
+                self.io.replace_atomic(&log_path, &migrated)?;
+                if self.rebuild_manifest_from_log(id, &migrated)? {
+                    repair.manifest_rebuilt = true;
+                }
+                return Ok(repair);
+            }
+            if header.v != CODEC_VERSION {
+                return Err(StoreError::UnsupportedLog { found: header.v });
+            }
+        }
 
         let (valid_len, dropped_lines) = valid_prefix(&bytes, start);
+        validate_physical_positions(
+            bytes[start..valid_len]
+                .split(|byte| *byte == b'\n')
+                .filter(|line| !line.is_empty()),
+        )?;
         if valid_len < bytes.len() {
             repair.truncated_bytes = (bytes.len() - valid_len) as u64;
             repair.dropped_lines = dropped_lines;
@@ -862,15 +1008,63 @@ impl JsonlStore {
         Ok(())
     }
 
+    fn next_physical_position(
+        &self,
+        log_path: &std::path::Path,
+        id: &SessionId,
+    ) -> Result<Seq, StoreError> {
+        let header_line = self
+            .io
+            .read_first_line(log_path)?
+            .ok_or_else(|| invalid_log("an existing session log is empty"))?;
+        let header = match decode_line(&header_line)? {
+            StoreLine::Header(header) => header,
+            StoreLine::Record(_) | StoreLine::Unknown(_) => {
+                return Err(StoreError::MissingHeader);
+            }
+        };
+        if header.v != CODEC_VERSION {
+            return Err(StoreError::UnsupportedLog { found: header.v });
+        }
+        if header.session != *id {
+            return Err(StoreError::WrongSession {
+                expected: header.session,
+                asked: *id,
+            });
+        }
+
+        let tail = self
+            .io
+            .read_last_line(log_path)?
+            .ok_or_else(|| invalid_log("an existing session log is empty"))?;
+        match decode_line(&tail)? {
+            StoreLine::Record(record) => {
+                let mut position = record.seq;
+                Ok(position.next())
+            }
+            StoreLine::Header(_) => {
+                let mut position = Seq::ZERO;
+                Ok(position.next())
+            }
+            StoreLine::Unknown(_) => {
+                Err(invalid_log("cannot append after an unknown session record"))
+            }
+        }
+    }
+
     fn append_already_locked(&self, id: &SessionId, ev: &DomainEvent) -> Result<(), StoreError> {
         let log_path = self.log_path(id);
         let is_new_session = !self.io.exists(&log_path)?;
-        if is_new_session {
+        let position = if is_new_session {
             let header = Header::new(*id, ev.env.ts, self.workspace.clone());
             self.io.append_line(&log_path, &encode_header(&header))?;
-        }
+            let mut first = Seq::ZERO;
+            first.next()
+        } else {
+            self.next_physical_position(&log_path, id)?
+        };
 
-        let record_line = encode_record(ev.env.seq, &SessionEntry::Event(ev.clone()))?;
+        let record_line = encode_record(position, &SessionEntry::Event(ev.clone()))?;
         self.io.append_line(&log_path, &record_line)?;
 
         let is_turn_boundary = matches!(ev.kind, EventKind::TurnCompleted { .. });
@@ -947,11 +1141,8 @@ impl JsonlStore {
             );
             let mut image = encode_header(&header);
             image.push(b'\n');
-            let record_seq: Seq = serde_json::from_value(
-                serde_json::to_value(transaction.revision())
-                    .expect("RunRevision always serialises"),
-            )
-            .expect("RunRevision and Seq share the durable integer representation");
+            let mut record_seq = Seq::ZERO;
+            let record_seq = record_seq.next();
             image.extend_from_slice(&encode_record(
                 record_seq,
                 &SessionEntry::RunTransaction(transaction.clone()),
@@ -999,43 +1190,55 @@ impl JsonlStore {
                 asked: *session,
             });
         }
-        let current = self.current_run_revision_from_lines(lines)?;
-        if expected_revision.is_none() {
-            return current.map_or_else(
-                || {
-                    Err(StoreError::Io(std::io::Error::new(
-                        std::io::ErrorKind::AlreadyExists,
-                        "an initial run append requires an absent session log",
-                    )))
-                },
-                |actual| Ok(RunAppend::Conflict { actual }),
-            );
-        }
-        if current != expected_revision {
-            return current.map_or(Err(StoreError::NotFound), |actual| {
-                Ok(RunAppend::Conflict { actual })
-            });
-        }
         if header.workspace_root.as_path() != transaction.root().as_path() {
-            return Err(StoreError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
+            return Err(invalid_log(
                 "run transaction root does not match the session header",
-            )));
+            ));
         }
-        let committed = current
-            .map(RunRevision::next)
-            .unwrap_or_else(|| RunRevision::new(1));
+        let state = self.run_log_state_from_lines(lines)?;
+        let committed = match expected_revision {
+            None => {
+                if let Some(actual) = state.revision {
+                    return Ok(RunAppend::Conflict { actual });
+                }
+                let first_admission = matches!(
+                    transaction.command(),
+                    RunCommand::CommandAdmitted {
+                        expected_revision: None,
+                        start: true,
+                        ..
+                    }
+                );
+                if !state.has_event {
+                    return Err(StoreError::Io(std::io::Error::new(
+                        std::io::ErrorKind::AlreadyExists,
+                        "an initial run append requires an absent or event-first session log",
+                    )));
+                }
+                if transaction.revision() != RunRevision::new(1) || !first_admission {
+                    return Err(invalid_log(
+                        "event-first adoption requires a revision-one initial admission",
+                    ));
+                }
+                RunRevision::new(1)
+            }
+            Some(expected) => {
+                if state.revision != Some(expected) {
+                    return state.revision.map_or(Err(StoreError::NotFound), |actual| {
+                        Ok(RunAppend::Conflict { actual })
+                    });
+                }
+                expected.next()
+            }
+        };
         if transaction.revision() != committed {
-            return Err(StoreError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
+            return Err(invalid_log(
                 "run transaction revision is not the expected successor",
-            )));
+            ));
         }
 
-        let record_seq: Seq = serde_json::from_value(
-            serde_json::to_value(transaction.revision()).expect("RunRevision always serialises"),
-        )
-        .expect("RunRevision and Seq share the durable integer representation");
+        let mut record_seq = state.last_position;
+        let record_seq = record_seq.next();
         let line = encode_record(
             record_seq,
             &SessionEntry::RunTransaction(transaction.clone()),

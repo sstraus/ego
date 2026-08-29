@@ -17,6 +17,86 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+/// Read the first newline-terminated line without visiting the rest of the file.
+fn read_first_line(path: &Path) -> io::Result<Option<Vec<u8>>> {
+    use io::BufRead as _;
+
+    let file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let mut line = Vec::new();
+    io::BufReader::new(file).read_until(b'\n', &mut line)?;
+    if line.is_empty() {
+        return Ok(None);
+    }
+    if line.pop() != Some(b'\n') {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "session log starts with an unterminated line",
+        ));
+    }
+    Ok(Some(line))
+}
+
+/// Read the final newline-terminated line without visiting the rest of the file.
+///
+/// Store logs define an unterminated final line as torn, so this refuses one
+/// instead of returning bytes an append could accidentally splice onto.
+fn read_last_line(path: &Path) -> io::Result<Option<Vec<u8>>> {
+    use io::{Read as _, Seek as _, SeekFrom};
+
+    let mut file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let len = file.metadata()?.len();
+    if len == 0 {
+        return Ok(None);
+    }
+
+    file.seek(SeekFrom::End(-1))?;
+    let mut last = [0_u8; 1];
+    file.read_exact(&mut last)?;
+    if last[0] != b'\n' {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "session log ends in an unterminated line",
+        ));
+    }
+
+    const CHUNK: u64 = 8 * 1024;
+    let mut cursor = len - 1;
+    let mut reversed_chunks = Vec::new();
+    while cursor > 0 {
+        let count = cursor.min(CHUNK);
+        let start = cursor - count;
+        file.seek(SeekFrom::Start(start))?;
+        let mut chunk = vec![0; count as usize];
+        file.read_exact(&mut chunk)?;
+        if let Some(newline) = chunk.iter().rposition(|byte| *byte == b'\n') {
+            reversed_chunks.push(chunk[newline + 1..].to_vec());
+            let capacity = reversed_chunks.iter().map(Vec::len).sum();
+            let mut line = Vec::with_capacity(capacity);
+            for chunk in reversed_chunks.into_iter().rev() {
+                line.extend_from_slice(&chunk);
+            }
+            return Ok(Some(line));
+        }
+        reversed_chunks.push(chunk);
+        cursor = start;
+    }
+
+    let capacity = reversed_chunks.iter().map(Vec::len).sum();
+    let mut line = Vec::with_capacity(capacity);
+    for chunk in reversed_chunks.into_iter().rev() {
+        line.extend_from_slice(&chunk);
+    }
+    Ok(Some(line))
+}
+
 /// The scratch path [`StoreIo::replace_atomic`] writes before renaming it
 /// onto `path`.
 ///
@@ -107,6 +187,61 @@ pub trait StoreIo: Send + Sync {
 
     /// Read the whole file at `path`, or `None` if it does not exist.
     fn read(&self, path: &Path) -> io::Result<Option<Vec<u8>>>;
+
+    /// Read only the first complete line at `path`, or `None` when the file is
+    /// absent or empty. The default keeps existing delegating adapters working
+    /// and falls back to their whole-file read only when no real file exists.
+    fn read_first_line(&self, path: &Path) -> io::Result<Option<Vec<u8>>> {
+        if let Some(line) = read_first_line(path)? {
+            return Ok(Some(line));
+        }
+        let Some(bytes) = self.read(path)? else {
+            return Ok(None);
+        };
+        let Some(newline) = bytes.iter().position(|byte| *byte == b'\n') else {
+            if bytes.is_empty() {
+                return Ok(None);
+            }
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "session log starts with an unterminated line",
+            ));
+        };
+        Ok(Some(bytes[..newline].to_vec()))
+    }
+
+    /// Read only the final complete line at `path`, or `None` when the file
+    /// is absent or empty.
+    ///
+    /// The default first uses the real filesystem operation because existing
+    /// delegating adapters did not have this narrow method when it was
+    /// introduced, then conservatively falls back to [`StoreIo::read`] for an
+    /// adapter backed by something else. Ordinary production appends use the
+    /// efficient [`OsIo`] override to derive the next physical record position
+    /// without an O(log size) whole-file read.
+    fn read_last_line(&self, path: &Path) -> io::Result<Option<Vec<u8>>> {
+        if let Some(line) = read_last_line(path)? {
+            return Ok(Some(line));
+        }
+        let Some(bytes) = self.read(path)? else {
+            return Ok(None);
+        };
+        if bytes.is_empty() {
+            return Ok(None);
+        }
+        if !bytes.ends_with(b"\n") {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "session log ends in an unterminated line",
+            ));
+        }
+        let content = &bytes[..bytes.len() - 1];
+        let start = content
+            .iter()
+            .rposition(|byte| *byte == b'\n')
+            .map_or(0, |newline| newline + 1);
+        Ok(Some(content[start..].to_vec()))
+    }
 
     /// Whether `path` exists. A distinct operation from [`StoreIo::read`] so
     /// a caller that only needs to know "does this log exist yet" is not
@@ -416,6 +551,14 @@ impl StoreIo for OsIo {
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e),
         }
+    }
+
+    fn read_first_line(&self, path: &Path) -> io::Result<Option<Vec<u8>>> {
+        read_first_line(path)
+    }
+
+    fn read_last_line(&self, path: &Path) -> io::Result<Option<Vec<u8>>> {
+        read_last_line(path)
     }
 
     fn exists(&self, path: &Path) -> io::Result<bool> {

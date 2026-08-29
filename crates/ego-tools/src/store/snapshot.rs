@@ -36,9 +36,10 @@ use ego_core::event::id::{Seq, SessionId};
 use ego_core::state::SessionState;
 use serde::{Deserialize, Serialize};
 
-/// The snapshot format version. Bumped when [`Snapshot`]'s shape changes;
-/// an unrecognised version is ignored rather than parsed optimistically,
-/// because a snapshot is a cache and replaying the log is always correct.
+/// The snapshot format version. Bumped when [`Snapshot`]'s shape or cursor
+/// interpretation changes; an unrecognised version is ignored rather than
+/// parsed optimistically, because a snapshot is a cache and replaying the log
+/// is always correct.
 ///
 /// v2: `SessionState` gained the attempt ledger and lifecycle
 /// (`docs/decisions/2026-08-21-attempt-accounting-ledger.md`). A v1 snapshot
@@ -56,10 +57,11 @@ use serde::{Deserialize, Serialize};
 /// authority, so older snapshots are discarded and rebuilt rather than
 /// migrated.
 ///
-/// v5: `SessionState` gained the admitted hook catalogue, live hook
-/// invocations, and their settlements. A v4 cache cannot reconstruct that
-/// state, so it is discarded and the authoritative log is replayed.
-pub const SNAPSHOT_VERSION: u32 = 6;
+/// v7 accompanies codec v8's physical record positions. Snapshot source
+/// sequence remains the last semantic event sequence reduced into the cache;
+/// a v6 cache is discarded so that transition cannot be mistaken for a
+/// physical log cursor.
+pub const SNAPSHOT_VERSION: u32 = 7;
 
 /// A reduced [`SessionState`] plus the point in the log it reduces.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
