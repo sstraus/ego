@@ -216,9 +216,9 @@ pub const UNBUILT: &[(&str, &str)] = &[
     ),
     (
         "doctor",
-        "a diagnostic contract and its actionable probes. Authentication, \
-         model resolution, and sandbox execution now exist, but this build has \
-         no unified health report and its MCP client is still unbuilt",
+        "a unified diagnostic contract and actionable probes. Authentication, \
+         model resolution, sandbox execution, and MCP now exist, but no health \
+         projection composes their sanitized status and actionable remediation",
     ),
 ];
 

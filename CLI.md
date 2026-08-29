@@ -44,6 +44,7 @@ ego mcp-server --max-concurrent-runs N --retained-requests N
                               sanitized resources; no MCP Tasks or prompts
 ego auth   login|logout|status [PROVIDER]
 ego models [--provider P] [--refresh] [--json]
+ego hooks  ls [--json]                     read-only admitted hook catalogue
 ego config get|set|unset|ls|edit
 ego rules  ls|allow|deny|revoke|remember|explain   (permission rules,
                               stable IDs; `explain <tool> <args>` shows the
@@ -70,7 +71,7 @@ Notes:
 ### 2.1 Availability — what ships today
 
 The same discipline as §3.1, and it was missing here until 2026-08-21. §2 lists
-fourteen commands; this build implements **eight**. The other six used to
+fifteen commands; this build implements **eight**. The other seven used to
 reach the *interactive* refusal, so `ego resume` was answered with a sentence
 about the permission dialog — true, and about a surface the caller had not
 asked for. They are now refused **by name**, each naming what it waits on, from
@@ -104,11 +105,12 @@ omitted when empty: two states, identical bytes.
 | `ego mcp-server` | **yes** | serves scoped `run`/`continue`/`cancel`/`status` tools and sanitized summary/output resources on stdio. `--max-concurrent-runs`, `--retained-requests`, and `--max-resource-bytes` are required non-zero deployment bounds; `-C`/the current directory is the sole canonical root and stdout remains protocol-only |
 | `ego auth` | **yes** | `login\|logout\|status [PROVIDER]`; credentials live in one locked `$EGO_HOME/auth.json`, while TOML commands and discovered auth plugins can supply login tokens |
 | `ego models` | **yes** | prints the shared current-model catalogue as deterministic text or versioned JSON; `--provider` filters both model and source rows, and `--refresh` updates authoritative discovered slices without promoting cached display facts into generation authority |
+| `ego hooks` | no | the strict hook catalogue and runner (**M4**). This build has no admitted hook snapshot to inspect; `docs/21-claude-hook-parity.md` defines the final stable Claude-compatible lifecycle and read-only projection |
 | `ego config` | no | a config writer. The loader is strict and read-only, and nothing in this build writes a config file — `-c/--set` overrides one run |
 | `ego rules` | no | somewhere to keep a rule. The grammar and its stable IDs are built and `--allow`/`--deny` already reach the engine through them, so `ls` and `explain` have their material; what `allow`, `deny`, `revoke` and `remember` have nowhere to write to is a rule store — the same read-only loader `config` waits on |
 | `ego usage` | no | a report across sessions, which needs both the workspace attribution `ls` waits on and the per-session cost line budgets add in **M3** |
 | `ego acp` | **yes** | the Agent Client Protocol on stdio, v1. A host's `session/new` mints an ordinary ego session and its `session/prompt` runs an ordinary turn, so what it opens is listed by `ego ls` and continued by `ego resume`. v1 and not the v2 draft: see `docs/decisions/2026-08-21-the-version-an-agent-answers-with.md` §6.2 |
-| `ego doctor` | no | most of what it would diagnose: the credential store, the MCP client and the sandbox backend are each waiting on their own milestone, and a report on three absent subsystems is not a diagnosis |
+| `ego doctor` | no | a unified diagnostic contract and actionable probes. Authentication, model resolution, sandbox execution, and MCP now exist, but no health projection composes their sanitized status and actionable remediation |
 
 All four M0b demonstrations now have an entry point (`ARCHITECTURE.md` §8): an
 interactive session, `ego run … | jq`, `kill → ego resume`, and the same
@@ -557,7 +559,7 @@ a capability.
 
 Slash commands: `/help /model /thinking /mode /plan /yolo /permissions /mcp
 /sessions /fork /compact /clear /usage /statusline /export /doctor /quit /new
-/name /goal /tools /skills /version`. These 23 commands are the complete
+/name /goal /tools /skills /hooks /version`. These 24 commands are the complete
 maintainer-selected surface; a missing implementation remains required work rather
 than an implicit de-selection. Typing `/` at the beginning of the composer
 opens a filterable menu; the menu, shortcut bindings, help, and enabled-state
