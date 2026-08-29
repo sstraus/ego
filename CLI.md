@@ -174,7 +174,9 @@ ceilings come only from an administrator's `/etc/ego`.
 ```
     --session NAME      named session (create or attach)
     --session-id UUID   caller-SUPPLIED id — no capture-then-resume dance
-    --ephemeral         no session written
+    --ephemeral         recognized only to refuse by name: exit 2 before a
+                        session is opened or created, or any effect occurs;
+                        use the durable default, --session, or --session-id
     --session-dir DIR   override store location
     --answer ID=JSON    repeatable; answer a pending AskQuestion while resuming
 ```
@@ -243,7 +245,8 @@ and line that said it.
 | `--system`, `--append-system` | **yes** | |
 | `--instructions` | **yes** | ships, and is **missing from §3's grammar** — documented only in §4.5's prose |
 | `--bare` | **yes** | |
-| `--session`, `--session-id`, `--ephemeral` | **yes** | one mutually exclusive group, as §4.5 requires |
+| `--session`, `--session-id` | **yes** | durable session choices; the parser places them in the §4.5 mutually exclusive session group |
+| `--ephemeral` | no | recognized only to refuse by name with usage error exit 2 before opening or creating a session or causing an effect; use the durable default, `--session`, or `--session-id` |
 | `--session-dir` | **yes** | |
 | `--answer` | no | regression case: the headless continuation of `AskQuestion`; the question event and accepted answer must exist before the flag can enforce anything |
 | `--output` | **yes** | `text\|json\|jsonl`. On `ego ls` the two machine forms are §4.6's, not §4.1/§4.2's — a listing is not a run |
@@ -449,6 +452,8 @@ event.
   `Timestamp` the session log carries.
 - The empty store writes `{"v":1,"sessions":[]}` and exits 0. A script that
   gets no output cannot tell an empty store from a command that failed.
+- Lineage changes the listing envelope version once; a session row has no
+  independent catalogue version.
 
 Default `--output text` is a table for the person who typed it: id, updated,
 model, title, and a `WORKSPACE` column only under `--all` — without `--all`
@@ -747,9 +752,9 @@ drafts, and the surface emits one overflow diagnostic.
 
 ### 6.6 Prompted compaction starts a clean session
 
-`/compact` is an idle-only session transition. It is unavailable in an
-`--ephemeral` session: compaction requires a durable, independently resumable
-source and never changes the invocation's persistence choice. It sends the
+`/compact` is an idle-only session transition. The final M3 contract rejects
+`--ephemeral` before every effect, so every admitted compaction source is
+durable and independently resumable. It sends the
 complete active provider context to one tool-less generation with a versioned
 εgo-owned prompt that asks for a self-contained continuation checkpoint. That
 checkpoint keeps
