@@ -212,14 +212,33 @@ impl Opened<'_> {
     /// swallowed: a caller decides whether dropping N events is routine or
     /// alarming, and it cannot decide what it was never told.
     pub fn repair_note(&self) -> Option<String> {
-        match self {
-            Opened::Durable(open) if !open.repair.is_clean() => Some(format!(
+        let Opened::Durable(open) = self else {
+            return None;
+        };
+        if open.repair.is_clean() {
+            return None;
+        }
+
+        let mut notes = Vec::new();
+        if open.repair.migrated {
+            notes
+                .push("the session log was migrated to the current codec on the way in".to_owned());
+        }
+        if open.repair.truncated_bytes != 0 || open.repair.dropped_lines != 0 {
+            notes.push(format!(
                 "the session log was repaired on the way in: {} bytes and {} \
                  lines were dropped from a torn tail",
                 open.repair.truncated_bytes, open.repair.dropped_lines
-            )),
-            _ => None,
+            ));
         }
+        if open.repair.removed_tmp {
+            notes.push("an orphaned manifest temporary file was removed on the way in".to_owned());
+        }
+        if open.repair.manifest_rebuilt {
+            notes.push("the session manifest was rebuilt from the log on the way in".to_owned());
+        }
+
+        Some(notes.join("; "))
     }
 }
 

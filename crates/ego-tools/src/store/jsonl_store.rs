@@ -72,6 +72,10 @@ struct RunLogState {
 /// the overwhelmingly common path where nothing was wrong.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Repair {
+    /// Whether the session image was migrated between codec versions. This is
+    /// distinct from tail repair: a clean migration changes the header and
+    /// physical positions, but drops no bytes or lines.
+    pub migrated: bool,
     /// Bytes cut from a torn tail.
     pub truncated_bytes: u64,
     /// Lines those bytes contained — a torn final line counts as one.
@@ -801,6 +805,13 @@ impl JsonlStore {
                 // installs the v8 header/physical positions. No v8 writer ever
                 // appends under a v7 header.
                 self.io.replace_atomic(&log_path, &migrated)?;
+                repair.migrated = true;
+                tracing::warn!(
+                    session = %session_dir_name(id),
+                    from_codec = MIGRATABLE_CODEC_VERSION,
+                    to_codec = CODEC_VERSION,
+                    "migrated a session log to the current codec"
+                );
                 if self.rebuild_manifest_from_log(id, &migrated)? {
                     repair.manifest_rebuilt = true;
                 }

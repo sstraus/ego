@@ -82,7 +82,7 @@ impl Fixture {
         fx
     }
 
-    fn append(&mut self, kind: EventKind, ts_millis: u64) {
+    fn append_result(&mut self, kind: EventKind, ts_millis: u64) -> Result<(), StoreError> {
         let ev = DomainEvent {
             env: Envelope {
                 id: EventId::new(),
@@ -95,7 +95,11 @@ impl Fixture {
             },
             kind,
         };
-        self.store.append(&self.id, &ev).unwrap();
+        self.store.append(&self.id, &ev)
+    }
+
+    fn append(&mut self, kind: EventKind, ts_millis: u64) {
+        self.append_result(kind, ts_millis).unwrap();
     }
 
     fn log_path(&self) -> PathBuf {
@@ -156,23 +160,11 @@ impl Fixture {
     }
 }
 
-/// Appending to a torn log without repairing it first loses **every event
-/// appended afterwards**, silently, with each `append` returning `Ok`.
-///
-/// This is the fact that decides whether repair may be opt-in. `append`
-/// (jsonl_store.rs) writes a header only when the log does not yet exist and
-/// otherwise appends raw bytes, so the first append after a tear concatenates
-/// a complete line onto a partial one. `valid_prefix` stops at the *first*
-/// line that does not decode and discards everything after it — so that one
-/// splice buries not just itself but every later append behind it.
-///
-/// What survives is the prefix up to the tear, which is exactly what a single
-/// unappended-to tear would have kept — so the appends do not merely fail to
-/// help, they cost nothing *and* achieve nothing. A caller who forgets to
-/// recover therefore does not get a slightly damaged session. It gets a
-/// session that accepts writes and keeps none of them.
+/// Appending to an unrepaired torn log refuses before mutation. The caller
+/// must open the session for writing, which repairs the tail before allowing
+/// any append; a direct append cannot splice a new record onto damaged bytes.
 #[test]
-fn appending_to_an_unrepaired_tear_silently_loses_every_later_event() {
+fn appending_to_an_unrepaired_tear_refuses_before_mutation() {
     let mut fx = Fixture::healthy();
     let before = fx.texts();
     assert_eq!(before, ["list the files", "here they are"]);
@@ -180,10 +172,9 @@ fn appending_to_an_unrepaired_tear_silently_loses_every_later_event() {
     // A crash part-way through writing the next event.
     const TEAR: usize = 20;
     fx.tear_tail(TEAR);
+    let torn = fx.log_bytes();
 
-    // The caller reopens and simply carries on, as a caller who was never
-    // made to recover would.
-    fx.append(
+    let failure = fx.append_result(
         EventKind::UserPrompt {
             text: "and now the tests".to_string(),
             images: Vec::new(),
@@ -191,39 +182,29 @@ fn appending_to_an_unrepaired_tear_silently_loses_every_later_event() {
         },
         2_000,
     );
-    fx.append(
-        EventKind::AssistantMessage {
-            text: "here are the tests".to_string(),
-        },
-        2_100,
+    let error = failure.expect_err("an append must refuse an unterminated tail");
+    assert!(
+        matches!(error, StoreError::Io(ref io_error) if io_error.kind() == std::io::ErrorKind::InvalidData),
+        "wrong refusal for a torn tail: {error:?}"
     );
-    fx.append(
-        EventKind::TurnCompleted {
-            ok: true,
-            exit_reason: ExitReason::Completed,
-        },
-        2_200,
+    assert_eq!(
+        fx.log_bytes(),
+        torn,
+        "a refused append must not mutate bytes"
     );
 
     let repair = fx.store.recover(&fx.id).unwrap();
 
-    assert!(
-        !repair.is_clean(),
-        "the splice has to be visible to recovery"
-    );
+    assert!(!repair.is_clean(), "the original tear has to be repaired");
     assert_eq!(
         fx.texts(),
         before,
-        "the session is back to what it held before the three appends: not \
-         one of them survived, and each returned Ok"
+        "recovery preserves the earlier valid prefix"
     );
-    // Three physical lines carrying four events: the torn one and the first
-    // append share a line, because the splice put no newline between them.
-    assert_eq!(repair.dropped_lines, 3, "{repair:?}");
+    assert_eq!(repair.dropped_lines, 1, "{repair:?}");
     assert!(
         repair.truncated_bytes > TEAR as u64,
-        "recovery cut far more than the {TEAR} bytes the crash did — the \
-         three appends went with it: {repair:?}"
+        "recovery removes the surviving bytes of the incomplete record too: {repair:?}"
     );
 }
 

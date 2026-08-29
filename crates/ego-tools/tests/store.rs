@@ -296,6 +296,14 @@ mod store {
             self.inner.read(path)
         }
 
+        fn read_first_line(&self, path: &std::path::Path) -> std::io::Result<Option<Vec<u8>>> {
+            self.inner.read_first_line(path)
+        }
+
+        fn read_last_line(&self, path: &std::path::Path) -> std::io::Result<Option<Vec<u8>>> {
+            self.inner.read_last_line(path)
+        }
+
         fn exists(&self, path: &std::path::Path) -> std::io::Result<bool> {
             self.inner.exists(path)
         }

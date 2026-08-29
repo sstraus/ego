@@ -189,12 +189,9 @@ pub trait StoreIo: Send + Sync {
     fn read(&self, path: &Path) -> io::Result<Option<Vec<u8>>>;
 
     /// Read only the first complete line at `path`, or `None` when the file is
-    /// absent or empty. The default keeps existing delegating adapters working
-    /// and falls back to their whole-file read only when no real file exists.
+    /// absent or empty. The default delegates exclusively to [`StoreIo::read`]
+    /// so an adapter remains the sole owner of the path it represents.
     fn read_first_line(&self, path: &Path) -> io::Result<Option<Vec<u8>>> {
-        if let Some(line) = read_first_line(path)? {
-            return Ok(Some(line));
-        }
         let Some(bytes) = self.read(path)? else {
             return Ok(None);
         };
@@ -213,16 +210,11 @@ pub trait StoreIo: Send + Sync {
     /// Read only the final complete line at `path`, or `None` when the file
     /// is absent or empty.
     ///
-    /// The default first uses the real filesystem operation because existing
-    /// delegating adapters did not have this narrow method when it was
-    /// introduced, then conservatively falls back to [`StoreIo::read`] for an
-    /// adapter backed by something else. Ordinary production appends use the
-    /// efficient [`OsIo`] override to derive the next physical record position
-    /// without an O(log size) whole-file read.
+    /// The default delegates exclusively to [`StoreIo::read`] so an adapter
+    /// remains the sole owner of the path it represents. Ordinary production
+    /// appends use the efficient [`OsIo`] override to derive the next physical
+    /// record position without an O(log size) whole-file read.
     fn read_last_line(&self, path: &Path) -> io::Result<Option<Vec<u8>>> {
-        if let Some(line) = read_last_line(path)? {
-            return Ok(Some(line));
-        }
         let Some(bytes) = self.read(path)? else {
             return Ok(None);
         };
