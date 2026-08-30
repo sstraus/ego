@@ -167,10 +167,49 @@ delegate_hook_port!(
     BlockingPort,
     Ok(HookOutcome::new(HookDecision::Block, None))
 );
-delegate_hook_port!(
-    FailingPort,
-    Err(HookFailure::new(HookFailureKind::HandlerFailed, None))
-);
+
+impl HookPort for FailingPort {
+    fn reached<'a>(
+        &'a self,
+        producer: &'a Producer,
+        occurrence: &'a HookOccurrence,
+        plan: &'a HookPlan,
+    ) -> HookReachFuture<'a> {
+        self.0.reached(producer, occurrence, plan)
+    }
+
+    fn started<'a>(
+        &'a self,
+        spec: &'a HookSpec,
+        occurrence: &'a HookOccurrence,
+        reached: &'a HookReachedEvidence,
+        activation: HookActivation,
+        invocation: HookInvocationId,
+    ) -> HookStartFuture<'a> {
+        self.0
+            .started(spec, occurrence, reached, activation, invocation)
+    }
+
+    fn invoke<'a>(&'a self, spec: &'a HookSpec, event: HookEvent) -> HookFuture<'a> {
+        if event.lifecycle() == HookLifecycle::Stop {
+            Box::pin(std::future::ready(Err(HookFailure::new(
+                HookFailureKind::HandlerFailed,
+                None,
+            ))))
+        } else {
+            self.0.invoke(spec, event)
+        }
+    }
+
+    fn settled<'a>(
+        &'a self,
+        spec: &'a HookSpec,
+        started: HookStartedEvidence,
+        result: &'a HookResult,
+    ) -> HookRecordFuture<'a> {
+        self.0.settled(spec, started, result)
+    }
+}
 
 impl HookPort for RecordingPort {
     fn reached<'a>(
@@ -452,7 +491,7 @@ fn run_turn<P: HookPort + Clone>(
 #[test]
 fn turn_loop_real_owner_records_prompt_and_stop_once_in_order() {
     let port = RecordingPort::default();
-    let (events, _state) = run_turn(
+    let (_events, _state) = run_turn(
         vec![
             AiEvent::TextDelta {
                 text: "answer".to_owned(),
@@ -466,10 +505,7 @@ fn turn_loop_real_owner_records_prompt_and_stop_once_in_order() {
         vec![HookLifecycle::UserPromptSubmit, HookLifecycle::Stop]
     );
     assert_eq!(
-        events
-            .iter()
-            .filter(|event| matches!(&event.kind, EventKind::HookInvocationStarted { .. }))
-            .count(),
+        port.starts.lock().expect("hook starts").len(),
         2
     );
 }
