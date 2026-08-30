@@ -80,13 +80,10 @@ Notes:
 ### 2.1 Availability — what ships today
 
 The same discipline as §3.1, and it was missing here until 2026-08-21. §2 lists
-sixteen commands; this build implements **ten**. The other six used to
-reach the *interactive* refusal, so `ego resume` was answered with a sentence
-about the permission dialog — true, and about a surface the caller had not
-asked for. They are now refused **by name**, each naming what it waits on, from
-the `UNBUILT` table in `crates/ego-cli/src/cli.rs`. A test binds that table to
-this section, so a command can be refused as documented only while this list
-still offers it.
+seventeen commands; this build implements **thirteen**. The remaining four are
+refused **by name**, each naming the subsystem it waits on, from the `UNBUILT`
+table in `crates/ego-cli/src/cli.rs`. A test binds that table to this section,
+so a command can be refused as documented only while this list still offers it.
 
 A word that is **not** on this list stays a prompt: §2's first line is
 `ego [PROMPT]`, so `ego "explain this failing test"` is the interactive form
@@ -102,7 +99,7 @@ the reason free on both sides. Two prose surfaces that agree today, with
 nothing that can say when they stop, are the same defect as a field that is
 omitted when empty: two states, identical bytes.
 
-| Command | M0b | Waiting on |
+| Command | Current | Status |
 |---|---|---|
 | `ego run` | **yes** | the scripting workhorse; the whole of §4 is about it |
 | `ego [PROMPT]` | **yes** | asks once whether to trust project files before ambient reads, then runs the line-oriented session. Permission questions accept `allow`, `deny`, or `amend`; amended raw JSON parameters are prepared and classified again from the beginning |
@@ -112,7 +109,7 @@ omitted when empty: two states, identical bytes.
 | `ego compact` | **yes** | a required request ID derives one idempotent clean target from the existing idle compaction operation and supports later continuation |
 | `ego export` | **yes** | local transcript export plus the producer-only version-1 structural bundle under `--sanitize`; Markdown, JSON, JSONL, stdout, and atomic file publication follow §2.1 |
 | `ego mcp` | **yes** | `add`, `rm`, `ls [--json]`, and `reload [NAME]` use one live admitted registry and truthful health projection. `login NAME` is typed but refuses before network access until the product CIMD origin and loopback redirect are published |
-| `ego mcp-server` | **yes** | currently serves scoped `run`/`continue`/`cancel`/`status` tools and sanitized summary/output resources on stdio; M3 adds `compact` under §6.6. `--max-concurrent-runs`, `--retained-requests`, and `--max-resource-bytes` are required non-zero deployment bounds; `-C`/the current directory is the sole canonical root and stdout remains protocol-only |
+| `ego mcp-server` | **yes** | serves scoped `run`/`continue`/`cancel`/`status`/`compact` tools and sanitized summary/output resources on stdio. `--max-concurrent-runs`, `--retained-requests`, and `--max-resource-bytes` are required non-zero deployment bounds; `-C`/the current directory is the sole canonical root and stdout remains protocol-only |
 | `ego auth` | **yes** | `login\|logout\|status [PROVIDER]`; credentials live in one locked `$EGO_HOME/auth.json`, while TOML commands and discovered auth plugins can supply login tokens |
 | `ego models` | **yes** | prints the shared current-model catalogue as deterministic text or versioned JSON; `--provider` filters both model and source rows, and `--refresh` updates authoritative discovered slices without promoting cached display facts into generation authority |
 | `ego hooks` | no | the strict hook catalogue and runner (**M4**). This build has no admitted hook snapshot to inspect; `docs/21-claude-hook-parity.md` defines the final stable Claude-compatible lifecycle and read-only projection |
@@ -231,7 +228,7 @@ ceilings come only from an administrator's `/etc/ego`.
 §4.5 requires this table: *no flag documented before its contract is
 implemented*. The grammar above is the **whole** design; this says which of it
 you can actually run. Checked against the clap definitions in
-`crates/ego-cli/src/cli.rs`, not against intent, on 2026-08-21.
+`crates/ego-cli/src/cli.rs`, not against intent, on 2026-08-30.
 
 A flag marked **no** is **refused by name**, with the subsystem it waits on —
 not swallowed, and not reported as an unknown argument. That mechanism is
@@ -249,7 +246,7 @@ written down. They are refused where the layers are read
 the flag, the file, the profile table and `-c`, and which arrives with the file
 and line that said it.
 
-| Flag | M0b | Note |
+| Flag | Current | Note |
 |---|---|---|
 | `-m, --model` | **yes** | |
 | `--offline` | **yes** | |
@@ -261,7 +258,7 @@ and line that said it.
 | `--ephemeral` | no | recognized only to refuse by name with usage error exit 2 before opening or creating a session or causing an effect; use the durable default, `--session`, or `--session-id` |
 | `--session-dir` | **yes** | |
 | `--artifact-dir` | **yes** | `ego run`/`ego resume` only, and only with the exact selected profile name `ci`; flags override `[profile.ci].artifact_dir` |
-| `--answer` | no | regression case: the headless continuation of `AskQuestion`; the question event and accepted answer must exist before the flag can enforce anything |
+| `--answer` | **yes** | `ego resume --answer QUESTION_ID=JSON` validates and durably settles pending questions before continuing the session |
 | `--output` | **yes** | `text\|json\|jsonl`. On `ego ls` the two machine forms are §4.6's, not §4.1/§4.2's — a listing is not a run |
 | `--all` | **yes** | `ego ls` only, and documented in §2 rather than here: §3 is the argument grammar of a *run*, and this widens a catalogue query |
 | `--schema`, `--schema-retries` | **yes** | `--schema-retries` ships as its own flag; §3 mentions it only inside `--schema`'s description |
@@ -272,13 +269,13 @@ and line that said it.
 | `-q`, `--no-color` | **yes** | `--no-color` was marked **yes** here on 2026-08-21 while being parsed and read by nothing — the same silently vacuous flag §4.4 refuses elsewhere. It decides for real from 2026-08-22: it is the highest-precedence input to the one capability gate (`crates/ego-cli/src/render/caps.rs`), above `NO_COLOR`, above `TERM`/`COLORTERM`, above `isatty`. See `docs/decisions/2026-08-22-two-axes-and-a-terminal-that-answers.md` §1 |
 | `--mode`, `--plan`, `--yolo`, `--allow`, `--deny` | **yes** | `--plan`/`--yolo` are spellings of `--mode`; two at once is a usage error. All five modes enforce. `auto` resolves a separate configured judge and routes its closed verdict before any human escalation. Five of the seven rule heads enforce: `read`, `write`, `list`, `search`, and `exec`; `net` and `tool` remain refused by name because no builtin produces those operations. The seven builtins are read, glob, grep, write, edit, exec, and read_tool_result. `edit` prepares both `Read` and `Write`; `read_tool_result` uses its session-evidence capability rather than a user-authored rule head. |
 | `--sandbox` | **yes** | `ro\|workspace\|off`, default `workspace`, enforced by the measured platform backend before a prepared process can launch; an unavailable required capability fails closed |
-| `-f`, `--file`, `--var` | no | waiting on executable agent files (**M4**). §5 is a design, not a feature: the shebang form runs nothing today |
+| `-f`, `--file`, `--var` | **yes** | strict version-1 agent files load through the existing bounded YAML implementation, apply their configuration layer below flags, and substitute declared body variables. M4 extracts the shared envelope for skills and still owns the direct executable shebang end-to-end proof, not these flags' availability |
 | `--attach` | no | waiting on a non-text content block — the conversation model carries text, tool calls and tool results, so an image has nothing to be sent in |
 | `--mcp` | **yes** | repeatable ordered selection of effective `NAME` entries and strict invocation-scoped `@FILE` entries; the selected live admission is shared by dispatch, `/tools`, `/doctor`, and deterministic `mcp_errors` |
 | `--retry`, `--fallback` | no | waiting on a retry seam. Delivery certainty is implemented and enforced; a generation owns its reservation for its whole life, so re-issuing one changes the attempt contract rather than adding a loop |
 | `-v`, `--verbose` | no | waiting on a **decision**, not a subsystem — the only such entry. §4.7 says exactly what `-q` suppresses and nothing anywhere says what `-v` adds. It was marked **yes** beside `--no-color` until 2026-08-23 while being parsed and read by nothing, which is `--no-color`'s own defect sitting in `--no-color`'s own row. The obvious answer, turning up `tracing`, is not obvious: this build installs no subscriber at all, so every `tracing::warn!` in the workspace already goes nowhere, and adding one puts a second writer on the stream §4.7's marks and notification own (R12) |
 
-**Nine documented flag spellings do not ship.** That is the gap this table
+**Six documented flag spellings do not ship.** That is the gap this table
 exists to stop being invisible, and it is not a defect list — every one of them
 refuses by name and says what it is waiting on. The defect would be §3 reading,
 to someone who has not run the binary, as though all of it worked.
@@ -592,10 +589,12 @@ opens a filterable menu; the menu, shortcut bindings, help, and enabled-state
 checks are projections of one action registry rather than parallel command
 implementations.
 
-That paragraph is the final contract. The current implementation has no slash
-parser or action registry: slash-looking composer input is submitted to the
-model like any other prompt. regression case introduces the registry and changes
-that behaviour.
+That paragraph is the final contract. The current implementation has the shared
+24-command action registry: a typed complete slash is classified as an action,
+while bracketed paste and non-command text remain ordinary prompts. Completion,
+menu, help, dispatch, and live availability read that one registry. Actions
+whose final owner has not landed remain visible with their explicit disabled
+reason rather than becoming model input or silently disappearing.
 
 The permission prompt has a plain representation that works in every terminal
 and scripted transcript: `allow`, `deny`, or `amend`. Amend reads a complete
@@ -637,16 +636,16 @@ composer ship. `ego` with no subcommand opens a session whose single Reedline
 owner stays active while rendered output, tools, and modal prompts cross
 bounded channels.
 
-| Surface | M0b | Note |
+| Surface | Current | Note |
 |---|---|---|
 | Input line, history, multiline | **yes** | reedline. `Ctrl+C` abandons the line and keeps the session; `Ctrl+D` ends it |
 | Bracketed paste | **yes** | on for every read, off on exit. A pasted stack trace is one prompt, not its first line |
 | Ctrl+V | **refused by name** | it asks for a pasteboard *image* first (§6.1), and there is nowhere to put one — the same gap that refuses `--attach`. It refuses rather than silently pasting text, because only one of those two can be discovered |
 | Permission dialog | **yes** | plain `allow`, `deny`, or `amend`; amend then reads replacement JSON parameters. Invalid answers re-prompt; Ctrl-C and EOF deny. The engine keeps the configured mode first and re-prepares/re-classifies every amendment |
-| Slash commands | no | there is no parser or registry yet; slash-looking composer input currently goes to the model. regression case introduces the final action surface |
+| Slash commands | **partly** | one shared 24-command registry drives typed-slash classification, completion, menu, help, and dispatch. Enabled actions have installed local handlers; unavailable actions remain registered and name their owning subsystem |
 | Live composer during a turn | **yes** | one Reedline owner accepts bounded external-printer output and preserves the exact draft through streaming, tools, permission waits, paste, and resize |
 | Ctrl-S drafts, prompt queue, steering | **yes** | exact LIFO drafts, durable FIFO busy input, safe-boundary steering, expedited Esc delivery, replay, and exit accounting |
-| Model/question menus and status line | no | regression case |
+| Model/question menus and status line | **yes** | the shared model picker, typed question path, and width-aware status projection are live |
 | `--attach` | no | §3.1's row: waiting on a non-text content block |
 | OSC 133 A (prompt mark), OSC 7 (cwd) | no | deliberately: both are owned by the surface rather than by a run, and their exact terminal contract is not implemented. `ego run` emits 133 C/D, OSC 9;4 and — under TUICommander — 7770 |
 
@@ -841,8 +840,8 @@ retries nor rolls back.
 
 An exact provider context overflow is a distinct settled provider failure, not
 ordinary output length or generic invalid input, and is never blindly retried.
-The operator then invokes `/compact` or `ego compact`; M3 adds no automatic
-threshold.
+The operator then invokes `/compact` or `ego compact`; M3 introduced no
+automatic threshold.
 
 ACP v1 advertises only the optional `_ego/compact` extension in
 `AgentCapabilities._meta`. Its request is
