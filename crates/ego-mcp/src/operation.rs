@@ -5,8 +5,11 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use ego_core::config::{McpHttpConfig, McpServerConfig, McpServerName, McpStdioConfig};
+use ego_core::event::hook::{HookLifecycle, HookOccurrenceKey};
+use ego_core::event::id::Producer;
+use ego_core::event::time::{Clock, Timestamp};
 use ego_core::generator::attempt::DeliveryCertainty;
-use ego_core::hook::EffectScope;
+use ego_core::hook::{EffectScope, HookEvent, HookLifecycleDispatcher, HookOccurrence};
 use ego_core::mcp::{
     CacheScope as CoreCacheScope, CancellationClassification, ForeignContent, ForeignInputRequired,
     ForeignResult, McpAdmissionFingerprint, McpOperationKind, McpSubject, ToolExecution,
@@ -17,8 +20,10 @@ use ego_core::permit::{
     ToolError, ToolResult,
 };
 use ego_core::suspension::{
-    ContinuationError, ContinuationJournal, OpenedContinuation, PreparedResume,
+    ContinuationError, ContinuationJournal, ContinuationRecord, ContinuationState,
+    OpenedContinuation, PreparedResume, ResumeFloor, ResumeKeySource,
 };
+use ego_core::turn::ToolEffectPorts;
 use futures::future;
 use rmcp::model::{
     CacheScope, CallToolRequestParams, CallToolResult, ContentBlock, GetPromptRequestParams,
@@ -30,7 +35,7 @@ use sha2::{Digest, Sha256};
 
 use crate::dynamic::{McpCollapsedBootstrap, McpOperation, McpOperationFactory};
 use crate::http::AdmittedMcpHttpProfile;
-use crate::registry::{McpToolSchemaAdmission, McpToolSchemaCommand};
+use crate::registry::{McpRegistryCapture, McpToolSchemaAdmission, McpToolSchemaCommand};
 use crate::state::{compile_schema, validate_answer};
 use crate::{
     McpClient, McpClientOptions, McpDuplexEffects, McpError, McpFailure, McpFuture,
@@ -84,54 +89,154 @@ impl OperationLimits {
 /// the selected operation alone receives the guarded one-shot claim.
 pub struct McpHttpOperationFactory {
     management: Arc<dyn McpHttpEffects>,
-    continuations: Arc<dyn McpInputRequiredRecorder>,
+    continuations: Arc<McpContinuationOwner>,
     limits: OperationLimits,
     collapsed: Option<CollapsedSchemaAdmission>,
 }
 
-/// Consumer-owned persistence boundary used before an input-required outcome
-/// is allowed to return control to the turn loop.
-pub trait McpInputRequiredRecorder: Send + Sync {
-    fn record(
-        &self,
-        envelope: &ego_core::permit::McpPreparedEnvelope,
-        required: crate::McpMappedInput,
-        resume: PreparedResume,
-    ) -> Result<ForeignInputRequired, ContinuationError>;
-}
-
-/// Durable adapter from one validated MRTR form to the core journal port.
-pub struct DurableMcpInputRequiredRecorder {
+/// The sole owner of durable MCP input-required and accepted-answer rounds.
+pub struct McpContinuationOwner {
     journal: Arc<dyn ContinuationJournal>,
+    hooks: HookLifecycleDispatcher,
+    keys: Arc<dyn ResumeKeySource>,
+    clock: Arc<dyn Clock>,
 }
 
-impl DurableMcpInputRequiredRecorder {
-    pub fn new(journal: Arc<dyn ContinuationJournal>) -> Self {
-        Self { journal }
+impl McpContinuationOwner {
+    pub fn new(
+        journal: Arc<dyn ContinuationJournal>,
+        hooks: HookLifecycleDispatcher,
+        keys: Arc<dyn ResumeKeySource>,
+        clock: Arc<dyn Clock>,
+    ) -> Self {
+        Self {
+            journal,
+            hooks,
+            keys,
+            clock,
+        }
     }
-}
 
-impl McpInputRequiredRecorder for DurableMcpInputRequiredRecorder {
-    fn record(
+    pub async fn record_input_required(
         &self,
-        envelope: &ego_core::permit::McpPreparedEnvelope,
+        envelope: ego_core::permit::McpPreparedEnvelope,
         required: crate::McpMappedInput,
         resume: PreparedResume,
-    ) -> Result<ForeignInputRequired, ContinuationError> {
-        let schema =
-            serde_json::to_vec(required.schema()).map_err(|_| ContinuationError::InvalidRecord)?;
-        let id = continuation_id(envelope, &required, &schema);
-        let record = resume.into_record(
-            id.clone(),
-            envelope.parameters().to_vec(),
-            required.request_state().to_vec(),
-            required.correlation_key(),
-            schema,
-            envelope.transport_fingerprint(),
-        )?;
-        self.journal.record(record)?;
-        ForeignInputRequired::new(id).map_err(|_| ContinuationError::InvalidId)
+    ) -> Result<ForeignInputRequired, McpError> {
+        let schema = serde_json::to_vec(required.schema())
+            .map_err(|_| continuation(ContinuationError::InvalidRecord))?;
+        let id = continuation_id(&envelope, &required, &schema);
+        let record = resume
+            .into_record(
+                id.clone(),
+                envelope.parameters().to_vec(),
+                required.request_state().to_vec(),
+                required.correlation_key(),
+                schema,
+                envelope.transport_fingerprint(),
+            )
+            .map_err(continuation)?;
+        self.journal.record(record).map_err(continuation)?;
+        self.dispatch(HookLifecycle::Elicitation, &id).await?;
+        ForeignInputRequired::new(id).map_err(|_| continuation(ContinuationError::InvalidId))
     }
+
+    pub async fn accept_answer<'a>(
+        &self,
+        id: &str,
+        raw_answer: &[u8],
+        capture: McpRegistryCapture,
+        floor: ResumeFloor,
+        effects: ToolEffectPorts<'a>,
+    ) -> Result<ToolExecution, McpError> {
+        let pending = self.journal.load(id).map_err(continuation)?;
+        validate_recorded_answer(&pending, raw_answer)?;
+        let now = self.clock.now();
+        self.journal
+            .accept_answer(id, raw_answer, now)
+            .map_err(continuation)?;
+        let accepted = self
+            .journal
+            .load(id)
+            .map_err(continuation)?
+            .into_accepted()
+            .map_err(continuation)?;
+        let (server, factory, call, current_fingerprints) = capture.prepare_resume(
+            accepted.subject(),
+            accepted.fingerprints(),
+            accepted.original_parameters(),
+        )?;
+        let opened = accepted
+            .open(call, &current_fingerprints, &floor, now, self.keys.as_ref())
+            .map_err(continuation)?;
+        let admission = McpResumeAdmission::validate(opened)?;
+        self.dispatch(HookLifecycle::ElicitationResult, id).await?;
+        let claim_time = self.clock.now();
+        let (authorized, successor) = admission.into_retry_authorized_with_successor(
+            floor,
+            claim_time,
+            self.keys.as_ref(),
+        )?;
+        let claimed = self.journal.claim(id, claim_time).map_err(continuation)?;
+        let (call, guarded) = effects.bind_mcp_resume(authorized, successor);
+        match factory.execute(server, call, &guarded).await {
+            Ok(execution) => {
+                self.journal
+                    .settle(claimed, ContinuationState::Completed)
+                    .map_err(continuation)?;
+                Ok(execution)
+            }
+            Err(error) => {
+                let delivery = error.delivery().unwrap_or(DeliveryCertainty::PossiblySent);
+                let state = if delivery == DeliveryCertainty::DefinitelyUnsent {
+                    ContinuationState::Failed
+                } else {
+                    ContinuationState::Uncertain
+                };
+                self.journal.settle(claimed, state).map_err(|settlement| {
+                    McpError::with_delivery(
+                        McpFailure::Transport,
+                        format!("continued MCP settlement failed: {settlement}"),
+                        delivery,
+                    )
+                })?;
+                Err(McpError::with_delivery(
+                    McpFailure::Transport,
+                    error.to_string(),
+                    delivery,
+                ))
+            }
+        }
+    }
+
+    async fn dispatch(&self, lifecycle: HookLifecycle, id: &str) -> Result<(), McpError> {
+        let key = HookOccurrenceKey::continuation(lifecycle, id)
+            .map_err(|error| hook_failure(error.to_string()))?;
+        let occurrence = HookOccurrence::new(key, HookEvent::session(lifecycle))
+            .map_err(|error| hook_failure(error.to_string()))?;
+        let result = self
+            .hooks
+            .dispatch(Producer::Main, occurrence)
+            .await
+            .map_err(|error| hook_failure(error.to_string()))?;
+        if !result.decision().is_continue() || !result.is_durable() {
+            return Err(hook_failure(format!(
+                "{} hook blocked or settled uncertain",
+                lifecycle.as_str()
+            )));
+        }
+        Ok(())
+    }
+}
+
+fn validate_recorded_answer(
+    record: &ContinuationRecord,
+    raw_answer: &[u8],
+) -> Result<(), McpError> {
+    let schema: Value = serde_json::from_slice(record.correlation_schema())?;
+    let answer: Value = serde_json::from_slice(raw_answer)?;
+    let validator = compile_schema(&schema)?;
+    validate_answer(&validator, &answer)
 }
 
 /// Protocol-validated continuation ready to reconstruct one exact MRTR retry.
@@ -148,13 +253,20 @@ impl McpResumeAdmission {
         Ok(Self { opened })
     }
 
-    pub fn into_retry_authorized(self) -> Result<Authorized, McpError> {
-        self.opened.into_retry_authorized().map_err(|error| {
-            McpError::new(
-                McpFailure::Authority,
-                format!("invalid MRTR continuation: {error}"),
-            )
-        })
+    pub fn into_retry_authorized_with_successor(
+        self,
+        floor: ResumeFloor,
+        now: Timestamp,
+        keys: &dyn ResumeKeySource,
+    ) -> Result<(Authorized, PreparedResume), McpError> {
+        self.opened
+            .into_retry_authorized_with_successor(floor, now, keys)
+            .map_err(|error| {
+                McpError::new(
+                    McpFailure::Authority,
+                    format!("invalid MRTR continuation: {error}"),
+                )
+            })
     }
 }
 
@@ -190,7 +302,7 @@ fn continuation_id(
 impl McpHttpOperationFactory {
     pub fn new(
         management: Arc<dyn McpHttpEffects>,
-        continuations: Arc<dyn McpInputRequiredRecorder>,
+        continuations: Arc<McpContinuationOwner>,
         max_sse_event_size: usize,
         timeout: Duration,
     ) -> Result<Self, McpError> {
@@ -204,7 +316,7 @@ impl McpHttpOperationFactory {
 
     pub(crate) fn runtime(
         management: Arc<dyn McpHttpEffects>,
-        continuations: Arc<dyn McpInputRequiredRecorder>,
+        continuations: Arc<McpContinuationOwner>,
         max_sse_event_size: usize,
         timeout: Duration,
         bootstrap: Option<McpCollapsedBootstrap>,
@@ -272,14 +384,14 @@ impl McpOperationFactory for McpHttpOperationFactory {
 
 /// A fresh stdio lifecycle consuming one guarded owned duplex.
 pub struct McpStdioOperationFactory {
-    continuations: Arc<dyn McpInputRequiredRecorder>,
+    continuations: Arc<McpContinuationOwner>,
     limits: OperationLimits,
     collapsed: Option<CollapsedSchemaAdmission>,
 }
 
 impl McpStdioOperationFactory {
     pub fn new(
-        continuations: Arc<dyn McpInputRequiredRecorder>,
+        continuations: Arc<McpContinuationOwner>,
         max_sse_event_size: usize,
         timeout: Duration,
     ) -> Result<Self, McpError> {
@@ -291,7 +403,7 @@ impl McpStdioOperationFactory {
     }
 
     pub(crate) fn runtime(
-        continuations: Arc<dyn McpInputRequiredRecorder>,
+        continuations: Arc<McpContinuationOwner>,
         max_sse_event_size: usize,
         timeout: Duration,
         bootstrap: Option<McpCollapsedBootstrap>,
@@ -489,7 +601,8 @@ async fn execute_http(
         factory.continuations.as_ref(),
         selected.delivery(),
         cancellation_from_http(selected.end()),
-    )?;
+    )
+    .await?;
     if let (Some(collapsed), Some(command)) = (factory.collapsed.as_ref(), schema) {
         collapsed.admission.reconcile(command).await?;
     }
@@ -500,7 +613,7 @@ async fn execute_stdio(
     config: &McpStdioConfig,
     call: PreparedCall,
     io: &dyn GuardedIo,
-    continuations: Arc<dyn McpInputRequiredRecorder>,
+    continuations: Arc<McpContinuationOwner>,
     limits: OperationLimits,
     admission: Arc<McpServerAdmission>,
     collapsed: Option<CollapsedSchemaAdmission>,
@@ -552,7 +665,8 @@ async fn execute_stdio(
         continuations.as_ref(),
         duplex.delivery(),
         cancellation_from_duplex(duplex),
-    )?;
+    )
+    .await?;
     if let (Some(collapsed), Some(command)) = (collapsed, schema) {
         collapsed.admission.reconcile(command).await?;
     }
@@ -880,11 +994,11 @@ fn tool_schema_command(
     )))
 }
 
-fn project_outcome(
+async fn project_outcome(
     outcome: OperationOutcome,
     envelope: &ego_core::permit::McpPreparedEnvelope,
     io: &dyn GuardedIo,
-    continuations: &dyn McpInputRequiredRecorder,
+    continuations: &McpContinuationOwner,
     delivery: DeliveryCertainty,
     cancellation: CancellationClassification,
 ) -> Result<ToolExecution, McpError> {
@@ -894,9 +1008,9 @@ fn project_outcome(
                 .take_mcp_resume()
                 .map_err(|error| McpError::new(McpFailure::Transport, error.to_string()))?;
             continuations
-                .record(envelope, required, resume)
+                .record_input_required(envelope.clone(), required, resume)
+                .await
                 .map(ToolExecution::InputRequired)
-                .map_err(|error| McpError::new(McpFailure::Transport, error.to_string()))
         }
         OperationOutcome::Complete(result) => {
             let projected = project_complete(result)?;
@@ -1428,7 +1542,10 @@ fn prepare_error(message: impl Into<String>) -> ToolError {
 }
 
 fn execution_error(message: impl Into<String>) -> ToolError {
-    ToolError::InvalidParams(format!("MCP execution failed: {}", message.into()))
+    ToolError::foreign(
+        format!("MCP execution failed: {}", message.into()),
+        DeliveryCertainty::DefinitelyUnsent,
+    )
 }
 
 fn mcp_prepare_error(error: McpError) -> ToolError {
@@ -1436,7 +1553,16 @@ fn mcp_prepare_error(error: McpError) -> ToolError {
 }
 
 fn mcp_execution_error(error: McpError) -> ToolError {
-    execution_error(error.to_string())
+    let delivery = error.delivery().unwrap_or(DeliveryCertainty::PossiblySent);
+    ToolError::foreign(format!("MCP execution failed: {error}"), delivery)
+}
+
+fn continuation(error: ContinuationError) -> McpError {
+    McpError::new(McpFailure::Authority, error.to_string())
+}
+
+fn hook_failure(message: impl Into<String>) -> McpError {
+    McpError::new(McpFailure::Authority, message)
 }
 
 fn authority(message: impl Into<String>) -> McpError {

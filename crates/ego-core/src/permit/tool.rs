@@ -14,6 +14,7 @@ use super::grant::PermitDenied;
 use super::path::CanonPath;
 use super::prepared_call::PreparedCall;
 use super::spawn::ProcessError;
+use crate::generator::attempt::DeliveryCertainty;
 use crate::mcp::{ForeignResult, ToolExecution};
 use crate::store::evidence::{EvidenceError, EvidencePage, EvidenceRef};
 use crate::suspension::ContinuationError;
@@ -60,6 +61,11 @@ pub enum ToolError {
     Process(ProcessError),
     /// Durable MCP continuation authority could not be prepared or recorded.
     Continuation(ContinuationError),
+    /// A foreign effect failed after its delivery certainty was known.
+    Foreign {
+        message: String,
+        delivery: DeliveryCertainty,
+    },
 }
 
 impl std::fmt::Display for ToolError {
@@ -71,6 +77,7 @@ impl std::fmt::Display for ToolError {
             ToolError::Evidence(err) => write!(f, "{err}"),
             ToolError::Process(err) => write!(f, "{err}"),
             ToolError::Continuation(err) => write!(f, "{err}"),
+            ToolError::Foreign { message, .. } => f.write_str(message),
         }
     }
 }
@@ -78,6 +85,25 @@ impl std::fmt::Display for ToolError {
 impl std::error::Error for ToolError {}
 
 impl ToolError {
+    pub fn foreign(message: impl Into<String>, delivery: DeliveryCertainty) -> Self {
+        Self::Foreign {
+            message: message.into(),
+            delivery,
+        }
+    }
+
+    pub fn delivery(&self) -> Option<DeliveryCertainty> {
+        match self {
+            Self::Foreign { delivery, .. } => Some(*delivery),
+            Self::InvalidParams(_)
+            | Self::Denied(_)
+            | Self::Fs(_)
+            | Self::Evidence(_)
+            | Self::Process(_)
+            | Self::Continuation(_) => None,
+        }
+    }
+
     pub fn into_failed_result(self) -> ToolResult {
         match self {
             Self::Process(error) => error.into_failed_result(),

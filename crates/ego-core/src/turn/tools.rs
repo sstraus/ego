@@ -17,7 +17,7 @@ use crate::permit::{
 };
 use crate::store::blob::BlobStore;
 use crate::store::evidence::EvidenceStore;
-use crate::suspension::ResumeSealer;
+use crate::suspension::{PreparedResume, ResumeSealer};
 
 use super::RegisteredTool;
 use super::catalogue::{
@@ -104,6 +104,27 @@ impl<'a> ToolEffectPorts<'a> {
             one_hop,
             duplex,
         }
+    }
+
+    /// Bind one reopened MCP authority to the same guarded effect path used
+    /// by an ordinary admitted tool execution.
+    pub fn bind_mcp_resume(
+        self,
+        authorized: Authorized,
+        resume: PreparedResume,
+    ) -> (PreparedCall, GuardedEffects<'a>) {
+        let (call, permit) = authorized.into_parts();
+        let guarded = GuardedEffects::new_with_resume(
+            permit,
+            self.fs,
+            self.process,
+            self.evidence,
+            self.resolver,
+            self.one_hop,
+            self.duplex,
+            Some(resume),
+        );
+        (call, guarded)
     }
 }
 

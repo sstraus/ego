@@ -1,3 +1,4 @@
+use ego_core::generator::attempt::DeliveryCertainty;
 use ego_core::permit::TransportError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -17,6 +18,7 @@ pub enum McpFailure {
 pub struct McpError {
     failure: McpFailure,
     message: String,
+    delivery: Option<DeliveryCertainty>,
 }
 
 impl McpError {
@@ -24,11 +26,28 @@ impl McpError {
         Self {
             failure,
             message: message.into(),
+            delivery: None,
+        }
+    }
+
+    pub fn with_delivery(
+        failure: McpFailure,
+        message: impl Into<String>,
+        delivery: DeliveryCertainty,
+    ) -> Self {
+        Self {
+            failure,
+            message: message.into(),
+            delivery: Some(delivery),
         }
     }
 
     pub fn failure(&self) -> McpFailure {
         self.failure
+    }
+
+    pub fn delivery(&self) -> Option<DeliveryCertainty> {
+        self.delivery
     }
 }
 
@@ -42,7 +61,8 @@ impl std::error::Error for McpError {}
 
 impl From<TransportError> for McpError {
     fn from(error: TransportError) -> Self {
-        Self::new(McpFailure::Transport, error.to_string())
+        let delivery = error.delivery();
+        Self::with_delivery(McpFailure::Transport, error.to_string(), delivery)
     }
 }
 

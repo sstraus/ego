@@ -114,22 +114,6 @@ impl ResumeSealer {
         authorized: &Authorized,
         floor: ResumeFloor,
     ) -> Result<PreparedResume, ContinuationError> {
-        let envelope = authorized
-            .call()
-            .mcp_envelope()
-            .ok_or(ContinuationError::AuthorityMismatch)?;
-        let subject = ContinuationSubject::new(
-            envelope.subject().server(),
-            envelope.operation().method(),
-            envelope.admission().generation(),
-            envelope.admission().schema(),
-        )?;
-        let fingerprints = ResumeFingerprints::new(
-            envelope.admission().generation(),
-            envelope.admission().operation(),
-            envelope.admission().schema(),
-            envelope.transport_fingerprint(),
-        )?;
         let expires_at = Timestamp::from_millis(
             self.clock
                 .now()
@@ -137,21 +121,46 @@ impl ResumeSealer {
                 .checked_add(self.lifetime_ms)
                 .ok_or(ContinuationError::InvalidRecord)?,
         );
-        let grant = seal_resume(
-            authorized,
-            subject.clone(),
-            fingerprints.clone(),
-            floor,
-            expires_at,
-            self.keys.as_ref(),
-        )?;
-        Ok(PreparedResume {
-            grant,
-            subject,
-            fingerprints,
-            expires_at,
-        })
+        prepare_resume_until(authorized, floor, expires_at, self.keys.as_ref())
     }
+}
+
+fn prepare_resume_until(
+    authorized: &Authorized,
+    floor: ResumeFloor,
+    expires_at: Timestamp,
+    keys: &dyn ResumeKeySource,
+) -> Result<PreparedResume, ContinuationError> {
+    let envelope = authorized
+        .call()
+        .mcp_envelope()
+        .ok_or(ContinuationError::AuthorityMismatch)?;
+    let subject = ContinuationSubject::new(
+        envelope.subject().server(),
+        envelope.operation().method(),
+        envelope.admission().generation(),
+        envelope.admission().schema(),
+    )?;
+    let fingerprints = ResumeFingerprints::new(
+        envelope.admission().generation(),
+        envelope.admission().operation(),
+        envelope.admission().schema(),
+        envelope.transport_fingerprint(),
+    )?;
+    let grant = seal_resume(
+        authorized,
+        subject.clone(),
+        fingerprints.clone(),
+        floor,
+        expires_at,
+        keys,
+    )?;
+    Ok(PreparedResume {
+        grant,
+        subject,
+        fingerprints,
+        expires_at,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -542,6 +551,9 @@ impl ContinuationRecord {
     pub fn transport_fingerprint(&self) -> Option<&str> {
         self.transport_fingerprint.as_deref()
     }
+    pub fn correlation_schema(&self) -> &[u8] {
+        &self.correlation_schema
+    }
     pub fn expires_at(&self) -> Timestamp {
         self.expires_at
     }
@@ -774,9 +786,6 @@ impl OpenedContinuation {
         let parameters = parameters
             .as_object_mut()
             .ok_or(ContinuationError::InvalidRecord)?;
-        if parameters.contains_key("inputResponses") || parameters.contains_key("requestState") {
-            return Err(ContinuationError::InvalidRecord);
-        }
         let answer = serde_json::from_slice(&self.accepted_answer)
             .map_err(|_| ContinuationError::InvalidAnswer)?;
         let request_state =
@@ -793,6 +802,23 @@ impl OpenedContinuation {
         self.authorized
             .with_verified_resume_parameters(&parameters)
             .map_err(|_| ContinuationError::InvalidRecord)
+    }
+
+    /// Consume one validated retry while preparing authority for a possible
+    /// successor round. The successor can never outlive its predecessor.
+    pub fn into_retry_authorized_with_successor(
+        self,
+        floor: ResumeFloor,
+        now: Timestamp,
+        keys: &dyn ResumeKeySource,
+    ) -> Result<(Authorized, PreparedResume), ContinuationError> {
+        if now >= self.expires_at {
+            return Err(ContinuationError::Expired);
+        }
+        let expires_at = self.expires_at;
+        let authorized = self.into_retry_authorized()?;
+        let successor = prepare_resume_until(&authorized, floor, expires_at, keys)?;
+        Ok((authorized, successor))
     }
 }
 

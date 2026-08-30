@@ -4,6 +4,7 @@
 //! intentionally remains RED until `McpContinuationOwner` owns both the
 //! asynchronous input-required projection and accepted-answer resume.
 
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -26,13 +27,14 @@ use ego_core::hook::{
 use ego_core::mcp::ToolExecution;
 use ego_core::permit::{
     Authorized, CanonPath, Classification, CleanupCertainty, DnsResolution, DuplexEnd,
-    DuplexHandle, DuplexSession, DuplexSpawner, EnvPolicy, GuardedEffects, OneHop, OneHopResponse,
+    DuplexHandle, DuplexSession, DuplexSpawner, GuardedEffects, OneHop, OneHopResponse,
     PolicyEngine, PrepareCtx, PreparedCall, ProcessError, ProcessExecutor, Resolver, SpawnSpec,
     Tool, ToolResult, TransportError, TransportFailure,
 };
 use ego_core::store::blob::{BlobError, BlobPage, BlobRead, BlobRef, BlobStore, BlobWriter};
 use ego_core::store::evidence::{
-    EvidenceError, EvidencePage, EvidenceRead, EvidenceStore, EvidenceWriter,
+    EvidenceError, EvidenceId, EvidencePage, EvidenceRead, EvidenceRef, EvidenceStore,
+    EvidenceWriter,
 };
 use ego_core::suspension::{
     ClaimedContinuation, ContinuationError, ContinuationJournal, ContinuationRecord,
@@ -44,13 +46,13 @@ use ego_core::turn::{
 use ego_mcp::{
     McpAdmittedCandidate, McpCacheMetadata, McpCandidateAdmission, McpCandidateError,
     McpCandidateIdentity, McpCandidateInventory, McpCapabilities, McpContinuationOwner, McpFuture,
-    McpInputMapping, McpInputRequired, McpOperationFactory, McpRegistryCandidate,
-    McpRegistryCapture, McpRegistryController, McpRegistryRefresh, McpServerAdmission,
-    McpStdioOperationFactory, McpTransportMaterial, RegistryScope, RegistryTrigger,
+    McpInputMapping, McpInputRequired, McpRegistryCandidate, McpRegistryCapture,
+    McpRegistryController, McpRegistryRefresh, McpServerAdmission, McpStdioOperationFactory,
+    McpTransportMaterial, RegistryScope, RegistryTrigger,
 };
 use futures::executor::block_on;
 use futures::future::BoxFuture;
-use futures::io::{AsyncRead, AsyncWrite, Cursor};
+use futures::io::{AsyncRead, AsyncWrite};
 use serde_json::json;
 
 const SCHEMA: &[u8] = br#"{"type":"object","properties":{"choice":{"type":"string"}},"required":["choice"],"additionalProperties":false}"#;
@@ -328,12 +330,33 @@ impl BlobStore for EmptyBlobs {
 }
 static EMPTY_BLOBS: EmptyBlobs = EmptyBlobs;
 struct EmptyEvidence;
+struct FixtureEvidenceWriter {
+    bytes: Vec<u8>,
+}
+impl EvidenceWriter for FixtureEvidenceWriter {
+    fn append(&mut self, chunk: &[u8]) -> Result<(), EvidenceError> {
+        self.bytes.extend_from_slice(chunk);
+        Ok(())
+    }
+
+    fn commit(self: Box<Self>) -> Result<EvidenceRef, EvidenceError> {
+        Ok(EvidenceRef::new(
+            EvidenceId::parse("0000000000000000000000000000000000000000000000000000000000000000")
+                .expect("fixture evidence id"),
+            self.bytes.len() as u64,
+        ))
+    }
+
+    fn abort(self: Box<Self>) -> Result<(), EvidenceError> {
+        Ok(())
+    }
+}
 impl EvidenceStore for EmptyEvidence {
     fn blob_store(&self) -> &dyn BlobStore {
         &EMPTY_BLOBS
     }
     fn begin(&self) -> Result<Box<dyn EvidenceWriter>, EvidenceError> {
-        Err(EvidenceError::Limit { limit: 0 })
+        Ok(Box::new(FixtureEvidenceWriter { bytes: Vec::new() }))
     }
     fn read_page<'a>(
         &'a self,
@@ -369,20 +392,71 @@ impl OneHop for OfflineOneHop {
 }
 
 struct ScriptedDuplex {
-    input: Cursor<Vec<u8>>,
-    output: Cursor<Vec<u8>>,
+    input: VecDeque<u8>,
+    output: Vec<u8>,
+    reader_waker: Option<std::task::Waker>,
+    complete: bool,
 }
 impl ScriptedDuplex {
     fn new(complete: bool) -> Self {
-        let result = if complete {
-            json!({"jsonrpc":"2.0","id":1,"result":{"resultType":"complete","content":[{"type":"text","text":"retry-complete"}],"isError":false}})
-        } else {
-            json!({"jsonrpc":"2.0","id":1,"result":{"resultType":"input_required","inputRequests":{"answer":{"method":"elicitation/create","params":{"mode":"form","message":"confirm","requestedSchema":{"type":"object","properties":{"choice":{"type":"string"}},"required":["choice"],"additionalProperties":false}}}},"requestState":"opaque-state"}})
-        };
-        let init = json!({"jsonrpc":"2.0","id":0,"result":{"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":{"tools":{"listChanged":false}},"ttlMs":0,"cacheScope":"private","_meta":{"io.modelcontextprotocol/serverInfo":{"name":"local","version":"1.0"}}}});
         Self {
-            input: Cursor::new(format!("{}\n{}\n", init, result).into_bytes()),
-            output: Cursor::new(Vec::new()),
+            input: VecDeque::new(),
+            output: Vec::new(),
+            reader_waker: None,
+            complete,
+        }
+    }
+
+    fn enqueue_response(&mut self, request: &serde_json::Value, result: serde_json::Value) {
+        let response = json!({
+            "jsonrpc": "2.0",
+            "id": request.get("id").cloned().unwrap_or(serde_json::Value::Null),
+            "result": result,
+        });
+        self.input
+            .extend(serde_json::to_vec(&response).expect("response"));
+        self.input.push_back(b'\n');
+        if let Some(waker) = self.reader_waker.take() {
+            waker.wake();
+        }
+    }
+
+    fn respond_to(&mut self, request: &serde_json::Value) {
+        match request.get("method").and_then(serde_json::Value::as_str) {
+            Some("server/discover") => self.enqueue_response(
+                request,
+                json!({
+                    "resultType":"complete",
+                    "supportedVersions":["2026-07-28"],
+                    "capabilities":{"tools":{"listChanged":false}},
+                    "ttlMs":0,
+                    "cacheScope":"private",
+                    "_meta":{"io.modelcontextprotocol/serverInfo":{"name":"local","version":"1.0"}}
+                }),
+            ),
+            Some("tools/list") => self.enqueue_response(
+                request,
+                json!({
+                    "resultType":"complete",
+                    "tools":[{
+                        "name":"lookup",
+                        "description":"continuation fixture",
+                        "inputSchema":{"type":"object","additionalProperties":false}
+                    }],
+                    "ttlMs":0,
+                    "cacheScope":"private"
+                }),
+            ),
+            Some("tools/call") => {
+                let result = if self.complete {
+                    json!({"resultType":"complete","content":[{"type":"text","text":"retry-complete"}],"isError":false})
+                } else {
+                    json!({"resultType":"input_required","inputRequests":{"answer":{"method":"elicitation/create","params":{"mode":"form","message":"confirm","requestedSchema":{"type":"object","properties":{"choice":{"type":"string"}},"required":["choice"],"additionalProperties":false}}}},"requestState":"opaque-state"})
+                };
+                self.enqueue_response(request, result);
+            }
+            Some("notifications/initialized") | None => {}
+            Some(_) => {}
         }
     }
 }
@@ -392,7 +466,15 @@ impl AsyncRead for ScriptedDuplex {
         cx: &mut std::task::Context<'_>,
         bytes: &mut [u8],
     ) -> std::task::Poll<std::io::Result<usize>> {
-        std::pin::Pin::new(&mut self.input).poll_read(cx, bytes)
+        if self.input.is_empty() {
+            self.reader_waker = Some(cx.waker().clone());
+            return std::task::Poll::Pending;
+        }
+        let amount = bytes.len().min(self.input.len());
+        for slot in &mut bytes[..amount] {
+            *slot = self.input.pop_front().expect("input byte");
+        }
+        std::task::Poll::Ready(Ok(amount))
     }
 }
 impl AsyncWrite for ScriptedDuplex {
@@ -401,19 +483,29 @@ impl AsyncWrite for ScriptedDuplex {
         cx: &mut std::task::Context<'_>,
         bytes: &[u8],
     ) -> std::task::Poll<std::io::Result<usize>> {
-        std::pin::Pin::new(&mut self.output).poll_write(cx, bytes)
+        self.output.extend_from_slice(bytes);
+        while let Some(index) = self.output.iter().position(|byte| *byte == b'\n') {
+            let line: Vec<u8> = self.output.drain(..=index).collect();
+            if let Ok(request) = serde_json::from_slice::<serde_json::Value>(&line[..index]) {
+                self.respond_to(&request);
+            }
+        }
+        let _ = cx;
+        std::task::Poll::Ready(Ok(bytes.len()))
     }
     fn poll_flush(
-        mut self: std::pin::Pin<&mut Self>,
+        self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
-        std::pin::Pin::new(&mut self.output).poll_flush(cx)
+        let _ = cx;
+        std::task::Poll::Ready(Ok(()))
     }
     fn poll_close(
-        mut self: std::pin::Pin<&mut Self>,
+        self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
-        std::pin::Pin::new(&mut self.output).poll_close(cx)
+        let _ = cx;
+        std::task::Poll::Ready(Ok(()))
     }
 }
 impl DuplexSession for ScriptedDuplex {
@@ -482,14 +574,15 @@ fn server_admission() -> Arc<McpServerAdmission> {
             .expect("admission"),
     )
 }
-fn captured_lookup(factory: Arc<McpStdioOperationFactory>) -> Arc<dyn Tool> {
+fn captured_lookup(factory: Arc<McpStdioOperationFactory>) -> (McpRegistryCapture, Arc<dyn Tool>) {
     let capture = registry_capture(factory);
-    capture
+    let tool = capture
         .tools()
         .iter()
         .find(|tool| tool.descriptor().name == "lookup")
         .cloned()
-        .expect("captured lookup tool")
+        .expect("captured lookup tool");
+    (capture, tool)
 }
 fn prepare_lookup(tool: &Arc<dyn Tool>) -> PreparedCall {
     let resolver = ego_core::permit::fake::FakeFs::default();
@@ -565,8 +658,8 @@ fn mcp_matrix_has_one_real_owner_for_each_mrtr_lifecycle() {
     );
 }
 
-#[test]
-fn real_operation_records_before_elicitation_and_returns_foreign_id() {
+#[tokio::test(flavor = "current_thread")]
+async fn real_operation_records_before_elicitation_and_returns_foreign_id() {
     let trace = Trace::default();
     let journal = Arc::new(Journal::with_trace(trace.clone()));
     let owner = Arc::new(McpContinuationOwner::new(
@@ -579,7 +672,7 @@ fn real_operation_records_before_elicitation_and_returns_foreign_id() {
         McpStdioOperationFactory::new(Arc::clone(&owner), 64 * 1024, Duration::from_secs(30))
             .expect("factory"),
     );
-    let tool = captured_lookup(Arc::clone(&factory));
+    let (_capture, tool) = captured_lookup(Arc::clone(&factory));
     let call = prepare_lookup(&tool);
     let auth = authorized(call);
     let (sealer, floor) = prepared_resume(&auth);
@@ -596,7 +689,7 @@ fn real_operation_records_before_elicitation_and_returns_foreign_id() {
         spawner.clone(),
         Some(resume),
     );
-    let outcome = block_on(tool.execute(call, &guarded)).expect("outcome");
+    let outcome = tool.execute(call, &guarded).await.expect("outcome");
     let ToolExecution::InputRequired(foreign) = outcome else {
         panic!("expected input-required")
     };
@@ -606,8 +699,8 @@ fn real_operation_records_before_elicitation_and_returns_foreign_id() {
     assert_eq!(spawner.calls(), 1);
 }
 
-#[test]
-fn accepted_answer_validates_hooks_claims_and_retries_once() {
+#[tokio::test(flavor = "current_thread")]
+async fn accepted_answer_validates_hooks_claims_and_retries_once() {
     let trace = Trace::default();
     let journal = Arc::new(Journal::with_trace(trace.clone()));
     let owner = Arc::new(McpContinuationOwner::new(
@@ -620,7 +713,7 @@ fn accepted_answer_validates_hooks_claims_and_retries_once() {
         McpStdioOperationFactory::new(Arc::clone(&owner), 64 * 1024, Duration::from_secs(30))
             .expect("factory"),
     );
-    let tool = captured_lookup(Arc::clone(&factory));
+    let (capture, tool) = captured_lookup(Arc::clone(&factory));
     let call = prepare_lookup(&tool);
     let auth = authorized(call);
     let (sealer, floor) = prepared_resume(&auth);
@@ -638,20 +731,21 @@ fn accepted_answer_validates_hooks_claims_and_retries_once() {
         Some(resume),
     );
     let ToolExecution::InputRequired(foreign) =
-        block_on(tool.execute(call, &guarded)).expect("required")
+        tool.execute(call, &guarded).await.expect("required")
     else {
         panic!("expected required")
     };
     let id = foreign.continuation_id().to_owned();
-    let capture = registry_capture(factory);
-    let retried = block_on(owner.accept_answer(
-        &id,
-        br#"{"choice":"yes"}"#,
-        capture,
-        floor,
-        ports(spawner.clone()),
-    ))
-    .expect("resume");
+    let retried = owner
+        .accept_answer(
+            &id,
+            br#"{"choice":"yes"}"#,
+            capture,
+            floor,
+            ports(spawner.clone()),
+        )
+        .await
+        .expect("resume");
     assert!(matches!(retried, ToolExecution::Complete(_)));
     assert_eq!(
         journal.events(),
@@ -685,7 +779,7 @@ fn schema_or_authority_failure_precedes_durable_acceptance() {
         McpStdioOperationFactory::new(Arc::clone(&owner), 64 * 1024, Duration::from_secs(30))
             .expect("factory"),
     );
-    let tool = captured_lookup(Arc::clone(&factory));
+    let (capture, tool) = captured_lookup(Arc::clone(&factory));
     let call = prepare_lookup(&tool);
     let auth = authorized(call.clone());
     let (sealer, floor) = prepared_resume(&auth);
@@ -707,7 +801,6 @@ fn schema_or_authority_failure_precedes_durable_acceptance() {
                 .expect("record"),
         )
         .expect("journal");
-    let capture = registry_capture(factory);
     assert!(
         block_on(owner.accept_answer(
             "continuation-schema-authority",
@@ -722,11 +815,11 @@ fn schema_or_authority_failure_precedes_durable_acceptance() {
     assert_eq!(journal.events(), vec!["record"]);
 }
 
-#[test]
-fn pre_block_or_uncertainty_leaves_accepted_answer_unclaimed_without_reentry() {
+#[tokio::test(flavor = "current_thread")]
+async fn pre_block_or_uncertainty_leaves_accepted_answer_unclaimed_without_reentry() {
     for mode in [HookMode::BlockResult, HookMode::UncertainResult] {
         let trace = Trace::default();
-        let journal = Arc::new(Journal::with_trace(trace));
+        let journal = Arc::new(Journal::with_trace(trace.clone()));
         let owner = Arc::new(McpContinuationOwner::new(
             journal.clone(),
             hooks_with_mode(mode, trace.clone()),
@@ -737,7 +830,7 @@ fn pre_block_or_uncertainty_leaves_accepted_answer_unclaimed_without_reentry() {
             McpStdioOperationFactory::new(Arc::clone(&owner), 64 * 1024, Duration::from_secs(30))
                 .expect("factory"),
         );
-        let tool = captured_lookup(Arc::clone(&factory));
+        let (capture, tool) = captured_lookup(Arc::clone(&factory));
         let call = prepare_lookup(&tool);
         let auth = authorized(call);
         let (sealer, floor) = prepared_resume(&auth);
@@ -755,20 +848,21 @@ fn pre_block_or_uncertainty_leaves_accepted_answer_unclaimed_without_reentry() {
             Some(resume),
         );
         let ToolExecution::InputRequired(foreign) =
-            block_on(tool.execute(call, &guarded)).expect("required")
+            tool.execute(call, &guarded).await.expect("required")
         else {
             panic!("expected required")
         };
-        let capture = registry_capture(factory);
         assert!(
-            block_on(owner.accept_answer(
-                foreign.continuation_id(),
-                br#"{"choice":"yes"}"#,
-                capture,
-                floor,
-                ports(spawner.clone())
-            ))
-            .is_err()
+            owner
+                .accept_answer(
+                    foreign.continuation_id(),
+                    br#"{"choice":"yes"}"#,
+                    capture,
+                    floor,
+                    ports(spawner.clone())
+                )
+                .await
+                .is_err()
         );
         assert_eq!(journal.state(), Some(ContinuationState::Accepted));
         assert!(!journal.events().contains(&"claim"));

@@ -12,7 +12,8 @@ use ego_core::mcp::{
     CacheScope, ContextEntry, ContextError, ContextSensitivity, ContextSnapshot, ContextSource,
     McpAdmissionFingerprint, McpOperationKind, McpSubject,
 };
-use ego_core::permit::Tool;
+use ego_core::permit::{PreparedCall, Tool};
+use ego_core::suspension::{ContinuationKind, ContinuationSubject, ResumeFingerprints};
 use ego_core::turn::{
     AdmittedToolSource, CapturedToolCatalogue, McpRegistryEvent, McpRegistryJournal,
     McpRegistryJournalError, RegisteredTool, ToolCatalogueError,
@@ -20,10 +21,10 @@ use ego_core::turn::{
 use rmcp::model::{Prompt, Resource};
 use sha2::{Digest, Sha256};
 
-use crate::dynamic::McpToolDefinition;
+use crate::dynamic::{McpCapturedTool, McpOperation, McpToolDefinition};
 use crate::{
-    McpCollapsedBootstrap, McpCollapsedCatalogue, McpDuplexEffectsFactory, McpError, McpFailure,
-    McpFuture, McpHttpEffects, McpInputRequiredRecorder, McpOperationFactory,
+    McpCollapsedBootstrap, McpCollapsedCatalogue, McpContinuationOwner, McpDuplexEffectsFactory,
+    McpError, McpFailure, McpFuture, McpHttpEffects, McpOperationFactory,
     McpRuntimeCandidateAdmission, McpServerAdmission,
 };
 
@@ -690,6 +691,19 @@ pub struct McpCapturedContextOperation {
     factory: Arc<dyn McpOperationFactory>,
 }
 
+type PreparedCapturedOperation = (
+    Arc<McpServerAdmission>,
+    Arc<dyn McpOperationFactory>,
+    PreparedCall,
+);
+
+pub(crate) type PreparedResumeOperation = (
+    Arc<McpServerAdmission>,
+    Arc<dyn McpOperationFactory>,
+    PreparedCall,
+    ResumeFingerprints,
+);
+
 impl McpCapturedContextOperation {
     pub fn entry(&self) -> &ContextEntry {
         &self.entry
@@ -713,6 +727,50 @@ impl McpCapturedContextOperation {
 
     pub fn operation_factory(&self) -> Arc<dyn McpOperationFactory> {
         Arc::clone(&self.factory)
+    }
+
+    fn matches_resume(
+        &self,
+        subject: &ContinuationSubject,
+        fingerprints: &ResumeFingerprints,
+    ) -> bool {
+        self.subject.server() == subject.server()
+            && self.operation.method() == subject.operation()
+            && self.admission.generation() == fingerprints.capture()
+            && self.admission.operation() == fingerprints.tool()
+            && self.admission.schema() == fingerprints.schema()
+            && matches!(
+                (subject.kind(), self.operation),
+                (ContinuationKind::Resource, McpOperationKind::ReadResource)
+                    | (ContinuationKind::Prompt, McpOperationKind::GetPrompt)
+            )
+    }
+
+    fn prepare_captured(
+        &self,
+        parameters: serde_json::Value,
+    ) -> Result<PreparedCapturedOperation, McpError> {
+        let operation = McpOperation::captured(
+            self.subject.clone(),
+            self.operation,
+            self.admission.clone(),
+            parameters,
+            Vec::new(),
+        );
+        let call = self
+            .factory
+            .prepare(Arc::clone(&self.server_admission), operation)
+            .map_err(|error| {
+                McpError::new(
+                    McpFailure::Authority,
+                    format!("continued MCP context could not be reconstructed: {error}"),
+                )
+            })?;
+        Ok((
+            Arc::clone(&self.server_admission),
+            Arc::clone(&self.factory),
+            call,
+        ))
     }
 }
 
@@ -751,6 +809,7 @@ impl ContextSource for McpCapturedContextSource {
 pub struct McpRegistryCapture {
     generation: Arc<str>,
     tools: Arc<[Arc<dyn Tool>]>,
+    captured_tools: Arc<[Arc<McpCapturedTool>]>,
     contexts: Arc<McpCapturedContextSource>,
     servers: Arc<[McpCapturedServer]>,
 }
@@ -774,6 +833,75 @@ impl McpRegistryCapture {
 
     pub fn servers(&self) -> &[McpCapturedServer] {
         &self.servers
+    }
+
+    pub(crate) fn prepare_resume(
+        &self,
+        subject: &ContinuationSubject,
+        fingerprints: &ResumeFingerprints,
+        original_parameters: &[u8],
+    ) -> Result<PreparedResumeOperation, McpError> {
+        let parameters = serde_json::from_slice(original_parameters).map_err(|error| {
+            McpError::new(
+                McpFailure::Authority,
+                format!("stored MCP parameters are invalid: {error}"),
+            )
+        })?;
+        let (admission, factory, call) = match subject.kind() {
+            ContinuationKind::Tool => {
+                let captured = self
+                    .captured_tools
+                    .iter()
+                    .find(|tool| {
+                        tool.matches_subject_parts(
+                            subject.server(),
+                            fingerprints.capture(),
+                            fingerprints.tool(),
+                            fingerprints.schema(),
+                        )
+                    })
+                    .ok_or_else(|| {
+                        McpError::new(
+                            McpFailure::Authority,
+                            "continued MCP tool is absent from the current registry capture",
+                        )
+                    })?;
+                captured.prepare_captured(parameters).map_err(|error| {
+                    McpError::new(
+                        McpFailure::Authority,
+                        format!("continued MCP tool could not be reconstructed: {error}"),
+                    )
+                })?
+            }
+            ContinuationKind::Resource | ContinuationKind::Prompt => {
+                let captured = self
+                    .contexts
+                    .operations()
+                    .iter()
+                    .find(|operation| operation.matches_resume(subject, fingerprints))
+                    .ok_or_else(|| {
+                        McpError::new(
+                            McpFailure::Authority,
+                            "continued MCP context operation is absent from the current registry capture",
+                        )
+                    })?;
+                captured.prepare_captured(parameters)?
+            }
+        };
+        let envelope = call.mcp_envelope().ok_or_else(|| {
+            McpError::new(
+                McpFailure::Authority,
+                "reconstructed MCP continuation has no protocol envelope",
+            )
+        })?;
+        let current = ResumeFingerprints::new(
+            envelope.admission().generation(),
+            envelope.admission().operation(),
+            envelope.admission().schema(),
+            envelope.transport_fingerprint(),
+        )
+        .map_err(|error| McpError::new(McpFailure::Authority, error.to_string()))?;
+        Ok((admission, factory, call, current))
     }
 }
 
@@ -801,6 +929,7 @@ impl AdmittedRegistrySnapshot {
             capture: McpRegistryCapture {
                 generation: Arc::from("generation-0"),
                 tools: Arc::from(Vec::<Arc<dyn Tool>>::new()),
+                captured_tools: Arc::from(Vec::<Arc<McpCapturedTool>>::new()),
                 contexts,
                 servers: Arc::from(Vec::<McpCapturedServer>::new()),
             },
@@ -1211,7 +1340,7 @@ impl McpRegistryController {
         journal: Arc<dyn McpRegistryJournal>,
         http_management: Arc<dyn McpHttpEffects>,
         stdio_management: Arc<dyn McpDuplexEffectsFactory>,
-        continuations: Arc<dyn McpInputRequiredRecorder>,
+        continuations: Arc<McpContinuationOwner>,
         max_sse_event_size: usize,
         timeout: Duration,
     ) -> Result<Arc<Self>, McpRegistryError> {
@@ -1526,7 +1655,7 @@ impl McpRegistryController {
             }
         };
         let generation: Arc<str> = Arc::from(format!("generation-{number}"));
-        let mut effect_tools = Vec::<Arc<dyn Tool>>::new();
+        let mut captured_tools = Vec::<Arc<McpCapturedTool>>::new();
         for (name, server) in &servers {
             for definition in server.tools.iter() {
                 let tool = match definition.capture(
@@ -1545,10 +1674,15 @@ impl McpRegistryController {
                         );
                     }
                 };
-                effect_tools.push(tool);
+                captured_tools.push(tool);
             }
         }
-        effect_tools.sort_by_key(|tool| tool.descriptor().name);
+        captured_tools.sort_by_key(|tool| tool.descriptor().name);
+        let effect_tools = captured_tools
+            .iter()
+            .cloned()
+            .map(|tool| -> Arc<dyn Tool> { tool })
+            .collect::<Vec<_>>();
         let tools = effect_tools
             .iter()
             .cloned()
@@ -1588,6 +1722,7 @@ impl McpRegistryController {
         let capture = McpRegistryCapture {
             generation: Arc::clone(&generation),
             tools: effect_tools.into(),
+            captured_tools: captured_tools.into(),
             contexts,
             servers: captured_servers.into(),
         };

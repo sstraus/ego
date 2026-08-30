@@ -11,8 +11,8 @@ use crate::registry::McpToolSchemaAdmission;
 use crate::{
     McpAdmittedCandidate, McpCacheMetadata, McpCandidateAdmission, McpCandidateError,
     McpCandidateIdentity, McpCandidateInventory, McpCandidateRequest, McpCapabilities, McpClient,
-    McpClientOptions, McpCollapsedBootstrap, McpDuplexEffectsFactory, McpFuture, McpHttpEffects,
-    McpHttpOperationFactory, McpInputRequiredRecorder, McpOperationFactory,
+    McpClientOptions, McpCollapsedBootstrap, McpContinuationOwner, McpDuplexEffectsFactory,
+    McpFuture, McpHttpEffects, McpHttpOperationFactory, McpOperationFactory,
     McpStdioOperationFactory,
 };
 
@@ -22,7 +22,7 @@ pub const MCP_DEFAULT_OPERATION_TIMEOUT: Duration = Duration::from_secs(30 * 60)
 pub(crate) struct McpRuntimeCandidateAdmission {
     http_management: Arc<dyn McpHttpEffects>,
     stdio_management: Arc<dyn McpDuplexEffectsFactory>,
-    continuations: Arc<dyn McpInputRequiredRecorder>,
+    continuations: Arc<McpContinuationOwner>,
     schemas: Arc<dyn McpToolSchemaAdmission>,
     max_sse_event_size: usize,
     timeout: Duration,
@@ -32,7 +32,7 @@ impl McpRuntimeCandidateAdmission {
     pub(crate) fn new(
         http_management: Arc<dyn McpHttpEffects>,
         stdio_management: Arc<dyn McpDuplexEffectsFactory>,
-        continuations: Arc<dyn McpInputRequiredRecorder>,
+        continuations: Arc<McpContinuationOwner>,
         schemas: Arc<dyn McpToolSchemaAdmission>,
         max_sse_event_size: usize,
         timeout: Duration,

@@ -45,8 +45,7 @@ pub use oauth::{
     McpTokenRefreshRequest, McpTokenRefreshResult, login, refresh_token,
 };
 pub use operation::{
-    DurableMcpInputRequiredRecorder, McpHttpOperationFactory, McpInputRequiredRecorder,
-    McpResumeAdmission, McpStdioOperationFactory,
+    McpContinuationOwner, McpHttpOperationFactory, McpResumeAdmission, McpStdioOperationFactory,
 };
 pub use registry::{
     McpAdmittedCandidate, McpAuthorizationStatus, McpCacheFreshness, McpCacheMetadata,

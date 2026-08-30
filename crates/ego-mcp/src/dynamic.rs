@@ -278,6 +278,22 @@ pub struct McpOperation {
 }
 
 impl McpOperation {
+    pub(crate) fn captured(
+        subject: McpSubject,
+        operation: McpOperationKind,
+        admission: McpAdmissionFingerprint,
+        parameters: Value,
+        invocations: Vec<(ForeignToolId, InvocationDigest)>,
+    ) -> Self {
+        Self {
+            subject,
+            operation,
+            admission,
+            parameters,
+            invocations,
+        }
+    }
+
     pub fn subject(&self) -> &McpSubject {
         &self.subject
     }
@@ -399,7 +415,7 @@ impl McpToolDefinition {
         generation: &str,
         server_admission: Arc<McpServerAdmission>,
         factory: Arc<dyn McpOperationFactory>,
-    ) -> Result<Arc<dyn Tool>, McpError> {
+    ) -> Result<Arc<McpCapturedTool>, McpError> {
         let admission = McpAdmissionFingerprint::new(
             generation,
             format!("{server}/{}", self.descriptor.name),
@@ -435,7 +451,41 @@ pub struct McpCapturedTool {
     collapsed: Option<McpCollapsedCatalogue>,
 }
 
+pub(crate) type PreparedCapturedToolOperation = (
+    Arc<McpServerAdmission>,
+    Arc<dyn McpOperationFactory>,
+    PreparedCall,
+);
+
 impl McpCapturedTool {
+    pub(crate) fn matches_subject_parts(
+        &self,
+        server: &str,
+        generation: &str,
+        operation: &str,
+        schema: &str,
+    ) -> bool {
+        self.server.as_ref() == server
+            && self.admission.generation() == generation
+            && self.admission.operation() == operation
+            && self.admission.schema() == schema
+    }
+
+    pub(crate) fn prepare_captured(
+        &self,
+        params: Value,
+    ) -> Result<PreparedCapturedToolOperation, ToolError> {
+        let operation = self.operation(&params)?;
+        let call = self
+            .factory
+            .prepare(Arc::clone(&self.server_admission), operation)?;
+        Ok((
+            Arc::clone(&self.server_admission),
+            Arc::clone(&self.factory),
+            call,
+        ))
+    }
+
     fn operation(&self, params: &Value) -> Result<McpOperation, ToolError> {
         validate(&self.outer.validator, params, "MCP tool parameters").map_err(tool_params)?;
         let outer = ForeignToolId::new(&self.server, &self.descriptor.name)
