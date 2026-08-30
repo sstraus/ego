@@ -42,9 +42,10 @@ of being advertised as working.
 ## Quickstart
 
 Available entry points are `ego [PROMPT]`, `ego run`, `ego resume`, `ego ls`,
-`ego fork`, `ego models`, `ego mcp`, `ego mcp-server`, and `ego acp`, plus
-`ego auth` for subscription credentials. Promptless `ego resume [ID]` re-enters
-the interactive driver; a resume carrying a prompt or `-` stays headless.
+`ego fork`, `ego usage`, `ego models`, `ego mcp`, `ego mcp-server`, and
+`ego acp`, plus `ego auth` for subscription credentials. Promptless
+`ego resume [ID]` re-enters the interactive driver; a resume carrying a prompt
+or `-` stays headless.
 
 For a subscription profile, log in before selecting its model:
 

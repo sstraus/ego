@@ -507,6 +507,39 @@ mod snapshot {
         assert_eq!(resumed, fx.full_replay());
     }
 
+    #[test]
+    fn version_seven_snapshot_is_a_cache_miss_after_the_usage_attribution_bump() {
+        assert_eq!(SNAPSHOT_VERSION, 8);
+        let fx = session_with_events();
+        let (source_seq, prefix_state) = fx.replay_prefix(4);
+        let mut legacy = Snapshot::new(fx.id, source_seq, prefix_state);
+        legacy.v = 7;
+        std::fs::write(fx.snapshot_path(), serde_json::to_vec(&legacy).unwrap()).unwrap();
+
+        let (resumed, rejection) = fx.store.resume(&fx.id).unwrap();
+
+        assert_eq!(rejection, Some(SnapshotRejection::Version { found: 7 }));
+        assert_eq!(resumed, fx.full_replay());
+    }
+
+    #[test]
+    fn version_eight_snapshot_replays_the_same_state_as_the_full_log() {
+        assert_eq!(SNAPSHOT_VERSION, 8);
+        let fx = session_with_events();
+        let (source_seq, prefix_state) = fx.replay_prefix(4);
+        fx.store
+            .write_snapshot(&fx.id, source_seq, &prefix_state)
+            .unwrap();
+        let written: Snapshot =
+            serde_json::from_slice(&std::fs::read(fx.snapshot_path()).unwrap()).unwrap();
+        assert_eq!(written.v, 8);
+
+        let (resumed, rejection) = fx.store.resume(&fx.id).unwrap();
+
+        assert_eq!(rejection, None);
+        assert_eq!(resumed, fx.full_replay());
+    }
+
     /// A snapshot a *previous build of this binary* wrote, byte for byte, not
     /// a synthetic one with its version field poked. `ItemState` gained four
     /// required fields in

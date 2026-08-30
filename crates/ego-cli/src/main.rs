@@ -126,6 +126,13 @@ async fn ordinary_main() -> std::process::ExitCode {
                 result: serde_json::Value::String(String::new()),
                 mcp_errors: Vec::new(),
             },
+            Ok(Invocation::Usage(args)) => Ended {
+                termination: ego_cli::usage::execute(&args, &out).await,
+                session: ego_core::event::id::SessionId::new(),
+                state: ego_core::state::SessionState::default(),
+                result: serde_json::Value::String(String::new()),
+                mcp_errors: Vec::new(),
+            },
             Ok(Invocation::Fork(args)) => run::fork(&args, &out),
             Ok(Invocation::Models(args)) => {
                 let termination = match ego_cli::models::execute(&args, &cancel).await {

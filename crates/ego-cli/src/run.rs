@@ -51,6 +51,7 @@ use ego_core::turn::{
     QueueStatus, RegisteredTool, Session, ToolEffectPorts, Tools, TurnConfig, TurnLoop,
     TurnOutcome, interactive_control,
 };
+use ego_core::usage::{UsagePeriod, UsageReportService};
 use ego_mcp::McpRegistryController;
 use ego_tools::clock::SystemClock;
 use ego_tools::config::OsUserConfigStore;
@@ -600,24 +601,7 @@ async fn run_with_registry<S: EventSink>(
 /// ('90s', '10m') and a permissive parser would accept a third nobody
 /// documented.
 fn deadline(spec: &str) -> Result<Duration, UsageError> {
-    let refuse = || {
-        UsageError(format!(
-            "`{spec}` is not a duration: write it as '90s', '10m' or '2h'"
-        ))
-    };
-    let spec = spec.trim();
-    let (digits, unit) = spec.split_at(spec.len().saturating_sub(1));
-    let scale = match unit {
-        "s" => 1,
-        "m" => 60,
-        "h" => 3_600,
-        _ => return Err(refuse()),
-    };
-    let count: u64 = digits.parse().map_err(|_| refuse())?;
-    count
-        .checked_mul(scale)
-        .map(Duration::from_secs)
-        .ok_or_else(refuse)
+    crate::cli::duration_seconds(spec).map(Duration::from_secs)
 }
 
 /// The workspace this run is rooted at.
@@ -2521,6 +2505,40 @@ async fn execute<S: EventSink>(
                                 Err(error) => diagnostics.note(&format!(
                                     "the session catalogue could not be read: {error}"
                                 )),
+                            }
+                            continue;
+                        }
+                        repl::Line::HostCommand(repl::HostCommand::Action(
+                            repl::actions::ActionId::Usage,
+                        )) => {
+                            let metadata =
+                                match crate::catalogue::listing(&jsonl_store, &root, false) {
+                                    Ok(metadata) => metadata,
+                                    Err(error) => {
+                                        diagnostics.note(&format!(
+                                            "the session catalogue could not be read: {error}"
+                                        ));
+                                        continue;
+                                    }
+                                };
+                            let Some(meta) =
+                                metadata.into_iter().find(|meta| meta.id == active.id())
+                            else {
+                                diagnostics.note(
+                                    "the active session is absent from its durable catalogue",
+                                );
+                                continue;
+                            };
+                            match UsageReportService::new(&jsonl_store, &clock)
+                                .report(std::slice::from_ref(&meta), UsagePeriod::All)
+                                .await
+                            {
+                                Ok(report) => {
+                                    let rendered = crate::usage::render_text(&report);
+                                    diagnostics.note(rendered.trim_end());
+                                }
+                                Err(error) => diagnostics
+                                    .note(&format!("the usage report could not be built: {error}")),
                             }
                             continue;
                         }

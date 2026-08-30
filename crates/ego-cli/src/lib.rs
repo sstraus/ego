@@ -37,3 +37,4 @@ pub mod repl;
 pub mod run;
 pub mod schema;
 pub mod session;
+pub mod usage;

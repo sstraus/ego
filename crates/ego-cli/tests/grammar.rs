@@ -46,6 +46,7 @@ fn parsed<const N: usize>(args: [&str; N]) -> ego_cli::cli::Args {
         }
         Invocation::Answered(_) => panic!("that answered a question: use `answered` for it"),
         Invocation::Fork(_) => panic!("`fork` takes no Args: use the fork tests for it"),
+        Invocation::Usage(_) => panic!("`usage` takes no Args: use the usage tests for it"),
     }
 }
 
@@ -65,6 +66,7 @@ fn parsed_slice(args: &[&str]) -> ego_cli::cli::Args {
         }
         Invocation::Answered(_) => panic!("that answered a question: use `answered` for it"),
         Invocation::Fork(_) => panic!("`fork` takes no Args: use the fork tests for it"),
+        Invocation::Usage(_) => panic!("`usage` takes no Args: use the usage tests for it"),
     }
 }
 

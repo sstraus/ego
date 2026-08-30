@@ -77,6 +77,7 @@ enum SurfaceActionEffect {
     Compact,
     Fork,
     Sessions,
+    Usage,
     New,
     Help,
     Clear,
@@ -104,6 +105,7 @@ impl ActionSink for SurfaceActionSink {
             ActionId::Compact => SurfaceActionEffect::Compact,
             ActionId::Fork => SurfaceActionEffect::Fork,
             ActionId::Sessions => SurfaceActionEffect::Sessions,
+            ActionId::Usage => SurfaceActionEffect::Usage,
             ActionId::New => SurfaceActionEffect::New,
             ActionId::Help => SurfaceActionEffect::Help,
             ActionId::Clear => SurfaceActionEffect::Clear,
@@ -738,6 +740,7 @@ impl Seat {
             ActionId::Compact,
             ActionId::Fork,
             ActionId::Sessions,
+            ActionId::Usage,
             ActionId::New,
             ActionId::Help,
             ActionId::Clear,
@@ -1481,6 +1484,9 @@ fn apply_surface_effect(
         }
         SurfaceActionEffect::Sessions => {
             return Some(Line::HostCommand(HostCommand::Action(ActionId::Sessions)));
+        }
+        SurfaceActionEffect::Usage => {
+            return Some(Line::HostCommand(HostCommand::Action(ActionId::Usage)));
         }
         SurfaceActionEffect::New => {
             return Some(Line::HostCommand(HostCommand::Action(ActionId::New)));

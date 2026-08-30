@@ -11,7 +11,7 @@ use std::fs::{self, OpenOptions};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use ego_core::event::domain::{DomainEvent, EventKind};
+use ego_core::event::domain::{DomainEvent, EventKind, GenerationRole};
 use ego_core::event::hook::HookCatalogueEvidence;
 use ego_core::event::id::{Producer, Seq, SessionId};
 use ego_core::event::time::Timestamp;
@@ -405,16 +405,14 @@ fn log_manifest_facts(log: &[u8]) -> Result<Option<LogManifestFacts>, StoreError
             }
             SessionEntry::RunTransaction(transaction) => {
                 last_ts = Some(transaction.observed_at());
-                if let RunCommand::CommandAdmitted {
-                    model: admitted_model,
-                    ..
-                } = transaction.command()
-                {
-                    model = Some(admitted_model.0.clone());
-                }
             }
             SessionEntry::Evidence(record) => {
                 last_ts.get_or_insert(created);
+                if let EvidenceRecord::GenerationAdmission(admission) = &record
+                    && admission.role() == GenerationRole::Main
+                {
+                    model = Some(admission.target().canonical_model().0.clone());
+                }
                 evidence_records.push(record);
             }
         }
@@ -974,11 +972,10 @@ impl JsonlStore {
             // recovery path that loses the manifest is the one directly
             // above.
             workspace_root: facts.workspace_root,
-            model: facts.model.or_else(|| {
-                previous
-                    .as_ref()
-                    .and_then(|manifest| manifest.meta.model.clone())
-            }),
+            // Only the latest authoritative main-generation admission owns
+            // this projection. A prior cache value is not evidence and must
+            // disappear when the log no longer supplies its source.
+            model: facts.model,
             // `created` comes from the log header rather than the old
             // manifest: the header is written once, at session creation, and
             // never rewritten, whereas this manifest is a derived cache that
@@ -1016,11 +1013,10 @@ impl JsonlStore {
         Ok(true)
     }
 
-    /// Replace `id`'s manifest, carrying its `created`/`model`/`title`
-    /// forward from whatever was there before (see `SessionMeta`'s doc
-    /// comment for why this store cannot populate the latter two from an
-    /// `append` call alone) and updating `updated` to `ev`'s envelope
-    /// timestamp.
+    /// Replace `id`'s manifest, carrying its `created`/`title` and projected
+    /// evidence forward from whatever was there before and updating `updated`
+    /// to `ev`'s envelope timestamp. Model identity is re-derived from that
+    /// evidence rather than trusted as an independent cache fact.
     fn write_manifest(
         &self,
         id: &SessionId,
@@ -1059,7 +1055,14 @@ impl JsonlStore {
             workspace_root,
             model: previous
                 .as_ref()
-                .and_then(|manifest| manifest.meta.model.clone())
+                .and_then(|manifest| {
+                    manifest
+                        .evidence
+                        .generations()
+                        .iter()
+                        .rfind(|admission| admission.role() == GenerationRole::Main)
+                        .map(|admission| admission.target().canonical_model().0.clone())
+                })
                 .or_else(|| log_facts.as_ref().and_then(|facts| facts.model.clone())),
             created: previous
                 .as_ref()

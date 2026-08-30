@@ -9,7 +9,9 @@ use std::collections::{HashMap, HashSet};
 use serde::{Deserialize, Serialize};
 
 use crate::cost::{CostDelta, CumulativeCost};
-use crate::event::domain::{DomainEvent, EventKind, ExitReason, OccupancyProvenance};
+use crate::event::domain::{
+    DomainEvent, EventKind, ExitReason, GenerationRole, OccupancyProvenance,
+};
 use crate::event::hook::{
     HookCatalogueEvidence, HookDecision, HookId, HookInvocationId, HookLifecycle, HookResult,
     HookSubject,
@@ -17,6 +19,7 @@ use crate::event::hook::{
 use crate::event::id::{
     AttemptId, EventId, GenerationId, ItemId, Producer, QueuedPromptId, Seq, SessionId, TurnId,
 };
+use crate::event::time::Timestamp;
 use crate::generator::attempt::{AttemptRef, DeliveryCertainty, Outcome, UsageReport};
 use crate::generator::types::{ImageRef, ReasoningState};
 use crate::permit::{ToolResult, ToolResultProvenance};
@@ -592,14 +595,27 @@ impl QuestionContinuation {
 /// `docs/decisions/2026-08-21-attempt-accounting-ledger.md`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Charge {
-    /// Which attempt spent it, when the event said so. `None` is a record
-    /// written before attempts were attributed, and is not correctable —
-    /// there is nothing to key a correction to.
-    pub attempt: Option<AttemptRef>,
+    /// Which durable generation fact owns this spend, or whether it predates
+    /// generation attribution entirely.
+    pub attribution: ChargeAttribution,
     /// The tokens observed.
     pub usage: Usage,
     /// What those tokens cost, or why that is not known.
     pub cost: CostDelta,
+}
+
+/// Durable ownership of one ledger contribution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ChargeAttribution {
+    /// Spend written before attempts carried durable role and start time.
+    LegacyUnattributed,
+    /// Spend joined to the generation that originally opened its attempt.
+    Generation {
+        attempt: AttemptRef,
+        role: GenerationRole,
+        started_at: Timestamp,
+    },
 }
 
 /// An attempt that has started and not yet settled.
@@ -608,6 +624,11 @@ pub struct LiveAttempt {
     /// The generation the attempt was started under. A settlement naming a
     /// different one is refused rather than silently re-attributed.
     pub generation: GenerationId,
+    /// The accounting line this generation contributes to.
+    pub role: GenerationRole,
+    /// The original start observation time, retained across later bookings
+    /// and corrections.
+    pub started_at: Timestamp,
 }
 
 /// Why the reducer declined to apply an event's effect.
@@ -1397,7 +1418,7 @@ impl SessionState {
                     });
                 }
             }
-            EventKind::GenerationStarted { attempt, .. } => self.start(ev, attempt),
+            EventKind::GenerationStarted { attempt, role } => self.start(ev, attempt, *role),
             EventKind::ExecutionObserved { .. } => {}
             EventKind::AttemptSettled { attempt, outcome } => self.settle(ev, attempt, outcome),
             EventKind::UsageUpdated {
@@ -1604,7 +1625,7 @@ impl SessionState {
     /// `AttemptId` is minted once per journey to the wire, so a second start
     /// is a replayed or forged record, and reopening a settled attempt would
     /// let its finalised contribution start accumulating again.
-    fn start(&mut self, ev: &DomainEvent, attempt: &AttemptRef) {
+    fn start(&mut self, ev: &DomainEvent, attempt: &AttemptRef, role: GenerationRole) {
         // Set before any refusal: attribution has begun the moment a producer
         // shows it knows how to attribute, whether or not this record stands.
         self.attribution_began = true;
@@ -1618,6 +1639,8 @@ impl SessionState {
             attempt.attempt(),
             LiveAttempt {
                 generation: attempt.generation(),
+                role,
+                started_at: ev.env.ts,
             },
         );
         // Recorded only once the start stands, and kept after it settles: an
@@ -1639,7 +1662,7 @@ impl SessionState {
             if self.attribution_began {
                 return self.refuse(ev, RefusalReason::UnattributedUsage);
             }
-            return self.push_charge(None, *usage, cost.clone());
+            return self.push_charge(ChargeAttribution::LegacyUnattributed, *usage, cost.clone());
         };
 
         let id = attempt.attempt();
@@ -1656,7 +1679,15 @@ impl SessionState {
         if live.generation != attempt.generation() {
             return self.refuse(ev, RefusalReason::GenerationMismatch);
         }
-        self.push_charge(Some(attempt), *usage, cost.clone());
+        self.push_charge(
+            ChargeAttribution::Generation {
+                attempt,
+                role: live.role,
+                started_at: live.started_at,
+            },
+            *usage,
+            cost.clone(),
+        );
     }
 
     /// Close an attempt's lifecycle, finalising whatever it booked.
@@ -1729,7 +1760,13 @@ impl SessionState {
         self.charges
             .iter()
             .enumerate()
-            .filter(move |(_, c)| c.attempt.is_some_and(|r| r.attempt() == id))
+            .filter(move |(_, charge)| {
+                matches!(
+                    charge.attribution,
+                    ChargeAttribution::Generation { attempt, .. }
+                        if attempt.attempt() == id
+                )
+            })
             .map(|(at, _)| at)
     }
 
@@ -1750,11 +1787,11 @@ impl SessionState {
     /// step, so the running totals stay exactly what a full pass would
     /// produce, and the ordinary path stays O(1). Only [`Self::correct`],
     /// which changes an entry that is not at the end, has to pay for a pass.
-    fn push_charge(&mut self, attempt: Option<AttemptRef>, usage: Usage, cost: CostDelta) {
+    fn push_charge(&mut self, attribution: ChargeAttribution, usage: Usage, cost: CostDelta) {
         self.usage.add(&usage);
         self.cost.add_delta(&cost);
         self.charges.push(Charge {
-            attempt,
+            attribution,
             usage,
             cost,
         });

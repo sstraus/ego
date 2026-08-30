@@ -372,8 +372,7 @@ impl ActionRegistry {
             enabled(Compact, "compact", "Compact the active context")
                 .unavailable("the compaction service"),
             enabled(Clear, "clear", "Clear composer and menu state"),
-            enabled(Usage, "usage", "Show usage, context, cost and budget")
-                .unavailable("the usage inspector"),
+            enabled(Usage, "usage", "Show usage, context, cost and budget"),
             enabled(Statusline, "statusline", "Configure the native status line"),
             enabled(Export, "export", "Export sanitized session data")
                 .unavailable("the session exporter"),

@@ -19,7 +19,7 @@
 //!    definition (§4.5's last clause) is only possible while there is exactly
 //!    one definition.
 
-use std::num::NonZeroUsize;
+use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::PathBuf;
 use std::str::FromStr;
 
@@ -32,6 +32,7 @@ use ego_core::config::{
 use ego_core::event::id::{ItemId, SessionId};
 use ego_core::generator::types::ThinkingLevel;
 use ego_core::permit::Confinement;
+use ego_core::usage::UsagePeriod;
 
 use crate::agent_file::{self, AgentFile};
 
@@ -51,6 +52,8 @@ pub enum Invocation {
     Resume(Box<Args>),
     /// `ego ls` — the catalogue, this workspace's by default.
     Ls(Box<LsArgs>),
+    /// `ego usage` — one versioned report for this workspace.
+    Usage(Box<UsageArgs>),
     /// `ego fork ID` — create a target at the source's latest durable idle boundary.
     Fork(Box<ForkArgs>),
     /// `ego models` — the shared model catalogue snapshot.
@@ -147,6 +150,7 @@ pub const BUILT: &[&str] = &[
     "resume",
     "fork",
     "ls",
+    "usage",
     "models",
     "acp",
     "auth",
@@ -197,11 +201,6 @@ pub const UNBUILT: &[(&str, &str)] = &[
          `explain` have their material; what `allow`, `deny`, `revoke` and \
          `remember` have nowhere to write to is a rule store — the same \
          read-only loader `config` waits on",
-    ),
-    (
-        "usage",
-        "a report across sessions, which needs both the workspace attribution \
-         `ls` waits on and the per-session cost line budgets add in **M3**",
     ),
     (
         "doctor",
@@ -327,6 +326,15 @@ pub struct LsArgs {
     pub session_dir: Option<PathBuf>,
     pub directory: Option<PathBuf>,
     pub output: Output,
+}
+
+/// The exact `ego usage [--period P] [--json]` request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsageArgs {
+    pub period: UsagePeriod,
+    pub session_dir: Option<PathBuf>,
+    pub directory: Option<PathBuf>,
+    pub json: bool,
 }
 
 /// The exact `ego fork ID` request and its shared store/workspace/output flags.
@@ -519,6 +527,31 @@ struct LsCommand {
 
     #[command(flatten)]
     common: Common,
+}
+
+/// `ego usage` — deterministic accounting for this workspace's local logs.
+#[derive(Debug, Parser)]
+#[command(
+    name = "ego usage",
+    about = "Report usage, context and cost for this workspace.",
+    disable_help_subcommand = true
+)]
+struct UsageCommand {
+    /// all|Ns|Nm|Nh
+    #[arg(
+        long,
+        default_value = "all",
+        value_parser = parse_usage_period,
+        allow_hyphen_values = true
+    )]
+    period: UsagePeriod,
+
+    /// Emit the exact versioned usage-report object.
+    #[arg(long)]
+    json: bool,
+
+    #[command(flatten)]
+    places: Places,
 }
 
 /// `ego fork ID` — the source boundary is always its latest durable idle event.
@@ -1105,6 +1138,7 @@ fn overview(program: &str) -> String {
             "resume" => "Continue a session; no ID = latest in this workspace",
             "fork" => "Fork a session at its latest durable idle boundary",
             "ls" => "List sessions (this workspace; --all for every one)",
+            "usage" => "Report usage, context and cost for this workspace",
             "models" => "List the shared model catalogue",
             "acp" => "Serve the Agent Client Protocol on stdio",
             "mcp-server" => "Serve scoped ego runs over MCP on stdio",
@@ -1252,6 +1286,15 @@ pub fn parse(argv: Vec<String>) -> Result<Invocation, UsageError> {
                 session_dir: parsed.common.places.session_dir,
                 directory: parsed.common.places.directory,
                 output: parsed.common.output,
+            }))),
+        },
+        Some("usage") => match clap_or_answer::<UsageCommand>(&tokens)? {
+            Parsed::Answered(text) => Ok(Invocation::Answered(text)),
+            Parsed::Command(parsed) => Ok(Invocation::Usage(Box::new(UsageArgs {
+                period: parsed.period,
+                session_dir: parsed.places.session_dir,
+                directory: parsed.places.directory,
+                json: parsed.json,
             }))),
         },
         Some("fork") => match clap_or_answer::<ForkCommand>(&tokens)? {
@@ -1473,4 +1516,45 @@ fn reject_ephemeral(ephemeral: bool) -> Result<(), UsageError> {
         ));
     }
     Ok(())
+}
+
+/// Parse the strict duration arithmetic shared by `--timeout` and usage.
+pub(crate) fn duration_seconds(spec: &str) -> Result<u64, UsageError> {
+    let refuse = || {
+        UsageError(format!(
+            "`{spec}` is not a duration: write it as '90s', '10m' or '2h'"
+        ))
+    };
+    let spec = spec.trim();
+    let (digits, scale) = if let Some(digits) = spec.strip_suffix('s') {
+        (digits, 1)
+    } else if let Some(digits) = spec.strip_suffix('m') {
+        (digits, 60)
+    } else if let Some(digits) = spec.strip_suffix('h') {
+        (digits, 3_600)
+    } else {
+        return Err(refuse());
+    };
+    if digits.is_empty() || !digits.bytes().all(|digit| digit.is_ascii_digit()) {
+        return Err(refuse());
+    }
+    let count: u64 = digits.parse().map_err(|_| refuse())?;
+    count.checked_mul(scale).ok_or_else(refuse)
+}
+
+fn parse_usage_period(spec: &str) -> Result<UsagePeriod, String> {
+    if spec != spec.trim() {
+        return Err(format!(
+            "`{spec}` is not a usage period: write `all`, `90s`, `10m` or `2h`"
+        ));
+    }
+    if spec == "all" {
+        return Ok(UsagePeriod::All);
+    }
+    let seconds = duration_seconds(spec).map_err(|_| {
+        format!("`{spec}` is not a usage period: write `all`, `90s`, `10m` or `2h`")
+    })?;
+    let seconds = NonZeroU64::new(seconds)
+        .ok_or_else(|| format!("`{spec}` is not a usage period: the duration must be positive"))?;
+    Ok(UsagePeriod::Last { seconds })
 }
