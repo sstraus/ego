@@ -52,6 +52,10 @@ use ego_core::cost::{Amount, CumulativeCost, CurrencyCode, Money, PricingRevisio
 use ego_core::event::domain::{DomainEvent, ExitReason};
 use ego_core::event::id::SessionId;
 use ego_core::event::time::{Clock, Timestamp};
+use ego_core::evidence::{
+    EvidenceAdmissionService, EvidenceError as AdmissionError, EvidenceKey, EvidenceRecord,
+    EvidenceStore as AdmissionStore, EvidenceWrite, RunInvocationId,
+};
 use ego_core::generation_model_source::{
     GenerationModelError, GenerationModelSource, GenerationProfile, GenerationRole,
 };
@@ -271,6 +275,16 @@ impl EvidenceStore for NoEvidence {
     }
 }
 
+impl AdmissionStore for NoEvidence {
+    fn write(
+        &self,
+        _key: EvidenceKey,
+        _record: EvidenceRecord,
+    ) -> Result<EvidenceWrite, AdmissionError> {
+        Ok(EvidenceWrite::Published)
+    }
+}
+
 /// Answers one request with one canned body, in small chunks.
 ///
 /// Chunked at a size that falls inside every frame of both transcripts, so a
@@ -370,6 +384,7 @@ async fn one_turn(
             id: SessionId::new(),
             state: SessionState::default(),
             store: &store,
+            evidence: &evidence,
             clock: &clock,
             sink: &NullSink,
             cancel: CancelToken::new(),
@@ -391,6 +406,8 @@ async fn one_turn(
                 system: None,
                 token_ceiling: None,
             },
+            admission: Arc::new(EvidenceAdmissionService::new()),
+            invocation: RunInvocationId::new(),
         },
         Tools::new(
             &registry,

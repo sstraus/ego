@@ -145,7 +145,14 @@ fn generic_anthropic_status_and_output_stop_remain_distinct() {
     assert!(generic.iter().any(|event| matches!(
         event,
         AiEvent::Error {
-            kind: ErrorKind::Unclassified,
+            kind: ErrorKind::Invalid,
+            ..
+        }
+    )));
+    assert!(!generic.iter().any(|event| matches!(
+        event,
+        AiEvent::Error {
+            kind: ErrorKind::ContextOverflow,
             ..
         }
     )));

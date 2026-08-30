@@ -806,7 +806,7 @@ fn each_stop_reason_becomes_what_it_means_or_says_it_cannot() {
         ("max_tokens", StopReason::Length),
         ("tool_use", StopReason::ToolUse),
         ("refusal", StopReason::Error),
-        ("model_context_window_exceeded", StopReason::Length),
+        ("model_context_window_exceeded", StopReason::Error),
         ("pause_turn", StopReason::Error),
         (
             "a_reason_invented_after_this_was_written",
