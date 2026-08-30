@@ -36,7 +36,8 @@ use ego_core::generation_model_source::{
     GenerationModelError, GenerationModelErrorClass, GenerationProfile, GenerationRole,
 };
 use ego_core::generator::capabilities::ModelCapabilities;
-use ego_core::generator::types::{ImageRef, ThinkingLevel, ToolDescriptor};
+use ego_core::generator::port::RequestExpressibilityError;
+use ego_core::generator::types::{GenRequest, ImageRef, ThinkingLevel, ToolDescriptor};
 use ego_core::permit::judge::{JudgeConfig, JudgeInput};
 use ego_core::permit::{
     CanonPath, Change, Escalation, ExecCaps, ExecObservation, HumanApprover, Op, OpName,
@@ -1205,18 +1206,20 @@ fn chosen(args: &Args, root: &Path) -> Result<Chosen, UsageError> {
     Ok(Chosen { store, id })
 }
 
-/// Prove the fixed judge generation envelope after run-context admission.
+/// Build the fixed judge generation envelope used by both startup proofs.
 ///
 /// Dynamic authority facts occupy one user-text block and cannot change the
 /// request's tool, thinking, parallelism or output-ceiling requirements. A
 /// canonical write-shaped input therefore exercises the same provider-facing
 /// shape without sending a generation or pretending that the provider was
 /// contacted. The exact in-turn request is checked again by `TurnLoop`.
-fn preflight_judge(
-    judge: &GenerationProfile,
+fn fixed_judge_request(
+    identity: &ModelRef,
+    request_model: &str,
+    max_output_tokens: Option<u64>,
     confinement: &RunConfinement,
     exec_caps: ExecCaps,
-) -> Result<(), RunTermination> {
+) -> GenRequest {
     let path = confinement.workspace().clone();
     let call = PreparedCall::new(
         "write",
@@ -1230,18 +1233,25 @@ fn preflight_judge(
         op: OpName::Write,
         path,
     };
-    let request =
-        JudgeInput::new(&call, confinement, exec_caps, &escalation).request(&JudgeConfig {
-            identity: judge.identity.clone(),
-            request_model: judge.request_model.clone(),
-            max_output_tokens: judge.output_ceiling(),
-        });
-    let gaps = judge.capabilities.request_gaps(&request);
+    JudgeInput::new(&call, confinement, exec_caps, &escalation).request(&JudgeConfig {
+        identity: identity.clone(),
+        request_model: request_model.to_owned(),
+        max_output_tokens,
+    })
+}
+
+fn validate_judge_request(
+    identity: &ModelRef,
+    capabilities: &ModelCapabilities,
+    request: &GenRequest,
+    ensure_expressible: impl FnOnce(&GenRequest) -> Result<(), RequestExpressibilityError>,
+) -> Result<(), RunTermination> {
+    let gaps = capabilities.request_gaps(request);
     if !gaps.is_empty() {
         return Err(RunTermination::UsageError {
             message: format!(
                 "judge model `{}` is incompatible with the fixed judge request: {}",
-                judge.identity.0.as_str(),
+                identity.0.as_str(),
                 gaps.iter()
                     .map(ToString::to_string)
                     .collect::<Vec<_>>()
@@ -1249,15 +1259,60 @@ fn preflight_judge(
             ),
         });
     }
-    judge
-        .generator
-        .ensure_expressible(&request)
-        .map_err(|error| RunTermination::UsageError {
-            message: format!(
-                "judge model `{}` cannot encode the fixed judge request: {error}",
-                judge.identity.0.as_str()
-            ),
-        })
+    ensure_expressible(request).map_err(|error| RunTermination::UsageError {
+        message: format!(
+            "judge model `{}` cannot encode the fixed judge request: {error}",
+            identity.0.as_str()
+        ),
+    })
+}
+
+fn preflight_judge(
+    judge: &GenerationProfile,
+    confinement: &RunConfinement,
+    exec_caps: ExecCaps,
+) -> Result<(), RunTermination> {
+    let request = fixed_judge_request(
+        &judge.identity,
+        &judge.request_model,
+        judge.output_ceiling(),
+        confinement,
+        exec_caps,
+    );
+    validate_judge_request(&judge.identity, &judge.capabilities, &request, |request| {
+        judge.generator.ensure_expressible(request)
+    })
+}
+
+/// Refuse only judge request-shape failures already determined by supplied
+/// configuration. Dynamic model facts defer to the post-admission preflight.
+fn preflight_supplied_judge(
+    effective: &Effective,
+    confinement: &RunConfinement,
+) -> Result<(), RunTermination> {
+    if effective.mode.unwrap_or(Mode::Default) != Mode::Auto {
+        return Ok(());
+    }
+    let identity = effective
+        .judge
+        .as_ref()
+        .ok_or_else(|| RunTermination::UsageError {
+            message: "`auto` mode requires `[permissions] judge = \"provider/model\"`".to_owned(),
+        })?;
+    let Some(profile) = model::supplied_request_profile(identity).map_err(generation_refusal)?
+    else {
+        return Ok(());
+    };
+    let request = fixed_judge_request(
+        identity,
+        profile.request_model(),
+        profile.output_ceiling(),
+        confinement,
+        ExecCaps::empty(),
+    );
+    validate_judge_request(identity, profile.capabilities(), &request, |request| {
+        profile.ensure_expressible(request)
+    })
 }
 
 fn generation_refusal(error: GenerationModelError) -> RunTermination {
@@ -2652,6 +2707,7 @@ async fn execute<S: EventSink>(
             .map_err(|error| RunTermination::Failed {
                 message: error.to_string(),
             })?;
+            preflight_supplied_judge(&settings.effective, &settings.confinement)?;
             (settings, ci, refresh, None)
         }
     };

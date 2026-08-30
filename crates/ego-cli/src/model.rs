@@ -10,6 +10,7 @@
 use std::sync::{Arc, RwLock};
 
 use ego_ai::catalogue::{Catalogue, ModelSlug, ResolveError, ResolvedModel};
+use ego_ai::generator::StaticRequestProfile;
 use ego_ai::http::Http;
 use ego_ai::provider::{Credentials, OLLAMA_BASE, OPENAI_BASE, ProviderRow, ResolvedCredential};
 use ego_core::ceiling::Ceilings;
@@ -96,18 +97,10 @@ fn base(var: &str, fallback: &str) -> Result<Url, ResolveError> {
 pub(crate) fn rows(
     auth: &std::collections::HashMap<String, ego_core::config::AuthProviderLayer>,
 ) -> Result<Vec<ProviderRow>, ResolveError> {
-    let mut rows = vec![
+    let mut rows = mapped_rows(
         ProviderRow::ollama(base(OLLAMA_HOST, OLLAMA_BASE)?),
         ProviderRow::openai_at(base(OPENAI_BASE_URL, OPENAI_BASE)?),
-        ProviderRow::openai_codex_default(),
-        ProviderRow::anthropic_default(),
-        ProviderRow::github_copilot_default(),
-        ProviderRow::xai_oauth_default(),
-        ProviderRow::kimi_coding_default(),
-        ProviderRow::minimax_oauth_default(),
-        ProviderRow::nous_default(),
-        ProviderRow::openrouter_default(),
-    ];
+    );
     for row in &mut rows {
         if let Some(config) = auth.get(row.id()) {
             let overlay = config
@@ -126,16 +119,67 @@ pub(crate) fn rows(
     Ok(rows)
 }
 
+fn mapped_rows(ollama: ProviderRow, openai: ProviderRow) -> Vec<ProviderRow> {
+    vec![
+        ollama,
+        openai,
+        ProviderRow::openai_codex_default(),
+        ProviderRow::anthropic_default(),
+        ProviderRow::github_copilot_default(),
+        ProviderRow::xai_oauth_default(),
+        ProviderRow::kimi_coding_default(),
+        ProviderRow::minimax_oauth_default(),
+        ProviderRow::nous_default(),
+        ProviderRow::openrouter_default(),
+    ]
+}
+
 /// Assemble the one resolver-selected catalogue from current rows and facts.
 pub(crate) fn catalogue(
     hosted: Vec<(String, facts::Hosted)>,
     auth: &std::collections::HashMap<String, ego_core::config::AuthProviderLayer>,
 ) -> Result<Catalogue, ResolveError> {
-    let mut catalogue = Catalogue::new(rows(auth)?);
+    Ok(catalogue_from_rows(hosted, rows(auth)?))
+}
+
+fn catalogue_from_rows(hosted: Vec<(String, facts::Hosted)>, rows: Vec<ProviderRow>) -> Catalogue {
+    let mut catalogue = Catalogue::new(rows);
     for (slug, model) in hosted {
         catalogue = catalogue.with_hosted(&slug, model);
     }
-    Ok(catalogue)
+    catalogue
+}
+
+/// Project only the request-shape facts already supplied for this model.
+///
+/// This path resolves no credential and owns no transport. An empty ceiling
+/// prevents the supplied-facts decoder from attaching rates to the temporary
+/// catalogue value; the returned profile cannot carry metering or pricing.
+pub(crate) fn supplied_request_profile(
+    identity: &ModelRef,
+) -> Result<Option<StaticRequestProfile>, GenerationModelError> {
+    let provider_id = identity
+        .0
+        .split_once('/')
+        .map(|(provider, _)| provider)
+        .unwrap_or(identity.0.as_str());
+    ensure_provider_mapping(provider_id).map_err(generation_error)?;
+    let hosted = facts::supplied(&Ceilings::default()).map_err(|error| {
+        GenerationModelError::new(GenerationModelErrorClass::Usage, error.to_string())
+    })?;
+    let slug = ModelSlug::parse(&identity.0).map_err(generation_error)?;
+    let catalogue = catalogue_from_rows(
+        hosted,
+        mapped_rows(
+            ProviderRow::ollama_default(),
+            ProviderRow::openai_at(
+                Url::parse(OPENAI_BASE).expect("the built-in OpenAI base is a URL"),
+            ),
+        ),
+    );
+    catalogue
+        .static_request_profile(&slug)
+        .map_err(generation_error)
 }
 
 /// Resolve `slug` against the daemon or against what was supplied.

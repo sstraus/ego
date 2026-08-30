@@ -180,7 +180,10 @@ fn durable_events(config: &Path) -> Vec<serde_json::Value> {
         .filter_map(|line| {
             let record: serde_json::Value =
                 serde_json::from_str(line).expect("durable event is JSON");
-            record.get("payload").cloned()
+            record
+                .get("payload")
+                .and_then(|payload| payload.get("event"))
+                .cloned()
         })
         .collect()
 }

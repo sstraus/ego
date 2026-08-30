@@ -45,6 +45,7 @@ use std::sync::Arc;
 use futures::future::BoxFuture;
 
 use crate::catalogue::{Catalogue, ModelDiscoveryReport, ModelSlug, ResolveError, ResolvedModel};
+use crate::generator::StaticRequestProfile;
 use crate::http::Http;
 use crate::provider::{ProviderRow, ResolvedCredential};
 use crate::wire::WireFormat;
@@ -102,6 +103,13 @@ pub struct Enumeration<'a> {
     pub credential: Option<&'a ResolvedCredential>,
 }
 
+/// Inputs a resolver may use for the request-shape facts that are already
+/// operator-supplied. There is deliberately no transport or credential.
+pub struct StaticResolution<'a> {
+    pub catalogue: &'a Catalogue,
+    pub slug: &'a ModelSlug,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResolverCredentialRequirement {
     None,
@@ -114,6 +122,17 @@ pub enum ResolverCredentialRequirement {
 /// rather than an `async fn`. That is the same shape [`Http`] uses and for the
 /// same reason.
 pub trait ModelResolver: Send + Sync + fmt::Debug {
+    /// The wire mapping whose request shape is already authoritative from
+    /// operator-supplied hosted facts, without resolving a credential or
+    /// consulting a provider or local daemon.
+    ///
+    /// Required rather than defaulted so every new resolver states whether
+    /// it can participate in the pre-effect static request proof.
+    fn supplied_request_mapping(
+        &self,
+        at: &StaticResolution<'_>,
+    ) -> Result<Option<StaticRequestProfile>, ResolveError>;
+
     fn enumeration_credential(&self) -> ResolverCredentialRequirement {
         ResolverCredentialRequirement::None
     }
@@ -146,6 +165,15 @@ impl Supplied {
 }
 
 impl ModelResolver for Supplied {
+    fn supplied_request_mapping(
+        &self,
+        at: &StaticResolution<'_>,
+    ) -> Result<Option<StaticRequestProfile>, ResolveError> {
+        at.catalogue
+            .static_request_profile_with_mapping(at.slug, self.wire)
+            .map(Some)
+    }
+
     fn resolve<'a>(
         &'a self,
         at: &'a Resolution<'a>,
@@ -182,6 +210,15 @@ impl SubscriptionSupplied {
 }
 
 impl ModelResolver for SubscriptionSupplied {
+    fn supplied_request_mapping(
+        &self,
+        at: &StaticResolution<'_>,
+    ) -> Result<Option<StaticRequestProfile>, ResolveError> {
+        at.catalogue
+            .static_request_profile_with_mapping(at.slug, self.wire)
+            .map(Some)
+    }
+
     fn resolve<'a>(
         &'a self,
         at: &'a Resolution<'a>,
@@ -214,6 +251,13 @@ impl ModelResolver for SubscriptionSupplied {
 pub struct OllamaDaemon;
 
 impl ModelResolver for OllamaDaemon {
+    fn supplied_request_mapping(
+        &self,
+        _at: &StaticResolution<'_>,
+    ) -> Result<Option<StaticRequestProfile>, ResolveError> {
+        Ok(None)
+    }
+
     fn resolve<'a>(
         &'a self,
         at: &'a Resolution<'a>,
@@ -233,6 +277,13 @@ impl ModelResolver for OllamaDaemon {
 pub struct KimiManaged;
 
 impl ModelResolver for KimiManaged {
+    fn supplied_request_mapping(
+        &self,
+        _at: &StaticResolution<'_>,
+    ) -> Result<Option<StaticRequestProfile>, ResolveError> {
+        Ok(None)
+    }
+
     fn enumeration_credential(&self) -> ResolverCredentialRequirement {
         ResolverCredentialRequirement::Required
     }
@@ -285,6 +336,15 @@ impl XaiLanguageModels {
 }
 
 impl ModelResolver for XaiLanguageModels {
+    fn supplied_request_mapping(
+        &self,
+        at: &StaticResolution<'_>,
+    ) -> Result<Option<StaticRequestProfile>, ResolveError> {
+        at.catalogue
+            .static_request_profile_with_mapping(at.slug, self.wire)
+            .map(Some)
+    }
+
     fn resolve<'a>(
         &'a self,
         at: &'a Resolution<'a>,

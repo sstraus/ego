@@ -14,14 +14,70 @@
 use std::sync::Arc;
 
 use ego_core::generator::attempt::{AttemptStream, DeliveryCertainty, GenerationAttempt};
+use ego_core::generator::capabilities::ModelCapabilities;
 use ego_core::generator::port::{Generator, RequestExpressibilityError};
 use ego_core::generator::types::{ErrorKind, GenRequest};
 use futures::{StreamExt, stream};
+use url::Url;
 
 use crate::http::{AdmittedHttpProfile, Http};
 use crate::provider::{ProviderRow, ResolvedCredential};
 use crate::wire;
 use crate::wire::WireFormat;
+
+/// The request-shape facts a resolver can prove entirely from operator-
+/// supplied hosted configuration.
+///
+/// This is deliberately not a resolved generation model: it carries no
+/// credential, metering, rates, pricing or generation authority.
+pub struct StaticRequestProfile {
+    request_model: String,
+    capabilities: ModelCapabilities,
+    wire: &'static dyn WireFormat,
+}
+
+impl StaticRequestProfile {
+    pub(crate) fn new(
+        request_model: String,
+        capabilities: ModelCapabilities,
+        wire: &'static dyn WireFormat,
+    ) -> Self {
+        Self {
+            request_model,
+            capabilities,
+            wire,
+        }
+    }
+
+    pub fn request_model(&self) -> &str {
+        &self.request_model
+    }
+
+    pub fn capabilities(&self) -> &ModelCapabilities {
+        &self.capabilities
+    }
+
+    pub fn output_ceiling(&self) -> Option<u64> {
+        self.capabilities
+            .max_output_tokens
+            .or(self.capabilities.max_context_tokens)
+    }
+
+    /// Prove that the row-selected mapping can encode this request without a
+    /// credential, transport or provider resolution.
+    pub fn ensure_expressible(
+        &self,
+        request: &GenRequest,
+    ) -> Result<(), RequestExpressibilityError> {
+        let base = Url::parse("https://request-shape.invalid/")
+            .expect("the static request-shape base is a URL");
+        let target = wire::RequestTarget::new(&base, &[]);
+        self.wire
+            .build_request(&target, request)
+            .map(drop)
+            .map_err(|refused| RequestExpressibilityError::new(refused.to_string()))
+    }
+}
 
 /// A [`Generator`] that sends a profile's own wire format over an [`Http`].
 ///

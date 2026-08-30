@@ -28,9 +28,10 @@ use ego_core::public::MeteringKind;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use url::Url;
 
+use crate::generator::StaticRequestProfile;
 use crate::http::Http;
 use crate::provider::{MissingCredential, ProviderRow, ResolvedCredential};
-use crate::resolver::Resolution;
+use crate::resolver::{Resolution, StaticResolution};
 use crate::wire::WireFormat;
 use crate::wire::provider_cost::ProviderCost;
 
@@ -946,6 +947,39 @@ impl Catalogue {
                 provider: provider.to_string(),
                 known: self.rows.keys().cloned().collect(),
             })
+    }
+
+    /// Project only request model, capabilities and row-selected wire facts
+    /// when the resolver says all three are operator-supplied.
+    ///
+    /// `None` is an explicit deferral to full resolution; this method never
+    /// opens a transport, resolves a credential or discovers a local model.
+    pub fn static_request_profile(
+        &self,
+        slug: &ModelSlug,
+    ) -> Result<Option<StaticRequestProfile>, ResolveError> {
+        let row = self.row(&slug.provider)?;
+        row.resolver.supplied_request_mapping(&StaticResolution {
+            catalogue: self,
+            slug,
+        })
+    }
+
+    pub(crate) fn static_request_profile_with_mapping(
+        &self,
+        slug: &ModelSlug,
+        wire: &'static dyn WireFormat,
+    ) -> Result<StaticRequestProfile, ResolveError> {
+        let key = slug.to_string();
+        let hosted = self
+            .hosted
+            .get(&key)
+            .ok_or(ResolveError::HostedModelNotConfigured { slug: key })?;
+        Ok(StaticRequestProfile::new(
+            slug.model.clone(),
+            hosted.capabilities.clone(),
+            wire,
+        ))
     }
 
     /// Resolve any slug, by asking whatever its row says resolves it.
