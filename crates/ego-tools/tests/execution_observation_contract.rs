@@ -224,8 +224,10 @@ fn recovery_clears_a_stale_manifest_observation_when_the_event_is_not_in_valid_l
                 &mut seq,
                 turn,
                 1,
-                EventKind::ExecutionObserved {
-                    observation: observation("landlock", "v1"),
+                EventKind::UserPrompt {
+                    text: "baseline".to_string(),
+                    images: Vec::new(),
+                    queued_prompt: None,
                 },
             ),
         )
@@ -237,9 +239,8 @@ fn recovery_clears_a_stale_manifest_observation_when_the_event_is_not_in_valid_l
                 &mut seq,
                 turn,
                 2,
-                EventKind::TurnCompleted {
-                    ok: true,
-                    exit_reason: ExitReason::Completed,
+                EventKind::ExecutionObserved {
+                    observation: observation("landlock", "v1"),
                 },
             ),
         )
@@ -248,9 +249,9 @@ fn recovery_clears_a_stale_manifest_observation_when_the_event_is_not_in_valid_l
     let mut lines = event_log_lines(root.path(), &id);
     assert!(
         lines.len() >= 3,
-        "header, observation, and turn boundary are required"
+        "header, baseline, and observation are required"
     );
-    lines.remove(1);
+    lines.truncate(2);
     std::fs::write(
         session_dir(root.path(), &id).join("events.jsonl"),
         lines.join("\n") + "\n",
