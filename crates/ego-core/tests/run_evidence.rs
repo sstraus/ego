@@ -739,12 +739,13 @@ fn run_context_schema_requires_complete_pre_effect_facts_and_closed_mcp_subjects
     let admissions = mcp_object["admissions"]
         .as_array()
         .expect("nested MCP admissions");
-    let admission_keys: Vec<_> = admissions[0]
+    let mut admission_keys: Vec<_> = admissions[0]
         .as_object()
         .expect("MCP admission descriptor object")
         .keys()
         .map(String::as_str)
         .collect();
+    admission_keys.sort_unstable();
     assert_eq!(
         admission_keys,
         ["generation_digest", "operation", "schema_digest"]
