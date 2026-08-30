@@ -9,9 +9,9 @@ use std::sync::{Arc, Mutex};
 use ego_core::config::{ConfigLayer, Source, Trust};
 use ego_core::event::hook::{
     HookActivation, HookContentDigest, HookDecision, HookFailure, HookInvocationId, HookLifecycle,
-    HookOccurrenceKey, HookOccurrenceOwner, HookOutcome, HookPlan, HookResult,
+    HookOccurrenceKey, HookOutcome, HookPlan, HookResult,
 };
-use ego_core::event::id::{Producer, SessionId};
+use ego_core::event::id::Producer;
 use ego_core::event::time::Timestamp;
 use ego_core::hook::{
     HookCatalogue, HookEvent, HookFuture, HookLifecycleDispatcher, HookOccurrence, HookPort,
@@ -33,7 +33,7 @@ const MCP_OWNERS: [(&str, HookLifecycle); 2] = [
         HookLifecycle::Elicitation,
     ),
     (
-        "McpInputState resume before guarded claim",
+        "MCP journal accepted answer before guarded claim",
         HookLifecycle::ElicitationResult,
     ),
 ];
@@ -128,12 +128,8 @@ fn dispatcher(port: RecordingPort) -> HookLifecycleDispatcher {
 
 fn occurrence(lifecycle: HookLifecycle) -> HookOccurrence {
     HookOccurrence::new(
-        HookOccurrenceKey::new(
-            lifecycle,
-            HookOccurrenceOwner::Session {
-                session: SessionId::new(),
-            },
-        ),
+        HookOccurrenceKey::continuation(lifecycle, format!("mcp-{}", "0".repeat(64)))
+            .expect("matching continuation occurrence owner"),
         HookEvent::session(lifecycle),
     )
     .expect("matching lifecycle occurrence")
@@ -150,42 +146,89 @@ fn required() -> McpInputRequired {
 
 #[derive(Default)]
 struct Continuations {
-    records: Mutex<usize>,
+    events: Mutex<Vec<&'static str>>,
+    pending: Mutex<Option<ContinuationRecord>>,
 }
 impl Continuations {
     fn records(&self) -> usize {
-        *self.records.lock().expect("continuation records")
+        self.events
+            .lock()
+            .expect("continuation events")
+            .iter()
+            .filter(|event| **event == "record")
+            .count()
+    }
+
+    fn recorded_id(&self) -> Option<String> {
+        self.pending
+            .lock()
+            .expect("continuation record")
+            .as_ref()
+            .map(|record| record.id().to_owned())
+    }
+
+    fn events(&self) -> Vec<&'static str> {
+        self.events.lock().expect("continuation events").clone()
     }
 }
 impl ContinuationJournal for Continuations {
-    fn record(&self, _record: ContinuationRecord) -> Result<(), ContinuationError> {
-        *self.records.lock().expect("continuation records") += 1;
+    fn record(&self, record: ContinuationRecord) -> Result<(), ContinuationError> {
+        let mut pending = self.pending.lock().expect("continuation record");
+        if pending.is_some() {
+            return Err(ContinuationError::InvalidTransition);
+        }
+        *pending = Some(record);
+        self.events
+            .lock()
+            .expect("continuation events")
+            .push("record");
         Ok(())
     }
     fn accept_answer(
         &self,
-        _id: &str,
-        _answer: &[u8],
-        _now: Timestamp,
+        id: &str,
+        answer: &[u8],
+        now: Timestamp,
     ) -> Result<(), ContinuationError> {
-        Err(ContinuationError::Unavailable(
-            "answer belongs to the operation owner".to_owned(),
-        ))
+        let mut pending = self.pending.lock().expect("continuation record");
+        let record = pending.as_mut().ok_or(ContinuationError::NotFound)?;
+        if record.id() != id {
+            return Err(ContinuationError::NotFound);
+        }
+        record.accept_answer(answer.to_vec(), now)?;
+        self.events
+            .lock()
+            .expect("continuation events")
+            .push("accepted_answer");
+        Ok(())
     }
     fn load(&self, _id: &str) -> Result<ContinuationRecord, ContinuationError> {
         Err(ContinuationError::NotFound)
     }
-    fn claim(&self, _id: &str, _now: Timestamp) -> Result<ClaimedContinuation, ContinuationError> {
-        Err(ContinuationError::NotFound)
+    fn claim(&self, id: &str, now: Timestamp) -> Result<ClaimedContinuation, ContinuationError> {
+        let mut pending = self.pending.lock().expect("continuation record");
+        let record = pending.take().ok_or(ContinuationError::NotFound)?;
+        if record.id() != id {
+            *pending = Some(record);
+            return Err(ContinuationError::NotFound);
+        }
+        let claimed = record.claim(now)?;
+        self.events
+            .lock()
+            .expect("continuation events")
+            .push("claim");
+        Ok(claimed)
     }
     fn settle(
         &self,
         _claimed: ClaimedContinuation,
         _state: ContinuationState,
     ) -> Result<(), ContinuationError> {
-        Err(ContinuationError::Unavailable(
-            "settlement belongs to the operation owner".to_owned(),
-        ))
+        self.events
+            .lock()
+            .expect("continuation events")
+            .push("settle");
+        Ok(())
     }
 }
 
@@ -199,7 +242,7 @@ fn mcp_matrix_has_one_owner_for_each_mrtr_lifecycle() {
                 HookLifecycle::Elicitation
             ),
             (
-                "McpInputState resume before guarded claim",
+                "MCP journal accepted answer before guarded claim",
                 HookLifecycle::ElicitationResult
             ),
         ]
@@ -217,8 +260,6 @@ fn operation_factory_projects_elicitation_after_record_then_result_before_claim(
         McpStdioOperationFactory::new(recorder, 64 * 1024, std::time::Duration::from_secs(30))
             .expect("MCP operation owner")
             .with_hook_dispatcher(dispatcher);
-    futures::executor::block_on(factory.dispatch_lifecycle(HookLifecycle::Elicitation))
-        .expect("request lifecycle before durable record");
     let mapped = McpInputMapping::map(required()).expect("one accepted MRTR form");
     let state = McpInputState::from_mapping(
         "server".parse().expect("server"),
@@ -229,11 +270,22 @@ fn operation_factory_projects_elicitation_after_record_then_result_before_claim(
     .expect("durable input-required state");
     let answer = McpInputResponse::new(state.request_id(), br#"{"choice":"yes"}"#)
         .expect("validated answer");
+    futures::executor::block_on(factory.dispatch_lifecycle(HookLifecycle::Elicitation))
+        .expect("request lifecycle after durable record");
+    let continuation_id = journal
+        .recorded_id()
+        .expect("operation owner durably records continuation before Elicitation");
+    journal
+        .accept_answer(&continuation_id, br#"{"choice":"yes"}"#, Timestamp::EPOCH)
+        .expect("answer is accepted durably before ElicitationResult");
     let retry = state
         .resume(answer)
         .expect("accepted answer resumes original operation");
     futures::executor::block_on(factory.dispatch_lifecycle(HookLifecycle::ElicitationResult))
         .expect("result lifecycle before durable claim");
+    journal
+        .claim(&continuation_id, Timestamp::EPOCH)
+        .expect("continuation is claimed only after ElicitationResult");
     assert_eq!(retry.method(), "tools/call");
     assert!(
         std::str::from_utf8(retry.body())
@@ -244,6 +296,11 @@ fn operation_factory_projects_elicitation_after_record_then_result_before_claim(
         journal.records(),
         1,
         "input-required result crosses the durable continuation boundary once"
+    );
+    assert_eq!(
+        journal.events(),
+        vec!["record", "accepted_answer", "claim"],
+        "record, accepted answer, hook points, and claim preserve owner order"
     );
     assert_eq!(
         port.calls(),

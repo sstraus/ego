@@ -200,10 +200,51 @@ delegate_cli_port!(
     BlockingPort,
     Ok(HookOutcome::new(HookDecision::Block, None))
 );
-delegate_cli_port!(
-    ObserverFailurePort,
-    Err(HookFailure::new(HookFailureKind::HandlerFailed, None))
-);
+
+impl HookPort for ObserverFailurePort {
+    fn reached<'a>(
+        &'a self,
+        producer: &'a ego_core::event::id::Producer,
+        occurrence: &'a HookOccurrence,
+        plan: &'a HookPlan,
+    ) -> HookReachFuture<'a> {
+        self.0.reached(producer, occurrence, plan)
+    }
+
+    fn started<'a>(
+        &'a self,
+        spec: &'a HookSpec,
+        occurrence: &'a HookOccurrence,
+        reached: &'a HookReachedEvidence,
+        activation: HookActivation,
+        invocation: HookInvocationId,
+    ) -> HookStartFuture<'a> {
+        self.0
+            .started(spec, occurrence, reached, activation, invocation)
+    }
+
+    fn invoke<'a>(
+        &'a self,
+        _spec: &'a HookSpec,
+        event: ego_core::hook::HookEvent,
+    ) -> HookFuture<'a> {
+        let outcome = if event.lifecycle() == HookLifecycle::PostModelSwitch {
+            Err(HookFailure::new(HookFailureKind::HandlerFailed, None))
+        } else {
+            Ok(HookOutcome::new(HookDecision::Continue, None))
+        };
+        Box::pin(std::future::ready(outcome))
+    }
+
+    fn settled<'a>(
+        &'a self,
+        spec: &'a HookSpec,
+        started: HookStartedEvidence,
+        result: &'a HookResult,
+    ) -> HookRecordFuture<'a> {
+        self.0.settled(spec, started, result)
+    }
+}
 
 fn dispatcher(port: RecordingPort) -> HookLifecycleDispatcher {
     HookLifecycleDispatcher::new(
@@ -268,12 +309,19 @@ fn catalogue() -> Arc<ModelCatalogueSnapshot> {
 }
 
 #[derive(Clone)]
-struct ConfigStore;
+struct ConfigStore {
+    selection: Arc<GenerationSelection>,
+}
 impl UserConfigStore for ConfigStore {
     fn mutate(
         &self,
         _mutation: UserConfigMutation,
     ) -> Result<UserConfigPublication, UserConfigError> {
+        assert_eq!(
+            self.selection.snapshot().expect("selection").identity,
+            ModelRef("openai/old".to_owned()),
+            "config publication must precede active model installation"
+        );
         Ok(UserConfigPublication::PublishedDurably)
     }
 }
@@ -316,14 +364,19 @@ fn cli_owner_matrix_has_one_deterministic_session_compaction_and_handoff_path() 
 }
 
 #[test]
-fn model_picker_real_handoff_gates_before_commit_and_observes_after_commit() {
+fn model_picker_persists_before_install_and_observes_after_commit() {
     let selection = Arc::new(GenerationSelection::new(
         ModelRef("openai/old".to_owned()),
         ThinkingLevel::Medium,
     ));
-    let mut picker =
-        ModelPicker::for_selection(catalogue(), Arc::clone(&selection), Arc::new(ConfigStore))
-            .with_hook_dispatcher(dispatcher(RecordingPort::default()));
+    let mut picker = ModelPicker::for_selection(
+        catalogue(),
+        Arc::clone(&selection),
+        Arc::new(ConfigStore {
+            selection: Arc::clone(&selection),
+        }),
+    )
+    .with_hook_dispatcher(dispatcher(RecordingPort::default()));
     assert_eq!(
         ActionSink::invoke(
             &mut picker,
@@ -347,8 +400,10 @@ fn model_picker_real_handoff_gates_before_commit_and_observes_after_commit() {
         Ok(PickerInputOutcome::Consumed)
     );
     assert_eq!(
-        picker.input(PickerInput::SessionOnly),
-        Ok(PickerInputOutcome::Closed(PickerOutcome::SessionInstalled))
+        picker.input(PickerInput::Enter),
+        Ok(PickerInputOutcome::Closed(PickerOutcome::Persisted(
+            UserConfigPublication::PublishedDurably,
+        )))
     );
     assert_eq!(
         selection.snapshot().expect("selection").identity,
