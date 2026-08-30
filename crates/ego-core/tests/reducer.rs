@@ -10,18 +10,23 @@ use ego_core::cost::{
 };
 use ego_core::event::domain::{
     DomainEvent, Envelope, EventKind, ExitReason, GenerationRole, OccupancyProvenance,
+    SubagentTerminal,
 };
 use ego_core::event::hook::{
     HookCatalogueEvidence, HookDecision, HookDescriptorEvidence, HookInvocationId, HookOutcome,
     HookSourceAuthority, HookSourceLocation,
 };
 use ego_core::event::id::{AttemptId, GenerationId};
-use ego_core::event::id::{EventId, ItemId, Producer, Seq, SessionId, TurnId};
+use ego_core::event::id::{
+    EventId, ItemId, Producer, Seq, SessionId, SubagentInvocationId, TurnId,
+};
 use ego_core::event::time::Timestamp;
 use ego_core::generator::attempt::{AttemptRef, DeliveryCertainty, Outcome, UsageReport};
 use ego_core::generator::types::{ErrorKind, StopReason};
 use ego_core::permit::{Authority, CanonPath, Escalation, OpName, ToolResult};
+use ego_core::run::{RunId, RunSelections};
 use ego_core::state::{PermissionEvent, RefusalReason, SessionState, SubagentEvent, Usage};
+use ego_core::store::blob::{BlobId, BlobRef};
 
 // Wrapped in a module named `reducer` so `cargo test -p ego-core reducer`
 // (the story's VERIFY command) matches these tests by substring: cargo's
@@ -29,6 +34,14 @@ use ego_core::state::{PermissionEvent, RefusalReason, SessionState, SubagentEven
 // `tests/reducer.rs`'s bare functions wouldn't otherwise contain "reducer".
 mod reducer {
     use super::*;
+
+    fn blob_ref(bytes: u64) -> BlobRef {
+        BlobRef::new(
+            BlobId::parse("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                .unwrap(),
+            bytes,
+        )
+    }
 
     fn ev(
         seq: Seq,
@@ -99,6 +112,8 @@ mod reducer {
         let reasoning_item = ItemId::new();
         let tool_item = ItemId::new();
         let source_session = SessionId::new();
+        let subagent_invocation = SubagentInvocationId::new();
+        let child_run = RunId::new(SessionId::new(), uuid::Uuid::now_v7());
         let mut seq = Seq::default();
         let mut parent: Option<EventId> = None;
         let mut log = Vec::new();
@@ -226,15 +241,27 @@ mod reducer {
         );
         push!(
             None,
-            EventKind::SubagentSpawned {
-                subagent_id: "sub-1".to_string()
+            EventKind::SubagentRequested {
+                invocation: subagent_invocation,
+                task: blob_ref(12),
+                selections: RunSelections::empty(),
             }
         );
         push!(
             None,
-            EventKind::SubagentReturned {
-                subagent_id: "sub-1".to_string(),
-                result: "done".to_string()
+            EventKind::SubagentSpawned {
+                invocation: subagent_invocation,
+                child: child_run,
+            }
+        );
+        push!(
+            None,
+            EventKind::SubagentSettled {
+                invocation: subagent_invocation,
+                child: Some(child_run),
+                terminal: SubagentTerminal::Returned {
+                    final_message: blob_ref(4),
+                },
             }
         );
         push!(
@@ -450,6 +477,8 @@ mod reducer {
         let unknown_parent = EventId::new(); // never applied to this state
         let regressed_seq = Seq::default(); // ZERO — below `primed_seq`
         assert!(regressed_seq < primed_seq);
+        let subagent_invocation = SubagentInvocationId::new();
+        let child_run = RunId::new(SessionId::new(), uuid::Uuid::now_v7());
 
         let table: Vec<(&str, EventKind)> = vec![
             (
@@ -604,16 +633,28 @@ mod reducer {
                 },
             ),
             (
-                "subagent_spawned",
-                EventKind::SubagentSpawned {
-                    subagent_id: String::new(),
+                "subagent_requested",
+                EventKind::SubagentRequested {
+                    invocation: subagent_invocation,
+                    task: blob_ref(12),
+                    selections: RunSelections::empty(),
                 },
             ),
             (
-                "subagent_returned",
-                EventKind::SubagentReturned {
-                    subagent_id: String::new(),
-                    result: String::new(),
+                "subagent_spawned",
+                EventKind::SubagentSpawned {
+                    invocation: subagent_invocation,
+                    child: child_run,
+                },
+            ),
+            (
+                "subagent_settled",
+                EventKind::SubagentSettled {
+                    invocation: subagent_invocation,
+                    child: Some(child_run),
+                    terminal: SubagentTerminal::Returned {
+                        final_message: blob_ref(4),
+                    },
                 },
             ),
             (
@@ -670,7 +711,7 @@ mod reducer {
         ];
         assert_eq!(
             table.len(),
-            26,
+            27,
             "keep this table in sync with EventKind's variant count (ARCH §1)"
         );
 
@@ -700,7 +741,7 @@ mod reducer {
 
         assert_eq!(
             state.unresolved_parents.len(),
-            26,
+            27,
             "every event's parent was unresolvable"
         );
         assert_eq!(
@@ -1119,14 +1160,18 @@ mod reducer {
         let mut seq = Seq::default();
         let mut state = SessionState::default();
         let source = SessionId::new();
+        let subagent_invocation = SubagentInvocationId::new();
+        let child_run = RunId::new(SessionId::new(), uuid::Uuid::now_v7());
 
         state.apply(&ev(
             seq.next(),
             turn,
             None,
             None,
-            EventKind::SubagentSpawned {
-                subagent_id: "s1".to_string(),
+            EventKind::SubagentRequested {
+                invocation: subagent_invocation,
+                task: blob_ref(12),
+                selections: RunSelections::empty(),
             },
         ));
         state.apply(&ev(
@@ -1134,9 +1179,22 @@ mod reducer {
             turn,
             None,
             None,
-            EventKind::SubagentReturned {
-                subagent_id: "s1".to_string(),
-                result: "ok".to_string(),
+            EventKind::SubagentSpawned {
+                invocation: subagent_invocation,
+                child: child_run,
+            },
+        ));
+        state.apply(&ev(
+            seq.next(),
+            turn,
+            None,
+            None,
+            EventKind::SubagentSettled {
+                invocation: subagent_invocation,
+                child: Some(child_run),
+                terminal: SubagentTerminal::Returned {
+                    final_message: blob_ref(4),
+                },
             },
         ));
         let hook = hook_descriptor();
@@ -1212,12 +1270,21 @@ mod reducer {
         assert_eq!(
             state.subagents,
             vec![
-                SubagentEvent::Spawned {
-                    subagent_id: "s1".to_string()
+                SubagentEvent::Requested {
+                    invocation: subagent_invocation,
+                    task: blob_ref(12),
+                    selections: RunSelections::empty(),
                 },
-                SubagentEvent::Returned {
-                    subagent_id: "s1".to_string(),
-                    result: "ok".to_string()
+                SubagentEvent::Spawned {
+                    invocation: subagent_invocation,
+                    child: child_run,
+                },
+                SubagentEvent::Settled {
+                    invocation: subagent_invocation,
+                    child: Some(child_run),
+                    terminal: SubagentTerminal::Returned {
+                        final_message: blob_ref(4),
+                    },
                 },
             ]
         );

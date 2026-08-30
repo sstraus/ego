@@ -28,10 +28,10 @@ use ego_core::run::{
 use ego_core::sink::{EventSink, NullSink};
 use ego_core::state::SessionState;
 use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
-use ego_core::usage::{UsageReport, USAGE_REPORT_VERSION};
+use ego_core::usage::{USAGE_REPORT_VERSION, UsageReport};
 use futures::future::{self, BoxFuture};
 use futures::stream::{self, BoxStream};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
 
 const SESSION: &str = "00000000-0000-0000-0000-000000000101";
@@ -536,11 +536,13 @@ mod regression_case {
         mismatched_descriptor.id = SkillId::parse(&format!("sk1:{DIGEST}")).unwrap();
         assert!(SkillCatalogueEvidence::new(vec![mismatched_descriptor]).is_err());
         assert!(SkillCatalogueEvidence::new(vec![first.clone(), first.clone()]).is_err());
-        assert!(SkillCatalogueEvidence::new(vec![
-            first.clone(),
-            skill_descriptor("charlie", "skills/alpha/SKILL.md"),
-        ])
-        .is_err());
+        assert!(
+            SkillCatalogueEvidence::new(vec![
+                first.clone(),
+                skill_descriptor("charlie", "skills/alpha/SKILL.md"),
+            ])
+            .is_err()
+        );
         assert!(SkillCatalogueEvidence::new(vec![second.clone(), first.clone()]).is_err());
 
         // Decode malformed wires independently of the validating constructor.
@@ -554,14 +556,9 @@ mod regression_case {
         assert!(serde_json::from_value::<SkillCatalogueEvidence>(duplicate_wire).is_err());
 
         let mut duplicate_location_wire = canonical_wire.clone();
-        duplicate_location_wire[1] = serde_json::to_value(skill_descriptor(
-            "charlie",
-            "skills/alpha/SKILL.md",
-        ))
-        .unwrap();
-        assert!(
-            serde_json::from_value::<SkillCatalogueEvidence>(duplicate_location_wire).is_err()
-        );
+        duplicate_location_wire[1] =
+            serde_json::to_value(skill_descriptor("charlie", "skills/alpha/SKILL.md")).unwrap();
+        assert!(serde_json::from_value::<SkillCatalogueEvidence>(duplicate_location_wire).is_err());
 
         let mut reversed_wire = canonical_wire;
         reversed_wire[0] = reversed_wire[1].clone();
@@ -698,10 +695,12 @@ mod regression_case {
             "parent_item": "00000000-0000-0000-0000-000000000107",
         }))
         .expect("alternate origin must be typed");
-        assert!(futures::executor::block_on(
-            controller.start(start_request(different_origin, DIGEST), bindings())
-        )
-        .is_err());
+        assert!(
+            futures::executor::block_on(
+                controller.start(start_request(different_origin, DIGEST), bindings())
+            )
+            .is_err()
+        );
 
         assert!(matches!(
             futures::executor::block_on(

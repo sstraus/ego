@@ -42,13 +42,15 @@ use ego_core::cost::{
 };
 use ego_core::event::domain::{
     CancelCause, DomainEvent, Envelope, EventKind, ExitReason, GenerationRole, OccupancyProvenance,
+    SubagentTerminal,
 };
 use ego_core::event::hook::{
     HookCatalogueEvidence, HookDecision, HookDescriptorEvidence, HookInvocationId, HookOutcome,
     HookSourceAuthority, HookSourceLocation,
 };
 use ego_core::event::id::{
-    EventId, GenerationId, ItemId, Producer, QueuedPromptId, Seq, SessionId, TurnId,
+    EventId, GenerationId, ItemId, Producer, QueuedPromptId, Seq, SessionId, SubagentInvocationId,
+    TurnId,
 };
 use ego_core::event::time::Timestamp;
 use ego_core::generator::attempt::{AttemptRef, DeliveryCertainty, Outcome, UsageReport};
@@ -60,7 +62,9 @@ use ego_core::generator::types::{ErrorKind, ReasoningState, StopReason};
 use ego_core::permit::{Authority, CanonPath, Escalation, OpName, ToolResult};
 use ego_core::public::project_public;
 use ego_core::question::{QuestionMode, QuestionOption, QuestionOutcome, QuestionRequest};
+use ego_core::run::{RunId, RunSelections};
 use ego_core::state::{SessionState, Usage};
+use ego_core::store::blob::{BlobId, BlobRef};
 
 // Wrapped in a module named `acp_golden` so `cargo test -p ego-acp
 // acp_golden` (the story's VERIFY command) matches these tests by
@@ -108,6 +112,14 @@ fn acp_state_v2(
 
 mod acp_golden {
     use super::*;
+
+    fn blob_ref(bytes: u64) -> BlobRef {
+        BlobRef::new(
+            BlobId::parse("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                .unwrap(),
+            bytes,
+        )
+    }
 
     /// Deserialise a fixed UUID literal into a `TurnId`/`ItemId` via their
     /// derived `Deserialize` impl, for deterministic, golden-comparable ids
@@ -162,6 +174,8 @@ mod acp_golden {
         let item_sub_1: ItemId = item_id(ITEM_SUB_1);
         let item_user_2: ItemId = item_id(ITEM_USER_2);
         let item_assistant_2: ItemId = item_id(ITEM_ASSISTANT_2);
+        let subagent_invocation = SubagentInvocationId::new();
+        let child_run = RunId::new(SessionId::new(), uuid::Uuid::now_v7());
 
         let mut seq = Seq::default();
         vec![
@@ -253,16 +267,20 @@ mod acp_golden {
                 turn1,
                 Some(item_sub_1),
                 EventKind::SubagentSpawned {
-                    subagent_id: "explorer-1".to_string(),
+                    invocation: subagent_invocation,
+                    child: child_run,
                 },
             ),
             ev(
                 seq.next(),
                 turn1,
                 Some(item_sub_1),
-                EventKind::SubagentReturned {
-                    subagent_id: "explorer-1".to_string(),
-                    result: "done".to_string(),
+                EventKind::SubagentSettled {
+                    invocation: subagent_invocation,
+                    child: Some(child_run),
+                    terminal: SubagentTerminal::Returned {
+                        final_message: blob_ref(4),
+                    },
                 },
             ),
             ev(
@@ -531,12 +549,21 @@ mod acp_golden {
                     outcome: HookOutcome::new(HookDecision::Continue, None),
                 },
             },
-            EventKind::SubagentSpawned {
-                subagent_id: String::new(),
+            EventKind::SubagentRequested {
+                invocation: SubagentInvocationId::new(),
+                task: blob_ref(0),
+                selections: RunSelections::empty(),
             },
-            EventKind::SubagentReturned {
-                subagent_id: String::new(),
-                result: String::new(),
+            EventKind::SubagentSpawned {
+                invocation: SubagentInvocationId::new(),
+                child: RunId::new(SessionId::new(), uuid::Uuid::now_v7()),
+            },
+            EventKind::SubagentSettled {
+                invocation: SubagentInvocationId::new(),
+                child: Some(RunId::new(SessionId::new(), uuid::Uuid::now_v7())),
+                terminal: SubagentTerminal::Returned {
+                    final_message: blob_ref(0),
+                },
             },
             EventKind::Error {
                 message: String::new(),
@@ -696,7 +723,7 @@ mod acp_golden {
     fn events_with_no_counterpart_in_either_version_project_to_none() {
         assert_eq!(
             one_of_each_kind().len(),
-            30,
+            31,
             "the current internal event set is exhaustive"
         );
         let none_in_both = [
@@ -714,7 +741,7 @@ mod acp_golden {
             "hook_invocation_started",
             "hook_invocation_settled",
             "subagent_spawned",
-            "subagent_returned",
+            "subagent_requested",
             "error",
             "generation_started",
             "attempt_settled",

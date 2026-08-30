@@ -43,26 +43,9 @@ use super::blob::SessionBlobStore;
 use super::io::{AtomicReplacePublication, StoreIo, tmp_path_for};
 use super::snapshot::{SNAPSHOT_VERSION, Snapshot, SnapshotRejection, validate};
 
-/// The only on-disk log version this build migrates. Writers emit only v8;
-/// this constant names the single v7 -> v8 ownership transition.
-const MIGRATABLE_CODEC_VERSION: u32 = 7;
-
-/// The sole decoder for the untagged v7 payload shape.
-#[derive(serde::Deserialize)]
-#[serde(untagged)]
-enum LegacySessionEntry {
-    Event(DomainEvent),
-    RunTransaction(RunTransaction),
-}
-
-impl From<LegacySessionEntry> for SessionEntry {
-    fn from(value: LegacySessionEntry) -> Self {
-        match value {
-            LegacySessionEntry::Event(event) => Self::Event(event),
-            LegacySessionEntry::RunTransaction(transaction) => Self::RunTransaction(transaction),
-        }
-    }
-}
+/// The only on-disk log version this build migrates. Writers emit only v9;
+/// this constant names the single v8 -> v9 ownership transition.
+const MIGRATABLE_CODEC_VERSION: u32 = 8;
 
 /// Filesystem-private cache projection. The public store port exposes only
 /// [`SessionMeta`]; execution and admitted-hook evidence remain internal log
@@ -286,7 +269,7 @@ fn accept_physical_position(current: &mut Seq, actual: Seq) -> Result<(), StoreE
     Ok(())
 }
 
-/// Validate the positions this codec can see. An unknown v8 record is kept
+/// Validate the positions this codec can see. An unknown v9 record is kept
 /// verbatim by recovery; because its position is opaque to this build, later
 /// records cannot be ordered relative to it and validation stops there.
 fn validate_physical_positions<'a>(
@@ -310,7 +293,56 @@ fn validate_physical_positions<'a>(
     Ok(())
 }
 
-fn migrate_v7_image(
+fn add_v9_defaults(value: &mut serde_json::Value) {
+    let Some(object) = value.as_object_mut() else {
+        return;
+    };
+    if object.contains_key("revision")
+        && object.contains_key("run_id")
+        && object.contains_key("command")
+    {
+        object
+            .entry("origin")
+            .or_insert_with(|| serde_json::json!({"kind": "top_level"}));
+    }
+    let kind = object
+        .get("kind")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    match kind.as_deref() {
+        Some("run_transaction") => {
+            if let Some(transaction) = object.get_mut("run_transaction") {
+                add_v9_defaults(transaction);
+            }
+        }
+        Some("evidence") => {
+            if let Some(evidence) = object
+                .get_mut("evidence")
+                .and_then(serde_json::Value::as_object_mut)
+                && evidence.get("kind").and_then(serde_json::Value::as_str) == Some("run_context")
+            {
+                evidence
+                    .entry("origin")
+                    .or_insert_with(|| serde_json::json!({"kind": "top_level"}));
+            }
+        }
+        _ => {}
+    }
+}
+
+fn decode_v8_entry(raw: &str) -> Result<SessionEntry, serde_json::Error> {
+    let mut value = serde_json::from_str::<serde_json::Value>(raw)?;
+    add_v9_defaults(&mut value);
+    if let Ok(entry) = serde_json::from_value::<SessionEntry>(value.clone()) {
+        return Ok(entry);
+    }
+    if let Ok(event) = serde_json::from_value::<DomainEvent>(value.clone()) {
+        return Ok(SessionEntry::Event(event));
+    }
+    serde_json::from_value::<RunTransaction>(value).map(SessionEntry::RunTransaction)
+}
+
+fn migrate_v8_image(
     bytes: &[u8],
     mut header: Header,
     start: usize,
@@ -324,13 +356,13 @@ fn migrate_v7_image(
         };
         match decode_line(&bytes[cursor..cursor + offset]) {
             Ok(StoreLine::Record(record)) => {
-                serde_json::from_str::<LegacySessionEntry>(record.payload.get()).map_err(|_| {
-                    invalid_log("cannot migrate a v7 log containing an unknown payload")
+                decode_v8_entry(record.payload.get()).map_err(|_| {
+                    invalid_log("cannot migrate a v8 log containing an unknown payload")
                 })?;
             }
             Ok(StoreLine::Unknown(_)) => {
                 return Err(invalid_log(
-                    "cannot migrate a v7 log containing an unknown record",
+                    "cannot migrate a v8 log containing an unknown record",
                 ));
             }
             Ok(StoreLine::Header(_)) => {
@@ -356,7 +388,7 @@ fn migrate_v7_image(
             StoreLine::Record(record) => record,
             StoreLine::Unknown(_) => {
                 return Err(invalid_log(
-                    "cannot migrate a v7 log containing an unknown record",
+                    "cannot migrate a v8 log containing an unknown record",
                 ));
             }
             StoreLine::Header(_) => {
@@ -365,8 +397,7 @@ fn migrate_v7_image(
                 ));
             }
         };
-        let entry = serde_json::from_str::<LegacySessionEntry>(record.payload.get())
-            .map(SessionEntry::from)
+        let entry = decode_v8_entry(record.payload.get())
             .map_err(|error| CodecError::Malformed(error.to_string()))?;
         let next = position.next();
         migrated.extend_from_slice(&encode_record(next, &entry)?);
@@ -945,14 +976,14 @@ impl JsonlStore {
         if let Some((header, _)) = decoded.as_ref() {
             if header.v == MIGRATABLE_CODEC_VERSION {
                 let (migrated, valid_len, dropped_lines) =
-                    migrate_v7_image(&bytes, header.clone(), start)?;
+                    migrate_v8_image(&bytes, header.clone(), start)?;
                 if valid_len < bytes.len() {
                     repair.truncated_bytes = (bytes.len() - valid_len) as u64;
                     repair.dropped_lines = dropped_lines;
                 }
-                // One atomic publication both removes any torn v7 tail and
-                // installs the v8 header/physical positions. No v8 writer ever
-                // appends under a v7 header.
+                // One atomic publication both removes any torn v8 tail and
+                // installs the v9 schema. No v9 writer ever appends under a
+                // v8 header.
                 self.io.replace_atomic(&log_path, &migrated)?;
                 repair.migrated = true;
                 tracing::warn!(

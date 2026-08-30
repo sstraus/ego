@@ -472,7 +472,7 @@ impl<'de> Deserialize<'de> for HookCatalogueEvidence {
     }
 }
 
-/// The nineteen stable lifecycle points owned by the harness.
+/// The twenty-one stable lifecycle points owned by the harness.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum HookLifecycle {
     SessionStart,
@@ -485,6 +485,8 @@ pub enum HookLifecycle {
     PostToolUse,
     PostToolUseFailure,
     PostToolBatch,
+    PreModelSwitch,
+    PostModelSwitch,
     SubagentStart,
     SubagentStop,
     Stop,
@@ -504,6 +506,7 @@ impl HookLifecycle {
             | Self::PreToolUse
             | Self::PermissionRequest
             | Self::PostToolBatch
+            | Self::PreModelSwitch
             | Self::SubagentStop
             | Self::Stop
             | Self::PreCompact
@@ -514,6 +517,7 @@ impl HookLifecycle {
             | Self::PermissionDenied
             | Self::PostToolUse
             | Self::PostToolUseFailure
+            | Self::PostModelSwitch
             | Self::SubagentStart
             | Self::StopFailure
             | Self::PostCompact

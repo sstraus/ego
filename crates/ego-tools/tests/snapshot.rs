@@ -18,15 +18,21 @@ use std::num::NonZeroUsize;
 use ego_core::cost::{
     Amount, CostAttribution, CostDelta, CumulativeCost, CurrencyCode, Money, PricingRevision,
 };
-use ego_core::event::domain::{DomainEvent, Envelope, EventKind, ExitReason, OccupancyProvenance};
+use ego_core::event::domain::{
+    DomainEvent, Envelope, EventKind, ExitReason, OccupancyProvenance, SubagentTerminal,
+};
 use ego_core::event::hook::{
     HookCatalogueEvidence, HookDescriptorEvidence, HookSourceAuthority, HookSourceLocation,
 };
-use ego_core::event::id::{EventId, ItemId, Producer, Seq, SessionId, TurnId};
+use ego_core::event::id::{
+    EventId, ItemId, Producer, Seq, SessionId, SubagentInvocationId, TurnId,
+};
 use ego_core::event::time::Timestamp;
 use ego_core::generator::types::ErrorKind;
 use ego_core::permit::{Authority, CanonPath, Escalation, OpName, ToolResult};
+use ego_core::run::{RunId, RunSelections};
 use ego_core::state::{SessionState, Usage};
+use ego_core::store::blob::{BlobId, BlobRef};
 use ego_core::store::session_store::SessionStore;
 use ego_tools::store::{
     JsonlStore, OsIo, SNAPSHOT_VERSION, Snapshot, SnapshotPolicy, SnapshotRejection, validate,
@@ -38,6 +44,14 @@ use tempfile::{TempDir, tempdir};
 // cargo's filter matches the full test path, not the source file name.
 mod snapshot {
     use super::*;
+
+    fn blob_ref(bytes: u64) -> BlobRef {
+        BlobRef::new(
+            BlobId::parse("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                .unwrap(),
+            bytes,
+        )
+    }
 
     struct Fixture {
         _dir: TempDir,
@@ -120,6 +134,11 @@ mod snapshot {
         let turn2 = TurnId::new();
         let item_msg = ItemId::new();
         let item_tool = ItemId::new();
+        let subagent_invocation = SubagentInvocationId::new();
+        let child_run: RunId =
+            "00000000-0000-0000-0000-000000000101.00000000-0000-7000-8000-000000000102"
+                .parse()
+                .unwrap();
         let mut seq = Seq::default();
 
         let first_id = EventId::new();
@@ -266,8 +285,10 @@ mod snapshot {
             seq.next(),
             turn1,
             None,
-            EventKind::SubagentSpawned {
-                subagent_id: "explorer-1".to_string(),
+            EventKind::SubagentRequested {
+                invocation: subagent_invocation,
+                task: blob_ref(12),
+                selections: RunSelections::empty(),
             },
             None,
             EventId::new(),
@@ -276,9 +297,23 @@ mod snapshot {
             seq.next(),
             turn1,
             None,
-            EventKind::SubagentReturned {
-                subagent_id: "explorer-1".to_string(),
-                result: "done".to_string(),
+            EventKind::SubagentSpawned {
+                invocation: subagent_invocation,
+                child: child_run,
+            },
+            None,
+            EventId::new(),
+        );
+        push(
+            seq.next(),
+            turn1,
+            None,
+            EventKind::SubagentSettled {
+                invocation: subagent_invocation,
+                child: Some(child_run),
+                terminal: SubagentTerminal::Returned {
+                    final_message: blob_ref(4),
+                },
             },
             None,
             EventId::new(),
@@ -508,8 +543,8 @@ mod snapshot {
     }
 
     #[test]
-    fn version_seven_snapshot_is_a_cache_miss_after_the_usage_attribution_bump() {
-        assert_eq!(SNAPSHOT_VERSION, 8);
+    fn version_seven_snapshot_is_a_cache_miss_after_the_codec_bump() {
+        assert_eq!(SNAPSHOT_VERSION, 9);
         let fx = session_with_events();
         let (source_seq, prefix_state) = fx.replay_prefix(4);
         let mut legacy = Snapshot::new(fx.id, source_seq, prefix_state);
@@ -523,8 +558,8 @@ mod snapshot {
     }
 
     #[test]
-    fn version_eight_snapshot_replays_the_same_state_as_the_full_log() {
-        assert_eq!(SNAPSHOT_VERSION, 8);
+    fn current_snapshot_replays_the_same_state_as_the_full_log() {
+        assert_eq!(SNAPSHOT_VERSION, 9);
         let fx = session_with_events();
         let (source_seq, prefix_state) = fx.replay_prefix(4);
         fx.store
@@ -532,7 +567,7 @@ mod snapshot {
             .unwrap();
         let written: Snapshot =
             serde_json::from_slice(&std::fs::read(fx.snapshot_path()).unwrap()).unwrap();
-        assert_eq!(written.v, 8);
+        assert_eq!(written.v, 9);
 
         let (resumed, rejection) = fx.store.resume(&fx.id).unwrap();
 

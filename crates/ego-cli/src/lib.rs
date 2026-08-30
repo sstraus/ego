@@ -17,8 +17,6 @@ pub(crate) const DISPLAY_NAME: &str = "εgo";
 
 pub mod acp;
 pub(crate) mod agent_file;
-#[cfg(test)]
-pub(crate) mod skill;
 pub(crate) mod attachment;
 pub mod auth;
 pub mod budget;
@@ -39,4 +37,7 @@ pub mod repl;
 pub mod run;
 pub mod schema;
 pub mod session;
+#[allow(dead_code)] // Connected to the turn service by M4 S6 after admission is green.
+pub(crate) mod skill;
 pub mod usage;
+pub(crate) mod yaml_envelope;

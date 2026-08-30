@@ -13,12 +13,15 @@ use ego_core::cost::{
 };
 use ego_core::event::domain::{
     DomainEvent, Envelope, EventKind, ExitReason, GenerationRole, OccupancyProvenance,
+    SubagentTerminal,
 };
 use ego_core::event::hook::{
     HookCatalogueEvidence, HookDecision, HookDescriptorEvidence, HookInvocationId, HookOutcome,
     HookSourceAuthority, HookSourceLocation,
 };
-use ego_core::event::id::{EventId, ItemId, Producer, Seq, SessionId, TurnId};
+use ego_core::event::id::{
+    EventId, ItemId, Producer, Seq, SessionId, SubagentInvocationId, TurnId,
+};
 use ego_core::event::time::Timestamp;
 use ego_core::generator::types::{ErrorKind, ReasoningState};
 use ego_core::permit::{Authority, CanonPath, Escalation, OpName, ToolResult};
@@ -26,7 +29,9 @@ use ego_core::public::{
     InstructionDescriptor, InstructionSource, ItemKind, PUBLIC_EVENT_VERSION, PublicEvent,
     project_public,
 };
+use ego_core::run::RunId;
 use ego_core::state::Usage;
+use ego_core::store::blob::{BlobId, BlobRef};
 
 mod common;
 
@@ -84,6 +89,14 @@ mod public_golden {
     const ITEM_SUB_1: &str = "00000000-0000-0000-0000-000000000008";
     const ITEM_USER_2: &str = "00000000-0000-0000-0000-000000000009";
     const ITEM_ASSISTANT_2: &str = "00000000-0000-0000-0000-00000000000a";
+
+    fn blob_ref(bytes: u64) -> BlobRef {
+        BlobRef::new(
+            BlobId::parse("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+                .unwrap(),
+            bytes,
+        )
+    }
     const ITEM_REASONING_1: &str = "00000000-0000-0000-0000-00000000000b";
 
     fn ev(seq: Seq, turn: TurnId, item: Option<ItemId>, kind: EventKind) -> DomainEvent {
@@ -127,6 +140,8 @@ mod public_golden {
         let item_sub_1: ItemId = id(ITEM_SUB_1);
         let item_user_2: ItemId = id(ITEM_USER_2);
         let item_assistant_2: ItemId = id(ITEM_ASSISTANT_2);
+        let subagent_invocation = SubagentInvocationId::new();
+        let child_run = RunId::new(SessionId::new(), uuid::Uuid::now_v7());
         let item_reasoning_1: ItemId = id(ITEM_REASONING_1);
 
         let mut seq = Seq::default();
@@ -219,16 +234,20 @@ mod public_golden {
                 turn1,
                 Some(item_sub_1),
                 EventKind::SubagentSpawned {
-                    subagent_id: "explorer-1".to_string(),
+                    invocation: subagent_invocation,
+                    child: child_run,
                 },
             ),
             ev(
                 seq.next(),
                 turn1,
                 Some(item_sub_1),
-                EventKind::SubagentReturned {
-                    subagent_id: "explorer-1".to_string(),
-                    result: "done".to_string(),
+                EventKind::SubagentSettled {
+                    invocation: subagent_invocation,
+                    child: Some(child_run),
+                    terminal: SubagentTerminal::Returned {
+                        final_message: blob_ref(4),
+                    },
                 },
             ),
             ev(

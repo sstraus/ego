@@ -243,6 +243,7 @@ mod store {
                 "session_id": session,
                 "nonce": "00000000-0000-7000-8000-000000000054"
             },
+            "origin": {"kind": "top_level"},
             "root": "/workspace",
             "selections": {
                 "model": "model/test",

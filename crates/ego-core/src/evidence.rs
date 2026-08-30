@@ -20,7 +20,7 @@ use crate::generator::capabilities::ModelCapabilities;
 use crate::mcp::McpOperationKind;
 use crate::permit::{Confinement, PolicyDigest};
 use crate::public::InstructionDescriptor;
-use crate::run::RunId;
+use crate::run::{RunId, RunOrigin};
 
 pub const EVIDENCE_SCHEMA_VERSION: u32 = 2;
 
@@ -410,6 +410,7 @@ pub struct RunContextEvidence {
     session: SessionId,
     invocation: RunInvocationId,
     run_id: RunId,
+    origin: RunOrigin,
     ego_version: EgoVersion,
     config: ConfigProvenance,
     config_digest: EvidenceDigest,
@@ -459,6 +460,11 @@ impl RunContextEvidence {
         self
     }
 
+    pub fn with_origin(mut self, origin: RunOrigin) -> Self {
+        self.origin = origin;
+        self
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn complete(
         session: SessionId,
@@ -480,6 +486,7 @@ impl RunContextEvidence {
             session,
             invocation,
             run_id,
+            origin: RunOrigin::TopLevel,
             ego_version,
             config,
             config_digest,
@@ -505,6 +512,10 @@ impl RunContextEvidence {
 
     pub const fn run_id(&self) -> RunId {
         self.run_id
+    }
+
+    pub fn origin(&self) -> &RunOrigin {
+        &self.origin
     }
 
     pub fn config(&self) -> &ConfigProvenance {

@@ -39,7 +39,8 @@ use uuid::Uuid;
 use crate::ceiling::Budget;
 use crate::config::{Mode, ModelRef};
 use crate::cost::Money;
-use crate::event::id::SessionId;
+pub use crate::event::id::SubagentInvocationId;
+use crate::event::id::{ItemId, SessionId, TurnId};
 use crate::event::time::{Clock, Timestamp};
 use crate::evidence::{EvidenceError, EvidenceWrite, RunInvocationId};
 use crate::generator::capabilities::ModelCapabilities;
@@ -447,6 +448,25 @@ impl std::fmt::Display for RunId {
     }
 }
 
+/// Durable causal origin shared by every transaction in one rooted run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RunOrigin {
+    TopLevel,
+    Subagent {
+        invocation: SubagentInvocationId,
+        parent_run: RunId,
+        parent_turn: TurnId,
+        parent_item: ItemId,
+    },
+}
+
+impl Default for RunOrigin {
+    fn default() -> Self {
+        Self::TopLevel
+    }
+}
+
 /// Monotonic revision of the lifecycle records in one run stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -640,6 +660,7 @@ pub struct TurnLease(Uuid);
 pub struct RunTransaction {
     revision: RunRevision,
     run_id: RunId,
+    origin: RunOrigin,
     root: RunRoot,
     selections: RunSelections,
     command: RunCommand,
@@ -656,6 +677,10 @@ impl RunTransaction {
 
     pub const fn run_id(&self) -> RunId {
         self.run_id
+    }
+
+    pub fn origin(&self) -> &RunOrigin {
+        &self.origin
     }
 
     pub fn root(&self) -> &RunRoot {
@@ -724,6 +749,7 @@ pub struct StartRequest {
     digest: RequestDigest,
     selections: RunSelections,
     prompt: String,
+    origin: RunOrigin,
 }
 
 impl StartRequest {
@@ -740,7 +766,17 @@ impl StartRequest {
             digest,
             selections,
             prompt: prompt.into(),
+            origin: RunOrigin::TopLevel,
         }
+    }
+
+    pub fn with_origin(mut self, origin: RunOrigin) -> Self {
+        self.origin = origin;
+        self
+    }
+
+    pub fn origin(&self) -> &RunOrigin {
+        &self.origin
     }
 }
 
@@ -812,6 +848,7 @@ pub struct RunPreparation {
     pub root: RunRoot,
     pub selections: RunSelections,
     pub continuation: bool,
+    pub origin: RunOrigin,
 }
 
 pub struct RunPrepared<P> {
@@ -839,6 +876,7 @@ pub struct RunStart {
     pub run_id: RunId,
     pub root: RunRoot,
     pub model: ModelRef,
+    pub origin: RunOrigin,
 }
 
 /// Opaque live identity held by the executor adapter.
@@ -1126,6 +1164,7 @@ impl From<RunExecutorError> for RunError {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RunSnapshot {
     run_id: RunId,
+    origin: RunOrigin,
     root: RunRoot,
     selections: RunSelections,
     revision: RunRevision,
@@ -1136,6 +1175,9 @@ pub struct RunSnapshot {
 impl RunSnapshot {
     pub const fn run_id(&self) -> RunId {
         self.run_id
+    }
+    pub fn origin(&self) -> &RunOrigin {
+        &self.origin
     }
     pub const fn session_id(&self) -> SessionId {
         self.run_id.session_id()
@@ -1230,6 +1272,7 @@ pub enum RunCommandOutcome {
 enum ExecutionMode {
     Start {
         root: RunRoot,
+        origin: RunOrigin,
         model: ModelRef,
         prompt: String,
         prepared: Box<dyn Any + Send>,
@@ -1417,6 +1460,7 @@ where
                 root: request.root.clone(),
                 selections: request.selections.clone(),
                 continuation: false,
+                origin: request.origin.clone(),
             })
             .await?;
         let (model, prepared) = prepared.into_parts();
@@ -1424,6 +1468,7 @@ where
         let transaction = RunTransaction {
             revision: RunRevision::new(1),
             run_id,
+            origin: request.origin.clone(),
             root: request.root.clone(),
             selections: request.selections.clone(),
             command: RunCommand::CommandAdmitted {
@@ -1459,6 +1504,7 @@ where
                 }
                 let mode = ExecutionMode::Start {
                     root: request.root.clone(),
+                    origin: request.origin.clone(),
                     model,
                     prompt: request.prompt,
                     prepared: Box::new(prepared),
@@ -1466,6 +1512,7 @@ where
                 Ok(RunCommandOutcome::Admitted(self.admission(
                     RunSnapshot {
                         run_id,
+                        origin: request.origin,
                         root: request.root,
                         selections: request.selections,
                         revision,
@@ -1518,6 +1565,7 @@ where
                 root: folded.snapshot.root.clone(),
                 selections: preparation_selections,
                 continuation: true,
+                origin: folded.snapshot.origin.clone(),
             })
             .await?;
         let (prepared_model, prepared) = prepared.into_parts();
@@ -1533,6 +1581,7 @@ where
         let transaction = RunTransaction {
             revision,
             run_id: request.run_id,
+            origin: folded.snapshot.origin.clone(),
             root: folded.snapshot.root.clone(),
             selections: folded.snapshot.selections.clone(),
             command: RunCommand::CommandAdmitted {
@@ -1573,6 +1622,7 @@ where
                 Ok(RunCommandOutcome::Admitted(self.admission(
                     RunSnapshot {
                         run_id: request.run_id,
+                        origin: folded.snapshot.origin,
                         root: folded.snapshot.root,
                         selections: folded.snapshot.selections,
                         revision: committed,
@@ -1616,6 +1666,7 @@ where
         let effect = match mode {
             ExecutionMode::Start {
                 root,
+                origin,
                 model,
                 prompt,
                 prepared,
@@ -1633,6 +1684,7 @@ where
                         run_id,
                         root,
                         model,
+                        origin,
                     })
                     .await?;
                 self.bind_handle(run_id, &handle)?;
@@ -1941,6 +1993,11 @@ where
                 session_id: folded.snapshot.session_id(),
             });
         }
+        if folded.snapshot.origin != request.origin {
+            return Err(RunError::Integrity {
+                message: "replayed run request changes its durable origin".to_owned(),
+            });
+        }
         if matches!(
             receipt.settlement,
             Some(RunSettlement::Interrupted | RunSettlement::Uncertain)
@@ -2016,6 +2073,7 @@ where
         let transaction = RunTransaction {
             revision: folded.snapshot.revision.next(),
             run_id: request.run_id,
+            origin: folded.snapshot.origin.clone(),
             root: folded.snapshot.root.clone(),
             selections: folded.snapshot.selections.clone(),
             command: RunCommand::CancelRequested {
@@ -2047,6 +2105,7 @@ where
                 }
                 Ok(RunSnapshot {
                     run_id: request.run_id,
+                    origin: folded.snapshot.origin,
                     root: folded.snapshot.root,
                     selections: folded.snapshot.selections,
                     revision,
@@ -2121,6 +2180,7 @@ where
             let transaction = RunTransaction {
                 revision: folded.snapshot.revision.next(),
                 run_id,
+                origin: folded.snapshot.origin.clone(),
                 root: folded.snapshot.root.clone(),
                 selections: folded.snapshot.selections.clone(),
                 command: RunCommand::CommandSettled {
@@ -2139,6 +2199,7 @@ where
                 RunAppend::Committed { revision } => {
                     let snapshot = RunSnapshot {
                         run_id,
+                        origin: folded.snapshot.origin,
                         root: folded.snapshot.root,
                         selections: folded.snapshot.selections,
                         revision,
@@ -2272,6 +2333,7 @@ impl FoldedRun {
         }
         let run_id = first.run_id;
         let root = first.root.clone();
+        let origin = first.origin.clone();
         let selections = first.selections.clone();
         let mut admissions: Vec<AdmissionReceipt> = Vec::new();
         let mut active: Option<ActiveLease> = None;
@@ -2281,6 +2343,7 @@ impl FoldedRun {
         let mut admitted_leases = BTreeSet::new();
         let mut snapshot = RunSnapshot {
             run_id,
+            origin: first.origin.clone(),
             root: root.clone(),
             selections: selections.clone(),
             revision: expected,
@@ -2291,12 +2354,13 @@ impl FoldedRun {
         let mut pruned = BTreeSet::new();
         for transaction in &transactions {
             if transaction.run_id != run_id
+                || transaction.origin != origin
                 || transaction.root != root
                 || transaction.selections != selections
                 || transaction.revision != expected
             {
                 return Err(RunError::Integrity {
-                    message: "run transaction stream changes identity, root, selections, or revision order"
+                    message: "run transaction stream changes identity, origin, root, selections, or revision order"
                         .to_owned(),
                 });
             }

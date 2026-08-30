@@ -1,7 +1,7 @@
 //! Identity and ordering: UUIDv7 newtypes, `Seq`, `Producer`.
 
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
+use uuid::{Uuid, Variant, Version};
 
 use super::hook::HookId;
 
@@ -21,6 +21,79 @@ impl Default for SessionId {
         Self::new()
     }
 }
+
+/// UUIDv7 identity of one requested child run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct SubagentInvocationId(Uuid);
+
+impl SubagentInvocationId {
+    pub fn new() -> Self {
+        Self(Uuid::now_v7())
+    }
+
+    pub fn from_uuid(value: Uuid) -> Result<Self, InvalidSubagentInvocationId> {
+        if value.get_version() != Some(Version::SortRand) || value.get_variant() != Variant::RFC4122
+        {
+            return Err(InvalidSubagentInvocationId);
+        }
+        Ok(Self(value))
+    }
+
+    pub const fn uuid(self) -> Uuid {
+        self.0
+    }
+}
+
+impl Default for SubagentInvocationId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::str::FromStr for SubagentInvocationId {
+    type Err = InvalidSubagentInvocationId;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let uuid = Uuid::parse_str(value).map_err(|_| InvalidSubagentInvocationId)?;
+        let id = Self::from_uuid(uuid)?;
+        if uuid.to_string() != value {
+            return Err(InvalidSubagentInvocationId);
+        }
+        Ok(id)
+    }
+}
+
+impl TryFrom<String> for SubagentInvocationId {
+    type Error = InvalidSubagentInvocationId;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        value.parse()
+    }
+}
+
+impl From<SubagentInvocationId> for String {
+    fn from(value: SubagentInvocationId) -> Self {
+        value.to_string()
+    }
+}
+
+impl std::fmt::Display for SubagentInvocationId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidSubagentInvocationId;
+
+impl std::fmt::Display for InvalidSubagentInvocationId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("invalid subagent invocation id; expected canonical RFC 4122 UUIDv7")
+    }
+}
+
+impl std::error::Error for InvalidSubagentInvocationId {}
 
 /// A caller's session id that is not one.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -249,8 +322,8 @@ impl Default for Seq {
 pub enum Producer {
     /// The main agent loop.
     Main,
-    /// A subagent, identified by its id.
-    Subagent(String),
+    /// A subagent, identified by the parent request that admitted it.
+    Subagent(SubagentInvocationId),
     /// A hook, identified by its durable admitted identity.
     Hook(HookId),
 }
@@ -355,7 +428,11 @@ mod tests {
 
     #[test]
     fn producer_serde_roundtrip_subagent() {
-        let p = Producer::Subagent("agent-42".to_string());
+        let invocation = SubagentInvocationId::from_uuid(
+            Uuid::parse_str("01900000-0000-7000-8000-000000000042").unwrap(),
+        )
+        .unwrap();
+        let p = Producer::Subagent(invocation);
         let json = serde_json::to_string(&p).unwrap();
         let back: Producer = serde_json::from_str(&json).unwrap();
         assert_eq!(p, back);

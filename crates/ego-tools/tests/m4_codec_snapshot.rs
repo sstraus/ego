@@ -2,9 +2,9 @@
 
 use ego_core::event::id::{Seq, SessionId};
 use ego_core::state::SessionState;
-use ego_core::store::codec::{decode_line, StoreLine};
+use ego_core::store::codec::{StoreLine, decode_line};
 use ego_tools::store::{
-    JsonlStore, LeaseInputs, OsIo, Snapshot, SnapshotRejection, SNAPSHOT_VERSION,
+    JsonlStore, LeaseInputs, OsIo, SNAPSHOT_VERSION, Snapshot, SnapshotRejection,
 };
 use std::path::Path;
 use std::time::Duration;

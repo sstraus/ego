@@ -7,15 +7,22 @@ use serde::{Deserialize, Serialize};
 use super::hook::{
     HookCatalogueEvidence, HookId, HookInvocationId, HookLifecycle, HookResult, HookSubject,
 };
-use super::id::{EventId, ItemId, Producer, QueuedPromptId, Seq, SessionId, TurnId};
+use super::id::{
+    EventId, ItemId, Producer, QueuedPromptId, Seq, SessionId, SubagentInvocationId, TurnId,
+};
+use super::skill::{
+    SkillCatalogueEvidence, SkillCatalogueGeneration, SkillContentDigest, SkillId,
+    SkillInvocationId, SkillSourceAuthority, SkillSourceLocation,
+};
 use super::time::Timestamp;
 use crate::cost::CostDelta;
 use crate::generator::attempt::{AttemptRef, Outcome};
 use crate::generator::types::{ErrorKind, ImageRef, ReasoningState};
 use crate::permit::{Authority, Escalation, ExecObservation, ToolResult, ToolResultProvenance};
 use crate::question::{QuestionOutcome, QuestionRequest};
+use crate::run::{CancelReason, DeniedBy, RunId, RunSelections, RunSettlement};
 use crate::state::Usage;
-use crate::store::blob::BlobRef;
+use crate::store::blob::{BlobId, BlobRef};
 
 /// The full envelope every `DomainEvent` carries, per ARCH §1: a monotonic
 /// sequence number, stable session/turn/item identity, a causal parent, an
@@ -48,6 +55,41 @@ pub enum GenerationRole {
     Main,
     Judge,
     Compaction,
+    Subagent,
+    Hook,
+}
+
+/// Closed refusal evidence for a child that never reached admission.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SubagentRefusal {
+    InvalidTask { diagnostic: String },
+    ProfileUnavailable { diagnostic: String },
+    AuthorityWouldWiden { diagnostic: String },
+    PreparationFailed { diagnostic: String },
+    AdmissionFailed { diagnostic: String },
+}
+
+/// One final parent-visible child settlement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SubagentTerminal {
+    Returned {
+        #[serde(with = "m4_blob_ref")]
+        final_message: BlobRef,
+    },
+    Refused {
+        failure: SubagentRefusal,
+    },
+    Failed {
+        #[serde(with = "subagent_failed_settlement")]
+        settlement: RunSettlement,
+    },
+    ReturnBlocked {
+        #[serde(with = "m4_blob_ref")]
+        final_message: BlobRef,
+        hook_invocation: HookInvocationId,
+    },
 }
 
 /// Who stopped a turn that did not finish on its own.
@@ -150,9 +192,10 @@ pub enum OccupancyProvenance {
 /// ToolCallDelta | ToolCallCompleted | PermissionRequested |
 /// PermissionAmended | PermissionDecided | GenerationStarted |
 /// ExecutionObserved | AttemptSettled | UsageUpdated | UsageCorrected |
-/// ContextWindowUpdated | TurnCompleted | Compacted | Forked |
+/// ContextWindowUpdated | TurnCompleted | CompactionSeeded | Compacted | Forked |
 /// HookCatalogueAdmitted | HookInvocationStarted | HookInvocationSettled |
-/// SubagentSpawned | SubagentReturned | Error
+/// SubagentRequested | SubagentSpawned | SubagentSettled |
+/// SkillCatalogueAdmitted | SkillInstructionAdmitted | SkillResourceAdmitted | Error
 /// ```
 ///
 /// This is the internal representation: it evolves freely with core, and
@@ -391,10 +434,49 @@ pub enum EventKind {
         invocation: HookInvocationId,
         result: HookResult,
     },
-    /// A subagent was spawned.
-    SubagentSpawned { subagent_id: String },
-    /// A subagent returned its final result.
-    SubagentReturned { subagent_id: String, result: String },
+    /// A bounded child request became durable before preparation.
+    SubagentRequested {
+        invocation: SubagentInvocationId,
+        #[serde(with = "m4_blob_ref")]
+        task: BlobRef,
+        selections: RunSelections,
+    },
+    /// The rooted run controller admitted the child.
+    SubagentSpawned {
+        invocation: SubagentInvocationId,
+        child: RunId,
+    },
+    /// One child reached its final parent-return boundary.
+    SubagentSettled {
+        invocation: SubagentInvocationId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        child: Option<RunId>,
+        terminal: SubagentTerminal,
+    },
+    /// One complete ordered skill catalogue was admitted atomically.
+    SkillCatalogueAdmitted {
+        generation: SkillCatalogueGeneration,
+        descriptors: SkillCatalogueEvidence,
+    },
+    /// Exact rendered skill instructions became durable before consumption.
+    SkillInstructionAdmitted {
+        invocation: SkillInvocationId,
+        skill: SkillId,
+        catalogue_generation: SkillCatalogueGeneration,
+        source: SkillSourceAuthority,
+        location: SkillSourceLocation,
+        source_digest: SkillContentDigest,
+        #[serde(with = "m4_blob_ref")]
+        rendered: BlobRef,
+    },
+    /// One guarded skill resource became durable before disclosure.
+    SkillResourceAdmitted {
+        invocation: SkillInvocationId,
+        skill: SkillId,
+        location: SkillSourceLocation,
+        #[serde(with = "m4_blob_ref")]
+        content: BlobRef,
+    },
     /// An error occurred.
     ///
     /// `kind` is `#[serde(default)]`, which is
@@ -441,6 +523,18 @@ impl EventKind {
                     references.push(feedback.reference().blob_ref());
                 }
             }
+            Self::SubagentRequested { task, .. } => references.push(task.clone()),
+            Self::SubagentSettled { terminal, .. } => match terminal {
+                SubagentTerminal::Returned { final_message }
+                | SubagentTerminal::ReturnBlocked { final_message, .. } => {
+                    references.push(final_message.clone());
+                }
+                SubagentTerminal::Refused { .. } | SubagentTerminal::Failed { .. } => {}
+            },
+            Self::SkillInstructionAdmitted { rendered, .. } => {
+                references.push(rendered.clone());
+            }
+            Self::SkillResourceAdmitted { content, .. } => references.push(content.clone()),
             _ => {}
         }
         references
@@ -479,10 +573,102 @@ impl EventKind {
             EventKind::HookCatalogueAdmitted { .. } => "hook_catalogue_admitted",
             EventKind::HookInvocationStarted { .. } => "hook_invocation_started",
             EventKind::HookInvocationSettled { .. } => "hook_invocation_settled",
+            EventKind::SubagentRequested { .. } => "subagent_requested",
             EventKind::SubagentSpawned { .. } => "subagent_spawned",
-            EventKind::SubagentReturned { .. } => "subagent_returned",
+            EventKind::SubagentSettled { .. } => "subagent_settled",
+            EventKind::SkillCatalogueAdmitted { .. } => "skill_catalogue_admitted",
+            EventKind::SkillInstructionAdmitted { .. } => "skill_instruction_admitted",
+            EventKind::SkillResourceAdmitted { .. } => "skill_resource_admitted",
             EventKind::Error { .. } => "error",
         }
+    }
+}
+
+mod m4_blob_ref {
+    use super::*;
+
+    #[derive(Serialize)]
+    struct Wire<'a> {
+        id: &'a str,
+        bytes: u64,
+    }
+
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct OwnedWire {
+        id: String,
+        bytes: u64,
+    }
+
+    pub fn serialize<S>(value: &BlobRef, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        Wire {
+            id: value.id.as_str(),
+            bytes: value.bytes,
+        }
+        .serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<BlobRef, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = OwnedWire::deserialize(deserializer)?;
+        let id = BlobId::parse(wire.id).map_err(serde::de::Error::custom)?;
+        Ok(BlobRef::new(id, wire.bytes))
+    }
+}
+
+mod subagent_failed_settlement {
+    use super::*;
+
+    #[derive(Serialize, Deserialize)]
+    #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+    enum Wire {
+        ContextOverflow,
+        Cancelled { reason: CancelReason },
+        PermissionRequired { action: String, by: DeniedBy },
+        Interrupted,
+        Uncertain,
+    }
+
+    pub fn serialize<S>(value: &RunSettlement, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let wire = match value {
+            RunSettlement::Completed => {
+                return Err(serde::ser::Error::custom(
+                    "completed child cannot use the failed terminal",
+                ));
+            }
+            RunSettlement::ContextOverflow => Wire::ContextOverflow,
+            RunSettlement::Cancelled { reason } => Wire::Cancelled { reason: *reason },
+            RunSettlement::PermissionRequired { action, by } => Wire::PermissionRequired {
+                action: action.clone(),
+                by: by.clone(),
+            },
+            RunSettlement::Interrupted => Wire::Interrupted,
+            RunSettlement::Uncertain => Wire::Uncertain,
+        };
+        wire.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<RunSettlement, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Ok(match Wire::deserialize(deserializer)? {
+            Wire::ContextOverflow => RunSettlement::ContextOverflow,
+            Wire::Cancelled { reason } => RunSettlement::Cancelled { reason },
+            Wire::PermissionRequired { action, by } => {
+                RunSettlement::PermissionRequired { action, by }
+            }
+            Wire::Interrupted => RunSettlement::Interrupted,
+            Wire::Uncertain => RunSettlement::Uncertain,
+        })
     }
 }
 

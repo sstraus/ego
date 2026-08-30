@@ -134,10 +134,12 @@ mod regression_case {
                 ("user-skill", SkillSourceAuthority::User),
             ]
         );
-        assert!(catalogue.diagnostics().iter().all(|diagnostic| !diagnostic
-            .source_path()
-            .to_string_lossy()
-            .contains(".claude")));
+        assert!(catalogue.diagnostics().iter().all(|diagnostic| {
+            !diagnostic
+                .source_path()
+                .to_string_lossy()
+                .contains(".claude")
+        }));
     }
 
     #[test]
@@ -150,10 +152,12 @@ mod regression_case {
             "body",
         );
         let catalogue = roots.catalogue(false);
-        assert!(catalogue
-            .descriptors()
-            .iter()
-            .any(|descriptor| descriptor.name() == "canonical"));
+        assert!(
+            catalogue
+                .descriptors()
+                .iter()
+                .any(|descriptor| descriptor.name() == "canonical")
+        );
 
         for (name, field) in [
             ("list-form", "allowed-tools:\n  - read\n  - grep"),
@@ -213,10 +217,12 @@ mod regression_case {
             .iter()
             .all(|descriptor| descriptor.name() != "duplicate" && descriptor.name() != "skills"));
         for name in ["duplicate", "skills"] {
-            assert!(catalogue
-                .diagnostics()
-                .iter()
-                .any(|diagnostic| diagnostic.name() == name && diagnostic.is_collision()));
+            assert!(
+                catalogue
+                    .diagnostics()
+                    .iter()
+                    .any(|diagnostic| diagnostic.name() == name && diagnostic.is_collision())
+            );
         }
     }
 
@@ -230,17 +236,21 @@ mod regression_case {
             "secret project body",
         );
         let catalogue = roots.catalogue(false);
-        assert!(catalogue
-            .descriptors()
-            .iter()
-            .all(|descriptor| descriptor.name() != "project-only"));
-        assert!(catalogue
-            .diagnostics()
-            .iter()
-            .any(
-                |diagnostic| diagnostic.source() == SkillSourceAuthority::Project
-                    && diagnostic.source_path() == project
-            ));
+        assert!(
+            catalogue
+                .descriptors()
+                .iter()
+                .all(|descriptor| descriptor.name() != "project-only")
+        );
+        assert!(
+            catalogue
+                .diagnostics()
+                .iter()
+                .any(
+                    |diagnostic| diagnostic.source() == SkillSourceAuthority::Project
+                        && diagnostic.source_path() == project
+                )
+        );
     }
 
     #[test]
@@ -272,19 +282,25 @@ mod regression_case {
             .reload(roots.discovery(false), &["help"])
             .expect("reload returns last good");
         assert_eq!(catalogue.snapshot_digest(), before);
-        assert!(catalogue
-            .descriptors()
-            .iter()
-            .any(|descriptor| descriptor.name() == "stable"));
-        assert!(catalogue
-            .descriptors()
-            .iter()
-            .all(|descriptor| descriptor.name() != "new-invalid"));
-        assert!(catalogue
-            .diagnostics()
-            .iter()
-            .any(|diagnostic| diagnostic.name() == "stable"
-                && diagnostic.message().contains("unknown")));
+        assert!(
+            catalogue
+                .descriptors()
+                .iter()
+                .any(|descriptor| descriptor.name() == "stable")
+        );
+        assert!(
+            catalogue
+                .descriptors()
+                .iter()
+                .all(|descriptor| descriptor.name() != "new-invalid")
+        );
+        assert!(
+            catalogue
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.name() == "stable"
+                    && diagnostic.message().contains("unknown"))
+        );
     }
 
     #[test]

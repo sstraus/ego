@@ -263,8 +263,12 @@ pub enum ExportEvent {
         invocation: HookInvocationId,
         result: ExportHookResult,
     },
+    SubagentRequested,
     SubagentSpawned,
-    SubagentReturned,
+    SubagentSettled,
+    SkillCatalogueAdmitted,
+    SkillInstructionAdmitted,
+    SkillResourceAdmitted,
     Error {
         error_kind: ErrorKind,
     },
@@ -839,13 +843,28 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
                 result,
             }
         }
-        EventKind::SubagentSpawned { .. } => {
+        EventKind::SubagentRequested { .. } => {
             redactions.opaque_prose += 1;
-            ExportEvent::SubagentSpawned
+            ExportEvent::SubagentRequested
         }
-        EventKind::SubagentReturned { .. } => {
-            redactions.opaque_prose += 2;
-            ExportEvent::SubagentReturned
+        EventKind::SubagentSpawned { .. } => ExportEvent::SubagentSpawned,
+        EventKind::SubagentSettled { terminal, .. } => {
+            if matches!(
+                terminal,
+                crate::event::domain::SubagentTerminal::Refused { .. }
+            ) {
+                redactions.opaque_prose += 1;
+            }
+            ExportEvent::SubagentSettled
+        }
+        EventKind::SkillCatalogueAdmitted { .. } => ExportEvent::SkillCatalogueAdmitted,
+        EventKind::SkillInstructionAdmitted { .. } => {
+            redactions.opaque_prose += 1;
+            ExportEvent::SkillInstructionAdmitted
+        }
+        EventKind::SkillResourceAdmitted { .. } => {
+            redactions.opaque_prose += 1;
+            ExportEvent::SkillResourceAdmitted
         }
         EventKind::Error { kind, .. } => {
             redactions.raw_error += 1;

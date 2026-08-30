@@ -333,7 +333,10 @@ impl CliGenerationModelSource {
         run_deadline: Option<std::time::Instant>,
     ) -> Result<GenerationProfile, GenerationModelError> {
         let (identity, thinking) = match role {
-            GenerationRole::Main | GenerationRole::Compaction => {
+            GenerationRole::Main
+            | GenerationRole::Compaction
+            | GenerationRole::Subagent
+            | GenerationRole::Hook => {
                 let selection = self.selection.read()?;
                 (selection.identity.clone(), selection.thinking)
             }

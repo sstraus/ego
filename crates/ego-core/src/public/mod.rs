@@ -264,8 +264,8 @@ pub enum PublicEvent {
         /// The tool name, for `kind: tool`; absent for every other kind.
         #[serde(skip_serializing_if = "Option::is_none")]
         name: Option<String>,
-        /// The tool call's arguments, the permission's description, or the
-        /// subagent id — this item kind's one piece of starting detail.
+        /// The tool call's arguments or the permission's description.
+        /// Typed subagent lifecycle items carry no private task or blob detail.
         #[serde(skip_serializing_if = "Option::is_none")]
         text: Option<String>,
     },
@@ -618,20 +618,27 @@ pub fn project_public(ev: &DomainEvent) -> Option<PublicEvent> {
         EventKind::Forked { .. } => None,
         EventKind::HookCatalogueAdmitted { .. }
         | EventKind::HookInvocationStarted { .. }
-        | EventKind::HookInvocationSettled { .. } => None,
-        EventKind::SubagentSpawned { subagent_id } => Some(PublicEvent::ItemStarted {
+        | EventKind::HookInvocationSettled { .. }
+        | EventKind::SubagentRequested { .. }
+        | EventKind::SkillCatalogueAdmitted { .. }
+        | EventKind::SkillInstructionAdmitted { .. }
+        | EventKind::SkillResourceAdmitted { .. } => None,
+        EventKind::SubagentSpawned { .. } => Some(PublicEvent::ItemStarted {
             turn,
             item: item?,
             kind: ItemKind::Subagent,
             name: None,
-            text: Some(subagent_id.clone()),
+            text: None,
         }),
-        EventKind::SubagentReturned { result, .. } => Some(PublicEvent::ItemCompleted {
+        EventKind::SubagentSettled { terminal, .. } => Some(PublicEvent::ItemCompleted {
             turn,
             item: item?,
             kind: ItemKind::Subagent,
-            ok: true,
-            text: Some(result.clone()),
+            ok: matches!(
+                terminal,
+                crate::event::domain::SubagentTerminal::Returned { .. }
+            ),
+            text: None,
         }),
         // Passed through as classified, never re-derived. The adapter that
         // saw the provider's own answer is the only thing that could classify

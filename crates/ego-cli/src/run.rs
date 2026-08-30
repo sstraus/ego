@@ -4859,6 +4859,7 @@ pub fn diagnose(termination: &RunTermination, broken: Option<String>) {
 mod tests {
     use super::*;
     use crate::render::caps::{Depth, OscProfile};
+    use ego_core::run::RunOrigin;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::tempdir;
 
@@ -4908,6 +4909,7 @@ mod tests {
                 Some("ci".to_owned()),
             ),
             continuation: false,
+            origin: RunOrigin::TopLevel,
         };
 
         let result = CliPrepared::prepare(

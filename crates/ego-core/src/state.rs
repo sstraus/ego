@@ -10,20 +10,26 @@ use serde::{Deserialize, Serialize};
 
 use crate::cost::{CostDelta, CumulativeCost};
 use crate::event::domain::{
-    DomainEvent, EventKind, ExitReason, GenerationRole, OccupancyProvenance,
+    DomainEvent, EventKind, ExitReason, GenerationRole, OccupancyProvenance, SubagentTerminal,
 };
 use crate::event::hook::{
     HookCatalogueEvidence, HookDecision, HookId, HookInvocationId, HookLifecycle, HookResult,
     HookSubject,
 };
 use crate::event::id::{
-    AttemptId, EventId, GenerationId, ItemId, Producer, QueuedPromptId, Seq, SessionId, TurnId,
+    AttemptId, EventId, GenerationId, ItemId, Producer, QueuedPromptId, Seq, SessionId,
+    SubagentInvocationId, TurnId,
+};
+use crate::event::skill::{
+    SkillCatalogueEvidence, SkillCatalogueGeneration, SkillContentDigest, SkillId,
+    SkillInvocationId, SkillSourceAuthority, SkillSourceLocation,
 };
 use crate::event::time::Timestamp;
 use crate::generator::attempt::{AttemptRef, DeliveryCertainty, Outcome, UsageReport};
 use crate::generator::types::{ImageRef, ReasoningState};
 use crate::permit::{ToolResult, ToolResultProvenance};
 use crate::question::{QuestionAnswer, QuestionError, QuestionOutcome, QuestionRequest};
+use crate::run::{RunId, RunSelections};
 use crate::session::SessionLineage;
 use crate::store::blob::BlobRef;
 
@@ -454,8 +460,40 @@ impl HookSettlement {
 /// A subagent lifecycle event, in application order.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SubagentEvent {
-    Spawned { subagent_id: String },
-    Returned { subagent_id: String, result: String },
+    Requested {
+        invocation: SubagentInvocationId,
+        task: BlobRef,
+        selections: RunSelections,
+    },
+    Spawned {
+        invocation: SubagentInvocationId,
+        child: RunId,
+    },
+    Settled {
+        invocation: SubagentInvocationId,
+        child: Option<RunId>,
+        terminal: SubagentTerminal,
+    },
+}
+
+/// Durable rendered skill evidence retained by the reducer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SkillEvent {
+    Instruction {
+        invocation: SkillInvocationId,
+        skill: SkillId,
+        catalogue_generation: SkillCatalogueGeneration,
+        source: SkillSourceAuthority,
+        location: SkillSourceLocation,
+        source_digest: SkillContentDigest,
+        rendered: BlobRef,
+    },
+    Resource {
+        invocation: SkillInvocationId,
+        skill: SkillId,
+        location: SkillSourceLocation,
+        content: BlobRef,
+    },
 }
 
 /// A record of this session having been forked from another.
@@ -697,6 +735,18 @@ pub enum RefusalReason {
     HookBlockAtObserver,
     /// Escalation was requested outside the sole `PreToolUse` owner.
     HookEscalationOutsidePreToolUse,
+    /// A child fact named an invocation with no durable request.
+    SubagentInvocationUnknown,
+    /// One invocation was requested more than once.
+    SubagentAlreadyRequested,
+    /// One invocation was spawned more than once.
+    SubagentAlreadySpawned,
+    /// One invocation was settled more than once.
+    SubagentAlreadySettled,
+    /// A spawned or terminal child id disagreed with its admitted run.
+    SubagentChildMismatch,
+    /// Refusal/admission or success/failure facts formed an impossible terminal.
+    SubagentTerminalMismatch,
 }
 
 /// An event whose effect the reducer declined to apply.
@@ -835,6 +885,11 @@ pub struct SessionState {
     settled_hooks: HashSet<HookInvocationId>,
     /// Subagent lifecycle events, in application order.
     pub subagents: Vec<SubagentEvent>,
+    /// The latest complete admitted skill catalogue.
+    skill_catalogue_generation: Option<SkillCatalogueGeneration>,
+    skill_catalogue: SkillCatalogueEvidence,
+    /// Rendered instruction and guarded resource facts, in application order.
+    skill_events: Vec<SkillEvent>,
     /// Error messages, in application order.
     pub errors: Vec<String>,
     /// Compaction summaries, in application order.
@@ -896,6 +951,9 @@ impl Default for SessionState {
             hook_settlements: Vec::default(),
             settled_hooks: HashSet::default(),
             subagents: Vec::default(),
+            skill_catalogue_generation: None,
+            skill_catalogue: SkillCatalogueEvidence::default(),
+            skill_events: Vec::default(),
             errors: Vec::default(),
             compactions: Vec::default(),
             forks: Vec::default(),
@@ -1213,6 +1271,18 @@ impl SessionState {
         &self.hook_settlements
     }
 
+    pub fn skill_catalogue_generation(&self) -> Option<SkillCatalogueGeneration> {
+        self.skill_catalogue_generation
+    }
+
+    pub fn skill_catalogue(&self) -> &SkillCatalogueEvidence {
+        &self.skill_catalogue
+    }
+
+    pub fn skill_events(&self) -> &[SkillEvent] {
+        &self.skill_events
+    }
+
     /// Every structured reference the current snapshot keeps reachable.
     ///
     /// Semantic traversal belongs in core. The filesystem adapter receives
@@ -1243,6 +1313,25 @@ impl SessionState {
                 .filter_map(|settlement| settlement.result().feedback())
                 .map(|feedback| feedback.reference().blob_ref()),
         );
+        for event in &self.subagents {
+            match event {
+                SubagentEvent::Requested { task, .. } => references.push(task.clone()),
+                SubagentEvent::Settled { terminal, .. } => match terminal {
+                    SubagentTerminal::Returned { final_message }
+                    | SubagentTerminal::ReturnBlocked { final_message, .. } => {
+                        references.push(final_message.clone());
+                    }
+                    SubagentTerminal::Refused { .. } | SubagentTerminal::Failed { .. } => {}
+                },
+                SubagentEvent::Spawned { .. } => {}
+            }
+        }
+        for event in &self.skill_events {
+            match event {
+                SkillEvent::Instruction { rendered, .. } => references.push(rendered.clone()),
+                SkillEvent::Resource { content, .. } => references.push(content.clone()),
+            }
+        }
         references
     }
 
@@ -1490,26 +1579,164 @@ impl SessionState {
                 invocation,
                 result,
             } => self.settle_hook(ev, *hook, *invocation, result),
-            EventKind::SubagentSpawned { subagent_id } => {
-                self.subagents.push(SubagentEvent::Spawned {
-                    subagent_id: subagent_id.clone(),
-                });
+            EventKind::SubagentRequested {
+                invocation,
+                task,
+                selections,
+            } => self.request_subagent(ev, *invocation, task, selections),
+            EventKind::SubagentSpawned { invocation, child } => {
+                self.spawn_subagent(ev, *invocation, *child);
             }
-            EventKind::SubagentReturned {
-                subagent_id,
-                result,
+            EventKind::SubagentSettled {
+                invocation,
+                child,
+                terminal,
             } => {
-                self.subagents.push(SubagentEvent::Returned {
-                    subagent_id: subagent_id.clone(),
-                    result: result.clone(),
-                });
+                self.settle_subagent(ev, *invocation, *child, terminal);
             }
+            EventKind::SkillCatalogueAdmitted {
+                generation,
+                descriptors,
+            } => {
+                self.skill_catalogue_generation = Some(*generation);
+                self.skill_catalogue = descriptors.clone();
+            }
+            EventKind::SkillInstructionAdmitted {
+                invocation,
+                skill,
+                catalogue_generation,
+                source,
+                location,
+                source_digest,
+                rendered,
+            } => self.skill_events.push(SkillEvent::Instruction {
+                invocation: *invocation,
+                skill: *skill,
+                catalogue_generation: *catalogue_generation,
+                source: *source,
+                location: location.clone(),
+                source_digest: *source_digest,
+                rendered: rendered.clone(),
+            }),
+            EventKind::SkillResourceAdmitted {
+                invocation,
+                skill,
+                location,
+                content,
+            } => self.skill_events.push(SkillEvent::Resource {
+                invocation: *invocation,
+                skill: *skill,
+                location: location.clone(),
+                content: content.clone(),
+            }),
             // `kind` is deliberately not reduced: `errors` is a list of
             // what was said, and nothing in the reducer branches on why.
             // Adding a field no reader consults would be a second place for
             // the classification to drift from the log's own copy.
             EventKind::Error { message, .. } => self.errors.push(message.clone()),
         }
+    }
+
+    fn request_subagent(
+        &mut self,
+        ev: &DomainEvent,
+        invocation: SubagentInvocationId,
+        task: &BlobRef,
+        selections: &RunSelections,
+    ) {
+        if self.subagents.iter().any(|event| match event {
+            SubagentEvent::Requested {
+                invocation: existing,
+                ..
+            }
+            | SubagentEvent::Spawned {
+                invocation: existing,
+                ..
+            }
+            | SubagentEvent::Settled {
+                invocation: existing,
+                ..
+            } => *existing == invocation,
+        }) {
+            return self.refuse(ev, RefusalReason::SubagentAlreadyRequested);
+        }
+        self.subagents.push(SubagentEvent::Requested {
+            invocation,
+            task: task.clone(),
+            selections: selections.clone(),
+        });
+    }
+
+    fn spawn_subagent(&mut self, ev: &DomainEvent, invocation: SubagentInvocationId, child: RunId) {
+        let requested = self.subagents.iter().any(|event| {
+            matches!(event, SubagentEvent::Requested { invocation: existing, .. } if *existing == invocation)
+        });
+        if !requested {
+            return self.refuse(ev, RefusalReason::SubagentInvocationUnknown);
+        }
+        if self.subagents.iter().any(|event| {
+            matches!(event, SubagentEvent::Spawned { invocation: existing, .. } if *existing == invocation)
+        }) {
+            return self.refuse(ev, RefusalReason::SubagentAlreadySpawned);
+        }
+        if self.subagents.iter().any(|event| {
+            matches!(event, SubagentEvent::Settled { invocation: existing, .. } if *existing == invocation)
+        }) {
+            return self.refuse(ev, RefusalReason::SubagentAlreadySettled);
+        }
+        if self.subagents.iter().any(|event| {
+            matches!(event, SubagentEvent::Spawned { child: existing, .. } if *existing == child)
+        }) {
+            return self.refuse(ev, RefusalReason::SubagentChildMismatch);
+        }
+        self.subagents
+            .push(SubagentEvent::Spawned { invocation, child });
+    }
+
+    fn settle_subagent(
+        &mut self,
+        ev: &DomainEvent,
+        invocation: SubagentInvocationId,
+        child: Option<RunId>,
+        terminal: &SubagentTerminal,
+    ) {
+        let requested = self.subagents.iter().any(|event| {
+            matches!(event, SubagentEvent::Requested { invocation: existing, .. } if *existing == invocation)
+        });
+        if !requested {
+            return self.refuse(ev, RefusalReason::SubagentInvocationUnknown);
+        }
+        if self.subagents.iter().any(|event| {
+            matches!(event, SubagentEvent::Settled { invocation: existing, .. } if *existing == invocation)
+        }) {
+            return self.refuse(ev, RefusalReason::SubagentAlreadySettled);
+        }
+        let spawned = self.subagents.iter().find_map(|event| match event {
+            SubagentEvent::Spawned {
+                invocation: existing,
+                child,
+            } if *existing == invocation => Some(*child),
+            _ => None,
+        });
+        let valid = match terminal {
+            SubagentTerminal::Refused { .. } => spawned.is_none() && child.is_none(),
+            SubagentTerminal::Failed { settlement } => {
+                !matches!(settlement, crate::run::RunSettlement::Completed)
+                    && spawned.is_some()
+                    && spawned == child
+            }
+            SubagentTerminal::Returned { .. } | SubagentTerminal::ReturnBlocked { .. } => {
+                spawned.is_some() && spawned == child
+            }
+        };
+        if !valid {
+            return self.refuse(ev, RefusalReason::SubagentTerminalMismatch);
+        }
+        self.subagents.push(SubagentEvent::Settled {
+            invocation,
+            child,
+            terminal: terminal.clone(),
+        });
     }
 
     fn start_hook(

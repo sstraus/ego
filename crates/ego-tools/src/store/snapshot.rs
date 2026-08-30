@@ -65,7 +65,10 @@ use serde::{Deserialize, Serialize};
 /// v8 makes every ledger charge's attribution explicit and retains generation
 /// role and original start time. A v7 cache cannot supply those facts, so it
 /// is discarded and rebuilt from the authoritative log.
-pub const SNAPSHOT_VERSION: u32 = 8;
+///
+/// v9 retains typed child and skill evidence plus the two new generation
+/// roles. A v8 cache is discarded and rebuilt from the migrated event log.
+pub const SNAPSHOT_VERSION: u32 = 9;
 
 /// A reduced [`SessionState`] plus the point in the log it reduces.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

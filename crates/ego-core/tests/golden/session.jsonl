@@ -7,8 +7,8 @@
 {"type":"item_completed","turn":"00000000-0000-0000-0000-000000000002","item":"00000000-0000-0000-0000-000000000006","kind":"tool","ok":true,"text":"file1\nfile2\n"}
 {"type":"item_started","turn":"00000000-0000-0000-0000-000000000002","item":"00000000-0000-0000-0000-000000000007","kind":"permission","name":"edit","text":"no rule covers write /etc/hosts"}
 {"type":"item_completed","turn":"00000000-0000-0000-0000-000000000002","item":"00000000-0000-0000-0000-000000000007","kind":"permission","ok":false}
-{"type":"item_started","turn":"00000000-0000-0000-0000-000000000002","item":"00000000-0000-0000-0000-000000000008","kind":"subagent","text":"explorer-1"}
-{"type":"item_completed","turn":"00000000-0000-0000-0000-000000000002","item":"00000000-0000-0000-0000-000000000008","kind":"subagent","ok":true,"text":"done"}
+{"type":"item_started","turn":"00000000-0000-0000-0000-000000000002","item":"00000000-0000-0000-0000-000000000008","kind":"subagent"}
+{"type":"item_completed","turn":"00000000-0000-0000-0000-000000000002","item":"00000000-0000-0000-0000-000000000008","kind":"subagent","ok":true}
 {"type":"usage_updated","turn":"00000000-0000-0000-0000-000000000002","usage_delta":{"uncached_input_tokens":120,"cache_read_tokens":900,"cache_write_tokens":60,"cache_write_extended_tokens":0,"output_tokens":45},"cost_delta":{"cost":"known","amount":{"amount":"0.0027","currency":"USD"},"attribution":{"source":"table","revision":"test-2026-08"}}}
 {"type":"context_window_updated","turn":"00000000-0000-0000-0000-000000000002","used_tokens":1125,"provenance":"generation_boundary"}
 {"type":"error","turn":"00000000-0000-0000-0000-000000000002","message":"rate limited, retrying","kind":"transient"}

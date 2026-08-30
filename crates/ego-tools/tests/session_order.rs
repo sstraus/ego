@@ -49,7 +49,7 @@ fn admitted(
 ) -> RunTransaction {
     let session = serde_json::to_value(session).unwrap();
     serde_json::from_value(serde_json::json!({
-        "revision": revision, "run_id": { "session_id": session, "nonce": "00000000-0000-7000-8000-000000000054" }, "root": root,
+        "revision": revision, "run_id": { "session_id": session, "nonce": "00000000-0000-7000-8000-000000000054" }, "origin": { "kind": "top_level" }, "root": root,
         "selections": { "model": "model/test", "thinking": null, "mode": null, "budget": null, "profile": null },
         "command": { "kind": "command_admitted", "request_id": "00000000-0000-7000-8000-000000000055", "digest": "store-race", "expected_revision": expected_revision, "lease": "00000000-0000-7000-8000-000000000056", "executor_id": "00000000-0000-7000-8000-000000000057", "prompt": "store race", "model": "model/test", "start": true },
         "status": "running", "observed_at": 0, "pruned_receipts": []
@@ -106,7 +106,7 @@ impl StoreIo for FailingFsyncIo {
 
 #[test]
 fn codec_version_is_bumped_for_physical_positions() {
-    assert_eq!(CODEC_VERSION, 8);
+    assert_eq!(CODEC_VERSION, 9);
 }
 
 #[test]
@@ -160,23 +160,23 @@ fn recovery_rejects_gap_and_regression_without_changing_bytes() {
 }
 
 #[test]
-fn recognized_v7_log_migrates_to_v8_preserving_counters_and_payloads() {
+fn recognized_v8_log_migrates_to_v9_preserving_counters_and_payloads() {
     let dir = tempdir().unwrap();
     let id = SessionId::new();
     let path = log_path(dir.path(), &id);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     let mut bytes = encode_header(&Header {
-        v: 7,
+        v: 8,
         session: id,
         created: Timestamp::from_millis(1),
         workspace_root: "/workspace".into(),
     });
     bytes.push(b'\n');
-    bytes.extend(encode_record(seq(41), &event(11, "v7-first")).unwrap());
+    bytes.extend(encode_record(seq(41), &event(11, "v8-first")).unwrap());
     bytes.push(b'\n');
     bytes.extend(encode_record(seq(1), &admitted(&id, 1, None, "/workspace")).unwrap());
     bytes.push(b'\n');
-    bytes.extend(encode_record(seq(99), &event(12, "v7-second")).unwrap());
+    bytes.extend(encode_record(seq(99), &event(12, "v8-second")).unwrap());
     bytes.push(b'\n');
     std::fs::write(&path, &bytes).unwrap();
     let store = JsonlStore::new(dir.path(), "/workspace", Box::new(OsIo));
@@ -188,11 +188,11 @@ fn recognized_v7_log_migrates_to_v8_preserving_counters_and_payloads() {
         panic!("migration must retain a header")
     };
     assert_eq!(header.v, CODEC_VERSION);
-    assert_eq!(header.v, 8);
+    assert_eq!(header.v, 9);
     let mut migrated_records = Vec::new();
     for line in lines.filter(|line| !line.is_empty()) {
         let StoreLine::Record(record) = decode_line(line).unwrap() else {
-            panic!("recognized v7 entries must remain records")
+            panic!("recognized v8 entries must remain records")
         };
         migrated_records.push((
             record.seq,
@@ -213,7 +213,7 @@ fn recognized_v7_log_migrates_to_v8_preserving_counters_and_payloads() {
             assert_eq!(
                 &actual.kind,
                 &EventKind::UserPrompt {
-                    text: "v7-first".into(),
+                    text: "v8-first".into(),
                     images: vec![],
                     queued_prompt: None,
                 }
@@ -231,7 +231,7 @@ fn recognized_v7_log_migrates_to_v8_preserving_counters_and_payloads() {
             assert_eq!(
                 &actual.kind,
                 &EventKind::UserPrompt {
-                    text: "v7-second".into(),
+                    text: "v8-second".into(),
                     images: vec![],
                     queued_prompt: None,
                 }
@@ -242,19 +242,19 @@ fn recognized_v7_log_migrates_to_v8_preserving_counters_and_payloads() {
 }
 
 #[test]
-fn v7_log_with_valid_unknown_record_is_refused_without_mutation() {
+fn v8_log_with_valid_unknown_record_is_refused_without_mutation() {
     let dir = tempdir().unwrap();
     let id = SessionId::new();
     let path = log_path(dir.path(), &id);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     let mut bytes = encode_header(&Header {
-        v: 7,
+        v: 8,
         session: id,
         created: Timestamp::from_millis(1),
         workspace_root: "/workspace".into(),
     });
     bytes.push(b'\n');
-    bytes.extend(encode_record(seq(1), &event(1, "v7")).unwrap());
+    bytes.extend(encode_record(seq(1), &event(1, "v8")).unwrap());
     bytes.push(b'\n');
     bytes.extend_from_slice(br#"{"future":true}"#);
     bytes.push(b'\n');
@@ -266,7 +266,7 @@ fn v7_log_with_valid_unknown_record_is_refused_without_mutation() {
 }
 
 #[test]
-fn real_v6_snapshot_is_rejected_and_full_replay_uses_v7() {
+fn real_v6_snapshot_is_rejected_and_full_replay_uses_current_log() {
     let dir = tempdir().unwrap();
     let id = SessionId::new();
     let store = JsonlStore::new(dir.path(), "/workspace", Box::new(OsIo));
@@ -293,7 +293,7 @@ fn real_v6_snapshot_is_rejected_and_full_replay_uses_v7() {
     let (state, rejection) = store.resume(&id).unwrap();
     assert_eq!(rejection, Some(SnapshotRejection::Version { found: 6 }));
     assert_eq!(state, expected);
-    assert_eq!(SNAPSHOT_VERSION, 8);
+    assert_eq!(SNAPSHOT_VERSION, 9);
 }
 
 #[test]

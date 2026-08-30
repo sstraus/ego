@@ -16,7 +16,7 @@ use crate::state::{Charge, ChargeAttribution, SessionState, Usage};
 use crate::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
 
 /// The externally serialized usage-report contract.
-pub const USAGE_REPORT_VERSION: u32 = 1;
+pub const USAGE_REPORT_VERSION: u32 = 2;
 
 /// A deterministic workspace or active-session usage report.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -61,6 +61,8 @@ pub struct UsageLines {
     pub main: UsageLine,
     pub judge: UsageLine,
     pub compaction: UsageLine,
+    pub subagent: UsageLine,
+    pub hook: UsageLine,
     pub total: UsageLine,
 }
 
@@ -221,6 +223,8 @@ struct LinesAccumulator {
     main: LineAccumulator,
     judge: LineAccumulator,
     compaction: LineAccumulator,
+    subagent: LineAccumulator,
+    hook: LineAccumulator,
     total: LineAccumulator,
 }
 
@@ -230,6 +234,8 @@ impl LinesAccumulator {
             main: LineAccumulator::new(),
             judge: LineAccumulator::new(),
             compaction: LineAccumulator::new(),
+            subagent: LineAccumulator::new(),
+            hook: LineAccumulator::new(),
             total: LineAccumulator::new(),
         }
     }
@@ -239,6 +245,8 @@ impl LinesAccumulator {
             GenerationRole::Main => self.main.add(charge),
             GenerationRole::Judge => self.judge.add(charge),
             GenerationRole::Compaction => self.compaction.add(charge),
+            GenerationRole::Subagent => self.subagent.add(charge),
+            GenerationRole::Hook => self.hook.add(charge),
         }
         self.total.add(charge);
     }
@@ -248,6 +256,8 @@ impl LinesAccumulator {
             main: self.main.finish(),
             judge: self.judge.finish(),
             compaction: self.compaction.finish(),
+            subagent: self.subagent.finish(),
+            hook: self.hook.finish(),
             total: self.total.finish(),
         }
     }
