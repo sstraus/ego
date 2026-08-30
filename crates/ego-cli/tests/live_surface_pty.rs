@@ -944,6 +944,7 @@ fn live_surface_native_questions_cover_single_multiple_and_free_text() {
     input.flush().expect("question prompt flush");
     until_normalized(&reader, &mut output, idle_start, "Single question");
     let single_choice_start = output.len();
+    until_from(&reader, &mut output, single_choice_start, b"> 1. Yes");
     input.write_all(b"2").expect("single selection");
     input.flush().expect("single selection flush");
     until_from(&reader, &mut output, single_choice_start, b"> 2. No");
@@ -957,6 +958,7 @@ fn live_surface_native_questions_cover_single_multiple_and_free_text() {
         b"Multiple question",
     );
     let multiple_first_start = output.len();
+    until_from(&reader, &mut output, multiple_first_start, b"> [ ] 1. Red");
     input.write_all(b"1").expect("multiple first selection");
     input.flush().expect("multiple first selection flush");
     until_from(&reader, &mut output, multiple_first_start, b"> [x] 1. Red");
@@ -976,7 +978,7 @@ fn live_surface_native_questions_cover_single_multiple_and_free_text() {
         &reader,
         &mut output,
         multiple_submit_start,
-        b"Free question",
+        b"Free question ",
     );
     input.write_all(b"free answer\r").expect("free-text answer");
     input.flush().expect("free-text answer flush");
