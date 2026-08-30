@@ -30,6 +30,8 @@ ego resume [ID] [PROMPT]      continue a session; no ID = latest in this workspa
                               --answer QUESTION_ID=JSON answers pending input
 ego ls                        list sessions (this workspace; --all for every one)
 ego fork <ID>                 branch a session
+ego compact <ID> --request-id UUID
+                              publish one idempotent checkpoint target
 ego export <ID>               render a session (--format md|json|jsonl)
 ego mcp add NAME --stdio [--cwd DIR] [--inherit-env NAME]... -- COMMAND [ARG]...
         add NAME --http URL [--auth none|oauth] [--allow-insecure-loopback]
@@ -39,8 +41,8 @@ ego mcp add NAME --stdio [--cwd DIR] [--inherit-env NAME]... -- COMMAND [ARG]...
 ego mcp-server --max-concurrent-runs N --retained-requests N
                --max-resource-bytes N [-C DIR] [--session-dir DIR]
                               serve ego AS an MCP server on stdio: scoped
-                              run/continue/cancel/status tools (delegation
-                              surface for Claude, Codex, CI orchestrators) plus
+                              run/continue/cancel/status tools, plus M3 compact
+                              (delegation surface for Claude, Codex, CI) plus
                               sanitized resources; no MCP Tasks or prompts
 ego auth   login|logout|status [PROVIDER]
 ego models [--provider P] [--refresh] [--json]
@@ -71,7 +73,7 @@ Notes:
 ### 2.1 Availability — what ships today
 
 The same discipline as §3.1, and it was missing here until 2026-08-21. §2 lists
-fifteen commands; this build implements **eight**. The other seven used to
+sixteen commands; this build implements **ten**. The other six used to
 reach the *interactive* refusal, so `ego resume` was answered with a sentence
 about the permission dialog — true, and about a surface the caller had not
 asked for. They are now refused **by name**, each naming what it waits on, from
@@ -99,16 +101,17 @@ omitted when empty: two states, identical bytes.
 | `ego [PROMPT]` | **yes** | asks once whether to trust project files before ambient reads, then runs the line-oriented session. Permission questions accept `allow`, `deny`, or `amend`; amended raw JSON parameters are prepared and classified again from the beginning |
 | `ego resume` | **yes** | continues a session that already exists, never creating one. `[ID]` is optional: without it the most recently updated session of this workspace is taken. Without a prompt source it enters the interactive driver; with a prompt or `-` it remains headless |
 | `ego ls` | **yes** | this workspace by default, `--all` for the whole store; `--output json\|jsonl` per §4.6 |
-| `ego fork` | no | session forking (**M3**), which needs the branch point to be nameable in the log rather than just a file copy |
+| `ego fork` | **yes** | creates a durable lineage branch at an explicit valid source boundary without copying source spend or run state |
+| `ego compact` | no | regression case's headless spelling for the existing idle compaction operation: a required request ID derives one idempotent clean target and later continuation |
 | `ego export` | no | replay and export with `--sanitize` (**M3**). The projection exists; the redaction contract that makes an exported session safe to hand over does not |
 | `ego mcp` | **yes** | `add`, `rm`, `ls [--json]`, and `reload [NAME]` use one live admitted registry and truthful health projection. `login NAME` is typed but refuses before network access until the product CIMD origin and loopback redirect are published |
-| `ego mcp-server` | **yes** | serves scoped `run`/`continue`/`cancel`/`status` tools and sanitized summary/output resources on stdio. `--max-concurrent-runs`, `--retained-requests`, and `--max-resource-bytes` are required non-zero deployment bounds; `-C`/the current directory is the sole canonical root and stdout remains protocol-only |
+| `ego mcp-server` | **yes** | currently serves scoped `run`/`continue`/`cancel`/`status` tools and sanitized summary/output resources on stdio; M3 adds `compact` under §6.6. `--max-concurrent-runs`, `--retained-requests`, and `--max-resource-bytes` are required non-zero deployment bounds; `-C`/the current directory is the sole canonical root and stdout remains protocol-only |
 | `ego auth` | **yes** | `login\|logout\|status [PROVIDER]`; credentials live in one locked `$EGO_HOME/auth.json`, while TOML commands and discovered auth plugins can supply login tokens |
 | `ego models` | **yes** | prints the shared current-model catalogue as deterministic text or versioned JSON; `--provider` filters both model and source rows, and `--refresh` updates authoritative discovered slices without promoting cached display facts into generation authority |
 | `ego hooks` | no | the strict hook catalogue and runner (**M4**). This build has no admitted hook snapshot to inspect; `docs/21-claude-hook-parity.md` defines the final stable Claude-compatible lifecycle and read-only projection |
 | `ego config` | no | a config writer. The loader is strict and read-only, and nothing in this build writes a config file — `-c/--set` overrides one run |
 | `ego rules` | no | somewhere to keep a rule. The grammar and its stable IDs are built and `--allow`/`--deny` already reach the engine through them, so `ls` and `explain` have their material; what `allow`, `deny`, `revoke` and `remember` have nowhere to write to is a rule store — the same read-only loader `config` waits on |
-| `ego usage` | no | a report across sessions, which needs both the workspace attribution `ls` waits on and the per-session cost line budgets add in **M3** |
+| `ego usage` | **yes** | reports the versioned main/judge/compaction/total accounting DTO for this workspace; `--period` accepts `all` or a positive `s`/`m`/`h` duration and `--json` emits the same DTO the text view renders |
 | `ego acp` | **yes** | the Agent Client Protocol on stdio, v1. A host's `session/new` mints an ordinary ego session and its `session/prompt` runs an ordinary turn, so what it opens is listed by `ego ls` and continued by `ego resume`. v1 and not the v2 draft: see `docs/decisions/2026-08-21-the-version-an-agent-answers-with.md` §6.2 |
 | `ego doctor` | no | a unified diagnostic contract and actionable probes. Authentication, model resolution, sandbox execution, and MCP now exist, but no health projection composes their sanitized status and actionable remediation |
 
@@ -784,6 +787,74 @@ permission, tool batch, or accepted prompt is active; saved drafts require
 confirmation and remain with the source. The complete decision and prompt
 contract are in
 `docs/decisions/2026-08-24-compaction-seeds-a-clean-session.md`.
+
+#### Transition identity, output, and host parity
+
+Both `/compact` and the headless spelling invoke one
+`CompactionTransitionService`. `/compact` mints a fresh request ID. The exact
+headless grammar is:
+
+```
+ego compact ID --request-id UUID [--output text|json|jsonl]
+            [-C DIR] [--session-dir DIR]
+```
+
+There is no alias and no implicit request ID. The target is deterministically
+derived from the request ID; that same value is the
+`successor_start_request_id` a later Main start uses to adopt the event-first
+target. Repeating the same request after a lost response inspects and confirms
+the matching target without another checkpoint generation or charge. Reusing
+the ID for another source or target is a no-effect identity collision.
+
+Text output is the target session ID followed by a newline, matching `ego fork`.
+JSON and JSONL each emit exactly one version-1 receipt; JSONL terminates it with
+one newline:
+
+```json
+{
+  "v": 1,
+  "source": "019...",
+  "source_seq": 42,
+  "target": "019...",
+  "publication": { "kind": "published_durably" },
+  "successor_start_request_id": "019..."
+}
+```
+
+`publication.kind` is `published_durably` or
+`published_durability_uncertain`; `diagnostic` is omitted when absent. Invalid
+grammar is exit 2 and a provider failure is exit 4. Busy, collision, target
+inspection, and `not_published` outcomes exit 1 without exposing a usable target.
+A durability-uncertain target is already authoritative: the command emits the
+receipt, exits successfully, writes the warning only to stderr, and neither
+retries nor rolls back.
+
+An exact provider context overflow is a distinct settled provider failure, not
+ordinary output length or generic invalid input, and is never blindly retried.
+The operator then invokes `/compact` or `ego compact`; M3 adds no automatic
+threshold.
+
+ACP v1 advertises only the optional `_ego/compact` extension in
+`AgentCapabilities._meta`. Its request is
+`{"v":1,"sessionId":"...","requestId":"..."}`; its response carries
+`v`, `sourceSessionId`, `sourceSeq`, `targetSessionId`, `publication`, and
+`successorStartRequestId`. A successful response registers the target so the
+next standard `session/prompt` adopts it. It does not advertise `session/load`
+or add standard list, fork, resume, or delete operations. Because ACP has no
+standard context-overflow stop reason, the preceding `session/prompt` returns a
+structured application error naming `_ego/compact` after the typed settlement
+is durable; it does not report max tokens or refusal.
+
+At M3 `ego mcp-server` exposes five tools: `run`, `continue`, `cancel`, `status`,
+and `compact`. The compact input is exactly
+`{"request_id":"...","run_id":"...","expected_revision":N}` and its
+version-1 result carries `source_session_id`, `source_seq`,
+`target_session_id`, `publication`, and `successor_start_request_id`.
+Visibility and revision checks remain mandatory. Application failures return
+MCP `isError: true`; published uncertainty is a successful non-retryable tool
+result, and `status` projects the durable `context_overflow` settlement. The
+source session owns every compaction generation's usage and cost,
+and the target receives no copied ledger or run state.
 
 ## 7. Configuration
 
