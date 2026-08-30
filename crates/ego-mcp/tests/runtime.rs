@@ -77,7 +77,18 @@ impl LocalPeer {
         let result = self.listener.accept();
         if let Ok((mut stream, _)) = result {
             self.accepted.store(true, Ordering::Release);
-            let _ = Self::read_request_headers(&mut stream);
+            stream
+                .set_read_timeout(Some(Duration::from_millis(500)))
+                .expect("pre-header read timeout");
+            let mut header_bytes = Vec::new();
+            while !header_bytes.ends_with(b"\r\n\r\n") {
+                let mut byte = [0_u8; 1];
+                match stream.read(&mut byte) {
+                    Ok(0) => break,
+                    Ok(count) => header_bytes.extend_from_slice(&byte[..count]),
+                    Err(_) => break,
+                }
+            }
             let mut request_tail = Vec::new();
             let _ = stream.read_to_end(&mut request_tail);
         }
