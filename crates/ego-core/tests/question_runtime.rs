@@ -19,7 +19,7 @@ use ego_core::evidence::{
     EvidenceStore as AdmissionStore, EvidenceWrite, RunInvocationId,
 };
 use ego_core::generation_model_source::{
-    GenerationModelError, GenerationModelSource, GenerationProfile, GenerationRole,
+    GenerationModelError, GenerationModelRequest, GenerationModelSource, GenerationProfile,
 };
 use ego_core::generator::capabilities::{
     CacheRetention, CancelSemantics, ModelCapabilities, ReasoningCarryover, ReasoningEffortSupport,
@@ -258,7 +258,7 @@ struct FixedSource {
 impl GenerationModelSource for FixedSource {
     fn resolve<'a>(
         &'a self,
-        _role: GenerationRole,
+        _request: GenerationModelRequest,
     ) -> BoxFuture<'a, Result<GenerationProfile, GenerationModelError>> {
         Box::pin(futures::future::ready(Ok(GenerationProfile {
             identity: ModelRef("test-model".into()),

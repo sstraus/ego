@@ -460,6 +460,7 @@ mod regression_case {
             "source": "project",
             "location": "skills/explain-failure/SKILL.md",
             "source_digest": DIGEST,
+            "admission": blob(32),
             "rendered": blob(33),
         }));
         let resource = decode(json!({
@@ -585,6 +586,7 @@ mod regression_case {
             "source": "project",
             "location": "skills/explain-failure/SKILL.md",
             "source_digest": DIGEST,
+            "admission": blob(32),
             "rendered": blob(33),
         }));
         let resource = decode(json!({
@@ -605,7 +607,7 @@ mod regression_case {
             assert!(project_public(event).is_none(), "skill evidence is private");
         }
         assert!(state.refusals.is_empty(), "typed skill facts must reduce");
-        assert_eq!(instruction.kind.blob_references().len(), 1);
+        assert_eq!(instruction.kind.blob_references().len(), 2);
         assert_eq!(resource.kind.blob_references().len(), 1);
     }
 

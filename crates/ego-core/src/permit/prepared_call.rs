@@ -10,11 +10,12 @@ use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 
 use super::foreign::{
-    ForeignToolId, ForeignTransportTarget, HttpRequest, HttpRequestDigest, InvocationDigest,
-    NetworkTarget, PreparedConnect, Subject,
+    ForeignToolId, ForeignTransportTarget, HttpRequest, HttpRequestDigest, HttpRoute,
+    InvocationDigest, NetworkTarget, PreparedConnect, Subject,
 };
 use super::path::CanonPath;
 use super::spawn::SpawnSpec;
+use crate::event::hook::HookId;
 use crate::mcp::{McpAdmissionFingerprint, McpOperationKind, McpSubject};
 use crate::store::evidence::EvidenceRead;
 
@@ -61,6 +62,9 @@ pub enum Op {
         target: NetworkTarget,
         request_digest: HttpRequestDigest,
     },
+    /// One request-scoped release of named secret sources into named HTTP
+    /// header sinks. No rule grammar can grant this operation persistently.
+    SecretEgress { authority: SecretEgressAuthority },
     /// One MCP target whose exact request bytes are minted later by the
     /// admitted protocol profile. This does not grant ordinary HTTP.
     ProtocolConnect { target: NetworkTarget },
@@ -131,6 +135,7 @@ pub enum OpName {
     ReadEvidence,
     Opaque,
     Connect,
+    SecretEgress,
 }
 
 impl fmt::Display for OpName {
@@ -144,6 +149,7 @@ impl fmt::Display for OpName {
             OpName::ReadEvidence => "read_evidence",
             OpName::Opaque => "opaque",
             OpName::Connect => "connect",
+            OpName::SecretEgress => "secret_egress",
         };
         write!(f, "{name}")
     }
@@ -161,6 +167,7 @@ impl Op {
             Op::ReadEvidence { .. } => OpName::ReadEvidence,
             Op::Opaque { .. } => OpName::Opaque,
             Op::Connect { .. } | Op::ProtocolConnect { .. } => OpName::Connect,
+            Op::SecretEgress { .. } => OpName::SecretEgress,
         }
     }
 
@@ -185,6 +192,7 @@ impl Op {
             | Op::Spawn { .. }
             | Op::Opaque { .. }
             | Op::Connect { .. }
+            | Op::SecretEgress { .. }
             | Op::ProtocolConnect { .. } => true,
         }
     }
@@ -199,6 +207,7 @@ impl Op {
             Op::ReadEvidence { .. }
             | Op::Opaque { .. }
             | Op::Connect { .. }
+            | Op::SecretEgress { .. }
             | Op::ProtocolConnect { .. } => None,
         }
     }
@@ -214,6 +223,7 @@ impl Op {
             Op::ReadEvidence { .. }
             | Op::Opaque { .. }
             | Op::Connect { .. }
+            | Op::SecretEgress { .. }
             | Op::ProtocolConnect { .. } => None,
             _ => self.path(),
         }
@@ -237,7 +247,39 @@ impl Op {
             Op::Connect { target, .. } | Op::ProtocolConnect { target } => {
                 Subject::Network(target.clone())
             }
+            Op::SecretEgress { authority } => Subject::Network(authority.target.clone()),
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SecretEgressAuthority {
+    hook: HookId,
+    target: NetworkTarget,
+    request_digest: HttpRequestDigest,
+    sources: Vec<String>,
+    header_sinks: Vec<String>,
+}
+
+impl SecretEgressAuthority {
+    pub fn hook(&self) -> HookId {
+        self.hook
+    }
+
+    pub fn target(&self) -> &NetworkTarget {
+        &self.target
+    }
+
+    pub fn request_digest(&self) -> &HttpRequestDigest {
+        &self.request_digest
+    }
+
+    pub fn sources(&self) -> &[String] {
+        &self.sources
+    }
+
+    pub fn header_sinks(&self) -> &[String] {
+        &self.header_sinks
     }
 }
 
@@ -247,6 +289,33 @@ pub struct PreparedCall {
     pub tool: String,
     pub ops: Vec<Op>,
     mcp: Option<Box<McpPreparedEnvelope>>,
+    hook_http: Option<Box<HookHttpPreparedEnvelope>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HookHttpPreparedEnvelope {
+    hook: HookId,
+    route: HttpRoute,
+    request_digest: HttpRequestDigest,
+    secret: Option<SecretEgressAuthority>,
+}
+
+impl HookHttpPreparedEnvelope {
+    pub fn hook(&self) -> HookId {
+        self.hook
+    }
+
+    pub fn route(&self) -> &HttpRoute {
+        &self.route
+    }
+
+    pub fn request_digest(&self) -> &HttpRequestDigest {
+        &self.request_digest
+    }
+
+    pub fn secret(&self) -> Option<&SecretEgressAuthority> {
+        self.secret.as_ref()
+    }
 }
 
 /// Protocol facts captured before policy classifies an MCP operation.
@@ -292,6 +361,7 @@ impl PreparedCall {
             tool: tool.into(),
             ops,
             mcp: None,
+            hook_http: None,
         }
     }
 
@@ -340,6 +410,7 @@ impl PreparedCall {
                 transport,
                 parameters,
             })),
+            hook_http: None,
         })
     }
 
@@ -388,11 +459,64 @@ impl PreparedCall {
                 transport,
                 parameters,
             })),
+            hook_http: None,
         })
     }
 
     pub fn mcp_envelope(&self) -> Option<&McpPreparedEnvelope> {
         self.mcp.as_deref()
+    }
+
+    pub fn hook_http(
+        hook: HookId,
+        route: HttpRoute,
+        request: &HttpRequest,
+        mut secret_sources: Vec<String>,
+    ) -> Self {
+        secret_sources.sort();
+        secret_sources.dedup();
+        let request_digest = HttpRequestDigest::of(request);
+        let mut header_sinks = request
+            .headers()
+            .iter()
+            .filter(|header| header.is_secret())
+            .map(|header| header.name().to_owned())
+            .collect::<Vec<_>>();
+        header_sinks.sort();
+        header_sinks.dedup();
+        let secret = (!secret_sources.is_empty() || !header_sinks.is_empty()).then(|| {
+            SecretEgressAuthority {
+                hook,
+                target: route.target().clone(),
+                request_digest: request_digest.clone(),
+                sources: secret_sources,
+                header_sinks,
+            }
+        });
+        let mut ops = vec![Op::Connect {
+            target: route.target().clone(),
+            request_digest: request_digest.clone(),
+        }];
+        if let Some(authority) = &secret {
+            ops.push(Op::SecretEgress {
+                authority: authority.clone(),
+            });
+        }
+        Self {
+            tool: format!("hook_http:{hook}"),
+            ops,
+            mcp: None,
+            hook_http: Some(Box::new(HookHttpPreparedEnvelope {
+                hook,
+                route,
+                request_digest,
+                secret,
+            })),
+        }
+    }
+
+    pub fn hook_http_envelope(&self) -> Option<&HookHttpPreparedEnvelope> {
+        self.hook_http.as_deref()
     }
 
     pub(crate) fn apply_verified_resume_parameters(
@@ -442,6 +566,7 @@ impl PreparedCall {
             tool: rendered,
             ops,
             mcp: None,
+            hook_http: None,
         }
     }
 
@@ -465,6 +590,7 @@ impl PreparedCall {
                 Op::Spawn { spec },
             ],
             mcp: None,
+            hook_http: None,
         }
     }
 
@@ -502,6 +628,7 @@ impl PreparedCall {
             tool: rendered,
             ops,
             mcp: None,
+            hook_http: None,
         }
     }
 }

@@ -22,6 +22,7 @@ use ego_core::event::hook::{
 use ego_core::event::id::{
     EventId, ItemId, Producer, Seq, SessionId, SubagentInvocationId, TurnId,
 };
+use ego_core::event::skill::SkillSourceAuthority;
 use ego_core::event::time::{Clock, Timestamp};
 use ego_core::evidence::{EvidenceError, EvidenceWrite};
 use ego_core::generator::capabilities::{
@@ -585,15 +586,17 @@ impl HookPort for ReturnHookPort {
 fn return_hook_catalogue() -> HookCatalogue {
     HookCatalogue::admit_typed(
         &[],
-        &[HookSource::skill_entries(
+        &[HookSource::skill_entries_with_authority(
             "skills/return/SKILL.md",
             ego_core::event::skill::SkillInvocationId::new(),
+            SkillSourceAuthority::User,
             [HookConfigEntry::new(
                 HookLifecycle::SubagentStop,
                 None,
                 HookHandlerConfig::Command {
                     command: "/usr/bin/return-hook".to_owned(),
-                    args: Vec::new(),
+                    args: None,
+                    shell: None,
                     timeout_seconds: None,
                 },
             )],

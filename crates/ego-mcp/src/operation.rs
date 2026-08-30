@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use ego_core::config::{McpHttpConfig, McpServerConfig, McpServerName, McpStdioConfig};
 use ego_core::generator::attempt::DeliveryCertainty;
+use ego_core::hook::EffectScope;
 use ego_core::mcp::{
     CacheScope as CoreCacheScope, CancellationClassification, ForeignContent, ForeignInputRequired,
     ForeignResult, McpAdmissionFingerprint, McpOperationKind, McpSubject, ToolExecution,
@@ -32,9 +33,10 @@ use crate::http::AdmittedMcpHttpProfile;
 use crate::registry::{McpToolSchemaAdmission, McpToolSchemaCommand};
 use crate::state::{compile_schema, validate_answer};
 use crate::{
-    McpClient, McpClientOptions, McpDuplexEffects, McpError, McpFailure, McpFuture, McpHttpEffects,
-    McpHttpEnd, McpHttpPurpose, McpHttpResponse, McpHttpSettlement, McpManualOutcome,
-    McpPreparedHttpParts, McpRequestId, McpServerAdmission, PreparedMcpHttpCall,
+    McpClient, McpClientOptions, McpDuplexEffects, McpError, McpFailure, McpFuture,
+    McpHookExecution, McpHttpEffects, McpHttpEnd, McpHttpPurpose, McpHttpResponse,
+    McpHttpSettlement, McpManualOutcome, McpPreparedHttpParts, McpRequestId, McpServerAdmission,
+    PreparedMcpHttpCall,
 };
 
 #[derive(Clone, Copy)]
@@ -71,6 +73,10 @@ impl OperationLimits {
             )
         })?;
         McpClientOptions::new(self.max_sse_event_size, deadline)
+    }
+
+    fn hook_options(self, scope: &EffectScope) -> Result<McpClientOptions, McpError> {
+        McpClientOptions::new(self.max_sse_event_size, scope.deadline())
     }
 }
 
@@ -244,6 +250,24 @@ impl McpOperationFactory for McpHttpOperationFactory {
                 .map_err(mcp_execution_error)
         })
     }
+
+    fn execute_hook<'a>(
+        &'a self,
+        admission: Arc<McpServerAdmission>,
+        call: PreparedCall,
+        io: &'a dyn GuardedIo,
+        scope: EffectScope,
+    ) -> futures::future::BoxFuture<'a, Result<McpHookExecution, ToolError>> {
+        Box::pin(async move {
+            let McpServerConfig::Http(config) = admission.config() else {
+                return Err(execution_error("HTTP MCP factory received stdio config"));
+            };
+            let config = config.clone();
+            execute_http_hook(&config, call, io, self, admission, scope)
+                .await
+                .map_err(mcp_execution_error)
+        })
+    }
 }
 
 /// A fresh stdio lifecycle consuming one guarded owned duplex.
@@ -319,6 +343,24 @@ impl McpOperationFactory for McpStdioOperationFactory {
             )
             .await
             .map_err(mcp_execution_error)
+        })
+    }
+
+    fn execute_hook<'a>(
+        &'a self,
+        admission: Arc<McpServerAdmission>,
+        call: PreparedCall,
+        io: &'a dyn GuardedIo,
+        scope: EffectScope,
+    ) -> futures::future::BoxFuture<'a, Result<McpHookExecution, ToolError>> {
+        Box::pin(async move {
+            let McpServerConfig::Stdio(config) = admission.config() else {
+                return Err(execution_error("stdio MCP factory received HTTP config"));
+            };
+            let config = config.clone();
+            execute_stdio_hook(&config, call, io, self.limits, scope)
+                .await
+                .map_err(mcp_execution_error)
         })
     }
 }
@@ -515,6 +557,193 @@ async fn execute_stdio(
         collapsed.admission.reconcile(command).await?;
     }
     Ok(execution)
+}
+
+async fn execute_http_hook(
+    config: &McpHttpConfig,
+    call: PreparedCall,
+    io: &dyn GuardedIo,
+    factory: &McpHttpOperationFactory,
+    admission: Arc<McpServerAdmission>,
+    scope: EffectScope,
+) -> Result<McpHookExecution, McpError> {
+    ensure_hook_scope(&scope)?;
+    let envelope = call
+        .mcp_envelope()
+        .cloned()
+        .ok_or_else(|| authority("selected MCP hook has no protocol envelope"))?;
+    let server = server_name(envelope.subject().server())?;
+    let profile = AdmittedMcpHttpProfile::initial(&server, config.url.as_url())?;
+    let route = profile.route(config.url.as_url())?;
+    let transport = ForeignTransportTarget::http(route.clone());
+    let fingerprint =
+        http_transport_fingerprint(profile.fingerprint(), envelope.admission(), &transport);
+    if envelope.transport() != &transport || envelope.transport_fingerprint() != fingerprint {
+        return Err(authority("selected MCP hook transport fingerprint changed"));
+    }
+    let request = operation_request(&envelope)?;
+    if !matches!(&request, OperationRequest::Tool(_)) {
+        return Err(authority("MCP hook operation is not a tool call"));
+    }
+    let expected_wire_params = request.wire_params()?;
+    let claim = io.claim_mcp_http(call).map_err(McpError::from)?;
+    if claim.envelope() != &envelope {
+        return Err(authority("guarded MCP hook claim changed its envelope"));
+    }
+    let broker = Arc::new(SplitMcpHttpEffects::new(
+        Arc::clone(&factory.management),
+        claim,
+        server.clone(),
+        profile.fingerprint(),
+        route,
+        envelope,
+        expected_wire_params,
+        admission_headers(admission.as_ref())?,
+    ));
+    let effects: Arc<dyn McpHttpEffects> = broker.clone();
+    let mut client = McpClient::connect_http(
+        server,
+        config.clone(),
+        factory.limits.hook_options(&scope)?,
+        effects,
+    )?;
+    if let Err(error) = client.discover().await {
+        let _ = client.settle().await;
+        return Err(error);
+    }
+    let outcome = invoke_in_scope(request, &mut client, &scope).await;
+    let settlement = client.settle().await;
+    let outcome = outcome?;
+    settlement?;
+    let selected = broker
+        .selected_settlement()?
+        .ok_or_else(|| protocol("selected MCP hook HTTP operation was not settled"))?;
+    project_hook_outcome(outcome, io, selected.delivery())
+}
+
+async fn execute_stdio_hook(
+    config: &McpStdioConfig,
+    call: PreparedCall,
+    io: &dyn GuardedIo,
+    limits: OperationLimits,
+    scope: EffectScope,
+) -> Result<McpHookExecution, McpError> {
+    ensure_hook_scope(&scope)?;
+    let envelope = call
+        .mcp_envelope()
+        .cloned()
+        .ok_or_else(|| authority("selected MCP hook has no protocol envelope"))?;
+    let server = server_name(envelope.subject().server())?;
+    let spec = call
+        .ops
+        .iter()
+        .find_map(|op| match op {
+            ego_core::permit::Op::Spawn { spec } => Some(spec),
+            _ => None,
+        })
+        .ok_or_else(|| authority("selected MCP hook has no spawn authority"))?;
+    let expected = stdio_transport_fingerprint(config, envelope.admission(), spec);
+    if envelope.transport_fingerprint() != expected
+        || envelope.transport().to_string() != format!("stdio:{server}")
+    {
+        return Err(authority("selected MCP hook transport fingerprint changed"));
+    }
+    let request = operation_request(&envelope)?;
+    if !matches!(&request, OperationRequest::Tool(_)) {
+        return Err(authority("MCP hook operation is not a tool call"));
+    }
+    let duplex = io.guarded_duplex(call).await.map_err(McpError::from)?;
+    let effects: Box<dyn McpDuplexEffects> = Box::new(ClaimedDuplexEffects {
+        server: server.clone(),
+        duplex: Some(duplex),
+    });
+    let mut client = McpClient::connect_stdio(server, limits.hook_options(&scope)?, effects)?;
+    if let Err(error) = client.discover().await {
+        let _ = client.settle().await;
+        return Err(error);
+    }
+    let outcome = invoke_in_scope(request, &mut client, &scope).await;
+    let settlement = client.settle().await;
+    let outcome = outcome?;
+    let settlement = settlement?;
+    let duplex = settlement
+        .duplex()
+        .ok_or_else(|| protocol("selected MCP hook stdio operation has no settlement"))?;
+    project_hook_outcome(outcome, io, duplex.delivery())
+}
+
+async fn invoke_in_scope(
+    request: OperationRequest,
+    client: &mut McpClient,
+    scope: &EffectScope,
+) -> Result<OperationOutcome, McpError> {
+    let cancellation = client.cancellation();
+    let mut invoke = Box::pin(request.invoke(client));
+    loop {
+        tokio::select! {
+            outcome = &mut invoke => return outcome,
+            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(scope.deadline())) => {
+                cancellation.cancel();
+                return Err(McpError::new(
+                    McpFailure::Transport,
+                    "MCP hook deadline elapsed",
+                ));
+            }
+            _ = tokio::time::sleep(Duration::from_millis(2)) => {
+                if scope.is_cancelled() {
+                    cancellation.cancel();
+                    return Err(McpError::new(
+                        McpFailure::Cancelled,
+                        "MCP hook was cancelled",
+                    ));
+                }
+            }
+        }
+    }
+}
+
+fn project_hook_outcome(
+    outcome: OperationOutcome,
+    io: &dyn GuardedIo,
+    delivery: DeliveryCertainty,
+) -> Result<McpHookExecution, McpError> {
+    let OperationOutcome::Complete(CompleteResult::Tool(result)) = outcome else {
+        return Err(protocol("MCP hook did not return a complete tool result"));
+    };
+    if result.is_error == Some(true)
+        || !result
+            .result_type
+            .as_ref()
+            .is_some_and(rmcp::model::ResultType::is_complete)
+    {
+        return Err(protocol(
+            "MCP hook tool result was not successful and complete",
+        ));
+    }
+    let evidence_bytes = serde_json::to_vec(&result)?;
+    let evidence = io
+        .store_evidence(&evidence_bytes)
+        .map_err(|error| McpError::new(McpFailure::Transport, error.to_string()))?;
+    if result.structured_content.is_none() {
+        return Err(protocol("MCP hook result has no structuredContent"));
+    }
+    Ok(McpHookExecution::new(result, evidence, delivery))
+}
+
+fn ensure_hook_scope(scope: &EffectScope) -> Result<(), McpError> {
+    if scope.is_cancelled() {
+        return Err(McpError::new(
+            McpFailure::Cancelled,
+            "MCP hook was cancelled",
+        ));
+    }
+    if Instant::now() >= scope.deadline() {
+        return Err(McpError::new(
+            McpFailure::Transport,
+            "MCP hook deadline elapsed",
+        ));
+    }
+    Ok(())
 }
 
 enum OperationRequest {

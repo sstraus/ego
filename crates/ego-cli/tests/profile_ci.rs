@@ -686,6 +686,7 @@ fn direct_ci_run_context_records_complete_admitted_pre_effect_facts() {
         "session",
         "invocation",
         "run_id",
+        "origin",
         "ego_version",
         "config",
         "config_digest",

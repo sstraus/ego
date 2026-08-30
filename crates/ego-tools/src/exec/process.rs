@@ -8,6 +8,7 @@ use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use ego_core::generator::attempt::DeliveryCertainty;
+use ego_core::hook::EffectScope;
 use ego_core::permit::{
     CleanupCertainty, DuplexEnd, DuplexSession, DuplexSettlement, ExecCaps, ProcessError,
     RunConfinement, SpawnSpec, StreamProvenance, ToolContentBlock, ToolResult, TransportError,
@@ -17,7 +18,7 @@ use ego_core::store::evidence::{EvidenceError, EvidenceStore as _, EvidenceWrite
 use ego_core::turn::CancelToken;
 use futures::future::BoxFuture;
 use futures::io::{AsyncRead as FuturesAsyncRead, AsyncWrite as FuturesAsyncWrite};
-use tokio::io::{AsyncRead, AsyncReadExt as _};
+use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::process::Child;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -69,6 +70,32 @@ impl RunProcessContext {
     }
 
     pub(crate) async fn execute(&self, spec: &SpawnSpec) -> Result<ToolResult, ProcessError> {
+        self.execute_inner(spec, None).await
+    }
+
+    pub(crate) async fn execute_handler(
+        &self,
+        spec: &SpawnSpec,
+        input: &[u8],
+        scope: EffectScope,
+    ) -> Result<ToolResult, ProcessError> {
+        if scope.is_cancelled() {
+            return Err(ProcessError::Cancelled);
+        }
+        if Instant::now() >= scope.deadline() {
+            return Err(ProcessError::Timeout {
+                timeout: scope.timeout(),
+            });
+        }
+        self.execute_inner(spec, Some((input.to_vec(), scope)))
+            .await
+    }
+
+    async fn execute_inner(
+        &self,
+        spec: &SpawnSpec,
+        handler: Option<(Vec<u8>, EffectScope)>,
+    ) -> Result<ToolResult, ProcessError> {
         self.confinement
             .requirements()
             .check(self.capabilities)
@@ -79,7 +106,7 @@ impl RunProcessContext {
         let limits = self.limits;
         let spec = spec.clone();
         super::runtime_handle()
-            .spawn(async move { execute(backend, evidence, cancel, limits, &spec).await })
+            .spawn(async move { execute(backend, evidence, cancel, limits, &spec, handler).await })
             .await
             .map_err(|error| ProcessError::Backend(format!("process task failed: {error}")))?
     }
@@ -105,6 +132,7 @@ pub(crate) async fn execute(
     cancel: CancelToken,
     limits: ExecLimits,
     spec: &SpawnSpec,
+    handler: Option<(Vec<u8>, EffectScope)>,
 ) -> Result<ToolResult, ProcessError> {
     let mut command = prefixed_command(backend.launch_prefix(), spec)?;
     command
@@ -135,9 +163,7 @@ pub(crate) async fn execute(
         }
     };
     let tree_id = child.id();
-    // An EOF pipe gives the child null input without handing a sandboxed
-    // helper a descriptor for a filesystem device.
-    drop(child.stdin.take());
+    let stdin = child.stdin.take();
     let Some(stdout) = child.stdout.take() else {
         terminate_tree(&mut child, tree_id, limits.termination_grace()).await;
         let _ = abort_writers([stdout_writer, stderr_writer]).await;
@@ -165,6 +191,24 @@ pub(crate) async fn execute(
         stderr_writer,
         limits.preview_bytes(),
     ));
+    if let Some((input, scope)) = &handler {
+        let Some(mut stdin) = stdin else {
+            terminate_tree(&mut child, tree_id, limits.termination_grace()).await;
+            let _ = abort_outputs(stdout_task.take(), stderr_task.take(), None, None).await;
+            return Err(ProcessError::Invariant(
+                "stdin pipe was not installed".into(),
+            ));
+        };
+        if let Err(error) = write_handler_input(&mut stdin, input, &cancel, scope).await {
+            terminate_tree(&mut child, tree_id, limits.termination_grace()).await;
+            let _ = abort_outputs(stdout_task.take(), stderr_task.take(), None, None).await;
+            return Err(error);
+        }
+    } else {
+        // An EOF pipe gives the child null input without handing a sandboxed
+        // helper a descriptor for a filesystem device.
+        drop(stdin);
+    }
     let started = Instant::now();
     let mut status = None;
     let mut descendants_cleaned = false;
@@ -172,7 +216,11 @@ pub(crate) async fn execute(
     let mut stderr_pending = None;
 
     loop {
-        if cancel.is_cancelled() {
+        if cancel.is_cancelled()
+            || handler
+                .as_ref()
+                .is_some_and(|(_, scope)| scope.is_cancelled())
+        {
             request_abort(&mut stdout_task);
             request_abort(&mut stderr_task);
             terminate_tree(&mut child, tree_id, limits.termination_grace()).await;
@@ -184,6 +232,23 @@ pub(crate) async fn execute(
             )
             .await;
             return Err(ProcessError::Cancelled);
+        }
+        if let Some((_, scope)) = &handler
+            && Instant::now() >= scope.deadline()
+        {
+            request_abort(&mut stdout_task);
+            request_abort(&mut stderr_task);
+            terminate_tree(&mut child, tree_id, limits.termination_grace()).await;
+            let _ = abort_outputs(
+                stdout_task.take(),
+                stderr_task.take(),
+                stdout_pending.take(),
+                stderr_pending.take(),
+            )
+            .await;
+            return Err(ProcessError::Timeout {
+                timeout: scope.timeout(),
+            });
         }
         if spec
             .timeout()
@@ -280,6 +345,35 @@ pub(crate) async fn execute(
     }
 
     Ok(result)
+}
+
+async fn write_handler_input(
+    stdin: &mut tokio::process::ChildStdin,
+    input: &[u8],
+    parent_cancel: &CancelToken,
+    scope: &EffectScope,
+) -> Result<(), ProcessError> {
+    let mut write = Box::pin(async {
+        stdin.write_all(input).await?;
+        stdin.shutdown().await
+    });
+    loop {
+        tokio::select! {
+            result = &mut write => {
+                return result.map_err(|error| ProcessError::Backend(
+                    format!("writing hook handler stdin failed: {error}")
+                ));
+            }
+            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(scope.deadline())) => {
+                return Err(ProcessError::Timeout { timeout: scope.timeout() });
+            }
+            _ = tokio::time::sleep(Duration::from_millis(2)) => {
+                if parent_cancel.is_cancelled() || scope.is_cancelled() {
+                    return Err(ProcessError::Cancelled);
+                }
+            }
+        }
+    }
 }
 
 async fn spawn_duplex(

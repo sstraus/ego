@@ -902,7 +902,7 @@ mod turn {
     impl ego_core::generation_model_source::GenerationModelSource for FixedGenerationSource {
         fn resolve<'a>(
             &'a self,
-            _role: ego_core::generation_model_source::GenerationRole,
+            _request: ego_core::generation_model_source::GenerationModelRequest,
         ) -> BoxFuture<
             'a,
             Result<
@@ -4933,8 +4933,8 @@ mod turn {
     mod generation_boundary {
         use super::*;
         use ego_core::generation_model_source::{
-            GenerationModelError, GenerationModelErrorClass, GenerationModelSource,
-            GenerationProfile, GenerationRole,
+            GenerationModelError, GenerationModelErrorClass, GenerationModelRequest,
+            GenerationModelSource, GenerationProfile, GenerationRole,
         };
 
         enum ResolutionStep {
@@ -5150,8 +5150,9 @@ mod turn {
         impl GenerationModelSource for ScriptedGenerationSource {
             fn resolve<'a>(
                 &'a self,
-                role: GenerationRole,
+                request: GenerationModelRequest,
             ) -> BoxFuture<'a, Result<GenerationProfile, GenerationModelError>> {
+                let role = request.role();
                 self.resolved.lock().unwrap().push(role);
                 if let Some(trace) = &self.trace {
                     trace

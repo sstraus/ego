@@ -26,6 +26,7 @@ use super::prepared_call::{Op, PreparedCall};
 use super::scan::{Entry, EntryKind, Found, LineMatcher, Match, Scan, ScanRequest};
 use super::spawn::{ProcessError, ProcessExecutor, SpawnSpec};
 use super::tool::{ToolError, ToolResult};
+use crate::hook::EffectScope;
 use crate::store::evidence::{EvidencePage, EvidenceRead, EvidenceRef, EvidenceStore};
 use crate::suspension::{ContinuationError, PreparedResume};
 
@@ -386,6 +387,97 @@ impl<'a> GuardedEffects<'a> {
                 .ok_or_else(authority_mismatch)?;
             let connect = claim.connect.ok_or_else(authority_mismatch)?;
             http.execute_admitted(route, connect, request, None).await
+        })
+    }
+
+    pub fn exec_handler<'b>(
+        &'b self,
+        spec: &'b SpawnSpec,
+        input: &'b [u8],
+        scope: EffectScope,
+    ) -> BoxFuture<'b, Result<ToolResult, ProcessError>> {
+        if let Err(denied) = self.permit.allows_spawn(spec) {
+            return Box::pin(future::ready(Err(ProcessError::Invariant(
+                denied.to_string(),
+            ))));
+        }
+        self.process.execute_handler(spec, input, scope)
+    }
+
+    pub fn store_handler_evidence(&self, bytes: &[u8]) -> Result<EvidenceRef, ToolError> {
+        <Self as GuardedIo>::store_evidence(self, bytes)
+    }
+
+    pub fn guarded_hook_http(
+        &self,
+        call: PreparedCall,
+        request: HttpRequest,
+        scope: EffectScope,
+    ) -> BoxFuture<'static, Result<OneHopResponse, TransportError>> {
+        if scope.is_cancelled() {
+            return Box::pin(future::ready(Err(TransportError::definitely_unsent(
+                TransportFailure::Cancelled,
+            ))));
+        }
+        if std::time::Instant::now() >= scope.deadline() {
+            return Box::pin(future::ready(Err(TransportError::definitely_unsent(
+                TransportFailure::TimedOut,
+            ))));
+        }
+        let envelope = call.hook_http_envelope().cloned();
+        let claim = envelope.and_then(|envelope| {
+            if envelope.request_digest() != &super::HttpRequestDigest::of(&request) {
+                return None;
+            }
+            let connect = PreparedConnect::from_parts(
+                envelope.route().target().clone(),
+                envelope.request_digest().clone(),
+            );
+            let mut saw_connect = false;
+            let mut saw_secret = envelope.secret().is_none();
+            for op in &call.ops {
+                match op {
+                    Op::Connect {
+                        target,
+                        request_digest,
+                    } if target == connect.target()
+                        && request_digest == connect.request_digest()
+                        && !saw_connect =>
+                    {
+                        saw_connect = true
+                    }
+                    Op::SecretEgress { authority }
+                        if envelope.secret() == Some(authority) && !saw_secret =>
+                    {
+                        saw_secret = true;
+                    }
+                    _ => return None,
+                }
+            }
+            (saw_connect && saw_secret).then_some((envelope, connect))
+        });
+        let claimed = claim
+            .ok_or_else(authority_mismatch)
+            .and_then(|(envelope, connect)| {
+                self.permit.allows_network(&connect)?;
+                if let Some(secret) = envelope.secret() {
+                    self.permit.allows_secret_egress(secret)?;
+                }
+                self.foreign_spent
+                    .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                    .map_err(|_| authority_spent())?;
+                Ok((envelope, connect))
+            });
+        let http = self.http.clone();
+        Box::pin(async move {
+            let (envelope, connect) = claimed?;
+            http.execute_admitted(
+                envelope.route().clone(),
+                connect,
+                request,
+                Some(scope.deadline()),
+            )
+            .await
         })
     }
 

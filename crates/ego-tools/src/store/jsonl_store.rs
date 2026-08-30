@@ -300,8 +300,7 @@ fn add_v9_defaults(value: &mut serde_json::Value) {
     if let Some(event) = object
         .get_mut("kind")
         .and_then(serde_json::Value::as_object_mut)
-        && event.get("kind").and_then(serde_json::Value::as_str)
-            == Some("HookInvocationStarted")
+        && event.get("kind").and_then(serde_json::Value::as_str) == Some("HookInvocationStarted")
     {
         event
             .entry("activation")
@@ -1561,6 +1560,12 @@ impl JsonlStore {
             ev.kind,
             EventKind::HookInvocationStarted { .. } | EventKind::HookInvocationSettled { .. }
         );
+        let is_skill_admission = matches!(
+            ev.kind,
+            EventKind::SkillCatalogueAdmitted { .. }
+                | EventKind::SkillInstructionAdmitted { .. }
+                | EventKind::SkillResourceAdmitted { .. }
+        );
         let is_queue_boundary = matches!(
             ev.kind,
             EventKind::PromptQueued { .. }
@@ -1574,6 +1579,7 @@ impl JsonlStore {
             || is_execution_observation
             || is_hook_admission
             || is_hook_invocation
+            || is_skill_admission
             || is_queue_boundary
         {
             self.io.fsync(&log_path)?;

@@ -28,6 +28,7 @@ pub mod question;
 pub mod run;
 pub mod session;
 pub mod sink;
+pub mod skill;
 pub mod state;
 pub mod store;
 pub mod subagent;

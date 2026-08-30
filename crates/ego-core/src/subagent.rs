@@ -86,6 +86,9 @@ impl ChildRequest {
     pub const fn invocation(&self) -> SubagentInvocationId {
         self.invocation
     }
+    pub const fn wait(&self) -> ChildWait {
+        self.wait
+    }
     pub fn selections(&self) -> &RunSelections {
         &self.selections
     }
@@ -441,6 +444,10 @@ impl ChildRunService {
                 active: Mutex::new(BTreeMap::new()),
             }),
         }
+    }
+    /// The already admitted parent identity required by typed child requests.
+    pub fn parent_run(&self) -> RunId {
+        self.inner.ports.parent_run
     }
     pub async fn start(&self, request: ChildRequest) -> Result<ChildAdmission, ChildServiceError> {
         start(&self.inner, request).await
@@ -873,7 +880,7 @@ async fn prepare_result(
         }
     }
     enum ResultSource {
-        Execute(RunExecution),
+        Execute(Box<RunExecution>),
         Observed(RunSettlement),
         Wait(RunSubscription),
     }
@@ -883,7 +890,7 @@ async fn prepare_result(
             .get_mut(&invocation)
             .ok_or(ChildServiceError::UnknownInvocation { invocation })?;
         let source = if let Some(execution) = child.execution.take() {
-            ResultSource::Execute(execution)
+            ResultSource::Execute(Box::new(execution))
         } else if let Some(settlement) = child.observed.clone() {
             ResultSource::Observed(settlement)
         } else {
@@ -894,7 +901,7 @@ async fn prepare_result(
     let settlement = match source {
         ResultSource::Execute(execution) => inner
             .controller
-            .execute(execution)
+            .execute(*execution)
             .await
             .map_err(controller_error)?
             .settlement()

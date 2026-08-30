@@ -227,7 +227,7 @@ fn rooted_command_and_generation_evidence_precede_one_matching_start() {
     let log = log_path(root.path(), &session);
     std::fs::create_dir_all(log.parent().unwrap()).unwrap();
     let mut initial = encode_header(&Header {
-        v: CODEC_VERSION,
+        v: 8,
         session,
         created: Timestamp::from_millis(1),
         workspace_root: "/workspace".into(),
@@ -589,13 +589,13 @@ fn manifest_cache_is_rebuilt_and_unknown_evidence_prefix_fails_closed() {
 }
 
 #[test]
-fn recognized_v7_legacy_entries_migrate_to_tagged_v8_and_unknown_stays_unchanged() {
+fn recognized_v8_legacy_entries_migrate_to_tagged_v9_and_unknown_stays_unchanged() {
     let root = tempdir().unwrap();
     let session = SessionId::new();
     let log = log_path(root.path(), &session);
     std::fs::create_dir_all(log.parent().unwrap()).unwrap();
     let mut legacy = encode_header(&Header {
-        v: 7,
+        v: 8,
         session,
         created: Timestamp::from_millis(1),
         workspace_root: "/workspace".into(),

@@ -6,9 +6,10 @@ use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use futures::lock::Mutex as AsyncMutex;
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::config::{ConfigLayer, Source, Sourced, Trust};
 use crate::digest::sha256_hex;
@@ -18,14 +19,18 @@ use crate::event::hook::{
     HookInvocationId, HookLifecycle, HookOutcome, HookPhase, HookSourceAuthority,
     HookSourceLocation, HookSubject,
 };
-use crate::event::skill::SkillInvocationId;
+use crate::event::skill::{SkillInvocationId, SkillSourceAuthority};
 use crate::permit::rule::{ArgvToken, Rule, Segment};
+use crate::turn::CancelToken;
 
 const MAX_FEEDBACK_BYTES: usize = 4096;
 const MAX_TIMEOUT_SECONDS: u64 = 3600;
+const MAX_HOOK_SCALAR_BYTES: usize = 16 * 1024;
+const MAX_HOOK_COLLECTION_ENTRIES: usize = 256;
+const MAX_HOOK_WIRE_BYTES: usize = 64 * 1024;
 
 /// One typed declaration shared by TOML and projected skill frontmatter.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HookConfigEntry {
     event: HookLifecycle,
@@ -143,6 +148,18 @@ impl HookMatcher {
     }
 }
 
+impl Serialize for HookMatcher {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            Self::Permission(rule) => serializer.collect_str(rule),
+            Self::Exact(value) => serializer.serialize_str(value),
+        }
+    }
+}
+
 impl<'de> Deserialize<'de> for HookMatcher {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -153,7 +170,7 @@ impl<'de> Deserialize<'de> for HookMatcher {
             return Ok(Self::Permission(rule));
         }
         if value.is_empty()
-            || value.len() > 4096
+            || value.len() > MAX_HOOK_SCALAR_BYTES
             || value.chars().any(char::is_control)
             || (value.starts_with('/') && value.ends_with('/'))
         {
@@ -163,14 +180,16 @@ impl<'de> Deserialize<'de> for HookMatcher {
     }
 }
 
-/// The current closed handler set. Effect adapters arrive in S5.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+/// The current closed handler configuration shared by all four adapters.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum HookHandlerConfig {
     Command {
         command: String,
         #[serde(default)]
-        args: Vec<String>,
+        args: Option<Vec<String>>,
+        #[serde(default)]
+        shell: Option<String>,
         #[serde(default, rename = "timeout")]
         timeout_seconds: Option<u64>,
     },
@@ -179,17 +198,21 @@ pub enum HookHandlerConfig {
         #[serde(default)]
         headers: Vec<(String, String)>,
         #[serde(default)]
-        allowed_env_vars: Vec<String>,
+        allowed_env_vars: Option<Vec<String>>,
         #[serde(default, rename = "timeout")]
         timeout_seconds: Option<u64>,
     },
     McpTool {
         server: String,
         tool: String,
+        input: serde_json::Value,
         #[serde(default, rename = "timeout")]
         timeout_seconds: Option<u64>,
     },
     Prompt {
+        prompt: String,
+        #[serde(default)]
+        model: Option<String>,
         #[serde(default, rename = "timeout")]
         timeout_seconds: Option<u64>,
     },
@@ -198,19 +221,72 @@ pub enum HookHandlerConfig {
 impl Default for HookHandlerConfig {
     fn default() -> Self {
         Self::Prompt {
+            prompt: String::new(),
+            model: None,
             timeout_seconds: None,
         }
     }
 }
 
 impl HookHandlerConfig {
+    pub fn timeout_for(&self, lifecycle: HookLifecycle) -> Duration {
+        let configured = match self {
+            Self::Command {
+                timeout_seconds, ..
+            }
+            | Self::Http {
+                timeout_seconds, ..
+            }
+            | Self::McpTool {
+                timeout_seconds, ..
+            }
+            | Self::Prompt {
+                timeout_seconds, ..
+            } => *timeout_seconds,
+        };
+        let default = match self {
+            Self::Prompt { .. } => 30,
+            _ if matches!(
+                lifecycle,
+                HookLifecycle::UserPromptSubmit
+                    | HookLifecycle::PreModelSwitch
+                    | HookLifecycle::PostModelSwitch
+            ) =>
+            {
+                30
+            }
+            _ => 600,
+        };
+        Duration::from_secs(configured.unwrap_or(default))
+    }
+
     fn validate(&self) -> Result<(), HookCatalogueError> {
         let timeout = match self {
             Self::Command {
                 command,
+                args,
+                shell,
                 timeout_seconds,
-                ..
             } => {
+                validate_scalar("command", command, false)?;
+                if args.is_some() && shell.is_some() {
+                    return Err(HookCatalogueError::invalid(
+                        "args",
+                        "command args and shell are mutually exclusive",
+                    ));
+                }
+                if let Some(args) = args {
+                    validate_strings("args", args)?;
+                }
+                if let Some(shell) = shell {
+                    validate_scalar("shell", shell, false)?;
+                    if !matches!(shell.as_str(), "bash" | "powershell") {
+                        return Err(HookCatalogueError::invalid(
+                            "shell",
+                            "shell must be exactly bash or powershell",
+                        ));
+                    }
+                }
                 if command.trim().is_empty() {
                     return Err(HookCatalogueError::invalid(
                         "command",
@@ -225,6 +301,7 @@ impl HookHandlerConfig {
                 allowed_env_vars,
                 timeout_seconds,
             } => {
+                validate_scalar("url", url, false)?;
                 let parsed = url::Url::parse(url)
                     .map_err(|_| HookCatalogueError::invalid("url", "invalid HTTP URL"))?;
                 if !matches!(parsed.scheme(), "http" | "https") || parsed.host().is_none() {
@@ -233,28 +310,38 @@ impl HookHandlerConfig {
                         "hook URL must be absolute HTTP or HTTPS",
                     ));
                 }
-                if headers
-                    .iter()
-                    .any(|(name, _)| name.trim().is_empty() || name.chars().any(char::is_control))
+                if headers.len() > MAX_HOOK_COLLECTION_ENTRIES
+                    || headers.iter().any(|(name, value)| {
+                        name.trim().is_empty()
+                            || name.len() > MAX_HOOK_SCALAR_BYTES
+                            || value.len() > MAX_HOOK_SCALAR_BYTES
+                            || name.chars().any(char::is_control)
+                    })
                 {
                     return Err(HookCatalogueError::invalid(
                         "headers",
                         "invalid header name",
                     ));
                 }
-                if let Some(name) = allowed_env_vars.iter().find(|name| !valid_env_name(name)) {
-                    return Err(HookCatalogueError::invalid(
-                        "allowed_env_vars",
-                        format!("invalid environment variable `{name}`"),
-                    ));
+                if let Some(allowed_env_vars) = allowed_env_vars {
+                    validate_strings("allowed_env_vars", allowed_env_vars)?;
+                    if let Some(name) = allowed_env_vars.iter().find(|name| !valid_env_name(name)) {
+                        return Err(HookCatalogueError::invalid(
+                            "allowed_env_vars",
+                            format!("invalid environment variable `{name}`"),
+                        ));
+                    }
                 }
                 *timeout_seconds
             }
             Self::McpTool {
                 server,
                 tool,
+                input,
                 timeout_seconds,
             } => {
+                validate_scalar("server", server, false)?;
+                validate_scalar("tool", tool, false)?;
                 if server.trim().is_empty() {
                     return Err(HookCatalogueError::invalid(
                         "server",
@@ -267,9 +354,30 @@ impl HookHandlerConfig {
                         "MCP handler tool is empty",
                     ));
                 }
+                if !input.is_object()
+                    || match serde_json::to_vec(input) {
+                        Ok(bytes) => bytes.len() > MAX_HOOK_WIRE_BYTES,
+                        Err(_) => true,
+                    }
+                {
+                    return Err(HookCatalogueError::invalid(
+                        "input",
+                        "MCP hook input must be a JSON object of at most 64 KiB",
+                    ));
+                }
                 *timeout_seconds
             }
-            Self::Prompt { timeout_seconds } => *timeout_seconds,
+            Self::Prompt {
+                prompt,
+                model,
+                timeout_seconds,
+            } => {
+                validate_scalar("prompt", prompt, false)?;
+                if let Some(model) = model {
+                    validate_scalar("model", model, false)?;
+                }
+                *timeout_seconds
+            }
         };
         if timeout.is_some_and(|seconds| seconds == 0 || seconds > MAX_TIMEOUT_SECONDS) {
             return Err(HookCatalogueError::invalid(
@@ -277,8 +385,45 @@ impl HookHandlerConfig {
                 format!("must be between 1 and {MAX_TIMEOUT_SECONDS} seconds"),
             ));
         }
+        if match serde_json::to_vec(self) {
+            Ok(bytes) => bytes.len() > MAX_HOOK_WIRE_BYTES,
+            Err(_) => true,
+        } {
+            return Err(HookCatalogueError::invalid(
+                "handler",
+                "canonical handler configuration exceeds 64 KiB",
+            ));
+        }
         Ok(())
     }
+}
+
+fn validate_scalar(
+    field: &'static str,
+    value: &str,
+    allow_empty: bool,
+) -> Result<(), HookCatalogueError> {
+    if (!allow_empty && value.is_empty()) || value.len() > MAX_HOOK_SCALAR_BYTES {
+        return Err(HookCatalogueError::invalid(
+            field,
+            "configured scalar is empty or exceeds 16 KiB",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_strings(field: &'static str, values: &[String]) -> Result<(), HookCatalogueError> {
+    if values.len() > MAX_HOOK_COLLECTION_ENTRIES
+        || values
+            .iter()
+            .any(|value| value.len() > MAX_HOOK_SCALAR_BYTES)
+    {
+        return Err(HookCatalogueError::invalid(
+            field,
+            "configured collection exceeds its hook-domain bound",
+        ));
+    }
+    Ok(())
 }
 
 fn valid_env_name(value: &str) -> bool {
@@ -298,14 +443,16 @@ pub enum HookSource {
     Skill {
         location: String,
         invocation: SkillInvocationId,
+        authority: SkillSourceAuthority,
         entries: Vec<HookConfigEntry>,
     },
 }
 
 impl HookSource {
-    pub fn skill_entries(
+    pub fn skill_entries_with_authority(
         location: impl Into<String>,
         invocation: SkillInvocationId,
+        authority: SkillSourceAuthority,
         entries: impl IntoIterator<Item = HookConfigEntry>,
     ) -> Self {
         let location = location.into();
@@ -316,6 +463,7 @@ impl HookSource {
                 .collect(),
             location,
             invocation,
+            authority,
         }
     }
 
@@ -336,7 +484,12 @@ impl HookSource {
         match self {
             Self::System => HookSourceAuthority::System,
             Self::User => HookSourceAuthority::User,
-            Self::Project | Self::Skill { .. } => HookSourceAuthority::Project,
+            Self::Project => HookSourceAuthority::Project,
+            Self::Skill { authority, .. } => match authority {
+                SkillSourceAuthority::System => HookSourceAuthority::System,
+                SkillSourceAuthority::User => HookSourceAuthority::User,
+                SkillSourceAuthority::Project => HookSourceAuthority::Project,
+            },
         }
     }
 
@@ -452,10 +605,13 @@ impl HookSpec {
         let handler = match handler {
             "command" => HookHandlerConfig::Command {
                 command: owner.to_owned(),
-                args: Vec::new(),
+                args: None,
+                shell: None,
                 timeout_seconds: None,
             },
             "prompt" => HookHandlerConfig::Prompt {
+                prompt: owner.to_owned(),
+                model: None,
                 timeout_seconds: None,
             },
             "mcp_tool" => {
@@ -465,13 +621,14 @@ impl HookSpec {
                 HookHandlerConfig::McpTool {
                     server: server.to_owned(),
                     tool: tool.to_owned(),
+                    input: serde_json::json!({}),
                     timeout_seconds: None,
                 }
             }
             "http" => HookHandlerConfig::Http {
                 url: owner.to_owned(),
                 headers: Vec::new(),
-                allowed_env_vars: Vec::new(),
+                allowed_env_vars: None,
                 timeout_seconds: None,
             },
             exact_name => {
@@ -505,12 +662,16 @@ impl HookSpec {
                     | "type"
                     | "command"
                     | "args"
+                    | "shell"
                     | "timeout"
                     | "url"
                     | "headers"
                     | "allowed_env_vars"
                     | "server"
                     | "tool"
+                    | "input"
+                    | "prompt"
+                    | "model"
             ) {
                 return Err(HookCatalogueError::UnsupportedField {
                     exact_name: name.to_owned(),
@@ -634,6 +795,334 @@ impl HookEvent {
     }
 }
 
+/// The one cancellation and deadline authority shared by every effect of a
+/// hook invocation. It is runtime state and is never serialized.
+#[derive(Debug, Clone)]
+pub struct EffectScope {
+    cancel: CancelToken,
+    deadline: Instant,
+    timeout: Duration,
+}
+
+impl EffectScope {
+    pub fn new(timeout: Duration) -> Self {
+        Self::with_parent(CancelToken::new(), None, timeout)
+    }
+
+    pub fn with_parent(
+        cancel: CancelToken,
+        parent_deadline: Option<Instant>,
+        timeout: Duration,
+    ) -> Self {
+        let configured = Instant::now()
+            .checked_add(timeout)
+            .unwrap_or_else(Instant::now);
+        let deadline = parent_deadline.map_or(configured, |parent| parent.min(configured));
+        Self {
+            cancel,
+            deadline,
+            timeout,
+        }
+    }
+
+    pub fn cancel_token(&self) -> CancelToken {
+        self.cancel.clone()
+    }
+
+    pub fn deadline(&self) -> Instant {
+        self.deadline
+    }
+
+    pub fn timeout(&self) -> Duration {
+        self.timeout
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancel.is_cancelled()
+    }
+}
+
+/// Runtime-only invocation material handed to exactly one handler adapter.
+#[derive(Debug, Clone)]
+pub struct HookInvocationRequest {
+    handler: HookHandlerConfig,
+    event: HookEvent,
+    activation: HookActivation,
+    invocation: HookInvocationId,
+    effect_scope: EffectScope,
+}
+
+impl HookInvocationRequest {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        handler: HookHandlerConfig,
+        lifecycle: HookLifecycle,
+        matcher: Option<HookMatcher>,
+        subject: HookSubject,
+        activation: HookActivation,
+        invocation: HookInvocationId,
+        effect_scope: EffectScope,
+    ) -> Self {
+        let selector = matcher.as_ref().map(|matcher| match matcher {
+            HookMatcher::Permission(rule) => rule.to_string(),
+            HookMatcher::Exact(value) => value.clone(),
+        });
+        let permission_selector = matcher.and_then(|matcher| match matcher {
+            HookMatcher::Permission(rule) => Some(rule),
+            HookMatcher::Exact(_) => None,
+        });
+        Self {
+            handler,
+            event: HookEvent {
+                lifecycle,
+                subject,
+                selector,
+                permission_selector,
+                hook_originated: true,
+            },
+            activation,
+            invocation,
+            effect_scope,
+        }
+    }
+
+    pub fn handler(&self) -> &HookHandlerConfig {
+        &self.handler
+    }
+
+    pub fn lifecycle(&self) -> HookLifecycle {
+        self.event.lifecycle
+    }
+
+    pub fn subject(&self) -> HookSubject {
+        self.event.subject
+    }
+
+    pub fn selector(&self) -> Option<&str> {
+        self.event.selector.as_deref()
+    }
+
+    pub fn activation(&self) -> HookActivation {
+        self.activation
+    }
+
+    pub fn invocation(&self) -> HookInvocationId {
+        self.invocation
+    }
+
+    pub fn effect_scope(&self) -> &EffectScope {
+        &self.effect_scope
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum HookPhaseV1 {
+    PreEffect,
+    Observer,
+}
+
+impl From<HookPhase> for HookPhaseV1 {
+    fn from(value: HookPhase) -> Self {
+        if value.is_pre_effect() {
+            Self::PreEffect
+        } else {
+            Self::Observer
+        }
+    }
+}
+
+/// Strict versioned event envelope used inside MCP hook input.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct HookEventV1 {
+    version: u8,
+    invocation_id: HookInvocationId,
+    activation: HookActivation,
+    event: HookLifecycle,
+    phase: HookPhaseV1,
+    subject: HookSubject,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    selector: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HookEventWire {
+    version: u8,
+    invocation_id: HookInvocationId,
+    activation: HookActivation,
+    event: HookLifecycle,
+    phase: HookPhaseV1,
+    subject: HookSubject,
+    #[serde(default)]
+    selector: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for HookEventV1 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = HookEventWire::deserialize(deserializer)?;
+        if wire.version != 1 || wire.phase != HookPhaseV1::from(wire.event.phase()) {
+            return Err(serde::de::Error::custom(
+                "invalid hook event version or phase",
+            ));
+        }
+        if wire
+            .selector
+            .as_ref()
+            .is_some_and(|selector| selector.len() > MAX_HOOK_SCALAR_BYTES)
+        {
+            return Err(serde::de::Error::custom("hook selector exceeds 16 KiB"));
+        }
+        Ok(Self {
+            version: wire.version,
+            invocation_id: wire.invocation_id,
+            activation: wire.activation,
+            event: wire.event,
+            phase: wire.phase,
+            subject: wire.subject,
+            selector: wire.selector,
+        })
+    }
+}
+
+impl HookEventV1 {
+    pub fn from_runtime(request: &HookInvocationRequest) -> Result<Self, HookWireError> {
+        request
+            .handler
+            .validate()
+            .map_err(HookWireError::catalogue)?;
+        let value = Self {
+            version: 1,
+            invocation_id: request.invocation,
+            activation: request.activation,
+            event: request.event.lifecycle,
+            phase: request.event.lifecycle.phase().into(),
+            subject: request.event.subject,
+            selector: request.event.selector.clone(),
+        };
+        validate_wire_size(&value)?;
+        Ok(value)
+    }
+}
+
+/// Strict command-stdin and HTTP-body request. Runtime-only effect state and
+/// handler configuration are deliberately absent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct HookHandlerRequestV1(HookEventV1);
+
+impl HookHandlerRequestV1 {
+    pub fn from_runtime(request: &HookInvocationRequest) -> Result<Self, HookWireError> {
+        Ok(Self(HookEventV1::from_runtime(request)?))
+    }
+
+    pub fn invocation_id(&self) -> HookInvocationId {
+        self.0.invocation_id
+    }
+
+    pub fn activation(&self) -> HookActivation {
+        self.0.activation
+    }
+}
+
+/// The sole accepted raw handler settlement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct HookHandlerResultV1 {
+    version: u8,
+    decision: HookDecision,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    feedback: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HookHandlerResultWire {
+    version: u8,
+    decision: HookDecision,
+    #[serde(default)]
+    feedback: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for HookHandlerResultV1 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = HookHandlerResultWire::deserialize(deserializer)?;
+        if wire.version != 1 {
+            return Err(serde::de::Error::custom("unsupported hook result version"));
+        }
+        if wire
+            .feedback
+            .as_ref()
+            .is_some_and(|feedback| feedback.len() > MAX_HOOK_WIRE_BYTES)
+        {
+            return Err(serde::de::Error::custom("hook feedback exceeds 64 KiB"));
+        }
+        Ok(Self {
+            version: wire.version,
+            decision: wire.decision,
+            feedback: wire.feedback,
+        })
+    }
+}
+
+impl HookHandlerResultV1 {
+    pub fn parse(bytes: &[u8]) -> Result<Self, HookWireError> {
+        if bytes.len() > MAX_HOOK_WIRE_BYTES {
+            return Err(HookWireError::new("hook result exceeds 64 KiB"));
+        }
+        let mut deserializer = serde_json::Deserializer::from_slice(bytes);
+        let result = Self::deserialize(&mut deserializer)
+            .map_err(|error| HookWireError::new(error.to_string()))?;
+        deserializer
+            .end()
+            .map_err(|error| HookWireError::new(error.to_string()))?;
+        Ok(result)
+    }
+
+    pub fn decision(&self) -> HookDecision {
+        self.decision
+    }
+
+    pub fn feedback(&self) -> Option<&str> {
+        self.feedback.as_deref()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HookWireError(String);
+
+impl HookWireError {
+    fn new(message: impl Into<String>) -> Self {
+        Self(message.into())
+    }
+
+    fn catalogue(error: HookCatalogueError) -> Self {
+        Self(error.to_string())
+    }
+}
+
+impl fmt::Display for HookWireError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for HookWireError {}
+
+fn validate_wire_size(value: &impl Serialize) -> Result<(), HookWireError> {
+    let bytes = serde_json::to_vec(value).map_err(|error| HookWireError::new(error.to_string()))?;
+    if bytes.len() > MAX_HOOK_WIRE_BYTES {
+        return Err(HookWireError::new("hook request exceeds 64 KiB"));
+    }
+    Ok(())
+}
+
 fn permission_rule_covers(matcher: &Rule, selector: &Rule) -> bool {
     match (matcher, selector) {
         (Rule::Read(pattern), Rule::Read(target))
@@ -690,7 +1179,7 @@ impl HookCatalogueCandidate {
                     ));
                 }
                 Source::System | Source::User | Source::Project => {}
-                other if layer.value.hooks.is_empty() => {}
+                _ if layer.value.hooks.is_empty() => {}
                 other => {
                     return Err(HookCatalogueError::invalid(
                         other.to_string(),
@@ -718,6 +1207,7 @@ impl HookCatalogueCandidate {
             let HookSource::Skill {
                 location,
                 invocation,
+                authority: _,
                 entries,
             } = skill
             else {
@@ -1091,11 +1581,11 @@ impl<P: HookPort> HookRunner<P> {
             } else {
                 None
             };
-            if let (Some(key), Some(consumed)) = (once_key, consumed.as_ref()) {
-                if consumed.contains(&key) {
-                    result.skipped_once = true;
-                    continue;
-                }
+            if let (Some(key), Some(consumed)) = (once_key, consumed.as_ref())
+                && consumed.contains(&key)
+            {
+                result.skipped_once = true;
+                continue;
             }
 
             let start = self

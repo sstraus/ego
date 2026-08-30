@@ -154,6 +154,7 @@ fn admitted_command(session: SessionId, invocation: RunInvocationId) -> SessionE
         "run_transaction": {
             "revision": 1,
             "run_id": run_id,
+            "origin": {"kind": "top_level"},
             "root": "/workspace",
             "selections": {
                 "model": "model/test",

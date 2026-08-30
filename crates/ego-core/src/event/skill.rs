@@ -280,6 +280,15 @@ impl Default for SkillInvocationId {
 #[serde(try_from = "String", into = "String")]
 pub struct SkillCatalogueGeneration([u8; SHA256_BYTES]);
 
+impl SkillCatalogueGeneration {
+    /// Derive the generation from the already canonical descriptor sequence.
+    pub fn derive(evidence: &SkillCatalogueEvidence) -> Self {
+        let canonical = serde_json::to_vec(evidence)
+            .expect("validated skill catalogue evidence always serialises");
+        Self(Sha256::digest(canonical).into())
+    }
+}
+
 impl FromStr for SkillCatalogueGeneration {
     type Err = SkillEvidenceError;
 
@@ -302,6 +311,12 @@ impl From<SkillCatalogueGeneration> for String {
     }
 }
 
+impl fmt::Display for SkillCatalogueGeneration {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&encode_hex(&self.0))
+    }
+}
+
 /// Bounded model- and user-visible metadata for one admitted skill.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -318,6 +333,12 @@ pub struct SkillDescriptorEvidence {
     pub source_digest: SkillContentDigest,
     pub user_invocable: bool,
     pub model_invocable: bool,
+}
+
+impl SkillDescriptorEvidence {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
 }
 
 #[derive(Deserialize)]
@@ -467,7 +488,7 @@ fn decode_lower_sha256(value: &str) -> Result<[u8; SHA256_BYTES], SkillEvidenceE
         return Err(SkillEvidenceError::new("invalid SHA-256 digest"));
     }
     let mut decoded = [0_u8; SHA256_BYTES];
-    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+    for (index, pair) in value.as_bytes().as_chunks::<2>().0.iter().enumerate() {
         decoded[index] = (hex_nibble(pair[0]) << 4) | hex_nibble(pair[1]);
     }
     Ok(decoded)

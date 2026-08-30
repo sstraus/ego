@@ -468,7 +468,13 @@ pub enum EventKind {
         location: SkillSourceLocation,
         source_digest: SkillContentDigest,
         #[serde(with = "m4_blob_ref")]
+        admission: BlobRef,
+        #[serde(with = "m4_blob_ref")]
         rendered: BlobRef,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        effort: Option<String>,
     },
     /// One guarded skill resource became durable before disclosure.
     SkillResourceAdmitted {
@@ -532,7 +538,12 @@ impl EventKind {
                 }
                 SubagentTerminal::Refused { .. } | SubagentTerminal::Failed { .. } => {}
             },
-            Self::SkillInstructionAdmitted { rendered, .. } => {
+            Self::SkillInstructionAdmitted {
+                admission,
+                rendered,
+                ..
+            } => {
+                references.push(admission.clone());
                 references.push(rendered.clone());
             }
             Self::SkillResourceAdmitted { content, .. } => references.push(content.clone()),

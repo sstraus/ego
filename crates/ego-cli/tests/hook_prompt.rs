@@ -5,12 +5,12 @@ use serde_json::json;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use ego_cli::hook::{HookPromptAdapter, ToollessGenerationService};
 use ego_core::event::domain::GenerationRole;
 use ego_core::event::hook::{
     HookActivation, HookDecision, HookInvocationId, HookLifecycle, HookSubject,
 };
 use ego_core::hook::{EffectScope, HookHandlerConfig, HookInvocationRequest};
-use ego_cli::hook::{HookPromptAdapter, ToollessGenerationService};
 
 #[derive(Clone, Default)]
 struct GenerationCapture {

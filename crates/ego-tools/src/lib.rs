@@ -9,6 +9,7 @@ pub mod config;
 pub mod credentials;
 pub mod exec;
 pub mod fs;
+pub mod hook;
 pub mod http;
 pub mod instructions;
 pub mod mcp;

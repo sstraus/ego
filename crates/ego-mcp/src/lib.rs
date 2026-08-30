@@ -8,6 +8,7 @@ mod client;
 mod dynamic;
 mod effects;
 mod error;
+mod hook;
 mod http;
 mod oauth;
 mod operation;
@@ -34,6 +35,9 @@ pub use effects::{
 };
 pub use ego_core::generator::attempt::DeliveryCertainty;
 pub use error::{McpError, McpFailure};
+pub use hook::{
+    McpHookAdapter, McpHookAdapterError, McpHookExecution, McpHookFailure, McpHookSettlement,
+};
 pub use http::{McpHttpBody, McpHttpResponse};
 pub use oauth::{
     McpAuthorizationInteraction, McpClientMetadata, McpCredentialBundle, McpLoginRequest,

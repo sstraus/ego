@@ -13,6 +13,49 @@ use crate::generator::types::ThinkingLevel;
 
 pub use crate::event::domain::GenerationRole;
 
+/// Model authority requested for one generation boundary.
+///
+/// Skill overrides are carried with the request so they cannot mutate or
+/// outlive the session selection that supplies ordinary generations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GenerationModelRequest {
+    role: GenerationRole,
+    model: Option<ModelRef>,
+    thinking: Option<ThinkingLevel>,
+}
+
+impl GenerationModelRequest {
+    pub fn new(role: GenerationRole) -> Self {
+        Self {
+            role,
+            model: None,
+            thinking: None,
+        }
+    }
+
+    pub fn with_skill_scope(
+        mut self,
+        model: Option<ModelRef>,
+        thinking: Option<ThinkingLevel>,
+    ) -> Self {
+        self.model = model;
+        self.thinking = thinking;
+        self
+    }
+
+    pub fn role(&self) -> GenerationRole {
+        self.role
+    }
+
+    pub fn model(&self) -> Option<&ModelRef> {
+        self.model.as_ref()
+    }
+
+    pub fn thinking(&self) -> Option<ThinkingLevel> {
+        self.thinking
+    }
+}
+
 /// Everything one generation attempt needs from the currently selected model.
 pub struct GenerationProfile {
     pub identity: ModelRef,
@@ -69,6 +112,6 @@ impl std::error::Error for GenerationModelError {}
 pub trait GenerationModelSource: Send + Sync {
     fn resolve<'a>(
         &'a self,
-        role: GenerationRole,
+        request: GenerationModelRequest,
     ) -> BoxFuture<'a, Result<GenerationProfile, GenerationModelError>>;
 }

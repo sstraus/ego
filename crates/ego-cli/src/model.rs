@@ -16,8 +16,8 @@ use ego_ai::provider::{Credentials, OLLAMA_BASE, OPENAI_BASE, ProviderRow, Resol
 use ego_core::ceiling::Ceilings;
 use ego_core::config::{AuthProviderLayer, ModelRef};
 use ego_core::generation_model_source::{
-    GenerationModelError, GenerationModelErrorClass, GenerationModelSource, GenerationProfile,
-    GenerationRole,
+    GenerationModelError, GenerationModelErrorClass, GenerationModelRequest, GenerationModelSource,
+    GenerationProfile, GenerationRole,
 };
 use ego_core::generator::port::Generator;
 use ego_core::generator::types::ThinkingLevel;
@@ -327,18 +327,21 @@ impl CliGenerationModelSource {
 
     async fn resolve_role(
         &self,
-        role: GenerationRole,
+        request: GenerationModelRequest,
         http: &Arc<dyn Http>,
         cancel: &CancelToken,
         run_deadline: Option<std::time::Instant>,
     ) -> Result<GenerationProfile, GenerationModelError> {
-        let (identity, thinking) = match role {
+        let (identity, thinking) = match request.role() {
             GenerationRole::Main
             | GenerationRole::Compaction
             | GenerationRole::Subagent
             | GenerationRole::Hook => {
                 let selection = self.selection.read()?;
-                (selection.identity.clone(), selection.thinking)
+                (
+                    request.model().cloned().unwrap_or(selection.identity),
+                    request.thinking().unwrap_or(selection.thinking),
+                )
             }
             GenerationRole::Judge => (
                 self.judge.clone().ok_or_else(|| {
@@ -404,11 +407,11 @@ struct BoundGenerationModelSource {
 impl GenerationModelSource for BoundGenerationModelSource {
     fn resolve<'a>(
         &'a self,
-        role: GenerationRole,
+        request: GenerationModelRequest,
     ) -> BoxFuture<'a, Result<GenerationProfile, GenerationModelError>> {
         Box::pin(
             self.source
-                .resolve_role(role, &self.http, &self.cancel, self.run_deadline),
+                .resolve_role(request, &self.http, &self.cancel, self.run_deadline),
         )
     }
 }

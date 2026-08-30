@@ -153,6 +153,7 @@ fn replay_uses_source_event_seq_cutoff_and_keeps_target_state_local() {
             SessionEntry::RunTransaction(serde_json::from_value(json!({
                 "revision": 1,
                 "run_id": {"session_id": root, "nonce": "00000000-0000-7000-8000-000000000106"},
+                "origin": {"kind": "top_level"},
                 "root": "/workspace",
                 "selections": {"model": "model/test", "thinking": null, "mode": null, "budget": null, "profile": null},
                 "command": {"kind": "command_admitted", "request_id": "00000000-0000-7000-8000-000000000107", "digest": "lineage", "expected_revision": null, "lease": "00000000-0000-7000-8000-000000000108", "executor_id": "00000000-0000-7000-8000-000000000109", "prompt": "run", "model": "model/test", "start": true},

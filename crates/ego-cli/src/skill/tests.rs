@@ -362,11 +362,7 @@ mod regression_case {
             catalogue.descriptor("forked").unwrap().agent(),
             Some("trusted")
         );
-        for (name, field) in [
-            ("agent-without-fork", "agent"),
-            ("temporary", "shell"),
-            ("hooked", "hooks"),
-        ] {
+        for (name, field) in [("agent-without-fork", "agent"), ("temporary", "shell")] {
             let diagnostic = catalogue
                 .diagnostics()
                 .iter()
@@ -374,6 +370,19 @@ mod regression_case {
                 .expect("unsupported field diagnostic");
             assert!(diagnostic.message().contains(field));
         }
+        assert!(
+            catalogue
+                .diagnostics()
+                .iter()
+                .all(|diagnostic| { diagnostic.name() != "hooked" })
+        );
+        assert!(
+            catalogue
+                .descriptor("hooked")
+                .expect("hooked skill is admitted")
+                .hooks()
+                .is_empty()
+        );
     }
 
     #[test]

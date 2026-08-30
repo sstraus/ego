@@ -91,6 +91,8 @@ fn append_lines(rows: &mut Vec<String>, prefix: &str, lines: &ego_core::usage::U
         ("main", &lines.main),
         ("judge", &lines.judge),
         ("compaction", &lines.compaction),
+        ("subagent", &lines.subagent),
+        ("hook", &lines.hook),
         ("total", &lines.total),
     ] {
         rows.push(format!(

@@ -275,7 +275,9 @@ mod report_service {
     use ego_core::event::time::Clock;
     use ego_core::run::{RunAppend, RunRevision, RunTransaction};
     use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
-    use ego_core::usage::{UsagePeriod, UsageReportError, UsageReportService};
+    use ego_core::usage::{
+        USAGE_REPORT_VERSION, UsagePeriod, UsageReportError, UsageReportService,
+    };
     use futures::executor::block_on;
     use futures::stream::{self, BoxStream};
     use std::collections::BTreeMap;
@@ -364,7 +366,7 @@ mod report_service {
         let report = block_on(service.report(&store.metadata, UsagePeriod::All))
             .expect("empty durable report");
         let json = serde_json::to_value(&report).expect("report serializes");
-        assert_eq!(json["v"], 1);
+        assert_eq!(json["v"], USAGE_REPORT_VERSION);
         assert_eq!(json["as_of"], 2_000);
         assert_eq!(json["period"], serde_json::json!({"kind": "all"}));
         assert!(json["sessions"].is_array());

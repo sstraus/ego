@@ -280,7 +280,7 @@ struct TestGenerationSource {
 impl ego_core::generation_model_source::GenerationModelSource for TestGenerationSource {
     fn resolve<'a>(
         &'a self,
-        _role: ego_core::generation_model_source::GenerationRole,
+        _request: ego_core::generation_model_source::GenerationModelRequest,
     ) -> BoxFuture<
         'a,
         Result<

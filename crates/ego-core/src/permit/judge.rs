@@ -247,6 +247,12 @@ enum CanonicalOp {
     Connect {
         target: String,
     },
+    SecretEgress {
+        hook: String,
+        target: String,
+        sources: Vec<String>,
+        header_sinks: Vec<String>,
+    },
 }
 
 impl From<&Op> for CanonicalOp {
@@ -295,6 +301,12 @@ impl From<&Op> for CanonicalOp {
             },
             Op::Connect { target, .. } | Op::ProtocolConnect { target } => Self::Connect {
                 target: target.to_string(),
+            },
+            Op::SecretEgress { authority } => Self::SecretEgress {
+                hook: authority.hook().to_string(),
+                target: authority.target().to_string(),
+                sources: authority.sources().to_vec(),
+                header_sinks: authority.header_sinks().to_vec(),
             },
         }
     }

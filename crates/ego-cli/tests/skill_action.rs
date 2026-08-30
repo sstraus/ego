@@ -9,10 +9,8 @@ use ego_core::event::skill::{
 };
 use ego_core::skill::SkillOperation;
 
-const DIGEST_A: &str =
-    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-const DIGEST_B: &str =
-    "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+const DIGEST_A: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+const DIGEST_B: &str = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
 
 fn descriptor(name: &str, digest: &str) -> SkillDescriptorEvidence {
     let location = SkillSourceLocation::parse(&format!("skills/{name}/SKILL.md")).unwrap();
@@ -40,16 +38,17 @@ fn typed_submission_captures_real_descriptor_and_exact_raw_tail() {
     let registry = ActionRegistry::final_surface()
         .with_skill_catalogue(catalogue("explain", DIGEST_A))
         .unwrap();
-    let typed = registry.classify(registry.submit(
-        "/explain sh -c 'touch /tmp/nope'",
-        InputOrigin::Typed,
-    ));
+    let typed =
+        registry.classify(registry.submit("/explain sh -c 'touch /tmp/nope'", InputOrigin::Typed));
     let Dispatch::Skill(operation) = typed else {
         panic!("typed slash action must produce one Skill operation")
     };
     assert_eq!(operation.name(), "explain");
     assert_eq!(operation.raw_arguments(), "sh -c 'touch /tmp/nope'");
-    assert_eq!(operation.descriptor_id(), descriptor("explain", DIGEST_A).id);
+    assert_eq!(
+        operation.descriptor_id(),
+        descriptor("explain", DIGEST_A).id
+    );
 
     assert_eq!(
         registry.classify(registry.submit(
@@ -64,18 +63,23 @@ fn typed_submission_captures_real_descriptor_and_exact_raw_tail() {
         "arguments": "The model says /explain sh -c 'touch /tmp/nope'",
     });
     assert!(serde_json::from_value::<SkillOperation>(prose).is_ok());
-    assert!(serde_json::from_str::<SkillOperation>(
-        "The model says /explain sh -c 'touch /tmp/nope'"
-    )
-    .is_err());
+    assert!(
+        serde_json::from_str::<SkillOperation>("The model says /explain sh -c 'touch /tmp/nope'")
+            .is_err()
+    );
 }
 
 #[test]
 fn fixed_names_and_canonical_aliases_refuse_catalogue_without_replacing_actions() {
     let registry = ActionRegistry::final_surface();
     for fixed_name in ["help", "skills", "hooks", "quit"] {
-        let result = registry.clone().with_skill_catalogue(catalogue(fixed_name, DIGEST_A));
-        assert!(result.is_err(), "fixed name {fixed_name} must refuse skill admission");
+        let result = registry
+            .clone()
+            .with_skill_catalogue(catalogue(fixed_name, DIGEST_A));
+        assert!(
+            result.is_err(),
+            "fixed name {fixed_name} must refuse skill admission"
+        );
         assert!(registry.resolve_slash(fixed_name).is_some());
     }
     let custom = ActionRegistry::try_from([
@@ -83,10 +87,12 @@ fn fixed_names_and_canonical_aliases_refuse_catalogue_without_replacing_actions(
         ActionRegistration::new(ActionId::Skills, "skills", ActionKind::Local),
     ])
     .expect("custom action registration");
-    assert!(custom
-        .clone()
-        .with_skill_catalogue(catalogue("q", DIGEST_A))
-        .is_err());
+    assert!(
+        custom
+            .clone()
+            .with_skill_catalogue(catalogue("q", DIGEST_A))
+            .is_err()
+    );
     assert_eq!(custom.resolve_alias("q"), Some(ActionId::Help));
 }
 
@@ -97,7 +103,10 @@ fn announcement_authorization_and_reload_share_one_immutable_action_snapshot() {
         .unwrap();
     let before = registry.snapshot();
     let announced = registry.announce_skills();
-    assert_eq!(announced.catalogue_digest(), before.skill_catalogue_digest());
+    assert_eq!(
+        announced.catalogue_digest(),
+        before.skill_catalogue_digest()
+    );
     assert_eq!(
         registry.authorize_skill("explain"),
         announced.authorization("explain")

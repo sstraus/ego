@@ -16,7 +16,7 @@ use ego_core::event::domain::{DomainEvent, Envelope, EventKind};
 use ego_core::event::id::{EventId, Producer, Seq, TurnId};
 use ego_core::event::time::Timestamp;
 use ego_core::generation_model_source::{
-    GenerationModelError, GenerationModelSource, GenerationProfile, GenerationRole,
+    GenerationModelError, GenerationModelRequest, GenerationModelSource, GenerationProfile,
 };
 use ego_core::permit::{
     Authority, BackendIdentity, CanonPath, Classification, Confinement, EnvName, EnvPolicy,
@@ -667,7 +667,7 @@ mod turn_execution_observation {
     impl GenerationModelSource for FixedSource {
         fn resolve<'a>(
             &'a self,
-            _role: GenerationRole,
+            _request: GenerationModelRequest,
         ) -> BoxFuture<'a, Result<GenerationProfile, GenerationModelError>> {
             Box::pin(futures::future::ready(Ok(GenerationProfile {
                 identity: ego_core::config::ModelRef("test-model".into()),

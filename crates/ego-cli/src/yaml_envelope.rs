@@ -160,7 +160,7 @@ impl EventReceiver for StrictReceiver {
     }
 }
 
-pub(crate) fn split<'a>(text: &'a str, shebang: bool) -> Result<(&'a str, &'a str), String> {
+pub(crate) fn split(text: &str, shebang: bool) -> Result<(&str, &str), String> {
     let mut offset = 0;
     if shebang && text.starts_with("#!") {
         offset = text

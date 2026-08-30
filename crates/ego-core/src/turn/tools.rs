@@ -11,8 +11,9 @@ use serde_json::Value;
 use crate::generator::types::ToolDescriptor as GenToolDescriptor;
 use crate::mcp::ToolExecution;
 use crate::permit::{
-    Authorized, CanonPath, Classification, DuplexSpawner, Fs, GuardedEffects, OneHop, Pending,
-    PolicyEngine, PrepareCtx, PreparedCall, ProcessExecutor, Resolution, Resolver, Tool, ToolError,
+    Authorized, CanonPath, Classification, DuplexSpawner, Fs, GuardedEffects, GuardedIo, OneHop,
+    Op, Pending, PolicyEngine, PrepareCtx, PreparedCall, ProcessExecutor, Resolution, Resolver,
+    Tool, ToolError,
 };
 use crate::store::blob::BlobStore;
 use crate::store::evidence::EvidenceStore;
@@ -49,7 +50,7 @@ impl GenerationToolCatalogue {
     pub(crate) fn select(&self, name: &str) -> Result<RegisteredTool, String> {
         self.registry
             .iter()
-            .find(|registered| registered.descriptor().name == name)
+            .find(|registered| registered.matches_name(name))
             .cloned()
             .ok_or_else(|| format!("there is no tool named {name}"))
     }
@@ -63,6 +64,17 @@ pub(crate) enum PreparedToolCall {
         call: PreparedCall,
     },
     HumanInput(crate::question::QuestionRequest),
+    Skill {
+        operation: crate::skill::SkillOperation,
+        catalogue: std::sync::Arc<crate::skill::SkillCatalogue>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolBatchError {
+    Unknown(String),
+    Invalid(String),
+    MixedAuthority,
 }
 
 /// Raw external-effect ports bound to a tool call only after authorization.
@@ -105,6 +117,7 @@ pub struct Tools<'a> {
     /// authorised call; there is no permit to swap into a shared one.
     effects: ToolEffectPorts<'a>,
     cwd: CanonPath,
+    skill_resource_roots: Option<crate::skill::SkillResourceRoots>,
     resume: Option<std::sync::Arc<ResumeSealer>>,
 }
 
@@ -125,6 +138,7 @@ impl<'a> Tools<'a> {
             policy,
             effects,
             cwd,
+            skill_resource_roots: None,
             resume: None,
         }
     }
@@ -143,6 +157,7 @@ impl<'a> Tools<'a> {
             policy,
             effects,
             cwd,
+            skill_resource_roots: None,
             resume: None,
         }
     }
@@ -162,6 +177,7 @@ impl<'a> Tools<'a> {
             policy,
             effects,
             cwd,
+            skill_resource_roots: None,
             resume: None,
         })
     }
@@ -171,8 +187,22 @@ impl<'a> Tools<'a> {
         self
     }
 
+    pub fn with_skill_resource_roots(mut self, roots: crate::skill::SkillResourceRoots) -> Self {
+        self.skill_resource_roots = Some(roots);
+        self
+    }
+
     pub(crate) fn blob_store(&self) -> &dyn BlobStore {
         self.effects.evidence.blob_store()
+    }
+
+    pub(crate) fn skill_catalogue(&self) -> Option<std::sync::Arc<crate::skill::SkillCatalogue>> {
+        self.registry
+            .iter()
+            .find_map(|registered| match registered {
+                RegisteredTool::Skill(catalogue) => Some(std::sync::Arc::clone(catalogue)),
+                RegisteredTool::Effect(_) | RegisteredTool::HumanInput(_) => None,
+            })
     }
 
     pub(crate) fn capture(&self) -> Result<GenerationToolCatalogue, ToolCatalogueError> {
@@ -187,6 +217,104 @@ impl<'a> Tools<'a> {
             registry,
             descriptors,
         })
+    }
+
+    pub(crate) fn capture_with_effect_ceiling(
+        &self,
+        ceiling: Option<&[&str]>,
+    ) -> Result<GenerationToolCatalogue, ToolCatalogueError> {
+        let mut captured = self.capture()?;
+        if let Some(ceiling) = ceiling {
+            captured
+                .registry
+                .retain(|registered| match registered.as_effect() {
+                    Some(tool) => ceiling.contains(&tool.descriptor().name.as_str()),
+                    None => true,
+                });
+            captured.descriptors = captured
+                .registry
+                .iter()
+                .map(RegisteredTool::descriptor)
+                .collect();
+        }
+        Ok(captured)
+    }
+
+    pub(crate) fn effect_names(&self) -> Vec<String> {
+        self.registry
+            .iter()
+            .filter_map(RegisteredTool::as_effect)
+            .map(|tool| tool.descriptor().name)
+            .collect()
+    }
+
+    pub(crate) fn prepare_skill_resource(
+        &self,
+        invocation: &crate::skill::SkillInvocation,
+        path: &str,
+    ) -> Result<
+        (
+            crate::event::skill::SkillSourceLocation,
+            CanonPath,
+            PreparedCall,
+        ),
+        String,
+    > {
+        let logical = crate::event::skill::SkillSourceLocation::parse(path)
+            .map_err(|error| error.to_string())?;
+        let relative_root = invocation.resource_root();
+        let source_root = self
+            .skill_resource_roots
+            .as_ref()
+            .ok_or_else(|| "skill resource roots are unavailable".to_owned())?
+            .root(invocation.source_authority());
+        let root = self
+            .effects
+            .fs
+            .canonicalize(&source_root.join(relative_root))
+            .map_err(|error| error.to_string())?;
+        let target = self
+            .effects
+            .fs
+            .canonicalize(&root.as_path().join(logical.as_str()))
+            .map_err(|error| error.to_string())?;
+        if !target.as_path().starts_with(root.as_path()) {
+            return Err("skill resource resolves outside its admitted root".to_owned());
+        }
+        invocation.validate_resource_path(&target, &root)?;
+        let prepared = PreparedCall::new(
+            "skill_resource",
+            vec![Op::Read {
+                path: target.clone(),
+            }],
+        );
+        Ok((logical, target, prepared))
+    }
+
+    pub(crate) fn read_skill_resource(
+        &self,
+        authorized: Authorized,
+        expected: &CanonPath,
+    ) -> Result<Vec<u8>, String> {
+        let (call, permit) = authorized.into_parts();
+        if call.ops.as_slice()
+            != [Op::Read {
+                path: expected.clone(),
+            }]
+        {
+            return Err("skill resource permit does not match the prepared read".to_owned());
+        }
+        let guarded = GuardedEffects::new_with_resume(
+            permit,
+            self.effects.fs,
+            self.effects.process,
+            self.effects.evidence,
+            std::sync::Arc::clone(&self.effects.resolver),
+            std::sync::Arc::clone(&self.effects.one_hop),
+            std::sync::Arc::clone(&self.effects.duplex),
+            None,
+        );
+        guarded.read(expected).map_err(|error| error.to_string())
     }
 
     /// What the model is told it can call.
@@ -244,7 +372,50 @@ impl<'a> Tools<'a> {
             RegisteredTool::HumanInput(tool) => {
                 tool.parse(params).map(PreparedToolCall::HumanInput)
             }
+            RegisteredTool::Skill(catalogue) => {
+                let operation: crate::skill::SkillOperation = serde_json::from_value(params)
+                    .map_err(|error| format!("skill was called with invalid arguments: {error}"))?;
+                if let crate::skill::SkillOperation::Invoke { name, .. } = &operation {
+                    catalogue
+                        .authorize_model(name)
+                        .map_err(|error| error.to_string())?;
+                }
+                Ok(PreparedToolCall::Skill {
+                    operation,
+                    catalogue: std::sync::Arc::clone(catalogue),
+                })
+            }
         }
+    }
+
+    /// Validate one provider batch before any call can cross an effect seam.
+    pub fn prepare_batch<I, N, A>(&self, calls: I) -> Result<(), ToolBatchError>
+    where
+        I: IntoIterator<Item = (N, A)>,
+        N: AsRef<str>,
+        A: AsRef<str>,
+    {
+        let mut prepared = Vec::new();
+        for (name, args) in calls {
+            let registered = self
+                .registry
+                .iter()
+                .find(|registered| registered.matches_name(name.as_ref()))
+                .cloned()
+                .ok_or_else(|| ToolBatchError::Unknown(name.as_ref().to_owned()))?;
+            prepared.push(
+                self.prepare_selected(registered, args.as_ref())
+                    .map_err(ToolBatchError::Invalid)?,
+            );
+        }
+        let skills = prepared
+            .iter()
+            .filter(|call| matches!(call, PreparedToolCall::Skill { .. }))
+            .count();
+        if skills > 0 && prepared.len() != 1 {
+            return Err(ToolBatchError::MixedAuthority);
+        }
+        Ok(())
     }
 
     /// Prepare raw parameters supplied by the human amendment path.

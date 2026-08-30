@@ -12,6 +12,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use super::CanonPath;
 use super::tool::{StreamProvenance, ToolContentBlock, ToolResult};
 use crate::credentials::SecretMaterial;
+use crate::hook::EffectScope;
 use crate::store::evidence::EvidenceError;
 
 /// A validated, host-native environment variable name.
@@ -799,6 +800,19 @@ pub trait ProcessExecutor: Send + Sync {
         &'a self,
         spec: &'a SpawnSpec,
     ) -> BoxFuture<'a, Result<ToolResult, ProcessError>>;
+
+    /// Execute one admitted hook handler with its strict request on stdin.
+    /// Owners that do not provide this effect fail before spawning anything.
+    fn execute_handler<'a>(
+        &'a self,
+        _spec: &'a SpawnSpec,
+        _input: &'a [u8],
+        _scope: EffectScope,
+    ) -> BoxFuture<'a, Result<ToolResult, ProcessError>> {
+        Box::pin(futures::future::ready(Err(ProcessError::Invariant(
+            "process executor has no hook-handler input seam".to_owned(),
+        ))))
+    }
 }
 
 /// Why an admitted process did not complete successfully.

@@ -149,6 +149,7 @@ impl ModeApprover {
                     Op::Spawn { .. }
                         | Op::Opaque { .. }
                         | Op::Connect { .. }
+                        | Op::SecretEgress { .. }
                         | Op::ProtocolConnect { .. }
                 ),
                 // `ARCHITECTURE.md:242` — these review unresolved

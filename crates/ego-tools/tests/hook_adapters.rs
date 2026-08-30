@@ -4,9 +4,9 @@
 //! Assertions observe prepared calls, typed owner results, and delivery
 //! certainty rather than adapter-local flags.
 
+use std::ffi::OsString;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use std::ffi::OsString;
 
 use futures::executor::block_on;
 use futures::future::BoxFuture;
@@ -20,10 +20,10 @@ use ego_core::hook::{
     EffectScope, HookHandlerConfig, HookHandlerRequestV1, HookInvocationRequest, HookMatcher,
 };
 use ego_core::permit::{
-    CanonPath, Classification, DnsResolution, GuardedEffects, HttpHeader, HttpRequest, HttpRoute,
-    EnvPolicy, HttpScheme, NetworkTarget, OneHop, OneHopResponse, Op, PolicyEngine, PreparedCall,
-    ProcessError, ProcessExecutor, ResolvedConnect, SpawnSpec, StreamProvenance, ToolContentBlock,
-    ToolResult, TransportError, Resolver,
+    CanonPath, Classification, DnsResolution, EnvPolicy, GuardedEffects, HttpHeader, HttpRequest,
+    HttpRoute, HttpScheme, NetworkTarget, OneHop, OneHopResponse, Op, PolicyEngine, PreparedCall,
+    ProcessError, ProcessExecutor, ResolvedConnect, Resolver, SpawnSpec, StreamProvenance,
+    ToolContentBlock, ToolResult, TransportError,
 };
 use ego_tools::hook::{CommandHookAdapter, HookAdapterResult, HttpHookAdapter};
 use ego_tools::store::SessionEvidenceStore;
@@ -65,26 +65,20 @@ impl ProcessExecutor for ProcessCapture {
 
 impl ProcessCapture {
     fn next_result(&self) -> Result<ToolResult, ProcessError> {
-        self.result
-            .lock()
-            .unwrap()
-            .take()
-            .unwrap_or_else(|| {
-                Ok(ToolResult::new(vec![ToolContentBlock::process(
-                    StreamProvenance::Stdout,
-                    br#"{"version":1,"decision":"continue"}"#,
-                    4096,
-                    ego_core::store::evidence::EvidenceRef::new(
-                        ego_core::store::evidence::EvidenceId::parse(
-                            ego_core::digest::sha256_hex(
-                                br#"{"version":1,"decision":"continue"}"#,
-                            ),
-                        )
-                        .expect("handler result evidence id"),
-                        br#"{"version":1,"decision":"continue"}"#.len() as u64,
-                    ),
-                )]))
-            })
+        self.result.lock().unwrap().take().unwrap_or_else(|| {
+            Ok(ToolResult::new(vec![ToolContentBlock::process(
+                StreamProvenance::Stdout,
+                br#"{"version":1,"decision":"continue"}"#,
+                4096,
+                ego_core::store::evidence::EvidenceRef::new(
+                    ego_core::store::evidence::EvidenceId::parse(ego_core::digest::sha256_hex(
+                        br#"{"version":1,"decision":"continue"}"#,
+                    ))
+                    .expect("handler result evidence id"),
+                    br#"{"version":1,"decision":"continue"}"#.len() as u64,
+                ),
+            )]))
+        })
     }
 
     fn record_output(&self, result: &Result<ToolResult, ProcessError>) {
@@ -150,7 +144,12 @@ fn http_request(url: &str, authorization: &str) -> HookInvocationRequest {
     )
 }
 
-fn admitted_http() -> (PreparedCall, HttpRequest, tempfile::TempDir, SessionEvidenceStore) {
+fn admitted_http() -> (
+    PreparedCall,
+    HttpRequest,
+    tempfile::TempDir,
+    SessionEvidenceStore,
+) {
     let hook_id = HookId::derive(
         HookSourceAuthority::Project,
         &HookSourceLocation::parse("hooks/http.toml").expect("hook location"),
@@ -170,12 +169,7 @@ fn admitted_http() -> (PreparedCall, HttpRequest, tempfile::TempDir, SessionEvid
     .expect("admitted HTTP request");
     let target = NetworkTarget::new("hooks.example.test", 443).expect("target");
     let route = HttpRoute::new(HttpScheme::Https, target).expect("route");
-    let prepared = PreparedCall::hook_http(
-        hook_id,
-        route,
-        &request,
-        vec!["HOOK_TOKEN".to_owned()],
-    );
+    let prepared = PreparedCall::hook_http(hook_id, route, &request, vec!["HOOK_TOKEN".to_owned()]);
     let root = tempfile::tempdir().expect("evidence root");
     let evidence = SessionEvidenceStore::open(
         root.path(),
@@ -281,10 +275,7 @@ fn command_uses_process_executor_and_guarded_effects_for_exact_argv() {
     let lower_deadline = Instant::now();
     invoke_command(
         &process,
-        command_call(
-            Some(vec!["--exact".to_owned(), "argv".to_owned()]),
-            None,
-        ),
+        command_call(Some(vec!["--exact".to_owned(), "argv".to_owned()]), None),
         request,
         ego_core::generator::attempt::DeliveryCertainty::DefinitelySent,
     );
@@ -355,11 +346,18 @@ fn http_uses_guarded_http_prepared_call_with_connect_and_secret_egress() {
     assert!(admitted.headers()[0].is_secret());
     assert_eq!(admitted.headers()[0].name(), "authorization");
     assert_eq!(admitted.body(), br#"{"version":1,"decision":"continue"}"#);
-    assert!(prepared.ops.iter().any(|op| matches!(op, Op::Connect { .. })));
-    assert!(prepared
-        .ops
-        .iter()
-        .any(|op| op.name().to_string() == "secret_egress"));
+    assert!(
+        prepared
+            .ops
+            .iter()
+            .any(|op| matches!(op, Op::Connect { .. }))
+    );
+    assert!(
+        prepared
+            .ops
+            .iter()
+            .any(|op| op.name().to_string() == "secret_egress")
+    );
     let policy = policy_for_http(Mode::Yolo);
     let Classification::Settled(Ok(authorized)) = policy.classify(prepared.clone()) else {
         panic!("yolo policy must settle the admitted hook HTTP call");
@@ -388,16 +386,16 @@ fn http_uses_guarded_http_prepared_call_with_connect_and_secret_egress() {
 
 #[test]
 fn http_rejects_url_tokens_and_missing_environment_before_preparation() {
-    assert!(HttpHookAdapter::prepare(http_request(
-        "https://${HOOK_TOKEN}/check",
-        "literal",
-    ))
-    .is_err());
-    assert!(HttpHookAdapter::prepare(http_request(
-        "https://hooks.example.test/check",
-        "${MISSING}",
-    ))
-    .is_err());
+    assert!(
+        HttpHookAdapter::prepare(http_request("https://${HOOK_TOKEN}/check", "literal",)).is_err()
+    );
+    assert!(
+        HttpHookAdapter::prepare(http_request(
+            "https://hooks.example.test/check",
+            "${MISSING}",
+        ))
+        .is_err()
+    );
 }
 
 #[test]
@@ -406,26 +404,28 @@ fn secret_egress_is_a_one_shot_policy_decision_and_offline_is_definitely_unsent(
     let Classification::Ask(pending) = policy_for_http(Mode::Default).classify(prepared) else {
         panic!("secret egress must remain a one-shot approval question");
     };
-    assert!(pending
-        .request()
-        .ops()
-        .iter()
-        .any(|op| op.name().to_string() == "secret_egress"));
-    assert!(pending
-        .request()
-        .ops()
-        .iter()
-        .any(|op| matches!(op, Op::Connect { .. })));
+    assert!(
+        pending
+            .request()
+            .ops()
+            .iter()
+            .any(|op| op.name().to_string() == "secret_egress")
+    );
+    assert!(
+        pending
+            .request()
+            .ops()
+            .iter()
+            .any(|op| matches!(op, Op::Connect { .. }))
+    );
 }
 
 #[test]
 fn guarded_http_offline_refusal_is_definitely_unsent_before_one_hop() {
     let target = NetworkTarget::new("hooks.example.test", 443).expect("target");
-    let route = ego_core::permit::HttpRoute::new(
-        ego_core::permit::HttpScheme::Https,
-        target.clone(),
-    )
-    .expect("route");
+    let route =
+        ego_core::permit::HttpRoute::new(ego_core::permit::HttpScheme::Https, target.clone())
+            .expect("route");
     let request = ego_core::permit::HttpRequest::get("/check").expect("request");
     let connect = ego_core::permit::PreparedConnect::new(target, &request);
     let result = block_on(
@@ -477,10 +477,11 @@ impl Resolver for TestResolver {
         target: NetworkTarget,
         _deadline: Option<std::time::Instant>,
     ) -> BoxFuture<'static, Result<DnsResolution, TransportError>> {
-        Box::pin(std::future::ready(Ok(
-            DnsResolution::new(target, vec![std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)])
-                .expect("loopback resolution"),
-        )))
+        Box::pin(std::future::ready(Ok(DnsResolution::new(
+            target,
+            vec![std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)],
+        )
+        .expect("loopback resolution"))))
     }
 }
 

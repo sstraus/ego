@@ -1,5 +1,6 @@
 //! RED contract for regression case: one versioned usage report over one ledger.
 
+use ego_core::usage::USAGE_REPORT_VERSION;
 use serde_json::Value;
 
 mod support;
@@ -38,17 +39,17 @@ fn json_report(finished: &support::Finished) -> Value {
 }
 
 #[test]
-fn usage_json_is_a_versioned_report_with_all_four_role_lines_and_total() {
+fn usage_json_is_a_versioned_report_with_all_six_role_lines_and_total() {
     let report = json_report(&seeded_usage(["--json"]));
 
-    assert_eq!(report["v"], 1);
+    assert_eq!(report["v"], USAGE_REPORT_VERSION);
     assert!(report["as_of"].is_number(), "{report}");
     assert_eq!(report["period"], serde_json::json!({"kind": "all"}));
     let sessions = report["sessions"].as_array().expect("report sessions");
     assert_eq!(sessions.len(), 1);
     let lines = sessions[0]["lines"].as_object().expect("report lines");
-    assert_eq!(lines.len(), 4);
-    for role in ["main", "judge", "compaction", "total"] {
+    assert_eq!(lines.len(), 6);
+    for role in ["main", "judge", "compaction", "subagent", "hook", "total"] {
         assert!(lines.contains_key(role), "missing {role} line: {lines:?}");
     }
     assert!(report["totals"].is_object(), "workspace totals are present");
@@ -86,6 +87,8 @@ fn usage_text_and_json_are_deterministic_projections_of_the_same_report() {
     assert!(text.stdout.contains("main"), "{}", text.stdout);
     assert!(text.stdout.contains("judge"), "{}", text.stdout);
     assert!(text.stdout.contains("compaction"), "{}", text.stdout);
+    assert!(text.stdout.contains("subagent"), "{}", text.stdout);
+    assert!(text.stdout.contains("hook"), "{}", text.stdout);
     assert!(text.stdout.contains("total"), "{}", text.stdout);
     assert!(report["totals"]["main"].is_object(), "{report}");
     assert!(

@@ -17,6 +17,8 @@ use super::id::{ItemId, TurnId};
 use crate::digest::{is_lower_sha256, sha256_hex};
 use crate::store::evidence::EvidenceRef;
 
+pub use crate::hook::HookSource;
+
 const HOOK_ID_PREFIX: &str = "h1:";
 const HOOK_ID_DOMAIN: &[u8] = b"ego.hook-id";
 const HOOK_ID_GRAMMAR: &[u8] = &[1];

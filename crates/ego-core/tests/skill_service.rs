@@ -15,45 +15,47 @@ use ego_core::budget::BudgetGate;
 use ego_core::config::ModelRef;
 use ego_core::event::domain::{DomainEvent, EventKind};
 use ego_core::event::hook::{
-    HookActivation, HookDecision, HookFailure, HookInvocationId, HookOutcome, HookSource,
+    HookActivation, HookDecision, HookFailure, HookInvocationId, HookLifecycle, HookOutcome,
+    HookSource,
 };
 use ego_core::event::id::{Producer, SessionId, SubagentInvocationId};
 use ego_core::event::skill::{
-    SkillContentDigest, SkillDescriptorEvidence, SkillId, SkillInvocationId,
-    SkillSourceAuthority, SkillSourceLocation,
+    SkillContentDigest, SkillDescriptorEvidence, SkillId, SkillInvocationId, SkillSourceAuthority,
+    SkillSourceLocation,
 };
 use ego_core::event::time::{Clock, Timestamp};
 use ego_core::evidence::{EvidenceError, EvidenceWrite};
 use ego_core::generator::capabilities::ModelCapabilities;
 use ego_core::hook::{
-    HookEvent, HookFuture, HookPort, HookRecordFuture, HookSpec, HookStartError, HookStartFuture,
-    HookStartedEvidence,
+    HookConfigEntry, HookEvent, HookFuture, HookHandlerConfig, HookPort, HookRecordFuture,
+    HookSpec, HookStartError, HookStartFuture, HookStartedEvidence,
 };
 use ego_core::permit::{GuardedEffects, GuardedIo, Op, PreparedCall};
-use ego_core::store::evidence::{
-    EvidenceError as StoreEvidenceError, EvidencePage, EvidenceRead, EvidenceStore,
-    EvidenceWriter,
+use ego_core::run::{
+    EventSinkFactory, IdSource, RecoveryEvidence, RunController, RunExecutionBindings, RunExecutor,
+    RunExecutorError, RunFuture, RunHandle, RunId, RunPreparation, RunPrepared, RunRetention,
+    RunRoot, RunSelections, RunSettlement, RunStart,
 };
 use ego_core::sink::NullSink;
-use ego_core::run::{
-    EventSinkFactory, IdSource, RecoveryEvidence, RunController, RunExecutionBindings,
-    RunExecutor, RunExecutorError, RunFuture, RunHandle, RunId, RunPreparation, RunPrepared,
-    RunRetention, RunRoot, RunSelections, RunSettlement, RunStart,
+use ego_core::skill::{
+    ActiveSkillScope, SkillCatalogue, SkillInvocation, SkillOperation, SkillSpec,
 };
+use ego_core::store::blob::{
+    BlobError, BlobId, BlobPage, BlobRead, BlobRef, BlobStore, BlobWriter,
+};
+use ego_core::store::evidence::{
+    EvidenceError as StoreEvidenceError, EvidencePage, EvidenceRead, EvidenceStore, EvidenceWriter,
+};
+use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
 use ego_core::subagent::{
     ChildJournal, ChildJournalError, ChildProfileResolver, ChildRequest, ChildResultEvidence,
     ChildResultReader, ChildResultReaderError, ChildResultStore, ChildRunService,
     ChildSelectionAdmission, ChildServicePorts, ChildTaskReader, ChildWait,
 };
-use ego_core::skill::{ActiveSkillScope, SkillCatalogue, SkillInvocation, SkillOperation, SkillSpec};
-use ego_core::store::blob::{BlobError, BlobId, BlobPage, BlobRead, BlobRef, BlobStore, BlobWriter};
-use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
 use ego_core::turn::{Journal, RegisteredTool};
 
-const DIGEST_A: &str =
-    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-const DIGEST_B: &str =
-    "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+const DIGEST_A: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+const DIGEST_B: &str = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
 const BODY: &[u8] = b"Explain $ARGUMENTS and keep $1 inert.";
 
 #[derive(Clone)]
@@ -132,9 +134,9 @@ impl BlobStore for RecordingBlobStore {
         &'a self,
         request: &'a BlobRead,
     ) -> BoxFuture<'a, Result<BlobPage, BlobError>> {
-        let result = self.read(&request.reference).and_then(|bytes| {
-            BlobPage::new(request.reference.clone(), request.offset, bytes)
-        });
+        let result = self
+            .read(&request.reference)
+            .and_then(|bytes| BlobPage::new(request.reference.clone(), request.offset, bytes));
         Box::pin(futures::future::ready(result))
     }
 
@@ -147,7 +149,7 @@ impl BlobStore for RecordingBlobStore {
 }
 
 struct RecordingSessionStore {
-    entries: Mutex<Vec<SessionEntry>>,
+    entries: Mutex<Vec<(SessionId, SessionEntry)>>,
     order: Arc<Mutex<Vec<&'static str>>>,
 }
 
@@ -171,36 +173,67 @@ impl RecordingSessionStore {
 
 impl RecordingSessionStore {
     fn entries(&self) -> Vec<SessionEntry> {
-        self.entries.lock().expect("session entries").clone()
+        self.entries
+            .lock()
+            .expect("session entries")
+            .iter()
+            .map(|(_, entry)| entry.clone())
+            .collect()
     }
 }
 
 impl SessionStore for RecordingSessionStore {
-    fn append(&self, _id: &SessionId, event: &DomainEvent) -> Result<(), StoreError> {
+    fn append(&self, id: &SessionId, event: &DomainEvent) -> Result<(), StoreError> {
         self.entries
             .lock()
             .expect("session entries")
-            .push(SessionEntry::Event(event.clone()));
+            .push((*id, SessionEntry::Event(event.clone())));
         self.order.lock().expect("append order").push("event");
         Ok(())
     }
 
     fn read(
         &self,
-        _id: &SessionId,
+        id: &SessionId,
     ) -> Result<BoxStream<'static, Result<SessionEntry, StoreError>>, StoreError> {
-        Ok(Box::pin(stream::iter(self.entries().into_iter().map(Ok))))
+        let entries = self
+            .entries
+            .lock()
+            .expect("session entries")
+            .iter()
+            .filter(|(entry_id, _)| entry_id == id)
+            .map(|(_, entry)| entry.clone())
+            .collect::<Vec<_>>();
+        if entries.is_empty() {
+            return Err(StoreError::NotFound);
+        }
+        Ok(Box::pin(stream::iter(entries.into_iter().map(Ok))))
     }
 
     fn compare_and_append_run(
         &self,
-        _session: &SessionId,
-        _expected_revision: Option<ego_core::run::RunRevision>,
-        _transaction: ego_core::run::RunTransaction,
+        session: &SessionId,
+        expected_revision: Option<ego_core::run::RunRevision>,
+        transaction: ego_core::run::RunTransaction,
     ) -> Result<ego_core::run::RunAppend, StoreError> {
-        Err(StoreError::Io(std::io::Error::other(
-            "skill contract uses the shared event journal",
-        )))
+        let mut entries = self.entries.lock().expect("session entries");
+        let current = entries.iter().rev().find_map(|(entry_session, entry)| {
+            if entry_session != session {
+                return None;
+            }
+            match entry {
+                SessionEntry::RunTransaction(transaction) => Some(transaction.revision()),
+                SessionEntry::Event(_) | SessionEntry::Evidence(_) => None,
+            }
+        });
+        if current != expected_revision {
+            return Ok(ego_core::run::RunAppend::Conflict {
+                actual: current.unwrap_or_else(|| ego_core::run::RunRevision::new(0)),
+            });
+        }
+        let revision = transaction.revision();
+        entries.push((*session, SessionEntry::RunTransaction(transaction)));
+        Ok(ego_core::run::RunAppend::Committed { revision })
     }
 
     fn list(&self) -> Result<Vec<SessionMeta>, StoreError> {
@@ -260,10 +293,8 @@ impl ego_core::permit::Resolver for NoResolver {
         &self,
         _target: ego_core::permit::NetworkTarget,
         _deadline: Option<std::time::Instant>,
-    ) -> BoxFuture<
-        'static,
-        Result<ego_core::permit::DnsResolution, ego_core::permit::TransportError>,
-    > {
+    ) -> BoxFuture<'static, Result<ego_core::permit::DnsResolution, ego_core::permit::TransportError>>
+    {
         Box::pin(futures::future::ready(Err(
             ego_core::permit::TransportError::definitely_unsent(
                 ego_core::permit::TransportFailure::Offline,
@@ -298,10 +329,8 @@ impl ego_core::permit::DuplexSpawner for NoDuplex {
     fn spawn(
         &self,
         _spec: ego_core::permit::SpawnSpec,
-    ) -> BoxFuture<
-        'static,
-        Result<ego_core::permit::DuplexHandle, ego_core::permit::TransportError>,
-    > {
+    ) -> BoxFuture<'static, Result<ego_core::permit::DuplexHandle, ego_core::permit::TransportError>>
+    {
         Box::pin(futures::future::ready(Err(
             ego_core::permit::TransportError::definitely_unsent(
                 ego_core::permit::TransportFailure::Offline,
@@ -358,16 +387,26 @@ fn spec_with_body(
     .with_model(ModelRef("ordinary-model".to_owned()), "balanced")
     .with_tool_ceiling(["read", "grep"])
     .with_fork(ChildWait::Foreground)
-    .with_hooks(
-        [
-            ego_core::event::hook::HookLifecycle::PreToolUse,
-            ego_core::event::hook::HookLifecycle::PostToolUse,
-        ],
-        HookActivation::Skill {
-            invocation: SkillInvocationId::new(),
-        },
-    )
-    .expect("explicit skill execution settings")
+    .with_hook_entries(vec![
+        HookConfigEntry::new(
+            HookLifecycle::PreToolUse,
+            None,
+            HookHandlerConfig::Prompt {
+                prompt: "fixture".to_owned(),
+                model: None,
+                timeout_seconds: None,
+            },
+        ),
+        HookConfigEntry::new(
+            HookLifecycle::PostToolUse,
+            None,
+            HookHandlerConfig::Prompt {
+                prompt: "fixture".to_owned(),
+                model: None,
+                timeout_seconds: None,
+            },
+        ),
+    ])
 }
 
 fn catalogue(name: &str, digest: &str) -> SkillCatalogue {
@@ -388,19 +427,23 @@ fn skill_operation_wire_is_closed_and_has_only_invoke_or_read_resource() {
         let wire = serde_json::to_value(&operation).expect("typed operation wire");
         assert!(serde_json::from_value::<SkillOperation>(wire).is_ok());
     }
-    assert!(serde_json::from_value::<SkillOperation>(json!({
-        "kind": "invoke",
-        "name": "explain",
-        "arguments": "x",
-        "extra": true,
-    }))
-    .is_err());
-    assert!(serde_json::from_value::<SkillOperation>(json!({
-        "kind": "execute",
-        "name": "explain",
-        "arguments": "x",
-    }))
-    .is_err());
+    assert!(
+        serde_json::from_value::<SkillOperation>(json!({
+            "kind": "invoke",
+            "name": "explain",
+            "arguments": "x",
+            "extra": true,
+        }))
+        .is_err()
+    );
+    assert!(
+        serde_json::from_value::<SkillOperation>(json!({
+            "kind": "execute",
+            "name": "explain",
+            "arguments": "x",
+        }))
+        .is_err()
+    );
 }
 
 #[test]
@@ -433,16 +476,33 @@ fn four_real_visibility_configs_announce_and_authorize_only_their_admitted_audie
     let both = SkillCatalogue::new(vec![spec("both", DIGEST_A, true, true)]).unwrap();
     let user = SkillCatalogue::new(vec![spec("user", DIGEST_A, true, false)]).unwrap();
     let model = SkillCatalogue::new(vec![spec("model", DIGEST_A, false, true)]).unwrap();
-    assert!(both.announce_for_user().iter().any(|item| item.name() == "both"));
-    assert!(both.announce_for_model().iter().any(|item| item.name() == "both"));
+    assert!(
+        both.announce_for_user()
+            .iter()
+            .any(|item| item.name() == "both")
+    );
+    assert!(
+        both.announce_for_model()
+            .iter()
+            .any(|item| item.name() == "both")
+    );
     assert!(both.authorize_user("both").is_ok());
     assert!(both.authorize_model("both").is_ok());
-    assert!(user.announce_for_user().iter().any(|item| item.name() == "user"));
+    assert!(
+        user.announce_for_user()
+            .iter()
+            .any(|item| item.name() == "user")
+    );
     assert!(user.announce_for_model().is_empty());
     assert!(user.authorize_user("user").is_ok());
     assert!(user.authorize_model("user").is_err());
     assert!(model.announce_for_user().is_empty());
-    assert!(model.announce_for_model().iter().any(|item| item.name() == "model"));
+    assert!(
+        model
+            .announce_for_model()
+            .iter()
+            .any(|item| item.name() == "model")
+    );
     assert!(model.authorize_user("model").is_err());
     assert!(model.authorize_model("model").is_ok());
     assert!(SkillCatalogue::new(vec![spec("disabled", DIGEST_A, false, false)]).is_err());
@@ -476,10 +536,13 @@ fn durable_admission_and_rendered_blobs_are_forced_in_order_and_resume_uses_capt
     )
     .unwrap();
     let records = store.entries();
-    assert!(matches!(records[0], SessionEntry::Event(DomainEvent {
-        kind: EventKind::SkillInstructionAdmitted { .. },
-        ..
-    })));
+    assert!(matches!(
+        records[0],
+        SessionEntry::Event(DomainEvent {
+            kind: EventKind::SkillInstructionAdmitted { .. },
+            ..
+        })
+    ));
     let SessionEntry::Event(DomainEvent {
         kind:
             EventKind::SkillInstructionAdmitted {
@@ -506,10 +569,12 @@ fn durable_admission_and_rendered_blobs_are_forced_in_order_and_resume_uses_capt
     assert_eq!(blobs.committed.lock().unwrap().len(), 2);
     let admission = invocation.admission_blob(&blobs).unwrap();
     assert!(serde_json::to_vec(&admission).unwrap().len() <= 64 * 1024);
-    assert!(serde_json::to_vec(&admission)
-        .unwrap()
-        .windows(BODY.len())
-        .all(|window| window != BODY));
+    assert!(
+        serde_json::to_vec(&admission)
+            .unwrap()
+            .windows(BODY.len())
+            .all(|window| window != BODY)
+    );
 
     let changed = SkillCatalogue::new(vec![spec_with_body(
         "explain",
@@ -530,10 +595,7 @@ fn durable_admission_and_rendered_blobs_are_forced_in_order_and_resume_uses_capt
 #[test]
 fn resource_reads_cross_prepared_call_and_guarded_effects_before_durable_bytes() {
     let path = ego_core::permit::CanonPath::new("/workspace/skills/explain/refs/data.txt");
-    let prepared = PreparedCall::new(
-        "skill_resource",
-        vec![Op::Read { path: path.clone() }],
-    );
+    let prepared = PreparedCall::new("skill_resource", vec![Op::Read { path: path.clone() }]);
     assert!(prepared.ops.iter().any(|op| matches!(op, Op::Read { .. })));
 
     let policy = ego_core::permit::PolicyEngine::new(
@@ -542,15 +604,15 @@ fn resource_reads_cross_prepared_call_and_guarded_effects_before_durable_bytes()
         ego_core::config::Ruleset::from_layer(
             ego_core::config::PermCfg {
                 judge: None,
-                allow: vec![ego_core::permit::rule::Rule::load("read(**)")
-                    .expect("resource read rule")],
+                allow: vec![
+                    ego_core::permit::rule::Rule::load("read(**)").expect("resource read rule"),
+                ],
                 deny: Vec::new(),
             },
             ego_core::config::Source::Project,
         ),
     );
-    let ego_core::permit::Classification::Settled(Ok(authorized)) =
-        policy.classify(prepared)
+    let ego_core::permit::Classification::Settled(Ok(authorized)) = policy.classify(prepared)
     else {
         panic!("the admitted resource read must be authorised");
     };
@@ -563,15 +625,7 @@ fn resource_reads_cross_prepared_call_and_guarded_effects_before_durable_bytes()
     let one_hop = Arc::new(NoHop);
     let duplex = Arc::new(NoDuplex);
     let (_, permit) = authorized.into_parts();
-    let guarded = GuardedEffects::new(
-        permit,
-        &fs,
-        &process,
-        &evidence,
-        resolver,
-        one_hop,
-        duplex,
-    );
+    let guarded = GuardedEffects::new(permit, &fs, &process, &evidence, resolver, one_hop, duplex);
     let bytes = guarded.read(&path).expect("guarded exact resource bytes");
     assert_eq!(bytes, b"exact\nbytes\0");
 }
@@ -611,18 +665,17 @@ fn turn_batch_selection_rejects_skill_and_effect_before_either_executes() {
             "explain",
             r#"{"kind":"invoke","name":"explain","arguments":"one"}"#,
         ),
-        (
-            "fake_write",
-            r#"{"path":"/workspace/out","contents":"x"}"#,
-        ),
+        ("fake_write", r#"{"path":"/workspace/out","contents":"x"}"#),
     ]);
     let error = result.expect_err("mixed skill/effect batch must reject before execution");
     assert!(format!("{error:?}").contains("MixedAuthority"));
-    assert!(<ego_core::permit::fake::FakeFs as ego_core::permit::Fs>::read(
-        &fs,
-        &ego_core::permit::CanonPath::new("/workspace/out"),
-    )
-    .is_err());
+    assert!(
+        <ego_core::permit::fake::FakeFs as ego_core::permit::Fs>::read(
+            &fs,
+            &ego_core::permit::CanonPath::new("/workspace/out"),
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -631,7 +684,7 @@ fn skill_service_bridges_real_child_service_and_hook_runner_for_both_fork_modes(
     let hook_port = RecordingHookPort::default();
     let hooks = ego_core::hook::HookRunner::new(hook_port.clone());
     let service = ego_core::skill::SkillService::new(child, hooks);
-    let invocation = SkillInvocation::admit_for_service(
+    let foreground_invocation = SkillInvocation::admit_for_service(
         spec("explain", DIGEST_A, true, true),
         SkillOperation::Invoke {
             name: "explain".to_owned(),
@@ -639,37 +692,57 @@ fn skill_service_bridges_real_child_service_and_hook_runner_for_both_fork_modes(
         },
     )
     .expect("typed service invocation");
-    let invocation_id = invocation.id();
+    let foreground_id = foreground_invocation.id();
+    let background_invocation = SkillInvocation::admit_for_service(
+        spec("explain", DIGEST_A, true, true),
+        SkillOperation::Invoke {
+            name: "explain".to_owned(),
+            arguments: "background".to_owned(),
+        },
+    )
+    .expect("typed background service invocation");
+    let background_id = background_invocation.id();
 
     let foreground = service
-        .fork(invocation.clone(), ChildWait::Foreground)
+        .fork(foreground_invocation, ChildWait::Foreground)
         .expect("foreground skill fork");
     let background = service
-        .fork(invocation, ChildWait::Background)
+        .fork(background_invocation, ChildWait::Background)
         .expect("background skill fork");
     assert_eq!(foreground.wait_mode(), ChildWait::Foreground);
     assert_eq!(background.wait_mode(), ChildWait::Background);
     assert_eq!(hook_port.invocations(), 2);
     let starts = hook_port.started.lock().expect("hook starts");
     assert_eq!(starts.len(), 2);
-    assert!(starts.iter().all(|(activation, source)| matches!(
-        (activation, source),
-        (
-            HookActivation::Skill { invocation },
-            HookSource::Skill {
+    let observed_ids = starts
+        .iter()
+        .map(|(activation, source)| {
+            let HookActivation::Skill { invocation } = activation else {
+                panic!("skill service hook activation must be skill-scoped");
+            };
+            let HookSource::Skill {
                 invocation: source_invocation,
                 authority,
                 ..
-            }
-        ) if invocation == invocation_id
-            && source_invocation == invocation_id
-            && *authority == SkillSourceAuthority::User
-    )));
+            } = source
+            else {
+                panic!("skill service hook source must be skill-scoped");
+            };
+            assert_eq!(invocation, source_invocation);
+            assert_eq!(*authority, SkillSourceAuthority::User);
+            *invocation
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        observed_ids,
+        std::collections::BTreeSet::from([foreground_id, background_id])
+    );
     let child_events = child_events.lock().expect("child journal");
-    assert!(child_events.iter().any(|event| matches!(
-        &event.kind,
-        EventKind::SubagentRequested { .. }
-    )));
+    assert!(
+        child_events
+            .iter()
+            .any(|event| matches!(&event.kind, EventKind::SubagentRequested { .. }))
+    );
     assert_eq!(
         &*child_waits.lock().expect("child waits"),
         &[ChildWait::Foreground, ChildWait::Background]
@@ -719,7 +792,10 @@ impl RunExecutor for ChildExecutor {
         &'a self,
         request: &'a RunStart,
     ) -> BoxFuture<'a, Result<RunHandle, RunExecutorError>> {
-        Box::pin(futures::future::ready(Ok(RunHandle::new(request.run_id, ()))))
+        Box::pin(futures::future::ready(Ok(RunHandle::new(
+            request.run_id,
+            (),
+        ))))
     }
 
     fn recover<'a>(
@@ -791,7 +867,10 @@ impl ChildResultReader for ChildResults {
     ) -> Result<ChildResultEvidence, ChildResultReaderError> {
         let bytes = b"child result".to_vec();
         Ok(ChildResultEvidence::new(
-            BlobRef::new(BlobId::parse(DIGEST_A).expect("result id"), bytes.len() as u64),
+            BlobRef::new(
+                BlobId::parse(ego_core::digest::sha256_hex(&bytes)).expect("result id"),
+                bytes.len() as u64,
+            ),
             bytes,
         ))
     }
@@ -858,7 +937,9 @@ impl HookPort for RecordingHookPort {
             .expect("hook starts")
             .push((activation, spec.source()));
         Box::pin(futures::future::ready(Ok(HookStartedEvidence::new(
-            spec.id(), invocation, activation,
+            spec.id(),
+            invocation,
+            activation,
         ))))
     }
 
@@ -890,14 +971,13 @@ fn real_child_service() -> (
         Arc::new(ChildExecutor),
         Arc::new(FixedClock),
         Arc::new(FixedIds),
-        RunRetention::new(std::num::NonZeroUsize::new(4).expect("retention"))
-            .expect("retention"),
+        RunRetention::new(std::num::NonZeroUsize::new(4).expect("retention")).expect("retention"),
     ));
     let gate = Arc::new(Mutex::new(BudgetGate::unlimited(
         ego_core::cost::CurrencyCode::new("USD").expect("currency"),
     )));
-    let bindings = RunExecutionBindings::new(Arc::new(NullFactory), None)
-        .with_budget_gate(Arc::clone(&gate));
+    let bindings =
+        RunExecutionBindings::new(Arc::new(NullFactory), None).with_budget_gate(Arc::clone(&gate));
     let child_journal = ChildJournalFixture::default();
     let child_events = Arc::clone(&child_journal.events);
     let child_selection = ChildSelection::default();
@@ -913,11 +993,11 @@ fn real_child_service() -> (
     );
     (
         ChildRunService::new(
-        controller,
-        gate,
-        RunRoot::new("/workspace").expect("root"),
-        bindings,
-        ports,
+            controller,
+            gate,
+            RunRoot::new("/workspace").expect("root"),
+            bindings,
+            ports,
         ),
         child_events,
         child_waits,

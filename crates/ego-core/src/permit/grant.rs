@@ -341,6 +341,19 @@ impl Permit {
         }
     }
 
+    pub(crate) fn allows_secret_egress(
+        &self,
+        authority: &super::SecretEgressAuthority,
+    ) -> Result<(), TransportError> {
+        if self.scope.secret_egress.as_ref() == Some(authority) {
+            Ok(())
+        } else {
+            Err(TransportError::definitely_unsent(
+                TransportFailure::AuthorityMismatch,
+            ))
+        }
+    }
+
     pub(crate) fn allows_protocol_network(
         &self,
         target: &NetworkTarget,
@@ -964,6 +977,13 @@ impl fmt::Display for PermissionRequest {
                 Op::Connect { target, .. } | Op::ProtocolConnect { target } => {
                     write!(f, "\n- connect {}", TerminalSafe(&target.to_string()))?;
                 }
+                Op::SecretEgress { authority } => write!(
+                    f,
+                    "\n- release secrets {:?} to {} headers {:?}",
+                    authority.sources(),
+                    TerminalSafe(&authority.target().to_string()),
+                    authority.header_sinks()
+                )?,
             }
         }
         Ok(())
@@ -1361,6 +1381,9 @@ impl PolicyEngine {
         let mut rules: Vec<RuleAuthority> = Vec::new();
         for op in &call.ops {
             let Some(entry) = self.matching(&self.allow, op) else {
+                if self.mode == Mode::Yolo && matches!(op, Op::SecretEgress { .. }) {
+                    continue;
+                }
                 let why = match op.subject_path(&self.workspace) {
                     Some(path) => Escalation::NoRuleCovers {
                         op: op.name(),
@@ -1652,6 +1675,9 @@ fn scope_of(call: &PreparedCall) -> Scope {
             } => {
                 scope.network = Some(target.clone());
                 scope.http_request_digest = Some(request_digest.clone());
+            }
+            Op::SecretEgress { authority } => {
+                scope.secret_egress = Some(authority.clone());
             }
             Op::ProtocolConnect { target } => {
                 scope.network = Some(target.clone());

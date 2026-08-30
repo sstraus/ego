@@ -16,7 +16,7 @@ mod journal;
 mod mcp_registry;
 mod tools;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -30,7 +30,7 @@ use crate::compact::{
     COMPACTION_PROMPT, Checkpoint, CompactionBusy, CompactionError, PreparedCompaction,
     checkpoint_frame,
 };
-use crate::config::SystemPrompt;
+use crate::config::{ModelRef, SystemPrompt};
 use crate::cost::{Money, RateSource};
 use crate::event::domain::{
     CancelCause, EventKind, ExitReason, GenerationRole, OccupancyProvenance,
@@ -44,7 +44,7 @@ use crate::evidence::{
     GenerationTarget, PricingEvidence, RunInvocationId,
 };
 use crate::generation_model_source::{
-    GenerationModelErrorClass, GenerationModelSource, GenerationProfile,
+    GenerationModelErrorClass, GenerationModelRequest, GenerationModelSource, GenerationProfile,
 };
 use crate::generator::attempt::{AttemptStream, GenerationAttempt, UsageReport, settled_cost};
 use crate::generator::history::conversation_from_with_blobs;
@@ -73,7 +73,7 @@ pub use mcp_registry::{
     McpRegistryJournalOperation,
 };
 use tools::{GenerationToolCatalogue, PreparedToolCall};
-pub use tools::{ToolEffectPorts, Tools};
+pub use tools::{ToolBatchError, ToolEffectPorts, Tools};
 
 /// The final model-visible registry. Only `Effect` enters preparation,
 /// permission policy, and guarded I/O; human input crosses its own typed port.
@@ -81,6 +81,7 @@ pub use tools::{ToolEffectPorts, Tools};
 pub enum RegisteredTool {
     Effect(Arc<dyn crate::permit::Tool>),
     HumanInput(Arc<dyn crate::question::HumanInputTool>),
+    Skill(Arc<crate::skill::SkillCatalogue>),
 }
 
 impl RegisteredTool {
@@ -95,20 +96,61 @@ impl RegisteredTool {
                 }
             }
             Self::HumanInput(tool) => tool.descriptor(),
+            Self::Skill(_) => crate::generator::types::ToolDescriptor {
+                name: "skill".to_owned(),
+                description:
+                    "Invoke one admitted skill or read one resource from a live invocation"
+                        .to_owned(),
+                parameters: serde_json::json!({
+                    "oneOf": [
+                        {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": ["kind", "name", "arguments"],
+                            "properties": {
+                                "kind": { "const": "invoke" },
+                                "name": { "type": "string" },
+                                "arguments": { "type": "string" }
+                            }
+                        },
+                        {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": ["kind", "invocation", "path"],
+                            "properties": {
+                                "kind": { "const": "read_resource" },
+                                "invocation": { "type": "string" },
+                                "path": { "type": "string" }
+                            }
+                        }
+                    ]
+                }),
+            },
+        }
+    }
+
+    pub fn skill(catalogue: Arc<crate::skill::SkillCatalogue>) -> Self {
+        Self::Skill(catalogue)
+    }
+
+    pub(crate) fn matches_name(&self, name: &str) -> bool {
+        match self {
+            Self::Skill(catalogue) => name == "skill" || catalogue.authorize_model(name).is_ok(),
+            _ => self.descriptor().name == name,
         }
     }
 
     pub fn as_effect(&self) -> Option<&Arc<dyn crate::permit::Tool>> {
         match self {
             Self::Effect(tool) => Some(tool),
-            Self::HumanInput(_) => None,
+            Self::HumanInput(_) | Self::Skill(_) => None,
         }
     }
 
     pub fn as_human_input(&self) -> Option<&Arc<dyn crate::question::HumanInputTool>> {
         match self {
             Self::HumanInput(tool) => Some(tool),
-            Self::Effect(_) => None,
+            Self::Effect(_) | Self::Skill(_) => None,
         }
     }
 }
@@ -449,6 +491,9 @@ pub struct TurnLoop<'a> {
     cancel: CancelToken,
     control: Option<&'a mut InteractiveControl>,
     elicitor: Option<Arc<dyn Elicitor>>,
+    active_skill_scope: Option<crate::skill::ActiveSkillScope>,
+    active_skill_invocations:
+        BTreeMap<crate::event::skill::SkillInvocationId, crate::skill::SkillInvocation>,
 }
 
 impl<'a> TurnLoop<'a> {
@@ -481,6 +526,8 @@ impl<'a> TurnLoop<'a> {
             cancel: session.cancel,
             control: None,
             elicitor: None,
+            active_skill_scope: None,
+            active_skill_invocations: BTreeMap::new(),
         }
     }
 
@@ -653,13 +700,17 @@ impl<'a> TurnLoop<'a> {
             tracing::warn!(?repairs, "source history was repaired for compaction");
         }
         let mut source_messages: Vec<Message> = self.with_system(history).into();
+        source_messages.extend(
+            self.durable_skill_messages()
+                .map_err(CompactionError::Store)?,
+        );
         source_messages.push(Message::text(Role::System, COMPACTION_PROMPT));
         let source_messages =
             Conversation::new(source_messages).map_err(CompactionError::History)?;
 
         let source = Arc::clone(&self.source);
         let profile = source
-            .resolve(GenerationRole::Compaction)
+            .resolve(GenerationModelRequest::new(GenerationRole::Compaction))
             .await
             .map_err(|error| CompactionError::Resolution {
                 role: GenerationRole::Compaction,
@@ -806,7 +857,7 @@ impl<'a> TurnLoop<'a> {
             Checkpoint::parse(checkpoint_text).map_err(CompactionError::InvalidCheckpoint)?;
 
         let main = Arc::clone(&self.source)
-            .resolve(GenerationRole::Main)
+            .resolve(GenerationModelRequest::new(GenerationRole::Main))
             .await
             .map_err(|error| CompactionError::Resolution {
                 role: GenerationRole::Main,
@@ -978,6 +1029,12 @@ impl<'a> TurnLoop<'a> {
         reason = "TurnAbandoned carries the exact durable session state by contract"
     )]
     pub async fn resume_turn(&mut self, turn: TurnId) -> Result<TurnOutcome, TurnAbandoned> {
+        if let Err(cause) = self.admit_skill_catalogue(turn) {
+            return Err(self.abandon(turn, cause));
+        }
+        if let Err(cause) = self.restore_skill_scope(turn) {
+            return Err(self.abandon(turn, cause));
+        }
         if let Some(observation) = self.execution_observation.take()
             && let Err(cause) = self.journal.append(
                 turn,
@@ -1025,6 +1082,43 @@ impl<'a> TurnLoop<'a> {
         })
     }
 
+    fn restore_skill_scope(&mut self, turn: TurnId) -> Result<(), StoreError> {
+        let invocations = self
+            .journal
+            .state()
+            .skill_events()
+            .iter()
+            .filter_map(|event| match event {
+                crate::state::SkillEvent::Instruction {
+                    turn: admitted_turn,
+                    invocation,
+                    ..
+                } if *admitted_turn == turn => Some(*invocation),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        self.active_skill_scope = None;
+        self.active_skill_invocations.clear();
+        for invocation_id in invocations {
+            let invocation = crate::skill::SkillInvocation::resume_durable(
+                invocation_id,
+                self.tools.blob_store(),
+                &mut self.journal,
+            )
+            .map_err(skill_store_error)?;
+            let baseline = self.tools.effect_names();
+            let scope = self
+                .active_skill_scope
+                .get_or_insert_with(|| crate::skill::ActiveSkillScope::new(baseline));
+            invocation
+                .apply_captured_scope(scope)
+                .map_err(skill_store_error)?;
+            self.active_skill_invocations
+                .insert(invocation_id, invocation);
+        }
+        Ok(())
+    }
+
     /// Consume every accepted prompt that lacks a correlated `UserPrompt` as
     /// one fresh user turn. Empty recovery is not a turn and spends nothing.
     #[expect(
@@ -1064,6 +1158,8 @@ impl<'a> TurnLoop<'a> {
             Option<crate::event::id::QueuedPromptId>,
         )>,
     ) -> Result<TurnOutcome, TurnAbandoned> {
+        self.active_skill_scope = None;
+        self.active_skill_invocations.clear();
         let turn = TurnId::new();
         if let Some(observation) = self.execution_observation.take()
             && let Err(cause) = self.journal.append(
@@ -1081,6 +1177,10 @@ impl<'a> TurnLoop<'a> {
         // instant it mints the id. Before this, nothing in the workspace
         // could emit it at all.
         self.journal.publish(&PublicEvent::TurnStarted { turn });
+
+        if let Err(cause) = self.admit_skill_catalogue(turn) {
+            return Err(self.abandon(turn, cause));
+        }
 
         let driven = match self.drive(turn, &prompts).await {
             Ok(ended) => ended,
@@ -1109,6 +1209,8 @@ impl<'a> TurnLoop<'a> {
         ) {
             return Err(self.abandon(turn, cause));
         }
+        self.active_skill_scope = None;
+        self.active_skill_invocations.clear();
         if let Err(cause) = self.close_and_drain_controls(turn).await {
             return Err(self.abandon(turn, cause));
         }
@@ -1120,6 +1222,26 @@ impl<'a> TurnLoop<'a> {
             exit_reason,
             denied,
         })
+    }
+
+    fn admit_skill_catalogue(&mut self, turn: TurnId) -> Result<(), StoreError> {
+        let Some(catalogue) = self.tools.skill_catalogue() else {
+            return Ok(());
+        };
+        if self.journal.state().skill_catalogue_generation() == Some(catalogue.generation()) {
+            return Ok(());
+        }
+        self.journal
+            .append(
+                turn,
+                None,
+                None,
+                EventKind::SkillCatalogueAdmitted {
+                    generation: catalogue.generation(),
+                    descriptors: catalogue.evidence().clone(),
+                },
+            )
+            .map(|_| ())
     }
 
     /// Give up on a turn whose log could not be written.
@@ -1244,6 +1366,28 @@ impl<'a> TurnLoop<'a> {
                     continue;
                 }
                 return Ok(DriveOutcome::Ended(exit, None));
+            }
+
+            if pending.len() != 1
+                && pending.iter().any(|call| {
+                    matches!(call.selected.as_ref(), Some(Ok(RegisteredTool::Skill(_))))
+                })
+            {
+                for call in &pending {
+                    self.journal.append(
+                        turn,
+                        Some(call.item),
+                        Some(call.started),
+                        EventKind::ToolCallCompleted {
+                            ok: false,
+                            result: ToolResult::builtin(
+                                "a Skill call must be the only call in its provider response",
+                            ),
+                        },
+                    )?;
+                }
+                self.deliver_pending(turn)?;
+                continue;
             }
 
             let mut pending = pending;
@@ -1460,12 +1604,13 @@ impl<'a> TurnLoop<'a> {
         }
 
         let source = Arc::clone(&self.source);
+        let model_request = self.main_model_request();
         let profile = match await_controlled(
             &mut self.journal,
             &self.cancel,
             &mut self.control,
             turn,
-            source.resolve(GenerationRole::Main),
+            source.resolve(model_request),
             InterruptDisposition::Return,
         )
         .await
@@ -1488,7 +1633,11 @@ impl<'a> TurnLoop<'a> {
             Controlled::Failed(cause) => return Err(cause),
         };
 
-        let catalogue = match self.tools.capture() {
+        let ceiling = self
+            .active_skill_scope
+            .as_ref()
+            .map(crate::skill::ActiveSkillScope::effect_tools);
+        let catalogue = match self.tools.capture_with_effect_ceiling(ceiling.as_deref()) {
             Ok(catalogue) => catalogue,
             Err(error) => {
                 tracing::warn!(%error, "the admitted tool catalogue refused a generation");
@@ -1710,7 +1859,19 @@ impl<'a> TurnLoop<'a> {
         Ok(Generated::Ended(exit))
     }
 
-    /// The rebuilt history with this turn's system prompt in front of it.
+    fn main_model_request(&self) -> GenerationModelRequest {
+        let request = GenerationModelRequest::new(GenerationRole::Main);
+        let Some(scope) = self.active_skill_scope.as_ref() else {
+            return request;
+        };
+        request.with_skill_scope(
+            scope.model().map(|model| ModelRef(model.to_owned())),
+            scope.thinking(),
+        )
+    }
+
+    /// The rebuilt history with the configured system prompt and the exact
+    /// durable skill instructions admitted for this turn in front of it.
     ///
     /// Rebuilt through [`Conversation::new`] rather than pushed into: a
     /// `Conversation` is a *checked* history, and there is deliberately no way
@@ -1719,13 +1880,67 @@ impl<'a> TurnLoop<'a> {
     /// history that validated a moment ago still does — which is what the
     /// `expect` says.
     fn with_system(&self, history: Conversation) -> Conversation {
-        let Some(system) = self.config.system.as_ref() else {
+        if self.config.system.is_none() && self.active_skill_invocations.is_empty() {
             return history;
-        };
+        }
         let mut messages: Vec<Message> = history.into();
-        messages.insert(0, Message::text(Role::System, &system.text));
+        let mut system_messages = Vec::new();
+        if let Some(system) = self.config.system.as_ref() {
+            system_messages.push(Message::text(Role::System, &system.text));
+        }
+        for invocation in self.active_skill_invocations.values() {
+            let rendered = format!(
+                "Admitted skill instruction (invocation {}; {}):\n{}",
+                invocation.id(),
+                invocation.provenance_tag(),
+                invocation.rendered_text()
+            );
+            system_messages.push(Message::text(Role::System, rendered));
+        }
+        messages.splice(0..0, system_messages);
         Conversation::new(messages)
             .expect("a text message adds no call and answers none, so a valid history stays valid")
+    }
+
+    fn durable_skill_messages(&self) -> Result<Vec<Message>, StoreError> {
+        self.journal
+            .state()
+            .skill_events()
+            .iter()
+            .filter_map(|event| match event {
+                crate::state::SkillEvent::Instruction {
+                    invocation,
+                    source,
+                    location,
+                    source_digest,
+                    rendered,
+                    ..
+                } if !self.active_skill_invocations.contains_key(invocation) => {
+                    Some((invocation, source, location, source_digest, rendered))
+                }
+                crate::state::SkillEvent::Instruction { .. } => None,
+                crate::state::SkillEvent::Resource { .. } => None,
+            })
+            .map(|(invocation, source, location, source_digest, rendered)| {
+                let bytes =
+                    self.tools.blob_store().read(rendered).map_err(|error| {
+                        StoreError::Io(std::io::Error::other(error.to_string()))
+                    })?;
+                let text = String::from_utf8(bytes).map_err(|_| {
+                    StoreError::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "rendered skill blob is not valid UTF-8",
+                    ))
+                })?;
+                Ok(Message::text(
+                    Role::System,
+                    format!(
+                        "Admitted skill instruction (invocation {invocation}; source={source:?} \
+                         location={location} digest={source_digest}):\n{text}"
+                    ),
+                ))
+            })
+            .collect()
     }
 
     /// Prefix target-local history with its already-validated ancestor history.
@@ -2098,7 +2313,7 @@ impl<'a> TurnLoop<'a> {
             &self.cancel,
             &mut self.control,
             turn,
-            source.resolve(GenerationRole::Judge),
+            source.resolve(GenerationModelRequest::new(GenerationRole::Judge)),
             InterruptDisposition::Return,
         )
         .await
@@ -2348,6 +2563,86 @@ impl<'a> TurnLoop<'a> {
             PreparedToolCall::Effect { tool, call } => (tool, call),
             PreparedToolCall::HumanInput(request) => {
                 return self.run_question(turn, call, request).await;
+            }
+            PreparedToolCall::Skill {
+                operation,
+                catalogue,
+            } => {
+                if let crate::skill::SkillOperation::ReadResource { invocation, path } = &operation
+                {
+                    let admitted = match self.active_skill_invocations.get(invocation).cloned() {
+                        Some(admitted) => admitted,
+                        None => {
+                            return Ok(answered(
+                                false,
+                                "skill resource invocation is not live in this turn".to_owned(),
+                            ));
+                        }
+                    };
+                    let (logical, target, prepared) =
+                        match self.tools.prepare_skill_resource(&admitted, path) {
+                            Ok(prepared) => prepared,
+                            Err(error) => return Ok(answered(false, error)),
+                        };
+                    let authorized = match self.tools.authorize(prepared) {
+                        Classification::Settled(Ok(authorized)) => {
+                            self.decided(turn, call, true, authorized.by().clone())?;
+                            authorized
+                        }
+                        Classification::Settled(Err(denial)) => {
+                            self.decided(turn, call, false, denial.authority())?;
+                            return Ok(ToolOutcome::Refused { denial });
+                        }
+                        Classification::Ask(pending) => {
+                            return Ok(ToolOutcome::Unanswerable { pending });
+                        }
+                    };
+                    let bytes = match self.tools.read_skill_resource(authorized, &target) {
+                        Ok(bytes) => bytes,
+                        Err(error) => return Ok(answered(false, error)),
+                    };
+                    if let Err(error) = admitted.record_resource(
+                        logical,
+                        &bytes,
+                        self.tools.blob_store(),
+                        &mut self.journal,
+                        turn,
+                    ) {
+                        return Ok(answered(false, error.to_string()));
+                    }
+                    return Ok(answered(true, String::from_utf8_lossy(&bytes).into_owned()));
+                }
+                let mut next_scope = self.active_skill_scope.clone().unwrap_or_else(|| {
+                    crate::skill::ActiveSkillScope::new(self.tools.effect_names())
+                });
+                if let Err(error) = crate::skill::SkillInvocation::preflight_scope(
+                    &catalogue,
+                    &operation,
+                    &mut next_scope,
+                ) {
+                    return Ok(answered(false, error.to_string()));
+                }
+                let invocation = crate::skill::SkillInvocation::admit_in_turn(
+                    &catalogue,
+                    operation,
+                    self.tools.blob_store(),
+                    &mut self.journal,
+                    turn,
+                );
+                return Ok(match invocation {
+                    Ok(invocation) => {
+                        self.active_skill_scope = Some(next_scope);
+                        self.active_skill_invocations
+                            .insert(invocation.id(), invocation.clone());
+                        match invocation.rendered(self.tools.blob_store()) {
+                            Ok(bytes) => {
+                                answered(true, String::from_utf8_lossy(&bytes).into_owned())
+                            }
+                            Err(error) => answered(false, error.to_string()),
+                        }
+                    }
+                    Err(error) => answered(false, error.to_string()),
+                });
             }
         };
         let authorized = loop {
@@ -2727,6 +3022,13 @@ enum ToolOutcome {
     Unanswerable { pending: Pending },
     /// Judge admission failed for a cause that ends the whole turn.
     Ended(ExitReason),
+}
+
+fn skill_store_error(error: crate::skill::SkillError) -> StoreError {
+    StoreError::Io(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        error.to_string(),
+    ))
 }
 
 enum DriveOutcome {

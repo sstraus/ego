@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use ego_core::generator::types::ToolDescriptor as GeneratorToolDescriptor;
+use ego_core::hook::EffectScope;
 use ego_core::mcp::{McpAdmissionFingerprint, McpOperationKind, McpSubject, ToolExecution};
 use ego_core::permit::{
     ForeignToolId, GuardedIo, InvocationDigest, PrepareCtx, PreparedCall, Tool, ToolDescriptor,
@@ -312,6 +313,20 @@ pub trait McpOperationFactory: Send + Sync {
         call: PreparedCall,
         io: &'a dyn GuardedIo,
     ) -> BoxFuture<'a, Result<ToolExecution, ToolError>>;
+
+    fn execute_hook<'a>(
+        &'a self,
+        _admission: Arc<McpServerAdmission>,
+        _call: PreparedCall,
+        _io: &'a dyn GuardedIo,
+        _scope: EffectScope,
+    ) -> BoxFuture<'a, Result<crate::McpHookExecution, ToolError>> {
+        Box::pin(async {
+            Err(ToolError::InvalidParams(
+                "MCP operation owner does not expose raw hook structuredContent".to_owned(),
+            ))
+        })
+    }
 }
 
 pub(crate) struct McpToolDefinition {

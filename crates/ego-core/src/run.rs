@@ -450,9 +450,10 @@ impl std::fmt::Display for RunId {
 }
 
 /// Durable causal origin shared by every transaction in one rooted run.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RunOrigin {
+    #[default]
     TopLevel,
     Subagent {
         invocation: SubagentInvocationId,
@@ -460,12 +461,6 @@ pub enum RunOrigin {
         parent_turn: TurnId,
         parent_item: ItemId,
     },
-}
-
-impl Default for RunOrigin {
-    fn default() -> Self {
-        Self::TopLevel
-    }
 }
 
 /// Monotonic revision of the lifecycle records in one run stream.

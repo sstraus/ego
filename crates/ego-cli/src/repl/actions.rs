@@ -4,6 +4,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ego_core::event::skill::{SkillCatalogueEvidence, SkillId};
+use ego_core::skill::AdmittedSkillOperation;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ActionId {
@@ -67,9 +69,10 @@ impl Submission {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Dispatch {
     Action(ActionId),
+    Skill(AdmittedSkillOperation),
     Prompt,
     Immediate,
     InteractiveIngress,
@@ -297,6 +300,29 @@ impl ActionRegistration {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SurfaceSnapshot {
     availability: HashMap<ActionId, Availability>,
+    skill_catalogue_digest: Option<String>,
+}
+
+impl SurfaceSnapshot {
+    pub fn skill_catalogue_digest(&self) -> Option<&str> {
+        self.skill_catalogue_digest.as_deref()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillAnnouncement {
+    catalogue_digest: Option<String>,
+    authorization: HashMap<String, SkillId>,
+}
+
+impl SkillAnnouncement {
+    pub fn catalogue_digest(&self) -> Option<&str> {
+        self.catalogue_digest.as_deref()
+    }
+
+    pub fn authorization(&self, name: &str) -> Option<SkillId> {
+        self.authorization.get(name).copied()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -306,6 +332,13 @@ pub struct RegistryError(&'static str);
 pub struct ActionRegistry {
     registrations: Vec<ActionRegistration>,
     live_availability: Arc<Mutex<HashMap<ActionId, Availability>>>,
+    skill_surface: Arc<Mutex<SkillSurface>>,
+}
+
+#[derive(Debug, Default)]
+struct SkillSurface {
+    catalogue: SkillCatalogueEvidence,
+    digest: Option<String>,
 }
 
 impl<const N: usize> TryFrom<[ActionRegistration; N]> for ActionRegistry {
@@ -340,6 +373,7 @@ impl<const N: usize> TryFrom<[ActionRegistration; N]> for ActionRegistry {
         Ok(Self {
             registrations: value.into(),
             live_availability: Arc::new(Mutex::new(HashMap::new())),
+            skill_surface: Arc::new(Mutex::new(SkillSurface::default())),
         })
     }
 }
@@ -404,6 +438,11 @@ impl ActionRegistry {
     pub fn names(&self) -> Vec<&str> {
         self.iter().map(ActionRegistration::name).collect()
     }
+    pub fn aliases(&self) -> Vec<&str> {
+        self.iter()
+            .flat_map(|registration| registration.aliases.iter().copied())
+            .collect()
+    }
     pub fn id(&self, name: &str) -> Option<ActionId> {
         self.resolve_slash(name)
     }
@@ -460,12 +499,86 @@ impl ActionRegistry {
         self.iter().filter(|a| a.name.starts_with(filter)).collect()
     }
     pub fn snapshot(&self) -> SurfaceSnapshot {
+        let skill_catalogue_digest = self
+            .skill_surface
+            .lock()
+            .expect("skill surface lock")
+            .digest
+            .clone();
         SurfaceSnapshot {
             availability: self
                 .iter()
                 .map(|a| (a.id, self.availability(a.id)))
                 .collect(),
+            skill_catalogue_digest,
         }
+    }
+
+    pub fn with_skill_catalogue(
+        mut self,
+        catalogue: SkillCatalogueEvidence,
+    ) -> Result<Self, RegistryError> {
+        self.validate_skill_catalogue(&catalogue)?;
+        let digest =
+            ego_core::event::skill::SkillCatalogueGeneration::derive(&catalogue).to_string();
+        self.skill_surface = Arc::new(Mutex::new(SkillSurface {
+            catalogue,
+            digest: Some(digest),
+        }));
+        Ok(self)
+    }
+
+    pub fn reload_skills(&self, catalogue: SkillCatalogueEvidence) -> Result<(), RegistryError> {
+        self.validate_skill_catalogue(&catalogue)?;
+        let digest =
+            ego_core::event::skill::SkillCatalogueGeneration::derive(&catalogue).to_string();
+        *self.skill_surface.lock().expect("skill surface lock") = SkillSurface {
+            catalogue,
+            digest: Some(digest),
+        };
+        Ok(())
+    }
+
+    fn validate_skill_catalogue(
+        &self,
+        catalogue: &SkillCatalogueEvidence,
+    ) -> Result<(), RegistryError> {
+        let fixed: HashSet<&str> = self.names().into_iter().chain(self.aliases()).collect();
+        if catalogue
+            .descriptors()
+            .iter()
+            .any(|descriptor| fixed.contains(descriptor.name.as_str()))
+        {
+            return Err(RegistryError(
+                "skill name conflicts with a fixed action or alias",
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn announce_skills(&self) -> SkillAnnouncement {
+        let surface = self.skill_surface.lock().expect("skill surface lock");
+        SkillAnnouncement {
+            catalogue_digest: surface.digest.clone(),
+            authorization: surface
+                .catalogue
+                .descriptors()
+                .iter()
+                .filter(|descriptor| descriptor.user_invocable)
+                .map(|descriptor| (descriptor.name.clone(), descriptor.id))
+                .collect(),
+        }
+    }
+
+    pub fn authorize_skill(&self, name: &str) -> Option<SkillId> {
+        self.skill_surface
+            .lock()
+            .expect("skill surface lock")
+            .catalogue
+            .descriptors()
+            .iter()
+            .find(|descriptor| descriptor.name == name && descriptor.user_invocable)
+            .map(|descriptor| descriptor.id)
     }
     pub fn select(&self, id: ActionId, displayed: &SurfaceSnapshot) -> Option<ActionSelection> {
         displayed
@@ -559,13 +672,27 @@ impl ActionRegistry {
     }
     pub fn classify(&self, submission: Submission) -> Dispatch {
         if submission.origin == InputOrigin::Typed
-            && let Some(name) = submission.text.strip_prefix('/')
-            && !name.contains(char::is_whitespace)
-            && let Some(id) = self
-                .resolve_slash(name)
-                .or_else(|| self.resolve_alias(name))
+            && let Some(command) = submission.text.strip_prefix('/')
         {
-            return Dispatch::Action(id);
+            let boundary = command.find(char::is_whitespace).unwrap_or(command.len());
+            let name = &command[..boundary];
+            let raw_arguments = command[boundary..].trim_start_matches(char::is_whitespace);
+            if boundary == command.len()
+                && let Some(id) = self
+                    .resolve_slash(name)
+                    .or_else(|| self.resolve_alias(name))
+            {
+                return Dispatch::Action(id);
+            }
+            let surface = self.skill_surface.lock().expect("skill surface lock");
+            if let Some(descriptor) = surface
+                .catalogue
+                .descriptors()
+                .iter()
+                .find(|descriptor| descriptor.name == name && descriptor.user_invocable)
+            {
+                return Dispatch::Skill(AdmittedSkillOperation::invoke(descriptor, raw_arguments));
+            }
         }
         Dispatch::Prompt
     }

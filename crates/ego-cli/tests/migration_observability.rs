@@ -1,4 +1,4 @@
-//! RED contract for observable, lossless v7-to-v8 session migration.
+//! RED contract for observable, lossless v8-to-v9 session migration.
 
 use ego_cli::session::Opened;
 use ego_core::event::domain::{DomainEvent, Envelope, EventKind};
@@ -44,7 +44,7 @@ fn log_path(root: &Path, id: &SessionId) -> std::path::PathBuf {
 }
 
 #[test]
-fn clean_v7_migration_is_reported_as_migration_not_torn_tail_loss() {
+fn clean_v8_migration_is_reported_as_migration_not_torn_tail_loss() {
     let root = tempdir().expect("temporary session root");
     let id = SessionId::new();
     let path = log_path(root.path(), &id);
@@ -52,15 +52,15 @@ fn clean_v7_migration_is_reported_as_migration_not_torn_tail_loss() {
         .expect("create session directory");
 
     let mut bytes = encode_header(&Header {
-        v: 7,
+        v: 8,
         session: id,
         created: Timestamp::from_millis(4_000),
         workspace_root: "/workspace".into(),
     });
     bytes.push(b'\n');
-    bytes.extend(encode_record(seq(9), &event()).expect("encode v7 event"));
+    bytes.extend(encode_record(seq(9), &event()).expect("encode v8 event"));
     bytes.push(b'\n');
-    std::fs::write(&path, bytes).expect("write v7 fixture");
+    std::fs::write(&path, bytes).expect("write v8 fixture");
 
     let store = JsonlStore::new(root.path(), "/workspace", Box::new(OsIo));
     let open = store
@@ -73,7 +73,7 @@ fn clean_v7_migration_is_reported_as_migration_not_torn_tail_loss() {
                 is_alive: ALIVE,
             },
         )
-        .expect("open migrates the v7 session");
+        .expect("open migrates the v8 session");
 
     let repair_debug = format!("{:?}", open.repair);
     let repair_identifies_migration = repair_debug.contains("migrated: true");

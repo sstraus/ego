@@ -20,8 +20,8 @@ use ego_core::compact::{
     PreparedCompaction,
 };
 use ego_core::config::{
-    Effective, Limits, McpServerConfig, Mode, ModelRef, Posture, Selection, SystemPrompt, Trust,
-    UserConfigStore, resolve_selected, system_prompt,
+    ConfigLayer, Effective, Limits, McpServerConfig, Mode, ModelRef, Posture, Selection, Sourced,
+    SystemPrompt, Trust, UserConfigStore, resolve_selected, system_prompt,
 };
 use ego_core::cost::CurrencyCode;
 use ego_core::event::domain::CancelCause;
@@ -34,7 +34,8 @@ use ego_core::evidence::{
 };
 use ego_core::export::Exporter;
 use ego_core::generation_model_source::{
-    GenerationModelError, GenerationModelErrorClass, GenerationProfile, GenerationRole,
+    GenerationModelError, GenerationModelErrorClass, GenerationModelRequest, GenerationProfile,
+    GenerationRole,
 };
 use ego_core::generator::capabilities::ModelCapabilities;
 use ego_core::generator::port::RequestExpressibilityError;
@@ -800,9 +801,15 @@ fn instructions(
 /// is not a builtin is refused rather than ignored, because a run that
 /// silently offered fewer tools than it was told to is a run whose failure has
 /// no visible cause.
-fn tools(selected: Option<&Vec<String>>) -> Result<Vec<RegisteredTool>, UsageError> {
+fn tools(
+    selected: Option<&Vec<String>>,
+    skills: Option<Arc<ego_core::skill::SkillCatalogue>>,
+) -> Result<Vec<RegisteredTool>, UsageError> {
     let mut all: Vec<_> = builtins().into_iter().map(RegisteredTool::Effect).collect();
     all.push(RegisteredTool::HumanInput(Arc::new(AskQuestionTool)));
+    if let Some(skills) = skills.filter(|catalogue| !catalogue.specs().is_empty()) {
+        all.push(RegisteredTool::skill(skills));
+    }
     let Some(names) = selected else {
         return Ok(all);
     };
@@ -859,6 +866,8 @@ struct Settings {
     /// The effective runtime boundary, resolved independently of permission
     /// mode and fixed for the whole run.
     confinement: RunConfinement,
+    trust: Trust,
+    profile_layers: Option<Vec<Sourced<ConfigLayer>>>,
     effective: Effective,
 }
 
@@ -1028,7 +1037,7 @@ fn rooted_settings(
             .map(config::SelectedProfile::as_resolver_input),
     )
     .map_err(|err| UsageError(err.to_string()))?;
-    finish_rooted_settings(args, cwd, effective, trust, diagnostics)
+    finish_rooted_settings(args, cwd, effective, trust, Some(layers), diagnostics)
 }
 
 fn frozen_rooted_settings(
@@ -1038,7 +1047,7 @@ fn frozen_rooted_settings(
     diagnostics: &dyn Diagnostics,
 ) -> Result<Settings, UsageError> {
     let effective = frozen.resolve(args)?;
-    finish_rooted_settings(args, cwd, effective, Trust::Untrusted, diagnostics)
+    finish_rooted_settings(args, cwd, effective, Trust::Untrusted, None, diagnostics)
 }
 
 fn finish_rooted_settings(
@@ -1046,6 +1055,7 @@ fn finish_rooted_settings(
     cwd: PathBuf,
     effective: Effective,
     trust: Trust,
+    profile_layers: Option<Vec<Sourced<ConfigLayer>>>,
     diagnostics: &dyn Diagnostics,
 ) -> Result<Settings, UsageError> {
     let started = std::time::Instant::now();
@@ -1091,6 +1101,8 @@ fn finish_rooted_settings(
         root,
         cwd,
         confinement,
+        trust,
+        profile_layers,
         effective,
     })
 }
@@ -1100,6 +1112,7 @@ fn finish_rooted_settings(
 struct Materials {
     system: Option<SystemPrompt>,
     registry: Vec<RegisteredTool>,
+    skills: Option<Arc<ego_core::skill::SkillCatalogue>>,
     compiled: Option<schema::Schema>,
     text: String,
     slug: String,
@@ -1161,7 +1174,8 @@ fn prepared_materials(
         &settings.cwd,
         diagnostics,
     )?;
-    let registry = tools(args.tools.as_ref())?;
+    let skills = discover_skills(settings, diagnostics)?;
+    let registry = tools(args.tools.as_ref(), skills.clone())?;
     let slug = args
         .model
         .clone()
@@ -1177,10 +1191,55 @@ fn prepared_materials(
     Ok(Materials {
         system,
         registry,
+        skills,
         compiled,
         text,
         slug,
     })
+}
+
+fn discover_skills(
+    settings: &Settings,
+    diagnostics: &dyn Diagnostics,
+) -> Result<Option<Arc<ego_core::skill::SkillCatalogue>>, UsageError> {
+    discover_skills_at(
+        &settings.root,
+        settings.trust,
+        settings.profile_layers.as_deref(),
+        diagnostics,
+    )
+}
+
+fn discover_skills_at(
+    root: &Path,
+    trust: Trust,
+    profile_layers: Option<&[Sourced<ConfigLayer>]>,
+    diagnostics: &dyn Diagnostics,
+) -> Result<Option<Arc<ego_core::skill::SkillCatalogue>>, UsageError> {
+    let Some(profile_layers) = profile_layers else {
+        return Ok(None);
+    };
+    let Some(discovery) =
+        crate::skill::SkillDiscovery::for_workspace(root, trust == Trust::Trusted)
+    else {
+        return Ok(None);
+    };
+    let actions = repl::actions::ActionRegistry::final_surface();
+    let fixed = actions
+        .names()
+        .into_iter()
+        .chain(actions.aliases())
+        .collect::<Vec<_>>();
+    let catalogue = crate::skill::SkillCatalogue::discover_with_profile_layers(
+        discovery,
+        &fixed,
+        profile_layers,
+    )
+    .map_err(|error| UsageError(error.to_string()))?;
+    for diagnostic in catalogue.diagnostics() {
+        diagnostics.note(&diagnostic.to_string());
+    }
+    Ok(Some(catalogue.core()))
 }
 
 /// The store this run logs through, and which session in it.
@@ -1481,14 +1540,14 @@ async fn generation_preflight_inner(
     }
     let bound = source.bind(Arc::clone(&http), cancel.clone(), run_deadline);
     let main = bound
-        .resolve(GenerationRole::Main)
+        .resolve(GenerationModelRequest::new(GenerationRole::Main))
         .await
         .map_err(generation_refusal)?;
     let capabilities = main.capabilities.clone();
     let judge_enabled = mode == Mode::Auto;
     if judge_enabled {
         let judge = bound
-            .resolve(GenerationRole::Judge)
+            .resolve(GenerationModelRequest::new(GenerationRole::Judge))
             .await
             .map_err(generation_refusal)?;
         preflight_judge(&judge, confinement, proof_observation.capabilities())?;
@@ -1549,7 +1608,7 @@ async fn acquire_attachments(
     let http = Arc::new(ProviderHttpAdapter::new(Arc::clone(ports))) as Arc<dyn ego_ai::http::Http>;
     let profile = source
         .bind(http, cancel.clone(), run_deadline)
-        .resolve(GenerationRole::Main)
+        .resolve(GenerationModelRequest::new(GenerationRole::Main))
         .await
         .map_err(generation_refusal)?;
     attachment::acquire(
@@ -1774,6 +1833,7 @@ impl CliPrepared {
         let Materials {
             system,
             registry,
+            skills: _,
             compiled,
             text: _,
             slug,
@@ -1784,6 +1844,7 @@ impl CliPrepared {
             cwd,
             confinement,
             effective,
+            ..
         } = settings;
         let schema_retries = args.schema_retries;
         let max_turns = args.max_turns;
@@ -2265,6 +2326,7 @@ impl CliCompactionCommand {
         let Materials {
             system,
             registry,
+            skills: _,
             compiled: _,
             text: _,
             slug,
@@ -2276,6 +2338,7 @@ impl CliCompactionCommand {
             cwd,
             confinement,
             effective,
+            ..
         } = settings;
         let clock = SystemClock;
         let opened = Opened::Durable(Box::new(
@@ -2642,6 +2705,7 @@ struct ExecutionPreflight {
 struct ExecutionReady {
     system: Option<SystemPrompt>,
     registry: Vec<RegisteredTool>,
+    skills: Option<Arc<ego_core::skill::SkillCatalogue>>,
     compiled: Option<schema::Schema>,
     text: String,
     generation: GenerationReady,
@@ -2699,6 +2763,7 @@ async fn execution_preflight(
     let Materials {
         system,
         registry,
+        skills,
         compiled,
         text,
         slug,
@@ -2740,6 +2805,7 @@ async fn execution_preflight(
         ready: ExecutionReady {
             system,
             registry,
+            skills,
             compiled,
             text,
             generation: GenerationReady {
@@ -2834,18 +2900,28 @@ async fn execute<S: EventSink>(
         None
     };
 
-    let (system, registry, compiled, text, slug, generation) = match ready {
+    let (system, registry, skills, compiled, text, slug, generation) = match ready {
         Some(ExecutionReady {
             system,
             registry,
+            skills,
             compiled,
             text,
             generation,
-        }) => (system, registry, compiled, text, None, Some(generation)),
+        }) => (
+            system,
+            registry,
+            skills,
+            compiled,
+            text,
+            None,
+            Some(generation),
+        ),
         None => {
             let Materials {
                 system,
                 registry,
+                skills,
                 compiled,
                 text,
                 slug,
@@ -2856,18 +2932,32 @@ async fn execute<S: EventSink>(
                 diagnostics,
             )
             .map_err(usage)?;
-            (system, registry, compiled, text, Some(slug), None)
+            (system, registry, skills, compiled, text, Some(slug), None)
         }
     };
     let mut registry = registry;
+    if let (Some(status), Some(skills)) = (status.as_ref(), skills.as_ref()) {
+        let actions = status.seat.action_registry();
+        actions
+            .reload_skills(skills.evidence().clone())
+            .map_err(|error| RunTermination::Failed {
+                message: format!("interactive skill actions could not be installed: {error:?}"),
+            })?;
+    }
+    let skill_trust = settings.trust;
+    let skill_profile_layers = settings.profile_layers.clone();
     let Settings {
         run_deadline,
         root,
         cwd,
         confinement,
         effective,
+        ..
     } = settings;
     let mode = effective.mode.unwrap_or(Mode::Default);
+    let skill_resource_roots = crate::config::ego_home().map(|user| {
+        ego_core::skill::SkillResourceRoots::new(PathBuf::from("/etc/ego"), user, root.join(".ego"))
+    });
 
     let currency = CurrencyCode::new(SETTLEMENT).expect("a constant this file controls");
     let mut opened = match early_opened {
@@ -3150,6 +3240,10 @@ async fn execute<S: EventSink>(
                 None => {
                     Tools::from_registry(&registry, &policy, effect_ports, CanonPath::new(&cwd))
                 }
+            };
+            let tools = match skill_resource_roots.as_ref() {
+                Some(roots) => tools.with_skill_resource_roots(roots.clone()),
+                None => tools,
             };
             let loop_ = TurnLoop::new(session, runtime, tools);
             let loop_ = match $active.replayed() {
@@ -3553,10 +3647,17 @@ async fn execute<S: EventSink>(
                                         .map_err(|error| {
                                             CompactionError::Internal(error.to_string())
                                         })?;
+                                let target_skills = discover_skills_at(
+                                    &root,
+                                    skill_trust,
+                                    skill_profile_layers.as_deref(),
+                                    diagnostics,
+                                )
+                                .map_err(|error| CompactionError::Internal(error.to_string()))?;
                                 let target_registry =
-                                    tools(args.tools.as_ref()).map_err(|error| {
-                                        CompactionError::Internal(error.to_string())
-                                    })?;
+                                    tools(args.tools.as_ref(), target_skills.clone()).map_err(
+                                        |error| CompactionError::Internal(error.to_string()),
+                                    )?;
                                 let target_tools: Vec<ToolDescriptor> = target_registry
                                     .iter()
                                     .map(RegisteredTool::descriptor)
@@ -3602,7 +3703,7 @@ async fn execute<S: EventSink>(
                                 );
                                 let compaction_tools = match admitted_tools.as_ref() {
                                     Some(source) => Tools::from_registry_with_source(
-                                        &registry,
+                                        &target_registry,
                                         Arc::clone(source),
                                         &policy,
                                         effect_ports,
@@ -3612,11 +3713,17 @@ async fn execute<S: EventSink>(
                                         CompactionError::Internal(error.to_string())
                                     })?,
                                     None => Tools::from_registry(
-                                        &registry,
+                                        &target_registry,
                                         &policy,
                                         effect_ports,
                                         CanonPath::new(&cwd),
                                     ),
+                                };
+                                let compaction_tools = match skill_resource_roots.as_ref() {
+                                    Some(roots) => {
+                                        compaction_tools.with_skill_resource_roots(roots.clone())
+                                    }
+                                    None => compaction_tools,
                                 };
                                 let mut compaction =
                                     TurnLoop::new(session, runtime, compaction_tools);
@@ -3656,7 +3763,7 @@ async fn execute<S: EventSink>(
                                 *prepared_runtime
                                     .lock()
                                     .expect("interactive compaction runtime") =
-                                    Some((target_system, target_registry));
+                                    Some((target_system, target_registry, target_skills));
                                 Ok(prepared)
                             });
                             let mut preparation = DeferredCompactionPreparation {
@@ -3713,13 +3820,26 @@ async fn execute<S: EventSink>(
                                 diagnostics.note("compaction target was not published");
                                 continue;
                             }
-                            if let Some((target_system, target_registry)) = target_runtime
-                                .lock()
-                                .expect("interactive compaction runtime")
-                                .take()
+                            if let Some((target_system, target_registry, target_skills)) =
+                                target_runtime
+                                    .lock()
+                                    .expect("interactive compaction runtime")
+                                    .take()
                             {
                                 registry = target_registry;
                                 config.system = target_system;
+                                if let (Some(status), Some(skills)) =
+                                    (status.as_ref(), target_skills.as_ref())
+                                {
+                                    let actions = status.seat.action_registry();
+                                    if let Err(error) =
+                                        actions.reload_skills(skills.evidence().clone())
+                                    {
+                                        diagnostics.note(&format!(
+                                            "fresh skill actions could not be installed: {error:?}"
+                                        ));
+                                    }
+                                }
                             }
                             state = active.state().clone();
                             last.session = active.id();

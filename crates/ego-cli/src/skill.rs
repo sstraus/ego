@@ -5,31 +5,32 @@ use std::fmt;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use ego_core::config::{ConfigLayer, Sourced, Trust, resolve};
+use ego_core::config::{ConfigLayer, ModelRef, Sourced, Trust, resolve};
 use ego_core::event::hook::HookLifecycle;
-use ego_core::event::skill::{SkillInvocationId, SkillSourceLocation};
+use ego_core::event::skill::{
+    SkillContentDigest, SkillDescriptorEvidence, SkillId, SkillInvocationId, SkillSourceLocation,
+};
 use ego_core::hook::{HookConfigEntry, HookHandlerConfig, HookMatcher};
 use ego_core::permit::rule::Rule;
+use ego_core::skill::{SkillCatalogue as CoreSkillCatalogue, SkillSpec};
+use ego_core::subagent::ChildWait;
 
 use crate::yaml_envelope::{self, MAX_FILE_BYTES, Node};
 
 const PORTABLE_TOOLS: &[&str] = &[
     "ask_question",
-    "bash",
     "edit",
+    "exec",
     "glob",
     "grep",
     "read",
+    "read_tool_result",
     "write",
 ];
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum SkillSourceAuthority {
-    System,
-    User,
-    Project,
-}
+pub(crate) use ego_core::event::skill::SkillSourceAuthority;
 
 #[derive(Clone, Debug)]
 pub(crate) struct SkillDiscovery {
@@ -53,42 +54,14 @@ impl SkillDiscovery {
             trusted_project,
         }
     }
-}
 
-#[derive(Clone, PartialEq, Eq)]
-pub(crate) struct SkillDescriptor {
-    name: String,
-    description: String,
-    source: SkillSourceAuthority,
-    source_path: PathBuf,
-    source_digest: String,
-    allowed_tools: Vec<String>,
-    agent: Option<String>,
-}
-
-impl fmt::Debug for SkillDescriptor {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("SkillDescriptor")
-            .field("name", &self.name)
-            .field("description", &self.description)
-            .field("source", &self.source)
-            .field("source_path", &self.source_path)
-            .field("source_digest", &self.source_digest)
-            .field("agent", &self.agent)
-            .finish_non_exhaustive()
-    }
-}
-
-impl SkillDescriptor {
-    pub(crate) fn name(&self) -> &str {
-        &self.name
-    }
-    pub(crate) fn source(&self) -> SkillSourceAuthority {
-        self.source
-    }
-    pub(crate) fn agent(&self) -> Option<&str> {
-        self.agent.as_deref()
+    pub(crate) fn for_workspace(workspace: &Path, trusted_project: bool) -> Option<Self> {
+        Some(Self::new(
+            PathBuf::from("/etc/ego/skills"),
+            crate::config::ego_home()?.join("skills"),
+            workspace.join(".ego/skills"),
+            trusted_project,
+        ))
     }
 }
 
@@ -142,7 +115,7 @@ impl fmt::Display for SkillCatalogueError {
 
 #[derive(Clone, Debug)]
 pub(crate) struct SkillCatalogue {
-    descriptors: Vec<SkillDescriptor>,
+    catalogue: Arc<CoreSkillCatalogue>,
     diagnostics: Vec<SkillDiagnostic>,
     snapshot_digest: String,
 }
@@ -153,11 +126,7 @@ impl SkillCatalogue {
         fixed_actions: &[&str],
     ) -> Result<Self, SkillCatalogueError> {
         let candidate = Candidate::build(discovery, fixed_actions, None)?;
-        Ok(Self {
-            snapshot_digest: candidate.digest(),
-            descriptors: candidate.descriptors,
-            diagnostics: candidate.diagnostics,
-        })
+        Ok(candidate.publish())
     }
 
     pub(crate) fn discover_with_profile_layers(
@@ -166,11 +135,7 @@ impl SkillCatalogue {
         profile_layers: &[Sourced<ConfigLayer>],
     ) -> Result<Self, SkillCatalogueError> {
         let candidate = Candidate::build(discovery, fixed_actions, Some(profile_layers))?;
-        Ok(Self {
-            snapshot_digest: candidate.digest(),
-            descriptors: candidate.descriptors,
-            diagnostics: candidate.diagnostics,
-        })
+        Ok(candidate.publish())
     }
 
     pub(crate) fn reload(
@@ -196,30 +161,38 @@ impl SkillCatalogue {
 
     fn publish_reload(&mut self, candidate: Candidate) {
         if candidate.diagnostics.is_empty() {
-            self.snapshot_digest = candidate.digest();
-            self.descriptors = candidate.descriptors;
+            let published = candidate.publish();
+            self.catalogue = published.catalogue;
+            self.snapshot_digest = published.snapshot_digest;
+            self.diagnostics = published.diagnostics;
+            return;
         }
         self.diagnostics = candidate.diagnostics;
     }
 
-    pub(crate) fn descriptors(&self) -> &[SkillDescriptor] {
-        &self.descriptors
+    pub(crate) fn descriptors(&self) -> &[SkillSpec] {
+        self.catalogue.specs()
     }
     pub(crate) fn diagnostics(&self) -> &[SkillDiagnostic] {
         &self.diagnostics
     }
-    pub(crate) fn descriptor(&self, name: &str) -> Option<&SkillDescriptor> {
-        self.descriptors
+    pub(crate) fn descriptor(&self, name: &str) -> Option<&SkillSpec> {
+        self.catalogue
+            .specs()
             .iter()
-            .find(|descriptor| descriptor.name == name)
+            .find(|spec| spec.name() == name)
     }
     pub(crate) fn snapshot_digest(&self) -> &str {
         &self.snapshot_digest
     }
+
+    pub(crate) fn core(&self) -> Arc<CoreSkillCatalogue> {
+        Arc::clone(&self.catalogue)
+    }
 }
 
 struct Candidate {
-    descriptors: Vec<SkillDescriptor>,
+    admitted: Vec<(SkillSpec, PathBuf)>,
     diagnostics: Vec<SkillDiagnostic>,
 }
 
@@ -242,7 +215,7 @@ impl Candidate {
         } else {
             Trust::Untrusted
         };
-        let mut descriptors = Vec::new();
+        let mut admitted = Vec::new();
         let mut diagnostics = Vec::new();
         for (source, root, enabled) in [
             (SkillSourceAuthority::System, discovery.system, true),
@@ -253,21 +226,21 @@ impl Candidate {
                 discovery.trusted_project,
             ),
         ] {
-            discover_root(source, &root, enabled, &mut descriptors, &mut diagnostics);
+            discover_root(source, &root, enabled, &mut admitted, &mut diagnostics);
         }
 
         if let Some(profile_layers) = profile_layers {
-            descriptors.retain(|descriptor| {
-                let Some(profile) = descriptor.agent.as_deref() else {
+            admitted.retain(|(spec, source_path)| {
+                let Some(profile) = spec.agent() else {
                     return true;
                 };
                 match resolve(profile_layers, profile_trust, Some(profile)) {
                     Ok(_) => true,
                     Err(error) => {
                         diagnostics.push(SkillDiagnostic {
-                            name: descriptor.name.clone(),
-                            source: descriptor.source,
-                            source_path: descriptor.source_path.clone(),
+                            name: spec.name().to_owned(),
+                            source: spec.source(),
+                            source_path: source_path.clone(),
                             message: format!(
                                 "field `agent` must select an existing profile: {error}"
                             ),
@@ -281,9 +254,9 @@ impl Candidate {
 
         let fixed = fixed_unique;
         let mut occurrences: BTreeMap<String, Vec<usize>> = BTreeMap::new();
-        for (index, descriptor) in descriptors.iter().enumerate() {
+        for (index, (spec, _)) in admitted.iter().enumerate() {
             occurrences
-                .entry(descriptor.name.clone())
+                .entry(spec.name().to_owned())
                 .or_default()
                 .push(index);
         }
@@ -292,11 +265,11 @@ impl Candidate {
             if indices.len() > 1 || fixed.contains(name.as_str()) {
                 for index in indices {
                     rejected.insert(index);
-                    let descriptor = &descriptors[index];
+                    let (spec, source_path) = &admitted[index];
                     diagnostics.push(SkillDiagnostic {
                         name: name.clone(),
-                        source: descriptor.source,
-                        source_path: descriptor.source_path.clone(),
+                        source: spec.source(),
+                        source_path: source_path.clone(),
                         message: if fixed.contains(name.as_str()) {
                             format!("collides with fixed action `{name}`")
                         } else {
@@ -307,12 +280,12 @@ impl Candidate {
                 }
             }
         }
-        descriptors = descriptors
+        admitted = admitted
             .into_iter()
             .enumerate()
             .filter_map(|(index, descriptor)| (!rejected.contains(&index)).then_some(descriptor))
             .collect();
-        descriptors.sort_by(|left, right| left.name.cmp(&right.name));
+        admitted.sort_by(|(left, _), (right, _)| left.name().cmp(right.name()));
         diagnostics.sort_by(|left, right| {
             left.name
                 .cmp(&right.name)
@@ -320,26 +293,21 @@ impl Candidate {
                 .then_with(|| left.source_path.cmp(&right.source_path))
         });
         Ok(Self {
-            descriptors,
+            admitted,
             diagnostics,
         })
     }
 
-    fn digest(&self) -> String {
-        let mut canonical = String::new();
-        for descriptor in &self.descriptors {
-            canonical.push_str(&descriptor.name);
-            canonical.push('\0');
-            canonical.push_str(match descriptor.source {
-                SkillSourceAuthority::System => "system",
-                SkillSourceAuthority::User => "user",
-                SkillSourceAuthority::Project => "project",
-            });
-            canonical.push('\0');
-            canonical.push_str(&descriptor.source_digest);
-            canonical.push('\n');
+    fn publish(self) -> SkillCatalogue {
+        let catalogue =
+            CoreSkillCatalogue::new(self.admitted.into_iter().map(|(spec, _)| spec).collect())
+                .expect("the candidate already rejects duplicate and unreachable skills");
+        let snapshot_digest = catalogue.generation().to_string();
+        SkillCatalogue {
+            catalogue: Arc::new(catalogue),
+            diagnostics: self.diagnostics,
+            snapshot_digest,
         }
-        ego_core::digest::sha256_hex(canonical.as_bytes())
     }
 }
 
@@ -347,7 +315,7 @@ fn discover_root(
     source: SkillSourceAuthority,
     root: &Path,
     enabled: bool,
-    descriptors: &mut Vec<SkillDescriptor>,
+    admitted: &mut Vec<(SkillSpec, PathBuf)>,
     diagnostics: &mut Vec<SkillDiagnostic>,
 ) {
     let Ok(entries) = fs::read_dir(root) else {
@@ -376,7 +344,7 @@ fn discover_root(
             continue;
         }
         match load_skill(source, root, &path, &directory_name) {
-            Ok(descriptor) => descriptors.push(descriptor),
+            Ok(spec) => admitted.push((spec, path.clone())),
             Err(message) => diagnostics.push(diagnostic(directory_name, source, path, message)),
         }
     }
@@ -387,7 +355,7 @@ fn load_skill(
     root: &Path,
     requested_path: &Path,
     directory_name: &str,
-) -> Result<SkillDescriptor, String> {
+) -> Result<SkillSpec, String> {
     let canonical_root = fs::canonicalize(root)
         .map_err(|error| format!("skill root could not be resolved: {error}"))?;
     let path = fs::canonicalize(requested_path)
@@ -413,8 +381,9 @@ fn load_skill(
         return Err(format!("exceeds {MAX_FILE_BYTES} bytes"));
     }
     let text = String::from_utf8(bytes).map_err(|_| "is not valid UTF-8".to_owned())?;
-    let source_digest = ego_core::digest::sha256_hex(text.as_bytes());
-    let (header, _body) = yaml_envelope::split(&text, false)?;
+    let source_digest = SkillContentDigest::parse(&ego_core::digest::sha256_hex(text.as_bytes()))
+        .map_err(|error| error.to_string())?;
+    let (header, body) = yaml_envelope::split(&text, false)?;
     let mut entries = yaml_envelope::mapping(header)?;
     validate_field_names(&entries)?;
 
@@ -430,8 +399,8 @@ fn load_skill(
         return Err("field `description` exceeds 1024 characters".to_owned());
     }
 
-    let allowed_tools = take_tool_scalar(&mut entries, "allowed-tools")?.unwrap_or_default();
-    let _disallowed_tools = take_tool_scalar(&mut entries, "disallowed-tools")?.unwrap_or_default();
+    let allowed_tools = take_tool_scalar(&mut entries, "allowed-tools")?;
+    let disallowed_tools = take_tool_scalar(&mut entries, "disallowed-tools")?.unwrap_or_default();
     let _ = take_optional_string(&mut entries, "license")?;
     let compatibility = take_optional_string(&mut entries, "compatibility")?;
     if compatibility
@@ -440,8 +409,14 @@ fn load_skill(
     {
         return Err("field `compatibility` exceeds 500 characters".to_owned());
     }
-    for key in ["when_to_use", "argument-hint", "model", "effort"] {
-        let _ = take_optional_string(&mut entries, key)?;
+    let trigger = take_optional_string(&mut entries, "when_to_use")?;
+    let argument_hint = take_optional_string(&mut entries, "argument-hint")?;
+    let model = take_optional_string(&mut entries, "model")?.map(ModelRef);
+    let effort = take_optional_string(&mut entries, "effort")?;
+    if let Some(value) = effort.as_deref()
+        && ego_core::skill::parse_skill_effort(value).is_none()
+    {
+        return Err(format!("field `effort` has unsupported value `{value}`"));
     }
     let user_invocable = take_optional_bool(&mut entries, "user-invocable")?.unwrap_or(true);
     let model_invocable =
@@ -461,8 +436,8 @@ fn load_skill(
             "field `arguments` contains invalid identifier `{argument}`"
         ));
     }
-    let _ = take_string_sequence(&mut entries, "paths")?;
-    let _ = take_string_mapping(&mut entries, "metadata")?;
+    let paths = take_string_sequence(&mut entries, "paths")?;
+    let metadata = take_string_mapping(&mut entries, "metadata")?;
 
     let context = take_optional_string(&mut entries, "context")?;
     if context.as_deref().is_some_and(|value| value != "fork") {
@@ -475,28 +450,60 @@ fn load_skill(
     if let Some(agent) = &agent {
         validate_profile_name(agent).map_err(|message| format!("field `agent` {message}"))?;
     }
-    if take_optional_bool(&mut entries, "background")? == Some(true) {
-        return Err(
-            "field `background` is unavailable until its final owner is connected".to_owned(),
-        );
-    }
-    if entries.contains_key("hooks") {
-        return Err("field `hooks` is unavailable until its final owner is connected".to_owned());
-    }
+    let background = take_optional_bool(&mut entries, "background")?.unwrap_or(false);
+    let hooks = match entries.remove("hooks") {
+        None => Vec::new(),
+        Some(Node::Sequence(hooks)) => hooks
+            .into_iter()
+            .enumerate()
+            .map(|(ordinal, hook)| project_hook_entry(hook, ordinal))
+            .collect::<Result<Vec<_>, _>>()?,
+        Some(_) => return Err("field `hooks` must be a sequence".to_owned()),
+    };
     if entries.contains_key("shell") {
         return Err("field `shell` is unsupported".to_owned());
     }
     debug_assert!(entries.is_empty(), "the closed field set is fully consumed");
 
-    Ok(SkillDescriptor {
+    let location = SkillSourceLocation::parse(&format!("skills/{name}/SKILL.md"))
+        .map_err(|error| error.to_string())?;
+    let descriptor = SkillDescriptorEvidence {
+        id: SkillId::derive(source, &location, &name, &source_digest),
         name,
         description,
+        trigger,
+        argument_hint,
         source,
-        source_path: path,
+        location,
         source_digest,
-        allowed_tools,
-        agent,
-    })
+        user_invocable,
+        model_invocable,
+    };
+    let mut spec = SkillSpec::new(descriptor, body.as_bytes().to_vec())
+        .map_err(|error| error.to_string())?
+        .with_model_selection(model, effort)
+        .with_disallowed_tools(disallowed_tools)
+        .with_arguments(arguments)
+        .with_metadata(metadata)
+        .with_resource_paths(paths)
+        .map_err(|error| error.to_string())?
+        .with_hook_entries(hooks);
+    if let Some(tools) = allowed_tools {
+        spec = spec.with_tool_ceiling(tools);
+    }
+    if context.as_deref() == Some("fork") {
+        spec = spec.with_fork(if background {
+            ChildWait::Background
+        } else {
+            ChildWait::Foreground
+        });
+    } else if background {
+        return Err("field `background` requires `context: fork`".to_owned());
+    }
+    if let Some(agent) = agent {
+        spec = spec.with_profile(agent);
+    }
+    Ok(spec)
 }
 
 fn validate_field_names(entries: &BTreeMap<String, Node>) -> Result<(), String> {
@@ -750,7 +757,7 @@ fn project_hook_matcher(value: String) -> Result<HookMatcher, String> {
         return Ok(HookMatcher::Permission(rule));
     }
     if value.is_empty()
-        || value.len() > 4096
+        || value.len() > 16 * 1024
         || value.chars().any(char::is_control)
         || (value.starts_with('/') && value.ends_with('/'))
     {
@@ -764,34 +771,59 @@ fn project_hook_handler(node: Node) -> Result<HookHandlerConfig, String> {
     let handler_type = hook_required_string(&mut fields, "type")?;
     match handler_type.as_str() {
         "command" => {
-            reject_unknown_hook_fields(&fields, &["command", "args", "timeout"])?;
+            reject_unknown_hook_fields(&fields, &["command", "args", "shell", "timeout"])?;
+            let args = hook_optional_strings(&mut fields, "args")?;
+            let shell = hook_optional_string(&mut fields, "shell")?;
+            if args.is_some() && shell.is_some() {
+                return Err(
+                    "skill hook command fields `args` and `shell` are mutually exclusive"
+                        .to_owned(),
+                );
+            }
+            if let Some(shell) = shell.as_deref()
+                && !matches!(shell, "bash" | "powershell")
+            {
+                return Err(
+                    "skill hook field `shell` must be exactly `bash` or `powershell`".to_owned(),
+                );
+            }
             Ok(HookHandlerConfig::Command {
                 command: hook_required_string(&mut fields, "command")?,
-                args: hook_optional_strings(&mut fields, "args")?.unwrap_or_default(),
+                args,
+                shell,
                 timeout_seconds: hook_optional_timeout(&mut fields)?,
             })
         }
         "http" => {
-            reject_unknown_hook_fields(&fields, &["url", "headers", "allowedEnvVars", "timeout"])?;
+            reject_unknown_hook_fields(
+                &fields,
+                &["url", "headers", "allowed_env_vars", "timeout"],
+            )?;
             Ok(HookHandlerConfig::Http {
                 url: hook_required_string(&mut fields, "url")?,
                 headers: hook_optional_string_map(&mut fields, "headers")?.unwrap_or_default(),
-                allowed_env_vars: hook_optional_strings(&mut fields, "allowedEnvVars")?
-                    .unwrap_or_default(),
+                allowed_env_vars: hook_optional_strings(&mut fields, "allowed_env_vars")?,
                 timeout_seconds: hook_optional_timeout(&mut fields)?,
             })
         }
         "mcp_tool" => {
-            reject_unknown_hook_fields(&fields, &["server", "tool", "timeout"])?;
+            reject_unknown_hook_fields(&fields, &["server", "tool", "input", "timeout"])?;
+            let input = fields
+                .remove("input")
+                .ok_or_else(|| "skill hook is missing required field `input`".to_owned())?;
+            let input = hook_json_object(input, "input")?;
             Ok(HookHandlerConfig::McpTool {
                 server: hook_required_string(&mut fields, "server")?,
                 tool: hook_required_string(&mut fields, "tool")?,
+                input,
                 timeout_seconds: hook_optional_timeout(&mut fields)?,
             })
         }
         "prompt" => {
-            reject_unknown_hook_fields(&fields, &["timeout"])?;
+            reject_unknown_hook_fields(&fields, &["prompt", "model", "timeout"])?;
             Ok(HookHandlerConfig::Prompt {
+                prompt: hook_required_string(&mut fields, "prompt")?,
+                model: hook_optional_string(&mut fields, "model")?,
                 timeout_seconds: hook_optional_timeout(&mut fields)?,
             })
         }
@@ -803,13 +835,73 @@ fn hook_mapping(node: Node, field: &str) -> Result<BTreeMap<String, Node>, Strin
     let Node::Mapping(entries) = node else {
         return Err(format!("skill hook field `{field}` must be a mapping"));
     };
-    entries
-        .into_iter()
-        .map(|(key, value)| match key {
-            Node::Scalar { value: key, .. } => Ok((key, value)),
-            _ => Err(format!("skill hook field `{field}` has a non-string key")),
-        })
-        .collect()
+    let mut mapped = BTreeMap::new();
+    for (key, value) in entries {
+        let Node::Scalar { value: key, .. } = key else {
+            return Err(format!("skill hook field `{field}` has a non-string key"));
+        };
+        if mapped.insert(key.clone(), value).is_some() {
+            return Err(format!(
+                "skill hook field `{field}` contains duplicate `{key}`"
+            ));
+        }
+    }
+    Ok(mapped)
+}
+
+fn hook_json_object(node: Node, field: &str) -> Result<serde_json::Value, String> {
+    let value = hook_json_value(node, field)?;
+    if !value.is_object() {
+        return Err(format!("skill hook field `{field}` must be an object"));
+    }
+    let bytes = serde_json::to_vec(&value)
+        .map_err(|error| format!("skill hook field `{field}` is not JSON: {error}"))?;
+    if bytes.len() > 64 * 1024 {
+        return Err(format!(
+            "skill hook field `{field}` exceeds 65536 encoded bytes"
+        ));
+    }
+    Ok(value)
+}
+
+fn hook_json_value(node: Node, field: &str) -> Result<serde_json::Value, String> {
+    match node {
+        Node::Scalar { value, plain: true } => match value.as_str() {
+            "null" => Ok(serde_json::Value::Null),
+            "true" => Ok(serde_json::Value::Bool(true)),
+            "false" => Ok(serde_json::Value::Bool(false)),
+            _ => match serde_json::from_str::<serde_json::Value>(&value) {
+                Ok(value @ serde_json::Value::Number(_)) => Ok(value),
+                _ => Ok(serde_json::Value::String(value)),
+            },
+        },
+        Node::Scalar {
+            value,
+            plain: false,
+        } => Ok(serde_json::Value::String(value)),
+        Node::Sequence(values) => values
+            .into_iter()
+            .map(|value| hook_json_value(value, field))
+            .collect::<Result<Vec<_>, _>>()
+            .map(serde_json::Value::Array),
+        Node::Mapping(entries) => {
+            let mut object = serde_json::Map::new();
+            for (key, value) in entries {
+                let Some(key) = yaml_envelope::scalar(key) else {
+                    return Err(format!(
+                        "skill hook field `{field}` object keys must be non-empty strings"
+                    ));
+                };
+                let value = hook_json_value(value, field)?;
+                if object.insert(key.clone(), value).is_some() {
+                    return Err(format!(
+                        "skill hook field `{field}` contains duplicate object key `{key}`"
+                    ));
+                }
+            }
+            Ok(serde_json::Value::Object(object))
+        }
+    }
 }
 
 fn reject_unknown_hook_fields(

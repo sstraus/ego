@@ -6,6 +6,7 @@ use super::path::CanonPath;
 use super::spawn::SpawnSpec;
 use super::{
     ForeignToolId, ForeignTransportTarget, HttpRequestDigest, InvocationDigest, NetworkTarget,
+    SecretEgressAuthority,
 };
 use crate::store::evidence::EvidenceRead;
 
@@ -48,6 +49,7 @@ pub struct Scope {
     pub(super) endpoints: Vec<String>,
     pub(super) network: Option<NetworkTarget>,
     pub(super) http_request_digest: Option<HttpRequestDigest>,
+    pub(super) secret_egress: Option<SecretEgressAuthority>,
     pub(super) foreign_invocations: Vec<(ForeignToolId, InvocationDigest)>,
     pub(super) foreign_transport: Option<ForeignTransportTarget>,
     pub(super) spawn: Option<SpawnSpec>,

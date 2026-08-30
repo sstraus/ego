@@ -13,30 +13,30 @@ use futures::future::BoxFuture;
 use futures::io::{AsyncRead, AsyncWrite, Cursor};
 use serde_json::json;
 
-use ego_core::config::{ConfigLayer, Mode, PermCfg, ResolvedMcpEntry, Ruleset, Source, Trust, resolve};
+use ego_core::config::{
+    ConfigLayer, Mode, PermCfg, ResolvedMcpEntry, Ruleset, Source, Trust, resolve,
+};
 use ego_core::event::hook::{HookActivation, HookInvocationId, HookLifecycle, HookSubject};
 use ego_core::hook::{EffectScope, HookHandlerConfig, HookInvocationRequest};
 use ego_core::mcp::{McpAdmissionFingerprint, McpOperationKind, McpSubject, ToolExecution};
 use ego_core::permit::{
-    CleanupCertainty, CanonPath, Classification, DnsResolution, DuplexEnd, DuplexHandle,
+    CanonPath, Classification, CleanupCertainty, DnsResolution, DuplexEnd, DuplexHandle,
     DuplexSession, DuplexSpawner, EnvPolicy, ForeignToolId, GuardedEffects, GuardedIo,
     InvocationDigest, OneHop, OneHopResponse, Op, PolicyEngine, PreparedCall, ProcessError,
-    ProcessExecutor, Resolver, ResolvedConnect, SpawnSpec, ToolError, ToolResult, TransportError,
+    ProcessExecutor, ResolvedConnect, Resolver, SpawnSpec, ToolError, ToolResult, TransportError,
     TransportFailure,
 };
 use ego_core::store::blob::{BlobError, BlobPage, BlobRead, BlobRef, BlobStore, BlobWriter};
 use ego_core::store::evidence::{
     EvidenceError, EvidencePage, EvidenceRead, EvidenceStore, EvidenceWriter,
 };
-use ego_core::turn::{
-    McpRegistryEvent, McpRegistryJournal, McpRegistryJournalError,
-};
+use ego_core::turn::{McpRegistryEvent, McpRegistryJournal, McpRegistryJournalError};
 use ego_mcp::{
-    McpAdmittedCandidate, McpCandidateAdmission, McpCandidateError, McpCandidateIdentity,
-    McpCandidateInventory, McpCandidateRequest, McpCapabilities, McpCacheMetadata, McpHookAdapter,
-    McpHookFailure, McpOperation, McpOperationFactory, McpRegistryCandidate, McpRegistryCapture,
-    McpRegistryController, McpRegistryRefresh, McpServerAdmission, McpTransportMaterial,
-    McpFuture, RegistryScope, RegistryTrigger,
+    McpAdmittedCandidate, McpCacheMetadata, McpCandidateAdmission, McpCandidateError,
+    McpCandidateIdentity, McpCandidateInventory, McpCandidateRequest, McpCapabilities, McpFuture,
+    McpHookAdapter, McpHookFailure, McpOperation, McpOperationFactory, McpRegistryCandidate,
+    McpRegistryCapture, McpRegistryController, McpRegistryRefresh, McpServerAdmission,
+    McpTransportMaterial, RegistryScope, RegistryTrigger,
 };
 
 fn request(server: &str, tool: &str, input: serde_json::Value) -> HookInvocationRequest {
@@ -56,10 +56,7 @@ fn request(server: &str, tool: &str, input: serde_json::Value) -> HookInvocation
     )
 }
 
-fn wrapped_wire(
-    request: &HookInvocationRequest,
-    input: &serde_json::Value,
-) -> serde_json::Value {
+fn wrapped_wire(request: &HookInvocationRequest, input: &serde_json::Value) -> serde_json::Value {
     json!({
         "hook": ego_core::hook::HookEventV1::from_runtime(request)
             .expect("strict MCP hook event"),
@@ -126,7 +123,12 @@ macro_rules! invoke_admitted_hook {
         let parameters = $parameters;
         let wire = wrapped_wire(&request, &parameters);
         let prepared = admitted_call(&wire);
-        assert!(prepared.ops.iter().any(|op| matches!(op, Op::Opaque { .. })));
+        assert!(
+            prepared
+                .ops
+                .iter()
+                .any(|op| matches!(op, Op::Opaque { .. }))
+        );
         assert!(prepared.ops.iter().any(|op| matches!(op, Op::Spawn { .. })));
         let authorized = authorize(prepared.clone());
         let fs = ego_core::permit::fake::FakeFs::default();
@@ -144,13 +146,15 @@ macro_rules! invoke_admitted_hook {
             Arc::new(OfflineOneHop),
             guarded_duplex,
         );
-        let result = block_on(McpHookAdapter::new(
-            $capture,
-            guarded,
-            prepared,
-            EffectScope::new(Duration::from_secs(30)),
-        )
-        .invoke(request));
+        let result = block_on(
+            McpHookAdapter::new(
+                $capture,
+                guarded,
+                prepared,
+                EffectScope::new(Duration::from_secs(30)),
+            )
+            .invoke(request),
+        );
         assert_eq!(duplex.calls(), $expected_duplexes);
         result
     }};
@@ -165,12 +169,7 @@ fn mcp_wraps_hook_and_input_for_one_captured_tool_and_preserves_generation() {
     let request = request("server", "lookup", json!({"key": "value"}));
     let input = json!({"key": "value"});
     let expected_wire = wrapped_wire(&request, &input);
-    let result = invoke_admitted_hook!(
-        capture,
-        request,
-        input,
-        1,
-    );
+    let result = invoke_admitted_hook!(capture, request, input, 1,);
     let settled = result.expect("typed MCP settlement");
 
     assert_eq!(settled.registry_generation(), "generation-1");
@@ -220,11 +219,7 @@ fn mcp_unknown_capture_or_denied_egress_fails_before_operation() {
             "structuredContent": {"version": 1, "decision": "continue"},
             "content": [{"type": "text", "text": "evidence only"}],
         })),
-        request(
-            "unknown",
-            "lookup",
-            json!({}),
-        ),
+        request("unknown", "lookup", json!({}),),
         json!({}),
         0,
     );
@@ -262,9 +257,9 @@ fn capture_registry(result: serde_json::Value) -> McpRegistryCapture {
         })
         .expect("configured server");
     let structured_content = result.get("structuredContent").cloned();
-    let mut result = rmcp::model::CallToolResult::success(vec![
-        rmcp::model::ContentBlock::text("evidence only"),
-    ]);
+    let mut result = rmcp::model::CallToolResult::success(vec![rmcp::model::ContentBlock::text(
+        "evidence only",
+    )]);
     result.structured_content = structured_content;
     let factory = Arc::new(HookFactory {
         result,
@@ -487,9 +482,9 @@ impl Resolver for OfflineResolver {
         _target: ego_core::permit::NetworkTarget,
         _deadline: Option<std::time::Instant>,
     ) -> BoxFuture<'static, Result<DnsResolution, TransportError>> {
-        Box::pin(futures::future::ready(Err(TransportError::definitely_unsent(
-            TransportFailure::Offline,
-        ))))
+        Box::pin(futures::future::ready(Err(
+            TransportError::definitely_unsent(TransportFailure::Offline),
+        )))
     }
 }
 
@@ -502,9 +497,9 @@ impl OneHop for OfflineOneHop {
         _request: ego_core::permit::HttpRequest,
         _deadline: Option<std::time::Instant>,
     ) -> BoxFuture<'static, Result<OneHopResponse, TransportError>> {
-        Box::pin(futures::future::ready(Err(TransportError::definitely_unsent(
-            TransportFailure::Offline,
-        ))))
+        Box::pin(futures::future::ready(Err(
+            TransportError::definitely_unsent(TransportFailure::Offline),
+        )))
     }
 }
 
@@ -520,12 +515,11 @@ impl RecordingDuplexSpawner {
 }
 
 impl DuplexSpawner for RecordingDuplexSpawner {
-    fn spawn(
-        &self,
-        spec: SpawnSpec,
-    ) -> BoxFuture<'static, Result<DuplexHandle, TransportError>> {
+    fn spawn(&self, spec: SpawnSpec) -> BoxFuture<'static, Result<DuplexHandle, TransportError>> {
         self.calls.lock().expect("duplex calls").push(spec);
-        Box::pin(futures::future::ready(Ok(Box::new(MemoryDuplex::default()) as DuplexHandle)))
+        Box::pin(futures::future::ready(Ok(
+            Box::new(MemoryDuplex::default()) as DuplexHandle,
+        )))
     }
 }
 
@@ -575,21 +569,25 @@ impl DuplexSession for MemoryDuplex {
     }
 
     fn settle(self: Box<Self>) -> BoxFuture<'static, ego_core::permit::DuplexSettlement> {
-        Box::pin(futures::future::ready(ego_core::permit::DuplexSettlement::new(
-            DuplexEnd::Exited { code: 0 },
-            CleanupCertainty::Complete,
-            ego_core::generator::attempt::DeliveryCertainty::DefinitelyUnsent,
-            Err(EvidenceError::Limit { limit: 0 }),
-        )))
+        Box::pin(futures::future::ready(
+            ego_core::permit::DuplexSettlement::new(
+                DuplexEnd::Exited { code: 0 },
+                CleanupCertainty::Complete,
+                ego_core::generator::attempt::DeliveryCertainty::DefinitelyUnsent,
+                Err(EvidenceError::Limit { limit: 0 }),
+            ),
+        ))
     }
 
     fn interrupt(self: Box<Self>) -> BoxFuture<'static, ego_core::permit::DuplexSettlement> {
-        Box::pin(futures::future::ready(ego_core::permit::DuplexSettlement::new(
-            DuplexEnd::Interrupted,
-            CleanupCertainty::Complete,
-            ego_core::generator::attempt::DeliveryCertainty::DefinitelyUnsent,
-            Err(EvidenceError::Limit { limit: 0 }),
-        )))
+        Box::pin(futures::future::ready(
+            ego_core::permit::DuplexSettlement::new(
+                DuplexEnd::Interrupted,
+                CleanupCertainty::Complete,
+                ego_core::generator::attempt::DeliveryCertainty::DefinitelyUnsent,
+                Err(EvidenceError::Limit { limit: 0 }),
+            ),
+        ))
     }
 }
 
@@ -600,7 +598,9 @@ impl McpOperationFactory for HookFactory {
         operation: McpOperation,
     ) -> Result<PreparedCall, ToolError> {
         if operation.operation() != McpOperationKind::CallTool {
-            return Err(ToolError::InvalidParams("hook requires a tool call".to_owned()));
+            return Err(ToolError::InvalidParams(
+                "hook requires a tool call".to_owned(),
+            ));
         }
         let subject = McpSubject::Tool {
             server: admission.name().to_string(),
@@ -671,9 +671,9 @@ impl McpOperationFactory for HookFactory {
             Ok(ego_mcp::McpHookExecution::new(
                 result,
                 ego_core::store::evidence::EvidenceRef::new(
-                    ego_core::store::evidence::EvidenceId::parse(
-                        ego_core::digest::sha256_hex(&evidence_bytes),
-                    )
+                    ego_core::store::evidence::EvidenceId::parse(ego_core::digest::sha256_hex(
+                        &evidence_bytes,
+                    ))
                     .expect("MCP hook evidence id"),
                     evidence_bytes.len() as u64,
                 ),

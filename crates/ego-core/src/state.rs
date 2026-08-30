@@ -485,13 +485,17 @@ pub enum SubagentEvent {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SkillEvent {
     Instruction {
+        turn: TurnId,
         invocation: SkillInvocationId,
         skill: SkillId,
         catalogue_generation: SkillCatalogueGeneration,
         source: SkillSourceAuthority,
         location: SkillSourceLocation,
         source_digest: SkillContentDigest,
+        admission: BlobRef,
         rendered: BlobRef,
+        model: Option<String>,
+        effort: Option<String>,
     },
     Resource {
         invocation: SkillInvocationId,
@@ -1333,7 +1337,14 @@ impl SessionState {
         }
         for event in &self.skill_events {
             match event {
-                SkillEvent::Instruction { rendered, .. } => references.push(rendered.clone()),
+                SkillEvent::Instruction {
+                    admission,
+                    rendered,
+                    ..
+                } => {
+                    references.push(admission.clone());
+                    references.push(rendered.clone());
+                }
                 SkillEvent::Resource { content, .. } => references.push(content.clone()),
             }
         }
@@ -1614,15 +1625,22 @@ impl SessionState {
                 source,
                 location,
                 source_digest,
+                admission,
                 rendered,
+                model,
+                effort,
             } => self.skill_events.push(SkillEvent::Instruction {
+                turn: ev.env.turn,
                 invocation: *invocation,
                 skill: *skill,
                 catalogue_generation: *catalogue_generation,
                 source: *source,
                 location: location.clone(),
                 source_digest: *source_digest,
+                admission: admission.clone(),
                 rendered: rendered.clone(),
+                model: model.clone(),
+                effort: effort.clone(),
             }),
             EventKind::SkillResourceAdmitted {
                 invocation,

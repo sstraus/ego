@@ -14,7 +14,7 @@ use ego_core::event::hook::{
     HookOutcome, HookSubject,
 };
 use ego_core::event::id::ItemId;
-use ego_core::event::skill::SkillInvocationId;
+use ego_core::event::skill::{SkillInvocationId, SkillSourceAuthority};
 use ego_core::hook::{
     HookCatalogue, HookCatalogueError, HookConfigEntry, HookEvent, HookFuture, HookHandlerConfig,
     HookMatcher, HookPort, HookRecordFuture, HookRunError, HookRunner, HookSource, HookSpec,
@@ -28,9 +28,18 @@ fn layer(source: Source, toml: &str) -> Sourced<ConfigLayer> {
 
 fn persistent_layers() -> [Sourced<ConfigLayer>; 3] {
     [
-        layer(Source::System, "[[hooks]]\nevent = \"PreToolUse\"\n"),
-        layer(Source::User, "[[hooks]]\nevent = \"PostToolUse\"\n"),
-        layer(Source::Project, "[[hooks]]\nevent = \"PermissionDenied\"\n"),
+        layer(
+            Source::System,
+            "[[hooks]]\nevent = \"PreToolUse\"\n[hooks.handler]\ntype = \"prompt\"\nprompt = \"fixture\"\n",
+        ),
+        layer(
+            Source::User,
+            "[[hooks]]\nevent = \"PostToolUse\"\n[hooks.handler]\ntype = \"prompt\"\nprompt = \"fixture\"\n",
+        ),
+        layer(
+            Source::Project,
+            "[[hooks]]\nevent = \"PermissionDenied\"\n[hooks.handler]\ntype = \"prompt\"\nprompt = \"fixture\"\n",
+        ),
     ]
 }
 
@@ -42,7 +51,8 @@ fn typed_skill_hook() -> HookConfigEntry {
         )),
         HookHandlerConfig::Command {
             command: "/usr/bin/skill-hook".to_owned(),
-            args: Vec::new(),
+            args: None,
+            shell: None,
             timeout_seconds: None,
         },
     )
@@ -51,9 +61,10 @@ fn typed_skill_hook() -> HookConfigEntry {
 #[test]
 fn typed_sources_and_skill_projection_make_one_strict_source_bound_catalogue() {
     let layers = persistent_layers();
-    let skill = HookSource::skill_entries(
+    let skill = HookSource::skill_entries_with_authority(
         "skills/demo/SKILL.md",
         SkillInvocationId::new(),
+        SkillSourceAuthority::User,
         [typed_skill_hook()],
     );
     let catalogue = HookCatalogue::admit_typed(&layers, &[skill], Trust::Trusted)
@@ -149,7 +160,7 @@ fn closed_handlers_reject_exact_unknown_fields_and_admit_http_without_adapter() 
     let http = HookHandlerConfig::Http {
         url: "https://hooks.example.test/notify".to_owned(),
         headers: Vec::new(),
-        allowed_env_vars: Vec::new(),
+        allowed_env_vars: None,
         timeout_seconds: None,
     };
     let spec = HookSpec::from_typed(
@@ -341,9 +352,10 @@ fn typed_catalogue() -> HookCatalogue {
     let layers = persistent_layers();
     HookCatalogue::admit_typed(
         &layers,
-        &[HookSource::skill_entries(
+        &[HookSource::skill_entries_with_authority(
             "skills/demo/SKILL.md",
             SkillInvocationId::new(),
+            SkillSourceAuthority::User,
             [typed_skill_hook()],
         )],
         Trust::Trusted,
@@ -355,9 +367,10 @@ fn once_catalogue() -> HookCatalogue {
     let layers = persistent_layers();
     HookCatalogue::admit_typed(
         &layers,
-        &[HookSource::skill_entries(
+        &[HookSource::skill_entries_with_authority(
             "skills/demo/SKILL.md",
             SkillInvocationId::new(),
+            SkillSourceAuthority::User,
             [typed_skill_hook().with_once(true)],
         )],
         Trust::Trusted,
@@ -368,16 +381,18 @@ fn once_catalogue() -> HookCatalogue {
 fn failure_catalogue() -> HookCatalogue {
     HookCatalogue::admit_typed(
         &[],
-        &[HookSource::skill_entries(
+        &[HookSource::skill_entries_with_authority(
             "skills/failure/SKILL.md",
             SkillInvocationId::new(),
+            SkillSourceAuthority::User,
             [
                 HookConfigEntry::new(
                     HookLifecycle::PreCompact,
                     None,
                     HookHandlerConfig::Command {
                         command: "/usr/bin/pre-compact".to_owned(),
-                        args: Vec::new(),
+                        args: None,
+                        shell: None,
                         timeout_seconds: None,
                     },
                 ),
@@ -386,7 +401,8 @@ fn failure_catalogue() -> HookCatalogue {
                     None,
                     HookHandlerConfig::Command {
                         command: "/usr/bin/post-compact".to_owned(),
-                        args: Vec::new(),
+                        args: None,
+                        shell: None,
                         timeout_seconds: None,
                     },
                 ),
@@ -718,9 +734,10 @@ fn catalogue_reload_builds_a_real_candidate_then_atomically_keeps_last_good() {
     let first_invocation = SkillInvocationId::new();
     let second_invocation = SkillInvocationId::new();
     let skills = [
-        HookSource::skill_entries(
+        HookSource::skill_entries_with_authority(
             "skills/reloaded/first/SKILL.md",
             first_invocation,
+            SkillSourceAuthority::User,
             [
                 typed_skill_hook().with_once(true),
                 HookConfigEntry::new(
@@ -728,22 +745,25 @@ fn catalogue_reload_builds_a_real_candidate_then_atomically_keeps_last_good() {
                     None,
                     HookHandlerConfig::Command {
                         command: "/usr/bin/reloaded-first".to_owned(),
-                        args: Vec::new(),
+                        args: None,
+                        shell: None,
                         timeout_seconds: None,
                     },
                 ),
             ],
         ),
-        HookSource::skill_entries(
+        HookSource::skill_entries_with_authority(
             "skills/reloaded/second/SKILL.md",
             second_invocation,
+            SkillSourceAuthority::User,
             [
                 HookConfigEntry::new(
                     HookLifecycle::SubagentStart,
                     None,
                     HookHandlerConfig::Command {
                         command: "/usr/bin/reloaded-second-start".to_owned(),
-                        args: Vec::new(),
+                        args: None,
+                        shell: None,
                         timeout_seconds: None,
                     },
                 ),
@@ -752,7 +772,8 @@ fn catalogue_reload_builds_a_real_candidate_then_atomically_keeps_last_good() {
                     None,
                     HookHandlerConfig::Command {
                         command: "/usr/bin/reloaded-second-compact".to_owned(),
-                        args: Vec::new(),
+                        args: None,
+                        shell: None,
                         timeout_seconds: None,
                     },
                 ),
@@ -811,7 +832,10 @@ fn catalogue_reload_builds_a_real_candidate_then_atomically_keeps_last_good() {
 fn persistent_once_is_refused_and_candidate_duplicates_are_not_published() {
     assert!(matches!(
         HookCatalogue::admit_typed(
-            &[layer(Source::User, "[[hooks]]\nevent = \"PostToolUse\"\nonce = true\n")],
+            &[layer(
+                Source::User,
+                "[[hooks]]\nevent = \"PostToolUse\"\nonce = true\n[hooks.handler]\ntype = \"prompt\"\nprompt = \"fixture\"\n",
+            )],
             &[],
             Trust::Trusted,
         ),
@@ -819,9 +843,10 @@ fn persistent_once_is_refused_and_candidate_duplicates_are_not_published() {
     ));
     let duplicate = HookCatalogue::admit_typed(
         &[],
-        &[HookSource::skill_entries(
+        &[HookSource::skill_entries_with_authority(
             "skills/demo/SKILL.md",
             SkillInvocationId::new(),
+            SkillSourceAuthority::User,
             [typed_skill_hook(), typed_skill_hook()],
         )],
         Trust::Trusted,

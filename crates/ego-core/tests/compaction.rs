@@ -20,7 +20,8 @@ use ego_core::evidence::{
     EvidenceStore as AdmissionStore, EvidenceWrite, RunInvocationId,
 };
 use ego_core::generation_model_source::{
-    GenerationModelError, GenerationModelErrorClass, GenerationModelSource, GenerationProfile,
+    GenerationModelError, GenerationModelErrorClass, GenerationModelRequest, GenerationModelSource,
+    GenerationProfile,
 };
 use ego_core::generator::attempt::{
     AttemptRef, AttemptStream, DeliveryCertainty, GenerationAttempt, Outcome, UsageReport,
@@ -678,8 +679,9 @@ impl CompactionSource {
 impl GenerationModelSource for CompactionSource {
     fn resolve<'a>(
         &'a self,
-        role: GenerationRole,
+        request: GenerationModelRequest,
     ) -> BoxFuture<'a, Result<GenerationProfile, GenerationModelError>> {
+        let role = request.role();
         self.roles.lock().expect("resolved roles").push(role);
         let step = self.steps.lock().expect("resolution steps").pop_front();
         let result = match step {

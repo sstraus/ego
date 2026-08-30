@@ -195,6 +195,15 @@ impl ProcessExecutor for GuardedExec {
     ) -> BoxFuture<'a, Result<ego_core::permit::ToolResult, ProcessError>> {
         Box::pin(self.context.execute(spec))
     }
+
+    fn execute_handler<'a>(
+        &'a self,
+        spec: &'a SpawnSpec,
+        input: &'a [u8],
+        scope: ego_core::hook::EffectScope,
+    ) -> BoxFuture<'a, Result<ego_core::permit::ToolResult, ProcessError>> {
+        Box::pin(self.context.execute_handler(spec, input, scope))
+    }
 }
 
 /// The complete external-effect adapter set owned by one run.

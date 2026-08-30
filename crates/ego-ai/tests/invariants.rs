@@ -57,7 +57,7 @@ use ego_core::evidence::{
     EvidenceStore as AdmissionStore, EvidenceWrite, RunInvocationId,
 };
 use ego_core::generation_model_source::{
-    GenerationModelError, GenerationModelSource, GenerationProfile, GenerationRole,
+    GenerationModelError, GenerationModelRequest, GenerationModelSource, GenerationProfile,
 };
 use ego_core::generator::attempt::DeliveryCertainty;
 use ego_core::generator::capabilities::{
@@ -241,7 +241,7 @@ struct SingleGenerationSource {
 impl GenerationModelSource for SingleGenerationSource {
     fn resolve<'a>(
         &'a self,
-        _role: GenerationRole,
+        _request: GenerationModelRequest,
     ) -> BoxFuture<'a, Result<GenerationProfile, GenerationModelError>> {
         let profile = GenerationProfile {
             identity: self.profile.identity.clone(),
