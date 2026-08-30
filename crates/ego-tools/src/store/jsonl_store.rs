@@ -11,6 +11,10 @@ use std::fs::{self, OpenOptions};
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use ego_core::compact::{
+    CompactionTargetError, CompactionTargetFacts, CompactionTargetInspection,
+    CompactionTargetPort,
+};
 use ego_core::event::domain::{DomainEvent, EventKind, GenerationRole};
 use ego_core::event::hook::HookCatalogueEvidence;
 use ego_core::event::id::{Producer, Seq, SessionId};
@@ -1808,6 +1812,143 @@ impl ReplaySource for JsonlStore {
             entries.push(entry);
         }
         Ok(Some(entries))
+    }
+}
+
+impl CompactionTargetPort for JsonlStore {
+    fn inspect(
+        &self,
+        target: SessionId,
+    ) -> Result<CompactionTargetInspection, CompactionTargetError> {
+        let log_path = self.log_path(&target);
+        if !self
+            .io
+            .exists(&log_path)
+            .map_err(StoreError::Io)
+            .map_err(compaction_target_error)?
+        {
+            return Ok(CompactionTargetInspection::Missing);
+        }
+        self.with_events_lock(&target, || self.inspect_compaction_target_locked(&target))
+            .map_err(compaction_target_error)
+    }
+
+    fn publish(&self, target: SessionId, seed: &TargetSeed) -> TargetPublication {
+        self.publish_target(&target, seed)
+    }
+
+    fn confirm(
+        &self,
+        target: SessionId,
+        expected: CompactionTargetFacts,
+    ) -> Result<TargetPublication, CompactionTargetError> {
+        self.with_events_lock(&target, || {
+            let actual = self.inspect_compaction_target_locked(&target)?;
+            if actual != CompactionTargetInspection::Compaction(expected) {
+                return Err(invalid_log(
+                    "the deterministic compaction target has different authoritative facts",
+                ));
+            }
+
+            let log_path = self.log_path(&target);
+            let bytes = self
+                .io
+                .read(&log_path)?
+                .ok_or_else(|| invalid_log("the deterministic compaction target is missing"))?;
+            let manifest_diagnostic = self
+                .rebuild_manifest_from_log(&target, &bytes)
+                .err()
+                .map(|error| format!("manifest cache update failed: {error}"));
+
+            let barrier_diagnostic = self
+                .io
+                .fsync(&log_path)
+                .and_then(|()| {
+                    let parent = log_path.parent().ok_or_else(|| {
+                        std::io::Error::other("the compaction target log has no parent directory")
+                    })?;
+                    self.io.fsync(parent)
+                })
+                .err()
+                .map(|error| error.to_string());
+
+            Ok(match barrier_diagnostic {
+                Some(barrier) => TargetPublication::PublishedDurabilityUncertain {
+                    diagnostic: match manifest_diagnostic {
+                        Some(manifest) => format!("{barrier}; {manifest}"),
+                        None => barrier,
+                    },
+                },
+                None => TargetPublication::PublishedDurably {
+                    diagnostic: manifest_diagnostic,
+                },
+            })
+        })
+        .map_err(compaction_target_error)
+    }
+}
+
+impl JsonlStore {
+    fn inspect_compaction_target_locked(
+        &self,
+        target: &SessionId,
+    ) -> Result<CompactionTargetInspection, StoreError> {
+        let log_path = self.log_path(target);
+        let Some(bytes) = self.io.read(&log_path)? else {
+            return Ok(CompactionTargetInspection::Missing);
+        };
+        if !bytes.ends_with(b"\n") {
+            return Err(invalid_log(
+                "the deterministic compaction target has an unterminated log tail",
+            ));
+        }
+
+        let entries = ReplaySource::entries(self, target).map_err(|error| {
+            invalid_log(format!(
+                "the deterministic compaction target could not be decoded: {error}"
+            ))
+        })?;
+        let Some(entries) = entries else {
+            return Ok(CompactionTargetInspection::Missing);
+        };
+        let Some(SessionEntry::Event(first_event)) = entries.first() else {
+            return Ok(CompactionTargetInspection::Occupied);
+        };
+
+        let mut first = Seq::ZERO;
+        first.next();
+        let EventKind::CompactionSeeded {
+            source,
+            source_seq,
+            prompt_revision,
+            ..
+        } = &first_event.kind
+        else {
+            return Ok(CompactionTargetInspection::Occupied);
+        };
+        if first_event.env.seq != first
+            || first_event.env.item.is_none()
+            || first_event.env.parent.is_some()
+            || first_event.env.producer != Producer::Main
+        {
+            return Err(invalid_log(
+                "the deterministic compaction target has a non-canonical sequence-1 seed",
+            ));
+        }
+
+        Ok(CompactionTargetInspection::Compaction(
+            CompactionTargetFacts {
+                source: *source,
+                source_seq: *source_seq,
+                prompt_revision: *prompt_revision,
+            },
+        ))
+    }
+}
+
+fn compaction_target_error(error: StoreError) -> CompactionTargetError {
+    CompactionTargetError {
+        diagnostic: error.to_string(),
     }
 }
 

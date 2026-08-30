@@ -14,6 +14,7 @@ use ego_core::cost::{Amount, CurrencyCode, MeteringRevision, Money};
 use ego_core::event::domain::{DomainEvent, EventKind, ExitReason};
 use ego_core::event::id::ItemId;
 use ego_core::event::time::{Clock, Timestamp};
+use ego_core::evidence::{EvidenceAdmissionService, RunInvocationId};
 use ego_core::generation_model_source::{
     GenerationModelError, GenerationModelSource, GenerationProfile, GenerationRole,
 };
@@ -349,6 +350,7 @@ fn unavailable_elicitor_persists_question_closes_unstarted_siblings_and_leaves_t
             id: ego_core::event::id::SessionId::new(),
             state: SessionState::default(),
             store: &store,
+            evidence: &evidence,
             clock: &clock,
             sink: &sink,
             cancel: CancelToken::new(),
@@ -360,6 +362,8 @@ fn unavailable_elicitor_persists_question_closes_unstarted_siblings_and_leaves_t
                 system: None,
                 token_ceiling: None,
             },
+            admission: Arc::new(EvidenceAdmissionService::new()),
+            invocation: RunInvocationId::new(),
         },
         tools,
     )

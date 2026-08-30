@@ -32,6 +32,7 @@ use ego_core::config::{
 use ego_core::event::id::{ItemId, SessionId};
 use ego_core::generator::types::ThinkingLevel;
 use ego_core::permit::Confinement;
+use ego_core::run::RequestId;
 use ego_core::usage::UsagePeriod;
 
 use crate::agent_file::{self, AgentFile};
@@ -56,6 +57,8 @@ pub enum Invocation {
     Usage(Box<UsageArgs>),
     /// `ego fork ID` — create a target at the source's latest durable idle boundary.
     Fork(Box<ForkArgs>),
+    /// `ego compact ID --request-id UUID` — publish one deterministic successor.
+    Compact(Box<CompactArgs>),
     /// `ego models` — the shared model catalogue snapshot.
     Models(Box<ModelsArgs>),
     /// `ego acp` — serve the Agent Client Protocol on stdio, until the host
@@ -149,6 +152,7 @@ pub const BUILT: &[&str] = &[
     "run",
     "resume",
     "fork",
+    "compact",
     "ls",
     "usage",
     "models",
@@ -341,6 +345,16 @@ pub struct UsageArgs {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForkArgs {
     pub source: SessionId,
+    pub session_dir: Option<PathBuf>,
+    pub directory: Option<PathBuf>,
+    pub output: Output,
+}
+
+/// The exact deterministic headless compaction request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompactArgs {
+    pub source: SessionId,
+    pub request_id: RequestId,
     pub session_dir: Option<PathBuf>,
     pub directory: Option<PathBuf>,
     pub output: Output,
@@ -563,6 +577,23 @@ struct UsageCommand {
 )]
 struct ForkCommand {
     source: String,
+
+    #[command(flatten)]
+    common: Common,
+}
+
+/// `ego compact ID --request-id UUID` — no implicit idempotency identity.
+#[derive(Debug, Parser)]
+#[command(
+    name = "ego compact",
+    about = "Compact a session into its deterministic successor.",
+    disable_help_subcommand = true
+)]
+struct CompactCommand {
+    source: String,
+
+    #[arg(long = "request-id")]
+    request_id: String,
 
     #[command(flatten)]
     common: Common,
@@ -1139,6 +1170,7 @@ fn overview(program: &str) -> String {
             "fork" => "Fork a session at its latest durable idle boundary",
             "ls" => "List sessions (this workspace; --all for every one)",
             "usage" => "Report usage, context and cost for this workspace",
+            "compact" => "Compact a session into its deterministic successor",
             "models" => "List the shared model catalogue",
             "acp" => "Serve the Agent Client Protocol on stdio",
             "mcp-server" => "Serve scoped ego runs over MCP on stdio",
@@ -1305,6 +1337,37 @@ pub fn parse(argv: Vec<String>) -> Result<Invocation, UsageError> {
                 })?;
                 Ok(Invocation::Fork(Box::new(ForkArgs {
                     source,
+                    session_dir: parsed.common.places.session_dir,
+                    directory: parsed.common.places.directory,
+                    output: parsed.common.output,
+                })))
+            }
+        },
+        Some("compact") => match clap_or_answer::<CompactCommand>(&tokens)? {
+            Parsed::Answered(text) => Ok(Invocation::Answered(text)),
+            Parsed::Command(parsed) => {
+                let source = SessionId::from_str(&parsed.source).map_err(|error| {
+                    UsageError(format!("`{}` is not a session id: {error}", parsed.source))
+                })?;
+                if source.uuid().is_nil() {
+                    return Err(UsageError(
+                        "the compaction source must not be the nil session id".to_owned(),
+                    ));
+                }
+                let request_id = RequestId::from_str(&parsed.request_id).map_err(|error| {
+                    UsageError(format!(
+                        "`{}` is not a compaction request id: {error}",
+                        parsed.request_id
+                    ))
+                })?;
+                if request_id.uuid().is_nil() {
+                    return Err(UsageError(
+                        "the compaction request id must not be nil".to_owned(),
+                    ));
+                }
+                Ok(Invocation::Compact(Box::new(CompactArgs {
+                    source,
+                    request_id,
                     session_dir: parsed.common.places.session_dir,
                     directory: parsed.common.places.directory,
                     output: parsed.common.output,

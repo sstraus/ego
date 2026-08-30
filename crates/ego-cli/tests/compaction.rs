@@ -1,84 +1,89 @@
-//! RED contract for regression case's interactive compaction boundary.
-//!
-//! `/compact` is a host-owned session command.  It must not enter the normal
-//! prompt ingress, which owns ordinary user turns and their queue.
+//! RED contract for the headless `ego compact` host surface.
 
-use ego_cli::catalogue::CATALOGUE_VERSION;
-use ego_cli::repl::actions::{ActionId, ActionRegistry, Availability};
-use ego_cli::repl::{DraftStash, HostCommand, Line};
-use ego_core::event::id::SessionId;
+use ego_cli::cli::{CompactArgs, Invocation, Output, parse};
 
-#[test]
-fn compact_is_a_typed_host_command_and_never_prompt_text() {
-    let command = HostCommand::Action(ActionId::Compact);
-    assert_eq!(
-        Line::HostCommand(command.clone()),
-        Line::HostCommand(HostCommand::Action(ActionId::Compact))
-    );
-    assert_ne!(
-        Line::HostCommand(command),
-        Line::Submitted("/compact".to_string()),
-        "compact must not enter ordinary prompt ingress"
-    );
-}
+const SOURCE: &str = "00000000-0000-0000-0000-000000000068";
+const REQUEST: &str = "00000000-0000-0000-0000-000000000069";
 
-#[test]
-fn typed_host_commands_cover_the_non_prompt_control_variants() {
-    for command in [
-        HostCommand::Action(ActionId::Compact),
-        HostCommand::Draft,
-        HostCommand::BusySubmit,
-        HostCommand::Interrupt,
-        HostCommand::ModalEscape,
-        HostCommand::ModelPicker("provider/model".to_string()),
-        HostCommand::QuestionSelector("answer".to_string()),
-    ] {
-        assert!(matches!(Line::HostCommand(command), Line::HostCommand(_)));
+fn compact(args: &[&str]) -> Result<CompactArgs, String> {
+    match parse(args.iter().map(|value| (*value).to_owned()).collect()) {
+        Ok(Invocation::Compact(args)) => Ok(*args),
+        Ok(other) => Err(format!("expected compact invocation, got {other:?}")),
+        Err(error) => Err(error.to_string()),
     }
 }
 
 #[test]
-fn compact_availability_remains_disabled_until_pending_work_is_consumed() {
-    let registry =
-        ActionRegistry::final_surface().with_availability(ActionId::Compact, Availability::Busy);
-    assert_eq!(registry.availability(ActionId::Compact), Availability::Busy);
+fn compact_requires_a_source_and_explicit_request_id() {
+    let args = compact(&["ego", "compact", SOURCE, "--request-id", REQUEST])
+        .expect("valid compact invocation");
+    assert_eq!(args.source.to_string(), SOURCE);
+    assert_eq!(args.request_id.uuid().to_string(), REQUEST);
 }
 
 #[test]
-fn ephemeral_source_disables_compact_with_the_exact_owner_reason() {
-    let registry = ActionRegistry::final_surface().with_availability(
-        ActionId::Compact,
-        Availability::Disabled {
-            owner: "compaction requires a durable source session",
-        },
+fn compact_preserves_output_and_root_selection_flags() {
+    let args = compact(&[
+        "ego",
+        "compact",
+        SOURCE,
+        "--request-id",
+        REQUEST,
+        "--output",
+        "jsonl",
+        "-C",
+        "/workspace",
+        "--session-dir",
+        "/sessions",
+    ])
+    .expect("valid compact invocation");
+    assert_eq!(args.output, Output::Jsonl);
+    assert_eq!(
+        args.directory.as_deref(),
+        Some(std::path::Path::new("/workspace"))
     );
     assert_eq!(
-        registry.availability(ActionId::Compact),
-        Availability::Disabled {
-            owner: "compaction requires a durable source session",
-        }
+        args.session_dir.as_deref(),
+        Some(std::path::Path::new("/sessions"))
     );
 }
 
 #[test]
-fn compaction_catalogue_publication_uses_catalogue_schema_v2() {
-    assert_eq!(CATALOGUE_VERSION, 2);
+fn compact_refuses_an_implicit_request_id() {
+    let result = parse(
+        ["ego", "compact", SOURCE]
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
+    );
+    assert!(result.is_err());
 }
 
 #[test]
-fn draft_stash_is_source_keyed_and_activation_starts_empty() {
-    let source = SessionId::new();
-    let target = SessionId::new();
-    let mut drafts = DraftStash::new(source);
+fn compact_has_no_alias_or_run_command_mode() {
+    for alias in ["--compact", "compress"] {
+        let result = parse(
+            ["ego", alias, SOURCE, "--request-id", REQUEST]
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+        );
+        assert!(
+            result.is_err(),
+            "unsupported compact alias {alias} was accepted"
+        );
+    }
+}
 
-    assert_eq!(drafts.active(), source);
-    assert_eq!(drafts.active_count(), 0);
-    assert_eq!(drafts.count(source), 0);
-    assert_eq!(drafts.count(target), 0);
-
-    drafts.activate(target);
-    assert_eq!(drafts.active(), target);
-    assert_eq!(drafts.active_count(), 0);
-    assert_eq!(drafts.count(source), 0);
-    assert_eq!(drafts.count(target), 0);
+#[test]
+fn compact_requires_a_real_session_id_and_request_id() {
+    for value in ["not-a-session", "00000000-0000-0000-0000-000000000000"] {
+        let result = parse(
+            ["ego", "compact", value, "--request-id", REQUEST]
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+        );
+        assert!(result.is_err(), "invalid source {value} was accepted");
+    }
 }

@@ -11,10 +11,12 @@ use crate::negotiate::{SERVED, negotiate};
 use crate::project::stop_reason_v1;
 use crate::question::{AcpQuestionAdapter, CapabilityCapture};
 use agent_client_protocol::{
-    Agent, AgentProtocolRouter, Client, ConnectionTo, Error, ErrorCode, on_receive_notification,
-    on_receive_request,
+    Agent, AgentProtocolRouter, Client, ConnectionTo, Error, ErrorCode, JsonRpcMessage,
+    JsonRpcRequest, Responder, UntypedMessage, on_receive_notification, on_receive_request,
 };
 use agent_client_protocol_schema::v1;
+use ego_core::compact::{CompactionCommand, CompactionReceipt, CompactionTransitionRequest};
+use ego_core::event::id::SessionId;
 use ego_core::event::time::Clock;
 use ego_core::generator::capabilities::ModelCapabilities;
 use ego_core::run::{
@@ -25,6 +27,7 @@ use ego_core::run::{
 use ego_core::sink::EventSink;
 use ego_core::store::session_store::SessionStore;
 use ego_core::turn::AdmittedToolSource;
+use serde::{Deserialize, Serialize};
 
 /// Failure to turn an untrusted protocol path into a canonical run root.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -138,10 +141,76 @@ impl RunBindingsBuilder for AcpRunBindingsBuilder {
     }
 }
 
-fn capabilities() -> v1::AgentCapabilities {
-    v1::AgentCapabilities::new()
+fn capabilities(compaction: bool) -> v1::AgentCapabilities {
+    let capabilities = v1::AgentCapabilities::new()
         .load_session(false)
-        .mcp_capabilities(v1::McpCapabilities::new().http(true).sse(false))
+        .mcp_capabilities(v1::McpCapabilities::new().http(true).sse(false));
+    if !compaction {
+        return capabilities;
+    }
+    capabilities.meta(serde_json::Map::from_iter([(
+        "ego".to_owned(),
+        serde_json::json!({
+            "compact": {"version": 1, "method": "_ego/compact"}
+        }),
+    )]))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AcpCompactRequest {
+    v: u32,
+    session_id: String,
+    request_id: String,
+}
+
+impl JsonRpcMessage for AcpCompactRequest {
+    fn matches_method(method: &str) -> bool {
+        method == "_ego/compact"
+    }
+
+    fn method(&self) -> &str {
+        "_ego/compact"
+    }
+
+    fn to_untyped_message(&self) -> Result<UntypedMessage, Error> {
+        UntypedMessage::new(self.method(), self)
+    }
+
+    fn parse_message(method: &str, params: &impl Serialize) -> Result<Self, Error> {
+        if !Self::matches_method(method) {
+            return Err(Error::method_not_found());
+        }
+        agent_client_protocol::util::json_cast_params(params)
+    }
+}
+
+impl JsonRpcRequest for AcpCompactRequest {
+    type Response = serde_json::Value;
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AcpCompactResponse {
+    v: u32,
+    source_session_id: SessionId,
+    source_seq: ego_core::event::id::Seq,
+    target_session_id: SessionId,
+    publication: ego_core::session::TargetPublication,
+    successor_start_request_id: RequestId,
+}
+
+impl From<CompactionReceipt> for AcpCompactResponse {
+    fn from(receipt: CompactionReceipt) -> Self {
+        Self {
+            v: 1,
+            source_session_id: receipt.source,
+            source_seq: receipt.source_seq,
+            target_session_id: receipt.target,
+            publication: receipt.publication,
+            successor_start_request_id: receipt.successor_start_request_id,
+        }
+    }
 }
 
 struct Registered {
@@ -414,6 +483,34 @@ where
         ids,
         bindings_builder,
         mcp_admitter,
+        None,
+    ))
+}
+
+/// Build the production ACP router with the versioned compaction extension.
+pub fn agent_with_compaction<S, E, C, I>(
+    controller: Arc<RunController<S, E, C, I>>,
+    roots: Arc<dyn RootResolver>,
+    spawner: Arc<dyn ExecutionSpawner>,
+    ids: Arc<dyn IdSource>,
+    bindings_builder: Arc<dyn RunBindingsBuilder>,
+    mcp_admitter: Arc<dyn McpSessionAdmitter>,
+    compaction: Arc<dyn CompactionCommand>,
+) -> AgentProtocolRouter
+where
+    S: SessionStore + 'static,
+    E: RunExecutor + 'static,
+    C: Clock + 'static,
+    I: IdSource + 'static,
+{
+    Agent.protocol_router().with_v1(v1_agent(
+        controller,
+        roots,
+        spawner,
+        ids,
+        bindings_builder,
+        mcp_admitter,
+        Some(compaction),
     ))
 }
 
@@ -424,6 +521,7 @@ fn v1_agent<S, E, C, I>(
     ids: Arc<dyn IdSource>,
     bindings_builder: Arc<dyn RunBindingsBuilder>,
     mcp_admitter: Arc<dyn McpSessionAdmitter>,
+    compaction: Option<Arc<dyn CompactionCommand>>,
 ) -> impl agent_client_protocol::ConnectTo<Client>
 where
     S: SessionStore + 'static,
@@ -433,6 +531,7 @@ where
 {
     let sessions = Sessions::default();
     let client_capabilities = Arc::new(Mutex::new(CapabilityCapture::default()));
+    let advertises_compaction = compaction.is_some();
     Agent
         .builder()
         .name("ego")
@@ -454,7 +553,7 @@ where
                         .capture_initialize(&request.client_capabilities);
                     responder.respond(
                         v1::InitializeResponse::new(answer)
-                            .agent_capabilities(capabilities())
+                            .agent_capabilities(capabilities(advertises_compaction))
                             .agent_info(Some(v1::Implementation::new(
                                 "ego",
                                 env!("CARGO_PKG_VERSION"),
@@ -655,6 +754,58 @@ where
                         }
                     })?;
                     Ok(())
+                }
+            },
+            on_receive_request!(),
+        )
+        .on_receive_request(
+            {
+                let compaction = compaction.clone();
+                move |request: AcpCompactRequest,
+                      responder: Responder<serde_json::Value>,
+                      _cx| {
+                    let compaction = compaction.clone();
+                    async move {
+                    let Some(compaction) = compaction else {
+                        return responder.respond_with_error(Error::method_not_found());
+                    };
+                    if request.v != 1 {
+                        return responder.respond_with_error(
+                            Error::invalid_params().data("unsupported _ego/compact version"),
+                        );
+                    }
+                    let source = match request.session_id.parse::<SessionId>() {
+                        Ok(source) if !source.uuid().is_nil() => source,
+                        _ => {
+                            return responder.respond_with_error(
+                                Error::invalid_params().data("invalid compaction sessionId"),
+                            );
+                        }
+                    };
+                    let request_id = match request.request_id.parse::<RequestId>() {
+                        Ok(request_id) if !request_id.uuid().is_nil() => request_id,
+                        _ => {
+                            return responder.respond_with_error(
+                                Error::invalid_params().data("invalid compaction requestId"),
+                            );
+                        }
+                    };
+                    match compaction
+                        .compact(CompactionTransitionRequest { request_id, source })
+                        .await
+                    {
+                        Ok(receipt) => match serde_json::to_value(AcpCompactResponse::from(receipt))
+                        {
+                            Ok(response) => responder.respond(response),
+                            Err(error) => responder.respond_with_error(
+                                Error::internal_error().data(error.to_string()),
+                            ),
+                        },
+                        Err(error) => responder.respond_with_error(
+                            Error::internal_error().data(error.to_string()),
+                        ),
+                    }
+                    }
                 }
             },
             on_receive_request!(),

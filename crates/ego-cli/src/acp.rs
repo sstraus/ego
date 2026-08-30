@@ -306,11 +306,19 @@ pub async fn serve(args: &AcpArgs, evidence: Arc<EvidenceAdmissionService>) -> R
     let executor = Arc::new(run::CliRunExecutor::for_acp(
         args.session_dir.clone(),
         Arc::clone(&store),
-        evidence,
+        Arc::clone(&evidence),
     ));
+    let compaction: Arc<dyn ego_core::compact::CompactionCommand> = Arc::new(
+        run::CliCompactionCommand::for_protocol(
+            root.clone(),
+            args.session_dir.clone(),
+            Arc::clone(&store),
+            evidence,
+        ),
+    );
     let ids = Arc::new(UuidIds);
     let controller = Arc::new(RunController::new(
-        store,
+        Arc::clone(&store),
         executor,
         Arc::new(SystemClock),
         Arc::clone(&ids),
@@ -339,13 +347,14 @@ pub async fn serve(args: &AcpArgs, evidence: Arc<EvidenceAdmissionService>) -> R
         MCP_DEFAULT_OPERATION_TIMEOUT,
     ));
 
-    let agent = ego_acp::serve::agent(
+    let agent = ego_acp::serve::agent_with_compaction(
         controller,
         Arc::new(CanonicalRoots { base: root }),
         Arc::new(TokioExecutionSpawner),
         ids,
         Arc::new(AcpRunBindingsBuilder),
         mcp_admitter,
+        compaction,
     );
     let outcome = agent.connect_to(Stdio::new()).await;
     mcp_cancel.cancel(CancelCause::Host);

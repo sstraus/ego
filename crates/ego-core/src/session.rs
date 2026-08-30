@@ -356,7 +356,11 @@ impl TargetSeed {
         }
     }
 
-    pub(crate) fn compaction(
+    /// Build the canonical sequence-one checkpoint seed consumed by a target
+    /// store. Ordinary callers obtain this from `PreparedCompaction`; the
+    /// constructor also lets outer adapters prove their publication contract
+    /// without fabricating serialized records.
+    pub fn compaction(
         source: SessionId,
         source_seq: Seq,
         prompt_revision: u32,
@@ -401,7 +405,8 @@ impl TargetSeed {
 }
 
 /// Publication outcome at the atomic target-log boundary.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TargetPublication {
     NotPublished { diagnostic: String },
     PublishedDurably { diagnostic: Option<String> },

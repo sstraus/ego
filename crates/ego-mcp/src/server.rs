@@ -23,6 +23,40 @@ pub struct McpServerToolCall {
     request_state: Option<String>,
 }
 
+/// One protocol-ready tool outcome, including MCP's application-error bit.
+pub struct McpServerCallOutcome {
+    result: ToolResult,
+    is_error: bool,
+}
+
+impl McpServerCallOutcome {
+    pub fn success(result: ToolResult) -> Self {
+        Self {
+            result,
+            is_error: false,
+        }
+    }
+
+    pub fn error(result: ToolResult) -> Self {
+        Self {
+            result,
+            is_error: true,
+        }
+    }
+
+    pub fn result(&self) -> &ToolResult {
+        &self.result
+    }
+
+    pub const fn is_error(&self) -> bool {
+        self.is_error
+    }
+
+    pub fn into_result(self) -> ToolResult {
+        self.result
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpServerResourceDescriptor {
     pub uri: String,
@@ -78,6 +112,13 @@ pub trait McpServerPort: Send + Sync {
         &'a self,
         call: McpServerToolCall,
     ) -> McpFuture<'a, Result<ToolResult, McpError>>;
+
+    fn call_tool_outcome<'a>(
+        &'a self,
+        call: McpServerToolCall,
+    ) -> McpFuture<'a, Result<McpServerCallOutcome, McpError>> {
+        Box::pin(async move { self.call_tool(call).await.map(McpServerCallOutcome::success) })
+    }
 
     fn list_resources<'a>(&'a self) -> McpFuture<'a, Vec<McpServerResourceDescriptor>>;
 
@@ -143,12 +184,18 @@ impl ServerHandler for ServerAdapter {
             request.request_state,
         )
         .map_err(|error| rmcp::ErrorData::invalid_params(error.to_string(), None))?;
-        let result = self
+        let outcome = self
             .port
-            .call_tool(call)
+            .call_tool_outcome(call)
             .await
             .map_err(|error| rmcp::ErrorData::invalid_params(error.to_string(), None))?;
-        Ok(CallToolResult::success(vec![ContentBlock::text(result.model_text())]).into())
+        let content = vec![ContentBlock::text(outcome.result().model_text())];
+        Ok(if outcome.is_error() {
+            CallToolResult::error(content)
+        } else {
+            CallToolResult::success(content)
+        }
+        .into())
     }
 
     async fn list_resources(

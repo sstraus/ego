@@ -105,12 +105,12 @@ async fn invoke(server: &dyn McpServerPort, name: &str, body: Value) -> Value {
 }
 
 #[test]
-fn advertised_surface_is_exactly_four_tools_and_three_resources() {
+fn advertised_surface_is_exactly_five_tools_and_three_resources() {
     let (controller, _executor) = run_fixture::mcp_controller_fixture();
     let server = server(controller);
     let tools = futures::executor::block_on(server.list_tools());
     let names: Vec<_> = tools.iter().map(|tool| tool.name.as_str()).collect();
-    assert_eq!(names, ["run", "continue", "cancel", "status"]);
+    assert_eq!(names, ["run", "continue", "cancel", "status", "compact"]);
 
     let resources = futures::executor::block_on(server.list_resources());
     let uris: Vec<_> = resources

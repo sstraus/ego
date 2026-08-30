@@ -134,6 +134,9 @@ async fn ordinary_main() -> std::process::ExitCode {
                 mcp_errors: Vec::new(),
             },
             Ok(Invocation::Fork(args)) => run::fork(&args, &out),
+            Ok(Invocation::Compact(args)) => {
+                run::compact(&args, &out, std::sync::Arc::clone(&evidence)).await
+            }
             Ok(Invocation::Models(args)) => {
                 let termination = match ego_cli::models::execute(&args, &cancel).await {
                     Ok(rendered) => {

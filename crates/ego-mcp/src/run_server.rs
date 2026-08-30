@@ -6,6 +6,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use ego_core::ceiling::{Budget, Ceilings};
+use ego_core::compact::{CompactionCommand, CompactionReceipt, CompactionTransitionRequest};
 use ego_core::config::{Mode, ModelRef};
 use ego_core::event::id::SessionId;
 use ego_core::event::time::Clock;
@@ -21,8 +22,8 @@ use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    McpError, McpFailure, McpFuture, McpServerPort, McpServerResourceContents,
-    McpServerResourceDescriptor, McpServerToolCall,
+    McpError, McpFailure, McpFuture, McpServerCallOutcome, McpServerPort,
+    McpServerResourceContents, McpServerResourceDescriptor, McpServerToolCall,
 };
 
 pub trait McpRunRootResolver: Send + Sync {
@@ -74,6 +75,7 @@ pub struct McpRunServerPorts {
     execution_spawner: Arc<dyn McpRunExecutionSpawner>,
     bindings_builder: Arc<dyn McpRunBindingsBuilder>,
     resource_reader: Arc<dyn McpRunResourceReader>,
+    compaction: Option<Arc<dyn CompactionCommand>>,
 }
 
 impl McpRunServerPorts {
@@ -88,7 +90,13 @@ impl McpRunServerPorts {
             execution_spawner,
             bindings_builder,
             resource_reader,
+            compaction: None,
         }
+    }
+
+    pub fn with_compaction(mut self, compaction: Arc<dyn CompactionCommand>) -> Self {
+        self.compaction = Some(compaction);
+        self
     }
 }
 
@@ -371,6 +379,76 @@ where
         self.controller.status(run_id).await.map_err(run_error)
     }
 
+    async fn compact(
+        &self,
+        arguments: &Map<String, Value>,
+    ) -> Result<McpServerCallOutcome, McpError> {
+        let request: CompactToolRequest = decode(arguments)?;
+        let request_id = parse_request_id(&request.request_id)?;
+        if request_id.uuid().is_nil() {
+            return Err(invalid("invalid nil MCP compaction request id"));
+        }
+        let run_id = parse_run_id(&request.run_id)?;
+        let result = self
+            .compact_visible(
+                request_id,
+                run_id,
+                ego_core::run::RunRevision::new(request.expected_revision),
+            )
+            .await;
+        match result {
+            Ok(receipt) => {
+                let text = serde_json::to_string(&McpCompactResponse::from(receipt))?;
+                Ok(McpServerCallOutcome::success(
+                    ego_core::permit::ToolResult::builtin(text),
+                ))
+            }
+            Err(error) => {
+                let text = serde_json::to_string(&json!({
+                    "v": 1,
+                    "isError": true,
+                    "error": error.to_string(),
+                }))?;
+                Ok(McpServerCallOutcome::error(
+                    ego_core::permit::ToolResult::builtin(text),
+                ))
+            }
+        }
+    }
+
+    async fn compact_visible(
+        &self,
+        request_id: RequestId,
+        run_id: RunId,
+        expected_revision: ego_core::run::RunRevision,
+    ) -> Result<CompactionReceipt, McpError> {
+        self.require_visible(run_id)?;
+        let snapshot = self.controller.status(run_id).await.map_err(run_error)?;
+        if snapshot.revision() != expected_revision {
+            return Err(authority("compaction expected_revision is stale"));
+        }
+        if !matches!(
+            snapshot.settlement(),
+            Some(ego_core::run::RunSettlement::ContextOverflow)
+        ) {
+            return Err(authority(
+                "compaction requires a settled context_overflow run",
+            ));
+        }
+        let compaction = self
+            .ports
+            .compaction
+            .as_ref()
+            .ok_or_else(|| authority("compaction is unavailable in this server composition"))?;
+        compaction
+            .compact(CompactionTransitionRequest {
+                request_id,
+                source: run_id.session_id(),
+            })
+            .await
+            .map_err(|error| McpError::new(McpFailure::Protocol, error.to_string()))
+    }
+
     fn bindings(
         &self,
         session_id: SessionId,
@@ -472,8 +550,13 @@ where
         let models = policy.allowed_models.iter().cloned().collect::<Vec<_>>();
         let modes = policy.allowed_modes.iter().cloned().collect::<Vec<_>>();
         let profiles = policy.allowed_profiles.iter().cloned().collect::<Vec<_>>();
+        let tools = if self.ports.compaction.is_some() {
+            vec!["run", "continue", "cancel", "status", "compact"]
+        } else {
+            vec!["run", "continue", "cancel", "status"]
+        };
         serde_json::to_string(&json!({
-            "tools": ["run", "continue", "cancel", "status"],
+            "tools": tools,
             "resources": [
                 "ego://capabilities",
                 "ego://runs/{run_id}/summary",
@@ -505,7 +588,7 @@ where
     I: IdSource + 'static,
 {
     fn list_tools<'a>(&'a self) -> McpFuture<'a, Vec<ToolDescriptor>> {
-        Box::pin(async { tool_descriptors() })
+        Box::pin(async { tool_descriptors(self.ports.compaction.is_some()) })
     }
 
     fn call_tool<'a>(
@@ -513,16 +596,17 @@ where
         call: McpServerToolCall,
     ) -> McpFuture<'a, Result<ego_core::permit::ToolResult, McpError>> {
         Box::pin(async move {
-            let result = match call.name() {
-                "run" => self.run(&call).await,
-                "continue" => self.continue_run(&call).await,
-                "cancel" => self.cancel(call.arguments()).await,
-                "status" => self.status(call.arguments()).await,
-                _ => Err(invalid("invalid MCP run tool name")),
-            }?;
-            let text = serialize_run_snapshot(&result)?;
-            Ok(ego_core::permit::ToolResult::builtin(text))
+            self.call_outcome(call)
+                .await
+                .map(McpServerCallOutcome::into_result)
         })
+    }
+
+    fn call_tool_outcome<'a>(
+        &'a self,
+        call: McpServerToolCall,
+    ) -> McpFuture<'a, Result<McpServerCallOutcome, McpError>> {
+        Box::pin(async move { self.call_outcome(call).await })
     }
 
     fn list_resources<'a>(&'a self) -> McpFuture<'a, Vec<McpServerResourceDescriptor>> {
@@ -555,6 +639,34 @@ where
         uri: &'a str,
     ) -> McpFuture<'a, Result<McpServerResourceContents, McpError>> {
         Box::pin(async move { self.resource(uri).await })
+    }
+}
+
+impl<S, E, C, I> McpRunServer<S, E, C, I>
+where
+    S: SessionStore + 'static,
+    E: RunExecutor + 'static,
+    C: Clock + 'static,
+    I: IdSource + 'static,
+{
+    async fn call_outcome(
+        &self,
+        call: McpServerToolCall,
+    ) -> Result<McpServerCallOutcome, McpError> {
+        if call.name() == "compact" {
+            return self.compact(call.arguments()).await;
+        }
+        let result = match call.name() {
+            "run" => self.run(&call).await,
+            "continue" => self.continue_run(&call).await,
+            "cancel" => self.cancel(call.arguments()).await,
+            "status" => self.status(call.arguments()).await,
+            _ => Err(invalid("invalid MCP run tool name")),
+        }?;
+        let text = serialize_run_snapshot(&result)?;
+        Ok(McpServerCallOutcome::success(
+            ego_core::permit::ToolResult::builtin(text),
+        ))
     }
 }
 
@@ -597,6 +709,37 @@ struct CancelToolRequest {
 #[serde(deny_unknown_fields)]
 struct StatusToolRequest {
     run_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CompactToolRequest {
+    request_id: String,
+    run_id: String,
+    expected_revision: u64,
+}
+
+#[derive(serde::Serialize)]
+struct McpCompactResponse {
+    v: u32,
+    source_session_id: SessionId,
+    source_seq: ego_core::event::id::Seq,
+    target_session_id: SessionId,
+    publication: ego_core::session::TargetPublication,
+    successor_start_request_id: RequestId,
+}
+
+impl From<CompactionReceipt> for McpCompactResponse {
+    fn from(receipt: CompactionReceipt) -> Self {
+        Self {
+            v: 1,
+            source_session_id: receipt.source,
+            source_seq: receipt.source_seq,
+            target_session_id: receipt.target,
+            publication: receipt.publication,
+            successor_start_request_id: receipt.successor_start_request_id,
+        }
+    }
 }
 
 #[derive(serde::Serialize)]
@@ -725,8 +868,8 @@ fn parse_resource_uri(uri: &str) -> Result<McpRunResourceRequest, McpError> {
     })
 }
 
-fn tool_descriptors() -> Vec<ToolDescriptor> {
-    vec![
+fn tool_descriptors(compaction: bool) -> Vec<ToolDescriptor> {
+    let mut tools = vec![
         descriptor(
             "run",
             "Start or exactly replay an ego run",
@@ -757,7 +900,15 @@ fn tool_descriptors() -> Vec<ToolDescriptor> {
                 "required":["run_id"], "properties":{"run_id":{"type":"string"}}
             }),
         ),
-    ]
+    ];
+    if compaction {
+        tools.push(descriptor(
+            "compact",
+            "Compact a visible context-overflow run into its deterministic successor",
+            mutation_schema(false),
+        ));
+    }
+    tools
 }
 
 fn mutation_schema(prompt: bool) -> Value {

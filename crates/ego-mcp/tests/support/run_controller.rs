@@ -9,16 +9,23 @@ use std::{future::Future, pin::Pin};
 use futures::future::{self, BoxFuture};
 use futures::stream::{self, BoxStream};
 
+use ego_core::compact::{
+    CompactionCommand, CompactionFuture, CompactionReceipt, CompactionTransitionError,
+    CompactionTransitionRequest,
+};
 use ego_core::config::ModelRef;
 use ego_core::event::domain::DomainEvent;
-use ego_core::event::id::SessionId;
+use ego_core::event::id::{Seq, SessionId};
 use ego_core::event::time::{Clock, Timestamp};
+use ego_core::evidence::{EvidenceError, EvidenceWrite};
 use ego_core::generator::capabilities::ModelCapabilities;
 use ego_core::run::{
-    DeniedBy, EventSinkFactory, IdSource, RunAppend, RunController, RunExecutionBindings,
-    RunExecutor, RunExecutorError, RunHandle, RunId, RunPreparation, RunPrepared, RunRetention,
-    RunRevision, RunRoot, RunSelections, RunSettlement, RunStart, RunTransaction,
+    DeniedBy, EventSinkFactory, IdSource, RequestId, RunAppend, RunController,
+    RunExecutionBindings, RunExecutor, RunExecutorError, RunFuture, RunHandle, RunId,
+    RunPreparation, RunPrepared, RunRetention, RunRevision, RunRoot, RunSelections, RunSettlement,
+    RunStart, RunTransaction,
 };
+use ego_core::session::TargetPublication;
 
 pub fn root() -> RunRoot {
     RunRoot::new("/workspace/project").expect("fixture root")
@@ -100,6 +107,7 @@ impl SessionStore for SessionStoreFixture {
             items.iter().rev().find_map(|entry| match entry {
                 SessionEntry::RunTransaction(tx) => Some(tx.revision()),
                 SessionEntry::Event(_) => None,
+                SessionEntry::Evidence(_) => None,
             })
         });
         if current != expected_revision {
@@ -150,6 +158,24 @@ struct Gate {
 
 pub struct Prepared;
 
+#[derive(Default)]
+pub struct CompactionCommandFixture;
+
+impl CompactionCommand for CompactionCommandFixture {
+    fn compact<'a>(
+        &'a self,
+        request: CompactionTransitionRequest,
+    ) -> CompactionFuture<'a, Result<CompactionReceipt, CompactionTransitionError>> {
+        Box::pin(future::ready(Ok(CompactionReceipt {
+            source: request.source,
+            source_seq: Seq::ZERO,
+            target: RequestId::session_id(request.request_id),
+            publication: TargetPublication::PublishedDurably { diagnostic: None },
+            successor_start_request_id: request.request_id,
+        })))
+    }
+}
+
 impl Default for ExecutorFixture {
     fn default() -> Self {
         Self {
@@ -184,6 +210,13 @@ impl ExecutorFixture {
         self.submissions.lock().expect("submissions").push_back(Ok(
             RunSettlement::permission_required("write file", DeniedBy::Nobody),
         ));
+    }
+
+    pub fn push_settlement(&self, settlement: RunSettlement) {
+        self.submissions
+            .lock()
+            .expect("submissions")
+            .push_back(Ok(settlement));
     }
     pub fn calls(&self) -> Vec<ExecutorCall> {
         self.calls.lock().expect("calls").clone()
@@ -228,6 +261,13 @@ impl RunExecutor for ExecutorFixture {
             ModelRef("model/allowed".to_owned()),
             Prepared,
         ))))
+    }
+
+    fn admit_run_context<'a>(
+        &'a self,
+        _prepared: &'a Self::Prepared,
+    ) -> RunFuture<'a, Result<EvidenceWrite, EvidenceError>> {
+        Box::pin(future::ready(Ok(EvidenceWrite::Published)))
     }
     fn start<'a>(
         &'a self,
@@ -455,6 +495,7 @@ pub fn ports_with_spawner() -> (McpRunServerPorts, Arc<ExecutionSpawner>) {
         spawner.clone(),
         Arc::new(BindingsBuilder),
         Arc::new(ResourceReader),
-    );
+    )
+    .with_compaction(Arc::new(CompactionCommandFixture));
     (ports, spawner)
 }

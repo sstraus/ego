@@ -6,15 +6,22 @@ use ego_acp::serve::{
     AcpRunBindingsBuilder, ExecutionSpawner, McpSessionAdmissionError, McpSessionAdmitter,
     RootResolver, SessionMcpAdmission,
 };
+use ego_core::compact::{
+    CompactionCommand, CompactionFuture, CompactionReceipt, CompactionTransitionError,
+    CompactionTransitionRequest,
+};
 use ego_core::config::ModelRef;
 use ego_core::event::domain::DomainEvent;
+use ego_core::event::id::Seq;
 use ego_core::event::id::SessionId;
 use ego_core::event::time::{Clock, Timestamp};
+use ego_core::evidence::{EvidenceError, EvidenceWrite};
 use ego_core::run::{
-    IdSource, RunAppend, RunController, RunExecutionBindings, RunExecutor, RunExecutorError,
-    RunHandle, RunPreparation, RunPrepared, RunRetention, RunRevision, RunRoot, RunSettlement,
-    RunStart, RunTransaction,
+    IdSource, RequestId, RunAppend, RunController, RunExecutionBindings, RunExecutor,
+    RunExecutorError, RunFuture, RunHandle, RunPreparation, RunPrepared, RunRetention, RunRevision,
+    RunRoot, RunSettlement, RunStart, RunTransaction,
 };
+use ego_core::session::TargetPublication;
 use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
 use futures::future::{self, BoxFuture};
 use futures::stream::BoxStream;
@@ -80,6 +87,7 @@ impl SessionStore for Store {
             entries.iter().rev().find_map(|entry| match entry {
                 SessionEntry::RunTransaction(transaction) => Some(transaction.revision()),
                 SessionEntry::Event(_) => None,
+                SessionEntry::Evidence(_) => None,
             })
         });
         if expected_revision != actual {
@@ -104,6 +112,24 @@ struct Executor;
 #[allow(dead_code)]
 struct Prepared;
 
+#[derive(Default)]
+pub struct CompactionCommandFixture;
+
+impl CompactionCommand for CompactionCommandFixture {
+    fn compact<'a>(
+        &'a self,
+        request: CompactionTransitionRequest,
+    ) -> CompactionFuture<'a, Result<CompactionReceipt, CompactionTransitionError>> {
+        Box::pin(future::ready(Ok(CompactionReceipt {
+            source: request.source,
+            source_seq: Seq::ZERO,
+            target: RequestId::session_id(request.request_id),
+            publication: TargetPublication::PublishedDurably { diagnostic: None },
+            successor_start_request_id: request.request_id,
+        })))
+    }
+}
+
 impl RunExecutor for Executor {
     type Prepared = Prepared;
 
@@ -115,6 +141,13 @@ impl RunExecutor for Executor {
             ModelRef("model/test".to_owned()),
             Prepared,
         ))))
+    }
+
+    fn admit_run_context<'a>(
+        &'a self,
+        _prepared: &'a Self::Prepared,
+    ) -> RunFuture<'a, Result<EvidenceWrite, EvidenceError>> {
+        Box::pin(future::ready(Ok(EvidenceWrite::Published)))
     }
 
     fn start<'a>(
@@ -208,11 +241,12 @@ impl ExecutionSpawner for TestSpawner {
 #[allow(dead_code)]
 pub fn agent() -> agent_client_protocol::AgentProtocolRouter {
     let ids = Arc::new(TestIds::default());
-    agent_with(
+    agent_with_compaction(
         Arc::new(Store::default()),
         Arc::new(Executor),
         Arc::new(TestClock),
         ids,
+        Arc::new(CompactionCommandFixture),
     )
 }
 
@@ -242,6 +276,38 @@ where
         ids,
         Arc::new(AcpRunBindingsBuilder),
         Arc::new(RejectingMcpAdmitter),
+    )
+}
+
+#[allow(dead_code)]
+pub fn agent_with_compaction<S, E, C, I>(
+    store: Arc<S>,
+    executor: Arc<E>,
+    clock: Arc<C>,
+    ids: Arc<I>,
+    compaction: Arc<dyn CompactionCommand>,
+) -> agent_client_protocol::AgentProtocolRouter
+where
+    S: SessionStore + 'static,
+    E: RunExecutor + 'static,
+    C: Clock + 'static,
+    I: IdSource + 'static,
+{
+    let controller = Arc::new(RunController::new(
+        store,
+        executor,
+        clock,
+        Arc::clone(&ids),
+        RunRetention::new(std::num::NonZeroUsize::new(2).expect("retention")).expect("retention"),
+    ));
+    ego_acp::serve::agent_with_compaction(
+        controller,
+        Arc::new(TestRoots),
+        Arc::new(TestSpawner),
+        ids,
+        Arc::new(AcpRunBindingsBuilder),
+        Arc::new(RejectingMcpAdmitter),
+        compaction,
     )
 }
 

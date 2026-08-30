@@ -317,7 +317,7 @@ async fn compose_and_serve(
         Arc::clone(&store),
         artifact_publisher,
         args.max_concurrent_runs,
-        evidence,
+        Arc::clone(&evidence),
     )
     .map_err(|error| McpError::new(McpFailure::InvalidValue, error.to_string()))?;
 
@@ -347,12 +347,21 @@ async fn compose_and_serve(
         controller: Arc::clone(&controller),
         artifacts: Arc::clone(&store),
     });
+    let compaction: Arc<dyn ego_core::compact::CompactionCommand> = Arc::new(
+        run::CliCompactionCommand::for_protocol(
+            root.clone(),
+            args.session_dir.clone(),
+            Arc::clone(&store),
+            evidence,
+        ),
+    );
     let ports = McpRunServerPorts::new(
         Arc::new(CanonicalRoots { base: root }),
         Arc::new(TokioExecutionSpawner),
         Arc::new(NoOutputBindings),
         resources,
-    );
+    )
+    .with_compaction(compaction);
     let factory = McpRunServerFactory::new(controller, config, ports);
     let connection: Arc<dyn McpServerPort> = Arc::new(factory.new_connection());
     ego_mcp::serve_stdio(connection, Box::new(ProcessStdio::new())).await

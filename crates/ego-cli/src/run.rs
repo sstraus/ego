@@ -14,6 +14,11 @@ use std::task::Waker;
 use std::time::Duration;
 
 use ego_core::ceiling::{Budget, Ceilings};
+use ego_core::compact::{
+    CompactionCommand, CompactionError, CompactionFuture, CompactionPreparation,
+    CompactionReceipt, CompactionTransitionError, CompactionTransitionRequest,
+    CompactionTransitionService, PreparedCompaction,
+};
 use ego_core::config::{
     Effective, Limits, Mode, ModelRef, Posture, Selection, SystemPrompt, Trust, UserConfigStore,
     resolve, system_prompt,
@@ -40,7 +45,8 @@ use ego_core::public::{PUBLIC_EVENT_VERSION, PublicEvent, QuestionReport, projec
 use ego_core::question::{AskQuestionTool, Elicitor, QuestionOutcome};
 use ego_core::run::{
     CancelReason, DeniedBy, RecoveryEvidence, RunExecutionBindings, RunExecutor, RunExecutorError,
-    RunHandle, RunId, RunPreparation, RunPrepared, RunSettlement, RunStart, RunTermination, Signal,
+    RequestId, RunHandle, RunId, RunPreparation, RunPrepared, RunSettlement, RunStart,
+    RunTermination, Signal,
 };
 use ego_core::sink::{EventSink, NullSink};
 use ego_core::state::{ItemKind, QuestionContinuation, SessionState};
@@ -64,7 +70,9 @@ use serde_json::Value;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::budget;
-use crate::cli::{Args, ForkArgs, ModelsArgs, Output, ResumeAnswer, SessionChoice, UsageError};
+use crate::cli::{
+    Args, CompactArgs, ForkArgs, ModelsArgs, Output, ResumeAnswer, SessionChoice, UsageError,
+};
 use crate::model_picker::ModelPicker;
 use crate::models;
 use crate::output::{
@@ -1883,6 +1891,238 @@ fn protocol_args(session_dir: Option<PathBuf>) -> Args {
     }
 }
 
+/// Production composition for every host-facing compaction command.
+pub struct CliCompactionCommand {
+    args: Args,
+    store: Arc<JsonlStore>,
+    admission: Arc<EvidenceAdmissionService>,
+}
+
+impl CliCompactionCommand {
+    pub fn new(
+        args: Args,
+        store: Arc<JsonlStore>,
+        admission: Arc<EvidenceAdmissionService>,
+    ) -> Self {
+        Self {
+            args,
+            store,
+            admission,
+        }
+    }
+
+    pub fn for_protocol(
+        root: PathBuf,
+        session_dir: Option<PathBuf>,
+        store: Arc<JsonlStore>,
+        admission: Arc<EvidenceAdmissionService>,
+    ) -> Self {
+        let mut args = protocol_args(session_dir);
+        args.directory = Some(root);
+        Self::new(args, store, admission)
+    }
+
+    async fn prepare_source(
+        &self,
+        source_id: SessionId,
+    ) -> Result<PreparedCompaction, CompactionError> {
+        let settings = settings(&self.args, |_| Trust::Untrusted, &Stderr)
+            .map_err(|error| CompactionError::Internal(error.to_string()))?;
+        let Materials {
+            system,
+            registry,
+            compiled: _,
+            text: _,
+            slug,
+        } = prepared_materials(&settings, &self.args, String::new(), &Stderr)
+            .map_err(|error| CompactionError::Internal(error.to_string()))?;
+        let Settings {
+            run_deadline,
+            root,
+            cwd,
+            confinement,
+            effective,
+        } = settings;
+        let clock = SystemClock;
+        let opened = Opened::Durable(Box::new(
+            session::open(self.store.as_ref(), &source_id, &clock)
+                .map_err(|error| CompactionError::Internal(error.to_string()))?,
+        ));
+        let invocation = RunInvocationId::new();
+        let context = RunContextEvidence::new(
+            source_id,
+            invocation,
+            source_id.to_string(),
+            ConfigProvenance::resolved(self.args.profile.clone()),
+        )
+        .with_instructions(
+            system
+                .as_ref()
+                .map(|prompt| prompt.sources.clone())
+                .unwrap_or_default(),
+        );
+        let Opened::Durable(opened_session) = &opened;
+        self.admission
+            .admit_run_context(&opened_session.writer, context)
+            .map_err(|error| CompactionError::Internal(error.to_string()))?;
+
+        let cancel = CancelToken::new();
+        let mut no_status = None;
+        let GenerationPreflight {
+            source,
+            selection: _,
+            capabilities: _,
+            judge_enabled,
+            proof_directory,
+            proof_evidence,
+        } = generation_preflight(
+            GenerationPreflightInput {
+                session_id: source_id,
+                confinement: &confinement,
+                effective: &effective,
+                slug,
+                cancel: &cancel,
+                run_deadline,
+                mcp_registry: None,
+                native_tools: &registry,
+            },
+            &mut no_status,
+        )
+        .await
+        .map_err(compaction_termination)?;
+        let opening = opened.state();
+        drop(proof_directory);
+        drop(proof_evidence);
+        let mut active = ActiveSession::durable(opened, opening.clone(), EVIDENCE_CAP)
+            .map_err(CompactionError::Internal)?;
+        let mode = effective.mode.unwrap_or(Mode::Default);
+        let policy = PolicyEngine::new(
+            CanonPath::new(&root),
+            mode,
+            effective.permissions.clone(),
+        );
+        let currency = CurrencyCode::new(SETTLEMENT).expect("a constant this file controls");
+        let mut gate = budget::gate(&effective.ceilings, effective.clamped.money, currency);
+        let config = TurnConfig {
+            system: system.clone(),
+            token_ceiling: effective.ceilings.tokens,
+        };
+        let (ports, observation) = effect_scope(
+            &confinement,
+            active.evidence(),
+            &cancel,
+            run_deadline,
+        )
+        .await
+        .map_err(compaction_termination)?;
+        let fs = OsFs;
+        let sink = NullSink;
+        let session = Session {
+            id: active.id(),
+            state: opening,
+            store: active.store(),
+            evidence: active.run_evidence(),
+            clock: &clock,
+            sink: &sink,
+            cancel: cancel.clone(),
+        };
+        let http = Arc::new(ProviderHttpAdapter::new(Arc::clone(&ports)))
+            as Arc<dyn ego_ai::http::Http>;
+        let runtime = GenerationRuntime {
+            source: source.bind(http, cancel.clone(), run_deadline),
+            gate: &mut gate,
+            config,
+            admission: Arc::clone(&self.admission),
+            invocation,
+        };
+        let effect_ports = ToolEffectPorts::new(
+            &fs,
+            ports.process(),
+            active.evidence(),
+            ports.resolver_handle(),
+            ports.one_hop_handle(),
+            ports.duplex_handle(),
+        );
+        let tools = Tools::from_registry(&registry, &policy, effect_ports, CanonPath::new(&cwd));
+        let mut loop_ = TurnLoop::new(session, runtime, tools);
+        if let Some(replayed) = active.replayed() {
+            loop_ = loop_.with_ancestor_conversation(replayed.conversation().clone());
+        }
+        if judge_enabled {
+            loop_ = loop_.with_judge(JudgeContext {
+                confinement: confinement.clone(),
+                exec_caps: observation.capabilities(),
+            });
+        }
+        loop_ = loop_.with_execution_observation(observation);
+        let target_tools = registry.iter().map(RegisteredTool::descriptor).collect();
+        let prepared = loop_.prepare_compaction(system, target_tools).await?;
+        let state = loop_.into_state();
+        active.replace_state(state);
+        Ok(prepared)
+    }
+}
+
+struct CliCompactionPreparation<'a> {
+    command: &'a CliCompactionCommand,
+    source: SessionId,
+}
+
+struct DeferredCompactionPreparation<'a> {
+    source: SessionId,
+    future: Option<CompactionFuture<'a, Result<PreparedCompaction, CompactionError>>>,
+}
+
+impl CompactionPreparation for DeferredCompactionPreparation<'_> {
+    fn source(&self) -> SessionId {
+        self.source
+    }
+
+    fn prepare<'a>(
+        &'a mut self,
+    ) -> CompactionFuture<'a, Result<PreparedCompaction, CompactionError>> {
+        self.future.take().unwrap_or_else(|| {
+            Box::pin(std::future::ready(Err(CompactionError::Internal(
+                "compaction preparation was requested more than once".to_owned(),
+            ))))
+        })
+    }
+}
+
+impl CompactionPreparation for CliCompactionPreparation<'_> {
+    fn source(&self) -> SessionId {
+        self.source
+    }
+
+    fn prepare<'a>(
+        &'a mut self,
+    ) -> CompactionFuture<'a, Result<PreparedCompaction, CompactionError>> {
+        Box::pin(async move { self.command.prepare_source(self.source).await })
+    }
+}
+
+impl CompactionCommand for CliCompactionCommand {
+    fn compact<'a>(
+        &'a self,
+        request: CompactionTransitionRequest,
+    ) -> CompactionFuture<'a, Result<CompactionReceipt, CompactionTransitionError>>
+    {
+        Box::pin(async move {
+            let mut preparation = CliCompactionPreparation {
+                command: self,
+                source: request.source,
+            };
+            CompactionTransitionService::new(SystemClock)
+                .compact(request, &mut preparation, self.store.as_ref())
+                .await
+        })
+    }
+}
+
+fn compaction_termination(termination: RunTermination) -> CompactionError {
+    CompactionError::Internal(run_executor_error(termination).to_string())
+}
+
 impl CliRunExecutor {
     /// Build the fixed headless inputs for the ACP host once, before admission.
     pub fn for_acp(
@@ -2747,54 +2987,137 @@ async fn execute<S: EventSink>(
                             }
                             seat.busy();
 
-                            let target_system = match instructions(
-                                &effective,
-                                &args,
-                                &root,
-                                &cwd,
-                                diagnostics,
-                            ) {
-                                Ok(system) => system,
-                                Err(error) => {
-                                    diagnostics.note(&format!(
-                                        "compaction target instructions could not be rebuilt: {error}"
-                                    ));
-                                    continue;
-                                }
-                            };
-                            let target_registry = match tools(args.tools.as_ref()) {
-                                Ok(registry) => registry,
-                                Err(error) => {
-                                    diagnostics.note(&format!(
-                                        "compaction target tools could not be rebuilt: {error}"
-                                    ));
-                                    continue;
-                                }
-                            };
-                            let target_tools: Vec<ToolDescriptor> = target_registry
-                                .iter()
-                                .map(|tool| tool.descriptor())
-                                .collect();
-
+                            let target_runtime = Arc::new(Mutex::new(None));
+                            let prepared_runtime = Arc::clone(&target_runtime);
+                            let source_id = active.id();
                             let compaction_cancel = CancelToken::new();
-                            let (ports, observation) = effect_scope(
-                                &confinement,
-                                active.evidence(),
-                                &compaction_cancel,
-                                run_deadline,
-                            )
-                            .await?;
-                            let mut compaction =
-                                build!(active, state, &compaction_cancel, ports, observation)
+                            let future: CompactionFuture<
+                                '_,
+                                Result<PreparedCompaction, CompactionError>,
+                            > = Box::pin(async {
+                                let target_system = instructions(
+                                    &effective,
+                                    &args,
+                                    &root,
+                                    &cwd,
+                                    diagnostics,
+                                )
+                                .map_err(|error| CompactionError::Internal(error.to_string()))?;
+                                let target_registry = tools(args.tools.as_ref())
+                                    .map_err(|error| CompactionError::Internal(error.to_string()))?;
+                                let target_tools: Vec<ToolDescriptor> = target_registry
+                                    .iter()
+                                    .map(RegisteredTool::descriptor)
+                                    .collect();
+                                let (ports, observation) = effect_scope(
+                                    &confinement,
+                                    active.evidence(),
+                                    &compaction_cancel,
+                                    run_deadline,
+                                )
+                                .await
+                                .map_err(compaction_termination)?;
+                                let source_state = std::mem::take(&mut state);
+                                let session = Session {
+                                    id: active.id(),
+                                    state: source_state,
+                                    store: active.store(),
+                                    evidence: active.run_evidence(),
+                                    clock: &clock,
+                                    sink,
+                                    cancel: compaction_cancel.clone(),
+                                };
+                                let http = Arc::new(ProviderHttpAdapter::new(Arc::clone(&ports)))
+                                    as Arc<dyn ego_ai::http::Http>;
+                                let runtime = GenerationRuntime {
+                                    source: source.bind(
+                                        http,
+                                        compaction_cancel.clone(),
+                                        run_deadline,
+                                    ),
+                                    gate: &mut gate,
+                                    config: config.clone(),
+                                    admission: Arc::clone(&evidence),
+                                    invocation,
+                                };
+                                let effect_ports = ToolEffectPorts::new(
+                                    &fs,
+                                    ports.process(),
+                                    active.evidence(),
+                                    ports.resolver_handle(),
+                                    ports.one_hop_handle(),
+                                    ports.duplex_handle(),
+                                );
+                                let compaction_tools = match admitted_tools.as_ref() {
+                                    Some(source) => Tools::from_registry_with_source(
+                                        &registry,
+                                        Arc::clone(source),
+                                        &policy,
+                                        effect_ports,
+                                        CanonPath::new(&cwd),
+                                    )
+                                    .map_err(|error| CompactionError::Internal(error.to_string()))?,
+                                    None => Tools::from_registry(
+                                        &registry,
+                                        &policy,
+                                        effect_ports,
+                                        CanonPath::new(&cwd),
+                                    ),
+                                };
+                                let mut compaction = TurnLoop::new(session, runtime, compaction_tools);
+                                if let Some(replayed) = active.replayed() {
+                                    compaction = compaction.with_ancestor_conversation(
+                                        replayed.conversation().clone(),
+                                    );
+                                }
+                                if let Some(elicitor) = elicitor.as_ref() {
+                                    compaction = compaction.with_elicitor(Arc::clone(elicitor));
+                                }
+                                if judge_enabled {
+                                    compaction = compaction.with_judge(JudgeContext {
+                                        confinement: confinement.clone(),
+                                        exec_caps: observation.capabilities(),
+                                    });
+                                }
+                                let mut compaction = compaction
+                                    .with_execution_observation(observation)
                                     .with_interactive_control(&mut control);
-                            let prepared = compaction
-                                .prepare_compaction(target_system.clone(), target_tools)
+                                let prepared = compaction
+                                    .prepare_compaction(target_system.clone(), target_tools)
+                                    .await;
+                                state = compaction.into_state();
+                                active.replace_state(state.clone());
+                                seat.refresh_queue(control.status());
+                                if !state.unacknowledged_prompts().is_empty()
+                                    || state.pending_question().is_some()
+                                    || !state.live_attempts.is_empty()
+                                {
+                                    return Err(CompactionError::Internal(
+                                        "compaction stopped before target creation because new source work became pending"
+                                            .to_owned(),
+                                    ));
+                                }
+                                let prepared = prepared?;
+                                *prepared_runtime
+                                    .lock()
+                                    .expect("interactive compaction runtime") =
+                                    Some((target_system, target_registry));
+                                Ok(prepared)
+                            });
+                            let mut preparation = DeferredCompactionPreparation {
+                                source: source_id,
+                                future: Some(future),
+                            };
+                            let request = CompactionTransitionRequest {
+                                request_id: RequestId::from_uuid(uuid::Uuid::now_v7()),
+                                source: source_id,
+                            };
+                            let receipt = CompactionTransitionService::new(clock)
+                                .compact(request, &mut preparation, &jsonl_store)
                                 .await;
-                            state = compaction.into_state();
-                            active.replace_state(state.clone());
-                            seat.refresh_queue(control.status());
-                            let prepared = match prepared {
-                                Ok(prepared) => prepared,
+                            drop(preparation);
+                            let receipt = match receipt {
+                                Ok(receipt) => receipt,
                                 Err(error) => {
                                     diagnostics.note(&format!("compaction failed: {error}"));
                                     if let Some(status) = status.as_ref()
@@ -2806,18 +3129,7 @@ async fn execute<S: EventSink>(
                                     continue;
                                 }
                             };
-
-                            if !state.unacknowledged_prompts().is_empty()
-                                || state.pending_question().is_some()
-                                || !state.live_attempts.is_empty()
-                            {
-                                diagnostics.note(
-                                    "compaction stopped before target creation because new source work became pending",
-                                );
-                                continue;
-                            }
-
-                            let target = SessionId::new();
+                            let target = receipt.target;
                             let target_opened = match session::open(&jsonl_store, &target, &clock) {
                                 Ok(opened) => Opened::Durable(Box::new(opened)),
                                 Err(error) => {
@@ -2827,8 +3139,7 @@ async fn execute<S: EventSink>(
                                     continue;
                                 }
                             };
-                            let seed = prepared.target_seed(session::now(&clock));
-                            let target_state = SessionState::replay([seed.event().clone()]);
+                            let target_state = target_opened.state();
                             let target_owner = match ActiveSession::durable(
                                 target_opened,
                                 target_state,
@@ -2842,19 +3153,19 @@ async fn execute<S: EventSink>(
                                     continue;
                                 }
                             };
-                            let publication = target_owner.publish_target(&seed);
-                            let diagnostic = publication.diagnostic().map(str::to_string);
-                            if !active.apply_publication(target_owner, &publication) {
-                                if let Some(diagnostic) = diagnostic {
-                                    diagnostics.note(&format!(
-                                        "compaction target was not published: {diagnostic}"
-                                    ));
-                                }
+                            let diagnostic = receipt.publication.diagnostic().map(str::to_string);
+                            if !active.apply_publication(target_owner, &receipt.publication) {
+                                diagnostics.note("compaction target was not published");
                                 continue;
                             }
-
-                            registry = target_registry;
-                            config.system = target_system;
+                            if let Some((target_system, target_registry)) = target_runtime
+                                .lock()
+                                .expect("interactive compaction runtime")
+                                .take()
+                            {
+                                registry = target_registry;
+                                config.system = target_system;
+                            }
                             state = active.state().clone();
                             last.session = active.id();
                             last.state = state.clone();
@@ -2883,9 +3194,6 @@ async fn execute<S: EventSink>(
                                 },
                                 &state,
                             );
-                            if let Some(event) = project_public(seed.event()) {
-                                sink.publish(&event, &state);
-                            }
                             if !seat.activate_session(active.id()) {
                                 last = Ended {
                                     termination: RunTermination::Failed {
@@ -3427,6 +3735,92 @@ pub fn fork(args: &ForkArgs, out: &Stdout) -> Ended {
     match forked(args, out) {
         Ok(ended) => ended,
         Err(termination) => Ended::refused(termination),
+    }
+}
+
+#[derive(serde::Serialize)]
+struct CompactOutput {
+    v: u32,
+    source_session_id: SessionId,
+    source_seq: ego_core::event::id::Seq,
+    target_session_id: SessionId,
+    publication: ego_core::session::TargetPublication,
+    successor_start_request_id: RequestId,
+}
+
+impl From<&CompactionReceipt> for CompactOutput {
+    fn from(receipt: &CompactionReceipt) -> Self {
+        Self {
+            v: 1,
+            source_session_id: receipt.source,
+            source_seq: receipt.source_seq,
+            target_session_id: receipt.target,
+            publication: receipt.publication.clone(),
+            successor_start_request_id: receipt.successor_start_request_id,
+        }
+    }
+}
+
+/// Run one explicit deterministic compaction without entering the run grammar.
+pub async fn compact(
+    args: &CompactArgs,
+    out: &Stdout,
+    admission: Arc<EvidenceAdmissionService>,
+) -> Ended {
+    let result = async {
+        let root = workspace(args.directory.as_ref())?;
+        let store_root = rooted_path(&root, session::store_root(args.session_dir.as_ref())?);
+        let store = Arc::new(session::jsonl(store_root, root.clone()));
+        let mut runtime_args = protocol_args(args.session_dir.clone());
+        runtime_args.directory = Some(root);
+        runtime_args.output = args.output;
+        let command = CliCompactionCommand::new(runtime_args, store, admission);
+        command
+            .compact(CompactionTransitionRequest {
+                request_id: args.request_id,
+                source: args.source,
+            })
+            .await
+            .map_err(|error| UsageError(error.to_string()))
+    }
+    .await;
+
+    match result {
+        Ok(receipt) => {
+            let rendered = match args.output {
+                Output::Text => Ok(format!(
+                    "compacted {} to {}",
+                    receipt.source, receipt.target
+                )),
+                Output::Json | Output::Jsonl => serde_json::to_string(&CompactOutput::from(&receipt))
+                    .map_err(|error| error.to_string()),
+            };
+            match rendered {
+                Ok(line) => out.line(&line),
+                Err(error) => {
+                    return Ended::refused(RunTermination::Failed {
+                        message: format!("the compaction receipt could not be rendered: {error}"),
+                    });
+                }
+            }
+            if let Some(diagnostic) = receipt.publication.diagnostic() {
+                Stderr.note(&format!(
+                    "compaction target {} is authoritative with a durability warning: {diagnostic}",
+                    receipt.target
+                ));
+            }
+            Ended {
+                termination: RunTermination::Done,
+                session: receipt.target,
+                state: SessionState::default(),
+                result: serde_json::to_value(CompactOutput::from(&receipt))
+                    .expect("the typed compaction receipt is serializable"),
+                mcp_errors: Vec::new(),
+            }
+        }
+        Err(error) => Ended::refused(RunTermination::Failed {
+            message: error.to_string(),
+        }),
     }
 }
 

@@ -422,6 +422,7 @@ mod turn_execution_observation {
     use ego_core::generator::fake::FakeGenerator;
     use ego_core::generator::port::AiEvent;
     use ego_core::generator::types::{StopReason, ThinkingLevel};
+    use ego_core::evidence::{EvidenceAdmissionService, RunInvocationId};
     use ego_core::permit::fake::FakeFs;
     use ego_core::permit::{ProcessError, ProcessExecutor, ToolResult};
     use ego_core::run::{RunAppend, RunRevision, RunTransaction};
@@ -624,6 +625,7 @@ mod turn_execution_observation {
                     id: ego_core::event::id::SessionId::new(),
                     state: SessionState::default(),
                     store: &self.store,
+                    evidence: &self.evidence,
                     clock: &self.clock,
                     sink: &self.sink,
                     cancel: CancelToken::new(),
@@ -637,6 +639,8 @@ mod turn_execution_observation {
                         system: None,
                         token_ceiling: None,
                     },
+                    admission: Arc::new(EvidenceAdmissionService::new()),
+                    invocation: RunInvocationId::new(),
                 },
                 tools,
             )

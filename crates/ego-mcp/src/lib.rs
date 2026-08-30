@@ -60,8 +60,8 @@ pub use run_server::{
 pub(crate) use runtime::McpRuntimeCandidateAdmission;
 pub use runtime::{MCP_DEFAULT_MAX_SSE_EVENT_SIZE, MCP_DEFAULT_OPERATION_TIMEOUT};
 pub use server::{
-    McpServerPort, McpServerResourceContents, McpServerResourceDescriptor, McpServerToolCall,
-    serve_stdio,
+    McpServerCallOutcome, McpServerPort, McpServerResourceContents, McpServerResourceDescriptor,
+    McpServerToolCall, serve_stdio,
 };
 pub use state::{
     CacheScope, McpInputMapping, McpInputRequestId, McpInputRequired, McpInputResponse,

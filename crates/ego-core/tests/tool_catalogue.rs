@@ -12,6 +12,7 @@ use ego_core::cost::MeteringRevision;
 use ego_core::event::domain::{DomainEvent, EventKind, ExitReason};
 use ego_core::event::id::SessionId;
 use ego_core::event::time::{Clock, Timestamp};
+use ego_core::evidence::{EvidenceAdmissionService, RunInvocationId};
 use ego_core::generator::attempt::{AttemptStream, GenerationAttempt};
 use ego_core::generator::fake::FakeGenerator;
 use ego_core::generator::port::{AiEvent, Generator, RequestExpressibilityError};
@@ -340,11 +341,14 @@ fn loop_with(
             system: None::<SystemPrompt>,
             token_ceiling: None,
         },
+        admission: Arc::new(EvidenceAdmissionService::new()),
+        invocation: RunInvocationId::new(),
     };
     let session = Session {
         id: SessionId::new(),
         state: SessionState::default(),
         store,
+        evidence,
         clock,
         sink,
         cancel: ego_core::turn::CancelToken::new(),
