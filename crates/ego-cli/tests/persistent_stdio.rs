@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 use tempfile::TempDir;
 
-const EXPECTED_TOOLS: [&str; 4] = ["run", "continue", "cancel", "status"];
+const EXPECTED_TOOLS: [&str; 5] = ["run", "continue", "cancel", "status", "compact"];
 const EXPECTED_RESOURCES: [&str; 3] = [
     "ego://capabilities",
     "ego://runs/{run_id}/summary",
