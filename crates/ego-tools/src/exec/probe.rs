@@ -490,6 +490,7 @@ fn network_probe_argv(
         std::env::current_exe()
             .map(|path| path.into_os_string())
             .unwrap_or_default(),
+        OsString::from("--exact"),
         OsString::from(NETWORK_PROBE_TOKEN),
         OsString::from(protocol),
         OsString::from(endpoint.to_string()),
@@ -511,6 +512,9 @@ where
 
     let mut arguments = arguments.into_iter();
     let _executable = arguments.next()?;
+    if arguments.next().as_deref() != Some(std::ffi::OsStr::new("--exact")) {
+        return None;
+    }
     if arguments.next().as_deref() != Some(std::ffi::OsStr::new(NETWORK_PROBE_TOKEN)) {
         return None;
     }
@@ -985,6 +989,38 @@ mod tests {
     use crate::exec::backend::{Backend, LaunchPrefix};
 
     use super::{CachedCapabilities, CapabilityCacheKey, cache_key, cached_capabilities};
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn network_probe_argv_and_dispatch_use_the_exact_libtest_guard() {
+        use std::ffi::OsString;
+
+        let endpoint = "127.0.0.1:1".parse().expect("probe endpoint");
+        let sentinel = "probe-sentinel";
+        let argv = super::network_probe_argv("tcp", endpoint, sentinel);
+        let executable = std::env::current_exe()
+            .expect("probe test executable")
+            .into_os_string();
+        assert_eq!(
+            argv,
+            vec![
+                executable,
+                OsString::from("--exact"),
+                OsString::from(super::NETWORK_PROBE_TOKEN),
+                OsString::from("tcp"),
+                OsString::from(endpoint.to_string()),
+                OsString::from(sentinel),
+            ]
+        );
+        assert!(super::dispatch_network_probe(argv.clone()).is_some());
+
+        let mut unguarded = vec![argv[0].clone(), OsString::from(super::NETWORK_PROBE_TOKEN)];
+        unguarded.extend_from_slice(&argv[3..]);
+        assert!(
+            super::dispatch_network_probe(unguarded).is_none(),
+            "the internal probe requires libtest's exact guard"
+        );
+    }
 
     struct CacheBackend {
         identity: BackendIdentity,
