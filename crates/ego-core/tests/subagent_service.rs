@@ -43,7 +43,7 @@ use ego_core::sink::{EventSink, NullSink};
 use ego_core::store::blob::{BlobId, BlobRef};
 use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
 use ego_core::subagent::{
-    ChildAuthorityAdmission, ChildJournal, ChildJournalError, ChildProfileResolver, ChildRequest,
+    ChildJournal, ChildJournalError, ChildProfileResolver, ChildRequest, ChildSelectionAdmission,
     ChildResultEvidence, ChildResultReader, ChildResultReaderError, ChildResultStore,
     ChildRunService, ChildTaskReader, ChildWait, ChildWaitResult,
 };
@@ -140,7 +140,7 @@ impl ExistingAuthorityAdmission {
     }
 }
 
-impl ChildAuthorityAdmission for ExistingAuthorityAdmission {
+impl ChildSelectionAdmission for ExistingAuthorityAdmission {
     fn admit(&self, requested: &RunSelections) -> Result<RunSelections, String> {
         *self.calls.lock().expect("authority admissions") += 1;
         let _parent_effective = &self.parent;
@@ -803,7 +803,7 @@ impl Harness {
     fn service_with_gate_and_authority(
         &self,
         gate: Arc<Mutex<BudgetGate>>,
-        authority: Arc<dyn ChildAuthorityAdmission>,
+        authority: Arc<dyn ChildSelectionAdmission>,
     ) -> ChildRunService {
         ChildRunService::new_with_authority_admission(
             Arc::clone(&self.controller),
