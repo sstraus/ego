@@ -15,6 +15,7 @@ use ego_core::config::{
     AuthProviderLayer, ConfigError, ConfigLayer, Effective, McpConfigProvenance,
     McpEnvironmentName, McpHttpAuth, McpHttpConfig, McpHttpUrl, McpLayerEntry, McpServerConfig,
     McpServerName, ResolvedMcpEntry, Source, Sourced, Trust, UserMcpSlot, resolve,
+    resolve_selected,
 };
 use serde::Deserialize;
 
@@ -170,8 +171,38 @@ pub fn layers(
 #[derive(Clone)]
 pub(crate) struct FrozenRunConfig {
     layers: Vec<Sourced<ConfigLayer>>,
-    profile: Option<String>,
+    profile: Option<SelectedProfile>,
     trust: Trust,
+}
+
+/// One process-captured profile selection. Reading the environment again
+/// after this value exists would create a second selection authority.
+#[derive(Clone)]
+pub(crate) struct SelectedProfile {
+    name: String,
+    source: Source,
+}
+
+impl SelectedProfile {
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub(crate) fn as_resolver_input(&self) -> (&str, Source) {
+        (&self.name, self.source)
+    }
+}
+
+/// Capture the environment fallback once at direct-host entry. A flag value
+/// is already tagged by argument construction and always wins.
+pub fn capture_profile(args: &mut Args) {
+    if args.profile.is_some() {
+        return;
+    }
+    if let Ok(name) = std::env::var(ENV_PROFILE) {
+        args.profile = Some(name);
+        args.profile_source = Some(Source::Env);
+    }
 }
 
 impl FrozenRunConfig {
@@ -189,12 +220,18 @@ impl FrozenRunConfig {
             layers.push(agent_file.layer()?);
         }
         layers.push(args_layer(args)?);
-        resolve(&layers, self.trust, self.profile.as_deref())
-            .map_err(|error| UsageError(error.to_string()))
+        let request_profile = profile(args);
+        let selected_profile = request_profile.as_ref().or(self.profile.as_ref());
+        resolve_selected(
+            &layers,
+            self.trust,
+            selected_profile.map(SelectedProfile::as_resolver_input),
+        )
+        .map_err(|error| UsageError(error.to_string()))
     }
 
     pub(crate) fn profile(&self) -> Option<&str> {
-        self.profile.as_deref()
+        self.profile.as_ref().map(SelectedProfile::name)
     }
 }
 
@@ -482,10 +519,13 @@ fn selection_flags(
 }
 
 /// The active profile: `--profile` beats `EGO_PROFILE`, per §7's precedence.
-pub fn profile(args: &Args) -> Option<String> {
-    args.profile
-        .clone()
-        .or_else(|| std::env::var(ENV_PROFILE).ok())
+pub(crate) fn profile(args: &Args) -> Option<SelectedProfile> {
+    args.profile.clone().map(|name| SelectedProfile {
+        name,
+        source: args
+            .profile_source
+            .expect("a captured profile carries its selection source"),
+    })
 }
 
 /// A TOML string literal. `toml`'s own serialiser would do this, and reaching
@@ -494,4 +534,60 @@ pub fn profile(args: &Args) -> Option<String> {
 fn quote(value: &str) -> String {
     let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
     format!("\"{escaped}\"")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ego_core::config::{ModelRef, Source, Trust};
+
+    fn run_args(profile: &str) -> Args {
+        let argv = ["ego", "run", "--profile", profile, "Ask"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        let crate::cli::Invocation::Run(args) =
+            crate::cli::parse(argv).expect("profile fixture invocation must parse")
+        else {
+            panic!("the profile fixture invocation must be a headless run");
+        };
+        *args
+    }
+
+    #[test]
+    fn request_profile_overrides_captured_startup_profile_and_records_flags_authority() {
+        let owner = tempfile::tempdir().expect("profile fixture owner");
+        let workspace = owner.path();
+        let ego = workspace.join(".ego");
+        std::fs::create_dir(&ego).expect("profile fixture config directory");
+        std::fs::write(
+            ego.join("config.toml"),
+            r#"[profile.regression_case]
+model = "startup/model"
+
+[profile.regression_case]
+model = "request/model"
+"#,
+        )
+        .expect("profile fixture config");
+
+        let startup = run_args("regression_case");
+        let frozen = FrozenRunConfig::capture(workspace, &startup, Trust::Trusted)
+            .expect("startup config must be captured");
+        assert_eq!(frozen.profile(), Some("regression_case"));
+
+        let request = run_args("regression_case");
+        let effective = frozen
+            .resolve(&request)
+            .expect("request profile must resolve");
+        assert_eq!(effective.model, Some(ModelRef("request/model".to_owned())));
+
+        let active = effective
+            .active_profile
+            .expect("request profile provenance must be present");
+        assert_eq!(active.name, "regression_case");
+        assert_eq!(active.selected_by, Source::Flags);
+        assert!(!active.definitions.is_empty());
+        assert!(active.definitions.contains(Source::Project));
+    }
 }

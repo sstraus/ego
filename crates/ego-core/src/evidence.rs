@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::budget::MeteringIdentity;
-use crate::config::ModelRef;
+use crate::config::{ActiveProfileProvenance, ModelRef};
 use crate::cost::PricingRevision;
 use crate::digest::sha256_hex;
 use crate::event::domain::GenerationRole;
@@ -77,12 +77,12 @@ impl fmt::Display for EvidenceDigest {
 pub enum ConfigProvenance {
     Resolved {
         #[serde(skip_serializing_if = "Option::is_none")]
-        profile: Option<String>,
+        profile: Option<ActiveProfileProvenance>,
     },
 }
 
 impl ConfigProvenance {
-    pub fn resolved(profile: Option<String>) -> Self {
+    pub fn resolved(profile: Option<ActiveProfileProvenance>) -> Self {
         Self::Resolved { profile }
     }
 }

@@ -3,12 +3,13 @@
 
 use super::error::ConfigError;
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 use super::layer::{
     AuthProviderLayer, ConfigLayer, McpLayerEntry, McpServerConfig, McpServerName, Mode, ModelRef,
     UiLayer,
 };
-use super::ruleset::Ruleset;
+use super::ruleset::{OriginSet, Ruleset};
 use super::source::{Source, Sourced, Trust};
 use crate::ceiling::{Ceilings, Clamped};
 use crate::generator::types::ThinkingLevel;
@@ -21,6 +22,14 @@ use crate::permit::rule::Rule;
 pub enum Posture {
     Bare,
     Ambient,
+}
+
+/// Safe provenance of one explicitly selected profile after the trust gate.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ActiveProfileProvenance {
+    pub name: String,
+    pub selected_by: Source,
+    pub definitions: OriginSet,
 }
 
 /// The exact authority that supplied a winning MCP entry.
@@ -77,6 +86,11 @@ pub struct Effective {
     pub permissions: Ruleset,
     pub judge: Option<ModelRef>,
     pub posture: Posture,
+    /// The selected profile and every eligible layer that defined it.
+    pub active_profile: Option<ActiveProfileProvenance>,
+    /// CI profile roots retain the layer that won per-field precedence.
+    pub session_dir: Option<Sourced<PathBuf>>,
+    pub artifact_dir: Option<Sourced<PathBuf>>,
     /// What this run may spend, after precedence and the system clamp.
     ///
     /// `2026-08-21-a-run-with-no-ceiling.md` §4: both fields are `None`
@@ -135,6 +149,30 @@ pub fn resolve(
     trust: Trust,
     active_profile: Option<&str>,
 ) -> Result<Effective, ConfigError> {
+    resolve_inner(layers, trust, active_profile, None)
+}
+
+/// Resolve one process-captured profile selection without rereading its
+/// environment or guessing its source.
+pub fn resolve_selected(
+    layers: &[Sourced<ConfigLayer>],
+    trust: Trust,
+    active_profile: Option<(&str, Source)>,
+) -> Result<Effective, ConfigError> {
+    resolve_inner(
+        layers,
+        trust,
+        active_profile.map(|(name, _)| name),
+        active_profile.map(|(_, source)| source),
+    )
+}
+
+fn resolve_inner(
+    layers: &[Sourced<ConfigLayer>],
+    trust: Trust,
+    active_profile: Option<&str>,
+    selected_by: Option<Source>,
+) -> Result<Effective, ConfigError> {
     let mut ordered: Vec<&Sourced<ConfigLayer>> = layers.iter().collect();
     ordered.sort_by_key(|l| l.source.rank());
 
@@ -157,15 +195,27 @@ pub fn resolve(
         })
         .collect();
 
-    if let Some(name) = active_profile {
-        let defined = eligible.iter().any(|l| l.value.profile.contains_key(name));
-        if !defined {
+    let active_profile_name = active_profile;
+    let resolved_active_profile = if let Some(name) = active_profile_name {
+        let mut definitions = OriginSet::default();
+        for layer in &eligible {
+            if layer.value.profile.contains_key(name) {
+                definitions.insert(layer.source);
+            }
+        }
+        if definitions.is_empty() {
             return Err(ConfigError::UnknownProfile {
                 name: name.to_string(),
             });
         }
-    }
-
+        selected_by.map(|selected_by| ActiveProfileProvenance {
+            name: name.to_owned(),
+            selected_by,
+            definitions,
+        })
+    } else {
+        None
+    };
     let mut model = None;
     let mut thinking = None;
     let mut mode = None;
@@ -176,9 +226,11 @@ pub fn resolve(
     let mut auth = std::collections::HashMap::new();
     let mut ui = UiLayer::default();
     let mut mcp = ResolvedMcpConfig::default();
+    let mut session_dir = None;
+    let mut artifact_dir = None;
 
     for sourced in &eligible {
-        let profile = active_profile.and_then(|name| sourced.value.profile.get(name));
+        let profile = active_profile_name.and_then(|name| sourced.value.profile.get(name));
 
         apply_mcp_entries(
             &mut mcp,
@@ -187,7 +239,7 @@ pub fn resolve(
                 source: sourced.source,
             },
         );
-        if let (Some(profile), Some(name)) = (profile, active_profile) {
+        if let (Some(profile), Some(name)) = (profile, active_profile_name) {
             apply_mcp_entries(
                 &mut mcp,
                 &profile.mcp.servers,
@@ -243,6 +295,18 @@ pub fn resolve(
             // make naming either a way to drop the other.
             ceilings.apply(budget);
         }
+        if let Some(path) = profile.and_then(|profile| profile.session_dir.clone()) {
+            session_dir = Some(Sourced {
+                source: sourced.source,
+                value: path,
+            });
+        }
+        if let Some(path) = profile.and_then(|profile| profile.artifact_dir.clone()) {
+            artifact_dir = Some(Sourced {
+                source: sourced.source,
+                value: path,
+            });
+        }
         for (id, provider) in &sourced.value.auth {
             let resolved = auth
                 .entry(id.clone())
@@ -280,7 +344,7 @@ pub fn resolve(
                 }
             }
         }
-        if let Some(profile) = active_profile.and_then(|name| sourced.value.profile.get(name))
+        if let Some(profile) = active_profile_name.and_then(|name| sourced.value.profile.get(name))
             && let Some(perm) = &profile.permissions
         {
             for entry in &perm.deny {
@@ -340,7 +404,7 @@ pub fn resolve(
         if let Some(budget) = &sourced.value.budget {
             system_ceiling.apply(budget);
         }
-        if let Some(budget) = active_profile
+        if let Some(budget) = active_profile_name
             .and_then(|name| sourced.value.profile.get(name))
             .and_then(|profile| profile.budget.as_ref())
         {
@@ -357,6 +421,9 @@ pub fn resolve(
         permissions,
         judge,
         posture,
+        active_profile: resolved_active_profile,
+        session_dir,
+        artifact_dir,
         ceilings,
         clamped,
         auth,

@@ -485,6 +485,7 @@ pub struct Args {
     pub answers: Vec<ResumeAnswer>,
     pub session: SessionChoice,
     pub session_dir: Option<PathBuf>,
+    pub artifact_dir: Option<PathBuf>,
     pub output: Output,
     pub schema: Option<String>,
     pub schema_retries: u32,
@@ -497,6 +498,7 @@ pub struct Args {
     pub directory: Option<PathBuf>,
     pub set: Vec<String>,
     pub profile: Option<String>,
+    pub(crate) profile_source: Option<ego_core::config::Source>,
     pub quiet: bool,
     pub no_color: bool,
 }
@@ -918,6 +920,10 @@ struct Flags {
 
     #[command(flatten)]
     common: Common,
+
+    /// Override the sanitized run-artifact root for profile `ci`.
+    #[arg(long)]
+    artifact_dir: Option<PathBuf>,
 
     /// JSON Schema the final answer must validate against; `@file` or inline.
     #[arg(long)]
@@ -1618,6 +1624,7 @@ fn into_args(command: RunCommand) -> Result<Args, UsageError> {
         answers: Vec::new(),
         session,
         session_dir: flags.common.places.session_dir,
+        artifact_dir: flags.artifact_dir,
         output: flags.common.output,
         schema: flags.schema,
         schema_retries: flags.schema_retries,
@@ -1635,6 +1642,10 @@ fn into_args(command: RunCommand) -> Result<Args, UsageError> {
         mcp: flags.mcp,
         directory: flags.common.places.directory,
         set: flags.set,
+        profile_source: flags
+            .profile
+            .as_ref()
+            .map(|_| ego_core::config::Source::Flags),
         profile: flags.profile,
         quiet: flags.quiet,
         no_color: flags.no_color,

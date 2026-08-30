@@ -25,7 +25,8 @@ pub use mutation::{
     UserConfigError, UserConfigMutation, UserConfigPublication, UserConfigStore, UserMcpSlot,
 };
 pub use resolve::{
-    Effective, McpConfigProvenance, Posture, ResolvedMcpConfig, ResolvedMcpEntry, resolve,
+    ActiveProfileProvenance, Effective, McpConfigProvenance, Posture, ResolvedMcpConfig,
+    ResolvedMcpEntry, resolve, resolve_selected,
 };
 pub use ruleset::{OriginSet, Ruleset, SourcedRule};
 pub use source::{Source, Sourced, Trust};

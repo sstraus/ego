@@ -40,14 +40,35 @@ async fn ordinary_main() -> std::process::ExitCode {
     let out = Stdout::new(cancel.clone());
     let evidence = std::sync::Arc::new(EvidenceAdmissionService::new());
 
-    let invocation = cli::parse(std::env::args().collect());
+    let mut invocation = cli::parse(std::env::args().collect());
+    if let Ok(Invocation::Run(args) | Invocation::Resume(args) | Invocation::Interactive(args)) =
+        &mut invocation
+    {
+        ego_cli::config::capture_profile(args);
+    }
+    if matches!(
+        &invocation,
+        Ok(Invocation::Interactive(args)) if args.profile.as_deref() == Some("ci")
+    ) {
+        invocation = Err(cli::UsageError(
+            "profile `ci` is available only through ego run or ego resume".to_owned(),
+        ));
+    }
+    let mut ci_preflight = match &invocation {
+        Ok(Invocation::Run(args) | Invocation::Resume(args))
+            if args.profile.as_deref() == Some("ci") =>
+        {
+            Some(run::preflight_ci(args, &cancel).await)
+        }
+        _ => None,
+    };
     let needs_mcp_runtime = matches!(
         &invocation,
         Ok(Invocation::Mcp(_)
             | Invocation::Interactive(_)
             | Invocation::Run(_)
             | Invocation::Resume(_))
-    );
+    ) && ci_preflight.as_ref().is_none_or(Result::is_ok);
     let mcp = if needs_mcp_runtime {
         Some(ego_cli::provider_http::McpProcessScope::online(cancel.clone()).await)
     } else {
@@ -212,19 +233,46 @@ async fn ordinary_main() -> std::process::ExitCode {
             }
             Ok(Invocation::Run(args) | Invocation::Resume(args)) => {
                 let json = args.output == cli::Output::Json;
-                let ended = run::run_with_mcp_registry(
-                    *args,
-                    &out,
-                    cancel,
-                    std::sync::Arc::clone(
-                        mcp.as_ref()
-                            .and_then(|runtime| runtime.as_ref().ok())
-                            .expect("run invocation constructed its MCP runtime")
-                            .controller(),
-                    ),
-                    std::sync::Arc::clone(&evidence),
-                )
-                .await;
+                let ended = match ci_preflight.take() {
+                    Some(Err(termination)) => Ended {
+                        termination,
+                        session: ego_core::event::id::SessionId::new(),
+                        state: ego_core::state::SessionState::default(),
+                        result: serde_json::Value::String(String::new()),
+                        mcp_errors: Vec::new(),
+                    },
+                    Some(Ok(preflight)) => {
+                        run::run_with_ci_preflight(
+                            *args,
+                            &out,
+                            cancel,
+                            std::sync::Arc::clone(
+                                mcp.as_ref()
+                                    .and_then(|runtime| runtime.as_ref().ok())
+                                    .expect("preflighted CI run constructed its MCP runtime")
+                                    .controller(),
+                            ),
+                            std::sync::Arc::clone(&evidence),
+                            preflight,
+                        )
+                        .await
+                    }
+                    None => {
+                        run::run_with_mcp_registry(
+                            *args,
+                            &out,
+                            cancel,
+                            std::sync::Arc::clone(
+                                mcp.as_ref()
+                                    .and_then(|runtime| runtime.as_ref().ok())
+                                    .expect("run invocation constructed its MCP runtime")
+                                    .controller(),
+                            ),
+                            std::sync::Arc::clone(&evidence),
+                        )
+                        .await
+                    }
+                };
                 if json {
                     let report = run::report(&ended);
                     match serde_json::to_string(&report) {

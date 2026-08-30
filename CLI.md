@@ -188,6 +188,8 @@ ceilings come only from an administrator's `/etc/ego`.
                         session is opened or created, or any effect occurs;
                         use the durable default, --session, or --session-id
     --session-dir DIR   override store location
+    --artifact-dir DIR  override the sanitized artifact root; valid only for
+                        the explicit `ci` profile
     --answer ID=JSON    repeatable; answer a pending AskQuestion while resuming
 ```
 
@@ -258,6 +260,7 @@ and line that said it.
 | `--session`, `--session-id` | **yes** | durable session choices; the parser places them in the §4.5 mutually exclusive session group |
 | `--ephemeral` | no | recognized only to refuse by name with usage error exit 2 before opening or creating a session or causing an effect; use the durable default, `--session`, or `--session-id` |
 | `--session-dir` | **yes** | |
+| `--artifact-dir` | **yes** | `ego run`/`ego resume` only, and only with the exact selected profile name `ci`; flags override `[profile.ci].artifact_dir` |
 | `--answer` | no | regression case: the headless continuation of `AskQuestion`; the question event and accepted answer must exist before the flag can enforce anything |
 | `--output` | **yes** | `text\|json\|jsonl`. On `ego ls` the two machine forms are §4.6's, not §4.1/§4.2's — a listing is not a run |
 | `--all` | **yes** | `ego ls` only, and documented in §2 rather than here: §3 is the argument grammar of a *run*, and this widens a catalogue query |
@@ -878,7 +881,28 @@ TOML, flag-mirroring keys, `[profile.NAME]` sections selected with
 `--profile NAME` (Codex's idea — one flag flips a whole posture). The `ci`
 profile is a **contract**, not detection: explicit trusted config, headless
 credential sources, isolated session/artifact dirs, no prompts, sanitized run
-bundle. Precedence: flags > env (`EGO_MODEL`, `EGO_PROFILE`, …) > local >
+bundle. It activates only through `--profile ci` or `EGO_PROFILE=ci`; ambient
+`CI` never activates it. Its exact root configuration is:
+
+```toml
+[profile.ci]
+session_dir = "/absolute/precreated/session-root"
+artifact_dir = "/absolute/precreated/artifact-root"
+```
+
+Both roots must be absolute, pre-existing real directories with non-symlink
+final components. After canonicalization, the workspace, session root, and
+artifact root must be pairwise disjoint, including containment. CI is accepted
+only by headless `ego run`/`ego resume`, requires explicit `--instructions`, a
+prompt supplied without an interactive path, and an already non-interactive
+credential source. Every admitted terminal outcome publishes exactly one
+canonical sanitized bundle while the session writer lease is held; a
+pre-admission refusal publishes none. Publication is never retried, deleted,
+or rolled back after uncertainty. JSONL stdout remains the ordinary parseable
+live event stream and diagnostics remain on stderr; the separately published
+bundle is the sanitized artifact.
+
+Precedence: flags > env (`EGO_MODEL`, `EGO_PROFILE`, …) > local >
 project > user > system, with system ceilings binding everyone. Credentials
 resolve through a source chain (OS keyring, systemd credentials, env,
 `credential_command` for Vault/SOPS, device-flow OAuth) via `ego auth` —

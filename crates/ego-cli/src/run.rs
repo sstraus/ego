@@ -21,7 +21,7 @@ use ego_core::compact::{
 };
 use ego_core::config::{
     Effective, Limits, Mode, ModelRef, Posture, Selection, SystemPrompt, Trust, UserConfigStore,
-    resolve, system_prompt,
+    resolve_selected, system_prompt,
 };
 use ego_core::cost::CurrencyCode;
 use ego_core::event::domain::CancelCause;
@@ -219,16 +219,31 @@ pub async fn run_with_mcp_registry(
     registry: Arc<McpRegistryController>,
     evidence: Arc<EvidenceAdmissionService>,
 ) -> Ended {
-    run_process(args, out, cancel, registry, evidence).await
+    run_process(args, out, cancel, registry, evidence, None).await
+}
+
+/// Run one direct CI invocation from the exact preflight snapshot captured
+/// before any process-wide MCP authority was opened.
+pub async fn run_with_ci_preflight(
+    args: Args,
+    out: &Stdout,
+    cancel: CancelToken,
+    registry: Arc<McpRegistryController>,
+    evidence: Arc<EvidenceAdmissionService>,
+    preflight: DirectPreflight,
+) -> Ended {
+    run_process(args, out, cancel, registry, evidence, Some(preflight.0)).await
 }
 
 async fn run_process(
-    args: Args,
+    mut args: Args,
     out: &Stdout,
     cancel: CancelToken,
     mcp_registry: Arc<McpRegistryController>,
     evidence: Arc<EvidenceAdmissionService>,
+    preflight: Option<ExecutionPreflight>,
 ) -> Ended {
+    config::capture_profile(&mut args);
     let output = args.output;
     let quiet = args.quiet;
     // The one place the terminal is asked what it is. §4.5's "stdout is
@@ -254,7 +269,7 @@ async fn run_process(
     let announce = Announce::new(out, capabilities, quiet);
     announce.opening(args.prompt.as_deref());
 
-    let ended = run_with_registry(args, |_| sink, cancel, mcp_registry, evidence).await;
+    let ended = run_with_registry(args, |_| sink, cancel, mcp_registry, evidence, preflight).await;
 
     // Draws the last block and closes the last line. A no-op unless text mode
     // has something outstanding, which is why it can run on the refusal path
@@ -277,12 +292,18 @@ pub async fn interactive_with_mcp_registry(
 }
 
 async fn interactive_process(
-    args: Args,
+    mut args: Args,
     out: &Stdout,
     cancel: CancelToken,
     mcp_registry: Arc<McpRegistryController>,
     evidence: Arc<EvidenceAdmissionService>,
 ) -> Ended {
+    config::capture_profile(&mut args);
+    if args.profile.as_deref() == Some("ci") {
+        return Ended::refused(RunTermination::UsageError {
+            message: "profile `ci` is available only through ego run or ego resume".to_owned(),
+        });
+    }
     // A machine-readable stream has no reader here. `--output json` is a
     // single document at completion and a conversation has no completion, so
     // the flag is refused by name rather than quietly producing a stream
@@ -377,6 +398,7 @@ async fn interactive_through(
         args,
         |_| &text_sink as &dyn EventSink,
         cancel,
+        None,
         RunHost {
             driver: Driver::Interactive {
                 seat: interactive_seat,
@@ -585,11 +607,13 @@ async fn run_with_registry<S: EventSink>(
     cancel: CancelToken,
     mcp_registry: Arc<McpRegistryController>,
     evidence: Arc<EvidenceAdmissionService>,
+    preflight: Option<ExecutionPreflight>,
 ) -> Ended {
     match execute(
         args,
         destination,
         cancel,
+        preflight,
         RunHost {
             driver: Driver::Once,
             elicitor: None,
@@ -833,6 +857,137 @@ struct Settings {
     effective: Effective,
 }
 
+/// Validated direct-host facts that exist only for the explicit CI posture.
+struct CiInvocation {
+    session_root: PathBuf,
+    artifact_root: PathBuf,
+}
+
+fn ci_invocation(
+    args: &Args,
+    settings: &Settings,
+    driver: &Driver<'_>,
+) -> Result<Option<CiInvocation>, UsageError> {
+    if settings
+        .effective
+        .active_profile
+        .as_ref()
+        .is_none_or(|profile| profile.name != "ci")
+    {
+        return Ok(None);
+    }
+    if !matches!(driver, Driver::Once) {
+        return Err(UsageError(
+            "profile `ci` is available only through ego run or ego resume".to_owned(),
+        ));
+    }
+    if args.instructions.is_none() {
+        return Err(UsageError(
+            "profile `ci` requires --instructions with an explicit file".to_owned(),
+        ));
+    }
+    if args.prompt.is_none()
+        && args.agent_file.is_none()
+        && args.stdin == crate::cli::Stdin::Ambient
+        && args.answers.is_empty()
+    {
+        return Err(UsageError(
+            "profile `ci` requires a headless prompt".to_owned(),
+        ));
+    }
+
+    let session_root = args
+        .session_dir
+        .as_ref()
+        .or_else(|| {
+            settings
+                .effective
+                .session_dir
+                .as_ref()
+                .map(|root| &root.value)
+        })
+        .ok_or_else(|| {
+            UsageError(
+                "profile `ci`: --session-dir must be an absolute, pre-existing directory"
+                    .to_owned(),
+            )
+        })?;
+    let artifact_root = args
+        .artifact_dir
+        .as_ref()
+        .or_else(|| {
+            settings
+                .effective
+                .artifact_dir
+                .as_ref()
+                .map(|root| &root.value)
+        })
+        .ok_or_else(|| {
+            UsageError(
+                "profile `ci`: --artifact-dir must be an absolute, pre-existing directory"
+                    .to_owned(),
+            )
+        })?;
+    let session_root = isolated_ci_root("--session-dir", session_root)?;
+    let artifact_root = isolated_ci_root("--artifact-dir", artifact_root)?;
+    if roots_overlap(&settings.root, &session_root)
+        || roots_overlap(&settings.root, &artifact_root)
+        || roots_overlap(&session_root, &artifact_root)
+    {
+        return Err(UsageError(
+            "workspace, session, and artifact roots must be pairwise disjoint".to_owned(),
+        ));
+    }
+    Ok(Some(CiInvocation {
+        session_root,
+        artifact_root,
+    }))
+}
+
+fn isolated_ci_root(flag: &str, path: &Path) -> Result<PathBuf, UsageError> {
+    if !path.is_absolute() {
+        return Err(UsageError(format!(
+            "{flag} must be an absolute, pre-existing directory"
+        )));
+    }
+    let metadata = std::fs::symlink_metadata(path).map_err(|_| {
+        UsageError(format!(
+            "{flag} must be an absolute, pre-existing directory"
+        ))
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(UsageError(format!(
+            "{flag} must be an absolute, pre-existing directory whose final component is not a symlink"
+        )));
+    }
+    std::fs::canonicalize(path).map_err(|error| {
+        UsageError(format!(
+            "{flag} directory {} could not be resolved: {error}",
+            path.display()
+        ))
+    })
+}
+
+fn roots_overlap(left: &Path, right: &Path) -> bool {
+    left.starts_with(right) || right.starts_with(left)
+}
+
+fn ci_preflight_termination(ci: bool, termination: RunTermination) -> RunTermination {
+    if !ci {
+        return termination;
+    }
+    match termination {
+        RunTermination::UsageError { message }
+            if message.to_ascii_lowercase().contains("credential") =>
+        {
+            RunTermination::UsageError {
+                message: format!("profile `ci` requires a non-interactive credential: {message}"),
+            }
+        }
+        other => other,
+    }
+}
+
 /// The command line and the config layers, resolved into one answer.
 fn settings(
     args: &Args,
@@ -859,8 +1014,15 @@ fn rooted_settings(
     // terminal or stdin read is reachable from that path.
     let trust = trust_for(&root);
     let layers = config::layers(&root, args, trust)?;
-    let effective = resolve(&layers, trust, config::profile(args).as_deref())
-        .map_err(|err| UsageError(err.to_string()))?;
+    let selected_profile = config::profile(args);
+    let effective = resolve_selected(
+        &layers,
+        trust,
+        selected_profile
+            .as_ref()
+            .map(config::SelectedProfile::as_resolver_input),
+    )
+    .map_err(|err| UsageError(err.to_string()))?;
     finish_rooted_settings(args, cwd, effective, trust, diagnostics)
 }
 
@@ -1537,6 +1699,12 @@ impl CliPrepared {
         }
         if let Some(profile) = request.selections.profile() {
             args.profile = Some(profile.to_owned());
+            args.profile_source = Some(ego_core::config::Source::Flags);
+        }
+        if args.profile.as_deref() == Some("ci") {
+            return Err(RunTermination::UsageError {
+                message: "profile ci available only through ego run or ego resume".to_owned(),
+            });
         }
         let root = request.root.as_path().to_path_buf();
         let settings = match frozen {
@@ -1564,7 +1732,7 @@ impl CliPrepared {
             .as_ref()
             .map(|prompt| prompt.sources.clone())
             .unwrap_or_default();
-        let config_provenance = ConfigProvenance::resolved(args.profile.clone());
+        let config_provenance = ConfigProvenance::resolved(effective.active_profile.clone());
         let run_context = RunContextEvidence::new(
             request.run_id.session_id(),
             request.invocation,
@@ -1886,6 +2054,7 @@ fn protocol_args(session_dir: Option<PathBuf>) -> Args {
         answers: Vec::new(),
         session: SessionChoice::New,
         session_dir,
+        artifact_dir: None,
         output: Output::Json,
         schema: None,
         schema_retries: 0,
@@ -1897,6 +2066,7 @@ fn protocol_args(session_dir: Option<PathBuf>) -> Args {
         directory: None,
         set: Vec::new(),
         profile: None,
+        profile_source: None,
         quiet: false,
         no_color: false,
     }
@@ -1964,7 +2134,7 @@ impl CliCompactionCommand {
             source_id,
             invocation,
             RunId::new(source_id, invocation.uuid()),
-            ConfigProvenance::resolved(self.args.profile.clone()),
+            ConfigProvenance::resolved(effective.active_profile.clone()),
         )
         .with_instructions(
             system
@@ -2308,18 +2478,140 @@ fn compaction_availability(pending_work: bool) -> repl::actions::Availability {
     }
 }
 
+struct ExecutionPreflight {
+    settings: Settings,
+    ci: Option<CiInvocation>,
+    refresh: ego_mcp::McpRegistryRefresh,
+    ready: ExecutionReady,
+}
+
+struct ExecutionReady {
+    system: Option<SystemPrompt>,
+    registry: Vec<RegisteredTool>,
+    compiled: Option<schema::Schema>,
+    text: String,
+    generation: GenerationReady,
+}
+
+struct GenerationReady {
+    source: Arc<model::CliGenerationModelSource>,
+    selection: Arc<model::GenerationSelection>,
+    main_capabilities: ModelCapabilities,
+    judge_enabled: bool,
+}
+
+/// Opaque result of the single direct-CI preflight pass.
+pub struct DirectPreflight(ExecutionPreflight);
+
+/// Complete direct-CI preflight before the process opens its MCP journals or
+/// any durable session. The returned value is consumed by the run; no input
+/// is resolved a second time.
+pub async fn preflight_ci(
+    args: &Args,
+    cancel: &CancelToken,
+) -> Result<DirectPreflight, RunTermination> {
+    let mut status = None;
+    let prepared =
+        execution_preflight(args, &Driver::Once, cancel, &mut status, &Stderr, None).await?;
+    debug_assert!(prepared.ci.is_some());
+    Ok(DirectPreflight(prepared))
+}
+
+async fn execution_preflight(
+    args: &Args,
+    driver: &Driver<'_>,
+    cancel: &CancelToken,
+    status: &mut Option<InteractiveStatus>,
+    diagnostics: &dyn Diagnostics,
+    mcp_registry: Option<Arc<McpRegistryController>>,
+) -> Result<ExecutionPreflight, RunTermination> {
+    let usage = |err: UsageError| RunTermination::UsageError {
+        message: err.to_string(),
+    };
+    let settings =
+        settings(args, |root| run_trust(args, driver, root), diagnostics).map_err(usage)?;
+    let ci = ci_invocation(args, &settings, driver).map_err(usage)?;
+    let selected_mcp =
+        config::selected_mcp(args, &settings.effective, &settings.cwd).map_err(usage)?;
+    let selected_mcp = ego_tools::mcp::materialize_admissions(selected_mcp);
+    let refresh = ego_mcp::McpRegistryRefresh::new(
+        selected_mcp,
+        ego_mcp::RegistryTrigger::ConfigChanged,
+        ego_mcp::RegistryScope::All,
+    )
+    .map_err(|error| RunTermination::Failed {
+        message: error.to_string(),
+    })?;
+    let Materials {
+        system,
+        registry,
+        compiled,
+        text,
+        slug,
+    } = materials(
+        &settings,
+        args,
+        matches!(driver, Driver::Interactive { .. }),
+        diagnostics,
+    )
+    .map_err(usage)?;
+    let GenerationPreflight {
+        source,
+        selection,
+        capabilities: main_capabilities,
+        judge_enabled,
+        proof_directory,
+        proof_evidence,
+    } = generation_preflight(
+        GenerationPreflightInput {
+            session_id: SessionId::new(),
+            confinement: &settings.confinement,
+            effective: &settings.effective,
+            slug,
+            cancel,
+            run_deadline: settings.run_deadline,
+            mcp_registry,
+            native_tools: &registry,
+        },
+        status,
+    )
+    .await
+    .map_err(|termination| ci_preflight_termination(ci.is_some(), termination))?;
+    drop(proof_directory);
+    drop(proof_evidence);
+    Ok(ExecutionPreflight {
+        settings,
+        ci,
+        refresh,
+        ready: ExecutionReady {
+            system,
+            registry,
+            compiled,
+            text,
+            generation: GenerationReady {
+                source,
+                selection,
+                main_capabilities,
+                judge_enabled,
+            },
+        },
+    })
+}
+
 /// Everything before the first turn.
 ///
 /// What is left here after the four steps above is the *order* they happen in,
-/// which is the part that is genuinely this function's: settings before
-/// session choice before materials because a missing `resume` target is true
-/// independently of model configuration, materials before the provider because
-/// a bad `--tools` must not reach a network, then the writer lease and durable
-/// run-context evidence before MCP reconciliation or provider resolution.
+/// which is the part that is genuinely this function's: settings, explicit CI
+/// posture and MCP selection are established before a session is chosen. A
+/// direct CI token already contains material and generation readiness; every
+/// ordinary run preserves the historical order by opening the selected
+/// session before materials, then admitting run context and reconciling MCP
+/// before generation readiness.
 async fn execute<S: EventSink>(
-    args: Args,
+    mut args: Args,
     destination: impl FnOnce(&ModelCapabilities) -> S,
     cancel: CancelToken,
+    preflight: Option<ExecutionPreflight>,
     host: RunHost<'_>,
 ) -> Result<Ended, RunTermination> {
     let RunHost {
@@ -2333,28 +2625,49 @@ async fn execute<S: EventSink>(
     let usage = |err: UsageError| RunTermination::UsageError {
         message: err.to_string(),
     };
-
-    let settings =
-        settings(&args, |root| run_trust(&args, &driver, root), diagnostics).map_err(usage)?;
-    let selected_mcp =
-        config::selected_mcp(&args, &settings.effective, &settings.cwd).map_err(usage)?;
-    let selected_mcp = ego_tools::mcp::materialize_admissions(selected_mcp);
-    let refresh = ego_mcp::McpRegistryRefresh::new(
-        selected_mcp,
-        ego_mcp::RegistryTrigger::ConfigChanged,
-        ego_mcp::RegistryScope::All,
-    )
-    .map_err(|error| RunTermination::Failed {
-        message: error.to_string(),
-    })?;
+    let (settings, ci, refresh, ready) = match preflight {
+        Some(ExecutionPreflight {
+            settings,
+            ci,
+            refresh,
+            ready,
+        }) => (settings, ci, refresh, Some(ready)),
+        None => {
+            let settings = settings(&args, |root| run_trust(&args, &driver, root), diagnostics)
+                .map_err(usage)?;
+            let ci = ci_invocation(&args, &settings, &driver).map_err(usage)?;
+            if ci.is_some() {
+                return Err(RunTermination::Failed {
+                    message: "direct CI execution is missing its preflight token".to_owned(),
+                });
+            }
+            let selected_mcp =
+                config::selected_mcp(&args, &settings.effective, &settings.cwd).map_err(usage)?;
+            let selected_mcp = ego_tools::mcp::materialize_admissions(selected_mcp);
+            let refresh = ego_mcp::McpRegistryRefresh::new(
+                selected_mcp,
+                ego_mcp::RegistryTrigger::ConfigChanged,
+                ego_mcp::RegistryScope::All,
+            )
+            .map_err(|error| RunTermination::Failed {
+                message: error.to_string(),
+            })?;
+            (settings, ci, refresh, None)
+        }
+    };
+    if let Some(ci) = &ci {
+        args.session_dir = Some(ci.session_root.clone());
+    }
+    let artifact_store = ci
+        .as_ref()
+        .map(|ci| session::jsonl(ci.artifact_root.clone(), settings.root.clone()));
     let Chosen {
         store: jsonl_store,
         id: session_id,
     } = chosen(&args, &settings.root).map_err(usage)?;
     let clock = SystemClock;
-    let early_opened = if args.answers.is_empty() {
-        None
-    } else {
+    let direct_ci_ready = ready.is_some();
+    let early_opened = if direct_ci_ready || !args.answers.is_empty() {
         Some(Opened::Durable(Box::new(
             session::open(&jsonl_store, &session_id, &clock).map_err(|err| {
                 RunTermination::Failed {
@@ -2362,21 +2675,36 @@ async fn execute<S: EventSink>(
                 }
             })?,
         )))
+    } else {
+        None
     };
-    let Materials {
-        system,
-        mut registry,
-        compiled,
-        text,
-        slug,
-    } = materials(
-        &settings,
-        &args,
-        matches!(&driver, Driver::Interactive { .. }),
-        diagnostics,
-    )
-    .map_err(usage)?;
 
+    let (system, registry, compiled, text, slug, generation) = match ready {
+        Some(ExecutionReady {
+            system,
+            registry,
+            compiled,
+            text,
+            generation,
+        }) => (system, registry, compiled, text, None, Some(generation)),
+        None => {
+            let Materials {
+                system,
+                registry,
+                compiled,
+                text,
+                slug,
+            } = materials(
+                &settings,
+                &args,
+                matches!(&driver, Driver::Interactive { .. }),
+                diagnostics,
+            )
+            .map_err(usage)?;
+            (system, registry, compiled, text, Some(slug), None)
+        }
+    };
+    let mut registry = registry;
     let Settings {
         run_deadline,
         root,
@@ -2402,6 +2730,7 @@ async fn execute<S: EventSink>(
     }
 
     let invocation = RunInvocationId::new();
+    let run_id = RunId::new(session_id, invocation.uuid());
     let instruction_descriptors = system
         .as_ref()
         .map(|prompt| prompt.sources.clone())
@@ -2409,8 +2738,8 @@ async fn execute<S: EventSink>(
     let context = RunContextEvidence::new(
         session_id,
         invocation,
-        RunId::new(session_id, invocation.uuid()),
-        ConfigProvenance::resolved(args.profile.clone()),
+        run_id,
+        ConfigProvenance::resolved(effective.active_profile.clone()),
     )
     .with_instructions(instruction_descriptors);
     let Opened::Durable(opened_session) = &opened;
@@ -2430,7 +2759,17 @@ async fn execute<S: EventSink>(
     let resume = if args.answers.is_empty() {
         None
     } else {
-        Some(apply_resume_answers_once(&mut opened, &args.answers)?)
+        Some(
+            apply_resume_answers_once(&mut opened, &args.answers).map_err(|termination| {
+                finalize_ci_error(
+                    &jsonl_store,
+                    artifact_store.as_ref(),
+                    run_id,
+                    termination,
+                    diagnostics,
+                )
+            })?,
+        )
     };
     if !text.trim().is_empty()
         && let Driver::Interactive { seat, .. } = &driver
@@ -2438,46 +2777,82 @@ async fn execute<S: EventSink>(
         seat.busy();
     }
 
-    mcp_registry
-        .reconcile(refresh)
-        .await
-        .map_err(|error| RunTermination::Failed {
-            message: error.to_string(),
-        })?;
+    mcp_registry.reconcile(refresh).await.map_err(|error| {
+        finalize_ci_error(
+            &jsonl_store,
+            artifact_store.as_ref(),
+            run_id,
+            RunTermination::Failed {
+                message: error.to_string(),
+            },
+            diagnostics,
+        )
+    })?;
     let mcp_status = mcp_registry.status();
     let mcp_errors = mcp_status.mcp_errors();
     let admitted_tools = Some(mcp_registry.admitted_tools());
 
-    let GenerationPreflight {
+    let GenerationReady {
         source,
         selection,
-        capabilities: main_capabilities,
+        main_capabilities,
         judge_enabled,
-        proof_directory,
-        proof_evidence,
-    } = generation_preflight(
-        GenerationPreflightInput {
-            session_id,
-            confinement: &confinement,
-            effective: &effective,
-            slug,
-            cancel: &cancel,
-            run_deadline,
-            mcp_registry: Some(Arc::clone(&mcp_registry)),
-            native_tools: &registry,
-        },
-        &mut status,
-    )
-    .await?;
+    } = match generation {
+        Some(generation) => generation,
+        None => {
+            let GenerationPreflight {
+                source,
+                selection,
+                capabilities: main_capabilities,
+                judge_enabled,
+                proof_directory,
+                proof_evidence,
+            } = generation_preflight(
+                GenerationPreflightInput {
+                    session_id,
+                    confinement: &confinement,
+                    effective: &effective,
+                    slug: slug.expect("ordinary execution prepared its model slug"),
+                    cancel: &cancel,
+                    run_deadline,
+                    mcp_registry: Some(Arc::clone(&mcp_registry)),
+                    native_tools: &registry,
+                },
+                &mut status,
+            )
+            .await
+            .map_err(|termination| {
+                finalize_ci_error(
+                    &jsonl_store,
+                    artifact_store.as_ref(),
+                    run_id,
+                    termination,
+                    diagnostics,
+                )
+            })?;
+            drop(proof_directory);
+            drop(proof_evidence);
+            GenerationReady {
+                source,
+                selection,
+                main_capabilities,
+                judge_enabled,
+            }
+        }
+    };
 
     let opening = opened.state();
-    drop(proof_directory);
-    drop(proof_evidence);
     let mut active =
         ActiveSession::durable(opened, opening.clone(), EVIDENCE_CAP).map_err(|err| {
-            RunTermination::Failed {
-                message: format!("could not open this session's tool evidence: {err}"),
-            }
+            finalize_ci_error(
+                &jsonl_store,
+                artifact_store.as_ref(),
+                run_id,
+                RunTermination::Failed {
+                    message: format!("could not open this session's tool evidence: {err}"),
+                },
+                diagnostics,
+            )
         })?;
 
     // Every startup gate has passed. From here the run has a session; a later
@@ -2651,7 +3026,7 @@ async fn execute<S: EventSink>(
                 Some(continuation) => HeadlessInput::Resumed(continuation.turn),
                 None => HeadlessInput::Prompt(&text),
             };
-            let (termination, state, result) = drive_headless_turn(
+            let driven = drive_headless_turn(
                 &mut active,
                 opening,
                 &clock,
@@ -2675,15 +3050,33 @@ async fn execute<S: EventSink>(
                 input,
                 diagnostics,
             )
-            .await?;
+            .await;
+            let (termination, state, result) = match driven {
+                Ok(driven) => driven,
+                Err(termination) => (
+                    termination,
+                    active.state().clone(),
+                    Value::String(String::new()),
+                ),
+            };
             active.replace_state(state.clone());
-            Ok(Ended {
+            let mut ended = Ended {
                 termination,
                 session: active.id(),
                 state,
                 result,
                 mcp_errors: mcp_errors.clone(),
-            })
+            };
+            if let Some(artifact_store) = artifact_store.as_ref() {
+                finalize_ci_bundle(
+                    &jsonl_store,
+                    artifact_store,
+                    run_id,
+                    &mut ended.termination,
+                    diagnostics,
+                );
+            }
+            Ok(ended)
         }
         Driver::Interactive { seat, between } => {
             let mut control = seat.take_control();
@@ -3782,18 +4175,15 @@ fn exported(args: &ExportArgs) -> Result<String, RunTermination> {
     let store = session::jsonl(store_root, root);
 
     if args.sanitize {
-        let bundle = Exporter::new(&store)
-            .sanitized(args.source)
-            .map_err(|error| RunTermination::Failed {
-                message: format!("the sanitized export was refused: {error}"),
-            })?;
-        let canonical = serde_json::to_string(&bundle).map_err(|error| RunTermination::Failed {
-            message: format!("the sanitized export could not be rendered: {error}"),
-        })?;
+        let canonical = canonical_sanitized_json(&store, args.source)
+            .map_err(|message| RunTermination::Failed { message })?;
         return Ok(match args.format {
-            ExportFormat::Json | ExportFormat::Jsonl => format!("{canonical}\n"),
+            ExportFormat::Json | ExportFormat::Jsonl => canonical,
             ExportFormat::Md => {
-                format!("# ego sanitized export\n\n```json\n{canonical}\n```\n")
+                format!(
+                    "# ego sanitized export\n\n```json\n{}\n```\n",
+                    canonical.trim_end()
+                )
             }
         });
     }
@@ -3826,6 +4216,70 @@ fn exported(args: &ExportArgs) -> Result<String, RunTermination> {
             .map(|rendered| format!("# ego export\n\n```json\n{rendered}\n```\n"))
             .map_err(local_render_error),
     }
+}
+
+/// The one canonical producer-only rendering used by both `ego export` and
+/// mandatory CI publication.
+fn canonical_sanitized_json(store: &JsonlStore, target: SessionId) -> Result<String, String> {
+    let bundle = Exporter::new(store)
+        .sanitized(target)
+        .map_err(|error| format!("the sanitized export was refused: {error}"))?;
+    serde_json::to_string(&bundle)
+        .map(|canonical| format!("{canonical}\n"))
+        .map_err(|error| format!("the sanitized export could not be rendered: {error}"))
+}
+
+fn finalize_ci_bundle(
+    session_store: &JsonlStore,
+    artifact_store: &dyn RunArtifactStore,
+    run_id: RunId,
+    termination: &mut RunTermination,
+    diagnostics: &dyn Diagnostics,
+) {
+    let publication = canonical_sanitized_json(session_store, run_id.session_id())
+        .and_then(|bytes| {
+            artifact_store
+                .publish(
+                    run_id,
+                    PublishedRunArtifact::sanitized_bundle(bytes.into_bytes()),
+                )
+                .map_err(|error| error.to_string())
+        })
+        .and_then(|publication| match publication {
+            ArtifactPublication::PublishedDurably => Ok(()),
+            ArtifactPublication::PublishedDurabilityUncertain { diagnostic } => Err(format!(
+                "the sanitized run bundle is visible but its durability is uncertain: {diagnostic}"
+            )),
+        });
+    let Err(message) = publication else {
+        return;
+    };
+    if termination.exit_code() == 0 {
+        *termination = RunTermination::Failed { message };
+    } else {
+        diagnostics.note(&format!(
+            "sanitized run bundle publication failed: {message}"
+        ));
+    }
+}
+
+fn finalize_ci_error(
+    session_store: &JsonlStore,
+    artifact_store: Option<&JsonlStore>,
+    run_id: RunId,
+    mut termination: RunTermination,
+    diagnostics: &dyn Diagnostics,
+) -> RunTermination {
+    if let Some(artifact_store) = artifact_store {
+        finalize_ci_bundle(
+            session_store,
+            artifact_store,
+            run_id,
+            &mut termination,
+            diagnostics,
+        );
+    }
+    termination
 }
 
 fn local_replay_error(error: ReplaySourceError) -> RunTermination {
@@ -4269,6 +4723,57 @@ mod tests {
             workspace(Some(&file_arg)).is_err(),
             "an existing regular file must be rejected as a workspace root: {}",
             regular_file.display()
+        );
+    }
+
+    #[tokio::test]
+    async fn protocol_ci_profile_is_refused_before_session_or_provider_effects() {
+        let owner = tempdir().expect("protocol profile fixture owner");
+        let workspace = owner.path().join("workspace");
+        let session_root = owner.path().join("sessions");
+        std::fs::create_dir(&workspace).expect("protocol fixture workspace");
+        let store = Arc::new(JsonlStore::new(
+            session_root.clone(),
+            workspace.clone(),
+            Box::new(OsIo),
+        ));
+        let invocation = RunInvocationId::new();
+        let request = RunPreparation {
+            run_id: RunId::new(SessionId::new(), invocation.uuid()),
+            invocation,
+            root: ego_core::run::RunRoot::new(workspace).expect("protocol fixture root"),
+            selections: ego_core::run::RunSelections::new(
+                None,
+                None,
+                None,
+                None,
+                Some("ci".to_owned()),
+            ),
+            continuation: false,
+        };
+
+        let result = CliPrepared::prepare(
+            protocol_args(None),
+            store,
+            None,
+            &request,
+            None,
+            None,
+            Arc::new(EvidenceAdmissionService::new()),
+        )
+        .await;
+        let message = match result {
+            Err(RunTermination::UsageError { message }) => message,
+            Err(_) => panic!("protocol ci selection must be a usage refusal"),
+            Ok(_) => panic!("protocol ci selection must be refused"),
+        };
+        assert_eq!(
+            message,
+            "profile ci available only through ego run or ego resume"
+        );
+        assert!(
+            !session_root.exists(),
+            "protocol profile refusal must precede session creation"
         );
     }
 

@@ -114,6 +114,11 @@ pub struct ProfileLayer {
     /// A spend ceiling, in the same grammar `--budget` takes
     /// (`crate::ceiling::Budget`).
     pub budget: Option<Budget>,
+    /// CI-only durable session root. Other profile names are rejected while
+    /// parsing the containing layer, even when they are inactive.
+    pub session_dir: Option<std::path::PathBuf>,
+    /// CI-only sanitized artifact root.
+    pub artifact_dir: Option<std::path::PathBuf>,
     /// Complete MCP entries contributed by this profile. Entries replace the
     /// same name from the layer's base table; their fields never merge.
     #[serde(default)]
@@ -790,6 +795,17 @@ impl ConfigLayer {
     pub fn parse(source: Source, text: &str) -> Result<Sourced<ConfigLayer>, ConfigError> {
         let value: ConfigLayer =
             toml::from_str(text).map_err(|err| classify_parse_error(source, &err))?;
+        if let Some((name, _)) = value.profile.iter().find(|(name, profile)| {
+            name.as_str() != "ci"
+                && (profile.session_dir.is_some() || profile.artifact_dir.is_some())
+        }) {
+            return Err(ConfigError::Invalid {
+                source,
+                message: format!(
+                    "profile `{name}` cannot set `session_dir` or `artifact_dir`; those keys belong only to profile `ci`"
+                ),
+            });
+        }
         Ok(Sourced { source, value })
     }
 }

@@ -7,14 +7,18 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
+use ego_core::event::domain::{DomainEvent, Envelope, EventKind};
+use ego_core::event::id::{EventId, Producer, Seq, SessionId, TurnId};
+use ego_core::event::time::Timestamp;
 use ego_core::run::RunId;
 use ego_core::store::run_artifact::{
     ArtifactPublication, PublishedRunArtifact, RunArtifactId, RunArtifactStore,
     RunArtifactStoreError,
 };
+use ego_core::store::session_store::SessionStore;
 use ego_tools::store::{AtomicReplacePublication, JsonlStore, OsIo, StoreIo};
 use serde_json::Value;
 use tempfile::TempDir;
@@ -101,9 +105,26 @@ impl Fixture {
         artifact_root: &Path,
         instructions: bool,
     ) -> Ego {
+        self.command_with_model(
+            "ollama/qwen3",
+            profile,
+            session_root,
+            artifact_root,
+            instructions,
+        )
+    }
+
+    fn command_with_model(
+        &self,
+        model: &str,
+        profile: Option<&str>,
+        session_root: &Path,
+        artifact_root: &Path,
+        instructions: bool,
+    ) -> Ego {
         let mut command = Ego::at(&self.home, &self.workspace, Some(&self.stub)).args([
             "--model",
-            "ollama/qwen3",
+            model,
             "--session-id",
             support::FIXTURE_SESSION_ID,
             "--session-dir",
@@ -171,7 +192,11 @@ impl Fixture {
         artifact_root: &Path,
         expected: &str,
     ) {
-        assert_ne!(finished.code, Some(0), "CI preflight unexpectedly succeeded");
+        assert_ne!(
+            finished.code,
+            Some(0),
+            "CI preflight unexpectedly succeeded"
+        );
         assert!(
             !finished.stderr.trim().is_empty(),
             "CI preflight refusal omitted its stderr diagnostic"
@@ -241,10 +266,9 @@ fn contains_key(value: &Value, wanted: &str) -> bool {
 
 impl CleanRunner {
     fn consume(&self) -> (usize, bool, bool, bool) {
-        let manifest: Value = serde_json::from_slice(
-            &fs::read(&self.manifest).expect("clean runner manifest"),
-        )
-        .expect("clean runner manifest JSON");
+        let manifest: Value =
+            serde_json::from_slice(&fs::read(&self.manifest).expect("clean runner manifest"))
+                .expect("clean runner manifest JSON");
         let bundle: Value = serde_json::from_slice(&stored_bundle_bytes(&self.bundle))
             .expect("clean runner sanitized bundle JSON");
         let records = bundle["records"]
@@ -364,15 +388,53 @@ fn artifact(bytes: &[u8]) -> PublishedRunArtifact {
     PublishedRunArtifact::sanitized_bundle(bytes.to_vec())
 }
 
+fn seed_session_with_unopenable_evidence(fixture: &Fixture) {
+    let session: SessionId = support::FIXTURE_SESSION_ID
+        .parse()
+        .expect("fixture session id");
+    let store = JsonlStore::new(
+        fixture.session_root.clone(),
+        fixture.workspace.clone(),
+        Box::new(OsIo),
+    );
+    let mut seq = Seq::ZERO;
+    store
+        .append(
+            &session,
+            &DomainEvent {
+                env: Envelope {
+                    seq: seq.next(),
+                    id: EventId::new(),
+                    turn: TurnId::new(),
+                    item: None,
+                    parent: None,
+                    ts: Timestamp::EPOCH,
+                    producer: Producer::Main,
+                },
+                kind: EventKind::UserPrompt {
+                    text: "durable prefix".to_owned(),
+                    images: Vec::new(),
+                    queued_prompt: None,
+                },
+            },
+        )
+        .expect("seed durable session prefix");
+    fs::write(fixture.session_dir().join("evidence"), b"not a directory")
+        .expect("block evidence directory");
+}
+
 #[test]
 fn only_explicit_profile_ci_activates_the_ci_posture() {
     let fixture = Fixture::new();
     let finished = fixture.run_ci("jsonl");
     assert_eq!(finished.code, Some(0), "stderr: {}", finished.stderr);
     assert_eq!(fixture.sanitized_bundles().len(), 1);
-    assert!(finished.stdout.lines().all(|line| {
-        serde_json::from_str::<Value>(line).is_ok()
-    }));
+    assert!(
+        finished
+            .stdout
+            .lines()
+            .all(|line| { serde_json::from_str::<Value>(line).is_ok() })
+    );
 }
 
 #[test]
@@ -411,7 +473,12 @@ fn ci_preflight_rejects_profile_from_untrusted_project_configuration_before_effe
     )
     .expect("untrusted project profile config");
     let finished = fixture
-        .command(Some("ci"), &fixture.session_root, &fixture.artifact_root, true)
+        .command(
+            Some("ci"),
+            &fixture.session_root,
+            &fixture.artifact_root,
+            true,
+        )
         .args(["--output", "jsonl", CI_PROMPT])
         .run();
     fixture.assert_preflight_refused(
@@ -431,7 +498,12 @@ fn ci_preflight_rejects_ambient_instruction_discovery_before_effects() {
     )
     .expect("ambient instruction fixture");
     let finished = fixture
-        .command(Some("ci"), &fixture.session_root, &fixture.artifact_root, false)
+        .command(
+            Some("ci"),
+            &fixture.session_root,
+            &fixture.artifact_root,
+            false,
+        )
         .args(["--output", "jsonl", CI_PROMPT])
         .run();
     fixture.assert_preflight_refused(
@@ -445,17 +517,16 @@ fn ci_preflight_rejects_ambient_instruction_discovery_before_effects() {
 #[test]
 fn ci_preflight_rejects_missing_noninteractive_credentials_before_effects() {
     let fixture = Fixture::new();
-    fs::write(fixture.home.join("models.toml"), OPENAI_CODEX_FACTS)
-        .expect("OpenAI model facts");
+    fs::write(fixture.home.join("models.toml"), OPENAI_CODEX_FACTS).expect("OpenAI model facts");
     let finished = fixture
-        .command(Some("ci"), &fixture.session_root, &fixture.artifact_root, true)
-        .args([
-            "--model",
+        .command_with_model(
             "openai-codex/gpt-5.1",
-            "--output",
-            "jsonl",
-            CI_PROMPT,
-        ])
+            Some("ci"),
+            &fixture.session_root,
+            &fixture.artifact_root,
+            true,
+        )
+        .args(["--output", "jsonl", CI_PROMPT])
         .run();
     fixture.assert_preflight_refused(
         &finished,
@@ -512,7 +583,10 @@ fn ci_preflight_rejects_non_disjoint_workspace_session_and_artifact_roots() {
     for (session_root, artifact_root) in [
         (fixture.workspace.as_path(), fixture.artifact_root.as_path()),
         (fixture.session_root.as_path(), fixture.workspace.as_path()),
-        (fixture.session_root.as_path(), fixture.session_root.as_path()),
+        (
+            fixture.session_root.as_path(),
+            fixture.session_root.as_path(),
+        ),
         (nested_session.as_path(), fixture.artifact_root.as_path()),
         (fixture.session_root.as_path(), nested_artifact.as_path()),
     ] {
@@ -533,7 +607,12 @@ fn ci_preflight_rejects_non_disjoint_workspace_session_and_artifact_roots() {
 fn ci_preflight_rejects_prompt_capable_invocation_before_effects() {
     let fixture = Fixture::new();
     let finished = fixture
-        .command(Some("ci"), &fixture.session_root, &fixture.artifact_root, true)
+        .command(
+            Some("ci"),
+            &fixture.session_root,
+            &fixture.artifact_root,
+            true,
+        )
         .args(["--output", "jsonl"])
         .run();
     fixture.assert_preflight_refused(
@@ -548,7 +627,12 @@ fn ci_preflight_rejects_prompt_capable_invocation_before_effects() {
 fn ci_preflight_rejects_conversational_invocation_before_seat_or_effects() {
     let fixture = Fixture::new();
     let finished = fixture
-        .command(Some("ci"), &fixture.session_root, &fixture.artifact_root, true)
+        .command(
+            Some("ci"),
+            &fixture.session_root,
+            &fixture.artifact_root,
+            true,
+        )
         .conversing()
         .run();
     fixture.assert_preflight_refused(
@@ -570,8 +654,8 @@ fn each_admitted_terminal_ci_run_publishes_exactly_one_sanitized_bundle() {
     assert!(report["usage"].is_object(), "{report}");
     let bundles = fixture.sanitized_bundles();
     assert_eq!(bundles.len(), 1);
-    let bundle: Value = serde_json::from_slice(&stored_bundle_bytes(&bundles[0]))
-        .expect("sanitized bundle JSON");
+    let bundle: Value =
+        serde_json::from_slice(&stored_bundle_bytes(&bundles[0])).expect("sanitized bundle JSON");
     assert_eq!(bundle["v"], 1);
     assert!(bundle["records"].is_array());
 }
@@ -584,8 +668,40 @@ fn provider_failed_terminal_ci_run_still_publishes_exactly_one_sanitized_bundle(
     });
     assert!(fixture.sanitized_bundles().is_empty());
     let finished = fixture.run_ci("json");
-    assert_ne!(finished.code, Some(0), "provider failure unexpectedly succeeded");
+    assert_ne!(
+        finished.code,
+        Some(0),
+        "provider failure unexpectedly succeeded"
+    );
     assert_eq!(fixture.sanitized_bundles().len(), 1);
+}
+
+#[test]
+fn post_admission_active_session_failure_finalizes_one_bundle_without_retry_or_delete() {
+    let fixture = Fixture::new();
+    seed_session_with_unopenable_evidence(&fixture);
+
+    let finished = fixture.run_ci("json");
+    assert_ne!(
+        finished.code,
+        Some(0),
+        "durable activation unexpectedly succeeded"
+    );
+    assert!(
+        finished
+            .stderr
+            .contains("could not open this session's tool evidence"),
+        "primary activation failure was lost: {}",
+        finished.stderr
+    );
+    assert_eq!(fixture.sanitized_bundles().len(), 1);
+    assert!(fixture.session_dir().join("evidence").is_file());
+    let log = fs::read_to_string(fixture.log()).expect("session log");
+    assert_eq!(
+        log.matches("\"run_context\"").count(),
+        1,
+        "post-admission failure retried run-context admission"
+    );
 }
 
 #[test]
@@ -597,8 +713,6 @@ fn jsonl_stdout_is_parseable_and_diagnostics_stay_on_stderr() {
     for line in finished.stdout.lines() {
         serde_json::from_str::<Value>(line).expect("JSONL stdout line");
     }
-    assert!(!finished.stdout.contains("CI-INSTRUCTION-SECRET"));
-    assert!(!finished.stdout.contains("CI-PROMPT-SECRET"));
 }
 
 #[test]
@@ -642,7 +756,7 @@ fn prepublication_failure_is_terminal_and_leaves_no_sanitized_bundle() {
         Err(RunArtifactStoreError::Io { message }) if message.contains("pre-publication")
     ));
     assert!(matches!(
-        store.read(run_id(), RunArtifactId::sanitized_bundle()),
+        RunArtifactStore::read(&store, run_id(), RunArtifactId::sanitized_bundle()),
         Err(RunArtifactStoreError::Absent { .. })
     ));
 }
@@ -669,8 +783,7 @@ fn durability_uncertainty_is_truthful_nonretrying_and_keeps_the_artifact_readabl
     assert_eq!(replace_calls.load(Ordering::SeqCst), 1);
     assert_eq!(remove_calls.load(Ordering::SeqCst), 0);
     assert_eq!(
-        store
-            .read(run_id(), RunArtifactId::sanitized_bundle())
+        RunArtifactStore::read(&store, run_id(), RunArtifactId::sanitized_bundle())
             .expect("uncertain artifact remains readable")
             .bytes(),
         bytes

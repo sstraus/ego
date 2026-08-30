@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
+use ego_core::config::{ActiveProfileProvenance, OriginSet, Source};
 use ego_core::event::domain::{DomainEvent, Envelope, EventKind, ExitReason};
 use ego_core::event::id::{EventId, ItemId, Producer, Seq, SessionId, TurnId};
 use ego_core::event::time::Timestamp;
@@ -79,7 +80,11 @@ fn context(session: SessionId) -> SessionEntry {
         session,
         invocation,
         run_id,
-        ConfigProvenance::resolved(Some("ci".to_owned())),
+        ConfigProvenance::resolved(Some(ActiveProfileProvenance {
+            name: "ci".to_owned(),
+            selected_by: Source::Flags,
+            definitions: OriginSet::just(Source::Flags),
+        })),
     )))
 }
 

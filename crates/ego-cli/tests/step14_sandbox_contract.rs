@@ -156,11 +156,21 @@ fn durable_payloads(home: &Path) -> Vec<serde_json::Value> {
         .collect()
 }
 
-fn execution_observation_count(home: &Path) -> usize {
-    durable_payloads(home)
-        .into_iter()
-        .filter(|payload| payload["kind"]["kind"] == "ExecutionObserved")
-        .count()
+fn assert_execution_observation_count(finished: &support::Finished, home: &Path, expected: usize) {
+    let payloads = durable_payloads(home);
+    let kinds = payloads
+        .iter()
+        .map(|payload| payload["event"]["kind"]["kind"].clone())
+        .collect::<Vec<_>>();
+    let observed = payloads
+        .iter()
+        .filter(|payload| payload["event"]["kind"]["kind"] == "ExecutionObserved")
+        .count();
+    assert_eq!(
+        observed, expected,
+        "stderr: {}\ndurable payload kinds: {kinds:?}\ndurable payload records: {payloads:?}",
+        finished.stderr
+    );
 }
 
 #[test]
@@ -573,7 +583,7 @@ fn disposable_startup_capability_proof_never_reaches_the_durable_event_log() {
         Some(5),
         "max-turns 0 stops before the first turn"
     );
-    assert_eq!(execution_observation_count(&home), 0);
+    assert_execution_observation_count(&finished, &home, 0);
 }
 
 #[test]
@@ -600,7 +610,7 @@ fn actual_once_executor_appends_exactly_one_execution_observed_fact() {
         .run();
 
     assert_eq!(finished.code, Some(0), "stderr: {}", finished.stderr);
-    assert_eq!(execution_observation_count(&home), 1);
+    assert_execution_observation_count(&finished, &home, 1);
 }
 
 #[test]
@@ -626,7 +636,7 @@ fn interactive_piped_seed_executor_appends_one_observation() {
         1,
         "the piped stdin is one interactive seed"
     );
-    assert_eq!(execution_observation_count(&home), 1);
+    assert_execution_observation_count(&finished, &home, 1);
 }
 
 #[test]
@@ -657,5 +667,5 @@ fn durable_actual_executor_creates_a_manifest_and_one_observation() {
         home.join("sessions").exists(),
         "durable run wrote no manifest"
     );
-    assert_eq!(execution_observation_count(&home), 1);
+    assert_execution_observation_count(&finished, &home, 1);
 }
