@@ -212,6 +212,8 @@ impl ExecutorFixture {
         ));
     }
 
+    /// Used by the compaction integration crate while shared support is compiled per test target.
+    #[allow(dead_code)]
     pub fn push_settlement(&self, settlement: RunSettlement) {
         self.submissions
             .lock()
