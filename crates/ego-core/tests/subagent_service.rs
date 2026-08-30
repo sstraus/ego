@@ -12,6 +12,7 @@ use ego_core::ceiling::Budget;
 use ego_core::config::{Mode, ModelRef};
 use ego_core::cost::{Amount, CurrencyCode, Money};
 use ego_core::event::domain::{SubagentRefusal, SubagentTerminal};
+use ego_core::event::hook::HookInvocationId;
 use ego_core::event::id::{ItemId, SessionId, SubagentInvocationId, TurnId};
 use ego_core::run::{RunId, RunOrigin, RunSelections, RunSettlement};
 use ego_core::store::blob::{BlobId, BlobRef};
@@ -164,6 +165,14 @@ fn every_non_success_terminal_remains_typed_and_completed_cannot_be_flattened() 
         assert_eq!(result.terminal(), &terminal);
         assert!(result.final_message().is_none());
     }
+    let blocked_message = blob(RESULT, 9);
+    let blocked = SubagentTerminal::ReturnBlocked {
+        final_message: blocked_message.clone(),
+        hook_invocation: HookInvocationId::new(),
+    };
+    let blocked_result = service.settle_for_test(blocked.clone());
+    assert_eq!(blocked_result.terminal(), &blocked);
+    assert_eq!(blocked_result.final_message(), Some(&blocked_message));
     assert!(service
         .settle_for_test(SubagentTerminal::Failed {
             settlement: RunSettlement::completed(),

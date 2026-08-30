@@ -5,7 +5,9 @@
 //! source-bound `HookSpec` catalogue and execute it through one `Hook` port.
 
 use ego_core::config::{ConfigLayer, Source, Sourced, Trust};
-use ego_core::event::hook::{HookDecision, HookLifecycle, HookOutcome};
+use ego_core::event::hook::{
+    HookDecision, HookFailure, HookFailureKind, HookLifecycle, HookOutcome,
+};
 use ego_core::event::id::{ItemId, TurnId};
 use ego_core::event::hook::HookSubject;
 use ego_core::hook::{
@@ -282,15 +284,25 @@ fn model_switch_hooks_match_the_canonical_target_and_do_not_fire_recursively() {
 }
 
 #[derive(Default)]
-struct RecordingHookPort;
+struct RecordingHookPort {
+    fail_pre_effect: bool,
+    fail_observer: bool,
+}
 
 impl RecordingHookPort {
-    fn with_failures<const N: usize>(_failures: [HookFailureAt; N]) -> Self {
-        Self
+    fn with_failures<const N: usize>(failures: [HookFailureAt; N]) -> Self {
+        let mut port = Self::default();
+        for failure in failures {
+            match failure {
+                HookFailureAt::PreEffect => port.fail_pre_effect = true,
+                HookFailureAt::Observer => port.fail_observer = true,
+            }
+        }
+        port
     }
 
     fn emits_hook_event() -> Self {
-        Self
+        Self::default()
     }
 }
 
@@ -300,6 +312,18 @@ impl HookPort for RecordingHookPort {
         _spec: &'a HookSpec,
         event: HookEvent,
     ) -> ego_core::hook::HookFuture<'a> {
+        let failure = match event.lifecycle().phase() {
+            phase if phase.is_pre_effect() && self.fail_pre_effect => {
+                Some(HookFailure::new(HookFailureKind::HandlerFailed, None))
+            }
+            phase if phase.is_observer() && self.fail_observer => {
+                Some(HookFailure::new(HookFailureKind::HandlerFailed, None))
+            }
+            _ => None,
+        };
+        if let Some(failure) = failure {
+            return Box::pin(async move { Err(failure) });
+        }
         let decision = if event.lifecycle() == HookLifecycle::PreToolUse {
             HookDecision::Block
         } else {
