@@ -4,7 +4,6 @@
 //! intentionally remains RED until `McpContinuationOwner` owns both the
 //! asynchronous input-required projection and accepted-answer resume.
 
-use std::ffi::OsString;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -24,12 +23,12 @@ use ego_core::hook::{
     HookReachFuture, HookReachedEvidence, HookRecordFuture, HookRunner, HookSpec, HookStartFuture,
     HookStartedEvidence,
 };
-use ego_core::mcp::{McpAdmissionFingerprint, McpOperationKind, McpSubject, ToolExecution};
+use ego_core::mcp::ToolExecution;
 use ego_core::permit::{
     Authorized, CanonPath, Classification, CleanupCertainty, DnsResolution, DuplexEnd,
-    DuplexHandle, DuplexSession, DuplexSpawner, EnvPolicy, ForeignToolId, GuardedEffects,
-    InvocationDigest, OneHop, OneHopResponse, PolicyEngine, PreparedCall, ProcessError,
-    ProcessExecutor, Resolver, SpawnSpec, ToolResult, TransportError, TransportFailure,
+    DuplexHandle, DuplexSession, DuplexSpawner, EnvPolicy, GuardedEffects, OneHop, OneHopResponse,
+    PolicyEngine, PrepareCtx, PreparedCall, ProcessError, ProcessExecutor, Resolver, SpawnSpec,
+    Tool, ToolResult, TransportError, TransportFailure,
 };
 use ego_core::store::blob::{BlobError, BlobPage, BlobRead, BlobRef, BlobStore, BlobWriter};
 use ego_core::store::evidence::{
@@ -55,7 +54,6 @@ use futures::io::{AsyncRead, AsyncWrite, Cursor};
 use serde_json::json;
 
 const SCHEMA: &[u8] = br#"{"type":"object","properties":{"choice":{"type":"string"}},"required":["choice"],"additionalProperties":false}"#;
-const ORIGINAL: &[u8] = br#"{"name":"lookup","arguments":{}}"#;
 
 const MCP_OWNERS: [(&str, HookLifecycle); 2] = [
     (
@@ -484,32 +482,22 @@ fn server_admission() -> Arc<McpServerAdmission> {
             .expect("admission"),
     )
 }
-fn prepared_call() -> PreparedCall {
-    let spec = SpawnSpec::new(
-        vec![OsString::from("mcp-server")],
-        None,
-        Some(Duration::from_secs(30)),
-        EnvPolicy::exact(Vec::new()).expect("environment"),
-    )
-    .expect("spawn");
-    PreparedCall::mcp_stdio(
-        McpSubject::Tool {
-            server: "server".into(),
-            name: "lookup".into(),
-        },
-        McpOperationKind::CallTool,
-        vec![(
-            ForeignToolId::new("server", "lookup").expect("tool"),
-            InvocationDigest::from_bytes(ORIGINAL),
-        )],
-        McpAdmissionFingerprint::new("generation-1", "server/lookup", "schema-v1")
-            .expect("fingerprint"),
-        "stdio-transport-v1",
-        "server",
-        spec,
-        &serde_json::from_slice(ORIGINAL).expect("params"),
-    )
-    .expect("prepared")
+fn captured_lookup(factory: Arc<McpStdioOperationFactory>) -> Arc<dyn Tool> {
+    let capture = registry_capture(factory);
+    capture
+        .tools()
+        .iter()
+        .find(|tool| tool.descriptor().name == "lookup")
+        .cloned()
+        .expect("captured lookup tool")
+}
+fn prepare_lookup(tool: &Arc<dyn Tool>) -> PreparedCall {
+    let resolver = ego_core::permit::fake::FakeFs::default();
+    let ctx = PrepareCtx {
+        cwd: CanonPath::new("/fixture"),
+        resolver: &resolver,
+    };
+    tool.prepare(json!({}), &ctx).expect("prepare")
 }
 fn authorized(call: PreparedCall) -> Authorized {
     let policy = PolicyEngine::new(
@@ -587,10 +575,12 @@ fn real_operation_records_before_elicitation_and_returns_foreign_id() {
         Arc::new(FixedResumeKey),
         Arc::new(FixedClock),
     ));
-    let factory =
+    let factory = Arc::new(
         McpStdioOperationFactory::new(Arc::clone(&owner), 64 * 1024, Duration::from_secs(30))
-            .expect("factory");
-    let call = prepared_call();
+            .expect("factory"),
+    );
+    let tool = captured_lookup(Arc::clone(&factory));
+    let call = prepare_lookup(&tool);
     let auth = authorized(call);
     let (sealer, floor) = prepared_resume(&auth);
     let resume = sealer.prepare(&auth, floor).expect("resume");
@@ -606,7 +596,7 @@ fn real_operation_records_before_elicitation_and_returns_foreign_id() {
         spawner.clone(),
         Some(resume),
     );
-    let outcome = block_on(factory.execute(server_admission(), call, &guarded)).expect("outcome");
+    let outcome = block_on(tool.execute(call, &guarded)).expect("outcome");
     let ToolExecution::InputRequired(foreign) = outcome else {
         panic!("expected input-required")
     };
@@ -630,7 +620,8 @@ fn accepted_answer_validates_hooks_claims_and_retries_once() {
         McpStdioOperationFactory::new(Arc::clone(&owner), 64 * 1024, Duration::from_secs(30))
             .expect("factory"),
     );
-    let call = prepared_call();
+    let tool = captured_lookup(Arc::clone(&factory));
+    let call = prepare_lookup(&tool);
     let auth = authorized(call);
     let (sealer, floor) = prepared_resume(&auth);
     let resume = sealer.prepare(&auth, floor.clone()).expect("resume");
@@ -647,7 +638,7 @@ fn accepted_answer_validates_hooks_claims_and_retries_once() {
         Some(resume),
     );
     let ToolExecution::InputRequired(foreign) =
-        block_on(factory.execute(server_admission(), call, &guarded)).expect("required")
+        block_on(tool.execute(call, &guarded)).expect("required")
     else {
         panic!("expected required")
     };
@@ -662,7 +653,10 @@ fn accepted_answer_validates_hooks_claims_and_retries_once() {
     ))
     .expect("resume");
     assert!(matches!(retried, ToolExecution::Complete(_)));
-    assert_eq!(journal.events(), vec!["record", "accepted_answer", "claim"]);
+    assert_eq!(
+        journal.events(),
+        vec!["record", "accepted_answer", "claim", "settle"]
+    );
     assert_eq!(
         trace.events(),
         vec![
@@ -670,7 +664,8 @@ fn accepted_answer_validates_hooks_claims_and_retries_once() {
             "Elicitation",
             "accepted_answer",
             "ElicitationResult",
-            "claim"
+            "claim",
+            "settle"
         ]
     );
     assert_eq!(spawner.calls(), 2);
@@ -686,7 +681,12 @@ fn schema_or_authority_failure_precedes_durable_acceptance() {
         Arc::new(FixedResumeKey),
         Arc::new(FixedClock),
     ));
-    let call = prepared_call();
+    let factory = Arc::new(
+        McpStdioOperationFactory::new(Arc::clone(&owner), 64 * 1024, Duration::from_secs(30))
+            .expect("factory"),
+    );
+    let tool = captured_lookup(Arc::clone(&factory));
+    let call = prepare_lookup(&tool);
     let auth = authorized(call.clone());
     let (sealer, floor) = prepared_resume(&auth);
     let mapped = mapped_input();
@@ -707,10 +707,6 @@ fn schema_or_authority_failure_precedes_durable_acceptance() {
                 .expect("record"),
         )
         .expect("journal");
-    let factory = Arc::new(
-        McpStdioOperationFactory::new(Arc::clone(&owner), 64 * 1024, Duration::from_secs(30))
-            .expect("factory"),
-    );
     let capture = registry_capture(factory);
     assert!(
         block_on(owner.accept_answer(
@@ -741,7 +737,8 @@ fn pre_block_or_uncertainty_leaves_accepted_answer_unclaimed_without_reentry() {
             McpStdioOperationFactory::new(Arc::clone(&owner), 64 * 1024, Duration::from_secs(30))
                 .expect("factory"),
         );
-        let call = prepared_call();
+        let tool = captured_lookup(Arc::clone(&factory));
+        let call = prepare_lookup(&tool);
         let auth = authorized(call);
         let (sealer, floor) = prepared_resume(&auth);
         let resume = sealer.prepare(&auth, floor.clone()).expect("resume");
@@ -758,7 +755,7 @@ fn pre_block_or_uncertainty_leaves_accepted_answer_unclaimed_without_reentry() {
             Some(resume),
         );
         let ToolExecution::InputRequired(foreign) =
-            block_on(factory.execute(server_admission(), call, &guarded)).expect("required")
+            block_on(tool.execute(call, &guarded)).expect("required")
         else {
             panic!("expected required")
         };
