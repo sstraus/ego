@@ -83,6 +83,7 @@ impl Fixture {
                 invocation,
                 lifecycle,
                 subject: subject(self.item),
+                activation: ego_core::event::hook::HookActivation::Persistent,
             },
             Producer::Main,
         )
@@ -312,6 +313,7 @@ fn reducer_refuses_start_subject_envelope_and_hook_producer_recursion() {
         invocation: HookInvocationId::new(),
         lifecycle: HookLifecycle::PreToolUse,
         subject: ego_core::event::hook::HookSubject::Session,
+        activation: ego_core::event::hook::HookActivation::Persistent,
     };
     state.apply(&wrong_session);
     assert_reason(&state, &wrong_session, RefusalReason::HookSubjectMismatch);
@@ -323,6 +325,7 @@ fn reducer_refuses_start_subject_envelope_and_hook_producer_recursion() {
         subject: ego_core::event::hook::HookSubject::Turn {
             turn: TurnId::new(),
         },
+        activation: ego_core::event::hook::HookActivation::Persistent,
     };
     wrong_turn.env.item = None;
     state.apply(&wrong_turn);
@@ -333,6 +336,7 @@ fn reducer_refuses_start_subject_envelope_and_hook_producer_recursion() {
         invocation: HookInvocationId::new(),
         lifecycle: HookLifecycle::PreToolUse,
         subject: ego_core::event::hook::HookSubject::Turn { turn: f.turn },
+        activation: ego_core::event::hook::HookActivation::Persistent,
     };
     turn_with_item.env.item = Some(ItemId::new());
     state.apply(&turn_with_item);
@@ -344,6 +348,7 @@ fn reducer_refuses_start_subject_envelope_and_hook_producer_recursion() {
         invocation: HookInvocationId::new(),
         lifecycle: HookLifecycle::PreToolUse,
         subject: ego_core::event::hook::HookSubject::Item { item: f.item },
+        activation: ego_core::event::hook::HookActivation::Persistent,
     };
     state.apply(&wrong_item);
     assert_reason(&state, &wrong_item, RefusalReason::HookSubjectMismatch);

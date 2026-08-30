@@ -10,14 +10,13 @@ use ego_core::config::{ConfigLayer, Source, Sourced, Trust};
 use ego_core::event::domain::EventKind;
 use ego_core::event::hook::{
     HookActivation, HookDecision, HookFailure, HookFailureKind, HookInvocationId, HookLifecycle,
-    HookOutcome, HookSubject,
+    HookOutcome, HookRunError, HookSubject,
 };
 use ego_core::event::id::ItemId;
 use ego_core::event::skill::SkillInvocationId;
 use ego_core::hook::{
-    HookCatalogue, HookCatalogueError, HookConfigEntry, HookEvent,
-    HookHandlerConfig, HookMatcher, HookPort, HookSpec, HookSource, HookStartedEvidence,
-    HookFuture, HookRecordFuture, HookRunner,
+    HookCatalogue, HookCatalogueError, HookConfigEntry, HookEvent, HookFuture, HookHandlerConfig,
+    HookMatcher, HookPort, HookRecordFuture, HookRunner, HookSource, HookSpec, HookStartedEvidence,
 };
 use ego_core::permit::rule::Rule;
 
@@ -59,25 +58,65 @@ fn typed_sources_and_skill_projection_make_one_strict_source_bound_catalogue() {
         .expect("complete typed catalogue");
     assert_eq!(catalogue.sources(), ["system", "user", "project", "skill"]);
     assert_eq!(catalogue.specs().len(), 4);
-    assert!(catalogue.specs().iter().all(|spec| spec.location().is_authority_relative()));
-    assert!(catalogue.specs().iter().all(|spec| spec.content_digest().is_lower_sha256()));
-    assert!(catalogue.specs().windows(2).all(|pair| pair[0].sort_key() < pair[1].sort_key()));
+    assert!(
+        catalogue
+            .specs()
+            .iter()
+            .all(|spec| spec.location().is_authority_relative())
+    );
+    assert!(
+        catalogue
+            .specs()
+            .iter()
+            .all(|spec| spec.content_digest().is_lower_sha256())
+    );
+    assert!(
+        catalogue
+            .specs()
+            .windows(2)
+            .all(|pair| pair[0].sort_key() < pair[1].sort_key())
+    );
     assert!(!catalogue.serialized_config().contains("/usr/bin"));
 }
 
 #[test]
 fn exactly_21_events_are_admitted_and_exact_other_12_names_refuse() {
     let admitted = [
-        "SessionStart", "InstructionsLoaded", "UserPromptSubmit", "UserPromptExpansion",
-        "PreToolUse", "PermissionRequest", "PermissionDenied", "PostToolUse",
-        "PostToolUseFailure", "PostToolBatch", "PreModelSwitch", "PostModelSwitch",
-        "SubagentStart", "SubagentStop", "Stop", "StopFailure", "PreCompact", "PostCompact",
-        "Elicitation", "ElicitationResult", "SessionEnd",
+        "SessionStart",
+        "InstructionsLoaded",
+        "UserPromptSubmit",
+        "UserPromptExpansion",
+        "PreToolUse",
+        "PermissionRequest",
+        "PermissionDenied",
+        "PostToolUse",
+        "PostToolUseFailure",
+        "PostToolBatch",
+        "PreModelSwitch",
+        "PostModelSwitch",
+        "SubagentStart",
+        "SubagentStop",
+        "Stop",
+        "StopFailure",
+        "PreCompact",
+        "PostCompact",
+        "Elicitation",
+        "ElicitationResult",
+        "SessionEnd",
     ];
     let refused = [
-        "Setup", "MessageDisplay", "Notification", "TaskCreated", "TaskCompleted",
-        "TeammateIdle", "ConfigChange", "CwdChanged", "DirectoryAdded", "FileChanged",
-        "WorktreeCreate", "WorktreeRemove",
+        "Setup",
+        "MessageDisplay",
+        "Notification",
+        "TaskCreated",
+        "TaskCompleted",
+        "TeammateIdle",
+        "ConfigChange",
+        "CwdChanged",
+        "DirectoryAdded",
+        "FileChanged",
+        "WorktreeCreate",
+        "WorktreeRemove",
     ];
     assert_eq!(admitted.len(), 21);
     assert_eq!(refused.len(), 12);
@@ -94,7 +133,14 @@ fn exactly_21_events_are_admitted_and_exact_other_12_names_refuse() {
 
 #[test]
 fn closed_handlers_reject_exact_unknown_fields_and_admit_http_without_adapter() {
-    for field in ["statusMessage", "async", "asyncRewake", "agent", "output", "regex"] {
+    for field in [
+        "statusMessage",
+        "async",
+        "asyncRewake",
+        "agent",
+        "output",
+        "regex",
+    ] {
         let error = HookSpec::from_fields("PreToolUse", [(field, "value")]).unwrap_err();
         assert_eq!(error.exact_name(), field);
     }
@@ -120,16 +166,39 @@ struct DurableHookPort {
     settled: Arc<Mutex<Vec<HookInvocationId>>>,
     emitted: Arc<Mutex<Vec<HookEvent>>>,
     fail: Arc<Mutex<Option<HookFailureKind>>>,
+    fail_started: Arc<Mutex<bool>>,
+    persist_started_before_failure: bool,
     block: bool,
 }
 
 impl DurableHookPort {
     fn fail_with(kind: HookFailureKind) -> Self {
-        Self { fail: Arc::new(Mutex::new(Some(kind))), ..Self::default() }
+        Self {
+            fail: Arc::new(Mutex::new(Some(kind))),
+            ..Self::default()
+        }
     }
 
     fn blocking() -> Self {
-        Self { block: true, ..Self::default() }
+        Self {
+            block: true,
+            ..Self::default()
+        }
+    }
+
+    fn fail_started_after_durable_record() -> Self {
+        Self {
+            fail_started: Arc::new(Mutex::new(true)),
+            persist_started_before_failure: true,
+            ..Self::default()
+        }
+    }
+
+    fn fail_started_without_durable_record() -> Self {
+        Self {
+            fail_started: Arc::new(Mutex::new(true)),
+            ..Self::default()
+        }
     }
 }
 
@@ -141,15 +210,32 @@ impl HookPort for DurableHookPort {
         activation: HookActivation,
         invocation: HookInvocationId,
     ) -> HookRecordFuture<'a> {
-        self.started
-            .lock()
-            .expect("started journal")
-            .push(HookStartedEvidence::new(_spec.id(), invocation, activation));
-        Box::pin(async { Ok(()) })
+        let fail = {
+            let mut fail = self.fail_started.lock().expect("started failure");
+            let fail_now = *fail;
+            *fail = false;
+            fail_now
+        };
+        if !fail || self.persist_started_before_failure {
+            self.started
+                .lock()
+                .expect("started journal")
+                .push(HookStartedEvidence::new(_spec.id(), invocation, activation));
+        }
+        if fail {
+            Box::pin(futures::future::ready(Err(HookRunError::new(
+                "durable hook start is uncertain",
+            ))))
+        } else {
+            Box::pin(futures::future::ready(Ok(())))
+        }
     }
 
     fn invoke<'a>(&'a self, _spec: &'a HookSpec, event: HookEvent) -> HookFuture<'a> {
-        self.emitted.lock().expect("hook emissions").push(event.clone().originated_by_hook());
+        self.emitted
+            .lock()
+            .expect("hook emissions")
+            .push(event.clone().originated_by_hook());
         if let Some(kind) = self.fail.lock().expect("failure").take() {
             return Box::pin(async move { Err(HookFailure::new(kind, None)) });
         }
@@ -167,7 +253,10 @@ impl HookPort for DurableHookPort {
         invocation: HookInvocationId,
         _outcome: Result<&'a HookOutcome, &'a HookFailure>,
     ) -> HookRecordFuture<'a> {
-        self.settled.lock().expect("settled journal").push(invocation);
+        self.settled
+            .lock()
+            .expect("settled journal")
+            .push(invocation);
         Box::pin(async { Ok(()) })
     }
 }
@@ -237,32 +326,45 @@ fn deterministic_matching_uses_permission_ast_and_valid_block_wins_with_durable_
     let catalogue = typed_catalogue();
     let event = HookEvent::tool(
         HookLifecycle::SubagentStop,
-        ego_core::event::hook::HookSubject::Item { item: ItemId::new() },
+        ego_core::event::hook::HookSubject::Item {
+            item: ItemId::new(),
+        },
         "read(src/main.rs)",
     );
     let first = catalogue.matching(&event);
     let second = catalogue.matching(&event);
     assert_eq!(first, second);
-    assert!(first.windows(2).all(|pair| pair[0].sort_key() < pair[1].sort_key()));
+    assert!(
+        first
+            .windows(2)
+            .all(|pair| pair[0].sort_key() < pair[1].sort_key())
+    );
     let port = DurableHookPort::blocking();
     let runner = HookRunner::new(port.clone());
     let result = futures::executor::block_on(runner.run(&catalogue, event)).expect("hook run");
     assert_eq!(result.decision(), HookDecision::Block);
     assert!(result.feedback_bytes() <= 4096);
     assert!(!port.started.lock().expect("starts").is_empty());
-    assert_eq!(port.started.lock().expect("starts").len(), port.settled.lock().expect("settles").len());
+    assert_eq!(
+        port.started.lock().expect("starts").len(),
+        port.settled.lock().expect("settles").len()
+    );
 }
 
 #[test]
 fn pre_effect_failure_blocks_observer_failure_stays_durable_and_effect_is_not_reverted() {
     let catalogue = failure_catalogue();
-    let pre = futures::executor::block_on(HookRunner::new(DurableHookPort::fail_with(
-        HookFailureKind::HandlerFailed,
-    )).run(&catalogue, HookEvent::session(HookLifecycle::PreCompact))).expect("pre result");
+    let pre = futures::executor::block_on(
+        HookRunner::new(DurableHookPort::fail_with(HookFailureKind::HandlerFailed))
+            .run(&catalogue, HookEvent::session(HookLifecycle::PreCompact)),
+    )
+    .expect("pre result");
     assert!(pre.is_blocked());
-    let post = futures::executor::block_on(HookRunner::new(DurableHookPort::fail_with(
-        HookFailureKind::HandlerFailed,
-    )).run(&catalogue, HookEvent::session(HookLifecycle::PostCompact))).expect("post result");
+    let post = futures::executor::block_on(
+        HookRunner::new(DurableHookPort::fail_with(HookFailureKind::HandlerFailed))
+            .run(&catalogue, HookEvent::session(HookLifecycle::PostCompact)),
+    )
+    .expect("post result");
     assert!(post.is_observer_failure());
     assert!(post.is_durable());
     assert!(!post.reverted_effect());
@@ -289,7 +391,10 @@ fn hook_started_event_persists_closed_skill_activation_for_replay() {
     };
     let encoded = serde_json::to_value(&event).expect("hook start encoding");
     assert_eq!(encoded["activation"]["kind"], "skill");
-    assert_eq!(encoded["activation"]["invocation"], skill_invocation.to_string());
+    assert_eq!(
+        encoded["activation"]["invocation"],
+        skill_invocation.to_string()
+    );
     let decoded: EventKind = serde_json::from_value(encoded).expect("hook start decoding");
     assert!(matches!(
         decoded,
@@ -306,18 +411,25 @@ fn durable_once_rebuilds_in_a_new_runner_and_hook_originated_events_are_suppress
     let port = DurableHookPort::default();
     let event = HookEvent::tool(
         HookLifecycle::SubagentStop,
-        HookSubject::Item { item: ItemId::new() },
+        HookSubject::Item {
+            item: ItemId::new(),
+        },
         "read(src/main.rs)",
     );
-    let first = futures::executor::block_on(HookRunner::new_with_durable_started(
-        port.clone(), port.started.clone(),
-    ).run(&catalogue, event.clone())).expect("first once invocation");
+    let first = futures::executor::block_on(
+        HookRunner::new_with_durable_started(port.clone(), port.started.clone())
+            .run(&catalogue, event.clone()),
+    )
+    .expect("first once invocation");
     assert!(first.started_invocation());
     let started = port.started.lock().expect("started evidence").clone();
-    let skill_invocation = started.iter().find_map(|evidence| match evidence.activation() {
-        HookActivation::Skill { invocation } => Some(invocation),
-        HookActivation::Persistent => None,
-    }).expect("skill activation evidence");
+    let skill_invocation = started
+        .iter()
+        .find_map(|evidence| match evidence.activation() {
+            HookActivation::Skill { invocation } => Some(invocation),
+            HookActivation::Persistent => None,
+        })
+        .expect("skill activation evidence");
     let hook = started.iter().find(|evidence| {
         matches!(evidence.activation(), HookActivation::Skill { invocation } if invocation == skill_invocation)
     }).expect("matching skill hook evidence").hook();
@@ -326,7 +438,8 @@ fn durable_once_rebuilds_in_a_new_runner_and_hook_originated_events_are_suppress
             && matches!(evidence.activation(), HookActivation::Skill { invocation } if invocation == skill_invocation)
     }));
     let rebuilt = HookRunner::new_with_durable_started(port.clone(), started.clone());
-    let second = futures::executor::block_on(rebuilt.run(&catalogue, event)).expect("replayed once");
+    let second =
+        futures::executor::block_on(rebuilt.run(&catalogue, event)).expect("replayed once");
     assert!(second.was_skipped_once());
     let persistent_replay = vec![HookStartedEvidence::new(
         hook,
@@ -338,35 +451,132 @@ fn durable_once_rebuilds_in_a_new_runner_and_hook_originated_events_are_suppress
         &catalogue,
         HookEvent::tool(
             HookLifecycle::SubagentStop,
-            HookSubject::Item { item: ItemId::new() },
+            HookSubject::Item {
+                item: ItemId::new(),
+            },
             "read(src/main.rs)",
         ),
-    )).expect("persistent activation does not consume skill once");
+    ))
+    .expect("persistent activation does not consume skill once");
     assert!(!not_skipped.was_skipped_once());
     let emitted = port.emitted.lock().expect("emitted events").clone();
-    assert!(emitted.iter().all(HookRunner::<DurableHookPort>::hook_originated_event));
+    assert!(
+        emitted
+            .iter()
+            .all(HookRunner::<DurableHookPort>::hook_originated_event)
+    );
     let suppressed = futures::executor::block_on(rebuilt.run(
         &catalogue,
         HookEvent::session(HookLifecycle::SessionStart).originated_by_hook(),
-    )).expect("suppressed recursive event");
+    ))
+    .expect("suppressed recursive event");
     assert!(!suppressed.started_invocation());
+}
+
+#[test]
+fn once_start_uncertainty_is_durable_and_rebuilt_runner_cannot_repeat() {
+    let catalogue = once_catalogue();
+    let port = DurableHookPort::fail_started_after_durable_record();
+    let event = HookEvent::tool(
+        HookLifecycle::SubagentStop,
+        HookSubject::Item {
+            item: ItemId::new(),
+        },
+        "read(src/main.rs)",
+    );
+    let first =
+        futures::executor::block_on(HookRunner::new(port.clone()).run(&catalogue, event.clone()))
+            .expect("uncertain pre-effect hook result");
+    assert!(
+        first.is_blocked(),
+        "uncertain pre-effect delivery fails closed"
+    );
+    assert!(
+        first.is_durable(),
+        "uncertainty is durable before it is reported"
+    );
+    assert!(!first.was_skipped_once());
+    let started = port.started.lock().expect("durable starts").clone();
+    assert_eq!(started.len(), 1);
+    assert!(matches!(
+        started[0].activation(),
+        HookActivation::Skill { .. }
+    ));
+
+    let rebuilt = HookRunner::new_with_durable_started(port.clone(), started);
+    let replay = futures::executor::block_on(rebuilt.run(&catalogue, event))
+        .expect("reconstructed runner consumes durable uncertainty");
+    assert!(replay.was_skipped_once());
+    assert!(!replay.started_invocation());
+    assert_eq!(port.started.lock().expect("durable starts").len(), 1);
+}
+
+#[test]
+fn once_start_without_durable_fact_does_not_preconsume_in_memory() {
+    let catalogue = once_catalogue();
+    let port = DurableHookPort::fail_started_without_durable_record();
+    let runner = HookRunner::new(port.clone());
+    let event = HookEvent::tool(
+        HookLifecycle::SubagentStop,
+        HookSubject::Item {
+            item: ItemId::new(),
+        },
+        "read(src/main.rs)",
+    );
+    let first = futures::executor::block_on(runner.run(&catalogue, event.clone()))
+        .expect("closed result for uncertain start");
+    assert!(first.is_blocked());
+    assert!(!first.started_invocation());
+    assert!(port.started.lock().expect("durable starts").is_empty());
+
+    // This is an explicit probe: absence of a durable start must not leave a
+    // stale in-memory once bit that silently suppresses a later admitted run.
+    let retry = futures::executor::block_on(runner.run(&catalogue, event))
+        .expect("explicit retry after absent durable fact");
+    assert!(retry.started_invocation());
+    assert_eq!(port.started.lock().expect("durable starts").len(), 1);
 }
 
 #[test]
 fn catalogue_reload_builds_a_real_candidate_then_atomically_keeps_last_good() {
     let mut catalogue = typed_catalogue();
     let before = catalogue.generation().to_owned();
-    let invalid = vec![HookConfigEntry::new(
-            HookLifecycle::PostToolUse,
-            None,
-            HookHandlerConfig::Command { command: String::new(), args: Vec::new(), timeout_seconds: None },
-        )];
-    assert!(catalogue.reload_typed(invalid, Trust::Trusted).is_err());
+    let invalid = [layer(
+        Source::User,
+        "[[hooks]]\nevent = \"PostToolUse\"\n[hooks.handler]\ntype = \"command\"\ncommand = \"\"\n",
+    )];
+    assert!(
+        catalogue
+            .reload_typed(&invalid, &[], Trust::Trusted)
+            .is_err()
+    );
     assert_eq!(catalogue.generation(), before);
+    let layers = persistent_layers();
+    let invocation = SkillInvocationId::new();
+    let skill = HookSource::skill_entries(
+        "skills/reloaded/SKILL.md",
+        invocation,
+        [typed_skill_hook().with_once(true)],
+    );
     catalogue
-        .reload_typed(vec![typed_skill_hook()], Trust::Trusted)
+        .reload_typed(&layers, &[skill], Trust::Trusted)
         .expect("candidate validates before publication");
     assert_ne!(catalogue.generation(), before);
+    assert_eq!(catalogue.sources(), ["system", "user", "project", "skill"]);
+    assert_eq!(catalogue.specs().len(), 4);
+    let reloaded_skill = catalogue
+        .specs()
+        .iter()
+        .find(|spec| spec.source().is_skill())
+        .expect("reloaded skill source");
+    assert_eq!(reloaded_skill.skill_invocation(), Some(invocation));
+    assert!(reloaded_skill.once());
+    assert!(
+        catalogue
+            .specs()
+            .windows(2)
+            .all(|pair| pair[0].sort_key() < pair[1].sort_key())
+    );
 }
 
 #[test]

@@ -224,6 +224,7 @@ fn events_are_exactly_the_three_typed_hook_facts_and_no_legacy_decoder_exists() 
         invocation,
         lifecycle: HookLifecycle::PreToolUse,
         subject,
+        activation: ego_core::event::hook::HookActivation::Persistent,
     };
     let _ = EventKind::HookInvocationSettled {
         hook: descriptor.id(),

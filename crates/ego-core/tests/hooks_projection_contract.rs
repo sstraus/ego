@@ -69,6 +69,7 @@ fn all_three_hook_events_project_to_none_without_feedback_or_location_leaks() {
                 invocation: id,
                 lifecycle: HookLifecycle::PostToolUse,
                 subject: ego_core::event::hook::HookSubject::Session,
+                activation: ego_core::event::hook::HookActivation::Persistent,
             },
             Producer::Main,
         ),

@@ -89,6 +89,7 @@ impl Fixture {
                     invocation,
                     lifecycle: HookLifecycle::PreToolUse,
                     subject: ego_core::event::hook::HookSubject::Turn { turn },
+                    activation: ego_core::event::hook::HookActivation::Persistent,
                 },
             ),
             event(
@@ -137,13 +138,13 @@ impl Fixture {
 }
 
 #[test]
-fn snapshot_version_is_eight_and_validation_exposes_exact_rejection_set() {
-    assert_eq!(SNAPSHOT_VERSION, 8);
+fn snapshot_version_is_nine_and_validation_exposes_exact_rejection_set() {
+    assert_eq!(SNAPSHOT_VERSION, 9);
     let fixture = Fixture::new();
     let state = fixture.full_replay();
     assert_eq!(state.hook_settlements().len(), 1);
     let snapshot = Snapshot::new(fixture.id, fixture.events[2].env.seq, state.clone());
-    assert_eq!(snapshot.v, 8);
+    assert_eq!(snapshot.v, 9);
     assert_eq!(
         validate(
             &snapshot,
@@ -248,6 +249,7 @@ fn unresolved_live_pre_effect_and_observer_states_survive_snapshot_without_retry
             invocation: HookInvocationId::new(),
             lifecycle: HookLifecycle::PreToolUse,
             subject: ego_core::event::hook::HookSubject::Turn { turn },
+            activation: ego_core::event::hook::HookActivation::Persistent,
         },
     );
     let observer = event(
@@ -261,6 +263,7 @@ fn unresolved_live_pre_effect_and_observer_states_survive_snapshot_without_retry
             invocation: HookInvocationId::new(),
             lifecycle: HookLifecycle::PostToolUse,
             subject: ego_core::event::hook::HookSubject::Turn { turn },
+            activation: ego_core::event::hook::HookActivation::Persistent,
         },
     );
     for e in [&admission, &pre, &observer] {

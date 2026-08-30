@@ -169,6 +169,7 @@ fn hook_events() -> (DomainEvent, DomainEvent, DomainEvent) {
             invocation,
             lifecycle: HookLifecycle::PreToolUse,
             subject: ego_core::event::hook::HookSubject::Turn { turn },
+            activation: ego_core::event::hook::HookActivation::Persistent,
         },
     );
     let settle = event(

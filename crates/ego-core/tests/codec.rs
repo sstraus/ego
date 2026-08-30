@@ -86,14 +86,14 @@ mod codec {
     /// to be a deliberate edit here, not a constant quietly following the
     /// code that changed it.
     #[test]
-    fn codec_header_carries_codec_version_8() {
+    fn codec_header_carries_codec_version_9() {
         let h = header();
-        assert_eq!(h.v, 8);
-        assert_eq!(CODEC_VERSION, 8);
+        assert_eq!(h.v, 9);
+        assert_eq!(CODEC_VERSION, 9);
 
         let bytes = encode_header(&h);
         match decode_line(&bytes).unwrap() {
-            StoreLine::Header(decoded) => assert_eq!(decoded.v, 8),
+            StoreLine::Header(decoded) => assert_eq!(decoded.v, 9),
             other => panic!("expected Header, got {other:?}"),
         }
     }
@@ -606,6 +606,7 @@ mod codec {
                     subject: ego_core::event::hook::HookSubject::Item {
                         item: common::id(GOLDEN_ITEM),
                     },
+                    activation: ego_core::event::hook::HookActivation::Persistent,
                 },
             },
             DomainEvent {

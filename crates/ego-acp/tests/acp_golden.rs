@@ -533,6 +533,7 @@ mod acp_golden {
                 invocation: HookInvocationId::new(),
                 lifecycle: ego_core::event::hook::HookLifecycle::PreToolUse,
                 subject: ego_core::event::hook::HookSubject::Session,
+                activation: ego_core::event::hook::HookActivation::Persistent,
             },
             EventKind::HookInvocationSettled {
                 hook: HookDescriptorEvidence::new(

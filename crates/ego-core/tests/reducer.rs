@@ -227,6 +227,7 @@ mod reducer {
                 invocation,
                 lifecycle: ego_core::event::hook::HookLifecycle::PreToolUse,
                 subject: ego_core::event::hook::HookSubject::Session,
+                activation: ego_core::event::hook::HookActivation::Persistent,
             }
         );
         push!(
@@ -619,6 +620,7 @@ mod reducer {
                         .unwrap(),
                     lifecycle: ego_core::event::hook::HookLifecycle::PreToolUse,
                     subject: ego_core::event::hook::HookSubject::Session,
+                    activation: ego_core::event::hook::HookActivation::Persistent,
                 },
             ),
             (
@@ -1218,6 +1220,7 @@ mod reducer {
                 invocation,
                 lifecycle: ego_core::event::hook::HookLifecycle::PreToolUse,
                 subject: ego_core::event::hook::HookSubject::Session,
+                activation: ego_core::event::hook::HookActivation::Persistent,
             },
         );
         let started_id = started.env.id;
