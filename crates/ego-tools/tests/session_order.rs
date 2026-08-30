@@ -172,17 +172,11 @@ fn recognized_v7_log_migrates_to_v8_preserving_counters_and_payloads() {
         workspace_root: "/workspace".into(),
     });
     bytes.push(b'\n');
-    bytes.extend(encode_record(seq(41), &SessionEntry::Event(event(11, "v7-first"))).unwrap());
+    bytes.extend(encode_record(seq(41), &event(11, "v7-first")).unwrap());
     bytes.push(b'\n');
-    bytes.extend(
-        encode_record(
-            seq(1),
-            &SessionEntry::RunTransaction(admitted(&id, 1, None, "/workspace")),
-        )
-        .unwrap(),
-    );
+    bytes.extend(encode_record(seq(1), &admitted(&id, 1, None, "/workspace")).unwrap());
     bytes.push(b'\n');
-    bytes.extend(encode_record(seq(99), &SessionEntry::Event(event(12, "v7-second"))).unwrap());
+    bytes.extend(encode_record(seq(99), &event(12, "v7-second")).unwrap());
     bytes.push(b'\n');
     std::fs::write(&path, &bytes).unwrap();
     let store = JsonlStore::new(dir.path(), "/workspace", Box::new(OsIo));
@@ -260,7 +254,7 @@ fn v7_log_with_valid_unknown_record_is_refused_without_mutation() {
         workspace_root: "/workspace".into(),
     });
     bytes.push(b'\n');
-    bytes.extend(encode_record(seq(1), &SessionEntry::Event(event(1, "v7"))).unwrap());
+    bytes.extend(encode_record(seq(1), &event(1, "v7")).unwrap());
     bytes.push(b'\n');
     bytes.extend_from_slice(br#"{"future":true}"#);
     bytes.push(b'\n');

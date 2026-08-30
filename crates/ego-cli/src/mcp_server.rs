@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use ego_core::event::id::SessionId;
+use ego_core::evidence::EvidenceAdmissionService;
 use ego_core::generator::attempt::DeliveryCertainty;
 use ego_core::generator::capabilities::ModelCapabilities;
 use ego_core::permit::{CleanupCertainty, DuplexEnd, DuplexSession, DuplexSettlement, ToolResult};
@@ -277,8 +278,11 @@ impl DuplexSession for ProcessStdio {
 }
 
 /// Serve one connection until the host closes stdio.
-pub async fn serve(args: &McpServerArgs) -> RunTermination {
-    match compose_and_serve(args).await {
+pub async fn serve(
+    args: &McpServerArgs,
+    evidence: Arc<EvidenceAdmissionService>,
+) -> RunTermination {
+    match compose_and_serve(args, evidence).await {
         Ok(settlement) if matches!(settlement.end(), DuplexEnd::Exited { code: 0 }) => {
             RunTermination::Done
         }
@@ -294,7 +298,10 @@ pub async fn serve(args: &McpServerArgs) -> RunTermination {
     }
 }
 
-async fn compose_and_serve(args: &McpServerArgs) -> Result<DuplexSettlement, McpError> {
+async fn compose_and_serve(
+    args: &McpServerArgs,
+    evidence: Arc<EvidenceAdmissionService>,
+) -> Result<DuplexSettlement, McpError> {
     let root = run::workspace(args.directory.as_ref())
         .map_err(|error| McpError::new(McpFailure::InvalidValue, error.to_string()))?;
     let run_root = RunRoot::new(root.clone())
@@ -310,6 +317,7 @@ async fn compose_and_serve(args: &McpServerArgs) -> Result<DuplexSettlement, Mcp
         Arc::clone(&store),
         artifact_publisher,
         args.max_concurrent_runs,
+        evidence,
     )
     .map_err(|error| McpError::new(McpFailure::InvalidValue, error.to_string()))?;
 

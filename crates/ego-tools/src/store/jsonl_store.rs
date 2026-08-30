@@ -15,6 +15,10 @@ use ego_core::event::domain::{DomainEvent, EventKind};
 use ego_core::event::hook::HookCatalogueEvidence;
 use ego_core::event::id::{Producer, Seq, SessionId};
 use ego_core::event::time::Timestamp;
+use ego_core::evidence::{
+    EvidenceError, EvidenceKey, EvidenceLogSource, EvidenceRecord, EvidenceWrite, ManifestEvidence,
+    ManifestEvidenceError,
+};
 use ego_core::permit::ExecObservation;
 use ego_core::run::{RunAppend, RunCommand, RunRevision, RunTransaction};
 use ego_core::session::{
@@ -38,6 +42,23 @@ use super::snapshot::{SNAPSHOT_VERSION, Snapshot, SnapshotRejection, validate};
 /// this constant names the single v7 -> v8 ownership transition.
 const MIGRATABLE_CODEC_VERSION: u32 = 7;
 
+/// The sole decoder for the untagged v7 payload shape.
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum LegacySessionEntry {
+    Event(DomainEvent),
+    RunTransaction(RunTransaction),
+}
+
+impl From<LegacySessionEntry> for SessionEntry {
+    fn from(value: LegacySessionEntry) -> Self {
+        match value {
+            LegacySessionEntry::Event(event) => Self::Event(event),
+            LegacySessionEntry::RunTransaction(transaction) => Self::RunTransaction(transaction),
+        }
+    }
+}
+
 /// Filesystem-private cache projection. The public store port exposes only
 /// [`SessionMeta`]; execution and admitted-hook evidence remain internal log
 /// facts, projected here only for bounded catalogue reads and recovery.
@@ -49,6 +70,8 @@ struct RunManifest {
     execution: Option<ExecObservation>,
     #[serde(default)]
     hooks: HookCatalogueEvidence,
+    #[serde(default)]
+    evidence: ManifestEvidence,
 }
 
 struct LogManifestFacts {
@@ -59,6 +82,7 @@ struct LogManifestFacts {
     lineage: Option<SessionLineage>,
     execution: Option<ExecObservation>,
     hooks: HookCatalogueEvidence,
+    evidence: ManifestEvidence,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -230,20 +254,30 @@ fn migrate_v7_image(
     mut header: Header,
     start: usize,
 ) -> Result<(Vec<u8>, usize, usize), StoreError> {
-    // A future line remains someone else's bytes even when an earlier line is
-    // corrupt. Refuse before constructing or publishing any replacement.
+    // A future payload remains someone else's bytes even when an earlier line
+    // is corrupt. Refuse before constructing or publishing any replacement.
     let mut cursor = start;
     while cursor < bytes.len() {
         let Some(offset) = bytes[cursor..].iter().position(|byte| *byte == b'\n') else {
             break;
         };
-        if matches!(
-            decode_line(&bytes[cursor..cursor + offset]),
-            Ok(StoreLine::Unknown(_))
-        ) {
-            return Err(invalid_log(
-                "cannot migrate a v7 log containing an unknown record",
-            ));
+        match decode_line(&bytes[cursor..cursor + offset]) {
+            Ok(StoreLine::Record(record)) => {
+                serde_json::from_str::<LegacySessionEntry>(record.payload.get()).map_err(|_| {
+                    invalid_log("cannot migrate a v7 log containing an unknown payload")
+                })?;
+            }
+            Ok(StoreLine::Unknown(_)) => {
+                return Err(invalid_log(
+                    "cannot migrate a v7 log containing an unknown record",
+                ));
+            }
+            Ok(StoreLine::Header(_)) => {
+                return Err(invalid_log(
+                    "unexpected header record past the log's first line",
+                ));
+            }
+            Err(_) => {}
         }
         cursor += offset + 1;
     }
@@ -270,12 +304,11 @@ fn migrate_v7_image(
                 ));
             }
         };
-        serde_json::from_str::<SessionEntry>(record.payload.get())
+        let entry = serde_json::from_str::<LegacySessionEntry>(record.payload.get())
+            .map(SessionEntry::from)
             .map_err(|error| CodecError::Malformed(error.to_string()))?;
         let next = position.next();
-        // RawValue's Serialize implementation re-emits the exact payload JSON;
-        // only the adapter-owned physical position and checksum change.
-        migrated.extend_from_slice(&encode_record(next, &record.payload)?);
+        migrated.extend_from_slice(&encode_record(next, &entry)?);
         migrated.push(b'\n');
     }
     Ok((migrated, valid_len, dropped_lines))
@@ -314,26 +347,38 @@ fn split_lines(bytes: &[u8]) -> Vec<&[u8]> {
 /// The manifest facts derived from a valid log prefix.
 ///
 /// Only ever called on a prefix [`valid_prefix`] has already accepted, so
-/// every line here is known to decode; a line that somehow does not is
-/// skipped rather than failing recovery, since refusing to rebuild a
-/// manifest is a worse outcome than rebuilding it from one event less.
-fn log_manifest_facts(log: &[u8]) -> Option<LogManifestFacts> {
+/// every physical line here is checksummed. Payload decoding is deliberately
+/// stricter: an unknown typed entry refuses projection so recovery never
+/// rewrites cache state from an authority this build cannot interpret.
+fn log_manifest_facts(log: &[u8]) -> Result<Option<LogManifestFacts>, StoreError> {
     let mut lines = split_lines(log).into_iter();
-    let (created, workspace_root) = match decode_line(lines.next()?) {
+    let Some(header_line) = lines.next() else {
+        return Ok(None);
+    };
+    let (created, workspace_root) = match decode_line(header_line) {
         Ok(StoreLine::Header(header)) => (header.created, header.workspace_root),
-        _ => return None,
+        _ => return Ok(None),
     };
     let mut last_ts = None;
     let mut model = None;
     let mut lineage = None;
     let mut execution = None;
     let mut hooks = HookCatalogueEvidence::default();
-    for entry in lines.filter_map(|line| match decode_line(line) {
-        Ok(StoreLine::Record(record)) => {
-            serde_json::from_str::<SessionEntry>(record.payload.get()).ok()
-        }
-        _ => None,
-    }) {
+    let mut evidence_records = Vec::new();
+    for line in lines {
+        let record = match decode_line(line)? {
+            StoreLine::Record(record) => record,
+            StoreLine::Unknown(_) => {
+                return Err(invalid_log("unknown record in the valid session prefix"));
+            }
+            StoreLine::Header(_) => {
+                return Err(invalid_log(
+                    "unexpected header record past the log's first line",
+                ));
+            }
+        };
+        let entry = serde_json::from_str::<SessionEntry>(record.payload.get())
+            .map_err(|_| invalid_log("unknown payload in the valid session prefix"))?;
         match entry {
             SessionEntry::Event(event) => {
                 last_ts = Some(event.env.ts);
@@ -368,9 +413,15 @@ fn log_manifest_facts(log: &[u8]) -> Option<LogManifestFacts> {
                     model = Some(admitted_model.0.clone());
                 }
             }
+            SessionEntry::Evidence(record) => {
+                last_ts.get_or_insert(created);
+                evidence_records.push(record);
+            }
         }
     }
-    Some(LogManifestFacts {
+    let evidence = ManifestEvidence::from_records(&evidence_records)
+        .map_err(|error| invalid_log(error.to_string()))?;
+    Ok(Some(LogManifestFacts {
         created,
         workspace_root,
         last_ts,
@@ -378,7 +429,8 @@ fn log_manifest_facts(log: &[u8]) -> Option<LogManifestFacts> {
         lineage,
         execution,
         hooks,
-    })
+        evidence,
+    }))
 }
 
 /// The filesystem `SessionStore`. Real I/O goes through the injected
@@ -439,13 +491,7 @@ impl JsonlStore {
         self.session_dir(id).join("events.lock")
     }
 
-    /// Serialize one complete log mutation and its manifest projection.
-    /// This is deliberately distinct from the long-held session writer lease.
-    fn with_events_lock<T>(
-        &self,
-        id: &SessionId,
-        operation: impl FnOnce() -> Result<T, StoreError>,
-    ) -> Result<T, StoreError> {
+    fn open_events_lock(&self, id: &SessionId) -> Result<RwLock<std::fs::File>, StoreError> {
         let lock_path = self.events_lock_path(id);
         if let Some(parent) = lock_path.parent() {
             fs::create_dir_all(parent)?;
@@ -456,7 +502,17 @@ impl JsonlStore {
             .write(true)
             .truncate(false)
             .open(lock_path)?;
-        let mut lock = RwLock::new(file);
+        Ok(RwLock::new(file))
+    }
+
+    /// Serialize one complete log mutation and its manifest projection.
+    /// This is deliberately distinct from the long-held session writer lease.
+    fn with_events_lock<T>(
+        &self,
+        id: &SessionId,
+        operation: impl FnOnce() -> Result<T, StoreError>,
+    ) -> Result<T, StoreError> {
+        let mut lock = self.open_events_lock(id)?;
         let _guard = lock.write()?;
         operation()
     }
@@ -486,9 +542,13 @@ impl JsonlStore {
             accept_physical_position(&mut last_position, record.seq)?;
             let entry = serde_json::from_str::<SessionEntry>(record.payload.get())
                 .map_err(|error| StoreError::Codec(CodecError::Malformed(error.to_string())))?;
-            let SessionEntry::RunTransaction(transaction) = entry else {
-                has_event = true;
-                continue;
+            let transaction = match entry {
+                SessionEntry::RunTransaction(transaction) => transaction,
+                SessionEntry::Event(_) => {
+                    has_event = true;
+                    continue;
+                }
+                SessionEntry::Evidence(_) => continue,
             };
             let expected = revision
                 .map(RunRevision::next)
@@ -751,7 +811,7 @@ impl JsonlStore {
                 .filter_map(|result| async move {
                     match result.ok()? {
                         SessionEntry::Event(event) => Some(event),
-                        SessionEntry::RunTransaction(_) => None,
+                        SessionEntry::RunTransaction(_) | SessionEntry::Evidence(_) => None,
                     }
                 })
                 .collect()
@@ -882,7 +942,7 @@ impl JsonlStore {
     /// repair may remove an `ExecutionObserved` event without changing the
     /// surviving last event's timestamp relative to the cached manifest.
     fn rebuild_manifest_from_log(&self, id: &SessionId, log: &[u8]) -> Result<bool, StoreError> {
-        let Some(facts) = log_manifest_facts(log) else {
+        let Some(facts) = log_manifest_facts(log)? else {
             return Ok(false);
         };
 
@@ -941,6 +1001,7 @@ impl JsonlStore {
             meta,
             execution: facts.execution,
             hooks: facts.hooks,
+            evidence: facts.evidence,
         };
         if previous.as_ref() == Some(&manifest) {
             return Ok(false);
@@ -973,10 +1034,10 @@ impl JsonlStore {
         // and reading back the header and event just appended would turn its
         // first append into an unnecessary whole-log read.
         let log_facts = if previous.is_none() && !is_new_session {
-            self.io
-                .read(&self.log_path(id))?
-                .as_deref()
-                .and_then(log_manifest_facts)
+            match self.io.read(&self.log_path(id))? {
+                Some(bytes) => log_manifest_facts(&bytes)?,
+                None => None,
+            }
         } else {
             None
         };
@@ -1043,10 +1104,16 @@ impl JsonlStore {
                 .or_else(|| log_facts.as_ref().map(|facts| facts.hooks.clone()))
                 .unwrap_or_default(),
         };
+        let evidence = previous
+            .as_ref()
+            .map(|manifest| manifest.evidence.clone())
+            .or_else(|| log_facts.as_ref().map(|facts| facts.evidence.clone()))
+            .unwrap_or_default();
         let manifest = RunManifest {
             meta,
             execution,
             hooks,
+            evidence,
         };
         let bytes = serde_json::to_vec(&manifest).expect("RunManifest always serialises");
         self.io.replace_atomic(&self.manifest_path(id), &bytes)?;
@@ -1094,6 +1161,174 @@ impl JsonlStore {
             StoreLine::Unknown(_) => {
                 Err(invalid_log("cannot append after an unknown session record"))
             }
+        }
+    }
+
+    fn inspect_evidence_log(
+        &self,
+        id: &SessionId,
+        bytes: &[u8],
+    ) -> Result<(Vec<EvidenceRecord>, Seq), StoreError> {
+        let (header, start) = decoded_header(bytes)?.ok_or(StoreError::MissingHeader)?;
+        if header.v != CODEC_VERSION {
+            return Err(StoreError::UnsupportedLog { found: header.v });
+        }
+        if header.session != *id {
+            return Err(StoreError::WrongSession {
+                expected: header.session,
+                asked: *id,
+            });
+        }
+
+        let mut evidence = Vec::new();
+        let mut last_position = Seq::ZERO;
+        for line in split_lines(&bytes[start..]) {
+            let record = match decode_line(line)? {
+                StoreLine::Record(record) => record,
+                StoreLine::Header(_) => {
+                    return Err(invalid_log(
+                        "unexpected header record past the log's first line",
+                    ));
+                }
+                StoreLine::Unknown(_) => {
+                    return Err(invalid_log("unknown record in the valid session prefix"));
+                }
+            };
+            accept_physical_position(&mut last_position, record.seq)?;
+            let entry = serde_json::from_str::<SessionEntry>(record.payload.get())
+                .map_err(|_| invalid_log("unknown payload in the valid session prefix"))?;
+            if let SessionEntry::Evidence(record) = entry {
+                evidence.push(record);
+            }
+        }
+        Ok((evidence, last_position))
+    }
+
+    pub(super) fn write_evidence(
+        &self,
+        id: &SessionId,
+        key: EvidenceKey,
+        record: EvidenceRecord,
+    ) -> Result<EvidenceWrite, EvidenceError> {
+        let map_store = |error: StoreError| EvidenceError::Store {
+            key: key.clone(),
+            diagnostic: error.to_string(),
+        };
+        let mut lock = self.open_events_lock(id).map_err(map_store)?;
+        let _guard = lock.write().map_err(|error| EvidenceError::Store {
+            key: key.clone(),
+            diagnostic: error.to_string(),
+        })?;
+        self.write_evidence_already_locked(id, key, record)
+    }
+
+    fn write_evidence_already_locked(
+        &self,
+        id: &SessionId,
+        key: EvidenceKey,
+        record: EvidenceRecord,
+    ) -> Result<EvidenceWrite, EvidenceError> {
+        if key != record.key() || key.session() != *id {
+            return Err(EvidenceError::Store {
+                key,
+                diagnostic: "evidence key, payload, and lease-held session do not agree".to_owned(),
+            });
+        }
+        let log_path = self.log_path(id);
+        let existing = self
+            .io
+            .read(&log_path)
+            .map_err(|error| EvidenceError::Store {
+                key: key.clone(),
+                diagnostic: error.to_string(),
+            })?;
+        let (records, mut last_position) = match existing.as_deref() {
+            Some(bytes) => {
+                self.inspect_evidence_log(id, bytes)
+                    .map_err(|error| EvidenceError::Store {
+                        key: key.clone(),
+                        diagnostic: error.to_string(),
+                    })?
+            }
+            None => (Vec::new(), Seq::ZERO),
+        };
+
+        if let Some(previous) = records.iter().find(|candidate| candidate.key() == key) {
+            if previous == &record {
+                return Ok(EvidenceWrite::AlreadyRecorded);
+            }
+            return Err(EvidenceError::idempotency_conflict(
+                key,
+                previous.digest(),
+                record.digest(),
+            ));
+        }
+        if let EvidenceKey::GenerationAdmission {
+            session,
+            invocation,
+            ..
+        } = &key
+            && !records.iter().any(|candidate| {
+                candidate.key()
+                    == EvidenceKey::RunContext {
+                        session: *session,
+                        invocation: *invocation,
+                    }
+            })
+        {
+            return Err(EvidenceError::RunContextRequired { key: record.key() });
+        }
+
+        let position = last_position.next();
+        let line = encode_record(position, &SessionEntry::Evidence(record)).map_err(|error| {
+            EvidenceError::Store {
+                key: key.clone(),
+                diagnostic: error.to_string(),
+            }
+        })?;
+
+        let (published, publication) = if let Some(mut bytes) = existing {
+            self.io
+                .append_line(&log_path, &line)
+                .map_err(|error| EvidenceError::Store {
+                    key: key.clone(),
+                    diagnostic: error.to_string(),
+                })?;
+            bytes.extend_from_slice(&line);
+            bytes.push(b'\n');
+            match self.io.fsync(&log_path) {
+                Ok(()) => (bytes, AtomicReplacePublication::PublishedDurably),
+                Err(error) => {
+                    return Err(EvidenceError::DurabilityUncertain {
+                        key,
+                        diagnostic: error.to_string(),
+                    });
+                }
+            }
+        } else {
+            let header = Header::new(*id, Timestamp::EPOCH, self.workspace.clone());
+            let mut image = encode_header(&header);
+            image.push(b'\n');
+            image.extend_from_slice(&line);
+            image.push(b'\n');
+            let publication = self
+                .io
+                .replace_atomic_publication(&log_path, &image)
+                .map_err(|error| EvidenceError::Store {
+                    key: key.clone(),
+                    diagnostic: error.to_string(),
+                })?;
+            (image, publication)
+        };
+
+        if let AtomicReplacePublication::PublishedDurabilityUncertain { diagnostic } = publication {
+            return Err(EvidenceError::DurabilityUncertain { key, diagnostic });
+        }
+        match self.rebuild_manifest_from_log(id, &published) {
+            Ok(_) => Ok(EvidenceWrite::Published),
+            Err(error) => Ok(EvidenceWrite::PublishedWithProjectionWarning {
+                diagnostic: error.to_string(),
+            }),
         }
     }
 
@@ -1459,7 +1694,7 @@ impl ReplaySource for JsonlStore {
         };
         let mut events = entries.into_iter().filter_map(|entry| match entry {
             SessionEntry::Event(event) => Some(event),
-            SessionEntry::RunTransaction(_) => None,
+            SessionEntry::RunTransaction(_) | SessionEntry::Evidence(_) => None,
         });
         let Some(first_event) = events.next() else {
             return Ok(None);
@@ -1570,6 +1805,30 @@ impl ReplaySource for JsonlStore {
             entries.push(entry);
         }
         Ok(Some(entries))
+    }
+}
+
+impl EvidenceLogSource for JsonlStore {
+    fn evidence_records(
+        &self,
+        session: &SessionId,
+    ) -> Result<Vec<EvidenceRecord>, ManifestEvidenceError> {
+        let map_store = |error: StoreError| ManifestEvidenceError::Store(error.to_string());
+        let mut lock = self.open_events_lock(session).map_err(map_store)?;
+        let _guard = lock
+            .write()
+            .map_err(|error| ManifestEvidenceError::Store(error.to_string()))?;
+        let bytes = self
+            .io
+            .read(&self.log_path(session))
+            .map_err(|error| ManifestEvidenceError::Store(error.to_string()))?
+            .ok_or_else(|| ManifestEvidenceError::Store("session not found".to_owned()))?;
+        let (records, _) = self
+            .inspect_evidence_log(session, &bytes)
+            .map_err(|error| ManifestEvidenceError::Store(error.to_string()))?;
+        self.rebuild_manifest_from_log(session, &bytes)
+            .map_err(|error| ManifestEvidenceError::Store(error.to_string()))?;
+        Ok(records)
     }
 }
 

@@ -699,6 +699,9 @@ mod store {
                     SessionEntry::RunTransaction(_) => {
                         panic!("event-only session contained a run transaction")
                     }
+                    SessionEntry::Evidence(_) => {
+                        panic!("event-only session contained evidence")
+                    }
                 },
             )
             .collect();

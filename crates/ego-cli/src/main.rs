@@ -11,6 +11,7 @@
 use ego_cli::cli::{self, Invocation};
 use ego_cli::output::{self, Stdout};
 use ego_cli::run::{self, Ended};
+use ego_core::evidence::EvidenceAdmissionService;
 use ego_core::run::RunTermination;
 use ego_core::turn::CancelToken;
 
@@ -37,6 +38,7 @@ fn main() -> std::process::ExitCode {
 async fn ordinary_main() -> std::process::ExitCode {
     let cancel = CancelToken::new();
     let out = Stdout::new(cancel.clone());
+    let evidence = std::sync::Arc::new(EvidenceAdmissionService::new());
 
     let invocation = cli::parse(std::env::args().collect());
     let needs_mcp_runtime = matches!(
@@ -145,7 +147,7 @@ async fn ordinary_main() -> std::process::ExitCode {
             // one to report — the same shape of absence `ls` has, for the opposite
             // reason. Its termination says whether the connection ended cleanly.
             Ok(Invocation::Acp(args)) => Ended {
-                termination: ego_cli::acp::serve(&args).await,
+                termination: ego_cli::acp::serve(&args, std::sync::Arc::clone(&evidence)).await,
                 session: ego_core::event::id::SessionId::new(),
                 state: ego_core::state::SessionState::default(),
                 result: serde_json::Value::String(String::new()),
@@ -154,7 +156,8 @@ async fn ordinary_main() -> std::process::ExitCode {
             // `mcp-server` owns stdout as its JSON-RPC transport and serves many
             // rooted runs, so the ordinary process projection must stay silent.
             Ok(Invocation::McpServer(args)) => Ended {
-                termination: ego_cli::mcp_server::serve(&args).await,
+                termination: ego_cli::mcp_server::serve(&args, std::sync::Arc::clone(&evidence))
+                    .await,
                 session: ego_core::event::id::SessionId::new(),
                 state: ego_core::state::SessionState::default(),
                 result: serde_json::Value::String(String::new()),
@@ -186,6 +189,7 @@ async fn ordinary_main() -> std::process::ExitCode {
                             .expect("interactive invocation constructed its MCP runtime")
                             .controller(),
                     ),
+                    std::sync::Arc::clone(&evidence),
                 )
                 .await
             }
@@ -201,6 +205,7 @@ async fn ordinary_main() -> std::process::ExitCode {
                             .expect("run invocation constructed its MCP runtime")
                             .controller(),
                     ),
+                    std::sync::Arc::clone(&evidence),
                 )
                 .await;
                 if json {

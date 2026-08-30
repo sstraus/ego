@@ -216,10 +216,7 @@ impl<'a> ReplayContext<'a> {
     ) -> Result<ReplayedContext, ReplayError> {
         let mut session_pins = Vec::new();
         let mut frames = Vec::new();
-        loop {
-            let SessionLineage::Fork { source, at_seq } = *lineage else {
-                break;
-            };
+        while let SessionLineage::Fork { source, at_seq } = *lineage {
             if !visited.insert(source) {
                 return Err(ReplayError::Cycle { session: source });
             }

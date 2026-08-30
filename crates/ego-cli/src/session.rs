@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use ego_core::event::id::SessionId;
 use ego_core::event::time::{Clock, Timestamp};
+use ego_core::evidence::EvidenceStore;
 use ego_core::session::{ReplayContext, ReplayedContext, TargetSeed};
 use ego_core::state::SessionState;
 use ego_core::store::session_store::{SessionStore, StoreError};
@@ -236,6 +237,11 @@ impl<'a> ActiveSession<'a> {
 
     pub fn store(&self) -> &dyn SessionStore {
         self.opened.store()
+    }
+
+    pub fn run_evidence(&self) -> &dyn EvidenceStore {
+        let Opened::Durable(open) = &self.opened;
+        &open.writer
     }
 
     pub fn evidence(&self) -> &SessionEvidenceStore {

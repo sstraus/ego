@@ -12,19 +12,64 @@ use super::codec::CodecError;
 use crate::event::domain::DomainEvent;
 use crate::event::id::SessionId;
 use crate::event::time::Timestamp;
+use crate::evidence::EvidenceRecord;
 use crate::run::{RunAppend, RunRevision, RunTransaction};
 use crate::session::SessionLineage;
 
 /// One durable item in a session's single ordered append-only stream.
 ///
-/// Conversation events and run-control transitions deliberately share the
-/// same store and read path. A second lifecycle log would allow replay and
-/// conversation history to disagree about which durable facts exist.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(untagged)]
+/// Conversation events, run-control transitions, and pre-effect evidence
+/// deliberately share the same store and read path. A second lifecycle or
+/// evidence log would allow replay and conversation history to disagree about
+/// which durable facts exist.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionEntry {
     Event(DomainEvent),
     RunTransaction(RunTransaction),
+    Evidence(EvidenceRecord),
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum SessionEntryWire {
+    Event { event: DomainEvent },
+    RunTransaction { run_transaction: RunTransaction },
+    Evidence { evidence: EvidenceRecord },
+}
+
+impl Serialize for SessionEntry {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Self::Event(event) => SessionEntryWire::Event {
+                event: event.clone(),
+            },
+            Self::RunTransaction(run_transaction) => SessionEntryWire::RunTransaction {
+                run_transaction: run_transaction.clone(),
+            },
+            Self::Evidence(evidence) => SessionEntryWire::Evidence {
+                evidence: evidence.clone(),
+            },
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for SessionEntry {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Ok(match SessionEntryWire::deserialize(deserializer)? {
+            SessionEntryWire::Event { event } => Self::Event(event),
+            SessionEntryWire::RunTransaction { run_transaction } => {
+                Self::RunTransaction(run_transaction)
+            }
+            SessionEntryWire::Evidence { evidence } => Self::Evidence(evidence),
+        })
+    }
 }
 
 /// The catalogue entry for one session (`ARCHITECTURE.md` §5's

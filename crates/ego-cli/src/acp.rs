@@ -16,6 +16,7 @@ use ego_core::config::{
 };
 use ego_core::credentials::SecretMaterial;
 use ego_core::event::domain::CancelCause;
+use ego_core::evidence::EvidenceAdmissionService;
 use ego_core::run::{IdSource, RunController, RunRetention, RunRoot, RunTermination};
 use ego_core::suspension::ContinuationJournal;
 use ego_core::turn::{AdmittedToolSource, CancelToken};
@@ -284,7 +285,7 @@ fn safe_mcp_error(message: impl Into<String>) -> McpSessionAdmissionError {
 }
 
 /// Serve the protocol on stdio until the host closes it.
-pub async fn serve(args: &AcpArgs) -> RunTermination {
+pub async fn serve(args: &AcpArgs, evidence: Arc<EvidenceAdmissionService>) -> RunTermination {
     let root = match run::workspace(args.directory.as_ref()) {
         Ok(root) => root,
         Err(error) => {
@@ -305,6 +306,7 @@ pub async fn serve(args: &AcpArgs) -> RunTermination {
     let executor = Arc::new(run::CliRunExecutor::for_acp(
         args.session_dir.clone(),
         Arc::clone(&store),
+        evidence,
     ));
     let ids = Arc::new(UuidIds);
     let controller = Arc::new(RunController::new(

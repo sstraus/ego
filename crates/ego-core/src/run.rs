@@ -41,11 +41,15 @@ use crate::config::{Mode, ModelRef};
 use crate::cost::Money;
 use crate::event::id::SessionId;
 use crate::event::time::{Clock, Timestamp};
+use crate::evidence::{EvidenceError, EvidenceWrite, RunInvocationId};
 use crate::generator::capabilities::ModelCapabilities;
 use crate::question::Elicitor;
 use crate::sink::EventSink;
 use crate::store::session_store::{SessionEntry, SessionStore, StoreError};
 use crate::turn::AdmittedToolSource;
+
+/// Borrowed future returned by run adapters at controller-owned boundaries.
+pub type RunFuture<'a, T> = BoxFuture<'a, T>;
 
 impl SessionId {
     /// Raw UUID for exact rooted identity comparisons and protocol projection.
@@ -788,6 +792,7 @@ pub struct CancelKey {
 #[derive(Debug, Clone)]
 pub struct RunPreparation {
     pub run_id: RunId,
+    pub invocation: RunInvocationId,
     pub root: RunRoot,
     pub selections: RunSelections,
     pub continuation: bool,
@@ -949,6 +954,11 @@ pub trait RunExecutor: Send + Sync {
         request: &'a RunPreparation,
     ) -> BoxFuture<'a, Result<RunPrepared<Self::Prepared>, RunExecutorError>>;
 
+    fn admit_run_context<'a>(
+        &'a self,
+        prepared: &'a Self::Prepared,
+    ) -> RunFuture<'a, Result<EvidenceWrite, EvidenceError>>;
+
     fn start<'a>(
         &'a self,
         request: &'a RunStart,
@@ -1028,6 +1038,10 @@ pub enum RunError {
     },
     Store(StoreError),
     Executor(RunExecutorError),
+    Evidence {
+        source: Box<EvidenceError>,
+        settlement_diagnostic: Option<String>,
+    },
     Integrity {
         message: String,
     },
@@ -1056,12 +1070,29 @@ impl std::fmt::Display for RunError {
             Self::PublishedDurabilityUncertain { diagnostic, .. } => f.write_str(diagnostic),
             Self::Store(error) => error.fmt(f),
             Self::Executor(error) => error.fmt(f),
+            Self::Evidence {
+                source,
+                settlement_diagnostic,
+            } => {
+                write!(f, "run evidence admission failed: {source}")?;
+                if let Some(diagnostic) = settlement_diagnostic {
+                    write!(f, "; settlement also failed: {diagnostic}")?;
+                }
+                Ok(())
+            }
             Self::Integrity { message } => f.write_str(message),
         }
     }
 }
 
-impl std::error::Error for RunError {}
+impl std::error::Error for RunError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Evidence { source, .. } => Some(source.as_ref()),
+            _ => None,
+        }
+    }
+}
 
 impl From<StoreError> for RunError {
     fn from(value: StoreError) -> Self {
@@ -1366,6 +1397,7 @@ where
             .executor
             .prepare(&RunPreparation {
                 run_id,
+                invocation: RunInvocationId::from_uuid(request.request_id.uuid()),
                 root: request.root.clone(),
                 selections: request.selections.clone(),
                 continuation: false,
@@ -1401,6 +1433,13 @@ where
                     return Err(RunError::Integrity {
                         message: "initial run commit returned a non-initial revision".to_owned(),
                     });
+                }
+                match self.executor.admit_run_context(&prepared).await {
+                    Ok(EvidenceWrite::PublishedWithProjectionWarning { diagnostic }) => {
+                        tracing::warn!(%diagnostic, "run evidence manifest projection failed");
+                    }
+                    Ok(EvidenceWrite::Published | EvidenceWrite::AlreadyRecorded) => {}
+                    Err(error) => return Err(self.refuse_evidence(run_id, lease, error).await),
                 }
                 let mode = ExecutionMode::Start {
                     root: request.root.clone(),
@@ -1459,6 +1498,7 @@ where
             .executor
             .prepare(&RunPreparation {
                 run_id: request.run_id,
+                invocation: RunInvocationId::from_uuid(request.request_id.uuid()),
                 root: folded.snapshot.root.clone(),
                 selections: preparation_selections,
                 continuation: true,
@@ -1501,6 +1541,15 @@ where
             RunAppend::Committed {
                 revision: committed,
             } => {
+                match self.executor.admit_run_context(&prepared).await {
+                    Ok(EvidenceWrite::PublishedWithProjectionWarning { diagnostic }) => {
+                        tracing::warn!(%diagnostic, "run evidence manifest projection failed");
+                    }
+                    Ok(EvidenceWrite::Published | EvidenceWrite::AlreadyRecorded) => {}
+                    Err(error) => {
+                        return Err(self.refuse_evidence(request.run_id, lease, error).await);
+                    }
+                }
                 let mode = ExecutionMode::Continue {
                     prompt: request.prompt,
                     prepared: Box::new(prepared),
@@ -1876,6 +1925,15 @@ where
                 session_id: folded.snapshot.session_id(),
             });
         }
+        if matches!(
+            receipt.settlement,
+            Some(RunSettlement::Interrupted | RunSettlement::Uncertain)
+        ) {
+            return Err(RunError::Integrity {
+                message: "the retained request ended before effect authority and cannot be retried"
+                    .to_owned(),
+            });
+        }
         Ok(RunCommandOutcome::Replayed(
             self.observation(&folded, receipt.lease),
         ))
@@ -2086,6 +2144,28 @@ where
                     return Err(RunError::PublishedDurabilityUncertain { run_id, diagnostic });
                 }
             }
+        }
+    }
+
+    async fn refuse_evidence(
+        &self,
+        run_id: RunId,
+        lease: TurnLease,
+        source: EvidenceError,
+    ) -> RunError {
+        let settlement = if matches!(source, EvidenceError::DurabilityUncertain { .. }) {
+            RunSettlement::Uncertain
+        } else {
+            RunSettlement::Interrupted
+        };
+        let settlement_diagnostic = self
+            .settle(run_id, lease, settlement)
+            .await
+            .err()
+            .map(|error| error.to_string());
+        RunError::Evidence {
+            source: Box::new(source),
+            settlement_diagnostic,
         }
     }
 

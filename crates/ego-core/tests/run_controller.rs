@@ -65,7 +65,7 @@ impl RecordingSessionStore {
                     .iter()
                     .filter_map(|entry| match entry {
                         SessionEntry::RunTransaction(transaction) => Some(transaction.clone()),
-                        SessionEntry::Event(_) => None,
+                        SessionEntry::Event(_) | SessionEntry::Evidence(_) => None,
                     })
                     .collect()
             })
@@ -151,7 +151,7 @@ impl SessionStore for RecordingSessionStore {
         let current = entries.get(session).and_then(|entries| {
             entries.iter().rev().find_map(|entry| match entry {
                 SessionEntry::RunTransaction(transaction) => Some(transaction.revision()),
-                SessionEntry::Event(_) => None,
+                SessionEntry::Event(_) | SessionEntry::Evidence(_) => None,
             })
         });
         if expected_revision != current {
@@ -372,6 +372,18 @@ impl ScriptedRunExecutor {
 
 impl RunExecutor for ScriptedRunExecutor {
     type Prepared = PreparedToken;
+
+    fn admit_run_context<'a>(
+        &'a self,
+        _prepared: &'a Self::Prepared,
+    ) -> ego_core::run::RunFuture<
+        'a,
+        Result<ego_core::evidence::EvidenceWrite, ego_core::evidence::EvidenceError>,
+    > {
+        Box::pin(future::ready(Ok(
+            ego_core::evidence::EvidenceWrite::Published,
+        )))
+    }
 
     fn prepare<'a>(
         &'a self,

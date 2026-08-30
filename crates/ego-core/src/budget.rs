@@ -78,6 +78,8 @@
 
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
+
 use crate::cost::{
     Amount, Ceiling, CostAttribution, CostDelta, CurrencyCode, MeteringRevision, Money, MoneyError,
     PricingRevision, ProviderCostRevision, RateSource, TokenCategory, UnknownCost,
@@ -285,7 +287,8 @@ pub struct ResolvedRates {
 ///
 /// See `docs/decisions/2026-08-21-how-a-model-is-metered.md` §1 and §2, as
 /// narrowed by `2026-08-21-a-run-with-no-ceiling.md` §3.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SettlementSource {
     /// The same quote that minted the reservation prices the observed usage.
     Quote,
@@ -450,7 +453,8 @@ impl Metering {
 /// labels; folding the rates into the binding would collapse two checks that
 /// catch different things into one, and leave the cheaper-quote substitution
 /// reported as a moved binding rather than as the changed quote it is.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum MeteringIdentity {
     Currency { settlement: SettlementSource },
     Subscription { revision: MeteringRevision },

@@ -136,6 +136,9 @@ impl Fixture {
                 SessionEntry::RunTransaction(_) => Err(StoreError::Io(std::io::Error::other(
                     "event-only fixture contained a run transaction",
                 ))),
+                SessionEntry::Evidence(_) => Err(StoreError::Io(std::io::Error::other(
+                    "event-only fixture contained evidence",
+                ))),
             })
             .collect()
     }

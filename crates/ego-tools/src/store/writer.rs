@@ -28,6 +28,9 @@ use std::time::Duration;
 use ego_core::event::domain::DomainEvent;
 use ego_core::event::id::SessionId;
 use ego_core::event::time::Timestamp;
+use ego_core::evidence::{
+    EvidenceError as RunEvidenceError, EvidenceKey, EvidenceRecord, EvidenceStore, EvidenceWrite,
+};
 use ego_core::run::{RunAppend, RunRevision, RunTransaction};
 use ego_core::session::{
     ReplaySource, ReplaySourceError, SessionBlobSource, SessionLineage, TargetPublication,
@@ -35,7 +38,7 @@ use ego_core::session::{
 };
 use ego_core::state::SessionState;
 use ego_core::store::blob::BlobRef;
-use ego_core::store::evidence::EvidenceError;
+use ego_core::store::evidence::EvidenceError as BlobEvidenceError;
 use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
 use futures::stream::BoxStream;
 
@@ -146,7 +149,7 @@ impl SessionWriter<'_> {
     }
 
     /// Bind complete tool evidence to this lease-held session.
-    pub fn evidence_store(&self, hard_cap: u64) -> Result<SessionEvidenceStore, EvidenceError> {
+    pub fn evidence_store(&self, hard_cap: u64) -> Result<SessionEvidenceStore, BlobEvidenceError> {
         let store = SessionEvidenceStore::with_io(
             self.store.session_dir(&self.id),
             hard_cap,
@@ -160,7 +163,7 @@ impl SessionWriter<'_> {
             }
             Err(StoreError::NotFound) => {}
             Err(error) => {
-                return Err(EvidenceError::Io {
+                return Err(BlobEvidenceError::Io {
                     message: error.to_string(),
                 });
             }
@@ -208,6 +211,23 @@ impl SessionStore for SessionWriter<'_> {
 
     fn list(&self) -> Result<Vec<SessionMeta>, StoreError> {
         self.store.list()
+    }
+}
+
+impl EvidenceStore for SessionWriter<'_> {
+    fn write(
+        &self,
+        key: EvidenceKey,
+        record: EvidenceRecord,
+    ) -> Result<EvidenceWrite, RunEvidenceError> {
+        if key.session() != self.id {
+            return Err(RunEvidenceError::Store {
+                key,
+                diagnostic: "evidence targets a session not covered by this writer lease"
+                    .to_owned(),
+            });
+        }
+        self.store.write_evidence(&self.id, key, record)
     }
 }
 

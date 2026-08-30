@@ -39,7 +39,13 @@ use crate::event::id::{
     EventId, GenerationId, ItemId, Producer, QueuedPromptId, SessionId, TurnId,
 };
 use crate::event::time::Clock;
-use crate::generation_model_source::{GenerationModelErrorClass, GenerationModelSource};
+use crate::evidence::{
+    EvidenceAdmissionService, EvidenceStore, EvidenceWrite, GenerationAdmissionEvidence,
+    GenerationTarget, PricingEvidence, RunInvocationId,
+};
+use crate::generation_model_source::{
+    GenerationModelErrorClass, GenerationModelSource, GenerationProfile,
+};
 use crate::generator::attempt::{AttemptStream, GenerationAttempt, UsageReport, settled_cost};
 use crate::generator::history::conversation_from_with_blobs;
 use crate::generator::port::AiEvent;
@@ -395,6 +401,7 @@ pub struct Session<'a> {
     /// numbering continues from.
     pub state: SessionState,
     pub store: &'a dyn SessionStore,
+    pub evidence: &'a dyn EvidenceStore,
     pub clock: &'a dyn Clock,
     /// Where the public projection goes as it happens. A session-level
     /// concern beside the store and the clock, because it outlives any one
@@ -410,6 +417,8 @@ pub struct GenerationRuntime<'a> {
     pub source: Arc<dyn GenerationModelSource>,
     pub gate: &'a mut BudgetGate,
     pub config: TurnConfig,
+    pub admission: Arc<EvidenceAdmissionService>,
+    pub invocation: RunInvocationId,
 }
 
 /// Stable host facts used only after policy reaches the optional judge seat.
@@ -428,6 +437,9 @@ pub struct TurnLoop<'a> {
     session_id: SessionId,
     journal: Journal<'a>,
     source: Arc<dyn GenerationModelSource>,
+    evidence: &'a dyn EvidenceStore,
+    admission: Arc<EvidenceAdmissionService>,
+    invocation: RunInvocationId,
     gate: &'a mut BudgetGate,
     config: TurnConfig,
     judge: Option<JudgeContext>,
@@ -457,6 +469,9 @@ impl<'a> TurnLoop<'a> {
                 session.state,
             ),
             source: runtime.source,
+            evidence: session.evidence,
+            admission: runtime.admission,
+            invocation: runtime.invocation,
             gate: runtime.gate,
             config: runtime.config,
             judge: None,
@@ -499,6 +514,52 @@ impl<'a> TurnLoop<'a> {
     pub fn with_ancestor_conversation(mut self, ancestor: Conversation) -> Self {
         self.ancestor = Some(ancestor);
         self
+    }
+
+    fn admit_generation(
+        &self,
+        profile: &GenerationProfile,
+        attempt: crate::generator::attempt::AttemptRef,
+        role: GenerationRole,
+    ) -> Result<(), StoreError> {
+        let provider = profile
+            .identity
+            .0
+            .split_once('/')
+            .map_or(profile.identity.0.as_str(), |(provider, _)| provider)
+            .to_owned();
+        let pricing = match profile.rates.as_ref() {
+            Some(rates) => PricingEvidence::Priced {
+                source: "resolved_rates".to_owned(),
+                revision: rates.quote.revision.clone(),
+                metering: profile.metering.identity(),
+            },
+            None => PricingEvidence::Unpriced {
+                source: "generation_profile".to_owned(),
+                reason: profile.metering.identity().to_string(),
+            },
+        };
+        let evidence = GenerationAdmissionEvidence::new(
+            self.session_id,
+            self.invocation,
+            attempt,
+            role,
+            GenerationTarget::new(
+                provider,
+                profile.identity.clone(),
+                profile.request_model.clone(),
+            ),
+            profile.capabilities.clone(),
+            pricing,
+        );
+        match self.admission.admit_generation(self.evidence, evidence) {
+            Ok(EvidenceWrite::PublishedWithProjectionWarning { diagnostic }) => {
+                tracing::warn!(%diagnostic, "generation evidence manifest projection failed");
+                Ok(())
+            }
+            Ok(EvidenceWrite::Published | EvidenceWrite::AlreadyRecorded) => Ok(()),
+            Err(error) => Err(StoreError::Io(std::io::Error::other(error.to_string()))),
+        }
     }
 
     /// The session so far.
@@ -657,6 +718,8 @@ impl<'a> TurnLoop<'a> {
         )
         .map_err(CompactionError::Budget)?;
         let reference = attempt.attempt();
+        self.admit_generation(&profile, reference, GenerationRole::Compaction)
+            .map_err(CompactionError::Store)?;
         let generation = self.journal.append(
             turn,
             None,
@@ -1514,6 +1577,7 @@ impl<'a> TurnLoop<'a> {
         };
 
         let reference = attempt.attempt();
+        self.admit_generation(&profile, reference, GenerationRole::Main)?;
         // Kept, not discarded: this is the id every item from this generation
         // names as its causal parent, and it is the only record of which
         // generation produced which call. Without it a rebuilt history cannot
@@ -2136,6 +2200,7 @@ impl<'a> TurnLoop<'a> {
             }
         };
         let reference = attempt.attempt();
+        self.admit_generation(&profile, reference, GenerationRole::Judge)?;
         self.journal.append(
             turn,
             None,

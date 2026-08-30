@@ -22,6 +22,10 @@ use ego_core::cost::{
 use ego_core::event::domain::{CancelCause, DomainEvent, Envelope, EventKind, ExitReason};
 use ego_core::event::id::{EventId, Producer, QueuedPromptId, Seq, SessionId, TurnId};
 use ego_core::event::time::{Clock, Timestamp};
+use ego_core::evidence::{
+    EvidenceAdmissionService, EvidenceError as AdmissionError, EvidenceKey, EvidenceRecord,
+    EvidenceStore as AdmissionStore, EvidenceWrite, RunInvocationId,
+};
 use ego_core::generator::attempt::{AttemptStream, GenerationAttempt};
 use ego_core::generator::capabilities::{
     CacheRetention, CancelSemantics, ModelCapabilities, ReasoningCarryover, ReasoningEffortSupport,
@@ -684,6 +688,20 @@ mod turn {
         }
     }
 
+    struct NoAdmissionEvidence;
+
+    impl AdmissionStore for NoAdmissionEvidence {
+        fn write(
+            &self,
+            _key: EvidenceKey,
+            _record: EvidenceRecord,
+        ) -> Result<EvidenceWrite, AdmissionError> {
+            Ok(EvidenceWrite::Published)
+        }
+    }
+
+    static NO_ADMISSION_EVIDENCE: NoAdmissionEvidence = NoAdmissionEvidence;
+
     /// Everything a `TurnLoop` borrows, kept alive in one place so a test can
     /// build a loop in one line without fighting the borrow checker.
     struct Fixture {
@@ -857,6 +875,7 @@ mod turn {
             id: SessionId::new(),
             state,
             store,
+            evidence: &NO_ADMISSION_EVIDENCE,
             clock,
             sink,
             cancel,
@@ -948,6 +967,8 @@ mod turn {
                 system,
                 token_ceiling,
             },
+            admission: Arc::new(EvidenceAdmissionService::new()),
+            invocation: RunInvocationId::new(),
         }
     }
 
@@ -5249,6 +5270,8 @@ mod turn {
                         system: None,
                         token_ceiling: None,
                     },
+                    admission: Arc::new(EvidenceAdmissionService::new()),
+                    invocation: RunInvocationId::new(),
                 },
                 tools,
             );
@@ -5391,6 +5414,8 @@ mod turn {
                         system: None,
                         token_ceiling: None,
                     },
+                    admission: Arc::new(EvidenceAdmissionService::new()),
+                    invocation: RunInvocationId::new(),
                 },
                 tools,
             )
@@ -5513,6 +5538,8 @@ mod turn {
                         system: None,
                         token_ceiling: None,
                     },
+                    admission: Arc::new(EvidenceAdmissionService::new()),
+                    invocation: RunInvocationId::new(),
                 },
                 tools,
             )
@@ -5570,6 +5597,8 @@ mod turn {
                             system: None,
                             token_ceiling: None,
                         },
+                        admission: Arc::new(EvidenceAdmissionService::new()),
+                        invocation: RunInvocationId::new(),
                     },
                     tools,
                 );
@@ -5630,6 +5659,8 @@ mod turn {
                         system: None,
                         token_ceiling: None,
                     },
+                    admission: Arc::new(EvidenceAdmissionService::new()),
+                    invocation: RunInvocationId::new(),
                 },
                 tools,
             );
@@ -5715,6 +5746,8 @@ mod turn {
                         system: None,
                         token_ceiling: None,
                     },
+                    admission: Arc::new(EvidenceAdmissionService::new()),
+                    invocation: RunInvocationId::new(),
                 },
                 tools,
             )
@@ -5808,6 +5841,8 @@ mod turn {
                         system: None,
                         token_ceiling: None,
                     },
+                    admission: Arc::new(EvidenceAdmissionService::new()),
+                    invocation: RunInvocationId::new(),
                 },
                 tools,
             )
@@ -5879,6 +5914,8 @@ mod turn {
                         system: None,
                         token_ceiling: None,
                     },
+                    admission: Arc::new(EvidenceAdmissionService::new()),
+                    invocation: RunInvocationId::new(),
                 },
                 tools,
             );
@@ -5944,6 +5981,8 @@ mod turn {
                         system: None,
                         token_ceiling: None,
                     },
+                    admission: Arc::new(EvidenceAdmissionService::new()),
+                    invocation: RunInvocationId::new(),
                 },
                 tools,
             )
@@ -6019,6 +6058,8 @@ mod turn {
                             system: None,
                             token_ceiling: None,
                         },
+                        admission: Arc::new(EvidenceAdmissionService::new()),
+                        invocation: RunInvocationId::new(),
                     },
                     tools,
                 )
@@ -6117,6 +6158,8 @@ mod turn {
                         system: None,
                         token_ceiling: None,
                     },
+                    admission: Arc::new(EvidenceAdmissionService::new()),
+                    invocation: RunInvocationId::new(),
                 },
                 tools,
             )
@@ -6226,6 +6269,8 @@ mod turn {
                         system: None,
                         token_ceiling: None,
                     },
+                    admission: Arc::new(EvidenceAdmissionService::new()),
+                    invocation: RunInvocationId::new(),
                 },
                 tools,
             )

@@ -22,6 +22,10 @@ use ego_core::cost::CurrencyCode;
 use ego_core::event::domain::CancelCause;
 use ego_core::event::domain::EventKind;
 use ego_core::event::id::{Producer, SessionId};
+use ego_core::evidence::{
+    ConfigProvenance, EvidenceAdmissionService, EvidenceError, EvidenceRecord, EvidenceWrite,
+    RunContextEvidence, RunInvocationId,
+};
 use ego_core::generation_model_source::{
     GenerationModelError, GenerationModelErrorClass, GenerationProfile, GenerationRole,
 };
@@ -201,8 +205,9 @@ pub async fn run_with_mcp_registry(
     out: &Stdout,
     cancel: CancelToken,
     registry: Arc<McpRegistryController>,
+    evidence: Arc<EvidenceAdmissionService>,
 ) -> Ended {
-    run_process(args, out, cancel, registry).await
+    run_process(args, out, cancel, registry, evidence).await
 }
 
 async fn run_process(
@@ -210,6 +215,7 @@ async fn run_process(
     out: &Stdout,
     cancel: CancelToken,
     mcp_registry: Arc<McpRegistryController>,
+    evidence: Arc<EvidenceAdmissionService>,
 ) -> Ended {
     let output = args.output;
     let quiet = args.quiet;
@@ -236,7 +242,7 @@ async fn run_process(
     let announce = Announce::new(out, capabilities, quiet);
     announce.opening(args.prompt.as_deref());
 
-    let ended = run_with_registry(args, |_| sink, cancel, mcp_registry).await;
+    let ended = run_with_registry(args, |_| sink, cancel, mcp_registry, evidence).await;
 
     // Draws the last block and closes the last line. A no-op unless text mode
     // has something outstanding, which is why it can run on the refusal path
@@ -253,8 +259,9 @@ pub async fn interactive_with_mcp_registry(
     out: &Stdout,
     cancel: CancelToken,
     registry: Arc<McpRegistryController>,
+    evidence: Arc<EvidenceAdmissionService>,
 ) -> Ended {
-    interactive_process(args, out, cancel, registry).await
+    interactive_process(args, out, cancel, registry, evidence).await
 }
 
 async fn interactive_process(
@@ -262,6 +269,7 @@ async fn interactive_process(
     out: &Stdout,
     cancel: CancelToken,
     mcp_registry: Arc<McpRegistryController>,
+    evidence: Arc<EvidenceAdmissionService>,
 ) -> Ended {
     // A machine-readable stream has no reader here. `--output json` is a
     // single document at completion and a conversation has no completion, so
@@ -290,6 +298,10 @@ async fn interactive_process(
         }
     };
     let seat = Arc::new(seat);
+    let services = InteractiveServices {
+        mcp_registry,
+        evidence,
+    };
 
     if let Some(surface) = surface {
         let output = InteractiveOutput::new(surface);
@@ -300,7 +312,7 @@ async fn interactive_process(
             capabilities,
             quiet,
             &output,
-            mcp_registry,
+            services,
         )
         .await;
         output.finish();
@@ -316,10 +328,15 @@ async fn interactive_process(
             capabilities,
             quiet,
             out,
-            mcp_registry,
+            services,
         )
         .await
     }
+}
+
+struct InteractiveServices {
+    mcp_registry: Arc<McpRegistryController>,
+    evidence: Arc<EvidenceAdmissionService>,
 }
 
 async fn interactive_through(
@@ -329,7 +346,7 @@ async fn interactive_through(
     capabilities: Capabilities,
     quiet: bool,
     output: &dyn TextOutput,
-    mcp_registry: Arc<McpRegistryController>,
+    services: InteractiveServices,
 ) -> Ended {
     let text_sink = TextSink::new(output, quiet, capabilities);
     let announce = Announce::new(output, capabilities, quiet);
@@ -356,7 +373,8 @@ async fn interactive_through(
             elicitor: Some(elicitor),
             status: Some(status),
             diagnostics: output,
-            mcp_registry,
+            mcp_registry: services.mcp_registry,
+            evidence: services.evidence,
         },
     )
     .await
@@ -554,6 +572,7 @@ async fn run_with_registry<S: EventSink>(
     destination: impl FnOnce(&ModelCapabilities) -> S,
     cancel: CancelToken,
     mcp_registry: Arc<McpRegistryController>,
+    evidence: Arc<EvidenceAdmissionService>,
 ) -> Ended {
     match execute(
         args,
@@ -565,6 +584,7 @@ async fn run_with_registry<S: EventSink>(
             status: None,
             diagnostics: &Stderr,
             mcp_registry,
+            evidence,
         },
     )
     .await
@@ -1015,8 +1035,8 @@ struct Chosen {
 /// error about the command as typed, and it would be true whatever the
 /// provider said. Answering it *after* the model resolved told an operator
 /// standing in the wrong directory that the network was down. Opening stays in
-/// [`execute`], because that takes a lease and can create, and a session must
-/// not be created for a run whose model does not resolve.
+/// [`execute`], because its writer lease is the authority that durably admits
+/// the run context before model or MCP effects begin.
 fn chosen(args: &Args, root: &Path) -> Result<Chosen, UsageError> {
     let store_root = rooted_path(root, session::store_root(args.session_dir.as_ref())?);
     // The same `root` that derives a named session's id below, so "the session
@@ -1028,7 +1048,7 @@ fn chosen(args: &Args, root: &Path) -> Result<Chosen, UsageError> {
     Ok(Chosen { store, id })
 }
 
-/// Prove the fixed judge generation envelope before a session exists.
+/// Prove the fixed judge generation envelope after run-context admission.
 ///
 /// Dynamic authority facts occupy one user-text block and cannot change the
 /// request's tool, thinking, parallelism or output-ceiling requirements. A
@@ -1100,7 +1120,6 @@ fn generation_refusal(error: GenerationModelError) -> RunTermination {
 struct GenerationPreflight {
     source: Arc<model::CliGenerationModelSource>,
     selection: Arc<model::GenerationSelection>,
-    model: ego_core::config::ModelRef,
     capabilities: ModelCapabilities,
     judge_enabled: bool,
     proof_directory: tempfile::TempDir,
@@ -1249,7 +1268,6 @@ async fn generation_preflight_inner(
         .resolve(GenerationRole::Main)
         .await
         .map_err(generation_refusal)?;
-    let model = main.identity.clone();
     let capabilities = main.capabilities.clone();
     let judge_enabled = mode == Mode::Auto;
     if judge_enabled {
@@ -1263,7 +1281,6 @@ async fn generation_preflight_inner(
     Ok(GenerationPreflight {
         source,
         selection,
-        model,
         capabilities,
         judge_enabled,
         proof_directory,
@@ -1356,6 +1373,8 @@ async fn drive_headless_turn(
     sink: &dyn EventSink,
     cancel: &CancelToken,
     source: Arc<model::CliGenerationModelSource>,
+    admission: Arc<EvidenceAdmissionService>,
+    invocation: RunInvocationId,
     effective: &Effective,
     config: TurnConfig,
     turns: &Turns<'_>,
@@ -1392,6 +1411,7 @@ async fn drive_headless_turn(
         id: active.id(),
         state: opening,
         store: active.store(),
+        evidence: active.run_evidence(),
         clock,
         sink,
         cancel: cancel.clone(),
@@ -1400,6 +1420,8 @@ async fn drive_headless_turn(
         source: source.bind(http, cancel.clone(), run_deadline),
         gate: &mut gate,
         config,
+        admission,
+        invocation,
     };
     let fs = OsFs;
     let effect_ports = ToolEffectPorts::new(
@@ -1471,7 +1493,7 @@ fn run_budget_spec(budget: &Budget) -> Result<String, RunTermination> {
     }
 }
 
-/// The headless pipeline after every refusal-producing selection has resolved.
+/// The headless pipeline assembled from read-only command facts before admission.
 pub struct CliPrepared {
     _permit: Option<OwnedSemaphorePermit>,
     store: Arc<JsonlStore>,
@@ -1488,11 +1510,9 @@ pub struct CliPrepared {
     system: Option<SystemPrompt>,
     registry: Vec<RegisteredTool>,
     compiled: Option<schema::Schema>,
-    source: Arc<model::CliGenerationModelSource>,
-    capabilities: ModelCapabilities,
-    judge_enabled: bool,
-    proof_directory: tempfile::TempDir,
-    proof_evidence: SessionEvidenceStore,
+    slug: String,
+    run_context: RunContextEvidence,
+    admission: Arc<EvidenceAdmissionService>,
 }
 
 impl CliPrepared {
@@ -1503,6 +1523,7 @@ impl CliPrepared {
         request: &RunPreparation,
         permit: Option<OwnedSemaphorePermit>,
         frozen: Option<&config::FrozenRunConfig>,
+        admission: Arc<EvidenceAdmissionService>,
     ) -> Result<RunPrepared<Self>, RunTermination> {
         let usage = |error: UsageError| RunTermination::UsageError {
             message: error.to_string(),
@@ -1542,36 +1563,23 @@ impl CliPrepared {
             confinement,
             effective,
         } = settings;
-
-        let proof_cancel = CancelToken::new();
-        let mut no_status = None;
-        let GenerationPreflight {
-            source,
-            selection: _,
-            model,
-            capabilities,
-            judge_enabled,
-            proof_directory,
-            proof_evidence,
-        } = generation_preflight(
-            GenerationPreflightInput {
-                session_id: request.run_id.session_id(),
-                confinement: &confinement,
-                effective: &effective,
-                slug,
-                cancel: &proof_cancel,
-                run_deadline,
-                mcp_registry: None,
-                native_tools: &registry,
-            },
-            &mut no_status,
-        )
-        .await?;
         let schema_retries = args.schema_retries;
         let max_turns = args.max_turns;
+        let instructions = system
+            .as_ref()
+            .map(|prompt| prompt.sources.clone())
+            .unwrap_or_default();
+        let config_provenance = ConfigProvenance::resolved(args.profile.clone());
+        let run_context = RunContextEvidence::new(
+            request.run_id.session_id(),
+            request.invocation,
+            request.run_id.to_string(),
+            config_provenance,
+        )
+        .with_instructions(instructions);
 
         Ok(RunPrepared::new(
-            model,
+            ModelRef(slug.clone()),
             Self {
                 _permit: permit,
                 store,
@@ -1588,11 +1596,9 @@ impl CliPrepared {
                 system,
                 registry,
                 compiled,
-                source,
-                capabilities,
-                judge_enabled,
-                proof_directory,
-                proof_evidence,
+                slug,
+                run_context,
+                admission,
             },
         ))
     }
@@ -1613,14 +1619,37 @@ impl CliPrepared {
         if let Some(note_text) = opened.repair_note() {
             Stderr.note(&note_text);
         }
+        let mut no_status = None;
+        let GenerationPreflight {
+            source,
+            selection: _,
+            capabilities: model_capabilities,
+            judge_enabled,
+            proof_directory,
+            proof_evidence,
+        } = generation_preflight(
+            GenerationPreflightInput {
+                session_id: self.session_id,
+                confinement: &self.confinement,
+                effective: &self.effective,
+                slug: self.slug.clone(),
+                cancel,
+                run_deadline: self.run_deadline,
+                mcp_registry: None,
+                native_tools: &self.registry,
+            },
+            &mut no_status,
+        )
+        .await
+        .map_err(run_executor_error)?;
         let opening = opened.state();
-        drop(self.proof_directory);
-        drop(self.proof_evidence);
+        drop(proof_directory);
+        drop(proof_evidence);
         let mut active = ActiveSession::durable(opened, opening.clone(), EVIDENCE_CAP)
             .map_err(|error| RunExecutorError::new(error.to_string()))?;
         let mcp_errors = bindings.mcp_errors().to_vec();
         let admitted_tools = bindings.admitted_tools();
-        let sink = bindings.sink_factory.create(&self.capabilities);
+        let sink = bindings.sink_factory.create(&model_capabilities);
         sink.publish(
             &PublicEvent::SessionStarted {
                 v: PUBLIC_EVENT_VERSION,
@@ -1657,13 +1686,17 @@ impl CliPrepared {
             max_turns: self.max_turns,
             deadline: self.run_deadline,
         };
+        let admission = Arc::clone(&self.admission);
+        let invocation = self.run_context.invocation();
         let (termination, state, result) = match drive_headless_turn(
             &mut active,
             opening,
             &clock,
             sink.as_ref(),
             cancel,
-            self.source,
+            source,
+            admission,
+            invocation,
             &self.effective,
             config,
             &turns,
@@ -1674,7 +1707,7 @@ impl CliPrepared {
             &self.confinement,
             self.run_deadline,
             bindings.elicitor,
-            self.judge_enabled,
+            judge_enabled,
             &[],
             HeadlessInput::Prompt(prompt),
             &Stderr,
@@ -1815,6 +1848,7 @@ pub struct CliRunExecutor {
     concurrency: Option<Arc<Semaphore>>,
     frozen: Option<Arc<config::FrozenRunConfig>>,
     artifacts: Option<Arc<dyn RunArtifactStore>>,
+    admission: Arc<EvidenceAdmissionService>,
 }
 
 #[derive(Clone)]
@@ -1865,13 +1899,18 @@ fn protocol_args(session_dir: Option<PathBuf>) -> Args {
 
 impl CliRunExecutor {
     /// Build the fixed headless inputs for the ACP host once, before admission.
-    pub fn for_acp(session_dir: Option<PathBuf>, store: Arc<JsonlStore>) -> Self {
+    pub fn for_acp(
+        session_dir: Option<PathBuf>,
+        store: Arc<JsonlStore>,
+        admission: Arc<EvidenceAdmissionService>,
+    ) -> Self {
         Self {
             args: protocol_args(session_dir),
             store,
             concurrency: None,
             frozen: None,
             artifacts: None,
+            admission,
         }
     }
 
@@ -1881,6 +1920,7 @@ impl CliRunExecutor {
         store: Arc<JsonlStore>,
         artifacts: Arc<dyn RunArtifactStore>,
         max_concurrent_runs: NonZeroUsize,
+        admission: Arc<EvidenceAdmissionService>,
     ) -> Result<(Self, CliMcpRunPolicy), UsageError> {
         let args = protocol_args(session_dir);
         let frozen = Arc::new(config::FrozenRunConfig::capture(
@@ -1912,6 +1952,7 @@ impl CliRunExecutor {
                 concurrency: Some(Arc::new(Semaphore::new(max_concurrent_runs.get()))),
                 frozen: Some(frozen),
                 artifacts: Some(artifacts),
+                admission,
             },
             policy,
         ))
@@ -1948,9 +1989,28 @@ impl RunExecutor for CliRunExecutor {
                 request,
                 permit,
                 self.frozen.as_deref(),
+                Arc::clone(&self.admission),
             )
             .await
             .map_err(run_executor_error)
+        })
+    }
+
+    fn admit_run_context<'a>(
+        &'a self,
+        prepared: &'a Self::Prepared,
+    ) -> ego_core::run::RunFuture<'a, Result<EvidenceWrite, EvidenceError>> {
+        Box::pin(async move {
+            let key = EvidenceRecord::RunContext(prepared.run_context.clone()).key();
+            let clock = SystemClock;
+            let opened = session::open(self.store.as_ref(), &prepared.session_id, &clock).map_err(
+                |error| EvidenceError::Store {
+                    key,
+                    diagnostic: error.to_string(),
+                },
+            )?;
+            self.admission
+                .admit_run_context(&opened.writer, prepared.run_context.clone())
         })
     }
 
@@ -2026,9 +2086,8 @@ fn compaction_availability(pending_work: bool) -> repl::actions::Availability {
 /// which is the part that is genuinely this function's: settings before
 /// session choice before materials because a missing `resume` target is true
 /// independently of model configuration, materials before the provider because
-/// a bad `--tools` must not reach a network, and the provider before the session
-/// is opened because a session must not be created for a run whose model does
-/// not resolve.
+/// a bad `--tools` must not reach a network, then the writer lease and durable
+/// run-context evidence before MCP reconciliation or provider resolution.
 async fn execute<S: EventSink>(
     args: Args,
     destination: impl FnOnce(&ModelCapabilities) -> S,
@@ -2041,6 +2100,7 @@ async fn execute<S: EventSink>(
         mut status,
         diagnostics,
         mcp_registry,
+        evidence,
     } = host;
     let usage = |err: UsageError| RunTermination::UsageError {
         message: err.to_string(),
@@ -2059,21 +2119,12 @@ async fn execute<S: EventSink>(
     .map_err(|error| RunTermination::Failed {
         message: error.to_string(),
     })?;
-    mcp_registry
-        .reconcile(refresh)
-        .await
-        .map_err(|error| RunTermination::Failed {
-            message: error.to_string(),
-        })?;
-    let mcp_status = mcp_registry.status();
-    let mcp_errors = mcp_status.mcp_errors();
-    let admitted_tools = Some(mcp_registry.admitted_tools());
     let Chosen {
         store: jsonl_store,
         id: session_id,
     } = chosen(&args, &settings.root).map_err(usage)?;
     let clock = SystemClock;
-    let mut early_opened = if args.answers.is_empty() {
+    let early_opened = if args.answers.is_empty() {
         None
     } else {
         Some(Opened::Durable(Box::new(
@@ -2083,10 +2134,6 @@ async fn execute<S: EventSink>(
                 }
             })?,
         )))
-    };
-    let resume = match early_opened.as_mut() {
-        Some(opened) => Some(apply_resume_answers_once(opened, &args.answers)?),
-        None => None,
     };
     let Materials {
         system,
@@ -2101,11 +2148,6 @@ async fn execute<S: EventSink>(
         diagnostics,
     )
     .map_err(usage)?;
-    if !text.trim().is_empty()
-        && let Driver::Interactive { seat, .. } = &driver
-    {
-        seat.busy();
-    }
 
     let Settings {
         run_deadline,
@@ -2114,11 +2156,73 @@ async fn execute<S: EventSink>(
         confinement,
         effective,
     } = settings;
+    let mode = effective.mode.unwrap_or(Mode::Default);
+
+    let currency = CurrencyCode::new(SETTLEMENT).expect("a constant this file controls");
+    let mut opened = match early_opened {
+        Some(opened) => opened,
+        None => Opened::Durable(Box::new(
+            session::open(&jsonl_store, &session_id, &clock).map_err(|err| {
+                RunTermination::Failed {
+                    message: err.to_string(),
+                }
+            })?,
+        )),
+    };
+    if let Some(note_text) = opened.repair_note() {
+        diagnostics.note(&note_text);
+    }
+
+    let invocation = RunInvocationId::new();
+    let instruction_descriptors = system
+        .as_ref()
+        .map(|prompt| prompt.sources.clone())
+        .unwrap_or_default();
+    let context = RunContextEvidence::new(
+        session_id,
+        invocation,
+        session_id.to_string(),
+        ConfigProvenance::resolved(args.profile.clone()),
+    )
+    .with_instructions(instruction_descriptors);
+    let Opened::Durable(opened_session) = &opened;
+    match evidence.admit_run_context(&opened_session.writer, context) {
+        Ok(EvidenceWrite::PublishedWithProjectionWarning { diagnostic }) => {
+            diagnostics.note(&format!(
+                "run evidence was durable but its manifest projection failed: {diagnostic}"
+            ));
+        }
+        Ok(EvidenceWrite::Published | EvidenceWrite::AlreadyRecorded) => {}
+        Err(error) => {
+            return Err(RunTermination::Failed {
+                message: error.to_string(),
+            });
+        }
+    }
+    let resume = if args.answers.is_empty() {
+        None
+    } else {
+        Some(apply_resume_answers_once(&mut opened, &args.answers)?)
+    };
+    if !text.trim().is_empty()
+        && let Driver::Interactive { seat, .. } = &driver
+    {
+        seat.busy();
+    }
+
+    mcp_registry
+        .reconcile(refresh)
+        .await
+        .map_err(|error| RunTermination::Failed {
+            message: error.to_string(),
+        })?;
+    let mcp_status = mcp_registry.status();
+    let mcp_errors = mcp_status.mcp_errors();
+    let admitted_tools = Some(mcp_registry.admitted_tools());
 
     let GenerationPreflight {
         source,
         selection,
-        model: _,
         capabilities: main_capabilities,
         judge_enabled,
         proof_directory,
@@ -2137,22 +2241,6 @@ async fn execute<S: EventSink>(
         &mut status,
     )
     .await?;
-    let mode = effective.mode.unwrap_or(Mode::Default);
-
-    let currency = CurrencyCode::new(SETTLEMENT).expect("a constant this file controls");
-    let opened = match early_opened {
-        Some(opened) => opened,
-        None => Opened::Durable(Box::new(
-            session::open(&jsonl_store, &session_id, &clock).map_err(|err| {
-                RunTermination::Failed {
-                    message: err.to_string(),
-                }
-            })?,
-        )),
-    };
-    if let Some(note_text) = opened.repair_note() {
-        diagnostics.note(&note_text);
-    }
 
     let opening = opened.state();
     drop(proof_directory);
@@ -2265,6 +2353,7 @@ async fn execute<S: EventSink>(
                 id: $active.id(),
                 state: $state,
                 store: $active.store(),
+                evidence: $active.run_evidence(),
                 clock: &clock,
                 sink,
                 cancel: $cancel.clone(),
@@ -2275,6 +2364,8 @@ async fn execute<S: EventSink>(
                 source: source.bind(http, $cancel.clone(), run_deadline),
                 gate: &mut gate,
                 config: config.clone(),
+                admission: Arc::clone(&evidence),
+                invocation,
             };
             let effect_ports = ToolEffectPorts::new(
                 &fs,
@@ -2339,6 +2430,8 @@ async fn execute<S: EventSink>(
                 sink,
                 &cancel,
                 Arc::clone(&source),
+                Arc::clone(&evidence),
+                invocation,
                 &effective,
                 config.clone(),
                 &turns,
@@ -2951,6 +3044,7 @@ struct RunHost<'a> {
     status: Option<InteractiveStatus>,
     diagnostics: &'a dyn Diagnostics,
     mcp_registry: Arc<McpRegistryController>,
+    evidence: Arc<EvidenceAdmissionService>,
 }
 
 struct InteractiveStatus {
