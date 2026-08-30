@@ -15,6 +15,7 @@ use ego_cli::hook::{HookPromptAdapter, ToollessGenerationService};
 use ego_cli::model::GenerationSelection;
 use ego_cli::model_picker::{ModelPicker, PickerInput, PickerInputOutcome, PickerOutcome};
 use ego_cli::repl::actions::{ActionId, ActionSink, LocalAction, LocalActionOutcome};
+use ego_cli::run::RunModelSwitchOwner;
 use ego_core::config::{
     ConfigLayer, ModelRef, Source, Trust, UserConfigError, UserConfigMutation,
     UserConfigPublication, UserConfigStore,
@@ -52,11 +53,11 @@ const CLI_OWNERS: [(&str, HookLifecycle); 10] = [
         HookLifecycle::PostCompact,
     ),
     (
-        "ModelPicker active selection pre-commit",
+        "run owner active selection pre-commit",
         HookLifecycle::PreModelSwitch,
     ),
     (
-        "GenerationSelection active selection post-commit",
+        "run owner active selection post-commit",
         HookLifecycle::PostModelSwitch,
     ),
     ("interactive session end", HookLifecycle::SessionEnd),
@@ -311,6 +312,7 @@ fn catalogue() -> Arc<ModelCatalogueSnapshot> {
 #[derive(Clone)]
 struct ConfigStore {
     selection: Arc<GenerationSelection>,
+    publications: Arc<Mutex<usize>>,
 }
 impl UserConfigStore for ConfigStore {
     fn mutate(
@@ -322,7 +324,14 @@ impl UserConfigStore for ConfigStore {
             ModelRef("openai/old".to_owned()),
             "config publication must precede active model installation"
         );
+        *self.publications.lock().expect("config publications") += 1;
         Ok(UserConfigPublication::PublishedDurably)
+    }
+}
+
+impl ConfigStore {
+    fn publications(&self) -> usize {
+        *self.publications.lock().expect("config publications")
     }
 }
 
@@ -369,14 +378,12 @@ fn model_picker_persists_before_install_and_observes_after_commit() {
         ModelRef("openai/old".to_owned()),
         ThinkingLevel::Medium,
     ));
-    let mut picker = ModelPicker::for_selection(
-        catalogue(),
-        Arc::clone(&selection),
-        Arc::new(ConfigStore {
-            selection: Arc::clone(&selection),
-        }),
-    )
-    .with_hook_dispatcher(dispatcher(RecordingPort::default()));
+    let config = Arc::new(ConfigStore {
+        selection: Arc::clone(&selection),
+        publications: Arc::new(Mutex::new(0)),
+    });
+    let mut picker =
+        ModelPicker::for_selection(catalogue(), Arc::clone(&selection), config.clone());
     assert_eq!(
         ActionSink::invoke(
             &mut picker,
@@ -399,38 +406,105 @@ fn model_picker_persists_before_install_and_observes_after_commit() {
         picker.input(PickerInput::Number(1)),
         Ok(PickerInputOutcome::Consumed)
     );
-    assert_eq!(
-        picker.input(PickerInput::Enter),
-        Ok(PickerInputOutcome::Closed(PickerOutcome::Persisted(
-            UserConfigPublication::PublishedDurably,
-        )))
-    );
+    let PickerInputOutcome::Closed(PickerOutcome::ModelSwitch(request)) =
+        picker.input(PickerInput::Enter).expect("staged switch")
+    else {
+        panic!("picker must stage a typed model-switch request");
+    };
+    assert_eq!(request.target(), ModelRef("openai/new".to_owned()));
+    assert_eq!(request.thinking(), ThinkingLevel::Off);
+    assert!(request.is_persistent());
     assert_eq!(
         selection.snapshot().expect("selection").identity,
-        ModelRef("openai/new".to_owned())
+        ModelRef("openai/old".to_owned()),
+        "picker stages a request without mutating the active session"
     );
+    assert_eq!(config.publications(), 0, "run owner owns publication");
 }
 
 #[test]
 fn same_selection_does_not_emit_model_switch_and_post_observer_cannot_revert_commit() {
-    let selection =
-        GenerationSelection::new(ModelRef("openai/old".to_owned()), ThinkingLevel::Medium);
+    let selection = Arc::new(GenerationSelection::new(
+        ModelRef("openai/old".to_owned()),
+        ThinkingLevel::Medium,
+    ));
+    let config = Arc::new(ConfigStore {
+        selection: Arc::clone(&selection),
+        publications: Arc::new(Mutex::new(0)),
+    });
+    let mut picker =
+        ModelPicker::for_selection(catalogue(), Arc::clone(&selection), config.clone());
+    ActionSink::invoke(
+        &mut picker,
+        LocalAction {
+            id: ActionId::Model,
+            busy: false,
+        },
+    );
+    picker.input(PickerInput::Number(1)).expect("old model");
+    picker.input(PickerInput::Enter).expect("model focus");
+    picker.input(PickerInput::Number(4)).expect("medium effort");
+    let PickerInputOutcome::Closed(PickerOutcome::ModelSwitch(request)) =
+        picker.input(PickerInput::Enter).expect("staged no-op")
+    else {
+        panic!("picker must stage a typed model-switch request");
+    };
+    assert_eq!(request.target(), ModelRef("openai/old".to_owned()));
+    assert_eq!(request.thinking(), ThinkingLevel::Medium);
+    assert!(request.is_persistent());
     let port = RecordingPort::default();
-    let dispatcher = dispatcher(port.clone());
-    selection
-        .install_with_hook_dispatcher(
-            ModelRef("openai/old".to_owned()),
-            ThinkingLevel::Medium,
-            &dispatcher,
-        )
-        .expect("same selection remains a no-op");
-    selection
-        .install_with_hook_dispatcher(
-            ModelRef("openai/new".to_owned()),
-            ThinkingLevel::Medium,
-            &dispatcher,
-        )
-        .expect("pre hook allowed commit");
+    let owner = RunModelSwitchOwner::new(
+        Arc::clone(&selection),
+        config.clone(),
+        dispatcher(port.clone()),
+    );
+    futures::executor::block_on(owner.apply(request)).expect("same selection remains a no-op");
+    assert_eq!(
+        selection.snapshot().expect("selection").identity,
+        ModelRef("openai/old".to_owned())
+    );
+    assert_eq!(config.publications(), 0, "same selection does not publish");
+    assert!(port.calls().is_empty(), "same selection emits no hooks");
+}
+
+#[test]
+fn model_switch_owner_persists_and_installs_only_after_pre_gate() {
+    let selection = Arc::new(GenerationSelection::new(
+        ModelRef("openai/old".to_owned()),
+        ThinkingLevel::Medium,
+    ));
+    let config = Arc::new(ConfigStore {
+        selection: Arc::clone(&selection),
+        publications: Arc::new(Mutex::new(0)),
+    });
+    let mut picker =
+        ModelPicker::for_selection(catalogue(), Arc::clone(&selection), config.clone());
+    ActionSink::invoke(
+        &mut picker,
+        LocalAction {
+            id: ActionId::Model,
+            busy: false,
+        },
+    );
+    picker.input(PickerInput::Number(2)).expect("new model");
+    picker.input(PickerInput::Enter).expect("model focus");
+    picker.input(PickerInput::Number(1)).expect("off effort");
+    let PickerInputOutcome::Closed(PickerOutcome::ModelSwitch(request)) =
+        picker.input(PickerInput::Enter).expect("staged switch")
+    else {
+        panic!("picker must stage a typed model-switch request");
+    };
+    assert_eq!(request.target(), ModelRef("openai/new".to_owned()));
+    assert_eq!(request.thinking(), ThinkingLevel::Off);
+    assert!(request.is_persistent());
+    let port = RecordingPort::default();
+    let owner = RunModelSwitchOwner::new(
+        Arc::clone(&selection),
+        config.clone(),
+        dispatcher(port.clone()),
+    );
+    futures::executor::block_on(owner.apply(request)).expect("pre gate allows switch");
+    assert_eq!(config.publications(), 1);
     assert_eq!(
         selection.snapshot().expect("selection").identity,
         ModelRef("openai/new".to_owned())
@@ -446,15 +520,23 @@ fn same_selection_does_not_emit_model_switch_and_post_observer_cannot_revert_com
 
 #[test]
 fn model_switch_block_preserves_old_selection_and_post_failure_does_not_revert_commit() {
-    let blocked_selection =
-        GenerationSelection::new(ModelRef("openai/old".to_owned()), ThinkingLevel::Medium);
+    let blocked_selection = Arc::new(GenerationSelection::new(
+        ModelRef("openai/old".to_owned()),
+        ThinkingLevel::Medium,
+    ));
+    let blocked_config = Arc::new(ConfigStore {
+        selection: Arc::clone(&blocked_selection),
+        publications: Arc::new(Mutex::new(0)),
+    });
     let blocked_port = BlockingPort::default();
     let blocked = blocking_dispatcher(blocked_port.clone());
-    let blocked_result = blocked_selection.install_with_hook_dispatcher(
-        ModelRef("openai/new".to_owned()),
-        ThinkingLevel::Medium,
-        &blocked,
+    let blocked_request = staged_request(Arc::clone(&blocked_selection), blocked_config.clone());
+    let blocked_owner = RunModelSwitchOwner::new(
+        Arc::clone(&blocked_selection),
+        blocked_config.clone(),
+        blocked,
     );
+    let blocked_result = futures::executor::block_on(blocked_owner.apply(blocked_request));
     assert!(
         blocked_result.is_err(),
         "pre-switch block is an owner refusal"
@@ -463,16 +545,25 @@ fn model_switch_block_preserves_old_selection_and_post_failure_does_not_revert_c
         blocked_selection.snapshot().expect("selection").identity,
         ModelRef("openai/old".to_owned())
     );
+    assert_eq!(blocked_config.publications(), 0);
 
-    let observed_selection =
-        GenerationSelection::new(ModelRef("openai/old".to_owned()), ThinkingLevel::Medium);
+    let observed_selection = Arc::new(GenerationSelection::new(
+        ModelRef("openai/old".to_owned()),
+        ThinkingLevel::Medium,
+    ));
+    let observed_config = Arc::new(ConfigStore {
+        selection: Arc::clone(&observed_selection),
+        publications: Arc::new(Mutex::new(0)),
+    });
     let observer_port = ObserverFailurePort::default();
     let observer_failure = observer_failure_dispatcher(observer_port.clone());
-    let observer_result = observed_selection.install_with_hook_dispatcher(
-        ModelRef("openai/new".to_owned()),
-        ThinkingLevel::Medium,
-        &observer_failure,
+    let observer_request = staged_request(Arc::clone(&observed_selection), observed_config.clone());
+    let observer_owner = RunModelSwitchOwner::new(
+        Arc::clone(&observed_selection),
+        observed_config.clone(),
+        observer_failure,
     );
+    let observer_result = futures::executor::block_on(observer_owner.apply(observer_request));
     assert!(
         observer_result.is_err(),
         "observer failure is visible to the owner"
@@ -482,6 +573,30 @@ fn model_switch_block_preserves_old_selection_and_post_failure_does_not_revert_c
         ModelRef("openai/new".to_owned()),
         "observer failure cannot roll back durable commit"
     );
+    assert_eq!(observed_config.publications(), 1);
+}
+
+fn staged_request(
+    selection: Arc<GenerationSelection>,
+    config: Arc<ConfigStore>,
+) -> ego_cli::model_picker::ModelSwitchRequest {
+    let mut picker = ModelPicker::for_selection(catalogue(), selection, config);
+    ActionSink::invoke(
+        &mut picker,
+        LocalAction {
+            id: ActionId::Model,
+            busy: false,
+        },
+    );
+    picker.input(PickerInput::Number(2)).expect("new model");
+    picker.input(PickerInput::Enter).expect("model focus");
+    picker.input(PickerInput::Number(1)).expect("off effort");
+    let PickerInputOutcome::Closed(PickerOutcome::ModelSwitch(request)) =
+        picker.input(PickerInput::Enter).expect("staged switch")
+    else {
+        panic!("picker must stage a typed model-switch request");
+    };
+    request
 }
 
 #[test]
