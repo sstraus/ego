@@ -32,7 +32,9 @@ ego ls                        list sessions (this workspace; --all for every one
 ego fork <ID>                 branch a session
 ego compact <ID> --request-id UUID
                               publish one idempotent checkpoint target
-ego export <ID>               render a session (--format md|json|jsonl)
+ego export <ID> [--sanitize] [--format md|json|jsonl] [--file PATH]
+                [-C DIR] [--session-dir DIR]
+                              render a session; Markdown is the default
 ego mcp add NAME --stdio [--cwd DIR] [--inherit-env NAME]... -- COMMAND [ARG]...
         add NAME --http URL [--auth none|oauth] [--allow-insecure-loopback]
         rm NAME | ls [--json] | login NAME | reload [NAME]
@@ -67,8 +69,13 @@ Notes:
 - Stdin contract (Codex's, the cleanest surveyed): prompt as argument; `-`
   reads the prompt from stdin; with *both* argv prompt and piped stdin, stdin
   is appended as a delimited context block.
-- `ego export --sanitize` redacts secrets before a transcript leaves the
-  machine (opencode's idea; mandatory for CI artifacts).
+- `ego export --sanitize` emits the producer-only version-1 structural bundle;
+  unsanitized export is an explicit local transcript with no safety claim.
+  Canonical JSON ends in one newline, JSONL is the same single bundle line, and
+  Markdown embeds that same bundle. `--file` suppresses stdout; JSONL with a
+  file is a usage error. Relative files resolve from canonical `-C`. Existing
+  identical bytes succeed without rewrite, different bytes conflict, and a
+  published-but-durability-uncertain file remains visible and is not retried.
 
 ### 2.1 Availability — what ships today
 
