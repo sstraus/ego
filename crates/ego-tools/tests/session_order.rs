@@ -362,8 +362,7 @@ fn event_first_adoption_reports_uncertain_durability_after_appending_valid_recor
     let bytes = std::fs::read(log_path(dir.path(), &id)).unwrap();
     let last = bytes
         .split(|byte| *byte == b'\n')
-        .filter(|line| !line.is_empty())
-        .last()
+        .rfind(|line| !line.is_empty())
         .unwrap();
     let StoreLine::Record(record) = decode_line(last).unwrap() else {
         panic!("event-first adoption must append a recognised run record")

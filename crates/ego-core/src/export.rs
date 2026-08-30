@@ -1,0 +1,1059 @@
+//! Producer-only structural export of durable session facts.
+
+use std::collections::{HashMap, HashSet};
+use std::fmt;
+
+use serde::Serialize;
+
+use crate::budget::MeteringIdentity;
+use crate::config::ModelRef;
+use crate::cost::{CostDelta, PricingRevision};
+use crate::event::domain::{EventKind, ExitReason, GenerationRole, OccupancyProvenance};
+use crate::event::hook::{
+    HookContentDigest, HookDecision, HookFailureKind, HookId, HookInvocationId, HookLifecycle,
+    HookResult, HookSourceAuthority, HookSubject,
+};
+use crate::event::id::{EventId, ItemId, Producer, QueuedPromptId, Seq, SessionId, TurnId};
+use crate::event::time::Timestamp;
+use crate::evidence::{
+    ConfigProvenance, EvidenceKey, EvidenceRecord, GenerationTarget, PricingEvidence,
+    RunInvocationId,
+};
+use crate::generator::attempt::{AttemptRef, Outcome};
+use crate::generator::capabilities::ModelCapabilities;
+use crate::generator::types::{ErrorKind, ImageRef};
+use crate::mcp::McpAdmissionFingerprint;
+use crate::permit::{Escalation, ExecObservation};
+use crate::public::InstructionSource;
+use crate::question::{QuestionMode, QuestionOutcome};
+use crate::run::{
+    CancelReason, RequestDigest, RequestId, RunCommand, RunId, RunRevision, RunSelections,
+    RunSettlement, RunStatus, TurnLease,
+};
+use crate::session::{
+    LineageEdges, ReplayError, ReplaySource, ReplaySourceError, SessionBlobSource, SessionLineage,
+    map_source, read_verified_blob, walk_lineage,
+};
+use crate::state::Usage;
+use crate::store::blob::BlobRef;
+use crate::store::session_store::SessionEntry;
+
+pub const EXPORT_BUNDLE_VERSION: u32 = 1;
+
+pub trait ExportSource: ReplaySource + SessionBlobSource {}
+
+impl<T: ReplaySource + SessionBlobSource> ExportSource for T {}
+
+/// One complete producer-only sanitized disclosure.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ExportBundle {
+    pub v: u32,
+    pub target: SessionId,
+    pub records: Vec<ExportRecord>,
+    pub redactions: Vec<RedactionCount>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ExportRecord {
+    Session {
+        session: SessionId,
+        lineage: Option<SessionLineage>,
+    },
+    Event {
+        session: SessionId,
+        position: Seq,
+        event_seq: Seq,
+        event_id: EventId,
+        turn: TurnId,
+        item: Option<ItemId>,
+        parent: Option<EventId>,
+        observed_at: Timestamp,
+        producer: Producer,
+        event: ExportEvent,
+    },
+    RunTransaction {
+        session: SessionId,
+        position: Seq,
+        revision: RunRevision,
+        run_id: RunId,
+        selections: RunSelections,
+        status: RunStatus,
+        observed_at: Timestamp,
+        pruned_receipts: Vec<TurnLease>,
+        command: ExportRunCommand,
+    },
+    RunContextEvidence {
+        evidence_v: u32,
+        session: SessionId,
+        position: Seq,
+        invocation: RunInvocationId,
+        run_id: RunId,
+        record_digest: String,
+        config: ConfigProvenance,
+        context_digest: Option<String>,
+        instructions: Vec<ExportInstructionEvidence>,
+        mcp_admissions: Vec<McpAdmissionFingerprint>,
+        execution: Option<ExecObservation>,
+    },
+    GenerationAdmissionEvidence {
+        evidence_v: u32,
+        session: SessionId,
+        position: Seq,
+        invocation: RunInvocationId,
+        attempt: AttemptRef,
+        role: GenerationRole,
+        record_digest: String,
+        target: GenerationTarget,
+        capabilities: ModelCapabilities,
+        pricing: ExportPricingEvidence,
+    },
+    BlobReference {
+        session: SessionId,
+        event: EventId,
+        reference: BlobRef,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ExportInstructionEvidence {
+    pub sha256: String,
+    pub bytes: u64,
+    pub source: InstructionSource,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ExportPricingEvidence {
+    Priced {
+        source: String,
+        revision: PricingRevision,
+        metering: MeteringIdentity,
+    },
+    Unpriced {
+        source: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ExportRunCommand {
+    CommandAdmitted {
+        request_id: RequestId,
+        digest: RequestDigest,
+        expected_revision: Option<RunRevision>,
+        lease: TurnLease,
+        executor_id: uuid::Uuid,
+        model: ModelRef,
+        start: bool,
+    },
+    CancelRequested {
+        request_id: RequestId,
+        digest: RequestDigest,
+        lease: TurnLease,
+    },
+    CommandSettled {
+        lease: TurnLease,
+        settlement: ExportRunSettlement,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum ExportRunSettlement {
+    Completed,
+    ContextOverflow,
+    Cancelled { reason: CancelReason },
+    PermissionRequired,
+    Interrupted,
+    Uncertain,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ExportEvent {
+    PromptQueued {
+        id: QueuedPromptId,
+        images: Vec<ImageRef>,
+    },
+    PromptDeliveryExpedited {
+        through: QueuedPromptId,
+    },
+    UserPrompt {
+        images: Vec<ImageRef>,
+        queued_prompt: Option<QueuedPromptId>,
+    },
+    AssistantDelta,
+    AssistantMessage,
+    ReasoningDelta,
+    ReasoningState,
+    ToolCallStarted,
+    ToolCallDelta,
+    ToolCallCompleted {
+        ok: bool,
+    },
+    QuestionRequested {
+        tool_call: ItemId,
+        mode: QuestionMode,
+        option_count: u64,
+        free_text: bool,
+    },
+    QuestionSettled {
+        outcome: ExportQuestionOutcome,
+    },
+    PermissionRequested,
+    PermissionAmended,
+    PermissionDecided {
+        allowed: Option<bool>,
+    },
+    GenerationStarted {
+        attempt: AttemptRef,
+        role: GenerationRole,
+    },
+    ExecutionObserved {
+        observation: ExecObservation,
+    },
+    AttemptSettled {
+        attempt: AttemptRef,
+        outcome: Outcome,
+    },
+    UsageUpdated {
+        usage: Usage,
+        cost_delta: CostDelta,
+        attempt: Option<AttemptRef>,
+    },
+    UsageCorrected {
+        attempt: AttemptRef,
+        usage: Usage,
+        cost_delta: CostDelta,
+    },
+    ContextWindowUpdated {
+        used_tokens: u64,
+        provenance: OccupancyProvenance,
+    },
+    TurnCompleted {
+        ok: bool,
+        exit_reason: ExitReason,
+    },
+    CompactionSeeded {
+        source: SessionId,
+        source_seq: Seq,
+        prompt_revision: u32,
+    },
+    Compacted,
+    Forked {
+        source: SessionId,
+        at_seq: Seq,
+    },
+    HookCatalogueAdmitted {
+        descriptors: Vec<ExportHookDescriptor>,
+    },
+    HookInvocationStarted {
+        hook: HookId,
+        invocation: HookInvocationId,
+        lifecycle: HookLifecycle,
+        subject: HookSubject,
+    },
+    HookInvocationSettled {
+        hook: HookId,
+        invocation: HookInvocationId,
+        result: ExportHookResult,
+    },
+    SubagentSpawned,
+    SubagentReturned,
+    Error {
+        error_kind: ErrorKind,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExportQuestionOutcome {
+    Answered,
+    Declined,
+    Cancelled,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ExportHookResult {
+    Outcome { decision: HookDecision },
+    Failure { failure: HookFailureKind },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct ExportHookDescriptor {
+    pub id: HookId,
+    pub source: HookSourceAuthority,
+    pub digest: HookContentDigest,
+    pub ordinal: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct RedactionCount {
+    pub category: RedactionCategory,
+    pub count: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RedactionCategory {
+    OpaqueProse,
+    HiddenReasoning,
+    Path,
+    ToolMaterial,
+    PermissionMaterial,
+    RawError,
+    BlobPayload,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExportError {
+    Replay(ReplayError),
+    Evidence {
+        session: SessionId,
+        position: Seq,
+        failure: ExportEvidenceFailure,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExportEvidenceFailure {
+    MissingRunEvidence,
+    MissingRunContext { invocation: RunInvocationId },
+    MissingGenerationAdmission { attempt: AttemptRef },
+    Duplicate { key: EvidenceKey },
+    OutOfOrder { key: EvidenceKey },
+    SessionMismatch { recorded: SessionId },
+    RunMismatch { invocation: RunInvocationId },
+    GenerationRoleMismatch { attempt: AttemptRef },
+}
+
+impl fmt::Display for ExportError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Replay(error) => error.fmt(formatter),
+            Self::Evidence {
+                session,
+                position,
+                failure,
+            } => write!(
+                formatter,
+                "session {session} has invalid run evidence at {position:?}: {failure:?}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ExportError {}
+
+impl From<ReplayError> for ExportError {
+    fn from(error: ReplayError) -> Self {
+        Self::Replay(error)
+    }
+}
+
+pub struct Exporter<'a> {
+    source: &'a dyn ExportSource,
+}
+
+impl<'a> Exporter<'a> {
+    pub fn new(source: &'a dyn ExportSource) -> Self {
+        Self { source }
+    }
+
+    pub fn sanitized(&self, target: SessionId) -> Result<ExportBundle, ExportError> {
+        let target_lineage = self.source.lineage(&target).map_err(source_error)?;
+        let mut nodes = vec![(target, target_lineage)];
+        if let Some(lineage) = target_lineage {
+            let mut visited = HashSet::from([target]);
+            nodes.extend(
+                walk_lineage(
+                    self.source,
+                    lineage,
+                    &mut visited,
+                    LineageEdges::ForksAndCompactions,
+                )?
+                .into_iter()
+                .map(|step| (step.source, step.lineage)),
+            );
+        }
+        nodes.reverse();
+
+        let mut records = Vec::new();
+        let mut redactions = Redactions::default();
+        for (session, lineage) in nodes {
+            let entries = self
+                .source
+                .entries(&session)
+                .map_err(source_error)?
+                .ok_or(ReplayError::MissingSession { session })?;
+            records.push(ExportRecord::Session { session, lineage });
+            self.project_session(session, entries, &mut records, &mut redactions)?;
+        }
+
+        Ok(ExportBundle {
+            v: EXPORT_BUNDLE_VERSION,
+            target,
+            records,
+            redactions: redactions.rows(),
+        })
+    }
+
+    fn project_session(
+        &self,
+        session: SessionId,
+        entries: Vec<SessionEntry>,
+        records: &mut Vec<ExportRecord>,
+        redactions: &mut Redactions,
+    ) -> Result<(), ExportError> {
+        let mut evidence = EvidenceValidation::default();
+        let mut verified_blobs = HashSet::new();
+        let mut position = Seq::ZERO;
+        for entry in entries {
+            let position = position.next();
+            match entry {
+                SessionEntry::Event(event) => {
+                    evidence.event(session, position, &event.kind)?;
+                    let references = event.kind.blob_references();
+                    let projected = project_event(&event.kind, redactions);
+                    records.push(ExportRecord::Event {
+                        session,
+                        position,
+                        event_seq: event.env.seq,
+                        event_id: event.env.id,
+                        turn: event.env.turn,
+                        item: event.env.item,
+                        parent: event.env.parent,
+                        observed_at: event.env.ts,
+                        producer: event.env.producer,
+                        event: projected,
+                    });
+                    for reference in references {
+                        if !verified_blobs.insert(reference.clone()) {
+                            continue;
+                        }
+                        read_verified_blob(self.source, session, &reference)?;
+                        redactions.blob_payload += 1;
+                        records.push(ExportRecord::BlobReference {
+                            session,
+                            event: event.env.id,
+                            reference,
+                        });
+                    }
+                }
+                SessionEntry::RunTransaction(transaction) => {
+                    evidence.transaction(session, position, &transaction)?;
+                    let command = project_run_command(transaction.command(), redactions);
+                    records.push(ExportRecord::RunTransaction {
+                        session,
+                        position,
+                        revision: transaction.revision(),
+                        run_id: transaction.run_id(),
+                        selections: transaction.selections().clone(),
+                        status: transaction.status(),
+                        observed_at: transaction.observed_at(),
+                        pruned_receipts: transaction.pruned_receipts().to_vec(),
+                        command,
+                    });
+                }
+                SessionEntry::Evidence(record) => {
+                    evidence.record(session, position, &record)?;
+                    records.push(project_evidence(session, position, &record, redactions));
+                }
+            }
+        }
+        evidence.finish(session, position)
+    }
+}
+
+fn source_error(error: ReplaySourceError) -> ExportError {
+    ExportError::Replay(map_source(error))
+}
+
+fn project_evidence(
+    session: SessionId,
+    position: Seq,
+    record: &EvidenceRecord,
+    redactions: &mut Redactions,
+) -> ExportRecord {
+    match record {
+        EvidenceRecord::RunContext(context) => {
+            redactions.path += context.instruction_paths().len() as u64;
+            redactions.tool_material += context.mcp_subjects().len() as u64;
+            let instructions = context
+                .instructions()
+                .iter()
+                .map(|instruction| {
+                    redactions.path += 2;
+                    ExportInstructionEvidence {
+                        sha256: instruction.sha256.clone(),
+                        bytes: instruction.bytes,
+                        source: instruction.source,
+                    }
+                })
+                .collect();
+            ExportRecord::RunContextEvidence {
+                evidence_v: context.version(),
+                session,
+                position,
+                invocation: context.invocation(),
+                run_id: context.run_id(),
+                record_digest: record.digest().to_string(),
+                config: context.config().clone(),
+                context_digest: context.context_digest().map(str::to_owned),
+                instructions,
+                mcp_admissions: context.mcp_admissions().to_vec(),
+                execution: context.execution().cloned(),
+            }
+        }
+        EvidenceRecord::GenerationAdmission(admission) => {
+            let pricing = match admission.pricing() {
+                PricingEvidence::Priced {
+                    source,
+                    revision,
+                    metering,
+                } => ExportPricingEvidence::Priced {
+                    source: source.clone(),
+                    revision: revision.clone(),
+                    metering: metering.clone(),
+                },
+                PricingEvidence::Unpriced { source, reason: _ } => {
+                    redactions.opaque_prose += 1;
+                    ExportPricingEvidence::Unpriced {
+                        source: source.clone(),
+                    }
+                }
+            };
+            ExportRecord::GenerationAdmissionEvidence {
+                evidence_v: admission.version(),
+                session,
+                position,
+                invocation: admission.invocation(),
+                attempt: admission.attempt(),
+                role: admission.role(),
+                record_digest: record.digest().to_string(),
+                target: admission.target().clone(),
+                capabilities: admission.capabilities().clone(),
+                pricing,
+            }
+        }
+    }
+}
+
+fn project_run_command(command: &RunCommand, redactions: &mut Redactions) -> ExportRunCommand {
+    match command {
+        RunCommand::CommandAdmitted {
+            request_id,
+            digest,
+            expected_revision,
+            lease,
+            executor_id,
+            prompt: _,
+            model,
+            start,
+        } => {
+            redactions.opaque_prose += 1;
+            ExportRunCommand::CommandAdmitted {
+                request_id: *request_id,
+                digest: digest.clone(),
+                expected_revision: *expected_revision,
+                lease: *lease,
+                executor_id: *executor_id,
+                model: model.clone(),
+                start: *start,
+            }
+        }
+        RunCommand::CancelRequested {
+            request_id,
+            digest,
+            lease,
+        } => ExportRunCommand::CancelRequested {
+            request_id: *request_id,
+            digest: digest.clone(),
+            lease: *lease,
+        },
+        RunCommand::CommandSettled { lease, settlement } => {
+            let settlement = match settlement {
+                RunSettlement::Completed => ExportRunSettlement::Completed,
+                RunSettlement::ContextOverflow => ExportRunSettlement::ContextOverflow,
+                RunSettlement::Cancelled { reason } => {
+                    ExportRunSettlement::Cancelled { reason: *reason }
+                }
+                RunSettlement::PermissionRequired { .. } => {
+                    redactions.permission_material += 1;
+                    ExportRunSettlement::PermissionRequired
+                }
+                RunSettlement::Interrupted => ExportRunSettlement::Interrupted,
+                RunSettlement::Uncertain => ExportRunSettlement::Uncertain,
+            };
+            ExportRunCommand::CommandSettled {
+                lease: *lease,
+                settlement,
+            }
+        }
+    }
+}
+
+fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
+    match kind {
+        EventKind::PromptQueued {
+            id,
+            text: _,
+            images,
+        } => {
+            redactions.opaque_prose += 1;
+            ExportEvent::PromptQueued {
+                id: *id,
+                images: images.clone(),
+            }
+        }
+        EventKind::PromptDeliveryExpedited { through } => {
+            ExportEvent::PromptDeliveryExpedited { through: *through }
+        }
+        EventKind::UserPrompt {
+            text: _,
+            images,
+            queued_prompt,
+        } => {
+            redactions.opaque_prose += 1;
+            ExportEvent::UserPrompt {
+                images: images.clone(),
+                queued_prompt: *queued_prompt,
+            }
+        }
+        EventKind::AssistantDelta { .. } => {
+            redactions.opaque_prose += 1;
+            ExportEvent::AssistantDelta
+        }
+        EventKind::AssistantMessage { .. } => {
+            redactions.opaque_prose += 1;
+            ExportEvent::AssistantMessage
+        }
+        EventKind::ReasoningDelta { .. } => {
+            redactions.hidden_reasoning += 1;
+            ExportEvent::ReasoningDelta
+        }
+        EventKind::ReasoningState { .. } => {
+            redactions.hidden_reasoning += 1;
+            ExportEvent::ReasoningState
+        }
+        EventKind::ToolCallStarted {
+            name: _,
+            args: _,
+            call_id,
+        } => {
+            redactions.tool_material += 2 + call_id.is_some() as u64;
+            ExportEvent::ToolCallStarted
+        }
+        EventKind::ToolCallDelta { .. } => {
+            redactions.tool_material += 1;
+            ExportEvent::ToolCallDelta
+        }
+        EventKind::ToolCallCompleted { ok, .. } => {
+            redactions.tool_material += 1;
+            ExportEvent::ToolCallCompleted { ok: *ok }
+        }
+        EventKind::QuestionRequested { request, tool_call } => {
+            redactions.opaque_prose += 1 + (request.options.len() as u64 * 2);
+            ExportEvent::QuestionRequested {
+                tool_call: *tool_call,
+                mode: request.mode,
+                option_count: request.options.len() as u64,
+                free_text: request.free_text,
+            }
+        }
+        EventKind::QuestionSettled { outcome } => {
+            let outcome = match outcome {
+                QuestionOutcome::Answered(answer) => {
+                    redactions.opaque_prose += match answer {
+                        crate::question::QuestionAnswer::Multiple(values) => values.len() as u64,
+                        crate::question::QuestionAnswer::Single(_)
+                        | crate::question::QuestionAnswer::FreeText(_) => 1,
+                    };
+                    ExportQuestionOutcome::Answered
+                }
+                QuestionOutcome::Declined => ExportQuestionOutcome::Declined,
+                QuestionOutcome::Cancelled => ExportQuestionOutcome::Cancelled,
+                QuestionOutcome::Unavailable => ExportQuestionOutcome::Unavailable,
+            };
+            ExportEvent::QuestionSettled { outcome }
+        }
+        EventKind::PermissionRequested { escalation, .. } => {
+            redactions.permission_material += 1;
+            if matches!(
+                escalation,
+                Escalation::NoRuleCovers { .. } | Escalation::ModeAsks { .. }
+            ) {
+                redactions.path += 1;
+            }
+            ExportEvent::PermissionRequested
+        }
+        EventKind::PermissionAmended { .. } => {
+            redactions.permission_material += 1;
+            ExportEvent::PermissionAmended
+        }
+        EventKind::PermissionDecided {
+            allowed,
+            by,
+            reason,
+        } => {
+            redactions.permission_material += 1 + by.is_some() as u64 + reason.is_some() as u64;
+            ExportEvent::PermissionDecided { allowed: *allowed }
+        }
+        EventKind::GenerationStarted { attempt, role } => ExportEvent::GenerationStarted {
+            attempt: *attempt,
+            role: *role,
+        },
+        EventKind::ExecutionObserved { observation } => ExportEvent::ExecutionObserved {
+            observation: observation.clone(),
+        },
+        EventKind::AttemptSettled { attempt, outcome } => ExportEvent::AttemptSettled {
+            attempt: *attempt,
+            outcome: *outcome,
+        },
+        EventKind::UsageUpdated {
+            usage,
+            cost_delta,
+            attempt,
+        } => ExportEvent::UsageUpdated {
+            usage: *usage,
+            cost_delta: cost_delta.clone(),
+            attempt: *attempt,
+        },
+        EventKind::UsageCorrected {
+            attempt,
+            usage,
+            cost_delta,
+        } => ExportEvent::UsageCorrected {
+            attempt: *attempt,
+            usage: *usage,
+            cost_delta: cost_delta.clone(),
+        },
+        EventKind::ContextWindowUpdated {
+            used_tokens,
+            provenance,
+        } => ExportEvent::ContextWindowUpdated {
+            used_tokens: *used_tokens,
+            provenance: *provenance,
+        },
+        EventKind::TurnCompleted { ok, exit_reason } => ExportEvent::TurnCompleted {
+            ok: *ok,
+            exit_reason: *exit_reason,
+        },
+        EventKind::CompactionSeeded {
+            source,
+            source_seq,
+            prompt_revision,
+            checkpoint: _,
+        } => {
+            redactions.opaque_prose += 1;
+            ExportEvent::CompactionSeeded {
+                source: *source,
+                source_seq: *source_seq,
+                prompt_revision: *prompt_revision,
+            }
+        }
+        EventKind::Compacted { .. } => {
+            redactions.opaque_prose += 1;
+            ExportEvent::Compacted
+        }
+        EventKind::Forked { source, at_seq } => ExportEvent::Forked {
+            source: *source,
+            at_seq: *at_seq,
+        },
+        EventKind::HookCatalogueAdmitted { descriptors } => {
+            redactions.path += descriptors.len() as u64;
+            ExportEvent::HookCatalogueAdmitted {
+                descriptors: descriptors
+                    .as_slice()
+                    .iter()
+                    .map(|descriptor| ExportHookDescriptor {
+                        id: descriptor.id(),
+                        source: descriptor.source(),
+                        digest: descriptor.digest(),
+                        ordinal: descriptor.ordinal(),
+                    })
+                    .collect(),
+            }
+        }
+        EventKind::HookInvocationStarted {
+            hook,
+            invocation,
+            lifecycle,
+            subject,
+        } => ExportEvent::HookInvocationStarted {
+            hook: *hook,
+            invocation: *invocation,
+            lifecycle: *lifecycle,
+            subject: *subject,
+        },
+        EventKind::HookInvocationSettled {
+            hook,
+            invocation,
+            result,
+        } => {
+            if result.feedback().is_some() {
+                redactions.opaque_prose += 1;
+            }
+            let result = match result {
+                HookResult::Outcome { outcome } => ExportHookResult::Outcome {
+                    decision: outcome.decision(),
+                },
+                HookResult::Failure { failure } => ExportHookResult::Failure {
+                    failure: failure.kind(),
+                },
+            };
+            ExportEvent::HookInvocationSettled {
+                hook: *hook,
+                invocation: *invocation,
+                result,
+            }
+        }
+        EventKind::SubagentSpawned { .. } => {
+            redactions.opaque_prose += 1;
+            ExportEvent::SubagentSpawned
+        }
+        EventKind::SubagentReturned { .. } => {
+            redactions.opaque_prose += 2;
+            ExportEvent::SubagentReturned
+        }
+        EventKind::Error { kind, .. } => {
+            redactions.raw_error += 1;
+            ExportEvent::Error { error_kind: *kind }
+        }
+    }
+}
+
+#[derive(Default)]
+struct EvidenceValidation {
+    keys: HashSet<EvidenceKey>,
+    contexts: HashMap<RunInvocationId, (RunId, Seq)>,
+    generations: HashMap<AttemptRef, (RunInvocationId, GenerationRole, Seq)>,
+    starts: HashSet<AttemptRef>,
+    admissions: HashMap<RunInvocationId, (RunId, Seq)>,
+}
+
+impl EvidenceValidation {
+    fn record(
+        &mut self,
+        session: SessionId,
+        position: Seq,
+        record: &EvidenceRecord,
+    ) -> Result<(), ExportError> {
+        let key = record.key();
+        if !self.keys.insert(key.clone()) {
+            return evidence_error(session, position, ExportEvidenceFailure::Duplicate { key });
+        }
+        match record {
+            EvidenceRecord::RunContext(context) => {
+                if context.session() != session {
+                    return evidence_error(
+                        session,
+                        position,
+                        ExportEvidenceFailure::SessionMismatch {
+                            recorded: context.session(),
+                        },
+                    );
+                }
+                if context.run_id().session_id() != session {
+                    return evidence_error(
+                        session,
+                        position,
+                        ExportEvidenceFailure::RunMismatch {
+                            invocation: context.invocation(),
+                        },
+                    );
+                }
+                if let Some((admitted, _)) = self.admissions.get(&context.invocation())
+                    && *admitted != context.run_id()
+                {
+                    return evidence_error(
+                        session,
+                        position,
+                        ExportEvidenceFailure::RunMismatch {
+                            invocation: context.invocation(),
+                        },
+                    );
+                }
+                self.contexts
+                    .insert(context.invocation(), (context.run_id(), position));
+            }
+            EvidenceRecord::GenerationAdmission(admission) => {
+                if admission.session() != session {
+                    return evidence_error(
+                        session,
+                        position,
+                        ExportEvidenceFailure::SessionMismatch {
+                            recorded: admission.session(),
+                        },
+                    );
+                }
+                if !self.contexts.contains_key(&admission.invocation()) {
+                    return evidence_error(
+                        session,
+                        position,
+                        ExportEvidenceFailure::MissingRunContext {
+                            invocation: admission.invocation(),
+                        },
+                    );
+                }
+                self.generations.insert(
+                    admission.attempt(),
+                    (admission.invocation(), admission.role(), position),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn transaction(
+        &mut self,
+        session: SessionId,
+        position: Seq,
+        transaction: &crate::run::RunTransaction,
+    ) -> Result<(), ExportError> {
+        if transaction.run_id().session_id() != session {
+            return evidence_error(
+                session,
+                position,
+                ExportEvidenceFailure::RunMismatch {
+                    invocation: RunInvocationId::from_uuid(transaction.run_id().nonce()),
+                },
+            );
+        }
+        if let RunCommand::CommandAdmitted { request_id, .. } = transaction.command() {
+            let invocation = RunInvocationId::from_uuid(request_id.uuid());
+            if let Some((context, _)) = self.contexts.get(&invocation) {
+                if *context != transaction.run_id() {
+                    return evidence_error(
+                        session,
+                        position,
+                        ExportEvidenceFailure::RunMismatch { invocation },
+                    );
+                }
+                return evidence_error(
+                    session,
+                    position,
+                    ExportEvidenceFailure::OutOfOrder {
+                        key: EvidenceKey::RunContext {
+                            session,
+                            invocation,
+                        },
+                    },
+                );
+            }
+            self.admissions
+                .insert(invocation, (transaction.run_id(), position));
+        }
+        Ok(())
+    }
+
+    fn event(
+        &mut self,
+        session: SessionId,
+        position: Seq,
+        event: &EventKind,
+    ) -> Result<(), ExportError> {
+        let EventKind::GenerationStarted { attempt, role } = event else {
+            return Ok(());
+        };
+        let Some((_, admitted_role, _)) = self.generations.get(attempt) else {
+            return evidence_error(
+                session,
+                position,
+                ExportEvidenceFailure::MissingGenerationAdmission { attempt: *attempt },
+            );
+        };
+        if admitted_role != role {
+            return evidence_error(
+                session,
+                position,
+                ExportEvidenceFailure::GenerationRoleMismatch { attempt: *attempt },
+            );
+        }
+        if !self.starts.insert(*attempt) {
+            let invocation = self
+                .generations
+                .get(attempt)
+                .map(|(invocation, _, _)| *invocation)
+                .expect("generation admission was checked above");
+            return evidence_error(
+                session,
+                position,
+                ExportEvidenceFailure::Duplicate {
+                    key: EvidenceKey::GenerationAdmission {
+                        session,
+                        invocation,
+                        attempt: *attempt,
+                    },
+                },
+            );
+        }
+        Ok(())
+    }
+
+    fn finish(self, session: SessionId, last: Seq) -> Result<(), ExportError> {
+        for (invocation, (run_id, position)) in self.admissions {
+            if self.contexts.get(&invocation).map(|(found, _)| *found) != Some(run_id) {
+                return evidence_error(
+                    session,
+                    position,
+                    ExportEvidenceFailure::MissingRunContext { invocation },
+                );
+            }
+        }
+        if self
+            .generations
+            .keys()
+            .any(|attempt| !self.starts.contains(attempt))
+        {
+            return evidence_error(session, last, ExportEvidenceFailure::MissingRunEvidence);
+        }
+        Ok(())
+    }
+}
+
+fn evidence_error<T>(
+    session: SessionId,
+    position: Seq,
+    failure: ExportEvidenceFailure,
+) -> Result<T, ExportError> {
+    Err(ExportError::Evidence {
+        session,
+        position,
+        failure,
+    })
+}
+
+#[derive(Default)]
+struct Redactions {
+    opaque_prose: u64,
+    hidden_reasoning: u64,
+    path: u64,
+    tool_material: u64,
+    permission_material: u64,
+    raw_error: u64,
+    blob_payload: u64,
+}
+
+impl Redactions {
+    fn rows(self) -> Vec<RedactionCount> {
+        [
+            (RedactionCategory::OpaqueProse, self.opaque_prose),
+            (RedactionCategory::HiddenReasoning, self.hidden_reasoning),
+            (RedactionCategory::Path, self.path),
+            (RedactionCategory::ToolMaterial, self.tool_material),
+            (
+                RedactionCategory::PermissionMaterial,
+                self.permission_material,
+            ),
+            (RedactionCategory::RawError, self.raw_error),
+            (RedactionCategory::BlobPayload, self.blob_payload),
+        ]
+        .into_iter()
+        .filter_map(|(category, count)| (count != 0).then_some(RedactionCount { category, count }))
+        .collect()
+    }
+}

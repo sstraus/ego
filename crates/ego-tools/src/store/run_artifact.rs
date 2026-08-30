@@ -4,7 +4,8 @@ use std::fs::{self, OpenOptions};
 
 use ego_core::run::RunId;
 use ego_core::store::run_artifact::{
-    PublishedRunArtifact, RunArtifactId, RunArtifactStore, RunArtifactStoreError,
+    ArtifactPublication, PublishedRunArtifact, RunArtifactId, RunArtifactStore,
+    RunArtifactStoreError,
 };
 use fd_lock::RwLock;
 use serde::{Deserialize, Serialize};
@@ -29,8 +30,12 @@ impl StoredRunArtifact {
         }
     }
 
-    fn into_public(self) -> PublishedRunArtifact {
-        PublishedRunArtifact::output(self.mime_type, self.bytes)
+    fn into_public(self, artifact_id: RunArtifactId) -> PublishedRunArtifact {
+        if artifact_id == RunArtifactId::sanitized_bundle() {
+            PublishedRunArtifact::sanitized_bundle(self.bytes)
+        } else {
+            PublishedRunArtifact::output(self.mime_type, self.bytes)
+        }
     }
 }
 
@@ -76,7 +81,7 @@ impl RunArtifactStore for JsonlStore {
         &self,
         run_id: RunId,
         artifact: PublishedRunArtifact,
-    ) -> Result<(), RunArtifactStoreError> {
+    ) -> Result<ArtifactPublication, RunArtifactStoreError> {
         let artifact_id = artifact.id();
         self.with_artifact_lock(run_id, || {
             let path = self.artifact_path(run_id, artifact_id);
@@ -91,7 +96,13 @@ impl RunArtifactStore for JsonlStore {
                     });
                 }
                 if existing == requested {
-                    return Ok(());
+                    return Ok(ArtifactPublication::PublishedDurably);
+                }
+                if artifact_id == RunArtifactId::sanitized_bundle() {
+                    return Err(RunArtifactStoreError::Conflict {
+                        run_id,
+                        artifact_id,
+                    });
                 }
             }
 
@@ -101,11 +112,11 @@ impl RunArtifactStore for JsonlStore {
                 .replace_atomic_publication(&path, &bytes)
                 .map_err(artifact_io)?
             {
-                AtomicReplacePublication::PublishedDurably => Ok(()),
+                AtomicReplacePublication::PublishedDurably => {
+                    Ok(ArtifactPublication::PublishedDurably)
+                }
                 AtomicReplacePublication::PublishedDurabilityUncertain { diagnostic } => {
-                    Err(RunArtifactStoreError::Io {
-                        message: diagnostic,
-                    })
+                    Ok(ArtifactPublication::PublishedDurabilityUncertain { diagnostic })
                 }
             }
         })
@@ -130,7 +141,15 @@ impl RunArtifactStore for JsonlStore {
                 artifact_id,
             });
         }
-        Ok(stored.into_public())
+        if artifact_id == RunArtifactId::sanitized_bundle()
+            && stored.mime_type != "application/json"
+        {
+            return Err(RunArtifactStoreError::Conflict {
+                run_id,
+                artifact_id,
+            });
+        }
+        Ok(stored.into_public(artifact_id))
     }
 }
 

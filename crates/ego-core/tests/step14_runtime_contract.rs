@@ -415,6 +415,10 @@ mod turn_execution_observation {
     use super::*;
     use ego_core::budget::{BudgetGate, Metering};
     use ego_core::cost::{Amount, CurrencyCode, MeteringRevision, Money};
+    use ego_core::evidence::{
+        EvidenceAdmissionService, EvidenceError as AdmissionError, EvidenceKey, EvidenceRecord,
+        EvidenceStore as AdmissionStore, EvidenceWrite, RunInvocationId,
+    };
     use ego_core::generator::capabilities::{
         CacheRetention, CancelSemantics, ModelCapabilities, ReasoningCarryover,
         ReasoningEffortSupport, Transport,
@@ -422,7 +426,6 @@ mod turn_execution_observation {
     use ego_core::generator::fake::FakeGenerator;
     use ego_core::generator::port::AiEvent;
     use ego_core::generator::types::{StopReason, ThinkingLevel};
-    use ego_core::evidence::{EvidenceAdmissionService, RunInvocationId};
     use ego_core::permit::fake::FakeFs;
     use ego_core::permit::{ProcessError, ProcessExecutor, ToolResult};
     use ego_core::run::{RunAppend, RunRevision, RunTransaction};
@@ -554,6 +557,16 @@ mod turn_execution_observation {
     }
 
     struct NoEvidence;
+
+    impl AdmissionStore for NoEvidence {
+        fn write(
+            &self,
+            _key: EvidenceKey,
+            _record: EvidenceRecord,
+        ) -> Result<EvidenceWrite, AdmissionError> {
+            Ok(EvidenceWrite::Published)
+        }
+    }
 
     impl EvidenceStore for NoEvidence {
         fn blob_store(&self) -> &dyn ego_core::store::blob::BlobStore {

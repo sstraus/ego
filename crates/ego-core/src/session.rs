@@ -138,7 +138,7 @@ impl fmt::Display for ReplayError {
 
 impl std::error::Error for ReplayError {}
 
-fn map_source(error: ReplaySourceError) -> ReplayError {
+pub(crate) fn map_source(error: ReplaySourceError) -> ReplayError {
     match error {
         ReplaySourceError::CorruptSession { session, reason }
         | ReplaySourceError::Unavailable { session, reason } => {
@@ -148,6 +148,80 @@ fn map_source(error: ReplaySourceError) -> ReplayError {
             ReplayError::UnknownEntry { session, position }
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LineageEdges {
+    Forks,
+    ForksAndCompactions,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LineageStep {
+    pub(crate) source: SessionId,
+    pub(crate) edge: SessionLineage,
+    pub(crate) lineage: Option<SessionLineage>,
+}
+
+pub(crate) fn walk_lineage<S: ReplaySource + ?Sized>(
+    source: &S,
+    mut edge: SessionLineage,
+    visited: &mut HashSet<SessionId>,
+    edges: LineageEdges,
+) -> Result<Vec<LineageStep>, ReplayError> {
+    let mut steps = Vec::new();
+    loop {
+        if edges == LineageEdges::Forks && !matches!(edge, SessionLineage::Fork { .. }) {
+            break;
+        }
+        let ancestor = match edge {
+            SessionLineage::Fork { source, .. } | SessionLineage::Compaction { source, .. } => {
+                source
+            }
+        };
+        if !visited.insert(ancestor) {
+            return Err(ReplayError::Cycle { session: ancestor });
+        }
+        let lineage = source.lineage(&ancestor).map_err(map_source)?;
+        steps.push(LineageStep {
+            source: ancestor,
+            edge,
+            lineage,
+        });
+        let Some(next) = lineage else {
+            break;
+        };
+        edge = next;
+    }
+    Ok(steps)
+}
+
+pub(crate) fn read_verified_blob<B: SessionBlobSource + ?Sized>(
+    blobs: &B,
+    session: SessionId,
+    reference: &BlobRef,
+) -> Result<Vec<u8>, ReplayError> {
+    let bytes = blobs
+        .read(&session, reference)
+        .map_err(|error| match error {
+            BlobError::NotFound { .. } => ReplayError::MissingBlob {
+                session,
+                reference: reference.clone(),
+            },
+            other => ReplayError::CorruptBlob {
+                session,
+                reference: reference.clone(),
+                reason: other.to_string(),
+            },
+        })?;
+    if bytes.len() as u64 != reference.bytes || sha256_hex(&bytes) != reference.id.as_str() {
+        return Err(ReplayError::CorruptBlob {
+            session,
+            reference: reference.clone(),
+            reason: "content identity or length does not match its reference".to_string(),
+        });
+    }
+    Ok(bytes)
 }
 
 /// The ancestor-only result of a lineage replay.
@@ -184,7 +258,7 @@ impl<'a> ReplayContext<'a> {
     }
 
     pub fn replay(&self, target: &SessionId) -> Result<ReplayedContext, ReplayError> {
-        let Some(mut lineage) = self.source.lineage(target).map_err(map_source)? else {
+        let Some(lineage) = self.source.lineage(target).map_err(map_source)? else {
             return Ok(ReplayedContext {
                 conversation: Conversation::new(Vec::new())
                     .expect("an empty conversation is valid"),
@@ -194,7 +268,7 @@ impl<'a> ReplayContext<'a> {
         };
 
         let mut visited = HashSet::from([*target]);
-        self.replay_from(&mut lineage, &mut visited)
+        self.replay_from(lineage, &mut visited)
     }
 
     /// Resolve a lineage fact before its target is published.
@@ -202,31 +276,24 @@ impl<'a> ReplayContext<'a> {
     /// Fork creation uses this to prove the entire referenced prefix before
     /// the atomic publication boundary. The lineage value is the same opaque
     /// fact carried by [`TargetSeed`]; no target-local state is involved.
-    pub fn replay_lineage(
-        &self,
-        mut lineage: SessionLineage,
-    ) -> Result<ReplayedContext, ReplayError> {
-        self.replay_from(&mut lineage, &mut HashSet::new())
+    pub fn replay_lineage(&self, lineage: SessionLineage) -> Result<ReplayedContext, ReplayError> {
+        self.replay_from(lineage, &mut HashSet::new())
     }
 
     fn replay_from(
         &self,
-        lineage: &mut SessionLineage,
+        lineage: SessionLineage,
         visited: &mut HashSet<SessionId>,
     ) -> Result<ReplayedContext, ReplayError> {
-        let mut session_pins = Vec::new();
-        let mut frames = Vec::new();
-        while let SessionLineage::Fork { source, at_seq } = *lineage {
-            if !visited.insert(source) {
-                return Err(ReplayError::Cycle { session: source });
-            }
-            session_pins.push(source);
-            frames.push((source, at_seq));
-            *lineage = match self.source.lineage(&source).map_err(map_source)? {
-                Some(next @ SessionLineage::Fork { .. }) => next,
-                Some(SessionLineage::Compaction { .. }) | None => break,
-            };
-        }
+        let steps = walk_lineage(self.source, lineage, visited, LineageEdges::Forks)?;
+        let session_pins = steps.iter().map(|step| step.source).collect();
+        let frames: Vec<_> = steps
+            .into_iter()
+            .filter_map(|step| match step.edge {
+                SessionLineage::Fork { at_seq, .. } => Some((step.source, at_seq)),
+                SessionLineage::Compaction { .. } => None,
+            })
+            .collect();
 
         let mut replay_seq = Seq::ZERO;
         let mut events = Vec::new();
@@ -247,30 +314,7 @@ impl<'a> ReplayContext<'a> {
                 }
 
                 for reference in event.kind.blob_references() {
-                    let bytes =
-                        self.blobs
-                            .read(&session, &reference)
-                            .map_err(|error| match error {
-                                BlobError::NotFound { .. } => ReplayError::MissingBlob {
-                                    session,
-                                    reference: reference.clone(),
-                                },
-                                other => ReplayError::CorruptBlob {
-                                    session,
-                                    reference: reference.clone(),
-                                    reason: other.to_string(),
-                                },
-                            })?;
-                    if bytes.len() as u64 != reference.bytes
-                        || sha256_hex(&bytes) != reference.id.as_str()
-                    {
-                        return Err(ReplayError::CorruptBlob {
-                            session,
-                            reference,
-                            reason: "content identity or length does not match its reference"
-                                .to_string(),
-                        });
-                    }
+                    let bytes = read_verified_blob(self.blobs, session, &reference)?;
                     if !blob_pins.contains(&reference) {
                         blob_pins.push(reference.clone());
                     }

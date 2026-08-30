@@ -15,9 +15,9 @@ use std::time::Duration;
 
 use ego_core::ceiling::{Budget, Ceilings};
 use ego_core::compact::{
-    CompactionCommand, CompactionError, CompactionFuture, CompactionPreparation,
-    CompactionReceipt, CompactionTransitionError, CompactionTransitionRequest,
-    CompactionTransitionService, PreparedCompaction,
+    CompactionCommand, CompactionError, CompactionFuture, CompactionPreparation, CompactionReceipt,
+    CompactionTransitionError, CompactionTransitionRequest, CompactionTransitionService,
+    PreparedCompaction,
 };
 use ego_core::config::{
     Effective, Limits, Mode, ModelRef, Posture, Selection, SystemPrompt, Trust, UserConfigStore,
@@ -31,6 +31,7 @@ use ego_core::evidence::{
     ConfigProvenance, EvidenceAdmissionService, EvidenceError, EvidenceRecord, EvidenceWrite,
     RunContextEvidence, RunInvocationId,
 };
+use ego_core::export::Exporter;
 use ego_core::generation_model_source::{
     GenerationModelError, GenerationModelErrorClass, GenerationProfile, GenerationRole,
 };
@@ -44,14 +45,15 @@ use ego_core::permit::{
 use ego_core::public::{PUBLIC_EVENT_VERSION, PublicEvent, QuestionReport, project_public};
 use ego_core::question::{AskQuestionTool, Elicitor, QuestionOutcome};
 use ego_core::run::{
-    CancelReason, DeniedBy, RecoveryEvidence, RunExecutionBindings, RunExecutor, RunExecutorError,
-    RequestId, RunHandle, RunId, RunPreparation, RunPrepared, RunSettlement, RunStart,
+    CancelReason, DeniedBy, RecoveryEvidence, RequestId, RunExecutionBindings, RunExecutor,
+    RunExecutorError, RunHandle, RunId, RunPreparation, RunPrepared, RunSettlement, RunStart,
     RunTermination, Signal,
 };
+use ego_core::session::{ReplaySource, ReplaySourceError};
 use ego_core::sink::{EventSink, NullSink};
 use ego_core::state::{ItemKind, QuestionContinuation, SessionState};
-use ego_core::store::run_artifact::{PublishedRunArtifact, RunArtifactStore};
-use ego_core::store::session_store::SessionMeta;
+use ego_core::store::run_artifact::{ArtifactPublication, PublishedRunArtifact, RunArtifactStore};
+use ego_core::store::session_store::{SessionEntry, SessionMeta};
 use ego_core::turn::{
     AdmittedToolSource, CancelToken, GenerationRuntime, InteractiveControl, Journal, JudgeContext,
     QueueStatus, RegisteredTool, Session, ToolEffectPorts, Tools, TurnConfig, TurnLoop,
@@ -64,14 +66,15 @@ use ego_tools::config::OsUserConfigStore;
 use ego_tools::exec::{ProcessError, RunEffectPorts};
 use ego_tools::fs::OsFs;
 use ego_tools::instructions::OsInstructionIo;
-use ego_tools::store::{JsonlStore, OsIo, SessionEvidenceStore};
+use ego_tools::store::{AtomicReplacePublication, JsonlStore, OsIo, SessionEvidenceStore, StoreIo};
 use ego_tools::tools::builtins;
 use serde_json::Value;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::budget;
 use crate::cli::{
-    Args, CompactArgs, ForkArgs, ModelsArgs, Output, ResumeAnswer, SessionChoice, UsageError,
+    Args, CompactArgs, ExportArgs, ExportFormat, ForkArgs, ModelsArgs, Output, ResumeAnswer,
+    SessionChoice, UsageError,
 };
 use crate::model_picker::ModelPicker;
 use crate::models;
@@ -1565,7 +1568,7 @@ impl CliPrepared {
         let run_context = RunContextEvidence::new(
             request.run_id.session_id(),
             request.invocation,
-            request.run_id.to_string(),
+            request.run_id,
             config_provenance,
         )
         .with_instructions(instructions);
@@ -1714,9 +1717,17 @@ impl CliPrepared {
         if matches!(&settlement, RunSettlement::Completed)
             && let Some(artifacts) = artifacts
         {
-            artifacts
+            match artifacts
                 .publish(run_id, public_result_artifact(result)?)
-                .map_err(|error| RunExecutorError::new(error.to_string()))?;
+                .map_err(|error| RunExecutorError::new(error.to_string()))?
+            {
+                ArtifactPublication::PublishedDurably => {}
+                ArtifactPublication::PublishedDurabilityUncertain { diagnostic } => {
+                    return Err(RunExecutorError::new(format!(
+                        "run artifact is visible but its durability is uncertain: {diagnostic}"
+                    )));
+                }
+            }
         }
         Ok(settlement)
     }
@@ -1952,7 +1963,7 @@ impl CliCompactionCommand {
         let context = RunContextEvidence::new(
             source_id,
             invocation,
-            source_id.to_string(),
+            RunId::new(source_id, invocation.uuid()),
             ConfigProvenance::resolved(self.args.profile.clone()),
         )
         .with_instructions(
@@ -1996,25 +2007,17 @@ impl CliCompactionCommand {
         let mut active = ActiveSession::durable(opened, opening.clone(), EVIDENCE_CAP)
             .map_err(CompactionError::Internal)?;
         let mode = effective.mode.unwrap_or(Mode::Default);
-        let policy = PolicyEngine::new(
-            CanonPath::new(&root),
-            mode,
-            effective.permissions.clone(),
-        );
+        let policy = PolicyEngine::new(CanonPath::new(&root), mode, effective.permissions.clone());
         let currency = CurrencyCode::new(SETTLEMENT).expect("a constant this file controls");
         let mut gate = budget::gate(&effective.ceilings, effective.clamped.money, currency);
         let config = TurnConfig {
             system: system.clone(),
             token_ceiling: effective.ceilings.tokens,
         };
-        let (ports, observation) = effect_scope(
-            &confinement,
-            active.evidence(),
-            &cancel,
-            run_deadline,
-        )
-        .await
-        .map_err(compaction_termination)?;
+        let (ports, observation) =
+            effect_scope(&confinement, active.evidence(), &cancel, run_deadline)
+                .await
+                .map_err(compaction_termination)?;
         let fs = OsFs;
         let sink = NullSink;
         let session = Session {
@@ -2026,8 +2029,8 @@ impl CliCompactionCommand {
             sink: &sink,
             cancel: cancel.clone(),
         };
-        let http = Arc::new(ProviderHttpAdapter::new(Arc::clone(&ports)))
-            as Arc<dyn ego_ai::http::Http>;
+        let http =
+            Arc::new(ProviderHttpAdapter::new(Arc::clone(&ports))) as Arc<dyn ego_ai::http::Http>;
         let runtime = GenerationRuntime {
             source: source.bind(http, cancel.clone(), run_deadline),
             gate: &mut gate,
@@ -2105,8 +2108,7 @@ impl CompactionCommand for CliCompactionCommand {
     fn compact<'a>(
         &'a self,
         request: CompactionTransitionRequest,
-    ) -> CompactionFuture<'a, Result<CompactionReceipt, CompactionTransitionError>>
-    {
+    ) -> CompactionFuture<'a, Result<CompactionReceipt, CompactionTransitionError>> {
         Box::pin(async move {
             let mut preparation = CliCompactionPreparation {
                 command: self,
@@ -2407,7 +2409,7 @@ async fn execute<S: EventSink>(
     let context = RunContextEvidence::new(
         session_id,
         invocation,
-        session_id.to_string(),
+        RunId::new(session_id, invocation.uuid()),
         ConfigProvenance::resolved(args.profile.clone()),
     )
     .with_instructions(instruction_descriptors);
@@ -2995,16 +2997,15 @@ async fn execute<S: EventSink>(
                                 '_,
                                 Result<PreparedCompaction, CompactionError>,
                             > = Box::pin(async {
-                                let target_system = instructions(
-                                    &effective,
-                                    &args,
-                                    &root,
-                                    &cwd,
-                                    diagnostics,
-                                )
-                                .map_err(|error| CompactionError::Internal(error.to_string()))?;
-                                let target_registry = tools(args.tools.as_ref())
-                                    .map_err(|error| CompactionError::Internal(error.to_string()))?;
+                                let target_system =
+                                    instructions(&effective, &args, &root, &cwd, diagnostics)
+                                        .map_err(|error| {
+                                            CompactionError::Internal(error.to_string())
+                                        })?;
+                                let target_registry =
+                                    tools(args.tools.as_ref()).map_err(|error| {
+                                        CompactionError::Internal(error.to_string())
+                                    })?;
                                 let target_tools: Vec<ToolDescriptor> = target_registry
                                     .iter()
                                     .map(RegisteredTool::descriptor)
@@ -3056,7 +3057,9 @@ async fn execute<S: EventSink>(
                                         effect_ports,
                                         CanonPath::new(&cwd),
                                     )
-                                    .map_err(|error| CompactionError::Internal(error.to_string()))?,
+                                    .map_err(|error| {
+                                        CompactionError::Internal(error.to_string())
+                                    })?,
                                     None => Tools::from_registry(
                                         &registry,
                                         &policy,
@@ -3064,7 +3067,8 @@ async fn execute<S: EventSink>(
                                         CanonPath::new(&cwd),
                                     ),
                                 };
-                                let mut compaction = TurnLoop::new(session, runtime, compaction_tools);
+                                let mut compaction =
+                                    TurnLoop::new(session, runtime, compaction_tools);
                                 if let Some(replayed) = active.replayed() {
                                     compaction = compaction.with_ancestor_conversation(
                                         replayed.conversation().clone(),
@@ -3730,6 +3734,185 @@ pub fn ls(args: &crate::cli::LsArgs, out: &Stdout) -> RunTermination {
     }
 }
 
+/// Read and render one session without opening a writer or constructing a run.
+pub fn export(args: &ExportArgs, out: &Stdout) -> RunTermination {
+    match exported(args) {
+        Ok(bytes) if args.file.is_none() => {
+            out.write(&bytes);
+            match out.broken() {
+                Some(message) => RunTermination::Failed { message },
+                None => RunTermination::Done,
+            }
+        }
+        Ok(bytes) => {
+            let root = match workspace(args.directory.as_ref()) {
+                Ok(root) => root,
+                Err(error) => {
+                    return RunTermination::UsageError {
+                        message: error.to_string(),
+                    };
+                }
+            };
+            let path = args.file.as_ref().expect("file mode was matched above");
+            match publish_export_file(&root, path, bytes.as_bytes()) {
+                Ok(AtomicReplacePublication::PublishedDurably) => RunTermination::Done,
+                Ok(AtomicReplacePublication::PublishedDurabilityUncertain { diagnostic }) => {
+                    RunTermination::Failed {
+                        message: format!(
+                            "the export file is visible but its durability is uncertain: {diagnostic}"
+                        ),
+                    }
+                }
+                Err(message) => RunTermination::Failed { message },
+            }
+        }
+        Err(termination) => termination,
+    }
+}
+
+fn exported(args: &ExportArgs) -> Result<String, RunTermination> {
+    let usage = |error: UsageError| RunTermination::UsageError {
+        message: error.to_string(),
+    };
+    let root = workspace(args.directory.as_ref()).map_err(usage)?;
+    let store_root = rooted_path(
+        &root,
+        session::store_root(args.session_dir.as_ref()).map_err(usage)?,
+    );
+    let store = session::jsonl(store_root, root);
+
+    if args.sanitize {
+        let bundle = Exporter::new(&store)
+            .sanitized(args.source)
+            .map_err(|error| RunTermination::Failed {
+                message: format!("the sanitized export was refused: {error}"),
+            })?;
+        let canonical = serde_json::to_string(&bundle).map_err(|error| RunTermination::Failed {
+            message: format!("the sanitized export could not be rendered: {error}"),
+        })?;
+        return Ok(match args.format {
+            ExportFormat::Json | ExportFormat::Jsonl => format!("{canonical}\n"),
+            ExportFormat::Md => {
+                format!("# ego sanitized export\n\n```json\n{canonical}\n```\n")
+            }
+        });
+    }
+
+    let events = ReplaySource::entries(&store, &args.source)
+        .map_err(local_replay_error)?
+        .ok_or_else(|| RunTermination::Failed {
+            message: format!("session {} is missing", args.source),
+        })?
+        .into_iter()
+        .filter_map(|entry| match entry {
+            SessionEntry::Event(event) => project_public(&event),
+            SessionEntry::RunTransaction(_) | SessionEntry::Evidence(_) => None,
+        })
+        .collect::<Vec<_>>();
+    match args.format {
+        ExportFormat::Json => serde_json::to_string(&events)
+            .map(|rendered| format!("{rendered}\n"))
+            .map_err(local_render_error),
+        ExportFormat::Jsonl => {
+            let mut rendered = String::new();
+            for event in events {
+                let line = serde_json::to_string(&event).map_err(local_render_error)?;
+                rendered.push_str(&line);
+                rendered.push('\n');
+            }
+            Ok(rendered)
+        }
+        ExportFormat::Md => serde_json::to_string(&events)
+            .map(|rendered| format!("# ego export\n\n```json\n{rendered}\n```\n"))
+            .map_err(local_render_error),
+    }
+}
+
+fn local_replay_error(error: ReplaySourceError) -> RunTermination {
+    RunTermination::Failed {
+        message: format!("the local export could not replay its session: {error}"),
+    }
+}
+
+fn local_render_error(error: serde_json::Error) -> RunTermination {
+    RunTermination::Failed {
+        message: format!("the local export could not be rendered: {error}"),
+    }
+}
+
+fn publish_export_file(
+    root: &Path,
+    requested: &Path,
+    bytes: &[u8],
+) -> Result<AtomicReplacePublication, String> {
+    let absolute = if requested.is_absolute() {
+        requested.to_path_buf()
+    } else {
+        root.join(requested)
+    };
+    let name = absolute.file_name().ok_or_else(|| {
+        format!(
+            "the export target {} has no normal file name",
+            requested.display()
+        )
+    })?;
+    let parent = absolute.parent().ok_or_else(|| {
+        format!(
+            "the export target {} has no parent directory",
+            requested.display()
+        )
+    })?;
+    let parent = std::fs::canonicalize(parent).map_err(|error| {
+        format!(
+            "the export target parent {} could not be resolved: {error}",
+            parent.display()
+        )
+    })?;
+    if !parent.is_dir() {
+        return Err(format!(
+            "the export target parent {} is not a directory",
+            parent.display()
+        ));
+    }
+    let target = parent.join(name);
+    match std::fs::symlink_metadata(&target) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(format!(
+                "the export target {} is a symlink",
+                target.display()
+            ));
+        }
+        Ok(metadata) if !metadata.is_file() => {
+            return Err(format!(
+                "the export target {} is not a regular file",
+                target.display()
+            ));
+        }
+        Ok(_) => {
+            let existing = OsIo
+                .read(&target)
+                .map_err(|error| format!("the export target could not be read: {error}"))?
+                .expect("metadata proved the export target exists");
+            if existing == bytes {
+                return Ok(AtomicReplacePublication::PublishedDurably);
+            }
+            return Err(format!(
+                "the export target {} already contains different bytes",
+                target.display()
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(format!(
+                "the export target {} could not be inspected: {error}",
+                target.display()
+            ));
+        }
+    }
+    OsIo.replace_atomic_publication(&target, bytes)
+        .map_err(|error| format!("the export target could not be published: {error}"))
+}
+
 /// `ego fork ID`: publish one clean target at the source's latest idle event.
 pub fn fork(args: &ForkArgs, out: &Stdout) -> Ended {
     match forked(args, out) {
@@ -3792,8 +3975,10 @@ pub async fn compact(
                     "compacted {} to {}",
                     receipt.source, receipt.target
                 )),
-                Output::Json | Output::Jsonl => serde_json::to_string(&CompactOutput::from(&receipt))
-                    .map_err(|error| error.to_string()),
+                Output::Json | Output::Jsonl => {
+                    serde_json::to_string(&CompactOutput::from(&receipt))
+                        .map_err(|error| error.to_string())
+                }
             };
             match rendered {
                 Ok(line) => out.line(&line),

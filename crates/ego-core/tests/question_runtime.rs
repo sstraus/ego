@@ -14,7 +14,10 @@ use ego_core::cost::{Amount, CurrencyCode, MeteringRevision, Money};
 use ego_core::event::domain::{DomainEvent, EventKind, ExitReason};
 use ego_core::event::id::ItemId;
 use ego_core::event::time::{Clock, Timestamp};
-use ego_core::evidence::{EvidenceAdmissionService, RunInvocationId};
+use ego_core::evidence::{
+    EvidenceAdmissionService, EvidenceError as AdmissionError, EvidenceKey, EvidenceRecord,
+    EvidenceStore as AdmissionStore, EvidenceWrite, RunInvocationId,
+};
 use ego_core::generation_model_source::{
     GenerationModelError, GenerationModelSource, GenerationProfile, GenerationRole,
 };
@@ -185,6 +188,16 @@ impl ProcessExecutor for NoProcess {
 }
 
 struct NoEvidence;
+
+impl AdmissionStore for NoEvidence {
+    fn write(
+        &self,
+        _key: EvidenceKey,
+        _record: EvidenceRecord,
+    ) -> Result<EvidenceWrite, AdmissionError> {
+        Ok(EvidenceWrite::Published)
+    }
+}
 
 impl EvidenceStore for NoEvidence {
     fn blob_store(&self) -> &dyn ego_core::store::blob::BlobStore {

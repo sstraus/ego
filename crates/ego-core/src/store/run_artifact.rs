@@ -14,6 +14,11 @@ impl RunArtifactId {
         Self("output")
     }
 
+    /// The producer-only sanitized export bundle for one run.
+    pub const fn sanitized_bundle() -> Self {
+        Self("sanitized_bundle")
+    }
+
     pub const fn as_str(self) -> &'static str {
         self.0
     }
@@ -36,6 +41,14 @@ impl PublishedRunArtifact {
         }
     }
 
+    pub fn sanitized_bundle(bytes: impl Into<Arc<[u8]>>) -> Self {
+        Self {
+            id: RunArtifactId::sanitized_bundle(),
+            mime_type: Arc::from("application/json"),
+            bytes: bytes.into(),
+        }
+    }
+
     pub const fn id(&self) -> RunArtifactId {
         self.id
     }
@@ -47,6 +60,13 @@ impl PublishedRunArtifact {
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
     }
+}
+
+/// Whether publication crossed the visible and durable boundaries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ArtifactPublication {
+    PublishedDurably,
+    PublishedDurabilityUncertain { diagnostic: String },
 }
 
 /// Closed failure vocabulary for the durable artifact boundary.
@@ -98,7 +118,7 @@ pub trait RunArtifactStore: Send + Sync {
         &self,
         run_id: RunId,
         artifact: PublishedRunArtifact,
-    ) -> Result<(), RunArtifactStoreError>;
+    ) -> Result<ArtifactPublication, RunArtifactStoreError>;
 
     fn read(
         &self,

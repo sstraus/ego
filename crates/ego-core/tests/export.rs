@@ -5,8 +5,10 @@ use std::collections::{BTreeMap, HashMap};
 use ego_core::event::domain::{DomainEvent, Envelope, EventKind, ExitReason};
 use ego_core::event::id::{EventId, ItemId, Producer, Seq, SessionId, TurnId};
 use ego_core::event::time::Timestamp;
-use ego_core::evidence::{ConfigProvenance, EvidenceRecord, RunContextEvidence, RunInvocationId};
-use ego_core::export::{ExportError, Exporter};
+use ego_core::evidence::{
+    ConfigProvenance, EvidenceKey, EvidenceRecord, RunContextEvidence, RunInvocationId,
+};
+use ego_core::export::{ExportError, ExportEvidenceFailure, Exporter};
 use ego_core::generator::types::{ErrorKind, ImageMediaType, ImageRef};
 use ego_core::permit::{CanonPath, Escalation, OpName, ToolResult};
 use ego_core::run::RunId;
@@ -79,6 +81,40 @@ fn context(session: SessionId) -> SessionEntry {
         run_id,
         ConfigProvenance::resolved(Some("ci".to_owned())),
     )))
+}
+
+fn admitted_command(session: SessionId, invocation: RunInvocationId) -> SessionEntry {
+    let run_id = RunId::new(session, invocation.uuid());
+    serde_json::from_value(serde_json::json!({
+        "kind": "run_transaction",
+        "run_transaction": {
+            "revision": 1,
+            "run_id": run_id,
+            "root": "/workspace",
+            "selections": {
+                "model": "model/test",
+                "thinking": null,
+                "mode": null,
+                "budget": null,
+                "profile": null
+            },
+            "command": {
+                "kind": "command_admitted",
+                "request_id": invocation.uuid(),
+                "digest": "export-order",
+                "expected_revision": null,
+                "lease": "00000000-0000-7000-8000-000000000056",
+                "executor_id": run_id.nonce(),
+                "prompt": "export-order",
+                "model": "model/test",
+                "start": true
+            },
+            "status": "running",
+            "observed_at": 0,
+            "pruned_receipts": []
+        }
+    }))
+    .expect("admitted command fixture")
 }
 
 fn fixture() -> (ExportFixture, SessionId, Vec<u8>) {
@@ -215,15 +251,21 @@ fn exporter_is_producer_only_and_emits_the_exact_versioned_shape() {
         .sanitized(target)
         .expect("valid evidence and lineage export");
     let encoded = serde_json::to_string(&bundle).expect("export bundle serializes");
-    assert!(encoded.starts_with("{\"v\":1,\"target\":"), "{encoded}");
+    let field_markers = ["{\"v\":1,\"target\":", ",\"records\":", ",\"redactions\":"];
+    let field_positions = field_markers.map(|marker| encoded.find(marker).expect("field marker"));
+    assert!(
+        field_positions.windows(2).all(|pair| pair[0] < pair[1]),
+        "{encoded}"
+    );
     let value: serde_json::Value = serde_json::from_str(&encoded).expect("bundle JSON");
-    let keys: Vec<&str> = value
+    let mut keys: Vec<&str> = value
         .as_object()
         .expect("bundle object")
         .keys()
         .map(String::as_str)
         .collect();
-    assert_eq!(keys, ["v", "target", "records", "redactions"]);
+    keys.sort_unstable();
+    assert_eq!(keys, ["records", "redactions", "target", "v"]);
     assert_eq!(value["v"], 1);
     assert!(value["records"].is_array(), "{value}");
     assert!(value["redactions"].is_array(), "{value}");
@@ -275,10 +317,23 @@ fn exporter_projects_adversarial_typed_entries_without_opaque_material() {
             "blob_payload",
         ]
     );
-    assert!(
+    assert_eq!(
         ledger
             .iter()
-            .all(|entry| entry["count"].as_u64() == Some(1))
+            .map(|entry| (
+                entry["category"].as_str().expect("category"),
+                entry["count"].as_u64().expect("count"),
+            ))
+            .collect::<Vec<_>>(),
+        [
+            ("opaque_prose", 2),
+            ("hidden_reasoning", 1),
+            ("path", 1),
+            ("tool_material", 4),
+            ("permission_material", 1),
+            ("raw_error", 1),
+            ("blob_payload", 1),
+        ]
     );
     assert_eq!(
         before,
@@ -311,7 +366,6 @@ fn exporter_emits_oldest_lineage_first_and_physical_positions() {
 fn unknown_durable_entry_fails_closed_and_preserves_source_bytes() {
     let (mut fixture, target, _) = fixture();
     let source = fixture.source;
-    let before = source_bytes(&fixture);
     fixture.entries.insert(
         source,
         Err(ReplaySourceError::UnknownEntry {
@@ -319,6 +373,7 @@ fn unknown_durable_entry_fails_closed_and_preserves_source_bytes() {
             position: Seq::ZERO,
         }),
     );
+    let before = source_bytes(&fixture);
     let error = Exporter::new(&fixture)
         .sanitized(target)
         .expect_err("unknown entry");
@@ -355,7 +410,6 @@ fn missing_lineage_source_fails_closed_and_preserves_source_bytes() {
 fn corrupt_session_fails_closed_and_preserves_source_bytes() {
     let (mut fixture, target, _) = fixture();
     let source = fixture.source;
-    let before = source_bytes(&fixture);
     fixture.entries.insert(
         source,
         Err(ReplaySourceError::CorruptSession {
@@ -363,6 +417,7 @@ fn corrupt_session_fails_closed_and_preserves_source_bytes() {
             reason: "checksum mismatch".to_owned(),
         }),
     );
+    let before = source_bytes(&fixture);
     let error = Exporter::new(&fixture)
         .sanitized(target)
         .expect_err("corrupt source");
@@ -439,11 +494,48 @@ fn missing_and_corrupt_blob_references_fail_closed_without_source_mutation() {
 fn invalid_run_evidence_fails_closed_before_rendering_or_mutating_sources() {
     let (mut fixture, target, _) = fixture();
     let other = SessionId::new();
-    let before = source_bytes(&fixture);
     fixture.entries.insert(target, Ok(vec![context(other)]));
+    let before = source_bytes(&fixture);
     let error = Exporter::new(&fixture)
         .sanitized(target)
         .expect_err("mismatched evidence");
     assert!(matches!(error, ExportError::Evidence { .. }));
     assert_eq!(before, source_bytes(&fixture));
+}
+
+#[test]
+fn rooted_command_must_precede_matching_run_context() {
+    let (mut fixture, target, _) = fixture();
+    let invocation = RunInvocationId::new();
+    fixture.entries.insert(
+        target,
+        Ok(vec![
+            SessionEntry::Evidence(EvidenceRecord::RunContext(RunContextEvidence::new(
+                target,
+                invocation,
+                RunId::new(target, invocation.uuid()),
+                ConfigProvenance::default(),
+            ))),
+            admitted_command(target, invocation),
+        ]),
+    );
+
+    let error = Exporter::new(&fixture)
+        .sanitized(target)
+        .expect_err("run context before command admission");
+    assert!(matches!(
+        error,
+        ExportError::Evidence {
+            session,
+            failure: ExportEvidenceFailure::OutOfOrder {
+                key: EvidenceKey::RunContext {
+                    session: recorded_session,
+                    invocation: recorded_invocation,
+                },
+            },
+            ..
+        } if session == target
+            && recorded_session == target
+            && recorded_invocation == invocation
+    ));
 }

@@ -137,6 +137,13 @@ async fn ordinary_main() -> std::process::ExitCode {
             Ok(Invocation::Compact(args)) => {
                 run::compact(&args, &out, std::sync::Arc::clone(&evidence)).await
             }
+            Ok(Invocation::Export(args)) => Ended {
+                termination: run::export(&args, &out),
+                session: args.source,
+                state: ego_core::state::SessionState::default(),
+                result: serde_json::Value::String(String::new()),
+                mcp_errors: Vec::new(),
+            },
             Ok(Invocation::Models(args)) => {
                 let termination = match ego_cli::models::execute(&args, &cancel).await {
                     Ok(rendered) => {

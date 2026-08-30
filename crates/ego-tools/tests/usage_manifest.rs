@@ -15,6 +15,7 @@ use ego_core::generator::capabilities::{
     CacheRetention, CancelSemantics, ImageInputSupport, ModelCapabilities, ReasoningCarryover,
     ReasoningEffortSupport, Transport,
 };
+use ego_core::run::RunId;
 use ego_core::store::session_store::SessionStore;
 use ego_tools::store::{JsonlStore, LeaseInputs, OsIo};
 use tempfile::tempdir;
@@ -81,7 +82,7 @@ fn main_generation_evidence_sets_model_after_judge_compaction_and_ambient_record
             ego_core::evidence::RunContextEvidence::new(
                 session,
                 invocation,
-                "regression_case-run",
+                RunId::new(session, invocation.uuid()),
                 ConfigProvenance::default(),
             ),
         )
@@ -116,7 +117,7 @@ fn manifest_model_stays_absent_without_main_generation_evidence() {
             ego_core::evidence::RunContextEvidence::new(
                 session,
                 invocation,
-                "regression_case-run",
+                RunId::new(session, invocation.uuid()),
                 ConfigProvenance::default(),
             ),
         )

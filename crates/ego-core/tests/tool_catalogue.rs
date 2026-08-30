@@ -12,7 +12,10 @@ use ego_core::cost::MeteringRevision;
 use ego_core::event::domain::{DomainEvent, EventKind, ExitReason};
 use ego_core::event::id::SessionId;
 use ego_core::event::time::{Clock, Timestamp};
-use ego_core::evidence::{EvidenceAdmissionService, RunInvocationId};
+use ego_core::evidence::{
+    EvidenceAdmissionService, EvidenceError as AdmissionError, EvidenceKey, EvidenceRecord,
+    EvidenceStore as AdmissionStore, EvidenceWrite, RunInvocationId,
+};
 use ego_core::generator::attempt::{AttemptStream, GenerationAttempt};
 use ego_core::generator::fake::FakeGenerator;
 use ego_core::generator::port::{AiEvent, Generator, RequestExpressibilityError};
@@ -189,6 +192,16 @@ impl SessionStore for MemoryStore {
 }
 
 struct NoEvidence;
+
+impl AdmissionStore for NoEvidence {
+    fn write(
+        &self,
+        _key: EvidenceKey,
+        _record: EvidenceRecord,
+    ) -> Result<EvidenceWrite, AdmissionError> {
+        Ok(EvidenceWrite::Published)
+    }
+}
 
 impl EvidenceStore for NoEvidence {
     fn blob_store(&self) -> &dyn ego_core::store::blob::BlobStore {

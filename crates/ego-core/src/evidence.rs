@@ -19,6 +19,7 @@ use crate::generator::capabilities::ModelCapabilities;
 use crate::mcp::{McpAdmissionFingerprint, McpSubject};
 use crate::permit::ExecObservation;
 use crate::public::InstructionDescriptor;
+use crate::run::RunId;
 
 const EVIDENCE_SCHEMA_VERSION: u32 = 1;
 
@@ -147,7 +148,7 @@ pub struct RunContextEvidence {
     version: u32,
     session: SessionId,
     invocation: RunInvocationId,
-    run_id: String,
+    run_id: RunId,
     config: ConfigProvenance,
     #[serde(skip_serializing_if = "Option::is_none")]
     context_digest: Option<String>,
@@ -167,14 +168,14 @@ impl RunContextEvidence {
     pub fn new(
         session: SessionId,
         invocation: RunInvocationId,
-        run_id: impl Into<String>,
+        run_id: RunId,
         config: ConfigProvenance,
     ) -> Self {
         Self {
             version: EVIDENCE_SCHEMA_VERSION,
             session,
             invocation,
-            run_id: run_id.into(),
+            run_id,
             config,
             context_digest: None,
             instruction_paths: Vec::new(),
@@ -235,8 +236,40 @@ impl RunContextEvidence {
         self.invocation
     }
 
+    pub const fn version(&self) -> u32 {
+        self.version
+    }
+
+    pub const fn run_id(&self) -> RunId {
+        self.run_id
+    }
+
+    pub fn config(&self) -> &ConfigProvenance {
+        &self.config
+    }
+
+    pub fn context_digest(&self) -> Option<&str> {
+        self.context_digest.as_deref()
+    }
+
+    pub fn instruction_paths(&self) -> &[String] {
+        &self.instruction_paths
+    }
+
     pub fn instructions(&self) -> &[InstructionDescriptor] {
         &self.instructions
+    }
+
+    pub fn mcp_subjects(&self) -> &[McpSubject] {
+        &self.mcp_subjects
+    }
+
+    pub fn mcp_admissions(&self) -> &[McpAdmissionFingerprint] {
+        &self.mcp_admissions
+    }
+
+    pub fn execution(&self) -> Option<&ExecObservation> {
+        self.execution.as_ref()
     }
 }
 
@@ -278,6 +311,10 @@ impl GenerationAdmissionEvidence {
 
     pub fn pricing(&self) -> &PricingEvidence {
         &self.pricing
+    }
+
+    pub const fn version(&self) -> u32 {
+        self.version
     }
 
     pub fn target(&self) -> &GenerationTarget {

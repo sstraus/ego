@@ -24,6 +24,10 @@ use ego_core::config::{Mode, PermCfg, Ruleset, Source};
 use ego_core::cost::{Amount, CurrencyCode, Money, PricingRevision, RateSource};
 use ego_core::event::domain::ExitReason;
 use ego_core::event::id::SessionId;
+use ego_core::evidence::{
+    EvidenceAdmissionService, EvidenceError as AdmissionError, EvidenceKey, EvidenceRecord,
+    EvidenceStore as AdmissionStore, EvidenceWrite, RunInvocationId,
+};
 use ego_core::generation_model_source::{
     GenerationModelError, GenerationModelSource, GenerationProfile, GenerationRole,
 };
@@ -112,6 +116,16 @@ impl DuplexSpawner for NoDuplex {
 }
 
 struct NoEvidence;
+
+impl AdmissionStore for NoEvidence {
+    fn write(
+        &self,
+        _key: EvidenceKey,
+        _record: EvidenceRecord,
+    ) -> Result<EvidenceWrite, AdmissionError> {
+        Ok(EvidenceWrite::Published)
+    }
+}
 
 impl BlobStore for NoEvidence {
     fn begin(&self) -> Result<Box<dyn BlobWriter>, BlobError> {
@@ -1732,6 +1746,7 @@ mod end_to_end {
                     id: SessionId::new(),
                     state: SessionState::default(),
                     store: &store,
+                    evidence: &ws.evidence,
                     clock: &clock,
                     sink: &sink,
                     cancel: CancelToken::new(),
@@ -1745,6 +1760,8 @@ mod end_to_end {
                         system: None,
                         token_ceiling: None,
                     },
+                    admission: Arc::new(EvidenceAdmissionService::new()),
+                    invocation: RunInvocationId::new(),
                 },
                 Tools::new(
                     &ws.registry,
@@ -1828,6 +1845,7 @@ mod end_to_end {
                     id: SessionId::new(),
                     state: SessionState::default(),
                     store: &store,
+                    evidence: &ws.evidence,
                     clock: &clock,
                     sink: &sink,
                     cancel: CancelToken::new(),
@@ -1841,6 +1859,8 @@ mod end_to_end {
                         system: None,
                         token_ceiling: None,
                     },
+                    admission: Arc::new(EvidenceAdmissionService::new()),
+                    invocation: RunInvocationId::new(),
                 },
                 Tools::new(
                     &ws.registry,

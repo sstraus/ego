@@ -18,8 +18,9 @@ use ego_core::permit::{BackendIdentity, ExecCaps, ExecObservation, PolicyDigest}
 use ego_core::public::{InstructionDescriptor, InstructionSource};
 use ego_core::run::{
     EventSinkFactory, IdSource, RecoveryEvidence, RunAppend, RunCommandOutcome, RunController,
-    RunExecutionBindings, RunExecutor, RunExecutorError, RunHandle, RunPreparation, RunPrepared,
-    RunRetention, RunRoot, RunSelections, RunSettlement, RunStart, RunTransaction, StartRequest,
+    RunExecutionBindings, RunExecutor, RunExecutorError, RunHandle, RunId, RunPreparation,
+    RunPrepared, RunRetention, RunRoot, RunSelections, RunSettlement, RunStart, RunTransaction,
+    StartRequest,
 };
 use ego_core::sink::{EventSink, NullSink};
 use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
@@ -62,7 +63,12 @@ fn target() -> GenerationTarget {
 }
 
 fn run_context(session: SessionId, id: RunInvocationId) -> RunContextEvidence {
-    RunContextEvidence::new(session, id, "run-id", ConfigProvenance::default())
+    RunContextEvidence::new(
+        session,
+        id,
+        RunId::new(session, id.uuid()),
+        ConfigProvenance::default(),
+    )
 }
 
 fn generation(
@@ -360,7 +366,7 @@ impl RunExecutor for FakeRunExecutor {
         let context = RunContextEvidence::new(
             request.run_id.session_id(),
             request.invocation,
-            "run-id",
+            request.run_id,
             ConfigProvenance::default(),
         );
         Box::pin(future::ready(Ok(RunPrepared::new(

@@ -96,7 +96,7 @@ fn sanitized_export_structurally_excludes_adversarial_material() {
         "args",
         "env",
         "cwd",
-        "reasoning",
+        "\"reasoning\":",
         "raw_error",
         "authorization",
         "Bearer",

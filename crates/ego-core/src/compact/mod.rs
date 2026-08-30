@@ -609,7 +609,7 @@ mod transition_contract_tests {
                 .lock()
                 .expect("confirmed publications")
                 .pop_front()
-                .unwrap_or_else(|| Ok(TargetPublication::PublishedDurably { diagnostic: None }))
+                .unwrap_or(Ok(TargetPublication::PublishedDurably { diagnostic: None }))
         }
     }
 

@@ -59,6 +59,8 @@ pub enum Invocation {
     Fork(Box<ForkArgs>),
     /// `ego compact ID --request-id UUID` — publish one deterministic successor.
     Compact(Box<CompactArgs>),
+    /// `ego export ID` — render one local or structurally sanitized transcript.
+    Export(Box<ExportArgs>),
     /// `ego models` — the shared model catalogue snapshot.
     Models(Box<ModelsArgs>),
     /// `ego acp` — serve the Agent Client Protocol on stdio, until the host
@@ -153,6 +155,7 @@ pub const BUILT: &[&str] = &[
     "resume",
     "fork",
     "compact",
+    "export",
     "ls",
     "usage",
     "models",
@@ -180,12 +183,6 @@ pub const BUILT: &[&str] = &[
 /// places the work, and from the code where it does not — a subsystem that
 /// table does not place still gets a reason, never a milestone invented for it.
 pub const UNBUILT: &[(&str, &str)] = &[
-    (
-        "export",
-        "replay and export with `--sanitize` (**M3**). The projection exists; \
-         the redaction contract that makes an exported session safe to hand \
-         over does not",
-    ),
     (
         "hooks",
         "the strict hook catalogue and runner (**M4**). This build has no \
@@ -358,6 +355,35 @@ pub struct CompactArgs {
     pub session_dir: Option<PathBuf>,
     pub directory: Option<PathBuf>,
     pub output: Output,
+}
+
+/// The exact read-only `ego export ID` request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExportArgs {
+    pub source: SessionId,
+    pub sanitize: bool,
+    pub format: ExportFormat,
+    pub file: Option<PathBuf>,
+    pub session_dir: Option<PathBuf>,
+    pub directory: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+#[value(rename_all = "lowercase")]
+pub enum ExportFormat {
+    Md,
+    Json,
+    Jsonl,
+}
+
+impl std::fmt::Display for ExportFormat {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Md => "md",
+            Self::Json => "json",
+            Self::Jsonl => "jsonl",
+        })
+    }
 }
 
 /// The exact `ego models [--provider P] [--refresh] [--json]` grammar.
@@ -597,6 +623,29 @@ struct CompactCommand {
 
     #[command(flatten)]
     common: Common,
+}
+
+/// `ego export ID` — no writer, provider, prompt, or host runtime.
+#[derive(Debug, Parser)]
+#[command(
+    name = "ego export",
+    about = "Export a session locally or as a structurally sanitized bundle.",
+    disable_help_subcommand = true
+)]
+struct ExportCommand {
+    source: String,
+
+    #[arg(long)]
+    sanitize: bool,
+
+    #[arg(long, value_enum, default_value_t = ExportFormat::Md)]
+    format: ExportFormat,
+
+    #[arg(long, value_name = "PATH")]
+    file: Option<PathBuf>,
+
+    #[command(flatten)]
+    places: Places,
 }
 
 #[derive(Debug, Parser)]
@@ -1171,6 +1220,7 @@ fn overview(program: &str) -> String {
             "ls" => "List sessions (this workspace; --all for every one)",
             "usage" => "Report usage, context and cost for this workspace",
             "compact" => "Compact a session into its deterministic successor",
+            "export" => "Export a session or sanitized bundle",
             "models" => "List the shared model catalogue",
             "acp" => "Serve the Agent Client Protocol on stdio",
             "mcp-server" => "Serve scoped ego runs over MCP on stdio",
@@ -1371,6 +1421,27 @@ pub fn parse(argv: Vec<String>) -> Result<Invocation, UsageError> {
                     session_dir: parsed.common.places.session_dir,
                     directory: parsed.common.places.directory,
                     output: parsed.common.output,
+                })))
+            }
+        },
+        Some("export") => match clap_or_answer::<ExportCommand>(&tokens)? {
+            Parsed::Answered(text) => Ok(Invocation::Answered(text)),
+            Parsed::Command(parsed) => {
+                let source = SessionId::from_str(&parsed.source).map_err(|error| {
+                    UsageError(format!("`{}` is not a session id: {error}", parsed.source))
+                })?;
+                if parsed.format == ExportFormat::Jsonl && parsed.file.is_some() {
+                    return Err(UsageError(
+                        "ego export --format jsonl cannot be combined with --file".to_owned(),
+                    ));
+                }
+                Ok(Invocation::Export(Box::new(ExportArgs {
+                    source,
+                    sanitize: parsed.sanitize,
+                    format: parsed.format,
+                    file: parsed.file,
+                    session_dir: parsed.places.session_dir,
+                    directory: parsed.places.directory,
                 })))
             }
         },

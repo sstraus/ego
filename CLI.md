@@ -109,8 +109,8 @@ omitted when empty: two states, identical bytes.
 | `ego resume` | **yes** | continues a session that already exists, never creating one. `[ID]` is optional: without it the most recently updated session of this workspace is taken. Without a prompt source it enters the interactive driver; with a prompt or `-` it remains headless |
 | `ego ls` | **yes** | this workspace by default, `--all` for the whole store; `--output json\|jsonl` per §4.6 |
 | `ego fork` | **yes** | creates a durable lineage branch at an explicit valid source boundary without copying source spend or run state |
-| `ego compact` | no | regression case's headless spelling for the existing idle compaction operation: a required request ID derives one idempotent clean target and later continuation |
-| `ego export` | no | replay and export with `--sanitize` (**M3**). The projection exists; implementation of the accepted structural redaction contract remains regression case work |
+| `ego compact` | **yes** | a required request ID derives one idempotent clean target from the existing idle compaction operation and supports later continuation |
+| `ego export` | **yes** | local transcript export plus the producer-only version-1 structural bundle under `--sanitize`; Markdown, JSON, JSONL, stdout, and atomic file publication follow §2.1 |
 | `ego mcp` | **yes** | `add`, `rm`, `ls [--json]`, and `reload [NAME]` use one live admitted registry and truthful health projection. `login NAME` is typed but refuses before network access until the product CIMD origin and loopback redirect are published |
 | `ego mcp-server` | **yes** | currently serves scoped `run`/`continue`/`cancel`/`status` tools and sanitized summary/output resources on stdio; M3 adds `compact` under §6.6. `--max-concurrent-runs`, `--retained-requests`, and `--max-resource-bytes` are required non-zero deployment bounds; `-C`/the current directory is the sole canonical root and stdout remains protocol-only |
 | `ego auth` | **yes** | `login\|logout\|status [PROVIDER]`; credentials live in one locked `$EGO_HOME/auth.json`, while TOML commands and discovered auth plugins can supply login tokens |

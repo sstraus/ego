@@ -14,6 +14,7 @@ use ego_core::generator::capabilities::{
     CacheRetention, CancelSemantics, ImageInputSupport, ModelCapabilities, ReasoningCarryover,
     ReasoningEffortSupport, Transport,
 };
+use ego_core::run::RunId;
 use ego_core::store::codec::{
     CODEC_VERSION, Header, StoreLine, decode_line, encode_header, encode_record,
 };
@@ -81,7 +82,12 @@ fn capabilities() -> ModelCapabilities {
 }
 
 fn context(session: SessionId, id: RunInvocationId) -> RunContextEvidence {
-    RunContextEvidence::new(session, id, "run-id", ConfigProvenance::default())
+    RunContextEvidence::new(
+        session,
+        id,
+        RunId::new(session, id.uuid()),
+        ConfigProvenance::default(),
+    )
 }
 
 fn generation(
@@ -209,6 +215,90 @@ fn lease_held_writer_is_the_only_evidence_store_and_physical_order_is_authoritat
                 role: GenerationRole::Main,
             },
         }) if actual == attempt && position == seq(1)
+    ));
+}
+
+#[test]
+fn rooted_command_and_generation_evidence_precede_one_matching_start() {
+    let root = tempdir().unwrap();
+    let session = SessionId::new();
+    let invocation = RunInvocationId::new();
+    let run_id = RunId::new(session, invocation.uuid());
+    let log = log_path(root.path(), &session);
+    std::fs::create_dir_all(log.parent().unwrap()).unwrap();
+    let mut initial = encode_header(&Header {
+        v: CODEC_VERSION,
+        session,
+        created: Timestamp::from_millis(1),
+        workspace_root: "/workspace".into(),
+    });
+    initial.push(b'\n');
+    let mut admitted = legacy_run_transaction(&session);
+    admitted["run_id"] = serde_json::to_value(run_id).unwrap();
+    admitted["command"]["executor_id"] = serde_json::to_value(run_id.nonce()).unwrap();
+    let admitted_entry = serde_json::json!({
+        "kind": "run_transaction",
+        "run_transaction": admitted,
+    });
+    initial.extend_from_slice(&encode_record(seq(1), &admitted_entry).unwrap());
+    initial.push(b'\n');
+    std::fs::write(&log, initial).unwrap();
+
+    let store = JsonlStore::new(root.path(), "/workspace", Box::new(OsIo));
+    let opened = store.open_writer(&session, lease()).unwrap();
+    let service = EvidenceAdmissionService::new();
+    let attempt = AttemptRef::first(GenerationId::new());
+    service
+        .admit_run_context(&opened.writer, context(session, invocation))
+        .unwrap();
+    service
+        .admit_generation(&opened.writer, generation(session, invocation, attempt))
+        .unwrap();
+    opened
+        .writer
+        .append(&session, &generation_started(attempt))
+        .unwrap();
+
+    let records = entries(&store, &session);
+    assert!(matches!(
+        &records[0],
+        SessionEntry::RunTransaction(transaction)
+            if transaction.run_id() == run_id
+                && matches!(transaction.command(), ego_core::run::RunCommand::CommandAdmitted { .. })
+    ));
+    assert!(matches!(
+        &records[1],
+        SessionEntry::Evidence(EvidenceRecord::RunContext(evidence))
+            if evidence.session() == session
+                && evidence.invocation() == invocation
+                && evidence.run_id() == run_id
+    ));
+    assert!(matches!(
+        &records[2],
+        SessionEntry::Evidence(EvidenceRecord::GenerationAdmission(evidence))
+            if evidence.session() == session
+                && evidence.invocation() == invocation
+                && evidence.attempt() == attempt
+    ));
+    assert_eq!(
+        records
+            .iter()
+            .filter(|entry| matches!(
+                entry,
+                SessionEntry::Event(DomainEvent {
+                    kind: EventKind::GenerationStarted { attempt: actual, .. },
+                    ..
+                }) if *actual == attempt
+            ))
+            .count(),
+        1
+    );
+    assert!(matches!(
+        &records[3],
+        SessionEntry::Event(DomainEvent {
+            kind: EventKind::GenerationStarted { attempt: actual, .. },
+            ..
+        }) if *actual == attempt
     ));
 }
 
@@ -454,11 +544,11 @@ fn recognized_v7_legacy_entries_migrate_to_tagged_v8_and_unknown_stays_unchanged
     let evidence_line = with_evidence
         .split(|byte| *byte == b'\n')
         .filter(|line| !line.is_empty())
-        .filter_map(|line| match decode_line(line).unwrap() {
+        .rev()
+        .find_map(|line| match decode_line(line).unwrap() {
             StoreLine::Record(record) => Some(record),
             StoreLine::Header(_) | StoreLine::Unknown(_) => None,
         })
-        .last()
         .unwrap();
     let evidence: SessionEntry = serde_json::from_str(evidence_line.payload.get()).unwrap();
     assert!(matches!(evidence, SessionEntry::Evidence(_)));

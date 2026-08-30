@@ -397,7 +397,8 @@ pub struct RunId {
 }
 
 impl RunId {
-    fn new(session_id: SessionId, nonce: Uuid) -> Self {
+    /// Build a run identity from its already-typed session and independent nonce.
+    pub const fn new(session_id: SessionId, nonce: Uuid) -> Self {
         Self { session_id, nonce }
     }
 
@@ -675,6 +676,10 @@ impl RunTransaction {
 
     pub const fn observed_at(&self) -> Timestamp {
         self.observed_at
+    }
+
+    pub fn pruned_receipts(&self) -> &[TurnLease] {
+        &self.pruned_receipts
     }
 }
 
