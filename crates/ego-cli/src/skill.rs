@@ -7,6 +7,10 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use ego_core::config::{ConfigLayer, Sourced, Trust, resolve};
+use ego_core::event::hook::HookLifecycle;
+use ego_core::event::skill::{SkillInvocationId, SkillSourceLocation};
+use ego_core::hook::{HookConfigEntry, HookHandlerConfig, HookMatcher};
+use ego_core::permit::rule::Rule;
 
 use crate::yaml_envelope::{self, MAX_FILE_BYTES, Node};
 
@@ -686,6 +690,236 @@ fn diagnostic(
         message: message.into(),
         collision: false,
     }
+}
+
+/// Project the closed invocation-scoped hook envelope without reading a skill body.
+pub(crate) fn project_skill_hooks(
+    header: &str,
+    logical_location: &str,
+    invocation: SkillInvocationId,
+) -> Result<Vec<HookConfigEntry>, String> {
+    let location = SkillSourceLocation::parse(logical_location)
+        .map_err(|error| format!("invalid skill hook source location: {error}"))?;
+    let mut root = yaml_envelope::mapping(header)?;
+    let version = root
+        .remove("version")
+        .ok_or_else(|| "skill hook envelope is missing required integer `version: 1`".to_owned())?;
+    match version {
+        Node::Scalar { value, plain: true } if value == "1" => {}
+        _ => return Err("skill hook envelope `version` must be the integer 1".to_owned()),
+    }
+    for key in root.keys() {
+        if key != "hooks" {
+            return Err(format!("unsupported skill hook envelope field `{key}`"));
+        }
+    }
+    let Some(hooks) = root.remove("hooks") else {
+        return Ok(Vec::new());
+    };
+    let Node::Sequence(hooks) = hooks else {
+        return Err("skill hook field `hooks` must be a sequence".to_owned());
+    };
+    hooks
+        .into_iter()
+        .enumerate()
+        .map(|(ordinal, hook)| {
+            Ok(project_hook_entry(hook, ordinal)?.bind_skill(location.as_str(), invocation))
+        })
+        .collect()
+}
+
+fn project_hook_entry(node: Node, ordinal: usize) -> Result<HookConfigEntry, String> {
+    let mut fields = hook_mapping(node, &format!("hooks[{ordinal}]"))?;
+    reject_unknown_hook_fields(&fields, &["event", "matcher", "once", "handler"])?;
+    let event = hook_required_string(&mut fields, "event")?;
+    let event =
+        HookLifecycle::parse(&event).ok_or_else(|| format!("unsupported hook event `{event}`"))?;
+    let matcher = hook_optional_string(&mut fields, "matcher")?
+        .map(project_hook_matcher)
+        .transpose()?;
+    let once = hook_optional_bool(&mut fields, "once")?.unwrap_or(false);
+    let handler = fields
+        .remove("handler")
+        .ok_or_else(|| "skill hook is missing required field `handler`".to_owned())?;
+    let handler = project_hook_handler(handler)?;
+    Ok(HookConfigEntry::new(event, matcher, handler).with_once(once))
+}
+
+fn project_hook_matcher(value: String) -> Result<HookMatcher, String> {
+    if let Ok(rule) = Rule::load(&value) {
+        return Ok(HookMatcher::Permission(rule));
+    }
+    if value.is_empty()
+        || value.len() > 4096
+        || value.chars().any(char::is_control)
+        || (value.starts_with('/') && value.ends_with('/'))
+    {
+        return Err(format!("invalid exact hook matcher `{value}`"));
+    }
+    Ok(HookMatcher::Exact(value))
+}
+
+fn project_hook_handler(node: Node) -> Result<HookHandlerConfig, String> {
+    let mut fields = hook_mapping(node, "handler")?;
+    let handler_type = hook_required_string(&mut fields, "type")?;
+    match handler_type.as_str() {
+        "command" => {
+            reject_unknown_hook_fields(&fields, &["command", "args", "timeout"])?;
+            Ok(HookHandlerConfig::Command {
+                command: hook_required_string(&mut fields, "command")?,
+                args: hook_optional_strings(&mut fields, "args")?.unwrap_or_default(),
+                timeout_seconds: hook_optional_timeout(&mut fields)?,
+            })
+        }
+        "http" => {
+            reject_unknown_hook_fields(&fields, &["url", "headers", "allowedEnvVars", "timeout"])?;
+            Ok(HookHandlerConfig::Http {
+                url: hook_required_string(&mut fields, "url")?,
+                headers: hook_optional_string_map(&mut fields, "headers")?.unwrap_or_default(),
+                allowed_env_vars: hook_optional_strings(&mut fields, "allowedEnvVars")?
+                    .unwrap_or_default(),
+                timeout_seconds: hook_optional_timeout(&mut fields)?,
+            })
+        }
+        "mcp_tool" => {
+            reject_unknown_hook_fields(&fields, &["server", "tool", "timeout"])?;
+            Ok(HookHandlerConfig::McpTool {
+                server: hook_required_string(&mut fields, "server")?,
+                tool: hook_required_string(&mut fields, "tool")?,
+                timeout_seconds: hook_optional_timeout(&mut fields)?,
+            })
+        }
+        "prompt" => {
+            reject_unknown_hook_fields(&fields, &["timeout"])?;
+            Ok(HookHandlerConfig::Prompt {
+                timeout_seconds: hook_optional_timeout(&mut fields)?,
+            })
+        }
+        _ => Err(format!("unsupported hook handler `{handler_type}`")),
+    }
+}
+
+fn hook_mapping(node: Node, field: &str) -> Result<BTreeMap<String, Node>, String> {
+    let Node::Mapping(entries) = node else {
+        return Err(format!("skill hook field `{field}` must be a mapping"));
+    };
+    entries
+        .into_iter()
+        .map(|(key, value)| match key {
+            Node::Scalar { value: key, .. } => Ok((key, value)),
+            _ => Err(format!("skill hook field `{field}` has a non-string key")),
+        })
+        .collect()
+}
+
+fn reject_unknown_hook_fields(
+    fields: &BTreeMap<String, Node>,
+    allowed: &[&str],
+) -> Result<(), String> {
+    if let Some(field) = fields
+        .keys()
+        .find(|field| !allowed.contains(&field.as_str()))
+    {
+        return Err(format!("unsupported skill hook field `{field}`"));
+    }
+    Ok(())
+}
+
+fn hook_required_string(
+    fields: &mut BTreeMap<String, Node>,
+    field: &str,
+) -> Result<String, String> {
+    hook_optional_string(fields, field)?
+        .ok_or_else(|| format!("skill hook is missing required field `{field}`"))
+}
+
+fn hook_optional_string(
+    fields: &mut BTreeMap<String, Node>,
+    field: &str,
+) -> Result<Option<String>, String> {
+    let Some(value) = fields.remove(field) else {
+        return Ok(None);
+    };
+    yaml_envelope::scalar(value)
+        .map(Some)
+        .ok_or_else(|| format!("skill hook field `{field}` must be a non-empty string"))
+}
+
+fn hook_optional_bool(
+    fields: &mut BTreeMap<String, Node>,
+    field: &str,
+) -> Result<Option<bool>, String> {
+    let Some(value) = fields.remove(field) else {
+        return Ok(None);
+    };
+    match value {
+        Node::Scalar { value, plain: true } if value == "true" => Ok(Some(true)),
+        Node::Scalar { value, plain: true } if value == "false" => Ok(Some(false)),
+        _ => Err(format!("skill hook field `{field}` must be a boolean")),
+    }
+}
+
+fn hook_optional_strings(
+    fields: &mut BTreeMap<String, Node>,
+    field: &str,
+) -> Result<Option<Vec<String>>, String> {
+    let Some(value) = fields.remove(field) else {
+        return Ok(None);
+    };
+    let Node::Sequence(values) = value else {
+        return Err(format!(
+            "skill hook field `{field}` must be a string sequence"
+        ));
+    };
+    values
+        .into_iter()
+        .map(|value| {
+            yaml_envelope::scalar(value)
+                .ok_or_else(|| format!("skill hook field `{field}` must contain non-empty strings"))
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(Some)
+}
+
+fn hook_optional_string_map(
+    fields: &mut BTreeMap<String, Node>,
+    field: &str,
+) -> Result<Option<Vec<(String, String)>>, String> {
+    let Some(value) = fields.remove(field) else {
+        return Ok(None);
+    };
+    let Node::Mapping(values) = value else {
+        return Err(format!(
+            "skill hook field `{field}` must be a string mapping"
+        ));
+    };
+    values
+        .into_iter()
+        .map(|(name, value)| {
+            let name = yaml_envelope::scalar(name)
+                .ok_or_else(|| format!("skill hook field `{field}` has a non-string name"))?;
+            let value = yaml_envelope::scalar(value)
+                .ok_or_else(|| format!("skill hook field `{field}` has a non-string value"))?;
+            Ok((name, value))
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(Some)
+}
+
+fn hook_optional_timeout(fields: &mut BTreeMap<String, Node>) -> Result<Option<u64>, String> {
+    let Some(value) = fields.remove("timeout") else {
+        return Ok(None);
+    };
+    let Node::Scalar { value, plain: true } = value else {
+        return Err("skill hook field `timeout` must be an integer".to_owned());
+    };
+    let seconds = value
+        .parse::<u64>()
+        .map_err(|_| "skill hook field `timeout` must be an integer".to_owned())?;
+    if !(1..=3600).contains(&seconds) {
+        return Err("skill hook field `timeout` must be between 1 and 3600 seconds".to_owned());
+    }
+    Ok(Some(seconds))
 }
 
 #[cfg(test)]

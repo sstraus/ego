@@ -13,8 +13,8 @@ use crate::event::domain::{
     DomainEvent, EventKind, ExitReason, GenerationRole, OccupancyProvenance, SubagentTerminal,
 };
 use crate::event::hook::{
-    HookCatalogueEvidence, HookDecision, HookId, HookInvocationId, HookLifecycle, HookResult,
-    HookSubject,
+    HookActivation, HookCatalogueEvidence, HookDecision, HookId, HookInvocationId, HookLifecycle,
+    HookResult, HookSubject,
 };
 use crate::event::id::{
     AttemptId, EventId, GenerationId, ItemId, Producer, QueuedPromptId, Seq, SessionId,
@@ -368,6 +368,7 @@ pub struct LiveHookInvocation {
     hook: HookId,
     lifecycle: HookLifecycle,
     subject: HookSubject,
+    activation: HookActivation,
     turn: TurnId,
     item: Option<ItemId>,
 }
@@ -387,6 +388,10 @@ impl LiveHookInvocation {
 
     pub fn subject(&self) -> HookSubject {
         self.subject
+    }
+
+    pub fn activation(&self) -> HookActivation {
+        self.activation
     }
 
     pub fn turn(&self) -> TurnId {
@@ -1573,7 +1578,8 @@ impl SessionState {
                 invocation,
                 lifecycle,
                 subject,
-            } => self.start_hook(ev, *hook, *invocation, *lifecycle, *subject),
+                activation,
+            } => self.start_hook(ev, *hook, *invocation, *lifecycle, *subject, *activation),
             EventKind::HookInvocationSettled {
                 hook,
                 invocation,
@@ -1746,6 +1752,7 @@ impl SessionState {
         invocation: HookInvocationId,
         lifecycle: HookLifecycle,
         subject: HookSubject,
+        activation: HookActivation,
     ) {
         if self.settled_hooks.contains(&invocation) {
             return self.refuse(ev, RefusalReason::HookInvocationAlreadySettled);
@@ -1769,6 +1776,7 @@ impl SessionState {
                 hook,
                 lifecycle,
                 subject,
+                activation,
                 turn: ev.env.turn,
                 item: ev.env.item,
             },

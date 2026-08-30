@@ -11,8 +11,8 @@ use crate::config::ModelRef;
 use crate::cost::{CostDelta, PricingRevision};
 use crate::event::domain::{EventKind, ExitReason, GenerationRole, OccupancyProvenance};
 use crate::event::hook::{
-    HookContentDigest, HookDecision, HookFailureKind, HookId, HookInvocationId, HookLifecycle,
-    HookResult, HookSourceAuthority, HookSubject,
+    HookActivation, HookContentDigest, HookDecision, HookFailureKind, HookId, HookInvocationId,
+    HookLifecycle, HookResult, HookSourceAuthority, HookSubject,
 };
 use crate::event::id::{EventId, ItemId, Producer, QueuedPromptId, Seq, SessionId, TurnId};
 use crate::event::time::Timestamp;
@@ -257,6 +257,7 @@ pub enum ExportEvent {
         invocation: HookInvocationId,
         lifecycle: HookLifecycle,
         subject: HookSubject,
+        activation: HookActivation,
     },
     HookInvocationSettled {
         hook: HookId,
@@ -815,11 +816,13 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
             invocation,
             lifecycle,
             subject,
+            activation,
         } => ExportEvent::HookInvocationStarted {
             hook: *hook,
             invocation: *invocation,
             lifecycle: *lifecycle,
             subject: *subject,
+            activation: *activation,
         },
         EventKind::HookInvocationSettled {
             hook,

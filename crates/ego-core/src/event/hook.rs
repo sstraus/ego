@@ -75,6 +75,11 @@ impl HookSourceLocation {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// Whether this is the already-validated authority-relative spelling.
+    pub const fn is_authority_relative(&self) -> bool {
+        true
+    }
 }
 
 impl FromStr for HookSourceLocation {
@@ -146,6 +151,11 @@ impl HookContentDigest {
 
     pub fn as_bytes(&self) -> &[u8; SHA256_BYTES] {
         &self.0
+    }
+
+    /// Whether this digest has the canonical lowercase SHA-256 spelling.
+    pub const fn is_lower_sha256(&self) -> bool {
+        true
     }
 }
 
@@ -499,6 +509,59 @@ pub enum HookLifecycle {
 }
 
 impl HookLifecycle {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SessionStart => "SessionStart",
+            Self::InstructionsLoaded => "InstructionsLoaded",
+            Self::UserPromptSubmit => "UserPromptSubmit",
+            Self::UserPromptExpansion => "UserPromptExpansion",
+            Self::PreToolUse => "PreToolUse",
+            Self::PermissionRequest => "PermissionRequest",
+            Self::PermissionDenied => "PermissionDenied",
+            Self::PostToolUse => "PostToolUse",
+            Self::PostToolUseFailure => "PostToolUseFailure",
+            Self::PostToolBatch => "PostToolBatch",
+            Self::PreModelSwitch => "PreModelSwitch",
+            Self::PostModelSwitch => "PostModelSwitch",
+            Self::SubagentStart => "SubagentStart",
+            Self::SubagentStop => "SubagentStop",
+            Self::Stop => "Stop",
+            Self::StopFailure => "StopFailure",
+            Self::PreCompact => "PreCompact",
+            Self::PostCompact => "PostCompact",
+            Self::Elicitation => "Elicitation",
+            Self::ElicitationResult => "ElicitationResult",
+            Self::SessionEnd => "SessionEnd",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "SessionStart" => Some(Self::SessionStart),
+            "InstructionsLoaded" => Some(Self::InstructionsLoaded),
+            "UserPromptSubmit" => Some(Self::UserPromptSubmit),
+            "UserPromptExpansion" => Some(Self::UserPromptExpansion),
+            "PreToolUse" => Some(Self::PreToolUse),
+            "PermissionRequest" => Some(Self::PermissionRequest),
+            "PermissionDenied" => Some(Self::PermissionDenied),
+            "PostToolUse" => Some(Self::PostToolUse),
+            "PostToolUseFailure" => Some(Self::PostToolUseFailure),
+            "PostToolBatch" => Some(Self::PostToolBatch),
+            "PreModelSwitch" => Some(Self::PreModelSwitch),
+            "PostModelSwitch" => Some(Self::PostModelSwitch),
+            "SubagentStart" => Some(Self::SubagentStart),
+            "SubagentStop" => Some(Self::SubagentStop),
+            "Stop" => Some(Self::Stop),
+            "StopFailure" => Some(Self::StopFailure),
+            "PreCompact" => Some(Self::PreCompact),
+            "PostCompact" => Some(Self::PostCompact),
+            "Elicitation" => Some(Self::Elicitation),
+            "ElicitationResult" => Some(Self::ElicitationResult),
+            "SessionEnd" => Some(Self::SessionEnd),
+            _ => None,
+        }
+    }
+
     pub fn phase(self) -> HookPhase {
         match self {
             Self::UserPromptSubmit
@@ -550,6 +613,16 @@ pub enum HookSubject {
     Session,
     Turn { turn: TurnId },
     Item { item: ItemId },
+}
+
+/// The closed lifetime authority under which one hook invocation started.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum HookActivation {
+    Persistent,
+    Skill {
+        invocation: crate::event::skill::SkillInvocationId,
+    },
 }
 
 /// A bounded preview whose complete bytes live in the evidence store.

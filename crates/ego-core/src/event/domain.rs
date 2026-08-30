@@ -427,6 +427,7 @@ pub enum EventKind {
         invocation: HookInvocationId,
         lifecycle: HookLifecycle,
         subject: HookSubject,
+        activation: crate::event::hook::HookActivation,
     },
     /// A previously started hook handler reached one final settlement.
     HookInvocationSettled {

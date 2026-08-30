@@ -13,6 +13,7 @@ use super::error::ConfigError;
 use super::source::{Source, Sourced};
 use crate::ceiling::Budget;
 use crate::generator::types::ThinkingLevel;
+use crate::hook::HookConfigEntry;
 use crate::permit::Confinement;
 use crate::permit::rule::Rule;
 
@@ -786,6 +787,9 @@ pub struct ConfigLayer {
     /// Name-keyed MCP entries in this layer.
     #[serde(default)]
     pub mcp: McpLayer,
+    /// Hooks retain declaration order within this authority layer.
+    #[serde(default)]
+    pub hooks: Vec<HookConfigEntry>,
 }
 
 impl ConfigLayer {

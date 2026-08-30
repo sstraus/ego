@@ -50,7 +50,7 @@ mod regression_case {
         let path = write_fixture(
             dir.path(),
             &id,
-            include_bytes!("../../ego-core/tests/golden/store_log.jsonl"),
+            include_bytes!("fixtures/store_log_codec8.jsonl"),
         );
         let store = JsonlStore::new(dir.path(), "/ws", Box::new(OsIo));
         let opened = store
@@ -113,7 +113,7 @@ mod regression_case {
             panic!("future JSON record must remain opaque to this codec")
         };
         assert_eq!(raw.as_bytes(), unknown_line);
-        let mut fixture = include_bytes!("../../ego-core/tests/golden/store_log.jsonl").to_vec();
+        let mut fixture = include_bytes!("fixtures/store_log_codec8.jsonl").to_vec();
         fixture.extend_from_slice(unknown_line);
         fixture.push(b'\n');
         let path = write_fixture(dir.path(), &id, &fixture);

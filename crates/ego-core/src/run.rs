@@ -36,6 +36,7 @@ use futures::future::BoxFuture;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use uuid::Uuid;
 
+use crate::budget::BudgetGate;
 use crate::ceiling::Budget;
 use crate::config::{Mode, ModelRef};
 use crate::cost::Money;
@@ -549,6 +550,13 @@ impl RunSelections {
         self.profile.as_deref()
     }
 
+    /// Pin a profile name already resolved and admitted by the config owner.
+    pub fn with_profile_name(&self, profile: impl Into<String>) -> Self {
+        let mut pinned = self.clone();
+        pinned.profile = Some(profile.into());
+        pinned
+    }
+
     fn with_model(&self, model: ModelRef) -> Self {
         let mut pinned = self.clone();
         pinned.model = Some(model);
@@ -937,6 +945,7 @@ pub struct RunExecutionBindings {
     pub elicitor: Option<Arc<dyn Elicitor>>,
     admitted_tools: Option<Arc<dyn AdmittedToolSource>>,
     mcp_errors: Arc<[String]>,
+    budget_gate: Option<Arc<Mutex<BudgetGate>>>,
 }
 
 impl RunExecutionBindings {
@@ -949,6 +958,7 @@ impl RunExecutionBindings {
             elicitor,
             admitted_tools: None,
             mcp_errors: Arc::from([]),
+            budget_gate: None,
         }
     }
 
@@ -967,6 +977,17 @@ impl RunExecutionBindings {
     pub fn with_mcp_errors(mut self, mcp_errors: Vec<String>) -> Self {
         self.mcp_errors = Arc::from(mcp_errors);
         self
+    }
+
+    /// Attach the root run family's one live budget authority.
+    pub fn with_budget_gate(mut self, gate: Arc<Mutex<BudgetGate>>) -> Self {
+        self.budget_gate = Some(gate);
+        self
+    }
+
+    /// The exact shared gate used by generation-boundary executors.
+    pub fn budget_gate(&self) -> Option<Arc<Mutex<BudgetGate>>> {
+        self.budget_gate.as_ref().map(Arc::clone)
     }
 
     pub fn admitted_tools(&self) -> Option<Arc<dyn AdmittedToolSource>> {
@@ -1315,6 +1336,10 @@ impl RunAdmission {
     }
     pub const fn revision(&self) -> RunRevision {
         self.snapshot.revision()
+    }
+    /// The controller-minted authority for this admitted turn.
+    pub const fn turn_lease(&self) -> TurnLease {
+        self.cancel_key.lease
     }
     pub fn snapshot(&self) -> &RunSnapshot {
         &self.snapshot
@@ -1742,6 +1767,14 @@ where
 
     pub async fn status(&self, run_id: RunId) -> Result<RunSnapshot, RunError> {
         Ok(self.read_exact(run_id).await?.snapshot)
+    }
+
+    /// Resolve the one run stream targeted by a deterministic start request.
+    pub async fn status_by_request(&self, request_id: RequestId) -> Result<RunSnapshot, RunError> {
+        Ok(self
+            .read_folded(RequestId::session_id(request_id))
+            .await?
+            .snapshot)
     }
 
     pub async fn recover(

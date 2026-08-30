@@ -297,6 +297,16 @@ fn add_v9_defaults(value: &mut serde_json::Value) {
     let Some(object) = value.as_object_mut() else {
         return;
     };
+    if let Some(event) = object
+        .get_mut("kind")
+        .and_then(serde_json::Value::as_object_mut)
+        && event.get("kind").and_then(serde_json::Value::as_str)
+            == Some("HookInvocationStarted")
+    {
+        event
+            .entry("activation")
+            .or_insert_with(|| serde_json::json!({"kind": "persistent"}));
+    }
     if object.contains_key("revision")
         && object.contains_key("run_id")
         && object.contains_key("command")
