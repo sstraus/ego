@@ -41,7 +41,7 @@ use ego_core::run::{
 use ego_core::sink::{EventSink, NullSink};
 use ego_core::state::{ItemKind, QuestionContinuation, SessionState};
 use ego_core::store::run_artifact::{PublishedRunArtifact, RunArtifactStore};
-use ego_core::store::session_store::{SessionMeta, SessionStore};
+use ego_core::store::session_store::SessionMeta;
 use ego_core::turn::{
     AdmittedToolSource, CancelToken, GenerationRuntime, InteractiveControl, Journal, JudgeContext,
     QueueStatus, RegisteredTool, Session, ToolEffectPorts, Tools, TurnConfig, TurnLoop,
@@ -117,11 +117,7 @@ pub fn apply_resume_answers_once(
         .expect("answer validation found the pending question");
     let request_event = pending.request_event();
 
-    let Opened::Durable(open) = opened else {
-        return Err(usage(
-            "question answers require a durable resumed session".to_string(),
-        ));
-    };
+    let Opened::Durable(open) = opened;
     let clock = SystemClock;
     let sink = NullSink;
     let mut journal = Journal::new(
@@ -1007,8 +1003,7 @@ fn prepared_materials(
 
 /// The store this run logs through, and which session in it.
 struct Chosen {
-    /// `None` under `--ephemeral`: a run that keeps nothing needs no store.
-    store: Option<JsonlStore>,
+    store: JsonlStore,
     id: SessionId,
 }
 
@@ -1023,22 +1018,12 @@ struct Chosen {
 /// [`execute`], because that takes a lease and can create, and a session must
 /// not be created for a run whose model does not resolve.
 fn chosen(args: &Args, root: &Path) -> Result<Chosen, UsageError> {
-    let store_root = match args.session {
-        SessionChoice::Ephemeral => None,
-        _ => Some(rooted_path(
-            root,
-            session::store_root(args.session_dir.as_ref())?,
-        )),
-    };
+    let store_root = rooted_path(root, session::store_root(args.session_dir.as_ref())?);
     // The same `root` that derives a named session's id below, so "the session
     // called build in this workspace" and "the sessions belonging to this
     // workspace" cannot disagree about which workspace that is.
-    let store = store_root.map(|dir| session::jsonl(dir, root.to_path_buf()));
-    let id = session::id_for(
-        &args.session,
-        root,
-        store.as_ref().map(|store| store as &dyn SessionStore),
-    )?;
+    let store = session::jsonl(store_root, root.to_path_buf());
+    let id = session::id_for(&args.session, root, &store)?;
 
     Ok(Chosen { store, id })
 }
@@ -1860,7 +1845,7 @@ fn protocol_args(session_dir: Option<PathBuf>) -> Args {
         allow: Vec::new(),
         deny: Vec::new(),
         answers: Vec::new(),
-        session: SessionChoice::Ephemeral,
+        session: SessionChoice::New,
         session_dir,
         output: Output::Json,
         schema: None,
@@ -2027,15 +2012,8 @@ impl RunExecutor for CliRunExecutor {
 }
 
 /// The exact interactive guard for the clean-session transition.
-fn compaction_availability(
-    active: &ActiveSession<'_>,
-    pending_work: bool,
-) -> repl::actions::Availability {
-    if !active.is_durable() {
-        repl::actions::Availability::Disabled {
-            owner: "compaction requires a durable source session",
-        }
-    } else if pending_work {
+fn compaction_availability(pending_work: bool) -> repl::actions::Availability {
+    if pending_work {
         repl::actions::Availability::Busy
     } else {
         repl::actions::Availability::Enabled
@@ -2098,16 +2076,13 @@ async fn execute<S: EventSink>(
     let mut early_opened = if args.answers.is_empty() {
         None
     } else {
-        Some(match &jsonl_store {
-            Some(store) => Opened::Durable(Box::new(
-                session::open(store, &session_id, &clock).map_err(|err| {
-                    RunTermination::Failed {
-                        message: err.to_string(),
-                    }
-                })?,
-            )),
-            None => Opened::Ephemeral(session::NullStore),
-        })
+        Some(Opened::Durable(Box::new(
+            session::open(&jsonl_store, &session_id, &clock).map_err(|err| {
+                RunTermination::Failed {
+                    message: err.to_string(),
+                }
+            })?,
+        )))
     };
     let resume = match early_opened.as_mut() {
         Some(opened) => Some(apply_resume_answers_once(opened, &args.answers)?),
@@ -2167,32 +2142,27 @@ async fn execute<S: EventSink>(
     let currency = CurrencyCode::new(SETTLEMENT).expect("a constant this file controls");
     let opened = match early_opened {
         Some(opened) => opened,
-        None => match &jsonl_store {
-            Some(store) => Opened::Durable(Box::new(
-                session::open(store, &session_id, &clock).map_err(|err| {
-                    RunTermination::Failed {
-                        message: err.to_string(),
-                    }
-                })?,
-            )),
-            None => Opened::Ephemeral(session::NullStore),
-        },
+        None => Opened::Durable(Box::new(
+            session::open(&jsonl_store, &session_id, &clock).map_err(|err| {
+                RunTermination::Failed {
+                    message: err.to_string(),
+                }
+            })?,
+        )),
     };
     if let Some(note_text) = opened.repair_note() {
         diagnostics.note(&note_text);
     }
 
     let opening = opened.state();
-    let mut active = if matches!(&opened, Opened::Durable(_)) {
-        drop(proof_directory);
+    drop(proof_directory);
+    drop(proof_evidence);
+    let mut active =
         ActiveSession::durable(opened, opening.clone(), EVIDENCE_CAP).map_err(|err| {
             RunTermination::Failed {
                 message: format!("could not open this session's tool evidence: {err}"),
             }
-        })?
-    } else {
-        ActiveSession::ephemeral(session_id, opening.clone(), proof_evidence, proof_directory)
-    };
+        })?;
 
     // Every startup gate has passed. From here the run has a session; a later
     // fresh model-resolution refusal is recorded by the turn loop before it
@@ -2425,10 +2395,7 @@ async fn execute<S: EventSink>(
                         || !state.unacknowledged_prompts().is_empty()
                         || state.pending_question().is_some()
                         || !state.live_attempts.is_empty();
-                    seat.set_compaction_availability(compaction_availability(
-                        &active,
-                        pending_work,
-                    ));
+                    seat.set_compaction_availability(compaction_availability(pending_work));
                     // The terminal owner keeps its next read active while this
                     // coordinator drives the turn; output returns through that
                     // same owner's bounded painter channel.
@@ -2455,12 +2422,7 @@ async fn execute<S: EventSink>(
                         repl::Line::HostCommand(repl::HostCommand::Action(
                             repl::actions::ActionId::Sessions,
                         )) => {
-                            let Some(store) = jsonl_store.as_ref() else {
-                                diagnostics
-                                    .note("an ephemeral run has no durable session catalogue");
-                                continue;
-                            };
-                            match crate::catalogue::listing(store, &root, false) {
+                            match crate::catalogue::listing(&jsonl_store, &root, false) {
                                 Ok(metas) => diagnostics
                                     .note(&crate::catalogue::table(&metas, false).join("\n")),
                                 Err(error) => diagnostics.note(&format!(
@@ -2472,23 +2434,14 @@ async fn execute<S: EventSink>(
                         repl::Line::HostCommand(repl::HostCommand::Action(
                             repl::actions::ActionId::New,
                         )) => {
-                            if !active.is_durable() {
-                                diagnostics.note(
-                                    "an ephemeral run cannot switch to a durable new session",
-                                );
-                                continue;
-                            }
                             if pending_work {
                                 diagnostics.note(
                                     "a new session cannot be selected while source work is pending",
                                 );
                                 continue;
                             }
-                            let Some(store) = jsonl_store.as_ref() else {
-                                unreachable!("durable active sessions have a JSONL store");
-                            };
                             let target = SessionId::new();
-                            let target_opened = match session::open(store, &target, &clock) {
+                            let target_opened = match session::open(&jsonl_store, &target, &clock) {
                                 Ok(opened) => opened,
                                 Err(error) => {
                                     diagnostics.note(&format!(
@@ -2553,10 +2506,6 @@ async fn execute<S: EventSink>(
                         repl::Line::HostCommand(repl::HostCommand::Action(
                             repl::actions::ActionId::Fork,
                         )) => {
-                            if !active.is_durable() {
-                                diagnostics.note("an ephemeral session cannot be forked");
-                                continue;
-                            }
                             if pending_work {
                                 diagnostics.note(
                                     "the session cannot be forked while source work is pending",
@@ -2584,11 +2533,8 @@ async fn execute<S: EventSink>(
                                     continue;
                                 }
                             };
-                            let Some(store) = jsonl_store.as_ref() else {
-                                unreachable!("durable active sessions have a JSONL store");
-                            };
                             let target = SessionId::new();
-                            let target_opened = match session::open(store, &target, &clock) {
+                            let target_opened = match session::open(&jsonl_store, &target, &clock) {
                                 Ok(opened) => opened,
                                 Err(error) => {
                                     diagnostics.note(&format!(
@@ -2678,7 +2624,7 @@ async fn execute<S: EventSink>(
                         repl::Line::HostCommand(repl::HostCommand::Action(
                             repl::actions::ActionId::Compact,
                         )) => {
-                            if compaction_availability(&active, pending_work)
+                            if compaction_availability(pending_work)
                                 != repl::actions::Availability::Enabled
                             {
                                 continue;
@@ -2758,13 +2704,8 @@ async fn execute<S: EventSink>(
                                 continue;
                             }
 
-                            let Some(store) = jsonl_store.as_ref() else {
-                                unreachable!(
-                                    "ephemeral compaction was refused before confirmation"
-                                );
-                            };
                             let target = SessionId::new();
-                            let target_opened = match session::open(store, &target, &clock) {
+                            let target_opened = match session::open(&jsonl_store, &target, &clock) {
                                 Ok(opened) => Opened::Durable(Box::new(opened)),
                                 Err(error) => {
                                     diagnostics.note(&format!(
@@ -3395,9 +3336,7 @@ fn forked(args: &ForkArgs, out: &Stdout) -> Result<Ended, RunTermination> {
     if let Some(note_text) = opened.repair_note() {
         out.note(&note_text);
     }
-    let Opened::Durable(opened) = opened else {
-        unreachable!("the source was opened durably");
-    };
+    let Opened::Durable(opened) = opened;
     fork_opened(args, out, &store, source, *opened, &clock)
 }
 
@@ -3641,23 +3580,23 @@ mod tests {
     }
 
     #[test]
-    fn ephemeral_compact_refuses_before_confirmation_resolution_generation_or_publication() {
+    fn durable_compact_is_enabled_when_idle_before_confirmation_resolution_generation_or_publication()
+     {
         let source = SessionId::new();
-        let owner = tempdir().expect("ephemeral evidence owner");
-        let evidence = SessionEvidenceStore::open(owner.path(), source, 1024)
-            .expect("ephemeral evidence store");
-        let active = crate::session::ActiveSession::ephemeral(
-            source,
-            SessionState::default(),
-            evidence,
-            owner,
-        );
+        let root: &'static tempfile::TempDir =
+            Box::leak(Box::new(tempdir().expect("durable evidence owner")));
+        let store = Box::leak(Box::new(crate::session::jsonl(
+            root.path().to_path_buf(),
+            PathBuf::from("/workspace"),
+        )));
+        let opened =
+            crate::session::open(store, &source, &SystemClock).expect("durable session writer");
+        let active = crate::session::ActiveSession::durable(opened, SessionState::default(), 1024)
+            .expect("durable active session");
 
         assert_eq!(
-            super::compaction_availability(&active, false),
-            repl::actions::Availability::Disabled {
-                owner: "compaction requires a durable source session",
-            }
+            super::compaction_availability(false),
+            repl::actions::Availability::Enabled
         );
         assert_eq!(active.id(), source);
         assert_eq!(active.state(), &SessionState::default());

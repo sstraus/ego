@@ -1,24 +1,20 @@
 //! Which session this run writes to, and where.
 //!
-//! `CLI.md` §3's four session flags, which §4.5 makes a mutually-exclusive
-//! group — already enforced by [`SessionChoice`](crate::cli::SessionChoice)
-//! being one field — plus the store the turn loop is handed.
+//! `CLI.md` §3's durable session choices plus the store the turn loop is
+//! handed. The recognized `--ephemeral` spelling is refused before a
+//! [`SessionChoice`](crate::cli::SessionChoice) exists.
 
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
 
-use ego_core::event::domain::DomainEvent;
 use ego_core::event::id::SessionId;
 use ego_core::event::time::{Clock, Timestamp};
-use ego_core::run::{RunAppend, RunRevision, RunTransaction};
 use ego_core::session::{ReplayContext, ReplayedContext, TargetSeed};
 use ego_core::state::SessionState;
-use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
+use ego_core::store::session_store::{SessionStore, StoreError};
 use ego_tools::store::SessionEvidenceStore;
 use ego_tools::store::{JsonlStore, LeaseInputs, OpenSession, OsIo};
-use futures::stream::BoxStream;
-use tempfile::TempDir;
 
 use crate::cli::{SessionChoice, UsageError};
 
@@ -36,46 +32,6 @@ const STALE_AFTER: Duration = Duration::from_secs(60);
 /// workspace" means.
 const NAMESPACE: uuid::Uuid = uuid::uuid!("8b8f5ec6-0e4b-4b6e-9a5f-2f6b2c8e6a10");
 
-/// A `SessionStore` that keeps nothing, for `--ephemeral`.
-///
-/// A real type rather than an `Option<&dyn SessionStore>` threaded through the
-/// loop: the loop's contract is that a failed append ends the turn, and an
-/// `Option` would turn "there is no store" into a branch at every append. This
-/// one accepts everything and remembers nothing, which is exactly what
-/// `--ephemeral` promises.
-///
-/// `read` reports `NotFound` rather than an empty stream, because that is the
-/// truth: there is no durable log to read, and answering "here is your empty
-/// session" would let a resume silently succeed against nothing.
-#[derive(Debug, Default)]
-pub struct NullStore;
-
-impl SessionStore for NullStore {
-    fn append(&self, _id: &SessionId, _ev: &DomainEvent) -> Result<(), StoreError> {
-        Ok(())
-    }
-
-    fn read(
-        &self,
-        _id: &SessionId,
-    ) -> Result<BoxStream<'static, Result<SessionEntry, StoreError>>, StoreError> {
-        Err(StoreError::NotFound)
-    }
-
-    fn compare_and_append_run(
-        &self,
-        _session: &SessionId,
-        _expected_revision: Option<RunRevision>,
-        _transaction: RunTransaction,
-    ) -> Result<RunAppend, StoreError> {
-        Err(StoreError::NotFound)
-    }
-
-    fn list(&self) -> Result<Vec<SessionMeta>, StoreError> {
-        Ok(Vec::new())
-    }
-}
-
 /// Where sessions live: `--session-dir`, else `$EGO_HOME/sessions`.
 pub fn store_root(explicit: Option<&PathBuf>) -> Result<PathBuf, UsageError> {
     if let Some(dir) = explicit {
@@ -85,8 +41,7 @@ pub fn store_root(explicit: Option<&PathBuf>) -> Result<PathBuf, UsageError> {
         .map(|home| home.join("sessions"))
         .ok_or_else(|| {
             UsageError(
-                "no home directory to keep sessions in: set EGO_HOME, pass \
-                 --session-dir, or run with --ephemeral"
+                "no home directory to keep sessions in: set EGO_HOME or pass --session-dir"
                     .to_string(),
             )
         })
@@ -96,15 +51,14 @@ pub fn store_root(explicit: Option<&PathBuf>) -> Result<PathBuf, UsageError> {
 ///
 /// `store` is consulted for exactly one choice — [`SessionChoice::Resume`],
 /// which selects a session that already exists rather than deriving or
-/// inventing an id. It is an `Option` because `--ephemeral` has no store, and
-/// those two choices cannot co-occur: they are the same field.
+/// inventing an id.
 pub fn id_for(
     choice: &SessionChoice,
     workspace: &std::path::Path,
-    store: Option<&dyn SessionStore>,
+    store: &dyn SessionStore,
 ) -> Result<SessionId, UsageError> {
     match choice {
-        SessionChoice::New | SessionChoice::Ephemeral => Ok(SessionId::new()),
+        SessionChoice::New => Ok(SessionId::new()),
         SessionChoice::Id(text) => SessionId::from_str(text)
             .map_err(|err| UsageError(format!("--session-id {err}: pass the id of a session"))),
         SessionChoice::Named(name) => {
@@ -126,9 +80,6 @@ pub fn id_for(
                     })?),
                     None => None,
                 };
-            let store = store.ok_or_else(|| {
-                UsageError("`resume` needs the session store, and this run has none".to_string())
-            })?;
             crate::catalogue::resolve(store, workspace, wanted)
         }
     }
@@ -179,13 +130,9 @@ pub fn jsonl(root: PathBuf, workspace: PathBuf) -> JsonlStore {
     JsonlStore::new(root, workspace, Box::new(OsIo))
 }
 
-/// The state a run starts from, and the store it writes through.
-///
-/// Two shapes rather than one trait object with a lifetime that outlives
-/// both, because the ephemeral case genuinely owns nothing.
+/// The state a durable run starts from, and the writer it owns.
 pub enum Opened<'a> {
     Durable(Box<OpenSession<'a>>),
-    Ephemeral(NullStore),
 }
 
 impl<'a> From<OpenSession<'a>> for Opened<'a> {
@@ -196,26 +143,20 @@ impl<'a> From<OpenSession<'a>> for Opened<'a> {
 
 impl Opened<'_> {
     pub fn store(&self) -> &dyn SessionStore {
-        match self {
-            Opened::Durable(open) => &open.writer,
-            Opened::Ephemeral(null) => null,
-        }
+        let Opened::Durable(open) = self;
+        &open.writer
     }
 
     pub fn state(&self) -> SessionState {
-        match self {
-            Opened::Durable(open) => open.state.clone(),
-            Opened::Ephemeral(_) => SessionState::default(),
-        }
+        let Opened::Durable(open) = self;
+        open.state.clone()
     }
 
     /// What opening had to repair, if anything. Reported rather than
     /// swallowed: a caller decides whether dropping N events is routine or
     /// alarming, and it cannot decide what it was never told.
     pub fn repair_note(&self) -> Option<String> {
-        let Opened::Durable(open) = self else {
-            return None;
-        };
+        let Opened::Durable(open) = self;
         if open.repair.is_clean() {
             return None;
         }
@@ -254,7 +195,6 @@ pub struct ActiveSession<'a> {
     opened: Opened<'a>,
     evidence: SessionEvidenceStore,
     replayed: Option<ReplayedContext>,
-    _ephemeral_owner: Option<TempDir>,
 }
 
 impl<'a> ActiveSession<'a> {
@@ -264,9 +204,7 @@ impl<'a> ActiveSession<'a> {
         evidence_cap: u64,
     ) -> Result<Self, String> {
         let opened = opened.into();
-        let Opened::Durable(open) = &opened else {
-            return Err("a durable active session requires a durable opened session".to_string());
-        };
+        let Opened::Durable(open) = &opened;
         let id = open.writer.id();
         let evidence = open
             .writer
@@ -281,24 +219,7 @@ impl<'a> ActiveSession<'a> {
             opened,
             evidence,
             replayed: Some(replayed),
-            _ephemeral_owner: None,
         })
-    }
-
-    pub fn ephemeral(
-        id: SessionId,
-        state: SessionState,
-        evidence: SessionEvidenceStore,
-        owner: TempDir,
-    ) -> Self {
-        Self {
-            id,
-            state,
-            opened: Opened::Ephemeral(NullStore),
-            evidence,
-            replayed: None,
-            _ephemeral_owner: Some(owner),
-        }
     }
 
     pub fn id(&self) -> SessionId {
@@ -326,9 +247,7 @@ impl<'a> ActiveSession<'a> {
     }
 
     pub(crate) fn replay_seed(&self, seed: &TargetSeed) -> Result<ReplayedContext, String> {
-        let Opened::Durable(open) = &self.opened else {
-            return Err("an ephemeral session cannot be a fork source".to_string());
-        };
+        let Opened::Durable(open) = &self.opened;
         ReplayContext::new(&open.writer, &open.writer)
             .replay_lineage(seed.lineage())
             .map_err(|error| error.to_string())
@@ -344,16 +263,8 @@ impl<'a> ActiveSession<'a> {
     ) -> ego_core::session::TargetPublication {
         use ego_core::session::TargetStore;
 
-        match &self.opened {
-            Opened::Durable(open) => open.writer.publish_target(seed),
-            Opened::Ephemeral(_) => ego_core::session::TargetPublication::NotPublished {
-                diagnostic: "the target is not durable".to_string(),
-            },
-        }
-    }
-
-    pub fn is_durable(&self) -> bool {
-        matches!(self.opened, Opened::Durable(_))
+        let Opened::Durable(open) = &self.opened;
+        open.writer.publish_target(seed)
     }
 
     /// Apply the target only after the store has established publication
@@ -386,7 +297,6 @@ mod compaction {
     use super::*;
     use ego_core::event::time::Clock;
     use ego_core::session::TargetPublication;
-    use ego_tools::store::SessionEvidenceStore;
     use tempfile::{TempDir, tempdir};
 
     struct FixedClock;
@@ -411,18 +321,6 @@ mod compaction {
         let mut state = SessionState::default();
         state.usage.uncached_input_tokens = uncached_input_tokens;
         ActiveSession::durable(opened, state, evidence_cap).unwrap()
-    }
-
-    fn ephemeral(
-        id: SessionId,
-        uncached_input_tokens: u64,
-        evidence_cap: u64,
-    ) -> ActiveSession<'static> {
-        let owner = tempdir().unwrap();
-        let evidence = SessionEvidenceStore::open(owner.path(), id, evidence_cap).unwrap();
-        let mut state = SessionState::default();
-        state.usage.uncached_input_tokens = uncached_input_tokens;
-        ActiveSession::ephemeral(id, state, evidence, owner)
     }
 
     fn assert_source_owner(active: &ActiveSession<'_>, source: SessionId, tokens: u64, cap: u64) {
@@ -495,8 +393,8 @@ mod compaction {
     fn an_activation_failure_after_publication_never_reverts_the_owner() {
         let source = SessionId::new();
         let target = SessionId::new();
-        let mut active = ephemeral(source, 51, 501);
-        let target_owner = ephemeral(target, 52, 502);
+        let mut active = durable(source, 51, 501);
+        let target_owner = durable(target, 52, 502);
 
         assert!(active.apply_publication(
             target_owner,

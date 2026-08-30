@@ -286,11 +286,12 @@ impl std::fmt::Display for Output {
     }
 }
 
-/// Where a session is written, or that it is not (`CLI.md` §3, "Session").
+/// Which durable session a run writes (`CLI.md` §3, "Session").
 ///
-/// One value rather than three independent flags, because §4.5 calls them a
+/// One value rather than independent durable flags, because §4.5 calls them a
 /// mutually-exclusive group and a group is a thing the type can *be*, not a
-/// rule someone has to remember to check.
+/// rule someone has to remember to check. The recognized `--ephemeral`
+/// spelling is refused before this value is built.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionChoice {
     /// A fresh session, written under the store root.
@@ -299,8 +300,6 @@ pub enum SessionChoice {
     Named(String),
     /// An id the caller supplied, so there is no capture-then-resume dance.
     Id(String),
-    /// Nothing is written.
-    Ephemeral,
     /// `ego resume [ID]`: a session that **already exists** — the one named,
     /// or the most recently updated one belonging to this workspace.
     ///
@@ -800,7 +799,7 @@ struct Flags {
     #[arg(long, group = "session-choice")]
     session_id: Option<String>,
 
-    /// Write no session at all.
+    /// Refused: every run uses a durable session.
     #[arg(long, group = "session-choice")]
     ephemeral: bool,
 
@@ -1323,10 +1322,11 @@ fn into_resume_args(command: ResumeCommand) -> Result<Args, UsageError> {
         flags,
     } = command;
 
+    reject_ephemeral(flags.ephemeral)?;
+
     for (given, flag) in [
         (flags.session.is_some(), "--session"),
         (flags.session_id.is_some(), "--session-id"),
-        (flags.ephemeral, "--ephemeral"),
     ] {
         if given {
             return Err(UsageError(format!(
@@ -1358,6 +1358,8 @@ fn into_resume_args(command: ResumeCommand) -> Result<Args, UsageError> {
 
 fn into_args(command: RunCommand) -> Result<Args, UsageError> {
     let RunCommand { prompt, flags } = command;
+
+    reject_ephemeral(flags.ephemeral)?;
 
     if flags.file.is_some() && prompt.is_some() {
         return Err(UsageError(
@@ -1412,9 +1414,7 @@ fn into_args(command: RunCommand) -> Result<Args, UsageError> {
         flags.mode
     };
 
-    let session = if flags.ephemeral {
-        SessionChoice::Ephemeral
-    } else if let Some(name) = flags.session {
+    let session = if let Some(name) = flags.session {
         SessionChoice::Named(name)
     } else if let Some(id) = flags.session_id {
         SessionChoice::Id(id)
@@ -1462,4 +1462,15 @@ fn into_args(command: RunCommand) -> Result<Args, UsageError> {
         quiet: flags.quiet,
         no_color: flags.no_color,
     })
+}
+
+fn reject_ephemeral(ephemeral: bool) -> Result<(), UsageError> {
+    if ephemeral {
+        return Err(UsageError(
+            "--ephemeral is not a supported session mode: use the durable default, \
+             --session NAME, or --session-id ID"
+                .to_string(),
+        ));
+    }
+    Ok(())
 }

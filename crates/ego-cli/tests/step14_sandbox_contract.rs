@@ -92,7 +92,8 @@ fn shell_write_case(
     let mut invocation = ego.args([
         "--model",
         "ollama/qwen3",
-        "--ephemeral",
+        "--session-id",
+        support::FIXTURE_SESSION_ID,
         "--output",
         "jsonl",
     ]);
@@ -277,7 +278,8 @@ fn cli_off_keeps_permission_and_exec_lifecycle_enforced() {
         .args([
             "--model",
             "ollama/qwen3",
-            "--ephemeral",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
             "--output",
             "jsonl",
             "--sandbox",
@@ -308,7 +310,8 @@ fn cli_confinement_uses_the_configured_level_without_degrading_to_off() {
             .args([
                 "--model",
                 "ollama/qwen3",
-                "--ephemeral",
+                "--session-id",
+                support::FIXTURE_SESSION_ID,
                 "--output",
                 "jsonl",
                 "--sandbox",
@@ -429,7 +432,8 @@ fn linux_landlock_hidden_current_exe_helper_runs_before_clap_and_provider() {
         .args([
             "--model",
             "ollama/qwen3",
-            "--ephemeral",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
             "--output",
             "jsonl",
             "--sandbox",
@@ -487,7 +491,8 @@ fn cli_offline_refuses_even_when_filesystem_sandbox_is_off() {
         .args([
             "--model",
             "ollama/qwen3",
-            "--ephemeral",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
             "--output",
             "jsonl",
             "--sandbox",
@@ -625,7 +630,7 @@ fn interactive_piped_seed_executor_appends_one_observation() {
 }
 
 #[test]
-fn ephemeral_actual_executor_creates_no_manifest_or_synthetic_observation() {
+fn durable_actual_executor_creates_a_manifest_and_one_observation() {
     let stub = Stub::start(exec_plan());
     let ego = Ego::against(&stub);
     let marker = ego.home_file("marker", "");
@@ -637,7 +642,8 @@ fn ephemeral_actual_executor_creates_no_manifest_or_synthetic_observation() {
         .args([
             "--model",
             "ollama/qwen3",
-            "--ephemeral",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
             "--sandbox",
             "off",
             "--allow",
@@ -648,8 +654,8 @@ fn ephemeral_actual_executor_creates_no_manifest_or_synthetic_observation() {
 
     assert_eq!(finished.code, Some(0), "stderr: {}", finished.stderr);
     assert!(
-        !home.join("sessions").exists(),
-        "ephemeral run wrote a manifest"
+        home.join("sessions").exists(),
+        "durable run wrote no manifest"
     );
-    assert_eq!(execution_observation_count(&home), 0);
+    assert_eq!(execution_observation_count(&home), 1);
 }

@@ -111,7 +111,13 @@ output = "0.00001"
 fn a_run_that_finishes_writes_its_answer_to_stdout_and_exits_zero() {
     let stub = Stub::start(Plan::default());
     let finished = Ego::against(&stub)
-        .args(["--model", "ollama/qwen3", "--ephemeral", "Do the thing"])
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "Do the thing",
+        ])
         .run();
 
     assert_eq!(finished.code, Some(0), "stderr: {}", finished.stderr);
@@ -131,7 +137,13 @@ fn a_session_seeded_from_argv_runs_its_turn_and_ends_when_nobody_is_there() {
     let stub = Stub::start(Plan::default());
     let finished = Ego::against(&stub)
         .conversing()
-        .args(["--model", "ollama/qwen3", "--ephemeral", "Do the thing"])
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "Do the thing",
+        ])
         .run();
 
     assert_eq!(finished.code, Some(0), "stderr: {}", finished.stderr);
@@ -164,7 +176,8 @@ fn noninteractive_question_suspends_with_a_structured_question_exit() {
         .args([
             "--model",
             "ollama/qwen3",
-            "--ephemeral",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
             "--output",
             "json",
             "Ask",
@@ -188,7 +201,12 @@ fn a_session_can_be_seeded_from_a_pipe_the_way_a_run_is() {
     let stub = Stub::start(Plan::default());
     let finished = Ego::against(&stub)
         .conversing()
-        .args(["--model", "ollama/qwen3", "--ephemeral"])
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+        ])
         .stdin("Do the thing")
         .run();
 
@@ -210,7 +228,8 @@ fn a_json_run_writes_one_object_whose_success_and_reason_cannot_disagree() {
         .args([
             "--model",
             "ollama/qwen3",
-            "--ephemeral",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
             "--output",
             "json",
             "Ask",
@@ -254,7 +273,8 @@ fn a_json_run_that_was_refused_says_not_ok_and_names_what_was_refused() {
         .args([
             "--model",
             "ollama/qwen3",
-            "--ephemeral",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
             "--output",
             "json",
             "Read the host table",
@@ -293,7 +313,8 @@ fn a_json_run_that_was_not_refused_carries_no_denied_key() {
         .args([
             "--model",
             "ollama/qwen3",
-            "--ephemeral",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
             "--output",
             "json",
             "Ask",
@@ -320,7 +341,8 @@ fn a_jsonl_run_writes_one_public_event_per_line() {
         .args([
             "--model",
             "ollama/qwen3",
-            "--ephemeral",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
             "--output",
             "jsonl",
             "Ask",
@@ -364,7 +386,8 @@ fn an_event_reaches_stdout_before_the_turn_that_produced_it_ends() {
         .args([
             "--model",
             "ollama/qwen3",
-            "--ephemeral",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
             "--output",
             "jsonl",
             "Ask",
@@ -407,7 +430,8 @@ fn session_started_advertises_only_the_capabilities_this_run_has() {
         .args([
             "--model",
             "ollama/qwen3",
-            "--ephemeral",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
             "--output",
             "jsonl",
             "Ask",
@@ -429,7 +453,8 @@ fn session_started_advertises_only_the_capabilities_this_run_has() {
         .args([
             "--model",
             "ollama/qwen3",
-            "--ephemeral",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
             "--no-tools",
             "--output",
             "jsonl",
@@ -461,7 +486,8 @@ fn a_headless_run_does_not_read_the_instruction_file_a_repository_ships() {
         .args([
             "--model",
             "ollama/qwen3",
-            "--ephemeral",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
             "--output",
             "jsonl",
             "Ask",
@@ -503,7 +529,8 @@ fn an_explicitly_named_instruction_file_is_described_and_never_quoted() {
         .args([
             "--model",
             "ollama/qwen3",
-            "--ephemeral",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
             "--instructions",
             "HOUSE-RULES.md",
             "--output",
@@ -572,7 +599,8 @@ fn the_two_ways_to_name_the_same_instruction_file_describe_it_identically() {
             .args([
                 "--model",
                 "ollama/qwen3",
-                "--ephemeral",
+                "--session-id",
+                support::FIXTURE_SESSION_ID,
                 "--instructions",
                 &spelling(&written),
                 "--output",
@@ -608,7 +636,8 @@ fn an_instruction_file_that_is_not_there_refuses_rather_than_running_without_it(
         .args([
             "--model",
             "ollama/qwen3",
-            "--ephemeral",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
             "--instructions",
             "nowhere.md",
             "Ask",
@@ -650,7 +679,8 @@ fn a_symlinked_instruction_file_is_still_refused_by_name() {
         .args([
             "--model",
             "ollama/qwen3",
-            "--ephemeral",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
             "--instructions",
             "house-rules.md",
             "--output",
@@ -687,7 +717,8 @@ fn a_system_prompt_given_on_the_command_line_claims_no_file() {
         .args([
             "--model",
             "ollama/qwen3",
-            "--ephemeral",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
             "--system",
             "Answer in one word.",
             "--output",
@@ -717,7 +748,8 @@ fn an_answer_that_never_validates_exits_one() {
         .args([
             "--model",
             "ollama/qwen3",
-            "--ephemeral",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
             "--schema",
             r#"{"type":"object","required":["ok"]}"#,
             "--schema-retries",
@@ -749,7 +781,8 @@ fn a_schema_mismatch_is_re_prompted_and_the_validated_document_is_the_result() {
         .args([
             "--model",
             "ollama/qwen3",
-            "--ephemeral",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
             "--schema",
             r#"{"type":"object","required":["ok"]}"#,
             "--output",
@@ -868,7 +901,8 @@ fn a_deny_rule_on_the_command_line_stops_a_tool_and_names_the_rule() {
         .args([
             "--model",
             "ollama/qwen3",
-            "--ephemeral",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
             "--output",
             "json",
             "--deny",
@@ -935,7 +969,13 @@ fn the_same_read_without_the_deny_rule_completes() {
     let ego = Ego::against(&stub);
     ego.file("notes.md", "the contents");
     let finished = ego
-        .args(["--model", "ollama/qwen3", "--ephemeral", "Read notes.md"])
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "Read notes.md",
+        ])
         .run();
 
     assert_eq!(finished.code, Some(0), "stderr: {}", finished.stderr);
@@ -981,7 +1021,8 @@ fn a_run_with_no_rule_flags_leaves_the_config_files_rules_alone() {
         .args([
             "--model",
             "ollama/qwen3",
-            "--ephemeral",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
             "--output",
             "json",
             "Read notes.md",
@@ -1016,7 +1057,8 @@ fn a_flag_rule_that_is_not_a_rule_is_refused_before_the_run() {
         .args([
             "--model",
             "ollama/qwen3",
-            "--ephemeral",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
             "--allow",
             "bash(git *)",
             "Ask",
@@ -1051,7 +1093,14 @@ fn a_flag_rule_that_is_not_a_rule_is_refused_before_the_run() {
 fn the_flag_whose_meaning_was_never_decided_is_refused_by_name() {
     for spelling in ["-v", "--verbose"] {
         let finished = Ego::nowhere()
-            .args(["--model", "ollama/qwen3", "--ephemeral", spelling, "Ask"])
+            .args([
+                "--model",
+                "ollama/qwen3",
+                "--session-id",
+                support::FIXTURE_SESSION_ID,
+                spelling,
+                "Ask",
+            ])
             .run();
 
         assert_eq!(
@@ -1079,7 +1128,14 @@ fn the_flag_whose_meaning_was_never_decided_is_refused_by_name() {
 fn the_neighbour_in_the_same_row_still_does_its_job() {
     let stub = Stub::start(Plan::default());
     let finished = Ego::against(&stub)
-        .args(["--model", "ollama/qwen3", "--ephemeral", "-q", "Ask"])
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "-q",
+            "Ask",
+        ])
         .run();
 
     assert_eq!(finished.code, Some(0), "stderr: {}", finished.stderr);
@@ -1107,7 +1163,8 @@ fn an_exec_rule_reaches_the_real_process_path() {
         .args([
             "--model",
             "ollama/qwen3",
-            "--ephemeral",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
             "--allow",
             "exec(/bin/echo *)",
             "Ask",
@@ -1134,7 +1191,8 @@ fn auto_mode_requires_and_accepts_a_separately_configured_judge() {
         .args([
             "--model",
             "ollama/qwen3",
-            "--ephemeral",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
             "--mode",
             "auto",
             "Ask",
@@ -1160,7 +1218,13 @@ fn auto_mode_from_a_file_layer_starts_the_real_judge_path() {
         "mode = \"auto\"\n[permissions]\njudge = \"ollama/qwen3\"\n",
     );
     let finished = ego
-        .args(["--model", "ollama/qwen3", "--ephemeral", "Ask"])
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "Ask",
+        ])
         .run();
 
     assert_eq!(
@@ -1183,7 +1247,8 @@ fn the_modes_whose_machinery_does_exist_are_accepted() {
             .args([
                 "--model",
                 "ollama/qwen3",
-                "--ephemeral",
+                "--session-id",
+                support::FIXTURE_SESSION_ID,
                 "--mode",
                 mode,
                 "Ask",
@@ -1206,7 +1271,8 @@ fn two_spellings_of_the_mode_at_once_are_refused() {
         .args([
             "--model",
             "ollama/qwen3",
-            "--ephemeral",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
             "--plan",
             "--yolo",
             "Ask",
@@ -1223,7 +1289,8 @@ fn two_spellings_of_the_mode_at_once_are_refused() {
         .args([
             "--model",
             "ollama/qwen3",
-            "--ephemeral",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
             "--plan",
             "--mode",
             "edits",
@@ -1245,7 +1312,8 @@ fn an_unknown_mode_is_refused_and_names_the_modes_that_exist() {
         .args([
             "--model",
             "ollama/qwen3",
-            "--ephemeral",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
             "--mode",
             "wat",
             "Ask",
@@ -1326,7 +1394,13 @@ fn a_permission_nobody_can_grant_exits_three_without_ever_prompting() {
         ..Plan::default()
     });
     let finished = Ego::against(&stub)
-        .args(["--model", "ollama/qwen3", "--ephemeral", "Read it"])
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "Read it",
+        ])
         .run();
 
     assert_eq!(finished.code, Some(3), "stderr: {}", finished.stderr);
@@ -1345,7 +1419,13 @@ fn a_daemon_that_does_not_answer_exits_four() {
     // refused rather than left hanging.
     let finished = Ego::nowhere()
         .env("OLLAMA_HOST", "127.0.0.1:1")
-        .args(["--model", "ollama/qwen3", "--ephemeral", "Ask"])
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "Ask",
+        ])
         .run();
 
     assert_eq!(finished.code, Some(4), "stderr: {}", finished.stderr);
@@ -1360,7 +1440,13 @@ fn a_model_the_daemon_does_not_serve_exits_two() {
         ..Plan::default()
     });
     let finished = Ego::against(&stub)
-        .args(["--model", "ollama/qwen3", "--ephemeral", "Ask"])
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "Ask",
+        ])
         .run();
 
     assert_eq!(finished.code, Some(2), "stderr: {}", finished.stderr);
@@ -1379,7 +1465,8 @@ fn a_money_budget_smaller_than_the_generation_exits_five() {
         .args([
             "--model",
             "openai/gpt-5.1",
-            "--ephemeral",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
             "--budget",
             "0.01$",
             "--output",
@@ -1410,7 +1497,8 @@ fn a_token_budget_beats_a_schema_retry_and_exits_five() {
         .args([
             "--model",
             "ollama/qwen3",
-            "--ephemeral",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
             "--schema",
             r#"{"type":"object"}"#,
             "--schema-retries",
@@ -1444,7 +1532,8 @@ fn a_run_that_reaches_max_turns_exits_five_saying_max_turns() {
         .args([
             "--model",
             "ollama/qwen3",
-            "--ephemeral",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
             "--schema",
             r#"{"type":"object"}"#,
             "--schema-retries",
@@ -1473,7 +1562,8 @@ fn a_run_that_outlives_its_timeout_exits_124() {
         .args([
             "--model",
             "ollama/qwen3",
-            "--ephemeral",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
             "--timeout",
             "1s",
             "--output",
@@ -1501,7 +1591,8 @@ fn the_two_signals_with_a_documented_code_produce_it() {
             .args([
                 "--model",
                 "ollama/qwen3",
-                "--ephemeral",
+                "--session-id",
+                support::FIXTURE_SESSION_ID,
                 "--output",
                 "jsonl",
                 "Ask",
@@ -1555,7 +1646,8 @@ fn a_closed_stdout_stops_the_run_and_says_so_on_stderr() {
         .args([
             "--model",
             "ollama/qwen3",
-            "--ephemeral",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
             "--output",
             "jsonl",
             "Ask",
@@ -1584,7 +1676,14 @@ fn a_closed_stdout_stops_the_run_and_says_so_on_stderr() {
 fn the_separator_makes_the_word_run_a_prompt() {
     let stub = Stub::start(Plan::default());
     let finished = Ego::against(&stub)
-        .args(["--model", "ollama/qwen3", "--ephemeral", "--", "run"])
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--",
+            "run",
+        ])
         .run();
 
     assert_eq!(finished.code, Some(0), "stderr: {}", finished.stderr);
@@ -1604,7 +1703,13 @@ fn the_separator_makes_the_word_run_a_prompt() {
 fn a_dash_reads_the_prompt_from_stdin() {
     let stub = Stub::start(Plan::default());
     let finished = Ego::against(&stub)
-        .args(["--model", "ollama/qwen3", "--ephemeral", "-"])
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "-",
+        ])
         .stdin("what the pipe said")
         .run();
 
@@ -1628,7 +1733,13 @@ fn a_dash_reads_the_prompt_from_stdin() {
 fn piped_input_beside_an_argument_arrives_fenced_and_labelled() {
     let stub = Stub::start(Plan::default());
     let finished = Ego::against(&stub)
-        .args(["--model", "ollama/qwen3", "--ephemeral", "Summarise this"])
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "Summarise this",
+        ])
         .stdin("the piped body")
         .run();
 
@@ -1662,7 +1773,13 @@ fn stdout_carries_the_protocol_and_stderr_carries_the_diagnostics() {
     let ego = Ego::against(&stub);
     ego.file("notes.md", "the contents");
     let finished = ego
-        .args(["--model", "ollama/qwen3", "--ephemeral", "Read notes.md"])
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "Read notes.md",
+        ])
         .run();
 
     assert_eq!(finished.code, Some(0), "stderr: {}", finished.stderr);
@@ -1688,7 +1805,8 @@ fn headless_json_and_jsonl_never_instantiate_the_interactive_queue_surface() {
             .args([
                 "--model",
                 "ollama/qwen3",
-                "--ephemeral",
+                "--session-id",
+                support::FIXTURE_SESSION_ID,
                 "--output",
                 output,
                 "Answer once",
@@ -1726,7 +1844,14 @@ fn quiet_drops_the_tool_reports_and_keeps_the_answer() {
     let ego = Ego::against(&stub);
     ego.file("notes.md", "the contents");
     let finished = ego
-        .args(["--model", "ollama/qwen3", "--ephemeral", "-q", "Read it"])
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "-q",
+            "Read it",
+        ])
         .run();
 
     assert_eq!(finished.code, Some(0), "stderr: {}", finished.stderr);
@@ -1761,7 +1886,8 @@ fn a_money_budget_that_cannot_bind_says_so_once_and_leaves_stdout_clean() {
         .args([
             "--model",
             "ollama/qwen3",
-            "--ephemeral",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
             "--budget",
             "5$",
             "Read notes.md",
@@ -1809,7 +1935,8 @@ fn quiet_does_not_silence_a_budget_that_cannot_bind() {
         .args([
             "--model",
             "ollama/qwen3",
-            "--ephemeral",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
             "--budget",
             "5$",
             "-q",
@@ -1839,7 +1966,8 @@ fn a_money_budget_that_binds_is_not_announced() {
         .args([
             "--model",
             "openai/gpt-5.1",
-            "--ephemeral",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
             "--budget",
             "5$",
             "Ask",
@@ -1877,7 +2005,8 @@ fn a_hosted_model_resolves_from_supplied_facts_and_a_real_credential() {
         .args([
             "--model",
             "openai/gpt-5.1",
-            "--ephemeral",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
             "--budget",
             "100$",
             "--output",
@@ -1928,7 +2057,8 @@ fn a_hosted_run_with_no_ceiling_consults_no_rates_and_reports_no_cost() {
         .args([
             "--model",
             "openai/gpt-5.1",
-            "--ephemeral",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
             "--output",
             "json",
             "Ask",
@@ -1969,7 +2099,8 @@ fn a_token_ceiling_alone_still_consults_no_rates() {
         .args([
             "--model",
             "openai/gpt-5.1",
-            "--ephemeral",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
             "--budget",
             "400k",
             "--output",
@@ -1995,7 +2126,13 @@ fn a_hosted_model_without_its_credential_names_the_variable() {
     let ego = Ego::against(&stub);
     ego.home_file("models.toml", OPENAI_FACTS);
     let finished = ego
-        .args(["--model", "openai/gpt-5.1", "--ephemeral", "Ask"])
+        .args([
+            "--model",
+            "openai/gpt-5.1",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "Ask",
+        ])
         .run();
 
     assert_eq!(finished.code, Some(2), "stderr: {}", finished.stderr);
@@ -2021,7 +2158,13 @@ fn a_credential_set_to_whitespace_is_refused_like_a_missing_one() {
     let ego = Ego::against(&stub).env("OPENAI_API_KEY", "   ");
     ego.home_file("models.toml", OPENAI_FACTS);
     let finished = ego
-        .args(["--model", "openai/gpt-5.1", "--ephemeral", "Ask"])
+        .args([
+            "--model",
+            "openai/gpt-5.1",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "Ask",
+        ])
         .run();
 
     assert_eq!(finished.code, Some(2), "stderr: {}", finished.stderr);
@@ -2041,7 +2184,13 @@ fn a_hosted_model_with_no_supplied_facts_refuses_rather_than_guessing() {
     let stub = Stub::start(Plan::default());
     let finished = Ego::against(&stub)
         .env("OPENAI_API_KEY", "sk-test")
-        .args(["--model", "openai/gpt-5.1", "--ephemeral", "Ask"])
+        .args([
+            "--model",
+            "openai/gpt-5.1",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "Ask",
+        ])
         .run();
 
     assert_eq!(finished.code, Some(2), "stderr: {}", finished.stderr);
@@ -2063,7 +2212,13 @@ fn a_models_file_that_does_not_parse_is_refused_by_name() {
     ego.home_file("models.toml", "[model.\"openai/gpt-5.1\"\n");
     let finished = ego
         .env("OPENAI_API_KEY", "sk-test")
-        .args(["--model", "openai/gpt-5.1", "--ephemeral", "Ask"])
+        .args([
+            "--model",
+            "openai/gpt-5.1",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "Ask",
+        ])
         .run();
 
     assert_eq!(finished.code, Some(2), "stderr: {}", finished.stderr);
@@ -2104,7 +2259,13 @@ fn a_transport_no_row_can_speak_is_refused_where_it_is_written() {
         );
         let finished = ego
             .env("OPENAI_API_KEY", "sk-test")
-            .args(["--model", "openai/gpt-5.1", "--ephemeral", "Ask"])
+            .args([
+                "--model",
+                "openai/gpt-5.1",
+                "--session-id",
+                support::FIXTURE_SESSION_ID,
+                "Ask",
+            ])
             .run();
 
         assert_eq!(
@@ -2175,22 +2336,28 @@ fn a_named_session_is_the_same_session_the_second_time() {
     assert_eq!(second.report()["turns"], 2, "the log carries both turns");
 }
 
-/// `--ephemeral` writes nothing, which is checkable: the store directory is
-/// never created.
+/// An explicit durable id writes its event log, which is checkable without
+/// relying on an in-memory or hidden session mode.
 #[test]
-fn an_ephemeral_run_writes_no_session() {
+fn an_explicit_durable_run_writes_a_session() {
     let places = Places::new();
     let stub = Stub::start(Plan::default());
     let ego = places.ego(&stub);
     let home = ego.home_file("marker", "").parent().unwrap().to_path_buf();
     let finished = ego
-        .args(["--model", "ollama/qwen3", "--ephemeral", "Ask"])
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "Ask",
+        ])
         .run();
 
     assert_eq!(finished.code, Some(0), "stderr: {}", finished.stderr);
     assert!(
-        !home.join("sessions").exists(),
-        "an ephemeral run left a session behind"
+        home.join("sessions").exists(),
+        "the durable run wrote no session"
     );
 }
 
@@ -2199,7 +2366,7 @@ fn an_ephemeral_run_writes_no_session() {
 #[test]
 fn a_caller_supplied_session_id_is_the_session_the_run_reports() {
     let stub = Stub::start(Plan::default());
-    let supplied = "0198c7f4-9c1f-7a2b-8c3d-4e5f60718293";
+    let supplied = support::FIXTURE_SESSION_ID;
     let finished = Ego::against(&stub)
         .args([
             "--model",

@@ -360,7 +360,8 @@ fn live_surface_preserves_draft_through_busy_permission_and_resize() {
     let ego = Ego::against(&stub).conversing().args([
         "--model",
         "ollama/qwen3",
-        "--ephemeral",
+        "--session-id",
+        support::FIXTURE_SESSION_ID,
         "--sandbox",
         "off",
     ]);
@@ -566,7 +567,8 @@ fn live_surface_esc_expedites_sampling_once_and_reports_interrupt_state() {
     let ego = Ego::against(&stub).conversing().args([
         "--model",
         "ollama/qwen3",
-        "--ephemeral",
+        "--session-id",
+        support::FIXTURE_SESSION_ID,
         "--sandbox",
         "off",
     ]);
@@ -705,7 +707,8 @@ fn live_surface_meta_p_and_model_slash_share_one_modal_and_paste_stays_prompt() 
     let ego = Ego::against(&stub).conversing().args([
         "--model",
         "ollama/qwen3",
-        "--ephemeral",
+        "--session-id",
+        support::FIXTURE_SESSION_ID,
         "--sandbox",
         "off",
     ]);
@@ -906,7 +909,8 @@ fn live_surface_native_questions_cover_single_multiple_and_free_text() {
     let ego = Ego::against(&stub).conversing().args([
         "--model",
         "ollama/qwen3",
-        "--ephemeral",
+        "--session-id",
+        support::FIXTURE_SESSION_ID,
         "--sandbox",
         "off",
     ]);

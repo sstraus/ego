@@ -184,9 +184,12 @@ fn unknown_and_duplicate_named_selectors_fail_before_session_or_provider() {
         vec!["missing".to_owned()],
         vec!["remote".to_owned(), "remote".to_owned()],
     ] {
-        let mut ego = places
-            .ego(&stub)
-            .args(["--model", "ollama/qwen3", "--ephemeral"]);
+        let mut ego = places.ego(&stub).args([
+            "--model",
+            "ollama/qwen3",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+        ]);
         for selector in &selectors {
             ego = ego.arg("--mcp").arg(selector);
         }
@@ -227,7 +230,8 @@ fn strict_file_and_config_name_collision_fails_before_session_or_provider() {
         .args([
             "--model",
             "ollama/qwen3",
-            "--ephemeral",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
             "--mcp",
             "@scope.json",
             "prompt",
@@ -270,7 +274,8 @@ fn strict_invocation_file_requires_one_explicit_name_and_known_fields() {
             .args([
                 "--model",
                 "ollama/qwen3",
-                "--ephemeral",
+                "--session-id",
+                support::FIXTURE_SESSION_ID,
                 "--mcp",
                 "@scope.json",
                 "prompt",

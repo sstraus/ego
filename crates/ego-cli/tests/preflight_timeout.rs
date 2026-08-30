@@ -189,7 +189,8 @@ fn an_expired_run_before_preflight_spawns_no_credential_child() {
         .args([
             "--model",
             "openai-codex/gpt-5.1",
-            "--ephemeral",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
             "--timeout",
             "0s",
             "Ask",
@@ -215,7 +216,8 @@ fn run_deadline_during_main_preflight_cleans_the_credential_process_tree() {
         .args([
             "--model",
             "openai-codex/gpt-5.1",
-            "--ephemeral",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
             "--timeout",
             PREFLIGHT_TIMEOUT,
             "Ask",
@@ -272,7 +274,8 @@ printf '%s\n' '{"access":"judge-refresh","refresh":"judge-refresh","expires":0}'
         .args([
             "--model",
             "openai-codex/gpt-5.1",
-            "--ephemeral",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
             "--timeout",
             PREFLIGHT_TIMEOUT,
             "Ask",
@@ -294,7 +297,13 @@ fn sigint_and_sigterm_during_credential_preflight_cleanup_before_return() {
         let fixture = Fixture::new(&body);
         let running = fixture
             .ego()
-            .args(["--model", "openai-codex/gpt-5.1", "--ephemeral", "Ask"])
+            .args([
+                "--model",
+                "openai-codex/gpt-5.1",
+                "--session-id",
+                support::FIXTURE_SESSION_ID,
+                "Ask",
+            ])
             .spawn();
         wait_for_marker(&fixture.descendant_pid);
         let pid = running.child.id().to_string();
@@ -326,7 +335,8 @@ fn partial_credential_output_is_discarded_and_never_reaches_cli_streams() {
         .args([
             "--model",
             "openai-codex/gpt-5.1",
-            "--ephemeral",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
             "--timeout",
             PREFLIGHT_TIMEOUT,
             "Ask",
@@ -358,7 +368,8 @@ exit 124
         .args([
             "--model",
             "openai-codex/gpt-5.1",
-            "--ephemeral",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
             "--timeout",
             "10s",
             "Ask",

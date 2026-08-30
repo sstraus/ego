@@ -110,6 +110,9 @@ impl Default for Plan {
 /// asks for another.
 pub const MODEL: &str = "qwen3";
 
+/// Stable durable id for isolated CLI fixture sessions.
+pub const FIXTURE_SESSION_ID: &str = "0198c7f4-9c1f-7a2b-8c3d-4e5f60718293";
+
 /// A complete SSE transcript that answers with `content` and stops.
 ///
 /// Shaped after `crates/ego-ai/tests/goldens/stream_text.sse`, which was itself

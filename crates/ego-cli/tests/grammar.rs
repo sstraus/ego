@@ -45,6 +45,7 @@ fn parsed<const N: usize>(args: [&str; N]) -> ego_cli::cli::Args {
             panic!("`mcp-server` takes no Args: use the MCP server tests for it")
         }
         Invocation::Answered(_) => panic!("that answered a question: use `answered` for it"),
+        Invocation::Fork(_) => panic!("`fork` takes no Args: use the fork tests for it"),
     }
 }
 
@@ -63,6 +64,7 @@ fn parsed_slice(args: &[&str]) -> ego_cli::cli::Args {
             panic!("`mcp-server` takes no Args: use the MCP server tests for it")
         }
         Invocation::Answered(_) => panic!("that answered a question: use `answered` for it"),
+        Invocation::Fork(_) => panic!("`fork` takes no Args: use the fork tests for it"),
     }
 }
 
@@ -342,10 +344,8 @@ fn the_session_flags_collapse_into_one_choice() {
         parsed(["run", "--session-id", "abc", "Ask"]).session,
         SessionChoice::Id("abc".to_string())
     );
-    assert_eq!(
-        parsed(["run", "--ephemeral", "Ask"]).session,
-        SessionChoice::Ephemeral
-    );
+    let refusal = refused(["run", "--ephemeral", "Ask"]);
+    assert!(refusal.contains("--ephemeral"), "{refusal}");
 }
 
 /// The mode group, one axis over, and for the same reason: `--plan` and
