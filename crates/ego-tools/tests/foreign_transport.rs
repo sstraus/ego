@@ -1899,8 +1899,13 @@ fn cancellation_during_io_is_possibly_sent_after_one_request() {
     let (release_tx, release_rx) = mpsc::channel();
     let server = SocketServer::bind(move |mut stream| {
         let peer = stream.peer_addr().expect("peer");
-        let request = read_request(&mut stream);
+        let mut first_byte = [0_u8; 1];
+        stream
+            .read_exact(&mut first_byte)
+            .expect("first request byte");
         received_tx.send(()).expect("request synchronization");
+        let mut request = vec![first_byte[0]];
+        request.extend(read_request(&mut stream));
         let _ = release_rx.recv_timeout(Duration::from_secs(2));
         CapturedConnection {
             peer,
