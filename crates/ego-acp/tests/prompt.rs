@@ -31,6 +31,7 @@ use ego_core::config::ModelRef;
 use ego_core::event::domain::{CancelCause, DomainEvent};
 use ego_core::event::id::{ItemId, SessionId, TurnId};
 use ego_core::event::time::{Clock, Timestamp};
+use ego_core::evidence::{EvidenceError, EvidenceWrite};
 use ego_core::generator::capabilities::{
     CacheRetention, CancelSemantics, ImageInputSupport, ModelCapabilities, ReasoningCarryover,
     ReasoningEffortSupport, Transport,
@@ -323,6 +324,13 @@ impl RunExecutor for PromptExecutor {
         ))))
     }
 
+    fn admit_run_context<'a>(
+        &'a self,
+        _prepared: &'a Self::Prepared,
+    ) -> ego_core::run::RunFuture<'a, Result<EvidenceWrite, EvidenceError>> {
+        Box::pin(future::ready(Ok(EvidenceWrite::Published)))
+    }
+
     fn start<'a>(
         &'a self,
         request: &'a RunStart,
@@ -493,7 +501,7 @@ impl SessionStore for PromptStore {
         let actual = entries.get(session).and_then(|entries| {
             entries.iter().rev().find_map(|entry| match entry {
                 SessionEntry::RunTransaction(transaction) => Some(transaction.revision()),
-                SessionEntry::Event(_) => None,
+                SessionEntry::Event(_) | SessionEntry::Evidence(_) => None,
             })
         });
         if expected_revision != actual {
