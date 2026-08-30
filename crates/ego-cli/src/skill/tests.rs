@@ -8,6 +8,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::{SkillCatalogue, SkillDiscovery, SkillSourceAuthority};
+use ego_core::config::{ConfigLayer, Source, Trust};
 use tempfile::TempDir;
 
 const MAX_FILE_BYTES: usize = 1024 * 1024;
@@ -252,7 +253,7 @@ mod regression_case {
             "first body",
         );
         let mut catalogue = roots.catalogue(false);
-        let before = catalogue.snapshot_digest();
+        let before = catalogue.snapshot_digest().to_owned();
         roots.write(
             &roots.user,
             "new-valid",
@@ -330,6 +331,50 @@ mod regression_case {
                 .expect("unsupported field diagnostic");
             assert!(diagnostic.message().contains(field));
         }
+    }
+
+    #[test]
+    fn agent_must_resolve_through_the_existing_trusted_profile_owner() {
+        let roots = Roots::new();
+        roots.write(
+            &roots.user,
+            "known-profile",
+            &valid_for("known-profile", "context: fork\nagent: trusted"),
+            "body",
+        );
+        roots.write(
+            &roots.user,
+            "missing-profile",
+            &valid_for("missing-profile", "context: fork\nagent: absent"),
+            "body",
+        );
+
+        let profile_layer = ConfigLayer::parse(Source::User, "[profile.trusted]\n").unwrap();
+        ego_core::config::resolve(
+            std::slice::from_ref(&profile_layer),
+            Trust::Trusted,
+            Some("trusted"),
+        )
+        .expect("the existing profile owner must resolve the known profile");
+        // The final narrow API consumes the existing ConfigLayer/profile owner
+        // data. It must not grow a second profile parser or accept a name based
+        // only on identifier grammar.
+        let catalogue = SkillCatalogue::discover_with_profile_layers(
+            roots.discovery(false),
+            &["help"],
+            &[profile_layer],
+        )
+        .expect("profile diagnostics are non-fatal");
+        assert_eq!(
+            catalogue.descriptor("known-profile").unwrap().agent(),
+            Some("trusted")
+        );
+        let diagnostic = catalogue
+            .diagnostics()
+            .iter()
+            .find(|diagnostic| diagnostic.name() == "missing-profile")
+            .expect("unknown profile diagnostic");
+        assert!(diagnostic.message().contains("existing profile"));
     }
 
     #[test]

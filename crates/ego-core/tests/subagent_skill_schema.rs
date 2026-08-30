@@ -7,8 +7,14 @@
 
 use ego_core::config::ModelRef;
 use ego_core::event::domain::{DomainEvent, GenerationRole};
-use ego_core::event::hook::HookLifecycle;
+use ego_core::event::hook::{
+    HookContentDigest, HookLifecycle, HookSourceAuthority, HookSourceLocation,
+};
 use ego_core::event::id::{EventId, ItemId, Producer, Seq, SessionId, TurnId};
+use ego_core::event::skill::{
+    SkillCatalogueEvidence, SkillContentDigest, SkillDescriptorEvidence, SkillId,
+    SkillSourceAuthority, SkillSourceLocation,
+};
 use ego_core::event::time::Timestamp;
 use ego_core::evidence::{EvidenceError, EvidenceWrite, RunContextEvidence};
 use ego_core::generator::capabilities::ModelCapabilities;
@@ -422,8 +428,13 @@ mod regression_case {
 
     #[test]
     fn skill_catalogue_instruction_and_resource_facts_are_distinct_and_minimal() {
+        let skill_id = canonical_skill_id(
+            SkillSourceAuthority::Project,
+            "explain-failure",
+            "skills/explain-failure/SKILL.md",
+        );
         let descriptor = json!({
-            "id": format!("sk1:{DIGEST}"),
+            "id": skill_id,
             "name": "explain-failure",
             "description": "Explain a failing check.",
             "source": "project",
@@ -440,7 +451,11 @@ mod regression_case {
         let instruction = decode(json!({
             "kind": "SkillInstructionAdmitted",
             "invocation": INVOCATION,
-            "skill": format!("sk1:{DIGEST}"),
+            "skill": canonical_skill_id(
+                SkillSourceAuthority::Project,
+                "explain-failure",
+                "skills/explain-failure/SKILL.md",
+            ),
             "catalogue_generation": DIGEST,
             "source": "project",
             "location": "skills/explain-failure/SKILL.md",
@@ -450,7 +465,11 @@ mod regression_case {
         let resource = decode(json!({
             "kind": "SkillResourceAdmitted",
             "invocation": INVOCATION,
-            "skill": format!("sk1:{DIGEST}"),
+            "skill": canonical_skill_id(
+                SkillSourceAuthority::Project,
+                "explain-failure",
+                "skills/explain-failure/SKILL.md",
+            ),
             "location": "references/checklist.md",
             "content": blob(20),
         }));
@@ -468,6 +487,88 @@ mod regression_case {
         assert_ne!(instruction_value, resource_value);
     }
 
+    fn canonical_skill_id(source: SkillSourceAuthority, name: &str, location: &str) -> String {
+        let location = SkillSourceLocation::parse(location).unwrap();
+        let digest = SkillContentDigest::parse(DIGEST).unwrap();
+        SkillId::derive(source, &location, name, &digest).to_string()
+    }
+
+    fn skill_descriptor(name: &str, location: &str) -> SkillDescriptorEvidence {
+        let source = SkillSourceAuthority::User;
+        let location = SkillSourceLocation::parse(location).unwrap();
+        let source_digest = SkillContentDigest::parse(DIGEST).unwrap();
+        SkillDescriptorEvidence {
+            id: SkillId::derive(source, &location, name, &source_digest),
+            name: name.to_owned(),
+            description: format!("description for {name}"),
+            trigger: None,
+            argument_hint: None,
+            source,
+            location,
+            source_digest,
+            user_invocable: true,
+            model_invocable: true,
+        }
+    }
+
+    #[test]
+    fn skill_evidence_owns_distinct_source_types_and_validates_catalogue_identity() {
+        assert_ne!(
+            std::any::TypeId::of::<SkillContentDigest>(),
+            std::any::TypeId::of::<HookContentDigest>()
+        );
+        assert_ne!(
+            std::any::TypeId::of::<SkillSourceAuthority>(),
+            std::any::TypeId::of::<HookSourceAuthority>()
+        );
+        assert_ne!(
+            std::any::TypeId::of::<SkillSourceLocation>(),
+            std::any::TypeId::of::<HookSourceLocation>()
+        );
+
+        let first = skill_descriptor("alpha", "skills/alpha/SKILL.md");
+        let second = skill_descriptor("bravo", "skills/bravo/SKILL.md");
+        let canonical = SkillCatalogueEvidence::new(vec![first.clone(), second.clone()])
+            .expect("canonical catalogue must be constructible");
+        assert_eq!(canonical.descriptors(), &[first.clone(), second.clone()]);
+
+        let mut mismatched_descriptor = first.clone();
+        mismatched_descriptor.id = SkillId::parse(&format!("sk1:{DIGEST}")).unwrap();
+        assert!(SkillCatalogueEvidence::new(vec![mismatched_descriptor]).is_err());
+        assert!(SkillCatalogueEvidence::new(vec![first.clone(), first.clone()]).is_err());
+        assert!(SkillCatalogueEvidence::new(vec![
+            first.clone(),
+            skill_descriptor("charlie", "skills/alpha/SKILL.md"),
+        ])
+        .is_err());
+        assert!(SkillCatalogueEvidence::new(vec![second.clone(), first.clone()]).is_err());
+
+        // Decode malformed wires independently of the validating constructor.
+        let canonical_wire = serde_json::to_value(&canonical).unwrap();
+        let mut mismatched_wire = canonical_wire.clone();
+        mismatched_wire[0]["id"] = serde_json::json!(format!("sk1:{DIGEST}"));
+        assert!(serde_json::from_value::<SkillCatalogueEvidence>(mismatched_wire).is_err());
+
+        let mut duplicate_wire = canonical_wire.clone();
+        duplicate_wire[1] = duplicate_wire[0].clone();
+        assert!(serde_json::from_value::<SkillCatalogueEvidence>(duplicate_wire).is_err());
+
+        let mut duplicate_location_wire = canonical_wire.clone();
+        duplicate_location_wire[1] = serde_json::to_value(skill_descriptor(
+            "charlie",
+            "skills/alpha/SKILL.md",
+        ))
+        .unwrap();
+        assert!(
+            serde_json::from_value::<SkillCatalogueEvidence>(duplicate_location_wire).is_err()
+        );
+
+        let mut reversed_wire = canonical_wire;
+        reversed_wire[0] = reversed_wire[1].clone();
+        reversed_wire[1] = serde_json::to_value(first).unwrap();
+        assert!(serde_json::from_value::<SkillCatalogueEvidence>(reversed_wire).is_err());
+    }
+
     #[test]
     fn reducer_and_evidence_keep_typed_skill_facts_and_do_not_publish_private_bytes() {
         let catalogue = decode(json!({
@@ -478,7 +579,11 @@ mod regression_case {
         let instruction = decode(json!({
             "kind": "SkillInstructionAdmitted",
             "invocation": INVOCATION,
-            "skill": format!("sk1:{DIGEST}"),
+            "skill": canonical_skill_id(
+                SkillSourceAuthority::Project,
+                "explain-failure",
+                "skills/explain-failure/SKILL.md",
+            ),
             "catalogue_generation": DIGEST,
             "source": "project",
             "location": "skills/explain-failure/SKILL.md",
@@ -488,7 +593,11 @@ mod regression_case {
         let resource = decode(json!({
             "kind": "SkillResourceAdmitted",
             "invocation": INVOCATION,
-            "skill": format!("sk1:{DIGEST}"),
+            "skill": canonical_skill_id(
+                SkillSourceAuthority::Project,
+                "explain-failure",
+                "skills/explain-failure/SKILL.md",
+            ),
             "location": "references/checklist.md",
             "content": blob(20),
         }));
