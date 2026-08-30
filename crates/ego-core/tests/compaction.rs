@@ -15,6 +15,10 @@ use ego_core::cost::{CostDelta, UnknownCost};
 use ego_core::event::domain::{CancelCause, DomainEvent, Envelope, EventKind, GenerationRole};
 use ego_core::event::id::{EventId, GenerationId, ItemId, Producer, Seq, SessionId, TurnId};
 use ego_core::event::time::Timestamp;
+use ego_core::evidence::{
+    EvidenceAdmissionService, EvidenceError as AdmissionError, EvidenceKey, EvidenceRecord,
+    EvidenceStore as AdmissionStore, EvidenceWrite, RunInvocationId,
+};
 use ego_core::generation_model_source::{
     GenerationModelError, GenerationModelErrorClass, GenerationModelSource, GenerationProfile,
 };
@@ -612,6 +616,16 @@ impl ProcessExecutor for CompactionNoProcess {
 
 struct CompactionNoEvidence;
 
+impl AdmissionStore for CompactionNoEvidence {
+    fn write(
+        &self,
+        _key: EvidenceKey,
+        _record: EvidenceRecord,
+    ) -> Result<EvidenceWrite, AdmissionError> {
+        Ok(EvidenceWrite::Published)
+    }
+}
+
 impl EvidenceStore for CompactionNoEvidence {
     fn blob_store(&self) -> &dyn ego_core::store::blob::BlobStore {
         &common::EMPTY_BLOB_STORE
@@ -778,6 +792,7 @@ fn compaction_turn_with_state(
             id: SessionId::new(),
             state,
             store,
+            evidence,
             clock,
             sink,
             cancel: cancel.clone(),
@@ -789,6 +804,8 @@ fn compaction_turn_with_state(
                 system: None,
                 token_ceiling: None,
             },
+            admission: Arc::new(EvidenceAdmissionService::new()),
+            invocation: RunInvocationId::new(),
         },
         tools,
     );
