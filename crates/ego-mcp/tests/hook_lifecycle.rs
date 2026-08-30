@@ -560,55 +560,6 @@ fn ports(spawner: Arc<ScriptedSpawner>) -> ToolEffectPorts<'static> {
         spawner,
     )
 }
-fn registry_capture(factory: Arc<McpStdioOperationFactory>) -> McpRegistryCapture {
-    let admission = server_admission();
-    let inventory = McpCandidateInventory::new(
-        McpCapabilities::tools(),
-        vec![ego_core::generator::types::ToolDescriptor {
-            name: "lookup".into(),
-            description: "fixture".into(),
-            parameters: json!({"type":"object","additionalProperties":false}),
-        }],
-        Vec::new(),
-        Vec::new(),
-        McpCacheMetadata::default(),
-        None,
-    );
-    let candidate = McpAdmittedCandidate::new(
-        Arc::clone(&admission),
-        McpCandidateIdentity::validated("server"),
-        inventory,
-        factory,
-    )
-    .expect("candidate");
-    let candidate_port = Arc::new(OneCandidate(Mutex::new(Some(candidate))));
-    let registry = McpRegistryController::new(Arc::new(RegistryJournal::default()), candidate_port)
-        .expect("registry");
-    let layer = ConfigLayer::parse(
-        Source::User,
-        "[mcp.servers.server]\ntransport='stdio'\ncommand='mcp-server'\n",
-    )
-    .expect("config");
-    let provenance = resolve(&[layer], Trust::Trusted, None)
-        .expect("resolved")
-        .mcp
-        .entries()
-        .values()
-        .find_map(|entry| match entry {
-            ResolvedMcpEntry::Configured { provenance, .. } => Some(provenance.clone()),
-            ResolvedMcpEntry::Tombstone { .. } => None,
-        })
-        .expect("provenance");
-    let refresh = McpRegistryRefresh::new(
-        vec![McpRegistryCandidate::ready(admission, provenance)],
-        RegistryTrigger::Add,
-        RegistryScope::All,
-    )
-    .expect("refresh");
-    block_on(registry.reconcile(refresh)).expect("publication");
-    registry.capture().expect("capture")
-}
-
 #[test]
 fn mcp_matrix_has_one_real_owner_for_each_mrtr_lifecycle() {
     assert_eq!(
