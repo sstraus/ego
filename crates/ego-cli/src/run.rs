@@ -1796,7 +1796,6 @@ impl CliPrepared {
             &effective,
             &confinement,
             &cwd,
-            request.run_id.session_id(),
             request.invocation,
             request.run_id,
             instructions,
@@ -2140,11 +2139,11 @@ fn complete_run_context(
     effective: &Effective,
     confinement: &RunConfinement,
     cwd: &Path,
-    session: SessionId,
     invocation: RunInvocationId,
     run_id: RunId,
     instructions: Vec<InstructionDescriptor>,
 ) -> Result<RunContextEvidence, UsageError> {
+    let session = run_id.session_id();
     let mut auth = effective
         .auth
         .iter()
@@ -2289,7 +2288,6 @@ impl CliCompactionCommand {
             &effective,
             &confinement,
             &cwd,
-            source_id,
             invocation,
             RunId::new(source_id, invocation.uuid()),
             system
@@ -2897,7 +2895,6 @@ async fn execute<S: EventSink>(
         &effective,
         &confinement,
         &cwd,
-        session_id,
         invocation,
         run_id,
         instruction_descriptors,
