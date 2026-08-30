@@ -35,6 +35,7 @@ use crate::cost::{Money, RateSource};
 use crate::event::domain::{
     CancelCause, EventKind, ExitReason, GenerationRole, OccupancyProvenance,
 };
+use crate::event::hook::{HookLifecycle, HookOccurrenceKey, HookOccurrenceOwner, HookSubject};
 use crate::event::id::{
     EventId, GenerationId, ItemId, Producer, QueuedPromptId, SessionId, TurnId,
 };
@@ -52,6 +53,7 @@ use crate::generator::port::AiEvent;
 use crate::generator::types::{
     Conversation, ErrorKind, GenRequest, Message, Role, StopReason, ToolDescriptor,
 };
+use crate::hook::{HookEvent, HookLifecycleDispatcher, HookOccurrence};
 use crate::permit::ExecObservation;
 use crate::permit::judge::{JudgeConfig, JudgeDecoder, JudgeInput, JudgeOutcome};
 use crate::permit::{Authority, Classification, Pending, PolicyDenied, Resolution, ToolResult};
@@ -491,6 +493,7 @@ pub struct TurnLoop<'a> {
     cancel: CancelToken,
     control: Option<&'a mut InteractiveControl>,
     elicitor: Option<Arc<dyn Elicitor>>,
+    hook_dispatcher: Option<HookLifecycleDispatcher>,
     active_skill_scope: Option<crate::skill::ActiveSkillScope>,
     active_skill_invocations:
         BTreeMap<crate::event::skill::SkillInvocationId, crate::skill::SkillInvocation>,
@@ -526,6 +529,7 @@ impl<'a> TurnLoop<'a> {
             cancel: session.cancel,
             control: None,
             elicitor: None,
+            hook_dispatcher: None,
             active_skill_scope: None,
             active_skill_invocations: BTreeMap::new(),
         }
@@ -554,6 +558,12 @@ impl<'a> TurnLoop<'a> {
     /// Attach the session's sole human-input adapter.
     pub fn with_elicitor(mut self, elicitor: Arc<dyn Elicitor>) -> Self {
         self.elicitor = Some(elicitor);
+        self
+    }
+
+    /// Attach the session-bound lifecycle dispatcher.
+    pub fn with_hook_dispatcher(mut self, dispatcher: HookLifecycleDispatcher) -> Self {
+        self.hook_dispatcher = Some(dispatcher);
         self
     }
 
@@ -1272,9 +1282,19 @@ impl<'a> TurnLoop<'a> {
         )],
     ) -> Result<DriveOutcome, StoreError> {
         for (text, images, queued_prompt) in prompts {
+            let item = ItemId::new();
+            if !self
+                .dispatch_hook(
+                    HookOccurrenceOwner::Item { item },
+                    HookEvent::turn(HookLifecycle::UserPromptSubmit, HookSubject::Item { item }),
+                )
+                .await
+            {
+                return Ok(DriveOutcome::Ended(ExitReason::Completed, None));
+            }
             self.journal.append(
                 turn,
-                Some(ItemId::new()),
+                Some(item),
                 None,
                 EventKind::UserPrompt {
                     text: text.clone(),
@@ -1306,17 +1326,18 @@ impl<'a> TurnLoop<'a> {
                 return Ok(DriveOutcome::Ended(ExitReason::Budget, None));
             }
 
-            let (reason, pending, error_kind) = match self.generate(turn).await? {
+            let (generation, reason, pending, error_kind) = match self.generate(turn).await? {
                 Generated::Ended(reason) => return Ok(DriveOutcome::Ended(reason, None)),
                 Generated::Cancelled { cause, pending } => {
                     self.close_unstarted_siblings(turn, &pending)?;
                     return Ok(DriveOutcome::Ended(ExitReason::Cancelled(cause), None));
                 }
                 Generated::Stopped {
+                    generation,
                     reason,
                     pending,
                     error_kind,
-                } => (reason, pending, error_kind),
+                } => (generation, reason, pending, error_kind),
             };
 
             // A generation that says it stopped for tools and then names none
@@ -1365,6 +1386,24 @@ impl<'a> TurnLoop<'a> {
                 if exit == ExitReason::Completed && self.deliver_pending(turn)? {
                     continue;
                 }
+                if reason == StopReason::Stop {
+                    if !self
+                        .dispatch_hook(
+                            HookOccurrenceOwner::Generation { generation },
+                            HookEvent::turn(HookLifecycle::Stop, HookSubject::Turn { turn }),
+                        )
+                        .await
+                    {
+                        continue;
+                    }
+                } else if exit != ExitReason::Completed {
+                    let _ = self
+                        .dispatch_hook(
+                            HookOccurrenceOwner::Generation { generation },
+                            HookEvent::turn(HookLifecycle::StopFailure, HookSubject::Turn { turn }),
+                        )
+                        .await;
+                }
                 return Ok(DriveOutcome::Ended(exit, None));
             }
 
@@ -1385,6 +1424,15 @@ impl<'a> TurnLoop<'a> {
                             ),
                         },
                     )?;
+                }
+                if !self
+                    .dispatch_hook(
+                        HookOccurrenceOwner::Generation { generation },
+                        HookEvent::turn(HookLifecycle::PostToolBatch, HookSubject::Turn { turn }),
+                    )
+                    .await
+                {
+                    return Ok(DriveOutcome::Ended(ExitReason::Completed, None));
                 }
                 self.deliver_pending(turn)?;
                 continue;
@@ -1415,6 +1463,39 @@ impl<'a> TurnLoop<'a> {
                             Some(call.started),
                             EventKind::ToolCallCompleted { ok, result },
                         )?;
+                        if let Some(cause) = self.cancel.cause() {
+                            self.close_unstarted_siblings(turn, &pending[index + 1..])?;
+                            return Ok(DriveOutcome::Ended(ExitReason::Cancelled(cause), None));
+                        }
+                        continue;
+                    }
+                    ToolOutcome::Executed {
+                        ok,
+                        result,
+                        selector,
+                    } => {
+                        let call = &pending[index];
+                        self.journal.append(
+                            turn,
+                            Some(call.item),
+                            Some(call.started),
+                            EventKind::ToolCallCompleted { ok, result },
+                        )?;
+                        let lifecycle = if ok {
+                            HookLifecycle::PostToolUse
+                        } else {
+                            HookLifecycle::PostToolUseFailure
+                        };
+                        let _ = self
+                            .dispatch_hook(
+                                HookOccurrenceOwner::Item { item: call.item },
+                                HookEvent::tool(
+                                    lifecycle,
+                                    HookSubject::Item { item: call.item },
+                                    selector,
+                                ),
+                            )
+                            .await;
                         if let Some(cause) = self.cancel.cause() {
                             self.close_unstarted_siblings(turn, &pending[index + 1..])?;
                             return Ok(DriveOutcome::Ended(ExitReason::Cancelled(cause), None));
@@ -1464,7 +1545,36 @@ impl<'a> TurnLoop<'a> {
                     Some(denial),
                 ));
             }
+            if !self
+                .dispatch_hook(
+                    HookOccurrenceOwner::Generation { generation },
+                    HookEvent::turn(HookLifecycle::PostToolBatch, HookSubject::Turn { turn }),
+                )
+                .await
+            {
+                return Ok(DriveOutcome::Ended(ExitReason::Completed, None));
+            }
             self.deliver_pending(turn)?;
+        }
+    }
+
+    async fn dispatch_hook(&self, owner: HookOccurrenceOwner, event: HookEvent) -> bool {
+        let Some(dispatcher) = self.hook_dispatcher.as_ref() else {
+            return true;
+        };
+        let lifecycle = event.lifecycle();
+        let occurrence = HookOccurrence::new(HookOccurrenceKey::new(lifecycle, owner), event)
+            .expect("the lifecycle key is built from the same typed hook event");
+        match dispatcher.dispatch(Producer::Main, occurrence).await {
+            Ok(result) => !result.is_blocked(),
+            Err(error) if lifecycle.phase().is_observer() => {
+                tracing::warn!(%error, ?lifecycle, "hook observer dispatch failed");
+                true
+            }
+            Err(error) => {
+                tracing::warn!(%error, ?lifecycle, "hook gate dispatch failed closed");
+                false
+            }
         }
     }
 
@@ -1821,6 +1931,7 @@ impl<'a> TurnLoop<'a> {
             return Ok(Generated::Ended(ExitReason::Provider));
         }
         Ok(Generated::Stopped {
+            generation: reference.generation(),
             reason: settlement.outcome.stop(),
             pending: drained.pending,
             error_kind: drained.error_kind,
@@ -2645,6 +2756,20 @@ impl<'a> TurnLoop<'a> {
                 });
             }
         };
+        if !self
+            .dispatch_hook(
+                HookOccurrenceOwner::Item { item: call.item },
+                HookEvent::tool(
+                    HookLifecycle::PreToolUse,
+                    HookSubject::Item { item: call.item },
+                    prepared.tool.clone(),
+                ),
+            )
+            .await
+        {
+            return Ok(answered(false, "blocked by PreToolUse hook".to_owned()));
+        }
+        let hook_selector = prepared.tool.clone();
         let authorized = loop {
             match self.tools.authorize(prepared) {
                 Classification::Settled(Ok(authorized)) => {
@@ -2813,13 +2938,16 @@ impl<'a> TurnLoop<'a> {
             Controlled::Failed(cause) => return Err(cause),
         };
         Ok(match execution {
-            Ok(crate::mcp::ToolExecution::Complete(result)) => {
-                ToolOutcome::Answered { ok: true, result }
-            }
+            Ok(crate::mcp::ToolExecution::Complete(result)) => ToolOutcome::Executed {
+                ok: true,
+                result,
+                selector: hook_selector,
+            },
             Ok(crate::mcp::ToolExecution::InputRequired(_)) => ToolOutcome::QuestionRequired,
-            Err(failure) => ToolOutcome::Answered {
+            Err(failure) => ToolOutcome::Executed {
                 ok: false,
                 result: failure.into_failed_result(),
+                selector: hook_selector,
             },
         })
     }
@@ -3007,8 +3135,14 @@ impl<'a> TurnLoop<'a> {
 
 /// What running one tool call produced.
 enum ToolOutcome {
-    /// It ran, or it failed in a way the model should read and adapt to.
+    /// It did not reach a guarded effect, and the model should read why.
     Answered { ok: bool, result: ToolResult },
+    /// A guarded effect settled and owns a post-effect lifecycle point.
+    Executed {
+        ok: bool,
+        result: ToolResult,
+        selector: String,
+    },
     /// The pure human-input result was already journalled with its settlement
     /// as causal parent.
     Recorded,
@@ -3057,6 +3191,7 @@ enum Generated {
     },
     /// The generation finished. `pending` is what it asked to call.
     Stopped {
+        generation: GenerationId,
         reason: StopReason,
         pending: Vec<PendingCall>,
         /// How the provider classified its failure, when `reason` is

@@ -213,9 +213,8 @@ fn tagged_results_require_typed_decisions_feedback_and_failure_kinds() {
 fn events_are_exactly_the_four_typed_hook_facts_and_no_legacy_decoder_exists() {
     let descriptor = hook(0);
     let invocation = HookInvocationId::new();
-    let subject = ego_core::event::hook::HookSubject::Item {
-        item: ItemId::new(),
-    };
+    let subject_item = ItemId::new();
+    let subject = ego_core::event::hook::HookSubject::Item { item: subject_item };
     let _ = EventKind::HookCatalogueAdmitted {
         descriptors: HookCatalogueEvidence::new(vec![descriptor.clone()]).unwrap(),
     };

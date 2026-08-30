@@ -6,7 +6,7 @@ use std::ffi::OsString;
 use std::sync::{Arc, Mutex};
 
 use ego_core::budget::{BudgetGate, Metering};
-use ego_core::config::{ConfigLayer, Mode, ModelRef, PermCfg, Rule, Ruleset, Source, Trust};
+use ego_core::config::{ConfigLayer, Mode, ModelRef, PermCfg, Ruleset, Source, Trust};
 use ego_core::cost::MeteringRevision;
 use ego_core::event::domain::{DomainEvent, Envelope, EventKind};
 use ego_core::event::hook::{
@@ -35,6 +35,7 @@ use ego_core::hook::{
     HookStartedEvidence,
 };
 use ego_core::mcp::ToolExecution;
+use ego_core::permit::rule::Rule;
 use ego_core::permit::{
     CanonPath, DnsResolution, DuplexHandle, DuplexSpawner, EnvPolicy, GuardedIo, OneHop,
     OneHopResponse, Op, PolicyEngine, PrepareCtx, PreparedCall, ProcessError, ProcessExecutor,
@@ -476,14 +477,14 @@ impl ego_core::generation_model_source::GenerationModelSource for GeneratorSourc
     }
 }
 
-fn run_turn<P: HookPort + Clone>(
+fn run_turn<P: HookPort + Clone + 'static>(
     script: Vec<AiEvent>,
     port: &P,
 ) -> (Vec<DomainEvent>, SessionState) {
     run_turn_scripts(vec![script], port)
 }
 
-fn run_turn_scripts<P: HookPort + Clone>(
+fn run_turn_scripts<P: HookPort + Clone + 'static>(
     scripts: Vec<Vec<AiEvent>>,
     port: &P,
 ) -> (Vec<DomainEvent>, SessionState) {
@@ -550,7 +551,7 @@ fn run_turn_scripts<P: HookPort + Clone>(
         HookRunner::new_with_durable_started(port.clone(), Vec::<HookStartedEvidence>::new()),
         catalogue(),
     ));
-    let outcome = block_on(turn.run("prompt")).expect("TurnLoop owner");
+    let _outcome = block_on(turn.run("prompt")).expect("TurnLoop owner");
     (store.events(), turn.into_state())
 }
 
