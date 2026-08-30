@@ -20,16 +20,17 @@ use ego_core::compact::{
     PreparedCompaction,
 };
 use ego_core::config::{
-    Effective, Limits, Mode, ModelRef, Posture, Selection, SystemPrompt, Trust, UserConfigStore,
-    resolve_selected, system_prompt,
+    Effective, Limits, McpServerConfig, Mode, ModelRef, Posture, Selection, SystemPrompt, Trust,
+    UserConfigStore, resolve_selected, system_prompt,
 };
 use ego_core::cost::CurrencyCode;
 use ego_core::event::domain::CancelCause;
 use ego_core::event::domain::EventKind;
 use ego_core::event::id::{Producer, SessionId};
 use ego_core::evidence::{
-    ConfigProvenance, EvidenceAdmissionService, EvidenceError, EvidenceRecord, EvidenceWrite,
-    RunContextEvidence, RunInvocationId,
+    ConfigProvenance, EgoVersion, EvidenceAdmissionService, EvidenceDigest, EvidenceError,
+    EvidenceRecord, EvidenceWrite, ExecutionAdmissionDescriptor, McpContextDescriptor,
+    McpTransportKind, RunContextEvidence, RunInvocationId,
 };
 use ego_core::export::Exporter;
 use ego_core::generation_model_source::{
@@ -41,9 +42,12 @@ use ego_core::generator::types::{GenRequest, ImageRef, ThinkingLevel, ToolDescri
 use ego_core::permit::judge::{JudgeConfig, JudgeInput};
 use ego_core::permit::{
     CanonPath, Change, Escalation, ExecCaps, ExecObservation, HumanApprover, Op, OpName,
-    PermissionDecision, PermissionRequest, PolicyEngine, PreparedCall, RunConfinement,
+    PermissionDecision, PermissionRequest, PolicyDigest, PolicyEngine, PreparedCall,
+    RunConfinement,
 };
-use ego_core::public::{PUBLIC_EVENT_VERSION, PublicEvent, QuestionReport, project_public};
+use ego_core::public::{
+    InstructionDescriptor, PUBLIC_EVENT_VERSION, PublicEvent, QuestionReport, project_public,
+};
 use ego_core::question::{AskQuestionTool, Elicitor, QuestionOutcome};
 use ego_core::run::{
     CancelReason, DeniedBy, RecoveryEvidence, RequestId, RunExecutionBindings, RunExecutor,
@@ -1787,14 +1791,17 @@ impl CliPrepared {
             .as_ref()
             .map(|prompt| prompt.sources.clone())
             .unwrap_or_default();
-        let config_provenance = ConfigProvenance::resolved(effective.active_profile.clone());
-        let run_context = RunContextEvidence::new(
+        let run_context = complete_run_context(
+            &args,
+            &effective,
+            &confinement,
+            &cwd,
             request.run_id.session_id(),
             request.invocation,
             request.run_id,
-            config_provenance,
+            instructions,
         )
-        .with_instructions(instructions);
+        .map_err(usage)?;
 
         Ok(RunPrepared::new(
             ModelRef(slug.clone()),
@@ -2127,6 +2134,98 @@ fn protocol_args(session_dir: Option<PathBuf>) -> Args {
     }
 }
 
+/// Compose the one complete pre-effect evidence value used by every CLI host.
+fn complete_run_context(
+    args: &Args,
+    effective: &Effective,
+    confinement: &RunConfinement,
+    cwd: &Path,
+    session: SessionId,
+    invocation: RunInvocationId,
+    run_id: RunId,
+    instructions: Vec<InstructionDescriptor>,
+) -> Result<RunContextEvidence, UsageError> {
+    let mut auth = effective
+        .auth
+        .iter()
+        .map(|(provider, layer)| (provider.clone(), format!("{layer:?}")))
+        .collect::<Vec<_>>();
+    auth.sort();
+    let mcp_config = effective
+        .mcp
+        .entries()
+        .iter()
+        .map(|(name, entry)| (name.as_str().to_owned(), format!("{entry:?}")))
+        .collect::<Vec<_>>();
+    let config_facts = vec![
+        format!("model={:?}", effective.model),
+        format!("thinking={:?}", effective.thinking),
+        format!("mode={:?}", effective.mode),
+        format!("sandbox={:?}", effective.sandbox),
+        format!("permissions={:?}", effective.permissions),
+        format!("judge={:?}", effective.judge),
+        format!("posture={:?}", effective.posture),
+        format!("profile={:?}", effective.active_profile),
+        format!("session_dir={:?}", effective.session_dir),
+        format!("artifact_dir={:?}", effective.artifact_dir),
+        format!("ceilings={:?}", effective.ceilings),
+        format!("clamped={:?}", effective.clamped),
+        format!("ui={:?}", effective.ui),
+    ];
+    let config_digest = canonical_evidence_digest(&(config_facts, auth, mcp_config))?;
+    let mcp = config::selected_mcp(args, effective, cwd)?
+        .into_iter()
+        .map(|(name, server, provenance)| {
+            let transport = match &server {
+                McpServerConfig::Stdio(_) => McpTransportKind::Stdio,
+                McpServerConfig::Http(_) => McpTransportKind::Http,
+            };
+            let provenance_digest = canonical_evidence_digest(&(
+                name.as_str(),
+                format!("{server:?}"),
+                format!("{provenance:?}"),
+            ))?;
+            McpContextDescriptor::new(name.as_str(), transport, Vec::new(), provenance_digest)
+                .map_err(|error| UsageError(error.to_string()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let policy = ego_core::digest::sha256_hex(format!("{:?}", effective.permissions).as_bytes());
+    let policy = PolicyDigest::try_from(policy).expect("sha256_hex is a valid policy digest");
+    let workspace_digest = canonical_evidence_digest(
+        &confinement
+            .workspace()
+            .as_path()
+            .to_string_lossy()
+            .into_owned(),
+    )?;
+    let capabilities_digest = canonical_evidence_digest(&confinement.requirements().required())?;
+    let execution = ExecutionAdmissionDescriptor::new(
+        confinement.level(),
+        !confinement.offline(),
+        workspace_digest,
+        capabilities_digest,
+    );
+    Ok(RunContextEvidence::complete(
+        session,
+        invocation,
+        run_id,
+        EgoVersion::current(),
+        ConfigProvenance::resolved(effective.active_profile.clone()),
+        config_digest,
+        policy,
+        effective.ceilings.clone(),
+        instructions,
+        mcp,
+        execution,
+    ))
+}
+
+fn canonical_evidence_digest<T: serde::Serialize>(value: &T) -> Result<EvidenceDigest, UsageError> {
+    EvidenceAdmissionService::new()
+        .canonical_digest(value)
+        .map_err(|error| UsageError(error.to_string()))
+}
+
 /// Production composition for every host-facing compaction command.
 pub struct CliCompactionCommand {
     args: Args,
@@ -2185,18 +2284,20 @@ impl CliCompactionCommand {
                 .map_err(|error| CompactionError::Internal(error.to_string()))?,
         ));
         let invocation = RunInvocationId::new();
-        let context = RunContextEvidence::new(
+        let context = complete_run_context(
+            &self.args,
+            &effective,
+            &confinement,
+            &cwd,
             source_id,
             invocation,
             RunId::new(source_id, invocation.uuid()),
-            ConfigProvenance::resolved(effective.active_profile.clone()),
-        )
-        .with_instructions(
             system
                 .as_ref()
                 .map(|prompt| prompt.sources.clone())
                 .unwrap_or_default(),
-        );
+        )
+        .map_err(|error| CompactionError::Internal(error.to_string()))?;
         let Opened::Durable(opened_session) = &opened;
         self.admission
             .admit_run_context(&opened_session.writer, context)
@@ -2791,13 +2892,17 @@ async fn execute<S: EventSink>(
         .as_ref()
         .map(|prompt| prompt.sources.clone())
         .unwrap_or_default();
-    let context = RunContextEvidence::new(
+    let context = complete_run_context(
+        &args,
+        &effective,
+        &confinement,
+        &cwd,
         session_id,
         invocation,
         run_id,
-        ConfigProvenance::resolved(effective.active_profile.clone()),
+        instruction_descriptors,
     )
-    .with_instructions(instruction_descriptors);
+    .map_err(usage)?;
     let Opened::Durable(opened_session) = &opened;
     match evidence.admit_run_context(&opened_session.writer, context) {
         Ok(EvidenceWrite::PublishedWithProjectionWarning { diagnostic }) => {

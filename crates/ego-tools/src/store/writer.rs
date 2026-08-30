@@ -22,7 +22,7 @@
 //! repaired would destroy the evidence the port exists to expose.
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ego_core::event::domain::DomainEvent;
@@ -43,7 +43,7 @@ use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, St
 use futures::stream::BoxStream;
 
 use super::SessionEvidenceStore;
-use super::jsonl_store::{JsonlStore, Repair};
+use super::jsonl_store::{EvidenceIndex, JsonlStore, Repair};
 use super::lease::{Lease, LeaseError};
 use super::snapshot::SnapshotRejection;
 
@@ -140,6 +140,8 @@ pub struct SessionWriter<'a> {
     _lease: Arc<Lease>,
     /// References derived from the repaired log and accepted snapshot state.
     reachable_blobs: Vec<BlobRef>,
+    /// Rebuilt once from log truth and discarded with this lease.
+    evidence_index: Mutex<EvidenceIndex>,
 }
 
 impl SessionWriter<'_> {
@@ -227,7 +229,8 @@ impl EvidenceStore for SessionWriter<'_> {
                     .to_owned(),
             });
         }
-        self.store.write_evidence(&self.id, key, record)
+        self.store
+            .write_evidence(&self.id, &self.evidence_index, key, record)
     }
 }
 
@@ -317,6 +320,9 @@ impl JsonlStore {
             Err(source) => return Err(OpenError::Resume { source, repair }),
         };
         reachable_blobs.extend(state.blob_references());
+        let evidence_index = self
+            .evidence_index(id)
+            .map_err(|source| OpenError::Resume { source, repair })?;
 
         Ok(OpenSession {
             state,
@@ -327,6 +333,7 @@ impl JsonlStore {
                 id: *id,
                 _lease: Arc::new(held),
                 reachable_blobs,
+                evidence_index: Mutex::new(evidence_index),
             },
         })
     }

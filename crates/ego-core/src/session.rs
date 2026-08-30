@@ -9,7 +9,7 @@ use crate::digest::sha256_hex;
 use crate::event::domain::{DomainEvent, Envelope, EventKind};
 use crate::event::id::{EventId, ItemId, Producer, Seq, SessionId, TurnId};
 use crate::event::time::Timestamp;
-use crate::generator::history::conversation_from;
+use crate::generator::history::conversation_from_with_blob_reader;
 use crate::generator::types::Conversation;
 use crate::state::SessionState;
 use crate::store::blob::{BlobError, BlobRef};
@@ -341,10 +341,6 @@ impl<'a> ReplayContext<'a> {
                                     reason: error.to_string(),
                                 })?;
                         }
-                        // Durable images remain reachable through their pins. Ancestor replay
-                        // contributes text/tool conversation without embedding source bytes in
-                        // the target context.
-                        images.clear();
                     }
                     _ => {}
                 }
@@ -355,10 +351,17 @@ impl<'a> ReplayContext<'a> {
         }
 
         let state = SessionState::replay(events);
-        let (conversation, repairs) =
-            conversation_from(&state).map_err(|error| ReplayError::InvalidConversation {
-                reason: error.to_string(),
-            })?;
+        let (conversation, repairs) = conversation_from_with_blob_reader(&state, &|reference| {
+            verified_blobs
+                .get(reference)
+                .cloned()
+                .ok_or_else(|| BlobError::NotFound {
+                    reference: reference.id.clone(),
+                })
+        })
+        .map_err(|error| ReplayError::InvalidConversation {
+            reason: error.to_string(),
+        })?;
         if !repairs.is_empty() {
             return Err(ReplayError::InvalidConversation {
                 reason: format!("ancestor conversation required repair: {repairs:?}"),

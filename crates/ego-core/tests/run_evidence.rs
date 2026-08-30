@@ -5,16 +5,15 @@ use ego_core::event::domain::GenerationRole;
 use ego_core::event::id::{GenerationId, SessionId};
 use ego_core::evidence::{
     ConfigProvenance, EvidenceAdmissionService, EvidenceError, EvidenceKey, EvidenceRecord,
-    EvidenceStore, EvidenceWrite, GenerationAdmissionEvidence, GenerationTarget, ManifestEvidence,
-    PricingEvidence, RunContextEvidence, RunInvocationId,
+    EvidenceStore, EvidenceWrite, ExecutionAdmissionDescriptor, GenerationAdmissionEvidence,
+    GenerationTarget, ManifestEvidence, McpContextDescriptor, PricingEvidence, RunContextEvidence,
+    RunInvocationId,
 };
 use ego_core::generator::attempt::AttemptRef;
 use ego_core::generator::capabilities::{
     CacheRetention, CancelSemantics, ImageInputSupport, ModelCapabilities, ReasoningCarryover,
     ReasoningEffortSupport, Transport,
 };
-use ego_core::mcp::{McpAdmissionFingerprint, McpOperationKind, McpSubject};
-use ego_core::permit::{BackendIdentity, ExecCaps, ExecObservation, PolicyDigest};
 use ego_core::public::{InstructionDescriptor, InstructionSource};
 use ego_core::run::{
     EventSinkFactory, IdSource, RecoveryEvidence, RunAppend, RunCommandOutcome, RunController,
@@ -69,6 +68,16 @@ fn run_context(session: SessionId, id: RunInvocationId) -> RunContextEvidence {
         RunId::new(session, id.uuid()),
         ConfigProvenance::default(),
     )
+}
+
+fn instruction(path: &str) -> InstructionDescriptor {
+    InstructionDescriptor {
+        path: path.to_owned(),
+        sha256: "a".repeat(64),
+        bytes: 128,
+        scope: ".".to_owned(),
+        source: InstructionSource::Ambient,
+    }
 }
 
 fn generation(
@@ -126,7 +135,6 @@ fn assert_no_unsafe_keys(value: &serde_json::Value) {
         "userinfo",
         "credential_headers",
         "raw_config",
-        "tokens",
         "secrets",
         "raw_prompt",
         "results",
@@ -489,7 +497,12 @@ fn run_context_is_one_record_per_invocation_and_same_digest_is_idempotent() {
     );
     assert_eq!(store.writes.lock().unwrap().len(), 1);
 
-    let changed = run_context(session, id).with_context_digest("different");
+    let changed = RunContextEvidence::new(
+        session,
+        id,
+        RunId::new(session, uuid::Uuid::now_v7()),
+        ConfigProvenance::default(),
+    );
     assert!(matches!(
         service.admit_run_context(&store, changed),
         Err(EvidenceError::IdempotencyConflict { .. })
@@ -553,10 +566,13 @@ fn canonical_digest_is_versioned_length_framed_and_order_deterministic() {
     let session = SessionId::new();
     let service = EvidenceAdmissionService::new();
     let id = invocation();
-    let first = run_context(session, id).with_instruction_paths(vec!["a", "bc"]);
-    let second = run_context(session, id).with_instruction_paths(vec!["ab", "c"]);
+    let first =
+        run_context(session, id).with_instructions(vec![instruction("a"), instruction("bc")]);
+    let second =
+        run_context(session, id).with_instructions(vec![instruction("ab"), instruction("c")]);
     let first_digest = service.canonical_digest(&first).unwrap();
-    let reordered = first.clone().with_instruction_paths(vec!["bc", "a"]);
+    let reordered =
+        run_context(session, id).with_instructions(vec![instruction("bc"), instruction("a")]);
     assert_ne!(first_digest, service.canonical_digest(&second).unwrap());
     assert_eq!(first_digest, service.canonical_digest(&reordered).unwrap());
     assert!(
@@ -589,8 +605,10 @@ fn projection_warning_is_visible_without_withdrawing_effect_authority() {
 fn safe_evidence_is_structurally_descriptor_only_and_pricing_is_explicit() {
     let session = SessionId::new();
     let id = invocation();
-    let context =
-        run_context(session, id).with_instruction_paths(vec!["AGENTS.md", "nested/AGENTS.md"]);
+    let context = run_context(session, id).with_instructions(vec![
+        instruction("AGENTS.md"),
+        instruction("nested/AGENTS.md"),
+    ]);
     let generation = generation(session, id, attempt(), GenerationRole::Main);
     let context_wire = serde_json::to_value(&context).unwrap();
     let generation_wire = serde_json::to_value(&generation).unwrap();
@@ -607,34 +625,153 @@ fn safe_evidence_is_structurally_descriptor_only_and_pricing_is_explicit() {
         scope: ".".to_owned(),
         source: InstructionSource::Ambient,
     };
-    let mcp_subject = McpSubject::Tool {
-        server: "fixture-server".to_owned(),
-        name: "read_file".to_owned(),
-    };
-    let mcp_admission = McpAdmissionFingerprint::new(
-        "generation-digest",
-        McpOperationKind::CallTool.method(),
-        "schema-digest",
-    )
-    .unwrap();
-    let execution = ExecObservation::new(
-        BackendIdentity::new("fixture-backend", "2026-08"),
-        ExecCaps::READ_SCOPED.union(ExecCaps::WRITE_DENIED),
-        PolicyDigest::try_from("b".repeat(64)).unwrap(),
-    );
-    for projection in [
-        serde_json::to_value(instruction).unwrap(),
-        serde_json::to_value(mcp_subject).unwrap(),
-        serde_json::to_value(mcp_admission).unwrap(),
-        serde_json::to_value(execution).unwrap(),
-    ] {
-        assert_no_unsafe_keys(&projection);
-    }
+    assert_no_unsafe_keys(&serde_json::to_value(instruction).unwrap());
     assert!(matches!(
         generation.pricing(),
         PricingEvidence::Unpriced { source, reason }
             if source == "fixture" && reason == "subscription"
     ));
+}
+
+#[test]
+fn run_context_schema_requires_complete_pre_effect_facts_and_closed_mcp_subjects() {
+    let session = SessionId::new();
+    let invocation = invocation();
+    let wire = serde_json::json!({
+        "version": 2,
+        "session": session,
+        "invocation": invocation,
+        "run_id": RunId::new(session, invocation.uuid()),
+        "ego_version": env!("CARGO_PKG_VERSION"),
+        "config": ConfigProvenance::default(),
+        "config_digest": "a".repeat(64),
+        "policy_digest": "b".repeat(64),
+        "ceilings": {"money": null, "tokens": null},
+        "instructions": [{
+            "path": "AGENTS.md",
+            "sha256": "c".repeat(64),
+            "bytes": 128,
+            "scope": ".",
+            "source": "ambient"
+        }],
+        "mcp": [{
+            "server": "fixture-server",
+            "transport": "stdio",
+            "admissions": [{
+                "operation": "read_resource",
+                "generation_digest": "d".repeat(64),
+                "schema_digest": "e".repeat(64)
+            }],
+            "provenance_digest": "f".repeat(64)
+        }],
+        "execution": {
+            "confinement": "workspace",
+            "process_network": false,
+            "workspace_digest": "0".repeat(64),
+            "capabilities_digest": "1".repeat(64)
+        }
+    });
+    let context: RunContextEvidence =
+        serde_json::from_value(wire.clone()).expect("exact v2 RunContextEvidence deserializes");
+    let wire = serde_json::to_value(&context).expect("exact v2 RunContextEvidence serializes");
+    let exact_fields = [
+        "version",
+        "session",
+        "invocation",
+        "run_id",
+        "ego_version",
+        "config",
+        "config_digest",
+        "policy_digest",
+        "ceilings",
+        "instructions",
+        "mcp",
+        "execution",
+    ];
+    let mut keys: Vec<_> = wire
+        .as_object()
+        .expect("v2 RunContextEvidence is an object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    let mut expected = exact_fields.to_vec();
+    expected.sort_unstable();
+    assert_eq!(keys, expected);
+    for field in [
+        "version",
+        "session",
+        "invocation",
+        "run_id",
+        "ego_version",
+        "config",
+        "config_digest",
+        "policy_digest",
+        "ceilings",
+        "instructions",
+        "mcp",
+        "execution",
+    ] {
+        assert!(
+            wire.get(field).is_some_and(|value| !value.is_null()),
+            "complete RunContextEvidence omitted {field}: {wire}"
+        );
+        let mut missing = wire.clone();
+        missing
+            .as_object_mut()
+            .expect("RunContextEvidence is an object")
+            .remove(field);
+        assert!(
+            serde_json::from_value::<RunContextEvidence>(missing).is_err(),
+            "RunContextEvidence accepted missing required field {field}"
+        );
+    }
+    let mcp = wire["mcp"].as_array().expect("MCP descriptors");
+    serde_json::from_value::<McpContextDescriptor>(mcp[0].clone())
+        .expect("MCP descriptor is the closed typed form");
+    let mcp_object = mcp[0].as_object().expect("MCP descriptor object");
+    let mut mcp_keys: Vec<_> = mcp_object.keys().map(String::as_str).collect();
+    mcp_keys.sort_unstable();
+    assert_eq!(
+        mcp_keys,
+        ["admissions", "provenance_digest", "server", "transport"]
+    );
+    let admissions = mcp_object["admissions"]
+        .as_array()
+        .expect("nested MCP admissions");
+    let admission_keys: Vec<_> = admissions[0]
+        .as_object()
+        .expect("MCP admission descriptor object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        admission_keys,
+        ["generation_digest", "operation", "schema_digest"]
+    );
+    serde_json::from_value::<ExecutionAdmissionDescriptor>(wire["execution"].clone())
+        .expect("execution descriptor has the exact pre-effect shape");
+    for forbidden in [
+        "endpoint",
+        "uri",
+        "path",
+        "query",
+        "userinfo",
+        "header",
+        "credential",
+        "environment",
+    ] {
+        assert!(
+            !contains_key(&wire["mcp"], forbidden),
+            "MCP field leaked: {forbidden}"
+        );
+    }
+    assert!(
+        !wire.to_string().contains("https://")
+            && !wire.to_string().contains("?")
+            && !wire.to_string().contains("SECRET"),
+        "MCP descriptor serialized an unsafe value: {wire}"
+    );
 }
 
 #[test]

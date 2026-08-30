@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use ego_core::event::domain::{DomainEvent, Envelope, EventKind};
 use ego_core::event::id::{EventId, Producer, Seq, SessionId, TurnId};
 use ego_core::event::time::Timestamp;
+use ego_core::evidence::RunContextEvidence;
 use ego_core::run::RunId;
 use ego_core::store::run_artifact::{
     ArtifactPublication, PublishedRunArtifact, RunArtifactId, RunArtifactStore,
@@ -658,6 +659,69 @@ fn each_admitted_terminal_ci_run_publishes_exactly_one_sanitized_bundle() {
         serde_json::from_slice(&stored_bundle_bytes(&bundles[0])).expect("sanitized bundle JSON");
     assert_eq!(bundle["v"], 1);
     assert!(bundle["records"].is_array());
+}
+
+#[test]
+fn direct_ci_run_context_records_complete_admitted_pre_effect_facts() {
+    let fixture = Fixture::new();
+    let finished = fixture.run_ci("json");
+    assert_eq!(finished.code, Some(0), "stderr: {}", finished.stderr);
+    let context = fs::read_to_string(fixture.log())
+        .expect("session log")
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find_map(|record| {
+            let payload = record.get("payload")?;
+            let evidence = payload.get("evidence")?;
+            (evidence["kind"] == "run_context").then(|| evidence.clone())
+        })
+        .expect("direct run persisted run-context evidence");
+    assert_eq!(context["kind"], "run_context");
+    let mut body = context.clone();
+    body.as_object_mut()
+        .expect("run-context evidence object")
+        .remove("kind");
+    let exact_fields = [
+        "version",
+        "session",
+        "invocation",
+        "run_id",
+        "ego_version",
+        "config",
+        "config_digest",
+        "policy_digest",
+        "ceilings",
+        "instructions",
+        "mcp",
+        "execution",
+    ];
+    let mut keys: Vec<_> = body
+        .as_object()
+        .expect("run-context evidence object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    let mut expected = exact_fields.to_vec();
+    expected.sort_unstable();
+    assert_eq!(keys, expected, "direct run-context schema drifted: {body}");
+    serde_json::from_value::<RunContextEvidence>(body.clone())
+        .expect("direct run-context evidence uses the exact v2 schema");
+    for field in exact_fields {
+        assert!(
+            body.get(field).is_some_and(|value| !value.is_null()),
+            "direct run-context evidence omitted {field}: {body}"
+        );
+        let mut missing = body.clone();
+        missing
+            .as_object_mut()
+            .expect("run-context evidence object")
+            .remove(field);
+        assert!(
+            serde_json::from_value::<RunContextEvidence>(missing).is_err(),
+            "direct run-context accepted missing required field {field}"
+        );
+    }
 }
 
 #[test]

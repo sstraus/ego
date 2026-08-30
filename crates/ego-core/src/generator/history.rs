@@ -11,7 +11,7 @@
 
 use super::types::{ContentBlock, Conversation, HistoryError, Message, Role};
 use crate::state::{ItemKind, ItemState, SessionState};
-use crate::store::blob::BlobStore;
+use crate::store::blob::{BlobError, BlobRef, BlobStore};
 
 /// Something the rebuild had to do to make the history sendable.
 ///
@@ -70,12 +70,20 @@ pub fn conversation_from_with_blobs(
     state: &SessionState,
     blobs: &dyn BlobStore,
 ) -> Result<(Conversation, Vec<Repair>), HistoryError> {
-    conversation_from_inner(state, Some(blobs))
+    conversation_from_with_blob_reader(state, &|reference| blobs.read(reference))
+}
+
+/// Rebuild and hydrate every durable image through an already-resolved blob reader.
+pub(crate) fn conversation_from_with_blob_reader(
+    state: &SessionState,
+    read_blob: &dyn Fn(&BlobRef) -> Result<Vec<u8>, BlobError>,
+) -> Result<(Conversation, Vec<Repair>), HistoryError> {
+    conversation_from_inner(state, Some(read_blob))
 }
 
 fn conversation_from_inner(
     state: &SessionState,
-    blobs: Option<&dyn BlobStore>,
+    read_blob: Option<&dyn Fn(&BlobRef) -> Result<Vec<u8>, BlobError>>,
 ) -> Result<(Conversation, Vec<Repair>), HistoryError> {
     let mut items: Vec<&ItemState> = state.items.values().collect();
     // By `seq`, not by `ItemId` — see `ItemState::seq`.
@@ -146,10 +154,11 @@ fn conversation_from_inner(
                     });
                 }
                 for durable in &item.images {
-                    let blobs = blobs.ok_or_else(|| HistoryError::ImageBlobStoreRequired {
-                        reference: durable.reference().to_string(),
-                    })?;
-                    let bytes = blobs.read(durable.reference()).map_err(|error| {
+                    let read_blob =
+                        read_blob.ok_or_else(|| HistoryError::ImageBlobStoreRequired {
+                            reference: durable.reference().to_string(),
+                        })?;
+                    let bytes = read_blob(durable.reference()).map_err(|error| {
                         HistoryError::ImageUnavailable {
                             reference: durable.reference().to_string(),
                             cause: error.to_string(),

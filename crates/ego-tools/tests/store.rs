@@ -13,10 +13,13 @@ use std::time::Duration;
 use ego_core::event::domain::{DomainEvent, Envelope, EventKind, ExitReason};
 use ego_core::event::id::{EventId, Producer, QueuedPromptId, Seq, SessionId, TurnId};
 use ego_core::event::time::Timestamp;
-use ego_core::run::{RunAppend, RunRevision, RunTransaction};
+use ego_core::evidence::{
+    ConfigProvenance, EvidenceAdmissionService, RunContextEvidence, RunInvocationId,
+};
+use ego_core::run::{RunAppend, RunId, RunRevision, RunTransaction};
 use ego_core::store::codec::{CODEC_VERSION, CodecError, StoreLine, decode_line, encode_record};
 use ego_core::store::session_store::{SessionEntry, SessionStore, StoreError};
-use ego_tools::store::{JsonlStore, OsIo, StoreIo};
+use ego_tools::store::{AtomicReplacePublication, JsonlStore, LeaseInputs, OsIo, StoreIo};
 use futures::StreamExt;
 use futures::executor::block_on;
 use tempfile::tempdir;
@@ -27,6 +30,17 @@ use tempfile::tempdir;
 // tests/store.rs's bare functions wouldn't otherwise contain "store".
 mod store {
     use super::*;
+
+    const ALIVE: &dyn Fn(u32) -> bool = &|_| true;
+
+    fn evidence_lease() -> LeaseInputs<'static> {
+        LeaseInputs {
+            pid: 66066,
+            now: Timestamp::from_millis(6_606_600),
+            stale_after: Duration::from_secs(30),
+            is_alive: ALIVE,
+        }
+    }
 
     fn ev_at(seq: Seq, turn: TurnId, kind: EventKind, ts_millis: u64) -> DomainEvent {
         DomainEvent {
@@ -310,6 +324,14 @@ mod store {
 
         fn replace_atomic(&self, path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
             self.inner.replace_atomic(path, bytes)
+        }
+
+        fn replace_atomic_publication(
+            &self,
+            path: &std::path::Path,
+            bytes: &[u8],
+        ) -> std::io::Result<AtomicReplacePublication> {
+            self.inner.replace_atomic_publication(path, bytes)
         }
 
         fn truncate(&self, path: &std::path::Path, len: u64) -> std::io::Result<()> {
@@ -1095,6 +1117,43 @@ mod store {
              already exists) instead of StoreIo::exists — that re-introduces the O(n) \
              whole-log read per event this test exists to catch; saw {log_reads} reads \
              across {event_count} appends"
+        );
+    }
+
+    #[test]
+    fn lease_local_evidence_admissions_do_not_read_the_whole_log_per_record() {
+        let dir = tempdir().unwrap();
+        let reads = Arc::new(Mutex::new(HashMap::new()));
+        let io = ReadCountingIo {
+            inner: OsIo,
+            reads: reads.clone(),
+        };
+        let store = JsonlStore::new(dir.path(), "/ws", Box::new(io));
+        let session = SessionId::new();
+        let opened = store.open_writer(&session, evidence_lease()).unwrap();
+        let log = log_path(dir.path(), &session);
+        let reads_before = *reads.lock().unwrap().get(&log).unwrap_or(&0);
+        let service = EvidenceAdmissionService::new();
+        for _ in 0..4 {
+            let invocation = RunInvocationId::new();
+            service
+                .admit_run_context(
+                    &opened.writer,
+                    RunContextEvidence::new(
+                        session,
+                        invocation,
+                        RunId::new(session, invocation.uuid()),
+                        ConfigProvenance::default(),
+                    ),
+                )
+                .unwrap();
+        }
+        let reads_after = *reads.lock().unwrap().get(&log).unwrap_or(&0);
+        assert_eq!(
+            reads_after,
+            reads_before,
+            "evidence admission read the whole log {} additional times",
+            reads_after - reads_before
         );
     }
 

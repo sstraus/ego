@@ -6,6 +6,7 @@ use std::fmt;
 use serde::Serialize;
 
 use crate::budget::MeteringIdentity;
+use crate::ceiling::Ceilings;
 use crate::config::ModelRef;
 use crate::cost::{CostDelta, PricingRevision};
 use crate::event::domain::{EventKind, ExitReason, GenerationRole, OccupancyProvenance};
@@ -16,14 +17,14 @@ use crate::event::hook::{
 use crate::event::id::{EventId, ItemId, Producer, QueuedPromptId, Seq, SessionId, TurnId};
 use crate::event::time::Timestamp;
 use crate::evidence::{
-    ConfigProvenance, EvidenceKey, EvidenceRecord, GenerationTarget, PricingEvidence,
-    RunInvocationId,
+    ConfigProvenance, EVIDENCE_SCHEMA_VERSION, EgoVersion, EvidenceDigest, EvidenceKey,
+    EvidenceRecord, ExecutionAdmissionDescriptor, GenerationTarget, McpContextDescriptor,
+    PricingEvidence, RunInvocationId,
 };
 use crate::generator::attempt::{AttemptRef, Outcome};
 use crate::generator::capabilities::ModelCapabilities;
 use crate::generator::types::{ErrorKind, ImageRef};
-use crate::mcp::McpAdmissionFingerprint;
-use crate::permit::{Escalation, ExecObservation};
+use crate::permit::{Escalation, ExecObservation, PolicyDigest};
 use crate::public::InstructionSource;
 use crate::question::{QuestionMode, QuestionOutcome};
 use crate::run::{
@@ -90,11 +91,14 @@ pub enum ExportRecord {
         invocation: RunInvocationId,
         run_id: RunId,
         record_digest: String,
+        ego_version: EgoVersion,
         config: ConfigProvenance,
-        context_digest: Option<String>,
+        config_digest: EvidenceDigest,
+        policy_digest: PolicyDigest,
+        ceilings: Ceilings,
         instructions: Vec<ExportInstructionEvidence>,
-        mcp_admissions: Vec<McpAdmissionFingerprint>,
-        execution: Option<ExecObservation>,
+        mcp: Vec<McpContextDescriptor>,
+        execution: ExecutionAdmissionDescriptor,
     },
     GenerationAdmissionEvidence {
         evidence_v: u32,
@@ -320,14 +324,37 @@ pub enum ExportError {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExportEvidenceFailure {
+    UnsupportedVersion {
+        found: u32,
+        required: u32,
+    },
     MissingRunEvidence,
-    MissingRunContext { invocation: RunInvocationId },
-    MissingGenerationAdmission { attempt: AttemptRef },
-    Duplicate { key: EvidenceKey },
-    OutOfOrder { key: EvidenceKey },
-    SessionMismatch { recorded: SessionId },
-    RunMismatch { invocation: RunInvocationId },
-    GenerationRoleMismatch { attempt: AttemptRef },
+    MissingRunContext {
+        invocation: RunInvocationId,
+    },
+    MissingGenerationAdmission {
+        attempt: AttemptRef,
+    },
+    Duplicate {
+        key: EvidenceKey,
+    },
+    OutOfOrder {
+        key: EvidenceKey,
+    },
+    SessionMismatch {
+        recorded: SessionId,
+    },
+    RunMismatch {
+        invocation: RunInvocationId,
+    },
+    GenerationRoleMismatch {
+        attempt: AttemptRef,
+    },
+    AttemptOwnershipConflict {
+        attempt: AttemptRef,
+        existing_invocation: RunInvocationId,
+        requested_invocation: RunInvocationId,
+    },
 }
 
 impl fmt::Display for ExportError {
@@ -480,8 +507,6 @@ fn project_evidence(
 ) -> ExportRecord {
     match record {
         EvidenceRecord::RunContext(context) => {
-            redactions.path += context.instruction_paths().len() as u64;
-            redactions.tool_material += context.mcp_subjects().len() as u64;
             let instructions = context
                 .instructions()
                 .iter()
@@ -501,11 +526,14 @@ fn project_evidence(
                 invocation: context.invocation(),
                 run_id: context.run_id(),
                 record_digest: record.digest().to_string(),
+                ego_version: context.ego_version().clone(),
                 config: context.config().clone(),
-                context_digest: context.context_digest().map(str::to_owned),
+                config_digest: context.config_digest().clone(),
+                policy_digest: context.policy_digest().clone(),
+                ceilings: context.ceilings().clone(),
                 instructions,
-                mcp_admissions: context.mcp_admissions().to_vec(),
-                execution: context.execution().cloned(),
+                mcp: context.mcp().to_vec(),
+                execution: context.execution().clone(),
             }
         }
         EvidenceRecord::GenerationAdmission(admission) => {
@@ -842,6 +870,16 @@ impl EvidenceValidation {
         position: Seq,
         record: &EvidenceRecord,
     ) -> Result<(), ExportError> {
+        if record.version() != EVIDENCE_SCHEMA_VERSION {
+            return evidence_error(
+                session,
+                position,
+                ExportEvidenceFailure::UnsupportedVersion {
+                    found: record.version(),
+                    required: EVIDENCE_SCHEMA_VERSION,
+                },
+            );
+        }
         let key = record.key();
         if !self.keys.insert(key.clone()) {
             return evidence_error(session, position, ExportEvidenceFailure::Duplicate { key });
@@ -896,6 +934,19 @@ impl EvidenceValidation {
                         position,
                         ExportEvidenceFailure::MissingRunContext {
                             invocation: admission.invocation(),
+                        },
+                    );
+                }
+                if let Some((existing_invocation, _, _)) =
+                    self.generations.get(&admission.attempt())
+                {
+                    return evidence_error(
+                        session,
+                        position,
+                        ExportEvidenceFailure::AttemptOwnershipConflict {
+                            attempt: admission.attempt(),
+                            existing_invocation: *existing_invocation,
+                            requested_invocation: admission.invocation(),
                         },
                     );
                 }

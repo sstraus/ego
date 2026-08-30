@@ -7,22 +7,23 @@
 //!     events.jsonl        # the log; first line is a versioned header record
 //! ```
 
+use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use ego_core::compact::{
-    CompactionTargetError, CompactionTargetFacts, CompactionTargetInspection,
-    CompactionTargetPort,
+    CompactionTargetError, CompactionTargetFacts, CompactionTargetInspection, CompactionTargetPort,
 };
 use ego_core::event::domain::{DomainEvent, EventKind, GenerationRole};
 use ego_core::event::hook::HookCatalogueEvidence;
 use ego_core::event::id::{Producer, Seq, SessionId};
 use ego_core::event::time::Timestamp;
 use ego_core::evidence::{
-    EvidenceError, EvidenceKey, EvidenceLogSource, EvidenceRecord, EvidenceWrite, ManifestEvidence,
-    ManifestEvidenceError,
+    EVIDENCE_SCHEMA_VERSION, EvidenceError, EvidenceKey, EvidenceLogSource, EvidenceRecord,
+    EvidenceWrite, ManifestEvidence, ManifestEvidenceError, RunInvocationId,
 };
+use ego_core::generator::attempt::AttemptRef;
 use ego_core::permit::ExecObservation;
 use ego_core::run::{RunAppend, RunCommand, RunRevision, RunTransaction};
 use ego_core::session::{
@@ -87,6 +88,62 @@ struct LogManifestFacts {
     execution: Option<ExecObservation>,
     hooks: HookCatalogueEvidence,
     evidence: ManifestEvidence,
+}
+
+/// Lease-local evidence facts derived from the repaired valid prefix.
+/// The session log remains the only authority and this value is never stored.
+#[derive(Debug, Default)]
+pub(super) struct EvidenceIndex {
+    records: HashMap<EvidenceKey, EvidenceRecord>,
+    attempt_owners: HashMap<AttemptRef, RunInvocationId>,
+}
+
+impl EvidenceIndex {
+    fn from_records(id: SessionId, records: Vec<EvidenceRecord>) -> Result<Self, StoreError> {
+        let mut index = Self::default();
+        for record in records {
+            if record.version() != EVIDENCE_SCHEMA_VERSION {
+                return Err(invalid_log(format!(
+                    "unsupported evidence version {}; version {} is required",
+                    record.version(),
+                    EVIDENCE_SCHEMA_VERSION
+                )));
+            }
+            let key = record.key();
+            if key.session() != id || index.records.contains_key(&key) {
+                return Err(invalid_log(
+                    "conflicting evidence key in the valid session prefix",
+                ));
+            }
+            if let EvidenceKey::GenerationAdmission {
+                session,
+                invocation,
+                attempt,
+            } = key.clone()
+            {
+                let context = EvidenceKey::RunContext {
+                    session,
+                    invocation,
+                };
+                if !index.records.contains_key(&context) {
+                    return Err(invalid_log(
+                        "generation evidence precedes its run context in the valid prefix",
+                    ));
+                }
+                if index
+                    .attempt_owners
+                    .insert(attempt, invocation)
+                    .is_some_and(|owner| owner != invocation)
+                {
+                    return Err(invalid_log(
+                        "one attempt is owned by two invocations in the valid prefix",
+                    ));
+                }
+            }
+            index.records.insert(key, record);
+        }
+        Ok(index)
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1211,9 +1268,18 @@ impl JsonlStore {
         Ok((evidence, last_position))
     }
 
+    pub(super) fn evidence_index(&self, id: &SessionId) -> Result<EvidenceIndex, StoreError> {
+        let Some(bytes) = self.io.read(&self.log_path(id))? else {
+            return Ok(EvidenceIndex::default());
+        };
+        let (records, _) = self.inspect_evidence_log(id, &bytes)?;
+        EvidenceIndex::from_records(*id, records)
+    }
+
     pub(super) fn write_evidence(
         &self,
         id: &SessionId,
+        index: &Mutex<EvidenceIndex>,
         key: EvidenceKey,
         record: EvidenceRecord,
     ) -> Result<EvidenceWrite, EvidenceError> {
@@ -1226,12 +1292,17 @@ impl JsonlStore {
             key: key.clone(),
             diagnostic: error.to_string(),
         })?;
-        self.write_evidence_already_locked(id, key, record)
+        let mut index = index.lock().map_err(|_| EvidenceError::Store {
+            key: key.clone(),
+            diagnostic: "lease-local evidence index lock is poisoned".to_owned(),
+        })?;
+        self.write_evidence_already_locked(id, &mut index, key, record)
     }
 
     fn write_evidence_already_locked(
         &self,
         id: &SessionId,
+        index: &mut EvidenceIndex,
         key: EvidenceKey,
         record: EvidenceRecord,
     ) -> Result<EvidenceWrite, EvidenceError> {
@@ -1241,26 +1312,14 @@ impl JsonlStore {
                 diagnostic: "evidence key, payload, and lease-held session do not agree".to_owned(),
             });
         }
-        let log_path = self.log_path(id);
-        let existing = self
-            .io
-            .read(&log_path)
-            .map_err(|error| EvidenceError::Store {
-                key: key.clone(),
-                diagnostic: error.to_string(),
-            })?;
-        let (records, mut last_position) = match existing.as_deref() {
-            Some(bytes) => {
-                self.inspect_evidence_log(id, bytes)
-                    .map_err(|error| EvidenceError::Store {
-                        key: key.clone(),
-                        diagnostic: error.to_string(),
-                    })?
-            }
-            None => (Vec::new(), Seq::ZERO),
-        };
-
-        if let Some(previous) = records.iter().find(|candidate| candidate.key() == key) {
+        if record.version() != EVIDENCE_SCHEMA_VERSION {
+            return Err(EvidenceError::UnsupportedVersion {
+                key,
+                found: record.version(),
+                required: EVIDENCE_SCHEMA_VERSION,
+            });
+        }
+        if let Some(previous) = index.records.get(&key) {
             if previous == &record {
                 return Ok(EvidenceWrite::AlreadyRecorded);
             }
@@ -1273,38 +1332,72 @@ impl JsonlStore {
         if let EvidenceKey::GenerationAdmission {
             session,
             invocation,
-            ..
+            attempt,
         } = &key
-            && !records.iter().any(|candidate| {
-                candidate.key()
-                    == EvidenceKey::RunContext {
-                        session: *session,
-                        invocation: *invocation,
-                    }
-            })
         {
-            return Err(EvidenceError::RunContextRequired { key: record.key() });
+            let context = EvidenceKey::RunContext {
+                session: *session,
+                invocation: *invocation,
+            };
+            if !index.records.contains_key(&context) {
+                return Err(EvidenceError::RunContextRequired { key: record.key() });
+            }
+            if let Some(owner) = index.attempt_owners.get(attempt)
+                && owner != invocation
+            {
+                return Err(EvidenceError::AttemptOwnershipConflict {
+                    session: *session,
+                    attempt: *attempt,
+                    existing_invocation: *owner,
+                    requested_invocation: *invocation,
+                });
+            }
         }
 
-        let position = last_position.next();
-        let line = encode_record(position, &SessionEntry::Evidence(record)).map_err(|error| {
-            EvidenceError::Store {
+        let log_path = self.log_path(id);
+        let is_new_session = !self
+            .io
+            .exists(&log_path)
+            .map_err(|error| EvidenceError::Store {
                 key: key.clone(),
                 diagnostic: error.to_string(),
-            }
-        })?;
+            })?;
+        let position = if is_new_session {
+            let mut first = Seq::ZERO;
+            first.next()
+        } else {
+            self.next_physical_position(&log_path, id)
+                .map_err(|error| EvidenceError::Store {
+                    key: key.clone(),
+                    diagnostic: error.to_string(),
+                })?
+        };
+        let line =
+            encode_record(position, &SessionEntry::Evidence(record.clone())).map_err(|error| {
+                EvidenceError::Store {
+                    key: key.clone(),
+                    diagnostic: error.to_string(),
+                }
+            })?;
 
-        let (published, publication) = if let Some(mut bytes) = existing {
+        let publication = if !is_new_session {
             self.io
                 .append_line(&log_path, &line)
                 .map_err(|error| EvidenceError::Store {
                     key: key.clone(),
                     diagnostic: error.to_string(),
                 })?;
-            bytes.extend_from_slice(&line);
-            bytes.push(b'\n');
+            index.records.insert(key.clone(), record.clone());
+            if let EvidenceKey::GenerationAdmission {
+                invocation,
+                attempt,
+                ..
+            } = &key
+            {
+                index.attempt_owners.insert(*attempt, *invocation);
+            }
             match self.io.fsync(&log_path) {
-                Ok(()) => (bytes, AtomicReplacePublication::PublishedDurably),
+                Ok(()) => AtomicReplacePublication::PublishedDurably,
                 Err(error) => {
                     return Err(EvidenceError::DurabilityUncertain {
                         key,
@@ -1325,18 +1418,84 @@ impl JsonlStore {
                     key: key.clone(),
                     diagnostic: error.to_string(),
                 })?;
-            (image, publication)
+            index.records.insert(key.clone(), record.clone());
+            if let EvidenceKey::GenerationAdmission {
+                invocation,
+                attempt,
+                ..
+            } = &key
+            {
+                index.attempt_owners.insert(*attempt, *invocation);
+            }
+            publication
         };
 
         if let AtomicReplacePublication::PublishedDurabilityUncertain { diagnostic } = publication {
             return Err(EvidenceError::DurabilityUncertain { key, diagnostic });
         }
-        match self.rebuild_manifest_from_log(id, &published) {
+        match self.write_evidence_manifest(id, &record, is_new_session) {
             Ok(_) => Ok(EvidenceWrite::Published),
             Err(error) => Ok(EvidenceWrite::PublishedWithProjectionWarning {
                 diagnostic: error.to_string(),
             }),
         }
+    }
+
+    fn write_evidence_manifest(
+        &self,
+        id: &SessionId,
+        record: &EvidenceRecord,
+        is_new_session: bool,
+    ) -> Result<(), StoreError> {
+        let previous = self.read_manifest(id)?;
+        let mut manifest = match previous {
+            Some(manifest) => manifest,
+            None if is_new_session => RunManifest {
+                meta: SessionMeta {
+                    id: *id,
+                    workspace_root: self.workspace.clone(),
+                    model: None,
+                    created: Timestamp::EPOCH,
+                    updated: Timestamp::EPOCH,
+                    title: None,
+                    lineage: None,
+                },
+                execution: None,
+                hooks: HookCatalogueEvidence::default(),
+                evidence: ManifestEvidence::default(),
+            },
+            None => {
+                return Err(StoreError::Io(std::io::Error::other(
+                    "manifest cache disappeared while the writer lease was held",
+                )));
+            }
+        };
+        let mut records = manifest
+            .evidence
+            .run_contexts()
+            .iter()
+            .cloned()
+            .map(EvidenceRecord::RunContext)
+            .chain(
+                manifest
+                    .evidence
+                    .generations()
+                    .iter()
+                    .cloned()
+                    .map(EvidenceRecord::GenerationAdmission),
+            )
+            .collect::<Vec<_>>();
+        records.push(record.clone());
+        manifest.evidence = ManifestEvidence::from_records(&records)
+            .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
+        if let EvidenceRecord::GenerationAdmission(admission) = record
+            && admission.role() == GenerationRole::Main
+        {
+            manifest.meta.model = Some(admission.target().canonical_model().0.clone());
+        }
+        let bytes = serde_json::to_vec(&manifest).expect("RunManifest always serialises");
+        self.io.replace_atomic(&self.manifest_path(id), &bytes)?;
+        Ok(())
     }
 
     fn append_already_locked(&self, id: &SessionId, ev: &DomainEvent) -> Result<(), StoreError> {
@@ -1970,6 +2129,7 @@ impl EvidenceLogSource for JsonlStore {
         let (records, _) = self
             .inspect_evidence_log(session, &bytes)
             .map_err(|error| ManifestEvidenceError::Store(error.to_string()))?;
+        ManifestEvidence::from_records(&records)?;
         self.rebuild_manifest_from_log(session, &bytes)
             .map_err(|error| ManifestEvidenceError::Store(error.to_string()))?;
         Ok(records)

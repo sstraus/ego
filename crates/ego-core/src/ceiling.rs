@@ -25,7 +25,7 @@
 use std::fmt;
 use std::str::FromStr;
 
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::cost::{Amount, CurrencyCode, Money, MoneyError};
 use crate::state::Usage;
@@ -175,7 +175,7 @@ impl std::error::Error for BudgetSpecError {}
 /// administrator who caps money must not be escaped by a user who names a
 /// token ceiling instead, and the reverse. `None` is the ordinary case —
 /// `CLI.md:296-299` says ego imposes no ceiling of its own.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Ceilings {
     pub money: Option<Money>,
     pub tokens: Option<u64>,

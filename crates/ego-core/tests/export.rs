@@ -2,14 +2,21 @@
 
 use std::collections::{BTreeMap, HashMap};
 
+use ego_core::config::ModelRef;
 use ego_core::config::{ActiveProfileProvenance, OriginSet, Source};
-use ego_core::event::domain::{DomainEvent, Envelope, EventKind, ExitReason};
+use ego_core::event::domain::{DomainEvent, Envelope, EventKind, ExitReason, GenerationRole};
 use ego_core::event::id::{EventId, ItemId, Producer, Seq, SessionId, TurnId};
 use ego_core::event::time::Timestamp;
 use ego_core::evidence::{
-    ConfigProvenance, EvidenceKey, EvidenceRecord, RunContextEvidence, RunInvocationId,
+    ConfigProvenance, EvidenceKey, EvidenceRecord, GenerationAdmissionEvidence, GenerationTarget,
+    PricingEvidence, RunContextEvidence, RunInvocationId,
 };
 use ego_core::export::{ExportError, ExportEvidenceFailure, Exporter};
+use ego_core::generator::attempt::AttemptRef;
+use ego_core::generator::capabilities::{
+    CacheRetention, CancelSemantics, ImageInputSupport, ModelCapabilities, ReasoningCarryover,
+    ReasoningEffortSupport, Transport,
+};
 use ego_core::generator::types::{ErrorKind, ImageMediaType, ImageRef};
 use ego_core::permit::{CanonPath, Escalation, OpName, ToolResult};
 use ego_core::run::RunId;
@@ -72,7 +79,10 @@ fn event(seq: &mut Seq, kind: EventKind) -> SessionEntry {
 }
 
 fn context(session: SessionId) -> SessionEntry {
-    let invocation = RunInvocationId::new();
+    context_for(session, RunInvocationId::new())
+}
+
+fn context_for(session: SessionId, invocation: RunInvocationId) -> SessionEntry {
     let run_id = format!("{session}.{}", invocation.uuid())
         .parse::<RunId>()
         .expect("typed run identity");
@@ -86,6 +96,55 @@ fn context(session: SessionId) -> SessionEntry {
             definitions: OriginSet::just(Source::Flags),
         })),
     )))
+}
+
+fn generation_for(
+    session: SessionId,
+    invocation: RunInvocationId,
+    attempt: AttemptRef,
+) -> SessionEntry {
+    SessionEntry::Evidence(EvidenceRecord::GenerationAdmission(
+        GenerationAdmissionEvidence::new(
+            session,
+            invocation,
+            attempt,
+            GenerationRole::Main,
+            GenerationTarget::new(
+                "provider",
+                ModelRef("provider/model".to_owned()),
+                "wire-model",
+            ),
+            ModelCapabilities {
+                schema_version: ModelCapabilities::SCHEMA_VERSION,
+                max_context_tokens: Some(8192),
+                max_output_tokens: Some(1024),
+                max_tools: Some(32),
+                supports_parallel_tool_calls: true,
+                reasoning_carryover: ReasoningCarryover::Portable,
+                reasoning_efforts: ReasoningEffortSupport::Any,
+                reasoning_state_dialect: None,
+                cancel: CancelSemantics::Cooperative,
+                cache: CacheRetention::None,
+                transport: Transport::Sse,
+                image_input: ImageInputSupport::Unknown,
+            },
+            PricingEvidence::Unpriced {
+                source: "fixture".to_owned(),
+                reason: "subscription".to_owned(),
+            },
+        ),
+    ))
+}
+
+fn generation_started(attempt: AttemptRef) -> SessionEntry {
+    let mut sequence = Seq::ZERO;
+    event(
+        &mut sequence,
+        EventKind::GenerationStarted {
+            attempt,
+            role: GenerationRole::Main,
+        },
+    )
 }
 
 fn admitted_command(session: SessionId, invocation: RunInvocationId) -> SessionEntry {
@@ -543,4 +602,42 @@ fn rooted_command_must_precede_matching_run_context() {
             && recorded_session == target
             && recorded_invocation == invocation
     ));
+}
+
+#[test]
+fn same_attempt_ref_across_invocations_is_rejected_without_bundle_or_source_mutation() {
+    let (mut fixture, target, _) = fixture();
+    let first = RunInvocationId::new();
+    let second = RunInvocationId::new();
+    let attempt = AttemptRef::first(ego_core::event::id::GenerationId::new());
+    fixture.entries.insert(
+        target,
+        Ok(vec![
+            admitted_command(target, first),
+            context_for(target, first),
+            generation_for(target, first, attempt),
+            admitted_command(target, second),
+            context_for(target, second),
+            generation_for(target, second, attempt),
+            generation_started(attempt),
+        ]),
+    );
+    let before = source_bytes(&fixture);
+    let error = Exporter::new(&fixture)
+        .sanitized(target)
+        .expect_err("reusing an AttemptRef across invocations");
+    assert!(matches!(
+        error,
+        ExportError::Evidence {
+            failure: ExportEvidenceFailure::AttemptOwnershipConflict {
+                attempt: actual,
+                existing_invocation,
+                requested_invocation,
+            },
+            ..
+        } if actual == attempt
+            && existing_invocation == first
+            && requested_invocation == second
+    ));
+    assert_eq!(source_bytes(&fixture), before);
 }

@@ -3,7 +3,7 @@
 use ego_core::event::domain::{DomainEvent, Envelope, EventKind};
 use ego_core::event::id::{EventId, ItemId, Producer, Seq, SessionId, TurnId};
 use ego_core::event::time::Timestamp;
-use ego_core::generator::types::{Message, Role};
+use ego_core::generator::types::{ContentBlock, Image, ImageMediaType, Message, Role};
 use ego_core::session::{
     ReplayContext, ReplayError, ReplaySource, ReplaySourceError, SessionBlobSource, SessionLineage,
 };
@@ -174,9 +174,18 @@ fn replay_uses_source_event_seq_cutoff_and_keeps_target_state_local() {
         .insert((root, reference.clone()), PNG_1X1.to_vec());
 
     let replay = ReplayContext::new(&source, &blobs).replay(&target).unwrap();
+    let image = Image::new(PNG_1X1.to_vec(), ImageMediaType::Png).unwrap();
     assert_eq!(
         replay.conversation().messages(),
-        [Message::text(Role::User, "source prefix")]
+        [Message {
+            role: Role::User,
+            content: vec![
+                ContentBlock::Image { image },
+                ContentBlock::Text {
+                    text: "source prefix".to_owned(),
+                },
+            ],
+        }]
     );
     assert_eq!(replay.session_pins(), [root]);
     assert_eq!(replay.blob_pins(), [reference]);
@@ -203,8 +212,20 @@ fn nested_forks_follow_edges_iteratively_compaction_is_terminal_and_cycles_fail_
     let child = common::id::<SessionId>("00000000-0000-0000-0000-000000000202");
     let target = common::id::<SessionId>("00000000-0000-0000-0000-000000000203");
     let mut source = FixtureSource::default();
-    source.entries.insert(root, Ok(Some(vec![])));
-    source.entries.insert(child, Ok(Some(vec![])));
+    let reference = blob_ref();
+    source.entries.insert(
+        root,
+        Ok(Some(vec![image_prompt(
+            1,
+            ItemId::new(),
+            "root image",
+            reference.clone(),
+        )])),
+    );
+    source.entries.insert(
+        child,
+        Ok(Some(vec![prompt(1, ItemId::new(), "child text")])),
+    );
     source.entries.insert(target, Ok(Some(vec![])));
     source.lineages.insert(
         child,
@@ -220,9 +241,29 @@ fn nested_forks_follow_edges_iteratively_compaction_is_terminal_and_cycles_fail_
             at_seq: seq(1),
         })),
     );
-    let blobs = FixtureBlobs::default();
+    let mut blobs = FixtureBlobs::default();
+    blobs
+        .bytes
+        .insert((root, reference.clone()), PNG_1X1.to_vec());
     let replay = ReplayContext::new(&source, &blobs).replay(&target).unwrap();
     assert_eq!(replay.session_pins(), [child, root]);
+    let image = Image::new(PNG_1X1.to_vec(), ImageMediaType::Png).unwrap();
+    assert_eq!(
+        replay.conversation().messages(),
+        [Message {
+            role: Role::User,
+            content: vec![
+                ContentBlock::Image { image },
+                ContentBlock::Text {
+                    text: "root image".to_owned(),
+                },
+                ContentBlock::Text {
+                    text: "child text".to_owned(),
+                },
+            ],
+        }]
+    );
+    assert_eq!(replay.blob_pins(), [reference]);
 
     source.lineages.insert(
         root,

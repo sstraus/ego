@@ -1,6 +1,6 @@
 //! RED contracts for regression case: lease-held authoritative evidence.
 
-use ego_core::config::ModelRef;
+use ego_core::config::{ActiveProfileProvenance, ModelRef, OriginSet, Source};
 use ego_core::event::domain::{DomainEvent, Envelope, EventKind, GenerationRole};
 use ego_core::event::id::{EventId, GenerationId, Producer, Seq, SessionId, TurnId};
 use ego_core::event::time::Timestamp;
@@ -333,12 +333,94 @@ fn run_and_generation_retries_are_idempotent_but_changed_inputs_conflict_without
             .unwrap()
             .is_already_recorded()
     );
-    let changed = context(session, invocation).with_context_digest("different");
+    let changed = RunContextEvidence::new(
+        session,
+        invocation,
+        RunId::new(session, invocation.uuid()),
+        ConfigProvenance::resolved(Some(ActiveProfileProvenance {
+            name: "different".to_owned(),
+            selected_by: Source::Flags,
+            definitions: OriginSet::just(Source::Flags),
+        })),
+    );
     assert!(matches!(
         service.admit_run_context(&opened.writer, changed),
         Err(EvidenceError::IdempotencyConflict { .. })
     ));
     assert_eq!(entries(&store, &session), before);
+}
+
+#[test]
+fn schema_v1_run_context_is_checksum_valid_but_rejected_without_rewriting_source() {
+    let root = tempdir().unwrap();
+    let store = JsonlStore::new(root.path(), "/workspace", Box::new(OsIo));
+    let session = SessionId::new();
+    let invocation = RunInvocationId::new();
+
+    // Open the real lease-held writer before installing the adversarial source
+    // image so admission exercises the production writer boundary below.
+    let opened = store.open_writer(&session, lease()).unwrap();
+    let mut payload = serde_json::to_value(SessionEntry::Evidence(EvidenceRecord::RunContext(
+        context(session, invocation),
+    )))
+    .unwrap();
+    payload["evidence"]["version"] = json!(1);
+    let mut legacy_payload = payload["evidence"].clone();
+    legacy_payload.as_object_mut().unwrap().remove("kind");
+    let legacy: RunContextEvidence = serde_json::from_value(legacy_payload).unwrap();
+
+    let log = log_path(root.path(), &session);
+    let mut image = encode_header(&Header {
+        v: CODEC_VERSION,
+        session,
+        created: Timestamp::from_millis(1),
+        workspace_root: "/workspace".into(),
+    });
+    image.push(b'\n');
+    let record_line = encode_record(seq(1), &payload).unwrap();
+    assert!(matches!(
+        decode_line(&record_line).unwrap(),
+        StoreLine::Record(record) if record.seq == seq(1)
+    ));
+    image.extend_from_slice(&record_line);
+    image.push(b'\n');
+    std::fs::write(&log, image).unwrap();
+    let before = std::fs::read(&log).unwrap();
+
+    let service = EvidenceAdmissionService::new();
+    assert!(matches!(
+        service.admit_run_context(&opened.writer, legacy.clone()),
+        Err(EvidenceError::UnsupportedVersion {
+            found: 1,
+            required: 2,
+            ..
+        })
+    ));
+    assert_eq!(std::fs::read(&log).unwrap(), before);
+    drop(opened);
+
+    assert!(matches!(
+        ManifestEvidence::from_records(&[EvidenceRecord::RunContext(legacy.clone())]),
+        Err(
+            ego_core::evidence::ManifestEvidenceError::UnsupportedVersion {
+                found: 1,
+                required: 2,
+            }
+        )
+    ));
+    assert!(matches!(
+        ManifestEvidence::rebuild(&store, &session),
+        Err(
+            ego_core::evidence::ManifestEvidenceError::UnsupportedVersion {
+                found: 1,
+                required: 2,
+            }
+        )
+    ));
+    assert_eq!(std::fs::read(&log).unwrap(), before);
+
+    assert!(store.open_writer(&session, lease()).is_err());
+    assert_eq!(std::fs::read(&log).unwrap(), before);
 }
 
 #[test]
@@ -393,6 +475,41 @@ fn generation_evidence_requires_matching_run_and_new_attempt_for_changed_target(
             )
             .is_ok()
     );
+}
+
+#[test]
+fn same_attempt_ref_cannot_be_admitted_for_two_invocations_without_log_mutation() {
+    let root = tempdir().unwrap();
+    let store = JsonlStore::new(root.path(), "/workspace", Box::new(OsIo));
+    let session = SessionId::new();
+    let first = RunInvocationId::new();
+    let second = RunInvocationId::new();
+    let attempt = AttemptRef::first(GenerationId::new());
+    let opened = store.open_writer(&session, lease()).unwrap();
+    let service = EvidenceAdmissionService::new();
+    service
+        .admit_run_context(&opened.writer, context(session, first))
+        .unwrap();
+    service
+        .admit_generation(&opened.writer, generation(session, first, attempt))
+        .unwrap();
+    service
+        .admit_run_context(&opened.writer, context(session, second))
+        .unwrap();
+    let before = entries(&store, &session);
+    assert!(matches!(
+        service.admit_generation(&opened.writer, generation(session, second, attempt)),
+        Err(EvidenceError::AttemptOwnershipConflict {
+            session: actual_session,
+            attempt: actual_attempt,
+            existing_invocation,
+            requested_invocation,
+        }) if actual_session == session
+            && actual_attempt == attempt
+            && existing_invocation == first
+            && requested_invocation == second
+    ));
+    assert_eq!(entries(&store, &session), before);
 }
 
 #[test]
