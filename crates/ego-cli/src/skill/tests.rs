@@ -64,6 +64,33 @@ fn valid_for(name: &str, frontmatter: &str) -> String {
     format!("name: {name}\ndescription: Explain a failing check.\n{frontmatter}")
 }
 
+#[test]
+fn shared_yaml_envelope_projects_invocation_skill_hooks_into_typed_core_entries() {
+    let text = r#"---
+version: 1
+hooks:
+  - event: SubagentStop
+    matcher: "read(src/**)"
+    once: true
+    handler:
+      type: command
+      command: /usr/bin/skill-hook
+      args: []
+---
+The skill body is not part of hook configuration.
+"#;
+    let (header, body) = crate::yaml_envelope::split(text, false).expect("shared envelope");
+    assert!(body.contains("not part of hook configuration"));
+    let invocation = ego_core::event::skill::SkillInvocationId::new();
+    let entries = super::project_skill_hooks(header, "skills/demo/SKILL.md", invocation)
+        .expect("typed skill hook projection");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].event(), "SubagentStop");
+    assert!(entries[0].once());
+    assert_eq!(entries[0].source_location(), "skills/demo/SKILL.md");
+    assert_eq!(entries[0].invocation(), invocation);
+}
+
 mod regression_case {
     use super::*;
 

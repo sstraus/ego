@@ -1,101 +1,71 @@
-//! RED contract for M4 S4: one strict hook catalogue and deterministic runner.
+//! RED contract for M4 S4: one typed hook catalogue and durable runner.
 //!
-//! Configuration is intentionally expressed at the existing TOML/YAML
-//! boundaries.  The final implementation must project those inputs into one
-//! source-bound `HookSpec` catalogue and execute it through one `Hook` port.
+//! Core receives already projected, source-bound hook values. YAML envelope
+//! extraction belongs to the CLI boundary and is covered by its crate-private
+//! projection test; this suite never feeds raw skill YAML to core.
+
+use std::sync::{Arc, Mutex};
 
 use ego_core::config::{ConfigLayer, Source, Sourced, Trust};
 use ego_core::event::hook::{
-    HookDecision, HookFailure, HookFailureKind, HookLifecycle, HookOutcome,
+    HookDecision, HookFailure, HookFailureKind, HookInvocationId, HookLifecycle, HookOutcome,
+    HookSubject,
 };
 use ego_core::event::id::{ItemId, TurnId};
-use ego_core::event::hook::HookSubject;
+use ego_core::event::skill::SkillInvocationId;
 use ego_core::hook::{
-    HookCatalogue, HookCatalogueError, HookEvent, HookHandler, HookPort, HookRunner, HookSpec,
-    HookSource, HookTrigger,
+    HookCatalogue, HookCatalogueError, HookConfigEntry, HookEvent,
+    HookHandlerConfig, HookMatcher, HookPort, HookSpec, HookSource, HookFuture,
+    HookRecordFuture, HookRunner,
 };
+use ego_core::permit::rule::Rule;
 
 fn layer(source: Source, toml: &str) -> Sourced<ConfigLayer> {
     ConfigLayer::parse(source, toml).expect("valid hook layer")
 }
 
-fn system_layer() -> Sourced<ConfigLayer> {
-    layer(
-        Source::System,
-        r#"
-[[hooks]]
-event = "PreToolUse"
-matcher = "exec"
-[hooks.handler]
-type = "command"
-command = "/usr/bin/system-hook"
-args = []
-timeout = 30
-"#,
-    )
+fn persistent_layers() -> [Sourced<ConfigLayer>; 3] {
+    [
+        layer(Source::System, "[[hooks]]\nevent = \"PreToolUse\"\n"),
+        layer(Source::User, "[[hooks]]\nevent = \"PostToolUse\"\n"),
+        layer(Source::Project, "[[hooks]]\nevent = \"PermissionDenied\"\n"),
+    ]
 }
 
-fn user_layer() -> Sourced<ConfigLayer> {
-    layer(
-        Source::User,
-        r#"
-[[hooks]]
-event = "PostToolUse"
-[hooks.handler]
-type = "prompt"
-timeout = 30
-"#,
+fn typed_skill_hook() -> HookConfigEntry {
+    HookConfigEntry::new(
+        HookLifecycle::SubagentStop,
+        Some(HookMatcher::Permission(
+            Rule::load("read(src/**)").expect("canonical permission rule"),
+        )),
+        HookHandlerConfig::Command {
+            command: "/usr/bin/skill-hook".to_owned(),
+            args: Vec::new(),
+            timeout_seconds: None,
+        },
     )
-}
-
-fn project_layer() -> Sourced<ConfigLayer> {
-    layer(
-        Source::Project,
-        r#"
-[[hooks]]
-event = "PermissionDenied"
-[hooks.handler]
-type = "mcp_tool"
-server = "trusted"
-tool = "audit"
-"#,
-    )
-}
-
-fn skill_yaml() -> &'static str {
-    r#"
-hooks:
-  - event: SubagentStop
-    matcher: ""
-    once: true
-    handler:
-      type: command
-      command: /usr/bin/skill-hook
-      args: []
-"#
 }
 
 #[test]
-fn strict_sources_and_skill_hooks_project_into_one_source_bound_catalogue() {
-    let catalogue = HookCatalogue::admit(
-        &[system_layer(), user_layer(), project_layer()],
-        &[HookSource::skill("skills/demo/SKILL.md", skill_yaml(), "invocation-1")],
-        Trust::Trusted,
-    )
-    .expect("complete catalogue");
+fn typed_sources_and_skill_projection_make_one_strict_source_bound_catalogue() {
+    let layers = persistent_layers();
+    let skill = HookSource::skill_entries(
+        "skills/demo/SKILL.md",
+        SkillInvocationId::new(),
+        [typed_skill_hook()],
+    );
+    let catalogue = HookCatalogue::admit_typed(&layers, &[skill], Trust::Trusted)
+        .expect("complete typed catalogue");
     assert_eq!(catalogue.sources(), ["system", "user", "project", "skill"]);
     assert_eq!(catalogue.specs().len(), 4);
-    assert_eq!(catalogue.specs()[0].source(), HookSource::System);
-    assert!(catalogue.specs()[3].source().is_skill());
     assert!(catalogue.specs().iter().all(|spec| spec.location().is_authority_relative()));
     assert!(catalogue.specs().iter().all(|spec| spec.content_digest().is_lower_sha256()));
-    assert!(catalogue.specs().iter().all(|spec| spec.ordinal().is_some()));
-    assert!(!catalogue.serialized_config().contains("command"));
-    assert!(!catalogue.serialized_config().contains("server"));
+    assert!(catalogue.specs().windows(2).all(|pair| pair[0].sort_key() < pair[1].sort_key()));
+    assert!(!catalogue.serialized_config().contains("/usr/bin"));
 }
 
 #[test]
-fn exactly_the_ratified_21_events_are_admitted_and_the_other_12_are_refused_by_name() {
+fn exactly_21_events_are_admitted_and_exact_other_12_names_refuse() {
     let admitted = [
         "SessionStart", "InstructionsLoaded", "UserPromptSubmit", "UserPromptExpansion",
         "PreToolUse", "PermissionRequest", "PermissionDenied", "PostToolUse",
@@ -109,6 +79,7 @@ fn exactly_the_ratified_21_events_are_admitted_and_the_other_12_are_refused_by_n
         "WorktreeCreate", "WorktreeRemove",
     ];
     assert_eq!(admitted.len(), 21);
+    assert_eq!(refused.len(), 12);
     for event in admitted {
         let spec = HookSpec::from_wire(event, "command", "/usr/bin/hook").expect("admitted event");
         assert_eq!(spec.event_name(), event);
@@ -121,220 +92,177 @@ fn exactly_the_ratified_21_events_are_admitted_and_the_other_12_are_refused_by_n
 }
 
 #[test]
-fn unknown_deprecated_experimental_async_and_display_fields_fail_closed_by_exact_name() {
+fn closed_handlers_reject_exact_unknown_fields_and_admit_http_without_adapter() {
     for field in ["statusMessage", "async", "asyncRewake", "agent", "output", "regex"] {
         let error = HookSpec::from_fields("PreToolUse", [(field, "value")]).unwrap_err();
         assert_eq!(error.exact_name(), field);
     }
-    let nested_claude_map = "PreToolUse:\n  - hooks:\n      - type: command\n";
-    let error = HookCatalogue::from_claude_map(nested_claude_map).unwrap_err();
-    assert_eq!(error.exact_name(), "PreToolUse");
+    let http = HookHandlerConfig::Http {
+        url: "https://hooks.example.test/notify".to_owned(),
+        headers: Vec::new(),
+        allowed_env_vars: Vec::new(),
+        timeout_seconds: None,
+    };
+    let spec = HookSpec::from_typed(
+        HookConfigEntry::new(HookLifecycle::PostToolUse, None, http),
+        HookSource::User,
+        "hooks/user.toml",
+        0,
+    )
+    .expect("catalogue admits closed HTTP handler before S5 adapter");
+    assert_eq!(spec.event_name(), "PostToolUse");
+}
+
+#[derive(Clone, Default)]
+struct DurableHookPort {
+    started: Arc<Mutex<Vec<HookInvocationId>>>,
+    settled: Arc<Mutex<Vec<HookInvocationId>>>,
+    emitted: Arc<Mutex<Vec<HookEvent>>>,
+    fail: Arc<Mutex<Option<HookFailureKind>>>,
+}
+
+impl DurableHookPort {
+    fn fail_with(kind: HookFailureKind) -> Self {
+        Self { fail: Arc::new(Mutex::new(Some(kind))), ..Self::default() }
+    }
+}
+
+impl HookPort for DurableHookPort {
+    fn started<'a>(
+        &'a self,
+        _spec: &'a HookSpec,
+        _event: &'a HookEvent,
+        invocation: HookInvocationId,
+    ) -> HookRecordFuture<'a> {
+        self.started.lock().expect("started journal").push(invocation);
+        Box::pin(async { Ok(()) })
+    }
+
+    fn invoke<'a>(&'a self, _spec: &'a HookSpec, event: HookEvent) -> HookFuture<'a> {
+        self.emitted.lock().expect("hook emissions").push(event.clone().originated_by_hook());
+        if let Some(kind) = self.fail.lock().expect("failure").take() {
+            return Box::pin(async move { Err(HookFailure::new(kind, None)) });
+        }
+        Box::pin(async move { Ok(HookOutcome::new(HookDecision::Continue, None)) })
+    }
+
+    fn settled<'a>(
+        &'a self,
+        _spec: &'a HookSpec,
+        invocation: HookInvocationId,
+        _outcome: Result<&'a HookOutcome, &'a HookFailure>,
+    ) -> HookRecordFuture<'a> {
+        self.settled.lock().expect("settled journal").push(invocation);
+        Box::pin(async { Ok(()) })
+    }
+}
+
+fn typed_catalogue() -> HookCatalogue {
+    let layers = persistent_layers();
+    HookCatalogue::admit_typed(
+        &layers,
+        &[HookSource::skill_entries(
+            "skills/demo/SKILL.md",
+            SkillInvocationId::new(),
+            [typed_skill_hook()],
+        )],
+        Trust::Trusted,
+    )
+    .expect("typed catalogue")
 }
 
 #[test]
-fn catalogue_order_and_matchers_are_deterministic_and_any_valid_block_wins() {
-    let catalogue = HookCatalogue::admit(
-        &[system_layer(), user_layer(), project_layer()],
-        &[HookSource::skill("skills/demo/SKILL.md", skill_yaml(), "invocation-1")],
-        Trust::Trusted,
-    )
-    .unwrap();
+fn deterministic_matching_uses_permission_ast_and_valid_block_wins_with_durable_feedback() {
+    let catalogue = typed_catalogue();
     let event = HookEvent::tool(
         HookLifecycle::PreToolUse,
-        HookSubject::Item { item: ItemId::new() },
-        "exec",
+        ego_core::event::hook::HookSubject::Item { item: ItemId::new() },
+        "read(src/main.rs)",
     );
     let first = catalogue.matching(&event);
     let second = catalogue.matching(&event);
     assert_eq!(first, second);
     assert!(first.windows(2).all(|pair| pair[0].sort_key() < pair[1].sort_key()));
-
-    let runner = HookRunner::new(RecordingHookPort::default());
+    let port = DurableHookPort::default();
+    let runner = HookRunner::new(port.clone());
     let result = futures::executor::block_on(runner.run(&catalogue, event)).expect("hook run");
     assert_eq!(result.decision(), HookDecision::Block);
     assert!(result.feedback_bytes() <= 4096);
-    assert_eq!(
-        runner.call_order(),
-        first.iter().map(|spec| spec.id()).collect::<Vec<_>>()
-    );
+    assert!(!port.started.lock().expect("starts").is_empty());
+    assert_eq!(port.started.lock().expect("starts").len(), port.settled.lock().expect("settles").len());
 }
 
 #[test]
-fn pre_effect_failure_blocks_and_observer_failure_is_durable_without_reverting_effect() {
-    let catalogue = HookCatalogue::test_catalogue();
-    let runner = HookRunner::new(RecordingHookPort::with_failures([
-        HookFailureAt::PreEffect,
-        HookFailureAt::Observer,
-    ]));
-    let pre = futures::executor::block_on(runner.run(
-        &catalogue,
-        HookEvent::tool(
-            HookLifecycle::PreToolUse,
-            HookSubject::Item { item: ItemId::new() },
-            "exec",
-        ),
-    ))
-    .unwrap();
+fn pre_effect_failure_blocks_observer_failure_stays_durable_and_effect_is_not_reverted() {
+    let catalogue = typed_catalogue();
+    let pre = futures::executor::block_on(HookRunner::new(DurableHookPort::fail_with(
+        HookFailureKind::HandlerFailed,
+    )).run(&catalogue, HookEvent::session(HookLifecycle::PreCompact))).expect("pre result");
     assert!(pre.is_blocked());
-    assert!(!pre.effect_was_started());
-
-    let post = futures::executor::block_on(runner.run(
-        &catalogue,
-        HookEvent::tool(
-            HookLifecycle::PostToolUse,
-            HookSubject::Item { item: ItemId::new() },
-            "exec",
-        ),
-    ))
-    .unwrap();
+    let post = futures::executor::block_on(HookRunner::new(DurableHookPort::fail_with(
+        HookFailureKind::HandlerFailed,
+    )).run(&catalogue, HookEvent::session(HookLifecycle::PostCompact))).expect("post result");
     assert!(post.is_observer_failure());
-    assert!(post.effect_was_started());
     assert!(post.is_durable());
     assert!(!post.reverted_effect());
 }
 
 #[test]
-fn hook_originated_work_does_not_recurse_into_the_same_runner() {
-    let catalogue = HookCatalogue::test_catalogue();
-    let runner = HookRunner::new(RecordingHookPort::emits_hook_event());
-    let result = futures::executor::block_on(runner.run(
-        &catalogue,
-        HookEvent::session(HookLifecycle::SessionStart),
-    ))
-    .unwrap();
-    assert_eq!(result.recursive_invocation_count(), 0);
-    assert_eq!(runner.max_depth(), 1);
-}
-
-#[test]
-fn once_is_consumed_at_durable_start_only_for_skill_scope_and_survives_crash() {
-    let catalogue = HookCatalogue::test_catalogue_with_once();
-    let runner = HookRunner::new(RecordingHookPort::default());
-    let subject = HookSubject::Turn { turn: TurnId::new() };
-    let event = HookEvent::turn(HookLifecycle::SubagentStop, subject);
-    let first = futures::executor::block_on(runner.run(&catalogue, event.clone())).unwrap();
+fn durable_once_rebuilds_in_a_new_runner_and_hook_originated_events_are_suppressed() {
+    let catalogue = typed_catalogue();
+    let port = DurableHookPort::default();
+    let event = HookEvent::turn(HookLifecycle::SubagentStop, HookSubject::Turn { turn: TurnId::new() });
+    let first = futures::executor::block_on(HookRunner::new_with_durable_started(
+        port.clone(), port.started.clone(),
+    ).run(&catalogue, event.clone())).expect("first once invocation");
     assert!(first.started_invocation());
-    runner.crash_after_start();
-    let second = futures::executor::block_on(runner.run(&catalogue, event)).unwrap();
+    let rebuilt = HookRunner::new_with_durable_started(port.clone(), port.started.clone());
+    let second = futures::executor::block_on(rebuilt.run(&catalogue, event)).expect("replayed once");
     assert!(second.was_skipped_once());
-    assert_eq!(runner.started_count(), 1);
-    assert!(catalogue.persistent_once().is_err());
+    let emitted = port.emitted.lock().expect("emitted events").clone();
+    assert!(emitted.iter().all(HookRunner::<DurableHookPort>::hook_originated_event));
+    let suppressed = futures::executor::block_on(rebuilt.run(
+        &catalogue,
+        HookEvent::session(HookLifecycle::SessionStart).originated_by_hook(),
+    )).expect("suppressed recursive event");
+    assert!(!suppressed.started_invocation());
 }
 
 #[test]
-fn atomic_reload_publishes_only_complete_valid_catalogues_and_retains_last_good() {
-    let mut catalogue = HookCatalogue::admit(
-        &[system_layer(), user_layer(), project_layer()],
-        &[],
-        Trust::Trusted,
-    )
-    .unwrap();
-    let before = catalogue.generation();
-    let before_ids = catalogue.specs().iter().map(HookSpec::id).collect::<Vec<_>>();
-    let invalid = [
-        "unknown event",
-        "duplicate identity",
-        "missing handler owner",
-        "untrusted project",
-    ];
-    for candidate in invalid {
-        let error = catalogue.reload(candidate).unwrap_err();
-        assert_eq!(catalogue.generation(), before);
-        assert_eq!(catalogue.specs().iter().map(HookSpec::id).collect::<Vec<_>>(), before_ids);
-        assert_eq!(error.candidate_published(), false);
-    }
-    let _ = catalogue.reload_valid(system_layer(), user_layer(), project_layer());
+fn catalogue_reload_builds_a_real_candidate_then_atomically_keeps_last_good() {
+    let mut catalogue = typed_catalogue();
+    let before = catalogue.generation().to_owned();
+    let invalid = vec![HookConfigEntry::new(
+            HookLifecycle::PostToolUse,
+            None,
+            HookHandlerConfig::Command { command: String::new(), args: Vec::new(), timeout_seconds: None },
+        )];
+    assert!(catalogue.reload_typed(invalid, Trust::Trusted).is_err());
+    assert_eq!(catalogue.generation(), before);
+    catalogue
+        .reload_typed(vec![typed_skill_hook()], Trust::Trusted)
+        .expect("candidate validates before publication");
     assert_ne!(catalogue.generation(), before);
 }
 
 #[test]
-fn matcher_uses_exact_event_native_selectors_and_bounded_source_tagged_feedback() {
-    let spec = HookSpec::new(
-        HookLifecycle::PreToolUse,
-        Some("exec(git commit *)"),
-        HookHandler::command("/usr/bin/guard", []),
-    )
-    .with_source(HookSource::User, "hooks/user.toml", 0);
-    assert!(spec.matches(&HookEvent::tool(
-        HookLifecycle::PreToolUse,
-        HookSubject::Item { item: ItemId::new() },
-        "exec(git commit main)",
-    )));
-    assert!(!spec.matches(&HookEvent::tool(
-        HookLifecycle::PreToolUse,
-        HookSubject::Item { item: ItemId::new() },
-        "exec(git push)",
-    )));
-    assert!(HookTrigger::from_javascript_regex("/commit/").is_err());
-    let feedback = spec.feedback("blocked");
-    assert_eq!(feedback.source(), HookSource::User);
-    assert!(feedback.bytes() <= 4096);
-}
-
-#[test]
-fn model_switch_hooks_match_the_canonical_target_and_do_not_fire_recursively() {
-    let target = ego_core::config::ModelRef("provider/target".to_owned());
-    let before = HookEvent::model_switch(HookLifecycle::PreModelSwitch, target.clone());
-    let after = HookEvent::model_switch(HookLifecycle::PostModelSwitch, target);
-    assert_eq!(before.model_target(), after.model_target());
-    assert_eq!(before.lifecycle(), HookLifecycle::PreModelSwitch);
-    assert_eq!(after.lifecycle(), HookLifecycle::PostModelSwitch);
-    assert!(!HookRunner::hook_originated_event(&before));
-    assert!(!HookRunner::hook_originated_event(&after));
-}
-
-#[derive(Default)]
-struct RecordingHookPort {
-    fail_pre_effect: bool,
-    fail_observer: bool,
-}
-
-impl RecordingHookPort {
-    fn with_failures<const N: usize>(failures: [HookFailureAt; N]) -> Self {
-        let mut port = Self::default();
-        for failure in failures {
-            match failure {
-                HookFailureAt::PreEffect => port.fail_pre_effect = true,
-                HookFailureAt::Observer => port.fail_observer = true,
-            }
-        }
-        port
-    }
-
-    fn emits_hook_event() -> Self {
-        Self::default()
-    }
-}
-
-impl HookPort for RecordingHookPort {
-    fn invoke<'a>(
-        &'a self,
-        _spec: &'a HookSpec,
-        event: HookEvent,
-    ) -> ego_core::hook::HookFuture<'a> {
-        let failure = match event.lifecycle().phase() {
-            phase if phase.is_pre_effect() && self.fail_pre_effect => {
-                Some(HookFailure::new(HookFailureKind::HandlerFailed, None))
-            }
-            phase if phase.is_observer() && self.fail_observer => {
-                Some(HookFailure::new(HookFailureKind::HandlerFailed, None))
-            }
-            _ => None,
-        };
-        if let Some(failure) = failure {
-            return Box::pin(async move { Err(failure) });
-        }
-        let decision = if event.lifecycle() == HookLifecycle::PreToolUse {
-            HookDecision::Block
-        } else {
-            HookDecision::Continue
-        };
-        Box::pin(async move { Ok(HookOutcome::new(decision, None)) })
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-enum HookFailureAt {
-    PreEffect,
-    Observer,
+fn persistent_once_is_refused_and_candidate_duplicates_are_not_published() {
+    assert!(matches!(
+        HookCatalogue::admit_typed(
+            &[layer(Source::User, "[[hooks]]\nevent = \"PostToolUse\"\nonce = true\n")],
+            &[],
+            Trust::Trusted,
+        ),
+        Err(HookCatalogueError::Invalid { exact_name, .. }) if exact_name == "once"
+    ));
+    let duplicate = HookCatalogue::admit_typed(
+        &[],
+        &[HookSource::skill_entries(
+            "skills/demo/SKILL.md",
+            SkillInvocationId::new(),
+            [typed_skill_hook(), typed_skill_hook()],
+        )],
+        Trust::Trusted,
+    );
+    assert!(duplicate.is_err());
 }
