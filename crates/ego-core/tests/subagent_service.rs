@@ -31,7 +31,7 @@ use ego_core::generator::capabilities::{
 use ego_core::generator::types::{Conversation, GenRequest, Message, Role, ThinkingLevel};
 use ego_core::hook::{
     HookCatalogue, HookConfigEntry, HookEvent, HookFuture, HookHandlerConfig, HookPort,
-    HookRecordFuture, HookRunner, HookSource, HookStartedEvidence,
+    HookRecordFuture, HookRunner, HookSource, HookStartError, HookStartFuture, HookStartedEvidence,
 };
 use ego_core::permit::{CanonPath, Confinement, RunConfinement};
 use ego_core::run::{
@@ -118,11 +118,13 @@ impl ExistingAuthorityAdmission {
         let parent = resolve(
             &[ConfigLayer::parse(Source::User, "").expect("parent config")],
             Trust::Trusted,
+            None,
         )
         .expect("parent config resolves");
         let system = resolve(
             &[ConfigLayer::parse(Source::System, "").expect("system config")],
             Trust::Trusted,
+            None,
         )
         .expect("system config resolves");
         let workspace = CanonPath::new("/workspace");
@@ -548,12 +550,13 @@ impl HookPort for ReturnHookPort {
         _event: &'a HookEvent,
         activation: HookActivation,
         invocation: HookInvocationId,
-    ) -> HookRecordFuture<'a> {
+    ) -> HookStartFuture<'a, Result<HookStartedEvidence, HookStartError>> {
+        let evidence = HookStartedEvidence::new(spec.id(), invocation, activation);
         self.started
             .lock()
             .expect("return hook starts")
-            .push(HookStartedEvidence::new(spec.id(), invocation, activation));
-        Box::pin(future::ready(Ok(())))
+            .push(evidence);
+        Box::pin(future::ready(Ok(evidence)))
     }
 
     fn invoke<'a>(
@@ -706,6 +709,7 @@ impl RunExecutor for Executor {
         &'a self,
         _run: &'a RunId,
     ) -> BoxFuture<'a, Result<RecoveryEvidence, RunExecutorError>> {
+        self.calls.lock().expect("executor calls").push("recover");
         Box::pin(future::ready(Ok(RecoveryEvidence::Ambiguous)))
     }
 
@@ -912,7 +916,7 @@ fn child_uses_real_controller_and_durable_typed_parent_order() {
             .expect("child admission");
     harness.results.record_evidence(
         admission.child_run(),
-        blob(RESULT, 64),
+        blob_for_bytes(RESULT.as_bytes()),
         RESULT.as_bytes().to_vec(),
     );
     assert!(
@@ -927,7 +931,7 @@ fn child_uses_real_controller_and_durable_typed_parent_order() {
     assert_eq!(
         result,
         ChildWaitResult::Returned {
-            final_message: blob(RESULT, 64)
+            final_message: blob_for_bytes(RESULT.as_bytes())
         }
     );
     let prompts = harness.executor.prompts.lock().expect("prompts").clone();
@@ -1100,11 +1104,10 @@ fn settled_journal_failure_preserves_result_for_exactly_once_retry() {
             .expect("child admission");
     harness.results.record_evidence(
         admission.child_run(),
-        blob(RESULT, 64),
+        blob_for_bytes(RESULT.as_bytes()),
         RESULT.as_bytes().to_vec(),
     );
     harness.journal.fail_next_settled();
-    let calls_before_retry = harness.executor.call_count();
     let first = futures::executor::block_on(admission.wait());
     assert!(matches!(
         first,
@@ -1118,12 +1121,13 @@ fn settled_journal_failure_preserves_result_for_exactly_once_retry() {
             .iter()
             .all(|event| !matches!(&event.kind, EventKind::SubagentSettled { .. }))
     );
+    let calls_before_retry = harness.executor.call_count();
 
     let retried = futures::executor::block_on(admission.wait()).expect("recoverable result");
     assert_eq!(
         retried,
         ChildWaitResult::Returned {
-            final_message: blob(RESULT, 64)
+            final_message: blob_for_bytes(RESULT.as_bytes())
         }
     );
     assert_eq!(harness.executor.call_count(), calls_before_retry);
@@ -1283,11 +1287,11 @@ fn request_only_recovery_admits_once_without_executing_or_delivering() {
             .iter()
             .filter(|call| **call == "start")
             .count(),
-        1,
-        "request-only recovery admits exactly one controller run"
+        0,
+        "request-only recovery defers the external execution effect"
     );
     assert!(
-        executor_calls.iter().all(|call| **call != "submit"),
+        executor_calls.iter().all(|call| *call != "submit"),
         "request-only recovery defers execution"
     );
     assert!(harness.executor.prompts.lock().expect("prompts").is_empty());
@@ -1315,6 +1319,158 @@ fn request_only_recovery_admits_once_without_executing_or_delivering() {
             child: actual_child,
         } if *actual_invocation == invocation && *actual_child == child_run
     ));
+
+    let result_bytes = b"request-only final assistant";
+    let result_ref = blob_for_bytes(result_bytes);
+    results.record_evidence(child_run, result_ref.clone(), result_bytes.to_vec());
+    let collected = futures::executor::block_on(service.collect_background(invocation))
+        .expect("request-only recovery executes retained one-shot");
+    assert_eq!(
+        collected,
+        ChildWaitResult::Returned {
+            final_message: result_ref.clone()
+        }
+    );
+    let calls_after_collect = harness
+        .executor
+        .calls
+        .lock()
+        .expect("executor calls")
+        .clone();
+    assert_eq!(
+        calls_after_collect
+            .iter()
+            .filter(|call| **call == "prepare")
+            .count(),
+        1
+    );
+    assert_eq!(
+        calls_after_collect
+            .iter()
+            .filter(|call| **call == "start")
+            .count(),
+        1
+    );
+    assert_eq!(
+        calls_after_collect
+            .iter()
+            .filter(|call| **call == "submit")
+            .count(),
+        1
+    );
+    assert_eq!(results.read_count(), 1);
+    assert_eq!(parent_blobs.copied().len(), 1);
+
+    let calls_before_second_collect = harness.executor.call_count();
+    assert_eq!(
+        futures::executor::block_on(service.collect_background(invocation))
+            .expect("cached request-only result"),
+        collected
+    );
+    assert_eq!(
+        harness.executor.call_count(),
+        calls_before_second_collect,
+        "subsequent collection adds no executor effects"
+    );
+}
+
+#[test]
+fn after_spawn_recovery_delegates_uncertainty_without_reexecution_or_result_io() {
+    let harness = Harness::new(RunSettlement::Completed);
+    let invocation = SubagentInvocationId::new();
+    let child_run = {
+        let service = harness.service(BudgetGate::unlimited(
+            ego_core::cost::CurrencyCode::new("USD").expect("currency"),
+        ));
+        let admission =
+            futures::executor::block_on(service.start(request(invocation, ChildWait::Background)))
+                .expect("initial background child admission");
+        let child_run = admission.child_run();
+        drop(admission);
+        child_run
+    };
+    let events_before_recovery = harness
+        .journal
+        .read(invocation)
+        .expect("durable child lifecycle");
+    assert!(matches!(
+        events_before_recovery.as_slice(),
+        [
+            DomainEvent {
+                kind: EventKind::SubagentRequested { .. },
+                ..
+            },
+            DomainEvent {
+                kind: EventKind::SubagentSpawned { child, .. },
+                ..
+            }
+        ] if *child == child_run
+    ));
+    let task_reads_before_recovery = harness.task_reader.reads.lock().expect("task reads").len();
+    let reopened = harness.service(BudgetGate::unlimited(
+        ego_core::cost::CurrencyCode::new("USD").expect("currency"),
+    ));
+    let recovered = futures::executor::block_on(
+        reopened.recover_from_durable(invocation, ego_core::subagent::RecoveryCut::AfterSpawn),
+    )
+    .expect("AfterSpawn recovery delegates to the controller")
+    .expect("spawned child remains recoverable");
+    assert_eq!(recovered.child_run(), Some(child_run));
+    let collected = futures::executor::block_on(reopened.collect_background(invocation))
+        .expect("uncertain recovery settles through the child service");
+    assert_eq!(
+        collected,
+        ChildWaitResult::Failed {
+            settlement: RunSettlement::Uncertain
+        }
+    );
+    let calls_after_recovery = harness
+        .executor
+        .calls
+        .lock()
+        .expect("executor calls")
+        .clone();
+    assert_eq!(
+        calls_after_recovery
+            .iter()
+            .filter(|call| **call == "recover")
+            .count(),
+        1,
+        "reopened recovery delegates to RunController::recover"
+    );
+    assert_eq!(
+        calls_after_recovery
+            .iter()
+            .filter(|call| **call == "start")
+            .count(),
+        0,
+        "uncertain recovery never starts a new external effect"
+    );
+    assert_eq!(
+        calls_after_recovery
+            .iter()
+            .filter(|call| **call == "submit")
+            .count(),
+        0,
+        "uncertain recovery never submits a prompt"
+    );
+    assert_eq!(
+        harness.task_reader.reads.lock().expect("task reads").len(),
+        task_reads_before_recovery,
+        "uncertain recovery does not reread the task"
+    );
+    assert_eq!(harness.results.read_count(), 0);
+    assert!(harness.parent_blobs.copied().is_empty());
+    assert_eq!(
+        harness
+            .journal
+            .records()
+            .iter()
+            .filter(|event| matches!(&event.kind, EventKind::SubagentSettled { .. }))
+            .count(),
+        1,
+        "uncertainty is durably settled exactly once"
+    );
 }
 
 #[test]
@@ -1349,7 +1505,7 @@ fn child_execution_carries_prompt_and_preserves_each_typed_terminal() {
             .expect("completed child admission");
     harness.results.record_evidence(
         admission.child_run(),
-        blob(RESULT, 64),
+        blob_for_bytes(RESULT.as_bytes()),
         RESULT.as_bytes().to_vec(),
     );
     let returned = futures::executor::block_on(admission.wait()).expect("completed child");
@@ -1369,7 +1525,7 @@ fn subagent_stop_uses_real_hook_runner_decision_and_never_accepts_a_forged_id() 
                 .expect("completed child admission");
         harness.results.record_evidence(
             admission.child_run(),
-            blob(RESULT, 64),
+            blob_for_bytes(RESULT.as_bytes()),
             RESULT.as_bytes().to_vec(),
         );
         let port = ReturnHookPort::new(decision);
@@ -1457,7 +1613,7 @@ fn authority_profile_and_shared_budget_are_admitted_by_real_owners() {
     assert_eq!(second.budget_gate(), gate_id);
     harness.results.record_evidence(
         first.child_run(),
-        blob(RESULT, 64),
+        blob_for_bytes(RESULT.as_bytes()),
         RESULT.as_bytes().to_vec(),
     );
     assert!(matches!(
