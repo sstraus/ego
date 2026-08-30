@@ -2,10 +2,11 @@
 
 mod common;
 
+use std::ffi::OsString;
 use std::sync::{Arc, Mutex};
 
 use ego_core::budget::{BudgetGate, Metering};
-use ego_core::config::{ConfigLayer, Mode, ModelRef, Ruleset, Source, Trust};
+use ego_core::config::{ConfigLayer, Mode, ModelRef, PermCfg, Rule, Ruleset, Source, Trust};
 use ego_core::cost::MeteringRevision;
 use ego_core::event::domain::{DomainEvent, Envelope, EventKind};
 use ego_core::event::hook::{
@@ -33,9 +34,12 @@ use ego_core::hook::{
     HookReachFuture, HookReachedEvidence, HookRecordFuture, HookRunner, HookSpec, HookStartFuture,
     HookStartedEvidence,
 };
+use ego_core::mcp::ToolExecution;
 use ego_core::permit::{
-    CanonPath, DnsResolution, DuplexHandle, DuplexSpawner, OneHop, OneHopResponse, PolicyEngine,
-    ProcessError, ProcessExecutor, Resolver, ToolResult, TransportError, TransportFailure,
+    CanonPath, DnsResolution, DuplexHandle, DuplexSpawner, EnvPolicy, GuardedIo, OneHop,
+    OneHopResponse, Op, PolicyEngine, PrepareCtx, PreparedCall, ProcessError, ProcessExecutor,
+    Resolver, SpawnSpec, Tool, ToolDescriptor, ToolError, ToolResult, TransportError,
+    TransportFailure,
 };
 use ego_core::sink::CollectingSink;
 use ego_core::skill::{SkillInvocation, SkillOperation, SkillSpec};
@@ -50,6 +54,7 @@ use ego_core::turn::{
 use futures::executor::block_on;
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
+use serde_json::{Value, json};
 
 const LIFECYCLES: [HookLifecycle; 21] = [
     HookLifecycle::SessionStart,
@@ -191,7 +196,7 @@ impl HookPort for FailingPort {
     }
 
     fn invoke<'a>(&'a self, spec: &'a HookSpec, event: HookEvent) -> HookFuture<'a> {
-        if event.lifecycle() == HookLifecycle::Stop {
+        if event.lifecycle() == HookLifecycle::PostToolUseFailure {
             Box::pin(std::future::ready(Err(HookFailure::new(
                 HookFailureKind::HandlerFailed,
                 None,
@@ -320,6 +325,48 @@ impl ProcessExecutor for NoProcess {
         ))))
     }
 }
+
+struct FailingExecTool;
+
+impl Tool for FailingExecTool {
+    fn descriptor(&self) -> ToolDescriptor {
+        ToolDescriptor {
+            name: "failing_exec".to_owned(),
+            description: "executes a process that fails in the guarded test port".to_owned(),
+            schema: serde_json::from_value(json!({"type": "object"})).expect("schema"),
+        }
+    }
+
+    fn prepare(&self, _params: Value, _ctx: &PrepareCtx<'_>) -> Result<PreparedCall, ToolError> {
+        let spec = SpawnSpec::new(
+            vec![OsString::from("hook-lifecycle-failure")],
+            None,
+            None,
+            EnvPolicy::Inherited,
+        )
+        .expect("valid test process");
+        Ok(PreparedCall::new(
+            self.descriptor().name,
+            vec![Op::Spawn { spec }],
+        ))
+    }
+
+    fn execute<'a>(
+        &'a self,
+        call: PreparedCall,
+        io: &'a dyn GuardedIo,
+    ) -> BoxFuture<'a, Result<ToolExecution, ToolError>> {
+        Box::pin(async move {
+            let Some(Op::Spawn { spec }) = call.ops.into_iter().next() else {
+                return Err(ToolError::InvalidParams("expected one Spawn op".to_owned()));
+            };
+            io.exec(&spec)
+                .await
+                .map(ToolExecution::Complete)
+                .map_err(ToolError::from)
+        })
+    }
+}
 struct NoResolver;
 impl Resolver for NoResolver {
     fn resolve(
@@ -433,20 +480,39 @@ fn run_turn<P: HookPort + Clone>(
     script: Vec<AiEvent>,
     port: &P,
 ) -> (Vec<DomainEvent>, SessionState) {
+    run_turn_scripts(vec![script], port)
+}
+
+fn run_turn_scripts<P: HookPort + Clone>(
+    scripts: Vec<Vec<AiEvent>>,
+    port: &P,
+) -> (Vec<DomainEvent>, SessionState) {
     let store = Store::default();
     let clock = FixedClock;
     let sink = CollectingSink::new();
-    let generator = Arc::new(FakeGenerator::new(vec![script]));
+    let generator = Arc::new(FakeGenerator::new(scripts));
     let mut gate = BudgetGate::new(ego_core::cost::Money::new(
         ego_core::cost::Amount::new(1000, 0).expect("amount"),
         ego_core::cost::CurrencyCode::new("USD").expect("currency"),
     ));
-    let policy = PolicyEngine::new(CanonPath::new("/ws"), Mode::Default, Ruleset::default());
+    let policy = PolicyEngine::new(
+        CanonPath::new("/ws"),
+        Mode::Default,
+        Ruleset::from_layer(
+            PermCfg {
+                judge: None,
+                allow: vec![Rule::load("exec(*)").expect("exec rule")],
+                deny: Vec::new(),
+            },
+            Source::Project,
+        ),
+    );
     let process = NoProcess;
     let evidence = NoEvidence;
     let fs = ego_core::permit::fake::FakeFs::default();
+    let registry: [Arc<dyn Tool>; 1] = [Arc::new(FailingExecTool)];
     let tools = Tools::new(
-        &[],
+        &registry,
         &policy,
         ToolEffectPorts::new(
             &fs,
@@ -504,10 +570,7 @@ fn turn_loop_real_owner_records_prompt_and_stop_once_in_order() {
         port.calls(),
         vec![HookLifecycle::UserPromptSubmit, HookLifecycle::Stop]
     );
-    assert_eq!(
-        port.starts.lock().expect("hook starts").len(),
-        2
-    );
+    assert_eq!(port.starts.lock().expect("hook starts").len(), 2);
 }
 
 #[test]
@@ -529,13 +592,13 @@ fn dispatcher_accepts_every_admitted_lifecycle_once_in_deterministic_order() {
 }
 
 #[test]
-fn turn_loop_pre_block_stops_before_tool_effect_and_failure_observer_does_not_revert() {
+fn turn_loop_pre_block_stops_before_tool_effect_and_post_failure_observer_does_not_revert() {
     let blocking = BlockingPort::default();
     let (_events, blocked_state) = run_turn(
         vec![
             AiEvent::ToolCall {
                 call_id: "call-1".to_owned(),
-                name: "missing".to_owned(),
+                name: "failing_exec".to_owned(),
                 args: "{}".to_owned(),
             },
             AiEvent::Stop(StopReason::Stop),
@@ -547,39 +610,70 @@ fn turn_loop_pre_block_stops_before_tool_effect_and_failure_observer_does_not_re
         "a blocked pre-effect prompt cannot alter session state"
     );
     let failing = FailingPort::default();
-    let (_events, _state) = run_turn(
+    let (events, _state) = run_turn_scripts(
         vec![
-            AiEvent::TextDelta {
-                text: "answer".to_owned(),
-            },
-            AiEvent::Stop(StopReason::Stop),
+            vec![
+                AiEvent::ToolCall {
+                    call_id: "call-2".to_owned(),
+                    name: "failing_exec".to_owned(),
+                    args: "{}".to_owned(),
+                },
+                AiEvent::Stop(StopReason::ToolUse),
+            ],
+            vec![
+                AiEvent::TextDelta {
+                    text: "answer after failed tool".to_owned(),
+                },
+                AiEvent::Stop(StopReason::Stop),
+            ],
         ],
         &failing,
     );
     assert_eq!(
         failing.calls(),
-        vec![HookLifecycle::UserPromptSubmit, HookLifecycle::Stop]
+        vec![
+            HookLifecycle::UserPromptSubmit,
+            HookLifecycle::PreToolUse,
+            HookLifecycle::PostToolUseFailure,
+            HookLifecycle::PostToolBatch,
+            HookLifecycle::Stop,
+        ]
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event.kind, EventKind::ToolCallCompleted { ok: false, .. }))
     );
 }
 
 #[test]
-fn turn_loop_real_owner_reaches_tool_batch_and_failure_boundaries() {
+fn turn_loop_real_owner_reaches_tool_batch_and_failure_boundaries_then_stops() {
     let port = RecordingPort::default();
-    let (_events, _state) = run_turn(
+    let (_events, _state) = run_turn_scripts(
         vec![
-            AiEvent::ToolCall {
-                call_id: "call-1".to_owned(),
-                name: "missing".to_owned(),
-                args: "{}".to_owned(),
-            },
-            AiEvent::Stop(StopReason::Stop),
+            vec![
+                AiEvent::ToolCall {
+                    call_id: "call-1".to_owned(),
+                    name: "failing_exec".to_owned(),
+                    args: "{}".to_owned(),
+                },
+                AiEvent::Stop(StopReason::ToolUse),
+            ],
+            vec![AiEvent::Stop(StopReason::Stop)],
         ],
         &port,
     );
     let calls = port.calls();
-    assert!(calls.contains(&HookLifecycle::PreToolUse));
-    assert!(calls.contains(&HookLifecycle::PostToolUseFailure));
-    assert!(calls.contains(&HookLifecycle::PostToolBatch));
+    assert_eq!(
+        calls,
+        vec![
+            HookLifecycle::UserPromptSubmit,
+            HookLifecycle::PreToolUse,
+            HookLifecycle::PostToolUseFailure,
+            HookLifecycle::PostToolBatch,
+            HookLifecycle::Stop,
+        ]
+    );
 }
 
 struct ReducerFixture {
