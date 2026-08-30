@@ -28,10 +28,12 @@ use ego_core::generator::capabilities::{
 use ego_core::generator::fake::FakeGenerator;
 use ego_core::generator::port::AiEvent;
 use ego_core::generator::types::StopReason;
+use ego_core::mcp::{ForeignInputRequired, ToolExecution};
 use ego_core::permit::fake::{FakeFs, FakeWriteTool};
 use ego_core::permit::{
-    CanonPath, DuplexHandle, DuplexSpawner, HttpRequest, OneHop, OneHopResponse, ProcessError,
-    ProcessExecutor, ResolvedConnect, Resolver, SpawnSpec, ToolResult, TransportError, Typed,
+    CanonPath, DuplexHandle, DuplexSpawner, GuardedIo, HttpRequest, OneHop, OneHopResponse,
+    PrepareCtx, PreparedCall, ProcessError, ProcessExecutor, ResolvedConnect, Resolver, SpawnSpec,
+    Tool, ToolDescriptor, ToolError, ToolResult, TransportError, Typed,
 };
 use ego_core::question::{
     AskQuestionTool, Elicitor, ElicitorError, QuestionAnswer, QuestionMode, QuestionOption,
@@ -300,6 +302,39 @@ impl Elicitor for UnavailableElicitor {
     }
 }
 
+struct ForeignInputTool;
+
+impl Tool for ForeignInputTool {
+    fn descriptor(&self) -> ToolDescriptor {
+        ToolDescriptor {
+            name: "mcp_input".to_owned(),
+            description: "fixture MCP operation that suspends for foreign input".to_owned(),
+            schema: serde_json::from_value(serde_json::json!({"type": "object"}))
+                .expect("fixture schema"),
+        }
+    }
+
+    fn prepare(
+        &self,
+        _params: serde_json::Value,
+        _ctx: &PrepareCtx<'_>,
+    ) -> Result<PreparedCall, ToolError> {
+        Ok(PreparedCall::new(self.descriptor().name, Vec::new()))
+    }
+
+    fn execute<'a>(
+        &'a self,
+        _call: PreparedCall,
+        _io: &'a dyn GuardedIo,
+    ) -> BoxFuture<'a, Result<ToolExecution, ToolError>> {
+        Box::pin(async {
+            Ok(ToolExecution::InputRequired(
+                ForeignInputRequired::new("regression_case").expect("valid continuation id"),
+            ))
+        })
+    }
+}
+
 #[test]
 fn unavailable_elicitor_persists_question_closes_unstarted_siblings_and_leaves_turn_pending() {
     let request = QuestionRequest::new(
@@ -446,5 +481,99 @@ fn unavailable_elicitor_persists_question_closes_unstarted_siblings_and_leaves_t
             .iter()
             .all(|event| !matches!(event.kind, EventKind::TurnCompleted { .. })),
         "a suspended turn must not publish TurnCompleted"
+    );
+}
+
+#[test]
+fn foreign_input_required_is_projected_to_a_durable_pending_question() {
+    let generator = Arc::new(FakeGenerator::new(vec![vec![
+        AiEvent::ToolCall {
+            call_id: "mcp-input-call".into(),
+            name: "mcp_input".into(),
+            args: "{}".into(),
+        },
+        AiEvent::Stop(StopReason::ToolUse),
+    ]]));
+    let store = MemoryStore::default();
+    let clock = FixedClock;
+    let sink = CollectingSink::new();
+    let mut gate = BudgetGate::new(Money::new(
+        "1000".parse::<Amount>().expect("amount"),
+        CurrencyCode::new("USD").expect("currency"),
+    ));
+    let policy = ego_core::permit::PolicyEngine::new(
+        CanonPath::new("/ws"),
+        Mode::Default,
+        Ruleset::default(),
+    );
+    let fs = FakeFs::default();
+    let process = NoProcess;
+    let evidence = NoEvidence;
+    let resolver = Arc::new(NoResolver);
+    let one_hop = Arc::new(NoHop);
+    let duplex = Arc::new(NoDuplex);
+    let registry = vec![RegisteredTool::Effect(
+        Arc::new(ForeignInputTool) as Arc<dyn Tool>
+    )];
+    let tools = Tools::from_registry(
+        &registry,
+        &policy,
+        ToolEffectPorts::new(
+            &fs,
+            &process,
+            &evidence,
+            resolver.clone(),
+            one_hop.clone(),
+            duplex.clone(),
+        ),
+        CanonPath::new("/ws"),
+    );
+    let source = Arc::new(FixedSource { generator });
+    let mut turn = TurnLoop::new(
+        Session {
+            id: ego_core::event::id::SessionId::new(),
+            state: SessionState::default(),
+            store: &store,
+            evidence: &evidence,
+            clock: &clock,
+            sink: &sink,
+            cancel: CancelToken::new(),
+        },
+        GenerationRuntime {
+            source,
+            gate: &mut gate,
+            config: TurnConfig {
+                system: None,
+                token_ceiling: None,
+            },
+            admission: Arc::new(EvidenceAdmissionService::new()),
+            invocation: RunInvocationId::new(),
+        },
+        tools,
+    )
+    .with_elicitor(Arc::new(UnavailableElicitor));
+
+    let outcome = futures::executor::block_on(turn.run("invoke the MCP operation"))
+        .expect("foreign input suspension is a handled turn outcome");
+    assert_eq!(outcome.exit_reason, ExitReason::PermissionRequired);
+    assert!(!outcome.ok);
+    let pending = turn
+        .state()
+        .pending_question()
+        .expect("ForeignInputRequired must become a durable pending question");
+    assert!(pending.request().validate().is_ok());
+    assert!(
+        store
+            .events()
+            .iter()
+            .all(|event| !matches!(event.kind, EventKind::TurnCompleted { .. })),
+        "a foreign-input suspension must not publish TurnCompleted"
+    );
+    assert!(
+        store
+            .events()
+            .iter()
+            .any(|event| matches!(event.kind, EventKind::QuestionRequested { .. })),
+        "QuestionRequested must be durable before exposing the suspension"
     );
 }

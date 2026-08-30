@@ -1,8 +1,11 @@
 //! Coarse RED contract for current dynamic MCP families and MRTR.
 
+use std::collections::BTreeMap;
+
 use ego_core::config::McpServerName;
 use ego_core::generator::types::ToolDescriptor;
 use ego_mcp::{McpCollapsedBootstrap, McpCollapsedCatalogue, McpInputResponse, McpInputState};
+use rmcp::model::{ElicitRequest, ElicitRequestParams, InputRequest, InputRequiredResult};
 use serde_json::json;
 
 fn server() -> McpServerName {
@@ -156,4 +159,44 @@ fn only_one_elicitation_form_is_mapped_and_other_input_required_forms_are_refuse
     ] {
         assert!(ego_mcp::McpInputMapping::map(unsupported).is_err());
     }
+}
+
+#[test]
+fn rmcp_form_elicitation_retains_message_schema_and_continuation_authority() {
+    let mut requests = BTreeMap::new();
+    requests.insert(
+        "human-answer".to_owned(),
+        InputRequest::Elicitation(ElicitRequest::new(
+            ElicitRequestParams::FormElicitationParams {
+                meta: None,
+                message: "Confirm the deployment target".to_owned(),
+                requested_schema: serde_json::from_value(json!({
+                    "type": "object",
+                    "properties": {
+                        "target": {"type": "string", "enum": ["staging", "production"]}
+                    },
+                    "required": ["target"]
+                }))
+                .expect("form schema"),
+            },
+        )),
+    );
+    let mapped = ego_mcp::McpInputMapping::from_rmcp(InputRequiredResult::new(
+        Some(requests),
+        Some("opaque-continuation".to_owned()),
+    ))
+    .expect("one accepted form elicitation");
+
+    assert_eq!(mapped.correlation_key(), "human-answer");
+    assert_eq!(mapped.request_state(), b"opaque-continuation");
+    assert_eq!(
+        mapped.schema(),
+        &json!({
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "enum": ["staging", "production"]}
+            },
+            "required": ["target"]
+        })
+    );
 }
