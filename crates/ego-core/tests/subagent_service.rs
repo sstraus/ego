@@ -27,7 +27,8 @@ use ego_core::store::blob::{BlobId, BlobRef};
 use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
 use ego_core::subagent::{
     ChildAuthority, ChildJournal, ChildJournalError, ChildJournalRecord, ChildRequest,
-    ChildRunService, ChildWait, ChildWaitResult, SandboxLevel,
+    ChildResultReader, ChildResultReaderError, ChildRunService, ChildWait, ChildWaitResult,
+    SandboxLevel,
 };
 use futures::future::{self, BoxFuture};
 use futures::stream::{self, BoxStream};
@@ -87,6 +88,28 @@ fn request(invocation: SubagentInvocationId, wait: ChildWait) -> ChildRequest {
 #[derive(Default, Clone)]
 struct DurableJournal {
     records: Arc<Mutex<Vec<ChildJournalRecord>>>,
+}
+
+#[derive(Default, Clone)]
+struct DurableResults {
+    results: Arc<Mutex<BTreeMap<RunId, BlobRef>>>,
+}
+
+impl DurableResults {
+    fn record(&self, run: RunId, result: BlobRef) {
+        self.results.lock().expect("result evidence").insert(run, result);
+    }
+}
+
+impl ChildResultReader for DurableResults {
+    fn read_final_assistant(&self, run: RunId) -> Result<BlobRef, ChildResultReaderError> {
+        self.results
+            .lock()
+            .expect("result evidence")
+            .get(&run)
+            .cloned()
+            .ok_or_else(|| ChildResultReaderError::Missing { run })
+    }
 }
 
 impl DurableJournal {
@@ -227,6 +250,7 @@ impl EventSinkFactory for Sinks {
 }
 
 struct Executor {
+    calls: Mutex<Vec<&'static str>>,
     prompts: Mutex<Vec<String>>,
     settlement: Mutex<RunSettlement>,
 }
@@ -234,9 +258,14 @@ struct Executor {
 impl Executor {
     fn new(settlement: RunSettlement) -> Self {
         Self {
+            calls: Mutex::new(Vec::new()),
             prompts: Mutex::new(Vec::new()),
             settlement: Mutex::new(settlement),
         }
+    }
+
+    fn call_count(&self) -> usize {
+        self.calls.lock().expect("executor calls").len()
     }
 }
 
@@ -247,6 +276,7 @@ impl RunExecutor for Executor {
         &'a self,
         _request: &'a RunPreparation,
     ) -> BoxFuture<'a, Result<RunPrepared<Self::Prepared>, RunExecutorError>> {
+        self.calls.lock().expect("executor calls").push("prepare");
         Box::pin(future::ready(Ok(RunPrepared::new(
             ModelRef("provider/model".to_owned()),
             (),
@@ -264,6 +294,7 @@ impl RunExecutor for Executor {
         &'a self,
         request: &'a RunStart,
     ) -> BoxFuture<'a, Result<RunHandle, RunExecutorError>> {
+        self.calls.lock().expect("executor calls").push("start");
         Box::pin(future::ready(Ok(RunHandle::new(request.run_id, ()))))
     }
 
@@ -289,6 +320,7 @@ impl RunExecutor for Executor {
         _prepared: Self::Prepared,
         _bindings: RunExecutionBindings,
     ) -> BoxFuture<'a, Result<RunSettlement, RunExecutorError>> {
+        self.calls.lock().expect("executor calls").push("submit");
         self.prompts
             .lock()
             .expect("prompts")
@@ -310,6 +342,7 @@ struct Harness {
     store: Arc<Store>,
     executor: Arc<Executor>,
     journal: DurableJournal,
+    results: DurableResults,
     controller: Arc<Controller>,
 }
 
@@ -324,18 +357,24 @@ impl Harness {
             Arc::new(FixedIds),
             RunRetention::new(std::num::NonZeroUsize::new(8).expect("retention")).expect("retention"),
         ));
-        Self { store, executor, journal: DurableJournal::default(), controller }
+        Self { store, executor, journal: DurableJournal::default(), results: DurableResults::default(), controller }
     }
 
     fn service(&self, gate: BudgetGate) -> ChildRunService {
+        let gate = Arc::new(Mutex::new(gate));
+        self.service_with_gate(gate)
+    }
+
+    fn service_with_gate(&self, gate: Arc<Mutex<BudgetGate>>) -> ChildRunService {
         ChildRunService::new(
             Arc::clone(&self.controller),
-            Arc::new(Mutex::new(gate)),
+            Arc::clone(&gate),
             authority(),
             authority(),
             RunRoot::new("/workspace").expect("absolute root"),
-            RunExecutionBindings::new(Arc::new(Sinks), None),
+            RunExecutionBindings::new(Arc::new(Sinks), None).with_budget_gate(gate),
             Arc::new(self.journal.clone()),
+            Arc::new(self.results.clone()),
         )
     }
 }
@@ -349,6 +388,7 @@ fn child_uses_real_controller_and_durable_typed_parent_order() {
     let invocation = SubagentInvocationId::new();
     let admission = futures::executor::block_on(service.start(request(invocation, ChildWait::Foreground)))
         .expect("child admission");
+    harness.results.record(admission.child_run(), blob(RESULT, 64));
     assert!(matches!(admission.origin(), RunOrigin::Subagent { invocation: id, .. } if *id == invocation));
     assert_ne!(admission.child_run(), admission.parent_run());
     assert_ne!(admission.child_session(), admission.parent_run().session_id());
@@ -382,14 +422,22 @@ fn recovery_reopens_durable_facts_at_all_six_cuts_without_retrying_uncertain_del
         futures::executor::block_on(service.start(request(invocation, ChildWait::Background)))
             .expect("initial child");
         harness.journal.truncate_at(cut);
+        let calls_before_recovery = harness.executor.call_count();
         let reopened = harness.service(BudgetGate::unlimited(
             ego_core::cost::CurrencyCode::new("USD").expect("currency"),
         ));
         let recovered = futures::executor::block_on(reopened.recover_from_durable(invocation, cut))
             .expect("durable recovery");
-        assert_eq!(recovered.invocation(), invocation);
-        assert_eq!(recovered.admission_count(), 1, "cut {cut:?}");
-        assert!(!recovered.delivery_was_retried(), "cut {cut:?}");
+        if cut == ego_core::subagent::RecoveryCut::BeforeRequest {
+            assert!(recovered.is_none(), "a missing request is explicit absence");
+            assert!(harness.executor.prompts.lock().expect("prompts").is_empty());
+            assert_eq!(harness.executor.call_count(), calls_before_recovery);
+        } else {
+            let recovered = recovered.expect("request record permits lookup");
+            assert_eq!(recovered.invocation(), invocation);
+            assert_eq!(recovered.admission_count(), 1, "cut {cut:?}");
+            assert!(!recovered.delivery_was_retried(), "cut {cut:?}");
+        }
     }
 }
 
@@ -415,11 +463,11 @@ fn child_execution_carries_prompt_and_preserves_each_typed_terminal() {
     let service = harness.service(BudgetGate::unlimited(
         ego_core::cost::CurrencyCode::new("USD").expect("currency"),
     ));
-    let blocked = futures::executor::block_on(service.run_return_hook(
-        request(SubagentInvocationId::new(), ChildWait::Foreground),
-        blob(RESULT, 64),
-        HookInvocationId::new(),
-    ))
+    let invocation = SubagentInvocationId::new();
+    let admission = futures::executor::block_on(service.start(request(invocation, ChildWait::Foreground)))
+        .expect("completed child admission");
+    harness.results.record(admission.child_run(), blob(RESULT, 64));
+    let blocked = futures::executor::block_on(service.run_return_hook(invocation, HookInvocationId::new()))
     .expect("blocked return boundary");
     assert!(matches!(blocked, SubagentTerminal::ReturnBlocked { .. }));
 }
@@ -453,15 +501,22 @@ fn foreground_cancel_and_background_drop_preserve_real_execution_ownership() {
 #[test]
 fn authority_profile_and_shared_budget_are_admitted_by_real_owners() {
     let harness = Harness::new(RunSettlement::Completed);
-    let gate = BudgetGate::new(ego_core::cost::Money::new(
+    let gate = Arc::new(Mutex::new(BudgetGate::new(ego_core::cost::Money::new(
         "1".parse().expect("amount"),
         ego_core::cost::CurrencyCode::new("USD").expect("currency"),
-    ));
-    let service = harness.service(gate);
+    ))));
+    let service = harness.service_with_gate(Arc::clone(&gate));
+    let gate_id = gate.lock().expect("shared gate").id();
     let first = futures::executor::block_on(service.start(request(
         SubagentInvocationId::new(), ChildWait::Background,
     )))
     .expect("first child uses shared gate");
+    assert_eq!(first.budget_gate(), gate_id);
+    assert!(gate
+        .lock()
+        .expect("shared gate")
+        .outstanding()
+        .is_some_and(|amount| amount.amount > 0));
     let second = futures::executor::block_on(service.start(request(
         SubagentInvocationId::new(), ChildWait::Background,
     )));

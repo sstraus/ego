@@ -7,16 +7,17 @@
 use std::sync::{Arc, Mutex};
 
 use ego_core::config::{ConfigLayer, Source, Sourced, Trust};
+use ego_core::event::domain::EventKind;
 use ego_core::event::hook::{
-    HookDecision, HookFailure, HookFailureKind, HookInvocationId, HookLifecycle, HookOutcome,
-    HookSubject,
+    HookActivation, HookDecision, HookFailure, HookFailureKind, HookInvocationId, HookLifecycle,
+    HookOutcome, HookSubject,
 };
-use ego_core::event::id::{ItemId, TurnId};
+use ego_core::event::id::ItemId;
 use ego_core::event::skill::SkillInvocationId;
 use ego_core::hook::{
     HookCatalogue, HookCatalogueError, HookConfigEntry, HookEvent,
-    HookHandlerConfig, HookMatcher, HookPort, HookSpec, HookSource, HookFuture,
-    HookRecordFuture, HookRunner,
+    HookHandlerConfig, HookMatcher, HookPort, HookSpec, HookSource, HookStartedEvidence,
+    HookFuture, HookRecordFuture, HookRunner,
 };
 use ego_core::permit::rule::Rule;
 
@@ -115,15 +116,20 @@ fn closed_handlers_reject_exact_unknown_fields_and_admit_http_without_adapter() 
 
 #[derive(Clone, Default)]
 struct DurableHookPort {
-    started: Arc<Mutex<Vec<HookInvocationId>>>,
+    started: Arc<Mutex<Vec<HookStartedEvidence>>>,
     settled: Arc<Mutex<Vec<HookInvocationId>>>,
     emitted: Arc<Mutex<Vec<HookEvent>>>,
     fail: Arc<Mutex<Option<HookFailureKind>>>,
+    block: bool,
 }
 
 impl DurableHookPort {
     fn fail_with(kind: HookFailureKind) -> Self {
         Self { fail: Arc::new(Mutex::new(Some(kind))), ..Self::default() }
+    }
+
+    fn blocking() -> Self {
+        Self { block: true, ..Self::default() }
     }
 }
 
@@ -132,9 +138,13 @@ impl HookPort for DurableHookPort {
         &'a self,
         _spec: &'a HookSpec,
         _event: &'a HookEvent,
+        activation: HookActivation,
         invocation: HookInvocationId,
     ) -> HookRecordFuture<'a> {
-        self.started.lock().expect("started journal").push(invocation);
+        self.started
+            .lock()
+            .expect("started journal")
+            .push(HookStartedEvidence::new(_spec.id(), invocation, activation));
         Box::pin(async { Ok(()) })
     }
 
@@ -143,7 +153,12 @@ impl HookPort for DurableHookPort {
         if let Some(kind) = self.fail.lock().expect("failure").take() {
             return Box::pin(async move { Err(HookFailure::new(kind, None)) });
         }
-        Box::pin(async move { Ok(HookOutcome::new(HookDecision::Continue, None)) })
+        let decision = if self.block {
+            HookDecision::Block
+        } else {
+            HookDecision::Continue
+        };
+        Box::pin(async move { Ok(HookOutcome::new(decision, None)) })
     }
 
     fn settled<'a>(
@@ -171,11 +186,57 @@ fn typed_catalogue() -> HookCatalogue {
     .expect("typed catalogue")
 }
 
+fn once_catalogue() -> HookCatalogue {
+    let layers = persistent_layers();
+    HookCatalogue::admit_typed(
+        &layers,
+        &[HookSource::skill_entries(
+            "skills/demo/SKILL.md",
+            SkillInvocationId::new(),
+            [typed_skill_hook().with_once(true)],
+        )],
+        Trust::Trusted,
+    )
+    .expect("typed once catalogue")
+}
+
+fn failure_catalogue() -> HookCatalogue {
+    HookCatalogue::admit_typed(
+        &[],
+        &[HookSource::skill_entries(
+            "skills/failure/SKILL.md",
+            SkillInvocationId::new(),
+            [
+                HookConfigEntry::new(
+                    HookLifecycle::PreCompact,
+                    None,
+                    HookHandlerConfig::Command {
+                        command: "/usr/bin/pre-compact".to_owned(),
+                        args: Vec::new(),
+                        timeout_seconds: None,
+                    },
+                ),
+                HookConfigEntry::new(
+                    HookLifecycle::PostCompact,
+                    None,
+                    HookHandlerConfig::Command {
+                        command: "/usr/bin/post-compact".to_owned(),
+                        args: Vec::new(),
+                        timeout_seconds: None,
+                    },
+                ),
+            ],
+        )],
+        Trust::Trusted,
+    )
+    .expect("typed failure catalogue")
+}
+
 #[test]
 fn deterministic_matching_uses_permission_ast_and_valid_block_wins_with_durable_feedback() {
     let catalogue = typed_catalogue();
     let event = HookEvent::tool(
-        HookLifecycle::PreToolUse,
+        HookLifecycle::SubagentStop,
         ego_core::event::hook::HookSubject::Item { item: ItemId::new() },
         "read(src/main.rs)",
     );
@@ -183,7 +244,7 @@ fn deterministic_matching_uses_permission_ast_and_valid_block_wins_with_durable_
     let second = catalogue.matching(&event);
     assert_eq!(first, second);
     assert!(first.windows(2).all(|pair| pair[0].sort_key() < pair[1].sort_key()));
-    let port = DurableHookPort::default();
+    let port = DurableHookPort::blocking();
     let runner = HookRunner::new(port.clone());
     let result = futures::executor::block_on(runner.run(&catalogue, event)).expect("hook run");
     assert_eq!(result.decision(), HookDecision::Block);
@@ -194,7 +255,7 @@ fn deterministic_matching_uses_permission_ast_and_valid_block_wins_with_durable_
 
 #[test]
 fn pre_effect_failure_blocks_observer_failure_stays_durable_and_effect_is_not_reverted() {
-    let catalogue = typed_catalogue();
+    let catalogue = failure_catalogue();
     let pre = futures::executor::block_on(HookRunner::new(DurableHookPort::fail_with(
         HookFailureKind::HandlerFailed,
     )).run(&catalogue, HookEvent::session(HookLifecycle::PreCompact))).expect("pre result");
@@ -208,17 +269,80 @@ fn pre_effect_failure_blocks_observer_failure_stays_durable_and_effect_is_not_re
 }
 
 #[test]
+fn hook_started_event_persists_closed_skill_activation_for_replay() {
+    let catalogue = once_catalogue();
+    let hook = catalogue
+        .specs()
+        .iter()
+        .find(|spec| spec.event_name() == "SubagentStop")
+        .expect("skill hook")
+        .id();
+    let skill_invocation = SkillInvocationId::new();
+    let event = EventKind::HookInvocationStarted {
+        hook,
+        invocation: HookInvocationId::new(),
+        lifecycle: HookLifecycle::SubagentStop,
+        subject: HookSubject::Session,
+        activation: HookActivation::Skill {
+            invocation: skill_invocation,
+        },
+    };
+    let encoded = serde_json::to_value(&event).expect("hook start encoding");
+    assert_eq!(encoded["activation"]["kind"], "skill");
+    assert_eq!(encoded["activation"]["invocation"], skill_invocation.to_string());
+    let decoded: EventKind = serde_json::from_value(encoded).expect("hook start decoding");
+    assert!(matches!(
+        decoded,
+        EventKind::HookInvocationStarted {
+            activation: HookActivation::Skill { invocation },
+            ..
+        } if invocation == skill_invocation
+    ));
+}
+
+#[test]
 fn durable_once_rebuilds_in_a_new_runner_and_hook_originated_events_are_suppressed() {
-    let catalogue = typed_catalogue();
+    let catalogue = once_catalogue();
     let port = DurableHookPort::default();
-    let event = HookEvent::turn(HookLifecycle::SubagentStop, HookSubject::Turn { turn: TurnId::new() });
+    let event = HookEvent::tool(
+        HookLifecycle::SubagentStop,
+        HookSubject::Item { item: ItemId::new() },
+        "read(src/main.rs)",
+    );
     let first = futures::executor::block_on(HookRunner::new_with_durable_started(
         port.clone(), port.started.clone(),
     ).run(&catalogue, event.clone())).expect("first once invocation");
     assert!(first.started_invocation());
-    let rebuilt = HookRunner::new_with_durable_started(port.clone(), port.started.clone());
+    let started = port.started.lock().expect("started evidence").clone();
+    let skill_invocation = started.iter().find_map(|evidence| match evidence.activation() {
+        HookActivation::Skill { invocation } => Some(invocation),
+        HookActivation::Persistent => None,
+    }).expect("skill activation evidence");
+    let hook = started.iter().find(|evidence| {
+        matches!(evidence.activation(), HookActivation::Skill { invocation } if invocation == skill_invocation)
+    }).expect("matching skill hook evidence").hook();
+    assert!(started.iter().any(|evidence| {
+        evidence.hook() == hook
+            && matches!(evidence.activation(), HookActivation::Skill { invocation } if invocation == skill_invocation)
+    }));
+    let rebuilt = HookRunner::new_with_durable_started(port.clone(), started.clone());
     let second = futures::executor::block_on(rebuilt.run(&catalogue, event)).expect("replayed once");
     assert!(second.was_skipped_once());
+    let persistent_replay = vec![HookStartedEvidence::new(
+        hook,
+        started[0].invocation(),
+        HookActivation::Persistent,
+    )];
+    let fresh = HookRunner::new_with_durable_started(port.clone(), persistent_replay);
+    let not_skipped = futures::executor::block_on(fresh.run(
+        &catalogue,
+        HookEvent::tool(
+            HookLifecycle::SubagentStop,
+            HookSubject::Item { item: ItemId::new() },
+            "read(src/main.rs)",
+        ),
+    )).expect("persistent activation does not consume skill once");
+    assert!(!not_skipped.was_skipped_once());
     let emitted = port.emitted.lock().expect("emitted events").clone();
     assert!(emitted.iter().all(HookRunner::<DurableHookPort>::hook_originated_event));
     let suppressed = futures::executor::block_on(rebuilt.run(
