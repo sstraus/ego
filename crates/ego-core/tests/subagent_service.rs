@@ -6,7 +6,7 @@
 //! projection, or an externally supplied child result.
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use ego_core::budget::{BudgetGate, Metering, PricingQuote, Reservation, SettlementSource};
 use ego_core::ceiling::Budget;
@@ -43,14 +43,14 @@ use ego_core::sink::{EventSink, NullSink};
 use ego_core::store::blob::{BlobId, BlobRef};
 use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
 use ego_core::subagent::{
-    ChildJournal, ChildJournalError, ChildProfileResolver, ChildRequest, ChildSelectionAdmission,
-    ChildResultEvidence, ChildResultReader, ChildResultReaderError, ChildResultStore,
-    ChildRunService, ChildTaskReader, ChildWait, ChildWaitResult,
+    ChildJournal, ChildJournalError, ChildProfileResolver, ChildRequest, ChildResultEvidence,
+    ChildResultReader, ChildResultReaderError, ChildResultStore, ChildRunService,
+    ChildSelectionAdmission, ChildServicePorts, ChildTaskReader, ChildWait, ChildWaitResult,
 };
 use futures::future::{self, BoxFuture};
 use futures::stream::{self, BoxStream};
 
-const TASK: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+const DEFAULT_TASK_BYTES: &[u8] = b"rendered default task";
 const RESULT: &str = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
 
 fn child_event_kind(event: &DomainEvent) -> &'static str {
@@ -80,6 +80,11 @@ fn selections() -> RunSelections {
     )
 }
 
+fn parent_run() -> RunId {
+    static PARENT: OnceLock<RunId> = OnceLock::new();
+    *PARENT.get_or_init(|| RunId::new(SessionId::new(), uuid::Uuid::now_v7()))
+}
+
 fn profile_name_from_owner() -> String {
     let layer = ConfigLayer::parse(Source::User, "[profile.worker]\n").expect("profile layer");
     resolve_selected(
@@ -105,6 +110,7 @@ struct ExistingAuthorityAdmission {
     parent_confinement: RunConfinement,
     system_confinement: RunConfinement,
     calls: Arc<Mutex<usize>>,
+    requests: Arc<Mutex<Vec<SubagentInvocationId>>>,
 }
 
 impl ExistingAuthorityAdmission {
@@ -132,6 +138,7 @@ impl ExistingAuthorityAdmission {
             system_confinement: RunConfinement::new(Confinement::Workspace, true, workspace)
                 .expect("system confinement"),
             calls: Arc::new(Mutex::new(0)),
+            requests: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -141,24 +148,62 @@ impl ExistingAuthorityAdmission {
 }
 
 impl ChildSelectionAdmission for ExistingAuthorityAdmission {
-    fn admit(&self, requested: &RunSelections) -> Result<RunSelections, String> {
+    fn admit(
+        &self,
+        request: &ChildRequest,
+        bindings: &RunExecutionBindings,
+    ) -> Result<(RunSelections, RunExecutionBindings), String> {
         *self.calls.lock().expect("authority admissions") += 1;
+        self.requests
+            .lock()
+            .expect("authority requests")
+            .push(request.invocation());
         let _parent_effective = &self.parent;
         let _system_effective = &self.system;
         if self.parent_confinement.level() != self.system_confinement.level() {
             return Err("parent and system confinement disagree".to_owned());
         }
-        Ok(requested.clone())
+        if request
+            .requested_tools()
+            .is_some_and(|tools| tools.iter().any(|tool| tool != "read"))
+        {
+            return Err("requested tools widen the admitted tool owner".to_owned());
+        }
+        if request.requested_permission() != Some("allow(read(src/**))") {
+            return Err("requested permission is not admitted by Ruleset".to_owned());
+        }
+        if request.requested_sandbox() != Some("workspace")
+            || request.requested_offline() != Some(true)
+            || request
+                .requested_mcp()
+                .is_some_and(|servers| servers.iter().any(|server| server != "trusted"))
+        {
+            return Err("requested confinement or MCP widens the owner".to_owned());
+        }
+        Ok((request.selections().clone(), bindings.clone()))
     }
 }
 
+#[derive(Clone)]
 struct ExistingProfileOwner {
     layers: Vec<ego_core::config::Sourced<ConfigLayer>>,
     trust: Trust,
+    calls: Arc<Mutex<usize>>,
+}
+
+fn default_profile_owner() -> Arc<dyn ChildProfileResolver> {
+    Arc::new(ExistingProfileOwner {
+        layers: vec![
+            ConfigLayer::parse(Source::User, "[profile.worker]\n").expect("default profile layer"),
+        ],
+        trust: Trust::Trusted,
+        calls: Arc::new(Mutex::new(0)),
+    })
 }
 
 impl ChildProfileResolver for ExistingProfileOwner {
     fn resolve_profile(&self, name: &str) -> Result<(), String> {
+        *self.calls.lock().expect("profile resolutions") += 1;
         resolve_selected(&self.layers, self.trust, Some((name, Source::Flags)))
             .map(|_| ())
             .map_err(|error| error.to_string())
@@ -166,7 +211,7 @@ impl ChildProfileResolver for ExistingProfileOwner {
 }
 
 fn request(invocation: SubagentInvocationId, wait: ChildWait) -> ChildRequest {
-    request_with_task(invocation, wait, blob(TASK, 64))
+    request_with_task(invocation, wait, blob_for_bytes(DEFAULT_TASK_BYTES))
 }
 
 fn request_with_task(
@@ -176,7 +221,7 @@ fn request_with_task(
 ) -> ChildRequest {
     ChildRequest::new(
         invocation,
-        RunId::new(SessionId::new(), uuid::Uuid::now_v7()),
+        parent_run(),
         TurnId::new(),
         ItemId::new(),
         task,
@@ -186,6 +231,8 @@ fn request_with_task(
     .with_requested_tools(["read"])
     .with_requested_permission("allow(read(src/**))")
     .with_requested_sandbox("workspace")
+    .with_requested_offline(true)
+    .with_requested_mcp(["trusted"])
     .with_requested_profile(profile_name_from_owner())
 }
 
@@ -193,9 +240,6 @@ fn request_with_task(
 struct DurableJournal {
     events: Arc<Mutex<Vec<DomainEvent>>>,
     fail_next_settled: Arc<Mutex<bool>>,
-    seq: Arc<Mutex<Seq>>,
-    turn: TurnId,
-    parent: Arc<Mutex<Option<EventId>>>,
 }
 
 impl Default for DurableJournal {
@@ -203,35 +247,41 @@ impl Default for DurableJournal {
         Self {
             events: Arc::new(Mutex::new(Vec::new())),
             fail_next_settled: Arc::new(Mutex::new(false)),
-            seq: Arc::new(Mutex::new(Seq::default())),
-            turn: TurnId::new(),
-            parent: Arc::new(Mutex::new(None)),
         }
     }
 }
 
 #[derive(Default, Clone)]
 struct DurableResults {
-    results: Arc<Mutex<BTreeMap<RunId, BlobRef>>>,
+    results: Arc<Mutex<BTreeMap<RunId, ChildResultEvidence>>>,
+    reads: Arc<Mutex<usize>>,
 }
 
 impl DurableResults {
-    fn record(&self, run: RunId, result: BlobRef) {
+    fn record_evidence(&self, run: RunId, item: BlobRef, bytes: impl Into<Vec<u8>>) {
         self.results
             .lock()
             .expect("result evidence")
-            .insert(run, result);
+            .insert(run, ChildResultEvidence::new(item, bytes.into()));
+    }
+
+    fn read_count(&self) -> usize {
+        *self.reads.lock().expect("result reads")
     }
 }
 
 impl ChildResultReader for DurableResults {
-    fn read_final_assistant(&self, run: RunId) -> Result<BlobRef, ChildResultReaderError> {
+    fn read_final_assistant(
+        &self,
+        run: RunId,
+    ) -> Result<ChildResultEvidence, ChildResultReaderError> {
+        *self.reads.lock().expect("result reads") += 1;
         self.results
             .lock()
             .expect("result evidence")
             .get(&run)
             .cloned()
-            .ok_or_else(|| ChildResultReaderError::Missing { run })
+            .ok_or(ChildResultReaderError::Missing { run })
     }
 }
 
@@ -264,34 +314,6 @@ impl ChildTaskReader for RenderedTaskReader {
 }
 
 #[derive(Clone, Default)]
-struct VerifiedResults {
-    results: Arc<Mutex<BTreeMap<RunId, ChildResultEvidence>>>,
-}
-
-impl VerifiedResults {
-    fn record(&self, run: RunId, item: BlobRef, bytes: impl Into<Vec<u8>>) {
-        self.results
-            .lock()
-            .expect("result evidence")
-            .insert(run, ChildResultEvidence::new(item, bytes.into()));
-    }
-}
-
-impl ChildResultReader for VerifiedResults {
-    fn read_final_assistant(
-        &self,
-        run: RunId,
-    ) -> Result<ChildResultEvidence, ChildResultReaderError> {
-        self.results
-            .lock()
-            .expect("result evidence")
-            .get(&run)
-            .cloned()
-            .ok_or(ChildResultReaderError::Missing { run })
-    }
-}
-
-#[derive(Clone, Default)]
 struct ParentBlobStore {
     copied: Arc<Mutex<Vec<(RunId, ChildResultEvidence, BlobRef)>>>,
     fail_copy: Arc<Mutex<bool>>,
@@ -318,7 +340,7 @@ impl ChildResultStore for ParentBlobStore {
                 diagnostic: "injected parent blob copy failure".to_owned(),
             });
         }
-        let parent = blob(RESULT, 64);
+        let parent = blob_for_bytes(evidence.bytes());
         self.copied
             .lock()
             .expect("copied results")
@@ -359,8 +381,8 @@ impl DurableJournal {
 }
 
 impl ChildJournal for DurableJournal {
-    fn append(&self, kind: EventKind) -> Result<(), ChildJournalError> {
-        let fail = matches!(&kind, EventKind::SubagentSettled { .. }) && {
+    fn append(&self, event: DomainEvent) -> Result<(), ChildJournalError> {
+        let fail = matches!(&event.kind, EventKind::SubagentSettled { .. }) && {
             let mut flag = self.fail_next_settled.lock().expect("settled failure flag");
             let fail = *flag;
             *flag = false;
@@ -371,25 +393,14 @@ impl ChildJournal for DurableJournal {
                 "injected parent settlement durability failure",
             ));
         }
-        let id = EventId::new();
-        let event = DomainEvent {
-            env: Envelope {
-                seq: self.seq.lock().expect("journal sequence").next(),
-                id,
-                turn: self.turn,
-                item: None,
-                parent: *self.parent.lock().expect("journal parent"),
-                ts: Timestamp::EPOCH,
-                producer: Producer::Main,
-            },
-            kind,
-        };
-        *self.parent.lock().expect("journal parent") = Some(id);
         self.events.lock().expect("journal events").push(event);
         Ok(())
     }
 
-    fn read(&self, invocation: SubagentInvocationId) -> Result<Vec<EventKind>, ChildJournalError> {
+    fn read(
+        &self,
+        invocation: SubagentInvocationId,
+    ) -> Result<Vec<DomainEvent>, ChildJournalError> {
         Ok(self
             .records()
             .into_iter()
@@ -399,7 +410,7 @@ impl ChildJournal for DurableJournal {
                 | EventKind::SubagentSettled { invocation: id, .. }
                     if *id == invocation =>
                 {
-                    Some(event.kind.clone())
+                    Some(event)
                 }
                 _ => None,
             })
@@ -763,10 +774,13 @@ impl RunExecutor for Executor {
 type Controller = RunController<Store, Executor, FixedClock, FixedIds>;
 
 struct Harness {
+    parent_run: RunId,
     store: Arc<Store>,
     executor: Arc<Executor>,
     journal: DurableJournal,
     results: DurableResults,
+    task_reader: RenderedTaskReader,
+    parent_blobs: ParentBlobStore,
     controller: Arc<Controller>,
 }
 
@@ -783,21 +797,20 @@ impl Harness {
                 .expect("retention"),
         ));
         Self {
+            parent_run: parent_run(),
             store,
             executor,
             journal: DurableJournal::default(),
             results: DurableResults::default(),
+            task_reader: RenderedTaskReader::with_bytes(DEFAULT_TASK_BYTES.to_vec()),
+            parent_blobs: ParentBlobStore::default(),
             controller,
         }
     }
 
     fn service(&self, gate: BudgetGate) -> ChildRunService {
         let gate = Arc::new(Mutex::new(gate));
-        self.service_with_gate(gate)
-    }
-
-    fn service_with_gate(&self, gate: Arc<Mutex<BudgetGate>>) -> ChildRunService {
-        self.service_with_gate_and_authority(gate, Arc::new(ExistingAuthorityAdmission::new()))
+        self.service_with_ports(gate, self.default_ports())
     }
 
     fn service_with_gate_and_authority(
@@ -805,14 +818,43 @@ impl Harness {
         gate: Arc<Mutex<BudgetGate>>,
         authority: Arc<dyn ChildSelectionAdmission>,
     ) -> ChildRunService {
-        ChildRunService::new_with_authority_admission(
+        self.service_with_ports(
+            gate,
+            ChildServicePorts::new(
+                self.parent_run,
+                Arc::new(self.journal.clone()),
+                Arc::new(self.task_reader.clone()),
+                Arc::new(self.results.clone()),
+                Arc::new(self.parent_blobs.clone()),
+                default_profile_owner(),
+                authority,
+            ),
+        )
+    }
+
+    fn default_ports(&self) -> ChildServicePorts {
+        ChildServicePorts::new(
+            self.parent_run,
+            Arc::new(self.journal.clone()),
+            Arc::new(self.task_reader.clone()),
+            Arc::new(self.results.clone()),
+            Arc::new(self.parent_blobs.clone()),
+            default_profile_owner(),
+            Arc::new(ExistingAuthorityAdmission::new()),
+        )
+    }
+
+    fn service_with_ports(
+        &self,
+        gate: Arc<Mutex<BudgetGate>>,
+        ports: ChildServicePorts,
+    ) -> ChildRunService {
+        ChildRunService::new(
             Arc::clone(&self.controller),
             Arc::clone(&gate),
             RunRoot::new("/workspace").expect("absolute root"),
             RunExecutionBindings::new(Arc::new(Sinks), None).with_budget_gate(gate),
-            Arc::new(self.journal.clone()),
-            Arc::new(self.results.clone()),
-            authority,
+            ports,
         )
     }
 
@@ -825,16 +867,17 @@ impl Harness {
         let gate = Arc::new(Mutex::new(BudgetGate::unlimited(
             ego_core::cost::CurrencyCode::new("USD").expect("currency"),
         )));
-        ChildRunService::new_with_content_ports(
-            Arc::clone(&self.controller),
-            Arc::clone(&gate),
-            RunRoot::new("/workspace").expect("absolute root"),
-            RunExecutionBindings::new(Arc::new(Sinks), None).with_budget_gate(gate),
-            Arc::new(self.journal.clone()),
-            task_reader,
-            results,
-            parent_blobs,
-            Arc::new(ExistingAuthorityAdmission::new()),
+        self.service_with_ports(
+            gate,
+            ChildServicePorts::new(
+                self.parent_run,
+                Arc::new(self.journal.clone()),
+                task_reader,
+                results,
+                parent_blobs,
+                default_profile_owner(),
+                Arc::new(ExistingAuthorityAdmission::new()),
+            ),
         )
     }
 
@@ -842,15 +885,17 @@ impl Harness {
         let gate = Arc::new(Mutex::new(BudgetGate::unlimited(
             ego_core::cost::CurrencyCode::new("USD").expect("currency"),
         )));
-        ChildRunService::new_with_profile_owner(
-            Arc::clone(&self.controller),
-            Arc::clone(&gate),
-            RunRoot::new("/workspace").expect("absolute root"),
-            RunExecutionBindings::new(Arc::new(Sinks), None).with_budget_gate(gate),
-            Arc::new(self.journal.clone()),
-            Arc::new(self.results.clone()),
-            owner,
-            Arc::new(ExistingAuthorityAdmission::new()),
+        self.service_with_ports(
+            gate,
+            ChildServicePorts::new(
+                self.parent_run,
+                Arc::new(self.journal.clone()),
+                Arc::new(self.task_reader.clone()),
+                Arc::new(self.results.clone()),
+                Arc::new(self.parent_blobs.clone()),
+                owner,
+                Arc::new(ExistingAuthorityAdmission::new()),
+            ),
         )
     }
 }
@@ -865,9 +910,11 @@ fn child_uses_real_controller_and_durable_typed_parent_order() {
     let admission =
         futures::executor::block_on(service.start(request(invocation, ChildWait::Foreground)))
             .expect("child admission");
-    harness
-        .results
-        .record(admission.child_run(), blob(RESULT, 64));
+    harness.results.record_evidence(
+        admission.child_run(),
+        blob(RESULT, 64),
+        RESULT.as_bytes().to_vec(),
+    );
     assert!(
         matches!(admission.origin(), RunOrigin::Subagent { invocation: id, .. } if *id == invocation)
     );
@@ -883,10 +930,13 @@ fn child_uses_real_controller_and_durable_typed_parent_order() {
             final_message: blob(RESULT, 64)
         }
     );
+    let prompts = harness.executor.prompts.lock().expect("prompts").clone();
     assert_eq!(
-        harness.executor.prompts.lock().expect("prompts").as_slice(),
-        &[TASK.to_owned()]
+        prompts.as_slice(),
+        &[String::from_utf8(DEFAULT_TASK_BYTES.to_vec()).expect("UTF-8 default task")]
     );
+    assert_ne!(prompts[0], blob_for_bytes(DEFAULT_TASK_BYTES).id.as_str());
+    assert_eq!(harness.parent_blobs.copied().len(), 1);
     assert_eq!(
         harness
             .journal
@@ -906,11 +956,11 @@ fn child_reads_rendered_task_bytes_through_the_injected_reader() {
     let harness = Harness::new(RunSettlement::Completed);
     let task_bytes = b"rendered child task, not its content digest".to_vec();
     let task_reader = Arc::new(RenderedTaskReader::with_bytes(task_bytes.clone()));
-    let results = Arc::new(VerifiedResults::default());
+    let results = Arc::new(DurableResults::default());
     let parent_blobs = Arc::new(ParentBlobStore::default());
     let service = harness.content_service(task_reader.clone(), results.clone(), parent_blobs);
     let invocation = SubagentInvocationId::new();
-    let task = blob_for_bytes(b"task reference content");
+    let task = blob_for_bytes(&task_bytes);
     let admission = futures::executor::block_on(service.start(request_with_task(
         invocation,
         ChildWait::Foreground,
@@ -918,7 +968,7 @@ fn child_reads_rendered_task_bytes_through_the_injected_reader() {
     )))
     .expect("child admission");
     let result_bytes = b"final child assistant";
-    results.record(
+    results.record_evidence(
         admission.child_run(),
         blob_for_bytes(result_bytes),
         result_bytes.to_vec(),
@@ -926,7 +976,7 @@ fn child_reads_rendered_task_bytes_through_the_injected_reader() {
     let _ = futures::executor::block_on(admission.wait()).expect("child settlement");
     assert_eq!(
         harness.executor.prompts.lock().expect("prompts").as_slice(),
-        &[String::from_utf8(task_bytes).expect("UTF-8 task")]
+        &[String::from_utf8(task_bytes.clone()).expect("UTF-8 task")]
     );
     assert_ne!(
         harness.executor.prompts.lock().expect("prompts")[0],
@@ -943,18 +993,22 @@ fn child_result_is_verified_copied_to_parent_and_only_parent_ref_is_returned() {
     let result_bytes = b"verified final assistant bytes";
     let child_item = blob_for_bytes(result_bytes);
     let harness = Harness::new(RunSettlement::Completed);
-    let results = Arc::new(VerifiedResults::default());
+    let results = Arc::new(DurableResults::default());
     let parent_blobs = Arc::new(ParentBlobStore::default());
+    let task = blob_for_bytes(b"task");
     let service = harness.content_service(
         Arc::new(RenderedTaskReader::with_bytes(b"task".to_vec())),
         results.clone(),
         parent_blobs.clone(),
     );
     let invocation = SubagentInvocationId::new();
-    let admission =
-        futures::executor::block_on(service.start(request(invocation, ChildWait::Foreground)))
-            .expect("child admission");
-    results.record(
+    let admission = futures::executor::block_on(service.start(request_with_task(
+        invocation,
+        ChildWait::Foreground,
+        task,
+    )))
+    .expect("child admission");
+    results.record_evidence(
         admission.child_run(),
         child_item.clone(),
         result_bytes.to_vec(),
@@ -964,7 +1018,7 @@ fn child_result_is_verified_copied_to_parent_and_only_parent_ref_is_returned() {
         ChildWaitResult::Returned { final_message } => final_message,
         other => panic!("expected returned child result, got {other:?}"),
     };
-    assert_ne!(parent_ref, child_item);
+    assert_eq!(parent_ref, child_item);
     assert_eq!(parent_blobs.copied().len(), 1);
     assert_eq!(parent_blobs.copied()[0].2, parent_ref);
     assert!(matches!(
@@ -999,21 +1053,25 @@ fn child_result_digest_or_parent_copy_failure_fails_closed_without_return_or_set
             b"dishonest bytes".to_vec()
         };
         let harness = Harness::new(RunSettlement::Completed);
-        let results = Arc::new(VerifiedResults::default());
+        let results = Arc::new(DurableResults::default());
         let parent_blobs = Arc::new(ParentBlobStore::default());
         if copy_failure {
             parent_blobs.fail_copy();
         }
+        let task = blob_for_bytes(b"task");
         let service = harness.content_service(
             Arc::new(RenderedTaskReader::with_bytes(b"task".to_vec())),
             results.clone(),
             parent_blobs.clone(),
         );
         let invocation = SubagentInvocationId::new();
-        let admission =
-            futures::executor::block_on(service.start(request(invocation, ChildWait::Foreground)))
-                .expect("child admission");
-        results.record(admission.child_run(), declared, actual);
+        let admission = futures::executor::block_on(service.start(request_with_task(
+            invocation,
+            ChildWait::Foreground,
+            task,
+        )))
+        .expect("child admission");
+        results.record_evidence(admission.child_run(), declared, actual);
         let error = futures::executor::block_on(admission.wait()).unwrap_err();
         assert!(matches!(
             error,
@@ -1040,9 +1098,11 @@ fn settled_journal_failure_preserves_result_for_exactly_once_retry() {
     let admission =
         futures::executor::block_on(service.start(request(invocation, ChildWait::Foreground)))
             .expect("child admission");
-    harness
-        .results
-        .record(admission.child_run(), blob(RESULT, 64));
+    harness.results.record_evidence(
+        admission.child_run(),
+        blob(RESULT, 64),
+        RESULT.as_bytes().to_vec(),
+    );
     harness.journal.fail_next_settled();
     let calls_before_retry = harness.executor.call_count();
     let first = futures::executor::block_on(admission.wait());
@@ -1120,6 +1180,144 @@ fn recovery_reopens_durable_facts_at_all_six_cuts_without_retrying_uncertain_del
 }
 
 #[test]
+fn request_only_recovery_admits_once_without_executing_or_delivering() {
+    let harness = Harness::new(RunSettlement::Completed);
+    let authority = Arc::new(ExistingAuthorityAdmission::new());
+    let profile = Arc::new(ExistingProfileOwner {
+        layers: vec![
+            ConfigLayer::parse(Source::User, "[profile.worker]\n").expect("profile layer"),
+        ],
+        trust: Trust::Trusted,
+        calls: Arc::new(Mutex::new(0)),
+    });
+    let task_bytes = b"request-only rendered task".to_vec();
+    let task_reader = Arc::new(RenderedTaskReader::with_bytes(task_bytes.clone()));
+    let results = Arc::new(DurableResults::default());
+    let parent_blobs = Arc::new(ParentBlobStore::default());
+    let service = harness.service_with_ports(
+        Arc::new(Mutex::new(BudgetGate::unlimited(
+            ego_core::cost::CurrencyCode::new("USD").expect("currency"),
+        ))),
+        ChildServicePorts::new(
+            harness.parent_run,
+            Arc::new(harness.journal.clone()),
+            task_reader.clone(),
+            results.clone(),
+            parent_blobs.clone(),
+            profile.clone(),
+            authority.clone(),
+        ),
+    );
+    let invocation = SubagentInvocationId::new();
+    let parent_turn = TurnId::new();
+    let parent_item = ItemId::new();
+    let task = blob_for_bytes(&task_bytes);
+    let child_selections = selections().with_profile_name("worker");
+    let mut seq = Seq::default();
+    harness
+        .journal
+        .append(DomainEvent {
+            env: Envelope {
+                seq: seq.next(),
+                id: EventId::new(),
+                turn: parent_turn,
+                item: Some(parent_item),
+                parent: None,
+                ts: Timestamp::EPOCH,
+                producer: Producer::Main,
+            },
+            kind: EventKind::SubagentRequested {
+                invocation,
+                task,
+                selections: child_selections,
+            },
+        })
+        .expect("request is durable before admission");
+
+    let recovered = futures::executor::block_on(
+        service.recover_from_durable(invocation, ego_core::subagent::RecoveryCut::AfterRequest),
+    )
+    .expect("request-only recovery")
+    .expect("durable request fact");
+    assert_eq!(
+        recovered.origin(),
+        &RunOrigin::Subagent {
+            invocation,
+            parent_run: harness.parent_run,
+            parent_turn,
+            parent_item,
+        }
+    );
+    let child_run = recovered
+        .child_run()
+        .expect("request-only recovery admits one child");
+    assert_eq!(recovered.admission_count(), 1);
+    assert!(!recovered.delivery_was_retried());
+    assert_eq!(
+        authority.calls(),
+        0,
+        "selection admission already happened before request durability"
+    );
+    assert_eq!(
+        *profile.calls.lock().expect("profile resolutions"),
+        0,
+        "profile resolution already happened before request durability"
+    );
+    assert_eq!(task_reader.reads.lock().expect("task reads").len(), 1);
+    let executor_calls = harness
+        .executor
+        .calls
+        .lock()
+        .expect("executor calls")
+        .clone();
+    assert_eq!(
+        executor_calls
+            .iter()
+            .filter(|call| **call == "prepare")
+            .count(),
+        1,
+        "request-only recovery prepares exactly one child"
+    );
+    assert_eq!(
+        executor_calls
+            .iter()
+            .filter(|call| **call == "start")
+            .count(),
+        1,
+        "request-only recovery admits exactly one controller run"
+    );
+    assert!(
+        executor_calls.iter().all(|call| **call != "submit"),
+        "request-only recovery defers execution"
+    );
+    assert!(harness.executor.prompts.lock().expect("prompts").is_empty());
+    assert_eq!(
+        results.read_count(),
+        0,
+        "recovery does not deliver a result"
+    );
+    assert!(parent_blobs.copied().is_empty());
+    let transactions = harness.store.all_transactions();
+    assert_eq!(transactions.len(), 1);
+    assert_eq!(transactions[0].run_id(), child_run);
+    assert_eq!(transactions[0].origin(), recovered.origin());
+    let events = harness
+        .journal
+        .read(invocation)
+        .expect("request evidence remains readable");
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].env.turn, parent_turn);
+    assert_eq!(events[0].env.item, Some(parent_item));
+    assert!(matches!(
+        &events[1].kind,
+        EventKind::SubagentSpawned {
+            invocation: actual_invocation,
+            child: actual_child,
+        } if *actual_invocation == invocation && *actual_child == child_run
+    ));
+}
+
+#[test]
 fn child_execution_carries_prompt_and_preserves_each_typed_terminal() {
     for settlement in [
         RunSettlement::Cancelled {
@@ -1149,9 +1347,11 @@ fn child_execution_carries_prompt_and_preserves_each_typed_terminal() {
     let admission =
         futures::executor::block_on(service.start(request(invocation, ChildWait::Foreground)))
             .expect("completed child admission");
-    harness
-        .results
-        .record(admission.child_run(), blob(RESULT, 64));
+    harness.results.record_evidence(
+        admission.child_run(),
+        blob(RESULT, 64),
+        RESULT.as_bytes().to_vec(),
+    );
     let returned = futures::executor::block_on(admission.wait()).expect("completed child");
     assert!(matches!(returned, ChildWaitResult::Returned { .. }));
 }
@@ -1167,9 +1367,11 @@ fn subagent_stop_uses_real_hook_runner_decision_and_never_accepts_a_forged_id() 
         let admission =
             futures::executor::block_on(service.start(request(invocation, ChildWait::Foreground)))
                 .expect("completed child admission");
-        harness
-            .results
-            .record(admission.child_run(), blob(RESULT, 64));
+        harness.results.record_evidence(
+            admission.child_run(),
+            blob(RESULT, 64),
+            RESULT.as_bytes().to_vec(),
+        );
         let port = ReturnHookPort::new(decision);
         let runner = HookRunner::new(port.clone());
         let catalogue = return_hook_catalogue();
@@ -1253,7 +1455,11 @@ fn authority_profile_and_shared_budget_are_admitted_by_real_owners() {
     .expect("second child is admitted before its generation boundary");
     assert_eq!(first.budget_gate(), gate_id);
     assert_eq!(second.budget_gate(), gate_id);
-    harness.results.record(first.child_run(), blob(RESULT, 64));
+    harness.results.record_evidence(
+        first.child_run(),
+        blob(RESULT, 64),
+        RESULT.as_bytes().to_vec(),
+    );
     assert!(matches!(
         futures::executor::block_on(first.wait()).expect("first child settles"),
         ChildWaitResult::Returned { .. }
@@ -1283,6 +1489,7 @@ fn profile_owner_refuses_unknown_untrusted_and_widening_profiles_before_controll
     let owner = Arc::new(ExistingProfileOwner {
         layers: vec![layer],
         trust: Trust::Trusted,
+        calls: Arc::new(Mutex::new(0)),
     });
     let harness = Harness::new(RunSettlement::Completed);
     let service = harness.profile_service(owner);
@@ -1311,6 +1518,7 @@ fn profile_owner_refuses_unknown_untrusted_and_widening_profiles_before_controll
     let untrusted = Arc::new(ExistingProfileOwner {
         layers: vec![project_layer],
         trust: Trust::Untrusted,
+        calls: Arc::new(Mutex::new(0)),
     });
     let untrusted_service = harness.profile_service(untrusted);
     let refused = futures::executor::block_on(
