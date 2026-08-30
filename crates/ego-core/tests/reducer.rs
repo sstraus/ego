@@ -13,8 +13,9 @@ use ego_core::event::domain::{
     SubagentTerminal,
 };
 use ego_core::event::hook::{
-    HookCatalogueEvidence, HookDecision, HookDescriptorEvidence, HookInvocationId, HookOutcome,
-    HookSourceAuthority, HookSourceLocation,
+    HookCatalogueEvidence, HookDecision, HookDescriptorEvidence, HookInvocationId,
+    HookOccurrenceKey, HookOccurrenceOwner, HookOutcome, HookPlan, HookSourceAuthority,
+    HookSourceLocation,
 };
 use ego_core::event::id::{AttemptId, GenerationId};
 use ego_core::event::id::{
@@ -223,6 +224,7 @@ mod reducer {
         push!(
             None,
             EventKind::HookInvocationStarted {
+                occurrence: EventId::new(),
                 hook: hook.id(),
                 invocation,
                 lifecycle: ego_core::event::hook::HookLifecycle::PreToolUse,
@@ -233,6 +235,7 @@ mod reducer {
         push!(
             None,
             EventKind::HookInvocationSettled {
+                occurrence: EventId::new(),
                 hook: hook.id(),
                 invocation,
                 result: ego_core::event::hook::HookResult::Outcome {
@@ -613,8 +616,22 @@ mod reducer {
                 },
             ),
             (
+                "hook_lifecycle_reached",
+                EventKind::HookLifecycleReached {
+                    occurrence: HookOccurrenceKey::new(
+                        ego_core::event::hook::HookLifecycle::PreToolUse,
+                        HookOccurrenceOwner::Session {
+                            session: SessionId::new(),
+                        },
+                    ),
+                    subject: ego_core::event::hook::HookSubject::Session,
+                    plan: HookPlan::new(vec![hook_descriptor().id()]).unwrap(),
+                },
+            ),
+            (
                 "hook_invocation_started",
                 EventKind::HookInvocationStarted {
+                    occurrence: duplicate_id,
                     hook: hook_descriptor().id(),
                     invocation: HookInvocationId::parse("01900000-0000-7000-8000-000000000012")
                         .unwrap(),
@@ -626,6 +643,7 @@ mod reducer {
             (
                 "hook_invocation_settled",
                 EventKind::HookInvocationSettled {
+                    occurrence: EventId::new(),
                     hook: hook_descriptor().id(),
                     invocation: HookInvocationId::parse("01900000-0000-7000-8000-000000000012")
                         .unwrap(),
@@ -713,7 +731,7 @@ mod reducer {
         ];
         assert_eq!(
             table.len(),
-            27,
+            28,
             "keep this table in sync with EventKind's variant count (ARCH §1)"
         );
 
@@ -743,7 +761,7 @@ mod reducer {
 
         assert_eq!(
             state.unresolved_parents.len(),
-            27,
+            28,
             "every event's parent was unresolvable"
         );
         assert_eq!(
@@ -757,11 +775,12 @@ mod reducer {
                 .map(|r| r.reason)
                 .collect::<Vec<RefusalReason>>(),
             vec![
-                RefusalReason::HookInvocationParentMismatch,
+                RefusalReason::HookOccurrenceParentMismatch,
+                RefusalReason::HookInvocationUnknown,
                 RefusalReason::UnknownAttempt,
                 RefusalReason::UnknownAttempt,
             ],
-            "the hook settlement has the wrong parent, while the settlement and the correction name attempts nobody started, \
+            "the hook start has the wrong parent and its settlement has no live invocation, while the settlement and the correction name attempts nobody started, \
              and a refusal is recorded rather than raised"
         );
         assert_eq!(
@@ -1210,12 +1229,31 @@ mod reducer {
                 descriptors: HookCatalogueEvidence::new(vec![hook.clone()]).unwrap(),
             },
         ));
-        let started = ev(
+        let reached = ev(
             seq.next(),
             turn,
             None,
             None,
+            EventKind::HookLifecycleReached {
+                occurrence: HookOccurrenceKey::new(
+                    ego_core::event::hook::HookLifecycle::PreToolUse,
+                    HookOccurrenceOwner::Session {
+                        session: SessionId::new(),
+                    },
+                ),
+                subject: ego_core::event::hook::HookSubject::Session,
+                plan: HookPlan::new(vec![hook.id()]).unwrap(),
+            },
+        );
+        let reached_id = reached.env.id;
+        state.apply(&reached);
+        let started = ev(
+            seq.next(),
+            turn,
+            None,
+            Some(reached_id),
             EventKind::HookInvocationStarted {
+                occurrence: reached_id,
                 hook: hook.id(),
                 invocation,
                 lifecycle: ego_core::event::hook::HookLifecycle::PreToolUse,
@@ -1231,6 +1269,7 @@ mod reducer {
             None,
             Some(started_id),
             EventKind::HookInvocationSettled {
+                occurrence: reached_id,
                 hook: hook.id(),
                 invocation,
                 result: ego_core::event::hook::HookResult::Outcome {

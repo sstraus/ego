@@ -31,12 +31,15 @@ use crate::event::time::Timestamp;
 /// `docs/decisions/2026-08-21-a-header-the-repair-must-not-delete.md` §3 —
 /// actually compared when one is read.
 ///
-/// v9 makes child, skill, run-origin, hook-role, and usage facts final. v8
+/// v10 binds every hook start and settlement to a durable real-owner
+/// lifecycle occurrence. v9 hook runtime records cannot supply that required
+/// identity and are refused during migration; non-hook v9 records migrate.
+/// v9 made child, skill, run-origin, hook-role, and usage facts final. v8
 /// made `StoreRecord::seq` the contiguous physical position of every
 /// record in the single session stream. Event sequence numbers and run
 /// revisions remain semantic counters inside the payload and no longer
 /// compete for the record-order field.
-pub const CODEC_VERSION: u32 = 9;
+pub const CODEC_VERSION: u32 = 10;
 
 /// The fixed xxhash64 seed for record checksums. Part of the codec v1
 /// contract: changing it would silently invalidate every checksum already

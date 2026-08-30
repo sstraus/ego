@@ -13,8 +13,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use uuid::{Uuid, Variant, Version};
 
-use super::id::{ItemId, TurnId};
+use super::id::{EventId, GenerationId, ItemId, SessionId, SubagentInvocationId, TurnId};
 use crate::digest::{is_lower_sha256, sha256_hex};
+use crate::run::RequestId;
 use crate::store::evidence::EvidenceRef;
 
 pub use crate::hook::HookSource;
@@ -26,6 +27,7 @@ const SHA256_BYTES: usize = 32;
 const MAX_LOCATION_BYTES: usize = 4096;
 const MAX_FEEDBACK_BYTES: usize = 4096;
 const MAX_FEEDBACK_SIDE_BYTES: usize = 2048;
+const MCP_CONTINUATION_PREFIX: &str = "mcp-";
 
 /// A malformed durable hook evidence value.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -588,6 +590,136 @@ impl HookLifecycle {
             | Self::PostCompact
             | Self::SessionEnd => HookPhase::Observer,
         }
+    }
+}
+
+/// The real durable owner identity of one lifecycle occurrence.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum HookOccurrenceOwner {
+    Session { session: SessionId },
+    Event { event: EventId },
+    Item { item: ItemId },
+    Generation { generation: GenerationId },
+    Subagent { invocation: SubagentInvocationId },
+    Request { request: RequestId },
+    Continuation { id: String },
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum HookOccurrenceOwnerWire {
+    Session { session: SessionId },
+    Event { event: EventId },
+    Item { item: ItemId },
+    Generation { generation: GenerationId },
+    Subagent { invocation: SubagentInvocationId },
+    Request { request: RequestId },
+    Continuation { id: String },
+}
+
+impl<'de> Deserialize<'de> for HookOccurrenceOwner {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let owner = match HookOccurrenceOwnerWire::deserialize(deserializer)? {
+            HookOccurrenceOwnerWire::Session { session } => Self::Session { session },
+            HookOccurrenceOwnerWire::Event { event } => Self::Event { event },
+            HookOccurrenceOwnerWire::Item { item } => Self::Item { item },
+            HookOccurrenceOwnerWire::Generation { generation } => Self::Generation { generation },
+            HookOccurrenceOwnerWire::Subagent { invocation } => Self::Subagent { invocation },
+            HookOccurrenceOwnerWire::Request { request } => Self::Request { request },
+            HookOccurrenceOwnerWire::Continuation { id } => {
+                validate_continuation_id(&id).map_err(serde::de::Error::custom)?;
+                Self::Continuation { id }
+            }
+        };
+        Ok(owner)
+    }
+}
+
+/// A lifecycle tag paired with the idempotency identity of its real owner.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HookOccurrenceKey {
+    lifecycle: HookLifecycle,
+    owner: HookOccurrenceOwner,
+}
+
+impl HookOccurrenceKey {
+    pub fn new(lifecycle: HookLifecycle, owner: HookOccurrenceOwner) -> Self {
+        Self { lifecycle, owner }
+    }
+
+    pub fn continuation(
+        lifecycle: HookLifecycle,
+        id: impl Into<String>,
+    ) -> Result<Self, HookEvidenceError> {
+        let id = id.into();
+        validate_continuation_id(&id)?;
+        Ok(Self::new(
+            lifecycle,
+            HookOccurrenceOwner::Continuation { id },
+        ))
+    }
+
+    pub fn lifecycle(&self) -> HookLifecycle {
+        self.lifecycle
+    }
+
+    pub fn owner(&self) -> &HookOccurrenceOwner {
+        &self.owner
+    }
+}
+
+fn validate_continuation_id(value: &str) -> Result<(), HookEvidenceError> {
+    let digest = value
+        .strip_prefix(MCP_CONTINUATION_PREFIX)
+        .ok_or_else(|| HookEvidenceError::new("invalid MCP continuation occurrence id"))?;
+    if !is_lower_sha256(digest) {
+        return Err(HookEvidenceError::new(
+            "invalid MCP continuation occurrence id",
+        ));
+    }
+    Ok(())
+}
+
+/// The immutable ordered hook plan frozen by `HookLifecycleReached`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct HookPlan(Vec<HookId>);
+
+impl HookPlan {
+    pub fn new(hooks: Vec<HookId>) -> Result<Self, HookEvidenceError> {
+        let mut unique = HashSet::with_capacity(hooks.len());
+        if hooks.iter().any(|hook| !unique.insert(*hook)) {
+            return Err(HookEvidenceError::new(
+                "duplicate hook id in lifecycle occurrence plan",
+            ));
+        }
+        Ok(Self(hooks))
+    }
+
+    pub fn as_slice(&self) -> &[HookId] {
+        &self.0
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl<'de> Deserialize<'de> for HookPlan {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Self::new(Vec::<HookId>::deserialize(deserializer)?).map_err(serde::de::Error::custom)
     }
 }
 

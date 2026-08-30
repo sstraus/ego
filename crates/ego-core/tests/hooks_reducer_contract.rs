@@ -4,8 +4,8 @@ use ego_core::digest::sha256_hex;
 use ego_core::event::domain::{DomainEvent, Envelope, EventKind};
 use ego_core::event::hook::{
     HookCatalogueEvidence, HookDecision, HookDescriptorEvidence, HookFailure, HookFailureKind,
-    HookFeedback, HookId, HookInvocationId, HookLifecycle, HookOutcome, HookResult,
-    HookSourceAuthority, HookSourceLocation,
+    HookFeedback, HookId, HookInvocationId, HookLifecycle, HookOccurrenceKey, HookOccurrenceOwner,
+    HookOutcome, HookPlan, HookResult, HookSourceAuthority, HookSourceLocation,
 };
 use ego_core::event::id::{EventId, ItemId, Producer, Seq, TurnId};
 use ego_core::event::time::Timestamp;
@@ -33,6 +33,7 @@ struct Fixture {
     item: ItemId,
     seq: Seq,
     parent: Option<EventId>,
+    occurrence: Option<EventId>,
 }
 
 impl Fixture {
@@ -42,6 +43,7 @@ impl Fixture {
             item: ItemId::new(),
             seq: Seq::default(),
             parent: None,
+            occurrence: None,
         }
     }
 
@@ -79,6 +81,7 @@ impl Fixture {
     ) -> DomainEvent {
         self.event(
             EventKind::HookInvocationStarted {
+                occurrence: self.occurrence.unwrap_or_else(EventId::new),
                 hook,
                 invocation,
                 lifecycle,
@@ -97,12 +100,29 @@ impl Fixture {
     ) -> DomainEvent {
         self.event(
             EventKind::HookInvocationSettled {
+                occurrence: self.occurrence.unwrap_or_else(EventId::new),
                 hook,
                 invocation,
                 result,
             },
             Producer::Hook(hook),
         )
+    }
+
+    fn reach(&mut self, lifecycle: HookLifecycle, hooks: Vec<HookId>) -> DomainEvent {
+        let event = self.event(
+            EventKind::HookLifecycleReached {
+                occurrence: HookOccurrenceKey::new(
+                    lifecycle,
+                    HookOccurrenceOwner::Item { item: self.item },
+                ),
+                subject: subject(self.item),
+                plan: HookPlan::new(hooks).unwrap(),
+            },
+            Producer::Main,
+        );
+        self.occurrence = Some(event.env.id);
+        event
     }
 }
 
@@ -137,6 +157,7 @@ fn reducer_is_total_and_accepts_admission_start_settlement_in_order() {
     let invocation = HookInvocationId::new();
     let mut state = SessionState::default();
     state.apply(&f.admission(vec![d.clone()]));
+    state.apply(&f.reach(HookLifecycle::PreToolUse, vec![d.id()]));
     state.apply(&f.start(d.id(), invocation, HookLifecycle::PreToolUse));
     state.apply(&f.settle(d.id(), invocation, continue_result()));
     assert!(state.refusals.is_empty());
@@ -146,7 +167,7 @@ fn reducer_is_total_and_accepts_admission_start_settlement_in_order() {
 }
 
 #[test]
-fn reducer_records_refusals_without_result_errors_or_state_effects() {
+fn reducer_records_unreached_start_and_other_refusals_without_state_effects() {
     let mut f = Fixture::new();
     let d = descriptor(HookSourceAuthority::Project, 0);
     let unknown = HookId::derive(
@@ -157,16 +178,24 @@ fn reducer_records_refusals_without_result_errors_or_state_effects() {
     );
     let invocation = HookInvocationId::new();
     let mut state = SessionState::default();
-    let unknown_start = f.start(unknown, invocation, HookLifecycle::PreToolUse);
-    state.apply(&unknown_start);
-    assert_reason(&state, &unknown_start, RefusalReason::HookNotAdmitted);
+    // S7 validates the reached owner occurrence before any start identity.
+    let unreached_start = f.start(unknown, invocation, HookLifecycle::PreToolUse);
+    state.apply(&unreached_start);
+    assert_reason(
+        &state,
+        &unreached_start,
+        RefusalReason::HookOccurrenceUnknown,
+    );
     state.apply(&f.admission(vec![d.clone()]));
+    state.apply(&f.reach(HookLifecycle::PreToolUse, vec![d.id()]));
     let before_start = f.settle(d.id(), invocation, continue_result());
     state.apply(&before_start);
     assert_reason(&state, &before_start, RefusalReason::HookInvocationUnknown);
+    f.parent = Some(f.occurrence.expect("reached occurrence"));
     let accepted_start = f.start(d.id(), invocation, HookLifecycle::PreToolUse);
     let accepted_start_id = accepted_start.env.id;
     state.apply(&accepted_start);
+    f.parent = Some(f.occurrence.expect("reached occurrence"));
     let duplicate_start = f.start(d.id(), invocation, HookLifecycle::PreToolUse);
     state.apply(&duplicate_start);
     assert_reason(
@@ -196,6 +225,7 @@ fn reducer_covers_catalogue_replacement_live_survival_and_empty_clear() {
     let invocation = HookInvocationId::new();
     let mut state = SessionState::default();
     state.apply(&f.admission(vec![old.clone()]));
+    state.apply(&f.reach(HookLifecycle::PostToolUse, vec![old.id()]));
     let start = f.start(old.id(), invocation, HookLifecycle::PostToolUse);
     let start_id = start.env.id;
     state.apply(&start);
@@ -222,6 +252,7 @@ fn reducer_refuses_settlement_hook_invocation_envelope_parent_and_producer_misma
     let other_invocation = HookInvocationId::new();
     let mut state = SessionState::default();
     state.apply(&f.admission(vec![d.clone(), other.clone()]));
+    state.apply(&f.reach(HookLifecycle::PreToolUse, vec![d.id()]));
     let start = f.start(d.id(), invocation, HookLifecycle::PreToolUse);
     let start_id = start.env.id;
     state.apply(&start);
@@ -307,8 +338,17 @@ fn reducer_refuses_start_subject_envelope_and_hook_producer_recursion() {
     let mut state = SessionState::default();
     state.apply(&f.admission(vec![d.clone()]));
 
+    let mut wrong_reached = f.reach(HookLifecycle::PreToolUse, vec![d.id()]);
+    if let EventKind::HookLifecycleReached { subject, .. } = &mut wrong_reached.kind {
+        *subject = ego_core::event::hook::HookSubject::Session;
+    }
+    state.apply(&wrong_reached);
+    assert_reason(&state, &wrong_reached, RefusalReason::HookSubjectMismatch);
+    f.item = ItemId::new();
+    state.apply(&f.reach(HookLifecycle::PreToolUse, vec![d.id()]));
     let mut wrong_session = f.start(d.id(), HookInvocationId::new(), HookLifecycle::PreToolUse);
     wrong_session.kind = EventKind::HookInvocationStarted {
+        occurrence: f.occurrence.unwrap(),
         hook: d.id(),
         invocation: HookInvocationId::new(),
         lifecycle: HookLifecycle::PreToolUse,
@@ -316,9 +356,16 @@ fn reducer_refuses_start_subject_envelope_and_hook_producer_recursion() {
         activation: ego_core::event::hook::HookActivation::Persistent,
     };
     state.apply(&wrong_session);
-    assert_reason(&state, &wrong_session, RefusalReason::HookSubjectMismatch);
+    assert_reason(
+        &state,
+        &wrong_session,
+        RefusalReason::HookInvocationOccurrenceMismatch,
+    );
+    f.item = ItemId::new();
+    state.apply(&f.reach(HookLifecycle::PreToolUse, vec![d.id()]));
     let mut wrong_turn = f.start(d.id(), HookInvocationId::new(), HookLifecycle::PreToolUse);
     wrong_turn.kind = EventKind::HookInvocationStarted {
+        occurrence: f.occurrence.unwrap(),
         hook: d.id(),
         invocation: HookInvocationId::new(),
         lifecycle: HookLifecycle::PreToolUse,
@@ -329,9 +376,16 @@ fn reducer_refuses_start_subject_envelope_and_hook_producer_recursion() {
     };
     wrong_turn.env.item = None;
     state.apply(&wrong_turn);
-    assert_reason(&state, &wrong_turn, RefusalReason::HookSubjectMismatch);
+    assert_reason(
+        &state,
+        &wrong_turn,
+        RefusalReason::HookInvocationOccurrenceMismatch,
+    );
+    f.item = ItemId::new();
+    state.apply(&f.reach(HookLifecycle::PreToolUse, vec![d.id()]));
     let mut turn_with_item = f.start(d.id(), HookInvocationId::new(), HookLifecycle::PreToolUse);
     turn_with_item.kind = EventKind::HookInvocationStarted {
+        occurrence: f.occurrence.unwrap(),
         hook: d.id(),
         invocation: HookInvocationId::new(),
         lifecycle: HookLifecycle::PreToolUse,
@@ -340,10 +394,17 @@ fn reducer_refuses_start_subject_envelope_and_hook_producer_recursion() {
     };
     turn_with_item.env.item = Some(ItemId::new());
     state.apply(&turn_with_item);
-    assert_reason(&state, &turn_with_item, RefusalReason::HookSubjectMismatch);
+    assert_reason(
+        &state,
+        &turn_with_item,
+        RefusalReason::HookInvocationOccurrenceMismatch,
+    );
+    f.item = ItemId::new();
+    state.apply(&f.reach(HookLifecycle::PreToolUse, vec![d.id()]));
     let mut wrong_item = f.start(d.id(), HookInvocationId::new(), HookLifecycle::PreToolUse);
     wrong_item.env.item = Some(ItemId::new());
     wrong_item.kind = EventKind::HookInvocationStarted {
+        occurrence: f.occurrence.unwrap(),
         hook: d.id(),
         invocation: HookInvocationId::new(),
         lifecycle: HookLifecycle::PreToolUse,
@@ -351,13 +412,22 @@ fn reducer_refuses_start_subject_envelope_and_hook_producer_recursion() {
         activation: ego_core::event::hook::HookActivation::Persistent,
     };
     state.apply(&wrong_item);
-    assert_reason(&state, &wrong_item, RefusalReason::HookSubjectMismatch);
-    let mut recursive = f.start(d.id(), HookInvocationId::new(), HookLifecycle::PreToolUse);
+    assert_reason(
+        &state,
+        &wrong_item,
+        RefusalReason::HookInvocationOccurrenceMismatch,
+    );
+    f.item = ItemId::new();
+    let mut recursive = f.reach(HookLifecycle::PreToolUse, vec![d.id()]);
     recursive.env.producer = Producer::Hook(d.id());
     state.apply(&recursive);
     assert_reason(&state, &recursive, RefusalReason::RecursiveHookInvocation);
     assert!(state.live_hooks().is_empty());
-    assert_eq!(state.refusals.len(), 5, "five invalid starts");
+    assert_eq!(
+        state.refusals.len(),
+        6,
+        "one invalid reach, four invalid starts, and one recursive reach"
+    );
 }
 
 #[test]
@@ -368,8 +438,10 @@ fn unresolved_pre_effect_and_observer_replay_have_distinct_fail_closed_dispositi
     let mut f = Fixture::new();
     let mut state = SessionState::default();
     state.apply(&f.admission(vec![d.clone()]));
+    state.apply(&f.reach(HookLifecycle::PreToolUse, vec![d.id()]));
     let pre_start = f.start(d.id(), pre, HookLifecycle::PreToolUse);
     state.apply(&pre_start);
+    state.apply(&f.reach(HookLifecycle::PostToolUse, vec![d.id()]));
     let observer_start = f.start(d.id(), observer, HookLifecycle::PostToolUse);
     state.apply(&observer_start);
     let pre_live = state.live_hooks().get(&pre).expect("pre start is live");
@@ -398,6 +470,7 @@ fn failure_settlement_is_typed_and_feedback_continuation_does_not_recurse() {
     let invocation = HookInvocationId::new();
     let mut state = SessionState::default();
     state.apply(&f.admission(vec![d.clone()]));
+    state.apply(&f.reach(HookLifecycle::PreToolUse, vec![d.id()]));
     state.apply(&f.start(d.id(), invocation, HookLifecycle::PreToolUse));
     state.apply(&f.settle(
         d.id(),
@@ -419,6 +492,7 @@ fn reducer_refuses_observer_block_and_non_pre_escalation_but_accepts_continue() 
     state.apply(&f.admission(vec![d.clone()]));
 
     let observer = HookInvocationId::new();
+    state.apply(&f.reach(HookLifecycle::PostToolUse, vec![d.id()]));
     let start = f.start(d.id(), observer, HookLifecycle::PostToolUse);
     let start_id = start.env.id;
     state.apply(&start);
@@ -436,6 +510,8 @@ fn reducer_refuses_observer_block_and_non_pre_escalation_but_accepts_continue() 
     state.apply(&f.settle(d.id(), observer, continue_result()));
 
     let escalation = HookInvocationId::new();
+    f.item = ItemId::new();
+    state.apply(&f.reach(HookLifecycle::PostToolUse, vec![d.id()]));
     let escalation_start = f.start(d.id(), escalation, HookLifecycle::PostToolUse);
     let escalation_id = escalation_start.env.id;
     state.apply(&escalation_start);

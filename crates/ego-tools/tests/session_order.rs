@@ -106,7 +106,7 @@ impl StoreIo for FailingFsyncIo {
 
 #[test]
 fn codec_version_is_bumped_for_physical_positions() {
-    assert_eq!(CODEC_VERSION, 9);
+    assert_eq!(CODEC_VERSION, 10);
 }
 
 #[test]
@@ -188,7 +188,7 @@ fn recognized_v8_log_migrates_to_v9_preserving_counters_and_payloads() {
         panic!("migration must retain a header")
     };
     assert_eq!(header.v, CODEC_VERSION);
-    assert_eq!(header.v, 9);
+    assert_eq!(header.v, 10);
     let mut migrated_records = Vec::new();
     for line in lines.filter(|line| !line.is_empty()) {
         let StoreLine::Record(record) = decode_line(line).unwrap() else {
@@ -293,7 +293,7 @@ fn real_v6_snapshot_is_rejected_and_full_replay_uses_current_log() {
     let (state, rejection) = store.resume(&id).unwrap();
     assert_eq!(rejection, Some(SnapshotRejection::Version { found: 6 }));
     assert_eq!(state, expected);
-    assert_eq!(SNAPSHOT_VERSION, 9);
+    assert_eq!(SNAPSHOT_VERSION, 10);
 }
 
 #[test]

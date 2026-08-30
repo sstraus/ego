@@ -7,8 +7,12 @@
 //! with no implementation looks like.
 
 use crate::event::domain::{DomainEvent, Envelope, EventKind};
+use crate::event::hook::{
+    HookActivation, HookId, HookInvocationId, HookOccurrenceKey, HookPlan, HookResult, HookSubject,
+};
 use crate::event::id::{EventId, ItemId, Producer, Seq, SessionId, TurnId};
 use crate::event::time::Clock;
+use crate::hook::{HookReachedEvidence, HookStartedEvidence};
 use crate::public::{PublicEvent, project_public};
 use crate::sink::EventSink;
 use crate::state::SessionState;
@@ -79,6 +83,17 @@ impl<'a> Journal<'a> {
         parent: Option<EventId>,
         kind: EventKind,
     ) -> Result<EventId, StoreError> {
+        self.append_with_producer(turn, item, parent, self.producer.clone(), kind)
+    }
+
+    fn append_with_producer(
+        &mut self,
+        turn: TurnId,
+        item: Option<ItemId>,
+        parent: Option<EventId>,
+        producer: Producer,
+        kind: EventKind,
+    ) -> Result<EventId, StoreError> {
         let id = EventId::new();
         let event = DomainEvent {
             env: Envelope {
@@ -88,7 +103,7 @@ impl<'a> Journal<'a> {
                 item,
                 parent,
                 ts: self.clock.now(),
-                producer: self.producer.clone(),
+                producer,
             },
             kind,
         };
@@ -98,6 +113,89 @@ impl<'a> Journal<'a> {
             self.sink.publish(&public, &self.state);
         }
         Ok(id)
+    }
+
+    /// Durably freeze the exact ordered plan at a real owner's lifecycle point.
+    pub fn hook_reached(
+        &mut self,
+        turn: TurnId,
+        item: Option<ItemId>,
+        parent: Option<EventId>,
+        occurrence: HookOccurrenceKey,
+        subject: HookSubject,
+        plan: HookPlan,
+    ) -> Result<HookReachedEvidence, StoreError> {
+        let producer = self.producer.clone();
+        let event = self.append_with_producer(
+            turn,
+            item,
+            parent,
+            producer.clone(),
+            EventKind::HookLifecycleReached {
+                occurrence: occurrence.clone(),
+                subject,
+                plan: plan.clone(),
+            },
+        )?;
+        Ok(HookReachedEvidence::new(
+            event, occurrence, subject, producer, plan,
+        ))
+    }
+
+    /// Durably record the external-delivery boundary for one planned hook.
+    #[allow(clippy::too_many_arguments)]
+    pub fn hook_started(
+        &mut self,
+        turn: TurnId,
+        item: Option<ItemId>,
+        reached: &HookReachedEvidence,
+        hook: HookId,
+        invocation: HookInvocationId,
+        activation: HookActivation,
+    ) -> Result<HookStartedEvidence, StoreError> {
+        let event = self.append_with_producer(
+            turn,
+            item,
+            Some(reached.event()),
+            reached.producer().clone(),
+            EventKind::HookInvocationStarted {
+                occurrence: reached.event(),
+                hook,
+                invocation,
+                lifecycle: reached.occurrence().lifecycle(),
+                subject: reached.subject(),
+                activation,
+            },
+        )?;
+        Ok(HookStartedEvidence::new(
+            event,
+            reached.event(),
+            hook,
+            invocation,
+            activation,
+        ))
+    }
+
+    /// Durably settle one start under the hook producer that performed it.
+    pub fn hook_settled(
+        &mut self,
+        turn: TurnId,
+        item: Option<ItemId>,
+        started: HookStartedEvidence,
+        result: HookResult,
+    ) -> Result<EventId, StoreError> {
+        self.append_with_producer(
+            turn,
+            item,
+            Some(started.event()),
+            Producer::Hook(started.hook()),
+            EventKind::HookInvocationSettled {
+                occurrence: started.occurrence(),
+                hook: started.hook(),
+                invocation: started.invocation(),
+                result,
+            },
+        )
     }
 
     /// Publish an event the reducer cannot produce.

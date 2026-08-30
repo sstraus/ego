@@ -43,9 +43,9 @@ use super::blob::SessionBlobStore;
 use super::io::{AtomicReplacePublication, StoreIo, tmp_path_for};
 use super::snapshot::{SNAPSHOT_VERSION, Snapshot, SnapshotRejection, validate};
 
-/// The only on-disk log version this build migrates. Writers emit only v9;
-/// this constant names the single v8 -> v9 ownership transition.
-const MIGRATABLE_CODEC_VERSION: u32 = 8;
+/// The only on-disk log version this build migrates. Writers emit only v10;
+/// this constant names the single v9 -> v10 ownership transition.
+const MIGRATABLE_CODEC_VERSION: u32 = 9;
 
 /// Filesystem-private cache projection. The public store port exposes only
 /// [`SessionMeta`]; execution and admitted-hook evidence remain internal log
@@ -269,7 +269,7 @@ fn accept_physical_position(current: &mut Seq, actual: Seq) -> Result<(), StoreE
     Ok(())
 }
 
-/// Validate the positions this codec can see. An unknown v9 record is kept
+/// Validate the positions this codec can see. An unknown v10 record is kept
 /// verbatim by recovery; because its position is opaque to this build, later
 /// records cannot be ordered relative to it and validation stops there.
 fn validate_physical_positions<'a>(
@@ -293,65 +293,39 @@ fn validate_physical_positions<'a>(
     Ok(())
 }
 
-fn add_v9_defaults(value: &mut serde_json::Value) {
-    let Some(object) = value.as_object_mut() else {
-        return;
-    };
-    if let Some(event) = object
-        .get_mut("kind")
-        .and_then(serde_json::Value::as_object_mut)
-        && event.get("kind").and_then(serde_json::Value::as_str) == Some("HookInvocationStarted")
-    {
-        event
-            .entry("activation")
-            .or_insert_with(|| serde_json::json!({"kind": "persistent"}));
-    }
-    if object.contains_key("revision")
-        && object.contains_key("run_id")
-        && object.contains_key("command")
-    {
-        object
-            .entry("origin")
-            .or_insert_with(|| serde_json::json!({"kind": "top_level"}));
-    }
-    let kind = object
+fn decode_v9_entry(raw: &str) -> Result<SessionEntry, StoreError> {
+    let value = serde_json::from_str::<serde_json::Value>(raw)
+        .map_err(|error| CodecError::Malformed(error.to_string()))?;
+    let direct_event_kind = value
         .get("kind")
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_owned);
-    match kind.as_deref() {
-        Some("run_transaction") => {
-            if let Some(transaction) = object.get_mut("run_transaction") {
-                add_v9_defaults(transaction);
-            }
-        }
-        Some("evidence") => {
-            if let Some(evidence) = object
-                .get_mut("evidence")
-                .and_then(serde_json::Value::as_object_mut)
-                && evidence.get("kind").and_then(serde_json::Value::as_str) == Some("run_context")
-            {
-                evidence
-                    .entry("origin")
-                    .or_insert_with(|| serde_json::json!({"kind": "top_level"}));
-            }
-        }
-        _ => {}
+        .and_then(serde_json::Value::as_object)
+        .and_then(|event| event.get("kind"))
+        .and_then(serde_json::Value::as_str);
+    let stream_event_kind = value
+        .get("event")
+        .and_then(|event| event.get("kind"))
+        .and_then(|kind| kind.get("kind"))
+        .and_then(serde_json::Value::as_str);
+    if matches!(
+        direct_event_kind.or(stream_event_kind),
+        Some("HookInvocationStarted" | "HookInvocationSettled")
+    ) {
+        return Err(invalid_log(
+            "cannot migrate a v9 hook runtime record without a durable owner occurrence",
+        ));
     }
-}
-
-fn decode_v8_entry(raw: &str) -> Result<SessionEntry, serde_json::Error> {
-    let mut value = serde_json::from_str::<serde_json::Value>(raw)?;
-    add_v9_defaults(&mut value);
     if let Ok(entry) = serde_json::from_value::<SessionEntry>(value.clone()) {
         return Ok(entry);
     }
     if let Ok(event) = serde_json::from_value::<DomainEvent>(value.clone()) {
         return Ok(SessionEntry::Event(event));
     }
-    serde_json::from_value::<RunTransaction>(value).map(SessionEntry::RunTransaction)
+    serde_json::from_value::<RunTransaction>(value)
+        .map(SessionEntry::RunTransaction)
+        .map_err(|error| CodecError::Malformed(error.to_string()).into())
 }
 
-fn migrate_v8_image(
+fn migrate_v9_image(
     bytes: &[u8],
     mut header: Header,
     start: usize,
@@ -365,13 +339,11 @@ fn migrate_v8_image(
         };
         match decode_line(&bytes[cursor..cursor + offset]) {
             Ok(StoreLine::Record(record)) => {
-                decode_v8_entry(record.payload.get()).map_err(|_| {
-                    invalid_log("cannot migrate a v8 log containing an unknown payload")
-                })?;
+                decode_v9_entry(record.payload.get())?;
             }
             Ok(StoreLine::Unknown(_)) => {
                 return Err(invalid_log(
-                    "cannot migrate a v8 log containing an unknown record",
+                    "cannot migrate a v9 log containing an unknown record",
                 ));
             }
             Ok(StoreLine::Header(_)) => {
@@ -397,7 +369,7 @@ fn migrate_v8_image(
             StoreLine::Record(record) => record,
             StoreLine::Unknown(_) => {
                 return Err(invalid_log(
-                    "cannot migrate a v8 log containing an unknown record",
+                    "cannot migrate a v9 log containing an unknown record",
                 ));
             }
             StoreLine::Header(_) => {
@@ -406,8 +378,7 @@ fn migrate_v8_image(
                 ));
             }
         };
-        let entry = decode_v8_entry(record.payload.get())
-            .map_err(|error| CodecError::Malformed(error.to_string()))?;
+        let entry = decode_v9_entry(record.payload.get())?;
         let next = position.next();
         migrated.extend_from_slice(&encode_record(next, &entry)?);
         migrated.push(b'\n');
@@ -985,14 +956,14 @@ impl JsonlStore {
         if let Some((header, _)) = decoded.as_ref() {
             if header.v == MIGRATABLE_CODEC_VERSION {
                 let (migrated, valid_len, dropped_lines) =
-                    migrate_v8_image(&bytes, header.clone(), start)?;
+                    migrate_v9_image(&bytes, header.clone(), start)?;
                 if valid_len < bytes.len() {
                     repair.truncated_bytes = (bytes.len() - valid_len) as u64;
                     repair.dropped_lines = dropped_lines;
                 }
-                // One atomic publication both removes any torn v8 tail and
-                // installs the v9 schema. No v9 writer ever appends under a
-                // v8 header.
+                // One atomic publication both removes any torn v9 tail and
+                // installs the v10 schema. No v10 writer ever appends under a
+                // v9 header.
                 self.io.replace_atomic(&log_path, &migrated)?;
                 repair.migrated = true;
                 tracing::warn!(
@@ -1558,7 +1529,9 @@ impl JsonlStore {
         let is_hook_admission = matches!(ev.kind, EventKind::HookCatalogueAdmitted { .. });
         let is_hook_invocation = matches!(
             ev.kind,
-            EventKind::HookInvocationStarted { .. } | EventKind::HookInvocationSettled { .. }
+            EventKind::HookLifecycleReached { .. }
+                | EventKind::HookInvocationStarted { .. }
+                | EventKind::HookInvocationSettled { .. }
         );
         let is_skill_admission = matches!(
             ev.kind,

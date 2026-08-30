@@ -3,7 +3,8 @@
 use ego_core::event::domain::{DomainEvent, Envelope, EventKind};
 use ego_core::event::hook::{
     HookCatalogueEvidence, HookDescriptorEvidence, HookFailure, HookFailureKind, HookInvocationId,
-    HookLifecycle, HookResult, HookSourceAuthority, HookSourceLocation,
+    HookLifecycle, HookOccurrenceKey, HookOccurrenceOwner, HookPlan, HookResult,
+    HookSourceAuthority, HookSourceLocation,
 };
 use ego_core::event::id::{EventId, Producer, Seq, SessionId, TurnId};
 use ego_core::event::time::Timestamp;
@@ -64,6 +65,7 @@ impl Fixture {
         let d = descriptor(0);
         let invocation = HookInvocationId::new();
         let admission_id = EventId::new();
+        let reached_id = EventId::new();
         let start_id = EventId::new();
         let settle_id = EventId::new();
         let mut seq = Seq::default();
@@ -80,11 +82,27 @@ impl Fixture {
             ),
             event(
                 seq.next(),
-                start_id,
+                reached_id,
                 turn,
                 Some(admission_id),
                 Producer::Main,
+                EventKind::HookLifecycleReached {
+                    occurrence: HookOccurrenceKey::new(
+                        HookLifecycle::PreToolUse,
+                        HookOccurrenceOwner::Session { session: id },
+                    ),
+                    subject: ego_core::event::hook::HookSubject::Turn { turn },
+                    plan: HookPlan::new(vec![d.id()]).unwrap(),
+                },
+            ),
+            event(
+                seq.next(),
+                start_id,
+                turn,
+                Some(reached_id),
+                Producer::Main,
                 EventKind::HookInvocationStarted {
+                    occurrence: reached_id,
                     hook: d.id(),
                     invocation,
                     lifecycle: HookLifecycle::PreToolUse,
@@ -99,6 +117,7 @@ impl Fixture {
                 Some(start_id),
                 Producer::Hook(d.id()),
                 EventKind::HookInvocationSettled {
+                    occurrence: reached_id,
                     hook: d.id(),
                     invocation,
                     result: HookResult::Failure {
@@ -138,19 +157,19 @@ impl Fixture {
 }
 
 #[test]
-fn snapshot_version_is_nine_and_validation_exposes_exact_rejection_set() {
-    assert_eq!(SNAPSHOT_VERSION, 9);
+fn snapshot_version_is_ten_and_validation_exposes_exact_rejection_set() {
+    assert_eq!(SNAPSHOT_VERSION, 10);
     let fixture = Fixture::new();
     let state = fixture.full_replay();
     assert_eq!(state.hook_settlements().len(), 1);
-    let snapshot = Snapshot::new(fixture.id, fixture.events[2].env.seq, state.clone());
-    assert_eq!(snapshot.v, 9);
+    let snapshot = Snapshot::new(fixture.id, fixture.events[3].env.seq, state.clone());
+    assert_eq!(snapshot.v, 10);
     assert_eq!(
         validate(
             &snapshot,
             &fixture.id,
             fixture.events[0].env.seq,
-            fixture.events[2].env.seq
+            fixture.events[3].env.seq
         ),
         Ok(())
     );
@@ -159,7 +178,7 @@ fn snapshot_version_is_nine_and_validation_exposes_exact_rejection_set() {
             &snapshot,
             &SessionId::new(),
             fixture.events[0].env.seq,
-            fixture.events[2].env.seq
+            fixture.events[3].env.seq
         ),
         Err(SnapshotRejection::WrongSession)
     ));
@@ -169,7 +188,7 @@ fn snapshot_version_is_nine_and_validation_exposes_exact_rejection_set() {
 fn actual_v4_snapshot_is_rejected_and_jsonl_replay_reconstructs_hooks() {
     let fixture = Fixture::new();
     let state = fixture.full_replay();
-    let current = Snapshot::new(fixture.id, fixture.events[2].env.seq, state.clone());
+    let current = Snapshot::new(fixture.id, fixture.events[3].env.seq, state.clone());
     let mut version_only = serde_json::to_value(&current).unwrap();
     version_only["v"] = serde_json::json!(4);
     std::fs::write(
@@ -209,7 +228,7 @@ fn admitted_live_and_settled_hook_state_roundtrips_through_snapshot_and_replay()
     assert_eq!(expected.hook_settlements().len(), 1);
     fixture
         .store
-        .write_snapshot(&fixture.id, fixture.events[2].env.seq, &expected)
+        .write_snapshot(&fixture.id, fixture.events[3].env.seq, &expected)
         .unwrap();
     let written: Snapshot =
         serde_json::from_slice(&std::fs::read(fixture.snapshot_path()).unwrap()).unwrap();
@@ -238,13 +257,29 @@ fn unresolved_live_pre_effect_and_observer_states_survive_snapshot_without_retry
             descriptors: HookCatalogueEvidence::new(vec![d.clone()]).unwrap(),
         },
     );
-    let pre = event(
+    let pre_reached = event(
         seq.next(),
         EventId::new(),
         turn,
         Some(admission.env.id),
         Producer::Main,
+        EventKind::HookLifecycleReached {
+            occurrence: HookOccurrenceKey::new(
+                HookLifecycle::PreToolUse,
+                HookOccurrenceOwner::Session { session: id },
+            ),
+            subject: ego_core::event::hook::HookSubject::Turn { turn },
+            plan: HookPlan::new(vec![d.id()]).unwrap(),
+        },
+    );
+    let pre = event(
+        seq.next(),
+        EventId::new(),
+        turn,
+        Some(pre_reached.env.id),
+        Producer::Main,
         EventKind::HookInvocationStarted {
+            occurrence: pre_reached.env.id,
             hook: d.id(),
             invocation: HookInvocationId::new(),
             lifecycle: HookLifecycle::PreToolUse,
@@ -252,13 +287,29 @@ fn unresolved_live_pre_effect_and_observer_states_survive_snapshot_without_retry
             activation: ego_core::event::hook::HookActivation::Persistent,
         },
     );
-    let observer = event(
+    let observer_reached = event(
         seq.next(),
         EventId::new(),
         turn,
         Some(pre.env.id),
         Producer::Main,
+        EventKind::HookLifecycleReached {
+            occurrence: HookOccurrenceKey::new(
+                HookLifecycle::PostToolUse,
+                HookOccurrenceOwner::Session { session: id },
+            ),
+            subject: ego_core::event::hook::HookSubject::Turn { turn },
+            plan: HookPlan::new(vec![d.id()]).unwrap(),
+        },
+    );
+    let observer = event(
+        seq.next(),
+        EventId::new(),
+        turn,
+        Some(observer_reached.env.id),
+        Producer::Main,
         EventKind::HookInvocationStarted {
+            occurrence: observer_reached.env.id,
             hook: d.id(),
             invocation: HookInvocationId::new(),
             lifecycle: HookLifecycle::PostToolUse,
@@ -266,11 +317,11 @@ fn unresolved_live_pre_effect_and_observer_states_survive_snapshot_without_retry
             activation: ego_core::event::hook::HookActivation::Persistent,
         },
     );
-    for e in [&admission, &pre, &observer] {
+    for e in [&admission, &pre_reached, &pre, &observer_reached, &observer] {
         store.append(&id, e).unwrap();
     }
     let mut state = SessionState::default();
-    for e in [&admission, &pre, &observer] {
+    for e in [&admission, &pre_reached, &pre, &observer_reached, &observer] {
         state.apply(e);
     }
     assert_eq!(state.live_hooks().len(), 2);

@@ -12,11 +12,11 @@ use futures::stream::{self, BoxStream};
 use serde_json::json;
 
 use ego_core::budget::BudgetGate;
-use ego_core::config::ModelRef;
+use ego_core::config::{ModelRef, Trust};
 use ego_core::event::domain::{DomainEvent, EventKind};
 use ego_core::event::hook::{
-    HookActivation, HookDecision, HookFailure, HookInvocationId, HookLifecycle, HookOutcome,
-    HookSource,
+    HookActivation, HookDecision, HookInvocationId, HookLifecycle, HookOutcome, HookPlan,
+    HookResult, HookSource,
 };
 use ego_core::event::id::{Producer, SessionId, SubagentInvocationId};
 use ego_core::event::skill::{
@@ -27,8 +27,9 @@ use ego_core::event::time::{Clock, Timestamp};
 use ego_core::evidence::{EvidenceError, EvidenceWrite};
 use ego_core::generator::capabilities::ModelCapabilities;
 use ego_core::hook::{
-    HookConfigEntry, HookEvent, HookFuture, HookHandlerConfig, HookPort, HookRecordFuture,
-    HookSpec, HookStartError, HookStartFuture, HookStartedEvidence,
+    HookCatalogue, HookConfigEntry, HookEvent, HookFuture, HookHandlerConfig,
+    HookLifecycleDispatcher, HookOccurrence, HookPort, HookReachFuture, HookReachedEvidence,
+    HookRecordFuture, HookRunner, HookSpec, HookStartFuture, HookStartedEvidence,
 };
 use ego_core::permit::{GuardedEffects, GuardedIo, Op, PreparedCall};
 use ego_core::run::{
@@ -679,11 +680,9 @@ fn turn_batch_selection_rejects_skill_and_effect_before_either_executes() {
 }
 
 #[test]
-fn skill_service_bridges_real_child_service_and_hook_runner_for_both_fork_modes() {
+fn skill_service_bridges_real_child_service_for_both_fork_modes() {
     let (child, child_events, child_waits) = real_child_service();
-    let hook_port = RecordingHookPort::default();
-    let hooks = ego_core::hook::HookRunner::new(hook_port.clone());
-    let service = ego_core::skill::SkillService::new(child, hooks);
+    let service = ego_core::skill::SkillService::new(child);
     let foreground_invocation = SkillInvocation::admit_for_service(
         spec("explain", DIGEST_A, true, true),
         SkillOperation::Invoke {
@@ -711,32 +710,7 @@ fn skill_service_bridges_real_child_service_and_hook_runner_for_both_fork_modes(
         .expect("background skill fork");
     assert_eq!(foreground.wait_mode(), ChildWait::Foreground);
     assert_eq!(background.wait_mode(), ChildWait::Background);
-    assert_eq!(hook_port.invocations(), 2);
-    let starts = hook_port.started.lock().expect("hook starts");
-    assert_eq!(starts.len(), 2);
-    let observed_ids = starts
-        .iter()
-        .map(|(activation, source)| {
-            let HookActivation::Skill { invocation } = activation else {
-                panic!("skill service hook activation must be skill-scoped");
-            };
-            let HookSource::Skill {
-                invocation: source_invocation,
-                authority,
-                ..
-            } = source
-            else {
-                panic!("skill service hook source must be skill-scoped");
-            };
-            assert_eq!(invocation, source_invocation);
-            assert_eq!(*authority, SkillSourceAuthority::User);
-            *invocation
-        })
-        .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(
-        observed_ids,
-        std::collections::BTreeSet::from([foreground_id, background_id])
-    );
+    assert_ne!(foreground_id, background_id);
     let child_events = child_events.lock().expect("child journal");
     assert!(
         child_events
@@ -925,18 +899,39 @@ impl RecordingHookPort {
 }
 
 impl HookPort for RecordingHookPort {
+    fn reached<'a>(
+        &'a self,
+        producer: &'a Producer,
+        occurrence: &'a HookOccurrence,
+        plan: &'a HookPlan,
+    ) -> HookReachFuture<'a> {
+        let evidence = HookReachedEvidence::new(
+            ego_core::event::id::EventId::new(),
+            occurrence.key().clone(),
+            occurrence.event().subject(),
+            producer.clone(),
+            plan.clone(),
+        );
+        Box::pin(futures::future::ready(Ok(
+            ego_core::hook::HookReachOutcome::Fresh(evidence),
+        )))
+    }
+
     fn started<'a>(
         &'a self,
         spec: &'a HookSpec,
-        _event: &'a HookEvent,
+        _occurrence: &'a HookOccurrence,
+        reached: &'a HookReachedEvidence,
         activation: HookActivation,
         invocation: HookInvocationId,
-    ) -> HookStartFuture<'a, Result<HookStartedEvidence, HookStartError>> {
+    ) -> HookStartFuture<'a> {
         self.started
             .lock()
             .expect("hook starts")
             .push((activation, spec.source()));
         Box::pin(futures::future::ready(Ok(HookStartedEvidence::new(
+            reached.event(),
+            reached.event(),
             spec.id(),
             invocation,
             activation,
@@ -954,8 +949,8 @@ impl HookPort for RecordingHookPort {
     fn settled<'a>(
         &'a self,
         _spec: &'a HookSpec,
-        _invocation: HookInvocationId,
-        _outcome: Result<&'a HookOutcome, &'a HookFailure>,
+        _started: HookStartedEvidence,
+        _result: &'a HookResult,
     ) -> HookRecordFuture<'a> {
         Box::pin(futures::future::ready(Ok(())))
     }
@@ -990,6 +985,11 @@ fn real_child_service() -> (
         Arc::new(ParentResults),
         Arc::new(ChildProfile),
         Arc::new(child_selection),
+        Arc::new(HookLifecycleDispatcher::new(
+            HookRunner::new(RecordingHookPort::default()),
+            HookCatalogue::admit_typed(&[], &[], Trust::Trusted).expect("empty hook catalogue"),
+        )),
+        Producer::Main,
     );
     (
         ChildRunService::new(

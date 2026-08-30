@@ -5,7 +5,8 @@
 use serde::{Deserialize, Serialize};
 
 use super::hook::{
-    HookCatalogueEvidence, HookId, HookInvocationId, HookLifecycle, HookResult, HookSubject,
+    HookCatalogueEvidence, HookId, HookInvocationId, HookLifecycle, HookOccurrenceKey, HookPlan,
+    HookResult, HookSubject,
 };
 use super::id::{
     EventId, ItemId, Producer, QueuedPromptId, Seq, SessionId, SubagentInvocationId, TurnId,
@@ -193,7 +194,8 @@ pub enum OccupancyProvenance {
 /// PermissionAmended | PermissionDecided | GenerationStarted |
 /// ExecutionObserved | AttemptSettled | UsageUpdated | UsageCorrected |
 /// ContextWindowUpdated | TurnCompleted | CompactionSeeded | Compacted | Forked |
-/// HookCatalogueAdmitted | HookInvocationStarted | HookInvocationSettled |
+/// HookCatalogueAdmitted | HookLifecycleReached | HookInvocationStarted |
+/// HookInvocationSettled |
 /// SubagentRequested | SubagentSpawned | SubagentSettled |
 /// SkillCatalogueAdmitted | SkillInstructionAdmitted | SkillResourceAdmitted | Error
 /// ```
@@ -421,8 +423,15 @@ pub enum EventKind {
     Forked { source: SessionId, at_seq: Seq },
     /// One complete ordered hook catalogue was admitted atomically.
     HookCatalogueAdmitted { descriptors: HookCatalogueEvidence },
+    /// One real owner durably froze the ordered hook plan for its occurrence.
+    HookLifecycleReached {
+        occurrence: HookOccurrenceKey,
+        subject: HookSubject,
+        plan: HookPlan,
+    },
     /// A hook handler crossed its external-delivery boundary.
     HookInvocationStarted {
+        occurrence: EventId,
         hook: HookId,
         invocation: HookInvocationId,
         lifecycle: HookLifecycle,
@@ -431,6 +440,7 @@ pub enum EventKind {
     },
     /// A previously started hook handler reached one final settlement.
     HookInvocationSettled {
+        occurrence: EventId,
         hook: HookId,
         invocation: HookInvocationId,
         result: HookResult,
@@ -583,6 +593,7 @@ impl EventKind {
             EventKind::Compacted { .. } => "compacted",
             EventKind::Forked { .. } => "forked",
             EventKind::HookCatalogueAdmitted { .. } => "hook_catalogue_admitted",
+            EventKind::HookLifecycleReached { .. } => "hook_lifecycle_reached",
             EventKind::HookInvocationStarted { .. } => "hook_invocation_started",
             EventKind::HookInvocationSettled { .. } => "hook_invocation_settled",
             EventKind::SubagentRequested { .. } => "subagent_requested",

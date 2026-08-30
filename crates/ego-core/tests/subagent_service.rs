@@ -16,8 +16,8 @@ use ego_core::config::{
 use ego_core::cost::{Amount, CurrencyCode, PricingRevision};
 use ego_core::event::domain::{DomainEvent, Envelope, EventKind, SubagentTerminal};
 use ego_core::event::hook::{
-    HookActivation, HookDecision, HookFailure, HookInvocationId, HookLifecycle, HookOutcome,
-    HookSubject,
+    HookActivation, HookDecision, HookInvocationId, HookLifecycle, HookOutcome, HookPlan,
+    HookResult,
 };
 use ego_core::event::id::{
     EventId, ItemId, Producer, Seq, SessionId, SubagentInvocationId, TurnId,
@@ -31,8 +31,9 @@ use ego_core::generator::capabilities::{
 };
 use ego_core::generator::types::{Conversation, GenRequest, Message, Role, ThinkingLevel};
 use ego_core::hook::{
-    HookCatalogue, HookConfigEntry, HookEvent, HookFuture, HookHandlerConfig, HookPort,
-    HookRecordFuture, HookRunner, HookSource, HookStartError, HookStartFuture, HookStartedEvidence,
+    HookCatalogue, HookConfigEntry, HookEvent, HookFuture, HookHandlerConfig,
+    HookLifecycleDispatcher, HookOccurrence, HookPort, HookReachFuture, HookReachedEvidence,
+    HookRecordFuture, HookRunner, HookSource, HookStartFuture, HookStartedEvidence,
 };
 use ego_core::permit::{CanonPath, Confinement, RunConfinement};
 use ego_core::run::{
@@ -545,14 +546,39 @@ impl ReturnHookPort {
 }
 
 impl HookPort for ReturnHookPort {
+    fn reached<'a>(
+        &'a self,
+        producer: &'a Producer,
+        occurrence: &'a HookOccurrence,
+        plan: &'a HookPlan,
+    ) -> HookReachFuture<'a> {
+        let evidence = HookReachedEvidence::new(
+            EventId::new(),
+            occurrence.key().clone(),
+            occurrence.event().subject(),
+            producer.clone(),
+            plan.clone(),
+        );
+        Box::pin(future::ready(Ok(ego_core::hook::HookReachOutcome::Fresh(
+            evidence,
+        ))))
+    }
+
     fn started<'a>(
         &'a self,
         spec: &'a ego_core::hook::HookSpec,
-        _event: &'a HookEvent,
+        _occurrence: &'a HookOccurrence,
+        reached: &'a HookReachedEvidence,
         activation: HookActivation,
         invocation: HookInvocationId,
-    ) -> HookStartFuture<'a, Result<HookStartedEvidence, HookStartError>> {
-        let evidence = HookStartedEvidence::new(spec.id(), invocation, activation);
+    ) -> HookStartFuture<'a> {
+        let evidence = HookStartedEvidence::new(
+            reached.event(),
+            reached.event(),
+            spec.id(),
+            invocation,
+            activation,
+        );
         self.started
             .lock()
             .expect("return hook starts")
@@ -572,13 +598,13 @@ impl HookPort for ReturnHookPort {
     fn settled<'a>(
         &'a self,
         _spec: &'a ego_core::hook::HookSpec,
-        invocation: HookInvocationId,
-        _outcome: Result<&'a HookOutcome, &'a HookFailure>,
+        started: HookStartedEvidence,
+        _result: &'a HookResult,
     ) -> HookRecordFuture<'a> {
         self.settled
             .lock()
             .expect("return hook settlements")
-            .push(invocation);
+            .push(started.invocation());
         Box::pin(future::ready(Ok(())))
     }
 }
@@ -820,6 +846,27 @@ impl Harness {
         self.service_with_ports(gate, self.default_ports())
     }
 
+    fn service_with_return_hook(&self, gate: BudgetGate, port: ReturnHookPort) -> ChildRunService {
+        let gate = Arc::new(Mutex::new(gate));
+        self.service_with_ports(
+            Arc::clone(&gate),
+            ChildServicePorts::new(
+                self.parent_run,
+                Arc::new(self.journal.clone()),
+                Arc::new(self.task_reader.clone()),
+                Arc::new(self.results.clone()),
+                Arc::new(self.parent_blobs.clone()),
+                default_profile_owner(),
+                Arc::new(ExistingAuthorityAdmission::new()),
+                Arc::new(HookLifecycleDispatcher::new(
+                    HookRunner::new(port),
+                    return_hook_catalogue(),
+                )),
+                Producer::Main,
+            ),
+        )
+    }
+
     fn service_with_gate_and_authority(
         &self,
         gate: Arc<Mutex<BudgetGate>>,
@@ -835,6 +882,11 @@ impl Harness {
                 Arc::new(self.parent_blobs.clone()),
                 default_profile_owner(),
                 authority,
+                Arc::new(HookLifecycleDispatcher::new(
+                    HookRunner::new(ReturnHookPort::new(HookDecision::Continue)),
+                    return_hook_catalogue(),
+                )),
+                Producer::Main,
             ),
         )
     }
@@ -848,6 +900,11 @@ impl Harness {
             Arc::new(self.parent_blobs.clone()),
             default_profile_owner(),
             Arc::new(ExistingAuthorityAdmission::new()),
+            Arc::new(HookLifecycleDispatcher::new(
+                HookRunner::new(ReturnHookPort::new(HookDecision::Continue)),
+                return_hook_catalogue(),
+            )),
+            Producer::Main,
         )
     }
 
@@ -884,6 +941,11 @@ impl Harness {
                 parent_blobs,
                 default_profile_owner(),
                 Arc::new(ExistingAuthorityAdmission::new()),
+                Arc::new(HookLifecycleDispatcher::new(
+                    HookRunner::new(ReturnHookPort::new(HookDecision::Continue)),
+                    return_hook_catalogue(),
+                )),
+                Producer::Main,
             ),
         )
     }
@@ -902,6 +964,11 @@ impl Harness {
                 Arc::new(self.parent_blobs.clone()),
                 owner,
                 Arc::new(ExistingAuthorityAdmission::new()),
+                Arc::new(HookLifecycleDispatcher::new(
+                    HookRunner::new(ReturnHookPort::new(HookDecision::Continue)),
+                    return_hook_catalogue(),
+                )),
+                Producer::Main,
             ),
         )
     }
@@ -1213,6 +1280,11 @@ fn request_only_recovery_admits_once_without_executing_or_delivering() {
             parent_blobs.clone(),
             profile.clone(),
             authority.clone(),
+            Arc::new(HookLifecycleDispatcher::new(
+                HookRunner::new(ReturnHookPort::new(HookDecision::Continue)),
+                return_hook_catalogue(),
+            )),
+            Producer::Main,
         ),
     );
     let invocation = SubagentInvocationId::new();
@@ -1519,9 +1591,11 @@ fn child_execution_carries_prompt_and_preserves_each_typed_terminal() {
 fn subagent_stop_uses_real_hook_runner_decision_and_never_accepts_a_forged_id() {
     for decision in [HookDecision::Continue, HookDecision::Block] {
         let harness = Harness::new(RunSettlement::Completed);
-        let service = harness.service(BudgetGate::unlimited(
-            ego_core::cost::CurrencyCode::new("USD").expect("currency"),
-        ));
+        let port = ReturnHookPort::new(decision);
+        let service = harness.service_with_return_hook(
+            BudgetGate::unlimited(ego_core::cost::CurrencyCode::new("USD").expect("currency")),
+            port.clone(),
+        );
         let invocation = SubagentInvocationId::new();
         let admission =
             futures::executor::block_on(service.start(request(invocation, ChildWait::Foreground)))
@@ -1531,14 +1605,8 @@ fn subagent_stop_uses_real_hook_runner_decision_and_never_accepts_a_forged_id() 
             blob_for_bytes(RESULT.as_bytes()),
             RESULT.as_bytes().to_vec(),
         );
-        let port = ReturnHookPort::new(decision);
-        let runner = HookRunner::new(port.clone());
-        let catalogue = return_hook_catalogue();
-        let event = HookEvent::turn(HookLifecycle::SubagentStop, HookSubject::Session);
-        let terminal = futures::executor::block_on(
-            service.run_return_hook(invocation, &runner, &catalogue, event),
-        )
-        .expect("real SubagentStop return boundary");
+        let terminal = futures::executor::block_on(admission.wait())
+            .expect("real SubagentStop return boundary");
         let started = port.started.lock().expect("return hook starts").clone();
         assert_eq!(started.len(), 1);
         assert_eq!(
@@ -1547,13 +1615,13 @@ fn subagent_stop_uses_real_hook_runner_decision_and_never_accepts_a_forged_id() 
         );
         match decision {
             HookDecision::Continue => {
-                assert!(matches!(terminal, SubagentTerminal::Returned { .. }));
+                assert!(matches!(terminal, ChildWaitResult::Returned { .. }));
             }
             HookDecision::Block => {
                 let forged = HookInvocationId::new();
                 assert!(matches!(
                     terminal,
-                    SubagentTerminal::ReturnBlocked {
+                    ChildWaitResult::ReturnBlocked {
                         hook_invocation,
                         ..
                     } if hook_invocation == started[0].invocation() && hook_invocation != forged

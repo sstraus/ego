@@ -617,6 +617,7 @@ pub fn project_public(ev: &DomainEvent) -> Option<PublicEvent> {
         EventKind::Compacted { .. } => None,
         EventKind::Forked { .. } => None,
         EventKind::HookCatalogueAdmitted { .. }
+        | EventKind::HookLifecycleReached { .. }
         | EventKind::HookInvocationStarted { .. }
         | EventKind::HookInvocationSettled { .. }
         | EventKind::SubagentRequested { .. }

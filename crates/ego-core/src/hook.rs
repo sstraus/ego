@@ -5,7 +5,7 @@ use std::fmt;
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures::lock::Mutex as AsyncMutex;
@@ -13,12 +13,13 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::config::{ConfigLayer, Source, Sourced, Trust};
 use crate::digest::sha256_hex;
-use crate::event::domain::EventKind;
+use crate::event::domain::{DomainEvent, EventKind};
 use crate::event::hook::{
-    HookActivation, HookContentDigest, HookDecision, HookDescriptorEvidence, HookFailure, HookId,
-    HookInvocationId, HookLifecycle, HookOutcome, HookPhase, HookSourceAuthority,
-    HookSourceLocation, HookSubject,
+    HookActivation, HookContentDigest, HookDecision, HookDescriptorEvidence, HookFailure,
+    HookFeedback, HookId, HookInvocationId, HookLifecycle, HookOccurrenceKey, HookOutcome,
+    HookPhase, HookPlan, HookResult, HookSourceAuthority, HookSourceLocation, HookSubject,
 };
+use crate::event::id::{EventId, Producer};
 use crate::event::skill::{SkillInvocationId, SkillSourceAuthority};
 use crate::permit::rule::{ArgvToken, Rule, Segment};
 use crate::turn::CancelToken;
@@ -558,6 +559,7 @@ pub struct HookSpec {
     entry: HookConfigEntry,
     source: HookSource,
     evidence: HookDescriptorEvidence,
+    catalogue_order: u32,
 }
 
 impl HookSpec {
@@ -594,6 +596,7 @@ impl HookSpec {
             entry,
             source,
             evidence,
+            catalogue_order: ordinal,
         })
     }
 
@@ -728,12 +731,17 @@ impl HookSpec {
             HookSource::Project => 2,
             HookSource::Skill { .. } => 3,
         };
-        HookSortKey(authority, self.evidence.ordinal(), self.id().to_string())
+        HookSortKey(
+            authority,
+            self.catalogue_order,
+            self.evidence.ordinal(),
+            self.id().to_string(),
+        )
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct HookSortKey(u8, u32, String);
+pub struct HookSortKey(u8, u32, u32, String);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HookEvent {
@@ -741,7 +749,6 @@ pub struct HookEvent {
     subject: HookSubject,
     selector: Option<String>,
     permission_selector: Option<Rule>,
-    hook_originated: bool,
 }
 
 impl HookEvent {
@@ -751,7 +758,6 @@ impl HookEvent {
             subject: HookSubject::Session,
             selector: None,
             permission_selector: None,
-            hook_originated: false,
         }
     }
 
@@ -761,7 +767,6 @@ impl HookEvent {
             subject,
             selector: None,
             permission_selector: None,
-            hook_originated: false,
         }
     }
 
@@ -777,7 +782,6 @@ impl HookEvent {
             subject,
             selector: Some(selector),
             permission_selector,
-            hook_originated: false,
         }
     }
 
@@ -787,11 +791,6 @@ impl HookEvent {
 
     pub fn subject(&self) -> HookSubject {
         self.subject
-    }
-
-    pub fn originated_by_hook(mut self) -> Self {
-        self.hook_originated = true;
-        self
     }
 }
 
@@ -878,7 +877,6 @@ impl HookInvocationRequest {
                 subject,
                 selector,
                 permission_selector,
-                hook_originated: true,
             },
             activation,
             invocation,
@@ -1228,12 +1226,14 @@ impl HookCatalogueCandidate {
             admit_source_entries(&mut specs, &mut sources, skill.clone(), location, entries)?;
         }
         let mut ids = HashSet::new();
-        for spec in &specs {
+        for (order, spec) in specs.iter_mut().enumerate() {
             if !ids.insert(spec.id()) {
                 return Err(HookCatalogueError::DuplicateIdentity {
                     exact_name: spec.id().to_string(),
                 });
             }
+            spec.catalogue_order = u32::try_from(order)
+                .map_err(|_| HookCatalogueError::invalid("catalogue", "too many hooks"))?;
         }
         Ok(Self { specs, sources })
     }
@@ -1343,10 +1343,13 @@ impl HookCatalogue {
         &self.generation
     }
     pub fn matching(&self, event: &HookEvent) -> Vec<&HookSpec> {
-        self.specs
+        let mut matching = self
+            .specs
             .iter()
             .filter(|spec| spec.matches(event))
-            .collect()
+            .collect::<Vec<_>>();
+        matching.sort_by_key(|spec| spec.sort_key());
+        matching
     }
     pub fn serialized_config(&self) -> String {
         self.specs
@@ -1357,86 +1360,205 @@ impl HookCatalogue {
     }
 }
 
-/// Durable evidence sufficient to reconstruct one consumed skill-once key.
+/// One lifecycle occurrence paired with the event material matched by hooks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HookOccurrence {
+    key: HookOccurrenceKey,
+    event: HookEvent,
+}
+
+impl HookOccurrence {
+    pub fn new(key: HookOccurrenceKey, event: HookEvent) -> Result<Self, HookRunError> {
+        if key.lifecycle() != event.lifecycle() {
+            return Err(HookRunError::new(
+                "hook occurrence lifecycle does not match its event",
+            ));
+        }
+        Ok(Self { key, event })
+    }
+
+    pub fn key(&self) -> &HookOccurrenceKey {
+        &self.key
+    }
+
+    pub fn event(&self) -> &HookEvent {
+        &self.event
+    }
+}
+
+/// Durable proof that a real owner froze one exact ordered hook plan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HookReachedEvidence {
+    event: EventId,
+    occurrence: HookOccurrenceKey,
+    subject: HookSubject,
+    producer: Producer,
+    plan: HookPlan,
+}
+
+impl HookReachedEvidence {
+    pub fn new(
+        event: EventId,
+        occurrence: HookOccurrenceKey,
+        subject: HookSubject,
+        producer: Producer,
+        plan: HookPlan,
+    ) -> Self {
+        Self {
+            event,
+            occurrence,
+            subject,
+            producer,
+            plan,
+        }
+    }
+
+    pub fn event(&self) -> EventId {
+        self.event
+    }
+    pub fn occurrence(&self) -> &HookOccurrenceKey {
+        &self.occurrence
+    }
+    pub fn subject(&self) -> HookSubject {
+        self.subject
+    }
+    pub fn producer(&self) -> &Producer {
+        &self.producer
+    }
+    pub fn plan(&self) -> &HookPlan {
+        &self.plan
+    }
+}
+
+/// Durable evidence sufficient to bind a start and reconstruct skill-once use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct HookStartedEvidence {
+    event: EventId,
+    occurrence: EventId,
     hook: HookId,
     invocation: HookInvocationId,
     activation: HookActivation,
 }
 
 impl HookStartedEvidence {
-    pub fn new(hook: HookId, invocation: HookInvocationId, activation: HookActivation) -> Self {
+    pub fn new(
+        event: EventId,
+        occurrence: EventId,
+        hook: HookId,
+        invocation: HookInvocationId,
+        activation: HookActivation,
+    ) -> Self {
         Self {
+            event,
+            occurrence,
             hook,
             invocation,
             activation,
         }
     }
 
+    pub fn event(&self) -> EventId {
+        self.event
+    }
+    pub fn occurrence(&self) -> EventId {
+        self.occurrence
+    }
     pub fn hook(&self) -> HookId {
         self.hook
     }
-
     pub fn invocation(&self) -> HookInvocationId {
         self.invocation
     }
-
     pub fn activation(&self) -> HookActivation {
         self.activation
     }
 
-    pub fn from_event(event: &EventKind) -> Option<Self> {
-        match event {
+    pub fn from_event(event: &DomainEvent) -> Option<Self> {
+        match &event.kind {
             EventKind::HookInvocationStarted {
+                occurrence,
                 hook,
                 invocation,
                 activation,
                 ..
-            } => Some(Self::new(*hook, *invocation, *activation)),
+            } => Some(Self::new(
+                event.env.id,
+                *occurrence,
+                *hook,
+                *invocation,
+                *activation,
+            )),
             _ => None,
         }
     }
 }
 
-/// Read-only replay input accepted from a durable journal projection.
-pub trait DurableHookStarts {
-    fn snapshot(self) -> Vec<HookStartedEvidence>;
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HookSettledEvidence {
+    hook: HookId,
+    invocation: HookInvocationId,
+    result: HookResult,
 }
 
-impl DurableHookStarts for Vec<HookStartedEvidence> {
-    fn snapshot(self) -> Vec<HookStartedEvidence> {
-        self
+impl HookSettledEvidence {
+    pub fn new(hook: HookId, invocation: HookInvocationId, result: HookResult) -> Self {
+        Self {
+            hook,
+            invocation,
+            result,
+        }
+    }
+    pub fn hook(&self) -> HookId {
+        self.hook
+    }
+    pub fn invocation(&self) -> HookInvocationId {
+        self.invocation
+    }
+    pub fn result(&self) -> &HookResult {
+        &self.result
     }
 }
 
-impl DurableHookStarts for Arc<Mutex<Vec<HookStartedEvidence>>> {
-    fn snapshot(self) -> Vec<HookStartedEvidence> {
-        self.lock()
-            .expect("hook start evidence mutex poisoned")
-            .clone()
-    }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HookReachOutcome {
+    Fresh(HookReachedEvidence),
+    Recovered {
+        evidence: HookReachedEvidence,
+        starts: Vec<HookStartedEvidence>,
+        settlements: Vec<HookSettledEvidence>,
+    },
 }
 
 pub type HookFuture<'a> =
     Pin<Box<dyn Future<Output = Result<HookOutcome, HookFailure>> + Send + 'a>>;
-pub type HookStartFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+pub type HookReachFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<HookReachOutcome, HookReachError>> + Send + 'a>>;
+pub type HookStartFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<HookStartedEvidence, HookStartError>> + Send + 'a>>;
 pub type HookRecordFuture<'a> = Pin<Box<dyn Future<Output = Result<(), HookRunError>> + Send + 'a>>;
 
+/// The single durable/effect seam consumed by the lifecycle dispatcher.
 pub trait HookPort: Send + Sync {
+    fn reached<'a>(
+        &'a self,
+        producer: &'a Producer,
+        occurrence: &'a HookOccurrence,
+        plan: &'a HookPlan,
+    ) -> HookReachFuture<'a>;
     fn started<'a>(
         &'a self,
         spec: &'a HookSpec,
-        event: &'a HookEvent,
+        occurrence: &'a HookOccurrence,
+        reached: &'a HookReachedEvidence,
         activation: HookActivation,
         invocation: HookInvocationId,
-    ) -> HookStartFuture<'a, Result<HookStartedEvidence, HookStartError>>;
+    ) -> HookStartFuture<'a>;
     fn invoke<'a>(&'a self, spec: &'a HookSpec, event: HookEvent) -> HookFuture<'a>;
     fn settled<'a>(
         &'a self,
         spec: &'a HookSpec,
-        invocation: HookInvocationId,
-        outcome: Result<&'a HookOutcome, &'a HookFailure>,
+        started: HookStartedEvidence,
+        result: &'a HookResult,
     ) -> HookRecordFuture<'a>;
 }
 
@@ -1456,6 +1578,15 @@ impl fmt::Display for HookRunError {
 impl std::error::Error for HookRunError {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HookReachError {
+    Durable {
+        evidence: HookReachedEvidence,
+        failure: HookRunError,
+    },
+    Absent(HookRunError),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HookStartError {
     Durable {
         evidence: HookStartedEvidence,
@@ -1464,30 +1595,36 @@ pub enum HookStartError {
     Absent(HookRunError),
 }
 
-impl fmt::Display for HookStartError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Durable { failure, .. } | Self::Absent(failure) => failure.fmt(formatter),
+macro_rules! durable_error {
+    ($name:ty) => {
+        impl fmt::Display for $name {
+            fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                match self {
+                    Self::Durable { failure, .. } | Self::Absent(failure) => failure.fmt(formatter),
+                }
+            }
         }
-    }
-}
-
-impl std::error::Error for HookStartError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Durable { failure, .. } | Self::Absent(failure) => Some(failure),
+        impl std::error::Error for $name {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                match self {
+                    Self::Durable { failure, .. } | Self::Absent(failure) => Some(failure),
+                }
+            }
         }
-    }
+    };
 }
+durable_error!(HookReachError);
+durable_error!(HookStartError);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HookRunResult {
     decision: HookDecision,
-    feedback_bytes: usize,
+    feedback: Vec<HookFeedback>,
     observer_failure: bool,
     durable: bool,
     skipped_once: bool,
     started_invocation: bool,
+    blocking_occurrence: Option<EventId>,
     blocking_invocation: Option<HookInvocationId>,
 }
 
@@ -1495,8 +1632,15 @@ impl HookRunResult {
     pub fn decision(&self) -> HookDecision {
         self.decision
     }
+    pub fn feedback(&self) -> &[HookFeedback] {
+        &self.feedback
+    }
     pub fn feedback_bytes(&self) -> usize {
-        self.feedback_bytes
+        self.feedback.iter().fold(0usize, |bytes, feedback| {
+            bytes
+                .saturating_add(feedback.head_bytes())
+                .saturating_add(feedback.tail_bytes())
+        })
     }
     pub fn is_blocked(&self) -> bool {
         self.decision.is_blocking()
@@ -1516,28 +1660,31 @@ impl HookRunResult {
     pub fn started_invocation(&self) -> bool {
         self.started_invocation
     }
-
+    pub fn blocking_occurrence(&self) -> Option<EventId> {
+        self.blocking_occurrence
+    }
     pub fn blocking_invocation(&self) -> Option<HookInvocationId> {
         self.blocking_invocation
     }
 }
 
-pub struct HookRunner<P> {
-    port: P,
-    consumed_once: AsyncMutex<HashSet<(SkillInvocationId, HookId)>>,
+#[derive(Clone)]
+pub struct HookRunner {
+    port: Arc<dyn HookPort>,
+    consumed_once: Arc<AsyncMutex<HashSet<(SkillInvocationId, HookId)>>>,
 }
 
-impl<P: HookPort> HookRunner<P> {
-    pub fn new(port: P) -> Self {
-        Self {
-            port,
-            consumed_once: AsyncMutex::new(HashSet::new()),
-        }
+impl HookRunner {
+    pub fn new<P: HookPort + 'static>(port: P) -> Self {
+        Self::new_with_durable_started(port, std::iter::empty())
     }
 
-    pub fn new_with_durable_started(port: P, started: impl DurableHookStarts) -> Self {
+    pub fn new_with_durable_started<P, I>(port: P, started: I) -> Self
+    where
+        P: HookPort + 'static,
+        I: IntoIterator<Item = HookStartedEvidence>,
+    {
         let consumed_once = started
-            .snapshot()
             .into_iter()
             .filter_map(|record| match record.activation {
                 HookActivation::Skill { invocation } => Some((invocation, record.hook)),
@@ -1545,171 +1692,353 @@ impl<P: HookPort> HookRunner<P> {
             })
             .collect();
         Self {
-            port,
-            consumed_once: AsyncMutex::new(consumed_once),
+            port: Arc::new(port),
+            consumed_once: Arc::new(AsyncMutex::new(consumed_once)),
         }
     }
 
-    pub async fn run(
+    pub async fn run_occurrence(
         &self,
         catalogue: &HookCatalogue,
-        event: HookEvent,
+        producer: Producer,
+        occurrence: HookOccurrence,
     ) -> Result<HookRunResult, HookRunError> {
-        let phase = event.lifecycle.phase();
+        let phase = occurrence.event.lifecycle.phase();
         let mut result = empty_result();
-        if Self::hook_originated_event(&event) {
+        if !producer.may_trigger_hooks() {
             return Ok(result);
         }
-        for spec in catalogue.matching(&event) {
+
+        // The lock spans selection through every durable start. That makes a
+        // skill-once hook single-pending across concurrent owner occurrences.
+        let mut consumed_once = self.consumed_once.lock().await;
+        let mut specs = catalogue.matching(&occurrence.event);
+        specs.retain(|spec| {
+            let Some(invocation) = spec.skill_invocation() else {
+                return true;
+            };
+            if spec.once() && consumed_once.contains(&(invocation, spec.id())) {
+                result.skipped_once = true;
+                false
+            } else {
+                true
+            }
+        });
+        let plan = HookPlan::new(specs.iter().map(|spec| spec.id()).collect())
+            .map_err(|error| HookRunError::new(error.to_string()))?;
+        let reached = match self.port.reached(&producer, &occurrence, &plan).await {
+            Ok(HookReachOutcome::Fresh(evidence)) => {
+                validate_reached_evidence(&producer, &occurrence, &plan, &evidence)?;
+                evidence
+            }
+            Ok(HookReachOutcome::Recovered {
+                evidence,
+                starts,
+                settlements,
+            }) => {
+                validate_reached_identity(&producer, &occurrence, &evidence)?;
+                validate_recovered_prefix(&evidence, &starts, &settlements)?;
+                for started in &starts {
+                    consume_once_evidence_if_needed(&mut consumed_once, started);
+                }
+                apply_recovered_settlements(&mut result, phase, &evidence, &starts, &settlements);
+                if starts.len() != evidence.plan().len()
+                    || settlements.len() != evidence.plan().len()
+                {
+                    record_occurrence_uncertainty(&mut result, phase, &evidence, starts.last());
+                }
+                return Ok(result);
+            }
+            Err(HookReachError::Durable { evidence, .. }) => {
+                validate_reached_evidence(&producer, &occurrence, &plan, &evidence)?;
+                record_occurrence_uncertainty(&mut result, phase, &evidence, None);
+                return Ok(result);
+            }
+            Err(HookReachError::Absent(_)) => {
+                record_absent_failure(&mut result, phase);
+                return Ok(result);
+            }
+        };
+        result.durable = true;
+
+        for spec in specs {
             let invocation = HookInvocationId::new();
             let activation = spec
                 .skill_invocation()
                 .map_or(HookActivation::Persistent, |invocation| {
                     HookActivation::Skill { invocation }
                 });
-            let once_key = if spec.once() {
-                Some((
-                    spec.skill_invocation()
-                        .ok_or_else(|| HookRunError::new("persistent once hook reached runtime"))?,
-                    spec.id(),
-                ))
-            } else {
-                None
-            };
-            let mut consumed = if once_key.is_some() {
-                Some(self.consumed_once.lock().await)
-            } else {
-                None
-            };
-            if let (Some(key), Some(consumed)) = (once_key, consumed.as_ref())
-                && consumed.contains(&key)
-            {
-                result.skipped_once = true;
-                continue;
-            }
-
-            let start = self
+            let started = match self
                 .port
-                .started(spec, &event, activation, invocation)
-                .await;
-            match start {
-                Ok(evidence) => {
-                    validate_start_evidence(spec, invocation, activation, evidence)?;
-                    if let Some(consumed) = consumed.as_mut() {
-                        consume_once_evidence(consumed, evidence)?;
-                    }
-                }
+                .started(spec, &occurrence, &reached, activation, invocation)
+                .await
+            {
+                Ok(evidence) => evidence,
                 Err(HookStartError::Durable { evidence, .. }) => {
-                    validate_start_evidence(spec, invocation, activation, evidence)?;
-                    if let Some(consumed) = consumed.as_mut() {
-                        consume_once_evidence(consumed, evidence)?;
-                    }
-                    record_start_failure(&mut result, phase, Some(evidence));
-                    continue;
+                    validate_start_evidence(spec, &reached, invocation, activation, evidence)?;
+                    consume_once_evidence_if_needed(&mut consumed_once, &evidence);
+                    record_occurrence_uncertainty(&mut result, phase, &reached, Some(&evidence));
+                    return Ok(result);
                 }
                 Err(HookStartError::Absent(_)) => {
-                    record_start_failure(&mut result, phase, None);
-                    continue;
+                    record_occurrence_uncertainty(&mut result, phase, &reached, None);
+                    return Ok(result);
                 }
-            }
-            drop(consumed);
+            };
+            validate_start_evidence(spec, &reached, invocation, activation, started)?;
+            consume_once_evidence_if_needed(&mut consumed_once, &started);
             result.started_invocation = true;
-            let settlement = self.port.invoke(spec, event.clone()).await;
-            let durable = self
-                .port
-                .settled(spec, invocation, settlement.as_ref())
-                .await
-                .is_ok();
-            result.durable |= durable;
-            match settlement {
-                Ok(outcome) => {
-                    result.feedback_bytes = result
-                        .feedback_bytes
-                        .saturating_add(outcome.feedback().map_or(0, |feedback| {
-                            feedback.head_bytes().saturating_add(feedback.tail_bytes())
-                        }))
-                        .min(MAX_FEEDBACK_BYTES);
-                    if outcome.decision().is_blocking() {
-                        result.decision = HookDecision::Block;
-                        result.blocking_invocation.get_or_insert(invocation);
-                    } else if outcome.decision().is_escalation() && !result.decision.is_blocking() {
-                        result.decision = HookDecision::RequestEscalation;
-                    }
-                }
-                Err(_) if phase == HookPhase::PreEffect => {
-                    result.decision = HookDecision::Block;
-                    result.blocking_invocation.get_or_insert(invocation);
-                }
-                Err(_) => {
-                    result.observer_failure = true;
-                    result.durable |= durable;
-                }
+
+            let invoked = self.port.invoke(spec, occurrence.event.clone()).await;
+            let settled = normalize_result(phase, occurrence.event.lifecycle, invoked);
+            if self.port.settled(spec, started, &settled).await.is_err() {
+                record_occurrence_uncertainty(&mut result, phase, &reached, Some(&started));
+                return Ok(result);
             }
+            apply_result(
+                &mut result,
+                phase,
+                &reached,
+                Some(started.invocation()),
+                &settled,
+            );
         }
         Ok(result)
     }
+}
 
-    pub fn hook_originated_event(event: &HookEvent) -> bool {
-        event.hook_originated
+#[derive(Clone)]
+pub struct HookLifecycleDispatcher {
+    runner: HookRunner,
+    catalogue: Arc<HookCatalogue>,
+}
+
+impl HookLifecycleDispatcher {
+    pub fn new(runner: HookRunner, catalogue: HookCatalogue) -> Self {
+        Self {
+            runner,
+            catalogue: Arc::new(catalogue),
+        }
     }
+
+    pub async fn dispatch(
+        &self,
+        producer: Producer,
+        occurrence: HookOccurrence,
+    ) -> Result<HookRunResult, HookRunError> {
+        self.runner
+            .run_occurrence(&self.catalogue, producer, occurrence)
+            .await
+    }
+}
+
+fn validate_reached_evidence(
+    producer: &Producer,
+    occurrence: &HookOccurrence,
+    plan: &HookPlan,
+    evidence: &HookReachedEvidence,
+) -> Result<(), HookRunError> {
+    validate_reached_identity(producer, occurrence, evidence)?;
+    if evidence.plan() != plan {
+        return Err(HookRunError::new(
+            "durable hook reach evidence does not match its owner occurrence",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_reached_identity(
+    producer: &Producer,
+    occurrence: &HookOccurrence,
+    evidence: &HookReachedEvidence,
+) -> Result<(), HookRunError> {
+    if evidence.occurrence() != occurrence.key()
+        || evidence.subject() != occurrence.event.subject()
+        || evidence.producer() != producer
+    {
+        return Err(HookRunError::new(
+            "durable hook reach evidence does not match its owner occurrence",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_start_evidence(
     spec: &HookSpec,
+    reached: &HookReachedEvidence,
     invocation: HookInvocationId,
     activation: HookActivation,
     evidence: HookStartedEvidence,
 ) -> Result<(), HookRunError> {
-    if evidence.hook() != spec.id()
+    if evidence.occurrence() != reached.event()
+        || evidence.hook() != spec.id()
         || evidence.invocation() != invocation
         || evidence.activation() != activation
     {
         return Err(HookRunError::new(
-            "durable hook start evidence does not match its invocation",
+            "durable hook start evidence does not match its occurrence",
         ));
     }
     Ok(())
 }
 
-fn consume_once_evidence(
+fn consume_once_evidence_if_needed(
     consumed: &mut HashSet<(SkillInvocationId, HookId)>,
-    evidence: HookStartedEvidence,
+    evidence: &HookStartedEvidence,
+) {
+    if let HookActivation::Skill { invocation } = evidence.activation() {
+        consumed.insert((invocation, evidence.hook()));
+    }
+}
+
+fn normalize_result(
+    phase: HookPhase,
+    lifecycle: HookLifecycle,
+    result: Result<HookOutcome, HookFailure>,
+) -> HookResult {
+    match result {
+        Ok(outcome)
+            if (phase.is_observer() && outcome.decision().is_blocking())
+                || (outcome.decision().is_escalation()
+                    && lifecycle != HookLifecycle::PreToolUse) =>
+        {
+            HookResult::Failure {
+                failure: HookFailure::new(
+                    crate::event::hook::HookFailureKind::MalformedResult,
+                    outcome.feedback().cloned(),
+                ),
+            }
+        }
+        Ok(outcome) => HookResult::Outcome { outcome },
+        Err(failure) => HookResult::Failure { failure },
+    }
+}
+
+fn validate_recovered_prefix(
+    reached: &HookReachedEvidence,
+    starts: &[HookStartedEvidence],
+    settlements: &[HookSettledEvidence],
 ) -> Result<(), HookRunError> {
-    let HookActivation::Skill { invocation } = evidence.activation() else {
+    if starts.len() > reached.plan().len() || settlements.len() > starts.len() {
         return Err(HookRunError::new(
-            "once hook durable start lost its skill activation",
+            "recovered hook occurrence exceeds its frozen plan",
         ));
-    };
-    consumed.insert((invocation, evidence.hook()));
+    }
+    for (planned, started) in reached.plan().as_slice().iter().zip(starts) {
+        if *planned != started.hook() || started.occurrence() != reached.event() {
+            return Err(HookRunError::new(
+                "recovered hook start does not match its frozen plan",
+            ));
+        }
+    }
+    for (started, settled) in starts.iter().zip(settlements) {
+        if settled.hook() != started.hook() || settled.invocation() != started.invocation() {
+            return Err(HookRunError::new(
+                "recovered hook settlement does not match its start",
+            ));
+        }
+    }
     Ok(())
 }
 
-fn record_start_failure(
+fn apply_recovered_settlements(
+    aggregate: &mut HookRunResult,
+    phase: HookPhase,
+    reached: &HookReachedEvidence,
+    starts: &[HookStartedEvidence],
+    settlements: &[HookSettledEvidence],
+) {
+    for (started, settled) in starts.iter().zip(settlements) {
+        apply_result(
+            aggregate,
+            phase,
+            reached,
+            Some(started.invocation()),
+            settled.result(),
+        );
+    }
+    aggregate.durable = true;
+}
+
+fn apply_result(
+    aggregate: &mut HookRunResult,
+    phase: HookPhase,
+    reached: &HookReachedEvidence,
+    invocation: Option<HookInvocationId>,
+    result: &HookResult,
+) {
+    if let Some(feedback) = result.feedback() {
+        let next = aggregate
+            .feedback_bytes()
+            .saturating_add(feedback.head_bytes())
+            .saturating_add(feedback.tail_bytes());
+        if next <= MAX_FEEDBACK_BYTES {
+            aggregate.feedback.push(feedback.clone());
+        }
+    }
+    match result {
+        HookResult::Outcome { outcome } if outcome.decision().is_blocking() => {
+            aggregate.decision = HookDecision::Block;
+            aggregate.blocking_occurrence.get_or_insert(reached.event());
+            if let Some(invocation) = invocation {
+                aggregate.blocking_invocation.get_or_insert(invocation);
+            }
+        }
+        HookResult::Outcome { outcome }
+            if outcome.decision().is_escalation() && !aggregate.decision.is_blocking() =>
+        {
+            aggregate.decision = HookDecision::RequestEscalation;
+        }
+        HookResult::Failure { .. } if phase.is_pre_effect() => {
+            aggregate.decision = HookDecision::Block;
+            aggregate.blocking_occurrence.get_or_insert(reached.event());
+            if let Some(invocation) = invocation {
+                aggregate.blocking_invocation.get_or_insert(invocation);
+            }
+        }
+        HookResult::Failure { .. } => aggregate.observer_failure = true,
+        HookResult::Outcome { .. } => {}
+    }
+    aggregate.durable = true;
+}
+
+fn record_occurrence_uncertainty(
     result: &mut HookRunResult,
     phase: HookPhase,
-    evidence: Option<HookStartedEvidence>,
+    evidence: &HookReachedEvidence,
+    started: Option<&HookStartedEvidence>,
 ) {
-    if phase == HookPhase::PreEffect {
+    if phase.is_pre_effect() {
         result.decision = HookDecision::Block;
-        if let Some(evidence) = evidence {
+        result.blocking_occurrence.get_or_insert(evidence.event());
+        if let Some(started) = started {
             result
                 .blocking_invocation
-                .get_or_insert(evidence.invocation());
+                .get_or_insert(started.invocation());
         }
     } else {
         result.observer_failure = true;
     }
-    result.durable |= evidence.is_some();
+    result.durable = true;
+}
+
+fn record_absent_failure(result: &mut HookRunResult, phase: HookPhase) {
+    if phase.is_pre_effect() {
+        result.decision = HookDecision::Block;
+    } else {
+        result.observer_failure = true;
+    }
 }
 
 fn empty_result() -> HookRunResult {
     HookRunResult {
         decision: HookDecision::Continue,
-        feedback_bytes: 0,
+        feedback: Vec::new(),
         observer_failure: false,
         durable: false,
         skipped_once: false,
         started_invocation: false,
+        blocking_occurrence: None,
         blocking_invocation: None,
     }
 }

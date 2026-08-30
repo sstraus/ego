@@ -7,7 +7,8 @@ use ego_core::cost::{Amount, CostAttribution, CostDelta, CurrencyCode, Money, Pr
 use ego_core::event::domain::{DomainEvent, Envelope, EventKind, GenerationRole};
 use ego_core::event::hook::{
     HookCatalogueEvidence, HookDecision, HookDescriptorEvidence, HookInvocationId, HookLifecycle,
-    HookOutcome, HookResult, HookSourceAuthority, HookSourceLocation,
+    HookOccurrenceKey, HookOccurrenceOwner, HookOutcome, HookPlan, HookResult, HookSourceAuthority,
+    HookSourceLocation,
 };
 use ego_core::event::id::{Producer, Seq, SessionId};
 use ego_core::event::time::Timestamp;
@@ -86,14 +87,14 @@ mod codec {
     /// to be a deliberate edit here, not a constant quietly following the
     /// code that changed it.
     #[test]
-    fn codec_header_carries_codec_version_9() {
+    fn codec_header_carries_codec_version_10() {
         let h = header();
-        assert_eq!(h.v, 9);
-        assert_eq!(CODEC_VERSION, 9);
+        assert_eq!(h.v, 10);
+        assert_eq!(CODEC_VERSION, 10);
 
         let bytes = encode_header(&h);
         match decode_line(&bytes).unwrap() {
-            StoreLine::Header(decoded) => assert_eq!(decoded.v, 9),
+            StoreLine::Header(decoded) => assert_eq!(decoded.v, 10),
             other => panic!("expected Header, got {other:?}"),
         }
     }
@@ -450,6 +451,7 @@ mod codec {
     const GOLDEN_EVENT_6: &str = "00000000-0000-0000-0000-000000000012";
     const GOLDEN_EVENT_7: &str = "00000000-0000-0000-0000-000000000013";
     const GOLDEN_EVENT_8: &str = "00000000-0000-0000-0000-000000000014";
+    const GOLDEN_EVENT_9: &str = "00000000-0000-0000-0000-000000000015";
     const GOLDEN_GENERATION: &str = "00000000-0000-0000-0000-000000000010";
     const GOLDEN_ATTEMPT: &str = "00000000-0000-0000-0000-000000000011";
     const GOLDEN_HOOK_INVOCATION: &str = "01900000-0000-7000-8000-000000000012";
@@ -599,7 +601,23 @@ mod codec {
             },
             DomainEvent {
                 env: envelope(GOLDEN_EVENT_7, Some(GOLDEN_EVENT_6)),
+                kind: EventKind::HookLifecycleReached {
+                    occurrence: HookOccurrenceKey::new(
+                        HookLifecycle::PreToolUse,
+                        HookOccurrenceOwner::Item {
+                            item: common::id(GOLDEN_ITEM),
+                        },
+                    ),
+                    subject: ego_core::event::hook::HookSubject::Item {
+                        item: common::id(GOLDEN_ITEM),
+                    },
+                    plan: HookPlan::new(vec![golden_hook().id()]).unwrap(),
+                },
+            },
+            DomainEvent {
+                env: envelope(GOLDEN_EVENT_8, Some(GOLDEN_EVENT_7)),
                 kind: EventKind::HookInvocationStarted {
+                    occurrence: common::id(GOLDEN_EVENT_7),
                     hook: golden_hook().id(),
                     invocation: golden_hook_invocation(),
                     lifecycle: HookLifecycle::PreToolUse,
@@ -612,9 +630,10 @@ mod codec {
             DomainEvent {
                 env: Envelope {
                     producer: ego_core::event::id::Producer::Hook(golden_hook().id()),
-                    ..envelope(GOLDEN_EVENT_8, Some(GOLDEN_EVENT_7))
+                    ..envelope(GOLDEN_EVENT_9, Some(GOLDEN_EVENT_8))
                 },
                 kind: EventKind::HookInvocationSettled {
+                    occurrence: common::id(GOLDEN_EVENT_7),
                     hook: golden_hook().id(),
                     invocation: golden_hook_invocation(),
                     result: HookResult::Outcome {
@@ -631,9 +650,8 @@ mod codec {
         assert_eq!(
             actual,
             include_str!("golden/store_log.jsonl").trim_end(),
-            "the durable wire format changed. Every log already written to \
-             disk is in the old shape, so this is a codec version bump and a \
-             migration, not a fixture update."
+            "the durable wire format changed. The current v10 event shape and \
+             physical record positions are pinned by this committed fixture."
         );
     }
 

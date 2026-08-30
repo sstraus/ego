@@ -16,8 +16,9 @@ use ego_core::event::domain::{
     SubagentTerminal,
 };
 use ego_core::event::hook::{
-    HookCatalogueEvidence, HookDecision, HookDescriptorEvidence, HookInvocationId, HookOutcome,
-    HookSourceAuthority, HookSourceLocation,
+    HookCatalogueEvidence, HookDecision, HookDescriptorEvidence, HookInvocationId,
+    HookOccurrenceKey, HookOccurrenceOwner, HookOutcome, HookPlan, HookSourceAuthority,
+    HookSourceLocation,
 };
 use ego_core::event::id::{
     EventId, ItemId, Producer, Seq, SessionId, SubagentInvocationId, TurnId,
@@ -119,8 +120,8 @@ mod public_golden {
     /// `AssistantMessage` and `TurnCompleted` each appear more than once.
     /// The first turn covers every public item kind (message, tool,
     /// permission, subagent), a `UsageUpdated` (public, as `usage_delta` —
-    /// never a running total), a classified `Error`, and the four
-    /// internal-only kinds (`Compacted`, `Forked`, and all three hook facts,
+    /// never a running total), a classified `Error`, and the seven
+    /// internal-only kinds (`Compacted`, `Forked`, all four hook facts, and
     /// `ReasoningState`) that must not appear in the projection. The second,
     /// final turn is deliberately minimal so the golden's last line is a
     /// plain `turn_completed` — proving "the final result rides the terminal
@@ -306,7 +307,34 @@ mod public_golden {
                 seq.next(),
                 turn1,
                 None,
+                EventKind::HookLifecycleReached {
+                    occurrence: HookOccurrenceKey::new(
+                        ego_core::event::hook::HookLifecycle::PostToolUse,
+                        HookOccurrenceOwner::Session {
+                            session: SessionId::new(),
+                        },
+                    ),
+                    subject: ego_core::event::hook::HookSubject::Session,
+                    plan: HookPlan::new(vec![
+                        HookDescriptorEvidence::new(
+                            HookSourceAuthority::Project,
+                            HookSourceLocation::parse("hooks/project.json").unwrap(),
+                            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                                .parse()
+                                .unwrap(),
+                            0,
+                        )
+                        .id(),
+                    ])
+                    .unwrap(),
+                },
+            ),
+            ev(
+                seq.next(),
+                turn1,
+                None,
                 EventKind::HookInvocationStarted {
+                    occurrence: ego_core::event::id::EventId::new(),
                     hook: HookDescriptorEvidence::new(
                         HookSourceAuthority::Project,
                         HookSourceLocation::parse("hooks/project.json").unwrap(),
@@ -327,6 +355,7 @@ mod public_golden {
                 turn1,
                 None,
                 EventKind::HookInvocationSettled {
+                    occurrence: ego_core::event::id::EventId::new(),
                     hook: HookDescriptorEvidence::new(
                         HookSourceAuthority::Project,
                         HookSourceLocation::parse("hooks/project.json").unwrap(),
@@ -431,6 +460,7 @@ mod public_golden {
                     EventKind::Compacted { .. }
                         | EventKind::Forked { .. }
                         | EventKind::HookCatalogueAdmitted { .. }
+                        | EventKind::HookLifecycleReached { .. }
                         | EventKind::HookInvocationStarted { .. }
                         | EventKind::HookInvocationSettled { .. }
                         | EventKind::ReasoningState { .. }
@@ -439,8 +469,8 @@ mod public_golden {
             .collect::<Vec<_>>();
         assert_eq!(
             internal_kinds.len(),
-            6,
-            "fixture should exercise all four internal-only kinds"
+            7,
+            "fixture should exercise all seven internal-only kinds"
         );
         for event in &internal_kinds {
             assert_eq!(

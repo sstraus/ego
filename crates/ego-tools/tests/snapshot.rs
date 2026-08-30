@@ -544,7 +544,7 @@ mod snapshot {
 
     #[test]
     fn version_seven_snapshot_is_a_cache_miss_after_the_codec_bump() {
-        assert_eq!(SNAPSHOT_VERSION, 9);
+        assert_eq!(SNAPSHOT_VERSION, 10);
         let fx = session_with_events();
         let (source_seq, prefix_state) = fx.replay_prefix(4);
         let mut legacy = Snapshot::new(fx.id, source_seq, prefix_state);
@@ -559,7 +559,7 @@ mod snapshot {
 
     #[test]
     fn current_snapshot_replays_the_same_state_as_the_full_log() {
-        assert_eq!(SNAPSHOT_VERSION, 9);
+        assert_eq!(SNAPSHOT_VERSION, 10);
         let fx = session_with_events();
         let (source_seq, prefix_state) = fx.replay_prefix(4);
         fx.store
@@ -567,7 +567,7 @@ mod snapshot {
             .unwrap();
         let written: Snapshot =
             serde_json::from_slice(&std::fs::read(fx.snapshot_path()).unwrap()).unwrap();
-        assert_eq!(written.v, 9);
+        assert_eq!(written.v, 10, "current snapshots are written as v10");
 
         let (resumed, rejection) = fx.store.resume(&fx.id).unwrap();
 

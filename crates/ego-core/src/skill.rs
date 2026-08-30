@@ -7,15 +7,15 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::{ModelRef, Trust};
+use crate::config::ModelRef;
 use crate::event::domain::EventKind;
-use crate::event::hook::{HookLifecycle, HookSubject};
+use crate::event::hook::HookLifecycle;
 use crate::event::id::{ItemId, SubagentInvocationId, TurnId};
 use crate::event::skill::{
     SkillCatalogueEvidence, SkillCatalogueGeneration, SkillDescriptorEvidence, SkillId,
     SkillInvocationId, SkillSourceAuthority, SkillSourceLocation,
 };
-use crate::hook::{HookCatalogue, HookConfigEntry, HookEvent, HookPort, HookRunner, HookSource};
+use crate::hook::HookConfigEntry;
 use crate::permit::rule::PathPattern;
 use crate::permit::{CanonPath, GuardedIo, PathResolver};
 use crate::run::RunSelections;
@@ -952,15 +952,14 @@ impl SkillFork {
     }
 }
 
-/// Thin orchestration over the already completed child and hook owners.
-pub struct SkillService<P> {
+/// Thin orchestration over the completed child owner.
+pub struct SkillService {
     child: ChildRunService,
-    hooks: HookRunner<P>,
 }
 
-impl<P: HookPort> SkillService<P> {
-    pub fn new(child: ChildRunService, hooks: HookRunner<P>) -> Self {
-        Self { child, hooks }
+impl SkillService {
+    pub fn new(child: ChildRunService) -> Self {
+        Self { child }
     }
 
     pub fn fork(
@@ -1002,25 +1001,6 @@ impl<P: HookPort> SkillService<P> {
             request = request.with_requested_profile(profile.to_owned());
         }
 
-        let source = HookSource::skill_entries_with_authority(
-            spec.descriptor.location.as_str(),
-            invocation.id,
-            spec.descriptor.source,
-            spec.hooks.clone(),
-        );
-        let catalogue = HookCatalogue::admit_typed(&[], &[source], Trust::Trusted)
-            .map_err(|error| SkillError::new(error.to_string()))?;
-        if let Some(lifecycle) = spec.hooks.first().map(HookConfigEntry::lifecycle) {
-            let event = HookEvent::tool(
-                lifecycle,
-                HookSubject::Item {
-                    item: ItemId::new(),
-                },
-                "skill",
-            );
-            futures::executor::block_on(self.hooks.run(&catalogue, event))
-                .map_err(|error| SkillError::new(error.to_string()))?;
-        }
         let admission = futures::executor::block_on(self.child.start(request))
             .map_err(|error| SkillError::new(error.to_string()))?;
         if wait == ChildWait::Foreground {

@@ -12,7 +12,7 @@ use crate::cost::{CostDelta, PricingRevision};
 use crate::event::domain::{EventKind, ExitReason, GenerationRole, OccupancyProvenance};
 use crate::event::hook::{
     HookActivation, HookContentDigest, HookDecision, HookFailureKind, HookId, HookInvocationId,
-    HookLifecycle, HookResult, HookSourceAuthority, HookSubject,
+    HookLifecycle, HookOccurrenceKey, HookResult, HookSourceAuthority, HookSubject,
 };
 use crate::event::id::{EventId, ItemId, Producer, QueuedPromptId, Seq, SessionId, TurnId};
 use crate::event::time::Timestamp;
@@ -252,7 +252,13 @@ pub enum ExportEvent {
     HookCatalogueAdmitted {
         descriptors: Vec<ExportHookDescriptor>,
     },
+    HookLifecycleReached {
+        occurrence: HookOccurrenceKey,
+        subject: HookSubject,
+        plan: Vec<HookId>,
+    },
     HookInvocationStarted {
+        occurrence: EventId,
         hook: HookId,
         invocation: HookInvocationId,
         lifecycle: HookLifecycle,
@@ -260,6 +266,7 @@ pub enum ExportEvent {
         activation: HookActivation,
     },
     HookInvocationSettled {
+        occurrence: EventId,
         hook: HookId,
         invocation: HookInvocationId,
         result: ExportHookResult,
@@ -811,13 +818,24 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
                     .collect(),
             }
         }
+        EventKind::HookLifecycleReached {
+            occurrence,
+            subject,
+            plan,
+        } => ExportEvent::HookLifecycleReached {
+            occurrence: occurrence.clone(),
+            subject: *subject,
+            plan: plan.as_slice().to_vec(),
+        },
         EventKind::HookInvocationStarted {
+            occurrence,
             hook,
             invocation,
             lifecycle,
             subject,
             activation,
         } => ExportEvent::HookInvocationStarted {
+            occurrence: *occurrence,
             hook: *hook,
             invocation: *invocation,
             lifecycle: *lifecycle,
@@ -825,6 +843,7 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
             activation: *activation,
         },
         EventKind::HookInvocationSettled {
+            occurrence,
             hook,
             invocation,
             result,
@@ -841,6 +860,7 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
                 },
             };
             ExportEvent::HookInvocationSettled {
+                occurrence: *occurrence,
                 hook: *hook,
                 invocation: *invocation,
                 result,

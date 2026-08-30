@@ -14,7 +14,7 @@ use crate::event::domain::{
 };
 use crate::event::hook::{
     HookActivation, HookCatalogueEvidence, HookDecision, HookId, HookInvocationId, HookLifecycle,
-    HookResult, HookSubject,
+    HookOccurrenceKey, HookOccurrenceOwner, HookPlan, HookResult, HookSubject,
 };
 use crate::event::id::{
     AttemptId, EventId, GenerationId, ItemId, Producer, QueuedPromptId, Seq, SessionId,
@@ -360,10 +360,93 @@ pub enum PermissionEvent {
     },
 }
 
+/// One hook start accepted into a reached occurrence's immutable plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HookOccurrenceStart {
+    event: EventId,
+    hook: HookId,
+    invocation: HookInvocationId,
+    activation: HookActivation,
+}
+
+impl HookOccurrenceStart {
+    pub fn event(&self) -> EventId {
+        self.event
+    }
+
+    pub fn hook(&self) -> HookId {
+        self.hook
+    }
+
+    pub fn invocation(&self) -> HookInvocationId {
+        self.invocation
+    }
+
+    pub fn activation(&self) -> HookActivation {
+        self.activation
+    }
+}
+
+/// Durable state of one lifecycle occurrence reached by its real owner.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReachedHookOccurrence {
+    event: EventId,
+    key: HookOccurrenceKey,
+    subject: HookSubject,
+    plan: HookPlan,
+    producer: Producer,
+    turn: TurnId,
+    item: Option<ItemId>,
+    starts: Vec<HookOccurrenceStart>,
+}
+
+impl ReachedHookOccurrence {
+    pub fn event(&self) -> EventId {
+        self.event
+    }
+
+    pub fn key(&self) -> &HookOccurrenceKey {
+        &self.key
+    }
+
+    pub fn subject(&self) -> HookSubject {
+        self.subject
+    }
+
+    pub fn plan(&self) -> &HookPlan {
+        &self.plan
+    }
+
+    pub fn producer(&self) -> &Producer {
+        &self.producer
+    }
+
+    pub fn turn(&self) -> TurnId {
+        self.turn
+    }
+
+    pub fn item(&self) -> Option<ItemId> {
+        self.item
+    }
+
+    pub fn starts(&self) -> &[HookOccurrenceStart] {
+        &self.starts
+    }
+
+    pub fn replay_disposition(&self) -> HookReplayDisposition {
+        if self.key.lifecycle().phase().is_pre_effect() {
+            HookReplayDisposition::FailClosed
+        } else {
+            HookReplayDisposition::ObserverUncertain
+        }
+    }
+}
+
 /// A hook invocation that crossed its external-delivery boundary but has not
 /// yet settled.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LiveHookInvocation {
+    occurrence: EventId,
     start: EventId,
     hook: HookId,
     lifecycle: HookLifecycle,
@@ -374,6 +457,10 @@ pub struct LiveHookInvocation {
 }
 
 impl LiveHookInvocation {
+    pub fn occurrence(&self) -> EventId {
+        self.occurrence
+    }
+
     pub fn start(&self) -> EventId {
         self.start
     }
@@ -429,6 +516,7 @@ pub enum HookReplayDisposition {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HookSettlement {
     event: EventId,
+    occurrence: EventId,
     hook: HookId,
     invocation: HookInvocationId,
     result: HookResult,
@@ -443,6 +531,10 @@ impl HookSettlement {
 
     pub fn hook(&self) -> HookId {
         self.hook
+    }
+
+    pub fn occurrence(&self) -> EventId {
+        self.occurrence
     }
 
     pub fn invocation(&self) -> HookInvocationId {
@@ -715,9 +807,6 @@ pub enum RefusalReason {
     /// evidence about them. Discarding the booking because a late frame
     /// disagrees would let the provider rewrite what was already paid.
     UsageDisagreesWithSettlement,
-    /// A hook invocation named no descriptor in the current admitted
-    /// catalogue.
-    HookNotAdmitted,
     /// A hook invocation id is already live.
     HookInvocationAlreadyStarted,
     /// A hook invocation id has already settled and cannot be reopened.
@@ -744,6 +833,20 @@ pub enum RefusalReason {
     HookBlockAtObserver,
     /// Escalation was requested outside the sole `PreToolUse` owner.
     HookEscalationOutsidePreToolUse,
+    /// The occurrence key was already reached and cannot be rebound.
+    HookOccurrenceAlreadyReached,
+    /// A start or settlement named no accepted reached occurrence.
+    HookOccurrenceUnknown,
+    /// The occurrence was not causally parented by its real owner event.
+    HookOccurrenceParentMismatch,
+    /// The occurrence plan contains an unknown hook or changes catalogue order.
+    HookOccurrencePlanMismatch,
+    /// A start did not name the next hook in the frozen occurrence plan.
+    HookOccurrenceOrderMismatch,
+    /// A start's producer differs from the producer that reached the occurrence.
+    HookOccurrenceProducerMismatch,
+    /// A start or settlement named a different reached occurrence.
+    HookInvocationOccurrenceMismatch,
     /// A child fact named an invocation with no durable request.
     SubagentInvocationUnknown,
     /// One invocation was requested more than once.
@@ -886,6 +989,8 @@ pub struct SessionState {
     pub permissions: Vec<PermissionEvent>,
     /// The latest complete admitted hook catalogue.
     hook_catalogue: HookCatalogueEvidence,
+    /// Real owner occurrences in durable reach order.
+    hook_occurrences: Vec<ReachedHookOccurrence>,
     /// Hook invocations that started but have not settled.
     live_hooks: HashMap<HookInvocationId, LiveHookInvocation>,
     /// Accepted hook settlements, in application order.
@@ -956,6 +1061,7 @@ impl Default for SessionState {
             context: ContextWindow::default(),
             permissions: Vec::default(),
             hook_catalogue: HookCatalogueEvidence::default(),
+            hook_occurrences: Vec::default(),
             live_hooks: HashMap::default(),
             hook_settlements: Vec::default(),
             settled_hooks: HashSet::default(),
@@ -1276,6 +1382,36 @@ impl SessionState {
         &self.live_hooks
     }
 
+    pub fn hook_occurrences(&self) -> &[ReachedHookOccurrence] {
+        &self.hook_occurrences
+    }
+
+    pub fn hook_occurrence(&self, key: &HookOccurrenceKey) -> Option<&ReachedHookOccurrence> {
+        self.hook_occurrences
+            .iter()
+            .find(|occurrence| occurrence.key() == key)
+    }
+
+    pub fn hook_occurrence_settlements(&self, event: EventId) -> Vec<&HookSettlement> {
+        self.hook_settlements
+            .iter()
+            .filter(|settlement| settlement.occurrence == event)
+            .collect()
+    }
+
+    pub fn hook_occurrence_is_closed(&self, event: EventId) -> bool {
+        self.hook_occurrences
+            .iter()
+            .find(|occurrence| occurrence.event == event)
+            .is_some_and(|occurrence| {
+                self.hook_settlements
+                    .iter()
+                    .filter(|settlement| settlement.occurrence == event)
+                    .count()
+                    == occurrence.plan.len()
+            })
+    }
+
     pub fn hook_settlements(&self) -> &[HookSettlement] {
         &self.hook_settlements
     }
@@ -1584,18 +1720,33 @@ impl SessionState {
             EventKind::HookCatalogueAdmitted { descriptors } => {
                 self.hook_catalogue = descriptors.clone();
             }
+            EventKind::HookLifecycleReached {
+                occurrence,
+                subject,
+                plan,
+            } => self.reach_hook(ev, occurrence, *subject, plan),
             EventKind::HookInvocationStarted {
+                occurrence,
                 hook,
                 invocation,
                 lifecycle,
                 subject,
                 activation,
-            } => self.start_hook(ev, *hook, *invocation, *lifecycle, *subject, *activation),
+            } => self.start_hook(
+                ev,
+                *occurrence,
+                *hook,
+                *invocation,
+                *lifecycle,
+                *subject,
+                *activation,
+            ),
             EventKind::HookInvocationSettled {
+                occurrence,
                 hook,
                 invocation,
                 result,
-            } => self.settle_hook(ev, *hook, *invocation, result),
+            } => self.settle_hook(ev, *occurrence, *hook, *invocation, result),
             EventKind::SubagentRequested {
                 invocation,
                 task,
@@ -1763,9 +1914,67 @@ impl SessionState {
         });
     }
 
+    fn reach_hook(
+        &mut self,
+        ev: &DomainEvent,
+        key: &HookOccurrenceKey,
+        subject: HookSubject,
+        plan: &HookPlan,
+    ) {
+        if !ev.env.producer.may_trigger_hooks() {
+            return self.refuse(ev, RefusalReason::RecursiveHookInvocation);
+        }
+        if self.hook_occurrence(key).is_some() {
+            return self.refuse(ev, RefusalReason::HookOccurrenceAlreadyReached);
+        }
+        if !hook_subject_matches_envelope(subject, ev.env.turn, ev.env.item)
+            || !hook_owner_matches_envelope(key.owner(), subject, ev)
+        {
+            return self.refuse(ev, RefusalReason::HookSubjectMismatch);
+        }
+        if let HookOccurrenceOwner::Subagent { invocation } = key.owner()
+            && !self.subagents.iter().any(|event| {
+                matches!(
+                    event,
+                    SubagentEvent::Spawned {
+                        invocation: existing,
+                        ..
+                    } if existing == invocation
+                )
+            })
+        {
+            return self.refuse(ev, RefusalReason::HookOccurrenceUnknown);
+        }
+        let catalogue = self.hook_catalogue.as_slice();
+        let mut last_position = None;
+        for hook in plan.as_slice() {
+            let Some(position) = catalogue
+                .iter()
+                .position(|descriptor| descriptor.id() == *hook)
+            else {
+                return self.refuse(ev, RefusalReason::HookOccurrencePlanMismatch);
+            };
+            if last_position.is_some_and(|last| position <= last) {
+                return self.refuse(ev, RefusalReason::HookOccurrencePlanMismatch);
+            }
+            last_position = Some(position);
+        }
+        self.hook_occurrences.push(ReachedHookOccurrence {
+            event: ev.env.id,
+            key: key.clone(),
+            subject,
+            plan: plan.clone(),
+            producer: ev.env.producer.clone(),
+            turn: ev.env.turn,
+            item: ev.env.item,
+            starts: Vec::new(),
+        });
+    }
+
     fn start_hook(
         &mut self,
         ev: &DomainEvent,
+        occurrence: EventId,
         hook: HookId,
         invocation: HookInvocationId,
         lifecycle: HookLifecycle,
@@ -1778,18 +1987,50 @@ impl SessionState {
         if self.live_hooks.contains_key(&invocation) {
             return self.refuse(ev, RefusalReason::HookInvocationAlreadyStarted);
         }
-        if !ev.env.producer.may_trigger_hooks() {
-            return self.refuse(ev, RefusalReason::RecursiveHookInvocation);
+        let Some(position) = self
+            .hook_occurrences
+            .iter()
+            .position(|reached| reached.event == occurrence)
+        else {
+            return self.refuse(ev, RefusalReason::HookOccurrenceUnknown);
+        };
+        let reached = &self.hook_occurrences[position];
+        let settled_count = self
+            .hook_settlements
+            .iter()
+            .filter(|settlement| settlement.occurrence == occurrence)
+            .count();
+        if reached.starts.len() != settled_count {
+            return self.refuse(ev, RefusalReason::HookOccurrenceOrderMismatch);
         }
-        if !self.hook_catalogue.contains(hook) {
-            return self.refuse(ev, RefusalReason::HookNotAdmitted);
+        if ev.env.parent != Some(reached.event) {
+            return self.refuse(ev, RefusalReason::HookOccurrenceParentMismatch);
         }
-        if !hook_subject_matches_envelope(subject, ev.env.turn, ev.env.item) {
-            return self.refuse(ev, RefusalReason::HookSubjectMismatch);
+        if ev.env.producer != reached.producer {
+            return self.refuse(ev, RefusalReason::HookOccurrenceProducerMismatch);
         }
+        if lifecycle != reached.key.lifecycle()
+            || subject != reached.subject
+            || ev.env.turn != reached.turn
+            || ev.env.item != reached.item
+        {
+            return self.refuse(ev, RefusalReason::HookInvocationOccurrenceMismatch);
+        }
+        if reached.plan.as_slice().get(reached.starts.len()) != Some(&hook) {
+            return self.refuse(ev, RefusalReason::HookOccurrenceOrderMismatch);
+        }
+        self.hook_occurrences[position]
+            .starts
+            .push(HookOccurrenceStart {
+                event: ev.env.id,
+                hook,
+                invocation,
+                activation,
+            });
         self.live_hooks.insert(
             invocation,
             LiveHookInvocation {
+                occurrence,
                 start: ev.env.id,
                 hook,
                 lifecycle,
@@ -1804,6 +2045,7 @@ impl SessionState {
     fn settle_hook(
         &mut self,
         ev: &DomainEvent,
+        occurrence: EventId,
         hook: HookId,
         invocation: HookInvocationId,
         result: &HookResult,
@@ -1814,6 +2056,9 @@ impl SessionState {
         let Some(live) = self.live_hooks.get(&invocation).cloned() else {
             return self.refuse(ev, RefusalReason::HookInvocationUnknown);
         };
+        if occurrence != live.occurrence {
+            return self.refuse(ev, RefusalReason::HookInvocationOccurrenceMismatch);
+        }
         if hook != live.hook {
             return self.refuse(ev, RefusalReason::HookInvocationHookMismatch);
         }
@@ -1850,6 +2095,7 @@ impl SessionState {
         self.settled_hooks.insert(invocation);
         self.hook_settlements.push(HookSettlement {
             event: ev.env.id,
+            occurrence,
             hook,
             invocation,
             result: result.clone(),
@@ -2108,5 +2354,23 @@ fn hook_subject_matches_envelope(subject: HookSubject, turn: TurnId, item: Optio
         HookSubject::Session => item.is_none(),
         HookSubject::Turn { turn: subject_turn } => subject_turn == turn && item.is_none(),
         HookSubject::Item { item: subject_item } => item == Some(subject_item),
+    }
+}
+
+fn hook_owner_matches_envelope(
+    owner: &HookOccurrenceOwner,
+    subject: HookSubject,
+    ev: &DomainEvent,
+) -> bool {
+    match owner {
+        HookOccurrenceOwner::Event { event } => ev.env.parent == Some(*event),
+        HookOccurrenceOwner::Item { item } => {
+            ev.env.item == Some(*item) && subject == HookSubject::Item { item: *item }
+        }
+        HookOccurrenceOwner::Session { .. }
+        | HookOccurrenceOwner::Generation { .. }
+        | HookOccurrenceOwner::Subagent { .. }
+        | HookOccurrenceOwner::Request { .. }
+        | HookOccurrenceOwner::Continuation { .. } => true,
     }
 }

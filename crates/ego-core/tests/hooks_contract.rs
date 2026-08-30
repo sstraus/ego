@@ -7,10 +7,10 @@ use ego_core::digest::sha256_hex;
 use ego_core::event::domain::EventKind;
 use ego_core::event::hook::{
     HookCatalogueEvidence, HookContentDigest, HookDecision, HookDescriptorEvidence, HookFailure,
-    HookFailureKind, HookFeedback, HookId, HookInvocationId, HookLifecycle, HookResult,
-    HookSourceAuthority, HookSourceLocation,
+    HookFailureKind, HookFeedback, HookId, HookInvocationId, HookLifecycle, HookOccurrenceKey,
+    HookOccurrenceOwner, HookPlan, HookResult, HookSourceAuthority, HookSourceLocation,
 };
-use ego_core::event::id::{ItemId, Producer};
+use ego_core::event::id::{EventId, ItemId, Producer};
 use ego_core::store::evidence::{EvidenceId, EvidenceRef};
 use serde_json::json;
 
@@ -210,7 +210,7 @@ fn tagged_results_require_typed_decisions_feedback_and_failure_kinds() {
 }
 
 #[test]
-fn events_are_exactly_the_three_typed_hook_facts_and_no_legacy_decoder_exists() {
+fn events_are_exactly_the_four_typed_hook_facts_and_no_legacy_decoder_exists() {
     let descriptor = hook(0);
     let invocation = HookInvocationId::new();
     let subject = ego_core::event::hook::HookSubject::Item {
@@ -219,7 +219,16 @@ fn events_are_exactly_the_three_typed_hook_facts_and_no_legacy_decoder_exists() 
     let _ = EventKind::HookCatalogueAdmitted {
         descriptors: HookCatalogueEvidence::new(vec![descriptor.clone()]).unwrap(),
     };
+    let _ = EventKind::HookLifecycleReached {
+        occurrence: HookOccurrenceKey::new(
+            HookLifecycle::PreToolUse,
+            HookOccurrenceOwner::Item { item: subject_item },
+        ),
+        subject,
+        plan: HookPlan::new(vec![descriptor.id()]).unwrap(),
+    };
     let _ = EventKind::HookInvocationStarted {
+        occurrence: EventId::new(),
         hook: descriptor.id(),
         invocation,
         lifecycle: HookLifecycle::PreToolUse,
@@ -227,6 +236,7 @@ fn events_are_exactly_the_three_typed_hook_facts_and_no_legacy_decoder_exists() 
         activation: ego_core::event::hook::HookActivation::Persistent,
     };
     let _ = EventKind::HookInvocationSettled {
+        occurrence: EventId::new(),
         hook: descriptor.id(),
         invocation,
         result: HookResult::Outcome {

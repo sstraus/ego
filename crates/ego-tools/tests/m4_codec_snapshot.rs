@@ -38,9 +38,9 @@ mod regression_case {
     use super::*;
 
     #[test]
-    fn current_writers_are_codec_and_snapshot_nine() {
-        assert_eq!(ego_core::store::codec::CODEC_VERSION, 9);
-        assert_eq!(SNAPSHOT_VERSION, 9);
+    fn current_writers_are_codec_and_snapshot_ten() {
+        assert_eq!(ego_core::store::codec::CODEC_VERSION, 10);
+        assert_eq!(SNAPSHOT_VERSION, 10);
     }
 
     #[test]
@@ -67,7 +67,7 @@ mod regression_case {
         let StoreLine::Header(header) = decode_line(lines.next().unwrap()).unwrap() else {
             panic!("migration must retain one header")
         };
-        assert_eq!(header.v, 9);
+        assert_eq!(header.v, 10);
         let records = lines
             .map(|line| decode_line(line).expect("migrated record"))
             .collect::<Vec<_>>();

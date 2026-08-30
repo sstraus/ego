@@ -9,7 +9,7 @@
 //!
 //! ## Fixture provenance
 //!
-//! This reuses the same 22-event, two-turn log as
+//! This reuses the same 23-event, two-turn log as
 //! `ego-core/tests/public_golden.rs` rather than inventing a second one.
 //! `ego-core`'s test fixture is private to that crate's own test binary —
 //! integration tests are separate compilation units and cannot import each
@@ -26,7 +26,7 @@
 //! projection.
 //!
 //! The fixture is a representative session, **not** an exhaustive tour of
-//! the domain's 30 event kinds: its 22 events cover 20 distinct kinds
+//! the domain's 31 event kinds: its 23 events cover 21 distinct kinds
 //! (`UserPrompt`, `AssistantDelta`, `AssistantMessage` and `TurnCompleted`
 //! each appear more than once) and omit `ReasoningDelta`,
 //! `GenerationStarted`, `AttemptSettled`, `UsageCorrected`, both prompt-queue
@@ -45,8 +45,9 @@ use ego_core::event::domain::{
     SubagentTerminal,
 };
 use ego_core::event::hook::{
-    HookCatalogueEvidence, HookDecision, HookDescriptorEvidence, HookInvocationId, HookOutcome,
-    HookSourceAuthority, HookSourceLocation,
+    HookCatalogueEvidence, HookDecision, HookDescriptorEvidence, HookInvocationId,
+    HookOccurrenceKey, HookOccurrenceOwner, HookOutcome, HookPlan, HookSourceAuthority,
+    HookSourceLocation,
 };
 use ego_core::event::id::{
     EventId, GenerationId, ItemId, Producer, QueuedPromptId, Seq, SessionId, SubagentInvocationId,
@@ -339,6 +340,32 @@ mod acp_golden {
                 seq.next(),
                 turn1,
                 None,
+                EventKind::HookLifecycleReached {
+                    occurrence: HookOccurrenceKey::new(
+                        ego_core::event::hook::HookLifecycle::PreToolUse,
+                        HookOccurrenceOwner::Session {
+                            session: SessionId::new(),
+                        },
+                    ),
+                    subject: ego_core::event::hook::HookSubject::Session,
+                    plan: HookPlan::new(vec![
+                        HookDescriptorEvidence::new(
+                            HookSourceAuthority::Project,
+                            HookSourceLocation::parse("hooks/project.json").unwrap(),
+                            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                                .parse()
+                                .unwrap(),
+                            0,
+                        )
+                        .id(),
+                    ])
+                    .unwrap(),
+                },
+            ),
+            ev(
+                seq.next(),
+                turn1,
+                None,
                 EventKind::Error {
                     message: "rate limited, retrying".to_string(),
                     kind: ErrorKind::Unclassified,
@@ -383,7 +410,7 @@ mod acp_golden {
         ]
     }
 
-    /// Every event kind in the domain's 30-variant set, once each.
+    /// Every event kind in the domain's 31-variant projection fixture, once each.
     ///
     /// This is the *source* the `None`-set test selects from by name, so
     /// that a kind renamed or removed upstream breaks a test instead of
@@ -520,7 +547,29 @@ mod acp_golden {
                 )])
                 .unwrap(),
             },
+            EventKind::HookLifecycleReached {
+                occurrence: HookOccurrenceKey::new(
+                    ego_core::event::hook::HookLifecycle::PreToolUse,
+                    HookOccurrenceOwner::Session {
+                        session: SessionId::new(),
+                    },
+                ),
+                subject: ego_core::event::hook::HookSubject::Session,
+                plan: HookPlan::new(vec![
+                    HookDescriptorEvidence::new(
+                        HookSourceAuthority::Project,
+                        HookSourceLocation::parse("hooks/project.json").unwrap(),
+                        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                            .parse()
+                            .unwrap(),
+                        0,
+                    )
+                    .id(),
+                ])
+                .unwrap(),
+            },
             EventKind::HookInvocationStarted {
+                occurrence: EventId::new(),
                 hook: HookDescriptorEvidence::new(
                     HookSourceAuthority::Project,
                     HookSourceLocation::parse("hooks/project.json").unwrap(),
@@ -536,6 +585,7 @@ mod acp_golden {
                 activation: ego_core::event::hook::HookActivation::Persistent,
             },
             EventKind::HookInvocationSettled {
+                occurrence: EventId::new(),
                 hook: HookDescriptorEvidence::new(
                     HookSourceAuthority::Project,
                     HookSourceLocation::parse("hooks/project.json").unwrap(),
@@ -739,6 +789,7 @@ mod acp_golden {
             "compacted",
             "forked",
             "hook_catalogue_admitted",
+            "hook_lifecycle_reached",
             "hook_invocation_started",
             "hook_invocation_settled",
             "subagent_spawned",

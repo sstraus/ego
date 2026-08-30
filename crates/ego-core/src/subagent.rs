@@ -8,12 +8,14 @@ use futures::future::BoxFuture;
 use crate::budget::BudgetGate;
 use crate::digest::sha256_hex;
 use crate::event::domain::{DomainEvent, Envelope, EventKind, SubagentRefusal, SubagentTerminal};
-use crate::event::hook::HookInvocationId;
+use crate::event::hook::{
+    HookInvocationId, HookLifecycle, HookOccurrenceKey, HookOccurrenceOwner, HookSubject,
+};
 use crate::event::id::{
     EventId, GateId, ItemId, Producer, Seq, SessionId, SubagentInvocationId, TurnId,
 };
 use crate::event::time::{Clock, Timestamp};
-use crate::hook::{HookCatalogue, HookEvent, HookPort, HookRunner};
+use crate::hook::{HookEvent, HookLifecycleDispatcher, HookOccurrence};
 use crate::run::{
     CancelKey, IdSource, RequestDigest, RequestId, RunCommandOutcome, RunController, RunError,
     RunExecution, RunExecutionBindings, RunExecutor, RunId, RunOrigin, RunRecoveryOutcome, RunRoot,
@@ -239,6 +241,8 @@ pub struct ChildServicePorts {
     parent_results: Arc<dyn ChildResultStore>,
     profiles: Arc<dyn ChildProfileResolver>,
     selections: Arc<dyn ChildSelectionAdmission>,
+    hooks: Arc<HookLifecycleDispatcher>,
+    producer: Producer,
 }
 impl ChildServicePorts {
     #[allow(clippy::too_many_arguments)]
@@ -250,6 +254,8 @@ impl ChildServicePorts {
         parent_results: Arc<dyn ChildResultStore>,
         profiles: Arc<dyn ChildProfileResolver>,
         selections: Arc<dyn ChildSelectionAdmission>,
+        hooks: Arc<HookLifecycleDispatcher>,
+        producer: Producer,
     ) -> Self {
         Self {
             parent_run,
@@ -259,6 +265,8 @@ impl ChildServicePorts {
             parent_results,
             profiles,
             selections,
+            hooks,
+            producer,
         }
     }
 }
@@ -457,39 +465,6 @@ impl ChildRunService {
         invocation: SubagentInvocationId,
     ) -> Result<ChildWaitResult, ChildServiceError> {
         finish(&self.inner, invocation).await
-    }
-    pub async fn run_return_hook<P: HookPort>(
-        &self,
-        invocation: SubagentInvocationId,
-        runner: &HookRunner<P>,
-        catalogue: &HookCatalogue,
-        event: HookEvent,
-    ) -> Result<SubagentTerminal, ChildServiceError> {
-        let prepared = prepare_result(&self.inner, invocation).await?;
-        let ChildWaitResult::Returned { final_message } = prepared else {
-            return Err(ChildServiceError::InvalidDurableState {
-                diagnostic: "return hook requires a completed child".into(),
-            });
-        };
-        let outcome = runner
-            .run(catalogue, event)
-            .await
-            .map_err(controller_error)?;
-        let result = if outcome.is_blocked() {
-            let hook_invocation = outcome.blocking_invocation().ok_or_else(|| {
-                ChildServiceError::InvalidDurableState {
-                    diagnostic: "blocked SubagentStop has no durable hook invocation".into(),
-                }
-            })?;
-            ChildWaitResult::ReturnBlocked {
-                final_message,
-                hook_invocation,
-            }
-        } else {
-            ChildWaitResult::Returned { final_message }
-        };
-        set_pending(&self.inner, invocation, result.clone())?;
-        persist_pending(&self.inner, invocation).map(|_| terminal_of(&result))
     }
     pub async fn recover_from_durable(
         &self,
@@ -794,6 +769,7 @@ async fn start(
             result: None,
         },
     );
+    dispatch_subagent(inner, request.invocation, HookLifecycle::SubagentStart).await?;
     Ok(ChildAdmission {
         inner: Arc::clone(inner),
         invocation: request.invocation,
@@ -858,9 +834,68 @@ async fn finish(
     inner: &Arc<Inner>,
     invocation: SubagentInvocationId,
 ) -> Result<ChildWaitResult, ChildServiceError> {
+    {
+        let active = inner.active.lock().expect("active children");
+        let child = active
+            .get(&invocation)
+            .ok_or(ChildServiceError::UnknownInvocation { invocation })?;
+        if let Some(result) = &child.result {
+            return Ok(result.clone());
+        }
+        if child.pending.is_some() {
+            drop(active);
+            return persist_pending(inner, invocation);
+        }
+    }
     let prepared = prepare_result(inner, invocation).await?;
+    let prepared = match prepared {
+        ChildWaitResult::Returned { final_message } => {
+            let outcome = dispatch_subagent(inner, invocation, HookLifecycle::SubagentStop).await?;
+            if outcome.is_blocked() {
+                let hook_invocation = outcome.blocking_invocation().ok_or_else(|| {
+                    ChildServiceError::InvalidDurableState {
+                        diagnostic:
+                            "blocked SubagentStop has no durable hook invocation settlement".into(),
+                    }
+                })?;
+                ChildWaitResult::ReturnBlocked {
+                    final_message,
+                    hook_invocation,
+                }
+            } else {
+                ChildWaitResult::Returned { final_message }
+            }
+        }
+        other => other,
+    };
     set_pending(inner, invocation, prepared)?;
     persist_pending(inner, invocation)
+}
+
+async fn dispatch_subagent(
+    inner: &Arc<Inner>,
+    invocation: SubagentInvocationId,
+    lifecycle: HookLifecycle,
+) -> Result<crate::hook::HookRunResult, ChildServiceError> {
+    let item = inner
+        .active
+        .lock()
+        .expect("active children")
+        .get(&invocation)
+        .map(|child| child.parent_item)
+        .ok_or(ChildServiceError::UnknownInvocation { invocation })?;
+    let subject = HookSubject::Item { item };
+    let occurrence = HookOccurrence::new(
+        HookOccurrenceKey::new(lifecycle, HookOccurrenceOwner::Subagent { invocation }),
+        HookEvent::turn(lifecycle, subject),
+    )
+    .map_err(controller_error)?;
+    inner
+        .ports
+        .hooks
+        .dispatch(inner.ports.producer.clone(), occurrence)
+        .await
+        .map_err(controller_error)
 }
 
 async fn prepare_result(

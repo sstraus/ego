@@ -10,7 +10,8 @@ use std::sync::{Arc, Mutex};
 use ego_core::event::domain::{DomainEvent, Envelope, EventKind};
 use ego_core::event::hook::{
     HookCatalogueEvidence, HookDecision, HookDescriptorEvidence, HookInvocationId, HookLifecycle,
-    HookOutcome, HookResult, HookSourceAuthority, HookSourceLocation,
+    HookOccurrenceKey, HookOccurrenceOwner, HookOutcome, HookPlan, HookResult, HookSourceAuthority,
+    HookSourceLocation,
 };
 use ego_core::event::id::{EventId, Producer, Seq, SessionId, TurnId};
 use ego_core::event::time::Timestamp;
@@ -145,7 +146,7 @@ impl StoreIo for SpyIo {
     }
 }
 
-fn hook_events() -> (DomainEvent, DomainEvent, DomainEvent) {
+fn hook_events() -> (DomainEvent, DomainEvent, DomainEvent, DomainEvent) {
     let d = descriptor(0);
     let turn = TurnId::new();
     let invocation = HookInvocationId::new();
@@ -159,12 +160,29 @@ fn hook_events() -> (DomainEvent, DomainEvent, DomainEvent) {
             descriptors: HookCatalogueEvidence::new(vec![d.clone()]).unwrap(),
         },
     );
-    let start = event(
+    let reached = event(
         &mut seq,
         turn,
         Some(admission.env.id),
         Producer::Main,
+        EventKind::HookLifecycleReached {
+            occurrence: HookOccurrenceKey::new(
+                HookLifecycle::PreToolUse,
+                HookOccurrenceOwner::Session {
+                    session: SessionId::new(),
+                },
+            ),
+            subject: ego_core::event::hook::HookSubject::Turn { turn },
+            plan: HookPlan::new(vec![d.id()]).unwrap(),
+        },
+    );
+    let start = event(
+        &mut seq,
+        turn,
+        Some(reached.env.id),
+        Producer::Main,
         EventKind::HookInvocationStarted {
+            occurrence: reached.env.id,
             hook: d.id(),
             invocation,
             lifecycle: HookLifecycle::PreToolUse,
@@ -178,6 +196,7 @@ fn hook_events() -> (DomainEvent, DomainEvent, DomainEvent) {
         Some(start.env.id),
         Producer::Hook(d.id()),
         EventKind::HookInvocationSettled {
+            occurrence: reached.env.id,
             hook: d.id(),
             invocation,
             result: HookResult::Outcome {
@@ -185,7 +204,7 @@ fn hook_events() -> (DomainEvent, DomainEvent, DomainEvent) {
             },
         },
     );
-    (admission, start, settle)
+    (admission, reached, start, settle)
 }
 
 #[test]
@@ -195,7 +214,7 @@ fn admission_fsyncs_log_before_atomic_manifest_replace_and_manifest_contains_typ
     let io = SpyIo::new(Arc::clone(&calls));
     let store = JsonlStore::new(dir.path(), "/ws", Box::new(io));
     let id = SessionId::new();
-    let (admission, _, _) = hook_events();
+    let (admission, _, _, _) = hook_events();
     store.append(&id, &admission).unwrap();
     let calls = calls.lock().unwrap();
     let fsync = calls.iter().position(|call| call == "fsync").unwrap();
@@ -220,8 +239,9 @@ fn start_and_settlement_each_force_log_fsync_and_use_hook_producer_on_settlement
     let io = SpyIo::new(Arc::clone(&calls));
     let store = JsonlStore::new(dir.path(), "/ws", Box::new(io));
     let id = SessionId::new();
-    let (admission, start, settle) = hook_events();
+    let (admission, reached, start, settle) = hook_events();
     store.append(&id, &admission).unwrap();
+    store.append(&id, &reached).unwrap();
     let baseline = calls
         .lock()
         .unwrap()
@@ -249,7 +269,7 @@ fn missing_or_corrupt_manifest_rebuilds_never_fired_descriptors_from_authoritati
     let dir = tempdir().unwrap();
     let store = JsonlStore::new(dir.path(), "/ws", Box::new(OsIo));
     let id = SessionId::new();
-    let (admission, _, _) = hook_events();
+    let (admission, _, _, _) = hook_events();
     store.append(&id, &admission).unwrap();
     let path = manifest(dir.path(), &id);
     std::fs::remove_file(&path).unwrap();
@@ -269,7 +289,7 @@ fn empty_admission_clears_manifest_catalogue_and_keeps_raw_manifest_valid() {
     let dir = tempdir().unwrap();
     let store = JsonlStore::new(dir.path(), "/ws", Box::new(OsIo));
     let id = SessionId::new();
-    let (admission, _, _) = hook_events();
+    let (admission, _, _, _) = hook_events();
     store.append(&id, &admission).unwrap();
     let mut seq = admission.env.seq;
     let clear = event(
@@ -315,7 +335,7 @@ fn failed_append_and_torn_tail_cannot_advance_manifest_beyond_valid_log_prefix()
     store.append(&id, &harmless).unwrap();
     let before = std::fs::read(manifest(dir.path(), &id)).unwrap();
     *fail_append.lock().unwrap() = true;
-    let (admission, _, _) = hook_events();
+    let (admission, _, _, _) = hook_events();
     assert!(store.append(&id, &admission).is_err());
     assert_eq!(
         std::fs::read(manifest(dir.path(), &id)).unwrap(),
@@ -343,7 +363,7 @@ fn later_turn_boundary_preserves_admitted_hooks_and_does_not_replace_them_with_e
     let dir = tempdir().unwrap();
     let store = JsonlStore::new(dir.path(), "/ws", Box::new(OsIo));
     let id = SessionId::new();
-    let (admission, _, _) = hook_events();
+    let (admission, _, _, _) = hook_events();
     store.append(&id, &admission).unwrap();
     let mut seq = admission.env.seq;
     let boundary = event(
