@@ -13,6 +13,8 @@ use super::types::{ContentBlock, Conversation, HistoryError, Message, Role};
 use crate::state::{ItemKind, ItemState, SessionState};
 use crate::store::blob::{BlobError, BlobRef, BlobStore};
 
+type BlobReader<'a> = dyn Fn(&BlobRef) -> Result<Vec<u8>, BlobError> + 'a;
+
 /// Something the rebuild had to do to make the history sendable.
 ///
 /// Returned rather than logged: whether a silently repaired history is worth
@@ -76,14 +78,14 @@ pub fn conversation_from_with_blobs(
 /// Rebuild and hydrate every durable image through an already-resolved blob reader.
 pub(crate) fn conversation_from_with_blob_reader(
     state: &SessionState,
-    read_blob: &dyn Fn(&BlobRef) -> Result<Vec<u8>, BlobError>,
+    read_blob: &BlobReader<'_>,
 ) -> Result<(Conversation, Vec<Repair>), HistoryError> {
     conversation_from_inner(state, Some(read_blob))
 }
 
 fn conversation_from_inner(
     state: &SessionState,
-    read_blob: Option<&dyn Fn(&BlobRef) -> Result<Vec<u8>, BlobError>>,
+    read_blob: Option<&BlobReader<'_>>,
 ) -> Result<(Conversation, Vec<Repair>), HistoryError> {
     let mut items: Vec<&ItemState> = state.items.values().collect();
     // By `seq`, not by `ItemId` — see `ItemState::seq`.
