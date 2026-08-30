@@ -250,35 +250,6 @@ pub fn agent() -> agent_client_protocol::AgentProtocolRouter {
     )
 }
 
-pub fn agent_with<S, E, C, I>(
-    store: Arc<S>,
-    executor: Arc<E>,
-    clock: Arc<C>,
-    ids: Arc<I>,
-) -> agent_client_protocol::AgentProtocolRouter
-where
-    S: SessionStore + 'static,
-    E: RunExecutor + 'static,
-    C: Clock + 'static,
-    I: IdSource + 'static,
-{
-    let controller = Arc::new(RunController::new(
-        store,
-        executor,
-        clock,
-        Arc::clone(&ids),
-        RunRetention::new(std::num::NonZeroUsize::new(2).expect("retention")).expect("retention"),
-    ));
-    ego_acp::serve::agent(
-        controller,
-        Arc::new(TestRoots),
-        Arc::new(TestSpawner),
-        ids,
-        Arc::new(AcpRunBindingsBuilder),
-        Arc::new(RejectingMcpAdmitter),
-    )
-}
-
 #[allow(dead_code)]
 pub fn agent_with_compaction<S, E, C, I>(
     store: Arc<S>,
