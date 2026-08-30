@@ -5,7 +5,6 @@ use ego_core::event::domain::{DomainEvent, Envelope, EventKind};
 use ego_core::event::id::{EventId, Producer, Seq, SessionId, TurnId};
 use ego_core::event::time::Timestamp;
 use ego_core::store::codec::{Header, encode_header, encode_record};
-use ego_core::store::session_store::SessionEntry;
 use ego_tools::store::{JsonlStore, LeaseInputs, OsIo};
 use std::path::Path;
 use std::time::Duration;
@@ -59,7 +58,7 @@ fn clean_v7_migration_is_reported_as_migration_not_torn_tail_loss() {
         workspace_root: "/workspace".into(),
     });
     bytes.push(b'\n');
-    bytes.extend(encode_record(seq(9), &SessionEntry::Event(event())).expect("encode v7 event"));
+    bytes.extend(encode_record(seq(9), &event()).expect("encode v7 event"));
     bytes.push(b'\n');
     std::fs::write(&path, bytes).expect("write v7 fixture");
 
