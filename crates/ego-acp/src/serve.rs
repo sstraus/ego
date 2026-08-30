@@ -370,6 +370,12 @@ fn unsupported_block(what: &str) -> String {
 fn prompt_result(snapshot: &RunSnapshot) -> Result<v1::StopReason, String> {
     match snapshot.settlement() {
         Some(RunSettlement::Completed) => stop_reason_v1(&ego_core::run::RunTermination::Done),
+        Some(RunSettlement::ContextOverflow) => {
+            stop_reason_v1(&ego_core::run::RunTermination::ContextOverflow {
+                message: "the provider context window is exhausted; invoke _ego/compact"
+                    .to_string(),
+            })
+        }
         Some(RunSettlement::Cancelled { .. }) | Some(RunSettlement::Interrupted) => stop_reason_v1(
             &ego_core::run::RunTermination::Signalled(ego_core::run::Signal::Int),
         ),

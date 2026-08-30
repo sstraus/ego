@@ -235,6 +235,7 @@ fn stop_reason_v2(exit_reason: ExitReason) -> v2::StopReason {
         // projection, which is what this module is.
         ExitReason::Cancelled(_) => v2::StopReason::Cancelled,
         ExitReason::Provider => v2::StopReason::Other("_provider".to_string()),
+        ExitReason::ContextOverflow => v2::StopReason::Other("_context_overflow".to_string()),
         ExitReason::Internal => v2::StopReason::Other("_internal".to_string()),
         ExitReason::PermissionRequired => v2::StopReason::Other("_permission".to_string()),
         ExitReason::Budget => v2::StopReason::Other("_budget".to_string()),
@@ -301,6 +302,7 @@ pub fn stop_reason_v1(termination: &RunTermination) -> Result<v1::StopReason, St
         RunTermination::TaskFailed => Err("the turn ran and the task did not succeed".to_string()),
         RunTermination::UsageError { message }
         | RunTermination::Provider { message }
+        | RunTermination::ContextOverflow { message }
         | RunTermination::Failed { message } => Err(message.clone()),
     }
 }

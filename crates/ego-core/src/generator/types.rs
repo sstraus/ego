@@ -513,7 +513,7 @@ pub enum StopReason {
 
 /// Why a provider error happened, in the only terms a caller can act on.
 ///
-/// Four values, each with a distinct action. Not the twenty-four of
+/// Five values, each with a distinct action. Not the twenty-four of
 /// OpenRouter's `error_type`: that is a fine vocabulary and it is
 /// OpenRouter's, and six of its values describe image generation this
 /// repository does not do. The adapter maps its provider's spelling onto
@@ -531,8 +531,12 @@ pub enum ErrorKind {
     /// Momentarily unable: overload, rate limit, timeout, upstream
     /// unavailability. A retry may succeed.
     Transient,
-    /// The request is wrong and will be wrong again: schema, context length,
-    /// an unsupported parameter. No retry changes it.
+    /// The provider explicitly reported that the model context window was
+    /// exhausted. The current request cannot succeed unchanged, and hosts
+    /// may offer an explicit compaction transition.
+    ContextOverflow,
+    /// The request is wrong and will be wrong again: schema or an unsupported
+    /// parameter. No retry changes it.
     Invalid,
     /// The account or the credential is refused: unauthenticated, forbidden,
     /// out of credit. No retry changes it, and the request was not the

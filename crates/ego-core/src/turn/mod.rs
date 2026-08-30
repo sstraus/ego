@@ -1235,6 +1235,7 @@ impl<'a> TurnLoop<'a> {
                     // than to this mapping. Recorded here so the next
                     // reader knows it was seen and not missed.
                     StopReason::Error => match error_kind {
+                        Some(ErrorKind::ContextOverflow) => ExitReason::ContextOverflow,
                         Some(ErrorKind::Invalid) => ExitReason::Usage,
                         _ => ExitReason::Provider,
                     },

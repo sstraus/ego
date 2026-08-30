@@ -710,6 +710,8 @@ enum Incomplete {
 enum Ending {
     /// A reason with an exact counterpart in [`StopReason`].
     Mapped(StopReason),
+    /// The provider's exact context-window exhaustion discriminator.
+    ContextOverflow,
     /// The model declined. `Error` loses the policy category `stop_details`
     /// carries, and that loss is named rather than hidden.
     Refusal,
@@ -806,6 +808,14 @@ impl StreamDecoder {
                     );
                 }
                 out.push(AiEvent::Stop(stop));
+            }
+            Some(Ending::ContextOverflow) => {
+                out.push(AiEvent::Error {
+                    message: "the provider reported that the model context window is exhausted"
+                        .to_string(),
+                    kind: ErrorKind::ContextOverflow,
+                });
+                out.push(AiEvent::Stop(StopReason::Error));
             }
             Some(Ending::Refusal) => {
                 out.push(AiEvent::Error {
@@ -1050,12 +1060,8 @@ fn open(block: StartBlock) -> Block {
 fn ending(spelled: &str) -> Ending {
     match spelled {
         "end_turn" | "stop_sequence" => Ending::Mapped(StopReason::Stop),
-        // `model_context_window_exceeded` is documented as "treat as
-        // truncated", so `Length` is the closer of the two available readings.
-        // It is a distinct condition — the prompt *plus* the response filled
-        // the window, which is actionable differently from a caller-set
-        // ceiling — and ego has nowhere to record the difference.
-        "max_tokens" | "model_context_window_exceeded" => Ending::Mapped(StopReason::Length),
+        "max_tokens" => Ending::Mapped(StopReason::Length),
+        "model_context_window_exceeded" => Ending::ContextOverflow,
         "tool_use" => Ending::Mapped(StopReason::ToolUse),
         "refusal" => Ending::Refusal,
         other => Ending::Unmappable(other.to_string()),

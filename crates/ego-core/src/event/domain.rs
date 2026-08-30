@@ -100,6 +100,9 @@ pub enum ExitReason {
     /// §4.4: a headless run never hangs on a prompt, so an unresolvable
     /// permission ends it rather than being answered on the model's behalf.
     PermissionRequired,
+    /// The provider explicitly reported that the model context window was
+    /// exhausted. This is settled and never an automatic retry signal.
+    ContextOverflow,
     /// The provider or the network failed. Distinct from [`Internal`] because
     /// `CLI.md` §4.3 makes them different exits — a script retries 4 and does
     /// not retry 1.

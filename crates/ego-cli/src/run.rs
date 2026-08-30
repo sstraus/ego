@@ -1730,6 +1730,7 @@ fn run_executor_error(termination: RunTermination) -> RunExecutorError {
     RunExecutorError::new(match termination {
         RunTermination::UsageError { message }
         | RunTermination::Provider { message }
+        | RunTermination::ContextOverflow { message }
         | RunTermination::Failed { message } => message,
         other => format!(
             "the prepared run stopped before submission: {}",
@@ -1750,6 +1751,7 @@ fn settlement(termination: RunTermination) -> Result<RunSettlement, RunExecutorE
         RunTermination::Signalled(Signal::Int) => Ok(RunSettlement::cancelled(CancelReason::User)),
         RunTermination::Signalled(Signal::Term) => Ok(RunSettlement::cancelled(CancelReason::Host)),
         RunTermination::BudgetExceeded => Ok(RunSettlement::completed()),
+        RunTermination::ContextOverflow { .. } => Ok(RunSettlement::ContextOverflow),
         RunTermination::QuestionRequired { question } => Err(RunExecutorError::new(format!(
             "question {} still requires an answer",
             question.id
@@ -3627,9 +3629,9 @@ pub fn diagnose(termination: &RunTermination, broken: Option<String>) {
     let message = match termination {
         RunTermination::Done => return,
         RunTermination::TaskFailed => "the answer never satisfied the schema".to_string(),
-        RunTermination::UsageError { message } | RunTermination::Provider { message } => {
-            message.clone()
-        }
+        RunTermination::UsageError { message }
+        | RunTermination::Provider { message }
+        | RunTermination::ContextOverflow { message } => message.clone(),
         RunTermination::Failed { message } => message.clone(),
         RunTermination::QuestionRequired { question } => format!(
             "stopped: human input required — answer with `ego resume --answer {}=JSON`",

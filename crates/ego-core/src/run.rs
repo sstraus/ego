@@ -139,6 +139,9 @@ pub enum RunTermination {
     QuestionRequired { question: QuestionReport },
     /// The provider or the network failed.
     Provider { message: String },
+    /// The provider explicitly reported that the model context window was
+    /// exhausted. The run is settled; a host may offer explicit compaction.
+    ContextOverflow { message: String },
     /// Our own defect.
     Failed { message: String },
     /// A budget ceiling stopped the run.
@@ -179,6 +182,7 @@ impl RunTermination {
             RunTermination::PermissionRequired { .. } => 3,
             RunTermination::QuestionRequired { .. } => 3,
             RunTermination::Provider { .. } => 4,
+            RunTermination::ContextOverflow { .. } => 4,
             RunTermination::BudgetExceeded => 5,
             RunTermination::MaxTurns => 5,
             RunTermination::TimedOut => 124,
@@ -205,6 +209,7 @@ impl RunTermination {
             RunTermination::TaskFailed
             | RunTermination::UsageError { .. }
             | RunTermination::Provider { .. }
+            | RunTermination::ContextOverflow { .. }
             | RunTermination::Failed { .. }
             | RunTermination::Signalled(_) => "error",
         }
@@ -268,6 +273,9 @@ impl RunTermination {
             }
             ExitReason::Provider => Some(RunTermination::Provider {
                 message: "the provider or the network failed".to_string(),
+            }),
+            ExitReason::ContextOverflow => Some(RunTermination::ContextOverflow {
+                message: "the provider context window is exhausted".to_string(),
             }),
             // A summary line, like `Provider` above and for the same reason:
             // the gaps themselves are already in the log as an
@@ -586,6 +594,7 @@ pub enum CancelReason {
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum RunSettlement {
     Completed,
+    ContextOverflow,
     Cancelled { reason: CancelReason },
     PermissionRequired { action: String, by: DeniedBy },
     Interrupted,
@@ -610,7 +619,9 @@ impl RunSettlement {
 
     fn status(&self) -> RunStatus {
         match self {
-            Self::Completed | Self::PermissionRequired { .. } => RunStatus::Settled,
+            Self::Completed | Self::ContextOverflow | Self::PermissionRequired { .. } => {
+                RunStatus::Settled
+            }
             Self::Cancelled { .. } => RunStatus::Cancelled,
             Self::Interrupted => RunStatus::Interrupted,
             Self::Uncertain => RunStatus::Uncertain,
