@@ -1725,22 +1725,7 @@ impl SessionState {
                 subject,
                 plan,
             } => self.reach_hook(ev, occurrence, *subject, plan),
-            EventKind::HookInvocationStarted {
-                occurrence,
-                hook,
-                invocation,
-                lifecycle,
-                subject,
-                activation,
-            } => self.start_hook(
-                ev,
-                *occurrence,
-                *hook,
-                *invocation,
-                *lifecycle,
-                *subject,
-                *activation,
-            ),
+            EventKind::HookInvocationStarted { .. } => self.start_hook(ev),
             EventKind::HookInvocationSettled {
                 occurrence,
                 hook,
@@ -1971,16 +1956,26 @@ impl SessionState {
         });
     }
 
-    fn start_hook(
-        &mut self,
-        ev: &DomainEvent,
-        occurrence: EventId,
-        hook: HookId,
-        invocation: HookInvocationId,
-        lifecycle: HookLifecycle,
-        subject: HookSubject,
-        activation: HookActivation,
-    ) {
+    fn start_hook(&mut self, ev: &DomainEvent) {
+        let EventKind::HookInvocationStarted {
+            occurrence,
+            hook,
+            invocation,
+            lifecycle,
+            subject,
+            activation,
+        } = &ev.kind
+        else {
+            unreachable!("start_hook is called only for HookInvocationStarted")
+        };
+        let (occurrence, hook, invocation, lifecycle, subject, activation) = (
+            *occurrence,
+            *hook,
+            *invocation,
+            *lifecycle,
+            *subject,
+            *activation,
+        );
         if self.settled_hooks.contains(&invocation) {
             return self.refuse(ev, RefusalReason::HookInvocationAlreadySettled);
         }
