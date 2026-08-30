@@ -6,9 +6,7 @@ use ego_ai::catalogue::{
     ModelAvailability, ModelAvailabilityCause, ModelCatalogueEntry, ModelCatalogueSnapshot,
     ModelCatalogueSourceStatus, ModelSlug,
 };
-use ego_core::config::{
-    ModelRef, UserConfigError, UserConfigMutation, UserConfigPublication, UserConfigStore,
-};
+use ego_core::config::{ModelRef, UserConfigStore};
 use ego_core::generator::capabilities::ReasoningEffortSupport;
 use ego_core::generator::types::ThinkingLevel;
 
@@ -19,8 +17,29 @@ use crate::repl::selector::{Selector, SelectorKey, SelectorKind, SelectorOption,
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PickerOutcome {
     Cancelled,
-    SessionInstalled,
-    Persisted(UserConfigPublication),
+    ModelSwitch(ModelSwitchRequest),
+}
+
+/// A validated active-session selection staged for the asynchronous run owner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelSwitchRequest {
+    target: ModelRef,
+    thinking: ThinkingLevel,
+    persistent: bool,
+}
+
+impl ModelSwitchRequest {
+    pub fn target(&self) -> ModelRef {
+        self.target.clone()
+    }
+
+    pub fn thinking(&self) -> ThinkingLevel {
+        self.thinking
+    }
+
+    pub fn is_persistent(&self) -> bool {
+        self.persistent
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,8 +104,6 @@ pub enum PickerError {
     NoSelection,
     NoSession,
     SelectionRead(String),
-    Persistence(UserConfigError),
-    SessionInstall(String),
 }
 
 impl std::fmt::Display for PickerError {
@@ -114,10 +131,6 @@ impl std::fmt::Display for PickerError {
                     f,
                     "the current model selection could not be read: {message}"
                 )
-            }
-            Self::Persistence(error) => write!(f, "user defaults were not persisted: {error}"),
-            Self::SessionInstall(message) => {
-                write!(f, "the session selection was not installed: {message}")
             }
         }
     }
@@ -339,21 +352,16 @@ impl ModelPicker {
 
     fn commit(&mut self, persist: bool) -> Result<PickerOutcome, PickerError> {
         let chosen = self.chosen.clone().ok_or(PickerError::NoSelection)?;
-        if !persist {
-            self.install(&chosen)?;
-            self.close();
-            return Ok(PickerOutcome::SessionInstalled);
+        if self.selection.is_none() || persist && self.config_store.is_none() {
+            return Err(PickerError::NoSession);
         }
-        let store = self.config_store.as_ref().ok_or(PickerError::NoSession)?;
-        let publication = store
-            .mutate(UserConfigMutation::ModelAndThinking {
-                model: chosen.model.clone(),
-                thinking: chosen.thinking,
-            })
-            .map_err(PickerError::Persistence)?;
-        self.install(&chosen)?;
+        let request = ModelSwitchRequest {
+            target: ModelRef(chosen.model),
+            thinking: chosen.thinking,
+            persistent: persist,
+        };
         self.close();
-        Ok(PickerOutcome::Persisted(publication))
+        Ok(PickerOutcome::ModelSwitch(request))
     }
 
     pub fn replace_snapshot(
@@ -443,13 +451,6 @@ impl ModelPicker {
             });
         }
         Ok(())
-    }
-
-    fn install(&self, chosen: &Chosen) -> Result<(), PickerError> {
-        let selection = self.selection.as_ref().ok_or(PickerError::NoSession)?;
-        selection
-            .install(ModelRef(chosen.model.clone()), chosen.thinking)
-            .map_err(PickerError::SessionInstall)
     }
 }
 

@@ -260,7 +260,7 @@ fn absent_thinking_flag_preserves_file_value_and_unknown_keys_fail_strictly() {
 }
 
 #[test]
-fn escape_and_session_only_record_no_user_config_mutation() {
+fn escape_and_session_only_stage_without_user_config_mutation() {
     let store = RecordingUserConfigStore::new(Ok(UserConfigPublication::PublishedDurably));
     let escape_selection = selection();
     let mut picker = ModelPicker::for_selection(
@@ -284,58 +284,59 @@ fn escape_and_session_only_record_no_user_config_mutation() {
         Arc::new(store.clone()),
     );
     choose_openai_high(&mut picker);
-    assert_eq!(
-        picker.input(PickerInput::SessionOnly).unwrap(),
-        PickerInputOutcome::Closed(PickerOutcome::SessionInstalled)
-    );
+    let PickerInputOutcome::Closed(PickerOutcome::ModelSwitch(request)) =
+        picker.input(PickerInput::SessionOnly).unwrap()
+    else {
+        panic!("session-only selection must stage a model-switch request");
+    };
+    assert_eq!(request.target(), ModelRef("openai/gpt-5.6".into()));
+    assert_eq!(request.thinking(), ThinkingLevel::High);
+    assert!(!request.is_persistent());
     assert!(store.mutations().is_empty());
-    assert_selection(&session_selection, "openai/gpt-5.6", ThinkingLevel::High);
+    assert_selection(&session_selection, "openai/gpt-5.6", ThinkingLevel::Medium);
 }
 
 #[test]
-fn enter_records_one_typed_mutation_then_installs_memory() {
+fn enter_stages_one_typed_request_without_mutating_memory() {
     let store = RecordingUserConfigStore::new(Ok(UserConfigPublication::PublishedDurably));
     let selection = selection();
     let mut picker =
         ModelPicker::for_selection(catalogue(), Arc::clone(&selection), Arc::new(store.clone()));
     choose_openai_high(&mut picker);
-    assert_eq!(
-        picker.input(PickerInput::Enter).unwrap(),
-        PickerInputOutcome::Closed(PickerOutcome::Persisted(
-            UserConfigPublication::PublishedDurably,
-        ))
-    );
-    assert_eq!(
-        store.mutations(),
-        vec![UserConfigMutation::ModelAndThinking {
-            model: "openai/gpt-5.6".into(),
-            thinking: ThinkingLevel::High,
-        }]
-    );
-    assert_selection(&selection, "openai/gpt-5.6", ThinkingLevel::High);
+    let PickerInputOutcome::Closed(PickerOutcome::ModelSwitch(request)) =
+        picker.input(PickerInput::Enter).unwrap()
+    else {
+        panic!("persistent selection must stage a model-switch request");
+    };
+    assert_eq!(request.target(), ModelRef("openai/gpt-5.6".into()));
+    assert_eq!(request.thinking(), ThinkingLevel::High);
+    assert!(request.is_persistent());
+    assert!(store.mutations().is_empty(), "run owner owns persistence");
+    assert_selection(&selection, "openai/gpt-5.6", ThinkingLevel::Medium);
 }
 
 #[test]
-fn failed_enter_records_the_typed_mutation_but_keeps_memory_unchanged() {
+fn failed_store_does_not_affect_picker_request_staging() {
     let store =
         RecordingUserConfigStore::new(Err(UserConfigError::new("injected pre-publish failure")));
     let selection = selection();
     let mut picker =
         ModelPicker::for_selection(catalogue(), Arc::clone(&selection), Arc::new(store.clone()));
     choose_openai_high(&mut picker);
-    let _error = picker.input(PickerInput::Enter).unwrap_err();
-    assert_eq!(
-        store.mutations(),
-        vec![UserConfigMutation::ModelAndThinking {
-            model: "openai/gpt-5.6".into(),
-            thinking: ThinkingLevel::High,
-        }]
-    );
+    let PickerInputOutcome::Closed(PickerOutcome::ModelSwitch(request)) =
+        picker.input(PickerInput::Enter).unwrap()
+    else {
+        panic!("picker must stage without calling the config store");
+    };
+    assert_eq!(request.target(), ModelRef("openai/gpt-5.6".into()));
+    assert_eq!(request.thinking(), ThinkingLevel::High);
+    assert!(request.is_persistent());
+    assert!(store.mutations().is_empty());
     assert_selection(&selection, "openai/gpt-5.6", ThinkingLevel::Medium);
 }
 
 #[test]
-fn uncertain_publication_installs_memory_and_preserves_diagnostic() {
+fn uncertain_publication_is_owned_by_run_owner_after_staging() {
     let diagnostic = "directory barrier did not complete";
     let store =
         RecordingUserConfigStore::new(Ok(UserConfigPublication::PublishedDurabilityUncertain {
@@ -346,15 +347,16 @@ fn uncertain_publication_installs_memory_and_preserves_diagnostic() {
         ModelPicker::for_selection(catalogue(), Arc::clone(&selection), Arc::new(store.clone()));
     choose_openai_high(&mut picker);
 
-    assert_eq!(
-        picker.input(PickerInput::Enter).unwrap(),
-        PickerInputOutcome::Closed(PickerOutcome::Persisted(
-            UserConfigPublication::PublishedDurabilityUncertain {
-                diagnostic: diagnostic.into(),
-            },
-        ))
-    );
-    assert_selection(&selection, "openai/gpt-5.6", ThinkingLevel::High);
+    let PickerInputOutcome::Closed(PickerOutcome::ModelSwitch(request)) =
+        picker.input(PickerInput::Enter).unwrap()
+    else {
+        panic!("picker must stage before publication uncertainty is known");
+    };
+    assert_eq!(request.target(), ModelRef("openai/gpt-5.6".into()));
+    assert_eq!(request.thinking(), ThinkingLevel::High);
+    assert!(request.is_persistent());
+    assert!(store.mutations().is_empty(), "run owner owns publication");
+    assert_selection(&selection, "openai/gpt-5.6", ThinkingLevel::Medium);
 }
 
 #[test]
@@ -408,10 +410,14 @@ fn thinking_action_opens_current_model_and_current_effort() {
         Some("openai/gpt-5.6")
     );
     assert_eq!(picker.view().current_id.as_deref(), Some("medium"));
-    assert_eq!(
-        picker.input(PickerInput::SessionOnly).unwrap(),
-        PickerInputOutcome::Closed(PickerOutcome::SessionInstalled)
-    );
+    let PickerInputOutcome::Closed(PickerOutcome::ModelSwitch(request)) =
+        picker.input(PickerInput::SessionOnly).unwrap()
+    else {
+        panic!("session-only thinking selection must stage a request");
+    };
+    assert_eq!(request.target(), ModelRef("openai/gpt-5.6".into()));
+    assert_eq!(request.thinking(), ThinkingLevel::Medium);
+    assert!(!request.is_persistent());
     assert!(store.mutations().is_empty());
     assert_selection(&selection, "openai/gpt-5.6", ThinkingLevel::Medium);
 }

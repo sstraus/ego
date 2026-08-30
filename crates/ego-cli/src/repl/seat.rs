@@ -1440,9 +1440,9 @@ fn execute_action_and_modal(
     if !matches!(action, ActionId::Model | ActionId::Thinking) {
         return (handled, None);
     }
-    let (picker, selection) = {
+    let picker = {
         let status = status.lock().expect("surface status lock");
-        (status.model_picker.clone(), status.model_selection.clone())
+        status.model_picker.clone()
     };
     let Some(picker) = picker else {
         return (handled, None);
@@ -1464,7 +1464,7 @@ fn execute_action_and_modal(
     }
     (
         handled,
-        run_model_picker(editor, phase, status, picker, selection, busy),
+        run_model_picker(editor, phase, status, picker, busy),
     )
 }
 
@@ -1874,7 +1874,6 @@ fn run_model_picker(
     phase: &SurfacePhase,
     status: &SharedStatus,
     picker: Arc<Mutex<ModelPicker>>,
-    selection: Option<Arc<GenerationSelection>>,
     busy: bool,
 ) -> Option<Line> {
     let after = if busy {
@@ -1883,7 +1882,7 @@ fn run_model_picker(
         EditPhase::Idle
     };
     let saved = enter_modal(editor, phase, status);
-    let interrupted = loop {
+    let result = loop {
         let view = picker.lock().expect("model picker lock").view();
         let prompt = Question::new(model_picker_prompt(&view), Arc::clone(status));
         let line = answer(false, editor.read_line(&prompt));
@@ -1898,14 +1897,14 @@ fn run_model_picker(
         };
         let outcome = picker.lock().expect("model picker lock").input(input);
         match outcome {
-            Ok(PickerInputOutcome::Closed(outcome)) => {
-                if !matches!(outcome, PickerOutcome::Cancelled)
-                    && let Some(selection) = selection.as_ref()
-                {
-                    refresh_picker_selection(status, selection);
+            Ok(PickerInputOutcome::Closed(outcome)) => match outcome {
+                PickerOutcome::Cancelled => {
+                    break matches!(&line, Line::Ended | Line::ExternalBreak(_)).then_some(line);
                 }
-                break matches!(&line, Line::Ended | Line::ExternalBreak(_)).then_some(line);
-            }
+                PickerOutcome::ModelSwitch(request) => {
+                    break Some(Line::HostCommand(HostCommand::ModelSwitch(request)));
+                }
+            },
             Ok(PickerInputOutcome::Consumed | PickerInputOutcome::FocusChanged(_)) => {
                 status.lock().expect("surface status lock").notice = None;
                 repaint_status(status);
@@ -1917,23 +1916,7 @@ fn run_model_picker(
         }
     };
     leave_modal(editor, phase, status, saved, after);
-    interrupted
-}
-
-fn refresh_picker_selection(status: &SharedStatus, selection: &GenerationSelection) {
-    let selected = selection.snapshot();
-    let mut current = status.lock().expect("surface status lock");
-    match selected {
-        Ok(selected) => {
-            if let Some(snapshot) = current.snapshot.as_mut() {
-                snapshot.set_selection(selected.identity, selected.thinking);
-            }
-            current.notice = None;
-        }
-        Err(error) => current.notice = Some(error.to_string()),
-    }
-    drop(current);
-    repaint_status(status);
+    result
 }
 
 fn model_picker_input(command: &str) -> Option<PickerInput> {

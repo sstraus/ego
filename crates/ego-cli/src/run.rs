@@ -21,11 +21,13 @@ use ego_core::compact::{
 };
 use ego_core::config::{
     ConfigLayer, Effective, Limits, McpServerConfig, Mode, ModelRef, Posture, Selection, Sourced,
-    SystemPrompt, Trust, UserConfigStore, resolve_selected, system_prompt,
+    SystemPrompt, Trust, UserConfigError, UserConfigMutation, UserConfigPublication,
+    UserConfigStore, resolve_selected, system_prompt,
 };
 use ego_core::cost::CurrencyCode;
 use ego_core::event::domain::CancelCause;
 use ego_core::event::domain::EventKind;
+use ego_core::event::hook::{HookLifecycle, HookOccurrenceKey, HookOccurrenceOwner, HookSubject};
 use ego_core::event::id::{Producer, SessionId};
 use ego_core::evidence::{
     ConfigProvenance, EgoVersion, EvidenceAdmissionService, EvidenceDigest, EvidenceError,
@@ -40,6 +42,7 @@ use ego_core::generation_model_source::{
 use ego_core::generator::capabilities::ModelCapabilities;
 use ego_core::generator::port::RequestExpressibilityError;
 use ego_core::generator::types::{GenRequest, ImageRef, ThinkingLevel, ToolDescriptor};
+use ego_core::hook::{HookEvent, HookLifecycleDispatcher, HookOccurrence};
 use ego_core::permit::judge::{JudgeConfig, JudgeInput};
 use ego_core::permit::{
     CanonPath, Change, Escalation, ExecCaps, ExecObservation, HumanApprover, Op, OpName,
@@ -82,7 +85,7 @@ use crate::cli::{
     Args, CompactArgs, ExportArgs, ExportFormat, ForkArgs, ModelsArgs, Output, ResumeAnswer,
     SessionChoice, UsageError,
 };
-use crate::model_picker::ModelPicker;
+use crate::model_picker::{ModelPicker, ModelSwitchRequest};
 use crate::models;
 use crate::output::{
     Diagnostics, InteractiveOutput, JsonlSink, Report, Stderr, Stdout, TextOutput, TextSink, note,
@@ -100,6 +103,178 @@ use crate::{attachment, config, model, prompt, repl, schema};
 /// build can produce is either zero (a local daemon) or supplied alongside its
 /// own currency.
 const SETTLEMENT: &str = "USD";
+
+/// The active session's asynchronous authority for one staged model switch.
+#[derive(Clone)]
+pub struct RunModelSwitchOwner {
+    selection: Arc<model::GenerationSelection>,
+    config_store: Arc<dyn UserConfigStore>,
+    hooks: HookLifecycleDispatcher,
+}
+
+impl RunModelSwitchOwner {
+    pub fn new(
+        selection: Arc<model::GenerationSelection>,
+        config_store: Arc<dyn UserConfigStore>,
+        hooks: HookLifecycleDispatcher,
+    ) -> Self {
+        Self {
+            selection,
+            config_store,
+            hooks,
+        }
+    }
+
+    /// Gate, publish, and install a picker request at the real run owner.
+    pub async fn apply(
+        &self,
+        request: ModelSwitchRequest,
+    ) -> Result<Option<UserConfigPublication>, RunModelSwitchError> {
+        let target = request.target();
+        let thinking = request.thinking();
+        let current = self
+            .selection
+            .snapshot()
+            .map_err(|error| RunModelSwitchError::Selection(error.to_string()))?;
+        if current.identity == target && current.thinking == thinking {
+            return Ok(None);
+        }
+
+        let request_id = RequestId::from_uuid(uuid::Uuid::now_v7());
+        let pre = model_switch_occurrence(HookLifecycle::PreModelSwitch, request_id, &target)?;
+        let pre = self
+            .hooks
+            .dispatch(Producer::Main, pre)
+            .await
+            .map_err(|error| RunModelSwitchError::PreDispatch(error.to_string()))?;
+        if pre.is_blocked() {
+            return Err(RunModelSwitchError::PreBlocked);
+        }
+
+        let publication = if request.is_persistent() {
+            Some(
+                self.config_store
+                    .mutate(UserConfigMutation::ModelAndThinking {
+                        model: target.0.clone(),
+                        thinking,
+                    })
+                    .map_err(RunModelSwitchError::Persistence)?,
+            )
+        } else {
+            None
+        };
+        if let Err(message) = self.selection.install(target.clone(), thinking) {
+            return Err(RunModelSwitchError::Install {
+                message,
+                publication,
+            });
+        }
+
+        let post = model_switch_occurrence(HookLifecycle::PostModelSwitch, request_id, &target)?;
+        let post = self
+            .hooks
+            .dispatch(Producer::Main, post)
+            .await
+            .map_err(|error| RunModelSwitchError::PostDispatch {
+                message: error.to_string(),
+                publication: publication.clone(),
+            })?;
+        if post.is_observer_failure() {
+            return Err(RunModelSwitchError::PostObserver { publication });
+        }
+        Ok(publication)
+    }
+}
+
+fn model_switch_occurrence(
+    lifecycle: HookLifecycle,
+    request: RequestId,
+    target: &ModelRef,
+) -> Result<HookOccurrence, RunModelSwitchError> {
+    HookOccurrence::new(
+        HookOccurrenceKey::new(lifecycle, HookOccurrenceOwner::Request { request }),
+        HookEvent::tool(lifecycle, HookSubject::Session, target.0.clone()),
+    )
+    .map_err(|error| RunModelSwitchError::Occurrence(error.to_string()))
+}
+
+#[derive(Debug)]
+pub enum RunModelSwitchError {
+    Selection(String),
+    Occurrence(String),
+    PreDispatch(String),
+    PreBlocked,
+    Persistence(UserConfigError),
+    Install {
+        message: String,
+        publication: Option<UserConfigPublication>,
+    },
+    PostDispatch {
+        message: String,
+        publication: Option<UserConfigPublication>,
+    },
+    PostObserver {
+        publication: Option<UserConfigPublication>,
+    },
+}
+
+impl RunModelSwitchError {
+    pub fn publication(&self) -> Option<&UserConfigPublication> {
+        match self {
+            Self::Install { publication, .. }
+            | Self::PostDispatch { publication, .. }
+            | Self::PostObserver { publication } => publication.as_ref(),
+            Self::Selection(_)
+            | Self::Occurrence(_)
+            | Self::PreDispatch(_)
+            | Self::PreBlocked
+            | Self::Persistence(_) => None,
+        }
+    }
+}
+
+impl std::fmt::Display for RunModelSwitchError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Selection(message) => {
+                write!(
+                    formatter,
+                    "the active model selection could not be read: {message}"
+                )
+            }
+            Self::Occurrence(message) => {
+                write!(
+                    formatter,
+                    "the model-switch lifecycle is invalid: {message}"
+                )
+            }
+            Self::PreDispatch(message) => {
+                write!(formatter, "the pre-model-switch gate failed: {message}")
+            }
+            Self::PreBlocked => formatter.write_str("the model switch was blocked by a hook"),
+            Self::Persistence(error) => {
+                write!(formatter, "user model defaults were not published: {error}")
+            }
+            Self::Install { message, .. } => {
+                write!(
+                    formatter,
+                    "the active model selection was not installed: {message}"
+                )
+            }
+            Self::PostDispatch { message, .. } => {
+                write!(
+                    formatter,
+                    "the post-model-switch observer failed: {message}"
+                )
+            }
+            Self::PostObserver { .. } => {
+                formatter.write_str("a post-model-switch observer failed after commit")
+            }
+        }
+    }
+}
+
+impl std::error::Error for RunModelSwitchError {}
 
 /// Validate and apply the sole answer batch against one already-opened
 /// durable session. Validation is complete before the first journal append.
@@ -398,6 +573,7 @@ async fn interactive_through(
         human,
         native: human && capabilities.osc != OscProfile::None,
         picker: None,
+        model_switch_owner: None,
     };
     let between = || text_sink.finish();
     let ended = match execute(
@@ -3385,6 +3561,44 @@ async fn execute<S: EventSink>(
                             diagnostics.note(why);
                             continue;
                         }
+                        repl::Line::HostCommand(repl::HostCommand::ModelSwitch(request)) => {
+                            let Some(owner) = status
+                                .as_ref()
+                                .and_then(|status| status.model_switch_owner.clone())
+                            else {
+                                diagnostics
+                                    .note("the active session has no model-switch lifecycle owner");
+                                continue;
+                            };
+                            seat.busy();
+                            let applied = owner.apply(request).await;
+                            let publication = match &applied {
+                                Ok(publication) => publication.as_ref(),
+                                Err(error) => error.publication(),
+                            };
+                            if let Some(UserConfigPublication::PublishedDurabilityUncertain {
+                                diagnostic,
+                            }) = publication
+                            {
+                                diagnostics.note(&format!(
+                                    "model defaults are authoritative with a durability warning: {diagnostic}"
+                                ));
+                            }
+                            if let Err(error) = applied {
+                                diagnostics.note(&format!("model switch failed: {error}"));
+                            }
+                            if let Some(status) = status.as_ref()
+                                && status.human
+                            {
+                                match selection.snapshot() {
+                                    Ok(selected) => status.seat.refresh_status(&state, selected),
+                                    Err(error) => diagnostics.note(&format!(
+                                        "the model-switch status selection could not be refreshed: {error}"
+                                    )),
+                                }
+                            }
+                            continue;
+                        }
                         repl::Line::HostCommand(repl::HostCommand::Action(
                             repl::actions::ActionId::Sessions,
                         )) => {
@@ -4057,6 +4271,8 @@ struct InteractiveStatus {
     native: bool,
     /// The run owns the same picker instance installed into the terminal seat.
     picker: Option<Arc<Mutex<ModelPicker>>>,
+    /// Installed with the one session-bound dispatcher after hook composition.
+    model_switch_owner: Option<RunModelSwitchOwner>,
 }
 
 fn run_trust(args: &Args, driver: &Driver<'_>, root: &Path) -> Trust {

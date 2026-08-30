@@ -48,6 +48,7 @@ pub(super) const INTERRUPT_COMMAND: &str = "ego:interrupt";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostCommand {
     Action(ActionId),
+    ModelSwitch(crate::model_picker::ModelSwitchRequest),
     Draft,
     BusySubmit,
     Interrupt,

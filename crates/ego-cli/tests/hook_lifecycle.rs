@@ -395,7 +395,7 @@ fn model_picker_persists_before_install_and_observes_after_commit() {
         LocalActionOutcome::Completed
     );
     assert_eq!(
-        picker.input(PickerInput::Number(2)),
+        picker.input(PickerInput::Number(1)),
         Ok(PickerInputOutcome::Consumed)
     );
     assert!(matches!(
@@ -441,7 +441,7 @@ fn same_selection_does_not_emit_model_switch_and_post_observer_cannot_revert_com
             busy: false,
         },
     );
-    picker.input(PickerInput::Number(1)).expect("old model");
+    picker.input(PickerInput::Number(2)).expect("old model");
     picker.input(PickerInput::Enter).expect("model focus");
     picker.input(PickerInput::Number(4)).expect("medium effort");
     let PickerInputOutcome::Closed(PickerOutcome::ModelSwitch(request)) =
@@ -486,7 +486,7 @@ fn model_switch_owner_persists_and_installs_only_after_pre_gate() {
             busy: false,
         },
     );
-    picker.input(PickerInput::Number(2)).expect("new model");
+    picker.input(PickerInput::Number(1)).expect("new model");
     picker.input(PickerInput::Enter).expect("model focus");
     picker.input(PickerInput::Number(1)).expect("off effort");
     let PickerInputOutcome::Closed(PickerOutcome::ModelSwitch(request)) =
@@ -588,7 +588,7 @@ fn staged_request(
             busy: false,
         },
     );
-    picker.input(PickerInput::Number(2)).expect("new model");
+    picker.input(PickerInput::Number(1)).expect("new model");
     picker.input(PickerInput::Enter).expect("model focus");
     picker.input(PickerInput::Number(1)).expect("off effort");
     let PickerInputOutcome::Closed(PickerOutcome::ModelSwitch(request)) =
