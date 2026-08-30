@@ -1,75 +1,82 @@
-//! RED contract for MCP lifecycle ownership in M4 S7.
+//! RED contract for the concrete MCP continuation owner.
 //!
-//! The operation factory and its durable continuation recorder are the only
-//! producers of the two MRTR lifecycle points. The tests intentionally attach
-//! the final dispatcher at that production boundary.
+//! This crosses the real stdio operation and guarded-authority seams.  It
+//! intentionally remains RED until `McpContinuationOwner` owns both the
+//! asynchronous input-required projection and accepted-answer resume.
 
+use std::ffi::OsString;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use ego_core::config::{ConfigLayer, Source, Trust};
+use ego_core::config::{
+    ConfigLayer, Mode, PermCfg, ResolvedMcpEntry, Ruleset, Source, Trust, resolve,
+};
 use ego_core::event::hook::{
-    HookActivation, HookContentDigest, HookDecision, HookInvocationId, HookLifecycle,
-    HookOccurrenceKey, HookOutcome, HookPlan, HookResult,
+    HookActivation, HookDecision, HookInvocationId, HookLifecycle, HookOutcome, HookPlan,
+    HookResult,
 };
 use ego_core::event::id::Producer;
-use ego_core::event::time::Timestamp;
+use ego_core::event::time::{Clock, Timestamp};
+use ego_core::generator::attempt::DeliveryCertainty;
 use ego_core::hook::{
     HookCatalogue, HookEvent, HookFuture, HookLifecycleDispatcher, HookOccurrence, HookPort,
     HookReachFuture, HookReachedEvidence, HookRecordFuture, HookRunner, HookSpec, HookStartFuture,
     HookStartedEvidence,
 };
+use ego_core::mcp::{McpAdmissionFingerprint, McpOperationKind, McpSubject, ToolExecution};
+use ego_core::permit::{
+    Authorized, CanonPath, Classification, CleanupCertainty, DnsResolution, DuplexEnd,
+    DuplexHandle, DuplexSession, DuplexSpawner, EnvPolicy, ForeignToolId, GuardedEffects,
+    InvocationDigest, OneHop, OneHopResponse, PolicyEngine, PreparedCall, ProcessError,
+    ProcessExecutor, Resolver, SpawnSpec, ToolResult, TransportError, TransportFailure,
+};
+use ego_core::store::blob::{BlobError, BlobPage, BlobRead, BlobRef, BlobStore, BlobWriter};
+use ego_core::store::evidence::{
+    EvidenceError, EvidencePage, EvidenceRead, EvidenceStore, EvidenceWriter,
+};
 use ego_core::suspension::{
     ClaimedContinuation, ContinuationError, ContinuationJournal, ContinuationRecord,
-    ContinuationState,
+    ContinuationState, ResumeKeySource, ResumeSealer,
 };
-use ego_mcp::run::McpContinuationOwner;
+use ego_core::turn::{
+    McpRegistryEvent, McpRegistryJournal, McpRegistryJournalError, ToolEffectPorts,
+};
 use ego_mcp::{
-    DurableMcpInputRequiredRecorder, McpInputMapping, McpInputRequired, McpInputResponse,
-    McpInputState, McpStdioOperationFactory,
+    McpAdmittedCandidate, McpCacheMetadata, McpCandidateAdmission, McpCandidateError,
+    McpCandidateIdentity, McpCandidateInventory, McpCapabilities, McpContinuationOwner, McpFuture,
+    McpInputMapping, McpInputRequired, McpOperationFactory, McpRegistryCandidate,
+    McpRegistryCapture, McpRegistryController, McpRegistryRefresh, McpServerAdmission,
+    McpStdioOperationFactory, McpTransportMaterial, RegistryScope, RegistryTrigger,
 };
+use futures::executor::block_on;
+use futures::future::BoxFuture;
+use futures::io::{AsyncRead, AsyncWrite, Cursor};
+use serde_json::json;
+
+const SCHEMA: &[u8] = br#"{"type":"object","properties":{"choice":{"type":"string"}},"required":["choice"],"additionalProperties":false}"#;
+const ORIGINAL: &[u8] = br#"{"name":"lookup","arguments":{}}"#;
 
 const MCP_OWNERS: [(&str, HookLifecycle); 2] = [
     (
-        "McpOperationFactory::project_outcome durable request",
+        "McpContinuationOwner::record_input_required",
         HookLifecycle::Elicitation,
     ),
     (
-        "MCP journal accepted answer before guarded claim",
+        "McpContinuationOwner::accept_answer",
         HookLifecycle::ElicitationResult,
     ),
 ];
 
-fn hook_catalogue() -> HookCatalogue {
-    let source = "[[hooks]]\nevent = \"Elicitation\"\n[hooks.handler]\ntype = \"prompt\"\nprompt = \"continue\"\n[[hooks]]\nevent = \"ElicitationResult\"\n[hooks.handler]\ntype = \"prompt\"\nprompt = \"continue\"\n";
-    HookCatalogue::admit_typed(
-        &[ConfigLayer::parse(Source::User, source).expect("admitted MCP hooks")],
-        &[],
-        Trust::Trusted,
-    )
-    .expect("MCP hook catalogue")
-}
-
 #[derive(Clone, Default)]
 struct Trace(Arc<Mutex<Vec<String>>>);
-
 impl Trace {
-    fn push(&self, event: impl Into<String>) {
-        self.0
-            .lock()
-            .expect("MCP lifecycle trace")
-            .push(event.into());
+    fn push(&self, item: impl Into<String>) {
+        self.0.lock().expect("trace").push(item.into());
     }
-
     fn events(&self) -> Vec<String> {
-        self.0.lock().expect("MCP lifecycle trace").clone()
+        self.0.lock().expect("trace").clone()
     }
-}
-
-#[derive(Clone, Default)]
-struct RecordingPort {
-    calls: Arc<Mutex<Vec<HookLifecycle>>>,
-    trace: Trace,
-    mode: HookMode,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -80,52 +87,36 @@ enum HookMode {
     UncertainResult,
 }
 
+#[derive(Clone, Default)]
+struct RecordingPort {
+    calls: Arc<Mutex<Vec<HookLifecycle>>>,
+    trace: Trace,
+    mode: HookMode,
+}
 impl RecordingPort {
-    fn calls(&self) -> Vec<HookLifecycle> {
-        self.calls.lock().expect("MCP hook calls").clone()
-    }
-
-    fn with_trace(trace: Trace) -> Self {
+    fn new(trace: Trace, mode: HookMode) -> Self {
         Self {
             calls: Arc::default(),
             trace,
-            mode: HookMode::Continue,
-        }
-    }
-
-    fn blocking_with_trace(trace: Trace) -> Self {
-        Self {
-            calls: Arc::default(),
-            trace,
-            mode: HookMode::BlockResult,
-        }
-    }
-
-    fn uncertain_with_trace(trace: Trace) -> Self {
-        Self {
-            calls: Arc::default(),
-            trace,
-            mode: HookMode::UncertainResult,
+            mode,
         }
     }
 }
-
 impl HookPort for RecordingPort {
     fn reached<'a>(
         &'a self,
-        producer: &'a ego_core::event::id::Producer,
+        producer: &'a Producer,
         occurrence: &'a HookOccurrence,
         plan: &'a HookPlan,
     ) -> HookReachFuture<'a> {
-        let evidence = HookReachedEvidence::new(
-            ego_core::event::id::EventId::new(),
-            occurrence.key().clone(),
-            occurrence.event().subject(),
-            producer.clone(),
-            plan.clone(),
-        );
         Box::pin(std::future::ready(Ok(
-            ego_core::hook::HookReachOutcome::Fresh(evidence),
+            ego_core::hook::HookReachOutcome::Fresh(HookReachedEvidence::new(
+                ego_core::event::id::EventId::new(),
+                occurrence.key().clone(),
+                occurrence.event().subject(),
+                producer.clone(),
+                plan.clone(),
+            )),
         )))
     }
     fn started<'a>(
@@ -136,11 +127,9 @@ impl HookPort for RecordingPort {
         activation: HookActivation,
         invocation: HookInvocationId,
     ) -> HookStartFuture<'a> {
-        self.calls
-            .lock()
-            .expect("MCP hook calls")
-            .push(occurrence.event().lifecycle());
-        self.trace.push(occurrence.event().lifecycle().as_str());
+        let lifecycle = occurrence.event().lifecycle();
+        self.calls.lock().expect("hook calls").push(lifecycle);
+        self.trace.push(lifecycle.as_str());
         Box::pin(std::future::ready(Ok(HookStartedEvidence::new(
             reached.event(),
             reached.event(),
@@ -149,24 +138,13 @@ impl HookPort for RecordingPort {
             activation,
         ))))
     }
-
-    fn invoke<'a>(
-        &'a self,
-        _spec: &'a HookSpec,
-        event: ego_core::hook::HookEvent,
-    ) -> HookFuture<'a> {
-        let outcome = match (self.mode, event.lifecycle()) {
-            (HookMode::Continue, _) => HookOutcome::new(HookDecision::Continue, None),
-            (HookMode::BlockResult, HookLifecycle::ElicitationResult) => {
-                HookOutcome::new(HookDecision::Block, None)
-            }
-            (HookMode::BlockResult | HookMode::UncertainResult, _) => {
-                HookOutcome::new(HookDecision::Continue, None)
-            }
+    fn invoke<'a>(&'a self, _spec: &'a HookSpec, event: HookEvent) -> HookFuture<'a> {
+        let decision = match (self.mode, event.lifecycle()) {
+            (HookMode::BlockResult, HookLifecycle::ElicitationResult) => HookDecision::Block,
+            _ => HookDecision::Continue,
         };
-        Box::pin(std::future::ready(Ok(outcome)))
+        Box::pin(std::future::ready(Ok(HookOutcome::new(decision, None))))
     }
-
     fn settled<'a>(
         &'a self,
         spec: &'a HookSpec,
@@ -177,94 +155,73 @@ impl HookPort for RecordingPort {
             && spec.event_name() == HookLifecycle::ElicitationResult.as_str()
         {
             return Box::pin(std::future::ready(Err(ego_core::hook::HookRunError::new(
-                "simulated post-answer delivery uncertainty",
+                "simulated delivery uncertainty",
             ))));
         }
         Box::pin(std::future::ready(Ok(())))
     }
 }
 
-fn dispatcher(port: RecordingPort) -> HookLifecycleDispatcher {
+fn hooks_with_mode(mode: HookMode, trace: Trace) -> HookLifecycleDispatcher {
+    let source = "[[hooks]]\nevent = \"Elicitation\"\n[hooks.handler]\ntype = \"prompt\"\nprompt = \"continue\"\n[[hooks]]\nevent = \"ElicitationResult\"\n[hooks.handler]\ntype = \"prompt\"\nprompt = \"continue\"\n";
+    let catalogue = HookCatalogue::admit_typed(
+        &[ConfigLayer::parse(Source::User, source).expect("hooks")],
+        &[],
+        Trust::Trusted,
+    )
+    .expect("catalogue");
     HookLifecycleDispatcher::new(
-        HookRunner::new_with_durable_started(port, Vec::<HookStartedEvidence>::new()),
-        hook_catalogue(),
+        HookRunner::new_with_durable_started(RecordingPort::new(trace, mode), Vec::new()),
+        catalogue,
     )
-}
-
-fn occurrence(lifecycle: HookLifecycle) -> HookOccurrence {
-    HookOccurrence::new(
-        HookOccurrenceKey::continuation(lifecycle, format!("mcp-{}", "0".repeat(64)))
-            .expect("matching continuation occurrence owner"),
-        HookEvent::session(lifecycle),
-    )
-    .expect("matching lifecycle occurrence")
-}
-
-fn required() -> McpInputRequired {
-    McpInputRequired::elicitation(
-        br#"{"type":"object","properties":{"choice":{"type":"string"}},"required":["choice"],"additionalProperties":false}"#,
-        "answer",
-        b"opaque-request-state",
-    )
-    .expect("current MRTR elicitation form")
 }
 
 #[derive(Default)]
-struct Continuations {
+struct Journal {
     events: Mutex<Vec<&'static str>>,
-    pending: Mutex<Option<ContinuationRecord>>,
+    record: Mutex<Option<ContinuationRecord>>,
     trace: Trace,
 }
-impl Continuations {
-    fn records(&self) -> usize {
-        self.events
-            .lock()
-            .expect("continuation events")
-            .iter()
-            .filter(|event| **event == "record")
-            .count()
-    }
-
-    fn recorded_id(&self) -> Option<String> {
-        self.pending
-            .lock()
-            .expect("continuation record")
-            .as_ref()
-            .map(|record| record.id().to_owned())
-    }
-
-    fn events(&self) -> Vec<&'static str> {
-        self.events.lock().expect("continuation events").clone()
-    }
-
+impl Journal {
     fn with_trace(trace: Trace) -> Self {
         Self {
             events: Mutex::default(),
-            pending: Mutex::default(),
+            record: Mutex::default(),
             trace,
         }
     }
-
+    fn events(&self) -> Vec<&'static str> {
+        self.events.lock().expect("journal events").clone()
+    }
     fn state(&self) -> Option<ContinuationState> {
-        self.pending
+        self.record
             .lock()
-            .expect("continuation record")
+            .expect("record")
             .as_ref()
             .map(ContinuationRecord::state)
     }
+    fn id(&self) -> String {
+        self.record
+            .lock()
+            .expect("record")
+            .as_ref()
+            .expect("recorded continuation")
+            .id()
+            .to_owned()
+    }
+    fn push(&self, event: &'static str) {
+        self.events.lock().expect("journal events").push(event);
+        self.trace.push(event);
+    }
 }
-impl ContinuationJournal for Continuations {
+impl ContinuationJournal for Journal {
     fn record(&self, record: ContinuationRecord) -> Result<(), ContinuationError> {
-        let mut pending = self.pending.lock().expect("continuation record");
-        if pending.is_some() {
+        let mut slot = self.record.lock().expect("record");
+        if slot.is_some() {
             return Err(ContinuationError::InvalidTransition);
         }
-        *pending = Some(record);
-        self.events
-            .lock()
-            .expect("continuation events")
-            .push("record");
-        self.trace.push("record");
+        *slot = Some(record);
+        self.push("record");
         Ok(())
     }
     fn accept_answer(
@@ -273,22 +230,18 @@ impl ContinuationJournal for Continuations {
         answer: &[u8],
         now: Timestamp,
     ) -> Result<(), ContinuationError> {
-        let mut pending = self.pending.lock().expect("continuation record");
-        let record = pending.as_mut().ok_or(ContinuationError::NotFound)?;
+        let mut slot = self.record.lock().expect("record");
+        let record = slot.as_mut().ok_or(ContinuationError::NotFound)?;
         if record.id() != id {
             return Err(ContinuationError::NotFound);
         }
         record.accept_answer(answer.to_vec(), now)?;
-        self.events
-            .lock()
-            .expect("continuation events")
-            .push("accepted_answer");
-        self.trace.push("accepted_answer");
+        self.push("accepted_answer");
         Ok(())
     }
     fn load(&self, id: &str) -> Result<ContinuationRecord, ContinuationError> {
-        let pending = self.pending.lock().expect("continuation record");
-        let record = pending
+        let slot = self.record.lock().expect("record");
+        let record = slot
             .as_ref()
             .filter(|record| record.id() == id)
             .ok_or(ContinuationError::NotFound)?;
@@ -298,29 +251,25 @@ impl ContinuationJournal for Continuations {
         .map_err(|_| ContinuationError::Corrupt("decode".into()))
     }
     fn claim(&self, id: &str, now: Timestamp) -> Result<ClaimedContinuation, ContinuationError> {
-        let mut pending = self.pending.lock().expect("continuation record");
-        let record = pending.take().ok_or(ContinuationError::NotFound)?;
+        let mut slot = self.record.lock().expect("record");
+        let record = slot.take().ok_or(ContinuationError::NotFound)?;
         if record.id() != id {
-            *pending = Some(record);
+            *slot = Some(record);
             return Err(ContinuationError::NotFound);
         }
-        let encoded =
+        let bytes =
             serde_json::to_vec(&record).map_err(|_| ContinuationError::Corrupt("encode".into()))?;
         let claimed = match record.claim(now) {
             Ok(claimed) => claimed,
             Err(error) => {
-                *pending = Some(
-                    serde_json::from_slice(&encoded)
+                *slot = Some(
+                    serde_json::from_slice(&bytes)
                         .map_err(|_| ContinuationError::Corrupt("decode".into()))?,
                 );
                 return Err(error);
             }
         };
-        self.events
-            .lock()
-            .expect("continuation events")
-            .push("claim");
-        self.trace.push("claim");
+        self.push("claim");
         Ok(claimed)
     }
     fn settle(
@@ -328,86 +277,441 @@ impl ContinuationJournal for Continuations {
         _claimed: ClaimedContinuation,
         _state: ContinuationState,
     ) -> Result<(), ContinuationError> {
-        self.events
-            .lock()
-            .expect("continuation events")
-            .push("settle");
+        self.push("settle");
         Ok(())
     }
 }
 
+struct FixedClock;
+impl Clock for FixedClock {
+    fn now(&self) -> Timestamp {
+        Timestamp::EPOCH
+    }
+}
+struct FixedResumeKey;
+impl ResumeKeySource for FixedResumeKey {
+    fn resume_key(&self) -> Result<Arc<[u8]>, ContinuationError> {
+        Ok(Arc::from(*b"mcp-hook-lifecycle-test-key-32bytes!"))
+    }
+}
+
+struct NoProcess;
+impl ProcessExecutor for NoProcess {
+    fn execute<'a>(
+        &'a self,
+        _spec: &'a SpawnSpec,
+    ) -> BoxFuture<'a, Result<ToolResult, ProcessError>> {
+        Box::pin(std::future::ready(Err(ProcessError::Invariant(
+            "fixture does not execute processes".into(),
+        ))))
+    }
+}
+struct EmptyBlobs;
+impl BlobStore for EmptyBlobs {
+    fn begin(&self) -> Result<Box<dyn BlobWriter>, BlobError> {
+        Err(BlobError::Limit { limit: 0 })
+    }
+    fn read(&self, reference: &BlobRef) -> Result<Vec<u8>, BlobError> {
+        Err(BlobError::NotFound {
+            reference: reference.id.clone(),
+        })
+    }
+    fn read_page<'a>(
+        &'a self,
+        request: &'a BlobRead,
+    ) -> BoxFuture<'a, Result<BlobPage, BlobError>> {
+        Box::pin(std::future::ready(Err(BlobError::NotFound {
+            reference: request.reference.id.clone(),
+        })))
+    }
+    fn collect_garbage(&self, _reachable: &[BlobRef]) -> Result<usize, BlobError> {
+        Ok(0)
+    }
+}
+static EMPTY_BLOBS: EmptyBlobs = EmptyBlobs;
+struct EmptyEvidence;
+impl EvidenceStore for EmptyEvidence {
+    fn blob_store(&self) -> &dyn BlobStore {
+        &EMPTY_BLOBS
+    }
+    fn begin(&self) -> Result<Box<dyn EvidenceWriter>, EvidenceError> {
+        Err(EvidenceError::Limit { limit: 0 })
+    }
+    fn read_page<'a>(
+        &'a self,
+        _request: &'a EvidenceRead,
+    ) -> BoxFuture<'a, Result<EvidencePage, EvidenceError>> {
+        Box::pin(std::future::ready(Err(EvidenceError::Limit { limit: 0 })))
+    }
+}
+struct OfflineResolver;
+impl Resolver for OfflineResolver {
+    fn resolve(
+        &self,
+        _target: ego_core::permit::NetworkTarget,
+        _deadline: Option<std::time::Instant>,
+    ) -> BoxFuture<'static, Result<DnsResolution, TransportError>> {
+        Box::pin(std::future::ready(Err(TransportError::definitely_unsent(
+            TransportFailure::Offline,
+        ))))
+    }
+}
+struct OfflineOneHop;
+impl OneHop for OfflineOneHop {
+    fn execute(
+        &self,
+        _connect: ego_core::permit::ResolvedConnect,
+        _request: ego_core::permit::HttpRequest,
+        _deadline: Option<std::time::Instant>,
+    ) -> BoxFuture<'static, Result<OneHopResponse, TransportError>> {
+        Box::pin(std::future::ready(Err(TransportError::definitely_unsent(
+            TransportFailure::Offline,
+        ))))
+    }
+}
+
+struct ScriptedDuplex {
+    input: Cursor<Vec<u8>>,
+    output: Cursor<Vec<u8>>,
+}
+impl ScriptedDuplex {
+    fn new(complete: bool) -> Self {
+        let result = if complete {
+            json!({"jsonrpc":"2.0","id":1,"result":{"resultType":"complete","content":[{"type":"text","text":"retry-complete"}],"isError":false}})
+        } else {
+            json!({"jsonrpc":"2.0","id":1,"result":{"resultType":"input_required","inputRequests":{"answer":{"method":"elicitation/create","params":{"mode":"form","message":"confirm","requestedSchema":{"type":"object","properties":{"choice":{"type":"string"}},"required":["choice"],"additionalProperties":false}}}},"requestState":"opaque-state"}})
+        };
+        let init = json!({"jsonrpc":"2.0","id":0,"result":{"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":{"tools":{"listChanged":false}},"ttlMs":0,"cacheScope":"private","_meta":{"io.modelcontextprotocol/serverInfo":{"name":"local","version":"1.0"}}}});
+        Self {
+            input: Cursor::new(format!("{}\n{}\n", init, result).into_bytes()),
+            output: Cursor::new(Vec::new()),
+        }
+    }
+}
+impl AsyncRead for ScriptedDuplex {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        bytes: &mut [u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.input).poll_read(cx, bytes)
+    }
+}
+impl AsyncWrite for ScriptedDuplex {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        bytes: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.output).poll_write(cx, bytes)
+    }
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.output).poll_flush(cx)
+    }
+    fn poll_close(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.output).poll_close(cx)
+    }
+}
+impl DuplexSession for ScriptedDuplex {
+    fn delivery(&self) -> DeliveryCertainty {
+        DeliveryCertainty::DefinitelyUnsent
+    }
+    fn settle(self: Box<Self>) -> BoxFuture<'static, ego_core::permit::DuplexSettlement> {
+        Box::pin(std::future::ready(ego_core::permit::DuplexSettlement::new(
+            DuplexEnd::Exited { code: 0 },
+            CleanupCertainty::Complete,
+            DeliveryCertainty::DefinitelyUnsent,
+            Ok(ToolResult::builtin("settled")),
+        )))
+    }
+    fn interrupt(self: Box<Self>) -> BoxFuture<'static, ego_core::permit::DuplexSettlement> {
+        Box::pin(std::future::ready(ego_core::permit::DuplexSettlement::new(
+            DuplexEnd::Interrupted,
+            CleanupCertainty::Complete,
+            DeliveryCertainty::DefinitelyUnsent,
+            Ok(ToolResult::builtin("interrupted")),
+        )))
+    }
+}
+#[derive(Clone)]
+struct ScriptedSpawner {
+    calls: Arc<AtomicUsize>,
+}
+impl ScriptedSpawner {
+    fn new() -> Self {
+        Self {
+            calls: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+    fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+impl DuplexSpawner for ScriptedSpawner {
+    fn spawn(&self, _spec: SpawnSpec) -> BoxFuture<'static, Result<DuplexHandle, TransportError>> {
+        let complete = self.calls.fetch_add(1, Ordering::SeqCst) > 0;
+        Box::pin(std::future::ready(Ok(
+            Box::new(ScriptedDuplex::new(complete)) as DuplexHandle,
+        )))
+    }
+}
+
+fn server_admission() -> Arc<McpServerAdmission> {
+    let layer = ConfigLayer::parse(
+        Source::User,
+        "[mcp.servers.server]\ntransport='stdio'\ncommand='mcp-server'\n",
+    )
+    .expect("config");
+    let resolved = resolve(&[layer], Trust::Trusted, None)
+        .expect("resolved")
+        .mcp;
+    let (name, config) = resolved
+        .entries()
+        .iter()
+        .find_map(|(name, entry)| match entry {
+            ResolvedMcpEntry::Configured { server, .. } => Some((name.clone(), server.clone())),
+            ResolvedMcpEntry::Tombstone { .. } => None,
+        })
+        .expect("server");
+    Arc::new(
+        McpServerAdmission::new(name, config, McpTransportMaterial::stdio(Vec::new()))
+            .expect("admission"),
+    )
+}
+fn prepared_call() -> PreparedCall {
+    let spec = SpawnSpec::new(
+        vec![OsString::from("mcp-server")],
+        None,
+        Some(Duration::from_secs(30)),
+        EnvPolicy::exact(Vec::new()).expect("environment"),
+    )
+    .expect("spawn");
+    PreparedCall::mcp_stdio(
+        McpSubject::Tool {
+            server: "server".into(),
+            name: "lookup".into(),
+        },
+        McpOperationKind::CallTool,
+        vec![(
+            ForeignToolId::new("server", "lookup").expect("tool"),
+            InvocationDigest::from_bytes(ORIGINAL),
+        )],
+        McpAdmissionFingerprint::new("generation-1", "server/lookup", "schema-v1")
+            .expect("fingerprint"),
+        "stdio-transport-v1",
+        "server",
+        spec,
+        &serde_json::from_slice(ORIGINAL).expect("params"),
+    )
+    .expect("prepared")
+}
+fn authorized(call: PreparedCall) -> Authorized {
+    let policy = PolicyEngine::new(
+        CanonPath::new("/workspace"),
+        Mode::Yolo,
+        Ruleset::from_layer(
+            PermCfg {
+                judge: None,
+                allow: vec![
+                    ego_core::permit::rule::Rule::load("tool(server/lookup)").expect("tool rule"),
+                    ego_core::permit::rule::Rule::load("exec(mcp-server *)").expect("process rule"),
+                ],
+                deny: Vec::new(),
+            },
+            Source::Project,
+        ),
+    );
+    let Classification::Settled(Ok(authorized)) = policy.classify(call) else {
+        panic!("call must be authorized")
+    };
+    authorized
+}
+fn mapped_input() -> ego_mcp::McpMappedInput {
+    McpInputMapping::map(
+        McpInputRequired::elicitation(SCHEMA, "answer", b"opaque-state").expect("elicitation"),
+    )
+    .expect("mapped input")
+}
+fn prepared_resume(authorized: &Authorized) -> (ResumeSealer, ego_core::suspension::ResumeFloor) {
+    let policy = PolicyEngine::new(CanonPath::new("/workspace"), Mode::Yolo, Ruleset::default());
+    let floor = policy.resume_floor();
+    let sealer =
+        ResumeSealer::new(Arc::new(FixedResumeKey), Arc::new(FixedClock), 30_000).expect("sealer");
+    let _ = authorized;
+    (sealer, floor)
+}
+fn ports(spawner: Arc<ScriptedSpawner>) -> ToolEffectPorts<'static> {
+    let fs: &'static ego_core::permit::fake::FakeFs =
+        Box::leak(Box::new(ego_core::permit::fake::FakeFs::default()));
+    let process: &'static NoProcess = Box::leak(Box::new(NoProcess));
+    let evidence: &'static EmptyEvidence = Box::leak(Box::new(EmptyEvidence));
+    ToolEffectPorts::new(
+        fs,
+        process,
+        evidence,
+        Arc::new(OfflineResolver),
+        Arc::new(OfflineOneHop),
+        spawner,
+    )
+}
+fn registry_capture(factory: Arc<McpStdioOperationFactory>) -> McpRegistryCapture {
+    let admission = server_admission();
+    let inventory = McpCandidateInventory::new(
+        McpCapabilities::tools(),
+        vec![ego_core::generator::types::ToolDescriptor {
+            name: "lookup".into(),
+            description: "fixture".into(),
+            parameters: json!({"type":"object","additionalProperties":false}),
+        }],
+        Vec::new(),
+        Vec::new(),
+        McpCacheMetadata::default(),
+        None,
+    );
+    let candidate = McpAdmittedCandidate::new(
+        Arc::clone(&admission),
+        McpCandidateIdentity::validated("server"),
+        inventory,
+        factory,
+    )
+    .expect("candidate");
+    let candidate_port = Arc::new(OneCandidate(Mutex::new(Some(candidate))));
+    let registry = McpRegistryController::new(Arc::new(RegistryJournal::default()), candidate_port)
+        .expect("registry");
+    let layer = ConfigLayer::parse(
+        Source::User,
+        "[mcp.servers.server]\ntransport='stdio'\ncommand='mcp-server'\n",
+    )
+    .expect("config");
+    let provenance = resolve(&[layer], Trust::Trusted, None)
+        .expect("resolved")
+        .mcp
+        .entries()
+        .values()
+        .find_map(|entry| match entry {
+            ResolvedMcpEntry::Configured { provenance, .. } => Some(provenance.clone()),
+            ResolvedMcpEntry::Tombstone { .. } => None,
+        })
+        .expect("provenance");
+    let refresh = McpRegistryRefresh::new(
+        vec![McpRegistryCandidate::ready(admission, provenance)],
+        RegistryTrigger::Add,
+        RegistryScope::All,
+    )
+    .expect("refresh");
+    block_on(registry.reconcile(refresh)).expect("publication");
+    registry.capture().expect("capture")
+}
+
 #[test]
-fn mcp_matrix_has_one_owner_for_each_mrtr_lifecycle() {
+fn mcp_matrix_has_one_real_owner_for_each_mrtr_lifecycle() {
     assert_eq!(
         MCP_OWNERS,
         [
             (
-                "McpOperationFactory::project_outcome durable request",
+                "McpContinuationOwner::record_input_required",
                 HookLifecycle::Elicitation
             ),
             (
-                "MCP journal accepted answer before guarded claim",
+                "McpContinuationOwner::accept_answer",
                 HookLifecycle::ElicitationResult
-            ),
+            )
         ]
     );
 }
 
 #[test]
-fn operation_factory_projects_elicitation_after_record_then_result_before_claim() {
+fn real_operation_records_before_elicitation_and_returns_foreign_id() {
     let trace = Trace::default();
-    let journal = Arc::new(Continuations::with_trace(trace.clone()));
-    let journal_port: Arc<dyn ContinuationJournal> = journal.clone();
-    let recorder = Arc::new(DurableMcpInputRequiredRecorder::new(journal_port));
-    let port = RecordingPort::with_trace(trace.clone());
-    let owner = McpContinuationOwner::new(
-        McpStdioOperationFactory::new(recorder, 64 * 1024, std::time::Duration::from_secs(30))
-            .expect("MCP operation owner"),
+    let journal = Arc::new(Journal::with_trace(trace.clone()));
+    let owner = Arc::new(McpContinuationOwner::new(
         journal.clone(),
-        dispatcher(port.clone()),
+        hooks_with_mode(HookMode::Continue, trace.clone()),
+        Arc::new(FixedResumeKey),
+        Arc::new(FixedClock),
+    ));
+    let factory =
+        McpStdioOperationFactory::new(Arc::clone(&owner), 64 * 1024, Duration::from_secs(30))
+            .expect("factory");
+    let call = prepared_call();
+    let auth = authorized(call);
+    let (sealer, floor) = prepared_resume(&auth);
+    let resume = sealer.prepare(&auth, floor).expect("resume");
+    let spawner = Arc::new(ScriptedSpawner::new());
+    let (call, permit) = auth.into_parts();
+    let guarded = GuardedEffects::new_with_resume(
+        permit,
+        Box::leak(Box::new(ego_core::permit::fake::FakeFs::default())),
+        Box::leak(Box::new(NoProcess)),
+        Box::leak(Box::new(EmptyEvidence)),
+        Arc::new(OfflineResolver),
+        Arc::new(OfflineOneHop),
+        spawner.clone(),
+        Some(resume),
     );
-    let state = McpInputState::from_mapping(
-        "server".parse().expect("server"),
-        "tools/call",
-        br#"{"name":"lookup","arguments":{}}"#,
-        McpInputMapping::map(required()).expect("one accepted MRTR form"),
-    )
-    .expect("durable input-required state");
-    let request_id = state.request_id().clone();
-    let foreign = futures::executor::block_on(owner.execute_input_required(state, required()))
-        .expect("actual operation owner projects input-required outcome");
-    let foreign = match foreign {
-        ego_core::mcp::ToolExecution::InputRequired(foreign) => foreign,
-        ego_core::mcp::ToolExecution::Complete(_) => {
-            panic!("MRTR input-required outcome must remain foreign input-required")
-        }
+    let outcome = block_on(factory.execute(server_admission(), call, &guarded)).expect("outcome");
+    let ToolExecution::InputRequired(foreign) = outcome else {
+        panic!("expected input-required")
     };
-    let continuation_id = journal
-        .recorded_id()
-        .expect("operation owner durably records continuation before Elicitation");
-    assert_eq!(foreign.continuation_id(), continuation_id);
-    let retry = futures::executor::block_on(owner.accept_answer(
-        &continuation_id,
-        McpInputResponse::new(&request_id, br#"{"choice":"yes"}"#).expect("validated answer"),
-        Timestamp::EPOCH,
+    assert_eq!(foreign.continuation_id(), journal.id());
+    assert_eq!(journal.events(), vec!["record"]);
+    assert_eq!(trace.events(), vec!["record", "Elicitation"]);
+    assert_eq!(spawner.calls(), 1);
+}
+
+#[test]
+fn accepted_answer_validates_hooks_claims_and_retries_once() {
+    let trace = Trace::default();
+    let journal = Arc::new(Journal::with_trace(trace.clone()));
+    let owner = Arc::new(McpContinuationOwner::new(
+        journal.clone(),
+        hooks_with_mode(HookMode::Continue, trace.clone()),
+        Arc::new(FixedResumeKey),
+        Arc::new(FixedClock),
+    ));
+    let factory = Arc::new(
+        McpStdioOperationFactory::new(Arc::clone(&owner), 64 * 1024, Duration::from_secs(30))
+            .expect("factory"),
+    );
+    let call = prepared_call();
+    let auth = authorized(call);
+    let (sealer, floor) = prepared_resume(&auth);
+    let resume = sealer.prepare(&auth, floor.clone()).expect("resume");
+    let spawner = Arc::new(ScriptedSpawner::new());
+    let (call, permit) = auth.into_parts();
+    let guarded = GuardedEffects::new_with_resume(
+        permit,
+        Box::leak(Box::new(ego_core::permit::fake::FakeFs::default())),
+        Box::leak(Box::new(NoProcess)),
+        Box::leak(Box::new(EmptyEvidence)),
+        Arc::new(OfflineResolver),
+        Arc::new(OfflineOneHop),
+        spawner.clone(),
+        Some(resume),
+    );
+    let ToolExecution::InputRequired(foreign) =
+        block_on(factory.execute(server_admission(), call, &guarded)).expect("required")
+    else {
+        panic!("expected required")
+    };
+    let id = foreign.continuation_id().to_owned();
+    let capture = registry_capture(factory);
+    let retried = block_on(owner.accept_answer(
+        &id,
+        br#"{"choice":"yes"}"#,
+        capture,
+        floor,
+        ports(spawner.clone()),
     ))
-    .expect("answer is accepted, hooked, claimed, and retried by the run owner");
-    assert_eq!(retry.method(), "tools/call");
-    assert!(
-        std::str::from_utf8(retry.body())
-            .expect("retry body")
-            .contains("inputResponses")
-    );
-    assert_eq!(
-        journal.records(),
-        1,
-        "input-required result crosses the durable continuation boundary once"
-    );
-    assert_eq!(
-        journal.events(),
-        vec!["record", "accepted_answer", "claim"],
-        "record, accepted answer, hook points, and claim preserve owner order"
-    );
+    .expect("resume");
+    assert!(matches!(retried, ToolExecution::Complete(_)));
+    assert_eq!(journal.events(), vec!["record", "accepted_answer", "claim"]);
     assert_eq!(
         trace.events(),
         vec![
@@ -416,128 +720,222 @@ fn operation_factory_projects_elicitation_after_record_then_result_before_claim(
             "accepted_answer",
             "ElicitationResult",
             "claim"
-        ],
-        "durable record precedes Elicitation and accepted answer precedes result hook/claim"
+        ]
     );
-    assert_eq!(
-        port.calls(),
-        vec![HookLifecycle::Elicitation, HookLifecycle::ElicitationResult]
-    );
+    assert_eq!(spawner.calls(), 2);
+    assert_eq!(journal.state(), None);
 }
 
 #[test]
-fn mcp_pre_block_and_uncertainty_leave_accepted_answer_unclaimed_without_reentry() {
-    let trace = Trace::default();
-    let journal = Arc::new(Continuations::with_trace(trace.clone()));
-    let journal_port: Arc<dyn ContinuationJournal> = journal.clone();
-    let recorder = Arc::new(DurableMcpInputRequiredRecorder::new(journal_port));
-    let port = RecordingPort::blocking_with_trace(trace.clone());
-    let owner = McpContinuationOwner::new(
-        McpStdioOperationFactory::new(recorder, 64 * 1024, std::time::Duration::from_secs(30))
-            .expect("MCP operation owner"),
+fn schema_or_authority_failure_precedes_durable_acceptance() {
+    let journal = Arc::new(Journal::default());
+    let owner = Arc::new(McpContinuationOwner::new(
         journal.clone(),
-        dispatcher(port.clone()),
-    );
-    let state = McpInputState::required(
-        "server".parse().expect("server"),
-        "tools/call",
-        "call-block",
-        br#"{"type":"object","properties":{"choice":{"type":"string"}},"required":["choice"],"additionalProperties":false}"#,
-        br#"{"name":"lookup","arguments":{}}"#,
-    )
-    .expect("MRTR state");
-    let request_id = state.request_id().clone();
-    let _ = futures::executor::block_on(owner.execute_input_required(state, required()))
-        .expect("input-required projection");
-    let id = journal.recorded_id().expect("recorded continuation");
-    let result = futures::executor::block_on(owner.accept_answer(
-        &id,
-        McpInputResponse::new(&request_id, br#"{"choice":"yes"}"#).expect("schema-valid answer"),
-        Timestamp::EPOCH,
+        hooks_with_mode(HookMode::Continue, Trace::default()),
+        Arc::new(FixedResumeKey),
+        Arc::new(FixedClock),
     ));
+    let call = prepared_call();
+    let auth = authorized(call.clone());
+    let (sealer, floor) = prepared_resume(&auth);
+    let mapped = mapped_input();
+    let envelope = call.mcp_envelope().expect("envelope").clone();
+    journal
+        .record(
+            sealer
+                .prepare(&auth, floor.clone())
+                .expect("resume")
+                .into_record(
+                    "continuation-schema-authority",
+                    envelope.parameters().to_vec(),
+                    mapped.request_state().to_vec(),
+                    mapped.correlation_key(),
+                    serde_json::to_vec(mapped.schema()).expect("schema"),
+                    envelope.transport_fingerprint(),
+                )
+                .expect("record"),
+        )
+        .expect("journal");
+    let factory = Arc::new(
+        McpStdioOperationFactory::new(Arc::clone(&owner), 64 * 1024, Duration::from_secs(30))
+            .expect("factory"),
+    );
+    let capture = registry_capture(factory);
     assert!(
-        result.is_err(),
-        "a pre-effect block/uncertainty must fail closed"
+        block_on(owner.accept_answer(
+            "continuation-schema-authority",
+            br#"{"unexpected":true}"#,
+            capture,
+            floor,
+            ports(Arc::new(ScriptedSpawner::new()))
+        ))
+        .is_err()
     );
-    assert_eq!(journal.state(), Some(ContinuationState::Accepted));
-    assert!(!journal.events().iter().any(|event| *event == "claim"));
-    assert_eq!(port.calls(), vec![HookLifecycle::Elicitation]);
-
-    let trace = Trace::default();
-    let journal = Arc::new(Continuations::with_trace(trace.clone()));
-    let journal_port: Arc<dyn ContinuationJournal> = journal.clone();
-    let recorder = Arc::new(DurableMcpInputRequiredRecorder::new(journal_port));
-    let port = RecordingPort::uncertain_with_trace(trace.clone());
-    let owner = McpContinuationOwner::new(
-        McpStdioOperationFactory::new(recorder, 64 * 1024, std::time::Duration::from_secs(30))
-            .expect("MCP operation owner"),
-        journal.clone(),
-        dispatcher(port.clone()),
-    );
-    let state = McpInputState::required(
-        "server".parse().expect("server"),
-        "tools/call",
-        "call-uncertain",
-        br#"{"type":"object","properties":{"choice":{"type":"string"}},"required":["choice"],"additionalProperties":false}"#,
-        br#"{"name":"lookup","arguments":{}}"#,
-    )
-    .expect("MRTR state");
-    let request_id = state.request_id().clone();
-    let _ = futures::executor::block_on(owner.execute_input_required(state, required()))
-        .expect("input-required projection");
-    let id = journal.recorded_id().expect("recorded continuation");
-    let result = futures::executor::block_on(owner.accept_answer(
-        &id,
-        McpInputResponse::new(&request_id, br#"{"choice":"yes"}"#).expect("schema-valid answer"),
-        Timestamp::EPOCH,
-    ));
-    assert!(result.is_err(), "uncertain result delivery must not claim");
-    assert_eq!(journal.state(), Some(ContinuationState::Accepted));
-    assert!(!journal.events().iter().any(|event| *event == "claim"));
-    assert_eq!(
-        port.calls(),
-        vec![HookLifecycle::Elicitation, HookLifecycle::ElicitationResult]
-    );
+    assert_eq!(journal.state(), Some(ContinuationState::Pending));
+    assert_eq!(journal.events(), vec!["record"]);
 }
 
 #[test]
-fn accepted_answer_is_single_use_and_delivery_uncertainty_is_not_retried() {
-    let state = McpInputState::required(
-        "server".parse().expect("server"),
-        "tools/call",
-        "call-1",
-        br#"{"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"],"additionalProperties":false}"#,
-        br#"{"name":"confirm","arguments":{}}"#,
-    ).expect("MRTR state");
-    let request_id = state.request_id().clone();
-    let response = McpInputResponse::new(&request_id, br#"{"ok":true}"#).expect("answer");
-    let retry = state.resume(response).expect("first answer claim");
-    assert!(McpInputResponse::new(&request_id, br#"{"ok":true}"#).is_err());
-    assert_eq!(retry.call_id(), "call-1");
+fn pre_block_or_uncertainty_leaves_accepted_answer_unclaimed_without_reentry() {
+    for mode in [HookMode::BlockResult, HookMode::UncertainResult] {
+        let trace = Trace::default();
+        let journal = Arc::new(Journal::with_trace(trace));
+        let owner = Arc::new(McpContinuationOwner::new(
+            journal.clone(),
+            hooks_with_mode(mode, trace.clone()),
+            Arc::new(FixedResumeKey),
+            Arc::new(FixedClock),
+        ));
+        let factory = Arc::new(
+            McpStdioOperationFactory::new(Arc::clone(&owner), 64 * 1024, Duration::from_secs(30))
+                .expect("factory"),
+        );
+        let call = prepared_call();
+        let auth = authorized(call);
+        let (sealer, floor) = prepared_resume(&auth);
+        let resume = sealer.prepare(&auth, floor.clone()).expect("resume");
+        let spawner = Arc::new(ScriptedSpawner::new());
+        let (call, permit) = auth.into_parts();
+        let guarded = GuardedEffects::new_with_resume(
+            permit,
+            Box::leak(Box::new(ego_core::permit::fake::FakeFs::default())),
+            Box::leak(Box::new(NoProcess)),
+            Box::leak(Box::new(EmptyEvidence)),
+            Arc::new(OfflineResolver),
+            Arc::new(OfflineOneHop),
+            spawner.clone(),
+            Some(resume),
+        );
+        let ToolExecution::InputRequired(foreign) =
+            block_on(factory.execute(server_admission(), call, &guarded)).expect("required")
+        else {
+            panic!("expected required")
+        };
+        let capture = registry_capture(factory);
+        assert!(
+            block_on(owner.accept_answer(
+                foreign.continuation_id(),
+                br#"{"choice":"yes"}"#,
+                capture,
+                floor,
+                ports(spawner.clone())
+            ))
+            .is_err()
+        );
+        assert_eq!(journal.state(), Some(ContinuationState::Accepted));
+        assert!(!journal.events().contains(&"claim"));
+        assert_eq!(spawner.calls(), 1);
+        assert_eq!(
+            journal.trace.events(),
+            vec![
+                "record",
+                "Elicitation",
+                "accepted_answer",
+                "ElicitationResult"
+            ]
+        );
+    }
+}
+
+#[derive(Default)]
+struct RegistryJournal {
+    events: Mutex<Vec<McpRegistryEvent>>,
+}
+impl McpRegistryJournal for RegistryJournal {
+    fn append(&self, event: McpRegistryEvent) -> Result<(), McpRegistryJournalError> {
+        self.events.lock().expect("registry").push(event);
+        Ok(())
+    }
+    fn replay(&self) -> Result<Vec<McpRegistryEvent>, McpRegistryJournalError> {
+        Ok(self.events.lock().expect("registry").clone())
+    }
+    fn begin_refresh(
+        &self,
+        request_id: String,
+        trigger: String,
+        server_scope: Option<String>,
+    ) -> Result<u64, McpRegistryJournalError> {
+        self.events
+            .lock()
+            .expect("registry")
+            .push(McpRegistryEvent::RefreshRequested {
+                request_id,
+                trigger,
+                server_scope,
+                config_revision: 1,
+            });
+        Ok(1)
+    }
+}
+struct OneCandidate(Mutex<Option<McpAdmittedCandidate>>);
+impl McpCandidateAdmission for OneCandidate {
+    fn admit(
+        &self,
+        _request: ego_mcp::McpCandidateRequest,
+    ) -> McpFuture<'static, Result<McpAdmittedCandidate, McpCandidateError>> {
+        let candidate = self.0.lock().expect("candidate").take();
+        Box::pin(async move {
+            candidate.ok_or_else(|| McpCandidateError::Invalid {
+                cause: "candidate already used".into(),
+            })
+        })
+    }
+}
+
+fn registry_capture(factory: Arc<McpStdioOperationFactory>) -> McpRegistryCapture {
+    let admission = server_admission();
+    let inventory = McpCandidateInventory::new(
+        McpCapabilities::tools(),
+        vec![ego_core::generator::types::ToolDescriptor {
+            name: "lookup".into(),
+            description: "continuation fixture".into(),
+            parameters: json!({"type":"object","additionalProperties":false}),
+        }],
+        Vec::new(),
+        Vec::new(),
+        McpCacheMetadata::default(),
+        None,
+    );
+    let candidate = McpAdmittedCandidate::new(
+        Arc::clone(&admission),
+        McpCandidateIdentity::validated("server"),
+        inventory,
+        factory,
+    )
+    .expect("candidate");
+    let candidate_port = Arc::new(OneCandidate(Mutex::new(Some(candidate))));
+    let registry = McpRegistryController::new(Arc::new(RegistryJournal::default()), candidate_port)
+        .expect("registry");
+    let layer = ConfigLayer::parse(
+        Source::User,
+        "[mcp.servers.server]\ntransport='stdio'\ncommand='mcp-server'\n",
+    )
+    .expect("config");
+    let provenance = resolve(&[layer], Trust::Trusted, None)
+        .expect("resolved")
+        .mcp
+        .entries()
+        .values()
+        .find_map(|entry| match entry {
+            ResolvedMcpEntry::Configured { provenance, .. } => Some(provenance.clone()),
+            ResolvedMcpEntry::Tombstone { .. } => None,
+        })
+        .expect("provenance");
+    let refresh = McpRegistryRefresh::new(
+        vec![McpRegistryCandidate::ready(admission, provenance)],
+        RegistryTrigger::Add,
+        RegistryScope::All,
+    )
+    .expect("refresh");
+    block_on(registry.reconcile(refresh)).expect("publication");
+    registry.capture().expect("capture")
 }
 
 #[test]
-fn mcp_hook_effect_producer_cannot_reenter_mrtr() {
-    let location =
-        ego_core::event::hook::HookSourceLocation::parse("hooks/mcp.toml").expect("hook location");
-    let digest: HookContentDigest =
-        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-            .parse()
-            .expect("hook digest");
-    let hook = ego_core::event::hook::HookId::derive(
-        ego_core::event::hook::HookSourceAuthority::Project,
-        &location,
-        &digest,
-        0,
-    );
-    let port = RecordingPort::default();
-    let dispatcher = dispatcher(port.clone());
-    let _ = futures::executor::block_on(
-        dispatcher.dispatch(Producer::Hook(hook), occurrence(HookLifecycle::Elicitation)),
-    );
-    assert!(!Producer::Hook(hook).may_trigger_hooks());
-    assert!(
-        port.calls().is_empty(),
-        "hook-originated MRTR effects cannot recursively emit lifecycle events"
-    );
+fn ordinary_question_path_does_not_add_an_mcp_hook_owner() {
+    assert_eq!(MCP_OWNERS.len(), 2);
+    assert!(MCP_OWNERS.iter().all(|(_, lifecycle)| matches!(
+        lifecycle,
+        HookLifecycle::Elicitation | HookLifecycle::ElicitationResult
+    )));
 }
