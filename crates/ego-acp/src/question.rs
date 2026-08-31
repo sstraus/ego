@@ -7,8 +7,9 @@ use std::sync::Arc;
 use agent_client_protocol::{Client, ConnectionTo};
 use agent_client_protocol_schema::v1::{
     ClientCapabilities, CreateElicitationRequest, CreateElicitationResponse, ElicitationAction,
-    ElicitationContentValue, ElicitationFormMode, ElicitationRequestScope, ElicitationSchema,
-    MultiSelectPropertySchema, RequestId, StringPropertySchema,
+    ElicitationContentValue, ElicitationFormMode, ElicitationPropertySchema,
+    ElicitationRequestScope, ElicitationSchema, MultiSelectPropertySchema, RequestId,
+    StringPropertySchema,
 };
 use ego_core::event::id::ItemId;
 use ego_core::question::{
@@ -105,7 +106,7 @@ impl AcpQuestionAdapter {
         request
             .validate()
             .map_err(|error| invalid_request(question, error))?;
-        let schema = match request.mode {
+        let schema = match &request.mode {
             QuestionMode::Single => ElicitationSchema::new().property(
                 "answer",
                 StringPropertySchema::new().enum_values(
@@ -129,6 +130,7 @@ impl AcpQuestionAdapter {
                 true,
             ),
             QuestionMode::FreeText => ElicitationSchema::new().string("answer", true),
+            QuestionMode::Form { schema } => map_form_schema(question, schema)?,
         };
         let scope = ElicitationRequestScope::new(RequestId::Str(question.to_string()));
         Ok(CreateElicitationRequest::new(
@@ -147,7 +149,7 @@ impl AcpQuestionAdapter {
                 let content = accepted.content.as_ref().ok_or_else(|| {
                     invalid_answer(question, "accepted elicitation has no content")
                 })?;
-                let answer = match request.mode {
+                let answer = match &request.mode {
                     QuestionMode::Single => match content.get("answer") {
                         Some(ElicitationContentValue::String(value)) => {
                             QuestionAnswer::single(value.clone())
@@ -171,6 +173,46 @@ impl AcpQuestionAdapter {
                         }
                         _ => return Err(invalid_answer(question, "`answer` must be a string")),
                     },
+                    QuestionMode::Form { .. } => {
+                        let mut answer = serde_json::Map::new();
+                        for (name, value) in content {
+                            let value = match value {
+                                ElicitationContentValue::String(value) => {
+                                    serde_json::Value::String(value.clone())
+                                }
+                                ElicitationContentValue::Integer(value) => {
+                                    serde_json::Value::Number((*value).into())
+                                }
+                                ElicitationContentValue::Number(value) => {
+                                    let number =
+                                        serde_json::Number::from_f64(*value).ok_or_else(|| {
+                                            invalid_answer(question, "form number is not finite")
+                                        })?;
+                                    serde_json::Value::Number(number)
+                                }
+                                ElicitationContentValue::Boolean(value) => {
+                                    serde_json::Value::Bool(*value)
+                                }
+                                ElicitationContentValue::StringArray(values) => {
+                                    serde_json::Value::Array(
+                                        values
+                                            .iter()
+                                            .cloned()
+                                            .map(serde_json::Value::String)
+                                            .collect(),
+                                    )
+                                }
+                                _ => {
+                                    return Err(invalid_answer(
+                                        question,
+                                        "form content contains an unsupported ACP value",
+                                    ));
+                                }
+                            };
+                            answer.insert(name.clone(), value);
+                        }
+                        QuestionAnswer::form(answer)
+                    }
                 };
                 answer
                     .validate_for(request)
@@ -217,6 +259,33 @@ impl AcpQuestionAdapter {
     }
 }
 
+fn map_form_schema(
+    question: ItemId,
+    schema: &serde_json::Value,
+) -> Result<ElicitationSchema, QuestionMappingError> {
+    let mapped: ElicitationSchema = serde_json::from_value(schema.clone())
+        .map_err(|error| invalid_request_reason(question, error.to_string()))?;
+    if mapped
+        .properties
+        .values()
+        .any(|property| matches!(property, ElicitationPropertySchema::Other(_)))
+    {
+        return Err(invalid_request_reason(
+            question,
+            "form schema contains a property type unsupported by ACP v1.5",
+        ));
+    }
+    let projected = serde_json::to_value(&mapped)
+        .map_err(|error| invalid_request_reason(question, error.to_string()))?;
+    if projected != *schema {
+        return Err(invalid_request_reason(
+            question,
+            "form schema cannot be represented exactly by ACP v1.5",
+        ));
+    }
+    Ok(mapped)
+}
+
 impl Elicitor for AcpQuestionAdapter {
     fn elicit<'a>(
         &'a self,
@@ -228,9 +297,13 @@ impl Elicitor for AcpQuestionAdapter {
 }
 
 fn invalid_request(question: ItemId, error: QuestionError) -> QuestionMappingError {
+    invalid_request_reason(question, error.to_string())
+}
+
+fn invalid_request_reason(question: ItemId, reason: impl Into<String>) -> QuestionMappingError {
     QuestionMappingError::InvalidRequest {
         id: question,
-        reason: error.to_string(),
+        reason: reason.into(),
     }
 }
 
