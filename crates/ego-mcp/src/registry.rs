@@ -807,7 +807,12 @@ impl ContextSource for McpCapturedContextSource {
 
 #[derive(Clone)]
 pub struct McpRegistryCapture {
+    inner: Arc<McpRegistryCaptureInner>,
+}
+
+struct McpRegistryCaptureInner {
     generation: Arc<str>,
+    stable_fingerprint: Arc<str>,
     tools: Arc<[Arc<dyn Tool>]>,
     captured_tools: Arc<[Arc<McpCapturedTool>]>,
     contexts: Arc<McpCapturedContextSource>,
@@ -816,23 +821,27 @@ pub struct McpRegistryCapture {
 
 impl McpRegistryCapture {
     pub fn generation(&self) -> &str {
-        &self.generation
+        &self.inner.generation
+    }
+
+    pub fn stable_fingerprint(&self) -> &str {
+        &self.inner.stable_fingerprint
     }
 
     pub fn tools(&self) -> &[Arc<dyn Tool>] {
-        &self.tools
+        &self.inner.tools
     }
 
     pub fn context_source(&self) -> Arc<dyn ContextSource> {
-        Arc::clone(&self.contexts) as Arc<dyn ContextSource>
+        Arc::clone(&self.inner.contexts) as Arc<dyn ContextSource>
     }
 
     pub fn context_operations(&self) -> &[McpCapturedContextOperation] {
-        self.contexts.operations()
+        self.inner.contexts.operations()
     }
 
     pub fn servers(&self) -> &[McpCapturedServer] {
-        &self.servers
+        &self.inner.servers
     }
 
     pub(crate) fn prepare_resume(
@@ -850,6 +859,7 @@ impl McpRegistryCapture {
         let (admission, factory, call) = match subject.kind() {
             ContinuationKind::Tool => {
                 let captured = self
+                    .inner
                     .captured_tools
                     .iter()
                     .find(|tool| {
@@ -875,6 +885,7 @@ impl McpRegistryCapture {
             }
             ContinuationKind::Resource | ContinuationKind::Prompt => {
                 let captured = self
+                    .inner
                     .contexts
                     .operations()
                     .iter()
@@ -927,11 +938,17 @@ impl AdmittedRegistrySnapshot {
             servers: BTreeMap::new(),
             tools: Arc::from(Vec::<RegisteredTool>::new()),
             capture: McpRegistryCapture {
-                generation: Arc::from("generation-0"),
-                tools: Arc::from(Vec::<Arc<dyn Tool>>::new()),
-                captured_tools: Arc::from(Vec::<Arc<McpCapturedTool>>::new()),
-                contexts,
-                servers: Arc::from(Vec::<McpCapturedServer>::new()),
+                inner: Arc::new(McpRegistryCaptureInner {
+                    generation: Arc::from("generation-0"),
+                    stable_fingerprint: Arc::from(
+                        stable_capture_fingerprint(&BTreeMap::new())
+                            .expect("the empty MCP capture has a stable fingerprint"),
+                    ),
+                    tools: Arc::from(Vec::<Arc<dyn Tool>>::new()),
+                    captured_tools: Arc::from(Vec::<Arc<McpCapturedTool>>::new()),
+                    contexts,
+                    servers: Arc::from(Vec::<McpCapturedServer>::new()),
+                }),
             },
         }
     }
@@ -1253,6 +1270,7 @@ fn failure_message(failure: McpFailure) -> &'static str {
 struct PublishedState {
     snapshot: Arc<AdmittedRegistrySnapshot>,
     status: McpRegistryStatus,
+    captures: BTreeMap<Arc<str>, Weak<McpRegistryCaptureInner>>,
 }
 
 #[derive(Clone)]
@@ -1331,6 +1349,7 @@ impl McpRegistryController {
             state: Arc::new(RwLock::new(PublishedState {
                 snapshot: Arc::new(AdmittedRegistrySnapshot::empty()),
                 status: McpRegistryStatus::default(),
+                captures: BTreeMap::new(),
             })),
             next_request: AtomicU64::new(1),
         }))
@@ -1371,6 +1390,7 @@ impl McpRegistryController {
                 state: Arc::new(RwLock::new(PublishedState {
                     snapshot: Arc::new(AdmittedRegistrySnapshot::empty()),
                     status: McpRegistryStatus::default(),
+                    captures: BTreeMap::new(),
                 })),
                 next_request: AtomicU64::new(1),
             }
@@ -1590,6 +1610,24 @@ impl McpRegistryController {
             .map(|snapshot| snapshot.capture.clone())
     }
 
+    pub fn resolve_capture(
+        &self,
+        stable_fingerprint: &str,
+    ) -> Result<McpRegistryCapture, McpRegistryError> {
+        self.state
+            .read()
+            .map_err(|_| McpRegistryError::PublicationUnavailable)?
+            .captures
+            .get(stable_fingerprint)
+            .and_then(Weak::upgrade)
+            .map(|inner| McpRegistryCapture { inner })
+            .ok_or_else(|| {
+                McpRegistryError::InvalidCandidate(
+                    "MCP registry capture identity is unavailable".to_owned(),
+                )
+            })
+    }
+
     fn current_snapshot(&self) -> Result<Arc<AdmittedRegistrySnapshot>, McpRegistryError> {
         self.state
             .read()
@@ -1655,6 +1693,17 @@ impl McpRegistryController {
             }
         };
         let generation: Arc<str> = Arc::from(format!("generation-{number}"));
+        let stable_fingerprint: Arc<str> = match stable_capture_fingerprint(&servers) {
+            Ok(fingerprint) => Arc::from(fingerprint),
+            Err(error) => {
+                return self.fail_publication(
+                    request_id,
+                    error.to_string(),
+                    &predecessor,
+                    servers.keys(),
+                );
+            }
+        };
         let mut captured_tools = Vec::<Arc<McpCapturedTool>>::new();
         for (name, server) in &servers {
             for definition in server.tools.iter() {
@@ -1720,11 +1769,14 @@ impl McpRegistryController {
             })
             .collect::<Vec<_>>();
         let capture = McpRegistryCapture {
-            generation: Arc::clone(&generation),
-            tools: effect_tools.into(),
-            captured_tools: captured_tools.into(),
-            contexts,
-            servers: captured_servers.into(),
+            inner: Arc::new(McpRegistryCaptureInner {
+                generation: Arc::clone(&generation),
+                stable_fingerprint,
+                tools: effect_tools.into(),
+                captured_tools: captured_tools.into(),
+                contexts,
+                servers: captured_servers.into(),
+            }),
         };
         let snapshot = Arc::new(AdmittedRegistrySnapshot {
             number,
@@ -1746,6 +1798,10 @@ impl McpRegistryController {
             .write()
             .map_err(|_| McpRegistryError::PublicationUnavailable)?;
         state.status = status_from_snapshot(&snapshot, status_overrides, Instant::now());
+        state.captures.insert(
+            Arc::clone(&snapshot.capture.inner.stable_fingerprint),
+            Arc::downgrade(&snapshot.capture.inner),
+        );
         state.snapshot = snapshot;
         Ok(publication)
     }
@@ -1811,6 +1867,231 @@ fn descriptor_digests(tools: &[RegisteredTool]) -> Vec<String> {
         .collect::<Vec<_>>();
     digests.sort();
     digests
+}
+
+fn stable_capture_fingerprint(
+    servers: &BTreeMap<McpServerName, Arc<AdmittedServerSlice>>,
+) -> Result<String, McpRegistryError> {
+    let mut fingerprint = StableCaptureHasher::new();
+    fingerprint.count("server-count", servers.len());
+    for (name, server) in servers {
+        fingerprint.field("server", name.as_str().as_bytes());
+        fingerprint.field("candidate-identity", server.identity.as_str().as_bytes());
+        fingerprint.provenance(&server.provenance);
+        fingerprint.server_admission(&server.admission)?;
+        fingerprint.field("capability-tools", &[u8::from(server.capabilities.tools)]);
+        fingerprint.field(
+            "capability-resources",
+            &[u8::from(server.capabilities.resources)],
+        );
+        fingerprint.field(
+            "capability-prompts",
+            &[u8::from(server.capabilities.prompts)],
+        );
+        fingerprint.optional_str("cache-source-revision", server.cache.source_revision());
+        fingerprint.field(
+            "collapsed-bootstrap",
+            &[u8::from(server.collapsed_bootstrap.is_some())],
+        );
+
+        let mut descriptors = server.descriptors.iter().collect::<Vec<_>>();
+        descriptors.sort_by(|left, right| left.name.cmp(&right.name));
+        fingerprint.count("descriptor-count", descriptors.len());
+        for descriptor in descriptors {
+            fingerprint.field("descriptor-name", descriptor.name.as_bytes());
+            fingerprint.field("descriptor-description", descriptor.description.as_bytes());
+            fingerprint.json("descriptor-parameters", &descriptor.parameters);
+        }
+
+        let mut definitions = server.tools.iter().collect::<Vec<_>>();
+        definitions.sort_by(|left, right| left.name().cmp(right.name()));
+        fingerprint.count("operation-count", definitions.len());
+        for definition in definitions {
+            fingerprint.field("operation-name", definition.name().as_bytes());
+            fingerprint.field(
+                "operation-schema",
+                definition.admission_schema_fingerprint().as_bytes(),
+            );
+        }
+
+        let mut resources = server.resources.iter().collect::<Vec<_>>();
+        resources.sort_by(|left, right| left.uri.cmp(&right.uri));
+        fingerprint.count("resource-count", resources.len());
+        for resource in resources {
+            let value = serde_json::to_value(resource)
+                .map_err(|error| McpRegistryError::InvalidCandidate(error.to_string()))?;
+            fingerprint.json("resource", &value);
+        }
+
+        let mut prompts = server.prompts.iter().collect::<Vec<_>>();
+        prompts.sort_by(|left, right| left.name.cmp(&right.name));
+        fingerprint.count("prompt-count", prompts.len());
+        for prompt in prompts {
+            let value = serde_json::to_value(prompt)
+                .map_err(|error| McpRegistryError::InvalidCandidate(error.to_string()))?;
+            fingerprint.json("prompt", &value);
+        }
+    }
+    Ok(fingerprint.finish())
+}
+
+struct StableCaptureHasher(Sha256);
+
+impl StableCaptureHasher {
+    fn new() -> Self {
+        let mut hash = Sha256::new();
+        hash.update(b"ego:mcp-registry-capture:v1");
+        Self(hash)
+    }
+
+    fn field(&mut self, name: &str, value: &[u8]) {
+        self.bytes(name.as_bytes());
+        self.bytes(value);
+    }
+
+    fn bytes(&mut self, value: &[u8]) {
+        self.0.update(value.len().to_string().as_bytes());
+        self.0.update([0]);
+        self.0.update(value);
+    }
+
+    fn count(&mut self, name: &str, value: usize) {
+        self.field(name, value.to_string().as_bytes());
+    }
+
+    fn optional_str(&mut self, name: &str, value: Option<&str>) {
+        self.field(name, &[u8::from(value.is_some())]);
+        if let Some(value) = value {
+            self.field(name, value.as_bytes());
+        }
+    }
+
+    fn provenance(&mut self, provenance: &McpConfigProvenance) {
+        match provenance {
+            McpConfigProvenance::Layer { source } => {
+                self.field("provenance-kind", b"layer");
+                self.field("provenance-source", source.to_string().as_bytes());
+            }
+            McpConfigProvenance::Profile { source, name } => {
+                self.field("provenance-kind", b"profile");
+                self.field("provenance-source", source.to_string().as_bytes());
+                self.field("provenance-profile", name.as_bytes());
+            }
+        }
+    }
+
+    fn server_admission(&mut self, admission: &McpServerAdmission) -> Result<(), McpRegistryError> {
+        match admission.config() {
+            McpServerConfig::Stdio(config) => {
+                self.field("transport", b"stdio");
+                self.field("command", config.command.as_bytes());
+                self.count("argument-count", config.args.len());
+                for argument in &config.args {
+                    self.field("argument", argument.as_bytes());
+                }
+                self.field("cwd-present", &[u8::from(config.cwd.is_some())]);
+                if let Some(cwd) = &config.cwd {
+                    self.field("cwd", cwd.as_os_str().as_encoded_bytes());
+                }
+                let mut inherited = config
+                    .inherit_env
+                    .iter()
+                    .map(|name| name.as_str())
+                    .collect::<Vec<_>>();
+                inherited.sort();
+                self.count("inherit-env-count", inherited.len());
+                for name in inherited {
+                    self.field("inherit-env", name.as_bytes());
+                }
+                let environment = admission.stdio_environment().ok_or_else(|| {
+                    McpRegistryError::InvalidCandidate(
+                        "admitted MCP stdio server has no stdio material".to_owned(),
+                    )
+                })?;
+                self.count("environment-count", environment.len());
+                for binding in environment {
+                    let binding = binding
+                        .explicit_binding()
+                        .map_err(|error| McpRegistryError::InvalidCandidate(error.to_string()))?;
+                    self.field("environment-name", binding.name().to_string().as_bytes());
+                    self.field(
+                        "environment-value",
+                        binding.expose_value().expose_secret_bytes(),
+                    );
+                }
+            }
+            McpServerConfig::Http(config) => {
+                self.field("transport", b"http");
+                self.field("url", config.url.to_string().as_bytes());
+                self.field(
+                    "http-auth",
+                    match config.auth {
+                        ego_core::config::McpHttpAuth::None => b"none",
+                        ego_core::config::McpHttpAuth::Oauth => b"oauth",
+                    },
+                );
+                self.field(
+                    "allow-insecure-loopback",
+                    &[u8::from(config.allow_insecure_loopback)],
+                );
+                let headers = admission.http_headers().ok_or_else(|| {
+                    McpRegistryError::InvalidCandidate(
+                        "admitted MCP HTTP server has no HTTP material".to_owned(),
+                    )
+                })?;
+                self.count("header-count", headers.len());
+                for header in headers {
+                    self.field("header-name", header.name().as_bytes());
+                    self.field("header-value", header.value().expose_secret_bytes());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn json(&mut self, name: &str, value: &serde_json::Value) {
+        self.bytes(name.as_bytes());
+        self.json_value(value);
+    }
+
+    fn json_value(&mut self, value: &serde_json::Value) {
+        match value {
+            serde_json::Value::Null => self.field("json-type", b"null"),
+            serde_json::Value::Bool(value) => {
+                self.field("json-type", b"boolean");
+                self.field("json-boolean", &[u8::from(*value)]);
+            }
+            serde_json::Value::Number(value) => {
+                self.field("json-type", b"number");
+                self.field("json-number", value.to_string().as_bytes());
+            }
+            serde_json::Value::String(value) => {
+                self.field("json-type", b"string");
+                self.field("json-string", value.as_bytes());
+            }
+            serde_json::Value::Array(values) => {
+                self.field("json-type", b"array");
+                self.count("json-length", values.len());
+                for value in values {
+                    self.json_value(value);
+                }
+            }
+            serde_json::Value::Object(values) => {
+                self.field("json-type", b"object");
+                self.count("json-length", values.len());
+                let mut fields = values.iter().collect::<Vec<_>>();
+                fields.sort_by_key(|(name, _)| (*name).clone());
+                for (name, value) in fields {
+                    self.field("json-field", name.as_bytes());
+                    self.json_value(value);
+                }
+            }
+        }
+    }
+
+    fn finish(self) -> String {
+        format!("sha256:{:x}", self.0.finalize())
+    }
 }
 
 fn validate_candidate_contents(

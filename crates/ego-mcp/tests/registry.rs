@@ -15,8 +15,8 @@ use ego_core::turn::{McpRegistryEvent, McpRegistryJournal, McpRegistryJournalErr
 use ego_mcp::{
     McpAdmittedCandidate, McpCandidateAdmission, McpCandidateError, McpCandidateInventory,
     McpCandidateRequest, McpFailure, McpOperation, McpOperationFactory, McpRegistryCandidate,
-    McpRegistryController, McpRegistryError, McpRegistryRefresh, McpServerAdmission,
-    McpTransportMaterial, RegistryScope, RegistryTrigger,
+    McpRegistryController, McpRegistryError, McpRegistryPublication, McpRegistryRefresh,
+    McpServerAdmission, McpTransportMaterial, RegistryScope, RegistryTrigger,
 };
 use futures::future::BoxFuture;
 use serde_json::json;
