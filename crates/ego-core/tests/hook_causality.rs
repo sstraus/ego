@@ -10,11 +10,11 @@ use ego_core::event::hook::{
 use ego_core::event::id::{EventId, ItemId, Producer, Seq, SessionId, TurnId};
 use ego_core::event::time::{Clock, Timestamp};
 use ego_core::hook::HookStartedEvidence;
+use ego_core::run::{RunAppend, RunRevision};
 use ego_core::sink::CollectingSink;
 use ego_core::state::{RefusalReason, SessionState};
 use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
 use ego_core::turn::Journal;
-use ego_core::run::{RunAppend, RunRevision};
 use futures::stream::BoxStream;
 
 #[derive(Default)]
@@ -30,7 +30,10 @@ impl Store {
 
 impl SessionStore for Store {
     fn append(&self, _id: &SessionId, event: &DomainEvent) -> Result<(), StoreError> {
-        self.events.lock().expect("journal events").push(event.clone());
+        self.events
+            .lock()
+            .expect("journal events")
+            .push(event.clone());
         Ok(())
     }
 
@@ -113,7 +116,10 @@ fn reached(
 }
 
 fn assert_last_refusal(state: &SessionState, reason: RefusalReason) {
-    assert_eq!(state.refusals.last().map(|refusal| refusal.reason), Some(reason));
+    assert_eq!(
+        state.refusals.last().map(|refusal| refusal.reason),
+        Some(reason)
+    );
 }
 
 #[test]
@@ -295,7 +301,10 @@ fn continuation_accepts_exact_tool_start_after_a_tool_delta() {
     );
     state.apply(&reached);
 
-    assert!(state.refusals.is_empty(), "the exact tool start parent is accepted");
+    assert!(
+        state.refusals.is_empty(),
+        "the exact tool start parent is accepted"
+    );
     assert_eq!(
         state.items.get(&item).expect("tool item").tool_call_started,
         Some(started.env.id),

@@ -186,7 +186,7 @@ impl ToolOriginFixture {
         let id = SessionId::new();
         let turn = TurnId::new();
         let item = ItemId::new();
-        let delta = event_with_item(
+        let mut delta = event_with_item(
             Seq::default().next(),
             EventId::new(),
             turn,
@@ -197,7 +197,7 @@ impl ToolOriginFixture {
                 text: "before-start".to_owned(),
             },
         );
-        let tool_started = event_with_item(
+        let mut tool_started = event_with_item(
             delta.env.seq.next(),
             EventId::new(),
             turn,
@@ -210,7 +210,7 @@ impl ToolOriginFixture {
                 call_id: Some("call-origin".to_owned()),
             },
         );
-        let accepted = event_with_item(
+        let mut accepted = event_with_item(
             tool_started.env.seq.next(),
             EventId::new(),
             turn,
@@ -334,7 +334,11 @@ fn snapshot_v12_roundtrip_and_tail_replay_preserve_tool_origin_and_result() {
     let expected = fixture.full_replay();
     fixture
         .store
-        .write_snapshot(&fixture.id, fixture.events[1].env.seq, &fixture.base_state())
+        .write_snapshot(
+            &fixture.id,
+            fixture.events[1].env.seq,
+            &fixture.base_state(),
+        )
         .unwrap();
 
     let (resumed, rejection) = fixture.store.resume(&fixture.id).unwrap();
@@ -347,11 +351,7 @@ fn snapshot_v12_roundtrip_and_tail_replay_preserve_tool_origin_and_result() {
 fn real_v11_snapshot_without_tool_origin_is_version_rejected_then_full_replay_succeeds() {
     let fixture = ToolOriginFixture::new();
     let expected = fixture.full_replay();
-    let snapshot = Snapshot::new(
-        fixture.id,
-        fixture.events[1].env.seq,
-        fixture.base_state(),
-    );
+    let snapshot = Snapshot::new(fixture.id, fixture.events[1].env.seq, fixture.base_state());
     let mut legacy = serde_json::to_value(snapshot).unwrap();
     legacy["v"] = serde_json::json!(11);
     let items = legacy["state"]["items"]
@@ -362,7 +362,11 @@ fn real_v11_snapshot_without_tool_origin_is_version_rejected_then_full_replay_su
             .expect("serialized item object")
             .remove("tool_call_started");
     }
-    std::fs::write(fixture.snapshot_path(), serde_json::to_vec(&legacy).unwrap()).unwrap();
+    std::fs::write(
+        fixture.snapshot_path(),
+        serde_json::to_vec(&legacy).unwrap(),
+    )
+    .unwrap();
 
     let (resumed, rejection) = fixture.store.resume(&fixture.id).unwrap();
     assert_eq!(rejection, Some(SnapshotRejection::Version { found: 11 }));
@@ -387,6 +391,7 @@ fn actual_v4_snapshot_is_rejected_and_jsonl_replay_reconstructs_hooks() {
     assert_eq!(resumed, state);
 
     let mut old = version_only;
+    old["v"] = serde_json::json!(SNAPSHOT_VERSION);
     let state_object = old["state"].as_object_mut().expect("snapshot state object");
     for field in [
         "hook_catalogue",

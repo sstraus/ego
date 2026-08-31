@@ -5,15 +5,15 @@ use std::sync::Arc;
 use ego_core::budget::{BudgetGate, Metering, SharedBudgetGate};
 use ego_core::cost::CurrencyCode;
 use ego_core::cost::MeteringRevision;
+use ego_core::event::id::{GateId, GenerationId};
+use ego_core::generator::attempt::{AttemptStream, GenerationAttempt};
 use ego_core::generator::capabilities::{
     CacheRetention, CancelSemantics, ImageInputSupport, ModelCapabilities, ReasoningCarryover,
     ReasoningEffortSupport, Transport,
 };
-use ego_core::generator::attempt::{AttemptStream, GenerationAttempt};
 use ego_core::generator::port::AiEvent;
-use ego_core::generator::types::{Conversation, GenRequest, Message, Role, ThinkingLevel};
-use ego_core::event::id::{GenerationId, GateId};
 use ego_core::generator::types::StopReason;
+use ego_core::generator::types::{Conversation, GenRequest, Message, Role, ThinkingLevel};
 use futures::{Stream, StreamExt};
 
 fn assert_send_sync<T: Send + Sync>() {}
@@ -34,9 +34,9 @@ fn root_prompt_and_child_clones_share_one_gate_id_and_ledger() {
 
 #[test]
 fn shared_gate_reservation_and_attempt_stream_are_consumed_once() {
-    let root = Arc::new(SharedBudgetGate::new(
-        BudgetGate::unlimited(CurrencyCode::new("USD").expect("currency")),
-    ));
+    let root = Arc::new(SharedBudgetGate::new(BudgetGate::unlimited(
+        CurrencyCode::new("USD").expect("currency"),
+    )));
     let (mut first, first_gate) = admitted_stream(&root, "first");
     let (mut second, second_gate) = admitted_stream(&root, "second");
     assert_eq!(first_gate, root.id());

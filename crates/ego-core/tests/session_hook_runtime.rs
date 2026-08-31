@@ -2,16 +2,16 @@
 
 use std::future::Future;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
 use std::task::{Context, Poll};
+use std::time::{Duration, Instant};
 
+use ego_core::config::{ConfigLayer, Source, Trust};
 use ego_core::event::domain::{DomainEvent, EventKind};
 use ego_core::event::hook::{
     HookDecision, HookLifecycle, HookOccurrenceKey, HookOccurrenceOwner, HookOutcome,
 };
 use ego_core::event::id::{Producer, Seq, SessionId, TurnId};
 use ego_core::event::time::{Clock, Timestamp};
-use ego_core::config::{ConfigLayer, Source, Trust};
 use ego_core::hook::{
     HookCatalogue, HookEvent, HookFuture, HookInvocationPort, HookInvocationRequest,
     HookLifecycleDispatcher, HookRunner, SessionHookRuntime,
@@ -38,7 +38,10 @@ impl Store {
 
 impl SessionStore for Store {
     fn append(&self, _id: &SessionId, event: &DomainEvent) -> Result<(), StoreError> {
-        self.events.lock().expect("journal events").push(event.clone());
+        self.events
+            .lock()
+            .expect("journal events")
+            .push(event.clone());
         Ok(())
     }
 
@@ -118,7 +121,6 @@ impl HookInvocationPort for RecordingPort {
             None,
         ))))
     }
-
 }
 
 fn active_catalogue() -> HookCatalogue {
@@ -130,7 +132,9 @@ fn active_catalogue() -> HookCatalogue {
     HookCatalogue::admit_typed(&[layer], &[], Trust::Trusted).expect("active catalogue")
 }
 
-fn runtime_fixture(blocked: bool) -> (
+fn runtime_fixture(
+    blocked: bool,
+) -> (
     SessionHookRuntime<'static>,
     Arc<RecordingPort>,
     &'static Store,
@@ -219,7 +223,10 @@ fn normal_append_and_two_hook_occurrences_share_one_sequence_and_state() {
     for event in &events {
         assert_eq!(event.env.seq, expected.next());
     }
-    assert_eq!(runtime.state().last_seq, events.last().expect("events").env.seq);
+    assert_eq!(
+        runtime.state().last_seq,
+        events.last().expect("events").env.seq
+    );
     let state = runtime.state();
     assert_eq!(state.hook_occurrences().len(), 2);
     assert_eq!(
@@ -251,12 +258,22 @@ fn recovered_completed_occurrence_does_not_invoke_and_state_keeps_all_facts() {
         occurrence(HookLifecycle::SessionStart, session, turn, 3),
     ))
     .expect("recovered dispatch");
-    assert_eq!(invocation.calls(), first_calls, "recovery never invokes again");
-    assert!(store
-        .events()
-        .iter()
-        .any(|event| matches!(event.kind, EventKind::HookLifecycleReached { .. })));
-    assert_eq!(store.events().len(), first_events, "recovery reuses durable envelope");
+    assert_eq!(
+        invocation.calls(),
+        first_calls,
+        "recovery never invokes again"
+    );
+    assert!(
+        store
+            .events()
+            .iter()
+            .any(|event| matches!(event.kind, EventKind::HookLifecycleReached { .. }))
+    );
+    assert_eq!(
+        store.events().len(),
+        first_events,
+        "recovery reuses durable envelope"
+    );
 }
 
 #[test]
@@ -277,7 +294,10 @@ fn blocked_invocation_does_not_hold_journal_lock_across_await() {
             text: "independent".into(),
         },
     );
-    assert!(append.is_ok(), "journal append must not await a hook-owned lock");
+    assert!(
+        append.is_ok(),
+        "journal append must not await a hook-owned lock"
+    );
     let _ = release.expect("blocked invocation release").send(());
     drop(blocked);
 }
@@ -286,12 +306,18 @@ fn blocked_invocation_does_not_hold_journal_lock_across_await() {
 fn finalization_rejects_live_append_handles_then_succeeds_after_ordered_teardown() {
     let (runtime, _invocation, _store, _session, _turn, _release) = runtime_fixture(false);
     let journal = runtime.journal().clone();
-    assert!(journal.try_into_state().is_err(), "live runtime retains append authority");
+    assert!(
+        journal.try_into_state().is_err(),
+        "live runtime retains append authority"
+    );
 
     let (runtime, _invocation, _store, _session, _turn, _release) = runtime_fixture(false);
     let journal = runtime.journal().clone();
     drop(runtime);
-    assert!(journal.try_into_state().is_ok(), "ordered teardown releases authority");
+    assert!(
+        journal.try_into_state().is_ok(),
+        "ordered teardown releases authority"
+    );
 }
 
 #[test]

@@ -122,7 +122,9 @@ impl<'s> SharedJournal<'s> {
         parent: Option<EventId>,
         kind: EventKind,
     ) -> Result<EventId, SharedJournalError> {
-        self.lock()?.append(turn, item, parent, kind).map_err(Into::into)
+        self.lock()?
+            .append(turn, item, parent, kind)
+            .map_err(Into::into)
     }
 
     /// Durably freeze a lifecycle plan through the existing journal.

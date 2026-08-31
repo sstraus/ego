@@ -2388,18 +2388,16 @@ fn hook_owner_matches_envelope(
         HookOccurrenceOwner::Event { event } => (ev.env.parent == Some(*event))
             .then_some(())
             .ok_or(RefusalReason::HookSubjectMismatch),
-        HookOccurrenceOwner::Item { item } => {
-            (ev.env.item == Some(*item) && subject == HookSubject::Item { item: *item })
-                .then_some(())
-                .ok_or(RefusalReason::HookSubjectMismatch)
-        }
-        HookOccurrenceOwner::Session { .. } | HookOccurrenceOwner::Request { .. } => {
-            ev.env
-                .item
-                .is_none()
-                .then_some(())
-                .ok_or(RefusalReason::HookSubjectMismatch)
-        }
+        HookOccurrenceOwner::Item { item } => (ev.env.item == Some(*item)
+            && subject == HookSubject::Item { item: *item })
+        .then_some(())
+        .ok_or(RefusalReason::HookSubjectMismatch),
+        HookOccurrenceOwner::Session { .. } | HookOccurrenceOwner::Request { .. } => ev
+            .env
+            .item
+            .is_none()
+            .then_some(())
+            .ok_or(RefusalReason::HookSubjectMismatch),
         HookOccurrenceOwner::Continuation { .. } => {
             let HookSubject::Item { item } = subject else {
                 return Err(RefusalReason::HookSubjectMismatch);
