@@ -64,6 +64,7 @@ use crate::sink::EventSink;
 use crate::state::{SessionState, Usage};
 use crate::store::session_store::{SessionStore, StoreError};
 
+use catalogue::ToolCaptureAuthority;
 pub use catalogue::{AdmittedToolSource, CapturedToolCatalogue, ToolCatalogueError};
 use control::{BoundaryIntent, ControlIntent};
 pub use control::{
@@ -303,6 +304,7 @@ struct PendingCall {
     selected: Option<Result<RegisteredTool, String>>,
     args: String,
     _catalogue_generation: Arc<str>,
+    capture_authority: ToolCaptureAuthority,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2344,6 +2346,7 @@ impl<'a> TurnLoop<'a> {
                         );
                         let selected = catalogue.select(&name);
                         let catalogue_generation = catalogue.generation();
+                        let capture_authority = catalogue.authority();
                         self.journal
                             .append(
                                 turn,
@@ -2372,6 +2375,7 @@ impl<'a> TurnLoop<'a> {
                                     selected: Some(selected),
                                     args,
                                     _catalogue_generation: catalogue_generation,
+                                    capture_authority,
                                 });
                             })
                     }
@@ -3024,12 +3028,16 @@ impl<'a> TurnLoop<'a> {
                 }
             }
         };
+        let resume_context = call
+            .capture_authority
+            .resume_context(self.hook_dispatcher.as_ref());
         let execution = await_controlled(
             &mut self.journal,
             &self.cancel,
             &mut self.control,
             turn,
-            self.tools.execute(tool.as_ref(), authorized),
+            self.tools
+                .execute(tool.as_ref(), authorized, resume_context),
             InterruptDisposition::AwaitEffect,
         )
         .await;

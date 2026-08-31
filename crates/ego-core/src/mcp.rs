@@ -158,24 +158,24 @@ pub trait ForeignQuestionPort: Send + Sync {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct McpAdmissionFingerprint {
-    generation: String,
+    capture: String,
     operation: String,
     schema: String,
 }
 
 impl McpAdmissionFingerprint {
     pub fn new(
-        generation: impl Into<String>,
+        capture: impl Into<String>,
         operation: impl Into<String>,
         schema: impl Into<String>,
     ) -> Result<Self, McpProjectionError> {
         let fingerprint = Self {
-            generation: generation.into(),
+            capture: capture.into(),
             operation: operation.into(),
             schema: schema.into(),
         };
         if [
-            &fingerprint.generation,
+            &fingerprint.capture,
             &fingerprint.operation,
             &fingerprint.schema,
         ]
@@ -187,8 +187,8 @@ impl McpAdmissionFingerprint {
         Ok(fingerprint)
     }
 
-    pub fn generation(&self) -> &str {
-        &self.generation
+    pub fn capture(&self) -> &str {
+        &self.capture
     }
 
     pub fn operation(&self) -> &str {
@@ -360,8 +360,8 @@ impl ForeignResult {
     pub fn invocation_digest(&self) -> &str {
         &self.invocation_digest
     }
-    pub fn admission_generation(&self) -> &str {
-        self.admission.generation()
+    pub fn admission_capture(&self) -> &str {
+        self.admission.capture()
     }
     pub fn admission(&self) -> &McpAdmissionFingerprint {
         &self.admission
@@ -432,7 +432,7 @@ pub struct ContextEntry {
     cache_scope: CacheScope,
     ttl_ms: Option<u64>,
     revision: String,
-    admission_generation: Option<String>,
+    admission_capture: Option<String>,
 }
 
 impl ContextEntry {
@@ -504,7 +504,7 @@ impl ContextEntry {
             cache_scope,
             ttl_ms: None,
             revision: revision.into(),
-            admission_generation: None,
+            admission_capture: None,
         };
         if !valid_identity(&entry.server)
             || entry.source.trim().is_empty()
@@ -524,15 +524,15 @@ impl ContextEntry {
         self.ttl_ms = Some(ttl_ms);
         self
     }
-    pub fn with_admission_generation(
+    pub fn with_admission_capture(
         mut self,
-        generation: impl Into<String>,
+        capture: impl Into<String>,
     ) -> Result<Self, ContextError> {
-        let generation = generation.into();
-        if !valid_identity(&generation) {
+        let capture = capture.into();
+        if !valid_identity(&capture) {
             return Err(ContextError::InvalidEntry);
         }
-        self.admission_generation = Some(generation);
+        self.admission_capture = Some(capture);
         Ok(self)
     }
     pub fn kind(&self) -> ContextKind {
@@ -565,8 +565,8 @@ impl ContextEntry {
     pub fn revision(&self) -> &str {
         &self.revision
     }
-    pub fn admission_generation(&self) -> Option<&str> {
-        self.admission_generation.as_deref()
+    pub fn admission_capture(&self) -> Option<&str> {
+        self.admission_capture.as_deref()
     }
 }
 

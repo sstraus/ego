@@ -120,12 +120,6 @@ impl RecordingPort {
     }
 }
 
-impl BlockingPort {
-    fn calls(&self) -> Vec<HookLifecycle> {
-        self.0.calls()
-    }
-}
-
 impl FailingPort {
     fn calls(&self) -> Vec<HookLifecycle> {
         self.0.calls()

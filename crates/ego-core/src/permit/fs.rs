@@ -28,7 +28,7 @@ use super::spawn::{ProcessError, ProcessExecutor, SpawnSpec};
 use super::tool::{ToolError, ToolResult};
 use crate::hook::EffectScope;
 use crate::store::evidence::{EvidencePage, EvidenceRead, EvidenceRef, EvidenceStore};
-use crate::suspension::{ContinuationError, PreparedResume};
+use crate::suspension::{ContinuationError, GuardedMcpResume};
 
 /// Why a filesystem operation failed, as opposed to being *denied*.
 ///
@@ -180,7 +180,7 @@ pub trait GuardedIo: Send + Sync {
     /// one rendered request by value.
     fn claim_mcp_http(&self, call: PreparedCall) -> Result<McpHttpClaim, TransportError>;
 
-    fn take_mcp_resume(&self) -> Result<PreparedResume, ContinuationError> {
+    fn take_mcp_resume(&self) -> Result<GuardedMcpResume, ContinuationError> {
         Err(ContinuationError::AuthorityMismatch)
     }
 
@@ -275,7 +275,7 @@ pub struct GuardedEffects<'a> {
     http: GuardedHttp,
     duplex: Arc<dyn DuplexSpawner>,
     foreign_spent: AtomicBool,
-    resume: Mutex<Option<PreparedResume>>,
+    resume: Mutex<Option<GuardedMcpResume>>,
 }
 
 impl<'a> GuardedEffects<'a> {
@@ -302,7 +302,7 @@ impl<'a> GuardedEffects<'a> {
         resolver: Arc<dyn Resolver>,
         one_hop: Arc<dyn OneHop>,
         duplex: Arc<dyn DuplexSpawner>,
-        resume: Option<PreparedResume>,
+        resume: Option<GuardedMcpResume>,
     ) -> Self {
         Self {
             permit,
@@ -700,7 +700,7 @@ impl GuardedIo for GuardedEffects<'_> {
         GuardedEffects::claim_mcp_http(self, call)
     }
 
-    fn take_mcp_resume(&self) -> Result<PreparedResume, ContinuationError> {
+    fn take_mcp_resume(&self) -> Result<GuardedMcpResume, ContinuationError> {
         self.resume
             .lock()
             .map_err(|_| ContinuationError::Unavailable("resume authority lock poisoned".into()))?

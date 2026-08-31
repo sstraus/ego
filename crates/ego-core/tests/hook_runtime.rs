@@ -322,17 +322,17 @@ impl HookPort for DurableHookPort {
     }
 }
 
+type PendingStart = (
+    HookStartedEvidence,
+    futures::channel::oneshot::Sender<Result<HookStartedEvidence, HookStartError>>,
+);
+
+type PendingStartSlot = Arc<Mutex<Option<PendingStart>>>;
+
 #[derive(Clone, Default)]
 struct PendingStartHookPort {
     started: Arc<Mutex<Vec<HookStartedEvidence>>>,
-    pending: Arc<
-        Mutex<
-            Option<(
-                HookStartedEvidence,
-                futures::channel::oneshot::Sender<Result<HookStartedEvidence, HookStartError>>,
-            )>,
-        >,
-    >,
+    pending: PendingStartSlot,
     start_calls: Arc<Mutex<usize>>,
     invoke_calls: Arc<Mutex<usize>>,
 }
@@ -387,11 +387,12 @@ impl HookPort for PendingStartHookPort {
         *self.start_calls.lock().expect("pending start calls") += 1;
         *self.pending.lock().expect("pending starts") = Some((evidence, sender));
         Box::pin(async move {
-            receiver.await.unwrap_or_else(|_| {
-                Err(HookStartError::Absent(HookRunError::new(
+            match receiver.await {
+                Ok(result) => result,
+                Err(_) => Err(HookStartError::Absent(HookRunError::new(
                     "pending hook start was cancelled",
-                )))
-            })
+                ))),
+            }
         })
     }
 

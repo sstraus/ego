@@ -4,7 +4,31 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::sync::Arc;
 
+use crate::hook::HookLifecycleDispatcher;
+use crate::suspension::{McpCaptureAuthority, McpCapturePin, McpResumeContext};
+
 use super::RegisteredTool;
+
+/// Authority retained with the exact catalogue selected for one generation.
+#[derive(Clone)]
+pub(crate) enum ToolCaptureAuthority {
+    Static,
+    Mcp(McpCaptureAuthority),
+}
+
+impl ToolCaptureAuthority {
+    pub(crate) fn resume_context(
+        &self,
+        dispatcher: Option<&HookLifecycleDispatcher>,
+    ) -> Option<McpResumeContext> {
+        match self {
+            Self::Mcp(capture) => dispatcher.map(|dispatcher| {
+                McpResumeContext::from_authority(dispatcher.clone(), capture.clone())
+            }),
+            Self::Static => None,
+        }
+    }
+}
 
 /// A failure to construct or capture one unambiguous model-visible catalogue.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,6 +57,7 @@ impl std::error::Error for ToolCatalogueError {}
 pub struct CapturedToolCatalogue {
     generation: Arc<str>,
     tools: Arc<[RegisteredTool]>,
+    authority: ToolCaptureAuthority,
 }
 
 impl CapturedToolCatalogue {
@@ -45,6 +70,24 @@ impl CapturedToolCatalogue {
         Ok(Self {
             generation: Arc::from(generation.into()),
             tools: tools.into(),
+            authority: ToolCaptureAuthority::Static,
+        })
+    }
+
+    /// Admit a complete MCP capture and retain its exact immutable authority.
+    pub fn new_mcp<P>(
+        generation: impl Into<String>,
+        tools: Vec<RegisteredTool>,
+        capture: P,
+    ) -> Result<Self, ToolCatalogueError>
+    where
+        P: McpCapturePin + 'static,
+    {
+        validate_distinct(&tools)?;
+        Ok(Self {
+            generation: Arc::from(generation.into()),
+            tools: tools.into(),
+            authority: ToolCaptureAuthority::Mcp(McpCaptureAuthority::new(capture)),
         })
     }
 
@@ -55,6 +98,10 @@ impl CapturedToolCatalogue {
 
     pub(crate) fn tools(&self) -> &[RegisteredTool] {
         &self.tools
+    }
+
+    pub(crate) fn authority(&self) -> ToolCaptureAuthority {
+        self.authority.clone()
     }
 }
 

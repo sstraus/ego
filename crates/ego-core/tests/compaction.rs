@@ -44,7 +44,7 @@ use ego_core::permit::{
 use ego_core::public::{
     ItemKind as PublicItemKind, PUBLIC_EVENT_VERSION, PublicEvent, project_public,
 };
-use ego_core::question::{QuestionMode, QuestionOption, QuestionRequest};
+use ego_core::question::{QuestionMode, QuestionOption, QuestionRequest, QuestionTarget};
 use ego_core::run::{RunAppend, RunRevision, RunTransaction};
 use ego_core::sink::CollectingSink;
 use ego_core::state::{ItemKind, SessionState, Usage};
@@ -857,7 +857,9 @@ fn busy_state(busy: &CompactionBusy) -> SessionState {
                     vec![QuestionOption::new("yes", "Yes")],
                     false,
                 ),
-                tool_call: ItemId::new(),
+                target: QuestionTarget::ModelTool {
+                    tool_call: ItemId::new(),
+                },
             },
         ),
         CompactionBusy::LiveAttempt => event(

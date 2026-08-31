@@ -59,9 +59,12 @@ const DIGEST_A: &str = "0123456789abcdef0123456789abcdef0123456789abcdef01234567
 const DIGEST_B: &str = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
 const BODY: &[u8] = b"Explain $ARGUMENTS and keep $1 inert.";
 
+type BlobRecord = (BlobRef, Vec<u8>);
+type CommittedBlobs = Arc<Mutex<BTreeMap<String, BlobRecord>>>;
+
 #[derive(Clone)]
 struct RecordingBlobStore {
-    committed: Arc<Mutex<BTreeMap<String, (BlobRef, Vec<u8>)>>>,
+    committed: CommittedBlobs,
     order: Arc<Mutex<Vec<&'static str>>>,
 }
 
@@ -145,7 +148,7 @@ impl BlobStore for RecordingBlobStore {
         let mut committed = self.committed.lock().expect("blob records");
         let before = committed.len();
         committed.retain(|_, (reference, _)| reachable.contains(reference));
-        Ok((before - committed.len()) as usize)
+        Ok(before - committed.len())
     }
 }
 
@@ -892,12 +895,6 @@ struct RecordingHookPort {
     started: Arc<Mutex<Vec<(HookActivation, HookSource)>>>,
 }
 
-impl RecordingHookPort {
-    fn invocations(&self) -> usize {
-        *self.invocations.lock().expect("hook invocations")
-    }
-}
-
 impl HookPort for RecordingHookPort {
     fn reached<'a>(
         &'a self,
@@ -956,11 +953,13 @@ impl HookPort for RecordingHookPort {
     }
 }
 
-fn real_child_service() -> (
+type RealChildService = (
     ChildRunService,
     Arc<Mutex<Vec<DomainEvent>>>,
     Arc<Mutex<Vec<ChildWait>>>,
-) {
+);
+
+fn real_child_service() -> RealChildService {
     let controller = Arc::new(RunController::new(
         Arc::new(RecordingSessionStore::default()),
         Arc::new(ChildExecutor),

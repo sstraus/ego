@@ -81,7 +81,7 @@ impl Fixture {
     ) -> DomainEvent {
         self.event(
             EventKind::HookInvocationStarted {
-                occurrence: self.occurrence.unwrap_or_else(EventId::new),
+                occurrence: self.occurrence.unwrap_or_default(),
                 hook,
                 invocation,
                 lifecycle,
@@ -100,7 +100,7 @@ impl Fixture {
     ) -> DomainEvent {
         self.event(
             EventKind::HookInvocationSettled {
-                occurrence: self.occurrence.unwrap_or_else(EventId::new),
+                occurrence: self.occurrence.unwrap_or_default(),
                 hook,
                 invocation,
                 result,

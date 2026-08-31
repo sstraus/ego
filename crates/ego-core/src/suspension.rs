@@ -11,6 +11,7 @@ use sha2::{Digest as _, Sha256};
 
 use crate::config::Mode;
 use crate::event::time::{Clock, Timestamp};
+use crate::hook::HookLifecycleDispatcher;
 use crate::permit::{Authority, Authorized, PreparedCall};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -27,7 +28,7 @@ pub struct ContinuationSubject {
     kind: ContinuationKind,
     server: String,
     operation: String,
-    admission_generation: String,
+    capture: String,
     descriptor_fingerprint: String,
 }
 
@@ -35,7 +36,7 @@ impl ContinuationSubject {
     pub fn new(
         server: impl Into<String>,
         operation: impl Into<String>,
-        admission_generation: impl Into<String>,
+        capture: impl Into<String>,
         descriptor_fingerprint: impl Into<String>,
     ) -> Result<Self, ContinuationError> {
         let operation = operation.into();
@@ -49,12 +50,12 @@ impl ContinuationSubject {
             kind,
             server: server.into(),
             operation,
-            admission_generation: admission_generation.into(),
+            capture: capture.into(),
             descriptor_fingerprint: descriptor_fingerprint.into(),
         };
         if [
             &subject.server,
-            &subject.admission_generation,
+            &subject.capture,
             &subject.descriptor_fingerprint,
         ]
         .into_iter()
@@ -74,8 +75,8 @@ impl ContinuationSubject {
     pub fn operation(&self) -> &str {
         &self.operation
     }
-    pub fn admission_generation(&self) -> &str {
-        &self.admission_generation
+    pub fn capture(&self) -> &str {
+        &self.capture
     }
     pub fn descriptor_fingerprint(&self) -> &str {
         &self.descriptor_fingerprint
@@ -84,6 +85,83 @@ impl ContinuationSubject {
 
 pub trait ResumeKeySource: Send + Sync {
     fn resume_key(&self) -> Result<Arc<[u8]>, ContinuationError>;
+}
+
+/// An immutable exact MCP registry capture retained across deferred execution.
+pub trait McpCapturePin: Send + Sync {
+    fn stable_fingerprint(&self) -> &str;
+}
+
+/// A type-erased strong pin for one exact immutable MCP registry capture.
+#[derive(Clone)]
+pub struct McpCaptureAuthority {
+    pin: Arc<dyn McpCapturePin>,
+}
+
+impl McpCaptureAuthority {
+    pub fn new<P>(pin: P) -> Self
+    where
+        P: McpCapturePin + 'static,
+    {
+        Self { pin: Arc::new(pin) }
+    }
+
+    pub fn capture(&self) -> &str {
+        self.pin.stable_fingerprint()
+    }
+}
+
+/// Session lifecycle authority paired with the exact capture that admitted it.
+#[derive(Clone)]
+pub struct McpResumeContext {
+    dispatcher: HookLifecycleDispatcher,
+    capture: McpCaptureAuthority,
+}
+
+impl McpResumeContext {
+    pub fn new<P>(dispatcher: HookLifecycleDispatcher, capture: P) -> Self
+    where
+        P: McpCapturePin + 'static,
+    {
+        Self {
+            dispatcher,
+            capture: McpCaptureAuthority::new(capture),
+        }
+    }
+
+    pub(crate) fn from_authority(
+        dispatcher: HookLifecycleDispatcher,
+        capture: McpCaptureAuthority,
+    ) -> Self {
+        Self {
+            dispatcher,
+            capture,
+        }
+    }
+
+    pub fn dispatcher(&self) -> &HookLifecycleDispatcher {
+        &self.dispatcher
+    }
+
+    pub fn capture(&self) -> &str {
+        self.capture.capture()
+    }
+}
+
+/// The sole one-shot MCP resume value carried by guarded effects.
+pub struct GuardedMcpResume {
+    resume: PreparedResume,
+    context: Option<McpResumeContext>,
+}
+
+impl GuardedMcpResume {
+    pub fn new(resume: PreparedResume, context: Option<McpResumeContext>) -> Self {
+        Self { resume, context }
+    }
+
+    pub fn into_parts(self) -> (PreparedResume, Option<McpResumeContext>) {
+        (self.resume, self.context)
+    }
 }
 
 /// Core-owned preparation of one sealed resume authority before foreign I/O.
@@ -139,11 +217,11 @@ fn prepare_resume_until(
     let subject = ContinuationSubject::new(
         envelope.subject().server(),
         envelope.operation().method(),
-        envelope.admission().generation(),
+        envelope.admission().capture(),
         envelope.admission().schema(),
     )?;
     let fingerprints = ResumeFingerprints::new(
-        envelope.admission().generation(),
+        envelope.admission().capture(),
         envelope.admission().operation(),
         envelope.admission().schema(),
         envelope.transport_fingerprint(),
@@ -377,11 +455,11 @@ fn validate_resume_binding(
         .ok_or(ContinuationError::AuthorityMismatch)?;
     if envelope.subject().server() != subject.server()
         || envelope.operation().method() != subject.operation()
-        || envelope.admission().generation() != fingerprints.capture()
+        || envelope.admission().capture() != fingerprints.capture()
         || envelope.admission().operation() != fingerprints.tool()
         || envelope.admission().schema() != fingerprints.schema()
         || envelope.transport_fingerprint() != fingerprints.transport()
-        || subject.admission_generation() != fingerprints.capture()
+        || subject.capture() != fingerprints.capture()
         || subject.descriptor_fingerprint() != fingerprints.schema()
     {
         return Err(ContinuationError::AuthorityMismatch);
@@ -538,8 +616,8 @@ impl ContinuationRecord {
     pub fn subject(&self) -> &ContinuationSubject {
         &self.subject
     }
-    pub fn admission_generation(&self) -> &str {
-        self.subject.admission_generation()
+    pub fn capture(&self) -> &str {
+        self.subject.capture()
     }
     pub fn descriptor_fingerprint(&self) -> &str {
         self.subject.descriptor_fingerprint()
@@ -593,11 +671,11 @@ impl ContinuationRecord {
 
     pub fn validate_fingerprints(
         &self,
-        admission_generation: &str,
+        capture: &str,
         descriptor_fingerprint: &str,
         prepared_call_fingerprint: &str,
     ) -> Result<(), ContinuationError> {
-        if self.subject.admission_generation() != admission_generation
+        if self.subject.capture() != capture
             || self.subject.descriptor_fingerprint() != descriptor_fingerprint
             || !self
                 .grant

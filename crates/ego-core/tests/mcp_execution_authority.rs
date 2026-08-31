@@ -8,6 +8,7 @@ use ego_core::permit::{
     ForeignToolId, ForeignTransportTarget, GuardedIo, HttpRoute, HttpScheme, InvocationDigest,
     NetworkTarget, Op, PrepareCtx, PreparedCall, Tool, ToolDescriptor, ToolError, ToolResult,
 };
+use ego_core::question::{QuestionMode, QuestionOption, QuestionRequest};
 use futures::future::BoxFuture;
 use serde_json::{Value, json};
 use std::sync::{
@@ -158,7 +159,16 @@ fn semantic_or_byte_mismatch_is_definitely_unsent_and_execution_has_closed_outco
         changed.authority_fingerprint()
     );
     let required = ToolExecution::InputRequired(
-        ForeignInputRequired::new("continuation-1").expect("continuation"),
+        ForeignInputRequired::new(
+            "continuation-1",
+            QuestionRequest::new(
+                "Continue",
+                QuestionMode::Single,
+                vec![QuestionOption::new("yes", "Yes")],
+                false,
+            ),
+        )
+        .expect("continuation"),
     );
     assert!(matches!(required, ToolExecution::InputRequired(_)));
 }

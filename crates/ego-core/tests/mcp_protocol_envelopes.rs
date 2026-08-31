@@ -233,7 +233,7 @@ fn foreign_result_preserves_provenance_bounds_unsupported_content_cache_and_deli
     .expect("foreign result");
     assert_eq!(result.server(), "alpha");
     assert_eq!(result.tool(), "call_tool");
-    assert_eq!(result.admission_generation(), "capture-7");
+    assert_eq!(result.admission_capture(), "capture-7");
     assert_eq!(result.ttl_ms(), None);
     assert_eq!(result.cache_scope(), None);
     assert!(result.visible_text().len() <= result.visible_limit());

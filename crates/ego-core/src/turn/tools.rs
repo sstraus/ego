@@ -17,11 +17,12 @@ use crate::permit::{
 };
 use crate::store::blob::BlobStore;
 use crate::store::evidence::EvidenceStore;
-use crate::suspension::{PreparedResume, ResumeSealer};
+use crate::suspension::{GuardedMcpResume, McpResumeContext, PreparedResume, ResumeSealer};
 
 use super::RegisteredTool;
 use super::catalogue::{
-    AdmittedToolSource, CapturedToolCatalogue, ToolCatalogueError, validate_distinct,
+    AdmittedToolSource, CapturedToolCatalogue, ToolCaptureAuthority, ToolCatalogueError,
+    validate_distinct,
 };
 
 struct EmptyAdmittedToolSource;
@@ -36,6 +37,7 @@ pub(crate) struct GenerationToolCatalogue {
     generation: std::sync::Arc<str>,
     registry: Vec<RegisteredTool>,
     descriptors: Vec<GenToolDescriptor>,
+    authority: ToolCaptureAuthority,
 }
 
 impl GenerationToolCatalogue {
@@ -53,6 +55,10 @@ impl GenerationToolCatalogue {
             .find(|registered| registered.matches_name(name))
             .cloned()
             .ok_or_else(|| format!("there is no tool named {name}"))
+    }
+
+    pub(crate) fn authority(&self) -> ToolCaptureAuthority {
+        self.authority.clone()
     }
 }
 
@@ -113,6 +119,7 @@ impl<'a> ToolEffectPorts<'a> {
         self,
         authorized: Authorized,
         resume: PreparedResume,
+        context: Option<McpResumeContext>,
     ) -> (PreparedCall, GuardedEffects<'a>) {
         let (call, permit) = authorized.into_parts();
         let guarded = GuardedEffects::new_with_resume(
@@ -123,7 +130,7 @@ impl<'a> ToolEffectPorts<'a> {
             self.resolver,
             self.one_hop,
             self.duplex,
-            Some(resume),
+            Some(GuardedMcpResume::new(resume, context)),
         );
         (call, guarded)
     }
@@ -238,6 +245,7 @@ impl<'a> Tools<'a> {
             generation: std::sync::Arc::from(dynamic.generation()),
             registry,
             descriptors,
+            authority: dynamic.authority(),
         })
     }
 
@@ -521,14 +529,16 @@ impl<'a> Tools<'a> {
         &self,
         tool: &dyn Tool,
         authorized: Authorized,
+        context: Option<McpResumeContext>,
     ) -> Result<ToolExecution, ToolError> {
         let resume = if authorized.call().mcp_envelope().is_some() {
-            Some(
+            Some(GuardedMcpResume::new(
                 self.resume
                     .as_ref()
                     .ok_or(crate::suspension::ContinuationError::InvalidKey)?
                     .prepare(&authorized, self.policy.resume_floor())?,
-            )
+                context,
+            ))
         } else {
             None
         };
