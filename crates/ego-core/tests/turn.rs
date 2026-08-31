@@ -5604,6 +5604,7 @@ mod turn {
                     tools,
                 );
                 let outcome = block_on(turn.run("hello")).expect("refusal is durable");
+                drop(turn);
                 assert_eq!(outcome.exit_reason, expected);
                 assert!(
                     !fx.store

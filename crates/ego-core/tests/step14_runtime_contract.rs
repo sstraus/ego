@@ -712,9 +712,11 @@ mod turn_execution_observation {
             vec![AiEvent::Stop(StopReason::Stop)],
             vec![AiEvent::Stop(StopReason::Stop)],
         ]);
-        let mut loop_ = fixture.loop_().with_execution_observation(observation());
-        futures::executor::block_on(loop_.run("first")).expect("first turn");
-        futures::executor::block_on(loop_.run("second")).expect("second turn");
+        {
+            let mut loop_ = fixture.loop_().with_execution_observation(observation());
+            futures::executor::block_on(loop_.run("first")).expect("first turn");
+            futures::executor::block_on(loop_.run("second")).expect("second turn");
+        }
 
         let events = fixture.store.events();
         let observation_at = events
@@ -755,9 +757,11 @@ mod turn_execution_observation {
     fn observation_append_failure_abandons_before_public_turn_or_prompt() {
         let mut fixture = Fixture::new(vec![vec![AiEvent::Stop(StopReason::Stop)]]);
         fixture.store.fail_at(1);
-        let mut loop_ = fixture.loop_().with_execution_observation(observation());
-        let abandoned = futures::executor::block_on(loop_.run("must not publish"))
-            .expect_err("observation append must be fatal before the turn");
+        let abandoned = {
+            let mut loop_ = fixture.loop_().with_execution_observation(observation());
+            futures::executor::block_on(loop_.run("must not publish"))
+                .expect_err("observation append must be fatal before the turn")
+        };
         assert!(fixture.store.events().is_empty());
         assert!(fixture.sink.events().is_empty());
         assert!(
@@ -770,8 +774,10 @@ mod turn_execution_observation {
     #[test]
     fn a_loop_without_an_observation_preserves_the_existing_turn_path() {
         let mut fixture = Fixture::new(vec![vec![AiEvent::Stop(StopReason::Stop)]]);
-        let mut loop_ = fixture.loop_();
-        futures::executor::block_on(loop_.run("without observation")).expect("turn completes");
+        {
+            let mut loop_ = fixture.loop_();
+            futures::executor::block_on(loop_.run("without observation")).expect("turn completes");
+        }
 
         assert!(
             fixture
