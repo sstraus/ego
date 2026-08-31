@@ -11,14 +11,18 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::event::domain::{DomainEvent, Envelope, EventKind};
 use crate::event::hook::{
-    HookActivation, HookId, HookInvocationId, HookOccurrenceKey, HookPlan, HookResult, HookSubject,
+    HookActivation, HookId, HookInvocationId, HookOccurrenceKey, HookOccurrenceOwner, HookPlan,
+    HookResult, HookSubject,
 };
 use crate::event::id::{EventId, ItemId, Producer, Seq, SessionId, TurnId};
 use crate::event::time::Clock;
-use crate::hook::{HookReachedEvidence, HookStartedEvidence};
+use crate::hook::{
+    HookJournalPort, HookOccurrence, HookReachError, HookReachOutcome, HookReachedEvidence,
+    HookRunError, HookSettledEvidence, HookSpec, HookStartError, HookStartedEvidence,
+};
 use crate::public::{PublicEvent, project_public};
 use crate::sink::EventSink;
-use crate::state::SessionState;
+use crate::state::{ItemKind, SessionState};
 use crate::store::session_store::{SessionStore, StoreError};
 
 /// Assembles envelopes, appends them to the durable log, folds them into the
@@ -187,6 +191,138 @@ impl<'s> SharedJournal<'s> {
             .into_inner()
             .map(Journal::into_state)
             .map_err(|_| SharedJournalError::Synchronization)
+    }
+}
+
+impl HookJournalPort for SharedJournal<'_> {
+    fn reached(
+        &self,
+        producer: &Producer,
+        occurrence: &HookOccurrence,
+        plan: &HookPlan,
+    ) -> Result<HookReachOutcome, HookReachError> {
+        let mut journal = self
+            .lock()
+            .map_err(|error| HookReachError::Absent(HookRunError::new(error.to_string())))?;
+        if matches!(occurrence.key().owner(), HookOccurrenceOwner::Continuation { .. }) {
+            let Some(item) = occurrence.causality().item() else {
+                return Err(HookReachError::Absent(HookRunError::new(
+                    "hook continuation has no causal tool item",
+                )));
+            };
+            let Some(tool) = journal.state().items.get(&item) else {
+                return Err(HookReachError::Absent(HookRunError::new(
+                    "hook continuation causal item is absent",
+                )));
+            };
+            if tool.kind != ItemKind::ToolCall
+                || tool.tool_call_started != occurrence.causality().parent()
+            {
+                return Err(HookReachError::Absent(HookRunError::new(
+                    "hook continuation does not name its admitted tool-call parent",
+                )));
+            }
+        }
+        if let Some(reached) = journal.state().hook_occurrence(occurrence.key()) {
+            if reached.subject() != occurrence.event().subject()
+                || reached.producer() != producer
+                || reached.turn() != occurrence.causality().turn()
+                || reached.item() != occurrence.causality().item()
+            {
+                return Err(HookReachError::Absent(HookRunError::new(
+                    "durable hook reach evidence does not match its causal occurrence",
+                )));
+            }
+            let evidence = HookReachedEvidence::new(
+                reached.event(),
+                reached.key().clone(),
+                reached.subject(),
+                reached.producer().clone(),
+                reached.plan().clone(),
+            );
+            let starts = reached
+                .starts()
+                .iter()
+                .map(|started| {
+                    HookStartedEvidence::new(
+                        started.event(),
+                        reached.event(),
+                        started.hook(),
+                        started.invocation(),
+                        started.activation(),
+                    )
+                })
+                .collect();
+            let settlements = journal
+                .state()
+                .hook_occurrence_settlements(reached.event())
+                .into_iter()
+                .map(|settled| {
+                    HookSettledEvidence::new(
+                        settled.event(),
+                        settled.occurrence(),
+                        settled.hook(),
+                        settled.invocation(),
+                        settled.result().clone(),
+                    )
+                })
+                .collect();
+            return Ok(HookReachOutcome::Recovered {
+                evidence,
+                starts,
+                settlements,
+            });
+        }
+
+        journal
+            .hook_reached(
+                occurrence.causality().turn(),
+                occurrence.causality().item(),
+                occurrence.causality().parent(),
+                occurrence.key().clone(),
+                occurrence.event().subject(),
+                plan.clone(),
+            )
+            .map(HookReachOutcome::Fresh)
+            .map_err(|error| HookReachError::Absent(HookRunError::new(error.to_string())))
+    }
+
+    fn started(
+        &self,
+        spec: &HookSpec,
+        occurrence: &HookOccurrence,
+        reached: &HookReachedEvidence,
+        activation: HookActivation,
+        invocation: HookInvocationId,
+    ) -> Result<HookStartedEvidence, HookStartError> {
+        self.lock()
+            .map_err(|error| HookStartError::Absent(HookRunError::new(error.to_string())))?
+            .hook_started(
+                occurrence.causality().turn(),
+                occurrence.causality().item(),
+                reached,
+                spec.id(),
+                invocation,
+                activation,
+            )
+            .map_err(|error| HookStartError::Absent(HookRunError::new(error.to_string())))
+    }
+
+    fn settled(
+        &self,
+        occurrence: &HookOccurrence,
+        started: HookStartedEvidence,
+        result: &HookResult,
+    ) -> Result<EventId, HookRunError> {
+        self.lock()
+            .map_err(|error| HookRunError::new(error.to_string()))?
+            .hook_settled(
+                occurrence.causality().turn(),
+                occurrence.causality().item(),
+                started,
+                result.clone(),
+            )
+            .map_err(|error| HookRunError::new(error.to_string()))
     }
 }
 

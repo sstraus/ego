@@ -18,12 +18,16 @@ use crate::event::domain::{DomainEvent, EventKind};
 use crate::event::hook::{
     HookActivation, HookContentDigest, HookDecision, HookDescriptorEvidence, HookFailure,
     HookFeedback, HookId, HookInvocationId, HookLifecycle, HookOccurrenceKey, HookOutcome,
-    HookPhase, HookPlan, HookResult, HookSourceAuthority, HookSourceLocation, HookSubject,
+    HookOccurrenceOwner, HookPhase, HookPlan, HookResult, HookSourceAuthority, HookSourceLocation,
+    HookSubject,
 };
-use crate::event::id::{EventId, Producer};
+use crate::event::id::{
+    EventId, GenerationId, ItemId, Producer, SessionId, SubagentInvocationId, TurnId,
+};
 use crate::event::skill::{SkillInvocationId, SkillSourceAuthority};
 use crate::permit::rule::{ArgvToken, Rule, Segment};
-use crate::turn::CancelToken;
+use crate::state::SessionState;
+use crate::turn::{CancelToken, SharedJournal, SharedJournalError};
 
 const MAX_FEEDBACK_BYTES: usize = 4096;
 const MAX_TIMEOUT_SECONDS: u64 = 3600;
@@ -795,6 +799,125 @@ impl HookEvent {
     }
 }
 
+/// Runtime-only causal envelope for one lifecycle occurrence.
+///
+/// The durable event keeps these values in its ordinary envelope. This value
+/// exists only to make the owner that reaches a hook supply them explicitly
+/// before the journal assembles that event.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HookCausality {
+    owner: HookOccurrenceOwner,
+    turn: TurnId,
+    item: Option<ItemId>,
+    parent: Option<EventId>,
+}
+
+impl HookCausality {
+    pub fn session(session: SessionId, turn: TurnId) -> Self {
+        Self::new(HookOccurrenceOwner::Session { session }, turn, None, None)
+    }
+
+    pub fn event(event: EventId, turn: TurnId, item: Option<ItemId>) -> Self {
+        Self::new(
+            HookOccurrenceOwner::Event { event },
+            turn,
+            item,
+            Some(event),
+        )
+    }
+
+    pub fn item(item: ItemId, turn: TurnId, parent: EventId) -> Self {
+        Self::new(
+            HookOccurrenceOwner::Item { item },
+            turn,
+            Some(item),
+            Some(parent),
+        )
+    }
+
+    pub fn generation(generation: GenerationId, turn: TurnId, parent: EventId) -> Self {
+        Self::new(
+            HookOccurrenceOwner::Generation { generation },
+            turn,
+            None,
+            Some(parent),
+        )
+    }
+
+    pub fn subagent(
+        invocation: SubagentInvocationId,
+        turn: TurnId,
+        item: ItemId,
+        parent: EventId,
+    ) -> Self {
+        Self::new(
+            HookOccurrenceOwner::Subagent { invocation },
+            turn,
+            Some(item),
+            Some(parent),
+        )
+    }
+
+    pub fn request(
+        request: crate::run::RequestId,
+        turn: TurnId,
+        parent: Option<EventId>,
+    ) -> Self {
+        Self::new(
+            HookOccurrenceOwner::Request { request },
+            turn,
+            None,
+            parent,
+        )
+    }
+
+    pub fn continuation(
+        id: impl Into<String>,
+        turn: TurnId,
+        item: ItemId,
+        parent: EventId,
+    ) -> Result<Self, HookRunError> {
+        let key = HookOccurrenceKey::continuation(HookLifecycle::Elicitation, id)
+            .map_err(|error| HookRunError::new(error.to_string()))?;
+        Ok(Self::new(
+            key.owner().clone(),
+            turn,
+            Some(item),
+            Some(parent),
+        ))
+    }
+
+    fn new(
+        owner: HookOccurrenceOwner,
+        turn: TurnId,
+        item: Option<ItemId>,
+        parent: Option<EventId>,
+    ) -> Self {
+        Self {
+            owner,
+            turn,
+            item,
+            parent,
+        }
+    }
+
+    pub fn owner(&self) -> &HookOccurrenceOwner {
+        &self.owner
+    }
+
+    pub fn turn(&self) -> TurnId {
+        self.turn
+    }
+
+    pub fn item(&self) -> Option<ItemId> {
+        self.item
+    }
+
+    pub fn parent(&self) -> Option<EventId> {
+        self.parent
+    }
+}
+
 /// The one cancellation and deadline authority shared by every effect of a
 /// hook invocation. It is runtime state and is never serialized.
 #[derive(Debug, Clone)]
@@ -845,69 +968,40 @@ impl EffectScope {
 /// Runtime-only invocation material handed to exactly one handler adapter.
 #[derive(Debug, Clone)]
 pub struct HookInvocationRequest {
-    hook: HookId,
+    started: HookStartedEvidence,
+    causality: HookCausality,
     handler: HookHandlerConfig,
     event: HookEvent,
-    activation: HookActivation,
-    invocation: HookInvocationId,
     effect_scope: EffectScope,
 }
 
 impl HookInvocationRequest {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
-        hook: HookId,
-        handler: HookHandlerConfig,
-        lifecycle: HookLifecycle,
-        matcher: Option<HookMatcher>,
-        subject: HookSubject,
-        activation: HookActivation,
-        invocation: HookInvocationId,
-        effect_scope: EffectScope,
-    ) -> Self {
-        let selector = matcher.as_ref().map(|matcher| match matcher {
-            HookMatcher::Permission(rule) => rule.to_string(),
-            HookMatcher::Exact(value) => value.clone(),
-        });
-        let permission_selector = matcher.and_then(|matcher| match matcher {
-            HookMatcher::Permission(rule) => Some(rule),
-            HookMatcher::Exact(_) => None,
-        });
-        Self {
-            hook,
-            handler,
-            event: HookEvent {
-                lifecycle,
-                subject,
-                selector,
-                permission_selector,
-            },
-            activation,
-            invocation,
-            effect_scope,
-        }
-    }
-
-    fn from_occurrence(
-        hook: HookId,
+        started: HookStartedEvidence,
+        causality: HookCausality,
         handler: HookHandlerConfig,
         event: HookEvent,
-        activation: HookActivation,
-        invocation: HookInvocationId,
         effect_scope: EffectScope,
     ) -> Self {
         Self {
-            hook,
+            started,
+            causality,
             handler,
             event,
-            activation,
-            invocation,
             effect_scope,
         }
     }
 
     pub fn hook(&self) -> HookId {
-        self.hook
+        self.started.hook()
+    }
+
+    pub fn started(&self) -> HookStartedEvidence {
+        self.started
+    }
+
+    pub fn causality(&self) -> &HookCausality {
+        &self.causality
     }
 
     pub fn handler(&self) -> &HookHandlerConfig {
@@ -927,11 +1021,11 @@ impl HookInvocationRequest {
     }
 
     pub fn activation(&self) -> HookActivation {
-        self.activation
+        self.started.activation()
     }
 
     pub fn invocation(&self) -> HookInvocationId {
-        self.invocation
+        self.started.invocation()
     }
 
     pub fn effect_scope(&self) -> &EffectScope {
@@ -1024,9 +1118,9 @@ impl HookEventV1 {
             .map_err(HookWireError::catalogue)?;
         let value = Self {
             version: 1,
-            hook_id: request.hook,
-            invocation_id: request.invocation,
-            activation: request.activation,
+            hook_id: request.hook(),
+            invocation_id: request.invocation(),
+            activation: request.activation(),
             event: request.event.lifecycle,
             phase: request.event.lifecycle.phase().into(),
             subject: request.event.subject,
@@ -1395,16 +1489,68 @@ impl HookCatalogue {
 pub struct HookOccurrence {
     key: HookOccurrenceKey,
     event: HookEvent,
+    causality: HookCausality,
 }
 
 impl HookOccurrence {
-    pub fn new(key: HookOccurrenceKey, event: HookEvent) -> Result<Self, HookRunError> {
+    pub fn new(
+        key: HookOccurrenceKey,
+        event: HookEvent,
+        causality: HookCausality,
+    ) -> Result<Self, HookRunError> {
         if key.lifecycle() != event.lifecycle() {
             return Err(HookRunError::new(
                 "hook occurrence lifecycle does not match its event",
             ));
         }
-        Ok(Self { key, event })
+        if key.owner() != causality.owner() {
+            return Err(HookRunError::new(
+                "hook occurrence owner does not match its causality",
+            ));
+        }
+        let subject_matches = match event.subject() {
+            HookSubject::Session => causality.item().is_none(),
+            HookSubject::Turn { turn } => turn == causality.turn() && causality.item().is_none(),
+            HookSubject::Item { item } => causality.item() == Some(item),
+        };
+        if !subject_matches {
+            return Err(HookRunError::new(
+                "hook occurrence subject does not match its causality",
+            ));
+        }
+        match key.owner() {
+            HookOccurrenceOwner::Event { event }
+                if causality.parent() != Some(*event) =>
+            {
+                return Err(HookRunError::new(
+                    "hook event owner is not its causal parent",
+                ));
+            }
+            HookOccurrenceOwner::Item { item } if causality.item() != Some(*item) => {
+                return Err(HookRunError::new(
+                    "hook item owner is not its causal item",
+                ));
+            }
+            HookOccurrenceOwner::Continuation { .. }
+                if causality.item().is_none() || causality.parent().is_none() =>
+            {
+                return Err(HookRunError::new(
+                    "hook continuation has no tool item and parent",
+                ));
+            }
+            HookOccurrenceOwner::Session { .. }
+            | HookOccurrenceOwner::Event { .. }
+            | HookOccurrenceOwner::Item { .. }
+            | HookOccurrenceOwner::Generation { .. }
+            | HookOccurrenceOwner::Subagent { .. }
+            | HookOccurrenceOwner::Request { .. }
+            | HookOccurrenceOwner::Continuation { .. } => {}
+        }
+        Ok(Self {
+            key,
+            event,
+            causality,
+        })
     }
 
     pub fn key(&self) -> &HookOccurrenceKey {
@@ -1413,6 +1559,10 @@ impl HookOccurrence {
 
     pub fn event(&self) -> &HookEvent {
         &self.event
+    }
+
+    pub fn causality(&self) -> &HookCausality {
+        &self.causality
     }
 }
 
@@ -1525,18 +1675,34 @@ impl HookStartedEvidence {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HookSettledEvidence {
+    event: EventId,
+    occurrence: EventId,
     hook: HookId,
     invocation: HookInvocationId,
     result: HookResult,
 }
 
 impl HookSettledEvidence {
-    pub fn new(hook: HookId, invocation: HookInvocationId, result: HookResult) -> Self {
+    pub fn new(
+        event: EventId,
+        occurrence: EventId,
+        hook: HookId,
+        invocation: HookInvocationId,
+        result: HookResult,
+    ) -> Self {
         Self {
+            event,
+            occurrence,
             hook,
             invocation,
             result,
         }
+    }
+    pub fn event(&self) -> EventId {
+        self.event
+    }
+    pub fn occurrence(&self) -> EventId {
+        self.occurrence
     }
     pub fn hook(&self) -> HookId {
         self.hook
@@ -1561,35 +1727,34 @@ pub enum HookReachOutcome {
 
 pub type HookFuture<'a> =
     Pin<Box<dyn Future<Output = Result<HookOutcome, HookFailure>> + Send + 'a>>;
-pub type HookReachFuture<'a> =
-    Pin<Box<dyn Future<Output = Result<HookReachOutcome, HookReachError>> + Send + 'a>>;
-pub type HookStartFuture<'a> =
-    Pin<Box<dyn Future<Output = Result<HookStartedEvidence, HookStartError>> + Send + 'a>>;
-pub type HookRecordFuture<'a> = Pin<Box<dyn Future<Output = Result<(), HookRunError>> + Send + 'a>>;
 
-/// The single durable/effect seam consumed by the lifecycle dispatcher.
-pub trait HookPort: Send + Sync {
-    fn reached<'a>(
-        &'a self,
-        producer: &'a Producer,
-        occurrence: &'a HookOccurrence,
-        plan: &'a HookPlan,
-    ) -> HookReachFuture<'a>;
-    fn started<'a>(
-        &'a self,
-        spec: &'a HookSpec,
-        occurrence: &'a HookOccurrence,
-        reached: &'a HookReachedEvidence,
+/// Synchronous durable authority used by the static lifecycle policy.
+pub trait HookJournalPort: Send + Sync {
+    fn reached(
+        &self,
+        producer: &Producer,
+        occurrence: &HookOccurrence,
+        plan: &HookPlan,
+    ) -> Result<HookReachOutcome, HookReachError>;
+    fn started(
+        &self,
+        spec: &HookSpec,
+        occurrence: &HookOccurrence,
+        reached: &HookReachedEvidence,
         activation: HookActivation,
         invocation: HookInvocationId,
-    ) -> HookStartFuture<'a>;
-    fn invoke<'a>(&'a self, request: HookInvocationRequest) -> HookFuture<'a>;
-    fn settled<'a>(
-        &'a self,
-        spec: &'a HookSpec,
+    ) -> Result<HookStartedEvidence, HookStartError>;
+    fn settled(
+        &self,
+        occurrence: &HookOccurrence,
         started: HookStartedEvidence,
-        result: &'a HookResult,
-    ) -> HookRecordFuture<'a>;
+        result: &HookResult,
+    ) -> Result<EventId, HookRunError>;
+}
+
+/// The sole external invocation effect consumed by the lifecycle policy.
+pub trait HookInvocationPort: Send + Sync {
+    fn invoke<'a>(&'a self, request: HookInvocationRequest) -> HookFuture<'a>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1656,6 +1821,7 @@ pub struct HookRunResult {
     started_invocation: bool,
     blocking_occurrence: Option<EventId>,
     blocking_invocation: Option<HookInvocationId>,
+    closure_event: Option<EventId>,
 }
 
 impl HookRunResult {
@@ -1696,11 +1862,13 @@ impl HookRunResult {
     pub fn blocking_invocation(&self) -> Option<HookInvocationId> {
         self.blocking_invocation
     }
+    pub fn closure_event(&self) -> Option<EventId> {
+        self.closure_event
+    }
 }
 
 #[derive(Clone)]
 pub struct HookRunner {
-    port: Arc<dyn HookPort>,
     once: Arc<Mutex<OnceAdmission>>,
 }
 
@@ -1749,13 +1917,12 @@ impl Drop for OnceReservations {
 }
 
 impl HookRunner {
-    pub fn new<P: HookPort + 'static>(port: P) -> Self {
-        Self::new_with_durable_started(port, std::iter::empty())
+    pub fn new() -> Self {
+        Self::new_with_durable_started(std::iter::empty())
     }
 
-    pub fn new_with_durable_started<P, I>(port: P, started: I) -> Self
+    pub fn new_with_durable_started<I>(started: I) -> Self
     where
-        P: HookPort + 'static,
         I: IntoIterator<Item = HookStartedEvidence>,
     {
         let consumed = started
@@ -1766,7 +1933,6 @@ impl HookRunner {
             })
             .collect();
         Self {
-            port: Arc::new(port),
             once: Arc::new(Mutex::new(OnceAdmission {
                 consumed,
                 pending: HashMap::new(),
@@ -1776,6 +1942,10 @@ impl HookRunner {
 
     pub async fn run_occurrence(
         &self,
+        journal: &dyn HookJournalPort,
+        invoker: &dyn HookInvocationPort,
+        parent_cancel: CancelToken,
+        parent_deadline: Instant,
         catalogue: &HookCatalogue,
         producer: Producer,
         occurrence: HookOccurrence,
@@ -1796,7 +1966,7 @@ impl HookRunner {
                 return Err(HookRunError::new(error.to_string()));
             }
         };
-        let reached = match self.port.reached(&producer, &occurrence, &plan).await {
+        let reached = match journal.reached(&producer, &occurrence, &plan) {
             Ok(HookReachOutcome::Fresh(evidence)) => {
                 if let Err(error) =
                     validate_reached_evidence(&producer, &occurrence, &plan, &evidence)
@@ -1844,6 +2014,7 @@ impl HookRunner {
             }
         };
         result.durable = true;
+        result.closure_event = Some(reached.event());
 
         for spec in specs {
             let invocation = HookInvocationId::new();
@@ -1852,11 +2023,13 @@ impl HookRunner {
                 .map_or(HookActivation::Persistent, |invocation| {
                     HookActivation::Skill { invocation }
                 });
-            let started = match self
-                .port
-                .started(spec, &occurrence, &reached, activation, invocation)
-                .await
-            {
+            let started = match journal.started(
+                spec,
+                &occurrence,
+                &reached,
+                activation,
+                invocation,
+            ) {
                 Ok(evidence) => evidence,
                 Err(HookStartError::Durable { evidence, .. }) => {
                     if let Err(error) =
@@ -1885,21 +2058,28 @@ impl HookRunner {
             self.finish_start(&mut reservations, &started);
             result.started_invocation = true;
 
-            let request = HookInvocationRequest::from_occurrence(
-                spec.id(),
+            let request = HookInvocationRequest::new(
+                started,
+                occurrence.causality.clone(),
                 spec.handler().clone(),
                 occurrence.event.clone(),
-                started.activation(),
-                started.invocation(),
-                EffectScope::new(spec.handler().timeout_for(occurrence.event.lifecycle)),
+                EffectScope::with_parent(
+                    parent_cancel.clone(),
+                    Some(parent_deadline),
+                    spec.handler().timeout_for(occurrence.event.lifecycle),
+                ),
             );
-            let invoked = self.port.invoke(request).await;
+            let invoked = invoker.invoke(request).await;
             let settled = normalize_result(phase, occurrence.event.lifecycle, invoked);
-            if self.port.settled(spec, started, &settled).await.is_err() {
-                reservations.release();
-                record_occurrence_uncertainty(&mut result, phase, &reached, Some(&started));
-                return Ok(result);
-            }
+            let settlement = match journal.settled(&occurrence, started, &settled) {
+                Ok(event) => event,
+                Err(_) => {
+                    reservations.release();
+                    record_occurrence_uncertainty(&mut result, phase, &reached, Some(&started));
+                    return Ok(result);
+                }
+            };
+            result.closure_event = Some(settlement);
             apply_result(
                 &mut result,
                 phase,
@@ -2016,12 +2196,89 @@ impl HookLifecycleDispatcher {
 
     pub async fn dispatch(
         &self,
+        journal: &dyn HookJournalPort,
+        invoker: &dyn HookInvocationPort,
+        parent_cancel: CancelToken,
+        parent_deadline: Instant,
         producer: Producer,
         occurrence: HookOccurrence,
     ) -> Result<HookRunResult, HookRunError> {
         self.runner
-            .run_occurrence(&self.catalogue, producer, occurrence)
+            .run_occurrence(
+                journal,
+                invoker,
+                parent_cancel,
+                parent_deadline,
+                &self.catalogue,
+                producer,
+                occurrence,
+            )
             .await
+    }
+}
+
+/// Borrow-scoped authority that binds one session's hook policy and effects.
+#[derive(Clone)]
+pub struct SessionHookRuntime<'s> {
+    dispatcher: HookLifecycleDispatcher,
+    journal: SharedJournal<'s>,
+    invoker: Arc<dyn HookInvocationPort + 's>,
+    parent_cancel: CancelToken,
+    parent_deadline: Instant,
+}
+
+impl<'s> SessionHookRuntime<'s> {
+    pub fn new(
+        dispatcher: HookLifecycleDispatcher,
+        journal: SharedJournal<'s>,
+        invoker: Arc<dyn HookInvocationPort + 's>,
+        parent_cancel: CancelToken,
+        parent_deadline: Instant,
+    ) -> Self {
+        Self {
+            dispatcher,
+            journal,
+            invoker,
+            parent_cancel,
+            parent_deadline,
+        }
+    }
+
+    pub async fn dispatch(
+        &self,
+        producer: Producer,
+        occurrence: HookOccurrence,
+    ) -> Result<HookRunResult, HookRunError> {
+        self.dispatcher
+            .dispatch(
+                &self.journal,
+                self.invoker.as_ref(),
+                self.parent_cancel.clone(),
+                self.parent_deadline,
+                producer,
+                occurrence,
+            )
+            .await
+    }
+
+    pub fn journal(&self) -> SharedJournal<'s> {
+        self.journal.clone()
+    }
+
+    pub fn inspect<T>(
+        &self,
+        inspect: impl FnOnce(&SessionState) -> T,
+    ) -> Result<T, SharedJournalError> {
+        self.journal.inspect(inspect)
+    }
+
+    pub fn state(&self) -> SessionState {
+        self.inspect(Clone::clone)
+            .expect("session hook runtime journal inspection")
+    }
+
+    pub fn try_into_state(self) -> Result<SessionState, SharedJournalError> {
+        self.journal.try_into_state()
     }
 }
 
@@ -2116,7 +2373,10 @@ fn validate_recovered_prefix(
         }
     }
     for (started, settled) in starts.iter().zip(settlements) {
-        if settled.hook() != started.hook() || settled.invocation() != started.invocation() {
+        if settled.occurrence() != reached.event()
+            || settled.hook() != started.hook()
+            || settled.invocation() != started.invocation()
+        {
             return Err(HookRunError::new(
                 "recovered hook settlement does not match its start",
             ));
@@ -2142,6 +2402,14 @@ fn apply_recovered_settlements(
         );
     }
     aggregate.durable = true;
+    aggregate.closure_event = if settlements.len() == reached.plan().len() {
+        settlements
+            .last()
+            .map(HookSettledEvidence::event)
+            .or(Some(reached.event()))
+    } else {
+        None
+    };
 }
 
 fn apply_result(
@@ -2224,5 +2492,6 @@ fn empty_result() -> HookRunResult {
         started_invocation: false,
         blocking_occurrence: None,
         blocking_invocation: None,
+        closure_event: None,
     }
 }
