@@ -29,7 +29,7 @@ use ego_core::cost::CurrencyCode;
 use ego_core::event::domain::CancelCause;
 use ego_core::event::domain::EventKind;
 use ego_core::event::hook::{HookLifecycle, HookOccurrenceKey, HookOccurrenceOwner, HookSubject};
-use ego_core::event::id::{Producer, SessionId};
+use ego_core::event::id::{EventId, Producer, SessionId, TurnId};
 use ego_core::evidence::{
     ConfigProvenance, EgoVersion, EvidenceAdmissionService, EvidenceDigest, EvidenceError,
     EvidenceRecord, EvidenceWrite, ExecutionAdmissionDescriptor, McpContextDescriptor,
@@ -43,7 +43,7 @@ use ego_core::generation_model_source::{
 use ego_core::generator::capabilities::ModelCapabilities;
 use ego_core::generator::port::RequestExpressibilityError;
 use ego_core::generator::types::{GenRequest, ImageRef, ThinkingLevel, ToolDescriptor};
-use ego_core::hook::{HookEvent, HookLifecycleDispatcher, HookOccurrence};
+use ego_core::hook::{HookCausality, HookEvent, HookOccurrence, SessionHookRuntime};
 use ego_core::permit::judge::{JudgeConfig, JudgeInput};
 use ego_core::permit::{
     CanonPath, Change, Escalation, ExecCaps, ExecObservation, HumanApprover, Op, OpName,
@@ -107,22 +107,28 @@ const SETTLEMENT: &str = "USD";
 
 /// The active session's asynchronous authority for one staged model switch.
 #[derive(Clone)]
-pub struct RunModelSwitchOwner {
+pub struct RunModelSwitchOwner<'s> {
     selection: Arc<model::GenerationSelection>,
     config_store: Arc<dyn UserConfigStore>,
-    hooks: HookLifecycleDispatcher,
+    hooks: SessionHookRuntime<'s>,
+    turn: TurnId,
+    parent: Option<EventId>,
 }
 
-impl RunModelSwitchOwner {
+impl<'s> RunModelSwitchOwner<'s> {
     pub fn new(
         selection: Arc<model::GenerationSelection>,
         config_store: Arc<dyn UserConfigStore>,
-        hooks: HookLifecycleDispatcher,
+        hooks: SessionHookRuntime<'s>,
+        turn: TurnId,
+        parent: Option<EventId>,
     ) -> Self {
         Self {
             selection,
             config_store,
             hooks,
+            turn,
+            parent,
         }
     }
 
@@ -142,7 +148,12 @@ impl RunModelSwitchOwner {
         }
 
         let request_id = RequestId::from_uuid(uuid::Uuid::now_v7());
-        let pre = model_switch_occurrence(HookLifecycle::PreModelSwitch, request_id, &target)?;
+        let pre = model_switch_occurrence(
+            HookLifecycle::PreModelSwitch,
+            request_id,
+            &target,
+            HookCausality::request(request_id, self.turn, self.parent),
+        )?;
         let pre = self
             .hooks
             .dispatch(Producer::Main, pre)
@@ -171,7 +182,12 @@ impl RunModelSwitchOwner {
             });
         }
 
-        let post = model_switch_occurrence(HookLifecycle::PostModelSwitch, request_id, &target)?;
+        let post = model_switch_occurrence(
+            HookLifecycle::PostModelSwitch,
+            request_id,
+            &target,
+            HookCausality::request(request_id, self.turn, pre.closure_event()),
+        )?;
         let post = self
             .hooks
             .dispatch(Producer::Main, post)
@@ -191,10 +207,12 @@ fn model_switch_occurrence(
     lifecycle: HookLifecycle,
     request: RequestId,
     target: &ModelRef,
+    causality: HookCausality,
 ) -> Result<HookOccurrence, RunModelSwitchError> {
     HookOccurrence::new(
         HookOccurrenceKey::new(lifecycle, HookOccurrenceOwner::Request { request }),
         HookEvent::tool(lifecycle, HookSubject::Session, target.0.clone()),
+        causality,
     )
     .map_err(|error| RunModelSwitchError::Occurrence(error.to_string()))
 }
@@ -4295,13 +4313,13 @@ enum Driver<'a> {
 struct RunHost<'a> {
     driver: Driver<'a>,
     elicitor: Option<Arc<dyn Elicitor>>,
-    status: Option<InteractiveStatus>,
+    status: Option<InteractiveStatus<'a>>,
     diagnostics: &'a dyn Diagnostics,
     mcp_registry: Arc<McpRegistryController>,
     evidence: Arc<EvidenceAdmissionService>,
 }
 
-struct InteractiveStatus {
+struct InteractiveStatus<'s> {
     seat: Arc<repl::Seat>,
     width: usize,
     human: bool,
@@ -4309,7 +4327,7 @@ struct InteractiveStatus {
     /// The run owns the same picker instance installed into the terminal seat.
     picker: Option<Arc<Mutex<ModelPicker>>>,
     /// Installed with the one session-bound dispatcher after hook composition.
-    model_switch_owner: Option<RunModelSwitchOwner>,
+    model_switch_owner: Option<RunModelSwitchOwner<'s>>,
 }
 
 fn run_trust(args: &Args, driver: &Driver<'_>, root: &Path) -> Trust {
