@@ -37,7 +37,7 @@ use ego_core::permit::{
 };
 use ego_core::question::{
     AskQuestionTool, Elicitor, ElicitorError, QuestionAnswer, QuestionMode, QuestionOption,
-    QuestionOutcome, QuestionRequest,
+    QuestionOutcome, QuestionRequest, QuestionTarget,
 };
 use ego_core::run::{RunAppend, RunRevision, RunTransaction};
 use ego_core::sink::CollectingSink;
@@ -302,7 +302,26 @@ impl Elicitor for UnavailableElicitor {
     }
 }
 
-struct ForeignInputTool;
+fn foreign_question_request() -> QuestionRequest {
+    QuestionRequest::new(
+        "Confirm the deployment target",
+        QuestionMode::Form {
+            schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "target": {"type": "string", "enum": ["staging", "production"]}
+                },
+                "required": ["target"]
+            }),
+        },
+        Vec::new(),
+        false,
+    )
+}
+
+struct ForeignInputTool {
+    request: QuestionRequest,
+}
 
 impl Tool for ForeignInputTool {
     fn descriptor(&self) -> ToolDescriptor {
@@ -329,7 +348,8 @@ impl Tool for ForeignInputTool {
     ) -> BoxFuture<'a, Result<ToolExecution, ToolError>> {
         Box::pin(async {
             Ok(ToolExecution::InputRequired(
-                ForeignInputRequired::new("regression_case").expect("valid continuation id"),
+                ForeignInputRequired::new("regression_case", self.request.clone())
+                    .expect("valid continuation id"),
             ))
         })
     }
@@ -485,6 +505,30 @@ fn unavailable_elicitor_persists_question_closes_unstarted_siblings_and_leaves_t
 }
 
 #[test]
+fn form_question_accepts_object_answers_and_rejects_schema_or_type_before_mutation() {
+    let request = foreign_question_request();
+    let original = request.clone();
+    let accepted = QuestionAnswer::from_json(&request, r#"{"target":"staging"}"#)
+        .expect("schema-valid form answer");
+    assert!(accepted.validate_for(&request).is_ok());
+    assert_eq!(request, original);
+
+    assert!(QuestionAnswer::from_json(&request, r#"{"target":42}"#).is_err());
+    assert_eq!(request, original);
+    assert!(QuestionAnswer::from_json(&request, r#"{"other":"staging"}"#).is_err());
+    assert_eq!(request, original);
+}
+
+#[test]
+fn foreign_input_required_carries_question_request_and_non_secret_continuation_id() {
+    let request = foreign_question_request();
+    let foreign = ForeignInputRequired::new("regression_case", request.clone())
+        .expect("valid continuation id");
+    assert_eq!(foreign.continuation_id(), "regression_case");
+    assert_eq!(foreign.question_request(), &request);
+}
+
+#[test]
 fn foreign_input_required_is_projected_to_a_durable_pending_question() {
     let generator = Arc::new(FakeGenerator::new(vec![vec![
         AiEvent::ToolCall {
@@ -512,9 +556,9 @@ fn foreign_input_required_is_projected_to_a_durable_pending_question() {
     let resolver = Arc::new(NoResolver);
     let one_hop = Arc::new(NoHop);
     let duplex = Arc::new(NoDuplex);
-    let registry = vec![RegisteredTool::Effect(
-        Arc::new(ForeignInputTool) as Arc<dyn Tool>
-    )];
+    let registry = vec![RegisteredTool::Effect(Arc::new(ForeignInputTool {
+        request: foreign_question_request(),
+    }) as Arc<dyn Tool>)];
     let tools = Tools::from_registry(
         &registry,
         &policy,
@@ -562,6 +606,15 @@ fn foreign_input_required_is_projected_to_a_durable_pending_question() {
         .pending_question()
         .expect("ForeignInputRequired must become a durable pending question");
     assert!(pending.request().validate().is_ok());
+    let QuestionTarget::ForeignContinuation {
+        tool_call,
+        continuation_id,
+    } = pending.target()
+    else {
+        panic!("foreign input must retain a closed ForeignContinuation target");
+    };
+    assert_eq!(*tool_call, pending.tool_call());
+    assert_eq!(continuation_id, "regression_case");
     assert!(
         store
             .events()

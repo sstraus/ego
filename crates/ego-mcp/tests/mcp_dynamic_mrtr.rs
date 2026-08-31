@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 
 use ego_core::config::McpServerName;
 use ego_core::generator::types::ToolDescriptor;
+use ego_core::question::QuestionMode;
 use ego_mcp::{McpCollapsedBootstrap, McpCollapsedCatalogue, McpInputResponse, McpInputState};
 use rmcp::model::{ElicitRequest, ElicitRequestParams, InputRequest, InputRequiredResult};
 use serde_json::json;
@@ -186,9 +187,25 @@ fn rmcp_form_elicitation_retains_message_schema_and_continuation_authority() {
         Some("opaque-continuation".to_owned()),
     ))
     .expect("one accepted form elicitation");
+    let question = mapped.question_request();
 
     assert_eq!(mapped.correlation_key(), "human-answer");
     assert_eq!(mapped.request_state(), b"opaque-continuation");
+    assert_eq!(question.prompt, "Confirm the deployment target");
+    assert_eq!(
+        question.mode,
+        QuestionMode::Form {
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "target": {"type": "string", "enum": ["staging", "production"]}
+                },
+                "required": ["target"]
+            })
+        }
+    );
+    assert!(question.options.is_empty());
+    assert!(!question.free_text);
     assert_eq!(
         mapped.schema(),
         &json!({
