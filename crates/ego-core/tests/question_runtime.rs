@@ -487,12 +487,14 @@ fn unavailable_elicitor_persists_question_closes_unstarted_siblings_and_leaves_t
         .find(|item| item.call_id.as_deref() == Some("sibling-call"))
         .expect("the unstarted sibling remains represented");
     assert_eq!(sibling.ok, Some(false));
-    assert!(sibling
-        .tool_result
-        .as_ref()
-        .expect("sibling closure result")
-        .model_text()
-        .contains("interrupted: not run"));
+    assert!(
+        sibling
+            .tool_result
+            .as_ref()
+            .expect("sibling closure result")
+            .model_text()
+            .contains("interrupted: not run")
+    );
 
     let events = store.events();
     let question = events

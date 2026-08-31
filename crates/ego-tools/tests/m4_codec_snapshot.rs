@@ -3,10 +3,10 @@
 use ego_core::event::id::{Seq, SessionId};
 use ego_core::question::QuestionTarget;
 use ego_core::state::SessionState;
-use ego_core::store::codec::{decode_line, StoreLine};
+use ego_core::store::codec::{StoreLine, decode_line};
 use ego_core::store::session_store::{SessionEntry, SessionStore};
 use ego_tools::store::{
-    JsonlStore, LeaseInputs, OsIo, Snapshot, SnapshotRejection, SNAPSHOT_VERSION,
+    JsonlStore, LeaseInputs, OsIo, SNAPSHOT_VERSION, Snapshot, SnapshotRejection,
 };
 use futures::StreamExt;
 use std::path::Path;

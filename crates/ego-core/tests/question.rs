@@ -7,7 +7,7 @@
 use ego_core::event::domain::{DomainEvent, Envelope, EventKind};
 use ego_core::event::id::{EventId, ItemId, Producer, Seq, TurnId};
 use ego_core::event::time::Timestamp;
-use ego_core::public::{project_public, ItemKind, PublicEvent, PUBLIC_EVENT_VERSION};
+use ego_core::public::{ItemKind, PUBLIC_EVENT_VERSION, PublicEvent, project_public};
 use ego_core::question::{
     QuestionAnswer, QuestionMode, QuestionOption, QuestionOutcome, QuestionRequest, QuestionTarget,
 };
@@ -54,17 +54,21 @@ fn event(
 
 #[test]
 fn request_validation_covers_modes_options_ids_and_free_text() {
-    assert!(request(QuestionMode::Single, &[("yes", "Yes")], false)
-        .validate()
-        .is_ok());
+    assert!(
+        request(QuestionMode::Single, &[("yes", "Yes")], false)
+            .validate()
+            .is_ok()
+    );
     assert!(
         request(QuestionMode::Multiple, &[("a", "A"), ("b", "B")], false)
             .validate()
             .is_ok()
     );
-    assert!(request(QuestionMode::FreeText, &[], true)
-        .validate()
-        .is_ok());
+    assert!(
+        request(QuestionMode::FreeText, &[], true)
+            .validate()
+            .is_ok()
+    );
 
     for invalid in [
         QuestionRequest::new("", QuestionMode::Single, vec![], false),

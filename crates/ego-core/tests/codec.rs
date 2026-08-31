@@ -16,8 +16,8 @@ use ego_core::generator::attempt::{AttemptRef, DeliveryCertainty, Outcome, Usage
 use ego_core::generator::types::{ErrorKind, ReasoningState, StopReason};
 use ego_core::state::Usage;
 use ego_core::store::codec::{
-    decode_line, decode_log, encode_header, encode_record, CodecError, Header, IndexedCodecError,
-    StoreLine, CODEC_VERSION,
+    CODEC_VERSION, CodecError, Header, IndexedCodecError, StoreLine, decode_line, decode_log,
+    encode_header, encode_record,
 };
 use serde::{Deserialize, Serialize};
 

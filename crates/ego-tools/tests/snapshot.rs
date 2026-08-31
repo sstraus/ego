@@ -35,9 +35,9 @@ use ego_core::state::{SessionState, Usage};
 use ego_core::store::blob::{BlobId, BlobRef};
 use ego_core::store::session_store::SessionStore;
 use ego_tools::store::{
-    validate, JsonlStore, OsIo, Snapshot, SnapshotPolicy, SnapshotRejection, SNAPSHOT_VERSION,
+    JsonlStore, OsIo, SNAPSHOT_VERSION, Snapshot, SnapshotPolicy, SnapshotRejection, validate,
 };
-use tempfile::{tempdir, TempDir};
+use tempfile::{TempDir, tempdir};
 
 // Wrapped in a module named `snapshot` so `cargo test -p ego-tools
 // snapshot` (the story's VERIFY command) matches these tests by substring:

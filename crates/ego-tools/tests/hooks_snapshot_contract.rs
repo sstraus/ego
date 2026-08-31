@@ -11,8 +11,8 @@ use ego_core::event::time::Timestamp;
 use ego_core::generator::attempt::DeliveryCertainty;
 use ego_core::state::SessionState;
 use ego_core::store::session_store::SessionStore;
-use ego_tools::store::{validate, JsonlStore, OsIo, Snapshot, SnapshotRejection, SNAPSHOT_VERSION};
-use tempfile::{tempdir, TempDir};
+use ego_tools::store::{JsonlStore, OsIo, SNAPSHOT_VERSION, Snapshot, SnapshotRejection, validate};
+use tempfile::{TempDir, tempdir};
 
 const DIGEST: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
@@ -329,12 +329,16 @@ fn unresolved_live_pre_effect_and_observer_states_survive_snapshot_without_retry
     let (resumed, rejection) = store.resume(&id).unwrap();
     assert_eq!(rejection, None);
     assert_eq!(resumed.live_hooks(), state.live_hooks());
-    assert!(resumed
-        .live_hooks()
-        .values()
-        .all(|hook| !hook.delivery().retry_is_safe()));
-    assert!(resumed
-        .live_hooks()
-        .values()
-        .all(|hook| hook.delivery() == DeliveryCertainty::PossiblySent));
+    assert!(
+        resumed
+            .live_hooks()
+            .values()
+            .all(|hook| !hook.delivery().retry_is_safe())
+    );
+    assert!(
+        resumed
+            .live_hooks()
+            .values()
+            .all(|hook| hook.delivery() == DeliveryCertainty::PossiblySent)
+    );
 }

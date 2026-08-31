@@ -27,8 +27,8 @@ use ego_core::event::time::Timestamp;
 use ego_core::generator::types::{ErrorKind, ReasoningState};
 use ego_core::permit::{Authority, CanonPath, Escalation, OpName, ToolResult};
 use ego_core::public::{
-    project_public, InstructionDescriptor, InstructionSource, ItemKind, PublicEvent,
-    PUBLIC_EVENT_VERSION,
+    InstructionDescriptor, InstructionSource, ItemKind, PUBLIC_EVENT_VERSION, PublicEvent,
+    project_public,
 };
 use ego_core::run::RunId;
 use ego_core::state::Usage;
@@ -315,15 +315,17 @@ mod public_golden {
                         },
                     ),
                     subject: ego_core::event::hook::HookSubject::Session,
-                    plan: HookPlan::new(vec![HookDescriptorEvidence::new(
-                        HookSourceAuthority::Project,
-                        HookSourceLocation::parse("hooks/project.json").unwrap(),
-                        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-                            .parse()
-                            .unwrap(),
-                        0,
-                    )
-                    .id()])
+                    plan: HookPlan::new(vec![
+                        HookDescriptorEvidence::new(
+                            HookSourceAuthority::Project,
+                            HookSourceLocation::parse("hooks/project.json").unwrap(),
+                            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                                .parse()
+                                .unwrap(),
+                            0,
+                        )
+                        .id(),
+                    ])
                     .unwrap(),
                 },
             ),
