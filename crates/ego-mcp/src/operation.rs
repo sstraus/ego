@@ -1,5 +1,6 @@
 //! Fresh per-operation MCP lifecycles bound to guarded transport authority.
 
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -22,7 +23,8 @@ use ego_core::permit::{
 };
 use ego_core::suspension::{
     ContinuationError, ContinuationJournal, ContinuationRecord, ContinuationState,
-    OpenedContinuation, PreparedResume, ResumeFloor, ResumeKeySource,
+    GuardedMcpResume, McpResumeContext, OpenedContinuation, PreparedResume, ResumeFloor,
+    ResumeKeySource,
 };
 use ego_core::turn::ToolEffectPorts;
 use futures::future;
@@ -36,7 +38,9 @@ use sha2::{Digest, Sha256};
 
 use crate::dynamic::{McpCollapsedBootstrap, McpOperation, McpOperationFactory};
 use crate::http::AdmittedMcpHttpProfile;
-use crate::registry::{McpRegistryCapture, McpToolSchemaAdmission, McpToolSchemaCommand};
+use crate::registry::{
+    McpRegistryCapture, McpRegistryError, McpToolSchemaAdmission, McpToolSchemaCommand,
+};
 use crate::state::{compile_schema, validate_answer};
 use crate::{
     McpClient, McpClientOptions, McpDuplexEffects, McpError, McpFailure, McpFuture,
@@ -95,26 +99,36 @@ pub struct McpHttpOperationFactory {
     collapsed: Option<CollapsedSchemaAdmission>,
 }
 
+/// Exact immutable registry capture lookup owned by continuation recovery.
+pub trait McpCaptureResolver: Send + Sync {
+    fn resolve_capture(
+        &self,
+        stable_fingerprint: &str,
+    ) -> Result<McpRegistryCapture, McpRegistryError>;
+}
+
 /// The sole owner of durable MCP input-required and accepted-answer rounds.
 pub struct McpContinuationOwner {
     journal: Arc<dyn ContinuationJournal>,
-    hooks: HookLifecycleDispatcher,
+    captures: Arc<dyn McpCaptureResolver>,
     keys: Arc<dyn ResumeKeySource>,
     clock: Arc<dyn Clock>,
+    pinned: Mutex<BTreeMap<String, McpRegistryCapture>>,
 }
 
 impl McpContinuationOwner {
     pub fn new(
         journal: Arc<dyn ContinuationJournal>,
-        hooks: HookLifecycleDispatcher,
+        captures: Arc<dyn McpCaptureResolver>,
         keys: Arc<dyn ResumeKeySource>,
         clock: Arc<dyn Clock>,
     ) -> Self {
         Self {
             journal,
-            hooks,
+            captures,
             keys,
             clock,
+            pinned: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -122,8 +136,16 @@ impl McpContinuationOwner {
         &self,
         envelope: ego_core::permit::McpPreparedEnvelope,
         required: crate::McpMappedInput,
-        resume: PreparedResume,
+        guarded: GuardedMcpResume,
     ) -> Result<ForeignInputRequired, McpError> {
+        let (resume, context) = guarded.into_parts();
+        let context =
+            context.ok_or_else(|| authority("MCP input required has no session context"))?;
+        if context.capture() != envelope.admission().capture() {
+            return Err(authority(
+                "MCP resume context capture does not match its operation",
+            ));
+        }
         let schema = serde_json::to_vec(required.schema())
             .map_err(|_| continuation(ContinuationError::InvalidRecord))?;
         let id = continuation_id(&envelope, &required, &schema);
@@ -136,8 +158,32 @@ impl McpContinuationOwner {
                 envelope.transport_fingerprint(),
             )
             .map_err(continuation)?;
-        self.journal.record(record).map_err(continuation)?;
-        self.dispatch(HookLifecycle::Elicitation, &id).await?;
+        if record.capture() != context.capture()
+            || record.fingerprints().capture() != context.capture()
+            || record.subject().server() != envelope.subject().server()
+            || record.subject().operation() != envelope.operation().method()
+            || record.fingerprints().tool() != envelope.admission().operation()
+            || record.fingerprints().schema() != envelope.admission().schema()
+        {
+            return Err(authority(
+                "MCP resume authority does not match its session context",
+            ));
+        }
+        let capture = self
+            .captures
+            .resolve_capture(context.capture())
+            .map_err(|error| authority(error.to_string()))?;
+        if capture.stable_fingerprint() != context.capture() {
+            return Err(authority(
+                "MCP capture resolver returned the wrong identity",
+            ));
+        }
+        self.insert_pin(id.clone(), capture)?;
+        if let Err(error) = self.journal.record(record) {
+            self.remove_pin(&id)?;
+            return Err(continuation(error));
+        }
+        Self::dispatch(context.dispatcher(), HookLifecycle::Elicitation, &id).await?;
         ForeignInputRequired::new(id, required.question_request().clone())
             .map_err(|_| continuation(ContinuationError::InvalidId))
     }
@@ -146,16 +192,25 @@ impl McpContinuationOwner {
         &self,
         id: &str,
         raw_answer: &[u8],
-        capture: McpRegistryCapture,
+        dispatcher: HookLifecycleDispatcher,
         floor: ResumeFloor,
         effects: ToolEffectPorts<'a>,
     ) -> Result<ToolExecution, McpError> {
         let pending = self.journal.load(id).map_err(continuation)?;
         validate_recorded_answer(&pending, raw_answer)?;
+        let capture = self.capture_for(id, pending.capture())?;
         let now = self.clock.now();
-        self.journal
-            .accept_answer(id, raw_answer, now)
-            .map_err(continuation)?;
+        if let Err(error) = self.journal.accept_answer(id, raw_answer, now) {
+            if error.is_expired()
+                || matches!(
+                    error,
+                    ContinuationError::DuplicateAnswer | ContinuationError::InvalidTransition
+                )
+            {
+                self.remove_pin(id)?;
+            }
+            return Err(continuation(error));
+        }
         let accepted = self
             .journal
             .load(id)
@@ -167,24 +222,61 @@ impl McpContinuationOwner {
             accepted.fingerprints(),
             accepted.original_parameters(),
         )?;
-        let opened = accepted
-            .open(call, &current_fingerprints, &floor, now, self.keys.as_ref())
-            .map_err(continuation)?;
+        let opened =
+            match accepted.open(call, &current_fingerprints, &floor, now, self.keys.as_ref()) {
+                Ok(opened) => opened,
+                Err(error) => {
+                    if error.is_expired() {
+                        self.remove_pin(id)?;
+                    }
+                    return Err(continuation(error));
+                }
+            };
+        let expires_at = opened.expires_at();
         let admission = McpResumeAdmission::validate(opened)?;
-        self.dispatch(HookLifecycle::ElicitationResult, id).await?;
+        Self::dispatch(&dispatcher, HookLifecycle::ElicitationResult, id).await?;
         let claim_time = self.clock.now();
-        let (authorized, successor) = admission.into_retry_authorized_with_successor(
+        let (authorized, successor) = match admission.into_retry_authorized_with_successor(
             floor,
             claim_time,
             self.keys.as_ref(),
-        )?;
-        let claimed = self.journal.claim(id, claim_time).map_err(continuation)?;
-        let (call, guarded) = effects.bind_mcp_resume(authorized, successor);
-        match factory.execute(server, call, &guarded).await {
+        ) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                if matches!(error.failure(), McpFailure::Authority)
+                    && self.clock.now() >= expires_at
+                {
+                    self.remove_pin(id)?;
+                }
+                return Err(error);
+            }
+        };
+        let claimed = match self.journal.claim(id, claim_time) {
+            Ok(claimed) => claimed,
+            Err(error) => {
+                if error.is_expired()
+                    || matches!(
+                        error,
+                        ContinuationError::DuplicateClaim | ContinuationError::InvalidTransition
+                    )
+                {
+                    self.remove_pin(id)?;
+                }
+                return Err(continuation(error));
+            }
+        };
+        let successor_context = McpResumeContext::new(dispatcher, capture.clone());
+        let (call, guarded) =
+            effects.bind_mcp_resume(authorized, successor, Some(successor_context));
+        let generation: Arc<str> = Arc::from(capture.generation());
+        match factory.execute(server, call, &guarded, generation).await {
             Ok(execution) => {
-                self.journal
+                let settlement = self
+                    .journal
                     .settle(claimed, ContinuationState::Completed)
-                    .map_err(continuation)?;
+                    .map_err(continuation);
+                self.remove_pin(id)?;
+                settlement?;
                 Ok(execution)
             }
             Err(error) => {
@@ -194,13 +286,15 @@ impl McpContinuationOwner {
                 } else {
                     ContinuationState::Uncertain
                 };
-                self.journal.settle(claimed, state).map_err(|settlement| {
+                let settlement = self.journal.settle(claimed, state).map_err(|settlement| {
                     McpError::with_delivery(
                         McpFailure::Transport,
                         format!("continued MCP settlement failed: {settlement}"),
                         delivery,
                     )
-                })?;
+                });
+                self.remove_pin(id)?;
+                settlement?;
                 Err(McpError::with_delivery(
                     McpFailure::Transport,
                     error.to_string(),
@@ -210,13 +304,68 @@ impl McpContinuationOwner {
         }
     }
 
-    async fn dispatch(&self, lifecycle: HookLifecycle, id: &str) -> Result<(), McpError> {
+    fn insert_pin(&self, id: String, capture: McpRegistryCapture) -> Result<(), McpError> {
+        let mut pinned = self
+            .pinned
+            .lock()
+            .map_err(|_| authority("MCP continuation capture lock is unavailable"))?;
+        if pinned.contains_key(&id) {
+            return Err(authority("MCP continuation capture is already pinned"));
+        }
+        pinned.insert(id, capture);
+        Ok(())
+    }
+
+    fn remove_pin(&self, id: &str) -> Result<(), McpError> {
+        self.pinned
+            .lock()
+            .map_err(|_| authority("MCP continuation capture lock is unavailable"))?
+            .remove(id);
+        Ok(())
+    }
+
+    fn capture_for(
+        &self,
+        id: &str,
+        stable_fingerprint: &str,
+    ) -> Result<McpRegistryCapture, McpError> {
+        if let Some(capture) = self
+            .pinned
+            .lock()
+            .map_err(|_| authority("MCP continuation capture lock is unavailable"))?
+            .get(id)
+            .cloned()
+        {
+            if capture.stable_fingerprint() != stable_fingerprint {
+                return Err(authority(
+                    "pinned MCP capture does not match the continuation",
+                ));
+            }
+            return Ok(capture);
+        }
+        let capture = self
+            .captures
+            .resolve_capture(stable_fingerprint)
+            .map_err(|error| authority(error.to_string()))?;
+        if capture.stable_fingerprint() != stable_fingerprint {
+            return Err(authority(
+                "MCP capture resolver returned the wrong identity",
+            ));
+        }
+        self.insert_pin(id.to_owned(), capture.clone())?;
+        Ok(capture)
+    }
+
+    async fn dispatch(
+        dispatcher: &HookLifecycleDispatcher,
+        lifecycle: HookLifecycle,
+        id: &str,
+    ) -> Result<(), McpError> {
         let key = HookOccurrenceKey::continuation(lifecycle, id)
             .map_err(|error| hook_failure(error.to_string()))?;
         let occurrence = HookOccurrence::new(key, HookEvent::session(lifecycle))
             .map_err(|error| hook_failure(error.to_string()))?;
-        let result = self
-            .hooks
+        let result = dispatcher
             .dispatch(Producer::Main, occurrence)
             .await
             .map_err(|error| hook_failure(error.to_string()))?;
@@ -234,7 +383,7 @@ impl McpContinuationOwner {
 /// continuation owner and its original raw effect authority.
 pub struct McpForeignQuestionPort<'a> {
     owner: Arc<McpContinuationOwner>,
-    capture: McpRegistryCapture,
+    dispatcher: HookLifecycleDispatcher,
     floor: ResumeFloor,
     effects: ToolEffectPorts<'a>,
 }
@@ -242,13 +391,13 @@ pub struct McpForeignQuestionPort<'a> {
 impl<'a> McpForeignQuestionPort<'a> {
     pub fn new(
         owner: Arc<McpContinuationOwner>,
-        capture: McpRegistryCapture,
+        dispatcher: HookLifecycleDispatcher,
         floor: ResumeFloor,
         effects: ToolEffectPorts<'a>,
     ) -> Self {
         Self {
             owner,
-            capture,
+            dispatcher,
             floor,
             effects,
         }
@@ -262,7 +411,7 @@ impl ForeignQuestionPort for McpForeignQuestionPort<'_> {
         canonical_json: &'a str,
     ) -> futures::future::BoxFuture<'a, Result<ToolExecution, String>> {
         let owner = Arc::clone(&self.owner);
-        let capture = self.capture.clone();
+        let dispatcher = self.dispatcher.clone();
         let floor = self.floor.clone();
         let effects = self.effects.clone();
         Box::pin(async move {
@@ -270,7 +419,7 @@ impl ForeignQuestionPort for McpForeignQuestionPort<'_> {
                 .accept_answer(
                     continuation_id,
                     canonical_json.as_bytes(),
-                    capture,
+                    dispatcher,
                     floor,
                     effects,
                 )
@@ -332,7 +481,7 @@ fn continuation_id(
     digest.update([0]);
     digest.update(envelope.operation().method().as_bytes());
     digest.update([0]);
-    digest.update(envelope.admission().generation().as_bytes());
+    digest.update(envelope.admission().capture().as_bytes());
     digest.update([0]);
     digest.update(envelope.admission().operation().as_bytes());
     digest.update([0]);
@@ -402,13 +551,14 @@ impl McpOperationFactory for McpHttpOperationFactory {
         admission: Arc<McpServerAdmission>,
         call: PreparedCall,
         io: &'a dyn GuardedIo,
+        generation: Arc<str>,
     ) -> futures::future::BoxFuture<'a, Result<ToolExecution, ToolError>> {
         Box::pin(async move {
             let McpServerConfig::Http(config) = admission.config() else {
                 return Err(execution_error("HTTP MCP factory received stdio config"));
             };
             let config = config.clone();
-            execute_http(&config, call, io, self, admission)
+            execute_http(&config, call, io, self, admission, generation)
                 .await
                 .map_err(mcp_execution_error)
         })
@@ -489,23 +639,16 @@ impl McpOperationFactory for McpStdioOperationFactory {
         admission: Arc<McpServerAdmission>,
         call: PreparedCall,
         io: &'a dyn GuardedIo,
+        generation: Arc<str>,
     ) -> futures::future::BoxFuture<'a, Result<ToolExecution, ToolError>> {
         Box::pin(async move {
             let McpServerConfig::Stdio(config) = admission.config() else {
                 return Err(execution_error("stdio MCP factory received HTTP config"));
             };
             let config = config.clone();
-            execute_stdio(
-                &config,
-                call,
-                io,
-                Arc::clone(&self.continuations),
-                self.limits,
-                admission,
-                self.collapsed.clone(),
-            )
-            .await
-            .map_err(mcp_execution_error)
+            execute_stdio(&config, call, io, self, admission, generation)
+                .await
+                .map_err(mcp_execution_error)
         })
     }
 
@@ -600,6 +743,7 @@ async fn execute_http(
     io: &dyn GuardedIo,
     factory: &McpHttpOperationFactory,
     admission: Arc<McpServerAdmission>,
+    generation: Arc<str>,
 ) -> Result<ToolExecution, McpError> {
     let envelope = call
         .mcp_envelope()
@@ -644,7 +788,13 @@ async fn execute_http(
     let selected = broker
         .selected_settlement()?
         .ok_or_else(|| protocol("selected MCP HTTP operation was not settled"))?;
-    let schema = tool_schema_command(&outcome, &envelope, admission, factory.collapsed.as_ref())?;
+    let schema = tool_schema_command(
+        &outcome,
+        &envelope,
+        admission,
+        &generation,
+        factory.collapsed.as_ref(),
+    )?;
     let execution = project_outcome(
         outcome,
         &envelope,
@@ -664,10 +814,9 @@ async fn execute_stdio(
     config: &McpStdioConfig,
     call: PreparedCall,
     io: &dyn GuardedIo,
-    continuations: Arc<McpContinuationOwner>,
-    limits: OperationLimits,
+    factory: &McpStdioOperationFactory,
     admission: Arc<McpServerAdmission>,
-    collapsed: Option<CollapsedSchemaAdmission>,
+    generation: Arc<str>,
 ) -> Result<ToolExecution, McpError> {
     let envelope = call
         .mcp_envelope()
@@ -696,7 +845,7 @@ async fn execute_stdio(
         server: server.clone(),
         duplex: Some(duplex),
     });
-    let mut client = McpClient::connect_stdio(server, limits.options()?, effects)?;
+    let mut client = McpClient::connect_stdio(server, factory.limits.options()?, effects)?;
     if let Err(error) = client.discover().await {
         let _ = client.settle().await;
         return Err(error);
@@ -708,17 +857,23 @@ async fn execute_stdio(
     let duplex = settlement
         .duplex()
         .ok_or_else(|| protocol("selected MCP stdio operation has no settlement"))?;
-    let schema = tool_schema_command(&outcome, &envelope, admission, collapsed.as_ref())?;
+    let schema = tool_schema_command(
+        &outcome,
+        &envelope,
+        admission,
+        &generation,
+        factory.collapsed.as_ref(),
+    )?;
     let execution = project_outcome(
         outcome,
         &envelope,
         io,
-        continuations.as_ref(),
+        factory.continuations.as_ref(),
         duplex.delivery(),
         cancellation_from_duplex(duplex),
     )
     .await?;
-    if let (Some(collapsed), Some(command)) = (collapsed, schema) {
+    if let (Some(collapsed), Some(command)) = (factory.collapsed.as_ref(), schema) {
         collapsed.admission.reconcile(command).await?;
     }
     Ok(execution)
@@ -1006,6 +1161,7 @@ fn tool_schema_command(
     outcome: &OperationOutcome,
     envelope: &ego_core::permit::McpPreparedEnvelope,
     server_admission: Arc<McpServerAdmission>,
+    generation: &str,
     collapsed: Option<&CollapsedSchemaAdmission>,
 ) -> Result<Option<McpToolSchemaCommand>, McpError> {
     let Some(collapsed) = collapsed else {
@@ -1038,7 +1194,7 @@ fn tool_schema_command(
     let requested_name = collapsed.bootstrap.requested_name(&parameters)?;
     Ok(Some(McpToolSchemaCommand::new(
         server_admission,
-        envelope.admission().generation().to_owned(),
+        generation.to_string(),
         envelope.admission().clone(),
         requested_name,
         structured_content,
@@ -1494,7 +1650,7 @@ fn http_transport_fingerprint(
     let mut hash = Sha256::new();
     hash.update(b"ego:mcp:selected-http:v1");
     hash.update(profile);
-    hash.update(admission.generation().as_bytes());
+    hash.update(admission.capture().as_bytes());
     hash.update([0]);
     hash.update(admission.operation().as_bytes());
     hash.update([0]);
@@ -1511,7 +1667,7 @@ fn stdio_transport_fingerprint(
 ) -> String {
     let mut hash = Sha256::new();
     hash.update(b"ego:mcp:selected-stdio:v1");
-    hash.update(admission.generation().as_bytes());
+    hash.update(admission.capture().as_bytes());
     hash.update([0]);
     hash.update(admission.operation().as_bytes());
     hash.update([0]);

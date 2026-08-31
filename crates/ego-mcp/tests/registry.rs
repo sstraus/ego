@@ -237,6 +237,7 @@ impl McpOperationFactory for CountingFactory {
         _admission: Arc<McpServerAdmission>,
         _call: PreparedCall,
         _io: &'a dyn ego_core::permit::GuardedIo,
+        _generation: Arc<str>,
     ) -> BoxFuture<'a, Result<ToolExecution, ToolError>> {
         let _retained = self.tools.len();
         Box::pin(async {

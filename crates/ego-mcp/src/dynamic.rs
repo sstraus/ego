@@ -328,6 +328,7 @@ pub trait McpOperationFactory: Send + Sync {
         admission: Arc<McpServerAdmission>,
         call: PreparedCall,
         io: &'a dyn GuardedIo,
+        generation: Arc<str>,
     ) -> BoxFuture<'a, Result<ToolExecution, ToolError>>;
 
     fn execute_hook<'a>(
@@ -413,11 +414,12 @@ impl McpToolDefinition {
         &self,
         server: &str,
         generation: &str,
+        capture: &str,
         server_admission: Arc<McpServerAdmission>,
         factory: Arc<dyn McpOperationFactory>,
     ) -> Result<Arc<McpCapturedTool>, McpError> {
         let admission = McpAdmissionFingerprint::new(
-            generation,
+            capture,
             format!("{server}/{}", self.descriptor.name),
             self.admission_schema_fingerprint(),
         )
@@ -431,6 +433,7 @@ impl McpToolDefinition {
                 schema,
             },
             server: Arc::from(server),
+            generation: Arc::from(generation),
             server_admission,
             factory,
             admission,
@@ -444,6 +447,7 @@ impl McpToolDefinition {
 pub struct McpCapturedTool {
     descriptor: ToolDescriptor,
     server: Arc<str>,
+    generation: Arc<str>,
     server_admission: Arc<McpServerAdmission>,
     factory: Arc<dyn McpOperationFactory>,
     admission: McpAdmissionFingerprint,
@@ -461,12 +465,12 @@ impl McpCapturedTool {
     pub(crate) fn matches_subject_parts(
         &self,
         server: &str,
-        generation: &str,
+        capture: &str,
         operation: &str,
         schema: &str,
     ) -> bool {
         self.server.as_ref() == server
-            && self.admission.generation() == generation
+            && self.admission.capture() == capture
             && self.admission.operation() == operation
             && self.admission.schema() == schema
     }
@@ -548,8 +552,12 @@ impl Tool for McpCapturedTool {
         call: PreparedCall,
         io: &'a dyn GuardedIo,
     ) -> BoxFuture<'a, Result<ToolExecution, ToolError>> {
-        self.factory
-            .execute(Arc::clone(&self.server_admission), call, io)
+        self.factory.execute(
+            Arc::clone(&self.server_admission),
+            call,
+            io,
+            Arc::clone(&self.generation),
+        )
     }
 }
 

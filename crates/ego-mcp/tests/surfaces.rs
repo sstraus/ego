@@ -244,6 +244,7 @@ impl McpOperationFactory for DynamicFactory {
         _admission: Arc<McpServerAdmission>,
         _call: PreparedCall,
         _io: &'a dyn GuardedIo,
+        _generation: Arc<str>,
     ) -> BoxFuture<'a, Result<ToolExecution, ToolError>> {
         Box::pin(async {
             Ok(ToolExecution::Complete(

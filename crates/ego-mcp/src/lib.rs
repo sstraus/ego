@@ -45,16 +45,17 @@ pub use oauth::{
     McpTokenRefreshRequest, McpTokenRefreshResult, login, refresh_token,
 };
 pub use operation::{
-    McpContinuationOwner, McpForeignQuestionPort, McpHttpOperationFactory, McpResumeAdmission,
-    McpStdioOperationFactory,
+    McpCaptureResolver, McpContinuationOwner, McpForeignQuestionPort, McpHttpOperationFactory,
+    McpResumeAdmission, McpStdioOperationFactory,
 };
 pub use registry::{
     McpAdmittedCandidate, McpAuthorizationStatus, McpCacheFreshness, McpCacheMetadata,
     McpCandidateAdmission, McpCandidateError, McpCandidateIdentity, McpCandidateInventory,
     McpCandidateRequest, McpCapabilities, McpCapturedContextOperation, McpCapturedContextSource,
     McpCapturedServer, McpRegistryCandidate, McpRegistryCapture, McpRegistryController,
-    McpRegistryError, McpRegistryPublication, McpRegistryRefresh, McpRegistryStatus,
-    McpServerDiagnostic, McpServerState, McpServerStatus, RegistryScope, RegistryTrigger,
+    McpRegistryError, McpRegistryPublication, McpRegistryRefresh, McpRegistryRuntime,
+    McpRegistryStatus, McpServerDiagnostic, McpServerState, McpServerStatus, RegistryScope,
+    RegistryTrigger,
 };
 pub use run_server::{
     McpRunBindingsBuilder, McpRunExecutionSpawner, McpRunResourceReader, McpRunResourceRequest,

@@ -178,6 +178,7 @@ impl<'a> McpHookAdapter<'a> {
             .map_err(|error| McpHookAdapterError(error.to_string()))?;
         let wire_input = json!({ "hook": hook, "input": input });
         let generation = self.capture.generation();
+        let stable_capture = self.capture.stable_fingerprint();
         let Some(captured) = self
             .capture
             .servers()
@@ -203,7 +204,7 @@ impl<'a> McpHookAdapter<'a> {
         let identity_matches = envelope.operation() == McpOperationKind::CallTool
             && envelope.subject().server() == server.as_str()
             && envelope.subject().operation_name() == tool.as_str()
-            && envelope.admission().generation() == generation
+            && envelope.admission().capture() == stable_capture
             && self
                 .capture
                 .tools()

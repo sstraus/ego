@@ -640,6 +640,7 @@ impl McpOperationFactory for HookFactory {
         _admission: Arc<McpServerAdmission>,
         _call: PreparedCall,
         _io: &'a dyn GuardedIo,
+        _generation: Arc<str>,
     ) -> BoxFuture<'a, Result<ToolExecution, ToolError>> {
         Box::pin(async {
             Err(ToolError::InvalidParams(

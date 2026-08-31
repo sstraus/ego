@@ -7,13 +7,17 @@ use std::sync::{Arc, RwLock, Weak};
 use std::time::{Duration, Instant};
 
 use ego_core::config::{McpConfigProvenance, McpServerConfig, McpServerName};
+use ego_core::event::time::Clock;
 use ego_core::generator::types::ToolDescriptor as GeneratorToolDescriptor;
 use ego_core::mcp::{
     CacheScope, ContextEntry, ContextError, ContextSensitivity, ContextSnapshot, ContextSource,
     McpAdmissionFingerprint, McpOperationKind, McpSubject,
 };
 use ego_core::permit::{PreparedCall, Tool};
-use ego_core::suspension::{ContinuationKind, ContinuationSubject, ResumeFingerprints};
+use ego_core::suspension::{
+    ContinuationJournal, ContinuationKind, ContinuationSubject, McpCapturePin, ResumeFingerprints,
+    ResumeKeySource,
+};
 use ego_core::turn::{
     AdmittedToolSource, CapturedToolCatalogue, McpRegistryEvent, McpRegistryJournal,
     McpRegistryJournalError, RegisteredTool, ToolCatalogueError,
@@ -22,6 +26,7 @@ use rmcp::model::{Prompt, Resource};
 use sha2::{Digest, Sha256};
 
 use crate::dynamic::{McpCapturedTool, McpOperation, McpToolDefinition};
+use crate::operation::McpCaptureResolver;
 use crate::{
     McpCollapsedBootstrap, McpCollapsedCatalogue, McpContinuationOwner, McpDuplexEffectsFactory,
     McpError, McpFailure, McpFuture, McpHttpEffects, McpOperationFactory,
@@ -736,7 +741,7 @@ impl McpCapturedContextOperation {
     ) -> bool {
         self.subject.server() == subject.server()
             && self.operation.method() == subject.operation()
-            && self.admission.generation() == fingerprints.capture()
+            && self.admission.capture() == fingerprints.capture()
             && self.admission.operation() == fingerprints.tool()
             && self.admission.schema() == fingerprints.schema()
             && matches!(
@@ -906,13 +911,19 @@ impl McpRegistryCapture {
             )
         })?;
         let current = ResumeFingerprints::new(
-            envelope.admission().generation(),
+            envelope.admission().capture(),
             envelope.admission().operation(),
             envelope.admission().schema(),
             envelope.transport_fingerprint(),
         )
         .map_err(|error| McpError::new(McpFailure::Authority, error.to_string()))?;
         Ok((admission, factory, call, current))
+    }
+}
+
+impl McpCapturePin for McpRegistryCapture {
+    fn stable_fingerprint(&self) -> &str {
+        McpRegistryCapture::stable_fingerprint(self)
     }
 }
 
@@ -1273,6 +1284,47 @@ struct PublishedState {
     captures: BTreeMap<Arc<str>, Vec<Weak<McpRegistryCaptureInner>>>,
 }
 
+impl PublishedState {
+    fn empty() -> Self {
+        Self {
+            snapshot: Arc::new(AdmittedRegistrySnapshot::empty()),
+            status: McpRegistryStatus::default(),
+            captures: BTreeMap::new(),
+        }
+    }
+}
+
+struct PublishedCaptureResolver {
+    state: Arc<RwLock<PublishedState>>,
+}
+
+impl McpCaptureResolver for PublishedCaptureResolver {
+    fn resolve_capture(
+        &self,
+        stable_fingerprint: &str,
+    ) -> Result<McpRegistryCapture, McpRegistryError> {
+        resolve_capture_in_state(&self.state, stable_fingerprint)
+    }
+}
+
+fn resolve_capture_in_state(
+    state: &RwLock<PublishedState>,
+    stable_fingerprint: &str,
+) -> Result<McpRegistryCapture, McpRegistryError> {
+    state
+        .read()
+        .map_err(|_| McpRegistryError::PublicationUnavailable)?
+        .captures
+        .get(stable_fingerprint)
+        .and_then(|captures| captures.iter().find_map(Weak::upgrade))
+        .map(|inner| McpRegistryCapture { inner })
+        .ok_or_else(|| {
+            McpRegistryError::InvalidCandidate(
+                "MCP registry capture identity is unavailable".to_owned(),
+            )
+        })
+}
+
 #[derive(Clone)]
 pub struct McpRegistryPublication {
     generation: Arc<str>,
@@ -1321,10 +1373,83 @@ impl AdmittedToolSource for RegistryToolSource {
             .map_err(|_| ToolCatalogueError::CaptureUnavailable)?
             .snapshot
             .clone();
-        CapturedToolCatalogue::new(
+        CapturedToolCatalogue::new_mcp(
             snapshot.generation.to_string(),
             snapshot.tools.iter().cloned().collect(),
+            snapshot.capture.clone(),
         )
+    }
+}
+
+#[derive(Clone)]
+pub struct McpRegistryRuntime {
+    controller: Arc<McpRegistryController>,
+    continuations: Arc<McpContinuationOwner>,
+}
+
+impl McpRegistryRuntime {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        registry_journal: Arc<dyn McpRegistryJournal>,
+        continuation_journal: Arc<dyn ContinuationJournal>,
+        http_management: Arc<dyn McpHttpEffects>,
+        stdio_management: Arc<dyn McpDuplexEffectsFactory>,
+        keys: Arc<dyn ResumeKeySource>,
+        clock: Arc<dyn Clock>,
+        max_sse_event_size: usize,
+        timeout: Duration,
+    ) -> Result<Self, McpRegistryError> {
+        if max_sse_event_size == 0 || timeout.is_zero() {
+            return Err(McpRegistryError::InvalidCandidate(
+                "invalid MCP runtime limits".to_owned(),
+            ));
+        }
+        registry_journal.replay()?;
+        let state = Arc::new(RwLock::new(PublishedState::empty()));
+        let resolver: Arc<dyn McpCaptureResolver> = Arc::new(PublishedCaptureResolver {
+            state: Arc::clone(&state),
+        });
+        let continuations = Arc::new(McpContinuationOwner::new(
+            continuation_journal,
+            resolver,
+            keys,
+            clock,
+        ));
+        let owner = Arc::clone(&continuations);
+        let controller = Arc::new_cyclic(move |controller| {
+            let schemas: Arc<dyn McpToolSchemaAdmission> =
+                Arc::new(ControllerToolSchemaAdmission {
+                    controller: controller.clone(),
+                });
+            let admission: Arc<dyn McpCandidateAdmission> =
+                Arc::new(McpRuntimeCandidateAdmission::new(
+                    Arc::clone(&http_management),
+                    Arc::clone(&stdio_management),
+                    Arc::clone(&owner),
+                    schemas,
+                    max_sse_event_size,
+                    timeout,
+                ));
+            McpRegistryController {
+                journal: registry_journal,
+                admission,
+                reconcile: tokio::sync::Mutex::new(()),
+                state,
+                next_request: AtomicU64::new(1),
+            }
+        });
+        Ok(Self {
+            controller,
+            continuations,
+        })
+    }
+
+    pub fn controller(&self) -> &Arc<McpRegistryController> {
+        &self.controller
+    }
+
+    pub fn continuation_owner(&self) -> &Arc<McpContinuationOwner> {
+        &self.continuations
     }
 }
 
@@ -1346,54 +1471,8 @@ impl McpRegistryController {
             journal,
             admission,
             reconcile: tokio::sync::Mutex::new(()),
-            state: Arc::new(RwLock::new(PublishedState {
-                snapshot: Arc::new(AdmittedRegistrySnapshot::empty()),
-                status: McpRegistryStatus::default(),
-                captures: BTreeMap::new(),
-            })),
+            state: Arc::new(RwLock::new(PublishedState::empty())),
             next_request: AtomicU64::new(1),
-        }))
-    }
-
-    pub fn new_runtime(
-        journal: Arc<dyn McpRegistryJournal>,
-        http_management: Arc<dyn McpHttpEffects>,
-        stdio_management: Arc<dyn McpDuplexEffectsFactory>,
-        continuations: Arc<McpContinuationOwner>,
-        max_sse_event_size: usize,
-        timeout: Duration,
-    ) -> Result<Arc<Self>, McpRegistryError> {
-        if max_sse_event_size == 0 || timeout.is_zero() {
-            return Err(McpRegistryError::InvalidCandidate(
-                "invalid MCP runtime limits".to_owned(),
-            ));
-        }
-        journal.replay()?;
-        Ok(Arc::new_cyclic(move |controller| {
-            let schemas: Arc<dyn McpToolSchemaAdmission> =
-                Arc::new(ControllerToolSchemaAdmission {
-                    controller: controller.clone(),
-                });
-            let admission: Arc<dyn McpCandidateAdmission> =
-                Arc::new(McpRuntimeCandidateAdmission::new(
-                    Arc::clone(&http_management),
-                    Arc::clone(&stdio_management),
-                    Arc::clone(&continuations),
-                    schemas,
-                    max_sse_event_size,
-                    timeout,
-                ));
-            Self {
-                journal,
-                admission,
-                reconcile: tokio::sync::Mutex::new(()),
-                state: Arc::new(RwLock::new(PublishedState {
-                    snapshot: Arc::new(AdmittedRegistrySnapshot::empty()),
-                    status: McpRegistryStatus::default(),
-                    captures: BTreeMap::new(),
-                })),
-                next_request: AtomicU64::new(1),
-            }
         }))
     }
 
@@ -1502,7 +1581,7 @@ impl McpRegistryController {
         let _serial = self.reconcile.lock().await;
         let (predecessor, prior_status) = self.current_state()?;
         if command.generation.as_str() != predecessor.generation.as_ref()
-            || command.admission_fingerprint.generation() != command.generation.as_str()
+            || command.admission_fingerprint.capture() != predecessor.capture.stable_fingerprint()
         {
             return Err(McpRegistryError::InvalidCandidate(
                 "collapsed schema lookup source generation is stale".to_owned(),
@@ -1535,12 +1614,12 @@ impl McpRegistryController {
                 )
             })?;
         let expected = McpAdmissionFingerprint::new(
-            predecessor.generation.to_string(),
+            predecessor.capture.stable_fingerprint(),
             format!("{name}/{lookup_name}"),
             lookup.admission_schema_fingerprint(),
         )
         .map_err(|error| McpRegistryError::InvalidCandidate(error.to_string()))?;
-        if command.admission_fingerprint.generation() != expected.generation()
+        if command.admission_fingerprint.capture() != expected.capture()
             || command.admission_fingerprint.operation() != expected.operation()
             || command.admission_fingerprint.schema() != expected.schema()
         {
@@ -1614,18 +1693,7 @@ impl McpRegistryController {
         &self,
         stable_fingerprint: &str,
     ) -> Result<McpRegistryCapture, McpRegistryError> {
-        self.state
-            .read()
-            .map_err(|_| McpRegistryError::PublicationUnavailable)?
-            .captures
-            .get(stable_fingerprint)
-            .and_then(|captures| captures.iter().find_map(Weak::upgrade))
-            .map(|inner| McpRegistryCapture { inner })
-            .ok_or_else(|| {
-                McpRegistryError::InvalidCandidate(
-                    "MCP registry capture identity is unavailable".to_owned(),
-                )
-            })
+        resolve_capture_in_state(&self.state, stable_fingerprint)
     }
 
     fn current_snapshot(&self) -> Result<Arc<AdmittedRegistrySnapshot>, McpRegistryError> {
@@ -1710,6 +1778,7 @@ impl McpRegistryController {
                 let tool = match definition.capture(
                     name.as_str(),
                     &generation,
+                    &stable_fingerprint,
                     Arc::clone(&server.admission),
                     Arc::clone(&server.factory),
                 ) {
@@ -1745,7 +1814,7 @@ impl McpRegistryController {
                 servers.keys(),
             );
         }
-        let contexts = match capture_contexts(&generation, &servers) {
+        let contexts = match capture_contexts(&stable_fingerprint, &servers) {
             Ok(contexts) => Arc::new(contexts),
             Err(error) => {
                 return self.fail_publication(
@@ -1832,6 +1901,15 @@ impl McpRegistryController {
         Err(McpRegistryError::InvalidCandidate(
             "registry publication failed".to_owned(),
         ))
+    }
+}
+
+impl McpCaptureResolver for McpRegistryController {
+    fn resolve_capture(
+        &self,
+        stable_fingerprint: &str,
+    ) -> Result<McpRegistryCapture, McpRegistryError> {
+        resolve_capture_in_state(&self.state, stable_fingerprint)
     }
 }
 
@@ -2152,7 +2230,7 @@ fn validate_candidate_contents(
 }
 
 fn capture_contexts(
-    generation: &str,
+    capture: &str,
     servers: &BTreeMap<McpServerName, Arc<AdmittedServerSlice>>,
 ) -> Result<McpCapturedContextSource, McpRegistryError> {
     let mut operations = Vec::new();
@@ -2172,14 +2250,14 @@ fn capture_contexts(
                 CacheScope::Private,
                 revision,
             )
-            .and_then(|entry| entry.with_admission_generation(generation))
+            .and_then(|entry| entry.with_admission_capture(capture))
             .map_err(|error| McpRegistryError::InvalidCandidate(error.to_string()))?;
             let subject = McpSubject::Resource {
                 server: server_name.to_string(),
                 uri: resource.uri.clone(),
             };
             let admission = McpAdmissionFingerprint::new(
-                generation,
+                capture,
                 format!("{server_name}/{}", resource.uri),
                 descriptor,
             )
@@ -2216,14 +2294,14 @@ fn capture_contexts(
                 CacheScope::Private,
                 revision,
             )
-            .and_then(|entry| entry.with_admission_generation(generation))
+            .and_then(|entry| entry.with_admission_capture(capture))
             .map_err(|error| McpRegistryError::InvalidCandidate(error.to_string()))?;
             let subject = McpSubject::Prompt {
                 server: server_name.to_string(),
                 name: prompt.name.clone(),
             };
             let admission = McpAdmissionFingerprint::new(
-                generation,
+                capture,
                 format!("{server_name}/{}", prompt.name),
                 descriptor,
             )
@@ -2334,6 +2412,7 @@ mod collapsed_mcp_red {
             _admission: Arc<McpServerAdmission>,
             _call: PreparedCall,
             _io: &'a dyn GuardedIo,
+            _generation: Arc<str>,
         ) -> BoxFuture<'a, Result<ToolExecution, ToolError>> {
             Box::pin(async {
                 Ok(ToolExecution::Complete(

@@ -703,7 +703,8 @@ fn authorized(call: PreparedCall) -> Authorized {
         .mcp_envelope()
         .expect("MCP envelope")
         .subject()
-        .operation_name();
+        .operation_name()
+        .to_owned();
     let policy = PolicyEngine::new(
         CanonPath::new("/workspace"),
         Mode::Yolo,
@@ -1512,6 +1513,7 @@ async fn answer_resume_resolves_recorded_capture_and_adapter_never_uses_loop_cap
     else {
         panic!("expected required");
     };
+    assert_eq!(journal.recorded_capture(), stable);
     let adapter = ego_mcp::McpForeignQuestionPort::new(
         Arc::clone(&owner),
         hooks_with_mode(HookMode::Continue, trace.clone()),
@@ -1523,7 +1525,6 @@ async fn answer_resume_resolves_recorded_capture_and_adapter_never_uses_loop_cap
             .await
             .expect("resume");
     assert!(matches!(result, ToolExecution::Complete(_)));
-    assert_eq!(journal.recorded_capture(), stable);
 }
 
 #[tokio::test(flavor = "current_thread")]

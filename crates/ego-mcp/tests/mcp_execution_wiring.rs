@@ -90,6 +90,7 @@ impl McpOperationFactory for FakeFactory {
         _: Arc<McpServerAdmission>,
         _: PreparedCall,
         _: &'a dyn GuardedIo,
+        _: Arc<str>,
     ) -> BoxFuture<'a, Result<ToolExecution, ToolError>> {
         self.executions.fetch_add(1, Ordering::SeqCst);
         Box::pin(async { Ok(ToolExecution::Complete(ToolResult::builtin("fixture"))) })
