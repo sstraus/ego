@@ -9,24 +9,25 @@ use std::time::{Duration, Instant};
 use ego_core::config::{McpConfigProvenance, McpServerConfig, McpServerName};
 use ego_core::event::time::Clock;
 use ego_core::generator::types::ToolDescriptor as GeneratorToolDescriptor;
+use ego_core::hook::HookLifecycleDispatcher;
 use ego_core::mcp::{
     CacheScope, ContextEntry, ContextError, ContextSensitivity, ContextSnapshot, ContextSource,
-    McpAdmissionFingerprint, McpOperationKind, McpSubject,
+    ForeignQuestionPort, McpAdmissionFingerprint, McpOperationKind, McpRuntimeBinding, McpSubject,
 };
 use ego_core::permit::{PreparedCall, Tool};
 use ego_core::suspension::{
     ContinuationJournal, ContinuationKind, ContinuationSubject, McpCapturePin, ResumeFingerprints,
-    ResumeKeySource,
+    ResumeFloor, ResumeKeySource,
 };
 use ego_core::turn::{
     AdmittedToolSource, CapturedToolCatalogue, McpRegistryEvent, McpRegistryJournal,
-    McpRegistryJournalError, RegisteredTool, ToolCatalogueError,
+    McpRegistryJournalError, RegisteredTool, ToolCatalogueError, ToolEffectPorts,
 };
 use rmcp::model::{Prompt, Resource};
 use sha2::{Digest, Sha256};
 
 use crate::dynamic::{McpCapturedTool, McpOperation, McpToolDefinition};
-use crate::operation::McpCaptureResolver;
+use crate::operation::{McpCaptureResolver, McpForeignQuestionPort};
 use crate::{
     McpCollapsedBootstrap, McpCollapsedCatalogue, McpContinuationOwner, McpDuplexEffectsFactory,
     McpError, McpFailure, McpFuture, McpHttpEffects, McpOperationFactory,
@@ -1450,6 +1451,22 @@ impl McpRegistryRuntime {
 
     pub fn continuation_owner(&self) -> &Arc<McpContinuationOwner> {
         &self.continuations
+    }
+}
+
+impl McpRuntimeBinding for McpRegistryRuntime {
+    fn foreign_question_port<'a>(
+        &self,
+        dispatcher: HookLifecycleDispatcher,
+        floor: ResumeFloor,
+        effects: ToolEffectPorts<'a>,
+    ) -> Arc<dyn ForeignQuestionPort + 'a> {
+        Arc::new(McpForeignQuestionPort::new(
+            Arc::clone(&self.continuations),
+            dispatcher,
+            floor,
+            effects,
+        ))
     }
 }
 

@@ -13,9 +13,11 @@ use ego_core::suspension::ContinuationJournal;
 use ego_core::turn::CancelToken;
 use ego_core::turn::McpRegistryJournal;
 use ego_mcp::{
-    DurableMcpInputRequiredRecorder, MCP_DEFAULT_MAX_SSE_EVENT_SIZE, MCP_DEFAULT_OPERATION_TIMEOUT,
-    McpDuplexEffectsFactory, McpHttpEffects, McpInputRequiredRecorder, McpRegistryController,
+    MCP_DEFAULT_MAX_SSE_EVENT_SIZE, MCP_DEFAULT_OPERATION_TIMEOUT, McpDuplexEffectsFactory,
+    McpHttpEffects, McpRegistryController, McpRegistryRuntime,
 };
+use ego_tools::clock::SystemClock;
+use ego_tools::credentials::OsResumeKey;
 use ego_tools::exec::{ExecLimits, ExecRunConfig, HttpCallTimeout, ProcessError, RunEffectPorts};
 use ego_tools::http::SystemResolver;
 use ego_tools::mcp::{RunMcpDuplexEffectsFactory, RunMcpHttpEffects};
@@ -147,11 +149,11 @@ impl CommandHttpScope {
 }
 
 /// One process-lifetime MCP authority and the OS effects it borrows from.
-/// The effect scope is retained beside the controller so neither its evidence
+/// The effect scope is retained beside the runtime so neither its evidence
 /// directory nor guarded process/network handles can disappear first.
 pub struct McpProcessScope {
     _effects: CommandHttpScope,
-    controller: Arc<McpRegistryController>,
+    runtime: Arc<McpRegistryRuntime>,
 }
 
 impl McpProcessScope {
@@ -166,29 +168,35 @@ impl McpProcessScope {
             Arc::new(JsonlContinuationJournal::open(&root).map_err(|error| {
                 format!("MCP continuation journal could not be opened: {error}")
             })?) as Arc<dyn ContinuationJournal>;
-        let continuations = Arc::new(DurableMcpInputRequiredRecorder::new(continuation_journal))
-            as Arc<dyn McpInputRequiredRecorder>;
         let http = Arc::new(RunMcpHttpEffects::new(Arc::clone(effects.ports())))
             as Arc<dyn McpHttpEffects>;
         let stdio = Arc::new(RunMcpDuplexEffectsFactory::new(
             effects.ports().duplex_handle(),
         )) as Arc<dyn McpDuplexEffectsFactory>;
-        let controller = McpRegistryController::new_runtime(
-            journal,
-            http,
-            stdio,
-            continuations,
-            MCP_DEFAULT_MAX_SSE_EVENT_SIZE,
-            MCP_DEFAULT_OPERATION_TIMEOUT,
-        )
-        .map_err(|error| format!("MCP registry authority could not be opened: {error}"))?;
+        let runtime = Arc::new(
+            McpRegistryRuntime::new(
+                journal,
+                continuation_journal,
+                http,
+                stdio,
+                Arc::new(OsResumeKey::open(&root)),
+                Arc::new(SystemClock),
+                MCP_DEFAULT_MAX_SSE_EVENT_SIZE,
+                MCP_DEFAULT_OPERATION_TIMEOUT,
+            )
+            .map_err(|error| format!("MCP registry authority could not be opened: {error}"))?,
+        );
         Ok(Self {
             _effects: effects,
-            controller,
+            runtime,
         })
     }
 
+    pub fn runtime(&self) -> &Arc<McpRegistryRuntime> {
+        &self.runtime
+    }
+
     pub fn controller(&self) -> &Arc<McpRegistryController> {
-        &self.controller
+        self.runtime.controller()
     }
 }

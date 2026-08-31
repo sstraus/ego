@@ -19,6 +19,7 @@ use ego_core::compact::{CompactionCommand, CompactionReceipt, CompactionTransiti
 use ego_core::event::id::SessionId;
 use ego_core::event::time::Clock;
 use ego_core::generator::capabilities::ModelCapabilities;
+use ego_core::mcp::McpRuntimeBinding;
 use ego_core::run::{
     CancelKey, ContinueRequest, EventSinkFactory, IdSource, RequestDigest, RequestId,
     RunCommandOutcome, RunController, RunExecutor, RunRoot, RunSelections, RunSettlement,
@@ -79,6 +80,7 @@ impl std::error::Error for McpSessionAdmissionError {}
 pub trait SessionMcpAdmission: Send + Sync {
     fn admitted_tools(&self) -> Arc<dyn AdmittedToolSource>;
     fn mcp_errors(&self) -> &[String];
+    fn mcp_runtime(&self) -> Arc<dyn McpRuntimeBinding>;
 }
 
 pub type McpSessionAdmissionFuture = Pin<
@@ -675,6 +677,7 @@ where
                         Some(mcp) => bindings.with_mcp(
                             mcp.admitted_tools(),
                             mcp.mcp_errors().to_vec(),
+                            mcp.mcp_runtime(),
                         ),
                         None => bindings,
                     };

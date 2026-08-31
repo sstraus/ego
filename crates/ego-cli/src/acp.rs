@@ -17,16 +17,18 @@ use ego_core::config::{
 use ego_core::credentials::SecretMaterial;
 use ego_core::event::domain::CancelCause;
 use ego_core::evidence::EvidenceAdmissionService;
+use ego_core::mcp::McpRuntimeBinding;
 use ego_core::run::{IdSource, RunController, RunRetention, RunRoot, RunTermination};
 use ego_core::suspension::ContinuationJournal;
 use ego_core::turn::{AdmittedToolSource, CancelToken};
 use ego_mcp::{
-    DurableMcpInputRequiredRecorder, MCP_DEFAULT_MAX_SSE_EVENT_SIZE, MCP_DEFAULT_OPERATION_TIMEOUT,
-    McpDuplexEffectsFactory, McpEnvironmentBinding, McpHeaderBinding, McpHttpEffects,
-    McpInputRequiredRecorder, McpRegistryCandidate, McpRegistryController, McpRegistryRefresh,
-    McpServerAdmission, McpTransportMaterial, RegistryScope, RegistryTrigger,
+    MCP_DEFAULT_MAX_SSE_EVENT_SIZE, MCP_DEFAULT_OPERATION_TIMEOUT, McpDuplexEffectsFactory,
+    McpEnvironmentBinding, McpHeaderBinding, McpHttpEffects, McpRegistryCandidate,
+    McpRegistryRefresh, McpRegistryRuntime, McpServerAdmission, McpTransportMaterial,
+    RegistryScope, RegistryTrigger,
 };
 use ego_tools::clock::SystemClock;
+use ego_tools::credentials::OsResumeKey;
 use ego_tools::mcp::{RunMcpDuplexEffectsFactory, RunMcpHttpEffects};
 use ego_tools::mcp_continuation::JsonlContinuationJournal;
 use ego_tools::mcp_registry::JsonlMcpRegistryJournal;
@@ -86,18 +88,19 @@ impl IdSource for UuidIds {
 }
 
 struct AcpSessionMcpAdmission {
-    _controller: Arc<McpRegistryController>,
+    runtime: Arc<McpRegistryRuntime>,
     _storage: tempfile::TempDir,
     admitted_tools: Arc<dyn AdmittedToolSource>,
     mcp_errors: Vec<String>,
 }
 
 impl AcpSessionMcpAdmission {
-    fn from_controller(controller: Arc<McpRegistryController>, storage: tempfile::TempDir) -> Self {
+    fn from_runtime(runtime: Arc<McpRegistryRuntime>, storage: tempfile::TempDir) -> Self {
+        let controller = runtime.controller();
         let admitted_tools = controller.admitted_tools();
         let mcp_errors = controller.status().mcp_errors();
         Self {
-            _controller: controller,
+            runtime,
             _storage: storage,
             admitted_tools,
             mcp_errors,
@@ -112,6 +115,10 @@ impl SessionMcpAdmission for AcpSessionMcpAdmission {
 
     fn mcp_errors(&self) -> &[String] {
         &self.mcp_errors
+    }
+
+    fn mcp_runtime(&self) -> Arc<dyn McpRuntimeBinding> {
+        self.runtime.clone()
     }
 }
 
@@ -170,28 +177,31 @@ impl McpSessionAdmitter for AcpMcpSessionAdmitter {
                     safe_mcp_error("ACP MCP continuation storage could not be opened")
                 })?,
             );
-            let continuations: Arc<dyn McpInputRequiredRecorder> =
-                Arc::new(DurableMcpInputRequiredRecorder::new(continuation_journal));
-            let controller = McpRegistryController::new_runtime(
-                registry_journal,
-                http_management,
-                stdio_management,
-                continuations,
-                max_sse_event_size,
-                timeout,
-            )
-            .map_err(|_| safe_mcp_error("ACP MCP runtime could not be created"))?;
-            controller
+            let runtime = Arc::new(
+                McpRegistryRuntime::new(
+                    registry_journal,
+                    continuation_journal,
+                    http_management,
+                    stdio_management,
+                    Arc::new(OsResumeKey::open(storage.path())),
+                    Arc::new(SystemClock),
+                    max_sse_event_size,
+                    timeout,
+                )
+                .map_err(|_| safe_mcp_error("ACP MCP runtime could not be created"))?,
+            );
+            runtime
+                .controller()
                 .reconcile(refresh)
                 .await
                 .map_err(|_| safe_mcp_error("the supplied MCP servers could not be admitted"))?;
-            if !controller.status().mcp_errors().is_empty() {
+            if !runtime.controller().status().mcp_errors().is_empty() {
                 return Err(safe_mcp_error(
                     "the supplied MCP servers could not be admitted",
                 ));
             }
             Ok(Some(
-                Arc::new(AcpSessionMcpAdmission::from_controller(controller, storage))
+                Arc::new(AcpSessionMcpAdmission::from_runtime(runtime, storage))
                     as Arc<dyn SessionMcpAdmission>,
             ))
         })
