@@ -7,9 +7,9 @@
 use ego_core::event::domain::{DomainEvent, Envelope, EventKind};
 use ego_core::event::id::{EventId, ItemId, Producer, Seq, TurnId};
 use ego_core::event::time::Timestamp;
-use ego_core::public::{ItemKind, PUBLIC_EVENT_VERSION, PublicEvent, project_public};
+use ego_core::public::{project_public, ItemKind, PublicEvent, PUBLIC_EVENT_VERSION};
 use ego_core::question::{
-    QuestionAnswer, QuestionMode, QuestionOption, QuestionOutcome, QuestionRequest,
+    QuestionAnswer, QuestionMode, QuestionOption, QuestionOutcome, QuestionRequest, QuestionTarget,
 };
 use ego_core::run::RunTermination;
 use ego_core::state::SessionState;
@@ -54,21 +54,17 @@ fn event(
 
 #[test]
 fn request_validation_covers_modes_options_ids_and_free_text() {
-    assert!(
-        request(QuestionMode::Single, &[("yes", "Yes")], false)
-            .validate()
-            .is_ok()
-    );
+    assert!(request(QuestionMode::Single, &[("yes", "Yes")], false)
+        .validate()
+        .is_ok());
     assert!(
         request(QuestionMode::Multiple, &[("a", "A"), ("b", "B")], false)
             .validate()
             .is_ok()
     );
-    assert!(
-        request(QuestionMode::FreeText, &[], true)
-            .validate()
-            .is_ok()
-    );
+    assert!(request(QuestionMode::FreeText, &[], true)
+        .validate()
+        .is_ok());
 
     for invalid in [
         QuestionRequest::new("", QuestionMode::Single, vec![], false),
@@ -154,7 +150,7 @@ fn requested_and_settled_are_correlated_by_the_question_item_and_preserve_order(
         Some(started.env.id),
         EventKind::QuestionRequested {
             request: request(QuestionMode::Single, &[("yes", "Yes")], false),
-            tool_call: call,
+            target: QuestionTarget::ModelTool { tool_call: call },
         },
     );
     let settled = event(
@@ -195,7 +191,9 @@ fn pending_reducer_rejects_wrong_duplicate_and_extra_answers_without_mutation() 
         None,
         EventKind::QuestionRequested {
             request: request(QuestionMode::Multiple, &[("a", "A"), ("b", "B")], false),
-            tool_call: ItemId::new(),
+            target: QuestionTarget::ModelTool {
+                tool_call: ItemId::new(),
+            },
         },
     );
     let mut state = SessionState::default();
@@ -233,7 +231,9 @@ fn requested_unsettled_recovery_stays_pending_and_is_not_torn_history() {
         None,
         EventKind::QuestionRequested {
             request: request(QuestionMode::FreeText, &[], true),
-            tool_call: ItemId::new(),
+            target: QuestionTarget::ModelTool {
+                tool_call: ItemId::new(),
+            },
         },
     );
     let mut state = SessionState::default();
@@ -261,7 +261,9 @@ fn valid_resume_settles_the_same_turn_and_completes_the_pure_tool_result() {
         None,
         EventKind::QuestionRequested {
             request: request.clone(),
-            tool_call: ItemId::new(),
+            target: QuestionTarget::ModelTool {
+                tool_call: ItemId::new(),
+            },
         },
     ));
     let answer = QuestionAnswer::from_json(&request, r#""yes""#).expect("canonical answer grammar");
@@ -275,19 +277,23 @@ fn valid_resume_settles_the_same_turn_and_completes_the_pure_tool_result() {
 
 #[test]
 fn public_question_item_and_headless_report_are_structured_and_versioned() {
-    assert_eq!(PUBLIC_EVENT_VERSION, 8);
-    assert_eq!(CODEC_VERSION, 10);
+    assert_eq!(PUBLIC_EVENT_VERSION, 9);
+    assert_eq!(CODEC_VERSION, 11);
 
     let turn = TurnId::new();
     let item = ItemId::new();
+    let request = request(QuestionMode::Single, &[("yes", "Yes")], false);
+    let target = QuestionTarget::ModelTool {
+        tool_call: ItemId::new(),
+    };
     let projected = project_public(&event(
         1,
         turn,
         item,
         None,
         EventKind::QuestionRequested {
-            request: request(QuestionMode::Single, &[("yes", "Yes")], false),
-            tool_call: ItemId::new(),
+            request: request.clone(),
+            target: target.clone(),
         },
     ))
     .expect("questions are public items");
@@ -300,18 +306,14 @@ fn public_question_item_and_headless_report_are_structured_and_versioned() {
         } if projected_item == item
     ));
     let json = serde_json::to_value(ego_core::public::QuestionReport::from_request(
-        item,
-        &request(QuestionMode::Single, &[("yes", "Yes")], false),
+        item, &target, &request,
     ))
     .unwrap();
     assert_eq!(json["id"], item.to_string());
     assert_eq!(json["mode"], "single");
 
     let required = RunTermination::QuestionRequired {
-        question: ego_core::public::QuestionReport::from_request(
-            item,
-            &request(QuestionMode::Single, &[("yes", "Yes")], false),
-        ),
+        question: ego_core::public::QuestionReport::from_request(item, &target, &request),
     };
     assert_eq!(required.exit_code(), 3);
     assert_eq!(required.exit_reason(), "question");

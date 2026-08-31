@@ -2,9 +2,9 @@
 
 use ego_core::event::id::{Seq, SessionId};
 use ego_core::state::SessionState;
-use ego_core::store::codec::{StoreLine, decode_line};
+use ego_core::store::codec::{decode_line, StoreLine};
 use ego_tools::store::{
-    JsonlStore, LeaseInputs, OsIo, SNAPSHOT_VERSION, Snapshot, SnapshotRejection,
+    JsonlStore, LeaseInputs, OsIo, Snapshot, SnapshotRejection, SNAPSHOT_VERSION,
 };
 use std::path::Path;
 use std::time::Duration;
@@ -30,7 +30,7 @@ fn write_fixture(root: &Path, id: &SessionId, bytes: &[u8]) -> std::path::PathBu
     let directory = session_dir(root, id);
     std::fs::create_dir_all(&directory).expect("fixture session directory");
     let path = directory.join("events.jsonl");
-    std::fs::write(&path, bytes).expect("codec-8 fixture");
+    std::fs::write(&path, bytes).expect("codec-10 fixture");
     path
 }
 
@@ -38,13 +38,13 @@ mod regression_case {
     use super::*;
 
     #[test]
-    fn current_writers_are_codec_and_snapshot_ten() {
-        assert_eq!(ego_core::store::codec::CODEC_VERSION, 10);
-        assert_eq!(SNAPSHOT_VERSION, 10);
+    fn current_writers_are_codec_and_snapshot_eleven() {
+        assert_eq!(ego_core::store::codec::CODEC_VERSION, 11);
+        assert_eq!(SNAPSHOT_VERSION, 11);
     }
 
     #[test]
-    fn owned_open_writer_migrates_real_codec_eight_then_reopens_cleanly() {
+    fn owned_open_writer_migrates_real_codec_ten_then_reopens_cleanly() {
         let dir = tempdir().unwrap();
         let id: SessionId = FIXTURE_SESSION.parse().unwrap();
         let path = write_fixture(
@@ -55,7 +55,7 @@ mod regression_case {
         let store = JsonlStore::new(dir.path(), "/ws", Box::new(OsIo));
         let opened = store
             .open_writer(&id, lease_inputs())
-            .expect("owned open path migrates codec 8");
+            .expect("owned open path migrates codec 10");
         assert!(opened.repair.migrated);
         assert_eq!(opened.repair.truncated_bytes, 0);
         drop(opened);
@@ -67,14 +67,14 @@ mod regression_case {
         let StoreLine::Header(header) = decode_line(lines.next().unwrap()).unwrap() else {
             panic!("migration must retain one header")
         };
-        assert_eq!(header.v, 10);
+        assert_eq!(header.v, 11);
         let records = lines
             .map(|line| decode_line(line).expect("migrated record"))
             .collect::<Vec<_>>();
-        assert_eq!(records.len(), 8);
+        assert_eq!(records.len(), 9);
         for (position, record) in records.iter().enumerate() {
             let StoreLine::Record(record) = record else {
-                panic!("recognized codec-8 record was not retained")
+                panic!("recognized codec-10 record was not retained")
             };
             assert_eq!(
                 record.seq,
@@ -105,7 +105,7 @@ mod regression_case {
     }
 
     #[test]
-    fn unknown_codec_eight_records_fail_migration_closed_without_mutating_bytes() {
+    fn unknown_codec_ten_records_fail_migration_closed_without_mutating_bytes() {
         let dir = tempdir().unwrap();
         let id: SessionId = FIXTURE_SESSION.parse().unwrap();
         let unknown_line = br#"{"future_m4_record":true}"#;
@@ -126,7 +126,7 @@ mod regression_case {
             fixture.split(|byte| *byte == b'\n').next().unwrap(),
         )
         .unwrap();
-        header["v"] = serde_json::json!(9);
+        header["v"] = serde_json::json!(12);
         let mut future_image = serde_json::to_vec(&header).unwrap();
         future_image.push(b'\n');
         future_image.extend_from_slice(fixture.splitn(2, |byte| *byte == b'\n').nth(1).unwrap());

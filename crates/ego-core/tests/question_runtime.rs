@@ -487,14 +487,12 @@ fn unavailable_elicitor_persists_question_closes_unstarted_siblings_and_leaves_t
         .find(|item| item.call_id.as_deref() == Some("sibling-call"))
         .expect("the unstarted sibling remains represented");
     assert_eq!(sibling.ok, Some(false));
-    assert!(
-        sibling
-            .tool_result
-            .as_ref()
-            .expect("sibling closure result")
-            .model_text()
-            .contains("interrupted: not run")
-    );
+    assert!(sibling
+        .tool_result
+        .as_ref()
+        .expect("sibling closure result")
+        .model_text()
+        .contains("interrupted: not run"));
 
     let events = store.events();
     let question = events
@@ -648,6 +646,13 @@ fn foreign_input_required_is_projected_to_a_durable_pending_question() {
     assert_eq!(*tool_call, pending.tool_call());
     assert_eq!(continuation_id, "regression_case");
     let question = pending.item_id();
+    assert!(
+        store
+            .events()
+            .iter()
+            .all(|event| !matches!(event.kind, EventKind::TurnCompleted { .. })),
+        "a foreign-input suspension must not publish TurnCompleted before resume"
+    );
     let answer = QuestionAnswer::from_json(pending.request(), r#"{"target":"staging"}"#)
         .expect("schema-valid form answer");
     let resumed = futures::executor::block_on(turn.resume_question(question, answer))
@@ -701,13 +706,6 @@ fn foreign_input_required_is_projected_to_a_durable_pending_question() {
         "a settled foreign question cannot retry"
     );
     assert_eq!(foreign_port.calls().len(), 1);
-    assert!(
-        store
-            .events()
-            .iter()
-            .all(|event| !matches!(event.kind, EventKind::TurnCompleted { .. })),
-        "a foreign-input suspension must not publish TurnCompleted"
-    );
     assert!(
         store
             .events()

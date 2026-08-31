@@ -35,9 +35,9 @@ use ego_core::state::{SessionState, Usage};
 use ego_core::store::blob::{BlobId, BlobRef};
 use ego_core::store::session_store::SessionStore;
 use ego_tools::store::{
-    JsonlStore, OsIo, SNAPSHOT_VERSION, Snapshot, SnapshotPolicy, SnapshotRejection, validate,
+    validate, JsonlStore, OsIo, Snapshot, SnapshotPolicy, SnapshotRejection, SNAPSHOT_VERSION,
 };
-use tempfile::{TempDir, tempdir};
+use tempfile::{tempdir, TempDir};
 
 // Wrapped in a module named `snapshot` so `cargo test -p ego-tools
 // snapshot` (the story's VERIFY command) matches these tests by substring:
@@ -544,7 +544,7 @@ mod snapshot {
 
     #[test]
     fn version_seven_snapshot_is_a_cache_miss_after_the_codec_bump() {
-        assert_eq!(SNAPSHOT_VERSION, 10);
+        assert_eq!(SNAPSHOT_VERSION, 11);
         let fx = session_with_events();
         let (source_seq, prefix_state) = fx.replay_prefix(4);
         let mut legacy = Snapshot::new(fx.id, source_seq, prefix_state);
@@ -559,7 +559,7 @@ mod snapshot {
 
     #[test]
     fn current_snapshot_replays_the_same_state_as_the_full_log() {
-        assert_eq!(SNAPSHOT_VERSION, 10);
+        assert_eq!(SNAPSHOT_VERSION, 11);
         let fx = session_with_events();
         let (source_seq, prefix_state) = fx.replay_prefix(4);
         fx.store
@@ -567,7 +567,7 @@ mod snapshot {
             .unwrap();
         let written: Snapshot =
             serde_json::from_slice(&std::fs::read(fx.snapshot_path()).unwrap()).unwrap();
-        assert_eq!(written.v, 10, "current snapshots are written as v10");
+        assert_eq!(written.v, 11, "current snapshots are written as v11");
 
         let (resumed, rejection) = fx.store.resume(&fx.id).unwrap();
 

@@ -16,8 +16,8 @@ use ego_core::generator::attempt::{AttemptRef, DeliveryCertainty, Outcome, Usage
 use ego_core::generator::types::{ErrorKind, ReasoningState, StopReason};
 use ego_core::state::Usage;
 use ego_core::store::codec::{
-    CODEC_VERSION, CodecError, Header, IndexedCodecError, StoreLine, decode_line, decode_log,
-    encode_header, encode_record,
+    decode_line, decode_log, encode_header, encode_record, CodecError, Header, IndexedCodecError,
+    StoreLine, CODEC_VERSION,
 };
 use serde::{Deserialize, Serialize};
 
@@ -87,14 +87,14 @@ mod codec {
     /// to be a deliberate edit here, not a constant quietly following the
     /// code that changed it.
     #[test]
-    fn codec_header_carries_codec_version_10() {
+    fn codec_header_carries_codec_version_11() {
         let h = header();
-        assert_eq!(h.v, 10);
-        assert_eq!(CODEC_VERSION, 10);
+        assert_eq!(h.v, 11);
+        assert_eq!(CODEC_VERSION, 11);
 
         let bytes = encode_header(&h);
         match decode_line(&bytes).unwrap() {
-            StoreLine::Header(decoded) => assert_eq!(decoded.v, 10),
+            StoreLine::Header(decoded) => assert_eq!(decoded.v, 11),
             other => panic!("expected Header, got {other:?}"),
         }
     }
@@ -650,7 +650,7 @@ mod codec {
         assert_eq!(
             actual,
             include_str!("golden/store_log.jsonl").trim_end(),
-            "the durable wire format changed. The current v10 event shape and \
+            "the durable wire format changed. The current v11 event shape and \
              physical record positions are pinned by this committed fixture."
         );
     }
