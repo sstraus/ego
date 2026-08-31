@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::task::Waker;
 use std::time::Duration;
 
+use ego_core::budget::SharedBudgetGate;
 use ego_core::ceiling::{Budget, Ceilings};
 use ego_core::compact::{
     CompactionCommand, CompactionError, CompactionFuture, CompactionPreparation, CompactionReceipt,
@@ -1826,8 +1827,8 @@ async fn drive_headless_turn(
     source: Arc<model::CliGenerationModelSource>,
     admission: Arc<EvidenceAdmissionService>,
     invocation: RunInvocationId,
-    effective: &Effective,
     config: TurnConfig,
+    gate: SharedBudgetGate,
     turns: &Turns<'_>,
     registry: &[RegisteredTool],
     admitted_tools: Option<Arc<dyn AdmittedToolSource>>,
@@ -1841,8 +1842,6 @@ async fn drive_headless_turn(
     input: HeadlessInput<'_>,
     diagnostics: &dyn Diagnostics,
 ) -> Result<(RunTermination, SessionState, Value), RunTermination> {
-    let currency = CurrencyCode::new(SETTLEMENT).expect("a controlled currency");
-    let mut gate = budget::gate(&effective.ceilings, effective.clamped.money, currency);
     let (ports, observation) =
         effect_scope(confinement, active.evidence(), cancel, run_deadline).await?;
     let images = acquire_attachments(
@@ -1869,7 +1868,7 @@ async fn drive_headless_turn(
     };
     let runtime = GenerationRuntime {
         source: source.bind(http, cancel.clone(), run_deadline),
-        gate: &mut gate,
+        gate,
         config,
         admission,
         invocation,
@@ -1896,7 +1895,9 @@ async fn drive_headless_turn(
         })?,
         None => Tools::from_registry(registry, policy, effect_ports, CanonPath::new(cwd)),
     };
-    let loop_ = TurnLoop::new(session, runtime, tools);
+    let loop_ = TurnLoop::new(session, runtime, tools).map_err(|error| RunTermination::Failed {
+        message: error.to_string(),
+    })?;
     let loop_ = match active.replayed() {
         Some(replayed) => loop_.with_ancestor_conversation(replayed.conversation().clone()),
         None => loop_,
@@ -1926,7 +1927,10 @@ async fn drive_headless_turn(
                 .await
         }
     };
-    Ok((termination, loop_.into_state(), result))
+    let state = loop_.into_state().map_err(|error| RunTermination::Failed {
+        message: error.to_string(),
+    })?;
+    Ok((termination, state, result))
 }
 
 /// Re-encode one typed selection through the current shared budget grammar.
@@ -2149,6 +2153,14 @@ impl CliPrepared {
         };
         let admission = Arc::clone(&self.admission);
         let invocation = self.run_context.invocation();
+        let currency = CurrencyCode::new(SETTLEMENT).expect("a controlled currency");
+        let gate = bindings.budget_gate().unwrap_or_else(|| {
+            SharedBudgetGate::new(budget::gate(
+                &self.effective.ceilings,
+                self.effective.clamped.money,
+                currency,
+            ))
+        });
         let (termination, state, result) = match drive_headless_turn(
             &mut active,
             opening,
@@ -2158,8 +2170,8 @@ impl CliPrepared {
             source,
             admission,
             invocation,
-            &self.effective,
             config,
+            gate,
             &turns,
             &self.registry,
             admitted_tools,
@@ -2572,7 +2584,11 @@ impl CliCompactionCommand {
         let mode = effective.mode.unwrap_or(Mode::Default);
         let policy = PolicyEngine::new(CanonPath::new(&root), mode, effective.permissions.clone());
         let currency = CurrencyCode::new(SETTLEMENT).expect("a constant this file controls");
-        let mut gate = budget::gate(&effective.ceilings, effective.clamped.money, currency);
+        let gate = SharedBudgetGate::new(budget::gate(
+            &effective.ceilings,
+            effective.clamped.money,
+            currency,
+        ));
         let config = TurnConfig {
             system: system.clone(),
             token_ceiling: effective.ceilings.tokens,
@@ -2596,7 +2612,7 @@ impl CliCompactionCommand {
             Arc::new(ProviderHttpAdapter::new(Arc::clone(&ports))) as Arc<dyn ego_ai::http::Http>;
         let runtime = GenerationRuntime {
             source: source.bind(http, cancel.clone(), run_deadline),
-            gate: &mut gate,
+            gate,
             config,
             admission: Arc::clone(&self.admission),
             invocation,
@@ -2610,7 +2626,8 @@ impl CliCompactionCommand {
             ports.duplex_handle(),
         );
         let tools = Tools::from_registry(&registry, &policy, effect_ports, CanonPath::new(&cwd));
-        let mut loop_ = TurnLoop::new(session, runtime, tools);
+        let mut loop_ = TurnLoop::new(session, runtime, tools)
+            .map_err(|error| CompactionError::Internal(error.to_string()))?;
         if let Some(replayed) = active.replayed() {
             loop_ = loop_.with_ancestor_conversation(replayed.conversation().clone());
         }
@@ -2623,7 +2640,9 @@ impl CliCompactionCommand {
         loop_ = loop_.with_execution_observation(observation);
         let target_tools = registry.iter().map(RegisteredTool::descriptor).collect();
         let prepared = loop_.prepare_compaction(system, target_tools).await?;
-        let state = loop_.into_state();
+        let state = loop_
+            .into_state()
+            .map_err(|error| CompactionError::Internal(error.to_string()))?;
         active.replace_state(state);
         Ok(prepared)
     }
@@ -3348,7 +3367,11 @@ async fn execute<S: EventSink>(
         }
     };
     let fs = OsFs;
-    let mut gate = budget::gate(&effective.ceilings, effective.clamped.money, currency);
+    let gate = SharedBudgetGate::new(budget::gate(
+        &effective.ceilings,
+        effective.clamped.money,
+        currency,
+    ));
 
     let mut config = TurnConfig {
         system,
@@ -3389,7 +3412,7 @@ async fn execute<S: EventSink>(
                 as Arc<dyn ego_ai::http::Http>;
             let runtime = GenerationRuntime {
                 source: source.bind(http, $cancel.clone(), run_deadline),
-                gate: &mut gate,
+                gate: gate.clone(),
                 config: config.clone(),
                 admission: Arc::clone(&evidence),
                 invocation,
@@ -3421,7 +3444,11 @@ async fn execute<S: EventSink>(
                 Some(roots) => tools.with_skill_resource_roots(roots.clone()),
                 None => tools,
             };
-            let loop_ = TurnLoop::new(session, runtime, tools);
+            let loop_ = TurnLoop::new(session, runtime, tools).map_err(|error| {
+                RunTermination::Failed {
+                    message: error.to_string(),
+                }
+            })?;
             let loop_ = match $active.replayed() {
                 Some(replayed) => loop_.with_ancestor_conversation(replayed.conversation().clone()),
                 None => loop_,
@@ -3463,8 +3490,8 @@ async fn execute<S: EventSink>(
                 Arc::clone(&source),
                 Arc::clone(&evidence),
                 invocation,
-                &effective,
                 config.clone(),
+                gate.clone(),
                 &turns,
                 &registry,
                 admitted_tools.clone(),
@@ -3902,7 +3929,7 @@ async fn execute<S: EventSink>(
                                         compaction_cancel.clone(),
                                         run_deadline,
                                     ),
-                                    gate: &mut gate,
+                                    gate: gate.clone(),
                                     config: config.clone(),
                                     admission: Arc::clone(&evidence),
                                     invocation,
@@ -3939,8 +3966,14 @@ async fn execute<S: EventSink>(
                                     }
                                     None => compaction_tools,
                                 };
-                                let mut compaction =
-                                    TurnLoop::new(session, runtime, compaction_tools);
+                                let mut compaction = TurnLoop::new(
+                                    session,
+                                    runtime,
+                                    compaction_tools,
+                                )
+                                .map_err(|error| {
+                                    CompactionError::Internal(error.to_string())
+                                })?;
                                 if let Some(replayed) = active.replayed() {
                                     compaction = compaction.with_ancestor_conversation(
                                         replayed.conversation().clone(),
@@ -3961,7 +3994,9 @@ async fn execute<S: EventSink>(
                                 let prepared = compaction
                                     .prepare_compaction(target_system.clone(), target_tools)
                                     .await;
-                                state = compaction.into_state();
+                                state = compaction.into_state().map_err(|error| {
+                                    CompactionError::Internal(error.to_string())
+                                })?;
                                 active.replace_state(state.clone());
                                 seat.refresh_queue(control.status());
                                 if !state.unacknowledged_prompts().is_empty()
@@ -4195,7 +4230,9 @@ async fn execute<S: EventSink>(
                         },
                     },
                 };
-                state = loop_.into_state();
+                state = loop_.into_state().map_err(|error| RunTermination::Failed {
+                    message: error.to_string(),
+                })?;
                 active.replace_state(state.clone());
                 if let Some(status) = status.as_ref()
                     && status.human
