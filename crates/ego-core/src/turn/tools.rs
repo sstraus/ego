@@ -78,6 +78,7 @@ pub enum ToolBatchError {
 }
 
 /// Raw external-effect ports bound to a tool call only after authorization.
+#[derive(Clone)]
 pub struct ToolEffectPorts<'a> {
     fs: &'a dyn Fs,
     process: &'a dyn ProcessExecutor,

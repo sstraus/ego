@@ -135,6 +135,7 @@ fn prepare_resume_until(
         .call()
         .mcp_envelope()
         .ok_or(ContinuationError::AuthorityMismatch)?;
+    let original_parameters = envelope.parameters().to_vec();
     let subject = ContinuationSubject::new(
         envelope.subject().server(),
         envelope.operation().method(),
@@ -160,6 +161,7 @@ fn prepare_resume_until(
         subject,
         fingerprints,
         expires_at,
+        original_parameters,
     })
 }
 
@@ -258,13 +260,13 @@ pub struct PreparedResume {
     subject: ContinuationSubject,
     fingerprints: ResumeFingerprints,
     expires_at: Timestamp,
+    original_parameters: Vec<u8>,
 }
 
 impl PreparedResume {
     pub fn into_record(
         self,
         id: impl Into<String>,
-        original_parameters: Vec<u8>,
         request_state: Vec<u8>,
         correlation_key: impl Into<String>,
         correlation_schema: Vec<u8>,
@@ -282,7 +284,7 @@ impl PreparedResume {
             self.expires_at,
         )?
         .with_protocol_state(
-            original_parameters,
+            self.original_parameters,
             request_state,
             correlation_key,
             correlation_schema,
@@ -816,8 +818,8 @@ impl OpenedContinuation {
             return Err(ContinuationError::Expired);
         }
         let expires_at = self.expires_at;
+        let successor = prepare_resume_until(&self.authorized, floor, expires_at, keys)?;
         let authorized = self.into_retry_authorized()?;
-        let successor = prepare_resume_until(&authorized, floor, expires_at, keys)?;
         Ok((authorized, successor))
     }
 }

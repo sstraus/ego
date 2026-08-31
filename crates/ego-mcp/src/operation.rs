@@ -12,7 +12,8 @@ use ego_core::generator::attempt::DeliveryCertainty;
 use ego_core::hook::{EffectScope, HookEvent, HookLifecycleDispatcher, HookOccurrence};
 use ego_core::mcp::{
     CacheScope as CoreCacheScope, CancellationClassification, ForeignContent, ForeignInputRequired,
-    ForeignResult, McpAdmissionFingerprint, McpOperationKind, McpSubject, ToolExecution,
+    ForeignQuestionPort, ForeignResult, McpAdmissionFingerprint, McpOperationKind, McpSubject,
+    ToolExecution,
 };
 use ego_core::permit::{
     Authorized, CanonPath, DuplexEnd, DuplexHandle, EnvPolicy, ForeignTransportTarget, GuardedIo,
@@ -129,7 +130,6 @@ impl McpContinuationOwner {
         let record = resume
             .into_record(
                 id.clone(),
-                envelope.parameters().to_vec(),
                 required.request_state().to_vec(),
                 required.correlation_key(),
                 schema,
@@ -227,6 +227,56 @@ impl McpContinuationOwner {
             )));
         }
         Ok(())
+    }
+}
+
+/// Session-bound adapter from the core question consumer to the captured MCP
+/// continuation owner and its original raw effect authority.
+pub struct McpForeignQuestionPort<'a> {
+    owner: Arc<McpContinuationOwner>,
+    capture: McpRegistryCapture,
+    floor: ResumeFloor,
+    effects: ToolEffectPorts<'a>,
+}
+
+impl<'a> McpForeignQuestionPort<'a> {
+    pub fn new(
+        owner: Arc<McpContinuationOwner>,
+        capture: McpRegistryCapture,
+        floor: ResumeFloor,
+        effects: ToolEffectPorts<'a>,
+    ) -> Self {
+        Self {
+            owner,
+            capture,
+            floor,
+            effects,
+        }
+    }
+}
+
+impl ForeignQuestionPort for McpForeignQuestionPort<'_> {
+    fn resume<'a>(
+        &'a self,
+        continuation_id: &'a str,
+        canonical_json: &'a str,
+    ) -> futures::future::BoxFuture<'a, Result<ToolExecution, String>> {
+        let owner = Arc::clone(&self.owner);
+        let capture = self.capture.clone();
+        let floor = self.floor.clone();
+        let effects = self.effects.clone();
+        Box::pin(async move {
+            owner
+                .accept_answer(
+                    continuation_id,
+                    canonical_json.as_bytes(),
+                    capture,
+                    floor,
+                    effects,
+                )
+                .await
+                .map_err(|error| error.to_string())
+        })
     }
 }
 

@@ -992,41 +992,60 @@ impl<'a> TurnLoop<'a> {
                     denied: None,
                 });
             };
-            let canonical_json = answer.model_text();
-            let settlement = match self.journal.append(
-                turn,
-                Some(question),
-                Some(parent),
-                EventKind::QuestionSettled {
-                    outcome: QuestionOutcome::Answered(answer),
-                },
-            ) {
-                Ok(event) => event,
+            let progress = match self
+                .settle_foreign_question(
+                    ForeignQuestionSettlement {
+                        turn,
+                        question,
+                        request_event: parent,
+                        tool_call,
+                        continuation_id,
+                    },
+                    answer,
+                    port,
+                )
+                .await
+            {
+                Ok(progress) => progress,
                 Err(cause) => return Err(self.abandon(turn, cause)),
             };
-            let execution = match port.resume(&continuation_id, &canonical_json).await {
-                Ok(execution) => execution,
-                Err(error) => {
-                    return Err(self.abandon(turn, StoreError::Io(std::io::Error::other(error))));
+            match progress {
+                ForeignQuestionProgress::Completed => return self.resume_turn(turn).await,
+                ForeignQuestionProgress::Successor { required, parent } => {
+                    let outcome = match self
+                        .run_foreign_question(turn, tool_call, parent, required)
+                        .await
+                    {
+                        Ok(outcome) => outcome,
+                        Err(cause) => return Err(self.abandon(turn, cause)),
+                    };
+                    return match outcome {
+                        ToolOutcome::Recorded => self.resume_turn(turn).await,
+                        ToolOutcome::QuestionRequired => {
+                            self.close_control();
+                            self.refresh_control_status();
+                            Ok(TurnOutcome {
+                                turn,
+                                ok: false,
+                                exit_reason: ExitReason::PermissionRequired,
+                                denied: None,
+                            })
+                        }
+                        ToolOutcome::Ended(exit_reason) => Ok(TurnOutcome {
+                            turn,
+                            ok: false,
+                            exit_reason,
+                            denied: None,
+                        }),
+                        ToolOutcome::Answered { .. }
+                        | ToolOutcome::Executed { .. }
+                        | ToolOutcome::Refused { .. }
+                        | ToolOutcome::Unanswerable { .. } => unreachable!(
+                            "foreign question continuation returns only recorded, pending, or ended"
+                        ),
+                    };
                 }
-            };
-            let crate::mcp::ToolExecution::Complete(result) = execution else {
-                return Err(self.abandon(
-                    turn,
-                    StoreError::Io(std::io::Error::other(
-                        "a successor foreign input request requires its continuation adapter",
-                    )),
-                ));
-            };
-            if let Err(cause) = self.journal.append(
-                turn,
-                Some(tool_call),
-                Some(settlement),
-                EventKind::ToolCallCompleted { ok: true, result },
-            ) {
-                return Err(self.abandon(turn, cause));
             }
-            return self.resume_turn(turn).await;
         }
         let prepared = self
             .journal
@@ -3026,7 +3045,9 @@ impl<'a> TurnLoop<'a> {
                 selector: hook_selector,
             },
             Ok(crate::mcp::ToolExecution::InputRequired(required)) => {
-                return self.run_foreign_question(turn, call, required);
+                return self
+                    .run_foreign_question(turn, call.item, call.started, required)
+                    .await;
             }
             Err(failure) => ToolOutcome::Executed {
                 ok: false,
@@ -3134,26 +3155,184 @@ impl<'a> TurnLoop<'a> {
         Ok(ToolOutcome::Recorded)
     }
 
-    fn run_foreign_question(
+    async fn run_foreign_question(
         &mut self,
         turn: TurnId,
-        call: &PendingCall,
+        tool_call: ItemId,
+        parent: EventId,
         required: crate::mcp::ForeignInputRequired,
     ) -> Result<ToolOutcome, StoreError> {
-        let question = ItemId::new();
-        self.journal.append(
+        let mut parent = parent;
+        let mut required = required;
+        loop {
+            let question = ItemId::new();
+            let request = required.question_request().clone();
+            let continuation_id = required.continuation_id().to_owned();
+            let request_event = self.journal.append(
+                turn,
+                Some(question),
+                Some(parent),
+                EventKind::QuestionRequested {
+                    request: request.clone(),
+                    target: QuestionTarget::ForeignContinuation {
+                        tool_call,
+                        continuation_id: continuation_id.clone(),
+                    },
+                },
+            )?;
+
+            let Some(elicitor) = self.elicitor.as_ref().map(Arc::clone) else {
+                return Ok(ToolOutcome::QuestionRequired);
+            };
+            let Some(port) = self.foreign_question_port.as_ref().map(Arc::clone) else {
+                return Ok(ToolOutcome::QuestionRequired);
+            };
+            let elicited = await_controlled(
+                &mut self.journal,
+                &self.cancel,
+                &mut self.control,
+                turn,
+                elicitor.elicit(question, request.clone()),
+                InterruptDisposition::Return,
+            )
+            .await;
+            let outcome = match elicited {
+                Controlled::Completed(Ok(outcome)) => outcome,
+                Controlled::Completed(Err(error)) => {
+                    tracing::error!(%error, %question, "foreign question elicitation failed");
+                    self.journal.append(
+                        turn,
+                        None,
+                        Some(request_event),
+                        EventKind::Error {
+                            message: error.to_string(),
+                            kind: ErrorKind::Unclassified,
+                        },
+                    )?;
+                    return Ok(ToolOutcome::Ended(ExitReason::Internal));
+                }
+                Controlled::Interrupted => {
+                    return Ok(ToolOutcome::Ended(ExitReason::Cancelled(
+                        self.cancel.cause().unwrap_or(CancelCause::User),
+                    )));
+                }
+                Controlled::Failed(cause) => return Err(cause),
+            };
+            if outcome == QuestionOutcome::Unavailable {
+                return Ok(ToolOutcome::QuestionRequired);
+            }
+            let answer = match outcome {
+                QuestionOutcome::Answered(answer) => answer,
+                outcome => {
+                    let exit_reason = if outcome == QuestionOutcome::Cancelled {
+                        ExitReason::Cancelled(CancelCause::User)
+                    } else {
+                        ExitReason::PermissionRequired
+                    };
+                    self.journal.append(
+                        turn,
+                        Some(question),
+                        Some(request_event),
+                        EventKind::QuestionSettled { outcome },
+                    )?;
+                    return Ok(ToolOutcome::Ended(exit_reason));
+                }
+            };
+            if let Err(error) = answer.validate_for(&request) {
+                tracing::error!(%error, %question, "elicitor returned an invalid foreign answer");
+                self.journal.append(
+                    turn,
+                    None,
+                    Some(request_event),
+                    EventKind::Error {
+                        message: error.to_string(),
+                        kind: ErrorKind::Unclassified,
+                    },
+                )?;
+                return Ok(ToolOutcome::Ended(ExitReason::Internal));
+            }
+            match self
+                .settle_foreign_question(
+                    ForeignQuestionSettlement {
+                        turn,
+                        question,
+                        request_event,
+                        tool_call,
+                        continuation_id,
+                    },
+                    answer,
+                    port,
+                )
+                .await?
+            {
+                ForeignQuestionProgress::Completed => return Ok(ToolOutcome::Recorded),
+                ForeignQuestionProgress::Successor {
+                    required: successor,
+                    parent: settlement,
+                } => {
+                    required = successor;
+                    parent = settlement;
+                }
+            }
+        }
+    }
+
+    async fn settle_foreign_question(
+        &mut self,
+        settlement: ForeignQuestionSettlement,
+        answer: QuestionAnswer,
+        port: Arc<dyn crate::mcp::ForeignQuestionPort>,
+    ) -> Result<ForeignQuestionProgress, StoreError> {
+        let ForeignQuestionSettlement {
+            turn,
+            question,
+            request_event,
+            tool_call,
+            continuation_id,
+        } = settlement;
+        let canonical_json = answer.model_text();
+        let settlement = self.journal.append(
             turn,
             Some(question),
-            Some(call.started),
-            EventKind::QuestionRequested {
-                request: required.question_request().clone(),
-                target: QuestionTarget::ForeignContinuation {
-                    tool_call: call.item,
-                    continuation_id: required.continuation_id().to_owned(),
-                },
+            Some(request_event),
+            EventKind::QuestionSettled {
+                outcome: QuestionOutcome::Answered(answer),
             },
         )?;
-        Ok(ToolOutcome::QuestionRequired)
+        let execution = await_controlled(
+            &mut self.journal,
+            &self.cancel,
+            &mut self.control,
+            turn,
+            port.resume(&continuation_id, &canonical_json),
+            InterruptDisposition::AwaitEffect,
+        )
+        .await;
+        let execution = match execution {
+            Controlled::Completed(Ok(execution)) => execution,
+            Controlled::Completed(Err(error)) => {
+                return Err(StoreError::Io(std::io::Error::other(error)));
+            }
+            Controlled::Interrupted => unreachable!("foreign effect waits are never dropped"),
+            Controlled::Failed(cause) => return Err(cause),
+        };
+        match execution {
+            crate::mcp::ToolExecution::Complete(result) => {
+                self.journal.append(
+                    turn,
+                    Some(tool_call),
+                    Some(settlement),
+                    EventKind::ToolCallCompleted { ok: true, result },
+                )?;
+                Ok(ForeignQuestionProgress::Completed)
+            }
+            crate::mcp::ToolExecution::InputRequired(required) => {
+                Ok(ForeignQuestionProgress::Successor {
+                    required,
+                    parent: settlement,
+                })
+            }
+        }
     }
 
     /// Record the canonical question that was actually presented.
@@ -3264,6 +3443,22 @@ enum ToolOutcome {
     Unanswerable { pending: Pending },
     /// Judge admission failed for a cause that ends the whole turn.
     Ended(ExitReason),
+}
+
+enum ForeignQuestionProgress {
+    Completed,
+    Successor {
+        required: crate::mcp::ForeignInputRequired,
+        parent: EventId,
+    },
+}
+
+struct ForeignQuestionSettlement {
+    turn: TurnId,
+    question: ItemId,
+    request_event: EventId,
+    tool_call: ItemId,
+    continuation_id: String,
 }
 
 fn skill_store_error(error: crate::skill::SkillError) -> StoreError {
