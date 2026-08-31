@@ -2424,13 +2424,16 @@ mod collapsed_mcp_red {
             Ok(PreparedCall::new("collapsed-test", Vec::new()))
         }
 
-        fn execute<'a>(
+        fn execute<'a, 'io>(
             &'a self,
             _admission: Arc<McpServerAdmission>,
             _call: PreparedCall,
-            _io: &'a dyn GuardedIo,
+            _io: &'a dyn GuardedIo<'io>,
             _generation: Arc<str>,
-        ) -> BoxFuture<'a, Result<ToolExecution, ToolError>> {
+        ) -> BoxFuture<'a, Result<ToolExecution, ToolError>>
+        where
+            'io: 'a,
+        {
             Box::pin(async {
                 Ok(ToolExecution::Complete(
                     ego_core::permit::ToolResult::builtin("collapsed-test"),

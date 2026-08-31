@@ -136,7 +136,7 @@ impl McpContinuationOwner {
         &self,
         envelope: ego_core::permit::McpPreparedEnvelope,
         required: crate::McpMappedInput,
-        guarded: GuardedMcpResume,
+        guarded: GuardedMcpResume<'_>,
     ) -> Result<ForeignInputRequired, McpError> {
         let (resume, context) = guarded.into_parts();
         let context =
@@ -546,13 +546,16 @@ impl McpOperationFactory for McpHttpOperationFactory {
         prepare_http(config, operation).map_err(mcp_prepare_error)
     }
 
-    fn execute<'a>(
+    fn execute<'a, 'io>(
         &'a self,
         admission: Arc<McpServerAdmission>,
         call: PreparedCall,
-        io: &'a dyn GuardedIo,
+        io: &'a dyn GuardedIo<'io>,
         generation: Arc<str>,
-    ) -> futures::future::BoxFuture<'a, Result<ToolExecution, ToolError>> {
+    ) -> futures::future::BoxFuture<'a, Result<ToolExecution, ToolError>>
+    where
+        'io: 'a,
+    {
         Box::pin(async move {
             let McpServerConfig::Http(config) = admission.config() else {
                 return Err(execution_error("HTTP MCP factory received stdio config"));
@@ -564,13 +567,16 @@ impl McpOperationFactory for McpHttpOperationFactory {
         })
     }
 
-    fn execute_hook<'a>(
+    fn execute_hook<'a, 'io>(
         &'a self,
         admission: Arc<McpServerAdmission>,
         call: PreparedCall,
-        io: &'a dyn GuardedIo,
+        io: &'a dyn GuardedIo<'io>,
         scope: EffectScope,
-    ) -> futures::future::BoxFuture<'a, Result<McpHookExecution, ToolError>> {
+    ) -> futures::future::BoxFuture<'a, Result<McpHookExecution, ToolError>>
+    where
+        'io: 'a,
+    {
         Box::pin(async move {
             let McpServerConfig::Http(config) = admission.config() else {
                 return Err(execution_error("HTTP MCP factory received stdio config"));
@@ -634,13 +640,16 @@ impl McpOperationFactory for McpStdioOperationFactory {
             .map_err(mcp_prepare_error)
     }
 
-    fn execute<'a>(
+    fn execute<'a, 'io>(
         &'a self,
         admission: Arc<McpServerAdmission>,
         call: PreparedCall,
-        io: &'a dyn GuardedIo,
+        io: &'a dyn GuardedIo<'io>,
         generation: Arc<str>,
-    ) -> futures::future::BoxFuture<'a, Result<ToolExecution, ToolError>> {
+    ) -> futures::future::BoxFuture<'a, Result<ToolExecution, ToolError>>
+    where
+        'io: 'a,
+    {
         Box::pin(async move {
             let McpServerConfig::Stdio(config) = admission.config() else {
                 return Err(execution_error("stdio MCP factory received HTTP config"));
@@ -652,13 +661,16 @@ impl McpOperationFactory for McpStdioOperationFactory {
         })
     }
 
-    fn execute_hook<'a>(
+    fn execute_hook<'a, 'io>(
         &'a self,
         admission: Arc<McpServerAdmission>,
         call: PreparedCall,
-        io: &'a dyn GuardedIo,
+        io: &'a dyn GuardedIo<'io>,
         scope: EffectScope,
-    ) -> futures::future::BoxFuture<'a, Result<McpHookExecution, ToolError>> {
+    ) -> futures::future::BoxFuture<'a, Result<McpHookExecution, ToolError>>
+    where
+        'io: 'a,
+    {
         Box::pin(async move {
             let McpServerConfig::Stdio(config) = admission.config() else {
                 return Err(execution_error("stdio MCP factory received HTTP config"));
@@ -740,7 +752,7 @@ pub(crate) fn stdio_spawn_spec(
 async fn execute_http(
     config: &McpHttpConfig,
     call: PreparedCall,
-    io: &dyn GuardedIo,
+    io: &dyn GuardedIo<'_>,
     factory: &McpHttpOperationFactory,
     admission: Arc<McpServerAdmission>,
     generation: Arc<str>,
@@ -813,7 +825,7 @@ async fn execute_http(
 async fn execute_stdio(
     config: &McpStdioConfig,
     call: PreparedCall,
-    io: &dyn GuardedIo,
+    io: &dyn GuardedIo<'_>,
     factory: &McpStdioOperationFactory,
     admission: Arc<McpServerAdmission>,
     generation: Arc<str>,
@@ -882,7 +894,7 @@ async fn execute_stdio(
 async fn execute_http_hook(
     config: &McpHttpConfig,
     call: PreparedCall,
-    io: &dyn GuardedIo,
+    io: &dyn GuardedIo<'_>,
     factory: &McpHttpOperationFactory,
     admission: Arc<McpServerAdmission>,
     scope: EffectScope,
@@ -944,7 +956,7 @@ async fn execute_http_hook(
 async fn execute_stdio_hook(
     config: &McpStdioConfig,
     call: PreparedCall,
-    io: &dyn GuardedIo,
+    io: &dyn GuardedIo<'_>,
     limits: OperationLimits,
     scope: EffectScope,
 ) -> Result<McpHookExecution, McpError> {
@@ -1024,7 +1036,7 @@ async fn invoke_in_scope(
 
 fn project_hook_outcome(
     outcome: OperationOutcome,
-    io: &dyn GuardedIo,
+    io: &dyn GuardedIo<'_>,
     delivery: DeliveryCertainty,
 ) -> Result<McpHookExecution, McpError> {
     let OperationOutcome::Complete(CompleteResult::Tool(result)) = outcome else {
@@ -1204,7 +1216,7 @@ fn tool_schema_command(
 async fn project_outcome(
     outcome: OperationOutcome,
     envelope: &ego_core::permit::McpPreparedEnvelope,
-    io: &dyn GuardedIo,
+    io: &dyn GuardedIo<'_>,
     continuations: &McpContinuationOwner,
     delivery: DeliveryCertainty,
     cancellation: CancellationClassification,

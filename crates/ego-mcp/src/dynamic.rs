@@ -323,21 +323,26 @@ pub trait McpOperationFactory: Send + Sync {
         operation: McpOperation,
     ) -> Result<PreparedCall, ToolError>;
 
-    fn execute<'a>(
+    fn execute<'a, 'io>(
         &'a self,
         admission: Arc<McpServerAdmission>,
         call: PreparedCall,
-        io: &'a dyn GuardedIo,
+        io: &'a dyn GuardedIo<'io>,
         generation: Arc<str>,
-    ) -> BoxFuture<'a, Result<ToolExecution, ToolError>>;
+    ) -> BoxFuture<'a, Result<ToolExecution, ToolError>>
+    where
+        'io: 'a;
 
-    fn execute_hook<'a>(
+    fn execute_hook<'a, 'io>(
         &'a self,
         _admission: Arc<McpServerAdmission>,
         _call: PreparedCall,
-        _io: &'a dyn GuardedIo,
+        _io: &'a dyn GuardedIo<'io>,
         _scope: EffectScope,
-    ) -> BoxFuture<'a, Result<crate::McpHookExecution, ToolError>> {
+    ) -> BoxFuture<'a, Result<crate::McpHookExecution, ToolError>>
+    where
+        'io: 'a,
+    {
         Box::pin(async {
             Err(ToolError::InvalidParams(
                 "MCP operation owner does not expose raw hook structuredContent".to_owned(),
@@ -547,11 +552,14 @@ impl Tool for McpCapturedTool {
             .prepare(Arc::clone(&self.server_admission), operation)
     }
 
-    fn execute<'a>(
+    fn execute<'a, 'io>(
         &'a self,
         call: PreparedCall,
-        io: &'a dyn GuardedIo,
-    ) -> BoxFuture<'a, Result<ToolExecution, ToolError>> {
+        io: &'a dyn GuardedIo<'io>,
+    ) -> BoxFuture<'a, Result<ToolExecution, ToolError>>
+    where
+        'io: 'a,
+    {
         self.factory.execute(
             Arc::clone(&self.server_admission),
             call,
