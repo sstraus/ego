@@ -16,9 +16,9 @@ use ego_core::event::id::{EventId, ItemId, Producer};
 use ego_core::event::skill::{SkillInvocationId, SkillSourceAuthority};
 use ego_core::hook::{
     HookCatalogue, HookCatalogueError, HookConfigEntry, HookEvent, HookFuture, HookHandlerConfig,
-    HookMatcher, HookOccurrence, HookPort, HookReachFuture, HookReachedEvidence, HookRecordFuture,
-    HookRunError, HookRunner, HookSource, HookSpec, HookStartError, HookStartFuture,
-    HookStartedEvidence,
+    HookInvocationRequest, HookMatcher, HookOccurrence, HookPort, HookReachFuture,
+    HookReachedEvidence, HookRecordFuture, HookRunError, HookRunner, HookSource, HookSpec,
+    HookStartError, HookStartFuture, HookStartedEvidence,
 };
 use ego_core::permit::rule::Rule;
 
@@ -292,11 +292,14 @@ impl HookPort for DurableHookPort {
         }
     }
 
-    fn invoke<'a>(&'a self, _spec: &'a HookSpec, event: HookEvent) -> HookFuture<'a> {
-        self.emitted
-            .lock()
-            .expect("hook emissions")
-            .push(event.clone());
+    fn invoke<'a>(&'a self, request: HookInvocationRequest) -> HookFuture<'a> {
+        self.emitted.lock().expect("hook emissions").push(
+            if let Some(selector) = request.selector() {
+                HookEvent::tool(request.lifecycle(), request.subject(), selector)
+            } else {
+                HookEvent::turn(request.lifecycle(), request.subject())
+            },
+        );
         if let Some(kind) = self.fail.lock().expect("failure").take() {
             return Box::pin(async move { Err(HookFailure::new(kind, None)) });
         }
@@ -396,7 +399,7 @@ impl HookPort for PendingStartHookPort {
         })
     }
 
-    fn invoke<'a>(&'a self, _spec: &'a HookSpec, _event: HookEvent) -> HookFuture<'a> {
+    fn invoke<'a>(&'a self, _request: HookInvocationRequest) -> HookFuture<'a> {
         *self.invoke_calls.lock().expect("hook invokes") += 1;
         Box::pin(async { Ok(HookOutcome::new(HookDecision::Continue, None)) })
     }
@@ -439,6 +442,50 @@ fn once_catalogue() -> HookCatalogue {
         Trust::Trusted,
     )
     .expect("typed once catalogue")
+}
+
+fn multi_once_catalogue() -> HookCatalogue {
+    let layers = persistent_layers();
+    let matcher = || {
+        Some(HookMatcher::Permission(
+            Rule::load("read(src/**)").expect("canonical permission rule"),
+        ))
+    };
+    let hooks = [
+        HookConfigEntry::new(
+            HookLifecycle::SubagentStop,
+            matcher(),
+            HookHandlerConfig::Command {
+                command: "/usr/bin/skill-hook-a".to_owned(),
+                args: None,
+                shell: None,
+                timeout_seconds: None,
+            },
+        )
+        .with_once(true),
+        HookConfigEntry::new(
+            HookLifecycle::SubagentStop,
+            matcher(),
+            HookHandlerConfig::Command {
+                command: "/usr/bin/skill-hook-b".to_owned(),
+                args: None,
+                shell: None,
+                timeout_seconds: None,
+            },
+        )
+        .with_once(true),
+    ];
+    HookCatalogue::admit_typed(
+        &layers,
+        &[HookSource::skill_entries_with_authority(
+            "skills/multi-once/SKILL.md",
+            SkillInvocationId::new(),
+            SkillSourceAuthority::User,
+            hooks,
+        )],
+        Trust::Trusted,
+    )
+    .expect("typed multi-once catalogue")
 }
 
 fn failure_catalogue() -> HookCatalogue {
@@ -785,6 +832,42 @@ fn concurrent_once_holds_admission_until_one_pending_start_completes() {
         1
     );
     assert_ne!(first.started_invocation(), second.started_invocation());
+}
+
+#[test]
+fn multiple_matching_once_hooks_each_consume_their_own_reservation() {
+    let catalogue = multi_once_catalogue();
+    let port = DurableHookPort::default();
+    let runner = HookRunner::new(port.clone());
+    let event = HookEvent::tool(
+        HookLifecycle::SubagentStop,
+        HookSubject::Item {
+            item: ItemId::new(),
+        },
+        "read(src/main.rs)",
+    );
+
+    let first = futures::executor::block_on(runner.run_occurrence(
+        &catalogue,
+        Producer::Main,
+        occurrence(event.clone()),
+    ))
+    .expect("both matching once hooks run");
+    assert!(first.started_invocation());
+    assert!(!first.was_skipped_once());
+    assert_eq!(port.started.lock().expect("started evidence").len(), 2);
+    assert_eq!(port.settled.lock().expect("settled evidence").len(), 2);
+
+    let second = futures::executor::block_on(runner.run_occurrence(
+        &catalogue,
+        Producer::Main,
+        occurrence(event),
+    ))
+    .expect("both once reservations are consumed");
+    assert!(second.was_skipped_once());
+    assert!(!second.started_invocation());
+    assert_eq!(port.started.lock().expect("started evidence").len(), 2);
+    assert_eq!(port.settled.lock().expect("settled evidence").len(), 2);
 }
 
 #[test]

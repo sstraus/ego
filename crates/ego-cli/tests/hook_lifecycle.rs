@@ -142,11 +142,7 @@ impl HookPort for RecordingPort {
         ))))
     }
 
-    fn invoke<'a>(
-        &'a self,
-        _spec: &'a HookSpec,
-        _event: ego_core::hook::HookEvent,
-    ) -> HookFuture<'a> {
+    fn invoke<'a>(&'a self, _request: ego_core::hook::HookInvocationRequest) -> HookFuture<'a> {
         Box::pin(std::future::ready(Ok(HookOutcome::new(
             HookDecision::Continue,
             None,
@@ -194,8 +190,7 @@ macro_rules! delegate_cli_port {
 
             fn invoke<'a>(
                 &'a self,
-                _spec: &'a HookSpec,
-                _event: ego_core::hook::HookEvent,
+                _request: ego_core::hook::HookInvocationRequest,
             ) -> HookFuture<'a> {
                 Box::pin(std::future::ready($outcome))
             }
@@ -239,12 +234,8 @@ impl HookPort for ObserverFailurePort {
             .started(spec, occurrence, reached, activation, invocation)
     }
 
-    fn invoke<'a>(
-        &'a self,
-        _spec: &'a HookSpec,
-        event: ego_core::hook::HookEvent,
-    ) -> HookFuture<'a> {
-        let outcome = if event.lifecycle() == HookLifecycle::PostModelSwitch {
+    fn invoke<'a>(&'a self, request: ego_core::hook::HookInvocationRequest) -> HookFuture<'a> {
+        let outcome = if request.lifecycle() == HookLifecycle::PostModelSwitch {
             Err(HookFailure::new(HookFailureKind::HandlerFailed, None))
         } else {
             Ok(HookOutcome::new(HookDecision::Continue, None))

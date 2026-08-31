@@ -31,7 +31,7 @@ use ego_core::generator::capabilities::{
 };
 use ego_core::generator::types::{Conversation, GenRequest, Message, Role, ThinkingLevel};
 use ego_core::hook::{
-    HookCatalogue, HookConfigEntry, HookEvent, HookFuture, HookHandlerConfig,
+    HookCatalogue, HookConfigEntry, HookFuture, HookHandlerConfig, HookInvocationRequest,
     HookLifecycleDispatcher, HookOccurrence, HookPort, HookReachFuture, HookReachedEvidence,
     HookRecordFuture, HookRunner, HookSource, HookStartFuture, HookStartedEvidence,
 };
@@ -586,11 +586,7 @@ impl HookPort for ReturnHookPort {
         Box::pin(future::ready(Ok(evidence)))
     }
 
-    fn invoke<'a>(
-        &'a self,
-        _spec: &'a ego_core::hook::HookSpec,
-        _event: HookEvent,
-    ) -> HookFuture<'a> {
+    fn invoke<'a>(&'a self, _request: HookInvocationRequest) -> HookFuture<'a> {
         let outcome = HookOutcome::new(self.decision, None);
         Box::pin(future::ready(Ok(outcome)))
     }

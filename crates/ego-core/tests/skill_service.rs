@@ -27,7 +27,7 @@ use ego_core::event::time::{Clock, Timestamp};
 use ego_core::evidence::{EvidenceError, EvidenceWrite};
 use ego_core::generator::capabilities::ModelCapabilities;
 use ego_core::hook::{
-    HookCatalogue, HookConfigEntry, HookEvent, HookFuture, HookHandlerConfig,
+    HookCatalogue, HookConfigEntry, HookFuture, HookHandlerConfig, HookInvocationRequest,
     HookLifecycleDispatcher, HookOccurrence, HookPort, HookReachFuture, HookReachedEvidence,
     HookRecordFuture, HookRunner, HookSpec, HookStartFuture, HookStartedEvidence,
 };
@@ -935,7 +935,7 @@ impl HookPort for RecordingHookPort {
         ))))
     }
 
-    fn invoke<'a>(&'a self, _spec: &'a HookSpec, _event: HookEvent) -> HookFuture<'a> {
+    fn invoke<'a>(&'a self, _request: HookInvocationRequest) -> HookFuture<'a> {
         *self.invocations.lock().expect("hook invocations") += 1;
         Box::pin(futures::future::ready(Ok(HookOutcome::new(
             HookDecision::Continue,

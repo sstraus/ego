@@ -76,7 +76,7 @@ fn wrapped_wire(request: &HookInvocationRequest, input: &serde_json::Value) -> s
     })
 }
 
-fn admitted_call(wire: &serde_json::Value) -> PreparedCall {
+fn admitted_call(wire: &serde_json::Value, capture: &str) -> PreparedCall {
     let subject = McpSubject::Tool {
         server: "server".to_owned(),
         name: "lookup".to_owned(),
@@ -95,7 +95,7 @@ fn admitted_call(wire: &serde_json::Value) -> PreparedCall {
             ForeignToolId::new("server", "lookup").expect("foreign tool identity"),
             InvocationDigest::from_bytes(&serde_json::to_vec(wire).expect("wrapped wire")),
         )],
-        McpAdmissionFingerprint::new("generation-1", "server/lookup", "schema-v1")
+        McpAdmissionFingerprint::new(capture, "server/lookup", "schema-v1")
             .expect("admission fingerprint"),
         "stdio-transport-v1",
         "server",
@@ -134,7 +134,8 @@ macro_rules! invoke_admitted_hook {
         let request = $request;
         let parameters = $parameters;
         let wire = wrapped_wire(&request, &parameters);
-        let prepared = admitted_call(&wire);
+        let capture = $capture;
+        let prepared = admitted_call(&wire, capture.stable_fingerprint());
         assert!(
             prepared
                 .ops
@@ -160,7 +161,7 @@ macro_rules! invoke_admitted_hook {
         );
         let result = block_on(
             McpHookAdapter::new(
-                $capture,
+                capture,
                 guarded,
                 prepared,
                 EffectScope::new(Duration::from_secs(30)),

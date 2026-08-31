@@ -20,7 +20,7 @@ use ego_core::event::id::Producer;
 use ego_core::event::time::{Clock, Timestamp};
 use ego_core::generator::attempt::DeliveryCertainty;
 use ego_core::hook::{
-    EffectScope, HookCatalogue, HookEvent, HookFuture, HookHandlerConfig, HookInvocationRequest,
+    EffectScope, HookCatalogue, HookFuture, HookHandlerConfig, HookInvocationRequest,
     HookLifecycleDispatcher, HookOccurrence, HookPort, HookReachFuture, HookReachedEvidence,
     HookRecordFuture, HookRunner, HookSpec, HookStartFuture, HookStartedEvidence,
 };
@@ -138,8 +138,8 @@ impl HookPort for RecordingPort {
             activation,
         ))))
     }
-    fn invoke<'a>(&'a self, _spec: &'a HookSpec, event: HookEvent) -> HookFuture<'a> {
-        let decision = match (self.mode, event.lifecycle()) {
+    fn invoke<'a>(&'a self, request: HookInvocationRequest) -> HookFuture<'a> {
+        let decision = match (self.mode, request.lifecycle()) {
             (HookMode::BlockResult, HookLifecycle::ElicitationResult) => HookDecision::Block,
             _ => HookDecision::Continue,
         };
