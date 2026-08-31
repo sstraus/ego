@@ -13,8 +13,8 @@ use ego_core::config::{
     ConfigLayer, Mode, PermCfg, ResolvedMcpEntry, Ruleset, Source, Trust, resolve,
 };
 use ego_core::event::hook::{
-    HookActivation, HookDecision, HookInvocationId, HookLifecycle, HookOutcome, HookPlan,
-    HookResult,
+    HookActivation, HookContentDigest, HookDecision, HookId, HookInvocationId, HookLifecycle,
+    HookOutcome, HookPlan, HookResult, HookSourceAuthority, HookSourceLocation,
 };
 use ego_core::event::id::Producer;
 use ego_core::event::time::{Clock, Timestamp};
@@ -1662,6 +1662,15 @@ async fn mismatched_capture_context_fails_closed_before_foreign_question_or_resu
 #[test]
 fn mcp_hook_adapter_wire_retains_the_admitted_hook_identity() {
     let request = HookInvocationRequest::new(
+        HookId::derive(
+            HookSourceAuthority::Project,
+            &HookSourceLocation::parse("hooks/mcp.toml").expect("hook source"),
+            &HookContentDigest::parse(
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            )
+            .expect("hook digest"),
+            0,
+        ),
         HookHandlerConfig::McpTool {
             server: "server".to_owned(),
             tool: "lookup".to_owned(),

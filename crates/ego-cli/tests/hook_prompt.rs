@@ -8,7 +8,8 @@ use std::time::Duration;
 use ego_cli::hook::{HookPromptAdapter, ToollessGenerationService};
 use ego_core::event::domain::GenerationRole;
 use ego_core::event::hook::{
-    HookActivation, HookDecision, HookInvocationId, HookLifecycle, HookSubject,
+    HookActivation, HookContentDigest, HookDecision, HookId, HookInvocationId, HookLifecycle,
+    HookSourceAuthority, HookSourceLocation, HookSubject,
 };
 use ego_core::hook::{EffectScope, HookHandlerConfig, HookInvocationRequest};
 
@@ -49,8 +50,21 @@ impl ToollessGenerationService for GenerationCapture {
     }
 }
 
+fn fixture_hook_id() -> HookId {
+    HookId::derive(
+        HookSourceAuthority::Project,
+        &HookSourceLocation::parse("hooks/prompt.toml").expect("hook source"),
+        &HookContentDigest::parse(
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        .expect("hook digest"),
+        0,
+    )
+}
+
 fn request() -> HookInvocationRequest {
     HookInvocationRequest::new(
+        fixture_hook_id(),
         HookHandlerConfig::Prompt {
             prompt: "Return one bounded diagnostic.".to_owned(),
             model: Some("ordinary-model".to_owned()),

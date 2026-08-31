@@ -112,6 +112,15 @@ impl ProcessCapture {
 
 fn command_request(args: Option<Vec<String>>, shell: Option<&str>) -> HookInvocationRequest {
     HookInvocationRequest::new(
+        HookId::derive(
+            HookSourceAuthority::Project,
+            &HookSourceLocation::parse("hooks/command.toml").expect("hook source"),
+            &HookContentDigest::parse(
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            )
+            .expect("hook digest"),
+            0,
+        ),
         HookHandlerConfig::Command {
             command: "/usr/bin/check".to_owned(),
             args,
@@ -129,6 +138,15 @@ fn command_request(args: Option<Vec<String>>, shell: Option<&str>) -> HookInvoca
 
 fn http_request(url: &str, authorization: &str) -> HookInvocationRequest {
     HookInvocationRequest::new(
+        HookId::derive(
+            HookSourceAuthority::Project,
+            &HookSourceLocation::parse("hooks/http.toml").expect("hook source"),
+            &HookContentDigest::parse(
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            )
+            .expect("hook digest"),
+            0,
+        ),
         HookHandlerConfig::Http {
             url: url.to_owned(),
             headers: vec![("Authorization".to_owned(), authorization.to_owned())],

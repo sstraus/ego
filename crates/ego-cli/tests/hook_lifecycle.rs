@@ -23,8 +23,9 @@ use ego_core::config::{
 };
 use ego_core::event::domain::GenerationRole;
 use ego_core::event::hook::{
-    HookActivation, HookDecision, HookFailure, HookFailureKind, HookInvocationId, HookLifecycle,
-    HookOutcome, HookPlan, HookResult, HookSubject,
+    HookActivation, HookContentDigest, HookDecision, HookFailure, HookFailureKind, HookId,
+    HookInvocationId, HookLifecycle, HookOutcome, HookPlan, HookResult, HookSourceAuthority,
+    HookSourceLocation, HookSubject,
 };
 use ego_core::generator::capabilities::{
     CacheRetention, CancelSemantics, ImageInputSupport, ModelCapabilities, ReasoningCarryover,
@@ -77,6 +78,18 @@ fn hook_catalogue() -> HookCatalogue {
         Trust::Trusted,
     )
     .expect("CLI hook catalogue")
+}
+
+fn fixture_hook_id(ordinal: u32) -> HookId {
+    HookId::derive(
+        HookSourceAuthority::Project,
+        &HookSourceLocation::parse("hooks/cli.toml").expect("hook source"),
+        &HookContentDigest::parse(
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        .expect("hook digest"),
+        ordinal,
+    )
 }
 
 #[derive(Clone, Default)]
@@ -605,6 +618,7 @@ fn staged_request(
 fn hook_prompt_resolution_and_child_initial_selection_are_not_active_switches() {
     let generation = HookGeneration::default();
     let request = HookInvocationRequest::new(
+        fixture_hook_id(0),
         HookHandlerConfig::Prompt {
             prompt: "Return continue".to_owned(),
             model: Some("openai/hook".to_owned()),
