@@ -1189,6 +1189,57 @@ async fn identical_authority_has_stable_capture_identity_across_publication_hist
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn equivalent_capture_resolution_survives_newer_pin_release_then_fails_closed_after_all_release(
+) {
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let admission = fixture_admission(vec![
+        Outcome::Candidate(candidate(
+            SERVER,
+            vec![CountingTool::new("alpha_tool", Arc::clone(&dropped))],
+        )),
+        Outcome::Candidate(candidate(
+            SERVER,
+            vec![CountingTool::new("alpha_tool", Arc::clone(&dropped))],
+        )),
+    ]);
+    let (registry, _) = controller(admission);
+    let first = registry
+        .reconcile(refresh(RegistryTrigger::Add))
+        .await
+        .expect("first publication");
+    let old_capture = first.capture().clone();
+    let old_generation = old_capture.generation().to_owned();
+    let stable = old_capture.stable_fingerprint().to_owned();
+
+    let newer = registry
+        .reconcile(refresh(RegistryTrigger::Reload))
+        .await
+        .expect("equivalent successor publication");
+    let newer_capture = newer.capture().clone();
+    assert_eq!(newer_capture.stable_fingerprint(), stable);
+    assert_ne!(newer_capture.generation(), old_generation);
+
+    // Removing the newer publication drops its current strong pin.  The
+    // older explicitly pinned equivalent remains the exact resolver result.
+    drop(newer_capture);
+    drop(newer);
+    registry
+        .reconcile(refresh_with(empty_config(), RegistryTrigger::Remove))
+        .await
+        .expect("remove current equivalent publication");
+    let resolved = registry
+        .resolve_capture(&stable)
+        .expect("older equivalent remains resolvable while pinned");
+    assert_eq!(resolved.generation(), old_generation);
+    assert_eq!(resolved.stable_fingerprint(), stable);
+    drop(resolved);
+    drop(first);
+    drop(old_capture);
+    assert!(registry.resolve_capture(&stable).is_err());
+    assert_eq!(dropped.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn every_authority_relevant_capture_drift_changes_stable_identity() {
     let dropped = Arc::new(AtomicUsize::new(0));
     let (_, baseline) = one_publication(

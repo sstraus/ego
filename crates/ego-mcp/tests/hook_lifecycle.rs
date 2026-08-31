@@ -4,13 +4,13 @@
 //! intentionally remains RED until `McpContinuationOwner` owns both the
 //! asynchronous input-required projection and accepted-answer resume.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ego_core::config::{
-    ConfigLayer, Mode, PermCfg, ResolvedMcpEntry, Ruleset, Source, Trust, resolve,
+    resolve, ConfigLayer, Mode, PermCfg, ResolvedMcpEntry, Ruleset, Source, Trust,
 };
 use ego_core::event::hook::{
     HookActivation, HookDecision, HookInvocationId, HookLifecycle, HookOutcome, HookPlan,
@@ -38,17 +38,17 @@ use ego_core::store::evidence::{
 };
 use ego_core::suspension::{
     ClaimedContinuation, ContinuationError, ContinuationJournal, ContinuationRecord,
-    ContinuationState, ResumeKeySource, ResumeSealer,
+    ContinuationState, McpResumeContext, ResumeKeySource, ResumeSealer,
 };
 use ego_core::turn::{
     McpRegistryEvent, McpRegistryJournal, McpRegistryJournalError, ToolEffectPorts,
 };
 use ego_mcp::{
     McpAdmittedCandidate, McpCacheMetadata, McpCandidateAdmission, McpCandidateError,
-    McpCandidateIdentity, McpCandidateInventory, McpCapabilities, McpContinuationOwner, McpFuture,
-    McpInputMapping, McpInputRequired, McpRegistryCandidate, McpRegistryCapture,
-    McpRegistryController, McpRegistryRefresh, McpServerAdmission, McpStdioOperationFactory,
-    McpTransportMaterial, RegistryScope, RegistryTrigger,
+    McpCandidateIdentity, McpCandidateInventory, McpCapabilities, McpCaptureResolver,
+    McpContinuationOwner, McpFuture, McpInputMapping, McpInputRequired, McpRegistryCandidate,
+    McpRegistryCapture, McpRegistryController, McpRegistryRefresh, McpServerAdmission,
+    McpStdioOperationFactory, McpTransportMaterial, RegistryScope, RegistryTrigger,
 };
 use futures::executor::block_on;
 use futures::future::BoxFuture;
@@ -209,6 +209,16 @@ impl Journal {
             .id()
             .to_owned()
     }
+    fn recorded_capture(&self) -> String {
+        self.record
+            .lock()
+            .expect("record")
+            .as_ref()
+            .expect("recorded continuation")
+            .fingerprints()
+            .capture()
+            .to_owned()
+    }
     fn push(&self, event: &'static str) {
         self.events.lock().expect("journal events").push(event);
         self.trace.push(event);
@@ -272,6 +282,93 @@ impl ContinuationJournal for Journal {
         self.push("claim");
         Ok(claimed)
     }
+    fn settle(
+        &self,
+        _claimed: ClaimedContinuation,
+        _state: ContinuationState,
+    ) -> Result<(), ContinuationError> {
+        self.push("settle");
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct MultiJournal {
+    events: Mutex<Vec<&'static str>>,
+    records: Mutex<BTreeMap<String, ContinuationRecord>>,
+}
+
+impl MultiJournal {
+    fn events(&self) -> Vec<&'static str> {
+        self.events.lock().expect("multi journal events").clone()
+    }
+
+    fn push(&self, event: &'static str) {
+        self.events
+            .lock()
+            .expect("multi journal events")
+            .push(event);
+    }
+}
+
+impl ContinuationJournal for MultiJournal {
+    fn record(&self, record: ContinuationRecord) -> Result<(), ContinuationError> {
+        let id = record.id().to_owned();
+        let mut records = self.records.lock().expect("multi journal records");
+        if records.insert(id, record).is_some() {
+            return Err(ContinuationError::InvalidTransition);
+        }
+        drop(records);
+        self.push("record");
+        Ok(())
+    }
+
+    fn accept_answer(
+        &self,
+        id: &str,
+        answer: &[u8],
+        now: Timestamp,
+    ) -> Result<(), ContinuationError> {
+        let mut records = self.records.lock().expect("multi journal records");
+        records
+            .get_mut(id)
+            .ok_or(ContinuationError::NotFound)?
+            .accept_answer(answer.to_vec(), now)?;
+        drop(records);
+        self.push("accepted_answer");
+        Ok(())
+    }
+
+    fn load(&self, id: &str) -> Result<ContinuationRecord, ContinuationError> {
+        let records = self.records.lock().expect("multi journal records");
+        let record = records.get(id).ok_or(ContinuationError::NotFound)?;
+        serde_json::from_slice(
+            &serde_json::to_vec(record).map_err(|_| ContinuationError::Corrupt("encode".into()))?,
+        )
+        .map_err(|_| ContinuationError::Corrupt("decode".into()))
+    }
+
+    fn claim(&self, id: &str, now: Timestamp) -> Result<ClaimedContinuation, ContinuationError> {
+        let mut records = self.records.lock().expect("multi journal records");
+        let record = records.remove(id).ok_or(ContinuationError::NotFound)?;
+        let bytes =
+            serde_json::to_vec(&record).map_err(|_| ContinuationError::Corrupt("encode".into()))?;
+        let claimed = match record.claim(now) {
+            Ok(claimed) => claimed,
+            Err(error) => {
+                records.insert(
+                    id.to_owned(),
+                    serde_json::from_slice(&bytes)
+                        .map_err(|_| ContinuationError::Corrupt("decode".into()))?,
+                );
+                return Err(error);
+            }
+        };
+        drop(records);
+        self.push("claim");
+        Ok(claimed)
+    }
+
     fn settle(
         &self,
         _claimed: ClaimedContinuation,
@@ -581,13 +678,17 @@ fn server_admission() -> Arc<McpServerAdmission> {
 }
 fn captured_lookup(factory: Arc<McpStdioOperationFactory>) -> (McpRegistryCapture, Arc<dyn Tool>) {
     let capture = registry_capture(factory);
-    let tool = capture
+    let tool = captured_tool(&capture, "lookup");
+    (capture, tool)
+}
+
+fn captured_tool(capture: &McpRegistryCapture, name: &str) -> Arc<dyn Tool> {
+    capture
         .tools()
         .iter()
-        .find(|tool| tool.descriptor().name == "lookup")
+        .find(|tool| tool.descriptor().name == name)
         .cloned()
-        .expect("captured lookup tool");
-    (capture, tool)
+        .unwrap_or_else(|| panic!("captured {name} tool"))
 }
 fn prepare_lookup(tool: &Arc<dyn Tool>) -> PreparedCall {
     let resolver = ego_core::permit::fake::FakeFs::default();
@@ -598,6 +699,11 @@ fn prepare_lookup(tool: &Arc<dyn Tool>) -> PreparedCall {
     tool.prepare(json!({}), &ctx).expect("prepare")
 }
 fn authorized(call: PreparedCall) -> Authorized {
+    let tool_name = call
+        .mcp_envelope()
+        .expect("MCP envelope")
+        .subject()
+        .operation_name();
     let policy = PolicyEngine::new(
         CanonPath::new("/workspace"),
         Mode::Yolo,
@@ -606,6 +712,8 @@ fn authorized(call: PreparedCall) -> Authorized {
                 judge: None,
                 allow: vec![
                     ego_core::permit::rule::Rule::load("tool(server/lookup)").expect("tool rule"),
+                    ego_core::permit::rule::Rule::load("tool(server/lookup-secondary)")
+                        .expect("secondary tool rule"),
                     ego_core::permit::rule::Rule::load("exec(mcp-server *)").expect("process rule"),
                 ],
                 deny: Vec::new(),
@@ -614,7 +722,7 @@ fn authorized(call: PreparedCall) -> Authorized {
         ),
     );
     let Classification::Settled(Ok(authorized)) = policy.classify(call) else {
-        panic!("call must be authorized")
+        panic!("{tool_name} call must be authorized")
     };
     authorized
 }
@@ -667,32 +775,25 @@ fn mcp_matrix_has_one_real_owner_for_each_mrtr_lifecycle() {
 async fn real_operation_records_before_elicitation_and_returns_foreign_id() {
     let trace = Trace::default();
     let journal = Arc::new(Journal::with_trace(trace.clone()));
-    let owner = Arc::new(McpContinuationOwner::new(
-        journal.clone(),
-        hooks_with_mode(HookMode::Continue, trace.clone()),
-        Arc::new(FixedResumeKey),
-        Arc::new(FixedClock),
-    ));
+    let resolver = Arc::new(ExactCaptureResolver::default());
+    let owner = context_free_owner(journal.clone(), resolver.clone());
     let factory = Arc::new(
         McpStdioOperationFactory::new(Arc::clone(&owner), 64 * 1024, Duration::from_secs(30))
             .expect("factory"),
     );
-    let (_capture, tool) = captured_lookup(Arc::clone(&factory));
+    let (capture, tool) = captured_lookup(Arc::clone(&factory));
+    resolver.insert(capture.clone());
     let call = prepare_lookup(&tool);
     let auth = authorized(call);
     let (sealer, floor) = prepared_resume(&auth);
     let resume = sealer.prepare(&auth, floor).expect("resume");
     let spawner = Arc::new(ScriptedSpawner::new());
-    let (call, permit) = auth.into_parts();
-    let guarded = GuardedEffects::new_with_resume(
-        permit,
-        Box::leak(Box::new(ego_core::permit::fake::FakeFs::default())),
-        Box::leak(Box::new(NoProcess)),
-        Box::leak(Box::new(EmptyEvidence)),
-        Arc::new(OfflineResolver),
-        Arc::new(OfflineOneHop),
+    let (call, guarded) = guarded_with_session_context(
+        auth,
+        resume,
+        hooks_with_mode(HookMode::Continue, trace.clone()),
+        &capture,
         spawner.clone(),
-        Some(resume),
     );
     let outcome = tool.execute(call, &guarded).await.expect("outcome");
     let ToolExecution::InputRequired(foreign) = outcome else {
@@ -708,32 +809,25 @@ async fn real_operation_records_before_elicitation_and_returns_foreign_id() {
 async fn accepted_answer_validates_hooks_claims_and_retries_once() {
     let trace = Trace::default();
     let journal = Arc::new(Journal::with_trace(trace.clone()));
-    let owner = Arc::new(McpContinuationOwner::new(
-        journal.clone(),
-        hooks_with_mode(HookMode::Continue, trace.clone()),
-        Arc::new(FixedResumeKey),
-        Arc::new(FixedClock),
-    ));
+    let resolver = Arc::new(ExactCaptureResolver::default());
+    let owner = context_free_owner(journal.clone(), resolver.clone());
     let factory = Arc::new(
         McpStdioOperationFactory::new(Arc::clone(&owner), 64 * 1024, Duration::from_secs(30))
             .expect("factory"),
     );
     let (capture, tool) = captured_lookup(Arc::clone(&factory));
+    resolver.insert(capture.clone());
     let call = prepare_lookup(&tool);
     let auth = authorized(call);
     let (sealer, floor) = prepared_resume(&auth);
     let resume = sealer.prepare(&auth, floor.clone()).expect("resume");
     let spawner = Arc::new(ScriptedSpawner::new());
-    let (call, permit) = auth.into_parts();
-    let guarded = GuardedEffects::new_with_resume(
-        permit,
-        Box::leak(Box::new(ego_core::permit::fake::FakeFs::default())),
-        Box::leak(Box::new(NoProcess)),
-        Box::leak(Box::new(EmptyEvidence)),
-        Arc::new(OfflineResolver),
-        Arc::new(OfflineOneHop),
+    let (call, guarded) = guarded_with_session_context(
+        auth,
+        resume,
+        hooks_with_mode(HookMode::Continue, trace.clone()),
+        &capture,
         spawner.clone(),
-        Some(resume),
     );
     let ToolExecution::InputRequired(foreign) =
         tool.execute(call, &guarded).await.expect("required")
@@ -745,7 +839,7 @@ async fn accepted_answer_validates_hooks_claims_and_retries_once() {
         .accept_answer(
             &id,
             br#"{"choice":"yes"}"#,
-            capture,
+            hooks_with_mode(HookMode::Continue, trace.clone()),
             floor,
             ports(spawner.clone()),
         )
@@ -775,32 +869,25 @@ async fn accepted_answer_validates_hooks_claims_and_retries_once() {
 async fn foreign_question_port_reuses_owner_capture_floor_and_effects_for_successor_rounds() {
     let trace = Trace::default();
     let journal = Arc::new(Journal::with_trace(trace.clone()));
-    let owner = Arc::new(McpContinuationOwner::new(
-        journal.clone(),
-        hooks_with_mode(HookMode::Continue, trace.clone()),
-        Arc::new(FixedResumeKey),
-        Arc::new(FixedClock),
-    ));
+    let resolver = Arc::new(ExactCaptureResolver::default());
+    let owner = context_free_owner(journal.clone(), resolver.clone());
     let factory = Arc::new(
         McpStdioOperationFactory::new(Arc::clone(&owner), 64 * 1024, Duration::from_secs(30))
             .expect("factory"),
     );
     let (capture, tool) = captured_lookup(Arc::clone(&factory));
+    resolver.insert(capture.clone());
     let call = prepare_lookup(&tool);
     let auth = authorized(call);
     let (sealer, floor) = prepared_resume(&auth);
     let resume = sealer.prepare(&auth, floor.clone()).expect("resume");
     let spawner = Arc::new(ScriptedSpawner::with_input_required_rounds(2));
-    let (call, permit) = auth.into_parts();
-    let guarded = GuardedEffects::new_with_resume(
-        permit,
-        Box::leak(Box::new(ego_core::permit::fake::FakeFs::default())),
-        Box::leak(Box::new(NoProcess)),
-        Box::leak(Box::new(EmptyEvidence)),
-        Arc::new(OfflineResolver),
-        Arc::new(OfflineOneHop),
+    let (call, guarded) = guarded_with_session_context(
+        auth,
+        resume,
+        hooks_with_mode(HookMode::Continue, trace.clone()),
+        &capture,
         spawner.clone(),
-        Some(resume),
     );
     let ToolExecution::InputRequired(initial) =
         tool.execute(call, &guarded).await.expect("required")
@@ -810,7 +897,7 @@ async fn foreign_question_port_reuses_owner_capture_floor_and_effects_for_succes
     let initial_id = initial.continuation_id().to_owned();
     let adapter = ego_mcp::McpForeignQuestionPort::new(
         Arc::clone(&owner),
-        capture,
+        hooks_with_mode(HookMode::Continue, trace.clone()),
         floor,
         ports(spawner.clone()),
     );
@@ -868,17 +955,14 @@ async fn foreign_question_port_reuses_owner_capture_floor_and_effects_for_succes
 #[test]
 fn schema_or_authority_failure_precedes_durable_acceptance() {
     let journal = Arc::new(Journal::default());
-    let owner = Arc::new(McpContinuationOwner::new(
-        journal.clone(),
-        hooks_with_mode(HookMode::Continue, Trace::default()),
-        Arc::new(FixedResumeKey),
-        Arc::new(FixedClock),
-    ));
+    let resolver = Arc::new(ExactCaptureResolver::default());
+    let owner = context_free_owner(journal.clone(), resolver.clone());
     let factory = Arc::new(
         McpStdioOperationFactory::new(Arc::clone(&owner), 64 * 1024, Duration::from_secs(30))
             .expect("factory"),
     );
     let (capture, tool) = captured_lookup(Arc::clone(&factory));
+    resolver.insert(capture.clone());
     let call = prepare_lookup(&tool);
     let auth = authorized(call.clone());
     let (sealer, floor) = prepared_resume(&auth);
@@ -899,16 +983,14 @@ fn schema_or_authority_failure_precedes_durable_acceptance() {
                 .expect("record"),
         )
         .expect("journal");
-    assert!(
-        block_on(owner.accept_answer(
-            "continuation-schema-authority",
-            br#"{"unexpected":true}"#,
-            capture,
-            floor,
-            ports(Arc::new(ScriptedSpawner::new()))
-        ))
-        .is_err()
-    );
+    assert!(block_on(owner.accept_answer(
+        "continuation-schema-authority",
+        br#"{"unexpected":true}"#,
+        hooks_with_mode(HookMode::Continue, Trace::default()),
+        floor,
+        ports(Arc::new(ScriptedSpawner::new()))
+    ))
+    .is_err());
     assert_eq!(journal.state(), Some(ContinuationState::Pending));
     assert_eq!(journal.events(), vec!["record"]);
 }
@@ -918,50 +1000,41 @@ async fn pre_block_or_uncertainty_leaves_accepted_answer_unclaimed_without_reent
     for mode in [HookMode::BlockResult, HookMode::UncertainResult] {
         let trace = Trace::default();
         let journal = Arc::new(Journal::with_trace(trace.clone()));
-        let owner = Arc::new(McpContinuationOwner::new(
-            journal.clone(),
-            hooks_with_mode(mode, trace.clone()),
-            Arc::new(FixedResumeKey),
-            Arc::new(FixedClock),
-        ));
+        let resolver = Arc::new(ExactCaptureResolver::default());
+        let owner = context_free_owner(journal.clone(), resolver.clone());
         let factory = Arc::new(
             McpStdioOperationFactory::new(Arc::clone(&owner), 64 * 1024, Duration::from_secs(30))
                 .expect("factory"),
         );
         let (capture, tool) = captured_lookup(Arc::clone(&factory));
+        resolver.insert(capture.clone());
         let call = prepare_lookup(&tool);
         let auth = authorized(call);
         let (sealer, floor) = prepared_resume(&auth);
         let resume = sealer.prepare(&auth, floor.clone()).expect("resume");
         let spawner = Arc::new(ScriptedSpawner::new());
-        let (call, permit) = auth.into_parts();
-        let guarded = GuardedEffects::new_with_resume(
-            permit,
-            Box::leak(Box::new(ego_core::permit::fake::FakeFs::default())),
-            Box::leak(Box::new(NoProcess)),
-            Box::leak(Box::new(EmptyEvidence)),
-            Arc::new(OfflineResolver),
-            Arc::new(OfflineOneHop),
+        let (call, guarded) = guarded_with_session_context(
+            auth,
+            resume,
+            hooks_with_mode(HookMode::Continue, trace.clone()),
+            &capture,
             spawner.clone(),
-            Some(resume),
         );
         let ToolExecution::InputRequired(foreign) =
             tool.execute(call, &guarded).await.expect("required")
         else {
             panic!("expected required")
         };
-        assert!(
-            owner
-                .accept_answer(
-                    foreign.continuation_id(),
-                    br#"{"choice":"yes"}"#,
-                    capture,
-                    floor,
-                    ports(spawner.clone())
-                )
-                .await
-                .is_err()
-        );
+        assert!(owner
+            .accept_answer(
+                foreign.continuation_id(),
+                br#"{"choice":"yes"}"#,
+                hooks_with_mode(mode, trace.clone()),
+                floor,
+                ports(spawner.clone())
+            )
+            .await
+            .is_err());
         assert_eq!(journal.state(), Some(ContinuationState::Accepted));
         assert!(!journal.events().contains(&"claim"));
         assert_eq!(spawner.calls(), 1);
@@ -1007,13 +1080,13 @@ impl McpRegistryJournal for RegistryJournal {
         Ok(1)
     }
 }
-struct OneCandidate(Mutex<Option<McpAdmittedCandidate>>);
+struct OneCandidate(Mutex<VecDeque<McpAdmittedCandidate>>);
 impl McpCandidateAdmission for OneCandidate {
     fn admit(
         &self,
         _request: ego_mcp::McpCandidateRequest,
     ) -> McpFuture<'static, Result<McpAdmittedCandidate, McpCandidateError>> {
-        let candidate = self.0.lock().expect("candidate").take();
+        let candidate = self.0.lock().expect("candidate").pop_front();
         Box::pin(async move {
             candidate.ok_or_else(|| McpCandidateError::Invalid {
                 cause: "candidate already used".into(),
@@ -1023,14 +1096,47 @@ impl McpCandidateAdmission for OneCandidate {
 }
 
 fn registry_capture(factory: Arc<McpStdioOperationFactory>) -> McpRegistryCapture {
+    registry_capture_with_history(factory, false).1
+}
+
+fn registry_capture_with_history(
+    factory: Arc<McpStdioOperationFactory>,
+    equivalent_successor: bool,
+) -> (Arc<McpRegistryController>, McpRegistryCapture) {
+    registry_capture_with_history_and_schema(
+        factory,
+        equivalent_successor,
+        json!({"type":"object","additionalProperties":false}),
+    )
+}
+
+fn registry_capture_with_schema(
+    factory: Arc<McpStdioOperationFactory>,
+    schema: serde_json::Value,
+) -> McpRegistryCapture {
+    registry_capture_with_history_and_schema(factory, false, schema).1
+}
+
+fn registry_capture_with_history_and_schema(
+    factory: Arc<McpStdioOperationFactory>,
+    equivalent_successor: bool,
+    schema: serde_json::Value,
+) -> (Arc<McpRegistryController>, McpRegistryCapture) {
     let admission = server_admission();
     let inventory = McpCandidateInventory::new(
         McpCapabilities::tools(),
-        vec![ego_core::generator::types::ToolDescriptor {
-            name: "lookup".into(),
-            description: "continuation fixture".into(),
-            parameters: json!({"type":"object","additionalProperties":false}),
-        }],
+        vec![
+            ego_core::generator::types::ToolDescriptor {
+                name: "lookup".into(),
+                description: "continuation fixture".into(),
+                parameters: schema.clone(),
+            },
+            ego_core::generator::types::ToolDescriptor {
+                name: "lookup-secondary".into(),
+                description: "second session continuation fixture".into(),
+                parameters: schema,
+            },
+        ],
         Vec::new(),
         Vec::new(),
         McpCacheMetadata::default(),
@@ -1043,7 +1149,12 @@ fn registry_capture(factory: Arc<McpStdioOperationFactory>) -> McpRegistryCaptur
         factory,
     )
     .expect("candidate");
-    let candidate_port = Arc::new(OneCandidate(Mutex::new(Some(candidate))));
+    let candidates = if equivalent_successor {
+        VecDeque::from([candidate.clone(), candidate])
+    } else {
+        VecDeque::from([candidate])
+    };
+    let candidate_port = Arc::new(OneCandidate(Mutex::new(candidates)));
     let registry = McpRegistryController::new(Arc::new(RegistryJournal::default()), candidate_port)
         .expect("registry");
     let layer = ConfigLayer::parse(
@@ -1068,7 +1179,32 @@ fn registry_capture(factory: Arc<McpStdioOperationFactory>) -> McpRegistryCaptur
     )
     .expect("refresh");
     block_on(registry.reconcile(refresh)).expect("publication");
-    registry.capture().expect("capture")
+    let capture = registry.capture().expect("capture");
+    (registry, capture)
+}
+
+fn registry_reload() -> McpRegistryRefresh {
+    let layer = ConfigLayer::parse(
+        Source::User,
+        "[mcp.servers.server]\ntransport='stdio'\ncommand='mcp-server'\n",
+    )
+    .expect("config");
+    let provenance = resolve(&[layer], Trust::Trusted, None)
+        .expect("resolved")
+        .mcp
+        .entries()
+        .values()
+        .find_map(|entry| match entry {
+            ResolvedMcpEntry::Configured { provenance, .. } => Some(provenance.clone()),
+            ResolvedMcpEntry::Tombstone { .. } => None,
+        })
+        .expect("provenance");
+    McpRegistryRefresh::new(
+        vec![McpRegistryCandidate::ready(server_admission(), provenance)],
+        RegistryTrigger::Reload,
+        RegistryScope::All,
+    )
+    .expect("reload refresh")
 }
 
 #[test]
@@ -1078,4 +1214,442 @@ fn ordinary_question_path_does_not_add_an_mcp_hook_owner() {
         lifecycle,
         HookLifecycle::Elicitation | HookLifecycle::ElicitationResult
     )));
+}
+
+// The continuation owner is process/admission scoped.  Session lifecycle and
+// capture identity belong to the one-shot guarded resume context instead of
+// being ambient state on the owner.
+#[derive(Default)]
+struct ExactCaptureResolver(Mutex<BTreeMap<String, McpRegistryCapture>>);
+
+impl ExactCaptureResolver {
+    fn insert(&self, capture: McpRegistryCapture) {
+        self.0
+            .lock()
+            .expect("capture resolver")
+            .insert(capture.stable_fingerprint().to_owned(), capture);
+    }
+
+    fn remove(&self, stable_fingerprint: &str) -> Option<McpRegistryCapture> {
+        self.0
+            .lock()
+            .expect("capture resolver")
+            .remove(stable_fingerprint)
+    }
+}
+
+impl McpCaptureResolver for ExactCaptureResolver {
+    fn resolve_capture(
+        &self,
+        stable_fingerprint: &str,
+    ) -> Result<McpRegistryCapture, ego_mcp::McpRegistryError> {
+        self.0
+            .lock()
+            .expect("capture resolver")
+            .get(stable_fingerprint)
+            .cloned()
+            .ok_or_else(|| {
+                ego_mcp::McpRegistryError::InvalidCandidate(
+                    "capture identity is unavailable".into(),
+                )
+            })
+    }
+}
+
+fn context_free_owner(
+    journal: Arc<dyn ContinuationJournal>,
+    resolver: Arc<ExactCaptureResolver>,
+) -> Arc<McpContinuationOwner> {
+    Arc::new(McpContinuationOwner::new(
+        journal,
+        resolver,
+        Arc::new(FixedResumeKey),
+        Arc::new(FixedClock),
+    ))
+}
+
+fn guarded_with_session_context(
+    authorized: Authorized,
+    resume: ego_core::suspension::PreparedResume,
+    dispatcher: HookLifecycleDispatcher,
+    capture: &McpRegistryCapture,
+    spawner: Arc<ScriptedSpawner>,
+) -> (PreparedCall, GuardedEffects<'static>) {
+    let context = McpResumeContext::new(dispatcher, capture.clone());
+    ToolEffectPorts::new(
+        Box::leak(Box::new(ego_core::permit::fake::FakeFs::default())),
+        Box::leak(Box::new(NoProcess)),
+        Box::leak(Box::new(EmptyEvidence)),
+        Arc::new(OfflineResolver),
+        Arc::new(OfflineOneHop),
+        spawner,
+    )
+    .bind_mcp_resume(authorized, resume, Some(context))
+}
+
+fn guarded_without_session_context(
+    authorized: Authorized,
+    resume: ego_core::suspension::PreparedResume,
+    spawner: Arc<ScriptedSpawner>,
+) -> (PreparedCall, GuardedEffects<'static>) {
+    ToolEffectPorts::new(
+        Box::leak(Box::new(ego_core::permit::fake::FakeFs::default())),
+        Box::leak(Box::new(NoProcess)),
+        Box::leak(Box::new(EmptyEvidence)),
+        Arc::new(OfflineResolver),
+        Arc::new(OfflineOneHop),
+        spawner,
+    )
+    .bind_mcp_resume(authorized, resume, None)
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn ordinary_operation_carries_exact_session_and_stable_capture_context() {
+    let trace = Trace::default();
+    let journal = Arc::new(Journal::with_trace(trace.clone()));
+    let resolver = Arc::new(ExactCaptureResolver::default());
+    let owner = context_free_owner(journal.clone(), resolver.clone());
+    let factory = Arc::new(
+        McpStdioOperationFactory::new(Arc::clone(&owner), 64 * 1024, Duration::from_secs(30))
+            .expect("factory"),
+    );
+    let (capture, tool) = captured_lookup(Arc::clone(&factory));
+    resolver.insert(capture.clone());
+    let auth = authorized(prepare_lookup(&tool));
+    let (sealer, floor) = prepared_resume(&auth);
+    let resume = sealer.prepare(&auth, floor).expect("resume");
+    let dispatcher = hooks_with_mode(HookMode::Continue, trace.clone());
+    let spawner = Arc::new(ScriptedSpawner::new());
+    let (call, guarded) =
+        guarded_with_session_context(auth, resume, dispatcher, &capture, spawner.clone());
+
+    let ToolExecution::InputRequired(required) =
+        tool.execute(call, &guarded).await.expect("required")
+    else {
+        panic!("expected input-required");
+    };
+    assert_eq!(required.continuation_id(), journal.id());
+    assert_eq!(journal.events(), vec!["record"]);
+    assert_eq!(trace.events(), vec!["record", "Elicitation"]);
+    assert_eq!(spawner.calls(), 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn successor_reconcile_before_input_projection_keeps_the_old_exact_capture_pinned() {
+    let trace = Trace::default();
+    let journal = Arc::new(Journal::with_trace(trace.clone()));
+    let resolver = Arc::new(ExactCaptureResolver::default());
+    let owner = context_free_owner(journal.clone(), resolver.clone());
+    let factory = Arc::new(
+        McpStdioOperationFactory::new(Arc::clone(&owner), 64 * 1024, Duration::from_secs(30))
+            .expect("factory"),
+    );
+    let (registry, capture) = registry_capture_with_history(Arc::clone(&factory), true);
+    let stable = capture.stable_fingerprint().to_owned();
+    let generation = capture.generation().to_owned();
+    resolver.insert(capture.clone());
+    let tool = captured_tool(&capture, "lookup");
+    let auth = authorized(prepare_lookup(&tool));
+    let (sealer, floor) = prepared_resume(&auth);
+    let resume = sealer.prepare(&auth, floor).expect("resume");
+    let spawner = Arc::new(ScriptedSpawner::new());
+
+    registry
+        .reconcile(registry_reload())
+        .await
+        .expect("publish equivalent successor before projection");
+    assert_ne!(registry.publication().generation(), generation);
+    assert_eq!(
+        registry.publication().capture().stable_fingerprint(),
+        stable
+    );
+
+    let (call, guarded) = guarded_with_session_context(
+        auth,
+        resume,
+        hooks_with_mode(HookMode::Continue, trace.clone()),
+        &capture,
+        spawner.clone(),
+    );
+    let ToolExecution::InputRequired(required) =
+        tool.execute(call, &guarded).await.expect("required")
+    else {
+        panic!("expected required");
+    };
+    assert_eq!(required.continuation_id(), journal.id());
+    assert_eq!(journal.recorded_capture(), stable);
+    assert_eq!(
+        resolver
+            .resolve_capture(&stable)
+            .expect("pinned old capture")
+            .generation(),
+        generation
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn one_owner_routes_interleaved_answers_to_the_originating_session_dispatcher() {
+    let trace_a = Trace::default();
+    let trace_b = Trace::default();
+    let journal = Arc::new(MultiJournal::default());
+    let resolver = Arc::new(ExactCaptureResolver::default());
+    let owner = context_free_owner(journal.clone(), resolver.clone());
+    let factory = Arc::new(
+        McpStdioOperationFactory::new(Arc::clone(&owner), 64 * 1024, Duration::from_secs(30))
+            .expect("factory"),
+    );
+    let (capture, tool_a) = captured_lookup(Arc::clone(&factory));
+    let tool_b = captured_tool(&capture, "lookup-secondary");
+    resolver.insert(capture.clone());
+
+    let first_auth = authorized(prepare_lookup(&tool_a));
+    let (sealer, floor) = prepared_resume(&first_auth);
+    let first_resume = sealer.prepare(&first_auth, floor.clone()).expect("resume");
+    let first_spawner = Arc::new(ScriptedSpawner::new());
+    let (first_call, first_guarded) = guarded_with_session_context(
+        first_auth,
+        first_resume,
+        hooks_with_mode(HookMode::Continue, trace_a.clone()),
+        &capture,
+        first_spawner.clone(),
+    );
+    let ToolExecution::InputRequired(first) = tool_a
+        .execute(first_call, &first_guarded)
+        .await
+        .expect("first required")
+    else {
+        panic!("expected first input-required");
+    };
+    let first_id = first.continuation_id().to_owned();
+    let second_auth = authorized(prepare_lookup(&tool_b));
+    let second_resume = sealer.prepare(&second_auth, floor.clone()).expect("resume");
+    let second_spawner = Arc::new(ScriptedSpawner::new());
+    let (second_call, second_guarded) = guarded_with_session_context(
+        second_auth,
+        second_resume,
+        hooks_with_mode(HookMode::Continue, trace_b.clone()),
+        &capture,
+        second_spawner.clone(),
+    );
+    let ToolExecution::InputRequired(second) = tool_b
+        .execute(second_call, &second_guarded)
+        .await
+        .expect("second required")
+    else {
+        panic!("expected second input-required");
+    };
+    assert_ne!(first_id, second.continuation_id());
+    assert_eq!(journal.events(), vec!["record", "record"]);
+
+    owner
+        .accept_answer(
+            second.continuation_id(),
+            br#"{"choice":"two"}"#,
+            hooks_with_mode(HookMode::Continue, trace_b.clone()),
+            floor.clone(),
+            ports(second_spawner),
+        )
+        .await
+        .expect("second answer");
+    owner
+        .accept_answer(
+            &first_id,
+            br#"{"choice":"one"}"#,
+            hooks_with_mode(HookMode::Continue, trace_a.clone()),
+            floor,
+            ports(first_spawner),
+        )
+        .await
+        .expect("first answer");
+
+    assert_eq!(trace_a.events(), vec!["Elicitation", "ElicitationResult"]);
+    assert_eq!(trace_b.events(), vec!["Elicitation", "ElicitationResult"]);
+    assert_eq!(
+        journal.events(),
+        vec![
+            "record",
+            "record",
+            "accepted_answer",
+            "claim",
+            "settle",
+            "accepted_answer",
+            "claim",
+            "settle"
+        ]
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn answer_resume_resolves_recorded_capture_and_adapter_never_uses_loop_capture() {
+    let trace = Trace::default();
+    let journal = Arc::new(Journal::with_trace(trace.clone()));
+    let resolver = Arc::new(ExactCaptureResolver::default());
+    let owner = context_free_owner(journal.clone(), resolver.clone());
+    let factory = Arc::new(
+        McpStdioOperationFactory::new(Arc::clone(&owner), 64 * 1024, Duration::from_secs(30))
+            .expect("factory"),
+    );
+    let (capture, tool) = captured_lookup(Arc::clone(&factory));
+    let stable = capture.stable_fingerprint().to_owned();
+    resolver.insert(capture.clone());
+    let auth = authorized(prepare_lookup(&tool));
+    let (sealer, floor) = prepared_resume(&auth);
+    let resume = sealer.prepare(&auth, floor.clone()).expect("resume");
+    let spawner = Arc::new(ScriptedSpawner::new());
+    let (call, guarded) = guarded_with_session_context(
+        auth,
+        resume,
+        hooks_with_mode(HookMode::Continue, trace.clone()),
+        &capture,
+        spawner.clone(),
+    );
+    let ToolExecution::InputRequired(required) =
+        tool.execute(call, &guarded).await.expect("required")
+    else {
+        panic!("expected required");
+    };
+    let adapter = ego_mcp::McpForeignQuestionPort::new(
+        Arc::clone(&owner),
+        hooks_with_mode(HookMode::Continue, trace.clone()),
+        floor,
+        ports(spawner),
+    );
+    let result =
+        ForeignQuestionPort::resume(&adapter, required.continuation_id(), r#"{"choice":"yes"}"#)
+            .await
+            .expect("resume");
+    assert!(matches!(result, ToolExecution::Complete(_)));
+    assert_eq!(journal.recorded_capture(), stable);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn blocked_result_keeps_the_pinned_capture_with_accepted_unclaimed_continuation() {
+    let trace = Trace::default();
+    let journal = Arc::new(Journal::with_trace(trace.clone()));
+    let resolver = Arc::new(ExactCaptureResolver::default());
+    let owner = context_free_owner(journal.clone(), resolver.clone());
+    let factory = Arc::new(
+        McpStdioOperationFactory::new(Arc::clone(&owner), 64 * 1024, Duration::from_secs(30))
+            .expect("factory"),
+    );
+    let (capture, tool) = captured_lookup(Arc::clone(&factory));
+    let stable = capture.stable_fingerprint().to_owned();
+    resolver.insert(capture.clone());
+    let auth = authorized(prepare_lookup(&tool));
+    let (sealer, floor) = prepared_resume(&auth);
+    let resume = sealer.prepare(&auth, floor.clone()).expect("resume");
+    let spawner = Arc::new(ScriptedSpawner::new());
+    let (call, guarded) = guarded_with_session_context(
+        auth,
+        resume,
+        hooks_with_mode(HookMode::Continue, trace.clone()),
+        &capture,
+        spawner.clone(),
+    );
+    let ToolExecution::InputRequired(required) =
+        tool.execute(call, &guarded).await.expect("required")
+    else {
+        panic!("expected required");
+    };
+    drop(guarded);
+    drop(capture);
+    assert!(resolver.remove(&stable).is_some());
+
+    let result = owner
+        .accept_answer(
+            required.continuation_id(),
+            br#"{"choice":"yes"}"#,
+            hooks_with_mode(HookMode::BlockResult, trace.clone()),
+            floor,
+            ports(spawner),
+        )
+        .await;
+    assert!(result.is_err(), "blocked result must not enter egress");
+    assert_eq!(journal.state(), Some(ContinuationState::Accepted));
+    assert_eq!(journal.events(), vec!["record", "accepted_answer"]);
+    assert_eq!(
+        trace.events(),
+        vec![
+            "record",
+            "Elicitation",
+            "accepted_answer",
+            "ElicitationResult"
+        ]
+    );
+    // The owner-held exact capture is still usable after the external map and
+    // the operation's temporary capture handle have been released.
+    assert_eq!(journal.recorded_capture(), stable);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn missing_session_context_fails_before_question_exposure_or_resumed_egress() {
+    let trace = Trace::default();
+    let journal = Arc::new(Journal::with_trace(trace.clone()));
+    let resolver = Arc::new(ExactCaptureResolver::default());
+    let owner = context_free_owner(journal.clone(), resolver.clone());
+    let factory = Arc::new(
+        McpStdioOperationFactory::new(Arc::clone(&owner), 64 * 1024, Duration::from_secs(30))
+            .expect("factory"),
+    );
+    let (capture, tool) = captured_lookup(Arc::clone(&factory));
+    resolver.insert(capture);
+    let auth = authorized(prepare_lookup(&tool));
+    let (sealer, floor) = prepared_resume(&auth);
+    let resume = sealer.prepare(&auth, floor).expect("resume");
+    let spawner = Arc::new(ScriptedSpawner::new());
+    let (call, guarded) = guarded_without_session_context(auth, resume, spawner.clone());
+
+    assert!(tool.execute(call, &guarded).await.is_err());
+    assert!(journal.events().is_empty());
+    assert!(trace.events().is_empty());
+    assert_eq!(spawner.calls(), 1, "only the initial admitted call ran");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn mismatched_capture_context_fails_closed_before_foreign_question_or_resume_egress() {
+    let trace = Trace::default();
+    let journal = Arc::new(Journal::with_trace(trace.clone()));
+    let resolver = Arc::new(ExactCaptureResolver::default());
+    let owner = context_free_owner(journal.clone(), resolver.clone());
+    let factory = Arc::new(
+        McpStdioOperationFactory::new(Arc::clone(&owner), 64 * 1024, Duration::from_secs(30))
+            .expect("factory"),
+    );
+    let (capture_a, tool_a) = captured_lookup(Arc::clone(&factory));
+    let capture_b = registry_capture_with_schema(
+        factory,
+        json!({
+            "type":"object",
+            "properties":{"different":{"type":"string"}},
+            "required":["different"],
+            "additionalProperties":false
+        }),
+    );
+    assert_ne!(
+        capture_a.stable_fingerprint(),
+        capture_b.stable_fingerprint(),
+        "mismatch fixture must use distinct stable capture identities"
+    );
+    resolver.insert(capture_a.clone());
+    resolver.insert(capture_b.clone());
+
+    let auth = authorized(prepare_lookup(&tool_a));
+    let (sealer, floor) = prepared_resume(&auth);
+    let resume = sealer.prepare(&auth, floor).expect("resume");
+    let spawner = Arc::new(ScriptedSpawner::new());
+    let (call, guarded) = guarded_with_session_context(
+        auth,
+        resume,
+        hooks_with_mode(HookMode::Continue, trace.clone()),
+        &capture_b,
+        spawner.clone(),
+    );
+
+    assert!(
+        tool_a.execute(call, &guarded).await.is_err(),
+        "a prepared call from capture A cannot execute with capture B context"
+    );
+    assert!(journal.events().is_empty());
+    assert!(trace.events().is_empty());
+    assert_eq!(spawner.calls(), 1, "only the initial admitted call ran");
 }
