@@ -1189,8 +1189,8 @@ async fn identical_authority_has_stable_capture_identity_across_publication_hist
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn equivalent_capture_resolution_survives_newer_pin_release_then_fails_closed_after_all_release(
-) {
+async fn equivalent_capture_resolution_survives_newer_pin_release_then_fails_closed_after_all_release()
+ {
     let dropped = Arc::new(AtomicUsize::new(0));
     let admission = fixture_admission(vec![
         Outcome::Candidate(candidate(

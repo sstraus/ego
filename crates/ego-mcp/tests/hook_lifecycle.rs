@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ego_core::config::{
-    resolve, ConfigLayer, Mode, PermCfg, ResolvedMcpEntry, Ruleset, Source, Trust,
+    ConfigLayer, Mode, PermCfg, ResolvedMcpEntry, Ruleset, Source, Trust, resolve,
 };
 use ego_core::event::hook::{
     HookActivation, HookDecision, HookInvocationId, HookLifecycle, HookOutcome, HookPlan,
@@ -983,14 +983,16 @@ fn schema_or_authority_failure_precedes_durable_acceptance() {
                 .expect("record"),
         )
         .expect("journal");
-    assert!(block_on(owner.accept_answer(
-        "continuation-schema-authority",
-        br#"{"unexpected":true}"#,
-        hooks_with_mode(HookMode::Continue, Trace::default()),
-        floor,
-        ports(Arc::new(ScriptedSpawner::new()))
-    ))
-    .is_err());
+    assert!(
+        block_on(owner.accept_answer(
+            "continuation-schema-authority",
+            br#"{"unexpected":true}"#,
+            hooks_with_mode(HookMode::Continue, Trace::default()),
+            floor,
+            ports(Arc::new(ScriptedSpawner::new()))
+        ))
+        .is_err()
+    );
     assert_eq!(journal.state(), Some(ContinuationState::Pending));
     assert_eq!(journal.events(), vec!["record"]);
 }
@@ -1025,16 +1027,18 @@ async fn pre_block_or_uncertainty_leaves_accepted_answer_unclaimed_without_reent
         else {
             panic!("expected required")
         };
-        assert!(owner
-            .accept_answer(
-                foreign.continuation_id(),
-                br#"{"choice":"yes"}"#,
-                hooks_with_mode(mode, trace.clone()),
-                floor,
-                ports(spawner.clone())
-            )
-            .await
-            .is_err());
+        assert!(
+            owner
+                .accept_answer(
+                    foreign.continuation_id(),
+                    br#"{"choice":"yes"}"#,
+                    hooks_with_mode(mode, trace.clone()),
+                    floor,
+                    ports(spawner.clone())
+                )
+                .await
+                .is_err()
+        );
         assert_eq!(journal.state(), Some(ContinuationState::Accepted));
         assert!(!journal.events().contains(&"claim"));
         assert_eq!(spawner.calls(), 1);
