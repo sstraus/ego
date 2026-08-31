@@ -669,20 +669,15 @@ impl SkillInvocation {
     ) -> Result<Self, SkillError> {
         let event = journal
             .inspect(|state| {
-                state
-                    .skill_events()
-                    .iter()
-                    .find_map(|event| match event {
-                        crate::state::SkillEvent::Instruction {
-                            invocation: found,
-                            admission,
-                            rendered,
-                            ..
-                        } if *found == invocation => {
-                            Some((admission.clone(), rendered.clone()))
-                        }
-                        _ => None,
-                    })
+                state.skill_events().iter().find_map(|event| match event {
+                    crate::state::SkillEvent::Instruction {
+                        invocation: found,
+                        admission,
+                        rendered,
+                        ..
+                    } if *found == invocation => Some((admission.clone(), rendered.clone())),
+                    _ => None,
+                })
             })
             .map_err(|error| SkillError::new(error.to_string()))?
             .ok_or_else(|| SkillError::new("skill invocation is not present in durable state"))?;

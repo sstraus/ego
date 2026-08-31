@@ -819,16 +819,17 @@ impl<'a> TurnLoop<'a> {
             .gate
             .snapshot()
             .map_err(|error| CompactionError::Internal(error.to_string()))?;
-        self.journal.publish(&PublicEvent::metering_selected(
-            turn,
-            &profile.metering,
-            budget.ledger(),
-            profile
-                .rates
-                .as_ref()
-                .map_or(&RateSource::None, |rates| &rates.source),
-        ))
-        .map_err(|error| CompactionError::Store(error.into()))?;
+        self.journal
+            .publish(&PublicEvent::metering_selected(
+                turn,
+                &profile.metering,
+                budget.ledger(),
+                profile
+                    .rates
+                    .as_ref()
+                    .map_or(&RateSource::None, |rates| &rates.source),
+            ))
+            .map_err(|error| CompactionError::Store(error.into()))?;
 
         let quote = profile.rates.as_ref().map(|rates| rates.quote.clone());
         let reservation = self
@@ -1490,19 +1491,19 @@ impl<'a> TurnLoop<'a> {
 
             let (generation, terminal, reason, pending, error_kind) =
                 match self.generate(turn).await? {
-                Generated::Ended(reason) => return Ok(DriveOutcome::Ended(reason, None)),
-                Generated::Cancelled { cause, pending } => {
-                    self.close_unstarted_siblings(turn, &pending)?;
-                    return Ok(DriveOutcome::Ended(ExitReason::Cancelled(cause), None));
-                }
-                Generated::Stopped {
-                    generation,
-                    terminal,
-                    reason,
-                    pending,
-                    error_kind,
-                } => (generation, terminal, reason, pending, error_kind),
-            };
+                    Generated::Ended(reason) => return Ok(DriveOutcome::Ended(reason, None)),
+                    Generated::Cancelled { cause, pending } => {
+                        self.close_unstarted_siblings(turn, &pending)?;
+                        return Ok(DriveOutcome::Ended(ExitReason::Cancelled(cause), None));
+                    }
+                    Generated::Stopped {
+                        generation,
+                        terminal,
+                        reason,
+                        pending,
+                        error_kind,
+                    } => (generation, terminal, reason, pending, error_kind),
+                };
 
             // A generation that says it stopped for tools and then names none
             // has nothing to answer. Generating again on that evidence loops
@@ -1732,7 +1733,7 @@ impl<'a> TurnLoop<'a> {
             event,
             causality,
         )
-            .expect("the lifecycle key is built from the same typed hook event");
+        .expect("the lifecycle key is built from the same typed hook event");
         match runtime.dispatch(Producer::Main, occurrence).await {
             Ok(result) => !result.is_blocked(),
             Err(error) if lifecycle.phase().is_observer() => {
@@ -3113,12 +3114,10 @@ impl<'a> TurnLoop<'a> {
                 }
             }
         };
-        let resume_context = call
-            .capture_authority
-            .resume_context(
-                self.hook_runtime.as_ref(),
-                HookCausality::item(call.item, turn, call.started),
-            );
+        let resume_context = call.capture_authority.resume_context(
+            self.hook_runtime.as_ref(),
+            HookCausality::item(call.item, turn, call.started),
+        );
         let execution = await_controlled(
             &self.journal,
             &self.cancel,

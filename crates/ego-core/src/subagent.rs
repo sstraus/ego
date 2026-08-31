@@ -11,9 +11,7 @@ use crate::event::domain::{DomainEvent, EventKind, SubagentRefusal, SubagentTerm
 use crate::event::hook::{
     HookInvocationId, HookLifecycle, HookOccurrenceKey, HookOccurrenceOwner, HookSubject,
 };
-use crate::event::id::{
-    EventId, GateId, ItemId, SessionId, SubagentInvocationId, TurnId,
-};
+use crate::event::id::{EventId, GateId, ItemId, SessionId, SubagentInvocationId, TurnId};
 use crate::event::time::Clock;
 use crate::hook::{HookCausality, HookEvent, HookOccurrence, SessionHookRuntime};
 use crate::run::{

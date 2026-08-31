@@ -17,8 +17,8 @@ use crate::digest::sha256_hex;
 use crate::event::domain::{DomainEvent, EventKind};
 use crate::event::hook::{
     HookActivation, HookContentDigest, HookDecision, HookDescriptorEvidence, HookFailure,
-    HookFeedback, HookId, HookInvocationId, HookLifecycle, HookOccurrenceKey, HookOutcome,
-    HookOccurrenceOwner, HookPhase, HookPlan, HookResult, HookSourceAuthority, HookSourceLocation,
+    HookFeedback, HookId, HookInvocationId, HookLifecycle, HookOccurrenceKey, HookOccurrenceOwner,
+    HookOutcome, HookPhase, HookPlan, HookResult, HookSourceAuthority, HookSourceLocation,
     HookSubject,
 };
 use crate::event::id::{
@@ -858,17 +858,8 @@ impl HookCausality {
         )
     }
 
-    pub fn request(
-        request: crate::run::RequestId,
-        turn: TurnId,
-        parent: Option<EventId>,
-    ) -> Self {
-        Self::new(
-            HookOccurrenceOwner::Request { request },
-            turn,
-            None,
-            parent,
-        )
+    pub fn request(request: crate::run::RequestId, turn: TurnId, parent: Option<EventId>) -> Self {
+        Self::new(HookOccurrenceOwner::Request { request }, turn, None, parent)
     }
 
     pub fn continuation(
@@ -1510,9 +1501,7 @@ impl HookOccurrence {
         }
         let subject_matches = match event.subject() {
             HookSubject::Session => causality.item_id().is_none(),
-            HookSubject::Turn { turn } => {
-                turn == causality.turn() && causality.item_id().is_none()
-            }
+            HookSubject::Turn { turn } => turn == causality.turn() && causality.item_id().is_none(),
             HookSubject::Item { item } => causality.item_id() == Some(item),
         };
         if !subject_matches {
@@ -1521,17 +1510,13 @@ impl HookOccurrence {
             ));
         }
         match key.owner() {
-            HookOccurrenceOwner::Event { event }
-                if causality.parent() != Some(*event) =>
-            {
+            HookOccurrenceOwner::Event { event } if causality.parent() != Some(*event) => {
                 return Err(HookRunError::new(
                     "hook event owner is not its causal parent",
                 ));
             }
             HookOccurrenceOwner::Item { item } if causality.item_id() != Some(*item) => {
-                return Err(HookRunError::new(
-                    "hook item owner is not its causal item",
-                ));
+                return Err(HookRunError::new("hook item owner is not its causal item"));
             }
             HookOccurrenceOwner::Continuation { .. }
                 if causality.item_id().is_none() || causality.parent().is_none() =>
@@ -2025,13 +2010,8 @@ impl HookRunner {
                 .map_or(HookActivation::Persistent, |invocation| {
                     HookActivation::Skill { invocation }
                 });
-            let started = match journal.started(
-                spec,
-                &occurrence,
-                &reached,
-                activation,
-                invocation,
-            ) {
+            let started = match journal.started(spec, &occurrence, &reached, activation, invocation)
+            {
                 Ok(evidence) => evidence,
                 Err(HookStartError::Durable { evidence, .. }) => {
                     if let Err(error) =

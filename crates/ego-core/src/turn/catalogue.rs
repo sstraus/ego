@@ -24,11 +24,7 @@ impl ToolCaptureAuthority {
     ) -> Option<McpResumeContext<'s>> {
         match self {
             Self::Mcp(capture) => runtime.map(|runtime| {
-                McpResumeContext::from_authority(
-                    runtime.clone(),
-                    capture.clone(),
-                    causality,
-                )
+                McpResumeContext::from_authority(runtime.clone(), capture.clone(), causality)
             }),
             Self::Static => None,
         }

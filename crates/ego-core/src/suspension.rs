@@ -120,11 +120,7 @@ pub struct McpResumeContext<'s> {
 }
 
 impl<'s> McpResumeContext<'s> {
-    pub fn new<P>(
-        runtime: SessionHookRuntime<'s>,
-        capture: P,
-        causality: HookCausality,
-    ) -> Self
+    pub fn new<P>(runtime: SessionHookRuntime<'s>, capture: P, causality: HookCausality) -> Self
     where
         P: McpCapturePin + 'static,
     {

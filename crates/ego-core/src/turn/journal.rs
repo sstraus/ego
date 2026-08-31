@@ -224,7 +224,10 @@ impl HookJournalPort for SharedJournal<'_> {
         let mut journal = self
             .lock()
             .map_err(|error| HookReachError::Absent(HookRunError::new(error.to_string())))?;
-        if matches!(occurrence.key().owner(), HookOccurrenceOwner::Continuation { .. }) {
+        if matches!(
+            occurrence.key().owner(),
+            HookOccurrenceOwner::Continuation { .. }
+        ) {
             let Some(item) = occurrence.causality().item_id() else {
                 return Err(HookReachError::Absent(HookRunError::new(
                     "hook continuation has no causal tool item",
