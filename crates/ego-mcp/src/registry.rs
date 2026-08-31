@@ -1270,7 +1270,7 @@ fn failure_message(failure: McpFailure) -> &'static str {
 struct PublishedState {
     snapshot: Arc<AdmittedRegistrySnapshot>,
     status: McpRegistryStatus,
-    captures: BTreeMap<Arc<str>, Weak<McpRegistryCaptureInner>>,
+    captures: BTreeMap<Arc<str>, Vec<Weak<McpRegistryCaptureInner>>>,
 }
 
 #[derive(Clone)]
@@ -1619,7 +1619,7 @@ impl McpRegistryController {
             .map_err(|_| McpRegistryError::PublicationUnavailable)?
             .captures
             .get(stable_fingerprint)
-            .and_then(Weak::upgrade)
+            .and_then(|captures| captures.iter().find_map(Weak::upgrade))
             .map(|inner| McpRegistryCapture { inner })
             .ok_or_else(|| {
                 McpRegistryError::InvalidCandidate(
@@ -1798,10 +1798,12 @@ impl McpRegistryController {
             .write()
             .map_err(|_| McpRegistryError::PublicationUnavailable)?;
         state.status = status_from_snapshot(&snapshot, status_overrides, Instant::now());
-        state.captures.insert(
-            Arc::clone(&snapshot.capture.inner.stable_fingerprint),
-            Arc::downgrade(&snapshot.capture.inner),
-        );
+        let captures = state
+            .captures
+            .entry(Arc::clone(&snapshot.capture.inner.stable_fingerprint))
+            .or_default();
+        captures.retain(|capture| capture.strong_count() > 0);
+        captures.push(Arc::downgrade(&snapshot.capture.inner));
         state.snapshot = snapshot;
         Ok(publication)
     }
