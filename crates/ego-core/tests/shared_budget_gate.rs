@@ -2,8 +2,14 @@
 
 use std::sync::Arc;
 
-use ego_core::budget::{SharedBudgetGate, BudgetGate};
+use ego_core::budget::{BudgetGate, Metering, SharedBudgetGate};
 use ego_core::cost::CurrencyCode;
+use ego_core::cost::MeteringRevision;
+use ego_core::generator::capabilities::{
+    CacheRetention, CancelSemantics, ImageInputSupport, ModelCapabilities, ReasoningCarryover,
+    ReasoningEffortSupport, Transport,
+};
+use ego_core::generator::types::{Conversation, GenRequest, Message, Role, ThinkingLevel};
 
 fn assert_send_sync<T: Send + Sync>() {}
 
@@ -40,17 +46,41 @@ fn shared_gate_reservation_and_attempt_stream_are_consumed_once() {
 }
 
 #[test]
-fn provider_pending_work_can_progress_while_another_owner_appends() {
-    // The shared gate API must return a bounded reservation before provider
-    // I/O and release its synchronization guard before awaiting that I/O.
-    // Keeping this assertion at the contract boundary prevents an async
-    // adapter from accepting a MutexGuard-shaped implementation.
-    fn append_while_provider_pending<'a>(
-        gate: &'a SharedBudgetGate,
-    ) -> impl std::future::Future<Output = Result<(), String>> + 'a {
-        gate.append_probe_while_pending()
-    }
-
-    let _ = append_while_provider_pending;
+fn provider_reservation_is_admitted_before_pending_io_without_holding_a_budget_guard() {
+    let currency = CurrencyCode::new("USD").expect("currency");
+    let root = Arc::new(SharedBudgetGate::new(BudgetGate::unlimited(currency)));
+    let metering = Metering::Unmetered {
+        revision: MeteringRevision("regression_case".to_owned()),
+    };
+    let request = GenRequest {
+        model: "provider/model".to_owned(),
+        messages: Conversation::new(vec![Message::text(Role::User, "pending".to_owned())])
+            .expect("valid conversation"),
+        tools: Vec::new(),
+        thinking: ThinkingLevel::Off,
+        max_output_tokens: Some(32),
+        parallel_tool_calls: false,
+    };
+    let caps = ModelCapabilities {
+        schema_version: ModelCapabilities::SCHEMA_VERSION,
+        max_context_tokens: Some(1024),
+        max_output_tokens: Some(32),
+        max_tools: Some(8),
+        supports_parallel_tool_calls: false,
+        reasoning_carryover: ReasoningCarryover::Portable,
+        reasoning_efforts: ReasoningEffortSupport::Any,
+        reasoning_state_dialect: None,
+        cancel: CancelSemantics::Cooperative,
+        cache: CacheRetention::Short,
+        transport: Transport::Sse,
+        image_input: ImageInputSupport::Unknown,
+    };
+    let first = root
+        .reserve(&metering, None, &request, &caps)
+        .expect("root reservation");
+    let second = root
+        .reserve(&metering, None, &request, &caps)
+        .expect("independent owner can reserve while provider is pending");
+    assert_eq!(first.gate(), root.id());
+    assert_eq!(second.gate(), root.id());
 }
-
