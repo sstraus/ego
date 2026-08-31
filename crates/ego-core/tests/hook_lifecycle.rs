@@ -800,7 +800,7 @@ fn concurrent_occurrences_release_admission_before_external_handler_await() {
 
     let port = PendingInvocationPort::default();
     let runner = HookRunner::new(port.clone());
-    let first_catalogue = catalogue();
+    let shared_catalogue = Arc::new(catalogue());
     let first = occurrence(
         HookLifecycle::SessionStart,
         HookOccurrenceOwner::Session {
@@ -814,16 +814,17 @@ fn concurrent_occurrences_release_admission_before_external_handler_await() {
         },
     );
     let mut pool = futures::executor::LocalPool::new();
+    let first_runner = runner.clone();
+    let first_catalogue = Arc::clone(&shared_catalogue);
     pool.spawner()
         .spawn_local(async move {
-            runner
+            first_runner
                 .run_occurrence(&first_catalogue, Producer::Main, first)
                 .await
                 .expect("first occurrence");
         })
         .expect("first occurrence task");
-    let runner = HookRunner::new(port.clone());
-    let second_catalogue = catalogue();
+    let second_catalogue = Arc::clone(&shared_catalogue);
     pool.spawner()
         .spawn_local(async move {
             runner
