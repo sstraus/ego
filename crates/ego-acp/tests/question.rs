@@ -8,17 +8,18 @@ use futures::executor::block_on;
 use std::collections::BTreeMap;
 
 use agent_client_protocol_schema::v1::{
-    ClientCapabilities, CreateElicitationRequest, CreateElicitationResponse,
+    BooleanPropertySchema, ClientCapabilities, CreateElicitationRequest, CreateElicitationResponse,
     ElicitationAcceptAction, ElicitationAction, ElicitationCapabilities, ElicitationContentValue,
     ElicitationFormCapabilities, ElicitationFormMode, ElicitationMode, ElicitationPropertySchema,
-    ElicitationRequestScope, ElicitationSchema, MultiSelectPropertySchema, RequestId,
-    StringPropertySchema,
+    ElicitationRequestScope, ElicitationSchema, IntegerPropertySchema, MultiSelectPropertySchema,
+    NumberPropertySchema, RequestId, StringPropertySchema,
 };
 use ego_acp::question::{
     AcpQuestionAdapter, CapabilityCapture, QuestionMappingError, QuestionRequest,
 };
 use ego_core::event::id::ItemId;
-use ego_core::question::{QuestionMode, QuestionOption, QuestionOutcome};
+use ego_core::question::{QuestionAnswer, QuestionMode, QuestionOption, QuestionOutcome};
+use serde_json::json;
 
 fn single_request() -> QuestionRequest {
     QuestionRequest::new(
@@ -46,6 +47,47 @@ fn multiple_request() -> QuestionRequest {
 
 fn free_text_request() -> QuestionRequest {
     QuestionRequest::new("Explain", QuestionMode::FreeText, vec![], true)
+}
+
+fn form_request() -> QuestionRequest {
+    QuestionRequest::new(
+        "Configure deployment",
+        QuestionMode::Form {
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "minLength": 2,
+                        "maxLength": 40
+                    },
+                    "count": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 9
+                    },
+                    "ratio": {
+                        "type": "number",
+                        "minimum": 0.5,
+                        "maximum": 1.0
+                    },
+                    "enabled": {"type": "boolean"},
+                    "tags": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "enum": ["alpha", "beta", "gamma"]
+                        },
+                        "minItems": 1,
+                        "maxItems": 2
+                    }
+                },
+                "required": ["name", "count", "ratio", "enabled", "tags"]
+            }),
+        },
+        vec![],
+        false,
+    )
 }
 
 fn scope() -> ElicitationRequestScope {
@@ -100,6 +142,166 @@ fn free_text_maps_to_a_v1_form_string_property_without_options() {
             one_of: None,
             ..
         }))
+    ));
+}
+
+#[test]
+fn form_maps_the_primitive_object_schema_without_wrapping_or_renaming() {
+    let request = AcpQuestionAdapter::form_request(ItemId::new(), &form_request()).unwrap();
+    let CreateElicitationRequest {
+        mode:
+            ElicitationMode::Form(ElicitationFormMode {
+                requested_schema, ..
+            }),
+        message,
+        ..
+    } = request
+    else {
+        panic!("form questions use v1 form mode");
+    };
+
+    assert_eq!(message, "Configure deployment");
+    assert_eq!(
+        serde_json::to_value(requested_schema).expect("schema is serializable"),
+        json!({
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "minLength": 2,
+                    "maxLength": 40
+                },
+                "count": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 9
+                },
+                "ratio": {
+                    "type": "number",
+                    "minimum": 0.5,
+                    "maximum": 1.0
+                },
+                "enabled": {"type": "boolean"},
+                "tags": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": ["alpha", "beta", "gamma"]
+                    },
+                    "minItems": 1,
+                    "maxItems": 2
+                }
+            },
+            "required": ["name", "count", "ratio", "enabled", "tags"]
+        })
+    );
+
+    // Keep the public property variants explicit so a projection cannot pass
+    // by serializing a differently typed or renamed field.
+    let request = AcpQuestionAdapter::form_request(ItemId::new(), &form_request()).unwrap();
+    let ElicitationMode::Form(form) = request.mode else {
+        panic!("form questions use v1 form mode");
+    };
+    assert!(matches!(
+        form.requested_schema.properties.get("name"),
+        Some(ElicitationPropertySchema::String(StringPropertySchema {
+            min_length: Some(2),
+            max_length: Some(40),
+            ..
+        }))
+    ));
+    assert!(matches!(
+        form.requested_schema.properties.get("count"),
+        Some(ElicitationPropertySchema::Integer(IntegerPropertySchema {
+            minimum: Some(1),
+            maximum: Some(9),
+            ..
+        }))
+    ));
+    assert!(matches!(
+        form.requested_schema.properties.get("ratio"),
+        Some(ElicitationPropertySchema::Number(NumberPropertySchema {
+            minimum: Some(minimum),
+            maximum: Some(maximum),
+            ..
+        })) if *minimum == 0.5 && *maximum == 1.0
+    ));
+    assert!(matches!(
+        form.requested_schema.properties.get("enabled"),
+        Some(ElicitationPropertySchema::Boolean(
+            BooleanPropertySchema { .. }
+        ))
+    ));
+    assert!(matches!(
+        form.requested_schema.properties.get("tags"),
+        Some(ElicitationPropertySchema::Array(
+            MultiSelectPropertySchema {
+                min_items: Some(1),
+                max_items: Some(2),
+                ..
+            }
+        ))
+    ));
+}
+
+#[test]
+fn accepted_form_content_becomes_the_same_validated_core_object() {
+    let question = ItemId::new();
+    let request = form_request();
+    let response = CreateElicitationResponse::new(ElicitationAction::Accept(
+        ElicitationAcceptAction::new().content(BTreeMap::from([
+            ("name".into(), ElicitationContentValue::from("production")),
+            ("count".into(), ElicitationContentValue::from(3_i64)),
+            ("ratio".into(), ElicitationContentValue::from(0.75_f64)),
+            ("enabled".into(), ElicitationContentValue::from(true)),
+            (
+                "tags".into(),
+                ElicitationContentValue::from(vec!["alpha", "beta"]),
+            ),
+        ])),
+    ));
+
+    let outcome = AcpQuestionAdapter::validate_response(question, &request, &response)
+        .expect("valid ACP form content becomes a core answer");
+    let QuestionOutcome::Answered(QuestionAnswer::Form(answer)) = outcome else {
+        panic!("accepted form content must become QuestionAnswer::Form");
+    };
+    let expected = json!({
+        "name": "production",
+        "count": 3,
+        "ratio": 0.75,
+        "enabled": true,
+        "tags": ["alpha", "beta"]
+    })
+    .as_object()
+    .expect("object answer")
+    .clone();
+    assert_eq!(answer, expected);
+    assert!(
+        QuestionAnswer::Form(answer).validate_for(&request).is_ok(),
+        "the mapped object must pass the original durable schema"
+    );
+}
+
+#[test]
+fn schema_invalid_accepted_form_content_fails_before_settlement() {
+    let question = ItemId::new();
+    let request = form_request();
+    let response = CreateElicitationResponse::new(ElicitationAction::Accept(
+        ElicitationAcceptAction::new().content(BTreeMap::from([
+            ("name".into(), ElicitationContentValue::from("production")),
+            // The durable schema requires an integer; ACP's string value must
+            // not be coerced before QuestionAnswer validation.
+            ("count".into(), ElicitationContentValue::from("three")),
+            ("ratio".into(), ElicitationContentValue::from(0.75_f64)),
+            ("enabled".into(), ElicitationContentValue::from(true)),
+            ("tags".into(), ElicitationContentValue::from(vec!["alpha"])),
+        ])),
+    ));
+
+    assert!(matches!(
+        AcpQuestionAdapter::validate_response(question, &request, &response),
+        Err(QuestionMappingError::InvalidAnswer { .. })
     ));
 }
 
