@@ -161,7 +161,7 @@ pub trait ForeignQuestionPort: Send + Sync {
 pub trait McpRuntimeBinding: Send + Sync {
     fn foreign_question_port<'a>(
         &self,
-        dispatcher: crate::hook::HookLifecycleDispatcher,
+        runtime: crate::hook::SessionHookRuntime<'a>,
         floor: crate::suspension::ResumeFloor,
         effects: crate::turn::ToolEffectPorts<'a>,
     ) -> Arc<dyn ForeignQuestionPort + 'a>;

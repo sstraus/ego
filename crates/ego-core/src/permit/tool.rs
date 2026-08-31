@@ -540,11 +540,13 @@ pub trait Tool: Send + Sync {
 
     fn prepare(&self, params: Value, ctx: &PrepareCtx<'_>) -> Result<PreparedCall, ToolError>;
 
-    fn execute<'a>(
+    fn execute<'a, 'io>(
         &'a self,
         call: PreparedCall,
-        io: &'a dyn GuardedIo,
-    ) -> BoxFuture<'a, Result<ToolExecution, ToolError>>;
+        io: &'a dyn GuardedIo<'io>,
+    ) -> BoxFuture<'a, Result<ToolExecution, ToolError>>
+    where
+        'io: 'a;
 }
 
 /// The typed half of a builtin tool: params with a `schemars`-derived
@@ -561,11 +563,13 @@ pub trait TypedTool: Send + Sync {
         ctx: &PrepareCtx<'_>,
     ) -> Result<PreparedCall, ToolError>;
 
-    fn execute<'a>(
+    fn execute<'a, 'io>(
         &'a self,
         call: PreparedCall,
-        io: &'a dyn GuardedIo,
-    ) -> BoxFuture<'a, Result<ToolResult, ToolError>>;
+        io: &'a dyn GuardedIo<'io>,
+    ) -> BoxFuture<'a, Result<ToolResult, ToolError>>
+    where
+        'io: 'a;
 }
 
 /// Adapts any [`TypedTool`] into a [`Tool`]: derives the JSON Schema via
@@ -588,11 +592,14 @@ impl<T: TypedTool> Tool for Typed<T> {
         self.0.prepare_typed(params, ctx)
     }
 
-    fn execute<'a>(
+    fn execute<'a, 'io>(
         &'a self,
         call: PreparedCall,
-        io: &'a dyn GuardedIo,
-    ) -> BoxFuture<'a, Result<ToolExecution, ToolError>> {
+        io: &'a dyn GuardedIo<'io>,
+    ) -> BoxFuture<'a, Result<ToolExecution, ToolError>>
+    where
+        'io: 'a,
+    {
         Box::pin(async move { self.0.execute(call, io).await.map(ToolExecution::Complete) })
     }
 }

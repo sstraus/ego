@@ -11,7 +11,7 @@ use sha2::{Digest as _, Sha256};
 
 use crate::config::Mode;
 use crate::event::time::{Clock, Timestamp};
-use crate::hook::HookLifecycleDispatcher;
+use crate::hook::{HookCausality, SessionHookRuntime};
 use crate::permit::{Authority, Authorized, PreparedCall};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -113,53 +113,65 @@ impl McpCaptureAuthority {
 
 /// Session lifecycle authority paired with the exact capture that admitted it.
 #[derive(Clone)]
-pub struct McpResumeContext {
-    dispatcher: HookLifecycleDispatcher,
+pub struct McpResumeContext<'s> {
+    runtime: SessionHookRuntime<'s>,
     capture: McpCaptureAuthority,
+    causality: HookCausality,
 }
 
-impl McpResumeContext {
-    pub fn new<P>(dispatcher: HookLifecycleDispatcher, capture: P) -> Self
+impl<'s> McpResumeContext<'s> {
+    pub fn new<P>(
+        runtime: SessionHookRuntime<'s>,
+        capture: P,
+        causality: HookCausality,
+    ) -> Self
     where
         P: McpCapturePin + 'static,
     {
         Self {
-            dispatcher,
+            runtime,
             capture: McpCaptureAuthority::new(capture),
+            causality,
         }
     }
 
     pub(crate) fn from_authority(
-        dispatcher: HookLifecycleDispatcher,
+        runtime: SessionHookRuntime<'s>,
         capture: McpCaptureAuthority,
+        causality: HookCausality,
     ) -> Self {
         Self {
-            dispatcher,
+            runtime,
             capture,
+            causality,
         }
     }
 
-    pub fn dispatcher(&self) -> &HookLifecycleDispatcher {
-        &self.dispatcher
+    pub fn runtime(&self) -> SessionHookRuntime<'s> {
+        self.runtime.clone()
     }
 
     pub fn capture(&self) -> &str {
         self.capture.capture()
     }
+
+    pub fn causality(&self) -> &HookCausality {
+        &self.causality
+    }
 }
 
 /// The sole one-shot MCP resume value carried by guarded effects.
-pub struct GuardedMcpResume {
+pub struct GuardedMcpResume<'s> {
     resume: PreparedResume,
-    context: Option<McpResumeContext>,
+    context: Option<McpResumeContext<'s>>,
 }
 
-impl GuardedMcpResume {
-    pub fn new(resume: PreparedResume, context: Option<McpResumeContext>) -> Self {
+impl<'s> GuardedMcpResume<'s> {
+    pub fn new(resume: PreparedResume, context: Option<McpResumeContext<'s>>) -> Self {
         Self { resume, context }
     }
 
-    pub fn into_parts(self) -> (PreparedResume, Option<McpResumeContext>) {
+    pub fn into_parts(self) -> (PreparedResume, Option<McpResumeContext<'s>>) {
         (self.resume, self.context)
     }
 }

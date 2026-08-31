@@ -5,17 +5,17 @@ use std::sync::{Arc, Mutex};
 
 use futures::future::BoxFuture;
 
-use crate::budget::BudgetGate;
+use crate::budget::SharedBudgetGate;
 use crate::digest::sha256_hex;
-use crate::event::domain::{DomainEvent, Envelope, EventKind, SubagentRefusal, SubagentTerminal};
+use crate::event::domain::{DomainEvent, EventKind, SubagentRefusal, SubagentTerminal};
 use crate::event::hook::{
     HookInvocationId, HookLifecycle, HookOccurrenceKey, HookOccurrenceOwner, HookSubject,
 };
 use crate::event::id::{
-    EventId, GateId, ItemId, Producer, Seq, SessionId, SubagentInvocationId, TurnId,
+    EventId, GateId, ItemId, SessionId, SubagentInvocationId, TurnId,
 };
-use crate::event::time::{Clock, Timestamp};
-use crate::hook::{HookEvent, HookLifecycleDispatcher, HookOccurrence};
+use crate::event::time::Clock;
+use crate::hook::{HookCausality, HookEvent, HookOccurrence, SessionHookRuntime};
 use crate::run::{
     CancelKey, IdSource, RequestDigest, RequestId, RunCommandOutcome, RunController, RunError,
     RunExecution, RunExecutionBindings, RunExecutor, RunId, RunOrigin, RunRecoveryOutcome, RunRoot,
@@ -162,7 +162,6 @@ impl std::fmt::Display for ChildJournalError {
 impl std::error::Error for ChildJournalError {}
 
 pub trait ChildJournal: Send + Sync {
-    fn append(&self, event: DomainEvent) -> Result<(), ChildJournalError>;
     fn read(&self, invocation: SubagentInvocationId)
     -> Result<Vec<DomainEvent>, ChildJournalError>;
 }
@@ -241,8 +240,6 @@ pub struct ChildServicePorts {
     parent_results: Arc<dyn ChildResultStore>,
     profiles: Arc<dyn ChildProfileResolver>,
     selections: Arc<dyn ChildSelectionAdmission>,
-    hooks: Arc<HookLifecycleDispatcher>,
-    producer: Producer,
 }
 impl ChildServicePorts {
     #[allow(clippy::too_many_arguments)]
@@ -254,8 +251,6 @@ impl ChildServicePorts {
         parent_results: Arc<dyn ChildResultStore>,
         profiles: Arc<dyn ChildProfileResolver>,
         selections: Arc<dyn ChildSelectionAdmission>,
-        hooks: Arc<HookLifecycleDispatcher>,
-        producer: Producer,
     ) -> Self {
         Self {
             parent_run,
@@ -265,8 +260,6 @@ impl ChildServicePorts {
             parent_results,
             profiles,
             selections,
-            hooks,
-            producer,
         }
     }
 }
@@ -368,7 +361,7 @@ impl ChildAdmission {
         &self.selections
     }
     pub fn budget_gate(&self) -> GateId {
-        self.inner.gate.lock().expect("child budget gate").id()
+        self.inner.gate.id()
     }
     pub fn subscription(&self) -> RunSubscription {
         self.subscription.clone()
@@ -396,8 +389,11 @@ impl ChildAdmission {
             .map_err(controller_error)?;
         Ok(())
     }
-    pub async fn wait(&self) -> Result<ChildWaitResult, ChildServiceError> {
-        finish(&self.inner, self.invocation).await
+    pub async fn wait(
+        &self,
+        parent: &SessionHookRuntime<'_>,
+    ) -> Result<ChildWaitResult, ChildServiceError> {
+        finish(&self.inner, self.invocation, parent).await
     }
 }
 
@@ -431,7 +427,7 @@ pub struct ChildRunService {
 impl ChildRunService {
     pub fn new<S, E, C, I>(
         controller: Arc<RunController<S, E, C, I>>,
-        gate: Arc<Mutex<BudgetGate>>,
+        gate: SharedBudgetGate,
         root: RunRoot,
         bindings: RunExecutionBindings,
         ports: ChildServicePorts,
@@ -457,19 +453,25 @@ impl ChildRunService {
     pub fn parent_run(&self) -> RunId {
         self.inner.ports.parent_run
     }
-    pub async fn start(&self, request: ChildRequest) -> Result<ChildAdmission, ChildServiceError> {
-        start(&self.inner, request).await
+    pub async fn start(
+        &self,
+        request: ChildRequest,
+        parent: &SessionHookRuntime<'_>,
+    ) -> Result<ChildAdmission, ChildServiceError> {
+        start(&self.inner, request, parent).await
     }
     pub async fn collect_background(
         &self,
         invocation: SubagentInvocationId,
+        parent: &SessionHookRuntime<'_>,
     ) -> Result<ChildWaitResult, ChildServiceError> {
-        finish(&self.inner, invocation).await
+        finish(&self.inner, invocation, parent).await
     }
     pub async fn recover_from_durable(
         &self,
         invocation: SubagentInvocationId,
         _cut: RecoveryCut,
+        parent: &SessionHookRuntime<'_>,
     ) -> Result<Option<RecoveredChild>, ChildServiceError> {
         let events = self
             .inner
@@ -512,8 +514,8 @@ impl ChildRunService {
                 origin,
             }));
         }
-        if let Some(child) = events.iter().find_map(|event| match &event.kind {
-            EventKind::SubagentSpawned { child, .. } => Some(*child),
+        if let Some((child, parent_event)) = events.iter().find_map(|event| match &event.kind {
+            EventKind::SubagentSpawned { child, .. } => Some((*child, event.env.id)),
             _ => None,
         }) {
             recover_active(
@@ -522,6 +524,7 @@ impl ChildRunService {
                 child,
                 requested.env.turn,
                 parent_item,
+                parent_event,
                 &origin,
             )
             .await?;
@@ -539,25 +542,36 @@ impl ChildRunService {
         {
             Ok(snapshot) => {
                 validate_expected_origin(&snapshot, &origin)?;
+                let parent_event = parent_origin(parent, parent_item)?;
                 recover_active(
                     &self.inner,
                     invocation,
                     snapshot.run_id(),
                     requested.env.turn,
                     parent_item,
+                    parent_event,
                     &origin,
                 )
                 .await?;
-                append_lifecycle(
-                    &self.inner,
-                    invocation,
+                let parent_event = append_lifecycle(
+                    parent,
                     requested.env.turn,
                     Some(parent_item),
+                    Some(parent_origin(parent, parent_item)?),
                     EventKind::SubagentSpawned {
                         invocation,
                         child: snapshot.run_id(),
                     },
                 )?;
+                if let Some(child) = self
+                    .inner
+                    .active
+                    .lock()
+                    .expect("active children")
+                    .get_mut(&invocation)
+                {
+                    child.parent_event = parent_event;
+                }
                 Ok(Some(RecoveredChild {
                     invocation,
                     child: Some(snapshot.run_id()),
@@ -575,11 +589,11 @@ impl ChildRunService {
                     self.inner.bindings.clone(),
                 )
                 .await?;
-                append_lifecycle(
-                    &self.inner,
-                    invocation,
+                let parent_event = append_lifecycle(
+                    parent,
                     requested.env.turn,
                     Some(parent_item),
+                    Some(parent_origin(parent, parent_item)?),
                     EventKind::SubagentSpawned { invocation, child },
                 )?;
                 self.inner.active.lock().expect("active children").insert(
@@ -588,6 +602,7 @@ impl ChildRunService {
                         run: child,
                         parent_turn: requested.env.turn,
                         parent_item,
+                        parent_event,
                         execution: Some(execution),
                         cancel_key: Some(cancel_key),
                         subscription,
@@ -609,7 +624,7 @@ impl ChildRunService {
 
 struct Inner {
     controller: Arc<dyn ControllerPort>,
-    gate: Arc<Mutex<BudgetGate>>,
+    gate: SharedBudgetGate,
     root: RunRoot,
     bindings: RunExecutionBindings,
     ports: ChildServicePorts,
@@ -619,6 +634,7 @@ struct ActiveChild {
     run: RunId,
     parent_turn: TurnId,
     parent_item: ItemId,
+    parent_event: EventId,
     execution: Option<RunExecution>,
     cancel_key: Option<CancelKey>,
     subscription: RunSubscription,
@@ -633,6 +649,7 @@ async fn recover_active(
     child: RunId,
     parent_turn: TurnId,
     parent_item: ItemId,
+    parent_event: EventId,
     expected_origin: &RunOrigin,
 ) -> Result<(), ChildServiceError> {
     let outcome = inner
@@ -650,6 +667,7 @@ async fn recover_active(
                 run: child,
                 parent_turn,
                 parent_item,
+                parent_event,
                 execution: Some(execution),
                 cancel_key: Some(cancel_key),
                 subscription,
@@ -664,6 +682,7 @@ async fn recover_active(
                 run: child,
                 parent_turn,
                 parent_item,
+                parent_event,
                 execution: None,
                 cancel_key: None,
                 subscription: observation.subscription(),
@@ -684,6 +703,7 @@ async fn recover_active(
 async fn start(
     inner: &Arc<Inner>,
     mut request: ChildRequest,
+    parent: &SessionHookRuntime<'_>,
 ) -> Result<ChildAdmission, ChildServiceError> {
     if request.parent_run != inner.ports.parent_run {
         return Err(ChildServiceError::InvalidDurableState {
@@ -717,18 +737,23 @@ async fn start(
         .journal
         .read(request.invocation)
         .map_err(journal_error)?;
-    if !existing.iter().any(|event| {
+    let requested_event = if let Some(event) = existing.iter().find(|event| {
         matches!(&event.kind, EventKind::SubagentRequested { invocation, .. } if *invocation == request.invocation)
     }) {
+        event.env.id
+    } else {
         append_lifecycle(
-            inner, request.invocation, request.parent_turn, Some(request.parent_item),
+            parent,
+            request.parent_turn,
+            Some(request.parent_item),
+            Some(parent_origin(parent, request.parent_item)?),
             EventKind::SubagentRequested {
                 invocation: request.invocation,
                 task: request.task.clone(),
                 selections: selections.clone(),
             },
-        )?;
-    }
+        )?
+    };
     let origin = RunOrigin::Subagent {
         invocation: request.invocation,
         parent_run: request.parent_run,
@@ -744,11 +769,11 @@ async fn start(
         bindings,
     )
     .await?;
-    append_lifecycle(
-        inner,
-        request.invocation,
+    let spawned = append_lifecycle(
+        parent,
         request.parent_turn,
         Some(request.parent_item),
+        Some(requested_event),
         EventKind::SubagentSpawned {
             invocation: request.invocation,
             child: child_run,
@@ -761,6 +786,7 @@ async fn start(
             run: child_run,
             parent_turn: request.parent_turn,
             parent_item: request.parent_item,
+            parent_event: spawned,
             execution: Some(execution),
             cancel_key: Some(cancel_key),
             subscription: subscription.clone(),
@@ -769,7 +795,23 @@ async fn start(
             result: None,
         },
     );
-    dispatch_subagent(inner, request.invocation, HookLifecycle::SubagentStart).await?;
+    let started = dispatch_subagent(
+        inner,
+        request.invocation,
+        HookLifecycle::SubagentStart,
+        spawned,
+        parent,
+    )
+    .await?;
+    if let Some(event) = started.closure_event()
+        && let Some(child) = inner
+            .active
+            .lock()
+            .expect("active children")
+            .get_mut(&request.invocation)
+    {
+        child.parent_event = event;
+    }
     Ok(ChildAdmission {
         inner: Arc::clone(inner),
         invocation: request.invocation,
@@ -833,6 +875,7 @@ async fn admit(
 async fn finish(
     inner: &Arc<Inner>,
     invocation: SubagentInvocationId,
+    parent: &SessionHookRuntime<'_>,
 ) -> Result<ChildWaitResult, ChildServiceError> {
     {
         let active = inner.active.lock().expect("active children");
@@ -844,13 +887,30 @@ async fn finish(
         }
         if child.pending.is_some() {
             drop(active);
-            return persist_pending(inner, invocation);
+            return persist_pending(inner, invocation, parent);
         }
     }
     let prepared = prepare_result(inner, invocation).await?;
     let prepared = match prepared {
         ChildWaitResult::Returned { final_message } => {
-            let outcome = dispatch_subagent(inner, invocation, HookLifecycle::SubagentStop).await?;
+            let parent_event = active_parent_event(inner, invocation)?;
+            let outcome = dispatch_subagent(
+                inner,
+                invocation,
+                HookLifecycle::SubagentStop,
+                parent_event,
+                parent,
+            )
+            .await?;
+            if let Some(event) = outcome.closure_event()
+                && let Some(child) = inner
+                    .active
+                    .lock()
+                    .expect("active children")
+                    .get_mut(&invocation)
+            {
+                child.parent_event = event;
+            }
             if outcome.is_blocked() {
                 let hook_invocation = outcome.blocking_invocation().ok_or_else(|| {
                     ChildServiceError::InvalidDurableState {
@@ -869,13 +929,15 @@ async fn finish(
         other => other,
     };
     set_pending(inner, invocation, prepared)?;
-    persist_pending(inner, invocation)
+    persist_pending(inner, invocation, parent)
 }
 
 async fn dispatch_subagent(
     inner: &Arc<Inner>,
     invocation: SubagentInvocationId,
     lifecycle: HookLifecycle,
+    parent_event: EventId,
+    parent: &SessionHookRuntime<'_>,
 ) -> Result<crate::hook::HookRunResult, ChildServiceError> {
     let item = inner
         .active
@@ -885,15 +947,22 @@ async fn dispatch_subagent(
         .map(|child| child.parent_item)
         .ok_or(ChildServiceError::UnknownInvocation { invocation })?;
     let subject = HookSubject::Item { item };
+    let turn = inner
+        .active
+        .lock()
+        .expect("active children")
+        .get(&invocation)
+        .map(|child| child.parent_turn)
+        .ok_or(ChildServiceError::UnknownInvocation { invocation })?;
+    let causality = HookCausality::subagent(invocation, turn, item, parent_event);
     let occurrence = HookOccurrence::new(
         HookOccurrenceKey::new(lifecycle, HookOccurrenceOwner::Subagent { invocation }),
         HookEvent::turn(lifecycle, subject),
+        causality,
     )
     .map_err(controller_error)?;
-    inner
-        .ports
-        .hooks
-        .dispatch(inner.ports.producer.clone(), occurrence)
+    parent
+        .dispatch(crate::event::id::Producer::Main, occurrence)
         .await
         .map_err(controller_error)
 }
@@ -991,6 +1060,7 @@ fn set_pending(
 fn persist_pending(
     inner: &Arc<Inner>,
     invocation: SubagentInvocationId,
+    parent: &SessionHookRuntime<'_>,
 ) -> Result<ChildWaitResult, ChildServiceError> {
     let (run, turn, item, result) = {
         let active = inner.active.lock().expect("active children");
@@ -1011,10 +1081,10 @@ fn persist_pending(
         )
     };
     append_lifecycle(
-        inner,
-        invocation,
+        parent,
         turn,
         Some(item),
+        Some(active_parent_event(inner, invocation)?),
         EventKind::SubagentSettled {
             invocation,
             child: Some(run),
@@ -1078,7 +1148,7 @@ fn validate_gate(inner: &Inner, bindings: &RunExecutionBindings) -> Result<(), C
         .ok_or_else(|| ChildServiceError::BudgetDenied {
             diagnostic: "child execution has no shared budget gate".into(),
         })?;
-    if !Arc::ptr_eq(&bound, &inner.gate) {
+    if !bound.same_owner(&inner.gate) {
         return Err(ChildServiceError::BudgetDenied {
             diagnostic: "child bindings carry a different budget gate".into(),
         });
@@ -1087,34 +1157,50 @@ fn validate_gate(inner: &Inner, bindings: &RunExecutionBindings) -> Result<(), C
 }
 
 fn append_lifecycle(
-    inner: &Inner,
-    invocation: SubagentInvocationId,
+    parent: &SessionHookRuntime<'_>,
     turn: TurnId,
     item: Option<ItemId>,
+    parent_event: Option<EventId>,
     kind: EventKind,
-) -> Result<(), ChildServiceError> {
-    let prior = inner
-        .ports
-        .journal
-        .read(invocation)
-        .map_err(journal_error)?;
-    let mut seq = prior.last().map_or(Seq::ZERO, |event| event.env.seq);
-    inner
-        .ports
-        .journal
-        .append(DomainEvent {
-            env: Envelope {
-                seq: seq.next(),
-                id: EventId::new(),
-                turn,
-                item,
-                parent: prior.last().map(|event| event.env.id),
-                ts: Timestamp::EPOCH,
-                producer: Producer::Main,
-            },
-            kind,
+) -> Result<EventId, ChildServiceError> {
+    parent
+        .journal()
+        .append(turn, item, parent_event, kind)
+        .map_err(|error| ChildServiceError::Journal {
+            diagnostic: error.to_string(),
         })
-        .map_err(journal_error)
+}
+
+fn parent_origin(
+    parent: &SessionHookRuntime<'_>,
+    item: ItemId,
+) -> Result<EventId, ChildServiceError> {
+    parent
+        .inspect(|state| {
+            state
+                .items
+                .get(&item)
+                .and_then(|item| item.tool_call_started)
+        })
+        .map_err(|error| ChildServiceError::Journal {
+            diagnostic: error.to_string(),
+        })?
+        .ok_or_else(|| ChildServiceError::InvalidDurableState {
+            diagnostic: "parent child item has no admitted tool-call origin".into(),
+        })
+}
+
+fn active_parent_event(
+    inner: &Inner,
+    invocation: SubagentInvocationId,
+) -> Result<EventId, ChildServiceError> {
+    inner
+        .active
+        .lock()
+        .expect("active children")
+        .get(&invocation)
+        .map(|child| child.parent_event)
+        .ok_or(ChildServiceError::UnknownInvocation { invocation })
 }
 
 fn authority_dimension(diagnostic: &str) -> String {

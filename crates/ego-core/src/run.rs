@@ -36,7 +36,7 @@ use futures::future::BoxFuture;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use uuid::Uuid;
 
-use crate::budget::BudgetGate;
+use crate::budget::SharedBudgetGate;
 use crate::ceiling::Budget;
 use crate::config::{Mode, ModelRef};
 use crate::cost::Money;
@@ -942,7 +942,7 @@ pub struct RunExecutionBindings {
     admitted_tools: Option<Arc<dyn AdmittedToolSource>>,
     mcp_errors: Arc<[String]>,
     mcp_runtime: Option<Arc<dyn McpRuntimeBinding>>,
-    budget_gate: Option<Arc<Mutex<BudgetGate>>>,
+    budget_gate: Option<SharedBudgetGate>,
 }
 
 impl RunExecutionBindings {
@@ -980,14 +980,14 @@ impl RunExecutionBindings {
     }
 
     /// Attach the root run family's one live budget authority.
-    pub fn with_budget_gate(mut self, gate: Arc<Mutex<BudgetGate>>) -> Self {
+    pub fn with_budget_gate(mut self, gate: SharedBudgetGate) -> Self {
         self.budget_gate = Some(gate);
         self
     }
 
     /// The exact shared gate used by generation-boundary executors.
-    pub fn budget_gate(&self) -> Option<Arc<Mutex<BudgetGate>>> {
-        self.budget_gate.as_ref().map(Arc::clone)
+    pub fn budget_gate(&self) -> Option<SharedBudgetGate> {
+        self.budget_gate.clone()
     }
 
     pub fn admitted_tools(&self) -> Option<Arc<dyn AdmittedToolSource>> {

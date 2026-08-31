@@ -24,7 +24,10 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use futures::StreamExt;
 use futures::future::{Either, select};
 
-use crate::budget::{BudgetGate, Metering, PricingQuote, SettlementSource};
+use crate::budget::{
+    BudgetSynchronizationError, Metering, PricingQuote, SettlementSource, SharedBudgetError,
+    SharedBudgetGate,
+};
 use crate::ceiling::tokens_reached;
 use crate::compact::{
     COMPACTION_PROMPT, Checkpoint, CompactionBusy, CompactionError, PreparedCompaction,
@@ -35,7 +38,7 @@ use crate::cost::{Money, RateSource};
 use crate::event::domain::{
     CancelCause, EventKind, ExitReason, GenerationRole, OccupancyProvenance,
 };
-use crate::event::hook::{HookLifecycle, HookOccurrenceKey, HookOccurrenceOwner, HookSubject};
+use crate::event::hook::{HookLifecycle, HookOccurrenceKey, HookSubject};
 use crate::event::id::{
     EventId, GenerationId, ItemId, Producer, QueuedPromptId, SessionId, TurnId,
 };
@@ -53,7 +56,7 @@ use crate::generator::port::AiEvent;
 use crate::generator::types::{
     Conversation, ErrorKind, GenRequest, Message, Role, StopReason, ToolDescriptor,
 };
-use crate::hook::{HookEvent, HookLifecycleDispatcher, HookOccurrence};
+use crate::hook::{HookCausality, HookEvent, HookOccurrence, HookRunError, SessionHookRuntime};
 use crate::permit::ExecObservation;
 use crate::permit::judge::{JudgeConfig, JudgeDecoder, JudgeInput, JudgeOutcome};
 use crate::permit::{Authority, Classification, Pending, PolicyDenied, Resolution, ToolResult};
@@ -77,6 +80,12 @@ pub use mcp_registry::{
 };
 use tools::{GenerationToolCatalogue, PreparedToolCall};
 pub use tools::{ToolBatchError, ToolEffectPorts, Tools};
+
+impl From<SharedJournalError> for CompactionError {
+    fn from(error: SharedJournalError) -> Self {
+        Self::Store(error.into())
+    }
+}
 
 /// The final model-visible registry. Only `Effect` enters preparation,
 /// permission policy, and guarded I/O; human input crosses its own typed port.
@@ -332,7 +341,7 @@ async fn receive_intent(control: &mut Option<&mut InteractiveControl>) -> Option
 }
 
 fn apply_intent(
-    journal: &mut Journal<'_>,
+    journal: &SharedJournal<'_>,
     cancel: &CancelToken,
     control: &mut InteractiveControl,
     turn: TurnId,
@@ -352,24 +361,33 @@ fn apply_intent(
                 },
             ) {
                 Ok(_) => {
-                    control.refresh(journal.state().queue_status());
+                    control.refresh(
+                        journal
+                            .inspect(SessionState::queue_status)
+                            .map_err(StoreError::from)?,
+                    );
                     let _ = reply.send(Ok(control.status()));
                     Ok(false)
                 }
                 Err(cause) => {
                     let _ = reply.send(Err(ControlError::Store(cause.to_string())));
-                    Err(cause)
+                    Err(cause.into())
                 }
             }
         }
         ControlIntent::Interrupt { reply } => {
             let through = journal
-                .state()
-                .unacknowledged_prompts()
-                .last()
-                .map(|prompt| prompt.id());
+                .inspect(|state| {
+                    state
+                        .unacknowledged_prompts()
+                        .last()
+                        .map(|prompt| prompt.id())
+                })
+                .map_err(StoreError::from)?;
             if let Some(through) = through
-                && journal.state().can_expedite_prompt(through)
+                && journal
+                    .inspect(|state| state.can_expedite_prompt(through))
+                    .map_err(StoreError::from)?
                 && let Err(cause) = journal.append(
                     turn,
                     None,
@@ -378,9 +396,13 @@ fn apply_intent(
                 )
             {
                 let _ = reply.send(Err(ControlError::Store(cause.to_string())));
-                return Err(cause);
+                return Err(cause.into());
             }
-            control.refresh(journal.state().queue_status());
+            control.refresh(
+                journal
+                    .inspect(SessionState::queue_status)
+                    .map_err(StoreError::from)?,
+            );
             cancel.cancel(CancelCause::User);
             let _ = reply.send(Ok(control.status()));
             Ok(true)
@@ -389,7 +411,7 @@ fn apply_intent(
 }
 
 async fn await_controlled<F, T>(
-    journal: &mut Journal<'_>,
+    journal: &SharedJournal<'_>,
     cancel: &CancelToken,
     control: &mut Option<&mut InteractiveControl>,
     turn: TurnId,
@@ -459,9 +481,9 @@ pub struct Session<'a> {
 }
 
 /// The run-owned inputs needed at every fresh generation boundary.
-pub struct GenerationRuntime<'a> {
+pub struct GenerationRuntime {
     pub source: Arc<dyn GenerationModelSource>,
-    pub gate: &'a mut BudgetGate,
+    pub gate: SharedBudgetGate,
     pub config: TurnConfig,
     pub admission: Arc<EvidenceAdmissionService>,
     pub invocation: RunInvocationId,
@@ -481,12 +503,13 @@ pub struct JudgeContext {
 /// over between them.
 pub struct TurnLoop<'a> {
     session_id: SessionId,
-    journal: Journal<'a>,
+    journal: SharedJournal<'a>,
     source: Arc<dyn GenerationModelSource>,
     evidence: &'a dyn EvidenceStore,
     admission: Arc<EvidenceAdmissionService>,
     invocation: RunInvocationId,
-    gate: &'a mut BudgetGate,
+    gate: SharedBudgetGate,
+    settlement_currency: crate::cost::CurrencyCode,
     config: TurnConfig,
     judge: Option<JudgeContext>,
     execution_observation: Option<ExecObservation>,
@@ -496,7 +519,7 @@ pub struct TurnLoop<'a> {
     control: Option<&'a mut InteractiveControl>,
     elicitor: Option<Arc<dyn Elicitor>>,
     foreign_question_port: Option<Arc<dyn crate::mcp::ForeignQuestionPort + 'a>>,
-    hook_dispatcher: Option<HookLifecycleDispatcher>,
+    hook_runtime: Option<SessionHookRuntime<'a>>,
     active_skill_scope: Option<crate::skill::ActiveSkillScope>,
     active_skill_invocations:
         BTreeMap<crate::event::skill::SkillInvocationId, crate::skill::SkillInvocation>,
@@ -508,22 +531,28 @@ impl<'a> TurnLoop<'a> {
     /// Three arguments rather than ten loose ones: a turn is a session, a
     /// model and a set of tools, and at ten positional parameters — four of
     /// which were `&dyn` — a call site said nothing about which was which.
-    pub fn new(session: Session<'a>, runtime: GenerationRuntime<'a>, tools: Tools<'a>) -> Self {
-        Self {
+    pub fn new(
+        session: Session<'a>,
+        runtime: GenerationRuntime,
+        tools: Tools<'a>,
+    ) -> Result<Self, BudgetSynchronizationError> {
+        let settlement_currency = runtime.gate.snapshot()?.currency();
+        Ok(Self {
             session_id: session.id,
-            journal: Journal::new(
+            journal: SharedJournal::new(Journal::new(
                 session.id,
                 session.store,
                 session.clock,
                 session.sink,
                 Producer::Main,
                 session.state,
-            ),
+            )),
             source: runtime.source,
             evidence: session.evidence,
             admission: runtime.admission,
             invocation: runtime.invocation,
             gate: runtime.gate,
+            settlement_currency,
             config: runtime.config,
             judge: None,
             execution_observation: None,
@@ -533,10 +562,10 @@ impl<'a> TurnLoop<'a> {
             control: None,
             elicitor: None,
             foreign_question_port: None,
-            hook_dispatcher: None,
+            hook_runtime: None,
             active_skill_scope: None,
             active_skill_invocations: BTreeMap::new(),
-        }
+        })
     }
 
     /// Attach the stable host facts for the optional judge seat.
@@ -553,7 +582,7 @@ impl<'a> TurnLoop<'a> {
 
     /// Attach the session's sole bounded interactive-intent receiver.
     pub fn with_interactive_control(mut self, control: &'a mut InteractiveControl) -> Self {
-        control.refresh(self.journal.state().queue_status());
+        control.refresh(self.state().queue_status());
         control.open();
         self.control = Some(control);
         self
@@ -574,10 +603,22 @@ impl<'a> TurnLoop<'a> {
         self
     }
 
-    /// Attach the session-bound lifecycle dispatcher.
-    pub fn with_hook_dispatcher(mut self, dispatcher: HookLifecycleDispatcher) -> Self {
-        self.hook_dispatcher = Some(dispatcher);
-        self
+    pub fn journal(&self) -> SharedJournal<'a> {
+        self.journal.clone()
+    }
+
+    /// Attach the session's borrow-scoped hook runtime.
+    pub fn with_hook_runtime(
+        mut self,
+        runtime: SessionHookRuntime<'a>,
+    ) -> Result<Self, HookRunError> {
+        if !self.journal.same_owner(&runtime.journal()) {
+            return Err(HookRunError::new(
+                "the hook runtime does not own this turn loop's journal",
+            ));
+        }
+        self.hook_runtime = Some(runtime);
+        Ok(self)
     }
 
     /// Attach ancestor-only provider history resolved by [`crate::session::ReplayContext`].
@@ -633,13 +674,23 @@ impl<'a> TurnLoop<'a> {
     }
 
     /// The session so far.
-    pub fn state(&self) -> &SessionState {
-        self.journal.state()
+    pub fn state(&self) -> SessionState {
+        self.journal
+            .inspect(Clone::clone)
+            .expect("turn loop journal inspection")
     }
 
     /// Take the session state back, to resume with a different loop.
-    pub fn into_state(self) -> SessionState {
-        self.journal.into_state()
+    pub fn into_state(self) -> Result<SessionState, SharedJournalError> {
+        let Self {
+            journal,
+            hook_runtime,
+            foreign_question_port,
+            ..
+        } = self;
+        drop(foreign_question_port);
+        drop(hook_runtime);
+        journal.try_into_state()
     }
 
     /// Produce and validate one clean-session checkpoint without publishing a target.
@@ -648,22 +699,24 @@ impl<'a> TurnLoop<'a> {
         target_system: Option<SystemPrompt>,
         target_tools: Vec<ToolDescriptor>,
     ) -> Result<PreparedCompaction, CompactionError> {
-        if !self.journal.state().unacknowledged_prompts().is_empty() {
+        if !self.state().unacknowledged_prompts().is_empty() {
             return Err(CompactionError::NotIdle(CompactionBusy::AcceptedPrompt));
         }
-        if self.journal.state().pending_question().is_some() {
+        if self.state().pending_question().is_some() {
             return Err(CompactionError::NotIdle(CompactionBusy::PendingQuestion));
         }
-        if !self.journal.state().live_attempts.is_empty() {
+        if !self.state().live_attempts.is_empty() {
             return Err(CompactionError::NotIdle(CompactionBusy::LiveAttempt));
         }
         if let Some(cause) = self.cancel.cause() {
             return Err(CompactionError::Cancelled(cause));
         }
 
-        let source_seq = self.journal.state().last_seq;
+        let source_seq = self.state().last_seq;
         let turn = TurnId::new();
-        self.journal.publish(&PublicEvent::TurnStarted { turn });
+        self.journal
+            .publish(&PublicEvent::TurnStarted { turn })
+            .map_err(|error| CompactionError::Store(error.into()))?;
         let result = self
             .prepare_compaction_inner(turn, source_seq, target_system, target_tools)
             .await;
@@ -702,7 +755,7 @@ impl<'a> TurnLoop<'a> {
                 None,
                 EventKind::TurnCompleted { ok, exit_reason },
             )
-            .map_err(CompactionError::Store)?;
+            .map_err(|error| CompactionError::Store(error.into()))?;
         result
     }
 
@@ -714,7 +767,7 @@ impl<'a> TurnLoop<'a> {
         target_tools: Vec<ToolDescriptor>,
     ) -> Result<PreparedCompaction, CompactionError> {
         let (history, repairs) =
-            conversation_from_with_blobs(self.journal.state(), self.tools.blob_store())
+            conversation_from_with_blobs(&self.state(), self.tools.blob_store())
                 .map_err(CompactionError::History)?;
         let history = self
             .with_ancestor(history)
@@ -762,15 +815,20 @@ impl<'a> TurnLoop<'a> {
                 error,
             })?;
 
+        let budget = self
+            .gate
+            .snapshot()
+            .map_err(|error| CompactionError::Internal(error.to_string()))?;
         self.journal.publish(&PublicEvent::metering_selected(
             turn,
             &profile.metering,
-            self.gate.ledger(),
+            budget.ledger(),
             profile
                 .rates
                 .as_ref()
                 .map_or(&RateSource::None, |rates| &rates.source),
-        ));
+        ))
+        .map_err(|error| CompactionError::Store(error.into()))?;
 
         let quote = profile.rates.as_ref().map(|rates| rates.quote.clone());
         let reservation = self
@@ -781,7 +839,10 @@ impl<'a> TurnLoop<'a> {
                 &request,
                 &profile.capabilities,
             )
-            .map_err(CompactionError::Budget)?;
+            .map_err(|error| match error {
+                SharedBudgetError::Denied(error) => CompactionError::Budget(error),
+                error => CompactionError::Internal(error.to_string()),
+            })?;
         let attempt = GenerationAttempt::new(
             GenerationId::new(),
             reservation,
@@ -819,9 +880,9 @@ impl<'a> TurnLoop<'a> {
             )
             .await;
 
-        let settlement = drained
-            .stream
-            .settle(self.gate)
+        let settlement = self
+            .gate
+            .settle(drained.stream)
             .map_err(|error| CompactionError::Internal(error.to_string()))?;
         if let Some(error) = drained.failure {
             return Err(CompactionError::Store(error));
@@ -838,7 +899,10 @@ impl<'a> TurnLoop<'a> {
                         quote.as_ref(),
                         UsageReport::Missing,
                         None,
-                        self.gate.currency(),
+                        self.gate
+                            .snapshot()
+                            .map_err(|error| CompactionError::Internal(error.to_string()))?
+                            .currency(),
                     ),
                     attempt: Some(reference),
                 },
@@ -960,7 +1024,6 @@ impl<'a> TurnLoop<'a> {
         answer: QuestionAnswer,
     ) -> Result<TurnOutcome, TurnAbandoned> {
         let foreign = self
-            .journal
             .state()
             .pending_question()
             .filter(|pending| pending.item_id() == question)
@@ -1049,19 +1112,16 @@ impl<'a> TurnLoop<'a> {
                 }
             }
         }
-        let prepared = self
-            .journal
-            .state()
-            .resume_question(question, answer.clone());
+        let prepared = self.state().resume_question(question, answer.clone());
         let continuation = match prepared {
             Ok(continuation) => {
-                let pending = self
-                    .journal
-                    .state()
-                    .pending_question()
-                    .expect("resume validation found the pending question");
-                let parent = pending.request_event();
-                let turn = pending.turn();
+                let (parent, turn) = {
+                    let state = self.state();
+                    let pending = state
+                        .pending_question()
+                        .expect("resume validation found the pending question");
+                    (pending.request_event(), pending.turn())
+                };
                 let settlement = match self.journal.append(
                     turn,
                     Some(question),
@@ -1087,11 +1147,10 @@ impl<'a> TurnLoop<'a> {
                 continuation
             }
             Err(crate::question::QuestionError::AlreadySettled) => {
-                let continuation = match self.journal.state().complete_settled_question(question) {
+                let continuation = match self.state().complete_settled_question(question) {
                     Ok(continuation) => continuation,
                     Err(error) => {
                         let turn = self
-                            .journal
                             .state()
                             .settled_question(question)
                             .map_or_else(TurnId::new, |settled| settled.turn());
@@ -1105,7 +1164,6 @@ impl<'a> TurnLoop<'a> {
                     }
                 };
                 let parent = self
-                    .journal
                     .state()
                     .settled_question(question)
                     .expect("the settlement used for recovery exists")
@@ -1125,8 +1183,7 @@ impl<'a> TurnLoop<'a> {
             }
             Err(error) => {
                 return Err(self.abandon(
-                    self.journal
-                        .state()
+                    self.state()
                         .pending_question()
                         .map_or_else(TurnId::new, |pending| pending.turn()),
                     StoreError::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, error)),
@@ -1197,7 +1254,6 @@ impl<'a> TurnLoop<'a> {
 
     fn restore_skill_scope(&mut self, turn: TurnId) -> Result<(), StoreError> {
         let invocations = self
-            .journal
             .state()
             .skill_events()
             .iter()
@@ -1216,7 +1272,7 @@ impl<'a> TurnLoop<'a> {
             let invocation = crate::skill::SkillInvocation::resume_durable(
                 invocation_id,
                 self.tools.blob_store(),
-                &mut self.journal,
+                &self.journal,
             )
             .map_err(skill_store_error)?;
             let baseline = self.tools.effect_names();
@@ -1240,7 +1296,6 @@ impl<'a> TurnLoop<'a> {
     )]
     pub async fn run_queued_turn(&mut self) -> Result<Option<TurnOutcome>, TurnAbandoned> {
         let prompts: Vec<_> = self
-            .journal
             .state()
             .unacknowledged_prompts()
             .into_iter()
@@ -1289,7 +1344,9 @@ impl<'a> TurnLoop<'a> {
         // something the reducer establishes — it is what the loop knows the
         // instant it mints the id. Before this, nothing in the workspace
         // could emit it at all.
-        self.journal.publish(&PublicEvent::TurnStarted { turn });
+        if let Err(cause) = self.journal.publish(&PublicEvent::TurnStarted { turn }) {
+            return Err(self.abandon(turn, cause));
+        }
 
         if let Err(cause) = self.admit_skill_catalogue(turn) {
             return Err(self.abandon(turn, cause));
@@ -1341,7 +1398,7 @@ impl<'a> TurnLoop<'a> {
         let Some(catalogue) = self.tools.skill_catalogue() else {
             return Ok(());
         };
-        if self.journal.state().skill_catalogue_generation() == Some(catalogue.generation()) {
+        if self.state().skill_catalogue_generation() == Some(catalogue.generation()) {
             return Ok(());
         }
         self.journal
@@ -1355,19 +1412,21 @@ impl<'a> TurnLoop<'a> {
                 },
             )
             .map(|_| ())
+            .map_err(Into::into)
     }
 
     /// Give up on a turn whose log could not be written.
     ///
     /// Takes the state by clone rather than by move: `run` borrows `self`, and
     /// a caller holding a `TurnLoop` is entitled to look at what survived.
-    fn abandon(&mut self, turn: TurnId, cause: StoreError) -> TurnAbandoned {
+    fn abandon(&mut self, turn: TurnId, cause: impl Into<StoreError>) -> TurnAbandoned {
+        let cause = cause.into();
         self.close_control();
         tracing::error!(?turn, %cause, "turn abandoned: its log could not be written");
         TurnAbandoned {
             turn,
             cause,
-            state: self.journal.state().clone(),
+            state: self.state(),
         }
     }
 
@@ -1386,16 +1445,7 @@ impl<'a> TurnLoop<'a> {
     ) -> Result<DriveOutcome, StoreError> {
         for (text, images, queued_prompt) in prompts {
             let item = ItemId::new();
-            if !self
-                .dispatch_hook(
-                    HookOccurrenceOwner::Item { item },
-                    HookEvent::turn(HookLifecycle::UserPromptSubmit, HookSubject::Item { item }),
-                )
-                .await
-            {
-                return Ok(DriveOutcome::Ended(ExitReason::Completed, None));
-            }
-            self.journal.append(
+            let admitted = self.journal.append(
                 turn,
                 Some(item),
                 None,
@@ -1405,6 +1455,15 @@ impl<'a> TurnLoop<'a> {
                     queued_prompt: *queued_prompt,
                 },
             )?;
+            if !self
+                .dispatch_hook(
+                    HookCausality::item(item, turn, admitted),
+                    HookEvent::turn(HookLifecycle::UserPromptSubmit, HookSubject::Item { item }),
+                )
+                .await
+            {
+                return Ok(DriveOutcome::Ended(ExitReason::Completed, None));
+            }
             if queued_prompt.is_some() {
                 self.refresh_control_status();
             }
@@ -1425,11 +1484,12 @@ impl<'a> TurnLoop<'a> {
             // on an unmetered or subscription row no charge is raised at all.
             // `CLI.md:128` spells it the same way: "exit 5 when hit", not
             // "when it would be hit".
-            if tokens_reached(self.config.token_ceiling, &self.journal.state().usage) {
+            if tokens_reached(self.config.token_ceiling, &self.state().usage) {
                 return Ok(DriveOutcome::Ended(ExitReason::Budget, None));
             }
 
-            let (generation, reason, pending, error_kind) = match self.generate(turn).await? {
+            let (generation, terminal, reason, pending, error_kind) =
+                match self.generate(turn).await? {
                 Generated::Ended(reason) => return Ok(DriveOutcome::Ended(reason, None)),
                 Generated::Cancelled { cause, pending } => {
                     self.close_unstarted_siblings(turn, &pending)?;
@@ -1437,10 +1497,11 @@ impl<'a> TurnLoop<'a> {
                 }
                 Generated::Stopped {
                     generation,
+                    terminal,
                     reason,
                     pending,
                     error_kind,
-                } => (generation, reason, pending, error_kind),
+                } => (generation, terminal, reason, pending, error_kind),
             };
 
             // A generation that says it stopped for tools and then names none
@@ -1492,7 +1553,7 @@ impl<'a> TurnLoop<'a> {
                 if reason == StopReason::Stop {
                     if !self
                         .dispatch_hook(
-                            HookOccurrenceOwner::Generation { generation },
+                            HookCausality::generation(generation, turn, terminal),
                             HookEvent::turn(HookLifecycle::Stop, HookSubject::Turn { turn }),
                         )
                         .await
@@ -1502,7 +1563,7 @@ impl<'a> TurnLoop<'a> {
                 } else if exit != ExitReason::Completed {
                     let _ = self
                         .dispatch_hook(
-                            HookOccurrenceOwner::Generation { generation },
+                            HookCausality::generation(generation, turn, terminal),
                             HookEvent::turn(HookLifecycle::StopFailure, HookSubject::Turn { turn }),
                         )
                         .await;
@@ -1530,7 +1591,7 @@ impl<'a> TurnLoop<'a> {
                 }
                 if !self
                     .dispatch_hook(
-                        HookOccurrenceOwner::Generation { generation },
+                        HookCausality::generation(generation, turn, terminal),
                         HookEvent::turn(HookLifecycle::PostToolBatch, HookSubject::Turn { turn }),
                     )
                     .await
@@ -1591,7 +1652,7 @@ impl<'a> TurnLoop<'a> {
                         };
                         let _ = self
                             .dispatch_hook(
-                                HookOccurrenceOwner::Item { item: call.item },
+                                HookCausality::item(call.item, turn, call.started),
                                 HookEvent::tool(
                                     lifecycle,
                                     HookSubject::Item { item: call.item },
@@ -1650,7 +1711,7 @@ impl<'a> TurnLoop<'a> {
             }
             if !self
                 .dispatch_hook(
-                    HookOccurrenceOwner::Generation { generation },
+                    HookCausality::generation(generation, turn, terminal),
                     HookEvent::turn(HookLifecycle::PostToolBatch, HookSubject::Turn { turn }),
                 )
                 .await
@@ -1661,14 +1722,18 @@ impl<'a> TurnLoop<'a> {
         }
     }
 
-    async fn dispatch_hook(&self, owner: HookOccurrenceOwner, event: HookEvent) -> bool {
-        let Some(dispatcher) = self.hook_dispatcher.as_ref() else {
+    async fn dispatch_hook(&self, causality: HookCausality, event: HookEvent) -> bool {
+        let Some(runtime) = self.hook_runtime.as_ref() else {
             return true;
         };
         let lifecycle = event.lifecycle();
-        let occurrence = HookOccurrence::new(HookOccurrenceKey::new(lifecycle, owner), event)
+        let occurrence = HookOccurrence::new(
+            HookOccurrenceKey::new(lifecycle, causality.owner().clone()),
+            event,
+            causality,
+        )
             .expect("the lifecycle key is built from the same typed hook event");
-        match dispatcher.dispatch(Producer::Main, occurrence).await {
+        match runtime.dispatch(Producer::Main, occurrence).await {
             Ok(result) => !result.is_blocked(),
             Err(error) if lifecycle.phase().is_observer() => {
                 tracing::warn!(%error, ?lifecycle, "hook observer dispatch failed");
@@ -1682,13 +1747,14 @@ impl<'a> TurnLoop<'a> {
     }
 
     fn refresh_control_status(&mut self) {
+        let status = self.state().queue_status();
         if let Some(control) = self.control.as_mut() {
-            control.refresh(self.journal.state().queue_status());
+            control.refresh(status);
         }
     }
 
     fn close_control(&mut self) {
-        let status = self.journal.state().queue_status();
+        let status = self.state().queue_status();
         if let Some(control) = self.control.as_deref_mut() {
             control.refresh(status);
             control.close();
@@ -1709,7 +1775,7 @@ impl<'a> TurnLoop<'a> {
                         .control
                         .as_deref_mut()
                         .expect("the boundary intent came from this coordinator");
-                    let _ = apply_intent(&mut self.journal, &self.cancel, control, turn, intent)?;
+                    let _ = apply_intent(&self.journal, &self.cancel, control, turn, intent)?;
                 }
                 BoundaryIntent::Closed => {
                     self.control = None;
@@ -1727,7 +1793,6 @@ impl<'a> TurnLoop<'a> {
             return Ok(false);
         }
         let pending: Vec<_> = self
-            .journal
             .state()
             .unacknowledged_prompts()
             .into_iter()
@@ -1783,7 +1848,7 @@ impl<'a> TurnLoop<'a> {
         // here — the log is never rewritten, so the run ends visibly at the
         // provider's exit code rather than resuming a session with a hole in
         // it (ADR §6).
-        let rebuilt = conversation_from_with_blobs(self.journal.state(), self.tools.blob_store())
+        let rebuilt = conversation_from_with_blobs(&self.state(), self.tools.blob_store())
             .and_then(|(history, repairs)| {
                 self.with_ancestor(history)
                     .map(|history| (history, repairs))
@@ -1819,7 +1884,7 @@ impl<'a> TurnLoop<'a> {
         let source = Arc::clone(&self.source);
         let model_request = self.main_model_request();
         let profile = match await_controlled(
-            &mut self.journal,
+            &self.journal,
             &self.cancel,
             &mut self.control,
             turn,
@@ -1896,15 +1961,19 @@ impl<'a> TurnLoop<'a> {
         // gate is about to mint a zero reservation — which means a monetary
         // `--budget` admits everything. The operator is told that here rather
         // than discovering it from a limit that never fired.
+        let budget = self
+            .gate
+            .snapshot()
+            .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
         self.journal.publish(&PublicEvent::metering_selected(
             turn,
             &profile.metering,
-            self.gate.ledger(),
+            budget.ledger(),
             profile
                 .rates
                 .as_ref()
                 .map_or(&RateSource::None, |rates| &rates.source),
-        ));
+        ))?;
 
         let quote = profile.rates.as_ref().map(|rates| rates.quote.clone());
         let reservation = match self.gate.reserve(
@@ -1916,7 +1985,12 @@ impl<'a> TurnLoop<'a> {
             Ok(reservation) => reservation,
             Err(denied) => {
                 tracing::warn!(%denied, "the budget gate refused a generation");
-                return self.refuse(turn, denied.to_string(), ExitReason::Budget);
+                let reason = if matches!(&denied, SharedBudgetError::Denied(_)) {
+                    ExitReason::Budget
+                } else {
+                    ExitReason::Internal
+                };
+                return self.refuse(turn, denied.to_string(), reason);
             }
         };
 
@@ -1972,7 +2046,7 @@ impl<'a> TurnLoop<'a> {
 
         // Settle before reporting anything, including a store failure: the
         // stream owns the reservation, and returning early would drop it.
-        let settlement = match drained.stream.settle(self.gate) {
+        let settlement = match self.gate.settle(drained.stream) {
             Ok(settlement) => settlement,
             Err(denied) => {
                 tracing::error!(%denied, "the gate refused to settle an attempt it minted");
@@ -1985,7 +2059,7 @@ impl<'a> TurnLoop<'a> {
         };
         drained.failure.map_or(Ok(()), Err)?;
 
-        self.journal.append(
+        let terminal = self.journal.append(
             turn,
             None,
             None,
@@ -2035,6 +2109,7 @@ impl<'a> TurnLoop<'a> {
         }
         Ok(Generated::Stopped {
             generation: reference.generation(),
+            terminal,
             reason: settlement.outcome.stop(),
             pending: drained.pending,
             error_kind: drained.error_kind,
@@ -2117,8 +2192,7 @@ impl<'a> TurnLoop<'a> {
     }
 
     fn durable_skill_messages(&self) -> Result<Vec<Message>, StoreError> {
-        self.journal
-            .state()
+        self.state()
             .skill_events()
             .iter()
             .filter_map(|event| match event {
@@ -2203,7 +2277,6 @@ impl<'a> TurnLoop<'a> {
         // an id from an *earlier* generation is just as unattributable. The
         // set is built once per generation and grown as calls are accepted.
         let mut seen: BTreeSet<String> = self
-            .journal
             .state()
             .items
             .values()
@@ -2226,11 +2299,11 @@ impl<'a> TurnLoop<'a> {
         let mut stated_cost: Option<Money> = None;
         let mut accounting_booked = false;
         let mut private_tool_use = false;
-        let settlement_currency = self.gate.currency();
+        let settlement_currency = self.settlement_currency;
 
         loop {
             let event = match await_controlled(
-                &mut self.journal,
+                &self.journal,
                 &self.cancel,
                 &mut self.control,
                 turn,
@@ -2432,7 +2505,7 @@ impl<'a> TurnLoop<'a> {
             };
 
             if let Err(cause) = appended {
-                failure = Some(cause);
+                failure = Some(cause.into());
                 break;
             }
             if self.cancel.is_cancelled() {
@@ -2466,7 +2539,7 @@ impl<'a> TurnLoop<'a> {
                     attempt: Some(reference),
                 },
             ) {
-                failure = Some(cause);
+                failure = Some(cause.into());
             } else {
                 accounting_booked = true;
             }
@@ -2487,7 +2560,7 @@ impl<'a> TurnLoop<'a> {
                 },
             )
         {
-            failure = Some(cause);
+            failure = Some(cause.into());
         }
 
         Drained {
@@ -2525,7 +2598,7 @@ impl<'a> TurnLoop<'a> {
         let exec_caps = judge.exec_caps;
         let source = Arc::clone(&self.source);
         let profile = match await_controlled(
-            &mut self.journal,
+            &self.journal,
             &self.cancel,
             &mut self.control,
             turn,
@@ -2596,15 +2669,19 @@ impl<'a> TurnLoop<'a> {
             )?;
             return Ok(JudgeRun::Unavailable);
         }
+        let budget = self
+            .gate
+            .snapshot()
+            .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
         self.journal.publish(&PublicEvent::metering_selected(
             turn,
             &profile.metering,
-            self.gate.ledger(),
+            budget.ledger(),
             profile
                 .rates
                 .as_ref()
                 .map_or(&RateSource::None, |rates| &rates.source),
-        ));
+        ))?;
         let quote = profile.rates.as_ref().map(|rates| &rates.quote);
         let reservation =
             match self
@@ -2614,7 +2691,12 @@ impl<'a> TurnLoop<'a> {
                 Ok(reservation) => reservation,
                 Err(denied) => {
                     tracing::warn!(%denied, "the budget gate refused the judge generation");
-                    return Ok(JudgeRun::Ended(ExitReason::Budget));
+                    let reason = if matches!(&denied, SharedBudgetError::Denied(_)) {
+                        ExitReason::Budget
+                    } else {
+                        ExitReason::Internal
+                    };
+                    return Ok(JudgeRun::Ended(reason));
                 }
             };
         let attempt = match GenerationAttempt::new(
@@ -2651,7 +2733,7 @@ impl<'a> TurnLoop<'a> {
         let mut failure = None;
         loop {
             let event = match await_controlled(
-                &mut self.journal,
+                &self.journal,
                 &self.cancel,
                 &mut self.control,
                 turn,
@@ -2690,7 +2772,10 @@ impl<'a> TurnLoop<'a> {
                 quote,
                 usage.map_or(UsageReport::Missing, UsageReport::Reported),
                 provider_cost,
-                self.gate.currency(),
+                self.gate
+                    .snapshot()
+                    .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?
+                    .currency(),
             );
             if let Err(cause) = self.journal.append(
                 turn,
@@ -2702,11 +2787,11 @@ impl<'a> TurnLoop<'a> {
                     attempt: Some(reference),
                 },
             ) {
-                failure = Some(cause);
+                failure = Some(cause.into());
             }
         }
 
-        let settlement = match stream.settle(self.gate) {
+        let settlement = match self.gate.settle(stream) {
             Ok(settlement) => settlement,
             Err(denied) => {
                 failure.map_or(Ok(()), Err)?;
@@ -2821,7 +2906,7 @@ impl<'a> TurnLoop<'a> {
                         logical,
                         &bytes,
                         self.tools.blob_store(),
-                        &mut self.journal,
+                        &self.journal,
                         turn,
                     ) {
                         return Ok(answered(false, error.to_string()));
@@ -2842,7 +2927,7 @@ impl<'a> TurnLoop<'a> {
                     &catalogue,
                     operation,
                     self.tools.blob_store(),
-                    &mut self.journal,
+                    &self.journal,
                     turn,
                 );
                 return Ok(match invocation {
@@ -2863,7 +2948,7 @@ impl<'a> TurnLoop<'a> {
         };
         if !self
             .dispatch_hook(
-                HookOccurrenceOwner::Item { item: call.item },
+                HookCausality::item(call.item, turn, call.started),
                 HookEvent::tool(
                     HookLifecycle::PreToolUse,
                     HookSubject::Item { item: call.item },
@@ -2887,7 +2972,7 @@ impl<'a> TurnLoop<'a> {
                 }
                 Classification::Ask(pending) => {
                     let resolution = await_controlled(
-                        &mut self.journal,
+                        &self.journal,
                         &self.cancel,
                         &mut self.control,
                         turn,
@@ -2942,7 +3027,7 @@ impl<'a> TurnLoop<'a> {
                             };
                             self.requested(turn, call, pending.request())?;
                             let decision = await_controlled(
-                                &mut self.journal,
+                                &self.journal,
                                 &self.cancel,
                                 &mut self.control,
                                 turn,
@@ -3030,9 +3115,12 @@ impl<'a> TurnLoop<'a> {
         };
         let resume_context = call
             .capture_authority
-            .resume_context(self.hook_dispatcher.as_ref());
+            .resume_context(
+                self.hook_runtime.as_ref(),
+                HookCausality::item(call.item, turn, call.started),
+            );
         let execution = await_controlled(
-            &mut self.journal,
+            &self.journal,
             &self.cancel,
             &mut self.control,
             turn,
@@ -3087,7 +3175,7 @@ impl<'a> TurnLoop<'a> {
         let outcome = match self.elicitor.as_ref().map(Arc::clone) {
             Some(elicitor) => {
                 let elicited = await_controlled(
-                    &mut self.journal,
+                    &self.journal,
                     &self.cancel,
                     &mut self.control,
                     turn,
@@ -3147,7 +3235,6 @@ impl<'a> TurnLoop<'a> {
             EventKind::QuestionSettled { outcome },
         )?;
         let continuation = self
-            .journal
             .state()
             .complete_settled_question(question)
             .expect("a just-persisted valid settlement has a pure continuation");
@@ -3196,7 +3283,7 @@ impl<'a> TurnLoop<'a> {
                 return Ok(ToolOutcome::QuestionRequired);
             };
             let elicited = await_controlled(
-                &mut self.journal,
+                &self.journal,
                 &self.cancel,
                 &mut self.control,
                 turn,
@@ -3308,7 +3395,7 @@ impl<'a> TurnLoop<'a> {
             },
         )?;
         let execution = await_controlled(
-            &mut self.journal,
+            &self.journal,
             &self.cancel,
             &mut self.control,
             turn,
@@ -3503,6 +3590,7 @@ enum Generated {
     /// The generation finished. `pending` is what it asked to call.
     Stopped {
         generation: GenerationId,
+        terminal: EventId,
         reason: StopReason,
         pending: Vec<PendingCall>,
         /// How the provider classified its failure, when `reason` is

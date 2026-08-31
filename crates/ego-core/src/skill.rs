@@ -21,7 +21,7 @@ use crate::permit::{CanonPath, GuardedIo, PathResolver};
 use crate::run::RunSelections;
 use crate::store::blob::{BlobRef, BlobStore};
 use crate::subagent::{ChildRequest, ChildRunService, ChildWait};
-use crate::turn::Journal;
+use crate::turn::SharedJournal;
 
 const MAX_ADMISSION_BYTES: usize = 64 * 1024;
 
@@ -573,7 +573,7 @@ impl SkillInvocation {
         catalogue: &SkillCatalogue,
         operation: SkillOperation,
         blobs: &dyn BlobStore,
-        journal: &mut Journal<'_>,
+        journal: &SharedJournal<'_>,
     ) -> Result<Self, SkillError> {
         Self::admit_in_turn(catalogue, operation, blobs, journal, TurnId::new())
     }
@@ -582,7 +582,7 @@ impl SkillInvocation {
         catalogue: &SkillCatalogue,
         operation: SkillOperation,
         blobs: &dyn BlobStore,
-        journal: &mut Journal<'_>,
+        journal: &SharedJournal<'_>,
         turn: TurnId,
     ) -> Result<Self, SkillError> {
         let spec = catalogue.authorize_model(operation.name())?.clone();
@@ -657,7 +657,7 @@ impl SkillInvocation {
         invocation: SkillInvocationId,
         _current: &SkillCatalogue,
         blobs: &dyn BlobStore,
-        journal: &mut Journal<'_>,
+        journal: &SharedJournal<'_>,
     ) -> Result<Self, SkillError> {
         Self::resume_durable(invocation, blobs, journal)
     }
@@ -665,21 +665,26 @@ impl SkillInvocation {
     pub(crate) fn resume_durable(
         invocation: SkillInvocationId,
         blobs: &dyn BlobStore,
-        journal: &mut Journal<'_>,
+        journal: &SharedJournal<'_>,
     ) -> Result<Self, SkillError> {
         let event = journal
-            .state()
-            .skill_events()
-            .iter()
-            .find_map(|event| match event {
-                crate::state::SkillEvent::Instruction {
-                    invocation: found,
-                    admission,
-                    rendered,
-                    ..
-                } if *found == invocation => Some((admission.clone(), rendered.clone())),
-                _ => None,
+            .inspect(|state| {
+                state
+                    .skill_events()
+                    .iter()
+                    .find_map(|event| match event {
+                        crate::state::SkillEvent::Instruction {
+                            invocation: found,
+                            admission,
+                            rendered,
+                            ..
+                        } if *found == invocation => {
+                            Some((admission.clone(), rendered.clone()))
+                        }
+                        _ => None,
+                    })
             })
+            .map_err(|error| SkillError::new(error.to_string()))?
             .ok_or_else(|| SkillError::new("skill invocation is not present in durable state"))?;
         let bytes = blobs
             .read(&event.0)
@@ -787,7 +792,7 @@ impl SkillInvocation {
         logical: SkillSourceLocation,
         bytes: &[u8],
         blobs: &dyn BlobStore,
-        journal: &mut Journal<'_>,
+        journal: &SharedJournal<'_>,
         turn: TurnId,
     ) -> Result<(), SkillError> {
         let content = commit_blob(blobs, bytes)?;
@@ -837,9 +842,9 @@ impl SkillInvocation {
         operation: &SkillOperation,
         authority_root: &CanonPath,
         resolver: &dyn PathResolver,
-        guarded: &dyn GuardedIo,
+        guarded: &dyn GuardedIo<'_>,
         blobs: &dyn BlobStore,
-        journal: &mut Journal<'_>,
+        journal: &SharedJournal<'_>,
         turn: TurnId,
     ) -> Result<Vec<u8>, SkillError> {
         let (invocation, logical) = match operation {

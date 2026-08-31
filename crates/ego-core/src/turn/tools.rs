@@ -119,7 +119,7 @@ impl<'a> ToolEffectPorts<'a> {
         self,
         authorized: Authorized,
         resume: PreparedResume,
-        context: Option<McpResumeContext>,
+        context: Option<McpResumeContext<'a>>,
     ) -> (PreparedCall, GuardedEffects<'a>) {
         let (call, permit) = authorized.into_parts();
         let guarded = GuardedEffects::new_with_resume(
@@ -529,7 +529,7 @@ impl<'a> Tools<'a> {
         &self,
         tool: &dyn Tool,
         authorized: Authorized,
-        context: Option<McpResumeContext>,
+        context: Option<McpResumeContext<'a>>,
     ) -> Result<ToolExecution, ToolError> {
         let resume = if authorized.call().mcp_envelope().is_some() {
             Some(GuardedMcpResume::new(

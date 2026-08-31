@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::sync::Arc;
 
-use crate::hook::HookLifecycleDispatcher;
+use crate::hook::{HookCausality, SessionHookRuntime};
 use crate::suspension::{McpCaptureAuthority, McpCapturePin, McpResumeContext};
 
 use super::RegisteredTool;
@@ -17,13 +17,18 @@ pub(crate) enum ToolCaptureAuthority {
 }
 
 impl ToolCaptureAuthority {
-    pub(crate) fn resume_context(
+    pub(crate) fn resume_context<'s>(
         &self,
-        dispatcher: Option<&HookLifecycleDispatcher>,
-    ) -> Option<McpResumeContext> {
+        runtime: Option<&SessionHookRuntime<'s>>,
+        causality: HookCausality,
+    ) -> Option<McpResumeContext<'s>> {
         match self {
-            Self::Mcp(capture) => dispatcher.map(|dispatcher| {
-                McpResumeContext::from_authority(dispatcher.clone(), capture.clone())
+            Self::Mcp(capture) => runtime.map(|runtime| {
+                McpResumeContext::from_authority(
+                    runtime.clone(),
+                    capture.clone(),
+                    causality,
+                )
             }),
             Self::Static => None,
         }

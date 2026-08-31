@@ -143,7 +143,7 @@ pub trait Fs: PathResolver {
 /// not by handle, so a component swapped between `allows_read` and the open
 /// is resolved a second time and is not re-checked. Closing that needs
 /// handle-relative, no-follow opens, which is `POTENTIALS.md` P23.
-pub trait GuardedIo: Send + Sync {
+pub trait GuardedIo<'s>: Send + Sync {
     /// Atomically and durably replace one permit-checked whole file.
     fn write(&self, path: &CanonPath, bytes: &[u8]) -> Result<(), IoDenied>;
 
@@ -180,7 +180,7 @@ pub trait GuardedIo: Send + Sync {
     /// one rendered request by value.
     fn claim_mcp_http(&self, call: PreparedCall) -> Result<McpHttpClaim, TransportError>;
 
-    fn take_mcp_resume(&self) -> Result<GuardedMcpResume, ContinuationError> {
+    fn take_mcp_resume(&self) -> Result<GuardedMcpResume<'s>, ContinuationError> {
         Err(ContinuationError::AuthorityMismatch)
     }
 
@@ -275,7 +275,7 @@ pub struct GuardedEffects<'a> {
     http: GuardedHttp,
     duplex: Arc<dyn DuplexSpawner>,
     foreign_spent: AtomicBool,
-    resume: Mutex<Option<GuardedMcpResume>>,
+    resume: Mutex<Option<GuardedMcpResume<'a>>>,
 }
 
 impl<'a> GuardedEffects<'a> {
@@ -302,7 +302,7 @@ impl<'a> GuardedEffects<'a> {
         resolver: Arc<dyn Resolver>,
         one_hop: Arc<dyn OneHop>,
         duplex: Arc<dyn DuplexSpawner>,
-        resume: Option<GuardedMcpResume>,
+        resume: Option<GuardedMcpResume<'a>>,
     ) -> Self {
         Self {
             permit,
@@ -405,7 +405,7 @@ impl<'a> GuardedEffects<'a> {
     }
 
     pub fn store_handler_evidence(&self, bytes: &[u8]) -> Result<EvidenceRef, ToolError> {
-        <Self as GuardedIo>::store_evidence(self, bytes)
+        <Self as GuardedIo<'a>>::store_evidence(self, bytes)
     }
 
     pub fn guarded_hook_http(
@@ -593,7 +593,7 @@ impl<'a> GuardedEffects<'a> {
     }
 }
 
-impl GuardedIo for GuardedEffects<'_> {
+impl<'a> GuardedIo<'a> for GuardedEffects<'a> {
     fn write(&self, path: &CanonPath, bytes: &[u8]) -> Result<(), IoDenied> {
         // Re-resolve now, at use time, rather than trusting `path` — see
         // the trait doc comment. `write_target` and not `canonicalize`,
@@ -700,7 +700,7 @@ impl GuardedIo for GuardedEffects<'_> {
         GuardedEffects::claim_mcp_http(self, call)
     }
 
-    fn take_mcp_resume(&self) -> Result<GuardedMcpResume, ContinuationError> {
+    fn take_mcp_resume(&self) -> Result<GuardedMcpResume<'a>, ContinuationError> {
         self.resume
             .lock()
             .map_err(|_| ContinuationError::Unavailable("resume authority lock poisoned".into()))?

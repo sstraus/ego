@@ -104,12 +104,32 @@ impl From<StoreError> for SharedJournalError {
     }
 }
 
+impl From<SharedJournalError> for StoreError {
+    fn from(error: SharedJournalError) -> Self {
+        match error {
+            SharedJournalError::Store(error) => error,
+            error @ (SharedJournalError::InUse | SharedJournalError::Synchronization) => {
+                StoreError::Io(std::io::Error::other(error.to_string()))
+            }
+        }
+    }
+}
+
 impl<'s> SharedJournal<'s> {
     /// Wrap the session's sole journal in cloneable append authority.
     pub fn new(journal: Journal<'s>) -> Self {
         Self {
             inner: Arc::new(Mutex::new(journal)),
         }
+    }
+
+    pub fn same_owner(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
+    }
+
+    pub fn publish(&self, event: &PublicEvent) -> Result<(), SharedJournalError> {
+        self.lock()?.publish(event);
+        Ok(())
     }
 
     fn lock(&self) -> Result<MutexGuard<'_, Journal<'s>>, SharedJournalError> {
