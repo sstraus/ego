@@ -45,6 +45,7 @@ use crate::event::id::{ItemId, SessionId, TurnId};
 use crate::event::time::{Clock, Timestamp};
 use crate::evidence::{EvidenceError, EvidenceWrite, RunInvocationId};
 use crate::generator::capabilities::ModelCapabilities;
+use crate::mcp::McpRuntimeBinding;
 use crate::question::Elicitor;
 use crate::sink::EventSink;
 use crate::store::session_store::{SessionEntry, SessionStore, StoreError};
@@ -940,6 +941,7 @@ pub struct RunExecutionBindings {
     pub elicitor: Option<Arc<dyn Elicitor>>,
     admitted_tools: Option<Arc<dyn AdmittedToolSource>>,
     mcp_errors: Arc<[String]>,
+    mcp_runtime: Option<Arc<dyn McpRuntimeBinding>>,
     budget_gate: Option<Arc<Mutex<BudgetGate>>>,
 }
 
@@ -953,6 +955,7 @@ impl RunExecutionBindings {
             elicitor,
             admitted_tools: None,
             mcp_errors: Arc::from([]),
+            mcp_runtime: None,
             budget_gate: None,
         }
     }
@@ -962,9 +965,11 @@ impl RunExecutionBindings {
         mut self,
         admitted_tools: Arc<dyn AdmittedToolSource>,
         mcp_errors: Vec<String>,
+        mcp_runtime: Arc<dyn McpRuntimeBinding>,
     ) -> Self {
         self.admitted_tools = Some(admitted_tools);
         self.mcp_errors = Arc::from(mcp_errors);
+        self.mcp_runtime = Some(mcp_runtime);
         self
     }
 
@@ -991,6 +996,10 @@ impl RunExecutionBindings {
 
     pub fn mcp_errors(&self) -> &[String] {
         &self.mcp_errors
+    }
+
+    pub fn mcp_runtime(&self) -> Option<Arc<dyn McpRuntimeBinding>> {
+        self.mcp_runtime.as_ref().map(Arc::clone)
     }
 }
 

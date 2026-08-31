@@ -5,6 +5,7 @@
 //! been validated.
 
 use std::fmt;
+use std::sync::Arc;
 
 use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
@@ -153,6 +154,17 @@ pub trait ForeignQuestionPort: Send + Sync {
         continuation_id: &'a str,
         canonical_json: &'a str,
     ) -> BoxFuture<'a, Result<ToolExecution, String>>;
+}
+
+/// Session-owned factory for a foreign-question adapter bound to the exact
+/// hook dispatcher, resume floor and effect authority of one turn.
+pub trait McpRuntimeBinding: Send + Sync {
+    fn foreign_question_port<'a>(
+        &self,
+        dispatcher: crate::hook::HookLifecycleDispatcher,
+        floor: crate::suspension::ResumeFloor,
+        effects: crate::turn::ToolEffectPorts<'a>,
+    ) -> Arc<dyn ForeignQuestionPort + 'a>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

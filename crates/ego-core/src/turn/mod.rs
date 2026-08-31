@@ -495,7 +495,7 @@ pub struct TurnLoop<'a> {
     cancel: CancelToken,
     control: Option<&'a mut InteractiveControl>,
     elicitor: Option<Arc<dyn Elicitor>>,
-    foreign_question_port: Option<Arc<dyn crate::mcp::ForeignQuestionPort>>,
+    foreign_question_port: Option<Arc<dyn crate::mcp::ForeignQuestionPort + 'a>>,
     hook_dispatcher: Option<HookLifecycleDispatcher>,
     active_skill_scope: Option<crate::skill::ActiveSkillScope>,
     active_skill_invocations:
@@ -568,7 +568,7 @@ impl<'a> TurnLoop<'a> {
     /// Attach the adapter that owns foreign continuation recovery.
     pub fn with_foreign_question_port(
         mut self,
-        port: Arc<dyn crate::mcp::ForeignQuestionPort>,
+        port: Arc<dyn crate::mcp::ForeignQuestionPort + 'a>,
     ) -> Self {
         self.foreign_question_port = Some(port);
         self
@@ -3289,7 +3289,7 @@ impl<'a> TurnLoop<'a> {
         &mut self,
         settlement: ForeignQuestionSettlement,
         answer: QuestionAnswer,
-        port: Arc<dyn crate::mcp::ForeignQuestionPort>,
+        port: Arc<dyn crate::mcp::ForeignQuestionPort + 'a>,
     ) -> Result<ForeignQuestionProgress, StoreError> {
         let ForeignQuestionSettlement {
             turn,

@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use ego_core::credentials::SecretMaterial;
+use ego_core::mcp::McpRuntimeBinding;
 use ego_core::permit::{EnvName, EnvPolicy, HttpHeader, HttpRequest, HttpRequestDigest};
 use ego_core::run::{EventSinkFactory, RunExecutionBindings};
 use ego_core::sink::{EventSink, NullSink};
@@ -26,6 +27,20 @@ struct EmptyMcpSource;
 impl AdmittedToolSource for EmptyMcpSource {
     fn capture(&self) -> Result<CapturedToolCatalogue, ToolCatalogueError> {
         CapturedToolCatalogue::new("test-generation", Vec::new())
+    }
+}
+
+#[derive(Debug, Default)]
+struct UnusedMcpRuntime;
+
+impl McpRuntimeBinding for UnusedMcpRuntime {
+    fn foreign_question_port<'a>(
+        &self,
+        _dispatcher: ego_core::hook::HookLifecycleDispatcher,
+        _floor: ego_core::suspension::ResumeFloor,
+        _effects: ego_core::turn::ToolEffectPorts<'a>,
+    ) -> Arc<dyn ego_core::mcp::ForeignQuestionPort + 'a> {
+        panic!("this runtime-only binding is not exercised by the surface test")
     }
 }
 
@@ -109,6 +124,7 @@ fn execution_bindings_keep_optional_live_mcp_source_and_safe_errors() {
     let bindings = empty.with_mcp(
         Arc::clone(&source),
         vec!["server 'files' is unavailable".to_owned()],
+        Arc::new(UnusedMcpRuntime),
     );
     assert!(bindings.admitted_tools().is_some());
     assert_eq!(
