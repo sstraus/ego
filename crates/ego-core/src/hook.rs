@@ -1,14 +1,15 @@
 //! Typed hook catalogue admission and durable invocation policy.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use futures::lock::Mutex as AsyncMutex;
+use futures::channel::oneshot;
+use futures::future::join_all;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::config::{ConfigLayer, Source, Sourced, Trust};
@@ -844,6 +845,7 @@ impl EffectScope {
 /// Runtime-only invocation material handed to exactly one handler adapter.
 #[derive(Debug, Clone)]
 pub struct HookInvocationRequest {
+    hook: HookId,
     handler: HookHandlerConfig,
     event: HookEvent,
     activation: HookActivation,
@@ -854,6 +856,7 @@ pub struct HookInvocationRequest {
 impl HookInvocationRequest {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
+        hook: HookId,
         handler: HookHandlerConfig,
         lifecycle: HookLifecycle,
         matcher: Option<HookMatcher>,
@@ -871,6 +874,7 @@ impl HookInvocationRequest {
             HookMatcher::Exact(_) => None,
         });
         Self {
+            hook,
             handler,
             event: HookEvent {
                 lifecycle,
@@ -882,6 +886,28 @@ impl HookInvocationRequest {
             invocation,
             effect_scope,
         }
+    }
+
+    fn from_occurrence(
+        hook: HookId,
+        handler: HookHandlerConfig,
+        event: HookEvent,
+        activation: HookActivation,
+        invocation: HookInvocationId,
+        effect_scope: EffectScope,
+    ) -> Self {
+        Self {
+            hook,
+            handler,
+            event,
+            activation,
+            invocation,
+            effect_scope,
+        }
+    }
+
+    pub fn hook(&self) -> HookId {
+        self.hook
     }
 
     pub fn handler(&self) -> &HookHandlerConfig {
@@ -935,6 +961,7 @@ impl From<HookPhase> for HookPhaseV1 {
 #[serde(deny_unknown_fields)]
 pub struct HookEventV1 {
     version: u8,
+    hook_id: HookId,
     invocation_id: HookInvocationId,
     activation: HookActivation,
     event: HookLifecycle,
@@ -948,6 +975,7 @@ pub struct HookEventV1 {
 #[serde(deny_unknown_fields)]
 struct HookEventWire {
     version: u8,
+    hook_id: HookId,
     invocation_id: HookInvocationId,
     activation: HookActivation,
     event: HookLifecycle,
@@ -977,6 +1005,7 @@ impl<'de> Deserialize<'de> for HookEventV1 {
         }
         Ok(Self {
             version: wire.version,
+            hook_id: wire.hook_id,
             invocation_id: wire.invocation_id,
             activation: wire.activation,
             event: wire.event,
@@ -995,6 +1024,7 @@ impl HookEventV1 {
             .map_err(HookWireError::catalogue)?;
         let value = Self {
             version: 1,
+            hook_id: request.hook,
             invocation_id: request.invocation,
             activation: request.activation,
             event: request.event.lifecycle,
@@ -1553,7 +1583,7 @@ pub trait HookPort: Send + Sync {
         activation: HookActivation,
         invocation: HookInvocationId,
     ) -> HookStartFuture<'a>;
-    fn invoke<'a>(&'a self, spec: &'a HookSpec, event: HookEvent) -> HookFuture<'a>;
+    fn invoke<'a>(&'a self, request: HookInvocationRequest) -> HookFuture<'a>;
     fn settled<'a>(
         &'a self,
         spec: &'a HookSpec,
@@ -1671,7 +1701,51 @@ impl HookRunResult {
 #[derive(Clone)]
 pub struct HookRunner {
     port: Arc<dyn HookPort>,
-    consumed_once: Arc<AsyncMutex<HashSet<(SkillInvocationId, HookId)>>>,
+    once: Arc<Mutex<OnceAdmission>>,
+}
+
+type OnceKey = (SkillInvocationId, HookId);
+
+#[derive(Default)]
+struct OnceAdmission {
+    consumed: HashSet<OnceKey>,
+    pending: HashMap<OnceKey, Vec<oneshot::Sender<()>>>,
+}
+
+struct OnceReservations {
+    once: Arc<Mutex<OnceAdmission>>,
+    keys: Vec<OnceKey>,
+}
+
+impl OnceReservations {
+    fn new(once: Arc<Mutex<OnceAdmission>>, keys: Vec<OnceKey>) -> Self {
+        Self { once, keys }
+    }
+
+    fn consume(&mut self, key: OnceKey) {
+        let mut once = self.once.lock().expect("once hook admission");
+        once.consumed.insert(key);
+        if let Some(waiters) = once.pending.remove(&key) {
+            wake_once_waiters(waiters);
+        }
+        self.keys.retain(|reserved| *reserved != key);
+    }
+
+    fn release(&mut self) {
+        let mut once = self.once.lock().expect("once hook admission");
+        for key in self.keys.drain(..) {
+            if let Some(waiters) = once.pending.remove(&key) {
+                wake_once_waiters(waiters);
+            }
+        }
+    }
+}
+
+impl Drop for OnceReservations {
+    fn drop(&mut self) {
+        // Cancellation before a durable start cannot leave a stale once bit.
+        self.release();
+    }
 }
 
 impl HookRunner {
@@ -1684,7 +1758,7 @@ impl HookRunner {
         P: HookPort + 'static,
         I: IntoIterator<Item = HookStartedEvidence>,
     {
-        let consumed_once = started
+        let consumed = started
             .into_iter()
             .filter_map(|record| match record.activation {
                 HookActivation::Skill { invocation } => Some((invocation, record.hook)),
@@ -1693,7 +1767,10 @@ impl HookRunner {
             .collect();
         Self {
             port: Arc::new(port),
-            consumed_once: Arc::new(AsyncMutex::new(consumed_once)),
+            once: Arc::new(Mutex::new(OnceAdmission {
+                consumed,
+                pending: HashMap::new(),
+            })),
         }
     }
 
@@ -1709,26 +1786,24 @@ impl HookRunner {
             return Ok(result);
         }
 
-        // The lock spans selection through every durable start. That makes a
-        // skill-once hook single-pending across concurrent owner occurrences.
-        let mut consumed_once = self.consumed_once.lock().await;
-        let mut specs = catalogue.matching(&occurrence.event);
-        specs.retain(|spec| {
-            let Some(invocation) = spec.skill_invocation() else {
-                return true;
-            };
-            if spec.once() && consumed_once.contains(&(invocation, spec.id())) {
-                result.skipped_once = true;
-                false
-            } else {
-                true
+        let (specs, mut reservations, skipped_once) =
+            self.reserve_plan(catalogue, &occurrence.event).await;
+        result.skipped_once = skipped_once;
+        let plan = match HookPlan::new(specs.iter().map(|spec| spec.id()).collect()) {
+            Ok(plan) => plan,
+            Err(error) => {
+                reservations.release();
+                return Err(HookRunError::new(error.to_string()));
             }
-        });
-        let plan = HookPlan::new(specs.iter().map(|spec| spec.id()).collect())
-            .map_err(|error| HookRunError::new(error.to_string()))?;
+        };
         let reached = match self.port.reached(&producer, &occurrence, &plan).await {
             Ok(HookReachOutcome::Fresh(evidence)) => {
-                validate_reached_evidence(&producer, &occurrence, &plan, &evidence)?;
+                if let Err(error) =
+                    validate_reached_evidence(&producer, &occurrence, &plan, &evidence)
+                {
+                    reservations.release();
+                    return Err(error);
+                }
                 evidence
             }
             Ok(HookReachOutcome::Recovered {
@@ -1736,11 +1811,13 @@ impl HookRunner {
                 starts,
                 settlements,
             }) => {
-                validate_reached_identity(&producer, &occurrence, &evidence)?;
-                validate_recovered_prefix(&evidence, &starts, &settlements)?;
-                for started in &starts {
-                    consume_once_evidence_if_needed(&mut consumed_once, started);
+                if let Err(error) = validate_reached_identity(&producer, &occurrence, &evidence)
+                    .and_then(|()| validate_recovered_prefix(&evidence, &starts, &settlements))
+                {
+                    reservations.release();
+                    return Err(error);
                 }
+                self.finish_recovered(&mut reservations, &starts);
                 apply_recovered_settlements(&mut result, phase, &evidence, &starts, &settlements);
                 if starts.len() != evidence.plan().len()
                     || settlements.len() != evidence.plan().len()
@@ -1750,11 +1827,18 @@ impl HookRunner {
                 return Ok(result);
             }
             Err(HookReachError::Durable { evidence, .. }) => {
-                validate_reached_evidence(&producer, &occurrence, &plan, &evidence)?;
+                if let Err(error) =
+                    validate_reached_evidence(&producer, &occurrence, &plan, &evidence)
+                {
+                    reservations.release();
+                    return Err(error);
+                }
+                reservations.release();
                 record_occurrence_uncertainty(&mut result, phase, &evidence, None);
                 return Ok(result);
             }
             Err(HookReachError::Absent(_)) => {
+                reservations.release();
                 record_absent_failure(&mut result, phase);
                 return Ok(result);
             }
@@ -1775,23 +1859,44 @@ impl HookRunner {
             {
                 Ok(evidence) => evidence,
                 Err(HookStartError::Durable { evidence, .. }) => {
-                    validate_start_evidence(spec, &reached, invocation, activation, evidence)?;
-                    consume_once_evidence_if_needed(&mut consumed_once, &evidence);
+                    if let Err(error) =
+                        validate_start_evidence(spec, &reached, invocation, activation, evidence)
+                    {
+                        reservations.release();
+                        return Err(error);
+                    }
+                    self.finish_start(&mut reservations, &evidence);
+                    reservations.release();
                     record_occurrence_uncertainty(&mut result, phase, &reached, Some(&evidence));
                     return Ok(result);
                 }
                 Err(HookStartError::Absent(_)) => {
+                    reservations.release();
                     record_occurrence_uncertainty(&mut result, phase, &reached, None);
                     return Ok(result);
                 }
             };
-            validate_start_evidence(spec, &reached, invocation, activation, started)?;
-            consume_once_evidence_if_needed(&mut consumed_once, &started);
+            if let Err(error) =
+                validate_start_evidence(spec, &reached, invocation, activation, started)
+            {
+                reservations.release();
+                return Err(error);
+            }
+            self.finish_start(&mut reservations, &started);
             result.started_invocation = true;
 
-            let invoked = self.port.invoke(spec, occurrence.event.clone()).await;
+            let request = HookInvocationRequest::from_occurrence(
+                spec.id(),
+                spec.handler().clone(),
+                occurrence.event.clone(),
+                started.activation(),
+                started.invocation(),
+                EffectScope::new(spec.handler().timeout_for(occurrence.event.lifecycle)),
+            );
+            let invoked = self.port.invoke(request).await;
             let settled = normalize_result(phase, occurrence.event.lifecycle, invoked);
             if self.port.settled(spec, started, &settled).await.is_err() {
+                reservations.release();
                 record_occurrence_uncertainty(&mut result, phase, &reached, Some(&started));
                 return Ok(result);
             }
@@ -1804,6 +1909,98 @@ impl HookRunner {
             );
         }
         Ok(result)
+    }
+
+    async fn reserve_plan<'a>(
+        &self,
+        catalogue: &'a HookCatalogue,
+        event: &HookEvent,
+    ) -> (Vec<&'a HookSpec>, OnceReservations, bool) {
+        loop {
+            let matching = catalogue.matching(event);
+            let waiting = {
+                let mut once = self.once.lock().expect("once hook admission");
+                let mut waiting = Vec::new();
+                for spec in &matching {
+                    let Some(key) = once_key(spec) else {
+                        continue;
+                    };
+                    if let Some(waiters) = once.pending.get_mut(&key) {
+                        let (sender, receiver) = oneshot::channel();
+                        waiters.push(sender);
+                        waiting.push(receiver);
+                    }
+                }
+                if !waiting.is_empty() {
+                    waiting
+                } else {
+                    let mut skipped = false;
+                    let mut reservations = Vec::new();
+                    let specs = matching
+                        .into_iter()
+                        .filter(|spec| {
+                            let Some(key) = once_key(spec) else {
+                                return true;
+                            };
+                            if once.consumed.contains(&key) {
+                                skipped = true;
+                                return false;
+                            }
+                            once.pending.insert(key, Vec::new());
+                            reservations.push(key);
+                            true
+                        })
+                        .collect();
+                    // Reserve the complete plan before its durable reach so a
+                    // concurrent occurrence cannot admit a later once spec.
+                    return (
+                        specs,
+                        OnceReservations::new(Arc::clone(&self.once), reservations),
+                        skipped,
+                    );
+                }
+            };
+
+            let _ = join_all(waiting).await;
+        }
+    }
+
+    fn finish_start(
+        &self,
+        reservations: &mut OnceReservations,
+        evidence: &HookStartedEvidence,
+    ) {
+        let key = match evidence.activation() {
+            HookActivation::Skill { invocation } => (invocation, evidence.hook()),
+            HookActivation::Persistent => return,
+        };
+        reservations.consume(key);
+    }
+
+    fn finish_recovered(
+        &self,
+        reservations: &mut OnceReservations,
+        starts: &[HookStartedEvidence],
+    ) {
+        for started in starts {
+            self.finish_start(reservations, started);
+        }
+        reservations.release();
+    }
+}
+
+fn once_key(spec: &HookSpec) -> Option<OnceKey> {
+    if spec.once() {
+        spec.skill_invocation()
+            .map(|invocation| (invocation, spec.id()))
+    } else {
+        None
+    }
+}
+
+fn wake_once_waiters(waiters: Vec<oneshot::Sender<()>>) {
+    for waiter in waiters {
+        let _ = waiter.send(());
     }
 }
 
@@ -1880,15 +2077,6 @@ fn validate_start_evidence(
         ));
     }
     Ok(())
-}
-
-fn consume_once_evidence_if_needed(
-    consumed: &mut HashSet<(SkillInvocationId, HookId)>,
-    evidence: &HookStartedEvidence,
-) {
-    if let HookActivation::Skill { invocation } = evidence.activation() {
-        consumed.insert((invocation, evidence.hook()));
-    }
 }
 
 fn normalize_result(
