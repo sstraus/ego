@@ -1017,8 +1017,11 @@ fn foreign_port_failure_after_settlement_does_not_complete_or_retry_the_call() {
             let question = events
                 .iter()
                 .find_map(|event| {
-                    matches!(event.kind, EventKind::QuestionRequested { .. })
-                        .then_some(event.env.item.expect("question item identity"))
+                    if matches!(event.kind, EventKind::QuestionRequested { .. }) {
+                        Some(event.env.item.expect("question item identity"))
+                    } else {
+                        None
+                    }
                 })
                 .expect("foreign question request");
             assert!(
