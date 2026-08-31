@@ -1,26 +1,28 @@
 //! RED contracts for the borrow-scoped shared session hook runtime.
 
+use std::future::Future;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use std::task::{Context, Poll};
 
 use ego_core::event::domain::{DomainEvent, EventKind};
 use ego_core::event::hook::{
-    HookDecision, HookInvocationId, HookLifecycle, HookOccurrenceKey,
-    HookOccurrenceOwner, HookOutcome, HookPlan, HookResult, HookSubject,
+    HookDecision, HookLifecycle, HookOccurrenceKey, HookOccurrenceOwner, HookOutcome,
 };
 use ego_core::event::id::{Producer, Seq, SessionId, TurnId};
 use ego_core::event::time::{Clock, Timestamp};
 use ego_core::config::{ConfigLayer, Source, Trust};
 use ego_core::hook::{
-    HookCatalogue, HookEvent, HookFuture, HookInvocationRequest, HookLifecycleDispatcher, HookPort,
-    HookRecordFuture, HookReachFuture, HookReachedEvidence, HookRunner, HookSpec,
-    HookStartFuture, HookStartedEvidence, SessionHookRuntime,
+    HookCatalogue, HookEvent, HookFuture, HookInvocationPort, HookInvocationRequest,
+    HookLifecycleDispatcher, HookRunner, SessionHookRuntime,
 };
+use ego_core::mcp::{ForeignQuestionPort, McpRuntimeBinding, ToolExecution};
 use ego_core::sink::NullSink;
 use ego_core::state::SessionState;
 use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
-use ego_core::turn::{CancelToken, Journal, SharedJournal};
+use ego_core::suspension::ResumeFloor;
+use ego_core::turn::{CancelToken, Journal, SharedJournal, ToolEffectPorts};
+use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 
 #[derive(Default)]
@@ -101,31 +103,7 @@ impl RecordingPort {
     }
 }
 
-impl HookPort for RecordingPort {
-    fn reached<'a>(
-        &'a self,
-        _producer: &'a Producer,
-        _occurrence: &'a ego_core::hook::HookOccurrence,
-        _plan: &'a HookPlan,
-    ) -> HookReachFuture<'a> {
-        Box::pin(std::future::ready(Err(ego_core::hook::HookReachError::Absent(
-            ego_core::hook::HookRunError::new("journal is supplied by SessionHookRuntime"),
-        ))))
-    }
-
-    fn started<'a>(
-        &'a self,
-        _spec: &'a HookSpec,
-        _occurrence: &'a ego_core::hook::HookOccurrence,
-        _reached: &'a HookReachedEvidence,
-        _activation: ego_core::event::hook::HookActivation,
-        _invocation: HookInvocationId,
-    ) -> HookStartFuture<'a> {
-        Box::pin(std::future::ready(Err(ego_core::hook::HookStartError::Absent(
-            ego_core::hook::HookRunError::new("journal is supplied by SessionHookRuntime"),
-        ))))
-    }
-
+impl HookInvocationPort for RecordingPort {
     fn invoke<'a>(&'a self, request: HookInvocationRequest) -> HookFuture<'a> {
         self.calls.lock().expect("hook calls").push(request);
         let blocked = self.blocked.lock().expect("hook block").take();
@@ -141,19 +119,6 @@ impl HookPort for RecordingPort {
         ))))
     }
 
-    fn settled<'a>(
-        &'a self,
-        _spec: &'a HookSpec,
-        _started: HookStartedEvidence,
-        _result: &'a HookResult,
-    ) -> HookRecordFuture<'a> {
-        Box::pin(std::future::ready(Ok(())))
-    }
-}
-
-fn empty_catalogue() -> HookCatalogue {
-    HookCatalogue::admit_typed(&[], &[], ego_core::config::Trust::Trusted)
-        .expect("empty catalogue")
 }
 
 fn active_catalogue() -> HookCatalogue {
@@ -169,6 +134,7 @@ fn runtime_fixture(blocked: bool) -> (
     SessionHookRuntime<'static>,
     Arc<RecordingPort>,
     &'static Store,
+    SessionId,
     TurnId,
     Option<futures::channel::oneshot::Sender<()>>,
 ) {
@@ -193,40 +159,33 @@ fn runtime_fixture(blocked: bool) -> (
         (RecordingPort::default(), None)
     };
     let invocation = Arc::new(port);
-    let dispatcher = HookLifecycleDispatcher::new(
-        HookRunner::new(RecordingPort::default()),
-        active_catalogue(),
-    );
+    let dispatcher = HookLifecycleDispatcher::new(HookRunner::new(), active_catalogue());
     let runtime = SessionHookRuntime::new(
         dispatcher,
         shared,
         Arc::clone(&invocation),
         CancelToken::new(),
         Instant::now() + Duration::from_secs(60),
-        ego_core::hook::HookCausality::turn(turn),
+        ego_core::hook::HookCausality::session(session, turn),
     );
-    (runtime, invocation, store, turn, release)
+    (runtime, invocation, store, session, turn, release)
 }
 
-fn occurrence(lifecycle: HookLifecycle, turn: TurnId, n: u128) -> ego_core::hook::HookOccurrence {
+fn occurrence(
+    lifecycle: HookLifecycle,
+    session: SessionId,
+    _n: u128,
+) -> ego_core::hook::HookOccurrence {
     ego_core::hook::HookOccurrence::new(
-        HookOccurrenceKey::new(
-            lifecycle,
-            HookOccurrenceOwner::Event {
-                event: serde_json::from_str(&format!(
-                    "\"00000000-0000-7000-8000-{n:012x}\""
-                ))
-                .expect("event id"),
-            },
-        ),
-        HookEvent::turn(lifecycle, HookSubject::Turn { turn }),
+        HookOccurrenceKey::new(lifecycle, HookOccurrenceOwner::Session { session }),
+        HookEvent::session(lifecycle),
     )
     .expect("matching occurrence")
 }
 
 #[test]
 fn normal_append_and_two_hook_occurrences_share_one_sequence_and_state() {
-    let (runtime, _invocation, store, turn, release) = runtime_fixture(false);
+    let (runtime, _invocation, store, session, turn, release) = runtime_fixture(false);
     let normal = runtime
         .journal()
         .append(
@@ -240,12 +199,12 @@ fn normal_append_and_two_hook_occurrences_share_one_sequence_and_state() {
         .expect("normal append");
     futures::executor::block_on(runtime.dispatch(
         Producer::Main,
-        occurrence(HookLifecycle::SessionStart, turn, 1),
+        occurrence(HookLifecycle::SessionStart, session, 1),
     ))
     .expect("first hook");
     futures::executor::block_on(runtime.dispatch(
         Producer::Main,
-        occurrence(HookLifecycle::SessionEnd, turn, 2),
+        occurrence(HookLifecycle::SessionEnd, session, 2),
     ))
     .expect("second hook");
     if let Some(release) = release {
@@ -259,15 +218,27 @@ fn normal_append_and_two_hook_occurrences_share_one_sequence_and_state() {
     for event in &events {
         assert_eq!(event.env.seq, expected.next());
     }
-    assert_eq!(runtime.state().last_seq, events[2].env.seq);
+    assert_eq!(runtime.state().last_seq, events.last().expect("events").env.seq);
+    let state = runtime.state();
+    assert_eq!(state.hook_occurrences().len(), 2);
+    assert_eq!(
+        state
+            .hook_occurrences()
+            .iter()
+            .map(|occurrence| occurrence.starts().len())
+            .sum::<usize>(),
+        1,
+        "the reached occurrence records its durable start"
+    );
+    assert_eq!(state.hook_settlements().len(), 1);
 }
 
 #[test]
 fn recovered_completed_occurrence_does_not_invoke_and_state_keeps_all_facts() {
-    let (runtime, invocation, store, turn, release) = runtime_fixture(false);
+    let (runtime, invocation, store, session, _turn, release) = runtime_fixture(false);
     futures::executor::block_on(runtime.dispatch(
         Producer::Main,
-        occurrence(HookLifecycle::SessionStart, turn, 3),
+        occurrence(HookLifecycle::SessionStart, session, 3),
     ))
     .expect("first dispatch");
     let first_events = store.events().len();
@@ -276,7 +247,7 @@ fn recovered_completed_occurrence_does_not_invoke_and_state_keeps_all_facts() {
     assert!(release.is_none());
     futures::executor::block_on(runtime.dispatch(
         Producer::Main,
-        occurrence(HookLifecycle::SessionStart, turn, 3),
+        occurrence(HookLifecycle::SessionStart, session, 3),
     ))
     .expect("recovered dispatch");
     assert_eq!(invocation.calls(), first_calls, "recovery never invokes again");
@@ -289,10 +260,10 @@ fn recovered_completed_occurrence_does_not_invoke_and_state_keeps_all_facts() {
 
 #[test]
 fn blocked_invocation_does_not_hold_journal_lock_across_await() {
-    let (runtime, _invocation, _store, turn, release) = runtime_fixture(true);
+    let (runtime, _invocation, _store, session, turn, release) = runtime_fixture(true);
     let mut blocked = Box::pin(runtime.dispatch(
         Producer::Main,
-        occurrence(HookLifecycle::SessionStart, turn, 4),
+        occurrence(HookLifecycle::SessionStart, session, 4),
     ));
     let waker = futures::task::noop_waker_ref();
     let mut context = Context::from_waker(waker);
@@ -312,18 +283,21 @@ fn blocked_invocation_does_not_hold_journal_lock_across_await() {
 
 #[test]
 fn finalization_rejects_live_append_handles_then_succeeds_after_ordered_teardown() {
-    let (runtime, _invocation, _store, _turn, _release) = runtime_fixture(false);
+    let (runtime, _invocation, _store, _session, _turn, _release) = runtime_fixture(false);
     let journal = runtime.journal().clone();
     assert!(journal.try_into_state().is_err(), "live runtime retains append authority");
+
+    let (runtime, _invocation, _store, _session, _turn, _release) = runtime_fixture(false);
+    let journal = runtime.journal().clone();
     drop(runtime);
     assert!(journal.try_into_state().is_ok(), "ordered teardown releases authority");
 }
 
 #[test]
 fn session_start_and_end_are_exact_once_and_reuse_durable_envelopes() {
-    let (runtime, _invocation, store, turn, release) = runtime_fixture(false);
-    let start = occurrence(HookLifecycle::SessionStart, turn, 5);
-    let end = occurrence(HookLifecycle::SessionEnd, turn, 6);
+    let (runtime, _invocation, store, session, _turn, release) = runtime_fixture(false);
+    let start = occurrence(HookLifecycle::SessionStart, session, 5);
+    let end = occurrence(HookLifecycle::SessionEnd, session, 6);
     futures::executor::block_on(runtime.dispatch(Producer::Main, start.clone())).expect("start");
     futures::executor::block_on(runtime.dispatch(Producer::Main, start)).expect("replayed start");
     futures::executor::block_on(runtime.dispatch(Producer::Main, end.clone())).expect("end");
@@ -337,4 +311,36 @@ fn session_start_and_end_are_exact_once_and_reuse_durable_envelopes() {
             .count(),
         2
     );
+}
+
+struct RejectingForeignPort;
+
+impl ForeignQuestionPort for RejectingForeignPort {
+    fn resume<'a>(
+        &'a self,
+        _continuation_id: &'a str,
+        _canonical_json: &'a str,
+    ) -> BoxFuture<'a, Result<ToolExecution, String>> {
+        Box::pin(async { Err("runtime-bound port was not invoked".to_owned()) })
+    }
+}
+
+#[derive(Default)]
+struct RuntimeBinding;
+
+impl McpRuntimeBinding for RuntimeBinding {
+    fn foreign_question_port<'a>(
+        &self,
+        _runtime: SessionHookRuntime<'a>,
+        _floor: ResumeFloor,
+        _effects: ToolEffectPorts<'a>,
+    ) -> Arc<dyn ForeignQuestionPort + 'a> {
+        Arc::new(RejectingForeignPort)
+    }
+}
+
+#[test]
+fn guarded_mcp_resume_accepts_object_safe_borrow_scoped_runtime() {
+    let binding: Arc<dyn McpRuntimeBinding> = Arc::new(RuntimeBinding);
+    let _object_safe = binding;
 }
