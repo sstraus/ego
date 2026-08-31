@@ -181,12 +181,26 @@ impl McpCandidateAdmission for FakeAdmission {
 struct CountingTool {
     name: String,
     dropped: Arc<AtomicUsize>,
+    parameters: serde_json::Value,
 }
 impl CountingTool {
     fn new(name: &str, dropped: Arc<AtomicUsize>) -> Arc<Self> {
         Arc::new(Self {
             name: name.to_owned(),
             dropped,
+            parameters: json!({"type":"object","additionalProperties":false}),
+        })
+    }
+
+    fn with_parameters(
+        name: &str,
+        dropped: Arc<AtomicUsize>,
+        parameters: serde_json::Value,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            name: name.to_owned(),
+            dropped,
+            parameters,
         })
     }
 }
@@ -200,7 +214,7 @@ impl CountingTool {
         ego_core::generator::types::ToolDescriptor {
             name: self.name.clone(),
             description: "counting MCP test tool".to_owned(),
-            parameters: json!({"type":"object","additionalProperties":false}),
+            parameters: self.parameters.clone(),
         }
     }
 }
@@ -295,6 +309,28 @@ fn config_two() -> ego_core::config::ResolvedMcpConfig {
         .expect("resolved MCP config")
         .mcp
 }
+
+fn config_changed() -> ego_core::config::ResolvedMcpConfig {
+    let layer = ConfigLayer::parse(
+        Source::User,
+        "[mcp.servers.alpha]\ntransport = 'stdio'\ncommand = 'mcp-alpha'\nargs = ['--changed']\n",
+    )
+    .expect("valid changed MCP layer");
+    resolve(&[layer], Trust::Trusted, None)
+        .expect("resolved changed MCP config")
+        .mcp
+}
+
+fn http_config() -> ego_core::config::ResolvedMcpConfig {
+    let layer = ConfigLayer::parse(
+        Source::User,
+        "[mcp.servers.alpha]\ntransport = 'http'\nurl = 'https://mcp-alpha.example.test/mcp'\n",
+    )
+    .expect("valid HTTP MCP layer");
+    resolve(&[layer], Trust::Trusted, None)
+        .expect("resolved HTTP MCP config")
+        .mcp
+}
 fn refresh_with(
     config: ego_core::config::ResolvedMcpConfig,
     trigger: RegistryTrigger,
@@ -309,6 +345,30 @@ fn refresh_zeta(trigger: RegistryTrigger) -> McpRegistryRefresh {
         RegistryScope::Server("zeta".parse().expect("server name")),
     )
     .expect("registry refresh")
+}
+
+fn fixture_admission(outcomes: Vec<Outcome>) -> Arc<FakeAdmission> {
+    let admission = Arc::new(FakeAdmission {
+        state: Arc::new(Mutex::new(AdmissionState::default())),
+        gate: Arc::new(Mutex::new(None)),
+    });
+    for outcome in outcomes {
+        admission.push(outcome);
+    }
+    admission
+}
+
+async fn one_publication(
+    config: ResolvedMcpConfig,
+    tools: Vec<Arc<CountingTool>>,
+) -> (Arc<McpRegistryController>, McpRegistryPublication) {
+    let admission = fixture_admission(vec![Outcome::Candidate(candidate(SERVER, tools))]);
+    let (registry, _) = controller(admission);
+    let publication = registry
+        .reconcile(refresh_with(config, RegistryTrigger::Add))
+        .await
+        .expect("fixture publication");
+    (registry, publication)
 }
 
 fn alpha_admission() -> (Arc<McpServerAdmission>, McpConfigProvenance) {
@@ -1080,4 +1140,168 @@ async fn oauth_without_cimd_is_authority_absent_without_fabricated_authorization
         .iter()
         .any(|secret| error.contains(secret))
     }));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn identical_authority_has_stable_capture_identity_across_publication_history() {
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let first_admission = fixture_admission(vec![
+        Outcome::Candidate(candidate(
+            SERVER,
+            vec![CountingTool::new("alpha_tool", Arc::clone(&dropped))],
+        )),
+        Outcome::Candidate(candidate(
+            SERVER,
+            vec![CountingTool::new("alpha_tool", Arc::clone(&dropped))],
+        )),
+    ]);
+    let (first_registry, _) = controller(first_admission);
+    first_registry
+        .reconcile(refresh(RegistryTrigger::Add))
+        .await
+        .expect("first publication");
+    let first = first_registry
+        .reconcile(refresh(RegistryTrigger::Reload))
+        .await
+        .expect("second publication");
+
+    let (second_registry, second) = one_publication(
+        config(),
+        vec![CountingTool::new("alpha_tool", Arc::clone(&dropped))],
+    )
+    .await;
+
+    assert_ne!(first.generation(), second.generation());
+    assert_ne!(
+        first.capture().stable_fingerprint(),
+        first.capture().generation(),
+        "stable identity is not the process-local publication generation"
+    );
+    assert_eq!(
+        first.capture().stable_fingerprint(),
+        second.capture().stable_fingerprint(),
+        "identical authority must reproduce its content-addressed capture identity"
+    );
+    assert_eq!(
+        second_registry.publication().generation(),
+        second.generation()
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn every_authority_relevant_capture_drift_changes_stable_identity() {
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let (_, baseline) = one_publication(
+        config(),
+        vec![CountingTool::new("alpha_tool", Arc::clone(&dropped))],
+    )
+    .await;
+    let (_, config_drift) = one_publication(
+        config_changed(),
+        vec![CountingTool::new("alpha_tool", Arc::clone(&dropped))],
+    )
+    .await;
+    let (_, transport_drift) = one_publication(
+        http_config(),
+        vec![CountingTool::new("alpha_tool", Arc::clone(&dropped))],
+    )
+    .await;
+    let (_, operation_and_inventory_drift) = one_publication(
+        config(),
+        vec![CountingTool::new("renamed_tool", Arc::clone(&dropped))],
+    )
+    .await;
+    let (_, schema_drift) = one_publication(
+        config(),
+        vec![CountingTool::with_parameters(
+            "alpha_tool",
+            Arc::clone(&dropped),
+            json!({
+                "type": "object",
+                "properties": {"mode": {"type": "string"}},
+                "required": ["mode"],
+                "additionalProperties": false
+            }),
+        )],
+    )
+    .await;
+    let stable = baseline.capture().stable_fingerprint();
+
+    assert_ne!(stable, config_drift.capture().stable_fingerprint());
+    assert_ne!(stable, transport_drift.capture().stable_fingerprint());
+    assert_ne!(
+        stable,
+        operation_and_inventory_drift.capture().stable_fingerprint()
+    );
+    assert_ne!(stable, schema_drift.capture().stable_fingerprint());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn controller_resolves_the_exact_historical_capture_and_fails_closed_unknown_identity() {
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let admission = fixture_admission(vec![
+        Outcome::Candidate(candidate(
+            SERVER,
+            vec![CountingTool::new("old_tool", Arc::clone(&dropped))],
+        )),
+        Outcome::Candidate(candidate(
+            SERVER,
+            vec![CountingTool::new("current_tool", Arc::clone(&dropped))],
+        )),
+    ]);
+    let (registry, _) = controller(admission);
+    let old = registry
+        .reconcile(refresh(RegistryTrigger::Add))
+        .await
+        .expect("old publication");
+    let old_fingerprint = old.capture().stable_fingerprint().to_owned();
+    let current = registry
+        .reconcile(refresh(RegistryTrigger::Reload))
+        .await
+        .expect("current publication");
+    assert_ne!(old.generation(), current.generation());
+    assert_ne!(
+        old.capture().stable_fingerprint(),
+        current.capture().stable_fingerprint()
+    );
+
+    let resolved = registry
+        .resolve_capture(&old_fingerprint)
+        .expect("historical capture remains addressable by stable identity");
+    assert_eq!(resolved.generation(), old.capture().generation());
+    assert_eq!(resolved.stable_fingerprint(), old_fingerprint);
+    assert_eq!(resolved.tools()[0].descriptor().name, "old_tool");
+    assert!(registry.resolve_capture("sha256:unknown-capture").is_err());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn fresh_controller_reconstructs_matching_capture_but_not_drift_or_removal() {
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let (_, original) = one_publication(
+        config(),
+        vec![CountingTool::new("alpha_tool", Arc::clone(&dropped))],
+    )
+    .await;
+    let stable = original.capture().stable_fingerprint().to_owned();
+
+    let (fresh, matching) = one_publication(
+        config(),
+        vec![CountingTool::new("alpha_tool", Arc::clone(&dropped))],
+    )
+    .await;
+    assert_eq!(matching.capture().stable_fingerprint(), stable);
+    let resolved = fresh
+        .resolve_capture(&stable)
+        .expect("full re-admission reproduces the durable capture identity");
+    assert_eq!(resolved.stable_fingerprint(), stable);
+
+    let (drifted, _) = one_publication(
+        config_changed(),
+        vec![CountingTool::new("alpha_tool", Arc::clone(&dropped))],
+    )
+    .await;
+    assert!(drifted.resolve_capture(&stable).is_err());
+
+    let (removed, _) = one_publication(empty_config(), Vec::new()).await;
+    assert!(removed.resolve_capture(&stable).is_err());
 }
