@@ -1,11 +1,14 @@
 //! RED contract for M4 S1's one-way codec and snapshot migration.
 
 use ego_core::event::id::{Seq, SessionId};
+use ego_core::question::QuestionTarget;
 use ego_core::state::SessionState;
 use ego_core::store::codec::{decode_line, StoreLine};
+use ego_core::store::session_store::{SessionEntry, SessionStore};
 use ego_tools::store::{
     JsonlStore, LeaseInputs, OsIo, Snapshot, SnapshotRejection, SNAPSHOT_VERSION,
 };
+use futures::StreamExt;
 use std::path::Path;
 use std::time::Duration;
 use tempfile::tempdir;
@@ -71,7 +74,7 @@ mod regression_case {
         let records = lines
             .map(|line| decode_line(line).expect("migrated record"))
             .collect::<Vec<_>>();
-        assert_eq!(records.len(), 9);
+        assert_eq!(records.len(), 11);
         for (position, record) in records.iter().enumerate() {
             let StoreLine::Record(record) = record else {
                 panic!("recognized codec-10 record was not retained")
@@ -87,6 +90,27 @@ mod regression_case {
             .open_writer(&id, lease_inputs())
             .expect("migrated log reopens through the owned path");
         assert!(reopened.repair.is_clean());
+        let entries = futures::executor::block_on(
+            SessionStore::read(&reopen_store, &id)
+                .unwrap()
+                .collect::<Vec<_>>(),
+        );
+        let mut state = SessionState::default();
+        for entry in entries {
+            if let SessionEntry::Event(event) = entry.expect("migrated entry reads") {
+                state.apply(&event);
+            }
+        }
+        let pending = state
+            .pending_question()
+            .expect("legacy QuestionRequested remains pending after migration");
+        let tool_call: ego_core::event::id::ItemId =
+            "00000000-0000-0000-0000-000000000016".parse().unwrap();
+        assert_eq!(
+            pending.target(),
+            &QuestionTarget::ModelTool { tool_call },
+            "v10 tool_call migrates to the exact model-tool target"
+        );
     }
 
     #[test]
