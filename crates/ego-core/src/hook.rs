@@ -1717,6 +1717,7 @@ pub type HookFuture<'a> =
 
 /// Synchronous durable authority used by the static lifecycle policy.
 pub trait HookJournalPort: Send + Sync {
+    #[allow(clippy::result_large_err)]
     fn reached(
         &self,
         producer: &Producer,
