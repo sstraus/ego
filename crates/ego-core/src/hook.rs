@@ -1965,11 +1965,7 @@ impl HookRunner {
         }
     }
 
-    fn finish_start(
-        &self,
-        reservations: &mut OnceReservations,
-        evidence: &HookStartedEvidence,
-    ) {
+    fn finish_start(&self, reservations: &mut OnceReservations, evidence: &HookStartedEvidence) {
         let key = match evidence.activation() {
             HookActivation::Skill { invocation } => (invocation, evidence.hook()),
             HookActivation::Persistent => return,
