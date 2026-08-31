@@ -70,7 +70,7 @@ use control::{BoundaryIntent, ControlIntent};
 pub use control::{
     ControlError, InteractiveControl, InteractiveIngress, QueueStatus, interactive_control,
 };
-pub use journal::Journal;
+pub use journal::{Journal, SharedJournal, SharedJournalError};
 pub use mcp_registry::{
     McpRegistryEvent, McpRegistryJournal, McpRegistryJournalError, McpRegistryJournalErrorKind,
     McpRegistryJournalOperation,

@@ -6,6 +6,9 @@
 //! while `tests/reducer.rs:143` reuses the tool's. That is what a contract
 //! with no implementation looks like.
 
+use std::fmt;
+use std::sync::{Arc, Mutex, MutexGuard};
+
 use crate::event::domain::{DomainEvent, Envelope, EventKind};
 use crate::event::hook::{
     HookActivation, HookId, HookInvocationId, HookOccurrenceKey, HookPlan, HookResult, HookSubject,
@@ -49,6 +52,140 @@ pub struct Journal<'a> {
     /// and carrying on does not restart its ordering.
     seq: Seq,
     state: SessionState,
+}
+
+/// A cloneable append authority for one borrow-scoped session journal.
+///
+/// The mutex serialises only synchronous journal operations. Store append,
+/// reduction, and publication still happen in [`Journal::append_with_producer`]
+/// and in their existing order; this handle adds no second write path.
+#[derive(Clone)]
+pub struct SharedJournal<'s> {
+    inner: Arc<Mutex<Journal<'s>>>,
+}
+
+/// Why a shared journal operation could not complete.
+#[derive(Debug)]
+pub enum SharedJournalError {
+    /// Another append-capable handle still owns the journal at finalization.
+    InUse,
+    /// A prior panic poisoned the journal lock, so no further write is safe.
+    Synchronization,
+    /// The sole underlying journal append failed.
+    Store(StoreError),
+}
+
+impl fmt::Display for SharedJournalError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InUse => f.write_str("the shared journal still has live append handles"),
+            Self::Synchronization => f.write_str("the shared journal lock is poisoned"),
+            Self::Store(error) => error.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for SharedJournalError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Store(error) => Some(error),
+            Self::InUse | Self::Synchronization => None,
+        }
+    }
+}
+
+impl From<StoreError> for SharedJournalError {
+    fn from(error: StoreError) -> Self {
+        Self::Store(error)
+    }
+}
+
+impl<'s> SharedJournal<'s> {
+    /// Wrap the session's sole journal in cloneable append authority.
+    pub fn new(journal: Journal<'s>) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(journal)),
+        }
+    }
+
+    fn lock(&self) -> Result<MutexGuard<'_, Journal<'s>>, SharedJournalError> {
+        self.inner
+            .lock()
+            .map_err(|_| SharedJournalError::Synchronization)
+    }
+
+    /// Append through the existing journal sequence.
+    pub fn append(
+        &self,
+        turn: TurnId,
+        item: Option<ItemId>,
+        parent: Option<EventId>,
+        kind: EventKind,
+    ) -> Result<EventId, SharedJournalError> {
+        self.lock()?.append(turn, item, parent, kind).map_err(Into::into)
+    }
+
+    /// Durably freeze a lifecycle plan through the existing journal.
+    pub fn hook_reached(
+        &self,
+        turn: TurnId,
+        item: Option<ItemId>,
+        parent: Option<EventId>,
+        occurrence: HookOccurrenceKey,
+        subject: HookSubject,
+        plan: HookPlan,
+    ) -> Result<HookReachedEvidence, SharedJournalError> {
+        self.lock()?
+            .hook_reached(turn, item, parent, occurrence, subject, plan)
+            .map_err(Into::into)
+    }
+
+    /// Durably record one hook delivery boundary through the existing journal.
+    #[allow(clippy::too_many_arguments)]
+    pub fn hook_started(
+        &self,
+        turn: TurnId,
+        item: Option<ItemId>,
+        reached: &HookReachedEvidence,
+        hook: HookId,
+        invocation: HookInvocationId,
+        activation: HookActivation,
+    ) -> Result<HookStartedEvidence, SharedJournalError> {
+        self.lock()?
+            .hook_started(turn, item, reached, hook, invocation, activation)
+            .map_err(Into::into)
+    }
+
+    /// Durably settle one hook start through the existing journal.
+    pub fn hook_settled(
+        &self,
+        turn: TurnId,
+        item: Option<ItemId>,
+        started: HookStartedEvidence,
+        result: HookResult,
+    ) -> Result<EventId, SharedJournalError> {
+        self.lock()?
+            .hook_settled(turn, item, started, result)
+            .map_err(Into::into)
+    }
+
+    /// Inspect current state without allowing a lock guard or reference to escape.
+    pub fn inspect<T>(
+        &self,
+        inspect: impl FnOnce(&SessionState) -> T,
+    ) -> Result<T, SharedJournalError> {
+        let journal = self.lock()?;
+        Ok(inspect(journal.state()))
+    }
+
+    /// Recover the exact final state once every other append handle is gone.
+    pub fn try_into_state(self) -> Result<SessionState, SharedJournalError> {
+        let journal = Arc::try_unwrap(self.inner).map_err(|_| SharedJournalError::InUse)?;
+        journal
+            .into_inner()
+            .map(Journal::into_state)
+            .map_err(|_| SharedJournalError::Synchronization)
+    }
 }
 
 impl<'a> Journal<'a> {

@@ -77,6 +77,7 @@
 //! refuse substitutions that cannot overspend.
 
 use std::fmt;
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
@@ -85,6 +86,7 @@ use crate::cost::{
     PricingRevision, ProviderCostRevision, RateSource, TokenCategory, UnknownCost,
 };
 use crate::event::id::GateId;
+use crate::generator::attempt::{AttemptStream, Settlement};
 use crate::generator::capabilities::ModelCapabilities;
 use crate::generator::types::GenRequest;
 use crate::state::Usage;
@@ -1451,6 +1453,157 @@ impl BudgetGate {
             exact,
             over_bound,
         })
+    }
+}
+
+/// An immutable view of one shared gate's accounting state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BudgetSnapshot {
+    id: GateId,
+    currency: CurrencyCode,
+    ledger: Ledger,
+    breached: Option<BoundBreach>,
+}
+
+impl BudgetSnapshot {
+    /// The gate whose immutable state this captures.
+    pub fn id(&self) -> GateId {
+        self.id
+    }
+
+    /// The session settlement currency.
+    pub fn currency(&self) -> CurrencyCode {
+        self.currency
+    }
+
+    /// The ledger at the instant the snapshot was taken.
+    pub fn ledger(&self) -> &Ledger {
+        &self.ledger
+    }
+
+    /// The breach that had closed the gate, if any.
+    pub fn breached(&self) -> Option<&BoundBreach> {
+        self.breached.as_ref()
+    }
+}
+
+/// A poisoned shared-budget lock. Every operation fails closed after this.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BudgetSynchronizationError;
+
+impl fmt::Display for BudgetSynchronizationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("the shared budget gate lock is poisoned")
+    }
+}
+
+impl std::error::Error for BudgetSynchronizationError {}
+
+/// Why a shared budget mutation could not complete.
+#[derive(Debug)]
+pub enum SharedBudgetError {
+    Synchronization(BudgetSynchronizationError),
+    Denied(BudgetDenied),
+    Reconcile(Box<ReconcileDenied>),
+}
+
+impl fmt::Display for SharedBudgetError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Synchronization(error) => error.fmt(f),
+            Self::Denied(error) => error.fmt(f),
+            Self::Reconcile(error) => error.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for SharedBudgetError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Synchronization(error) => Some(error),
+            Self::Denied(error) => Some(error),
+            Self::Reconcile(error) => Some(error.as_ref()),
+        }
+    }
+}
+
+struct SharedBudgetAuthority {
+    id: GateId,
+    gate: Mutex<BudgetGate>,
+}
+
+/// Cloneable authority over one root budget gate.
+///
+/// Reservations and attempt streams remain linear values. The lock is held
+/// only while minting a reservation, taking a snapshot, or consuming a fully
+/// polled [`AttemptStream`] into settlement.
+#[derive(Clone)]
+pub struct SharedBudgetGate {
+    inner: Arc<SharedBudgetAuthority>,
+}
+
+impl SharedBudgetGate {
+    /// Wrap one root gate in cloneable shared authority.
+    pub fn new(gate: BudgetGate) -> Self {
+        Self {
+            inner: Arc::new(SharedBudgetAuthority {
+                id: gate.id(),
+                gate: Mutex::new(gate),
+            }),
+        }
+    }
+
+    /// The immutable identity shared by every clone.
+    pub fn id(&self) -> GateId {
+        self.inner.id
+    }
+
+    /// Copy the gate's immutable accounting view without exposing its lock.
+    pub fn snapshot(&self) -> Result<BudgetSnapshot, BudgetSynchronizationError> {
+        let gate = self
+            .inner
+            .gate
+            .lock()
+            .map_err(|_| BudgetSynchronizationError)?;
+        Ok(BudgetSnapshot {
+            id: gate.id,
+            currency: gate.currency,
+            ledger: gate.ledger.clone(),
+            breached: gate.breached,
+        })
+    }
+
+    /// Reserve one generation while holding the gate only for admission.
+    pub fn reserve(
+        &self,
+        metering: &Metering,
+        rates: Option<&PricingQuote>,
+        req: &GenRequest,
+        caps: &ModelCapabilities,
+    ) -> Result<Reservation, SharedBudgetError> {
+        self.inner
+            .gate
+            .lock()
+            .map_err(|_| SharedBudgetError::Synchronization(BudgetSynchronizationError))?
+            .reserve(metering, rates, req, caps)
+            .map_err(SharedBudgetError::Denied)
+    }
+
+    /// Consume and settle a provider stream after polling has completed.
+    pub fn settle(&self, stream: AttemptStream) -> Result<Settlement, SharedBudgetError> {
+        let mut gate = self
+            .inner
+            .gate
+            .lock()
+            .map_err(|_| SharedBudgetError::Synchronization(BudgetSynchronizationError))?;
+        stream
+            .settle(&mut gate)
+            .map_err(SharedBudgetError::Reconcile)
+    }
+
+    /// Whether two handles carry the same root budget authority.
+    pub fn same_owner(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
     }
 }
 
