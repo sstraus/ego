@@ -28,7 +28,7 @@ use ego_core::generator::capabilities::{
 use ego_core::generator::fake::FakeGenerator;
 use ego_core::generator::port::AiEvent;
 use ego_core::generator::types::StopReason;
-use ego_core::mcp::{ForeignInputRequired, ToolExecution};
+use ego_core::mcp::{ForeignInputRequired, ForeignQuestionPort, ToolExecution};
 use ego_core::permit::fake::{FakeFs, FakeWriteTool};
 use ego_core::permit::{
     CanonPath, DuplexHandle, DuplexSpawner, GuardedIo, HttpRequest, OneHop, OneHopResponse,
@@ -323,6 +323,33 @@ struct ForeignInputTool {
     request: QuestionRequest,
 }
 
+#[derive(Default)]
+struct RecordingForeignQuestionPort {
+    calls: Mutex<Vec<(String, String)>>,
+}
+
+impl RecordingForeignQuestionPort {
+    fn calls(&self) -> Vec<(String, String)> {
+        self.calls.lock().expect("foreign port calls").clone()
+    }
+}
+
+impl ForeignQuestionPort for RecordingForeignQuestionPort {
+    fn resume<'a>(
+        &'a self,
+        continuation_id: &'a str,
+        canonical_json: &'a str,
+    ) -> BoxFuture<'a, Result<ToolExecution, String>> {
+        self.calls
+            .lock()
+            .expect("foreign port calls")
+            .push((continuation_id.to_owned(), canonical_json.to_owned()));
+        Box::pin(std::future::ready(Ok(ToolExecution::Complete(
+            ToolResult::builtin("foreign-complete"),
+        ))))
+    }
+}
+
 impl Tool for ForeignInputTool {
     fn descriptor(&self) -> ToolDescriptor {
         ToolDescriptor {
@@ -530,14 +557,17 @@ fn foreign_input_required_carries_question_request_and_non_secret_continuation_i
 
 #[test]
 fn foreign_input_required_is_projected_to_a_durable_pending_question() {
-    let generator = Arc::new(FakeGenerator::new(vec![vec![
-        AiEvent::ToolCall {
-            call_id: "mcp-input-call".into(),
-            name: "mcp_input".into(),
-            args: "{}".into(),
-        },
-        AiEvent::Stop(StopReason::ToolUse),
-    ]]));
+    let generator = Arc::new(FakeGenerator::new(vec![
+        vec![
+            AiEvent::ToolCall {
+                call_id: "mcp-input-call".into(),
+                name: "mcp_input".into(),
+                args: "{}".into(),
+            },
+            AiEvent::Stop(StopReason::ToolUse),
+        ],
+        vec![AiEvent::Stop(StopReason::Stop)],
+    ]));
     let store = MemoryStore::default();
     let clock = FixedClock;
     let sink = CollectingSink::new();
@@ -573,6 +603,7 @@ fn foreign_input_required_is_projected_to_a_durable_pending_question() {
         CanonPath::new("/ws"),
     );
     let source = Arc::new(FixedSource { generator });
+    let foreign_port = Arc::new(RecordingForeignQuestionPort::default());
     let mut turn = TurnLoop::new(
         Session {
             id: ego_core::event::id::SessionId::new(),
@@ -595,7 +626,8 @@ fn foreign_input_required_is_projected_to_a_durable_pending_question() {
         },
         tools,
     )
-    .with_elicitor(Arc::new(UnavailableElicitor));
+    .with_elicitor(Arc::new(UnavailableElicitor))
+    .with_foreign_question_port(foreign_port.clone());
 
     let outcome = futures::executor::block_on(turn.run("invoke the MCP operation"))
         .expect("foreign input suspension is a handled turn outcome");
@@ -615,6 +647,60 @@ fn foreign_input_required_is_projected_to_a_durable_pending_question() {
     };
     assert_eq!(*tool_call, pending.tool_call());
     assert_eq!(continuation_id, "regression_case");
+    let question = pending.item_id();
+    let answer = QuestionAnswer::from_json(pending.request(), r#"{"target":"staging"}"#)
+        .expect("schema-valid form answer");
+    let resumed = futures::executor::block_on(turn.resume_question(question, answer))
+        .expect("foreign continuation resumes the turn");
+    assert!(resumed.ok);
+    assert_eq!(
+        foreign_port.calls(),
+        vec![(
+            "regression_case".to_owned(),
+            r#"{"target":"staging"}"#.to_owned()
+        )]
+    );
+    let completed = store
+        .events()
+        .into_iter()
+        .find_map(|event| match event.kind {
+            EventKind::ToolCallCompleted { result, .. }
+                if result.model_text() == "foreign-complete" =>
+            {
+                Some(result)
+            }
+            _ => None,
+        })
+        .expect("foreign completion is the actual tool result");
+    assert_eq!(completed.model_text(), "foreign-complete");
+    let events = store.events();
+    let settled = events
+        .iter()
+        .position(|event| matches!(event.kind, EventKind::QuestionSettled { .. }))
+        .expect("QuestionSettled is durable before foreign resume");
+    let foreign_completion = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event.kind,
+                EventKind::ToolCallCompleted { ref result, .. }
+                    if result.model_text() == "foreign-complete"
+            )
+        })
+        .expect("foreign completion is durable");
+    assert!(settled < foreign_completion);
+    let duplicate = futures::executor::block_on(
+        turn.resume_question(
+            question,
+            QuestionAnswer::from_json(&foreign_question_request(), r#"{"target":"staging"}"#)
+                .expect("schema-valid duplicate answer"),
+        ),
+    );
+    assert!(
+        duplicate.is_err(),
+        "a settled foreign question cannot retry"
+    );
+    assert_eq!(foreign_port.calls().len(), 1);
     assert!(
         store
             .events()
