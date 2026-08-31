@@ -36,6 +36,8 @@ use ego_core::generator::capabilities::{
     CacheRetention, CancelSemantics, ImageInputSupport, ModelCapabilities, ReasoningCarryover,
     ReasoningEffortSupport, Transport,
 };
+use ego_core::hook::HookLifecycleDispatcher;
+use ego_core::mcp::{ForeignQuestionPort, McpRuntimeBinding, ToolExecution};
 use ego_core::public::{ItemKind, PublicEvent};
 use ego_core::run::{
     IdSource, RunAppend, RunExecutionBindings, RunExecutor, RunExecutorError, RunHandle, RunId,
@@ -43,8 +45,11 @@ use ego_core::run::{
 };
 use ego_core::state::SessionState;
 use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
+use ego_core::suspension::ResumeFloor;
 use ego_core::turn::CancelToken;
-use ego_core::turn::{AdmittedToolSource, CapturedToolCatalogue, ToolCatalogueError};
+use ego_core::turn::{
+    AdmittedToolSource, CapturedToolCatalogue, ToolCatalogueError, ToolEffectPorts,
+};
 use futures::channel::mpsc;
 use futures::future::{self, BoxFuture};
 use futures::stream::BoxStream;
@@ -251,6 +256,7 @@ impl AdmittedToolSource for RecordingMcpSource {
 struct RecordingMcpAdmission {
     source: Arc<dyn AdmittedToolSource>,
     errors: Vec<String>,
+    runtime: Arc<dyn McpRuntimeBinding>,
 }
 
 impl SessionMcpAdmission for RecordingMcpAdmission {
@@ -260,6 +266,38 @@ impl SessionMcpAdmission for RecordingMcpAdmission {
 
     fn mcp_errors(&self) -> &[String] {
         &self.errors
+    }
+
+    fn mcp_runtime(&self) -> Arc<dyn McpRuntimeBinding> {
+        Arc::clone(&self.runtime)
+    }
+}
+
+struct RejectingMcpPort;
+
+impl ForeignQuestionPort for RejectingMcpPort {
+    fn resume<'a>(
+        &'a self,
+        _continuation_id: &'a str,
+        _canonical_json: &'a str,
+    ) -> BoxFuture<'a, Result<ToolExecution, String>> {
+        Box::pin(future::ready(Err(
+            "prompt fixture must not invoke foreign resume".to_owned(),
+        )))
+    }
+}
+
+#[derive(Clone, Default)]
+struct RecordingMcpRuntime;
+
+impl McpRuntimeBinding for RecordingMcpRuntime {
+    fn foreign_question_port<'a>(
+        &self,
+        _dispatcher: HookLifecycleDispatcher,
+        _floor: ResumeFloor,
+        _effects: ToolEffectPorts<'a>,
+    ) -> Arc<dyn ForeignQuestionPort + 'a> {
+        Arc::new(RejectingMcpPort)
     }
 }
 
@@ -291,6 +329,7 @@ impl McpSessionAdmitter for RecordingMcpAdmitter {
         let admission = RecordingMcpAdmission {
             source: Arc::clone(&self.source) as Arc<dyn AdmittedToolSource>,
             errors: vec!["safe MCP diagnostic".to_owned()],
+            runtime: Arc::new(RecordingMcpRuntime),
         };
         let admission: Arc<dyn SessionMcpAdmission> = Arc::new(admission);
         Box::pin(future::ready(Ok(Some(admission))))
