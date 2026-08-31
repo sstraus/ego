@@ -641,3 +641,13 @@ fn direct_mcp_scope_keeps_runtime_owner_and_sessionless_controller_access() {
 
     let _ = scope_contract;
 }
+
+#[test]
+fn cli_has_one_hook_port_composite_for_all_typed_adapters() {
+    fn assert_hook_port<P: ego_core::hook::HookPort>() {}
+
+    // CLI owns the sole production-facing composition. It must route command,
+    // HTTP, MCP, and prompt handlers through their typed owners and reuse the
+    // session dispatcher rather than creating a second lifecycle path.
+    assert_hook_port::<ego_cli::hook::HookPortAdapter>();
+}

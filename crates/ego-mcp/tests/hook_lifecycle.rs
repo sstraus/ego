@@ -20,9 +20,9 @@ use ego_core::event::id::Producer;
 use ego_core::event::time::{Clock, Timestamp};
 use ego_core::generator::attempt::DeliveryCertainty;
 use ego_core::hook::{
-    HookCatalogue, HookEvent, HookFuture, HookLifecycleDispatcher, HookOccurrence, HookPort,
-    HookReachFuture, HookReachedEvidence, HookRecordFuture, HookRunner, HookSpec, HookStartFuture,
-    HookStartedEvidence,
+    EffectScope, HookCatalogue, HookEvent, HookFuture, HookHandlerConfig, HookInvocationRequest,
+    HookLifecycleDispatcher, HookOccurrence, HookPort, HookReachFuture, HookReachedEvidence,
+    HookRecordFuture, HookRunner, HookSpec, HookStartFuture, HookStartedEvidence,
 };
 use ego_core::mcp::{ForeignQuestionPort, ToolExecution};
 use ego_core::permit::{
@@ -1657,4 +1657,30 @@ async fn mismatched_capture_context_fails_closed_before_foreign_question_or_resu
     assert!(journal.events().is_empty());
     assert!(trace.events().is_empty());
     assert_eq!(spawner.calls(), 1, "only the initial admitted call ran");
+}
+
+#[test]
+fn mcp_hook_adapter_wire_retains_the_admitted_hook_identity() {
+    let request = HookInvocationRequest::new(
+        HookHandlerConfig::McpTool {
+            server: "server".to_owned(),
+            tool: "lookup".to_owned(),
+            input: json!({}),
+            timeout_seconds: Some(30),
+        },
+        HookLifecycle::PreToolUse,
+        None,
+        ego_core::event::hook::HookSubject::Session,
+        HookActivation::Persistent,
+        HookInvocationId::new(),
+        EffectScope::new(Duration::from_secs(30)),
+    );
+    let wire = serde_json::to_value(
+        ego_core::hook::HookEventV1::from_runtime(&request).expect("strict hook event"),
+    )
+    .expect("hook event wire");
+    assert!(
+        wire.get("hook_id").is_some(),
+        "the complete invocation request must carry hook identity through MCP"
+    );
 }

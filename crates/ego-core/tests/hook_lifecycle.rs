@@ -30,9 +30,9 @@ use ego_core::generator::fake::FakeGenerator;
 use ego_core::generator::port::AiEvent;
 use ego_core::generator::types::{StopReason, ThinkingLevel};
 use ego_core::hook::{
-    HookCatalogue, HookEvent, HookFuture, HookLifecycleDispatcher, HookOccurrence, HookPort,
-    HookReachFuture, HookReachedEvidence, HookRecordFuture, HookRunner, HookSpec, HookStartFuture,
-    HookStartedEvidence,
+    HookCatalogue, HookEvent, HookFuture, HookInvocationRequest, HookLifecycleDispatcher,
+    HookOccurrence, HookPort, HookReachFuture, HookReachedEvidence, HookRecordFuture, HookRunner,
+    HookSpec, HookStartFuture, HookStartedEvidence,
 };
 use ego_core::mcp::ToolExecution;
 use ego_core::permit::rule::Rule;
@@ -52,6 +52,7 @@ use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, St
 use ego_core::turn::{
     CancelToken, GenerationRuntime, Session, ToolEffectPorts, Tools, TurnConfig, TurnLoop,
 };
+use futures::channel::oneshot;
 use futures::executor::block_on;
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
@@ -106,6 +107,7 @@ fn occurrence(lifecycle: HookLifecycle, owner: HookOccurrenceOwner) -> HookOccur
 struct RecordingPort {
     starts: Arc<Mutex<Vec<HookStartedEvidence>>>,
     calls: Arc<Mutex<Vec<HookLifecycle>>>,
+    requests: Arc<Mutex<Vec<HookInvocationRequest>>>,
 }
 
 #[derive(Clone, Default)]
@@ -117,6 +119,10 @@ struct FailingPort(RecordingPort);
 impl RecordingPort {
     fn calls(&self) -> Vec<HookLifecycle> {
         self.calls.lock().expect("hook calls").clone()
+    }
+
+    fn requests(&self) -> Vec<HookInvocationRequest> {
+        self.requests.lock().expect("hook requests").clone()
     }
 }
 
@@ -148,7 +154,7 @@ macro_rules! delegate_hook_port {
                 self.0
                     .started(spec, occurrence, reached, activation, invocation)
             }
-            fn invoke<'a>(&'a self, _spec: &'a HookSpec, _event: HookEvent) -> HookFuture<'a> {
+            fn invoke<'a>(&'a self, _request: HookInvocationRequest) -> HookFuture<'a> {
                 Box::pin(std::future::ready($outcome))
             }
             fn settled<'a>(
@@ -190,14 +196,17 @@ impl HookPort for FailingPort {
             .started(spec, occurrence, reached, activation, invocation)
     }
 
-    fn invoke<'a>(&'a self, spec: &'a HookSpec, event: HookEvent) -> HookFuture<'a> {
-        if event.lifecycle() == HookLifecycle::PostToolUseFailure {
+    fn invoke<'a>(&'a self, request: HookInvocationRequest) -> HookFuture<'a> {
+        if request.lifecycle() == HookLifecycle::PostToolUseFailure {
             Box::pin(std::future::ready(Err(HookFailure::new(
                 HookFailureKind::HandlerFailed,
                 None,
             ))))
         } else {
-            self.0.invoke(spec, event)
+            Box::pin(std::future::ready(Ok(HookOutcome::new(
+                HookDecision::Continue,
+                None,
+            ))))
         }
     }
 
@@ -252,7 +261,8 @@ impl HookPort for RecordingPort {
         Box::pin(std::future::ready(Ok(evidence)))
     }
 
-    fn invoke<'a>(&'a self, _spec: &'a HookSpec, _event: HookEvent) -> HookFuture<'a> {
+    fn invoke<'a>(&'a self, request: HookInvocationRequest) -> HookFuture<'a> {
+        self.requests.lock().expect("hook requests").push(request);
         Box::pin(std::future::ready(Ok(HookOutcome::new(
             HookDecision::Continue,
             None,
@@ -669,6 +679,169 @@ fn turn_loop_real_owner_reaches_tool_batch_and_failure_boundaries_then_stops() {
             HookLifecycle::Stop,
         ]
     );
+}
+
+#[test]
+fn runner_passes_one_complete_request_bound_to_the_durable_start() {
+    let catalogue = catalogue();
+    let spec = catalogue
+        .specs()
+        .first()
+        .expect("one admitted hook")
+        .clone();
+    let event = HookEvent::session(HookLifecycle::SessionStart);
+    let occurrence = HookOccurrence::new(
+        HookOccurrenceKey::new(
+            event.lifecycle(),
+            HookOccurrenceOwner::Session {
+                session: SessionId::new(),
+            },
+        ),
+        event.clone(),
+    )
+    .expect("matching occurrence");
+    let port = RecordingPort::default();
+    let dispatcher = HookLifecycleDispatcher::new(
+        HookRunner::new_with_durable_started(port.clone(), Vec::<HookStartedEvidence>::new()),
+        catalogue,
+    );
+    block_on(dispatcher.dispatch(Producer::Main, occurrence.clone())).expect("hook dispatch");
+
+    let started = port.starts.lock().expect("hook starts")[0];
+    let request = port.requests().pop().expect("one invocation request");
+    assert_eq!(request.hook(), started.hook());
+    assert_eq!(request.invocation(), started.invocation());
+    assert_eq!(request.activation(), started.activation());
+    assert_eq!(request.lifecycle(), occurrence.event().lifecycle());
+    assert_eq!(request.subject(), occurrence.event().subject());
+    assert_eq!(request.handler(), spec.handler());
+    assert_eq!(
+        request.effect_scope().timeout(),
+        std::time::Duration::from_secs(30)
+    );
+}
+
+#[derive(Clone, Default)]
+struct PendingInvocationPort {
+    started: Arc<Mutex<Vec<HookStartedEvidence>>>,
+    releases: Arc<Mutex<Vec<oneshot::Sender<()>>>>,
+}
+
+impl PendingInvocationPort {
+    fn release_pending(&self) {
+        let releases = std::mem::take(&mut *self.releases.lock().expect("hook releases"));
+        for release in releases {
+            let _ = release.send(());
+        }
+    }
+}
+
+impl HookPort for PendingInvocationPort {
+    fn reached<'a>(
+        &'a self,
+        producer: &'a Producer,
+        occurrence: &'a HookOccurrence,
+        plan: &'a HookPlan,
+    ) -> HookReachFuture<'a> {
+        Box::pin(std::future::ready(Ok(
+            ego_core::hook::HookReachOutcome::Fresh(HookReachedEvidence::new(
+                EventId::new(),
+                occurrence.key().clone(),
+                occurrence.event().subject(),
+                producer.clone(),
+                plan.clone(),
+            )),
+        )))
+    }
+
+    fn started<'a>(
+        &'a self,
+        spec: &'a HookSpec,
+        _occurrence: &'a HookOccurrence,
+        reached: &'a HookReachedEvidence,
+        activation: HookActivation,
+        invocation: HookInvocationId,
+    ) -> HookStartFuture<'a> {
+        let evidence = HookStartedEvidence::new(
+            reached.event(),
+            reached.event(),
+            spec.id(),
+            invocation,
+            activation,
+        );
+        self.started.lock().expect("hook starts").push(evidence);
+        Box::pin(std::future::ready(Ok(evidence)))
+    }
+
+    fn invoke<'a>(&'a self, _request: HookInvocationRequest) -> HookFuture<'a> {
+        let (sender, receiver) = oneshot::channel();
+        self.releases.lock().expect("hook releases").push(sender);
+        Box::pin(async move {
+            receiver
+                .await
+                .map_err(|_| HookFailure::new(HookFailureKind::HandlerFailed, None))?;
+            Ok(HookOutcome::new(HookDecision::Continue, None))
+        })
+    }
+
+    fn settled<'a>(
+        &'a self,
+        _spec: &'a HookSpec,
+        _started: HookStartedEvidence,
+        _result: &'a HookResult,
+    ) -> HookRecordFuture<'a> {
+        Box::pin(std::future::ready(Ok(())))
+    }
+}
+
+#[test]
+fn concurrent_occurrences_release_admission_before_external_handler_await() {
+    use futures::task::LocalSpawnExt;
+
+    let port = PendingInvocationPort::default();
+    let runner = HookRunner::new(port.clone());
+    let first_catalogue = catalogue();
+    let first = occurrence(
+        HookLifecycle::SessionStart,
+        HookOccurrenceOwner::Session {
+            session: SessionId::new(),
+        },
+    );
+    let second = occurrence(
+        HookLifecycle::SessionStart,
+        HookOccurrenceOwner::Session {
+            session: SessionId::new(),
+        },
+    );
+    let mut pool = futures::executor::LocalPool::new();
+    pool.spawner()
+        .spawn_local(async move {
+            runner
+                .run_occurrence(&first_catalogue, Producer::Main, first)
+                .await
+                .expect("first occurrence");
+        })
+        .expect("first occurrence task");
+    let runner = HookRunner::new(port.clone());
+    let second_catalogue = catalogue();
+    pool.spawner()
+        .spawn_local(async move {
+            runner
+                .run_occurrence(&second_catalogue, Producer::Main, second)
+                .await
+                .expect("second occurrence");
+        })
+        .expect("second occurrence task");
+    pool.run_until_stalled();
+    assert_eq!(
+        port.started.lock().expect("hook starts").len(),
+        2,
+        "the journal/admission lock must not span external handler await"
+    );
+    port.release_pending();
+    pool.run_until_stalled();
+    port.release_pending();
+    pool.run_until_stalled();
 }
 
 struct ReducerFixture {
