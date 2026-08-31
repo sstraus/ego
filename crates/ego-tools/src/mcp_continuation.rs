@@ -5,6 +5,7 @@ use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 
 use ego_core::event::time::Clock;
+use ego_core::permit::InvocationDigest;
 use ego_core::suspension::{
     ClaimedContinuation, ContinuationError, ContinuationJournal, ContinuationRecord,
     ContinuationState,
@@ -293,6 +294,11 @@ fn decode_committed(
             ));
         }
         let snapshot: Snapshot = serde_json::from_slice(line).map_err(|_| corrupt())?;
+        if InvocationDigest::parse(snapshot.record.capture()).is_err()
+            || InvocationDigest::parse(snapshot.record.fingerprints().capture()).is_err()
+        {
+            return Err(corrupt());
+        }
         records.insert(snapshot.record.id().to_owned(), snapshot.record);
     }
     Ok(records)
