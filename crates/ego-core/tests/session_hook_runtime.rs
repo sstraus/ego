@@ -166,7 +166,6 @@ fn runtime_fixture(blocked: bool) -> (
         Arc::clone(&invocation),
         CancelToken::new(),
         Instant::now() + Duration::from_secs(60),
-        ego_core::hook::HookCausality::session(session, turn),
     );
     (runtime, invocation, store, session, turn, release)
 }
@@ -174,11 +173,13 @@ fn runtime_fixture(blocked: bool) -> (
 fn occurrence(
     lifecycle: HookLifecycle,
     session: SessionId,
+    turn: TurnId,
     _n: u128,
 ) -> ego_core::hook::HookOccurrence {
     ego_core::hook::HookOccurrence::new(
         HookOccurrenceKey::new(lifecycle, HookOccurrenceOwner::Session { session }),
         HookEvent::session(lifecycle),
+        ego_core::hook::HookCausality::session(session, turn),
     )
     .expect("matching occurrence")
 }
@@ -199,12 +200,12 @@ fn normal_append_and_two_hook_occurrences_share_one_sequence_and_state() {
         .expect("normal append");
     futures::executor::block_on(runtime.dispatch(
         Producer::Main,
-        occurrence(HookLifecycle::SessionStart, session, 1),
+        occurrence(HookLifecycle::SessionStart, session, turn, 1),
     ))
     .expect("first hook");
     futures::executor::block_on(runtime.dispatch(
         Producer::Main,
-        occurrence(HookLifecycle::SessionEnd, session, 2),
+        occurrence(HookLifecycle::SessionEnd, session, turn, 2),
     ))
     .expect("second hook");
     if let Some(release) = release {
@@ -235,10 +236,10 @@ fn normal_append_and_two_hook_occurrences_share_one_sequence_and_state() {
 
 #[test]
 fn recovered_completed_occurrence_does_not_invoke_and_state_keeps_all_facts() {
-    let (runtime, invocation, store, session, _turn, release) = runtime_fixture(false);
+    let (runtime, invocation, store, session, turn, release) = runtime_fixture(false);
     futures::executor::block_on(runtime.dispatch(
         Producer::Main,
-        occurrence(HookLifecycle::SessionStart, session, 3),
+        occurrence(HookLifecycle::SessionStart, session, turn, 3),
     ))
     .expect("first dispatch");
     let first_events = store.events().len();
@@ -247,7 +248,7 @@ fn recovered_completed_occurrence_does_not_invoke_and_state_keeps_all_facts() {
     assert!(release.is_none());
     futures::executor::block_on(runtime.dispatch(
         Producer::Main,
-        occurrence(HookLifecycle::SessionStart, session, 3),
+        occurrence(HookLifecycle::SessionStart, session, turn, 3),
     ))
     .expect("recovered dispatch");
     assert_eq!(invocation.calls(), first_calls, "recovery never invokes again");
@@ -263,7 +264,7 @@ fn blocked_invocation_does_not_hold_journal_lock_across_await() {
     let (runtime, _invocation, _store, session, turn, release) = runtime_fixture(true);
     let mut blocked = Box::pin(runtime.dispatch(
         Producer::Main,
-        occurrence(HookLifecycle::SessionStart, session, 4),
+        occurrence(HookLifecycle::SessionStart, session, turn, 4),
     ));
     let waker = futures::task::noop_waker_ref();
     let mut context = Context::from_waker(waker);
@@ -295,9 +296,9 @@ fn finalization_rejects_live_append_handles_then_succeeds_after_ordered_teardown
 
 #[test]
 fn session_start_and_end_are_exact_once_and_reuse_durable_envelopes() {
-    let (runtime, _invocation, store, session, _turn, release) = runtime_fixture(false);
-    let start = occurrence(HookLifecycle::SessionStart, session, 5);
-    let end = occurrence(HookLifecycle::SessionEnd, session, 6);
+    let (runtime, _invocation, store, session, turn, release) = runtime_fixture(false);
+    let start = occurrence(HookLifecycle::SessionStart, session, turn, 5);
+    let end = occurrence(HookLifecycle::SessionEnd, session, turn, 6);
     futures::executor::block_on(runtime.dispatch(Producer::Main, start.clone())).expect("start");
     futures::executor::block_on(runtime.dispatch(Producer::Main, start)).expect("replayed start");
     futures::executor::block_on(runtime.dispatch(Producer::Main, end.clone())).expect("end");
