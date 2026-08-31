@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use ego_core::budget::{BudgetGate, Metering, SharedBudgetGate};
-use ego_core::cost::CurrencyCode;
+use ego_core::cost::{CostDelta, CurrencyCode, UnknownCost};
 use ego_core::cost::MeteringRevision;
 use ego_core::generator::capabilities::{
     CacheRetention, CancelSemantics, ImageInputSupport, ModelCapabilities, ReasoningCarryover,
@@ -83,4 +83,8 @@ fn provider_reservation_is_admitted_before_pending_io_without_holding_a_budget_g
         .expect("independent owner can reserve while provider is pending");
     assert_eq!(first.gate(), root.id());
     assert_eq!(second.gate(), root.id());
+    root.settle(first, &CostDelta::Unknown(UnknownCost::NoPricingQuote))
+        .expect("root settlement consumes its reservation");
+    root.settle(second, &CostDelta::Unknown(UnknownCost::NoPricingQuote))
+        .expect("second owner settlement consumes its reservation");
 }
