@@ -8,8 +8,11 @@ use ego_core::permit::{
 };
 use ego_core::suspension::{ContinuationState, ResumeKeySource, ResumeSealer};
 use ego_tools::mcp_continuation::JsonlContinuationJournal;
+use serde_json::json;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+const CAPTURE: &str = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 #[derive(Clone)]
 struct FakeResumeKey {
@@ -76,6 +79,16 @@ fn now() -> Timestamp {
     Timestamp::from_millis(millis)
 }
 
+fn persisted_wire(root: &std::path::Path) -> serde_json::Value {
+    let bytes = std::fs::read(root.join("continuations.jsonl")).expect("journal bytes");
+    let line = std::str::from_utf8(&bytes)
+        .expect("journal UTF-8")
+        .lines()
+        .next()
+        .expect("journal line");
+    serde_json::from_str(line).expect("journal wire JSON")
+}
+
 fn authorized() -> ego_core::permit::Authorized {
     let permissions = ConfigLayer::parse(
         Source::Project,
@@ -96,8 +109,7 @@ fn authorized() -> ego_core::permit::Authorized {
             ForeignToolId::new("alpha", "weather").expect("tool"),
             InvocationDigest::parse(&format!("sha256:{:064x}", 1)).expect("digest"),
         )],
-        McpAdmissionFingerprint::new("capture-7", "weather", "tool-fingerprint")
-            .expect("admission"),
+        McpAdmissionFingerprint::new(CAPTURE, "weather", "tool-fingerprint").expect("admission"),
         "profile-7",
         ForeignTransportTarget::http(
             ego_core::permit::HttpRoute::new(
@@ -129,11 +141,77 @@ fn accepted_answer_is_durable_before_atomic_single_use_claim() {
             br#"{"inputResponses":[{"answer":"yes"}]}"#,
         )
         .expect("accepted");
+    let wire = persisted_wire(root.path());
+    assert_eq!(wire["version"], json!(1));
+    assert_eq!(wire["record"]["subject"]["capture"], json!(CAPTURE));
+    assert_eq!(wire["record"]["fingerprints"]["capture"], json!(CAPTURE));
+    let serialized = serde_json::to_string(&wire).expect("wire JSON");
+    assert!(!serialized.contains("admission_generation"));
+    assert!(!serialized.contains("generation-"));
     let claimed = journal.claim(&id).expect("claim");
     assert!(journal.claim(&id).is_err());
     journal
         .settle(claimed, ContinuationState::Completed)
         .expect("settled");
+}
+
+#[test]
+fn stable_capture_identity_survives_reopen_and_resume_validation() {
+    let root = tempfile::tempdir().expect("directory");
+    let key = FakeResumeKey {
+        key: Arc::from(b"deterministic-key-0123456789abcdef".as_slice()),
+    };
+    let writer = JsonlContinuationJournal::open(root.path()).expect("writer");
+    let authorized = authorized();
+    let call_digest = authorized.call().authority_fingerprint();
+    let prepared_fingerprint = format!(
+        "sha256:{}",
+        call_digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    );
+    let id = writer
+        .accept(
+            record(&authorized, Arc::clone(&key.key), now(), 300_000),
+            br#"{"inputResponses":[{"answer":"yes"}]}"#,
+        )
+        .expect("accepted");
+
+    let reopened = JsonlContinuationJournal::open(root.path()).expect("reopen");
+    let resumed = reopened
+        .resume_with_fingerprint(&id, CAPTURE, "tool-fingerprint", &prepared_fingerprint)
+        .expect("stable capture resumes after reopen");
+    assert_eq!(resumed.capture(), CAPTURE);
+    assert_eq!(resumed.fingerprints().capture(), CAPTURE);
+}
+
+#[test]
+fn ordinal_generation_snapshot_fails_closed_without_a_compatibility_reader() {
+    let root = tempfile::tempdir().expect("directory");
+    let key = FakeResumeKey {
+        key: Arc::from(b"deterministic-key-0123456789abcdef".as_slice()),
+    };
+    let authorized = authorized();
+    let record = record(&authorized, key.key, now(), 300_000);
+    let id = record.id().to_owned();
+    let mut wire = json!({
+        "version": 1,
+        "record": serde_json::to_value(record).expect("record JSON"),
+    });
+    wire["record"]["subject"]["capture"] = json!("generation-7");
+    wire["record"]["fingerprints"]["capture"] = json!("generation-7");
+    std::fs::write(
+        root.path().join("continuations.jsonl"),
+        format!("{}\n", serde_json::to_string(&wire).expect("wire JSON")),
+    )
+    .expect("legacy snapshot");
+
+    let reopened = JsonlContinuationJournal::open(root.path()).expect("reopen");
+    assert!(
+        reopened.state(&id).is_err(),
+        "ordinal generation capture records must fail closed"
+    );
 }
 
 #[test]
