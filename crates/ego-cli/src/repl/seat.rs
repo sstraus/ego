@@ -2238,6 +2238,9 @@ fn answer_question_selector(
         QuestionMode::Single => SelectorKind::Single,
         QuestionMode::Multiple => SelectorKind::Multiple,
         QuestionMode::FreeText => unreachable!("free text retains the editor grammar"),
+        QuestionMode::Form { .. } => {
+            unreachable!("form answers retain the raw JSON editor grammar")
+        }
     };
     let selector = Arc::new(Mutex::new(Selector::with_options(
         kind,
@@ -2431,6 +2434,7 @@ fn parse_question_answer(
                 _ => QuestionAnswer::free_text(raw),
             }
         }
+        QuestionMode::Form { .. } => return QuestionAnswer::from_json(request, raw),
     };
     answer.validate_for(request)?;
     Ok(answer)
