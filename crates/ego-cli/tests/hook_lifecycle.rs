@@ -14,6 +14,7 @@ use ego_ai::catalogue::{
 use ego_cli::hook::{HookPromptAdapter, ToollessGenerationService};
 use ego_cli::model::GenerationSelection;
 use ego_cli::model_picker::{ModelPicker, PickerInput, PickerInputOutcome, PickerOutcome};
+use ego_cli::provider_http::McpProcessScope;
 use ego_cli::repl::actions::{ActionId, ActionSink, LocalAction, LocalActionOutcome};
 use ego_cli::run::RunModelSwitchOwner;
 use ego_core::config::{
@@ -35,6 +36,7 @@ use ego_core::hook::{
     HookLifecycleDispatcher, HookOccurrence, HookPort, HookReachFuture, HookReachedEvidence,
     HookRecordFuture, HookRunner, HookSpec, HookStartFuture, HookStartedEvidence,
 };
+use ego_mcp::{McpRegistryController, McpRegistryRuntime};
 
 const CLI_OWNERS: [(&str, HookLifecycle); 10] = [
     (
@@ -627,4 +629,15 @@ fn hook_prompt_resolution_and_child_initial_selection_are_not_active_switches() 
             .as_slice(),
         &[GenerationRole::Hook]
     );
+}
+
+#[test]
+fn direct_mcp_scope_keeps_runtime_owner_and_sessionless_controller_access() {
+    fn scope_contract(scope: &McpProcessScope) {
+        let runtime: &Arc<McpRegistryRuntime> = scope.runtime();
+        let controller: &Arc<McpRegistryController> = scope.controller();
+        let _ = (runtime, controller);
+    }
+
+    let _ = scope_contract;
 }
