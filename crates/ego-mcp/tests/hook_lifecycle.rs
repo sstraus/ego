@@ -24,7 +24,7 @@ use ego_core::hook::{
     HookReachFuture, HookReachedEvidence, HookRecordFuture, HookRunner, HookSpec, HookStartFuture,
     HookStartedEvidence,
 };
-use ego_core::mcp::ToolExecution;
+use ego_core::mcp::{ForeignQuestionPort, ToolExecution};
 use ego_core::permit::{
     Authorized, CanonPath, Classification, CleanupCertainty, DnsResolution, DuplexEnd,
     DuplexHandle, DuplexSession, DuplexSpawner, GuardedEffects, OneHop, OneHopResponse,
@@ -532,11 +532,16 @@ impl DuplexSession for ScriptedDuplex {
 #[derive(Clone)]
 struct ScriptedSpawner {
     calls: Arc<AtomicUsize>,
+    input_required_rounds: usize,
 }
 impl ScriptedSpawner {
     fn new() -> Self {
+        Self::with_input_required_rounds(1)
+    }
+    fn with_input_required_rounds(input_required_rounds: usize) -> Self {
         Self {
             calls: Arc::new(AtomicUsize::new(0)),
+            input_required_rounds,
         }
     }
     fn calls(&self) -> usize {
@@ -545,7 +550,7 @@ impl ScriptedSpawner {
 }
 impl DuplexSpawner for ScriptedSpawner {
     fn spawn(&self, _spec: SpawnSpec) -> BoxFuture<'static, Result<DuplexHandle, TransportError>> {
-        let complete = self.calls.fetch_add(1, Ordering::SeqCst) > 0;
+        let complete = self.calls.fetch_add(1, Ordering::SeqCst) >= self.input_required_rounds;
         Box::pin(std::future::ready(Ok(
             Box::new(ScriptedDuplex::new(complete)) as DuplexHandle,
         )))
@@ -764,6 +769,100 @@ async fn accepted_answer_validates_hooks_claims_and_retries_once() {
     );
     assert_eq!(spawner.calls(), 2);
     assert_eq!(journal.state(), None);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn foreign_question_port_reuses_owner_capture_floor_and_effects_for_successor_rounds() {
+    let trace = Trace::default();
+    let journal = Arc::new(Journal::with_trace(trace.clone()));
+    let owner = Arc::new(McpContinuationOwner::new(
+        journal.clone(),
+        hooks_with_mode(HookMode::Continue, trace.clone()),
+        Arc::new(FixedResumeKey),
+        Arc::new(FixedClock),
+    ));
+    let factory = Arc::new(
+        McpStdioOperationFactory::new(Arc::clone(&owner), 64 * 1024, Duration::from_secs(30))
+            .expect("factory"),
+    );
+    let (capture, tool) = captured_lookup(Arc::clone(&factory));
+    let call = prepare_lookup(&tool);
+    let auth = authorized(call);
+    let (sealer, floor) = prepared_resume(&auth);
+    let resume = sealer.prepare(&auth, floor.clone()).expect("resume");
+    let spawner = Arc::new(ScriptedSpawner::with_input_required_rounds(2));
+    let (call, permit) = auth.into_parts();
+    let guarded = GuardedEffects::new_with_resume(
+        permit,
+        Box::leak(Box::new(ego_core::permit::fake::FakeFs::default())),
+        Box::leak(Box::new(NoProcess)),
+        Box::leak(Box::new(EmptyEvidence)),
+        Arc::new(OfflineResolver),
+        Arc::new(OfflineOneHop),
+        spawner.clone(),
+        Some(resume),
+    );
+    let ToolExecution::InputRequired(initial) =
+        tool.execute(call, &guarded).await.expect("required")
+    else {
+        panic!("expected required");
+    };
+    let initial_id = initial.continuation_id().to_owned();
+    let adapter = ego_mcp::McpForeignQuestionPort::new(
+        Arc::clone(&owner),
+        capture,
+        floor,
+        ports(spawner.clone()),
+    );
+    let first = ForeignQuestionPort::resume(&adapter, &initial_id, r#"{"choice":"yes"}"#)
+        .await
+        .expect("first adapter resume");
+    let ToolExecution::InputRequired(successor) = first else {
+        panic!("the first adapter resume must expose the persisted successor");
+    };
+    assert_ne!(successor.continuation_id(), initial_id);
+    assert_eq!(journal.state(), Some(ContinuationState::Pending));
+
+    let second =
+        ForeignQuestionPort::resume(&adapter, successor.continuation_id(), r#"{"choice":"yes"}"#)
+            .await
+            .expect("successor adapter resume");
+    let ToolExecution::Complete(result) = second else {
+        panic!("the successor adapter resume must complete");
+    };
+    assert_eq!(result.model_text(), "retry-complete");
+    assert_eq!(spawner.calls(), 3);
+    assert_eq!(journal.state(), None);
+    assert_eq!(
+        journal.events(),
+        vec![
+            "record",
+            "accepted_answer",
+            "claim",
+            "record",
+            "settle",
+            "accepted_answer",
+            "claim",
+            "settle"
+        ]
+    );
+    assert_eq!(
+        trace.events(),
+        vec![
+            "record",
+            "Elicitation",
+            "accepted_answer",
+            "ElicitationResult",
+            "claim",
+            "record",
+            "Elicitation",
+            "settle",
+            "accepted_answer",
+            "ElicitationResult",
+            "claim",
+            "settle"
+        ]
+    );
 }
 
 #[test]
