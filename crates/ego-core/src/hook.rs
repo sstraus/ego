@@ -1927,6 +1927,7 @@ impl HookRunner {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn run_occurrence(
         &self,
         journal: &dyn HookJournalPort,
@@ -2144,6 +2145,12 @@ impl HookRunner {
             self.finish_start(reservations, started);
         }
         reservations.release();
+    }
+}
+
+impl Default for HookRunner {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

@@ -8,7 +8,8 @@ use std::time::{Duration, Instant};
 use ego_core::config::{ConfigLayer, Source, Trust};
 use ego_core::event::domain::{DomainEvent, EventKind};
 use ego_core::event::hook::{
-    HookDecision, HookLifecycle, HookOccurrenceKey, HookOccurrenceOwner, HookOutcome,
+    HookCatalogueEvidence, HookContentDigest, HookDecision, HookDescriptorEvidence, HookLifecycle,
+    HookOccurrenceKey, HookOccurrenceOwner, HookOutcome, HookSourceAuthority, HookSourceLocation,
 };
 use ego_core::event::id::{Producer, Seq, SessionId, TurnId};
 use ego_core::event::time::{Clock, Timestamp};
@@ -126,10 +127,45 @@ impl HookInvocationPort for RecordingPort {
 fn active_catalogue() -> HookCatalogue {
     let layer = ConfigLayer::parse(
         Source::User,
-        "[[hooks]]\nevent = \"SessionStart\"\n[hooks.handler]\ntype = \"prompt\"\nprompt = \"fixture\"\n",
+        "[[hooks]]\nevent = \"SessionStart\"\n[hooks.handler]\ntype = \"prompt\"\nprompt = \"fixture\"\n[[hooks]]\nevent = \"SessionEnd\"\n[hooks.handler]\ntype = \"prompt\"\nprompt = \"fixture\"\n",
     )
     .expect("hook layer");
     HookCatalogue::admit_typed(&[layer], &[], Trust::Trusted).expect("active catalogue")
+}
+
+fn admitted_catalogue() -> HookCatalogueEvidence {
+    let content = "SessionStart\n\nfalse\nPrompt { prompt: \"fixture\", model: None, timeout_seconds: None }\n--\nSessionEnd\n\nfalse\nPrompt { prompt: \"fixture\", model: None, timeout_seconds: None }";
+    let digest = HookContentDigest::parse(&ego_core::digest::sha256_hex(content.as_bytes()))
+        .expect("catalogue digest");
+    HookCatalogueEvidence::new(vec![
+        HookDescriptorEvidence::new(
+            HookSourceAuthority::User,
+            HookSourceLocation::parse("hooks/user.toml").expect("catalogue location"),
+            digest.clone(),
+            0,
+        ),
+        HookDescriptorEvidence::new(
+            HookSourceAuthority::User,
+            HookSourceLocation::parse("hooks/user.toml").expect("catalogue location"),
+            digest,
+            1,
+        ),
+    ])
+    .expect("catalogue evidence")
+}
+
+fn admit_catalogue(runtime: &SessionHookRuntime<'_>, turn: TurnId) {
+    runtime
+        .journal()
+        .append(
+            turn,
+            None,
+            None,
+            EventKind::HookCatalogueAdmitted {
+                descriptors: admitted_catalogue(),
+            },
+        )
+        .expect("catalogue admission");
 }
 
 fn runtime_fixture(
@@ -167,7 +203,7 @@ fn runtime_fixture(
     let runtime = SessionHookRuntime::new(
         dispatcher,
         shared,
-        Arc::clone(&invocation),
+        invocation.clone(),
         CancelToken::new(),
         Instant::now() + Duration::from_secs(60),
     );
@@ -202,6 +238,7 @@ fn normal_append_and_two_hook_occurrences_share_one_sequence_and_state() {
             },
         )
         .expect("normal append");
+    admit_catalogue(&runtime, turn);
     futures::executor::block_on(runtime.dispatch(
         Producer::Main,
         occurrence(HookLifecycle::SessionStart, session, turn, 1),
@@ -235,15 +272,16 @@ fn normal_append_and_two_hook_occurrences_share_one_sequence_and_state() {
             .iter()
             .map(|occurrence| occurrence.starts().len())
             .sum::<usize>(),
-        1,
-        "the reached occurrence records its durable start"
+        2,
+        "the reached occurrences record their durable starts"
     );
-    assert_eq!(state.hook_settlements().len(), 1);
+    assert_eq!(state.hook_settlements().len(), 2);
 }
 
 #[test]
 fn recovered_completed_occurrence_does_not_invoke_and_state_keeps_all_facts() {
     let (runtime, invocation, store, session, turn, release) = runtime_fixture(false);
+    admit_catalogue(&runtime, turn);
     futures::executor::block_on(runtime.dispatch(
         Producer::Main,
         occurrence(HookLifecycle::SessionStart, session, turn, 3),
@@ -279,6 +317,7 @@ fn recovered_completed_occurrence_does_not_invoke_and_state_keeps_all_facts() {
 #[test]
 fn blocked_invocation_does_not_hold_journal_lock_across_await() {
     let (runtime, _invocation, _store, session, turn, release) = runtime_fixture(true);
+    admit_catalogue(&runtime, turn);
     let mut blocked = Box::pin(runtime.dispatch(
         Producer::Main,
         occurrence(HookLifecycle::SessionStart, session, turn, 4),
@@ -323,6 +362,7 @@ fn finalization_rejects_live_append_handles_then_succeeds_after_ordered_teardown
 #[test]
 fn session_start_and_end_are_exact_once_and_reuse_durable_envelopes() {
     let (runtime, _invocation, store, session, turn, release) = runtime_fixture(false);
+    admit_catalogue(&runtime, turn);
     let start = occurrence(HookLifecycle::SessionStart, session, turn, 5);
     let end = occurrence(HookLifecycle::SessionEnd, session, turn, 6);
     futures::executor::block_on(runtime.dispatch(Producer::Main, start.clone())).expect("start");

@@ -36,7 +36,7 @@ struct UnusedMcpRuntime;
 impl McpRuntimeBinding for UnusedMcpRuntime {
     fn foreign_question_port<'a>(
         &self,
-        _dispatcher: ego_core::hook::HookLifecycleDispatcher,
+        _runtime: ego_core::hook::SessionHookRuntime<'a>,
         _floor: ego_core::suspension::ResumeFloor,
         _effects: ego_core::turn::ToolEffectPorts<'a>,
     ) -> Arc<dyn ego_core::mcp::ForeignQuestionPort + 'a> {
