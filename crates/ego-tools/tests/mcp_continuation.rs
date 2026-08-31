@@ -58,7 +58,6 @@ fn record(
         .expect("prepared resume")
         .into_record(
             "continuation-1",
-            br#"{"method":"tools/call"}"#.to_vec(),
             br#"{"requestState":"opaque"}"#.to_vec(),
             "request-1",
             br#"{"type":"object"}"#.to_vec(),

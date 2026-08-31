@@ -891,7 +891,6 @@ fn schema_or_authority_failure_precedes_durable_acceptance() {
                 .expect("resume")
                 .into_record(
                     "continuation-schema-authority",
-                    envelope.parameters().to_vec(),
                     mapped.request_state().to_vec(),
                     mapped.correlation_key(),
                     serde_json::to_vec(mapped.schema()).expect("schema"),
