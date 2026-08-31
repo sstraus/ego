@@ -62,7 +62,9 @@ use ego_core::generator::capabilities::{
 use ego_core::generator::types::{ErrorKind, ReasoningState, StopReason};
 use ego_core::permit::{Authority, CanonPath, Escalation, OpName, ToolResult};
 use ego_core::public::project_public;
-use ego_core::question::{QuestionMode, QuestionOption, QuestionOutcome, QuestionRequest};
+use ego_core::question::{
+    QuestionMode, QuestionOption, QuestionOutcome, QuestionRequest, QuestionTarget,
+};
 use ego_core::run::{RunId, RunSelections};
 use ego_core::state::{SessionState, Usage};
 use ego_core::store::blob::{BlobId, BlobRef};
@@ -470,7 +472,9 @@ mod acp_golden {
                     vec![QuestionOption::new("yes", "Yes")],
                     false,
                 ),
-                tool_call: ItemId::new(),
+                target: QuestionTarget::ModelTool {
+                    tool_call: ItemId::new(),
+                },
             },
             EventKind::QuestionSettled {
                 outcome: QuestionOutcome::Unavailable,
