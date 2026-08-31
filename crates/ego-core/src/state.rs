@@ -276,6 +276,13 @@ pub struct ItemState {
     /// thing to rely on.
     pub seq: Seq,
     pub kind: ItemKind,
+    /// The exact event that admitted this item as a tool call.
+    ///
+    /// Kept separately from [`Self::seq`] because continuation causality
+    /// names an event id, and a tool delta may create the item before the
+    /// corresponding `ToolCallStarted` arrives. `None` means no tool start
+    /// has been accepted for this item.
+    pub tool_call_started: Option<EventId>,
     /// The provider's id for a tool call, when the record carried one.
     pub call_id: Option<String>,
     pub tool_name: Option<String>,
@@ -331,6 +338,7 @@ impl ItemState {
             turn,
             seq,
             kind,
+            tool_call_started: None,
             call_id: None,
             tool_name: None,
             args: String::new(),
@@ -1577,6 +1585,7 @@ impl SessionState {
                 call_id,
             } => {
                 if let Some(item) = self.item_mut(ev, ItemKind::ToolCall) {
+                    item.tool_call_started.get_or_insert(ev.env.id);
                     item.tool_name = Some(name.clone());
                     item.args = args.clone();
                     item.call_id = call_id.clone();
@@ -1928,10 +1937,11 @@ impl SessionState {
         if self.hook_occurrence(key).is_some() {
             return self.refuse(ev, RefusalReason::HookOccurrenceAlreadyReached);
         }
-        if !hook_subject_matches_envelope(subject, ev.env.turn, ev.env.item)
-            || !hook_owner_matches_envelope(key.owner(), subject, ev)
-        {
+        if !hook_subject_matches_envelope(subject, ev.env.turn, ev.env.item) {
             return self.refuse(ev, RefusalReason::HookSubjectMismatch);
+        }
+        if let Err(reason) = hook_owner_matches_envelope(self, key.owner(), subject, ev) {
+            return self.refuse(ev, reason);
         }
         if let HookOccurrenceOwner::Subagent { invocation } = key.owner()
             && !self.subagents.iter().any(|event| {
@@ -2369,19 +2379,42 @@ fn hook_subject_matches_envelope(subject: HookSubject, turn: TurnId, item: Optio
 }
 
 fn hook_owner_matches_envelope(
+    state: &SessionState,
     owner: &HookOccurrenceOwner,
     subject: HookSubject,
     ev: &DomainEvent,
-) -> bool {
+) -> Result<(), RefusalReason> {
     match owner {
-        HookOccurrenceOwner::Event { event } => ev.env.parent == Some(*event),
+        HookOccurrenceOwner::Event { event } => (ev.env.parent == Some(*event))
+            .then_some(())
+            .ok_or(RefusalReason::HookSubjectMismatch),
         HookOccurrenceOwner::Item { item } => {
-            ev.env.item == Some(*item) && subject == HookSubject::Item { item: *item }
+            (ev.env.item == Some(*item) && subject == HookSubject::Item { item: *item })
+                .then_some(())
+                .ok_or(RefusalReason::HookSubjectMismatch)
         }
-        HookOccurrenceOwner::Session { .. }
-        | HookOccurrenceOwner::Generation { .. }
-        | HookOccurrenceOwner::Subagent { .. }
-        | HookOccurrenceOwner::Request { .. }
-        | HookOccurrenceOwner::Continuation { .. } => true,
+        HookOccurrenceOwner::Session { .. } | HookOccurrenceOwner::Request { .. } => {
+            ev.env
+                .item
+                .is_none()
+                .then_some(())
+                .ok_or(RefusalReason::HookSubjectMismatch)
+        }
+        HookOccurrenceOwner::Continuation { .. } => {
+            let HookSubject::Item { item } = subject else {
+                return Err(RefusalReason::HookSubjectMismatch);
+            };
+            let Some(tool) = state.items.get(&item) else {
+                return Err(RefusalReason::HookSubjectMismatch);
+            };
+            if tool.kind != ItemKind::ToolCall {
+                return Err(RefusalReason::HookSubjectMismatch);
+            }
+            match tool.tool_call_started {
+                Some(started) if ev.env.parent == Some(started) => Ok(()),
+                Some(_) | None => Err(RefusalReason::HookOccurrenceParentMismatch),
+            }
+        }
+        HookOccurrenceOwner::Generation { .. } | HookOccurrenceOwner::Subagent { .. } => Ok(()),
     }
 }

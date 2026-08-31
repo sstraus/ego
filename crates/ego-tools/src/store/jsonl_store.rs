@@ -842,20 +842,18 @@ impl JsonlStore {
             Ok(None) => return Err(SnapshotRejection::Absent),
             Err(e) => return Err(SnapshotRejection::Unreadable(e.to_string())),
         };
+        #[derive(serde::Deserialize)]
+        struct SnapshotVersion {
+            v: u32,
+        }
+
+        let version: SnapshotVersion = serde_json::from_slice(&bytes)
+            .map_err(|error| SnapshotRejection::Unreadable(error.to_string()))?;
+        if version.v != SNAPSHOT_VERSION {
+            return Err(SnapshotRejection::Version { found: version.v });
+        }
         serde_json::from_slice(&bytes)
-            .map_err(|e| SnapshotRejection::Unreadable(e.to_string()))
-            .and_then(|snapshot: Snapshot| {
-                // Checked before anything else looks at the payload: a
-                // future version's `state` may not even deserialise into
-                // today's `SessionState`, so a parse failure above is
-                // already the common outcome — this catches the case where
-                // it happens to parse but must still not be trusted.
-                if snapshot.v == SNAPSHOT_VERSION {
-                    Ok(snapshot)
-                } else {
-                    Err(SnapshotRejection::Version { found: snapshot.v })
-                }
-            })
+            .map_err(|error| SnapshotRejection::Unreadable(error.to_string()))
     }
 
     /// Every event in `id`'s log, in order, skipping any line that does not
