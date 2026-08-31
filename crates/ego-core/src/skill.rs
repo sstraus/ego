@@ -15,7 +15,7 @@ use crate::event::skill::{
     SkillCatalogueEvidence, SkillCatalogueGeneration, SkillDescriptorEvidence, SkillId,
     SkillInvocationId, SkillSourceAuthority, SkillSourceLocation,
 };
-use crate::hook::HookConfigEntry;
+use crate::hook::{HookConfigEntry, SessionHookRuntime};
 use crate::permit::rule::PathPattern;
 use crate::permit::{CanonPath, GuardedIo, PathResolver};
 use crate::run::RunSelections;
@@ -971,6 +971,7 @@ impl SkillService {
         &self,
         invocation: SkillInvocation,
         wait: ChildWait,
+        parent: &SessionHookRuntime<'_>,
     ) -> Result<SkillFork, SkillError> {
         let spec = invocation
             .spec
@@ -1006,10 +1007,10 @@ impl SkillService {
             request = request.with_requested_profile(profile.to_owned());
         }
 
-        let admission = futures::executor::block_on(self.child.start(request))
+        let admission = futures::executor::block_on(self.child.start(request, parent))
             .map_err(|error| SkillError::new(error.to_string()))?;
         if wait == ChildWait::Foreground {
-            futures::executor::block_on(admission.wait())
+            futures::executor::block_on(admission.wait(parent))
                 .map_err(|error| SkillError::new(error.to_string()))?;
         }
         Ok(SkillFork { wait })

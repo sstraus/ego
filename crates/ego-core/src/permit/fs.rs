@@ -593,7 +593,7 @@ impl<'a> GuardedEffects<'a> {
     }
 }
 
-impl<'a> GuardedIo<'a> for GuardedEffects<'a> {
+impl<'s> GuardedIo<'s> for GuardedEffects<'s> {
     fn write(&self, path: &CanonPath, bytes: &[u8]) -> Result<(), IoDenied> {
         // Re-resolve now, at use time, rather than trusting `path` — see
         // the trait doc comment. `write_target` and not `canonicalize`,
@@ -700,7 +700,7 @@ impl<'a> GuardedIo<'a> for GuardedEffects<'a> {
         GuardedEffects::claim_mcp_http(self, call)
     }
 
-    fn take_mcp_resume(&self) -> Result<GuardedMcpResume<'a>, ContinuationError> {
+    fn take_mcp_resume(&self) -> Result<GuardedMcpResume<'s>, ContinuationError> {
         self.resume
             .lock()
             .map_err(|_| ContinuationError::Unavailable("resume authority lock poisoned".into()))?

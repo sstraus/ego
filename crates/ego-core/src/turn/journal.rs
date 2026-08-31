@@ -225,7 +225,7 @@ impl HookJournalPort for SharedJournal<'_> {
             .lock()
             .map_err(|error| HookReachError::Absent(HookRunError::new(error.to_string())))?;
         if matches!(occurrence.key().owner(), HookOccurrenceOwner::Continuation { .. }) {
-            let Some(item) = occurrence.causality().item() else {
+            let Some(item) = occurrence.causality().item_id() else {
                 return Err(HookReachError::Absent(HookRunError::new(
                     "hook continuation has no causal tool item",
                 )));
@@ -247,7 +247,7 @@ impl HookJournalPort for SharedJournal<'_> {
             if reached.subject() != occurrence.event().subject()
                 || reached.producer() != producer
                 || reached.turn() != occurrence.causality().turn()
-                || reached.item() != occurrence.causality().item()
+                || reached.item() != occurrence.causality().item_id()
             {
                 return Err(HookReachError::Absent(HookRunError::new(
                     "durable hook reach evidence does not match its causal occurrence",
@@ -297,7 +297,7 @@ impl HookJournalPort for SharedJournal<'_> {
         journal
             .hook_reached(
                 occurrence.causality().turn(),
-                occurrence.causality().item(),
+                occurrence.causality().item_id(),
                 occurrence.causality().parent(),
                 occurrence.key().clone(),
                 occurrence.event().subject(),
@@ -319,7 +319,7 @@ impl HookJournalPort for SharedJournal<'_> {
             .map_err(|error| HookStartError::Absent(HookRunError::new(error.to_string())))?
             .hook_started(
                 occurrence.causality().turn(),
-                occurrence.causality().item(),
+                occurrence.causality().item_id(),
                 reached,
                 spec.id(),
                 invocation,
@@ -338,7 +338,7 @@ impl HookJournalPort for SharedJournal<'_> {
             .map_err(|error| HookRunError::new(error.to_string()))?
             .hook_settled(
                 occurrence.causality().turn(),
-                occurrence.causality().item(),
+                occurrence.causality().item_id(),
                 started,
                 result.clone(),
             )

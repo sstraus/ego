@@ -909,7 +909,7 @@ impl HookCausality {
         self.turn
     }
 
-    pub fn item(&self) -> Option<ItemId> {
+    pub fn item_id(&self) -> Option<ItemId> {
         self.item
     }
 
@@ -1509,9 +1509,11 @@ impl HookOccurrence {
             ));
         }
         let subject_matches = match event.subject() {
-            HookSubject::Session => causality.item().is_none(),
-            HookSubject::Turn { turn } => turn == causality.turn() && causality.item().is_none(),
-            HookSubject::Item { item } => causality.item() == Some(item),
+            HookSubject::Session => causality.item_id().is_none(),
+            HookSubject::Turn { turn } => {
+                turn == causality.turn() && causality.item_id().is_none()
+            }
+            HookSubject::Item { item } => causality.item_id() == Some(item),
         };
         if !subject_matches {
             return Err(HookRunError::new(
@@ -1526,13 +1528,13 @@ impl HookOccurrence {
                     "hook event owner is not its causal parent",
                 ));
             }
-            HookOccurrenceOwner::Item { item } if causality.item() != Some(*item) => {
+            HookOccurrenceOwner::Item { item } if causality.item_id() != Some(*item) => {
                 return Err(HookRunError::new(
                     "hook item owner is not its causal item",
                 ));
             }
             HookOccurrenceOwner::Continuation { .. }
-                if causality.item().is_none() || causality.parent().is_none() =>
+                if causality.item_id().is_none() || causality.parent().is_none() =>
             {
                 return Err(HookRunError::new(
                     "hook continuation has no tool item and parent",
