@@ -6,10 +6,10 @@ use ego_core::event::hook::{
     HookLifecycle, HookOccurrenceKey, HookOccurrenceOwner, HookPlan, HookResult,
     HookSourceAuthority, HookSourceLocation,
 };
-use ego_core::event::id::{EventId, Producer, Seq, SessionId, TurnId};
+use ego_core::event::id::{EventId, ItemId, Producer, Seq, SessionId, TurnId};
 use ego_core::event::time::Timestamp;
 use ego_core::generator::attempt::DeliveryCertainty;
-use ego_core::state::SessionState;
+use ego_core::state::{RefusalReason, SessionState};
 use ego_core::store::session_store::SessionStore;
 use ego_tools::store::{JsonlStore, OsIo, SNAPSHOT_VERSION, Snapshot, SnapshotRejection, validate};
 use tempfile::{TempDir, tempdir};
@@ -41,12 +41,24 @@ fn event(
     producer: Producer,
     kind: EventKind,
 ) -> DomainEvent {
+    event_with_item(seq, id, turn, None, parent, producer, kind)
+}
+
+fn event_with_item(
+    seq: Seq,
+    id: EventId,
+    turn: TurnId,
+    item: Option<ItemId>,
+    parent: Option<EventId>,
+    producer: Producer,
+    kind: EventKind,
+) -> DomainEvent {
     DomainEvent {
         env: Envelope {
             seq,
             id,
             turn,
-            item: None,
+            item,
             parent,
             ts: Timestamp::from_millis(1_000),
             producer,
@@ -156,14 +168,138 @@ impl Fixture {
     }
 }
 
+struct ToolOriginFixture {
+    _dir: TempDir,
+    root: std::path::PathBuf,
+    store: JsonlStore,
+    id: SessionId,
+    item: ItemId,
+    tool_started: EventId,
+    events: Vec<DomainEvent>,
+}
+
+impl ToolOriginFixture {
+    fn new() -> Self {
+        let dir = tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let store = JsonlStore::new(dir.path(), "/ws", Box::new(OsIo));
+        let id = SessionId::new();
+        let turn = TurnId::new();
+        let item = ItemId::new();
+        let delta = event_with_item(
+            Seq::default().next(),
+            EventId::new(),
+            turn,
+            Some(item),
+            None,
+            Producer::Main,
+            EventKind::ToolCallDelta {
+                text: "before-start".to_owned(),
+            },
+        );
+        let tool_started = event_with_item(
+            delta.env.seq.next(),
+            EventId::new(),
+            turn,
+            Some(item),
+            Some(delta.env.id),
+            Producer::Main,
+            EventKind::ToolCallStarted {
+                name: "ask".to_owned(),
+                args: "{}".to_owned(),
+                call_id: Some("call-origin".to_owned()),
+            },
+        );
+        let accepted = event_with_item(
+            tool_started.env.seq.next(),
+            EventId::new(),
+            turn,
+            Some(item),
+            Some(tool_started.env.id),
+            Producer::Main,
+            EventKind::HookLifecycleReached {
+                occurrence: HookOccurrenceKey::continuation(
+                    HookLifecycle::Elicitation,
+                    format!("mcp-{}", "a".repeat(64)),
+                )
+                .unwrap(),
+                subject: ego_core::event::hook::HookSubject::Item { item },
+                plan: HookPlan::default(),
+            },
+        );
+        let rejected = event_with_item(
+            accepted.env.seq.next(),
+            EventId::new(),
+            turn,
+            Some(item),
+            Some(delta.env.id),
+            Producer::Main,
+            EventKind::HookLifecycleReached {
+                occurrence: HookOccurrenceKey::continuation(
+                    HookLifecycle::Elicitation,
+                    format!("mcp-{}", "b".repeat(64)),
+                )
+                .unwrap(),
+                subject: ego_core::event::hook::HookSubject::Item { item },
+                plan: HookPlan::default(),
+            },
+        );
+        let events = vec![delta, tool_started.clone(), accepted, rejected];
+        for event in &events {
+            store.append(&id, event).unwrap();
+        }
+        Self {
+            _dir: dir,
+            root,
+            store,
+            id,
+            item,
+            tool_started: tool_started.env.id,
+            events,
+        }
+    }
+
+    fn snapshot_path(&self) -> std::path::PathBuf {
+        self.root.join(self.id.to_string()).join("snapshot.json")
+    }
+
+    fn full_replay(&self) -> SessionState {
+        let mut state = SessionState::default();
+        for event in &self.events {
+            state.apply(event);
+        }
+        state
+    }
+
+    fn base_state(&self) -> SessionState {
+        let mut state = SessionState::default();
+        for event in self.events.iter().take(2) {
+            state.apply(event);
+        }
+        state
+    }
+}
+
+fn assert_tool_origin_and_continuation_result(state: &SessionState, item: ItemId, start: EventId) {
+    assert_eq!(
+        state.items.get(&item).expect("tool item").tool_call_started,
+        Some(start)
+    );
+    assert_eq!(state.hook_occurrences().len(), 1);
+    assert_eq!(
+        state.refusals.last().map(|refusal| refusal.reason),
+        Some(RefusalReason::HookOccurrenceParentMismatch)
+    );
+}
+
 #[test]
-fn snapshot_version_is_eleven_and_validation_exposes_exact_rejection_set() {
-    assert_eq!(SNAPSHOT_VERSION, 11);
+fn snapshot_version_is_twelve_and_validation_exposes_exact_rejection_set() {
+    assert_eq!(SNAPSHOT_VERSION, 12);
     let fixture = Fixture::new();
     let state = fixture.full_replay();
     assert_eq!(state.hook_settlements().len(), 1);
     let snapshot = Snapshot::new(fixture.id, fixture.events[3].env.seq, state.clone());
-    assert_eq!(snapshot.v, 11);
+    assert_eq!(snapshot.v, 12);
     assert_eq!(
         validate(
             &snapshot,
@@ -182,6 +318,56 @@ fn snapshot_version_is_eleven_and_validation_exposes_exact_rejection_set() {
         ),
         Err(SnapshotRejection::WrongSession)
     ));
+}
+
+#[test]
+fn full_log_replay_reconstructs_exact_tool_call_origin_and_parent_result() {
+    let fixture = ToolOriginFixture::new();
+    let state = fixture.full_replay();
+
+    assert_tool_origin_and_continuation_result(&state, fixture.item, fixture.tool_started);
+}
+
+#[test]
+fn snapshot_v12_roundtrip_and_tail_replay_preserve_tool_origin_and_result() {
+    let fixture = ToolOriginFixture::new();
+    let expected = fixture.full_replay();
+    fixture
+        .store
+        .write_snapshot(&fixture.id, fixture.events[1].env.seq, &fixture.base_state())
+        .unwrap();
+
+    let (resumed, rejection) = fixture.store.resume(&fixture.id).unwrap();
+    assert_eq!(rejection, None);
+    assert_eq!(resumed, expected);
+    assert_tool_origin_and_continuation_result(&resumed, fixture.item, fixture.tool_started);
+}
+
+#[test]
+fn real_v11_snapshot_without_tool_origin_is_version_rejected_then_full_replay_succeeds() {
+    let fixture = ToolOriginFixture::new();
+    let expected = fixture.full_replay();
+    let snapshot = Snapshot::new(
+        fixture.id,
+        fixture.events[1].env.seq,
+        fixture.base_state(),
+    );
+    let mut legacy = serde_json::to_value(snapshot).unwrap();
+    legacy["v"] = serde_json::json!(11);
+    let items = legacy["state"]["items"]
+        .as_object_mut()
+        .expect("snapshot items object");
+    for item in items.values_mut() {
+        item.as_object_mut()
+            .expect("serialized item object")
+            .remove("tool_call_started");
+    }
+    std::fs::write(fixture.snapshot_path(), serde_json::to_vec(&legacy).unwrap()).unwrap();
+
+    let (resumed, rejection) = fixture.store.resume(&fixture.id).unwrap();
+    assert_eq!(rejection, Some(SnapshotRejection::Version { found: 11 }));
+    assert_eq!(resumed, expected);
+    assert_tool_origin_and_continuation_result(&resumed, fixture.item, fixture.tool_started);
 }
 
 #[test]

@@ -223,13 +223,22 @@ fn continuation_requires_exact_tool_parent() {
         },
     );
     state.apply(&tool);
+    let wrong_known_parent = event(
+        turn,
+        None,
+        None,
+        EventKind::AssistantMessage {
+            text: "known but not the tool start".to_owned(),
+        },
+    );
+    state.apply(&wrong_known_parent);
     let wrong_parent = DomainEvent {
         env: Envelope {
             seq: Seq::ZERO,
             id: EventId::new(),
             turn,
             item: Some(item),
-            parent: Some(EventId::new()),
+            parent: Some(wrong_known_parent.env.id),
             ts: Timestamp::from_millis(79_000),
             producer: Producer::Main,
         },
@@ -241,6 +250,58 @@ fn continuation_requires_exact_tool_parent() {
     };
     state.apply(&wrong_parent);
     assert_last_refusal(&state, RefusalReason::HookOccurrenceParentMismatch);
+}
+
+#[test]
+fn continuation_accepts_exact_tool_start_after_a_tool_delta() {
+    let turn = TurnId::new();
+    let item = ItemId::new();
+    let continuation = HookOccurrenceKey::continuation(
+        HookLifecycle::Elicitation,
+        format!("mcp-{}", "b".repeat(64)),
+    )
+    .expect("valid continuation identity");
+    let mut state = SessionState::default();
+
+    let delta = event(
+        turn,
+        Some(item),
+        None,
+        EventKind::ToolCallDelta {
+            text: "partial".to_owned(),
+        },
+    );
+    state.apply(&delta);
+    let started = event(
+        turn,
+        Some(item),
+        Some(delta.env.id),
+        EventKind::ToolCallStarted {
+            name: "ask".to_owned(),
+            args: "{}".to_owned(),
+            call_id: Some("call-after-delta".to_owned()),
+        },
+    );
+    state.apply(&started);
+    let reached = event(
+        turn,
+        Some(item),
+        Some(started.env.id),
+        EventKind::HookLifecycleReached {
+            occurrence: continuation.clone(),
+            subject: HookSubject::Item { item },
+            plan: HookPlan::default(),
+        },
+    );
+    state.apply(&reached);
+
+    assert!(state.refusals.is_empty(), "the exact tool start parent is accepted");
+    assert_eq!(
+        state.items.get(&item).expect("tool item").tool_call_started,
+        Some(started.env.id),
+        "tool origin is the ToolCallStarted event, not the preceding delta"
+    );
+    assert_eq!(state.hook_occurrences().len(), 1);
 }
 
 #[test]
