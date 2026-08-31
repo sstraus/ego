@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use ego_core::config::McpServerName;
+use ego_core::question::{QuestionMode, QuestionRequest};
 use jsonschema::Validator;
 use rmcp::model::{
     CallToolResponse, CallToolResult, ElicitRequestParams, GetPromptResponse, GetPromptResult,
@@ -278,6 +279,7 @@ pub struct McpMappedInput {
     validator: Validator,
     correlation_key: String,
     request_state: Vec<u8>,
+    question_request: QuestionRequest,
 }
 
 impl McpMappedInput {
@@ -291,6 +293,10 @@ impl McpMappedInput {
 
     pub fn schema(&self) -> &Value {
         &self.schema
+    }
+
+    pub fn question_request(&self) -> &QuestionRequest {
+        &self.question_request
     }
 }
 
@@ -313,7 +319,19 @@ impl McpInputMapping {
             .request_state
             .filter(|state| !state.is_empty())
             .ok_or_else(|| protocol("elicitation form has no requestState"))?;
+        let question_request = QuestionRequest::new(
+            "MCP server requires structured input",
+            QuestionMode::Form {
+                schema: schema.clone(),
+            },
+            Vec::new(),
+            false,
+        );
+        question_request
+            .validate()
+            .map_err(|error| protocol(error.to_string()))?;
         Ok(McpMappedInput {
+            question_request,
             schema,
             validator,
             correlation_key,
@@ -342,25 +360,34 @@ impl McpInputMapping {
             return Err(protocol("sampling and roots MRTR requests are unsupported"));
         };
         let ElicitRequestParams::FormElicitationParams {
-            requested_schema, ..
+            message,
+            requested_schema,
+            ..
         } = request.params
         else {
             return Err(protocol("URL elicitation is unsupported"));
         };
         let schema = serde_json::to_value(requested_schema)?;
-        Self::map(McpInputRequired {
+        let mut mapped = Self::map(McpInputRequired {
             kind: InputKind::Elicitation,
-            schema: Some(schema),
+            schema: Some(schema.clone()),
             correlation_key: Some(correlation_key),
             request_state: Some(request_state.into_bytes()),
-        })
+        })?;
+        mapped.question_request =
+            QuestionRequest::new(message, QuestionMode::Form { schema }, Vec::new(), false);
+        mapped
+            .question_request
+            .validate()
+            .map_err(|error| protocol(error.to_string()))?;
+        Ok(mapped)
     }
 }
 
 /// A manual current-protocol operation never drives an automatic elicitor.
 pub enum McpManualOutcome<T> {
     Complete(T),
-    InputRequired(McpMappedInput),
+    InputRequired(Box<McpMappedInput>),
 }
 
 impl McpManualOutcome<CallToolResult> {
@@ -370,9 +397,9 @@ impl McpManualOutcome<CallToolResult> {
                 require_complete(result.result_type.as_ref(), "tools/call")?;
                 Ok(Self::Complete(result))
             }
-            CallToolResponse::InputRequired(required) => {
-                Ok(Self::InputRequired(McpInputMapping::from_rmcp(required)?))
-            }
+            CallToolResponse::InputRequired(required) => Ok(Self::InputRequired(Box::new(
+                McpInputMapping::from_rmcp(required)?,
+            ))),
             CallToolResponse::Task(_) => Err(protocol("MCP Tasks are unsupported")),
             _ => Err(protocol("unknown tools/call result type")),
         }
@@ -391,9 +418,9 @@ impl McpManualOutcome<ReadResourceResult> {
                 }
                 Ok(Self::Complete(result))
             }
-            ReadResourceResponse::InputRequired(required) => {
-                Ok(Self::InputRequired(McpInputMapping::from_rmcp(required)?))
-            }
+            ReadResourceResponse::InputRequired(required) => Ok(Self::InputRequired(Box::new(
+                McpInputMapping::from_rmcp(required)?,
+            ))),
             _ => Err(protocol("unknown resources/read result type")),
         }
     }
@@ -406,9 +433,9 @@ impl McpManualOutcome<GetPromptResult> {
                 require_complete(result.result_type.as_ref(), "prompts/get")?;
                 Ok(Self::Complete(result))
             }
-            GetPromptResponse::InputRequired(required) => {
-                Ok(Self::InputRequired(McpInputMapping::from_rmcp(required)?))
-            }
+            GetPromptResponse::InputRequired(required) => Ok(Self::InputRequired(Box::new(
+                McpInputMapping::from_rmcp(required)?,
+            ))),
             _ => Err(protocol("unknown prompts/get result type")),
         }
     }

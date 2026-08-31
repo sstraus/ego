@@ -20,7 +20,7 @@ use crate::cost::CostDelta;
 use crate::generator::attempt::{AttemptRef, Outcome};
 use crate::generator::types::{ErrorKind, ImageRef, ReasoningState};
 use crate::permit::{Authority, Escalation, ExecObservation, ToolResult, ToolResultProvenance};
-use crate::question::{QuestionOutcome, QuestionRequest};
+use crate::question::{QuestionOutcome, QuestionRequest, QuestionTarget};
 use crate::run::{CancelReason, DeniedBy, RunId, RunSelections, RunSettlement};
 use crate::state::Usage;
 use crate::store::blob::{BlobId, BlobRef};
@@ -287,11 +287,11 @@ pub enum EventKind {
     /// as a compatibility spelling.
     ToolCallCompleted { ok: bool, result: ToolResult },
     /// A typed human-input request became durable before any host was asked.
-    /// The envelope's item is the sole question identity; `tool_call` names
-    /// the pure model tool whose result this question will eventually close.
+    /// The envelope's item is the sole question identity; `target` names the
+    /// closed consumer that can eventually settle the originating tool call.
     QuestionRequested {
         request: QuestionRequest,
-        tool_call: ItemId,
+        target: QuestionTarget,
     },
     /// The terminal human-input outcome, correlated by the same envelope item
     /// as [`QuestionRequested`](Self::QuestionRequested).

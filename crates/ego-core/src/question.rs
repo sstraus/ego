@@ -6,17 +6,56 @@ use std::collections::HashSet;
 use futures::future::BoxFuture;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 
+use crate::event::id::ItemId;
 use crate::generator::types::ToolDescriptor;
 
 /// The shape of answer a question accepts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum QuestionMode {
     Single,
     Multiple,
     FreeText,
+    Form { schema: Value },
+}
+
+/// The durable consumer of one human answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum QuestionTarget {
+    ModelTool {
+        tool_call: ItemId,
+    },
+    ForeignContinuation {
+        tool_call: ItemId,
+        continuation_id: String,
+    },
+}
+
+impl QuestionTarget {
+    pub fn tool_call(&self) -> ItemId {
+        match self {
+            Self::ModelTool { tool_call } | Self::ForeignContinuation { tool_call, .. } => {
+                *tool_call
+            }
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), QuestionError> {
+        match self {
+            Self::ModelTool { .. } => Ok(()),
+            Self::ForeignContinuation {
+                continuation_id, ..
+            } if continuation_id.trim().is_empty()
+                || continuation_id.chars().any(char::is_control) =>
+            {
+                Err(QuestionError::InvalidTarget)
+            }
+            Self::ForeignContinuation { .. } => Ok(()),
+        }
+    }
 }
 
 /// One stable, model-visible choice.
@@ -78,7 +117,7 @@ impl QuestionRequest {
                 return Err(QuestionError::DuplicateOptionId(option.id.clone()));
             }
         }
-        match self.mode {
+        match &self.mode {
             QuestionMode::Single | QuestionMode::Multiple if self.options.is_empty() => {
                 Err(QuestionError::OptionsRequired)
             }
@@ -86,6 +125,19 @@ impl QuestionRequest {
                 Err(QuestionError::FreeTextHasOptions)
             }
             QuestionMode::FreeText if !self.free_text => Err(QuestionError::FreeTextDisabled),
+            QuestionMode::Form { schema } => {
+                if !self.options.is_empty() || self.free_text {
+                    return Err(QuestionError::InvalidFormGrammar);
+                }
+                if schema.get("type").and_then(Value::as_str) != Some("object") {
+                    return Err(QuestionError::InvalidFormSchema(
+                        "the form schema root must have type object".to_owned(),
+                    ));
+                }
+                jsonschema::validator_for(schema)
+                    .map(|_| ())
+                    .map_err(|error| QuestionError::InvalidFormSchema(error.to_string()))
+            }
             _ => Ok(()),
         }
     }
@@ -103,6 +155,7 @@ pub enum QuestionAnswer {
     Single(String),
     Multiple(Vec<String>),
     FreeText(String),
+    Form(Map<String, Value>),
 }
 
 impl QuestionAnswer {
@@ -122,13 +175,17 @@ impl QuestionAnswer {
         Self::FreeText(value.into())
     }
 
+    pub fn form(value: Map<String, Value>) -> Self {
+        Self::Form(value)
+    }
+
     /// Parse the JSON spelling accepted by `ego resume --answer` and validate
     /// it against the exact durable request.
     pub fn from_json(request: &QuestionRequest, json: &str) -> Result<Self, QuestionError> {
         request.validate()?;
         let value: Value = serde_json::from_str(json)
             .map_err(|error| QuestionError::MalformedJson(error.to_string()))?;
-        let answer = match request.mode {
+        let answer = match &request.mode {
             QuestionMode::Single => Self::Single(non_empty_string(value)?),
             QuestionMode::Multiple => {
                 let Value::Array(values) = value else {
@@ -149,6 +206,12 @@ impl QuestionAnswer {
                 Self::Multiple(answers)
             }
             QuestionMode::FreeText => Self::FreeText(non_empty_string(value)?),
+            QuestionMode::Form { .. } => {
+                let Value::Object(value) = value else {
+                    return Err(QuestionError::WrongAnswerType);
+                };
+                Self::Form(value)
+            }
         };
         answer.validate_for(request)?;
         Ok(answer)
@@ -156,7 +219,7 @@ impl QuestionAnswer {
 
     pub fn validate_for(&self, request: &QuestionRequest) -> Result<(), QuestionError> {
         request.validate()?;
-        match (request.mode, self) {
+        match (&request.mode, self) {
             (QuestionMode::Single, Self::Single(value))
             | (QuestionMode::FreeText, Self::FreeText(value)) => validate_value(request, value),
             (QuestionMode::Multiple, Self::Multiple(values)) => {
@@ -172,6 +235,16 @@ impl QuestionAnswer {
                 }
                 Ok(())
             }
+            (QuestionMode::Form { schema }, Self::Form(value)) => {
+                let value = Value::Object(value.clone());
+                let validator = jsonschema::validator_for(schema)
+                    .map_err(|error| QuestionError::InvalidFormSchema(error.to_string()))?;
+                if validator.is_valid(&value) {
+                    Ok(())
+                } else {
+                    Err(QuestionError::FormSchemaMismatch)
+                }
+            }
             _ => Err(QuestionError::WrongAnswerType),
         }
     }
@@ -182,6 +255,9 @@ impl QuestionAnswer {
             Self::Single(value) | Self::FreeText(value) => value.clone(),
             Self::Multiple(values) => serde_json::to_string(values)
                 .expect("a vector of strings always serializes to JSON"),
+            Self::Form(value) => {
+                serde_json::to_string(value).expect("a JSON object always serializes to JSON")
+            }
         }
     }
 }
@@ -226,6 +302,9 @@ pub enum QuestionError {
     OptionsRequired,
     FreeTextHasOptions,
     FreeTextDisabled,
+    InvalidFormGrammar,
+    InvalidFormSchema(String),
+    FormSchemaMismatch,
     MalformedJson(String),
     WrongAnswerType,
     EmptyAnswer,
@@ -235,6 +314,8 @@ pub enum QuestionError {
     WrongQuestion,
     PendingQuestion,
     AlreadySettled,
+    ForeignContinuationRequired,
+    InvalidTarget,
 }
 
 impl std::fmt::Display for QuestionError {
@@ -247,6 +328,11 @@ impl std::fmt::Display for QuestionError {
             Self::OptionsRequired => f.write_str("this question mode requires options"),
             Self::FreeTextHasOptions => f.write_str("a free-text question cannot have options"),
             Self::FreeTextDisabled => f.write_str("free-text mode requires free_text=true"),
+            Self::InvalidFormGrammar => {
+                f.write_str("a form question cannot have options or enable free text")
+            }
+            Self::InvalidFormSchema(error) => write!(f, "the form schema is invalid: {error}"),
+            Self::FormSchemaMismatch => f.write_str("the form answer does not match its schema"),
             Self::MalformedJson(error) => write!(f, "the answer is not valid JSON: {error}"),
             Self::WrongAnswerType => f.write_str("the answer has the wrong JSON type"),
             Self::EmptyAnswer => f.write_str("the answer is empty"),
@@ -258,6 +344,10 @@ impl std::fmt::Display for QuestionError {
                 f.write_str("a pending question must be answered before a new prompt")
             }
             Self::AlreadySettled => f.write_str("the question has already been settled"),
+            Self::ForeignContinuationRequired => {
+                f.write_str("the foreign question requires its continuation adapter")
+            }
+            Self::InvalidTarget => f.write_str("the question target is invalid"),
         }
     }
 }

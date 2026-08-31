@@ -43,9 +43,9 @@ use super::blob::SessionBlobStore;
 use super::io::{AtomicReplacePublication, StoreIo, tmp_path_for};
 use super::snapshot::{SNAPSHOT_VERSION, Snapshot, SnapshotRejection, validate};
 
-/// The only on-disk log version this build migrates. Writers emit only v10;
-/// this constant names the single v9 -> v10 ownership transition.
-const MIGRATABLE_CODEC_VERSION: u32 = 9;
+/// The only on-disk log version this build migrates. Writers emit only v11;
+/// this constant names the single v10 -> v11 question-target transition.
+const MIGRATABLE_CODEC_VERSION: u32 = 10;
 
 /// Filesystem-private cache projection. The public store port exposes only
 /// [`SessionMeta`]; execution and admitted-hook evidence remain internal log
@@ -269,7 +269,7 @@ fn accept_physical_position(current: &mut Seq, actual: Seq) -> Result<(), StoreE
     Ok(())
 }
 
-/// Validate the positions this codec can see. An unknown v10 record is kept
+/// Validate the positions this codec can see. An unknown current record is kept
 /// verbatim by recovery; because its position is opaque to this build, later
 /// records cannot be ordered relative to it and validation stops there.
 fn validate_physical_positions<'a>(
@@ -293,26 +293,26 @@ fn validate_physical_positions<'a>(
     Ok(())
 }
 
-fn decode_v9_entry(raw: &str) -> Result<SessionEntry, StoreError> {
-    let value = serde_json::from_str::<serde_json::Value>(raw)
+fn decode_v10_entry(raw: &str) -> Result<SessionEntry, StoreError> {
+    let mut value = serde_json::from_str::<serde_json::Value>(raw)
         .map_err(|error| CodecError::Malformed(error.to_string()))?;
-    let direct_event_kind = value
-        .get("kind")
-        .and_then(serde_json::Value::as_object)
-        .and_then(|event| event.get("kind"))
-        .and_then(serde_json::Value::as_str);
-    let stream_event_kind = value
-        .get("event")
-        .and_then(|event| event.get("kind"))
-        .and_then(|kind| kind.get("kind"))
-        .and_then(serde_json::Value::as_str);
-    if matches!(
-        direct_event_kind.or(stream_event_kind),
-        Some("HookInvocationStarted" | "HookInvocationSettled")
-    ) {
-        return Err(invalid_log(
-            "cannot migrate a v9 hook runtime record without a durable owner occurrence",
-        ));
+    let event_kind = if value.get("event").is_some() {
+        value
+            .get_mut("event")
+            .and_then(|event| event.get_mut("kind"))
+    } else {
+        value.get_mut("kind")
+    };
+    if let Some(event) = event_kind.and_then(serde_json::Value::as_object_mut)
+        && event.get("kind").and_then(serde_json::Value::as_str) == Some("QuestionRequested")
+    {
+        let tool_call = event
+            .remove("tool_call")
+            .ok_or_else(|| invalid_log("v10 QuestionRequested has no tool_call"))?;
+        event.insert(
+            "target".to_owned(),
+            serde_json::json!({"kind": "model_tool", "tool_call": tool_call}),
+        );
     }
     if let Ok(entry) = serde_json::from_value::<SessionEntry>(value.clone()) {
         return Ok(entry);
@@ -325,7 +325,7 @@ fn decode_v9_entry(raw: &str) -> Result<SessionEntry, StoreError> {
         .map_err(|error| CodecError::Malformed(error.to_string()).into())
 }
 
-fn migrate_v9_image(
+fn migrate_v10_image(
     bytes: &[u8],
     mut header: Header,
     start: usize,
@@ -339,11 +339,11 @@ fn migrate_v9_image(
         };
         match decode_line(&bytes[cursor..cursor + offset]) {
             Ok(StoreLine::Record(record)) => {
-                decode_v9_entry(record.payload.get())?;
+                decode_v10_entry(record.payload.get())?;
             }
             Ok(StoreLine::Unknown(_)) => {
                 return Err(invalid_log(
-                    "cannot migrate a v9 log containing an unknown record",
+                    "cannot migrate a v10 log containing an unknown record",
                 ));
             }
             Ok(StoreLine::Header(_)) => {
@@ -369,7 +369,7 @@ fn migrate_v9_image(
             StoreLine::Record(record) => record,
             StoreLine::Unknown(_) => {
                 return Err(invalid_log(
-                    "cannot migrate a v9 log containing an unknown record",
+                    "cannot migrate a v10 log containing an unknown record",
                 ));
             }
             StoreLine::Header(_) => {
@@ -378,7 +378,7 @@ fn migrate_v9_image(
                 ));
             }
         };
-        let entry = decode_v9_entry(record.payload.get())?;
+        let entry = decode_v10_entry(record.payload.get())?;
         let next = position.next();
         migrated.extend_from_slice(&encode_record(next, &entry)?);
         migrated.push(b'\n');
@@ -956,14 +956,14 @@ impl JsonlStore {
         if let Some((header, _)) = decoded.as_ref() {
             if header.v == MIGRATABLE_CODEC_VERSION {
                 let (migrated, valid_len, dropped_lines) =
-                    migrate_v9_image(&bytes, header.clone(), start)?;
+                    migrate_v10_image(&bytes, header.clone(), start)?;
                 if valid_len < bytes.len() {
                     repair.truncated_bytes = (bytes.len() - valid_len) as u64;
                     repair.dropped_lines = dropped_lines;
                 }
-                // One atomic publication both removes any torn v9 tail and
-                // installs the v10 schema. No v10 writer ever appends under a
-                // v9 header.
+                // One atomic publication both removes any torn v10 tail and
+                // installs the v11 schema. No v11 writer ever appends under a
+                // v10 header.
                 self.io.replace_atomic(&log_path, &migrated)?;
                 repair.migrated = true;
                 tracing::warn!(

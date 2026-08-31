@@ -58,7 +58,7 @@ use crate::permit::ExecObservation;
 use crate::permit::judge::{JudgeConfig, JudgeDecoder, JudgeInput, JudgeOutcome};
 use crate::permit::{Authority, Classification, Pending, PolicyDenied, Resolution, ToolResult};
 use crate::public::PublicEvent;
-use crate::question::{Elicitor, QuestionAnswer, QuestionOutcome};
+use crate::question::{Elicitor, QuestionAnswer, QuestionOutcome, QuestionTarget};
 use crate::run::{Denial, DeniedBy};
 use crate::sink::EventSink;
 use crate::state::{SessionState, Usage};
@@ -493,6 +493,7 @@ pub struct TurnLoop<'a> {
     cancel: CancelToken,
     control: Option<&'a mut InteractiveControl>,
     elicitor: Option<Arc<dyn Elicitor>>,
+    foreign_question_port: Option<Arc<dyn crate::mcp::ForeignQuestionPort>>,
     hook_dispatcher: Option<HookLifecycleDispatcher>,
     active_skill_scope: Option<crate::skill::ActiveSkillScope>,
     active_skill_invocations:
@@ -529,6 +530,7 @@ impl<'a> TurnLoop<'a> {
             cancel: session.cancel,
             control: None,
             elicitor: None,
+            foreign_question_port: None,
             hook_dispatcher: None,
             active_skill_scope: None,
             active_skill_invocations: BTreeMap::new(),
@@ -558,6 +560,15 @@ impl<'a> TurnLoop<'a> {
     /// Attach the session's sole human-input adapter.
     pub fn with_elicitor(mut self, elicitor: Arc<dyn Elicitor>) -> Self {
         self.elicitor = Some(elicitor);
+        self
+    }
+
+    /// Attach the adapter that owns foreign continuation recovery.
+    pub fn with_foreign_question_port(
+        mut self,
+        port: Arc<dyn crate::mcp::ForeignQuestionPort>,
+    ) -> Self {
+        self.foreign_question_port = Some(port);
         self
     }
 
@@ -946,6 +957,77 @@ impl<'a> TurnLoop<'a> {
         question: ItemId,
         answer: QuestionAnswer,
     ) -> Result<TurnOutcome, TurnAbandoned> {
+        let foreign = self
+            .journal
+            .state()
+            .pending_question()
+            .filter(|pending| pending.item_id() == question)
+            .and_then(|pending| match pending.target() {
+                QuestionTarget::ForeignContinuation {
+                    tool_call,
+                    continuation_id,
+                } => Some((
+                    pending.turn(),
+                    pending.request_event(),
+                    pending.request().clone(),
+                    *tool_call,
+                    continuation_id.clone(),
+                )),
+                QuestionTarget::ModelTool { .. } => None,
+            });
+        if let Some((turn, parent, request, tool_call, continuation_id)) = foreign {
+            if let Err(error) = answer.validate_for(&request) {
+                return Err(self.abandon(
+                    turn,
+                    StoreError::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, error)),
+                ));
+            }
+            let Some(port) = self.foreign_question_port.as_ref().map(Arc::clone) else {
+                self.close_control();
+                self.refresh_control_status();
+                return Ok(TurnOutcome {
+                    turn,
+                    ok: false,
+                    exit_reason: ExitReason::PermissionRequired,
+                    denied: None,
+                });
+            };
+            let canonical_json = answer.model_text();
+            let settlement = match self.journal.append(
+                turn,
+                Some(question),
+                Some(parent),
+                EventKind::QuestionSettled {
+                    outcome: QuestionOutcome::Answered(answer),
+                },
+            ) {
+                Ok(event) => event,
+                Err(cause) => return Err(self.abandon(turn, cause)),
+            };
+            let execution = match port.resume(&continuation_id, &canonical_json).await {
+                Ok(execution) => execution,
+                Err(error) => {
+                    return Err(self.abandon(turn, StoreError::Io(std::io::Error::other(error))));
+                }
+            };
+            let crate::mcp::ToolExecution::Complete(result) = execution else {
+                return Err(self.abandon(
+                    turn,
+                    StoreError::Io(std::io::Error::other(
+                        "a successor foreign input request requires its continuation adapter",
+                    )),
+                ));
+            };
+            if let Err(cause) = self.journal.append(
+                turn,
+                Some(tool_call),
+                Some(settlement),
+                EventKind::ToolCallCompleted { ok: true, result },
+            ) {
+                return Err(self.abandon(turn, cause));
+            }
+            return self.resume_turn(turn).await;
+        }
         let prepared = self
             .journal
             .state()
@@ -2943,7 +3025,9 @@ impl<'a> TurnLoop<'a> {
                 result,
                 selector: hook_selector,
             },
-            Ok(crate::mcp::ToolExecution::InputRequired(_)) => ToolOutcome::QuestionRequired,
+            Ok(crate::mcp::ToolExecution::InputRequired(required)) => {
+                return self.run_foreign_question(turn, call, required);
+            }
             Err(failure) => ToolOutcome::Executed {
                 ok: false,
                 result: failure.into_failed_result(),
@@ -2965,7 +3049,9 @@ impl<'a> TurnLoop<'a> {
             Some(call.started),
             EventKind::QuestionRequested {
                 request: request.clone(),
-                tool_call: call.item,
+                target: QuestionTarget::ModelTool {
+                    tool_call: call.item,
+                },
             },
         )?;
 
@@ -3046,6 +3132,28 @@ impl<'a> TurnLoop<'a> {
             },
         )?;
         Ok(ToolOutcome::Recorded)
+    }
+
+    fn run_foreign_question(
+        &mut self,
+        turn: TurnId,
+        call: &PendingCall,
+        required: crate::mcp::ForeignInputRequired,
+    ) -> Result<ToolOutcome, StoreError> {
+        let question = ItemId::new();
+        self.journal.append(
+            turn,
+            Some(question),
+            Some(call.started),
+            EventKind::QuestionRequested {
+                request: required.question_request().clone(),
+                target: QuestionTarget::ForeignContinuation {
+                    tool_call: call.item,
+                    continuation_id: required.continuation_id().to_owned(),
+                },
+            },
+        )?;
+        Ok(ToolOutcome::QuestionRequired)
     }
 
     /// Record the canonical question that was actually presented.

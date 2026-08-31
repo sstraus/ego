@@ -11,7 +11,7 @@ use crate::cost::{CostDelta, Money, RateSource};
 use crate::event::domain::{DomainEvent, EventKind, ExitReason, OccupancyProvenance};
 use crate::event::id::{ItemId, SessionId, TurnId};
 use crate::generator::types::ErrorKind;
-use crate::question::{QuestionMode, QuestionOption, QuestionRequest};
+use crate::question::{QuestionMode, QuestionOption, QuestionRequest, QuestionTarget};
 use crate::state::Usage;
 
 /// The current `PublicEvent` schema version, carried in `SessionStarted`'s
@@ -30,6 +30,7 @@ use crate::state::Usage;
 ///
 /// Version 7 adds the public question item and its structured report. The
 /// durable codec stays at 7 because new event variants are additive.
+/// Version 9 adds the closed question target to the public report.
 ///
 /// **The integer is re-derived at merge, never carried from here.** Three
 /// branches move this constant — metering, permissions and this one — so the
@@ -37,13 +38,14 @@ use crate::state::Usage;
 /// measurement of the merged tree. At merge: read the constant on the merge
 /// base and add one. A value that is not what you expect means another branch
 /// moved it too, and is a reason to stop and look rather than to overwrite.
-pub const PUBLIC_EVENT_VERSION: u32 = 8;
+pub const PUBLIC_EVENT_VERSION: u32 = 9;
 
 /// The structured question payload shared by JSON completion and public
 /// event projections. `id` is the `QuestionRequested` envelope item.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QuestionReport {
     pub id: ItemId,
+    pub target: QuestionTarget,
     pub prompt: String,
     pub mode: QuestionMode,
     pub options: Vec<QuestionOption>,
@@ -51,11 +53,12 @@ pub struct QuestionReport {
 }
 
 impl QuestionReport {
-    pub fn from_request(id: ItemId, request: &QuestionRequest) -> Self {
+    pub fn from_request(id: ItemId, target: &QuestionTarget, request: &QuestionRequest) -> Self {
         Self {
             id,
+            target: target.clone(),
             prompt: request.prompt.clone(),
-            mode: request.mode,
+            mode: request.mode.clone(),
             options: request.options.clone(),
             free_text: request.free_text,
         }
@@ -498,13 +501,13 @@ pub fn project_public(ev: &DomainEvent) -> Option<PublicEvent> {
             ok: *ok,
             text: Some(result.model_text()),
         }),
-        EventKind::QuestionRequested { request, .. } => Some(PublicEvent::ItemStarted {
+        EventKind::QuestionRequested { request, target } => Some(PublicEvent::ItemStarted {
             turn,
             item: item?,
             kind: ItemKind::Question,
             name: Some("ask_question".to_string()),
             text: Some(
-                serde_json::to_string(&QuestionReport::from_request(item?, request))
+                serde_json::to_string(&QuestionReport::from_request(item?, target, request))
                     .expect("a validated question report always serializes"),
             ),
         }),

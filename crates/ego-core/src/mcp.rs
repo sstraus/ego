@@ -6,6 +6,7 @@
 
 use std::fmt;
 
+use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 
 use crate::digest::sha256_hex;
@@ -110,19 +111,30 @@ impl McpOperationKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForeignInputRequired {
     continuation_id: String,
+    question_request: crate::question::QuestionRequest,
 }
 
 impl ForeignInputRequired {
-    pub fn new(continuation_id: impl Into<String>) -> Result<Self, McpProjectionError> {
+    pub fn new(
+        continuation_id: impl Into<String>,
+        question_request: crate::question::QuestionRequest,
+    ) -> Result<Self, McpProjectionError> {
         let continuation_id = continuation_id.into();
-        if !valid_identity(&continuation_id) {
+        if !valid_identity(&continuation_id) || question_request.validate().is_err() {
             return Err(McpProjectionError::InvalidIdentity);
         }
-        Ok(Self { continuation_id })
+        Ok(Self {
+            continuation_id,
+            question_request,
+        })
     }
 
     pub fn continuation_id(&self) -> &str {
         &self.continuation_id
+    }
+
+    pub fn question_request(&self) -> &crate::question::QuestionRequest {
+        &self.question_request
     }
 }
 
@@ -131,6 +143,16 @@ impl ForeignInputRequired {
 pub enum ToolExecution {
     Complete(ToolResult),
     InputRequired(ForeignInputRequired),
+}
+
+/// Consumer-owned boundary for resuming one already-recorded foreign
+/// continuation with a validated canonical form answer.
+pub trait ForeignQuestionPort: Send + Sync {
+    fn resume<'a>(
+        &'a self,
+        continuation_id: &'a str,
+        canonical_json: &'a str,
+    ) -> BoxFuture<'a, Result<ToolExecution, String>>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

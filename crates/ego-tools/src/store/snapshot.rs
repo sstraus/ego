@@ -71,7 +71,10 @@ use serde::{Deserialize, Serialize};
 ///
 /// v10 retains real-owner hook occurrence plans and their bound starts and
 /// settlements. A v9 cache is discarded and rebuilt from the v10 log.
-pub const SNAPSHOT_VERSION: u32 = 10;
+///
+/// v11 retains the closed target of every pending or settled question. A v10
+/// cache is discarded and rebuilt from the migrated event log.
+pub const SNAPSHOT_VERSION: u32 = 11;
 
 /// A reduced [`SessionState`] plus the point in the log it reduces.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

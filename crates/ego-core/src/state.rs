@@ -28,7 +28,9 @@ use crate::event::time::Timestamp;
 use crate::generator::attempt::{AttemptRef, DeliveryCertainty, Outcome, UsageReport};
 use crate::generator::types::{ImageRef, ReasoningState};
 use crate::permit::{ToolResult, ToolResultProvenance};
-use crate::question::{QuestionAnswer, QuestionError, QuestionOutcome, QuestionRequest};
+use crate::question::{
+    QuestionAnswer, QuestionError, QuestionOutcome, QuestionRequest, QuestionTarget,
+};
 use crate::run::{RunId, RunSelections};
 use crate::session::SessionLineage;
 use crate::store::blob::BlobRef;
@@ -610,7 +612,7 @@ pub struct PendingQuestion {
     item: ItemId,
     turn: TurnId,
     request_event: EventId,
-    tool_call: ItemId,
+    target: QuestionTarget,
     request: QuestionRequest,
 }
 
@@ -629,7 +631,7 @@ impl SettledQuestion {
     }
 
     pub fn tool_call(&self) -> ItemId {
-        self.pending.tool_call
+        self.pending.target.tool_call()
     }
 
     pub fn turn(&self) -> TurnId {
@@ -659,7 +661,11 @@ impl PendingQuestion {
     }
 
     pub fn tool_call(&self) -> ItemId {
-        self.tool_call
+        self.target.tool_call()
+    }
+
+    pub fn target(&self) -> &QuestionTarget {
+        &self.target
     }
 
     pub fn request(&self) -> &QuestionRequest {
@@ -1124,11 +1130,14 @@ impl SessionState {
     ) -> Result<QuestionContinuation, QuestionError> {
         let pending = self.pending_for(question)?;
         answer.validate_for(&pending.request)?;
+        if matches!(&pending.target, QuestionTarget::ForeignContinuation { .. }) {
+            return Err(QuestionError::ForeignContinuationRequired);
+        }
         Ok(QuestionContinuation {
             question,
             turn: pending.turn,
             original_turn: pending.turn,
-            tool_call: pending.tool_call,
+            tool_call: pending.target.tool_call(),
             tool_result: ToolResult::builtin(answer.model_text()),
             ok: true,
         })
@@ -1155,9 +1164,15 @@ impl SessionState {
             .settled_questions
             .get(&question)
             .ok_or(QuestionError::NoPendingQuestion)?;
+        if matches!(
+            &settled.pending.target,
+            QuestionTarget::ForeignContinuation { .. }
+        ) {
+            return Err(QuestionError::ForeignContinuationRequired);
+        }
         if self
             .items
-            .get(&settled.pending.tool_call)
+            .get(&settled.pending.target.tool_call())
             .is_some_and(|item| item.completed)
         {
             return Err(QuestionError::AlreadySettled);
@@ -1172,7 +1187,7 @@ impl SessionState {
             question,
             turn: settled.pending.turn,
             original_turn: settled.pending.turn,
-            tool_call: settled.pending.tool_call,
+            tool_call: settled.pending.target.tool_call(),
             tool_result: ToolResult::builtin(text),
             ok,
         })
@@ -1224,7 +1239,7 @@ impl SessionState {
         let pending_call = self
             .pending_question
             .as_ref()
-            .map(|pending| pending.tool_call);
+            .map(|pending| pending.target.tool_call());
         self.items
             .iter()
             .filter_map(|(id, item)| {
@@ -1580,11 +1595,12 @@ impl SessionState {
                     item.ok = Some(*ok);
                 }
             }
-            EventKind::QuestionRequested { request, tool_call } => {
+            EventKind::QuestionRequested { request, target } => {
                 let Some(item) = ev.env.item else {
                     return;
                 };
                 if request.validate().is_err()
+                    || target.validate().is_err()
                     || self.pending_question.is_some()
                     || self.settled_questions.contains_key(&item)
                 {
@@ -1596,7 +1612,7 @@ impl SessionState {
                     item,
                     turn: ev.env.turn,
                     request_event: ev.env.id,
-                    tool_call: *tool_call,
+                    target: target.clone(),
                     request: request.clone(),
                 });
             }

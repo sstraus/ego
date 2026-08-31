@@ -138,7 +138,8 @@ impl McpContinuationOwner {
             .map_err(continuation)?;
         self.journal.record(record).map_err(continuation)?;
         self.dispatch(HookLifecycle::Elicitation, &id).await?;
-        ForeignInputRequired::new(id).map_err(|_| continuation(ContinuationError::InvalidId))
+        ForeignInputRequired::new(id, required.question_request().clone())
+            .map_err(|_| continuation(ContinuationError::InvalidId))
     }
 
     pub async fn accept_answer<'a>(
@@ -947,7 +948,7 @@ fn map_manual<T>(
 ) -> OperationOutcome {
     match outcome {
         McpManualOutcome::Complete(result) => OperationOutcome::Complete(complete(result)),
-        McpManualOutcome::InputRequired(required) => OperationOutcome::InputRequired(required),
+        McpManualOutcome::InputRequired(required) => OperationOutcome::InputRequired(*required),
     }
 }
 

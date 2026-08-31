@@ -26,7 +26,7 @@ use crate::generator::capabilities::ModelCapabilities;
 use crate::generator::types::{ErrorKind, ImageRef};
 use crate::permit::{Escalation, ExecObservation, PolicyDigest};
 use crate::public::InstructionSource;
-use crate::question::{QuestionMode, QuestionOutcome};
+use crate::question::{QuestionMode, QuestionOutcome, QuestionTarget};
 use crate::run::{
     CancelReason, RequestDigest, RequestId, RunCommand, RunId, RunRevision, RunSelections,
     RunSettlement, RunStatus, TurnLease,
@@ -197,7 +197,7 @@ pub enum ExportEvent {
         ok: bool,
     },
     QuestionRequested {
-        tool_call: ItemId,
+        target: QuestionTarget,
         mode: QuestionMode,
         option_count: u64,
         free_text: bool,
@@ -695,11 +695,11 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
             redactions.tool_material += 1;
             ExportEvent::ToolCallCompleted { ok: *ok }
         }
-        EventKind::QuestionRequested { request, tool_call } => {
+        EventKind::QuestionRequested { request, target } => {
             redactions.opaque_prose += 1 + (request.options.len() as u64 * 2);
             ExportEvent::QuestionRequested {
-                tool_call: *tool_call,
-                mode: request.mode,
+                target: target.clone(),
+                mode: request.mode.clone(),
                 option_count: request.options.len() as u64,
                 free_text: request.free_text,
             }
@@ -711,6 +711,7 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
                         crate::question::QuestionAnswer::Multiple(values) => values.len() as u64,
                         crate::question::QuestionAnswer::Single(_)
                         | crate::question::QuestionAnswer::FreeText(_) => 1,
+                        crate::question::QuestionAnswer::Form(value) => value.len() as u64,
                     };
                     ExportQuestionOutcome::Answered
                 }
