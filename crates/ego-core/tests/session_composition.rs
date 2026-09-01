@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use ego_core::hook::HookLifecycleDispatcher;
+use ego_core::hook::SessionHookRuntime;
 use ego_core::mcp::{ForeignQuestionPort, McpRuntimeBinding, ToolExecution};
 use ego_core::run::{EventSinkFactory, RunExecutionBindings};
 use ego_core::sink::{EventSink, NullSink};
@@ -40,7 +40,7 @@ struct TestMcpRuntime;
 impl McpRuntimeBinding for TestMcpRuntime {
     fn foreign_question_port<'a>(
         &self,
-        _dispatcher: HookLifecycleDispatcher,
+        _runtime: SessionHookRuntime<'a>,
         _floor: ResumeFloor,
         _effects: ToolEffectPorts<'a>,
     ) -> Arc<dyn ForeignQuestionPort + 'a> {
