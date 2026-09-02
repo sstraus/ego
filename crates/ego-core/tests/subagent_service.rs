@@ -1924,3 +1924,97 @@ fn concurrent_children_have_distinct_leases_and_no_parent_transcript() {
         .is_err()
     );
 }
+
+#[test]
+fn concurrent_background_children_return_distinct_verified_parent_blobs_and_settle_durably() {
+    let harness = Harness::new(RunSettlement::Completed);
+    let service = harness.service(BudgetGate::unlimited(
+        ego_core::cost::CurrencyCode::new("USD").expect("currency"),
+    ));
+    let (first, second) = futures::executor::block_on(async {
+        futures::join!(
+            service.start(request(SubagentInvocationId::new(), ChildWait::Background)),
+            service.start(request(SubagentInvocationId::new(), ChildWait::Background)),
+        )
+    });
+    let first = first.expect("first background child");
+    let second = second.expect("second background child");
+
+    assert_ne!(first.child_run(), second.child_run());
+    assert_ne!(first.child_session(), second.child_session());
+    assert_ne!(first.turn_lease(), second.turn_lease());
+    let first_invocation = first.invocation();
+    let second_invocation = second.invocation();
+    let first_bytes = b"first verified background assistant";
+    let second_bytes = b"second verified background assistant";
+    let first_ref = blob_for_bytes(first_bytes);
+    let second_ref = blob_for_bytes(second_bytes);
+    assert_ne!(first_ref, second_ref);
+    harness
+        .results
+        .record_evidence(first.child_run(), first_ref.clone(), first_bytes.to_vec());
+    harness.results.record_evidence(
+        second.child_run(),
+        second_ref.clone(),
+        second_bytes.to_vec(),
+    );
+
+    let (first_returned, second_returned) = futures::executor::block_on(async {
+        futures::join!(
+            service.collect_background(first_invocation),
+            service.collect_background(second_invocation),
+        )
+    });
+    let first_returned = first_returned.expect("collect first background child");
+    let second_returned = second_returned.expect("collect second background child");
+    assert_eq!(
+        first_returned,
+        ChildWaitResult::Returned {
+            final_message: first_ref.clone()
+        }
+    );
+    assert_eq!(
+        second_returned,
+        ChildWaitResult::Returned {
+            final_message: second_ref.clone()
+        }
+    );
+    assert_eq!(harness.results.read_count(), 2);
+
+    let copied = harness.parent_blobs.copied();
+    assert_eq!(copied.len(), 2);
+    assert!(copied.iter().any(|(child, evidence, parent)| {
+        *child == first.child_run() && evidence.item() == &first_ref && parent == &first_ref
+    }));
+    assert!(copied.iter().any(|(child, evidence, parent)| {
+        *child == second.child_run() && evidence.item() == &second_ref && parent == &second_ref
+    }));
+
+    for (invocation, expected) in [
+        (first_invocation, first_ref),
+        (second_invocation, second_ref),
+    ] {
+        let events =
+            ChildJournal::read(&harness.journal, invocation).expect("durable child lifecycle");
+        assert!(matches!(
+            events.as_slice(),
+            [
+                DomainEvent {
+                    kind: EventKind::SubagentRequested { .. },
+                    ..
+                },
+                DomainEvent {
+                    kind: EventKind::SubagentSpawned { .. },
+                    ..
+                },
+                DomainEvent {
+                    kind: EventKind::SubagentSettled {
+                        terminal: SubagentTerminal::Returned { final_message },
+                        ..
+                    },
+                    ..
+                }
+            ] if *final_message == expected
+        ));
+    }
+}
