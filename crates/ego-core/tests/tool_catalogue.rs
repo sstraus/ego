@@ -135,11 +135,14 @@ impl TypedTool for TaggedTool {
         ))
     }
 
-    fn execute<'a>(
+    fn execute<'a, 'io>(
         &'a self,
         _call: ego_core::permit::PreparedCall,
-        _io: &'a dyn ego_core::permit::GuardedIo,
-    ) -> BoxFuture<'a, Result<ToolResult, ToolError>> {
+        _io: &'a dyn ego_core::permit::GuardedIo<'io>,
+    ) -> BoxFuture<'a, Result<ToolResult, ToolError>>
+    where
+        'io: 'a,
+    {
         if let Some(callback) = &self.on_execute {
             callback();
         }

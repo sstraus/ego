@@ -433,11 +433,14 @@ impl Tool for ForeignInputTool {
         Ok(PreparedCall::new(self.descriptor().name, Vec::new()))
     }
 
-    fn execute<'a>(
+    fn execute<'a, 'io>(
         &'a self,
         _call: PreparedCall,
-        _io: &'a dyn GuardedIo,
-    ) -> BoxFuture<'a, Result<ToolExecution, ToolError>> {
+        _io: &'a dyn GuardedIo<'io>,
+    ) -> BoxFuture<'a, Result<ToolExecution, ToolError>>
+    where
+        'io: 'a,
+    {
         Box::pin(async {
             Ok(ToolExecution::InputRequired(
                 ForeignInputRequired::new("regression_case", self.request.clone())
