@@ -12,10 +12,11 @@ use futures::stream::BoxStream;
 use http::{HeaderName, HeaderValue};
 use rmcp::model::{
     CallToolRequestParams, CallToolResult, CancelledNotificationParam, ClientCapabilities,
-    ClientInfo, ClientJsonRpcMessage, ClientRequest, GetPromptRequestParams, GetPromptResult,
-    Implementation, ListPromptsRequest, ListResourcesRequest, ListToolsRequest,
-    PaginatedRequestParams, Prompt, ProtocolVersion, ReadResourceRequestParams, ReadResourceResult,
-    Resource, ServerCapabilities, ServerJsonRpcMessage, ServerResult,
+    ClientInfo, ClientJsonRpcMessage, ClientRequest, ElicitationCapability,
+    FormElicitationCapability, GetPromptRequestParams, GetPromptResult, Implementation,
+    ListPromptsRequest, ListResourcesRequest, ListToolsRequest, PaginatedRequestParams, Prompt,
+    ProtocolVersion, ReadResourceRequestParams, ReadResourceResult, Resource, ServerCapabilities,
+    ServerJsonRpcMessage, ServerResult,
 };
 use rmcp::service::{PeerRequestOptions, RunningService};
 use rmcp::transport::common::client_side_sse::NeverRetry;
@@ -36,6 +37,15 @@ use crate::{
 
 pub const MCP_PROTOCOL_REVISION: &str = "2026-07-28";
 const MAX_JSON_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+
+fn current_client_capabilities() -> ClientCapabilities {
+    ClientCapabilities::builder()
+        .enable_elicitation_with(
+            ElicitationCapability::new()
+                .with_form(FormElicitationCapability::new().with_schema_validation(true)),
+        )
+        .build()
+}
 
 #[derive(Clone, Copy, Debug)]
 pub struct McpClientOptions {
@@ -684,7 +694,7 @@ impl McpClient {
             preferred_versions: vec![ProtocolVersion::V_2026_07_28],
         };
         let client_info = ClientInfo::new(
-            ClientCapabilities::default(),
+            current_client_capabilities(),
             Implementation::new("ego", env!("CARGO_PKG_VERSION")),
         )
         .with_protocol_version(ProtocolVersion::V_2026_07_28);

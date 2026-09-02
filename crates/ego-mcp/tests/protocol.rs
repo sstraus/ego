@@ -23,6 +23,7 @@ use ego_mcp::{
 };
 use futures::future::BoxFuture;
 use futures::io::{AsyncRead, AsyncWrite, Cursor};
+use rmcp::model::CallToolRequestParams;
 
 #[derive(Clone, Debug)]
 struct SeenHttp {
@@ -450,12 +451,129 @@ async fn selects_only_current_discover_and_required_request_metadata() {
         body["params"]["_meta"]["io.modelcontextprotocol/protocolVersion"],
         "2026-07-28"
     );
-    assert!(body["params"]["_meta"]["io.modelcontextprotocol/clientCapabilities"].is_object());
+    assert_eq!(
+        body["params"]["_meta"]["io.modelcontextprotocol/clientCapabilities"],
+        serde_json::json!({
+            "elicitation": {
+                "form": {"schemaValidation": true}
+            }
+        }),
+        "the client advertises exactly the optional input mode it implements"
+    );
     assert!(
         !seen[0]
             .headers
             .iter()
             .any(|(name, _)| name == "mcp-session-id")
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn current_client_rejects_legacy_only_discovery_without_handshake_fallback() {
+    let http = Arc::new(FakeHttp::new());
+    http.push(McpHttpResponse::json(
+        200,
+        br#"{"jsonrpc":"2.0","id":0,"result":{"resultType":"complete","supportedVersions":["2025-11-25","2025-06-18","2025-03-26"],"capabilities":{"tools":{"listChanged":false}},"ttlMs":0,"cacheScope":"private","_meta":{"io.modelcontextprotocol/serverInfo":{"name":"legacy-only","version":"1.0.0"}}}}"#,
+    ));
+    let mut client = McpClient::connect_http(
+        "legacy-only".parse().expect("server name"),
+        http_config(),
+        options(),
+        Arc::clone(&http) as Arc<dyn McpHttpEffects>,
+    )
+    .expect("HTTP client");
+
+    let error = client
+        .discover()
+        .await
+        .expect_err("legacy-only discovery must fail closed");
+    assert!(error.to_string().contains("no compatible protocol version"));
+    let seen = http.seen();
+    assert_eq!(seen.len(), 1, "version refusal must not retry");
+    assert!(
+        !seen[0]
+            .body
+            .windows(b"initialize".len())
+            .any(|window| window == b"initialize"),
+        "modern refusal must not fall back to initialize"
+    );
+    assert!(
+        !seen[0]
+            .headers
+            .iter()
+            .any(|(name, _)| name == "mcp-session-id"),
+        "modern refusal must not establish a session"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn named_tool_call_carries_current_routing_and_request_metadata() {
+    let http = Arc::new(FakeHttp::new());
+    http.push(McpHttpResponse::json(
+        200,
+        br#"{"jsonrpc":"2.0","id":0,"result":{"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":{"tools":{"listChanged":false}},"ttlMs":0,"cacheScope":"private","_meta":{"io.modelcontextprotocol/serverInfo":{"name":"remote","version":"1.0.0"}}}}"#,
+    ));
+    http.push(McpHttpResponse::json(
+        200,
+        br#"{"jsonrpc":"2.0","id":1,"result":{"resultType":"complete","content":[{"type":"text","text":"ok"}],"isError":false}}"#,
+    ));
+    let mut client = McpClient::connect_http(
+        "remote".parse().expect("server name"),
+        http_config(),
+        options(),
+        Arc::clone(&http) as Arc<dyn McpHttpEffects>,
+    )
+    .expect("HTTP client");
+
+    client.discover().await.expect("discover");
+    client
+        .call_tool_once(CallToolRequestParams::new("search_tools"))
+        .await
+        .expect("current tool call");
+
+    let seen = http.seen();
+    assert_eq!(seen.len(), 2);
+    let call = &seen[1];
+    assert!(
+        call.headers
+            .iter()
+            .any(|(name, value)| name == "mcp-protocol-version" && value == b"2026-07-28")
+    );
+    assert!(
+        call.headers
+            .iter()
+            .any(|(name, value)| name == "mcp-method" && value == b"tools/call")
+    );
+    assert!(
+        call.headers
+            .iter()
+            .any(|(name, value)| name == "mcp-name" && value == b"search_tools")
+    );
+    assert!(
+        !call
+            .headers
+            .iter()
+            .any(|(name, _)| name == "mcp-session-id")
+    );
+    let body: serde_json::Value = serde_json::from_slice(&call.body).expect("tool request body");
+    assert_eq!(body["method"], "tools/call");
+    assert_eq!(body["params"]["name"], "search_tools");
+    assert_eq!(
+        body["params"]["_meta"]["io.modelcontextprotocol/protocolVersion"],
+        "2026-07-28"
+    );
+    assert_eq!(
+        body["params"]["_meta"]["io.modelcontextprotocol/clientInfo"]["name"],
+        "ego"
+    );
+    assert_eq!(
+        body["params"]["_meta"]["io.modelcontextprotocol/clientCapabilities"],
+        serde_json::json!({
+            "elicitation": {
+                "form": {"schemaValidation": true}
+            }
+        }),
+        "every modern request repeats the exact request-scoped capabilities"
     );
 }
 
@@ -727,9 +845,11 @@ async fn server_adapter_owns_rmcp_and_exposes_only_scoped_port_values() {
     );
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn server_negotiates_the_supported_protocol_revision_for_an_older_request() {
-    let mut request = br#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"unsupported-client","version":"1.0"}}}"#.to_vec();
+async fn initialize_server(version: &str) -> (serde_json::Value, DuplexEvidence) {
+    let mut request = format!(
+        r#"{{"jsonrpc":"2.0","id":0,"method":"initialize","params":{{"protocolVersion":"{version}","capabilities":{{}},"clientInfo":{{"name":"same-client-for-every-version","version":"1.0"}}}}}}"#,
+    )
+    .into_bytes();
     request.push(b'\n');
     let (duplex, evidence, output) = MemoryDuplex::with_input(request);
     let port: Arc<dyn McpServerPort> = Arc::new(ServerPort);
@@ -739,8 +859,39 @@ async fn server_negotiates_the_supported_protocol_revision_for_an_older_request(
         .await
         .expect("server EOF has a truthful settlement");
 
-    let output = output.lock().expect("duplex output");
-    let response: serde_json::Value = serde_json::from_slice(&output).expect("JSON response");
+    let response = serde_json::from_slice(&output.lock().expect("duplex output"))
+        .expect("JSON initialize response");
+    (response, evidence)
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn server_echoes_each_supported_handshake_revision_independent_of_client_identity() {
+    for version in ["2025-03-26", "2025-06-18", "2025-11-25"] {
+        let (response, evidence) = initialize_server(version).await;
+        assert_eq!(
+            response["result"]["protocolVersion"], version,
+            "the requested supported wire revision must be negotiated exactly"
+        );
+        assert!(response["result"]["capabilities"]["tools"].is_object());
+        assert!(response["result"]["capabilities"]["resources"].is_object());
+        for unsupported in ["sampling", "roots", "elicitation", "tasks"] {
+            assert!(
+                response["result"]["capabilities"]
+                    .get(unsupported)
+                    .is_none(),
+                "optional capability {unsupported} was not admitted"
+            );
+        }
+        assert_eq!(
+            evidence.lock().expect("duplex evidence").as_slice(),
+            &["settle"]
+        );
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn server_counteroffers_latest_handshake_revision_for_modern_initialize() {
+    let (response, evidence) = initialize_server("2026-07-28").await;
     assert_eq!(response["result"]["protocolVersion"], "2025-11-25");
     assert_eq!(
         evidence.lock().expect("duplex evidence").as_slice(),

@@ -1,7 +1,7 @@
 //! MCP protocol ownership and guarded transport adapters.
 //!
-//! Outbound clients select 2026-07-28. The Claude-facing inbound stdio server
-//! selects 2025-11-25 until Claude supports the newer protocol era.
+//! Outbound clients select stateless 2026-07-28. The inbound stdio server
+//! negotiates its explicit handshake-era revision set through `rmcp`.
 
 mod admission;
 mod client;

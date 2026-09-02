@@ -17,6 +17,12 @@ use tokio_util::compat::{FuturesAsyncReadCompatExt, FuturesAsyncWriteCompatExt};
 
 use crate::{McpError, McpFailure, McpFuture};
 
+const INBOUND_HANDSHAKE_PROTOCOLS: &[ProtocolVersion] = &[
+    ProtocolVersion::V_2025_03_26,
+    ProtocolVersion::V_2025_06_18,
+    ProtocolVersion::V_2025_11_25,
+];
+
 pub struct McpServerToolCall {
     name: String,
     arguments: Map<String, serde_json::Value>,
@@ -136,7 +142,7 @@ struct ServerAdapter {
 
 impl ServerHandler for ServerAdapter {
     fn supported_protocol_versions(&self) -> Cow<'static, [ProtocolVersion]> {
-        Cow::Owned(vec![ProtocolVersion::V_2025_11_25])
+        Cow::Borrowed(INBOUND_HANDSHAKE_PROTOCOLS)
     }
 
     fn get_info(&self) -> ServerInfo {
