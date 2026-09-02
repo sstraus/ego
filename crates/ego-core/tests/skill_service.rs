@@ -15,11 +15,8 @@ use serde_json::json;
 use ego_core::budget::{BudgetGate, SharedBudgetGate};
 use ego_core::config::{ModelRef, Trust};
 use ego_core::event::domain::{DomainEvent, EventKind};
-use ego_core::event::hook::{
-    HookActivation, HookDecision, HookInvocationId, HookLifecycle, HookOutcome, HookPlan,
-    HookResult, HookSource,
-};
-use ego_core::event::id::{Producer, SessionId, SubagentInvocationId};
+use ego_core::event::hook::{HookDecision, HookLifecycle, HookOutcome};
+use ego_core::event::id::{ItemId, Producer, SessionId, SubagentInvocationId, TurnId};
 use ego_core::event::skill::{
     SkillContentDigest, SkillDescriptorEvidence, SkillId, SkillInvocationId, SkillSourceAuthority,
     SkillSourceLocation,
@@ -685,7 +682,13 @@ fn turn_batch_selection_rejects_skill_and_effect_before_either_executes() {
 
 #[test]
 fn skill_service_bridges_real_child_service_for_both_fork_modes() {
-    let (child, parent, child_events, child_waits) = real_child_service();
+    let RealChildFixture {
+        child,
+        parent,
+        child_events,
+        child_waits,
+        origins: [foreground_origin, background_origin],
+    } = real_child_service();
     let service = ego_core::skill::SkillService::new(child);
     let foreground_invocation = SkillInvocation::admit_for_service(
         spec("explain", DIGEST_A, true, true),
@@ -707,19 +710,38 @@ fn skill_service_bridges_real_child_service_for_both_fork_modes() {
     let background_id = background_invocation.id();
 
     let foreground = service
-        .fork(foreground_invocation, ChildWait::Foreground, &parent)
+        .fork(
+            foreground_invocation,
+            ChildWait::Foreground,
+            foreground_origin.turn,
+            foreground_origin.item,
+            &parent,
+        )
         .expect("foreground skill fork");
     let background = service
-        .fork(background_invocation, ChildWait::Background, &parent)
+        .fork(
+            background_invocation,
+            ChildWait::Background,
+            background_origin.turn,
+            background_origin.item,
+            &parent,
+        )
         .expect("background skill fork");
     assert_eq!(foreground.wait_mode(), ChildWait::Foreground);
     assert_eq!(background.wait_mode(), ChildWait::Background);
     assert_ne!(foreground_id, background_id);
     let child_events = child_events.lock().expect("child journal");
-    assert!(
+    assert_eq!(
         child_events
             .iter()
-            .any(|event| matches!(&event.kind, EventKind::SubagentRequested { .. }))
+            .filter(|event| matches!(&event.kind, EventKind::SubagentRequested { .. }))
+            .map(|event| (event.env.turn, event.env.item))
+            .collect::<Vec<_>>(),
+        vec![
+            (foreground_origin.turn, Some(foreground_origin.item)),
+            (background_origin.turn, Some(background_origin.item)),
+        ],
+        "each fork preserves the originating tool turn and item",
     );
     assert_eq!(
         &*child_waits.lock().expect("child waits"),
@@ -940,14 +962,21 @@ impl HookInvocationPort for RecordingHookPort {
     }
 }
 
-type RealChildService = (
-    ChildRunService,
-    SessionHookRuntime<'static>,
-    Arc<Mutex<Vec<DomainEvent>>>,
-    Arc<Mutex<Vec<ChildWait>>>,
-);
+#[derive(Clone, Copy)]
+struct ParentToolOrigin {
+    turn: TurnId,
+    item: ItemId,
+}
 
-fn real_child_service() -> RealChildService {
+struct RealChildFixture {
+    child: ChildRunService,
+    parent: SessionHookRuntime<'static>,
+    child_events: Arc<Mutex<Vec<DomainEvent>>>,
+    child_waits: Arc<Mutex<Vec<ChildWait>>>,
+    origins: [ParentToolOrigin; 2],
+}
+
+fn real_child_service() -> RealChildFixture {
     let controller = Arc::new(RunController::new(
         Arc::new(RecordingSessionStore::default()),
         Arc::new(ChildExecutor),
@@ -977,25 +1006,51 @@ fn real_child_service() -> RealChildService {
     let journal_store: &'static ChildJournalFixture = Box::leak(Box::new(child_journal));
     let clock: &'static FixedClock = Box::leak(Box::new(FixedClock));
     let sink: &'static NullSink = Box::leak(Box::new(NullSink));
+    let shared = SharedJournal::new(Journal::new(
+        parent_run.session_id(),
+        journal_store,
+        clock,
+        sink,
+        Producer::Main,
+        SessionState::default(),
+    ));
+    let turn = TurnId::new();
+    let origins = [
+        ParentToolOrigin {
+            turn,
+            item: ItemId::new(),
+        },
+        ParentToolOrigin {
+            turn,
+            item: ItemId::new(),
+        },
+    ];
+    for (ordinal, origin) in origins.iter().enumerate() {
+        shared
+            .append(
+                origin.turn,
+                Some(origin.item),
+                None,
+                EventKind::ToolCallStarted {
+                    name: "skill".to_owned(),
+                    args: "{}".to_owned(),
+                    call_id: Some(format!("skill-parent-{ordinal}")),
+                },
+            )
+            .expect("parent tool origin");
+    }
     let parent = SessionHookRuntime::new(
         HookLifecycleDispatcher::new(
             HookRunner::new(),
             HookCatalogue::admit_typed(&[], &[], Trust::Trusted).expect("empty hook catalogue"),
         ),
-        SharedJournal::new(Journal::new(
-            parent_run.session_id(),
-            journal_store,
-            clock,
-            sink,
-            Producer::Main,
-            SessionState::default(),
-        )),
+        shared,
         Arc::new(RecordingHookPort::default()),
         CancelToken::new(),
         Instant::now() + Duration::from_secs(60),
     );
-    (
-        ChildRunService::new(
+    RealChildFixture {
+        child: ChildRunService::new(
             controller,
             gate,
             RunRoot::new("/workspace").expect("root"),
@@ -1005,5 +1060,6 @@ fn real_child_service() -> RealChildService {
         parent,
         child_events,
         child_waits,
-    )
+        origins,
+    }
 }

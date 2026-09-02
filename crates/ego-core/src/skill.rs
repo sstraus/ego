@@ -966,6 +966,8 @@ impl SkillService {
         &self,
         invocation: SkillInvocation,
         wait: ChildWait,
+        parent_turn: TurnId,
+        parent_item: ItemId,
         parent: &SessionHookRuntime<'_>,
     ) -> Result<SkillFork, SkillError> {
         let spec = invocation
@@ -989,8 +991,8 @@ impl SkillService {
         let mut request = ChildRequest::new(
             SubagentInvocationId::new(),
             self.child.parent_run(),
-            TurnId::new(),
-            ItemId::new(),
+            parent_turn,
+            parent_item,
             rendered,
             selections,
             wait,
