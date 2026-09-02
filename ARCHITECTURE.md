@@ -67,14 +67,15 @@ independently.
 
 The final layout has six crates in one workspace, and all six are present. M2
 added `ego-mcp` with its real client/server surface. Dependency arrows point
-down only.
+inward toward consumer-owned ports.
 
 ```
 ego          (bin)  CLI: interactive line UI, headless, subcommands, config
 ├── ego-acp         ACP server on agent-client-protocol 2.0
 ├── ego-mcp         current MCP client + `ego mcp-server` on a release-gated
 │                   rmcp 3.x
-├── ego-tools       builtin tools + execution backends (the OS lives here)
+├── ego-tools       builtin tools + execution backends (the OS lives here);
+│                   implements the consumer ports owned by ego-mcp
 ├── ego-ai          provider layer: wire formats, provider table, usage,
 │                   delivery certainty, model catalogues
 └── ego-core        the harness: loop, reducer, permissions, sessions,
@@ -89,9 +90,17 @@ first integration). `ego-core` owns the provider-neutral conversation model
 port; `ego-ai` *implements* that port and owns `Http`, wire formats,
 credentials and provider tables. M2 replaces `Http`'s OS implementation with
 the shared core-owned guarded byte-transport port while leaving provider wire
-semantics in `ego-ai`. Every satellite crate depends on core; the
-binary wires implementations in. The crate count is a consequence, not a
-requirement.
+semantics in `ego-ai`. Every satellite crate depends on core; `ego-tools` also
+depends on `ego-mcp` solely to implement its consumer-owned HTTP and duplex
+effect ports. The binary wires implementations in. The crate count is a
+consequence, not a requirement.
+
+The complete allowed workspace edge set is: `ego-core -> {}`;
+`ego-ai -> {ego-core}`; `ego-acp -> {ego-core}`;
+`ego-mcp -> {ego-core}`; `ego-tools -> {ego-core, ego-mcp}`; and
+`ego-cli -> {ego-core, ego-ai, ego-tools, ego-acp, ego-mcp}`. In particular,
+`ego-mcp -> ego-tools` remains forbidden: protocol owns the narrow port and the
+outer OS crate implements it.
 
 Rules:
 
@@ -101,7 +110,9 @@ Rules:
 - `ego-ai` owns provider HTTP semantics behind the core-owned guarded
   byte-transport port (§3.1); it never exposes its provider client to a sibling.
 - `ego-tools` is where real I/O lives: guarded HTTP, filesystem tools, duplex
-  process spawning, and sandbox backends. It implements `ego-core`'s traits.
+  process spawning, and sandbox backends. It implements `ego-core`'s neutral
+  traits and the MCP-specific consumer ports owned by `ego-mcp`; it does not
+  import `rmcp`, parse MCP frames, or own MCP lifecycle state.
 - `ego-mcp` adapts current rmcp tools into `ego-core::Tool` objects and its
   resources/prompts into the core-owned `ContextSource`. It owns what rmcp does not provide
   (`docs/04-crates.md` §1): immutable admitted snapshots, access policy,
