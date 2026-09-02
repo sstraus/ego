@@ -29,6 +29,7 @@ use ego_acp::project::project_acp_v1;
 use ego_acp::serve::{McpSessionAdmissionError, McpSessionAdmitter, SessionMcpAdmission};
 use ego_core::config::ModelRef;
 use ego_core::event::domain::{CancelCause, DomainEvent};
+use ego_core::event::hook::{HookFailure, HookFailureKind};
 use ego_core::event::id::{ItemId, SessionId, TurnId};
 use ego_core::event::time::{Clock, Timestamp};
 use ego_core::evidence::{EvidenceError, EvidenceWrite};
@@ -36,7 +37,9 @@ use ego_core::generator::capabilities::{
     CacheRetention, CancelSemantics, ImageInputSupport, ModelCapabilities, ReasoningCarryover,
     ReasoningEffortSupport, Transport,
 };
-use ego_core::hook::HookLifecycleDispatcher;
+use ego_core::hook::{
+    HookCausality, HookFuture, HookInvocationPort, HookInvocationRequest, SessionHookRuntime,
+};
 use ego_core::mcp::{ForeignQuestionPort, McpRuntimeBinding, ToolExecution};
 use ego_core::public::{ItemKind, PublicEvent};
 use ego_core::run::{
@@ -280,6 +283,7 @@ impl ForeignQuestionPort for RejectingMcpPort {
         &'a self,
         _continuation_id: &'a str,
         _canonical_json: &'a str,
+        _causality: HookCausality,
     ) -> BoxFuture<'a, Result<ToolExecution, String>> {
         Box::pin(future::ready(Err(
             "prompt fixture must not invoke foreign resume".to_owned(),
@@ -290,13 +294,35 @@ impl ForeignQuestionPort for RejectingMcpPort {
 #[derive(Clone, Default)]
 struct RecordingMcpRuntime;
 
+struct UnusedHookPort;
+
+impl HookInvocationPort for UnusedHookPort {
+    fn invoke<'a>(&'a self, _request: HookInvocationRequest) -> HookFuture<'a> {
+        Box::pin(future::ready(Err(HookFailure::new(
+            HookFailureKind::HandlerFailed,
+            None,
+        ))))
+    }
+}
+
 impl McpRuntimeBinding for RecordingMcpRuntime {
-    fn foreign_question_port<'a>(
+    fn hook_invocation_port<'a>(
         &self,
-        _dispatcher: HookLifecycleDispatcher,
-        _floor: ResumeFloor,
+        _policy: &'a ego_core::permit::PolicyEngine,
         _effects: ToolEffectPorts<'a>,
-    ) -> Arc<dyn ForeignQuestionPort + 'a> {
+    ) -> Result<Arc<dyn HookInvocationPort + 'a>, String> {
+        Ok(Arc::new(UnusedHookPort))
+    }
+
+    fn foreign_question_port<'session, 'turn>(
+        &self,
+        _runtime: SessionHookRuntime<'session>,
+        _floor: ResumeFloor,
+        _effects: ToolEffectPorts<'turn>,
+    ) -> Arc<dyn ForeignQuestionPort + 'turn>
+    where
+        'session: 'turn,
+    {
         Arc::new(RejectingMcpPort)
     }
 }

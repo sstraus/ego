@@ -11,9 +11,9 @@ use ego_core::config::{ConfigLayer, Mode, ModelRef, PermCfg, Ruleset, Source, Tr
 use ego_core::cost::MeteringRevision;
 use ego_core::event::domain::{DomainEvent, Envelope, EventKind};
 use ego_core::event::hook::{
-    HookActivation, HookCatalogueEvidence, HookDecision, HookDescriptorEvidence, HookFailure,
-    HookFailureKind, HookInvocationId, HookLifecycle, HookOccurrenceKey, HookOccurrenceOwner,
-    HookOutcome, HookPlan, HookResult, HookSourceAuthority,
+    HookActivation, HookCatalogueEntryEvidence, HookCatalogueEvidence, HookDecision,
+    HookDescriptorEvidence, HookFailure, HookFailureKind, HookInvocationId, HookLifecycle,
+    HookOccurrenceKey, HookOccurrenceOwner, HookOutcome, HookPlan, HookResult, HookSourceAuthority,
 };
 use ego_core::event::id::{EventId, ItemId, Producer, Seq, SessionId, TurnId};
 use ego_core::event::skill::{
@@ -41,10 +41,11 @@ use ego_core::mcp::ToolExecution;
 use ego_core::permit::rule::Rule;
 use ego_core::permit::{
     CanonPath, DnsResolution, DuplexHandle, DuplexSpawner, EnvPolicy, GuardedIo, OneHop,
-    OneHopResponse, Op, PolicyEngine, PrepareCtx, PreparedCall, ProcessError, ProcessExecutor,
-    Resolver, SpawnSpec, Tool, ToolDescriptor, ToolError, ToolResult, TransportError,
-    TransportFailure,
+    OneHopResponse, Op, PermissionDecision, PolicyEngine, PrepareCtx, PreparedCall, ProcessError,
+    ProcessExecutor, Resolver, SpawnSpec, Tool, ToolDescriptor, ToolError, ToolResult,
+    TransportError, TransportFailure,
 };
+use ego_core::permit::{HumanApprover, PermissionRequest};
 use ego_core::sink::CollectingSink;
 use ego_core::skill::{SkillInvocation, SkillOperation, SkillSpec};
 use ego_core::state::{HookReplayDisposition, RefusalReason, SessionState};
@@ -117,7 +118,14 @@ fn catalogue_evidence(catalogue: &HookCatalogue) -> HookCatalogueEvidence {
             spec.ordinal().expect("hook ordinal"),
         )
     });
-    HookCatalogueEvidence::new(descriptors.collect()).expect("catalogue evidence")
+    HookCatalogueEvidence::new(
+        descriptors
+            .map(|descriptor| {
+                HookCatalogueEntryEvidence::new(descriptor, HookActivation::Persistent)
+            })
+            .collect(),
+    )
+    .expect("catalogue evidence")
 }
 
 fn occurrence(lifecycle: HookLifecycle, session: SessionId) -> HookOccurrence {
@@ -390,6 +398,15 @@ impl ProcessExecutor for NoProcess {
     }
 }
 
+#[derive(Debug)]
+struct DenyApprover;
+
+impl HumanApprover for DenyApprover {
+    fn decide<'a>(&'a self, _request: &'a PermissionRequest) -> BoxFuture<'a, PermissionDecision> {
+        Box::pin(std::future::ready(PermissionDecision::Deny))
+    }
+}
+
 struct FailingExecTool;
 
 impl Tool for FailingExecTool {
@@ -554,6 +571,14 @@ fn run_turn_scripts<P: HookInvocationPort + Clone + 'static>(
     scripts: Vec<Vec<AiEvent>>,
     port: &P,
 ) -> (Vec<DomainEvent>, SessionState) {
+    run_turn_scripts_with_policy(scripts, port, false)
+}
+
+fn run_turn_scripts_with_policy<P: HookInvocationPort + Clone + 'static>(
+    scripts: Vec<Vec<AiEvent>>,
+    port: &P,
+    deny_exec: bool,
+) -> (Vec<DomainEvent>, SessionState) {
     let store = Store::default();
     let clock = FixedClock;
     let sink = CollectingSink::new();
@@ -562,18 +587,28 @@ fn run_turn_scripts<P: HookInvocationPort + Clone + 'static>(
         ego_core::cost::Amount::new(1000, 0).expect("amount"),
         ego_core::cost::CurrencyCode::new("USD").expect("currency"),
     )));
-    let policy = PolicyEngine::new(
-        CanonPath::new("/ws"),
-        Mode::Default,
-        Ruleset::from_layer(
-            PermCfg {
-                judge: None,
-                allow: vec![Rule::load("exec(*)").expect("exec rule")],
-                deny: Vec::new(),
+    let permissions = Ruleset::from_layer(
+        PermCfg {
+            judge: None,
+            allow: if deny_exec {
+                Vec::new()
+            } else {
+                vec![Rule::load("exec(*)").expect("exec rule")]
             },
-            Source::Project,
-        ),
+            deny: Vec::new(),
+        },
+        Source::Project,
     );
+    let policy = if deny_exec {
+        PolicyEngine::with_human(
+            CanonPath::new("/ws"),
+            Mode::Default,
+            permissions,
+            Arc::new(DenyApprover),
+        )
+    } else {
+        PolicyEngine::new(CanonPath::new("/ws"), Mode::Default, permissions)
+    };
     let process = NoProcess;
     let evidence = NoEvidence;
     let fs = ego_core::permit::fake::FakeFs::default();
@@ -767,6 +802,36 @@ fn turn_loop_real_owner_reaches_tool_batch_and_failure_boundaries_then_stops() {
             HookLifecycle::PostToolBatch,
             HookLifecycle::Stop,
         ]
+    );
+}
+
+#[test]
+fn turn_loop_permission_denial_reaches_request_and_denied_hooks_once_before_exit() {
+    let port = RecordingPort::default();
+    let (_events, _state) = run_turn_scripts_with_policy(
+        vec![
+            vec![
+                AiEvent::ToolCall {
+                    call_id: "call-denied".to_owned(),
+                    name: "failing_exec".to_owned(),
+                    args: "{}".to_owned(),
+                },
+                AiEvent::Stop(StopReason::ToolUse),
+            ],
+            vec![AiEvent::Stop(StopReason::Stop)],
+        ],
+        &port,
+        true,
+    );
+    assert_eq!(
+        port.calls(),
+        vec![
+            HookLifecycle::UserPromptSubmit,
+            HookLifecycle::PreToolUse,
+            HookLifecycle::PermissionRequest,
+            HookLifecycle::PermissionDenied,
+        ],
+        "a settled policy denial has one request/denied owner path and exits before batch/stop",
     );
 }
 
@@ -970,8 +1035,18 @@ impl ReducerFixture {
     ) -> DomainEvent {
         self.event(
             EventKind::HookCatalogueAdmitted {
-                descriptors: ego_core::event::hook::HookCatalogueEvidence::new(descriptors)
-                    .expect("descriptor evidence"),
+                descriptors: ego_core::event::hook::HookCatalogueEvidence::new(
+                    descriptors
+                        .into_iter()
+                        .map(|descriptor| {
+                            ego_core::event::hook::HookCatalogueEntryEvidence::new(
+                                descriptor,
+                                HookActivation::Persistent,
+                            )
+                        })
+                        .collect(),
+                )
+                .expect("descriptor evidence"),
             },
             Producer::Main,
         )
@@ -1069,7 +1144,11 @@ fn reducer_replays_real_hook_reached_start_and_settle_events_without_rerun() {
     let reached = fixture.reached(
         key,
         ego_core::event::hook::HookSubject::Item { item: fixture.item },
-        HookPlan::new(vec![hook]).expect("single-hook plan"),
+        HookPlan::new(vec![ego_core::event::hook::HookPlanEntry::new(
+            hook,
+            HookActivation::Persistent,
+        )])
+        .expect("single-hook plan"),
     );
     let occurrence_event = reached.env.id;
     state.apply(&reached);
@@ -1123,7 +1202,11 @@ fn reducer_keeps_partial_pre_and_observer_occurrences_uncertain_by_actual_phase(
             HookOccurrenceOwner::Item { item: fixture.item },
         ),
         ego_core::event::hook::HookSubject::Item { item: fixture.item },
-        HookPlan::new(vec![pre_id]).expect("pre plan"),
+        HookPlan::new(vec![ego_core::event::hook::HookPlanEntry::new(
+            pre_id,
+            HookActivation::Persistent,
+        )])
+        .expect("pre plan"),
     );
     let pre_occurrence = pre_reached.env.id;
     state.apply(&pre_reached);
@@ -1139,7 +1222,11 @@ fn reducer_keeps_partial_pre_and_observer_occurrences_uncertain_by_actual_phase(
             HookOccurrenceOwner::Item { item: fixture.item },
         ),
         ego_core::event::hook::HookSubject::Item { item: fixture.item },
-        HookPlan::new(vec![observer_id]).expect("observer plan"),
+        HookPlan::new(vec![ego_core::event::hook::HookPlanEntry::new(
+            observer_id,
+            HookActivation::Persistent,
+        )])
+        .expect("observer plan"),
     );
     let observer_occurrence = observer_reached.env.id;
     state.apply(&observer_reached);
@@ -1178,6 +1265,62 @@ fn reducer_keeps_partial_pre_and_observer_occurrences_uncertain_by_actual_phase(
 }
 
 #[test]
+fn every_accepted_lifecycle_replays_uncertainty_from_its_declared_phase() {
+    let mut fixture = ReducerFixture::new();
+    let admitted = descriptor(0);
+    let hook = admitted.id();
+    let mut state = SessionState::default();
+    state.apply(&fixture.admission(vec![admitted]));
+
+    let mut dispositions = Vec::new();
+    for lifecycle in LIFECYCLES {
+        let reached = fixture.reached(
+            HookOccurrenceKey::new(lifecycle, HookOccurrenceOwner::Item { item: fixture.item }),
+            ego_core::event::hook::HookSubject::Item { item: fixture.item },
+            HookPlan::new(vec![ego_core::event::hook::HookPlanEntry::new(
+                hook,
+                HookActivation::Persistent,
+            )])
+            .expect("single-hook plan"),
+        );
+        let occurrence = reached.env.id;
+        state.apply(&reached);
+        let started = fixture.start(occurrence, hook, HookInvocationId::new(), lifecycle);
+        let invocation = match &started.kind {
+            EventKind::HookInvocationStarted { invocation, .. } => *invocation,
+            _ => unreachable!("fixture creates a hook start"),
+        };
+        state.apply(&started);
+        let live = state
+            .live_hooks()
+            .get(&invocation)
+            .expect("every reached lifecycle starts one hook");
+        dispositions.push((lifecycle, live.replay_disposition(), live.delivery()));
+    }
+
+    assert_eq!(dispositions.len(), LIFECYCLES.len());
+    for (lifecycle, disposition, delivery) in dispositions {
+        match lifecycle.phase() {
+            ego_core::event::hook::HookPhase::PreEffect => {
+                assert_eq!(
+                    disposition,
+                    HookReplayDisposition::FailClosed,
+                    "pre-effect {lifecycle:?} must fail closed after a crash",
+                );
+            }
+            ego_core::event::hook::HookPhase::Observer => {
+                assert_eq!(
+                    disposition,
+                    HookReplayDisposition::ObserverUncertain,
+                    "observer {lifecycle:?} must remain truthful after a crash",
+                );
+                assert_eq!(delivery, DeliveryCertainty::PossiblySent);
+            }
+        }
+    }
+}
+
+#[test]
 fn hook_dispatcher_rejects_hook_produced_reentry_before_owner_effect() {
     let location =
         ego_core::event::hook::HookSourceLocation::parse("hooks/project.toml").expect("location");
@@ -1197,17 +1340,28 @@ fn hook_dispatcher_rejects_hook_produced_reentry_before_owner_effect() {
         CoreHookRunner::new_with_durable_started(Vec::<HookStartedEvidence>::new()),
         catalogue(),
     );
-    let _ = block_on(dispatcher.dispatch(
+    let result = block_on(dispatcher.dispatch(
         &port,
         &port,
         CancelToken::new(),
         Instant::now() + Duration::from_secs(30),
         Producer::Hook(hook),
         event,
-    ));
+    ))
+    .expect("hook-produced effects are rejected as a no-op, not rerun");
+    assert_eq!(result.decision(), HookDecision::Continue);
+    assert!(
+        !result.is_durable(),
+        "reentry must not create hook evidence"
+    );
+    assert!(
+        !result.started_invocation(),
+        "reentry must not start a nested invocation"
+    );
+    assert!(result.closure_event().is_none());
     assert!(
         port.calls().is_empty(),
-        "hook-produced effects do not recursively invoke lifecycle handlers"
+        "reentry never reaches the invocation port"
     );
 }
 

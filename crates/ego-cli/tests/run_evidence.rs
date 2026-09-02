@@ -14,7 +14,7 @@ use ego_cli::run::Ended;
 use ego_core::evidence::EvidenceAdmissionService;
 use ego_core::run::RunTermination;
 use ego_core::turn::CancelToken;
-use ego_mcp::McpRegistryController;
+use ego_mcp::McpRegistryRuntime;
 
 fn assert_direct_surface<F>(_surface: F)
 where
@@ -22,7 +22,7 @@ where
         Args,
         &'a Stdout,
         CancelToken,
-        Arc<McpRegistryController>,
+        Arc<McpRegistryRuntime>,
         Arc<EvidenceAdmissionService>,
     ) -> Ended,
 {
@@ -34,7 +34,7 @@ where
         Args,
         &'a Stdout,
         CancelToken,
-        Arc<McpRegistryController>,
+        Arc<McpRegistryRuntime>,
         Arc<EvidenceAdmissionService>,
     ) -> Ended,
 {

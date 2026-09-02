@@ -153,18 +153,27 @@ pub trait ForeignQuestionPort: Send + Sync {
         &'a self,
         continuation_id: &'a str,
         canonical_json: &'a str,
+        causality: crate::hook::HookCausality,
     ) -> BoxFuture<'a, Result<ToolExecution, String>>;
 }
 
 /// Session-owned factory for a foreign-question adapter bound to the exact
 /// hook dispatcher, resume floor and effect authority of one turn.
 pub trait McpRuntimeBinding: Send + Sync {
-    fn foreign_question_port<'a>(
+    fn hook_invocation_port<'a>(
         &self,
-        runtime: crate::hook::SessionHookRuntime<'a>,
-        floor: crate::suspension::ResumeFloor,
+        policy: &'a crate::permit::PolicyEngine,
         effects: crate::turn::ToolEffectPorts<'a>,
-    ) -> Arc<dyn ForeignQuestionPort + 'a>;
+    ) -> Result<Arc<dyn crate::hook::HookInvocationPort + 'a>, String>;
+
+    fn foreign_question_port<'session, 'turn>(
+        &self,
+        runtime: crate::hook::SessionHookRuntime<'session>,
+        floor: crate::suspension::ResumeFloor,
+        effects: crate::turn::ToolEffectPorts<'turn>,
+    ) -> Arc<dyn ForeignQuestionPort + 'turn>
+    where
+        'session: 'turn;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

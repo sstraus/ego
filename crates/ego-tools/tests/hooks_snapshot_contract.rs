@@ -2,9 +2,10 @@
 
 use ego_core::event::domain::{DomainEvent, Envelope, EventKind};
 use ego_core::event::hook::{
-    HookCatalogueEvidence, HookDescriptorEvidence, HookFailure, HookFailureKind, HookInvocationId,
-    HookLifecycle, HookOccurrenceKey, HookOccurrenceOwner, HookPlan, HookResult,
-    HookSourceAuthority, HookSourceLocation,
+    HookActivation, HookCatalogueEntryEvidence, HookCatalogueEvidence, HookDescriptorEvidence,
+    HookFailure, HookFailureKind, HookInvocationId, HookLifecycle, HookOccurrenceKey,
+    HookOccurrenceOwner, HookPlan, HookPlanEntry, HookResult, HookSourceAuthority,
+    HookSourceLocation,
 };
 use ego_core::event::id::{EventId, ItemId, Producer, Seq, SessionId, TurnId};
 use ego_core::event::time::Timestamp;
@@ -89,7 +90,11 @@ impl Fixture {
                 None,
                 Producer::Main,
                 EventKind::HookCatalogueAdmitted {
-                    descriptors: HookCatalogueEvidence::new(vec![d.clone()]).unwrap(),
+                    descriptors: HookCatalogueEvidence::new(vec![HookCatalogueEntryEvidence::new(
+                        d.clone(),
+                        HookActivation::Persistent,
+                    )])
+                    .unwrap(),
                 },
             ),
             event(
@@ -104,7 +109,11 @@ impl Fixture {
                         HookOccurrenceOwner::Session { session: id },
                     ),
                     subject: ego_core::event::hook::HookSubject::Turn { turn },
-                    plan: HookPlan::new(vec![d.id()]).unwrap(),
+                    plan: HookPlan::new(vec![HookPlanEntry::new(
+                        d.id(),
+                        HookActivation::Persistent,
+                    )])
+                    .unwrap(),
                 },
             ),
             event(
@@ -293,13 +302,13 @@ fn assert_tool_origin_and_continuation_result(state: &SessionState, item: ItemId
 }
 
 #[test]
-fn snapshot_version_is_twelve_and_validation_exposes_exact_rejection_set() {
-    assert_eq!(SNAPSHOT_VERSION, 12);
+fn snapshot_version_is_thirteen_and_validation_exposes_exact_rejection_set() {
+    assert_eq!(SNAPSHOT_VERSION, 13);
     let fixture = Fixture::new();
     let state = fixture.full_replay();
     assert_eq!(state.hook_settlements().len(), 1);
     let snapshot = Snapshot::new(fixture.id, fixture.events[3].env.seq, state.clone());
-    assert_eq!(snapshot.v, 12);
+    assert_eq!(snapshot.v, 13);
     assert_eq!(
         validate(
             &snapshot,
@@ -329,7 +338,7 @@ fn full_log_replay_reconstructs_exact_tool_call_origin_and_parent_result() {
 }
 
 #[test]
-fn snapshot_v12_roundtrip_and_tail_replay_preserve_tool_origin_and_result() {
+fn snapshot_v13_roundtrip_and_tail_replay_preserve_tool_origin_and_result() {
     let fixture = ToolOriginFixture::new();
     let expected = fixture.full_replay();
     fixture
@@ -445,7 +454,11 @@ fn unresolved_live_pre_effect_and_observer_states_survive_snapshot_without_retry
         None,
         Producer::Main,
         EventKind::HookCatalogueAdmitted {
-            descriptors: HookCatalogueEvidence::new(vec![d.clone()]).unwrap(),
+            descriptors: HookCatalogueEvidence::new(vec![HookCatalogueEntryEvidence::new(
+                d.clone(),
+                HookActivation::Persistent,
+            )])
+            .unwrap(),
         },
     );
     let pre_reached = event(
@@ -460,7 +473,8 @@ fn unresolved_live_pre_effect_and_observer_states_survive_snapshot_without_retry
                 HookOccurrenceOwner::Session { session: id },
             ),
             subject: ego_core::event::hook::HookSubject::Turn { turn },
-            plan: HookPlan::new(vec![d.id()]).unwrap(),
+            plan: HookPlan::new(vec![HookPlanEntry::new(d.id(), HookActivation::Persistent)])
+                .unwrap(),
         },
     );
     let pre = event(
@@ -490,7 +504,8 @@ fn unresolved_live_pre_effect_and_observer_states_survive_snapshot_without_retry
                 HookOccurrenceOwner::Session { session: id },
             ),
             subject: ego_core::event::hook::HookSubject::Turn { turn },
-            plan: HookPlan::new(vec![d.id()]).unwrap(),
+            plan: HookPlan::new(vec![HookPlanEntry::new(d.id(), HookActivation::Persistent)])
+                .unwrap(),
         },
     );
     let observer = event(

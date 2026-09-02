@@ -13,9 +13,9 @@ use ego_core::event::domain::{
     SubagentTerminal,
 };
 use ego_core::event::hook::{
-    HookCatalogueEvidence, HookDecision, HookDescriptorEvidence, HookInvocationId,
-    HookOccurrenceKey, HookOccurrenceOwner, HookOutcome, HookPlan, HookSourceAuthority,
-    HookSourceLocation,
+    HookActivation, HookCatalogueEntryEvidence, HookCatalogueEvidence, HookDecision,
+    HookDescriptorEvidence, HookInvocationId, HookOccurrenceKey, HookOccurrenceOwner, HookOutcome,
+    HookPlan, HookPlanEntry, HookSourceAuthority, HookSourceLocation,
 };
 use ego_core::event::id::{AttemptId, GenerationId};
 use ego_core::event::id::{
@@ -102,6 +102,14 @@ mod reducer {
                 .unwrap(),
             0,
         )
+    }
+
+    fn hook_catalogue_entry() -> HookCatalogueEntryEvidence {
+        HookCatalogueEntryEvidence::new(hook_descriptor(), HookActivation::Persistent)
+    }
+
+    fn hook_plan_entry() -> HookPlanEntry {
+        HookPlanEntry::new(hook_descriptor().id(), HookActivation::Persistent)
     }
 
     /// A realistic single-turn log exercising every `EventKind` variant, with
@@ -217,7 +225,11 @@ mod reducer {
         push!(
             None,
             EventKind::HookCatalogueAdmitted {
-                descriptors: HookCatalogueEvidence::new(vec![hook.clone()]).unwrap(),
+                descriptors: HookCatalogueEvidence::new(vec![HookCatalogueEntryEvidence::new(
+                    hook.clone(),
+                    HookActivation::Persistent
+                ),])
+                .unwrap(),
             }
         );
         let invocation = HookInvocationId::new();
@@ -612,7 +624,7 @@ mod reducer {
             (
                 "hook_catalogue_admitted",
                 EventKind::HookCatalogueAdmitted {
-                    descriptors: HookCatalogueEvidence::new(vec![hook_descriptor()]).unwrap(),
+                    descriptors: HookCatalogueEvidence::new(vec![hook_catalogue_entry()]).unwrap(),
                 },
             ),
             (
@@ -625,7 +637,7 @@ mod reducer {
                         },
                     ),
                     subject: ego_core::event::hook::HookSubject::Session,
-                    plan: HookPlan::new(vec![hook_descriptor().id()]).unwrap(),
+                    plan: HookPlan::new(vec![hook_plan_entry()]).unwrap(),
                 },
             ),
             (
@@ -1226,7 +1238,11 @@ mod reducer {
             None,
             None,
             EventKind::HookCatalogueAdmitted {
-                descriptors: HookCatalogueEvidence::new(vec![hook.clone()]).unwrap(),
+                descriptors: HookCatalogueEvidence::new(vec![HookCatalogueEntryEvidence::new(
+                    hook.clone(),
+                    HookActivation::Persistent,
+                )])
+                .unwrap(),
             },
         ));
         let reached = ev(
@@ -1242,7 +1258,11 @@ mod reducer {
                     },
                 ),
                 subject: ego_core::event::hook::HookSubject::Session,
-                plan: HookPlan::new(vec![hook.id()]).unwrap(),
+                plan: HookPlan::new(vec![HookPlanEntry::new(
+                    hook.id(),
+                    HookActivation::Persistent,
+                )])
+                .unwrap(),
             },
         );
         let reached_id = reached.env.id;

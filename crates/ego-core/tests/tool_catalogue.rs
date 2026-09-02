@@ -325,7 +325,7 @@ fn loop_with(
     generator: Arc<dyn ego_core::generator::port::Generator>,
     static_tools: &[RegisteredTool],
     source: Arc<dyn AdmittedToolSource>,
-) -> Result<(TurnLoop<'static>, &'static MemoryStore), ToolCatalogueError> {
+) -> Result<(TurnLoop<'static, 'static>, &'static MemoryStore), ToolCatalogueError> {
     let store: &'static MemoryStore = Box::leak(Box::new(MemoryStore::default()));
     let clock = Box::leak(Box::new(FixedClock));
     let sink = Box::leak(Box::new(CollectingSink::new()));

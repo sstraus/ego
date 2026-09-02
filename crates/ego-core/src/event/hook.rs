@@ -423,32 +423,79 @@ impl<'de> Deserialize<'de> for HookDescriptorEvidence {
 /// One complete, ordered admitted hook catalogue.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
-pub struct HookCatalogueEvidence(Vec<HookDescriptorEvidence>);
+pub struct HookCatalogueEvidence(Vec<HookCatalogueEntryEvidence>);
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HookCatalogueEntryEvidence {
+    descriptor: HookDescriptorEvidence,
+    activation: HookActivation,
+}
+
+impl HookCatalogueEntryEvidence {
+    pub fn new(descriptor: HookDescriptorEvidence, activation: HookActivation) -> Self {
+        Self {
+            descriptor,
+            activation,
+        }
+    }
+
+    pub fn descriptor(&self) -> &HookDescriptorEvidence {
+        &self.descriptor
+    }
+
+    pub fn id(&self) -> HookId {
+        self.descriptor.id()
+    }
+
+    pub fn source(&self) -> HookSourceAuthority {
+        self.descriptor.source()
+    }
+
+    pub fn location(&self) -> &HookSourceLocation {
+        self.descriptor.location()
+    }
+
+    pub fn digest(&self) -> HookContentDigest {
+        self.descriptor.digest()
+    }
+
+    pub fn ordinal(&self) -> u32 {
+        self.descriptor.ordinal()
+    }
+
+    pub fn activation(&self) -> HookActivation {
+        self.activation
+    }
+}
 
 impl HookCatalogueEvidence {
-    pub fn new(descriptors: Vec<HookDescriptorEvidence>) -> Result<Self, HookEvidenceError> {
+    pub fn new(descriptors: Vec<HookCatalogueEntryEvidence>) -> Result<Self, HookEvidenceError> {
         let mut ids = HashSet::with_capacity(descriptors.len());
         let mut slots = HashSet::with_capacity(descriptors.len());
         for descriptor in &descriptors {
-            if descriptor.id
+            if descriptor.id()
                 != HookId::derive(
-                    descriptor.source,
-                    &descriptor.location,
-                    &descriptor.digest,
-                    descriptor.ordinal,
+                    descriptor.source(),
+                    descriptor.location(),
+                    &descriptor.digest(),
+                    descriptor.ordinal(),
                 )
             {
                 return Err(HookEvidenceError::new(
                     "hook descriptor id does not match its source evidence",
                 ));
             }
-            if !ids.insert(descriptor.id) {
-                return Err(HookEvidenceError::new("duplicate hook id in catalogue"));
+            if !ids.insert((descriptor.id(), descriptor.activation())) {
+                return Err(HookEvidenceError::new(
+                    "duplicate hook activation in catalogue",
+                ));
             }
             let slot = (
-                descriptor.source,
-                descriptor.location.clone(),
-                descriptor.ordinal,
+                descriptor.source(),
+                descriptor.location().clone(),
+                descriptor.ordinal(),
+                descriptor.activation(),
             );
             if !slots.insert(slot) {
                 return Err(HookEvidenceError::new(
@@ -459,7 +506,7 @@ impl HookCatalogueEvidence {
         Ok(Self(descriptors))
     }
 
-    pub fn as_slice(&self) -> &[HookDescriptorEvidence] {
+    pub fn as_slice(&self) -> &[HookCatalogueEntryEvidence] {
         &self.0
     }
 
@@ -472,7 +519,13 @@ impl HookCatalogueEvidence {
     }
 
     pub fn contains(&self, id: HookId) -> bool {
-        self.0.iter().any(|descriptor| descriptor.id == id)
+        self.0.iter().any(|descriptor| descriptor.id() == id)
+    }
+
+    pub fn contains_activation(&self, entry: HookPlanEntry) -> bool {
+        self.0.iter().any(|candidate| {
+            candidate.id() == entry.hook() && candidate.activation() == entry.activation()
+        })
     }
 }
 
@@ -481,7 +534,7 @@ impl<'de> Deserialize<'de> for HookCatalogueEvidence {
     where
         D: serde::Deserializer<'de>,
     {
-        let descriptors = Vec::<HookDescriptorEvidence>::deserialize(deserializer)?;
+        let descriptors = Vec::<HookCatalogueEntryEvidence>::deserialize(deserializer)?;
         Self::new(descriptors).map_err(serde::de::Error::custom)
     }
 }
@@ -688,20 +741,42 @@ fn validate_continuation_id(value: &str) -> Result<(), HookEvidenceError> {
 /// The immutable ordered hook plan frozen by `HookLifecycleReached`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
-pub struct HookPlan(Vec<HookId>);
+pub struct HookPlan(Vec<HookPlanEntry>);
+
+/// One descriptor execution under its exact persistent or skill activation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HookPlanEntry {
+    hook: HookId,
+    activation: HookActivation,
+}
+
+impl HookPlanEntry {
+    pub fn new(hook: HookId, activation: HookActivation) -> Self {
+        Self { hook, activation }
+    }
+
+    pub fn hook(self) -> HookId {
+        self.hook
+    }
+
+    pub fn activation(self) -> HookActivation {
+        self.activation
+    }
+}
 
 impl HookPlan {
-    pub fn new(hooks: Vec<HookId>) -> Result<Self, HookEvidenceError> {
+    pub fn new(hooks: Vec<HookPlanEntry>) -> Result<Self, HookEvidenceError> {
         let mut unique = HashSet::with_capacity(hooks.len());
         if hooks.iter().any(|hook| !unique.insert(*hook)) {
             return Err(HookEvidenceError::new(
-                "duplicate hook id in lifecycle occurrence plan",
+                "duplicate hook activation in lifecycle occurrence plan",
             ));
         }
         Ok(Self(hooks))
     }
 
-    pub fn as_slice(&self) -> &[HookId] {
+    pub fn as_slice(&self) -> &[HookPlanEntry] {
         &self.0
     }
 
@@ -719,7 +794,8 @@ impl<'de> Deserialize<'de> for HookPlan {
     where
         D: serde::Deserializer<'de>,
     {
-        Self::new(Vec::<HookId>::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+        Self::new(Vec::<HookPlanEntry>::deserialize(deserializer)?)
+            .map_err(serde::de::Error::custom)
     }
 }
 
@@ -771,6 +847,32 @@ pub struct HookFeedback {
 }
 
 impl HookFeedback {
+    pub fn bounded(
+        hook: HookId,
+        reference: EvidenceRef,
+        text: &str,
+    ) -> Result<Self, HookEvidenceError> {
+        if text.len() <= MAX_FEEDBACK_BYTES {
+            return Self::complete(hook, reference, text);
+        }
+        let mut head_bytes = MAX_FEEDBACK_SIDE_BYTES;
+        while !text.is_char_boundary(head_bytes) {
+            head_bytes -= 1;
+        }
+        let mut tail_start = text.len() - MAX_FEEDBACK_SIDE_BYTES;
+        while !text.is_char_boundary(tail_start) {
+            tail_start += 1;
+        }
+        Self::truncated(
+            hook,
+            reference,
+            text,
+            head_bytes,
+            text.len() - tail_start,
+            (tail_start - head_bytes) as u64,
+        )
+    }
+
     pub fn complete(
         hook: HookId,
         reference: EvidenceRef,

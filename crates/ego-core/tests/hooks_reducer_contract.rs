@@ -3,9 +3,10 @@
 use ego_core::digest::sha256_hex;
 use ego_core::event::domain::{DomainEvent, Envelope, EventKind};
 use ego_core::event::hook::{
-    HookCatalogueEvidence, HookDecision, HookDescriptorEvidence, HookFailure, HookFailureKind,
-    HookFeedback, HookId, HookInvocationId, HookLifecycle, HookOccurrenceKey, HookOccurrenceOwner,
-    HookOutcome, HookPlan, HookResult, HookSourceAuthority, HookSourceLocation,
+    HookActivation, HookCatalogueEntryEvidence, HookCatalogueEvidence, HookDecision,
+    HookDescriptorEvidence, HookFailure, HookFailureKind, HookFeedback, HookId, HookInvocationId,
+    HookLifecycle, HookOccurrenceKey, HookOccurrenceOwner, HookOutcome, HookPlan, HookPlanEntry,
+    HookResult, HookSourceAuthority, HookSourceLocation,
 };
 use ego_core::event::id::{EventId, ItemId, Producer, Seq, TurnId};
 use ego_core::event::time::Timestamp;
@@ -67,7 +68,15 @@ impl Fixture {
     fn admission(&mut self, descriptors: Vec<HookDescriptorEvidence>) -> DomainEvent {
         self.event(
             EventKind::HookCatalogueAdmitted {
-                descriptors: HookCatalogueEvidence::new(descriptors).unwrap(),
+                descriptors: HookCatalogueEvidence::new(
+                    descriptors
+                        .into_iter()
+                        .map(|descriptor| {
+                            HookCatalogueEntryEvidence::new(descriptor, HookActivation::Persistent)
+                        })
+                        .collect(),
+                )
+                .unwrap(),
             },
             Producer::Main,
         )
@@ -117,7 +126,13 @@ impl Fixture {
                     HookOccurrenceOwner::Item { item: self.item },
                 ),
                 subject: subject(self.item),
-                plan: HookPlan::new(hooks).unwrap(),
+                plan: HookPlan::new(
+                    hooks
+                        .into_iter()
+                        .map(|hook| HookPlanEntry::new(hook, HookActivation::Persistent))
+                        .collect(),
+                )
+                .unwrap(),
             },
             Producer::Main,
         );
@@ -163,7 +178,13 @@ fn reducer_is_total_and_accepts_admission_start_settlement_in_order() {
     assert!(state.refusals.is_empty());
     assert!(state.live_hooks().is_empty());
     assert_eq!(state.hook_settlements().len(), 1);
-    assert_eq!(state.hook_catalogue().as_slice(), &[d]);
+    assert_eq!(
+        state.hook_catalogue().as_slice(),
+        &[HookCatalogueEntryEvidence::new(
+            d,
+            HookActivation::Persistent
+        )]
+    );
 }
 
 #[test]
@@ -230,7 +251,13 @@ fn reducer_covers_catalogue_replacement_live_survival_and_empty_clear() {
     let start_id = start.env.id;
     state.apply(&start);
     state.apply(&f.admission(vec![replacement.clone()]));
-    assert_eq!(state.hook_catalogue().as_slice(), &[replacement]);
+    assert_eq!(
+        state.hook_catalogue().as_slice(),
+        &[HookCatalogueEntryEvidence::new(
+            replacement,
+            HookActivation::Persistent,
+        )]
+    );
     assert_eq!(
         state.live_hooks().len(),
         1,

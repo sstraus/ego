@@ -3,9 +3,10 @@
 use ego_core::digest::sha256_hex;
 use ego_core::event::domain::{DomainEvent, Envelope, EventKind};
 use ego_core::event::hook::{
-    HookCatalogueEvidence, HookDecision, HookDescriptorEvidence, HookFeedback, HookInvocationId,
-    HookLifecycle, HookOccurrenceKey, HookOccurrenceOwner, HookOutcome, HookPlan, HookResult,
-    HookSourceAuthority, HookSourceLocation,
+    HookActivation, HookCatalogueEntryEvidence, HookCatalogueEvidence, HookDecision,
+    HookDescriptorEvidence, HookFeedback, HookInvocationId, HookLifecycle, HookOccurrenceKey,
+    HookOccurrenceOwner, HookOutcome, HookPlan, HookPlanEntry, HookResult, HookSourceAuthority,
+    HookSourceLocation,
 };
 use ego_core::event::id::{EventId, ItemId, Producer, Seq, SessionId, TurnId};
 use ego_core::event::time::Timestamp;
@@ -59,7 +60,11 @@ fn all_four_hook_events_project_to_none_without_feedback_or_location_leaks() {
         event(
             seq.next(),
             EventKind::HookCatalogueAdmitted {
-                descriptors: HookCatalogueEvidence::new(vec![d.clone()]).unwrap(),
+                descriptors: HookCatalogueEvidence::new(vec![HookCatalogueEntryEvidence::new(
+                    d.clone(),
+                    HookActivation::Persistent,
+                )])
+                .unwrap(),
             },
             Producer::Main,
         ),
@@ -73,7 +78,8 @@ fn all_four_hook_events_project_to_none_without_feedback_or_location_leaks() {
                     },
                 ),
                 subject: ego_core::event::hook::HookSubject::Session,
-                plan: HookPlan::new(vec![d.id()]).unwrap(),
+                plan: HookPlan::new(vec![HookPlanEntry::new(d.id(), HookActivation::Persistent)])
+                    .unwrap(),
             },
             Producer::Main,
         ),

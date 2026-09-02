@@ -9,12 +9,11 @@ use std::time::{Duration, Instant};
 use ego_core::config::{McpConfigProvenance, McpServerConfig, McpServerName};
 use ego_core::event::time::Clock;
 use ego_core::generator::types::ToolDescriptor as GeneratorToolDescriptor;
-use ego_core::hook::HookLifecycleDispatcher;
 use ego_core::mcp::{
     CacheScope, ContextEntry, ContextError, ContextSensitivity, ContextSnapshot, ContextSource,
     ForeignQuestionPort, McpAdmissionFingerprint, McpOperationKind, McpRuntimeBinding, McpSubject,
 };
-use ego_core::permit::{PreparedCall, Tool};
+use ego_core::permit::{PreparedCall, Tool, ToolError};
 use ego_core::suspension::{
     ContinuationJournal, ContinuationKind, ContinuationSubject, McpCapturePin, ResumeFingerprints,
     ResumeFloor, ResumeKeySource,
@@ -27,6 +26,7 @@ use rmcp::model::{Prompt, Resource};
 use sha2::{Digest, Sha256};
 
 use crate::dynamic::{McpCapturedTool, McpOperation, McpToolDefinition};
+use crate::hook::McpHookPort;
 use crate::operation::{McpCaptureResolver, McpForeignQuestionPort};
 use crate::{
     McpCollapsedBootstrap, McpCollapsedCatalogue, McpContinuationOwner, McpDuplexEffectsFactory,
@@ -850,6 +850,47 @@ impl McpRegistryCapture {
         &self.inner.servers
     }
 
+    /// Prepare one hook call from this immutable registry generation.
+    pub fn prepare_hook_call(
+        &self,
+        server: &str,
+        tool: &str,
+        parameters: serde_json::Value,
+    ) -> Result<PreparedCall, ToolError> {
+        if !self
+            .inner
+            .servers
+            .iter()
+            .any(|candidate| candidate.identity().as_str() == server)
+        {
+            return Err(ToolError::InvalidParams(
+                "hook MCP server is absent from the captured registry".to_owned(),
+            ));
+        }
+        let captured = self
+            .inner
+            .captured_tools
+            .iter()
+            .find(|candidate| candidate.descriptor().name == tool)
+            .ok_or_else(|| {
+                ToolError::InvalidParams(
+                    "hook MCP tool is absent from the captured registry".to_owned(),
+                )
+            })?;
+        let (_, _, call) = captured.prepare_captured(parameters)?;
+        let matches_server = call.mcp_envelope().is_some_and(|envelope| {
+            envelope.operation() == McpOperationKind::CallTool
+                && envelope.subject().server() == server
+                && envelope.subject().operation_name() == tool
+        });
+        if !matches_server {
+            return Err(ToolError::InvalidParams(
+                "hook MCP target does not match the captured operation".to_owned(),
+            ));
+        }
+        Ok(call)
+    }
+
     pub(crate) fn prepare_resume(
         &self,
         subject: &ContinuationSubject,
@@ -1455,15 +1496,30 @@ impl McpRegistryRuntime {
 }
 
 impl McpRuntimeBinding for McpRegistryRuntime {
-    fn foreign_question_port<'a>(
+    fn hook_invocation_port<'a>(
         &self,
-        dispatcher: HookLifecycleDispatcher,
-        floor: ResumeFloor,
+        policy: &'a ego_core::permit::PolicyEngine,
         effects: ToolEffectPorts<'a>,
-    ) -> Arc<dyn ForeignQuestionPort + 'a> {
+    ) -> Result<Arc<dyn ego_core::hook::HookInvocationPort + 'a>, String> {
+        let capture = self
+            .controller
+            .capture()
+            .map_err(|error| error.to_string())?;
+        Ok(Arc::new(McpHookPort::new(capture, policy, effects)))
+    }
+
+    fn foreign_question_port<'session, 'turn>(
+        &self,
+        runtime: ego_core::hook::SessionHookRuntime<'session>,
+        floor: ResumeFloor,
+        effects: ToolEffectPorts<'turn>,
+    ) -> Arc<dyn ForeignQuestionPort + 'turn>
+    where
+        'session: 'turn,
+    {
         Arc::new(McpForeignQuestionPort::new(
             Arc::clone(&self.continuations),
-            dispatcher,
+            runtime,
             floor,
             effects,
         ))

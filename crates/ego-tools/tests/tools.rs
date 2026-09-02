@@ -19,7 +19,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-use ego_core::budget::{BudgetGate, Metering, PricingQuote, ResolvedRates, SettlementSource};
+use ego_core::budget::{
+    BudgetGate, Metering, PricingQuote, ResolvedRates, SettlementSource, SharedBudgetGate,
+};
 use ego_core::config::{Mode, PermCfg, Ruleset, Source};
 use ego_core::cost::{Amount, CurrencyCode, Money, PricingRevision, RateSource};
 use ego_core::event::domain::ExitReason;
@@ -1584,11 +1586,14 @@ mod rogue {
             Ok(PreparedCall::new(self.name().to_string(), vec![op]))
         }
 
-        fn execute<'a>(
+        fn execute<'a, 'io>(
             &'a self,
             _call: PreparedCall,
-            io: &'a dyn GuardedIo,
-        ) -> BoxFuture<'a, Result<ToolResult, ToolError>> {
+            io: &'a dyn GuardedIo<'io>,
+        ) -> BoxFuture<'a, Result<ToolResult, ToolError>>
+        where
+            'io: 'a,
+        {
             Box::pin(async move {
                 // `_call` is dropped on the floor. A well-behaved tool reads
                 // its ops back out and acts on those; this one has its own
@@ -1738,7 +1743,7 @@ mod end_to_end {
             ],
         ]));
         let sink = CollectingSink::new();
-        let mut gate = BudgetGate::new(usd("1000"));
+        let gate = SharedBudgetGate::new(BudgetGate::new(usd("1000")));
 
         let outcome = {
             let mut loop_ = TurnLoop::new(
@@ -1755,7 +1760,7 @@ mod end_to_end {
                     source: Arc::new(FixedSource {
                         generator: Arc::clone(&generator),
                     }),
-                    gate: &mut gate,
+                    gate,
                     config: TurnConfig {
                         system: None,
                         token_ceiling: None,
@@ -1776,7 +1781,8 @@ mod end_to_end {
                     ),
                     ws.cwd(),
                 ),
-            );
+            )
+            .expect("budget gate is available");
             block_on(loop_.run("what does main.rs print?")).expect("the log is writable")
         };
 
@@ -1837,7 +1843,7 @@ mod end_to_end {
             ],
         ]));
         let sink = CollectingSink::new();
-        let mut gate = BudgetGate::new(usd("1000"));
+        let gate = SharedBudgetGate::new(BudgetGate::new(usd("1000")));
 
         let outcome = {
             let mut loop_ = TurnLoop::new(
@@ -1854,7 +1860,7 @@ mod end_to_end {
                     source: Arc::new(FixedSource {
                         generator: Arc::clone(&generator),
                     }),
-                    gate: &mut gate,
+                    gate,
                     config: TurnConfig {
                         system: None,
                         token_ceiling: None,
@@ -1875,7 +1881,8 @@ mod end_to_end {
                     ),
                     ws.cwd(),
                 ),
-            );
+            )
+            .expect("budget gate is available");
             block_on(loop_.run("read that file")).expect("the log is writable")
         };
 

@@ -11,8 +11,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::event::domain::{DomainEvent, Envelope, EventKind};
 use crate::event::hook::{
-    HookActivation, HookId, HookInvocationId, HookOccurrenceKey, HookOccurrenceOwner, HookPlan,
-    HookResult, HookSubject,
+    HookActivation, HookId, HookInvocationId, HookLifecycle, HookOccurrenceKey,
+    HookOccurrenceOwner, HookPlan, HookResult, HookSubject,
 };
 use crate::event::id::{EventId, ItemId, Producer, Seq, SessionId, TurnId};
 use crate::event::time::Clock;
@@ -224,25 +224,34 @@ impl HookJournalPort for SharedJournal<'_> {
         let mut journal = self
             .lock()
             .map_err(|error| HookReachError::Absent(HookRunError::new(error.to_string())))?;
-        if matches!(
-            occurrence.key().owner(),
-            HookOccurrenceOwner::Continuation { .. }
-        ) {
+        if let HookOccurrenceOwner::Continuation { id } = occurrence.key().owner() {
             let Some(item) = occurrence.causality().item_id() else {
                 return Err(HookReachError::Absent(HookRunError::new(
                     "hook continuation has no causal tool item",
                 )));
             };
-            let Some(tool) = journal.state().items.get(&item) else {
-                return Err(HookReachError::Absent(HookRunError::new(
-                    "hook continuation causal item is absent",
-                )));
+            let valid_parent = match occurrence.key().lifecycle() {
+                HookLifecycle::Elicitation => {
+                    journal.state().items.get(&item).is_some_and(|tool| {
+                        tool.kind == ItemKind::ToolCall
+                            && tool.tool_call_started == occurrence.causality().parent()
+                    })
+                }
+                HookLifecycle::ElicitationResult => {
+                    occurrence.causality().parent().is_some_and(|parent| {
+                        journal.state().owns_foreign_continuation_settlement(
+                            id,
+                            occurrence.causality().turn(),
+                            item,
+                            parent,
+                        )
+                    })
+                }
+                _ => false,
             };
-            if tool.kind != ItemKind::ToolCall
-                || tool.tool_call_started != occurrence.causality().parent()
-            {
+            if !valid_parent {
                 return Err(HookReachError::Absent(HookRunError::new(
-                    "hook continuation does not name its admitted tool-call parent",
+                    "hook continuation does not name its exact lifecycle parent",
                 )));
             }
         }

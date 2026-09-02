@@ -98,11 +98,14 @@ impl TypedTool for EditTool {
         ))
     }
 
-    fn execute<'a>(
+    fn execute<'a, 'io>(
         &'a self,
         call: PreparedCall,
-        io: &'a dyn GuardedIo,
-    ) -> BoxFuture<'a, Result<ToolResult, ToolError>> {
+        io: &'a dyn GuardedIo<'io>,
+    ) -> BoxFuture<'a, Result<ToolResult, ToolError>>
+    where
+        'io: 'a,
+    {
         Box::pin(async move {
             let (path, old_string, new_string) = self.decode(call)?;
 

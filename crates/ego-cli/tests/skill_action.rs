@@ -98,7 +98,7 @@ fn fixed_names_and_canonical_aliases_refuse_catalogue_without_replacing_actions(
 
 #[test]
 fn announcement_authorization_and_reload_share_one_immutable_action_snapshot() {
-    let mut registry = ActionRegistry::final_surface()
+    let registry = ActionRegistry::final_surface()
         .with_skill_catalogue(catalogue("explain", DIGEST_A))
         .unwrap();
     let before = registry.snapshot();

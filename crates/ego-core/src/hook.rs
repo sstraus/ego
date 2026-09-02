@@ -16,10 +16,10 @@ use crate::config::{ConfigLayer, Source, Sourced, Trust};
 use crate::digest::sha256_hex;
 use crate::event::domain::{DomainEvent, EventKind};
 use crate::event::hook::{
-    HookActivation, HookContentDigest, HookDecision, HookDescriptorEvidence, HookFailure,
-    HookFeedback, HookId, HookInvocationId, HookLifecycle, HookOccurrenceKey, HookOccurrenceOwner,
-    HookOutcome, HookPhase, HookPlan, HookResult, HookSourceAuthority, HookSourceLocation,
-    HookSubject,
+    HookActivation, HookCatalogueEntryEvidence, HookCatalogueEvidence, HookContentDigest,
+    HookDecision, HookDescriptorEvidence, HookFailure, HookFeedback, HookId, HookInvocationId,
+    HookLifecycle, HookOccurrenceKey, HookOccurrenceOwner, HookOutcome, HookPhase, HookPlan,
+    HookPlanEntry, HookResult, HookSourceAuthority, HookSourceLocation, HookSubject,
 };
 use crate::event::id::{
     EventId, GenerationId, ItemId, Producer, SessionId, SubagentInvocationId, TurnId,
@@ -116,15 +116,23 @@ impl HookConfigEntry {
     }
 
     fn canonical(&self) -> String {
-        format!(
-            "{}\n{}\n{}\n{:?}",
-            self.event.as_str(),
-            self.matcher
-                .as_ref()
-                .map_or_else(String::new, HookMatcher::canonical),
-            self.once,
-            self.handler
-        )
+        #[derive(Serialize)]
+        struct CanonicalHook<'a> {
+            version: u8,
+            event: HookLifecycle,
+            matcher: &'a Option<HookMatcher>,
+            once: bool,
+            handler: &'a HookHandlerConfig,
+        }
+
+        serde_json::to_string(&CanonicalHook {
+            version: 1,
+            event: self.event,
+            matcher: &self.matcher,
+            once: self.once,
+            handler: &self.handler,
+        })
+        .expect("typed hook configuration has a canonical JSON encoding")
     }
 }
 
@@ -136,13 +144,6 @@ pub enum HookMatcher {
 }
 
 impl HookMatcher {
-    fn canonical(&self) -> String {
-        match self {
-            Self::Permission(rule) => format!("permission:{rule}"),
-            Self::Exact(value) => format!("exact:{value}"),
-        }
-    }
-
     fn matches(&self, event: &HookEvent) -> bool {
         match self {
             Self::Permission(matcher) => event
@@ -1342,7 +1343,7 @@ impl HookCatalogueCandidate {
         }
         let mut ids = HashSet::new();
         for (order, spec) in specs.iter_mut().enumerate() {
-            if !ids.insert(spec.id()) {
+            if !ids.insert((spec.id(), hook_activation(spec))) {
                 return Err(HookCatalogueError::DuplicateIdentity {
                     exact_name: spec.id().to_string(),
                 });
@@ -1426,7 +1427,7 @@ impl HookCatalogue {
         let material = candidate
             .specs
             .iter()
-            .map(|spec| spec.id().to_string())
+            .map(hook_execution_identity)
             .collect::<Vec<_>>()
             .join("\n");
         Self {
@@ -1448,8 +1449,56 @@ impl HookCatalogue {
         Ok(())
     }
 
+    pub fn with_skill_sources(&self, skills: &[HookSource]) -> Result<Self, HookCatalogueError> {
+        let skill_candidate = HookCatalogueCandidate::from_sources(&[], skills, Trust::Trusted)?;
+        let mut specs = self
+            .specs
+            .iter()
+            .filter(|spec| !spec.source().is_skill())
+            .cloned()
+            .collect::<Vec<_>>();
+        specs.extend(skill_candidate.specs);
+        let mut identities = HashSet::new();
+        for (order, spec) in specs.iter_mut().enumerate() {
+            if !identities.insert((spec.id(), hook_activation(spec))) {
+                return Err(HookCatalogueError::DuplicateIdentity {
+                    exact_name: hook_execution_identity(spec),
+                });
+            }
+            spec.catalogue_order = u32::try_from(order)
+                .map_err(|_| HookCatalogueError::invalid("catalogue", "too many hooks"))?;
+        }
+        let mut sources = self
+            .specs
+            .iter()
+            .filter(|spec| !spec.source().is_skill())
+            .map(|spec| spec.source().label())
+            .collect::<Vec<_>>();
+        sources.dedup();
+        for source in skill_candidate.sources {
+            if !sources.contains(&source) {
+                sources.push(source);
+            }
+        }
+        Ok(Self::publish(
+            HookCatalogueCandidate { specs, sources },
+            &self.generation,
+        ))
+    }
+
     pub fn specs(&self) -> &[HookSpec] {
         &self.specs
+    }
+    pub fn evidence(&self) -> HookCatalogueEvidence {
+        HookCatalogueEvidence::new(
+            self.specs
+                .iter()
+                .map(|spec| {
+                    HookCatalogueEntryEvidence::new(spec.evidence.clone(), hook_activation(spec))
+                })
+                .collect(),
+        )
+        .expect("an admitted hook catalogue has valid descriptor evidence")
     }
     pub fn sources(&self) -> &[&'static str] {
         &self.sources
@@ -1948,7 +1997,12 @@ impl HookRunner {
         let (specs, mut reservations, skipped_once) =
             self.reserve_plan(catalogue, &occurrence.event).await;
         result.skipped_once = skipped_once;
-        let plan = match HookPlan::new(specs.iter().map(|spec| spec.id()).collect()) {
+        let plan = match HookPlan::new(
+            specs
+                .iter()
+                .map(|spec| HookPlanEntry::new(spec.id(), hook_activation(spec)))
+                .collect(),
+        ) {
             Ok(plan) => plan,
             Err(error) => {
                 reservations.release();
@@ -2007,11 +2061,7 @@ impl HookRunner {
 
         for spec in specs {
             let invocation = HookInvocationId::new();
-            let activation = spec
-                .skill_invocation()
-                .map_or(HookActivation::Persistent, |invocation| {
-                    HookActivation::Skill { invocation }
-                });
+            let activation = hook_activation(spec);
             let started = match journal.started(spec, &occurrence, &reached, activation, invocation)
             {
                 Ok(evidence) => evidence,
@@ -2173,14 +2223,14 @@ fn wake_once_waiters(waiters: Vec<oneshot::Sender<()>>) {
 #[derive(Clone)]
 pub struct HookLifecycleDispatcher {
     runner: HookRunner,
-    catalogue: Arc<HookCatalogue>,
+    catalogue: Arc<Mutex<Arc<HookCatalogue>>>,
 }
 
 impl HookLifecycleDispatcher {
     pub fn new(runner: HookRunner, catalogue: HookCatalogue) -> Self {
         Self {
             runner,
-            catalogue: Arc::new(catalogue),
+            catalogue: Arc::new(Mutex::new(Arc::new(catalogue))),
         }
     }
 
@@ -2193,17 +2243,51 @@ impl HookLifecycleDispatcher {
         producer: Producer,
         occurrence: HookOccurrence,
     ) -> Result<HookRunResult, HookRunError> {
+        let catalogue = self
+            .catalogue
+            .lock()
+            .map_err(|_| HookRunError::new("hook catalogue synchronization failed"))?
+            .clone();
         self.runner
             .run_occurrence(
                 journal,
                 invoker,
                 parent_cancel,
                 parent_deadline,
-                &self.catalogue,
+                catalogue.as_ref(),
                 producer,
                 occurrence,
             )
             .await
+    }
+
+    pub fn catalogue_evidence(&self) -> HookCatalogueEvidence {
+        self.catalogue
+            .lock()
+            .expect("hook catalogue synchronization")
+            .evidence()
+    }
+
+    pub fn replace_catalogue(&self, catalogue: HookCatalogue) -> Result<(), HookRunError> {
+        let mut active = self
+            .catalogue
+            .lock()
+            .map_err(|_| HookRunError::new("hook catalogue synchronization failed"))?;
+        *active = Arc::new(catalogue);
+        Ok(())
+    }
+
+    pub fn catalogue_with_skill_sources(
+        &self,
+        skills: &[HookSource],
+    ) -> Result<HookCatalogue, HookRunError> {
+        let active = self
+            .catalogue
+            .lock()
+            .map_err(|_| HookRunError::new("hook catalogue synchronization failed"))?;
+        active
+            .with_skill_sources(skills)
+            .map_err(|error| HookRunError::new(error.to_string()))
     }
 }
 
@@ -2253,6 +2337,41 @@ impl<'s> SessionHookRuntime<'s> {
 
     pub fn journal(&self) -> SharedJournal<'s> {
         self.journal.clone()
+    }
+
+    pub fn catalogue_evidence(&self) -> HookCatalogueEvidence {
+        self.dispatcher.catalogue_evidence()
+    }
+
+    pub fn replace_catalogue(
+        &self,
+        turn: TurnId,
+        catalogue: HookCatalogue,
+    ) -> Result<(), HookRunError> {
+        let evidence = catalogue.evidence();
+        if self.dispatcher.catalogue_evidence() == evidence {
+            return Ok(());
+        }
+        self.journal
+            .append(
+                turn,
+                None,
+                None,
+                EventKind::HookCatalogueAdmitted {
+                    descriptors: evidence,
+                },
+            )
+            .map_err(|error| HookRunError::new(error.to_string()))?;
+        self.dispatcher.replace_catalogue(catalogue)
+    }
+
+    pub fn replace_skill_sources(
+        &self,
+        turn: TurnId,
+        skills: &[HookSource],
+    ) -> Result<(), HookRunError> {
+        let catalogue = self.dispatcher.catalogue_with_skill_sources(skills)?;
+        self.replace_catalogue(turn, catalogue)
     }
 
     pub fn inspect<T>(
@@ -2356,7 +2475,10 @@ fn validate_recovered_prefix(
         ));
     }
     for (planned, started) in reached.plan().as_slice().iter().zip(starts) {
-        if *planned != started.hook() || started.occurrence() != reached.event() {
+        if planned.hook() != started.hook()
+            || planned.activation() != started.activation()
+            || started.occurrence() != reached.event()
+        {
             return Err(HookRunError::new(
                 "recovered hook start does not match its frozen plan",
             ));
@@ -2373,6 +2495,22 @@ fn validate_recovered_prefix(
         }
     }
     Ok(())
+}
+
+fn hook_activation(spec: &HookSpec) -> HookActivation {
+    spec.skill_invocation()
+        .map_or(HookActivation::Persistent, |invocation| {
+            HookActivation::Skill { invocation }
+        })
+}
+
+fn hook_execution_identity(spec: &HookSpec) -> String {
+    match hook_activation(spec) {
+        HookActivation::Persistent => format!("{}\npersistent", spec.id()),
+        HookActivation::Skill { invocation } => {
+            format!("{}\nskill:{}", spec.id(), invocation)
+        }
+    }
 }
 
 fn apply_recovered_settlements(

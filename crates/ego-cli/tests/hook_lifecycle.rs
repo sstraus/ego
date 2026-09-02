@@ -4,8 +4,10 @@
 //! adapter are the production owners exercised here. No CLI lifecycle wrapper
 //! is created in the test.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use ego_ai::catalogue::{
     FactFreshness, ModelAvailability, ModelCatalogueEntry, ModelCatalogueSnapshot,
@@ -24,19 +26,25 @@ use ego_core::config::{
 use ego_core::event::domain::GenerationRole;
 use ego_core::event::hook::{
     HookActivation, HookContentDigest, HookDecision, HookFailure, HookFailureKind, HookId,
-    HookInvocationId, HookLifecycle, HookOutcome, HookPlan, HookResult, HookSourceAuthority,
-    HookSourceLocation, HookSubject,
+    HookInvocationId, HookLifecycle, HookOccurrenceKey, HookOccurrenceOwner, HookOutcome, HookPlan,
+    HookResult, HookSourceAuthority, HookSourceLocation,
 };
+use ego_core::event::id::{EventId, SessionId, TurnId};
+use ego_core::event::time::{Clock, Timestamp};
 use ego_core::generator::capabilities::{
     CacheRetention, CancelSemantics, ImageInputSupport, ModelCapabilities, ReasoningCarryover,
     ReasoningEffortSupport, Transport,
 };
 use ego_core::generator::types::ThinkingLevel;
 use ego_core::hook::{
-    EffectScope, HookCatalogue, HookFuture, HookHandlerConfig, HookInvocationRequest,
-    HookLifecycleDispatcher, HookOccurrence, HookPort, HookReachFuture, HookReachedEvidence,
-    HookRecordFuture, HookRunner, HookSpec, HookStartFuture, HookStartedEvidence,
+    EffectScope, HookCatalogue, HookCausality, HookEvent, HookFuture, HookHandlerConfig,
+    HookInvocationPort, HookInvocationRequest, HookJournalPort, HookLifecycleDispatcher,
+    HookOccurrence, HookReachError, HookReachOutcome, HookReachedEvidence, HookRunError,
+    HookRunner, HookSpec, HookStartError, HookStartedEvidence, SessionHookRuntime,
 };
+use ego_core::sink::NullSink;
+use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
+use ego_core::turn::{CancelToken, Journal, SharedJournal};
 use ego_mcp::{McpRegistryController, McpRegistryRuntime};
 
 const CLI_OWNERS: [(&str, HookLifecycle); 10] = [
@@ -103,13 +111,13 @@ impl RecordingPort {
     }
 }
 
-impl HookPort for RecordingPort {
-    fn reached<'a>(
-        &'a self,
-        producer: &'a ego_core::event::id::Producer,
-        occurrence: &'a HookOccurrence,
-        plan: &'a HookPlan,
-    ) -> HookReachFuture<'a> {
+impl HookJournalPort for RecordingPort {
+    fn reached(
+        &self,
+        producer: &ego_core::event::id::Producer,
+        occurrence: &HookOccurrence,
+        plan: &HookPlan,
+    ) -> Result<HookReachOutcome, HookReachError> {
         let evidence = HookReachedEvidence::new(
             ego_core::event::id::EventId::new(),
             occurrence.key().clone(),
@@ -117,45 +125,49 @@ impl HookPort for RecordingPort {
             producer.clone(),
             plan.clone(),
         );
-        Box::pin(std::future::ready(Ok(
-            ego_core::hook::HookReachOutcome::Fresh(evidence),
-        )))
+        Ok(HookReachOutcome::Fresh(evidence))
     }
-    fn started<'a>(
-        &'a self,
-        spec: &'a HookSpec,
-        occurrence: &'a HookOccurrence,
-        reached: &'a HookReachedEvidence,
+    fn started(
+        &self,
+        spec: &HookSpec,
+        occurrence: &HookOccurrence,
+        reached: &HookReachedEvidence,
         activation: HookActivation,
         invocation: HookInvocationId,
-    ) -> HookStartFuture<'a> {
+    ) -> Result<HookStartedEvidence, HookStartError> {
         self.calls
             .lock()
             .expect("CLI hook calls")
             .push(occurrence.event().lifecycle());
-        Box::pin(std::future::ready(Ok(HookStartedEvidence::new(
+        Ok(HookStartedEvidence::new(
             reached.event(),
             reached.event(),
             spec.id(),
             invocation,
             activation,
-        ))))
+        ))
     }
 
-    fn invoke<'a>(&'a self, _request: ego_core::hook::HookInvocationRequest) -> HookFuture<'a> {
+    fn settled(
+        &self,
+        _occurrence: &HookOccurrence,
+        _started: HookStartedEvidence,
+        _result: &HookResult,
+    ) -> Result<EventId, HookRunError> {
+        Ok(EventId::new())
+    }
+}
+
+impl HookInvocationPort for RecordingPort {
+    fn invoke<'a>(&'a self, request: HookInvocationRequest) -> HookFuture<'a> {
+        self.calls
+            .lock()
+            .expect("CLI hook calls")
+            .push(request.lifecycle());
         Box::pin(std::future::ready(Ok(HookOutcome::new(
             HookDecision::Continue,
             None,
         ))))
-    }
-
-    fn settled<'a>(
-        &'a self,
-        _spec: &'a HookSpec,
-        _started: HookStartedEvidence,
-        _result: &'a HookResult,
-    ) -> HookRecordFuture<'a> {
-        Box::pin(std::future::ready(Ok(())))
     }
 }
 
@@ -167,41 +179,45 @@ struct ObserverFailurePort(RecordingPort);
 
 macro_rules! delegate_cli_port {
     ($name:ty, $outcome:expr) => {
-        impl HookPort for $name {
-            fn reached<'a>(
-                &'a self,
-                producer: &'a ego_core::event::id::Producer,
-                occurrence: &'a HookOccurrence,
-                plan: &'a HookPlan,
-            ) -> HookReachFuture<'a> {
+        impl HookJournalPort for $name {
+            fn reached(
+                &self,
+                producer: &ego_core::event::id::Producer,
+                occurrence: &HookOccurrence,
+                plan: &HookPlan,
+            ) -> Result<HookReachOutcome, HookReachError> {
                 self.0.reached(producer, occurrence, plan)
             }
-            fn started<'a>(
-                &'a self,
-                spec: &'a HookSpec,
-                occurrence: &'a HookOccurrence,
-                reached: &'a HookReachedEvidence,
+            fn started(
+                &self,
+                spec: &HookSpec,
+                occurrence: &HookOccurrence,
+                reached: &HookReachedEvidence,
                 activation: HookActivation,
                 invocation: HookInvocationId,
-            ) -> HookStartFuture<'a> {
+            ) -> Result<HookStartedEvidence, HookStartError> {
                 self.0
                     .started(spec, occurrence, reached, activation, invocation)
             }
 
-            fn invoke<'a>(
-                &'a self,
-                _request: ego_core::hook::HookInvocationRequest,
-            ) -> HookFuture<'a> {
-                Box::pin(std::future::ready($outcome))
-            }
-
-            fn settled<'a>(
-                &'a self,
-                spec: &'a HookSpec,
+            fn settled(
+                &self,
+                occurrence: &HookOccurrence,
                 started: HookStartedEvidence,
-                result: &'a HookResult,
-            ) -> HookRecordFuture<'a> {
-                self.0.settled(spec, started, result)
+                result: &HookResult,
+            ) -> Result<EventId, HookRunError> {
+                self.0.settled(occurrence, started, result)
+            }
+        }
+
+        impl HookInvocationPort for $name {
+            fn invoke<'a>(&'a self, request: HookInvocationRequest) -> HookFuture<'a> {
+                self.0
+                    .calls
+                    .lock()
+                    .expect("CLI hook calls")
+                    .push(request.lifecycle());
+                Box::pin(std::future::ready($outcome))
             }
         }
     };
@@ -212,29 +228,45 @@ delegate_cli_port!(
     Ok(HookOutcome::new(HookDecision::Block, None))
 );
 
-impl HookPort for ObserverFailurePort {
-    fn reached<'a>(
-        &'a self,
-        producer: &'a ego_core::event::id::Producer,
-        occurrence: &'a HookOccurrence,
-        plan: &'a HookPlan,
-    ) -> HookReachFuture<'a> {
+impl HookJournalPort for ObserverFailurePort {
+    fn reached(
+        &self,
+        producer: &ego_core::event::id::Producer,
+        occurrence: &HookOccurrence,
+        plan: &HookPlan,
+    ) -> Result<HookReachOutcome, HookReachError> {
         self.0.reached(producer, occurrence, plan)
     }
 
-    fn started<'a>(
-        &'a self,
-        spec: &'a HookSpec,
-        occurrence: &'a HookOccurrence,
-        reached: &'a HookReachedEvidence,
+    fn started(
+        &self,
+        spec: &HookSpec,
+        occurrence: &HookOccurrence,
+        reached: &HookReachedEvidence,
         activation: HookActivation,
         invocation: HookInvocationId,
-    ) -> HookStartFuture<'a> {
+    ) -> Result<HookStartedEvidence, HookStartError> {
         self.0
             .started(spec, occurrence, reached, activation, invocation)
     }
 
-    fn invoke<'a>(&'a self, request: ego_core::hook::HookInvocationRequest) -> HookFuture<'a> {
+    fn settled(
+        &self,
+        occurrence: &HookOccurrence,
+        started: HookStartedEvidence,
+        result: &HookResult,
+    ) -> Result<EventId, HookRunError> {
+        self.0.settled(occurrence, started, result)
+    }
+}
+
+impl HookInvocationPort for ObserverFailurePort {
+    fn invoke<'a>(&'a self, request: HookInvocationRequest) -> HookFuture<'a> {
+        self.0
+            .calls
+            .lock()
+            .expect("CLI hook calls")
+            .push(request.lifecycle());
         let outcome = if request.lifecycle() == HookLifecycle::PostModelSwitch {
             Err(HookFailure::new(HookFailureKind::HandlerFailed, None))
         } else {
@@ -242,35 +274,72 @@ impl HookPort for ObserverFailurePort {
         };
         Box::pin(std::future::ready(outcome))
     }
+}
 
-    fn settled<'a>(
-        &'a self,
-        spec: &'a HookSpec,
-        started: HookStartedEvidence,
-        result: &'a HookResult,
-    ) -> HookRecordFuture<'a> {
-        self.0.settled(spec, started, result)
+#[derive(Default)]
+struct RuntimeStore;
+
+impl SessionStore for RuntimeStore {
+    fn append(
+        &self,
+        _id: &SessionId,
+        _event: &ego_core::event::domain::DomainEvent,
+    ) -> Result<(), StoreError> {
+        Ok(())
+    }
+
+    fn read(
+        &self,
+        _id: &SessionId,
+    ) -> Result<futures::stream::BoxStream<'static, Result<SessionEntry, StoreError>>, StoreError>
+    {
+        Ok(Box::pin(futures::stream::empty()))
+    }
+
+    fn compare_and_append_run(
+        &self,
+        _session: &SessionId,
+        _expected_revision: Option<ego_core::run::RunRevision>,
+        _transaction: ego_core::run::RunTransaction,
+    ) -> Result<ego_core::run::RunAppend, StoreError> {
+        Err(StoreError::NotFound)
+    }
+
+    fn list(&self) -> Result<Vec<SessionMeta>, StoreError> {
+        Ok(Vec::new())
     }
 }
 
-fn dispatcher(port: RecordingPort) -> HookLifecycleDispatcher {
-    HookLifecycleDispatcher::new(
-        HookRunner::new_with_durable_started(port, Vec::<HookStartedEvidence>::new()),
-        hook_catalogue(),
-    )
+struct FixedClock;
+
+impl Clock for FixedClock {
+    fn now(&self) -> Timestamp {
+        Timestamp::from_millis(1_000)
+    }
 }
 
-fn blocking_dispatcher(port: BlockingPort) -> HookLifecycleDispatcher {
-    HookLifecycleDispatcher::new(
-        HookRunner::new_with_durable_started(port, Vec::<HookStartedEvidence>::new()),
-        hook_catalogue(),
-    )
-}
-
-fn observer_failure_dispatcher(port: ObserverFailurePort) -> HookLifecycleDispatcher {
-    HookLifecycleDispatcher::new(
-        HookRunner::new_with_durable_started(port, Vec::<HookStartedEvidence>::new()),
-        hook_catalogue(),
+fn runtime<P>(port: P) -> SessionHookRuntime<'static>
+where
+    P: HookInvocationPort + 'static,
+{
+    let session = SessionId::new();
+    let store: &'static RuntimeStore = Box::leak(Box::new(RuntimeStore));
+    let clock: &'static FixedClock = Box::leak(Box::new(FixedClock));
+    let sink: &'static NullSink = Box::leak(Box::new(NullSink));
+    let journal = SharedJournal::new(Journal::new(
+        session,
+        store,
+        clock,
+        sink,
+        ego_core::event::id::Producer::Main,
+        ego_core::state::SessionState::default(),
+    ));
+    SessionHookRuntime::new(
+        HookLifecycleDispatcher::new(HookRunner::new(), hook_catalogue()),
+        journal,
+        Arc::new(port),
+        CancelToken::new(),
+        std::time::Instant::now() + Duration::from_secs(30),
     )
 }
 
@@ -370,12 +439,64 @@ impl ToollessGenerationService for HookGeneration {
 }
 
 #[test]
-fn cli_owner_matrix_has_one_deterministic_session_compaction_and_handoff_path() {
+fn cli_owner_matrix_routes_each_declared_lifecycle_once_in_order() {
     assert_eq!(CLI_OWNERS.len(), 10);
     assert_eq!(CLI_OWNERS[0].1, HookLifecycle::SessionStart);
     assert_eq!(CLI_OWNERS[4].1, HookLifecycle::PreCompact);
     assert_eq!(CLI_OWNERS[5].1, HookLifecycle::PostCompact);
     assert_eq!(CLI_OWNERS[8].1, HookLifecycle::SessionEnd);
+    let names = CLI_OWNERS
+        .iter()
+        .map(|(owner, _)| *owner)
+        .collect::<HashSet<_>>();
+    let lifecycles = CLI_OWNERS
+        .iter()
+        .map(|(_, lifecycle)| *lifecycle)
+        .collect::<HashSet<_>>();
+    assert_eq!(names.len(), CLI_OWNERS.len());
+    assert_eq!(lifecycles.len(), CLI_OWNERS.len());
+    assert_eq!(
+        CLI_OWNERS.map(|(_, lifecycle)| lifecycle),
+        [
+            HookLifecycle::SessionStart,
+            HookLifecycle::InstructionsLoaded,
+            HookLifecycle::UserPromptSubmit,
+            HookLifecycle::UserPromptExpansion,
+            HookLifecycle::PreCompact,
+            HookLifecycle::PostCompact,
+            HookLifecycle::PreModelSwitch,
+            HookLifecycle::PostModelSwitch,
+            HookLifecycle::SessionEnd,
+            HookLifecycle::Stop,
+        ]
+    );
+
+    let session = SessionId::new();
+    let journal_port = RecordingPort::default();
+    let invocation_port = RecordingPort::default();
+    let dispatcher = HookLifecycleDispatcher::new(HookRunner::new(), hook_catalogue());
+    for (_, lifecycle) in CLI_OWNERS {
+        let occurrence = HookOccurrence::new(
+            HookOccurrenceKey::new(lifecycle, HookOccurrenceOwner::Session { session }),
+            HookEvent::session(lifecycle),
+            HookCausality::session(session, TurnId::new()),
+        )
+        .expect("CLI lifecycle occurrence");
+        futures::executor::block_on(dispatcher.dispatch(
+            &journal_port,
+            &invocation_port,
+            ego_core::turn::CancelToken::new(),
+            std::time::Instant::now() + std::time::Duration::from_secs(30),
+            ego_core::event::id::Producer::Main,
+            occurrence,
+        ))
+        .expect("CLI lifecycle route");
+    }
+    assert_eq!(
+        invocation_port.calls(),
+        CLI_OWNERS.map(|(_, lifecycle)| lifecycle),
+        "one shared dispatcher routes the complete CLI owner matrix"
+    );
 }
 
 #[test]
@@ -462,7 +583,9 @@ fn same_selection_does_not_emit_model_switch_and_post_observer_cannot_revert_com
     let owner = RunModelSwitchOwner::new(
         Arc::clone(&selection),
         config.clone(),
-        dispatcher(port.clone()),
+        runtime(port.clone()),
+        TurnId::new(),
+        None,
     );
     futures::executor::block_on(owner.apply(request)).expect("same selection remains a no-op");
     assert_eq!(
@@ -507,7 +630,9 @@ fn model_switch_owner_persists_and_installs_only_after_pre_gate() {
     let owner = RunModelSwitchOwner::new(
         Arc::clone(&selection),
         config.clone(),
-        dispatcher(port.clone()),
+        runtime(port.clone()),
+        TurnId::new(),
+        None,
     );
     futures::executor::block_on(owner.apply(request)).expect("pre gate allows switch");
     assert_eq!(config.publications(), 1);
@@ -535,12 +660,14 @@ fn model_switch_block_preserves_old_selection_and_post_failure_does_not_revert_c
         publications: Arc::new(Mutex::new(0)),
     });
     let blocked_port = BlockingPort::default();
-    let blocked = blocking_dispatcher(blocked_port.clone());
+    let blocked = runtime(blocked_port.clone());
     let blocked_request = staged_request(Arc::clone(&blocked_selection), blocked_config.clone());
     let blocked_owner = RunModelSwitchOwner::new(
         Arc::clone(&blocked_selection),
         blocked_config.clone(),
         blocked,
+        TurnId::new(),
+        None,
     );
     let blocked_result = futures::executor::block_on(blocked_owner.apply(blocked_request));
     assert!(
@@ -562,12 +689,14 @@ fn model_switch_block_preserves_old_selection_and_post_failure_does_not_revert_c
         publications: Arc::new(Mutex::new(0)),
     });
     let observer_port = ObserverFailurePort::default();
-    let observer_failure = observer_failure_dispatcher(observer_port.clone());
+    let observer_failure = runtime(observer_port.clone());
     let observer_request = staged_request(Arc::clone(&observed_selection), observed_config.clone());
     let observer_owner = RunModelSwitchOwner::new(
         Arc::clone(&observed_selection),
         observed_config.clone(),
         observer_failure,
+        TurnId::new(),
+        None,
     );
     let observer_result = futures::executor::block_on(observer_owner.apply(observer_request));
     assert!(
@@ -608,18 +737,25 @@ fn staged_request(
 #[test]
 fn hook_prompt_resolution_and_child_initial_selection_are_not_active_switches() {
     let generation = HookGeneration::default();
+    let session = SessionId::new();
+    let turn = TurnId::new();
+    let invocation = HookInvocationId::new();
+    let lifecycle = HookLifecycle::UserPromptSubmit;
     let request = HookInvocationRequest::new(
-        fixture_hook_id(0),
+        HookStartedEvidence::new(
+            EventId::new(),
+            EventId::new(),
+            fixture_hook_id(0),
+            invocation,
+            HookActivation::Persistent,
+        ),
+        HookCausality::session(session, turn),
         HookHandlerConfig::Prompt {
             prompt: "Return continue".to_owned(),
             model: Some("openai/hook".to_owned()),
             timeout_seconds: Some(30),
         },
-        HookLifecycle::UserPromptSubmit,
-        None,
-        HookSubject::Session,
-        HookActivation::Persistent,
-        HookInvocationId::new(),
+        HookEvent::session(lifecycle),
         EffectScope::new(std::time::Duration::from_secs(30)),
     );
     let result =
@@ -638,21 +774,13 @@ fn hook_prompt_resolution_and_child_initial_selection_are_not_active_switches() 
 
 #[test]
 fn direct_mcp_scope_keeps_runtime_owner_and_sessionless_controller_access() {
-    fn scope_contract(scope: &McpProcessScope) {
-        let runtime: &Arc<McpRegistryRuntime> = scope.runtime();
-        let controller: &Arc<McpRegistryController> = scope.controller();
-        let _ = (runtime, controller);
-    }
-
-    let _ = scope_contract;
-}
-
-#[test]
-fn cli_has_one_hook_port_composite_for_all_typed_adapters() {
-    fn assert_hook_port<P: ego_core::hook::HookPort>() {}
-
-    // CLI owns the sole production-facing composition. It must route command,
-    // HTTP, MCP, and prompt handlers through their typed owners and reuse the
-    // session dispatcher rather than creating a second lifecycle path.
-    assert_hook_port::<ego_cli::hook::HookPortAdapter>();
+    let scope =
+        futures::executor::block_on(McpProcessScope::online(ego_core::turn::CancelToken::new()))
+            .expect("MCP process scope opens its owned runtime");
+    let runtime: &Arc<McpRegistryRuntime> = scope.runtime();
+    let controller: &Arc<McpRegistryController> = scope.controller();
+    assert!(
+        Arc::ptr_eq(controller, runtime.controller()),
+        "the controller comes from the process scope's sole runtime owner"
+    );
 }

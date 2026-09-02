@@ -1,11 +1,11 @@
-//! RED contract for observable, lossless v8-to-v9 session migration.
+//! RED contract for fail-closed rejection of retired session codecs.
 
-use ego_cli::session::Opened;
 use ego_core::event::domain::{DomainEvent, Envelope, EventKind};
 use ego_core::event::id::{EventId, Producer, Seq, SessionId, TurnId};
 use ego_core::event::time::Timestamp;
 use ego_core::store::codec::{Header, encode_header, encode_record};
-use ego_tools::store::{JsonlStore, LeaseInputs, OsIo};
+use ego_core::store::session_store::StoreError;
+use ego_tools::store::{JsonlStore, LeaseInputs, OpenError, OsIo};
 use std::path::Path;
 use std::time::Duration;
 use tempfile::tempdir;
@@ -44,7 +44,7 @@ fn log_path(root: &Path, id: &SessionId) -> std::path::PathBuf {
 }
 
 #[test]
-fn clean_v8_migration_is_reported_as_migration_not_torn_tail_loss() {
+fn retired_v8_log_is_refused_without_mutating_bytes() {
     let root = tempdir().expect("temporary session root");
     let id = SessionId::new();
     let path = log_path(root.path(), &id);
@@ -63,33 +63,26 @@ fn clean_v8_migration_is_reported_as_migration_not_torn_tail_loss() {
     std::fs::write(&path, bytes).expect("write v8 fixture");
 
     let store = JsonlStore::new(root.path(), "/workspace", Box::new(OsIo));
-    let open = store
-        .open_writer(
-            &id,
-            LeaseInputs {
-                pid: 64064,
-                now: Timestamp::from_millis(4_200),
-                stale_after: Duration::from_secs(30),
-                is_alive: ALIVE,
-            },
-        )
-        .expect("open migrates the v8 session");
-
-    let repair_debug = format!("{:?}", open.repair);
-    let repair_identifies_migration = repair_debug.contains("migrated: true");
-    let lossless = open.repair.truncated_bytes == 0 && open.repair.dropped_lines == 0;
-    let opened = Opened::from(open);
-    let note = opened.repair_note().unwrap_or_default();
-    let note_identifies_migration = note.to_ascii_lowercase().contains("migrat");
-    let note_does_not_claim_tail_loss = !note.to_ascii_lowercase().contains("torn tail");
-
-    assert!(
-        repair_identifies_migration,
-        "Repair must identify a clean codec migration: {repair_debug}"
-    );
-    assert!(lossless, "migration must drop zero bytes and lines");
-    assert!(
-        note_identifies_migration && note_does_not_claim_tail_loss,
-        "CLI repair note must identify migration, not torn-tail loss: {note:?}"
+    let before = std::fs::read(&path).expect("read v8 fixture before refusal");
+    let error = match store.open_writer(
+        &id,
+        LeaseInputs {
+            pid: 64064,
+            now: Timestamp::from_millis(4_200),
+            stale_after: Duration::from_secs(30),
+            is_alive: ALIVE,
+        },
+    ) {
+        Err(error) => error,
+        Ok(_) => panic!("retired v8 session codec must be refused"),
+    };
+    assert!(matches!(
+        error,
+        OpenError::Recover(StoreError::UnsupportedLog { found: 8 })
+    ));
+    assert_eq!(
+        std::fs::read(&path).expect("read v8 fixture after refusal"),
+        before,
+        "unsupported codec refusal must not rewrite the source log"
     );
 }

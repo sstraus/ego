@@ -11,7 +11,8 @@ use ego_core::config::{ConfigLayer, Source, Sourced, Trust};
 use ego_core::event::domain::EventKind;
 use ego_core::event::hook::{
     HookActivation, HookDecision, HookFailure, HookFailureKind, HookInvocationId, HookLifecycle,
-    HookOccurrenceKey, HookOccurrenceOwner, HookOutcome, HookPlan, HookResult, HookSubject,
+    HookOccurrenceKey, HookOccurrenceOwner, HookOutcome, HookPlan, HookPlanEntry, HookResult,
+    HookSubject,
 };
 use ego_core::event::id::{EventId, ItemId, Producer, TurnId};
 use ego_core::event::skill::{SkillInvocationId, SkillSourceAuthority};
@@ -51,7 +52,7 @@ where
         }
     }
 
-    async fn run_occurrence(
+    async fn dispatch_occurrence(
         &self,
         catalogue: &HookCatalogue,
         producer: Producer,
@@ -155,6 +156,41 @@ fn typed_sources_and_skill_projection_make_one_strict_source_bound_catalogue() {
             .all(|pair| pair[0].sort_key() < pair[1].sort_key())
     );
     assert!(!catalogue.serialized_config().contains("/usr/bin"));
+}
+
+#[test]
+fn repeated_skill_invocations_keep_descriptor_identity_but_plan_distinguishes_activation() {
+    let catalogue = once_catalogue();
+    let hook = catalogue
+        .specs()
+        .iter()
+        .find(|spec| spec.skill_invocation().is_some())
+        .expect("invocation-scoped hook")
+        .id();
+    let first = SkillInvocationId::new();
+    let second = SkillInvocationId::new();
+    let plan = HookPlan::new(vec![
+        HookPlanEntry::new(hook, HookActivation::Skill { invocation: first }),
+        HookPlanEntry::new(hook, HookActivation::Skill { invocation: second }),
+    ])
+    .expect("distinct activation-qualified plan entries");
+
+    assert_eq!(plan.len(), 2);
+    assert_eq!(plan.as_slice()[0].hook(), hook);
+    assert_eq!(plan.as_slice()[1].hook(), hook);
+    assert_ne!(
+        plan.as_slice()[0].activation(),
+        plan.as_slice()[1].activation()
+    );
+    let encoded = serde_json::to_value(&plan).expect("activation-qualified plan encoding");
+    assert_eq!(encoded[0]["hook"], hook.to_string());
+    assert_eq!(encoded[0]["activation"]["kind"], "skill");
+    assert_eq!(encoded[1]["activation"]["kind"], "skill");
+    let decoded: HookPlan = serde_json::from_value(encoded).expect("plan replay decoding");
+    assert_eq!(
+        decoded, plan,
+        "replay retains the frozen activation-qualified plan"
+    );
 }
 
 #[test]
@@ -586,7 +622,7 @@ fn deterministic_matching_uses_permission_ast_and_valid_block_wins_with_durable_
     );
     let port = DurableHookPort::blocking();
     let runner = HookRunner::new(port.clone());
-    let result = futures::executor::block_on(runner.run_occurrence(
+    let result = futures::executor::block_on(runner.dispatch_occurrence(
         &catalogue,
         Producer::Main,
         occurrence(event),
@@ -604,20 +640,22 @@ fn deterministic_matching_uses_permission_ast_and_valid_block_wins_with_durable_
 fn pre_effect_failure_blocks_observer_failure_stays_durable_and_effect_is_not_reverted() {
     let catalogue = failure_catalogue();
     let pre = futures::executor::block_on(
-        HookRunner::new(DurableHookPort::fail_with(HookFailureKind::HandlerFailed)).run_occurrence(
-            &catalogue,
-            Producer::Main,
-            occurrence(HookEvent::session(HookLifecycle::PreCompact)),
-        ),
+        HookRunner::new(DurableHookPort::fail_with(HookFailureKind::HandlerFailed))
+            .dispatch_occurrence(
+                &catalogue,
+                Producer::Main,
+                occurrence(HookEvent::session(HookLifecycle::PreCompact)),
+            ),
     )
     .expect("pre result");
     assert!(pre.is_blocked());
     let post = futures::executor::block_on(
-        HookRunner::new(DurableHookPort::fail_with(HookFailureKind::HandlerFailed)).run_occurrence(
-            &catalogue,
-            Producer::Main,
-            occurrence(HookEvent::session(HookLifecycle::PostCompact)),
-        ),
+        HookRunner::new(DurableHookPort::fail_with(HookFailureKind::HandlerFailed))
+            .dispatch_occurrence(
+                &catalogue,
+                Producer::Main,
+                occurrence(HookEvent::session(HookLifecycle::PostCompact)),
+            ),
     )
     .expect("post result");
     assert!(post.is_observer_failure());
@@ -673,14 +711,12 @@ fn durable_once_rebuilds_in_a_new_runner_and_hook_producers_are_suppressed() {
         "read(src/main.rs)",
     );
     let durable_started = port.started.lock().expect("started evidence").clone();
-    let first = futures::executor::block_on(
-        HookRunner::new_with_durable_started(port.clone(), durable_started).run_occurrence(
-            &catalogue,
-            Producer::Main,
-            occurrence(event.clone()),
-        ),
-    )
-    .expect("first once invocation");
+    let first =
+        futures::executor::block_on(
+            HookRunner::new_with_durable_started(port.clone(), durable_started)
+                .dispatch_occurrence(&catalogue, Producer::Main, occurrence(event.clone())),
+        )
+        .expect("first once invocation");
     assert!(first.started_invocation());
     let started = port.started.lock().expect("started evidence").clone();
     let skill_invocation = started
@@ -698,7 +734,7 @@ fn durable_once_rebuilds_in_a_new_runner_and_hook_producers_are_suppressed() {
             && matches!(evidence.activation(), HookActivation::Skill { invocation } if invocation == skill_invocation)
     }));
     let rebuilt = HookRunner::new_with_durable_started(port.clone(), started.clone());
-    let second = futures::executor::block_on(rebuilt.run_occurrence(
+    let second = futures::executor::block_on(rebuilt.dispatch_occurrence(
         &catalogue,
         Producer::Main,
         occurrence(event.clone()),
@@ -713,7 +749,7 @@ fn durable_once_rebuilds_in_a_new_runner_and_hook_producers_are_suppressed() {
         HookActivation::Persistent,
     )];
     let fresh = HookRunner::new_with_durable_started(port.clone(), persistent_replay);
-    let not_skipped = futures::executor::block_on(fresh.run_occurrence(
+    let not_skipped = futures::executor::block_on(fresh.dispatch_occurrence(
         &catalogue,
         Producer::Main,
         occurrence(HookEvent::tool(
@@ -726,7 +762,7 @@ fn durable_once_rebuilds_in_a_new_runner_and_hook_producers_are_suppressed() {
     ))
     .expect("persistent activation does not consume skill once");
     assert!(!not_skipped.was_skipped_once());
-    let suppressed = futures::executor::block_on(rebuilt.run_occurrence(
+    let suppressed = futures::executor::block_on(rebuilt.dispatch_occurrence(
         &catalogue,
         Producer::Hook(hook),
         occurrence(HookEvent::session(HookLifecycle::SessionStart)),
@@ -747,7 +783,7 @@ fn once_start_uncertainty_is_durable_and_rebuilt_runner_cannot_repeat() {
         "read(src/main.rs)",
     );
     let runner = HookRunner::new(port.clone());
-    let first = futures::executor::block_on(runner.run_occurrence(
+    let first = futures::executor::block_on(runner.dispatch_occurrence(
         &catalogue,
         Producer::Main,
         occurrence(event.clone()),
@@ -777,7 +813,7 @@ fn once_start_uncertainty_is_durable_and_rebuilt_runner_cannot_repeat() {
         Some(started[0])
     );
 
-    let live_retry = futures::executor::block_on(runner.run_occurrence(
+    let live_retry = futures::executor::block_on(runner.dispatch_occurrence(
         &catalogue,
         Producer::Main,
         occurrence(event.clone()),
@@ -788,7 +824,7 @@ fn once_start_uncertainty_is_durable_and_rebuilt_runner_cannot_repeat() {
     assert_eq!(port.started.lock().expect("durable starts").len(), 1);
 
     let rebuilt = HookRunner::new_with_durable_started(port.clone(), started);
-    let replay = futures::executor::block_on(rebuilt.run_occurrence(
+    let replay = futures::executor::block_on(rebuilt.dispatch_occurrence(
         &catalogue,
         Producer::Main,
         occurrence(event),
@@ -821,7 +857,7 @@ fn concurrent_once_consumes_admission_before_one_pending_invocation_completes() 
     let first_future = spawner
         .spawn_local_with_handle(async move {
             first_runner
-                .run_occurrence(&first_catalogue, Producer::Main, occurrence(first_event))
+                .dispatch_occurrence(&first_catalogue, Producer::Main, occurrence(first_event))
                 .await
         })
         .expect("spawn first concurrent once run");
@@ -830,7 +866,7 @@ fn concurrent_once_consumes_admission_before_one_pending_invocation_completes() 
     let second_future = spawner
         .spawn_local_with_handle(async move {
             second_runner
-                .run_occurrence(&second_catalogue, Producer::Main, occurrence(event))
+                .dispatch_occurrence(&second_catalogue, Producer::Main, occurrence(event))
                 .await
         })
         .expect("spawn second concurrent once run");
@@ -890,7 +926,7 @@ fn multiple_matching_once_hooks_each_consume_their_own_reservation() {
         "read(src/main.rs)",
     );
 
-    let first = futures::executor::block_on(runner.run_occurrence(
+    let first = futures::executor::block_on(runner.dispatch_occurrence(
         &catalogue,
         Producer::Main,
         occurrence(event.clone()),
@@ -901,7 +937,7 @@ fn multiple_matching_once_hooks_each_consume_their_own_reservation() {
     assert_eq!(port.started.lock().expect("started evidence").len(), 2);
     assert_eq!(port.settled.lock().expect("settled evidence").len(), 2);
 
-    let second = futures::executor::block_on(runner.run_occurrence(
+    let second = futures::executor::block_on(runner.dispatch_occurrence(
         &catalogue,
         Producer::Main,
         occurrence(event),
@@ -925,7 +961,7 @@ fn once_start_without_durable_fact_does_not_preconsume_in_memory() {
         },
         "read(src/main.rs)",
     );
-    let first = futures::executor::block_on(runner.run_occurrence(
+    let first = futures::executor::block_on(runner.dispatch_occurrence(
         &catalogue,
         Producer::Main,
         occurrence(event.clone()),
@@ -948,7 +984,7 @@ fn once_start_without_durable_fact_does_not_preconsume_in_memory() {
 
     // This is an explicit probe: absence of a durable start must not leave a
     // stale in-memory once bit that silently suppresses a later admitted run.
-    let retry = futures::executor::block_on(runner.run_occurrence(
+    let retry = futures::executor::block_on(runner.dispatch_occurrence(
         &catalogue,
         Producer::Main,
         occurrence(event),

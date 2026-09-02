@@ -755,7 +755,7 @@ fn compaction_turn_with_state(
     source: Arc<CompactionSource>,
     state: SessionState,
 ) -> (
-    TurnLoop<'static>,
+    TurnLoop<'static, 'static>,
     &'static CompactionMemoryStore,
     CancelToken,
 ) {
@@ -818,7 +818,7 @@ fn compaction_turn_with_state(
 fn compaction_turn(
     source: Arc<CompactionSource>,
 ) -> (
-    TurnLoop<'static>,
+    TurnLoop<'static, 'static>,
     &'static CompactionMemoryStore,
     CancelToken,
 ) {

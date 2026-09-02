@@ -34,12 +34,23 @@ impl AdmittedToolSource for EmptyMcpSource {
 struct UnusedMcpRuntime;
 
 impl McpRuntimeBinding for UnusedMcpRuntime {
-    fn foreign_question_port<'a>(
+    fn hook_invocation_port<'a>(
         &self,
-        _runtime: ego_core::hook::SessionHookRuntime<'a>,
-        _floor: ego_core::suspension::ResumeFloor,
+        _policy: &'a ego_core::permit::PolicyEngine,
         _effects: ego_core::turn::ToolEffectPorts<'a>,
-    ) -> Arc<dyn ego_core::mcp::ForeignQuestionPort + 'a> {
+    ) -> Result<Arc<dyn ego_core::hook::HookInvocationPort + 'a>, String> {
+        panic!("this runtime-only binding is not exercised by the surface test")
+    }
+
+    fn foreign_question_port<'session, 'turn>(
+        &self,
+        _runtime: ego_core::hook::SessionHookRuntime<'session>,
+        _floor: ego_core::suspension::ResumeFloor,
+        _effects: ego_core::turn::ToolEffectPorts<'turn>,
+    ) -> Arc<dyn ego_core::mcp::ForeignQuestionPort + 'turn>
+    where
+        'session: 'turn,
+    {
         panic!("this runtime-only binding is not exercised by the surface test")
     }
 }

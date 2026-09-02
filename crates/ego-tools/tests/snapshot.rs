@@ -22,7 +22,8 @@ use ego_core::event::domain::{
     DomainEvent, Envelope, EventKind, ExitReason, OccupancyProvenance, SubagentTerminal,
 };
 use ego_core::event::hook::{
-    HookCatalogueEvidence, HookDescriptorEvidence, HookSourceAuthority, HookSourceLocation,
+    HookActivation, HookCatalogueEntryEvidence, HookCatalogueEvidence, HookDescriptorEvidence,
+    HookSourceAuthority, HookSourceLocation,
 };
 use ego_core::event::id::{
     EventId, ItemId, Producer, Seq, SessionId, SubagentInvocationId, TurnId,
@@ -231,13 +232,16 @@ mod snapshot {
             turn1,
             None,
             EventKind::HookCatalogueAdmitted {
-                descriptors: HookCatalogueEvidence::new(vec![HookDescriptorEvidence::new(
-                    HookSourceAuthority::Project,
-                    HookSourceLocation::parse("hooks/project.json").unwrap(),
-                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-                        .parse()
-                        .unwrap(),
-                    0,
+                descriptors: HookCatalogueEvidence::new(vec![HookCatalogueEntryEvidence::new(
+                    HookDescriptorEvidence::new(
+                        HookSourceAuthority::Project,
+                        HookSourceLocation::parse("hooks/project.json").unwrap(),
+                        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                            .parse()
+                            .unwrap(),
+                        0,
+                    ),
+                    HookActivation::Persistent,
                 )])
                 .unwrap(),
             },
@@ -544,7 +548,7 @@ mod snapshot {
 
     #[test]
     fn version_seven_snapshot_is_a_cache_miss_after_the_codec_bump() {
-        assert_eq!(SNAPSHOT_VERSION, 11);
+        assert_eq!(SNAPSHOT_VERSION, 13);
         let fx = session_with_events();
         let (source_seq, prefix_state) = fx.replay_prefix(4);
         let mut legacy = Snapshot::new(fx.id, source_seq, prefix_state);
@@ -559,7 +563,7 @@ mod snapshot {
 
     #[test]
     fn current_snapshot_replays_the_same_state_as_the_full_log() {
-        assert_eq!(SNAPSHOT_VERSION, 11);
+        assert_eq!(SNAPSHOT_VERSION, 13);
         let fx = session_with_events();
         let (source_seq, prefix_state) = fx.replay_prefix(4);
         fx.store
@@ -567,7 +571,7 @@ mod snapshot {
             .unwrap();
         let written: Snapshot =
             serde_json::from_slice(&std::fs::read(fx.snapshot_path()).unwrap()).unwrap();
-        assert_eq!(written.v, 11, "current snapshots are written as v11");
+        assert_eq!(written.v, 13, "current snapshots are written as v13");
 
         let (resumed, rejection) = fx.store.resume(&fx.id).unwrap();
 

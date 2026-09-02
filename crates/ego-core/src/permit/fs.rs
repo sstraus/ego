@@ -267,23 +267,23 @@ impl From<FsError> for IoDenied {
 /// `Tool::execute` by value and keep a `GuardedEffects` built from that same
 /// permit — `E0505`, move out of a borrowed value, whose suggested fix is
 /// `Clone` on `Authorized`. That is the one thing Invariant W forbids.
-pub struct GuardedEffects<'a> {
+pub struct GuardedEffects<'effects, R = GuardedMcpResume<'effects>> {
     permit: Permit,
-    fs: &'a dyn Fs,
-    process: &'a dyn ProcessExecutor,
-    evidence: &'a dyn EvidenceStore,
+    fs: &'effects dyn Fs,
+    process: &'effects dyn ProcessExecutor,
+    evidence: &'effects dyn EvidenceStore,
     http: GuardedHttp,
     duplex: Arc<dyn DuplexSpawner>,
     foreign_spent: AtomicBool,
-    resume: Mutex<Option<GuardedMcpResume<'a>>>,
+    resume: Mutex<Option<R>>,
 }
 
-impl<'a> GuardedEffects<'a> {
+impl<'effects> GuardedEffects<'effects> {
     pub fn new(
         permit: Permit,
-        fs: &'a dyn Fs,
-        process: &'a dyn ProcessExecutor,
-        evidence: &'a dyn EvidenceStore,
+        fs: &'effects dyn Fs,
+        process: &'effects dyn ProcessExecutor,
+        evidence: &'effects dyn EvidenceStore,
         resolver: Arc<dyn Resolver>,
         one_hop: Arc<dyn OneHop>,
         duplex: Arc<dyn DuplexSpawner>,
@@ -292,17 +292,19 @@ impl<'a> GuardedEffects<'a> {
             permit, fs, process, evidence, resolver, one_hop, duplex, None,
         )
     }
+}
 
+impl<'effects, 'resume> GuardedEffects<'effects, GuardedMcpResume<'resume>> {
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_resume(
         permit: Permit,
-        fs: &'a dyn Fs,
-        process: &'a dyn ProcessExecutor,
-        evidence: &'a dyn EvidenceStore,
+        fs: &'effects dyn Fs,
+        process: &'effects dyn ProcessExecutor,
+        evidence: &'effects dyn EvidenceStore,
         resolver: Arc<dyn Resolver>,
         one_hop: Arc<dyn OneHop>,
         duplex: Arc<dyn DuplexSpawner>,
-        resume: Option<GuardedMcpResume<'a>>,
+        resume: Option<GuardedMcpResume<'resume>>,
     ) -> Self {
         Self {
             permit,
@@ -405,7 +407,7 @@ impl<'a> GuardedEffects<'a> {
     }
 
     pub fn store_handler_evidence(&self, bytes: &[u8]) -> Result<EvidenceRef, ToolError> {
-        <Self as GuardedIo<'a>>::store_evidence(self, bytes)
+        <Self as GuardedIo<'resume>>::store_evidence(self, bytes)
     }
 
     pub fn guarded_hook_http(
@@ -593,7 +595,7 @@ impl<'a> GuardedEffects<'a> {
     }
 }
 
-impl<'s> GuardedIo<'s> for GuardedEffects<'s> {
+impl<'effects, 'resume> GuardedIo<'resume> for GuardedEffects<'effects, GuardedMcpResume<'resume>> {
     fn write(&self, path: &CanonPath, bytes: &[u8]) -> Result<(), IoDenied> {
         // Re-resolve now, at use time, rather than trusting `path` — see
         // the trait doc comment. `write_target` and not `canonicalize`,
@@ -700,7 +702,7 @@ impl<'s> GuardedIo<'s> for GuardedEffects<'s> {
         GuardedEffects::claim_mcp_http(self, call)
     }
 
-    fn take_mcp_resume(&self) -> Result<GuardedMcpResume<'s>, ContinuationError> {
+    fn take_mcp_resume(&self) -> Result<GuardedMcpResume<'resume>, ContinuationError> {
         self.resume
             .lock()
             .map_err(|_| ContinuationError::Unavailable("resume authority lock poisoned".into()))?

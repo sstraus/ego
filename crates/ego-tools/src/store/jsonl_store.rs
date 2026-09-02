@@ -43,10 +43,6 @@ use super::blob::SessionBlobStore;
 use super::io::{AtomicReplacePublication, StoreIo, tmp_path_for};
 use super::snapshot::{SNAPSHOT_VERSION, Snapshot, SnapshotRejection, validate};
 
-/// The only on-disk log version this build migrates. Writers emit only v11;
-/// this constant names the single v10 -> v11 question-target transition.
-const MIGRATABLE_CODEC_VERSION: u32 = 10;
-
 /// Filesystem-private cache projection. The public store port exposes only
 /// [`SessionMeta`]; execution and admitted-hook evidence remain internal log
 /// facts, projected here only for bounded catalogue reads and recovery.
@@ -291,99 +287,6 @@ fn validate_physical_positions<'a>(
         }
     }
     Ok(())
-}
-
-fn decode_v10_entry(raw: &str) -> Result<SessionEntry, StoreError> {
-    let mut value = serde_json::from_str::<serde_json::Value>(raw)
-        .map_err(|error| CodecError::Malformed(error.to_string()))?;
-    let event_kind = if value.get("event").is_some() {
-        value
-            .get_mut("event")
-            .and_then(|event| event.get_mut("kind"))
-    } else {
-        value.get_mut("kind")
-    };
-    if let Some(event) = event_kind.and_then(serde_json::Value::as_object_mut)
-        && event.get("kind").and_then(serde_json::Value::as_str) == Some("QuestionRequested")
-    {
-        let tool_call = event
-            .remove("tool_call")
-            .ok_or_else(|| invalid_log("v10 QuestionRequested has no tool_call"))?;
-        event.insert(
-            "target".to_owned(),
-            serde_json::json!({"kind": "model_tool", "tool_call": tool_call}),
-        );
-    }
-    if let Ok(entry) = serde_json::from_value::<SessionEntry>(value.clone()) {
-        return Ok(entry);
-    }
-    if let Ok(event) = serde_json::from_value::<DomainEvent>(value.clone()) {
-        return Ok(SessionEntry::Event(event));
-    }
-    serde_json::from_value::<RunTransaction>(value)
-        .map(SessionEntry::RunTransaction)
-        .map_err(|error| CodecError::Malformed(error.to_string()).into())
-}
-
-fn migrate_v10_image(
-    bytes: &[u8],
-    mut header: Header,
-    start: usize,
-) -> Result<(Vec<u8>, usize, usize), StoreError> {
-    // A future payload remains someone else's bytes even when an earlier line
-    // is corrupt. Refuse before constructing or publishing any replacement.
-    let mut cursor = start;
-    while cursor < bytes.len() {
-        let Some(offset) = bytes[cursor..].iter().position(|byte| *byte == b'\n') else {
-            break;
-        };
-        match decode_line(&bytes[cursor..cursor + offset]) {
-            Ok(StoreLine::Record(record)) => {
-                decode_v10_entry(record.payload.get())?;
-            }
-            Ok(StoreLine::Unknown(_)) => {
-                return Err(invalid_log(
-                    "cannot migrate a v10 log containing an unknown record",
-                ));
-            }
-            Ok(StoreLine::Header(_)) => {
-                return Err(invalid_log(
-                    "unexpected header record past the log's first line",
-                ));
-            }
-            Err(_) => {}
-        }
-        cursor += offset + 1;
-    }
-
-    let (valid_len, dropped_lines) = valid_prefix(bytes, start);
-    header.v = CODEC_VERSION;
-    let mut migrated = encode_header(&header);
-    migrated.push(b'\n');
-    let mut position = Seq::ZERO;
-    for line in bytes[start..valid_len]
-        .split(|byte| *byte == b'\n')
-        .filter(|line| !line.is_empty())
-    {
-        let record = match decode_line(line)? {
-            StoreLine::Record(record) => record,
-            StoreLine::Unknown(_) => {
-                return Err(invalid_log(
-                    "cannot migrate a v10 log containing an unknown record",
-                ));
-            }
-            StoreLine::Header(_) => {
-                return Err(invalid_log(
-                    "unexpected header record past the log's first line",
-                ));
-            }
-        };
-        let entry = decode_v10_entry(record.payload.get())?;
-        let next = position.next();
-        migrated.extend_from_slice(&encode_record(next, &entry)?);
-        migrated.push(b'\n');
-    }
-    Ok((migrated, valid_len, dropped_lines))
 }
 
 /// A `SessionId`'s value, as a plain hyphenated UUID string.
@@ -951,33 +854,10 @@ impl JsonlStore {
         let decoded = decoded_header(&bytes)?;
         let start = decoded.as_ref().map(|(_, end)| *end).unwrap_or(0);
 
-        if let Some((header, _)) = decoded.as_ref() {
-            if header.v == MIGRATABLE_CODEC_VERSION {
-                let (migrated, valid_len, dropped_lines) =
-                    migrate_v10_image(&bytes, header.clone(), start)?;
-                if valid_len < bytes.len() {
-                    repair.truncated_bytes = (bytes.len() - valid_len) as u64;
-                    repair.dropped_lines = dropped_lines;
-                }
-                // One atomic publication both removes any torn v10 tail and
-                // installs the v11 schema. No v11 writer ever appends under a
-                // v10 header.
-                self.io.replace_atomic(&log_path, &migrated)?;
-                repair.migrated = true;
-                tracing::warn!(
-                    session = %session_dir_name(id),
-                    from_codec = MIGRATABLE_CODEC_VERSION,
-                    to_codec = CODEC_VERSION,
-                    "migrated a session log to the current codec"
-                );
-                if self.rebuild_manifest_from_log(id, &migrated)? {
-                    repair.manifest_rebuilt = true;
-                }
-                return Ok(repair);
-            }
-            if header.v != CODEC_VERSION {
-                return Err(StoreError::UnsupportedLog { found: header.v });
-            }
+        if let Some((header, _)) = decoded.as_ref()
+            && header.v != CODEC_VERSION
+        {
+            return Err(StoreError::UnsupportedLog { found: header.v });
         }
 
         let (valid_len, dropped_lines) = valid_prefix(&bytes, start);

@@ -16,8 +16,10 @@ use ego_core::event::hook::{
     HookActivation, HookContentDigest, HookId, HookInvocationId, HookLifecycle,
     HookSourceAuthority, HookSourceLocation, HookSubject,
 };
+use ego_core::event::id::{EventId, SessionId, TurnId};
 use ego_core::hook::{
-    EffectScope, HookHandlerConfig, HookHandlerRequestV1, HookInvocationRequest, HookMatcher,
+    EffectScope, HookCausality, HookEvent, HookHandlerConfig, HookHandlerRequestV1,
+    HookInvocationRequest, HookStartedEvidence,
 };
 use ego_core::permit::{
     CanonPath, Classification, DnsResolution, EnvPolicy, GuardedEffects, HttpHeader, HttpRequest,
@@ -111,53 +113,67 @@ impl ProcessCapture {
 }
 
 fn command_request(args: Option<Vec<String>>, shell: Option<&str>) -> HookInvocationRequest {
+    let hook = HookId::derive(
+        HookSourceAuthority::Project,
+        &HookSourceLocation::parse("hooks/command.toml").expect("hook source"),
+        &HookContentDigest::parse(
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        .expect("hook digest"),
+        0,
+    );
+    let invocation = HookInvocationId::new();
     HookInvocationRequest::new(
-        HookId::derive(
-            HookSourceAuthority::Project,
-            &HookSourceLocation::parse("hooks/command.toml").expect("hook source"),
-            &HookContentDigest::parse(
-                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-            )
-            .expect("hook digest"),
-            0,
+        HookStartedEvidence::new(
+            EventId::new(),
+            EventId::new(),
+            hook,
+            invocation,
+            HookActivation::Persistent,
         ),
+        HookCausality::session(SessionId::new(), TurnId::new()),
         HookHandlerConfig::Command {
             command: "/usr/bin/check".to_owned(),
             args,
             shell: shell.map(str::to_owned),
             timeout_seconds: Some(3),
         },
-        HookLifecycle::PreToolUse,
-        Some(HookMatcher::Exact("exec(git status)".to_owned())),
-        HookSubject::Session,
-        HookActivation::Persistent,
-        HookInvocationId::new(),
+        HookEvent::tool(
+            HookLifecycle::PreToolUse,
+            HookSubject::Session,
+            "exec(git status)",
+        ),
         EffectScope::new(Duration::from_secs(3)),
     )
 }
 
 fn http_request(url: &str, authorization: &str) -> HookInvocationRequest {
+    let hook = HookId::derive(
+        HookSourceAuthority::Project,
+        &HookSourceLocation::parse("hooks/http.toml").expect("hook source"),
+        &HookContentDigest::parse(
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        .expect("hook digest"),
+        0,
+    );
+    let invocation = HookInvocationId::new();
     HookInvocationRequest::new(
-        HookId::derive(
-            HookSourceAuthority::Project,
-            &HookSourceLocation::parse("hooks/http.toml").expect("hook source"),
-            &HookContentDigest::parse(
-                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-            )
-            .expect("hook digest"),
-            0,
+        HookStartedEvidence::new(
+            EventId::new(),
+            EventId::new(),
+            hook,
+            invocation,
+            HookActivation::Persistent,
         ),
+        HookCausality::session(SessionId::new(), TurnId::new()),
         HookHandlerConfig::Http {
             url: url.to_owned(),
             headers: vec![("Authorization".to_owned(), authorization.to_owned())],
             allowed_env_vars: Some(vec!["HOOK_TOKEN".to_owned()]),
             timeout_seconds: Some(30),
         },
-        HookLifecycle::UserPromptSubmit,
-        None,
-        HookSubject::Session,
-        HookActivation::Persistent,
-        HookInvocationId::new(),
+        HookEvent::session(HookLifecycle::UserPromptSubmit),
         EffectScope::new(Duration::from_secs(30)),
     )
 }

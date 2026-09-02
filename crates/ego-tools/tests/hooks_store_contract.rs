@@ -9,8 +9,9 @@ use std::sync::{Arc, Mutex};
 
 use ego_core::event::domain::{DomainEvent, Envelope, EventKind};
 use ego_core::event::hook::{
-    HookCatalogueEvidence, HookDecision, HookDescriptorEvidence, HookInvocationId, HookLifecycle,
-    HookOccurrenceKey, HookOccurrenceOwner, HookOutcome, HookPlan, HookResult, HookSourceAuthority,
+    HookActivation, HookCatalogueEntryEvidence, HookCatalogueEvidence, HookDecision,
+    HookDescriptorEvidence, HookInvocationId, HookLifecycle, HookOccurrenceKey,
+    HookOccurrenceOwner, HookOutcome, HookPlan, HookPlanEntry, HookResult, HookSourceAuthority,
     HookSourceLocation,
 };
 use ego_core::event::id::{EventId, Producer, Seq, SessionId, TurnId};
@@ -157,7 +158,11 @@ fn hook_events() -> (DomainEvent, DomainEvent, DomainEvent, DomainEvent) {
         None,
         Producer::Main,
         EventKind::HookCatalogueAdmitted {
-            descriptors: HookCatalogueEvidence::new(vec![d.clone()]).unwrap(),
+            descriptors: HookCatalogueEvidence::new(vec![HookCatalogueEntryEvidence::new(
+                d.clone(),
+                HookActivation::Persistent,
+            )])
+            .unwrap(),
         },
     );
     let reached = event(
@@ -173,7 +178,8 @@ fn hook_events() -> (DomainEvent, DomainEvent, DomainEvent, DomainEvent) {
                 },
             ),
             subject: ego_core::event::hook::HookSubject::Turn { turn },
-            plan: HookPlan::new(vec![d.id()]).unwrap(),
+            plan: HookPlan::new(vec![HookPlanEntry::new(d.id(), HookActivation::Persistent)])
+                .unwrap(),
         },
     );
     let start = event(

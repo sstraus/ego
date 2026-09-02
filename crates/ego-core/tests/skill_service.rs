@@ -589,8 +589,144 @@ fn durable_admission_and_rendered_blobs_are_forced_in_order_and_resume_uses_capt
     let resumed = SkillInvocation::resume(invocation.id(), &changed, &blobs, &journal).unwrap();
     assert_eq!(resumed.admission_blob(&blobs).unwrap(), admission);
     assert_eq!(
+        serde_json::to_value(resumed.admission_blob(&blobs).unwrap()).unwrap(),
+        serde_json::to_value(&admission).unwrap(),
+        "resume must reconstruct from the admitted snapshot, never current skill source"
+    );
+    assert_eq!(
         resumed.rendered(&blobs).unwrap(),
         invocation.rendered(&blobs).unwrap()
+    );
+}
+
+#[test]
+fn admitted_skill_snapshot_persists_versioned_executable_hooks_and_descriptor_evidence() {
+    let blobs = RecordingBlobStore::default();
+    let store = RecordingSessionStore::default();
+    let clock = FixedClock;
+    let sink = NullSink;
+    let session = SessionId::new();
+    let journal = SharedJournal::new(Journal::new(
+        session,
+        &store,
+        &clock,
+        &sink,
+        Producer::Main,
+        Default::default(),
+    ));
+    let spec = spec("snapshot", DIGEST_A, true, true)
+        .with_resource_paths(["refs/**"])
+        .expect("bounded resource policy");
+    let catalogue = SkillCatalogue::new(vec![spec]).expect("complete skill catalogue");
+    let invocation = SkillInvocation::admit(
+        &catalogue,
+        SkillOperation::Invoke {
+            name: "snapshot".to_owned(),
+            arguments: "captured".to_owned(),
+        },
+        &blobs,
+        &journal,
+    )
+    .expect("skill admission");
+
+    let value =
+        serde_json::to_value(invocation.admission_blob(&blobs).unwrap()).expect("admission JSON");
+    assert_eq!(value["version"], 1, "the hook snapshot has its own version");
+    let hooks = value["hooks"].as_array().expect("complete hook records");
+    assert_eq!(hooks.len(), 2);
+    for hook in hooks {
+        assert!(hook.get("lifecycle").is_some(), "lifecycle is required");
+        assert!(hook.get("matcher").is_some(), "matcher is required");
+        assert!(hook.get("once").is_some(), "once policy is required");
+        let handler = hook.get("handler").expect("handler configuration");
+        assert_eq!(handler["type"], "prompt");
+        assert_eq!(handler["prompt"], "fixture");
+        let evidence = hook.get("evidence").expect("descriptor evidence");
+        for field in ["id", "source", "location", "digest", "ordinal"] {
+            assert!(evidence.get(field).is_some(), "missing {field} evidence");
+        }
+    }
+    assert!(serde_json::to_vec(&value).expect("admission bytes").len() <= 64 * 1024);
+}
+
+#[test]
+fn admitted_skill_snapshot_rejects_lifecycle_only_unknown_missing_mismatched_and_oversized_shapes()
+{
+    let blobs = RecordingBlobStore::default();
+    let store = RecordingSessionStore::default();
+    let clock = FixedClock;
+    let sink = NullSink;
+    let session = SessionId::new();
+    let journal = SharedJournal::new(Journal::new(
+        session,
+        &store,
+        &clock,
+        &sink,
+        Producer::Main,
+        Default::default(),
+    ));
+    let catalogue = catalogue("snapshot", DIGEST_A);
+    let invocation = SkillInvocation::admit(
+        &catalogue,
+        SkillOperation::Invoke {
+            name: "snapshot".to_owned(),
+            arguments: "captured".to_owned(),
+        },
+        &blobs,
+        &journal,
+    )
+    .expect("skill admission");
+    let valid =
+        serde_json::to_value(invocation.admission_blob(&blobs).unwrap()).expect("admission JSON");
+
+    let mut lifecycle_only = valid.clone();
+    lifecycle_only["hooks"] = json!([{"lifecycle": "pre_tool_use"}]);
+    assert!(
+        serde_json::from_value::<ego_core::skill::SkillInvocationAdmission>(lifecycle_only)
+            .is_err(),
+        "lifecycle-only records cannot execute"
+    );
+
+    let mut unknown = valid.clone();
+    unknown["unknown"] = json!(true);
+    assert!(
+        serde_json::from_value::<ego_core::skill::SkillInvocationAdmission>(unknown).is_err(),
+        "unknown admission fields fail closed"
+    );
+
+    let mut missing_version = valid.clone();
+    missing_version
+        .as_object_mut()
+        .expect("admission object")
+        .remove("version");
+    assert!(
+        serde_json::from_value::<ego_core::skill::SkillInvocationAdmission>(missing_version)
+            .is_err(),
+        "missing snapshot version fails closed"
+    );
+
+    let mut missing_hooks = valid.clone();
+    missing_hooks
+        .as_object_mut()
+        .expect("admission object")
+        .remove("hooks");
+    assert!(
+        serde_json::from_value::<ego_core::skill::SkillInvocationAdmission>(missing_hooks).is_err(),
+        "missing executable hook snapshot fails closed"
+    );
+
+    let mut mismatched = valid.clone();
+    mismatched["hooks"][0]["evidence"]["digest"] = json!(DIGEST_B);
+    assert!(
+        serde_json::from_value::<ego_core::skill::SkillInvocationAdmission>(mismatched).is_err(),
+        "descriptor evidence mismatch fails closed"
+    );
+
+    let mut oversized = valid;
+    oversized["hooks"][0]["handler"] = json!({"type": "prompt", "prompt": "x".repeat(64 * 1024)});
+    assert!(
+        serde_json::from_value::<ego_core::skill::SkillInvocationAdmission>(oversized).is_err(),
+        "oversized executable hook configuration fails closed"
     );
 }
 

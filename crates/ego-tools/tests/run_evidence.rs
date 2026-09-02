@@ -18,7 +18,7 @@ use ego_core::run::RunId;
 use ego_core::store::codec::{
     CODEC_VERSION, Header, StoreLine, decode_line, encode_header, encode_record,
 };
-use ego_core::store::session_store::{SessionEntry, SessionStore};
+use ego_core::store::session_store::{SessionEntry, SessionStore, StoreError};
 use ego_tools::store::{JsonlStore, LeaseInputs, OsIo};
 use futures::executor::block_on;
 use futures::stream::StreamExt;
@@ -151,6 +151,7 @@ fn legacy_run_transaction(session: &SessionId) -> serde_json::Value {
             "session_id": serde_json::to_value(session).unwrap(),
             "nonce": "00000000-0000-7000-8000-000000000054"
         },
+        "origin": {"kind": "top_level"},
         "root": "/workspace",
         "selections": {
             "model": "model/test",
@@ -227,7 +228,7 @@ fn rooted_command_and_generation_evidence_precede_one_matching_start() {
     let log = log_path(root.path(), &session);
     std::fs::create_dir_all(log.parent().unwrap()).unwrap();
     let mut initial = encode_header(&Header {
-        v: 8,
+        v: CODEC_VERSION,
         session,
         created: Timestamp::from_millis(1),
         workspace_root: "/workspace".into(),
@@ -589,13 +590,13 @@ fn manifest_cache_is_rebuilt_and_unknown_evidence_prefix_fails_closed() {
 }
 
 #[test]
-fn recognized_v8_legacy_entries_migrate_to_tagged_v9_and_unknown_stays_unchanged() {
+fn retired_v10_log_is_refused_before_evidence_rebuild_and_unchanged() {
     let root = tempdir().unwrap();
     let session = SessionId::new();
     let log = log_path(root.path(), &session);
     std::fs::create_dir_all(log.parent().unwrap()).unwrap();
     let mut legacy = encode_header(&Header {
-        v: 8,
+        v: 10,
         session,
         created: Timestamp::from_millis(1),
         workspace_root: "/workspace".into(),
@@ -614,76 +615,18 @@ fn recognized_v8_legacy_entries_migrate_to_tagged_v9_and_unknown_stays_unchanged
     std::fs::write(&log, &legacy).unwrap();
 
     let store = JsonlStore::new(root.path(), "/workspace", Box::new(OsIo));
-    let repair = store.recover(&session).unwrap();
-    assert!(repair.migrated);
-    let migrated = std::fs::read(&log).unwrap();
-    let mut lines = migrated
-        .split(|byte| *byte == b'\n')
-        .filter(|line| !line.is_empty());
-    let header = decode_line(lines.next().unwrap()).unwrap();
+    let before = std::fs::read(&log).unwrap();
     assert!(matches!(
-        header,
-        StoreLine::Header(Header {
-            v: CODEC_VERSION,
-            ..
-        })
+        store.recover(&session),
+        Err(StoreError::UnsupportedLog { found: 10 })
     ));
-    let mut decoded_legacy = Vec::new();
-    for line in lines {
-        let StoreLine::Record(record) = decode_line(line).unwrap() else {
-            continue;
-        };
-        let entry: SessionEntry = serde_json::from_str(record.payload.get()).unwrap();
-        assert!(serde_json::to_value(&entry).unwrap().get("kind").is_some());
-        let is_legacy_event = !matches!(&entry, SessionEntry::Evidence(_));
-        decoded_legacy.push(entry);
-        assert!(is_legacy_event);
-        assert!(!record.payload.get().contains("codec9"));
-    }
-    assert!(
-        decoded_legacy
-            .iter()
-            .any(|entry| matches!(entry, SessionEntry::Event(_)))
-    );
-    assert!(
-        decoded_legacy
-            .iter()
-            .any(|entry| matches!(entry, SessionEntry::RunTransaction(_)))
-    );
-
-    let opened = store.open_writer(&session, lease()).unwrap();
-    let service = EvidenceAdmissionService::new();
-    service
-        .admit_run_context(&opened.writer, context(session, RunInvocationId::new()))
-        .unwrap();
-    drop(opened);
-    let with_evidence = std::fs::read(&log).unwrap();
-    let evidence_line = with_evidence
-        .split(|byte| *byte == b'\n')
-        .filter(|line| !line.is_empty())
-        .rev()
-        .find_map(|line| match decode_line(line).unwrap() {
-            StoreLine::Record(record) => Some(record),
-            StoreLine::Header(_) | StoreLine::Unknown(_) => None,
-        })
-        .unwrap();
-    let evidence: SessionEntry = serde_json::from_str(evidence_line.payload.get()).unwrap();
-    assert!(matches!(evidence, SessionEntry::Evidence(_)));
-    assert!(!evidence_line.payload.get().contains("codec9"));
-
-    let mut unknown = legacy;
-    unknown.extend_from_slice(
-        &encode_record(
-            seq(29),
-            &serde_json::json!({"kind":"legacy_future_payload"}),
-        )
-        .unwrap(),
-    );
-    unknown.push(b'\n');
-    std::fs::write(&log, &unknown).unwrap();
-    let before_unknown = std::fs::read(&log).unwrap();
-    assert!(store.recover(&session).is_err());
-    assert_eq!(std::fs::read(&log).unwrap(), before_unknown);
+    assert_eq!(std::fs::read(&log).unwrap(), before);
+    assert!(matches!(
+        ManifestEvidence::rebuild(&store, &session),
+        Err(ego_core::evidence::ManifestEvidenceError::Store(message))
+            if message.contains("codec version 10")
+    ));
+    assert_eq!(std::fs::read(&log).unwrap(), before);
 }
 
 #[test]

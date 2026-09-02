@@ -7,15 +7,19 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::ModelRef;
+use crate::config::{ModelRef, Trust};
 use crate::event::domain::EventKind;
-use crate::event::hook::HookLifecycle;
+use crate::event::hook::{
+    HookActivation, HookCatalogueEntryEvidence, HookDescriptorEvidence, HookLifecycle,
+};
 use crate::event::id::{ItemId, SubagentInvocationId, TurnId};
 use crate::event::skill::{
     SkillCatalogueEvidence, SkillCatalogueGeneration, SkillDescriptorEvidence, SkillId,
     SkillInvocationId, SkillSourceAuthority, SkillSourceLocation,
 };
-use crate::hook::{HookConfigEntry, SessionHookRuntime};
+use crate::hook::{
+    HookCatalogue, HookConfigEntry, HookHandlerConfig, HookMatcher, HookSource, SessionHookRuntime,
+};
 use crate::permit::rule::PathPattern;
 use crate::permit::{CanonPath, GuardedIo, PathResolver};
 use crate::run::RunSelections;
@@ -518,8 +522,9 @@ impl ActiveSkillScope {
 }
 
 /// Body-free, bounded authority snapshot referenced by the instruction fact.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SkillInvocationAdmission {
+    version: u8,
     invocation: SkillInvocationId,
     descriptor: SkillDescriptorEvidence,
     catalogue_generation: SkillCatalogueGeneration,
@@ -529,8 +534,127 @@ pub struct SkillInvocationAdmission {
     effort: Option<String>,
     fork: Option<String>,
     profile: Option<String>,
-    hook_lifecycles: Vec<HookLifecycle>,
+    hooks: Vec<AdmittedSkillHook>,
     resource_paths: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DecodedSkillInvocationAdmission {
+    version: u8,
+    invocation: SkillInvocationId,
+    descriptor: SkillDescriptorEvidence,
+    catalogue_generation: SkillCatalogueGeneration,
+    allowed_tools: Option<BTreeSet<String>>,
+    disallowed_tools: BTreeSet<String>,
+    model: Option<String>,
+    effort: Option<String>,
+    fork: Option<String>,
+    profile: Option<String>,
+    hooks: Vec<AdmittedSkillHook>,
+    resource_paths: Vec<String>,
+}
+
+impl<'de> Deserialize<'de> for SkillInvocationAdmission {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let decoded = DecodedSkillInvocationAdmission::deserialize(deserializer)?;
+        let admission = Self {
+            version: decoded.version,
+            invocation: decoded.invocation,
+            descriptor: decoded.descriptor,
+            catalogue_generation: decoded.catalogue_generation,
+            allowed_tools: decoded.allowed_tools,
+            disallowed_tools: decoded.disallowed_tools,
+            model: decoded.model,
+            effort: decoded.effort,
+            fork: decoded.fork,
+            profile: decoded.profile,
+            hooks: decoded.hooks,
+            resource_paths: decoded.resource_paths,
+        };
+        encode_admission(&admission)
+            .map(|_| admission)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AdmittedSkillHook {
+    version: u8,
+    lifecycle: HookLifecycle,
+    matcher: Option<HookMatcher>,
+    once: bool,
+    handler: HookHandlerConfig,
+    evidence: HookDescriptorEvidence,
+}
+
+impl SkillInvocationAdmission {
+    fn hook_source(&self) -> Result<HookSource, SkillError> {
+        if self.version != 1 || self.hooks.iter().any(|hook| hook.version != 1) {
+            return Err(SkillError::new(
+                "unsupported admitted skill hook snapshot version",
+            ));
+        }
+        let entries = self
+            .hooks
+            .iter()
+            .map(|hook| {
+                HookConfigEntry::new(hook.lifecycle, hook.matcher.clone(), hook.handler.clone())
+                    .with_once(hook.once)
+            })
+            .collect::<Vec<_>>();
+        let source = HookSource::skill_entries_with_authority(
+            self.descriptor.location.as_str(),
+            self.invocation,
+            self.descriptor.source,
+            entries,
+        );
+        let catalogue =
+            HookCatalogue::admit_typed(&[], std::slice::from_ref(&source), Trust::Trusted)
+                .map_err(|error| SkillError::new(error.to_string()))?;
+        let expected = self
+            .hooks
+            .iter()
+            .map(|hook| {
+                HookCatalogueEntryEvidence::new(
+                    hook.evidence.clone(),
+                    HookActivation::Skill {
+                        invocation: self.invocation,
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        if catalogue.evidence().as_slice() != expected.as_slice() {
+            return Err(SkillError::new(
+                "admitted skill hook snapshot does not match its descriptor evidence",
+            ));
+        }
+        Ok(source)
+    }
+}
+
+fn encode_admission(admission: &SkillInvocationAdmission) -> Result<Vec<u8>, SkillError> {
+    let bytes =
+        serde_json::to_vec(admission).map_err(|error| SkillError::new(error.to_string()))?;
+    if bytes.len() > MAX_ADMISSION_BYTES {
+        return Err(SkillError::new(
+            "skill invocation admission exceeds 65536 bytes",
+        ));
+    }
+    Ok(bytes)
+}
+
+fn decode_admission(bytes: &[u8]) -> Result<SkillInvocationAdmission, SkillError> {
+    if bytes.len() > MAX_ADMISSION_BYTES {
+        return Err(SkillError::new(
+            "skill invocation admission exceeds 65536 bytes",
+        ));
+    }
+    serde_json::from_slice(bytes).map_err(|error| SkillError::new(error.to_string()))
 }
 
 /// One admitted invocation. The exact rendered body and body-free authority
@@ -588,14 +712,8 @@ impl SkillInvocation {
         let spec = catalogue.authorize_model(operation.name())?.clone();
         let rendered = spec.render(&operation)?;
         let id = SkillInvocationId::new();
-        let admission = invocation_admission(id, catalogue.generation, &spec);
-        let admission_bytes =
-            serde_json::to_vec(&admission).map_err(|error| SkillError::new(error.to_string()))?;
-        if admission_bytes.len() > MAX_ADMISSION_BYTES {
-            return Err(SkillError::new(
-                "skill invocation admission exceeds 65536 bytes",
-            ));
-        }
+        let admission = invocation_admission(id, catalogue.generation, &spec)?;
+        let admission_bytes = encode_admission(&admission)?;
         let admission_ref = commit_blob(blobs, &admission_bytes)?;
         let rendered_ref = commit_blob(blobs, rendered.as_bytes())?;
         journal
@@ -636,9 +754,8 @@ impl SkillInvocation {
             .map_err(|error| SkillError::new(error.to_string()))?;
         let generation = SkillCatalogueGeneration::derive(&evidence);
         let id = SkillInvocationId::new();
-        let admission = invocation_admission(id, generation, &spec);
-        let admission_bytes =
-            serde_json::to_vec(&admission).map_err(|error| SkillError::new(error.to_string()))?;
+        let admission = invocation_admission(id, generation, &spec)?;
+        let admission_bytes = encode_admission(&admission)?;
         let admission_ref = synthetic_blob(&admission_bytes)?;
         // `admit_for_service` receives no blob owner; its child-service seam
         // names the already admitted source bytes supplied by that owner.
@@ -672,10 +789,27 @@ impl SkillInvocation {
                 state.skill_events().iter().find_map(|event| match event {
                     crate::state::SkillEvent::Instruction {
                         invocation: found,
+                        skill,
+                        catalogue_generation,
+                        source,
+                        location,
+                        source_digest,
                         admission,
                         rendered,
+                        model,
+                        effort,
                         ..
-                    } if *found == invocation => Some((admission.clone(), rendered.clone())),
+                    } if *found == invocation => Some((
+                        admission.clone(),
+                        rendered.clone(),
+                        *skill,
+                        *catalogue_generation,
+                        *source,
+                        location.clone(),
+                        *source_digest,
+                        model.clone(),
+                        effort.clone(),
+                    )),
                     _ => None,
                 })
             })
@@ -684,13 +818,22 @@ impl SkillInvocation {
         let bytes = blobs
             .read(&event.0)
             .map_err(|error| SkillError::new(error.to_string()))?;
-        let admission: SkillInvocationAdmission =
-            serde_json::from_slice(&bytes).map_err(|error| SkillError::new(error.to_string()))?;
-        if admission.invocation != invocation {
+        let admission = decode_admission(&bytes)?;
+        if admission.version != 1
+            || admission.invocation != invocation
+            || admission.descriptor.id != event.2
+            || admission.catalogue_generation != event.3
+            || admission.descriptor.source != event.4
+            || admission.descriptor.location != event.5
+            || admission.descriptor.source_digest != event.6
+            || admission.model != event.7
+            || admission.effort != event.8
+        {
             return Err(SkillError::new(
-                "skill admission blob names another invocation",
+                "skill admission blob does not match its durable instruction fact",
             ));
         }
+        admission.hook_source()?;
         let rendered_bytes = blobs
             .read(&event.1)
             .map_err(|error| SkillError::new(error.to_string()))?;
@@ -727,6 +870,9 @@ impl SkillInvocation {
 
     pub fn id(&self) -> SkillInvocationId {
         self.id
+    }
+    pub fn hook_source(&self) -> Result<HookSource, SkillError> {
+        self.admission.hook_source()
     }
     pub fn model(&self) -> Option<&str> {
         self.admission.model.as_deref()
@@ -817,7 +963,9 @@ impl SkillInvocation {
         let bytes = blobs
             .read(reference)
             .map_err(|error| SkillError::new(error.to_string()))?;
-        serde_json::from_slice(&bytes).map_err(|error| SkillError::new(error.to_string()))
+        let admission = decode_admission(&bytes)?;
+        admission.hook_source()?;
+        Ok(admission)
     }
     pub fn rendered(&self, blobs: &dyn BlobStore) -> Result<Vec<u8>, SkillError> {
         blobs
@@ -903,8 +1051,32 @@ fn invocation_admission(
     invocation: SkillInvocationId,
     catalogue_generation: SkillCatalogueGeneration,
     spec: &SkillSpec,
-) -> SkillInvocationAdmission {
-    SkillInvocationAdmission {
+) -> Result<SkillInvocationAdmission, SkillError> {
+    let hook_source = HookSource::skill_entries_with_authority(
+        spec.descriptor.location.as_str(),
+        invocation,
+        spec.descriptor.source,
+        spec.hooks.clone(),
+    );
+    let hook_catalogue =
+        HookCatalogue::admit_typed(&[], std::slice::from_ref(&hook_source), Trust::Trusted)
+            .map_err(|error| SkillError::new(error.to_string()))?;
+    let hook_evidence = hook_catalogue.evidence();
+    let hooks = spec
+        .hooks
+        .iter()
+        .zip(hook_evidence.as_slice())
+        .map(|(entry, evidence)| AdmittedSkillHook {
+            version: 1,
+            lifecycle: entry.lifecycle(),
+            matcher: entry.matcher().cloned(),
+            once: entry.once(),
+            handler: entry.handler().clone(),
+            evidence: evidence.descriptor().clone(),
+        })
+        .collect();
+    Ok(SkillInvocationAdmission {
+        version: 1,
         invocation,
         descriptor: spec.descriptor.clone(),
         catalogue_generation,
@@ -917,9 +1089,9 @@ fn invocation_admission(
             ChildWait::Background => "background".to_owned(),
         }),
         profile: spec.profile.clone(),
-        hook_lifecycles: spec.hooks.iter().map(HookConfigEntry::lifecycle).collect(),
+        hooks,
         resource_paths: spec.resource_paths.clone(),
-    }
+    })
 }
 
 fn commit_blob(blobs: &dyn BlobStore, bytes: &[u8]) -> Result<BlobRef, SkillError> {

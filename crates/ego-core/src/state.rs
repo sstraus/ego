@@ -1118,6 +1118,29 @@ impl SessionState {
         self.settled_questions.get(&question)
     }
 
+    /// Whether one durable answer settlement owns this exact foreign
+    /// continuation lifecycle parent.
+    pub(crate) fn owns_foreign_continuation_settlement(
+        &self,
+        continuation_id: &str,
+        turn: TurnId,
+        tool_call: ItemId,
+        settlement: EventId,
+    ) -> bool {
+        self.settled_questions.values().any(|settled| {
+            settled.pending.turn == turn
+                && settled.pending.target.tool_call() == tool_call
+                && settled.settlement_event == settlement
+                && matches!(
+                    &settled.pending.target,
+                    QuestionTarget::ForeignContinuation {
+                        continuation_id: candidate,
+                        ..
+                    } if candidate == continuation_id
+                )
+        })
+    }
+
     /// Parse a resume value against the pending request without changing
     /// state. The caller persists `QuestionSettled` before applying anything.
     pub fn answer_pending(
@@ -1940,7 +1963,7 @@ impl SessionState {
         if !hook_subject_matches_envelope(subject, ev.env.turn, ev.env.item) {
             return self.refuse(ev, RefusalReason::HookSubjectMismatch);
         }
-        if let Err(reason) = hook_owner_matches_envelope(self, key.owner(), subject, ev) {
+        if let Err(reason) = hook_owner_matches_envelope(self, key, subject, ev) {
             return self.refuse(ev, reason);
         }
         if let HookOccurrenceOwner::Subagent { invocation } = key.owner()
@@ -1958,11 +1981,10 @@ impl SessionState {
         }
         let catalogue = self.hook_catalogue.as_slice();
         let mut last_position = None;
-        for hook in plan.as_slice() {
-            let Some(position) = catalogue
-                .iter()
-                .position(|descriptor| descriptor.id() == *hook)
-            else {
+        for entry in plan.as_slice() {
+            let Some(position) = catalogue.iter().position(|descriptor| {
+                descriptor.id() == entry.hook() && descriptor.activation() == entry.activation()
+            }) else {
                 return self.refuse(ev, RefusalReason::HookOccurrencePlanMismatch);
             };
             if last_position.is_some_and(|last| position <= last) {
@@ -2037,7 +2059,10 @@ impl SessionState {
         {
             return self.refuse(ev, RefusalReason::HookInvocationOccurrenceMismatch);
         }
-        if reached.plan.as_slice().get(reached.starts.len()) != Some(&hook) {
+        let planned = reached.plan.as_slice().get(reached.starts.len());
+        if planned
+            .is_none_or(|planned| planned.hook() != hook || planned.activation() != activation)
+        {
             return self.refuse(ev, RefusalReason::HookOccurrenceOrderMismatch);
         }
         self.hook_occurrences[position]
@@ -2380,11 +2405,11 @@ fn hook_subject_matches_envelope(subject: HookSubject, turn: TurnId, item: Optio
 
 fn hook_owner_matches_envelope(
     state: &SessionState,
-    owner: &HookOccurrenceOwner,
+    key: &HookOccurrenceKey,
     subject: HookSubject,
     ev: &DomainEvent,
 ) -> Result<(), RefusalReason> {
-    match owner {
+    match key.owner() {
         HookOccurrenceOwner::Event { event } => (ev.env.parent == Some(*event))
             .then_some(())
             .ok_or(RefusalReason::HookSubjectMismatch),
@@ -2398,19 +2423,37 @@ fn hook_owner_matches_envelope(
             .is_none()
             .then_some(())
             .ok_or(RefusalReason::HookSubjectMismatch),
-        HookOccurrenceOwner::Continuation { .. } => {
+        HookOccurrenceOwner::Continuation { id } => {
             let HookSubject::Item { item } = subject else {
                 return Err(RefusalReason::HookSubjectMismatch);
             };
-            let Some(tool) = state.items.get(&item) else {
-                return Err(RefusalReason::HookSubjectMismatch);
-            };
-            if tool.kind != ItemKind::ToolCall {
-                return Err(RefusalReason::HookSubjectMismatch);
-            }
-            match tool.tool_call_started {
-                Some(started) if ev.env.parent == Some(started) => Ok(()),
-                Some(_) | None => Err(RefusalReason::HookOccurrenceParentMismatch),
+            match key.lifecycle() {
+                HookLifecycle::Elicitation => {
+                    let Some(tool) = state.items.get(&item) else {
+                        return Err(RefusalReason::HookSubjectMismatch);
+                    };
+                    if tool.kind != ItemKind::ToolCall {
+                        return Err(RefusalReason::HookSubjectMismatch);
+                    }
+                    match tool.tool_call_started {
+                        Some(started) if ev.env.parent == Some(started) => Ok(()),
+                        Some(_) | None => Err(RefusalReason::HookOccurrenceParentMismatch),
+                    }
+                }
+                HookLifecycle::ElicitationResult => ev
+                    .env
+                    .parent
+                    .filter(|settlement| {
+                        state.owns_foreign_continuation_settlement(
+                            id,
+                            ev.env.turn,
+                            item,
+                            *settlement,
+                        )
+                    })
+                    .map(|_| ())
+                    .ok_or(RefusalReason::HookOccurrenceParentMismatch),
+                _ => Err(RefusalReason::HookSubjectMismatch),
             }
         }
         HookOccurrenceOwner::Generation { .. } | HookOccurrenceOwner::Subagent { .. } => Ok(()),

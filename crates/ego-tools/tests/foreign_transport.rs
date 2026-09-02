@@ -586,6 +586,7 @@ fn guarded_http_is_the_only_subject_under_test_and_redirect_needs_fresh_authorit
     let captures = server.finish();
     assert_eq!(captures.len(), 1);
     assert_eq!(captures[0].request_count, 1);
+    drop(guarded);
     drop(fixture);
 }
 
@@ -683,6 +684,7 @@ fn guarded_duplex_settles_binary_child_and_keeps_stdout_out_of_evidence() {
             .model_text()
             .contains("EGO_FOREIGN_TRANSPORT_SENTINEL")
     );
+    drop(guarded);
     drop(fixture);
 }
 
@@ -749,6 +751,7 @@ fn guarded_duplex_interrupts_a_blocked_child_after_write() {
     assert_eq!(settlement.delivery(), DeliveryCertainty::PossiblySent);
     assert!(settlement.evidence().is_ok(), "evidence finalized");
     assert!(!descendant_is_running(direct), "direct child was reaped");
+    drop(guarded);
     drop(fixture);
 }
 
@@ -801,6 +804,7 @@ fn guarded_duplex_times_out_blocked_child_with_exact_timeout() {
     ));
     assert_eq!(settlement.delivery(), DeliveryCertainty::DefinitelyUnsent);
     assert!(settlement.evidence().is_ok(), "evidence finalized");
+    drop(guarded);
     drop(fixture);
 }
 
@@ -860,6 +864,7 @@ fn guarded_duplex_cancels_blocked_child_after_write() {
     ));
     assert_eq!(settlement.delivery(), DeliveryCertainty::PossiblySent);
     assert!(settlement.evidence().is_ok(), "evidence finalized");
+    drop(guarded);
     drop(fixture);
 }
 
@@ -907,6 +912,7 @@ fn guarded_duplex_interrupt_cleans_a_long_lived_descendant() {
     assert!(settlement.evidence().is_ok(), "evidence finalized");
     assert!(!descendant_is_running(descendant), "descendant was cleaned");
     assert!(!descendant_is_running(direct), "direct child was reaped");
+    drop(guarded);
     drop(fixture);
 }
 
@@ -1309,7 +1315,15 @@ fn reset_never_retries_a_request() {
 fn fresh_authorizations_use_fresh_sockets() {
     let server = SocketServer::bind(move |mut stream| {
         let peer = stream.peer_addr().expect("peer");
-        let request = read_request(&mut stream);
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("diagnostic request timeout");
+        let mut first_byte = [0_u8; 1];
+        stream
+            .read_exact(&mut first_byte)
+            .expect("fresh authorization request did not arrive");
+        let mut request = first_byte.to_vec();
+        request.extend(read_request(&mut stream));
         write!(
             stream,
             "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n"

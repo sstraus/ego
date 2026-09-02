@@ -31,16 +31,18 @@ use crate::event::time::Timestamp;
 /// `docs/decisions/2026-08-21-a-header-the-repair-must-not-delete.md` §3 —
 /// actually compared when one is read.
 ///
-/// v11 gives every durable question a closed model-tool or foreign-
-/// continuation target. v10 `QuestionRequested.tool_call` records migrate
-/// deterministically to the model-tool target. v10 binds every hook start
-/// and settlement to a durable real-owner lifecycle occurrence.
+/// v12 binds hook plans, starts, and settlements to explicit descriptor and
+/// activation identities, and makes admitted skill-hook snapshots sufficient
+/// for resume. It has no compatibility reader. v11 gives every durable
+/// question a closed model-tool or foreign-continuation target. v10 binds
+/// every hook start and settlement to a durable real-owner lifecycle
+/// occurrence.
 /// v9 made child, skill, run-origin, hook-role, and usage facts final. v8
 /// made `StoreRecord::seq` the contiguous physical position of every
 /// record in the single session stream. Event sequence numbers and run
 /// revisions remain semantic counters inside the payload and no longer
 /// compete for the record-order field.
-pub const CODEC_VERSION: u32 = 11;
+pub const CODEC_VERSION: u32 = 12;
 
 /// The fixed xxhash64 seed for record checksums. Part of the codec v1
 /// contract: changing it would silently invalidate every checksum already

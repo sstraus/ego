@@ -318,14 +318,13 @@ pub async fn serve(args: &AcpArgs, evidence: Arc<EvidenceAdmissionService>) -> R
         Arc::clone(&store),
         Arc::clone(&evidence),
     ));
-    let compaction: Arc<dyn ego_core::compact::CompactionCommand> = Arc::new(
-        run::CliCompactionCommand::for_protocol(
+    let compaction: Arc<dyn ego_core::compact::CompactionCommand> =
+        Arc::new(run::CliCompactionCommand::for_protocol(
             root.clone(),
             args.session_dir.clone(),
             Arc::clone(&store),
             evidence,
-        ),
-    );
+        ));
     let ids = Arc::new(UuidIds);
     let controller = Arc::new(RunController::new(
         Arc::clone(&store),

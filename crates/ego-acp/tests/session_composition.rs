@@ -3,7 +3,10 @@
 use std::sync::Arc;
 
 use ego_acp::serve::SessionMcpAdmission;
-use ego_core::hook::HookLifecycleDispatcher;
+use ego_core::event::hook::{HookFailure, HookFailureKind};
+use ego_core::hook::{
+    HookCausality, HookFuture, HookInvocationPort, HookInvocationRequest, SessionHookRuntime,
+};
 use ego_core::mcp::{ForeignQuestionPort, McpRuntimeBinding, ToolExecution};
 use ego_core::run::{EventSinkFactory, RunExecutionBindings};
 use ego_core::sink::{EventSink, NullSink};
@@ -30,6 +33,7 @@ impl ForeignQuestionPort for RejectingPort {
         &'a self,
         _continuation_id: &'a str,
         _canonical_json: &'a str,
+        _causality: HookCausality,
     ) -> BoxFuture<'a, Result<ToolExecution, String>> {
         Box::pin(async { Err("ACP test port was not invoked".to_owned()) })
     }
@@ -38,13 +42,32 @@ impl ForeignQuestionPort for RejectingPort {
 #[derive(Default)]
 struct TestMcpRuntime;
 
+struct UnusedHookPort;
+
+impl HookInvocationPort for UnusedHookPort {
+    fn invoke<'a>(&'a self, _request: HookInvocationRequest) -> HookFuture<'a> {
+        Box::pin(async { Err(HookFailure::new(HookFailureKind::HandlerFailed, None)) })
+    }
+}
+
 impl McpRuntimeBinding for TestMcpRuntime {
-    fn foreign_question_port<'a>(
+    fn hook_invocation_port<'a>(
         &self,
-        _dispatcher: HookLifecycleDispatcher,
-        _floor: ResumeFloor,
+        _policy: &'a ego_core::permit::PolicyEngine,
         _effects: ToolEffectPorts<'a>,
-    ) -> Arc<dyn ForeignQuestionPort + 'a> {
+    ) -> Result<Arc<dyn HookInvocationPort + 'a>, String> {
+        Ok(Arc::new(UnusedHookPort))
+    }
+
+    fn foreign_question_port<'session, 'turn>(
+        &self,
+        _runtime: SessionHookRuntime<'session>,
+        _floor: ResumeFloor,
+        _effects: ToolEffectPorts<'turn>,
+    ) -> Arc<dyn ForeignQuestionPort + 'turn>
+    where
+        'session: 'turn,
+    {
         Arc::new(RejectingPort)
     }
 }

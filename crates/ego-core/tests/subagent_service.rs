@@ -20,8 +20,8 @@ use ego_core::config::{
 use ego_core::cost::{Amount, CurrencyCode, PricingRevision};
 use ego_core::event::domain::{DomainEvent, Envelope, EventKind, SubagentTerminal};
 use ego_core::event::hook::{
-    HookCatalogueEvidence, HookDecision, HookDescriptorEvidence, HookInvocationId, HookLifecycle,
-    HookOutcome, HookSourceAuthority,
+    HookActivation, HookCatalogueEntryEvidence, HookCatalogueEvidence, HookDecision,
+    HookDescriptorEvidence, HookInvocationId, HookLifecycle, HookOutcome, HookSourceAuthority,
 };
 use ego_core::event::id::{
     EventId, ItemId, Producer, Seq, SessionId, SubagentInvocationId, TurnId,
@@ -635,7 +635,14 @@ fn catalogue_evidence(catalogue: &HookCatalogue) -> HookCatalogueEvidence {
             spec.ordinal().expect("hook ordinal"),
         )
     });
-    HookCatalogueEvidence::new(descriptors.collect()).expect("catalogue evidence")
+    HookCatalogueEvidence::new(
+        descriptors
+            .map(|descriptor| {
+                HookCatalogueEntryEvidence::new(descriptor, HookActivation::Persistent)
+            })
+            .collect(),
+    )
+    .expect("catalogue evidence")
 }
 
 fn parent_runtime(journal: DurableJournal, port: ReturnHookPort) -> SessionHookRuntime<'static> {

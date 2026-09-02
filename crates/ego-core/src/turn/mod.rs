@@ -50,6 +50,7 @@ use crate::evidence::{
 use crate::generation_model_source::{
     GenerationModelErrorClass, GenerationModelRequest, GenerationModelSource, GenerationProfile,
 };
+use crate::generator::attempt::DeliveryCertainty;
 use crate::generator::attempt::{AttemptStream, GenerationAttempt, UsageReport, settled_cost};
 use crate::generator::history::conversation_from_with_blobs;
 use crate::generator::port::AiEvent;
@@ -65,6 +66,7 @@ use crate::question::{Elicitor, QuestionAnswer, QuestionOutcome, QuestionTarget}
 use crate::run::{Denial, DeniedBy};
 use crate::sink::EventSink;
 use crate::state::{SessionState, Usage};
+use crate::store::evidence::EvidenceRef;
 use crate::store::session_store::{SessionStore, StoreError};
 
 use catalogue::ToolCaptureAuthority;
@@ -496,16 +498,311 @@ pub struct JudgeContext {
     pub exec_caps: crate::permit::ExecCaps,
 }
 
+/// One tool-less generation owner sharing the enclosing session's journal,
+/// evidence admission, invocation, and budget authority.
+#[derive(Clone)]
+pub struct ToollessGenerationOwner<'session, 'effects> {
+    session_id: SessionId,
+    journal: SharedJournal<'session>,
+    run_evidence: &'session dyn EvidenceStore,
+    response_evidence: &'effects dyn crate::store::evidence::EvidenceStore,
+    admission: Arc<EvidenceAdmissionService>,
+    invocation: RunInvocationId,
+    gate: SharedBudgetGate,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToollessGenerated {
+    raw: Vec<u8>,
+    evidence: EvidenceRef,
+    delivery: DeliveryCertainty,
+}
+
+impl ToollessGenerated {
+    pub fn raw(&self) -> &[u8] {
+        &self.raw
+    }
+
+    pub fn evidence(&self) -> &EvidenceRef {
+        &self.evidence
+    }
+
+    pub fn delivery(&self) -> DeliveryCertainty {
+        self.delivery
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToollessGenerationFailure {
+    message: String,
+    delivery: DeliveryCertainty,
+}
+
+impl ToollessGenerationFailure {
+    fn new(message: impl Into<String>, delivery: DeliveryCertainty) -> Self {
+        Self {
+            message: message.into(),
+            delivery,
+        }
+    }
+
+    pub fn delivery(&self) -> DeliveryCertainty {
+        self.delivery
+    }
+}
+
+impl std::fmt::Display for ToollessGenerationFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ToollessGenerationFailure {}
+
+impl<'session, 'effects> ToollessGenerationOwner<'session, 'effects> {
+    pub fn new(
+        session_id: SessionId,
+        journal: SharedJournal<'session>,
+        run_evidence: &'session dyn EvidenceStore,
+        response_evidence: &'effects dyn crate::store::evidence::EvidenceStore,
+        admission: Arc<EvidenceAdmissionService>,
+        invocation: RunInvocationId,
+        gate: SharedBudgetGate,
+    ) -> Self {
+        Self {
+            session_id,
+            journal,
+            run_evidence,
+            response_evidence,
+            admission,
+            invocation,
+            gate,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn generate(
+        &self,
+        source: Arc<dyn GenerationModelSource>,
+        role: GenerationRole,
+        turn: TurnId,
+        prompt: String,
+        input: String,
+        model: Option<ModelRef>,
+    ) -> Result<ToollessGenerated, ToollessGenerationFailure> {
+        let profile = source
+            .resolve(GenerationModelRequest::new(role).with_skill_scope(model, None))
+            .await
+            .map_err(|error| {
+                ToollessGenerationFailure::new(
+                    error.to_string(),
+                    DeliveryCertainty::DefinitelyUnsent,
+                )
+            })?;
+        let messages = Conversation::new(vec![
+            Message::text(Role::System, prompt),
+            Message::text(Role::User, input),
+        ])
+        .map_err(|error| {
+            ToollessGenerationFailure::new(error.to_string(), DeliveryCertainty::DefinitelyUnsent)
+        })?;
+        let request = GenRequest {
+            model: profile.request_model.clone(),
+            messages,
+            tools: Vec::new(),
+            thinking: profile.thinking,
+            max_output_tokens: profile.output_ceiling(),
+            parallel_tool_calls: false,
+        };
+        let gaps = profile.capabilities.request_gaps(&request);
+        if !gaps.is_empty() {
+            return Err(ToollessGenerationFailure::new(
+                gaps.iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("; "),
+                DeliveryCertainty::DefinitelyUnsent,
+            ));
+        }
+        profile
+            .generator
+            .ensure_expressible(&request)
+            .map_err(|error| {
+                ToollessGenerationFailure::new(
+                    error.to_string(),
+                    DeliveryCertainty::DefinitelyUnsent,
+                )
+            })?;
+        let budget = self.gate.snapshot().map_err(|error| {
+            ToollessGenerationFailure::new(error.to_string(), DeliveryCertainty::DefinitelyUnsent)
+        })?;
+        self.journal
+            .publish(&PublicEvent::metering_selected(
+                turn,
+                &profile.metering,
+                budget.ledger(),
+                profile
+                    .rates
+                    .as_ref()
+                    .map_or(&RateSource::None, |rates| &rates.source),
+            ))
+            .map_err(|error| {
+                ToollessGenerationFailure::new(
+                    error.to_string(),
+                    DeliveryCertainty::DefinitelyUnsent,
+                )
+            })?;
+        let quote = profile.rates.as_ref().map(|rates| &rates.quote);
+        let reservation = self
+            .gate
+            .reserve(&profile.metering, quote, &request, &profile.capabilities)
+            .map_err(|error| {
+                ToollessGenerationFailure::new(
+                    error.to_string(),
+                    DeliveryCertainty::DefinitelyUnsent,
+                )
+            })?;
+        let attempt = GenerationAttempt::new(
+            GenerationId::new(),
+            reservation,
+            &profile.metering,
+            quote,
+            &request,
+            &profile.capabilities,
+        )
+        .map_err(|error| {
+            ToollessGenerationFailure::new(error.to_string(), DeliveryCertainty::DefinitelyUnsent)
+        })?;
+        let reference = attempt.attempt();
+        admit_generation_evidence(
+            self.session_id,
+            self.invocation,
+            self.admission.as_ref(),
+            self.run_evidence,
+            &profile,
+            reference,
+            role,
+        )
+        .map_err(|error| {
+            ToollessGenerationFailure::new(error.to_string(), DeliveryCertainty::DefinitelyUnsent)
+        })?;
+        self.journal
+            .append(
+                turn,
+                None,
+                None,
+                EventKind::GenerationStarted {
+                    attempt: reference,
+                    role,
+                },
+            )
+            .map_err(|error| {
+                ToollessGenerationFailure::new(
+                    error.to_string(),
+                    DeliveryCertainty::DefinitelyUnsent,
+                )
+            })?;
+
+        let mut stream = profile.generator.generate(request, attempt);
+        let mut raw = Vec::new();
+        let mut usage: Option<Usage> = None;
+        let mut provider_cost: Option<Money> = None;
+        let mut provider_error = None;
+        let mut emitted_tool = false;
+        while let Some(event) = stream.next().await {
+            match event {
+                AiEvent::TextDelta { text } => raw.extend_from_slice(text.as_bytes()),
+                AiEvent::Usage(delta) => {
+                    let mut total = usage.unwrap_or(Usage::IDENTITY);
+                    total.add(&delta);
+                    usage = Some(total);
+                }
+                AiEvent::ProviderCost { cost } => provider_cost = Some(cost),
+                AiEvent::ToolCall { .. } => emitted_tool = true,
+                AiEvent::Error { message, .. } => {
+                    provider_error.get_or_insert(message);
+                }
+                AiEvent::ReasoningDelta { .. }
+                | AiEvent::ReasoningState(_)
+                | AiEvent::DeliveryObserved(_)
+                | AiEvent::Stop(_) => {}
+            }
+        }
+        let settlement = self.gate.settle(stream).map_err(|error| {
+            ToollessGenerationFailure::new(error.to_string(), DeliveryCertainty::PossiblySent)
+        })?;
+        let delivery = settlement.outcome.delivery();
+        let observed = usage.unwrap_or(Usage::IDENTITY);
+        let cost_delta = settled_cost(
+            &profile.metering,
+            quote,
+            usage.map_or(UsageReport::Missing, UsageReport::Reported),
+            provider_cost,
+            self.gate
+                .snapshot()
+                .map_err(|error| ToollessGenerationFailure::new(error.to_string(), delivery))?
+                .currency(),
+        );
+        self.journal
+            .append(
+                turn,
+                None,
+                None,
+                EventKind::UsageUpdated {
+                    usage: observed,
+                    cost_delta,
+                    attempt: Some(reference),
+                },
+            )
+            .map_err(|error| ToollessGenerationFailure::new(error.to_string(), delivery))?;
+        self.journal
+            .append(
+                turn,
+                None,
+                None,
+                EventKind::AttemptSettled {
+                    attempt: settlement.attempt,
+                    outcome: settlement.outcome,
+                },
+            )
+            .map_err(|error| ToollessGenerationFailure::new(error.to_string(), delivery))?;
+        if let Some(error) = provider_error {
+            return Err(ToollessGenerationFailure::new(error, delivery));
+        }
+        if emitted_tool || settlement.outcome.stop() != StopReason::Stop {
+            return Err(ToollessGenerationFailure::new(
+                "tool-less generation did not settle with a normal stop",
+                delivery,
+            ));
+        }
+        let mut writer = self
+            .response_evidence
+            .begin()
+            .map_err(|error| ToollessGenerationFailure::new(error.to_string(), delivery))?;
+        writer
+            .append(&raw)
+            .map_err(|error| ToollessGenerationFailure::new(error.to_string(), delivery))?;
+        let evidence = writer
+            .commit()
+            .map_err(|error| ToollessGenerationFailure::new(error.to_string(), delivery))?;
+        Ok(ToollessGenerated {
+            raw,
+            evidence,
+            delivery,
+        })
+    }
+}
+
 /// Runs turns against one session.
 ///
 /// Holds the session's whole world: what generates, what it costs, what it may
 /// call, and where the log goes. One `run` call is one turn; the state carries
 /// over between them.
-pub struct TurnLoop<'a> {
+pub struct TurnLoop<'session, 'turn> {
     session_id: SessionId,
-    journal: SharedJournal<'a>,
+    journal: SharedJournal<'session>,
     source: Arc<dyn GenerationModelSource>,
-    evidence: &'a dyn EvidenceStore,
+    evidence: &'session dyn EvidenceStore,
     admission: Arc<EvidenceAdmissionService>,
     invocation: RunInvocationId,
     gate: SharedBudgetGate,
@@ -513,42 +810,111 @@ pub struct TurnLoop<'a> {
     config: TurnConfig,
     judge: Option<JudgeContext>,
     execution_observation: Option<ExecObservation>,
-    tools: Tools<'a>,
+    tools: Tools<'turn>,
     ancestor: Option<Conversation>,
     cancel: CancelToken,
-    control: Option<&'a mut InteractiveControl>,
+    control: Option<&'turn mut InteractiveControl>,
     elicitor: Option<Arc<dyn Elicitor>>,
-    foreign_question_port: Option<Arc<dyn crate::mcp::ForeignQuestionPort + 'a>>,
-    hook_runtime: Option<SessionHookRuntime<'a>>,
+    foreign_question_port: Option<Arc<dyn crate::mcp::ForeignQuestionPort + 'turn>>,
+    hook_runtime: Option<SessionHookRuntime<'session>>,
     active_skill_scope: Option<crate::skill::ActiveSkillScope>,
     active_skill_invocations:
         BTreeMap<crate::event::skill::SkillInvocationId, crate::skill::SkillInvocation>,
 }
 
-impl<'a> TurnLoop<'a> {
+fn admit_generation_evidence(
+    session: SessionId,
+    invocation: RunInvocationId,
+    admission: &EvidenceAdmissionService,
+    store: &dyn EvidenceStore,
+    profile: &GenerationProfile,
+    attempt: crate::generator::attempt::AttemptRef,
+    role: GenerationRole,
+) -> Result<(), StoreError> {
+    let provider = profile
+        .identity
+        .0
+        .split_once('/')
+        .map_or(profile.identity.0.as_str(), |(provider, _)| provider)
+        .to_owned();
+    let pricing = match profile.rates.as_ref() {
+        Some(rates) => PricingEvidence::Priced {
+            source: "resolved_rates".to_owned(),
+            revision: rates.quote.revision.clone(),
+            metering: profile.metering.identity(),
+        },
+        None => PricingEvidence::Unpriced {
+            source: "generation_profile".to_owned(),
+            reason: profile.metering.identity().to_string(),
+        },
+    };
+    let evidence = GenerationAdmissionEvidence::new(
+        session,
+        invocation,
+        attempt,
+        role,
+        GenerationTarget::new(
+            provider,
+            profile.identity.clone(),
+            profile.request_model.clone(),
+        ),
+        profile.capabilities.clone(),
+        pricing,
+    );
+    match admission.admit_generation(store, evidence) {
+        Ok(EvidenceWrite::PublishedWithProjectionWarning { diagnostic }) => {
+            tracing::warn!(%diagnostic, "generation evidence manifest projection failed");
+            Ok(())
+        }
+        Ok(EvidenceWrite::Published | EvidenceWrite::AlreadyRecorded) => Ok(()),
+        Err(error) => Err(StoreError::Io(std::io::Error::other(error.to_string()))),
+    }
+}
+
+impl<'session, 'turn> TurnLoop<'session, 'turn> {
     /// Open a loop over a session.
     ///
     /// Three arguments rather than ten loose ones: a turn is a session, a
     /// model and a set of tools, and at ten positional parameters — four of
     /// which were `&dyn` — a call site said nothing about which was which.
     pub fn new(
-        session: Session<'a>,
+        session: Session<'session>,
         runtime: GenerationRuntime,
-        tools: Tools<'a>,
+        tools: Tools<'turn>,
+    ) -> Result<Self, BudgetSynchronizationError> {
+        let journal = SharedJournal::new(Journal::new(
+            session.id,
+            session.store,
+            session.clock,
+            session.sink,
+            Producer::Main,
+            session.state,
+        ));
+        Self::from_shared_journal(
+            session.id,
+            journal,
+            session.evidence,
+            session.cancel,
+            runtime,
+            tools,
+        )
+    }
+
+    /// Open one turn-local coordinator over the session's existing journal.
+    pub fn from_shared_journal(
+        session_id: SessionId,
+        journal: SharedJournal<'session>,
+        evidence: &'session dyn EvidenceStore,
+        cancel: CancelToken,
+        runtime: GenerationRuntime,
+        tools: Tools<'turn>,
     ) -> Result<Self, BudgetSynchronizationError> {
         let settlement_currency = runtime.gate.snapshot()?.currency();
         Ok(Self {
-            session_id: session.id,
-            journal: SharedJournal::new(Journal::new(
-                session.id,
-                session.store,
-                session.clock,
-                session.sink,
-                Producer::Main,
-                session.state,
-            )),
+            session_id,
+            journal,
             source: runtime.source,
-            evidence: session.evidence,
+            evidence,
             admission: runtime.admission,
             invocation: runtime.invocation,
             gate: runtime.gate,
@@ -558,7 +924,7 @@ impl<'a> TurnLoop<'a> {
             execution_observation: None,
             tools,
             ancestor: None,
-            cancel: session.cancel,
+            cancel,
             control: None,
             elicitor: None,
             foreign_question_port: None,
@@ -581,7 +947,7 @@ impl<'a> TurnLoop<'a> {
     }
 
     /// Attach the session's sole bounded interactive-intent receiver.
-    pub fn with_interactive_control(mut self, control: &'a mut InteractiveControl) -> Self {
+    pub fn with_interactive_control(mut self, control: &'turn mut InteractiveControl) -> Self {
         control.refresh(self.state().queue_status());
         control.open();
         self.control = Some(control);
@@ -597,20 +963,32 @@ impl<'a> TurnLoop<'a> {
     /// Attach the adapter that owns foreign continuation recovery.
     pub fn with_foreign_question_port(
         mut self,
-        port: Arc<dyn crate::mcp::ForeignQuestionPort + 'a>,
+        port: Arc<dyn crate::mcp::ForeignQuestionPort + 'turn>,
     ) -> Self {
         self.foreign_question_port = Some(port);
         self
     }
 
-    pub fn journal(&self) -> SharedJournal<'a> {
+    pub fn journal(&self) -> SharedJournal<'session> {
         self.journal.clone()
+    }
+
+    pub fn toolless_generation_owner(&self) -> ToollessGenerationOwner<'session, 'turn> {
+        ToollessGenerationOwner {
+            session_id: self.session_id,
+            journal: self.journal.clone(),
+            run_evidence: self.evidence,
+            response_evidence: self.tools.evidence_store(),
+            admission: Arc::clone(&self.admission),
+            invocation: self.invocation,
+            gate: self.gate.clone(),
+        }
     }
 
     /// Attach the session's borrow-scoped hook runtime.
     pub fn with_hook_runtime(
         mut self,
-        runtime: SessionHookRuntime<'a>,
+        runtime: SessionHookRuntime<'session>,
     ) -> Result<Self, HookRunError> {
         if !self.journal.same_owner(&runtime.journal()) {
             return Err(HookRunError::new(
@@ -633,44 +1011,15 @@ impl<'a> TurnLoop<'a> {
         attempt: crate::generator::attempt::AttemptRef,
         role: GenerationRole,
     ) -> Result<(), StoreError> {
-        let provider = profile
-            .identity
-            .0
-            .split_once('/')
-            .map_or(profile.identity.0.as_str(), |(provider, _)| provider)
-            .to_owned();
-        let pricing = match profile.rates.as_ref() {
-            Some(rates) => PricingEvidence::Priced {
-                source: "resolved_rates".to_owned(),
-                revision: rates.quote.revision.clone(),
-                metering: profile.metering.identity(),
-            },
-            None => PricingEvidence::Unpriced {
-                source: "generation_profile".to_owned(),
-                reason: profile.metering.identity().to_string(),
-            },
-        };
-        let evidence = GenerationAdmissionEvidence::new(
+        admit_generation_evidence(
             self.session_id,
             self.invocation,
+            self.admission.as_ref(),
+            self.evidence,
+            profile,
             attempt,
             role,
-            GenerationTarget::new(
-                provider,
-                profile.identity.clone(),
-                profile.request_model.clone(),
-            ),
-            profile.capabilities.clone(),
-            pricing,
-        );
-        match self.admission.admit_generation(self.evidence, evidence) {
-            Ok(EvidenceWrite::PublishedWithProjectionWarning { diagnostic }) => {
-                tracing::warn!(%diagnostic, "generation evidence manifest projection failed");
-                Ok(())
-            }
-            Ok(EvidenceWrite::Published | EvidenceWrite::AlreadyRecorded) => Ok(()),
-            Err(error) => Err(StoreError::Io(std::io::Error::other(error.to_string()))),
-        }
+        )
     }
 
     /// The session so far.
@@ -756,6 +1105,8 @@ impl<'a> TurnLoop<'a> {
                 EventKind::TurnCompleted { ok, exit_reason },
             )
             .map_err(|error| CompactionError::Store(error.into()))?;
+        self.deactivate_skill_hooks(turn)
+            .map_err(CompactionError::Store)?;
         result
     }
 
@@ -1241,6 +1592,9 @@ impl<'a> TurnLoop<'a> {
         ) {
             return Err(self.abandon(turn, cause));
         }
+        if let Err(cause) = self.deactivate_skill_hooks(turn) {
+            return Err(self.abandon(turn, cause));
+        }
         if let Err(cause) = self.close_and_drain_controls(turn).await {
             return Err(self.abandon(turn, cause));
         }
@@ -1267,8 +1621,7 @@ impl<'a> TurnLoop<'a> {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        self.active_skill_scope = None;
-        self.active_skill_invocations.clear();
+        self.deactivate_skill_hooks(turn)?;
         for invocation_id in invocations {
             let invocation = crate::skill::SkillInvocation::resume_durable(
                 invocation_id,
@@ -1285,6 +1638,58 @@ impl<'a> TurnLoop<'a> {
                 .map_err(skill_store_error)?;
             self.active_skill_invocations
                 .insert(invocation_id, invocation);
+        }
+        self.refresh_skill_hook_catalogue(turn)?;
+        Ok(())
+    }
+
+    fn refresh_skill_hook_catalogue(&self, turn: TurnId) -> Result<(), StoreError> {
+        let mut sources = Vec::new();
+        for invocation in self
+            .state()
+            .skill_events()
+            .iter()
+            .filter_map(|event| match event {
+                crate::state::SkillEvent::Instruction {
+                    turn: admitted_turn,
+                    invocation,
+                    ..
+                } if *admitted_turn == turn => Some(invocation),
+                _ => None,
+            })
+        {
+            let Some(active) = self.active_skill_invocations.get(invocation) else {
+                continue;
+            };
+            sources.push(active.hook_source().map_err(skill_store_error)?);
+        }
+        match self.hook_runtime.as_ref() {
+            Some(runtime) => runtime
+                .replace_skill_sources(turn, &sources)
+                .map_err(hook_store_error),
+            None if sources.iter().any(|source| {
+                matches!(source, crate::hook::HookSource::Skill { entries, .. } if !entries.is_empty())
+            }) => Err(StoreError::Io(std::io::Error::other(
+                "skill hooks require the session hook runtime",
+            ))),
+            None => Ok(()),
+        }
+    }
+
+    fn deactivate_skill_hooks(&mut self, turn: TurnId) -> Result<(), StoreError> {
+        let had_active = !self.active_skill_invocations.is_empty();
+        self.active_skill_invocations.clear();
+        self.active_skill_scope = None;
+        if had_active {
+            self.hook_runtime
+                .as_ref()
+                .ok_or_else(|| {
+                    StoreError::Io(std::io::Error::other(
+                        "skill hooks require the session hook runtime",
+                    ))
+                })?
+                .replace_skill_sources(turn, &[])
+                .map_err(hook_store_error)?;
         }
         Ok(())
     }
@@ -2886,18 +3291,66 @@ impl<'a> TurnLoop<'a> {
                             Ok(prepared) => prepared,
                             Err(error) => return Ok(answered(false, error)),
                         };
+                    let permission_selector = prepared.tool.clone();
                     let authorized = match self.tools.authorize(prepared) {
                         Classification::Settled(Ok(authorized)) => {
-                            self.decided(turn, call, true, authorized.by().clone())?;
+                            self.decided(
+                                turn,
+                                call,
+                                &permission_selector,
+                                true,
+                                authorized.by().clone(),
+                            )
+                            .await?;
                             authorized
                         }
                         Classification::Settled(Err(denial)) => {
-                            self.decided(turn, call, false, denial.authority())?;
+                            self.decided(
+                                turn,
+                                call,
+                                &permission_selector,
+                                false,
+                                denial.authority(),
+                            )
+                            .await?;
                             return Ok(ToolOutcome::Refused { denial });
                         }
-                        Classification::Ask(pending) => {
-                            return Ok(ToolOutcome::Unanswerable { pending });
-                        }
+                        Classification::Ask(pending) => match self.tools.settle(pending).await {
+                            Resolution::Settled(Ok(authorized)) => {
+                                self.decided(
+                                    turn,
+                                    call,
+                                    &permission_selector,
+                                    true,
+                                    authorized.by().clone(),
+                                )
+                                .await?;
+                                authorized
+                            }
+                            Resolution::Settled(Err(denial)) => {
+                                self.decided(
+                                    turn,
+                                    call,
+                                    &permission_selector,
+                                    false,
+                                    denial.authority(),
+                                )
+                                .await?;
+                                return Ok(ToolOutcome::Refused { denial });
+                            }
+                            Resolution::Ask(pending) => {
+                                if !self.requested(turn, call, pending.request()).await? {
+                                    return Ok(answered(
+                                        false,
+                                        "blocked by PermissionRequest hook".to_owned(),
+                                    ));
+                                }
+                                return Ok(ToolOutcome::Unanswerable { pending });
+                            }
+                            Resolution::HumanSettled { .. } | Resolution::Reclassify { .. } => {
+                                unreachable!("mode settlement cannot produce a human resolution")
+                            }
+                        },
                     };
                     let bytes = match self.tools.read_skill_resource(authorized, &target) {
                         Ok(bytes) => bytes,
@@ -2924,6 +3377,7 @@ impl<'a> TurnLoop<'a> {
                 ) {
                     return Ok(answered(false, error.to_string()));
                 }
+                let skill_selector = operation.name().to_owned();
                 let invocation = crate::skill::SkillInvocation::admit_in_turn(
                     &catalogue,
                     operation,
@@ -2931,18 +3385,45 @@ impl<'a> TurnLoop<'a> {
                     &self.journal,
                     turn,
                 );
-                return Ok(match invocation {
-                    Ok(invocation) => {
-                        self.active_skill_scope = Some(next_scope);
-                        self.active_skill_invocations
-                            .insert(invocation.id(), invocation.clone());
-                        match invocation.rendered(self.tools.blob_store()) {
-                            Ok(bytes) => {
-                                answered(true, String::from_utf8_lossy(&bytes).into_owned())
-                            }
-                            Err(error) => answered(false, error.to_string()),
-                        }
-                    }
+                let invocation = match invocation {
+                    Ok(invocation) => invocation,
+                    Err(error) => return Ok(answered(false, error.to_string())),
+                };
+                self.active_skill_scope = Some(next_scope);
+                self.active_skill_invocations
+                    .insert(invocation.id(), invocation.clone());
+                if let Err(error) = self.refresh_skill_hook_catalogue(turn) {
+                    return Ok(answered(false, error.to_string()));
+                }
+                let causality = HookCausality::item(call.item, turn, call.started);
+                let _ = self
+                    .dispatch_hook(
+                        causality.clone(),
+                        HookEvent::tool(
+                            HookLifecycle::InstructionsLoaded,
+                            HookSubject::Item { item: call.item },
+                            skill_selector.clone(),
+                        ),
+                    )
+                    .await;
+                if !self
+                    .dispatch_hook(
+                        causality,
+                        HookEvent::tool(
+                            HookLifecycle::UserPromptExpansion,
+                            HookSubject::Item { item: call.item },
+                            skill_selector,
+                        ),
+                    )
+                    .await
+                {
+                    return Ok(answered(
+                        false,
+                        "blocked by UserPromptExpansion hook".to_owned(),
+                    ));
+                }
+                return Ok(match invocation.rendered(self.tools.blob_store()) {
+                    Ok(bytes) => answered(true, String::from_utf8_lossy(&bytes).into_owned()),
                     Err(error) => answered(false, error.to_string()),
                 });
             }
@@ -2964,11 +3445,13 @@ impl<'a> TurnLoop<'a> {
         let authorized = loop {
             match self.tools.authorize(prepared) {
                 Classification::Settled(Ok(authorized)) => {
-                    self.decided(turn, call, true, authorized.by().clone())?;
+                    self.decided(turn, call, &hook_selector, true, authorized.by().clone())
+                        .await?;
                     break authorized;
                 }
                 Classification::Settled(Err(denial)) => {
-                    self.decided(turn, call, false, denial.authority())?;
+                    self.decided(turn, call, &hook_selector, false, denial.authority())
+                        .await?;
                     return Ok(ToolOutcome::Refused { denial });
                 }
                 Classification::Ask(pending) => {
@@ -2984,25 +3467,41 @@ impl<'a> TurnLoop<'a> {
                     let resolution = match resolution {
                         Controlled::Completed(resolution) => resolution,
                         Controlled::Interrupted => {
-                            self.decided(turn, call, false, Authority::Party)?;
+                            self.decided(turn, call, &hook_selector, false, Authority::Party)
+                                .await?;
                             return Ok(answered(false, "interrupted: permission denied".into()));
                         }
                         Controlled::Failed(cause) => return Err(cause),
                     };
                     match resolution {
                         Resolution::Settled(Ok(authorized)) => {
-                            self.decided(turn, call, true, authorized.by().clone())?;
+                            self.decided(turn, call, &hook_selector, true, authorized.by().clone())
+                                .await?;
                             break authorized;
                         }
                         Resolution::Settled(Err(denial)) => {
-                            self.decided(turn, call, false, denial.authority())?;
+                            self.decided(turn, call, &hook_selector, false, denial.authority())
+                                .await?;
                             return Ok(ToolOutcome::Refused { denial });
                         }
                         Resolution::Ask(pending) => {
+                            if !self.requested(turn, call, pending.request()).await? {
+                                return Ok(answered(
+                                    false,
+                                    "blocked by PermissionRequest hook".to_owned(),
+                                ));
+                            }
                             let pending = match self.judge_pending(turn, &pending).await? {
                                 JudgeRun::Unavailable => pending,
                                 JudgeRun::Ended(ExitReason::Cancelled(_)) => {
-                                    self.decided(turn, call, false, Authority::Party)?;
+                                    self.decided(
+                                        turn,
+                                        call,
+                                        &hook_selector,
+                                        false,
+                                        Authority::Party,
+                                    )
+                                    .await?;
                                     return Ok(answered(
                                         false,
                                         "interrupted: permission denied".into(),
@@ -3010,7 +3509,14 @@ impl<'a> TurnLoop<'a> {
                                 }
                                 JudgeRun::Ended(reason) => return Ok(ToolOutcome::Ended(reason)),
                                 JudgeRun::Decided { outcome, by } => {
-                                    self.judge_decided(turn, call, &outcome, by.clone())?;
+                                    self.judge_decided(
+                                        turn,
+                                        call,
+                                        &hook_selector,
+                                        &outcome,
+                                        by.clone(),
+                                    )
+                                    .await?;
                                     match self.tools.settle_judge(pending, &outcome, by) {
                                         Resolution::Settled(Ok(authorized)) => break authorized,
                                         Resolution::Settled(Err(denial)) => {
@@ -3026,7 +3532,6 @@ impl<'a> TurnLoop<'a> {
                                     }
                                 }
                             };
-                            self.requested(turn, call, pending.request())?;
                             let decision = await_controlled(
                                 &self.journal,
                                 &self.cancel,
@@ -3039,7 +3544,14 @@ impl<'a> TurnLoop<'a> {
                             let decision = match decision {
                                 Controlled::Completed(decision) => decision,
                                 Controlled::Interrupted => {
-                                    self.decided(turn, call, false, Authority::Party)?;
+                                    self.decided(
+                                        turn,
+                                        call,
+                                        &hook_selector,
+                                        false,
+                                        Authority::Party,
+                                    )
+                                    .await?;
                                     return Ok(answered(
                                         false,
                                         "interrupted: permission denied".into(),
@@ -3053,11 +3565,25 @@ impl<'a> TurnLoop<'a> {
                                 }
                                 Resolution::HumanSettled { result, .. } => match result {
                                     Ok(authorized) => {
-                                        self.decided(turn, call, true, authorized.by().clone())?;
+                                        self.decided(
+                                            turn,
+                                            call,
+                                            &hook_selector,
+                                            true,
+                                            authorized.by().clone(),
+                                        )
+                                        .await?;
                                         break authorized;
                                     }
                                     Err(denial) => {
-                                        self.decided(turn, call, false, denial.authority())?;
+                                        self.decided(
+                                            turn,
+                                            call,
+                                            &hook_selector,
+                                            false,
+                                            denial.authority(),
+                                        )
+                                        .await?;
                                         return Ok(ToolOutcome::Refused { denial });
                                     }
                                 },
@@ -3077,11 +3603,25 @@ impl<'a> TurnLoop<'a> {
                                 }
                                 Resolution::Settled(result) => match result {
                                     Ok(authorized) => {
-                                        self.decided(turn, call, true, authorized.by().clone())?;
+                                        self.decided(
+                                            turn,
+                                            call,
+                                            &hook_selector,
+                                            true,
+                                            authorized.by().clone(),
+                                        )
+                                        .await?;
                                         break authorized;
                                     }
                                     Err(denial) => {
-                                        self.decided(turn, call, false, denial.authority())?;
+                                        self.decided(
+                                            turn,
+                                            call,
+                                            &hook_selector,
+                                            false,
+                                            denial.authority(),
+                                        )
+                                        .await?;
                                         return Ok(ToolOutcome::Refused { denial });
                                     }
                                 },
@@ -3089,11 +3629,19 @@ impl<'a> TurnLoop<'a> {
                         }
                         Resolution::HumanSettled { result, .. } => match result {
                             Ok(authorized) => {
-                                self.decided(turn, call, true, authorized.by().clone())?;
+                                self.decided(
+                                    turn,
+                                    call,
+                                    &hook_selector,
+                                    true,
+                                    authorized.by().clone(),
+                                )
+                                .await?;
                                 break authorized;
                             }
                             Err(denial) => {
-                                self.decided(turn, call, false, denial.authority())?;
+                                self.decided(turn, call, &hook_selector, false, denial.authority())
+                                    .await?;
                                 return Ok(ToolOutcome::Refused { denial });
                             }
                         },
@@ -3375,7 +3923,7 @@ impl<'a> TurnLoop<'a> {
         &mut self,
         settlement: ForeignQuestionSettlement,
         answer: QuestionAnswer,
-        port: Arc<dyn crate::mcp::ForeignQuestionPort + 'a>,
+        port: Arc<dyn crate::mcp::ForeignQuestionPort + 'turn>,
     ) -> Result<ForeignQuestionProgress, StoreError> {
         let ForeignQuestionSettlement {
             turn,
@@ -3393,12 +3941,15 @@ impl<'a> TurnLoop<'a> {
                 outcome: QuestionOutcome::Answered(answer),
             },
         )?;
+        let causality =
+            HookCausality::continuation(continuation_id.clone(), turn, tool_call, settlement)
+                .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
         let execution = await_controlled(
             &self.journal,
             &self.cancel,
             &mut self.control,
             turn,
-            port.resume(&continuation_id, &canonical_json),
+            port.resume(&continuation_id, &canonical_json, causality),
             InterruptDisposition::AwaitEffect,
         )
         .await;
@@ -3430,20 +3981,30 @@ impl<'a> TurnLoop<'a> {
     }
 
     /// Record the canonical question that was actually presented.
-    fn requested(
+    async fn requested(
         &mut self,
         turn: TurnId,
         call: &PendingCall,
         request: &crate::permit::PermissionRequest,
-    ) -> Result<(), StoreError> {
-        self.permission(
+    ) -> Result<bool, StoreError> {
+        let request_event = self.permission(
             turn,
             call,
             EventKind::PermissionRequested {
                 tool: request.tool().to_string(),
                 escalation: request.why().clone(),
             },
-        )
+        )?;
+        Ok(self
+            .dispatch_hook(
+                HookCausality::event(request_event, turn, None),
+                HookEvent::tool(
+                    HookLifecycle::PermissionRequest,
+                    HookSubject::Turn { turn },
+                    request.tool(),
+                ),
+            )
+            .await)
     }
 
     /// §7: *every decision is appended, asked or not.*
@@ -3452,14 +4013,15 @@ impl<'a> TurnLoop<'a> {
     /// they refused. `PermissionRequested` is appended when mode settlement
     /// raises the canonical question, before either a human answer or the
     /// headless unanswerable result.
-    fn decided(
+    async fn decided(
         &mut self,
         turn: TurnId,
         call: &PendingCall,
+        selector: &str,
         allowed: bool,
         by: Authority,
     ) -> Result<(), StoreError> {
-        self.permission(
+        let decision = self.permission(
             turn,
             call,
             EventKind::PermissionDecided {
@@ -3467,13 +4029,27 @@ impl<'a> TurnLoop<'a> {
                 by: Some(by),
                 reason: None,
             },
-        )
+        )?;
+        if !allowed {
+            let _ = self
+                .dispatch_hook(
+                    HookCausality::event(decision, turn, None),
+                    HookEvent::tool(
+                        HookLifecycle::PermissionDenied,
+                        HookSubject::Turn { turn },
+                        selector,
+                    ),
+                )
+                .await;
+        }
+        Ok(())
     }
 
-    fn judge_decided(
+    async fn judge_decided(
         &mut self,
         turn: TurnId,
         call: &PendingCall,
+        selector: &str,
         outcome: &JudgeOutcome,
         by: Authority,
     ) -> Result<(), StoreError> {
@@ -3482,7 +4058,7 @@ impl<'a> TurnLoop<'a> {
             JudgeOutcome::Deny { .. } => Some(false),
             JudgeOutcome::Escalate { .. } => None,
         };
-        self.permission(
+        let decision = self.permission(
             turn,
             call,
             EventKind::PermissionDecided {
@@ -3490,7 +4066,20 @@ impl<'a> TurnLoop<'a> {
                 by: Some(by),
                 reason: Some(outcome.reason().to_owned()),
             },
-        )
+        )?;
+        if allowed == Some(false) {
+            let _ = self
+                .dispatch_hook(
+                    HookCausality::event(decision, turn, None),
+                    HookEvent::tool(
+                        HookLifecycle::PermissionDenied,
+                        HookSubject::Turn { turn },
+                        selector,
+                    ),
+                )
+                .await;
+        }
+        Ok(())
     }
 
     /// One permission event, on an item of its own and caused by the call's
@@ -3507,10 +4096,10 @@ impl<'a> TurnLoop<'a> {
         turn: TurnId,
         call: &PendingCall,
         kind: EventKind,
-    ) -> Result<(), StoreError> {
+    ) -> Result<EventId, StoreError> {
         self.journal
-            .append(turn, Some(ItemId::new()), Some(call.started), kind)?;
-        Ok(())
+            .append(turn, Some(ItemId::new()), Some(call.started), kind)
+            .map_err(Into::into)
     }
 }
 
@@ -3556,6 +4145,13 @@ struct ForeignQuestionSettlement {
 }
 
 fn skill_store_error(error: crate::skill::SkillError) -> StoreError {
+    StoreError::Io(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        error.to_string(),
+    ))
+}
+
+fn hook_store_error(error: crate::hook::HookRunError) -> StoreError {
     StoreError::Io(std::io::Error::new(
         std::io::ErrorKind::InvalidData,
         error.to_string(),

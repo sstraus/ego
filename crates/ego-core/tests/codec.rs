@@ -6,8 +6,9 @@
 use ego_core::cost::{Amount, CostAttribution, CostDelta, CurrencyCode, Money, PricingRevision};
 use ego_core::event::domain::{DomainEvent, Envelope, EventKind, GenerationRole};
 use ego_core::event::hook::{
-    HookCatalogueEvidence, HookDecision, HookDescriptorEvidence, HookInvocationId, HookLifecycle,
-    HookOccurrenceKey, HookOccurrenceOwner, HookOutcome, HookPlan, HookResult, HookSourceAuthority,
+    HookActivation, HookCatalogueEntryEvidence, HookCatalogueEvidence, HookDecision,
+    HookDescriptorEvidence, HookInvocationId, HookLifecycle, HookOccurrenceKey,
+    HookOccurrenceOwner, HookOutcome, HookPlan, HookPlanEntry, HookResult, HookSourceAuthority,
     HookSourceLocation,
 };
 use ego_core::event::id::{Producer, Seq, SessionId};
@@ -87,14 +88,14 @@ mod codec {
     /// to be a deliberate edit here, not a constant quietly following the
     /// code that changed it.
     #[test]
-    fn codec_header_carries_codec_version_11() {
+    fn codec_header_carries_codec_version_12() {
         let h = header();
-        assert_eq!(h.v, 11);
-        assert_eq!(CODEC_VERSION, 11);
+        assert_eq!(h.v, 12);
+        assert_eq!(CODEC_VERSION, 12);
 
         let bytes = encode_header(&h);
         match decode_line(&bytes).unwrap() {
-            StoreLine::Header(decoded) => assert_eq!(decoded.v, 11),
+            StoreLine::Header(decoded) => assert_eq!(decoded.v, 12),
             other => panic!("expected Header, got {other:?}"),
         }
     }
@@ -596,7 +597,11 @@ mod codec {
             DomainEvent {
                 env: envelope(GOLDEN_EVENT_6, Some(GOLDEN_EVENT_5)),
                 kind: EventKind::HookCatalogueAdmitted {
-                    descriptors: HookCatalogueEvidence::new(vec![golden_hook()]).unwrap(),
+                    descriptors: HookCatalogueEvidence::new(vec![HookCatalogueEntryEvidence::new(
+                        golden_hook(),
+                        HookActivation::Persistent,
+                    )])
+                    .unwrap(),
                 },
             },
             DomainEvent {
@@ -611,7 +616,11 @@ mod codec {
                     subject: ego_core::event::hook::HookSubject::Item {
                         item: common::id(GOLDEN_ITEM),
                     },
-                    plan: HookPlan::new(vec![golden_hook().id()]).unwrap(),
+                    plan: HookPlan::new(vec![HookPlanEntry::new(
+                        golden_hook().id(),
+                        HookActivation::Persistent,
+                    )])
+                    .unwrap(),
                 },
             },
             DomainEvent {
@@ -650,7 +659,7 @@ mod codec {
         assert_eq!(
             actual,
             include_str!("golden/store_log.jsonl").trim_end(),
-            "the durable wire format changed. The current v11 event shape and \
+            "the durable wire format changed. The current v12 event shape and \
              physical record positions are pinned by this committed fixture."
         );
     }

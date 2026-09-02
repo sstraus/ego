@@ -46,7 +46,7 @@ use ego_ai::provider::{CredentialStrategy, ProviderRow};
 use ego_ai::wire::openai_completions::OpenAiCompletions;
 use ego_ai::wire::provider_cost::ProviderCost;
 use ego_ai::wire::{RequestRefused, RequestTarget, WireFormat};
-use ego_core::budget::{BudgetGate, PricingQuote};
+use ego_core::budget::{BudgetGate, PricingQuote, SharedBudgetGate};
 use ego_core::config::{Mode, Ruleset};
 use ego_core::cost::{Amount, CumulativeCost, CurrencyCode, Money, PricingRevision};
 use ego_core::event::domain::{DomainEvent, ExitReason};
@@ -377,7 +377,7 @@ async fn one_turn(
     let evidence = NoEvidence;
     let foreign: Arc<NoForeign> = Arc::new(NoForeign);
     let registry: Vec<Arc<dyn Tool>> = Vec::new();
-    let mut gate = BudgetGate::new(usd("10"));
+    let gate = SharedBudgetGate::new(BudgetGate::new(usd("10")));
 
     let mut loop_ = TurnLoop::new(
         Session {
@@ -401,7 +401,7 @@ async fn one_turn(
                     rates: resolved.rates.clone(),
                 },
             }),
-            gate: &mut gate,
+            gate,
             config: TurnConfig {
                 system: None,
                 token_ceiling: None,
@@ -422,13 +422,17 @@ async fn one_turn(
             ),
             CanonPath::new("/ws"),
         ),
-    );
+    )
+    .expect("budget gate is available");
 
     let outcome = loop_
         .run("list the files")
         .await
         .expect("the store accepted every append");
-    (outcome.exit_reason, loop_.into_state())
+    (
+        outcome.exit_reason,
+        loop_.into_state().expect("journal ownership is released"),
+    )
 }
 
 /// The assistant text this session ended up holding.

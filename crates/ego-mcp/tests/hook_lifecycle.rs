@@ -14,8 +14,9 @@ use ego_core::config::{
 };
 use ego_core::event::domain::{DomainEvent, EventKind};
 use ego_core::event::hook::{
-    HookActivation, HookCatalogueEvidence, HookContentDigest, HookDecision, HookDescriptorEvidence,
-    HookId, HookInvocationId, HookLifecycle, HookOutcome, HookSourceAuthority, HookSourceLocation,
+    HookActivation, HookCatalogueEntryEvidence, HookCatalogueEvidence, HookContentDigest,
+    HookDecision, HookDescriptorEvidence, HookId, HookInvocationId, HookLifecycle, HookOutcome,
+    HookSourceAuthority, HookSourceLocation,
 };
 use ego_core::event::id::{EventId, ItemId, Producer, SessionId, TurnId};
 use ego_core::event::time::{Clock, Timestamp};
@@ -32,6 +33,7 @@ use ego_core::permit::{
     PolicyEngine, PrepareCtx, PreparedCall, ProcessError, ProcessExecutor, Resolver, SpawnSpec,
     Tool, ToolResult, TransportError, TransportFailure,
 };
+use ego_core::question::{QuestionAnswer, QuestionOutcome, QuestionTarget};
 use ego_core::sink::NullSink;
 use ego_core::state::SessionState;
 use ego_core::store::blob::{BlobError, BlobPage, BlobRead, BlobRef, BlobStore, BlobWriter};
@@ -62,17 +64,6 @@ use futures::stream::{self, BoxStream};
 use serde_json::json;
 
 const SCHEMA: &[u8] = br#"{"type":"object","properties":{"choice":{"type":"string"}},"required":["choice"],"additionalProperties":false}"#;
-
-const MCP_OWNERS: [(&str, HookLifecycle); 2] = [
-    (
-        "McpContinuationOwner::record_input_required",
-        HookLifecycle::Elicitation,
-    ),
-    (
-        "McpContinuationOwner::accept_answer",
-        HookLifecycle::ElicitationResult,
-    ),
-];
 
 #[derive(Clone, Default)]
 struct Trace(Arc<Mutex<Vec<String>>>);
@@ -192,11 +183,14 @@ fn hooks_with_mode(mode: HookMode, trace: Trace) -> SessionHookRuntime<'static> 
             .specs()
             .iter()
             .map(|spec| {
-                HookDescriptorEvidence::new(
-                    HookSourceAuthority::User,
-                    spec.location().clone(),
-                    spec.content_digest(),
-                    spec.ordinal().expect("hook ordinal"),
+                HookCatalogueEntryEvidence::new(
+                    HookDescriptorEvidence::new(
+                        HookSourceAuthority::User,
+                        spec.location().clone(),
+                        spec.content_digest(),
+                        spec.ordinal().expect("hook ordinal"),
+                    ),
+                    HookActivation::Persistent,
                 )
             })
             .collect(),
@@ -248,6 +242,67 @@ fn hooks_with_mode(mode: HookMode, trace: Trace) -> SessionHookRuntime<'static> 
         CancelToken::new(),
         std::time::Instant::now() + Duration::from_secs(60),
     )
+}
+
+fn tool_causality(runtime: &SessionHookRuntime<'_>) -> HookCausality {
+    runtime
+        .inspect(|state| {
+            state.items.iter().find_map(|(item, state)| {
+                state
+                    .tool_call_started
+                    .map(|parent| HookCausality::item(*item, state.turn, parent))
+            })
+        })
+        .expect("inspect continuation causality")
+        .expect("MCP fixture has a tool item causality")
+}
+
+fn settled_continuation_causality(
+    runtime: &SessionHookRuntime<'_>,
+    required: &ego_core::mcp::ForeignInputRequired,
+    canonical_json: &str,
+) -> HookCausality {
+    let answer = QuestionAnswer::from_json(required.question_request(), canonical_json)
+        .expect("fixture answer matches the durable MCP question schema");
+    let (tool_call, turn, tool_started) = runtime
+        .inspect(|state| {
+            state.items.iter().find_map(|(item, state)| {
+                state
+                    .tool_call_started
+                    .map(|parent| (*item, state.turn, parent))
+            })
+        })
+        .expect("inspect continuation question causality")
+        .expect("MCP fixture has a tool item causality");
+    let question_item = ItemId::new();
+    let requested = runtime
+        .journal()
+        .append(
+            turn,
+            Some(question_item),
+            Some(tool_started),
+            EventKind::QuestionRequested {
+                request: required.question_request().clone(),
+                target: QuestionTarget::ForeignContinuation {
+                    tool_call,
+                    continuation_id: required.continuation_id().to_owned(),
+                },
+            },
+        )
+        .expect("durable foreign question request");
+    let settled = runtime
+        .journal()
+        .append(
+            turn,
+            Some(question_item),
+            Some(requested),
+            EventKind::QuestionSettled {
+                outcome: QuestionOutcome::Answered(answer),
+            },
+        )
+        .expect("durable foreign question settlement");
+    HookCausality::continuation(required.continuation_id(), turn, tool_call, settled)
+        .expect("continuation causality")
 }
 
 #[derive(Default)]
@@ -807,12 +862,11 @@ fn mapped_input() -> ego_mcp::McpMappedInput {
     )
     .expect("mapped input")
 }
-fn prepared_resume(authorized: &Authorized) -> (ResumeSealer, ego_core::suspension::ResumeFloor) {
+fn prepared_resume() -> (ResumeSealer, ego_core::suspension::ResumeFloor) {
     let policy = PolicyEngine::new(CanonPath::new("/workspace"), Mode::Yolo, Ruleset::default());
     let floor = policy.resume_floor();
     let sealer =
         ResumeSealer::new(Arc::new(FixedResumeKey), Arc::new(FixedClock), 30_000).expect("sealer");
-    let _ = authorized;
     (sealer, floor)
 }
 fn ports(spawner: Arc<ScriptedSpawner>) -> ToolEffectPorts<'static> {
@@ -829,23 +883,6 @@ fn ports(spawner: Arc<ScriptedSpawner>) -> ToolEffectPorts<'static> {
         spawner,
     )
 }
-#[test]
-fn mcp_matrix_has_one_real_owner_for_each_mrtr_lifecycle() {
-    assert_eq!(
-        MCP_OWNERS,
-        [
-            (
-                "McpContinuationOwner::record_input_required",
-                HookLifecycle::Elicitation
-            ),
-            (
-                "McpContinuationOwner::accept_answer",
-                HookLifecycle::ElicitationResult
-            )
-        ]
-    );
-}
-
 #[tokio::test(flavor = "current_thread")]
 async fn real_operation_records_before_elicitation_and_returns_foreign_id() {
     let trace = Trace::default();
@@ -860,7 +897,7 @@ async fn real_operation_records_before_elicitation_and_returns_foreign_id() {
     resolver.insert(capture.clone());
     let call = prepare_lookup(&tool);
     let auth = authorized(call);
-    let (sealer, floor) = prepared_resume(&auth);
+    let (sealer, floor) = prepared_resume();
     let resume = sealer.prepare(&auth, floor).expect("resume");
     let spawner = Arc::new(ScriptedSpawner::new());
     let (call, guarded) = guarded_with_session_context(
@@ -894,7 +931,7 @@ async fn accepted_answer_validates_hooks_claims_and_retries_once() {
     resolver.insert(capture.clone());
     let call = prepare_lookup(&tool);
     let auth = authorized(call);
-    let (sealer, floor) = prepared_resume(&auth);
+    let (sealer, floor) = prepared_resume();
     let resume = sealer.prepare(&auth, floor.clone()).expect("resume");
     let spawner = Arc::new(ScriptedSpawner::new());
     let runtime = hooks_with_mode(HookMode::Continue, trace.clone());
@@ -906,11 +943,13 @@ async fn accepted_answer_validates_hooks_claims_and_retries_once() {
         panic!("expected required")
     };
     let id = foreign.continuation_id().to_owned();
+    let causality = settled_continuation_causality(&runtime, &foreign, r#"{"choice":"yes"}"#);
     let retried = owner
         .accept_answer(
             &id,
             br#"{"choice":"yes"}"#,
             runtime,
+            causality,
             floor,
             ports(spawner.clone()),
         )
@@ -950,7 +989,7 @@ async fn foreign_question_port_reuses_owner_capture_floor_and_effects_for_succes
     resolver.insert(capture.clone());
     let call = prepare_lookup(&tool);
     let auth = authorized(call);
-    let (sealer, floor) = prepared_resume(&auth);
+    let (sealer, floor) = prepared_resume();
     let resume = sealer.prepare(&auth, floor.clone()).expect("resume");
     let spawner = Arc::new(ScriptedSpawner::with_input_required_rounds(2));
     let runtime = hooks_with_mode(HookMode::Continue, trace.clone());
@@ -962,25 +1001,39 @@ async fn foreign_question_port_reuses_owner_capture_floor_and_effects_for_succes
         panic!("expected required");
     };
     let initial_id = initial.continuation_id().to_owned();
+    let runtime_for_events = runtime.clone();
+    let initial_causality =
+        settled_continuation_causality(&runtime_for_events, &initial, r#"{"choice":"yes"}"#);
     let adapter = ego_mcp::McpForeignQuestionPort::new(
         Arc::clone(&owner),
         runtime,
         floor,
         ports(spawner.clone()),
     );
-    let first = ForeignQuestionPort::resume(&adapter, &initial_id, r#"{"choice":"yes"}"#)
-        .await
-        .expect("first adapter resume");
+    let first = ForeignQuestionPort::resume(
+        &adapter,
+        &initial_id,
+        r#"{"choice":"yes"}"#,
+        initial_causality,
+    )
+    .await
+    .expect("first adapter resume");
     let ToolExecution::InputRequired(successor) = first else {
         panic!("the first adapter resume must expose the persisted successor");
     };
     assert_ne!(successor.continuation_id(), initial_id);
     assert_eq!(journal.state(), Some(ContinuationState::Pending));
 
-    let second =
-        ForeignQuestionPort::resume(&adapter, successor.continuation_id(), r#"{"choice":"yes"}"#)
-            .await
-            .expect("successor adapter resume");
+    let successor_causality =
+        settled_continuation_causality(&runtime_for_events, &successor, r#"{"choice":"yes"}"#);
+    let second = ForeignQuestionPort::resume(
+        &adapter,
+        successor.continuation_id(),
+        r#"{"choice":"yes"}"#,
+        successor_causality,
+    )
+    .await
+    .expect("successor adapter resume");
     let ToolExecution::Complete(result) = second else {
         panic!("the successor adapter resume must complete");
     };
@@ -1032,8 +1085,10 @@ fn schema_or_authority_failure_precedes_durable_acceptance() {
     resolver.insert(capture.clone());
     let call = prepare_lookup(&tool);
     let auth = authorized(call.clone());
-    let (sealer, floor) = prepared_resume(&auth);
+    let (sealer, floor) = prepared_resume();
     let mapped = mapped_input();
+    let runtime = hooks_with_mode(HookMode::Continue, Trace::default());
+    let causality = tool_causality(&runtime);
     let envelope = call.mcp_envelope().expect("envelope").clone();
     journal
         .record(
@@ -1054,7 +1109,8 @@ fn schema_or_authority_failure_precedes_durable_acceptance() {
         block_on(owner.accept_answer(
             "continuation-schema-authority",
             br#"{"unexpected":true}"#,
-            hooks_with_mode(HookMode::Continue, Trace::default()),
+            runtime,
+            causality,
             floor,
             ports(Arc::new(ScriptedSpawner::new()))
         ))
@@ -1079,7 +1135,7 @@ async fn pre_block_or_uncertainty_leaves_accepted_answer_unclaimed_without_reent
         resolver.insert(capture.clone());
         let call = prepare_lookup(&tool);
         let auth = authorized(call);
-        let (sealer, floor) = prepared_resume(&auth);
+        let (sealer, floor) = prepared_resume();
         let resume = sealer.prepare(&auth, floor.clone()).expect("resume");
         let spawner = Arc::new(ScriptedSpawner::new());
         let runtime = hooks_with_mode(mode, trace.clone());
@@ -1090,12 +1146,14 @@ async fn pre_block_or_uncertainty_leaves_accepted_answer_unclaimed_without_reent
         else {
             panic!("expected required")
         };
+        let causality = settled_continuation_causality(&runtime, &foreign, r#"{"choice":"yes"}"#);
         assert!(
             owner
                 .accept_answer(
                     foreign.continuation_id(),
                     br#"{"choice":"yes"}"#,
                     runtime,
+                    causality,
                     floor,
                     ports(spawner.clone())
                 )
@@ -1274,15 +1332,6 @@ fn registry_reload() -> McpRegistryRefresh {
     .expect("reload refresh")
 }
 
-#[test]
-fn ordinary_question_path_does_not_add_an_mcp_hook_owner() {
-    assert_eq!(MCP_OWNERS.len(), 2);
-    assert!(MCP_OWNERS.iter().all(|(_, lifecycle)| matches!(
-        lifecycle,
-        HookLifecycle::Elicitation | HookLifecycle::ElicitationResult
-    )));
-}
-
 // The continuation owner is process/admission scoped.  Session lifecycle and
 // capture identity belong to the one-shot guarded resume context instead of
 // being ambient state on the owner.
@@ -1393,7 +1442,7 @@ async fn ordinary_operation_carries_exact_session_and_stable_capture_context() {
     let (capture, tool) = captured_lookup(Arc::clone(&factory));
     resolver.insert(capture.clone());
     let auth = authorized(prepare_lookup(&tool));
-    let (sealer, floor) = prepared_resume(&auth);
+    let (sealer, floor) = prepared_resume();
     let resume = sealer.prepare(&auth, floor).expect("resume");
     let dispatcher = hooks_with_mode(HookMode::Continue, trace.clone());
     let spawner = Arc::new(ScriptedSpawner::new());
@@ -1427,7 +1476,7 @@ async fn successor_reconcile_before_input_projection_keeps_the_old_exact_capture
     resolver.insert(capture.clone());
     let tool = captured_tool(&capture, "lookup");
     let auth = authorized(prepare_lookup(&tool));
-    let (sealer, floor) = prepared_resume(&auth);
+    let (sealer, floor) = prepared_resume();
     let resume = sealer.prepare(&auth, floor).expect("resume");
     let spawner = Arc::new(ScriptedSpawner::new());
 
@@ -1480,7 +1529,7 @@ async fn one_owner_routes_interleaved_answers_to_the_originating_session_dispatc
     resolver.insert(capture.clone());
 
     let first_auth = authorized(prepare_lookup(&tool_a));
-    let (sealer, floor) = prepared_resume(&first_auth);
+    let (sealer, floor) = prepared_resume();
     let first_resume = sealer.prepare(&first_auth, floor.clone()).expect("resume");
     let first_spawner = Arc::new(ScriptedSpawner::new());
     let first_runtime = hooks_with_mode(HookMode::Continue, trace_a.clone());
@@ -1520,11 +1569,16 @@ async fn one_owner_routes_interleaved_answers_to_the_originating_session_dispatc
     assert_ne!(first_id, second.continuation_id());
     assert_eq!(journal.events(), vec!["record", "record"]);
 
+    let second_causality =
+        settled_continuation_causality(&second_runtime, &second, r#"{"choice":"two"}"#);
+    let first_causality =
+        settled_continuation_causality(&first_runtime, &first, r#"{"choice":"one"}"#);
     owner
         .accept_answer(
             second.continuation_id(),
             br#"{"choice":"two"}"#,
             second_runtime,
+            second_causality,
             floor.clone(),
             ports(second_spawner),
         )
@@ -1535,6 +1589,7 @@ async fn one_owner_routes_interleaved_answers_to_the_originating_session_dispatc
             &first_id,
             br#"{"choice":"one"}"#,
             first_runtime,
+            first_causality,
             floor,
             ports(first_spawner),
         )
@@ -1572,7 +1627,7 @@ async fn answer_resume_resolves_recorded_capture_and_adapter_never_uses_loop_cap
     let stable = capture.stable_fingerprint().to_owned();
     resolver.insert(capture.clone());
     let auth = authorized(prepare_lookup(&tool));
-    let (sealer, floor) = prepared_resume(&auth);
+    let (sealer, floor) = prepared_resume();
     let resume = sealer.prepare(&auth, floor.clone()).expect("resume");
     let spawner = Arc::new(ScriptedSpawner::new());
     let runtime = hooks_with_mode(HookMode::Continue, trace.clone());
@@ -1584,12 +1639,17 @@ async fn answer_resume_resolves_recorded_capture_and_adapter_never_uses_loop_cap
         panic!("expected required");
     };
     assert_eq!(journal.recorded_capture(), stable);
+    let causality = settled_continuation_causality(&runtime, &required, r#"{"choice":"yes"}"#);
     let adapter =
         ego_mcp::McpForeignQuestionPort::new(Arc::clone(&owner), runtime, floor, ports(spawner));
-    let result =
-        ForeignQuestionPort::resume(&adapter, required.continuation_id(), r#"{"choice":"yes"}"#)
-            .await
-            .expect("resume");
+    let result = ForeignQuestionPort::resume(
+        &adapter,
+        required.continuation_id(),
+        r#"{"choice":"yes"}"#,
+        causality,
+    )
+    .await
+    .expect("resume");
     assert!(matches!(result, ToolExecution::Complete(_)));
 }
 
@@ -1607,7 +1667,7 @@ async fn blocked_result_keeps_the_pinned_capture_with_accepted_unclaimed_continu
     let stable = capture.stable_fingerprint().to_owned();
     resolver.insert(capture.clone());
     let auth = authorized(prepare_lookup(&tool));
-    let (sealer, floor) = prepared_resume(&auth);
+    let (sealer, floor) = prepared_resume();
     let resume = sealer.prepare(&auth, floor.clone()).expect("resume");
     let spawner = Arc::new(ScriptedSpawner::new());
     let runtime = hooks_with_mode(HookMode::BlockResult, trace.clone());
@@ -1622,11 +1682,13 @@ async fn blocked_result_keeps_the_pinned_capture_with_accepted_unclaimed_continu
     drop(capture);
     assert!(resolver.remove(&stable).is_some());
 
+    let causality = settled_continuation_causality(&runtime, &required, r#"{"choice":"yes"}"#);
     let result = owner
         .accept_answer(
             required.continuation_id(),
             br#"{"choice":"yes"}"#,
             runtime,
+            causality,
             floor,
             ports(spawner),
         )
@@ -1661,7 +1723,7 @@ async fn missing_session_context_fails_before_question_exposure_or_resumed_egres
     let (capture, tool) = captured_lookup(Arc::clone(&factory));
     resolver.insert(capture);
     let auth = authorized(prepare_lookup(&tool));
-    let (sealer, floor) = prepared_resume(&auth);
+    let (sealer, floor) = prepared_resume();
     let resume = sealer.prepare(&auth, floor).expect("resume");
     let spawner = Arc::new(ScriptedSpawner::new());
     let (call, guarded) = guarded_without_session_context(auth, resume, spawner.clone());
@@ -1701,7 +1763,7 @@ async fn mismatched_capture_context_fails_closed_before_foreign_question_or_resu
     resolver.insert(capture_b.clone());
 
     let auth = authorized(prepare_lookup(&tool_a));
-    let (sealer, floor) = prepared_resume(&auth);
+    let (sealer, floor) = prepared_resume();
     let resume = sealer.prepare(&auth, floor).expect("resume");
     let spawner = Arc::new(ScriptedSpawner::new());
     let (call, guarded) = guarded_with_session_context(

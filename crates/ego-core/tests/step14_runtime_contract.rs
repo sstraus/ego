@@ -619,7 +619,7 @@ mod turn_execution_observation {
             }
         }
 
-        fn loop_(&mut self) -> TurnLoop<'_> {
+        fn loop_(&mut self) -> TurnLoop<'_, '_> {
             let tools = Tools::new(
                 &self.registry,
                 &self.policy,

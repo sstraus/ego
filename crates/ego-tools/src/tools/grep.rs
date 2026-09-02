@@ -53,11 +53,14 @@ impl TypedTool for GrepTool {
         ))
     }
 
-    fn execute<'a>(
+    fn execute<'a, 'io>(
         &'a self,
         call: PreparedCall,
-        io: &'a dyn GuardedIo,
-    ) -> BoxFuture<'a, Result<ToolResult, ToolError>> {
+        io: &'a dyn GuardedIo<'io>,
+    ) -> BoxFuture<'a, Result<ToolResult, ToolError>>
+    where
+        'io: 'a,
+    {
         Box::pin(async move {
             let Op::Search { root, query } = only_op(call)? else {
                 return Err(wrong_op(self.name()));

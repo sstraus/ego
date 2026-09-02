@@ -139,7 +139,7 @@ pub enum RunTermination {
     /// [`MaxTurns`]: Self::MaxTurns
     PermissionRequired { action: String, by: DeniedBy },
     /// A durable question awaits an answer from the invoking human.
-    QuestionRequired { question: QuestionReport },
+    QuestionRequired { question: Box<QuestionReport> },
     /// The provider or the network failed.
     Provider { message: String },
     /// The provider explicitly reported that the model context window was
@@ -225,7 +225,7 @@ impl RunTermination {
             ok: matches!(self, Self::Done),
             exit_reason: self.exit_reason(),
             question: match self {
-                Self::QuestionRequired { question } => Some(question.clone()),
+                Self::QuestionRequired { question } => Some(question.as_ref().clone()),
                 _ => None,
             },
         }

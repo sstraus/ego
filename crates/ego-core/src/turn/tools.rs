@@ -115,12 +115,12 @@ impl<'a> ToolEffectPorts<'a> {
 
     /// Bind one reopened MCP authority to the same guarded effect path used
     /// by an ordinary admitted tool execution.
-    pub fn bind_mcp_resume(
+    pub fn bind_mcp_resume<'session>(
         self,
         authorized: Authorized,
         resume: PreparedResume,
-        context: Option<McpResumeContext<'a>>,
-    ) -> (PreparedCall, GuardedEffects<'a>) {
+        context: Option<McpResumeContext<'session>>,
+    ) -> (PreparedCall, GuardedEffects<'a, GuardedMcpResume<'session>>) {
         let (call, permit) = authorized.into_parts();
         let guarded = GuardedEffects::new_with_resume(
             permit,
@@ -133,6 +133,37 @@ impl<'a> ToolEffectPorts<'a> {
             Some(GuardedMcpResume::new(resume, context)),
         );
         (call, guarded)
+    }
+
+    /// Bind one ordinary authorized hook effect to the run's exact raw
+    /// effect owners. The permit and prepared call stay paired by consuming
+    /// the typed authorization in one step.
+    pub fn bind(self, authorized: Authorized) -> (PreparedCall, GuardedEffects<'a>) {
+        let (call, permit) = authorized.into_parts();
+        let guarded = GuardedEffects::new(
+            permit,
+            self.fs,
+            self.process,
+            self.evidence,
+            self.resolver,
+            self.one_hop,
+            self.duplex,
+        );
+        (call, guarded)
+    }
+
+    /// Store complete hook feedback in the same session-bound evidence
+    /// authority used by tool output.
+    pub fn store_hook_feedback(
+        &self,
+        bytes: &[u8],
+    ) -> Result<crate::store::evidence::EvidenceRef, crate::store::evidence::EvidenceError> {
+        let mut writer = self.evidence.begin()?;
+        if let Err(error) = writer.append(bytes) {
+            let _ = writer.abort();
+            return Err(error);
+        }
+        writer.commit()
     }
 }
 
@@ -223,6 +254,10 @@ impl<'a> Tools<'a> {
 
     pub(crate) fn blob_store(&self) -> &dyn BlobStore {
         self.effects.evidence.blob_store()
+    }
+
+    pub(crate) fn evidence_store(&self) -> &'a dyn EvidenceStore {
+        self.effects.evidence
     }
 
     pub(crate) fn skill_catalogue(&self) -> Option<std::sync::Arc<crate::skill::SkillCatalogue>> {
@@ -334,7 +369,7 @@ impl<'a> Tools<'a> {
         {
             return Err("skill resource permit does not match the prepared read".to_owned());
         }
-        let guarded = GuardedEffects::new_with_resume(
+        let guarded = GuardedEffects::new(
             permit,
             self.effects.fs,
             self.effects.process,
@@ -342,7 +377,6 @@ impl<'a> Tools<'a> {
             std::sync::Arc::clone(&self.effects.resolver),
             std::sync::Arc::clone(&self.effects.one_hop),
             std::sync::Arc::clone(&self.effects.duplex),
-            None,
         );
         guarded.read(expected).map_err(|error| error.to_string())
     }
@@ -525,11 +559,11 @@ impl<'a> Tools<'a> {
     /// the next two lines — the tool receives the call the permit was minted
     /// for and a seam bound to that same permit, and there is no instant in
     /// between where a different call could be substituted.
-    pub async fn execute(
+    pub async fn execute<'session>(
         &self,
         tool: &dyn Tool,
         authorized: Authorized,
-        context: Option<McpResumeContext<'a>>,
+        context: Option<McpResumeContext<'session>>,
     ) -> Result<ToolExecution, ToolError> {
         let resume = if authorized.call().mcp_envelope().is_some() {
             Some(GuardedMcpResume::new(

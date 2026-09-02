@@ -12,7 +12,7 @@ use crate::cost::{CostDelta, PricingRevision};
 use crate::event::domain::{EventKind, ExitReason, GenerationRole, OccupancyProvenance};
 use crate::event::hook::{
     HookActivation, HookContentDigest, HookDecision, HookFailureKind, HookId, HookInvocationId,
-    HookLifecycle, HookOccurrenceKey, HookResult, HookSourceAuthority, HookSubject,
+    HookLifecycle, HookOccurrenceKey, HookPlanEntry, HookResult, HookSourceAuthority, HookSubject,
 };
 use crate::event::id::{EventId, ItemId, Producer, QueuedPromptId, Seq, SessionId, TurnId};
 use crate::event::time::Timestamp;
@@ -255,7 +255,7 @@ pub enum ExportEvent {
     HookLifecycleReached {
         occurrence: HookOccurrenceKey,
         subject: HookSubject,
-        plan: Vec<HookId>,
+        plan: Vec<HookPlanEntry>,
     },
     HookInvocationStarted {
         occurrence: EventId,
@@ -301,6 +301,7 @@ pub enum ExportHookResult {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct ExportHookDescriptor {
     pub id: HookId,
+    pub activation: HookActivation,
     pub source: HookSourceAuthority,
     pub digest: HookContentDigest,
     pub ordinal: u32,
@@ -812,6 +813,7 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
                     .iter()
                     .map(|descriptor| ExportHookDescriptor {
                         id: descriptor.id(),
+                        activation: descriptor.activation(),
                         source: descriptor.source(),
                         digest: descriptor.digest(),
                         ordinal: descriptor.ordinal(),

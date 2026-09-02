@@ -225,7 +225,7 @@ async fn ordinary_main() -> std::process::ExitCode {
                         mcp.as_ref()
                             .and_then(|runtime| runtime.as_ref().ok())
                             .expect("interactive invocation constructed its MCP runtime")
-                            .controller(),
+                            .runtime(),
                     ),
                     std::sync::Arc::clone(&evidence),
                 )
@@ -250,7 +250,7 @@ async fn ordinary_main() -> std::process::ExitCode {
                                 mcp.as_ref()
                                     .and_then(|runtime| runtime.as_ref().ok())
                                     .expect("preflighted CI run constructed its MCP runtime")
-                                    .controller(),
+                                    .runtime(),
                             ),
                             std::sync::Arc::clone(&evidence),
                             preflight,
@@ -266,7 +266,7 @@ async fn ordinary_main() -> std::process::ExitCode {
                                 mcp.as_ref()
                                     .and_then(|runtime| runtime.as_ref().ok())
                                     .expect("run invocation constructed its MCP runtime")
-                                    .controller(),
+                                    .runtime(),
                             ),
                             std::sync::Arc::clone(&evidence),
                         )

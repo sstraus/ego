@@ -79,11 +79,14 @@ impl TypedTool for ExecTool {
         Ok(PreparedCall::new(self.name(), vec![Op::Spawn { spec }]))
     }
 
-    fn execute<'a>(
+    fn execute<'a, 'io>(
         &'a self,
         call: PreparedCall,
-        io: &'a dyn GuardedIo,
-    ) -> BoxFuture<'a, Result<ToolResult, ToolError>> {
+        io: &'a dyn GuardedIo<'io>,
+    ) -> BoxFuture<'a, Result<ToolResult, ToolError>>
+    where
+        'io: 'a,
+    {
         Box::pin(async move {
             let tool = call.tool;
             let mut ops = call.ops.into_iter();

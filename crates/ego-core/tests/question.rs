@@ -282,7 +282,7 @@ fn valid_resume_settles_the_same_turn_and_completes_the_pure_tool_result() {
 #[test]
 fn public_question_item_and_headless_report_are_structured_and_versioned() {
     assert_eq!(PUBLIC_EVENT_VERSION, 9);
-    assert_eq!(CODEC_VERSION, 11);
+    assert_eq!(CODEC_VERSION, 12);
 
     let turn = TurnId::new();
     let item = ItemId::new();
@@ -317,7 +317,9 @@ fn public_question_item_and_headless_report_are_structured_and_versioned() {
     assert_eq!(json["mode"], "single");
 
     let required = RunTermination::QuestionRequired {
-        question: ego_core::public::QuestionReport::from_request(item, &target, &request),
+        question: Box::new(ego_core::public::QuestionReport::from_request(
+            item, &target, &request,
+        )),
     };
     assert_eq!(required.exit_code(), 3);
     assert_eq!(required.exit_reason(), "question");

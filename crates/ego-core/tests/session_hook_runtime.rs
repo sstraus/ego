@@ -8,21 +8,26 @@ use std::time::{Duration, Instant};
 use ego_core::config::{ConfigLayer, Source, Trust};
 use ego_core::event::domain::{DomainEvent, EventKind};
 use ego_core::event::hook::{
-    HookCatalogueEvidence, HookContentDigest, HookDecision, HookDescriptorEvidence, HookLifecycle,
-    HookOccurrenceKey, HookOccurrenceOwner, HookOutcome, HookSourceAuthority, HookSourceLocation,
+    HookActivation, HookCatalogueEvidence, HookDecision, HookLifecycle, HookOccurrenceKey,
+    HookOccurrenceOwner, HookOutcome,
 };
 use ego_core::event::id::{Producer, Seq, SessionId, TurnId};
+use ego_core::event::skill::{SkillInvocationId, SkillSourceAuthority};
 use ego_core::event::time::{Clock, Timestamp};
 use ego_core::hook::{
-    HookCatalogue, HookEvent, HookFuture, HookInvocationPort, HookInvocationRequest,
-    HookLifecycleDispatcher, HookRunner, SessionHookRuntime,
+    HookCatalogue, HookCausality, HookConfigEntry, HookEvent, HookFuture, HookHandlerConfig,
+    HookInvocationPort, HookInvocationRequest, HookLifecycleDispatcher, HookRunner, HookSource,
+    SessionHookRuntime,
 };
 use ego_core::mcp::{ForeignQuestionPort, McpRuntimeBinding, ToolExecution};
-use ego_core::sink::NullSink;
+use ego_core::run::{EventSinkFactory, RunExecutionBindings};
+use ego_core::sink::{EventSink, NullSink};
 use ego_core::state::SessionState;
 use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
 use ego_core::suspension::ResumeFloor;
-use ego_core::turn::{CancelToken, Journal, SharedJournal, ToolEffectPorts};
+use ego_core::turn::{
+    AdmittedToolSource, CancelToken, CapturedToolCatalogue, Journal, SharedJournal, ToolEffectPorts,
+};
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 
@@ -127,31 +132,14 @@ impl HookInvocationPort for RecordingPort {
 fn active_catalogue() -> HookCatalogue {
     let layer = ConfigLayer::parse(
         Source::User,
-        "[[hooks]]\nevent = \"SessionStart\"\n[hooks.handler]\ntype = \"prompt\"\nprompt = \"fixture\"\n[[hooks]]\nevent = \"SessionEnd\"\n[hooks.handler]\ntype = \"prompt\"\nprompt = \"fixture\"\n",
+        "[[hooks]]\nevent = \"SessionStart\"\n[hooks.handler]\ntype = \"prompt\"\nprompt = \"fixture\"\n[[hooks]]\nevent = \"InstructionsLoaded\"\n[hooks.handler]\ntype = \"prompt\"\nprompt = \"fixture\"\n[[hooks]]\nevent = \"UserPromptExpansion\"\n[hooks.handler]\ntype = \"prompt\"\nprompt = \"fixture\"\n[[hooks]]\nevent = \"SessionEnd\"\n[hooks.handler]\ntype = \"prompt\"\nprompt = \"fixture\"\n",
     )
     .expect("hook layer");
     HookCatalogue::admit_typed(&[layer], &[], Trust::Trusted).expect("active catalogue")
 }
 
 fn admitted_catalogue() -> HookCatalogueEvidence {
-    let content = "SessionStart\n\nfalse\nPrompt { prompt: \"fixture\", model: None, timeout_seconds: None }\n--\nSessionEnd\n\nfalse\nPrompt { prompt: \"fixture\", model: None, timeout_seconds: None }";
-    let digest = HookContentDigest::parse(&ego_core::digest::sha256_hex(content.as_bytes()))
-        .expect("catalogue digest");
-    HookCatalogueEvidence::new(vec![
-        HookDescriptorEvidence::new(
-            HookSourceAuthority::User,
-            HookSourceLocation::parse("hooks/user.toml").expect("catalogue location"),
-            digest,
-            0,
-        ),
-        HookDescriptorEvidence::new(
-            HookSourceAuthority::User,
-            HookSourceLocation::parse("hooks/user.toml").expect("catalogue location"),
-            digest,
-            1,
-        ),
-    ])
-    .expect("catalogue evidence")
+    active_catalogue().evidence()
 }
 
 fn admit_catalogue(runtime: &SessionHookRuntime<'_>, turn: TurnId) {
@@ -279,6 +267,133 @@ fn normal_append_and_two_hook_occurrences_share_one_sequence_and_state() {
 }
 
 #[test]
+fn admitted_catalogue_is_published_before_instruction_lifecycle_hooks_are_routed() {
+    let (runtime, invocation, store, session, turn, release) = runtime_fixture(false);
+    admit_catalogue(&runtime, turn);
+    futures::executor::block_on(runtime.dispatch(
+        Producer::Main,
+        occurrence(HookLifecycle::InstructionsLoaded, session, turn, 7),
+    ))
+    .expect("instructions-loaded hook");
+    futures::executor::block_on(runtime.dispatch(
+        Producer::Main,
+        occurrence(HookLifecycle::UserPromptExpansion, session, turn, 8),
+    ))
+    .expect("prompt-expansion hook");
+    if let Some(release) = release {
+        let _ = release.send(());
+    }
+
+    let events = store.events();
+    let admitted = events
+        .iter()
+        .position(|event| matches!(event.kind, EventKind::HookCatalogueAdmitted { .. }))
+        .expect("catalogue admission evidence");
+    let reached = events
+        .iter()
+        .enumerate()
+        .filter_map(|(index, event)| match &event.kind {
+            EventKind::HookLifecycleReached { occurrence, .. }
+                if matches!(
+                    occurrence.lifecycle(),
+                    HookLifecycle::InstructionsLoaded | HookLifecycle::UserPromptExpansion
+                ) =>
+            {
+                Some(index)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(reached.len(), 2);
+    assert!(reached.iter().all(|index| admitted < *index));
+    assert_eq!(
+        invocation.calls(),
+        2,
+        "both lifecycle events route through the catalogue"
+    );
+}
+
+#[test]
+fn skill_catalogue_is_activation_qualified_and_turn_completion_restores_persistent_only() {
+    let (runtime, _invocation, store, session, turn, _release) = runtime_fixture(false);
+    let invocation = SkillInvocationId::new();
+    let skill = HookSource::skill_entries_with_authority(
+        "skills/resumed/SKILL.md",
+        invocation,
+        SkillSourceAuthority::User,
+        [HookConfigEntry::new(
+            HookLifecycle::InstructionsLoaded,
+            None,
+            HookHandlerConfig::Prompt {
+                prompt: "resumed hook".to_owned(),
+                model: None,
+                timeout_seconds: Some(7),
+            },
+        )],
+    );
+    runtime
+        .replace_skill_sources(turn, &[skill])
+        .expect("publish complete active skill catalogue");
+    assert!(
+        runtime
+            .catalogue_evidence()
+            .as_slice()
+            .iter()
+            .any(|entry| { entry.activation() == HookActivation::Skill { invocation } })
+    );
+
+    futures::executor::block_on(runtime.dispatch(
+        Producer::Main,
+        occurrence(HookLifecycle::InstructionsLoaded, session, turn, 9),
+    ))
+    .expect("active skill hook");
+    let reached = store
+        .events()
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::HookLifecycleReached { plan, .. }
+                if plan
+                    .as_slice()
+                    .iter()
+                    .any(|entry| entry.activation() == HookActivation::Skill { invocation }) =>
+            {
+                Some(plan.clone())
+            }
+            _ => None,
+        })
+        .expect("activation-qualified skill plan was routed");
+    assert!(
+        reached
+            .as_slice()
+            .iter()
+            .any(|entry| { entry.activation() == HookActivation::Skill { invocation } })
+    );
+
+    runtime
+        .journal()
+        .append(
+            turn,
+            None,
+            None,
+            EventKind::TurnCompleted {
+                ok: true,
+                exit_reason: ego_core::event::domain::ExitReason::Completed,
+            },
+        )
+        .expect("turn completion");
+    runtime
+        .replace_skill_sources(turn, &[])
+        .expect("restore persistent-only catalogue after turn completion");
+    assert!(
+        runtime
+            .catalogue_evidence()
+            .as_slice()
+            .iter()
+            .all(|entry| !matches!(entry.activation(), HookActivation::Skill { .. }))
+    );
+}
+
+#[test]
 fn recovered_completed_occurrence_does_not_invoke_and_state_keeps_all_facts() {
     let (runtime, invocation, store, session, turn, release) = runtime_fixture(false);
     admit_catalogue(&runtime, turn);
@@ -387,6 +502,7 @@ impl ForeignQuestionPort for RejectingForeignPort {
         &'a self,
         _continuation_id: &'a str,
         _canonical_json: &'a str,
+        _causality: HookCausality,
     ) -> BoxFuture<'a, Result<ToolExecution, String>> {
         Box::pin(async { Err("runtime-bound port was not invoked".to_owned()) })
     }
@@ -396,18 +512,66 @@ impl ForeignQuestionPort for RejectingForeignPort {
 struct RuntimeBinding;
 
 impl McpRuntimeBinding for RuntimeBinding {
-    fn foreign_question_port<'a>(
+    fn hook_invocation_port<'a>(
         &self,
-        _runtime: SessionHookRuntime<'a>,
-        _floor: ResumeFloor,
+        _policy: &'a ego_core::permit::PolicyEngine,
         _effects: ToolEffectPorts<'a>,
-    ) -> Arc<dyn ForeignQuestionPort + 'a> {
+    ) -> Result<Arc<dyn ego_core::hook::HookInvocationPort + 'a>, String> {
+        panic!("this runtime-only binding is not exercised by the hook fixture")
+    }
+
+    fn foreign_question_port<'session, 'turn>(
+        &self,
+        _runtime: SessionHookRuntime<'session>,
+        _floor: ResumeFloor,
+        _effects: ToolEffectPorts<'turn>,
+    ) -> Arc<dyn ForeignQuestionPort + 'turn>
+    where
+        'session: 'turn,
+    {
         Arc::new(RejectingForeignPort)
     }
 }
 
+#[derive(Debug, Default)]
+struct SinkFactory;
+
+impl EventSinkFactory for SinkFactory {
+    fn create(
+        &self,
+        _capabilities: &ego_core::generator::capabilities::ModelCapabilities,
+    ) -> Arc<dyn EventSink> {
+        Arc::new(NullSink)
+    }
+}
+
+#[derive(Debug, Default)]
+struct EmptyAdmittedTools;
+
+impl AdmittedToolSource for EmptyAdmittedTools {
+    fn capture(&self) -> Result<CapturedToolCatalogue, ego_core::turn::ToolCatalogueError> {
+        CapturedToolCatalogue::new("session-hook-runtime", Vec::new())
+    }
+}
+
 #[test]
-fn guarded_mcp_resume_accepts_object_safe_borrow_scoped_runtime() {
-    let binding: Arc<dyn McpRuntimeBinding> = Arc::new(RuntimeBinding);
-    let _object_safe = binding;
+fn runtime_binding_is_retained_by_execution_composition() {
+    let runtime: Arc<dyn McpRuntimeBinding> = Arc::new(RuntimeBinding);
+    let bindings = RunExecutionBindings::new(Arc::new(SinkFactory), None).with_mcp(
+        Arc::new(EmptyAdmittedTools),
+        vec!["session hook runtime diagnostic".to_owned()],
+        Arc::clone(&runtime),
+    );
+    let forwarded = bindings.mcp_runtime().expect("runtime binding retained");
+    assert!(Arc::ptr_eq(&runtime, &forwarded));
+    assert_eq!(bindings.mcp_errors(), ["session hook runtime diagnostic"]);
+    assert_eq!(
+        bindings
+            .admitted_tools()
+            .expect("admitted tools retained")
+            .capture()
+            .expect("empty capture")
+            .generation(),
+        "session-hook-runtime"
+    );
 }

@@ -5,7 +5,7 @@ use std::sync::Mutex;
 use ego_core::event::domain::{DomainEvent, Envelope, EventKind};
 use ego_core::event::hook::{
     HookActivation, HookDecision, HookId, HookInvocationId, HookLifecycle, HookOccurrenceKey,
-    HookOccurrenceOwner, HookOutcome, HookPlan, HookResult, HookSubject,
+    HookOccurrenceOwner, HookOutcome, HookPlan, HookPlanEntry, HookResult, HookSubject,
 };
 use ego_core::event::id::{EventId, ItemId, Producer, Seq, SessionId, TurnId};
 use ego_core::event::time::{Clock, Timestamp};
@@ -342,7 +342,8 @@ fn durable_start_and_settlement_repeat_reached_turn_item_and_parent_chain() {
             None,
             occurrence,
             HookSubject::Item { item },
-            HookPlan::new(vec![hook]).expect("one hook plan"),
+            HookPlan::new(vec![HookPlanEntry::new(hook, HookActivation::Persistent)])
+                .expect("one hook plan"),
         )
         .expect("durable reach");
     let started = journal

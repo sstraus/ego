@@ -453,8 +453,8 @@ fn failed_structured_result_survives_turn_reduction_and_history_roundtrip() {
     assert_eq!(item_state.tool_result.as_ref(), Some(&result));
     assert!(item_state.text.is_empty());
 
-    let bytes = encode_record(completed.env.seq, &completed).expect("codec encodes v11 result");
-    let StoreLine::Record(record) = decode_line(&bytes).expect("codec decodes v11 result") else {
+    let bytes = encode_record(completed.env.seq, &completed).expect("codec encodes v12 result");
+    let StoreLine::Record(record) = decode_line(&bytes).expect("codec decodes v12 result") else {
         panic!("structured result must be a durable record");
     };
     let decoded: DomainEvent = serde_json::from_str(record.payload.get()).unwrap();
@@ -463,7 +463,7 @@ fn failed_structured_result_survives_turn_reduction_and_history_roundtrip() {
 
 #[test]
 fn failed_structured_result_public_projection_stays_text_only_with_current_version() {
-    assert_eq!(CODEC_VERSION, 11);
+    assert_eq!(CODEC_VERSION, 12);
     assert_eq!(PUBLIC_EVENT_VERSION, 9);
     let item = ItemId::new();
     let completed = event(

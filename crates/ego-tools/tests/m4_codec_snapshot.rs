@@ -1,14 +1,11 @@
 //! RED contract for M4 S1's one-way codec and snapshot migration.
 
 use ego_core::event::id::{Seq, SessionId};
-use ego_core::question::QuestionTarget;
 use ego_core::state::SessionState;
 use ego_core::store::codec::{StoreLine, decode_line};
-use ego_core::store::session_store::{SessionEntry, SessionStore};
 use ego_tools::store::{
     JsonlStore, LeaseInputs, OsIo, SNAPSHOT_VERSION, Snapshot, SnapshotRejection,
 };
-use futures::StreamExt;
 use std::path::Path;
 use std::time::Duration;
 use tempfile::tempdir;
@@ -41,13 +38,13 @@ mod regression_case {
     use super::*;
 
     #[test]
-    fn current_writers_keep_codec_eleven_and_advance_snapshot_to_twelve() {
-        assert_eq!(ego_core::store::codec::CODEC_VERSION, 11);
-        assert_eq!(SNAPSHOT_VERSION, 12);
+    fn current_writers_keep_codec_twelve_and_advance_snapshot_to_thirteen() {
+        assert_eq!(ego_core::store::codec::CODEC_VERSION, 12);
+        assert_eq!(SNAPSHOT_VERSION, 13);
     }
 
     #[test]
-    fn owned_open_writer_migrates_real_codec_ten_then_reopens_cleanly() {
+    fn older_codec_is_rejected_without_a_compatibility_reader_or_byte_mutation() {
         let dir = tempdir().unwrap();
         let id: SessionId = FIXTURE_SESSION.parse().unwrap();
         let path = write_fixture(
@@ -55,62 +52,10 @@ mod regression_case {
             &id,
             include_bytes!("fixtures/store_log_codec10.jsonl"),
         );
+        let before = std::fs::read(&path).unwrap();
         let store = JsonlStore::new(dir.path(), "/ws", Box::new(OsIo));
-        let opened = store
-            .open_writer(&id, lease_inputs())
-            .expect("owned open path migrates codec 10");
-        assert!(opened.repair.migrated);
-        assert_eq!(opened.repair.truncated_bytes, 0);
-        drop(opened);
-
-        let migrated = std::fs::read(&path).unwrap();
-        let mut lines = migrated
-            .split(|byte| *byte == b'\n')
-            .filter(|line| !line.is_empty());
-        let StoreLine::Header(header) = decode_line(lines.next().unwrap()).unwrap() else {
-            panic!("migration must retain one header")
-        };
-        assert_eq!(header.v, 11);
-        let records = lines
-            .map(|line| decode_line(line).expect("migrated record"))
-            .collect::<Vec<_>>();
-        assert_eq!(records.len(), 11);
-        for (position, record) in records.iter().enumerate() {
-            let StoreLine::Record(record) = record else {
-                panic!("recognized codec-10 record was not retained")
-            };
-            assert_eq!(
-                record.seq,
-                serde_json::from_value::<Seq>(serde_json::json!(position + 1)).unwrap()
-            );
-        }
-
-        let reopen_store = JsonlStore::new(dir.path(), "/ws", Box::new(OsIo));
-        let reopened = reopen_store
-            .open_writer(&id, lease_inputs())
-            .expect("migrated log reopens through the owned path");
-        assert!(reopened.repair.is_clean());
-        let entries = futures::executor::block_on(
-            SessionStore::read(&reopen_store, &id)
-                .unwrap()
-                .collect::<Vec<_>>(),
-        );
-        let mut state = SessionState::default();
-        for entry in entries {
-            if let SessionEntry::Event(event) = entry.expect("migrated entry reads") {
-                state.apply(&event);
-            }
-        }
-        let pending = state
-            .pending_question()
-            .expect("legacy QuestionRequested remains pending after migration");
-        let tool_call: ego_core::event::id::ItemId =
-            "00000000-0000-0000-0000-000000000016".parse().unwrap();
-        assert_eq!(
-            pending.target(),
-            &QuestionTarget::ModelTool { tool_call },
-            "v10 tool_call migrates to the exact model-tool target"
-        );
+        assert!(store.open_writer(&id, lease_inputs()).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 
     #[test]
@@ -129,7 +74,7 @@ mod regression_case {
     }
 
     #[test]
-    fn unknown_codec_ten_records_fail_migration_closed_without_mutating_bytes() {
+    fn unknown_records_fail_closed_without_compatibility_migration_or_byte_mutation() {
         let dir = tempdir().unwrap();
         let id: SessionId = FIXTURE_SESSION.parse().unwrap();
         let unknown_line = br#"{"future_m4_record":true}"#;
@@ -150,7 +95,7 @@ mod regression_case {
             fixture.split(|byte| *byte == b'\n').next().unwrap(),
         )
         .unwrap();
-        header["v"] = serde_json::json!(12);
+        header["v"] = serde_json::json!(13);
         let mut future_image = serde_json::to_vec(&header).unwrap();
         future_image.push(b'\n');
         future_image.extend_from_slice(fixture.splitn(2, |byte| *byte == b'\n').nth(1).unwrap());

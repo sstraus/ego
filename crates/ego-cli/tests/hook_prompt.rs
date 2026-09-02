@@ -9,9 +9,13 @@ use ego_cli::hook::{HookPromptAdapter, ToollessGenerationService};
 use ego_core::event::domain::GenerationRole;
 use ego_core::event::hook::{
     HookActivation, HookContentDigest, HookDecision, HookId, HookInvocationId, HookLifecycle,
-    HookSourceAuthority, HookSourceLocation, HookSubject,
+    HookSourceAuthority, HookSourceLocation,
 };
-use ego_core::hook::{EffectScope, HookHandlerConfig, HookInvocationRequest};
+use ego_core::event::id::{EventId, SessionId, TurnId};
+use ego_core::hook::{
+    EffectScope, HookCausality, HookEvent, HookHandlerConfig, HookInvocationRequest,
+    HookStartedEvidence,
+};
 
 #[derive(Clone, Default)]
 struct GenerationCapture {
@@ -63,18 +67,23 @@ fn fixture_hook_id() -> HookId {
 }
 
 fn request() -> HookInvocationRequest {
+    let hook = fixture_hook_id();
+    let invocation = HookInvocationId::new();
     HookInvocationRequest::new(
-        fixture_hook_id(),
+        HookStartedEvidence::new(
+            EventId::new(),
+            EventId::new(),
+            hook,
+            invocation,
+            HookActivation::Persistent,
+        ),
+        HookCausality::session(SessionId::new(), TurnId::new()),
         HookHandlerConfig::Prompt {
             prompt: "Return one bounded diagnostic.".to_owned(),
             model: Some("ordinary-model".to_owned()),
             timeout_seconds: Some(30),
         },
-        HookLifecycle::UserPromptSubmit,
-        None,
-        HookSubject::Session,
-        HookActivation::Persistent,
-        HookInvocationId::new(),
+        HookEvent::session(HookLifecycle::UserPromptSubmit),
         EffectScope::new(Duration::from_secs(30)),
     )
 }

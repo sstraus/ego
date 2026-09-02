@@ -7,7 +7,7 @@ use ego_core::state::SessionState;
 use ego_core::store::codec::{
     CODEC_VERSION, Header, StoreLine, decode_line, encode_header, encode_record,
 };
-use ego_core::store::session_store::{SessionEntry, SessionStore};
+use ego_core::store::session_store::{SessionEntry, SessionStore, StoreError};
 use ego_tools::store::{JsonlStore, OsIo, SNAPSHOT_VERSION, Snapshot, SnapshotRejection, StoreIo};
 use std::path::{Path, PathBuf};
 use tempfile::tempdir;
@@ -106,7 +106,7 @@ impl StoreIo for FailingFsyncIo {
 
 #[test]
 fn codec_version_is_bumped_for_physical_positions() {
-    assert_eq!(CODEC_VERSION, 10);
+    assert_eq!(CODEC_VERSION, 12);
 }
 
 #[test]
@@ -160,85 +160,33 @@ fn recovery_rejects_gap_and_regression_without_changing_bytes() {
 }
 
 #[test]
-fn recognized_v8_log_migrates_to_v9_preserving_counters_and_payloads() {
+fn retired_v10_log_is_refused_without_mutating_bytes() {
     let dir = tempdir().unwrap();
     let id = SessionId::new();
     let path = log_path(dir.path(), &id);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     let mut bytes = encode_header(&Header {
-        v: 8,
+        v: 10,
         session: id,
         created: Timestamp::from_millis(1),
         workspace_root: "/workspace".into(),
     });
     bytes.push(b'\n');
-    bytes.extend(encode_record(seq(41), &event(11, "v8-first")).unwrap());
+    bytes.extend(encode_record(seq(41), &event(11, "v10-first")).unwrap());
     bytes.push(b'\n');
     bytes.extend(encode_record(seq(1), &admitted(&id, 1, None, "/workspace")).unwrap());
     bytes.push(b'\n');
-    bytes.extend(encode_record(seq(99), &event(12, "v8-second")).unwrap());
+    bytes.extend(encode_record(seq(99), &event(12, "v10-second")).unwrap());
     bytes.push(b'\n');
     std::fs::write(&path, &bytes).unwrap();
     let store = JsonlStore::new(dir.path(), "/workspace", Box::new(OsIo));
 
-    store.recover(&id).unwrap();
-    let migrated = std::fs::read(&path).unwrap();
-    let mut lines = migrated.split(|byte| *byte == b'\n');
-    let StoreLine::Header(header) = decode_line(lines.next().unwrap()).unwrap() else {
-        panic!("migration must retain a header")
-    };
-    assert_eq!(header.v, CODEC_VERSION);
-    assert_eq!(header.v, 10);
-    let mut migrated_records = Vec::new();
-    for line in lines.filter(|line| !line.is_empty()) {
-        let StoreLine::Record(record) = decode_line(line).unwrap() else {
-            panic!("recognized v8 entries must remain records")
-        };
-        migrated_records.push((
-            record.seq,
-            serde_json::from_str::<SessionEntry>(record.payload.get()).unwrap(),
-        ));
-    }
-    assert_eq!(migrated_records.len(), 3);
-    assert_eq!(
-        migrated_records
-            .iter()
-            .map(|(position, _)| *position)
-            .collect::<Vec<_>>(),
-        vec![seq(1), seq(2), seq(3)]
-    );
-    match &migrated_records[0].1 {
-        SessionEntry::Event(actual) => {
-            assert_eq!(actual.env.seq, seq(11));
-            assert_eq!(
-                &actual.kind,
-                &EventKind::UserPrompt {
-                    text: "v8-first".into(),
-                    images: vec![],
-                    queued_prompt: None,
-                }
-            );
-        }
-        other => panic!("first migrated payload changed shape: {other:?}"),
-    }
+    let before = std::fs::read(&path).unwrap();
     assert!(matches!(
-        &migrated_records[1].1,
-        SessionEntry::RunTransaction(transaction) if transaction.revision() == RunRevision::new(1)
+        store.recover(&id),
+        Err(StoreError::UnsupportedLog { found: 10 })
     ));
-    match &migrated_records[2].1 {
-        SessionEntry::Event(actual) => {
-            assert_eq!(actual.env.seq, seq(12));
-            assert_eq!(
-                &actual.kind,
-                &EventKind::UserPrompt {
-                    text: "v8-second".into(),
-                    images: vec![],
-                    queued_prompt: None,
-                }
-            );
-        }
-        other => panic!("last migrated payload changed shape: {other:?}"),
-    }
+    assert_eq!(std::fs::read(&path).unwrap(), before);
 }
 
 #[test]
@@ -261,7 +209,10 @@ fn v8_log_with_valid_unknown_record_is_refused_without_mutation() {
     std::fs::write(&path, &bytes).unwrap();
     let store = JsonlStore::new(dir.path(), "/workspace", Box::new(OsIo));
     let before_unknown = std::fs::read(&path).unwrap();
-    assert!(store.recover(&id).is_err());
+    assert!(matches!(
+        store.recover(&id),
+        Err(StoreError::UnsupportedLog { found: 8 })
+    ));
     assert_eq!(std::fs::read(&path).unwrap(), before_unknown);
 }
 
@@ -293,7 +244,7 @@ fn real_v6_snapshot_is_rejected_and_full_replay_uses_current_log() {
     let (state, rejection) = store.resume(&id).unwrap();
     assert_eq!(rejection, Some(SnapshotRejection::Version { found: 6 }));
     assert_eq!(state, expected);
-    assert_eq!(SNAPSHOT_VERSION, 10);
+    assert_eq!(SNAPSHOT_VERSION, 13);
 }
 
 #[test]

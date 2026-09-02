@@ -2,7 +2,10 @@
 
 use std::sync::Arc;
 
-use ego_core::hook::SessionHookRuntime;
+use ego_core::event::hook::{HookFailure, HookFailureKind};
+use ego_core::hook::{
+    HookCausality, HookFuture, HookInvocationPort, HookInvocationRequest, SessionHookRuntime,
+};
 use ego_core::mcp::{ForeignQuestionPort, McpRuntimeBinding, ToolExecution};
 use ego_core::run::{EventSinkFactory, RunExecutionBindings};
 use ego_core::sink::{EventSink, NullSink};
@@ -29,6 +32,7 @@ impl ForeignQuestionPort for RejectingPort {
         &'a self,
         _continuation_id: &'a str,
         _canonical_json: &'a str,
+        _causality: HookCausality,
     ) -> BoxFuture<'a, Result<ToolExecution, String>> {
         Box::pin(async { Err("session-bound port was not invoked".to_owned()) })
     }
@@ -37,22 +41,34 @@ impl ForeignQuestionPort for RejectingPort {
 #[derive(Default)]
 struct TestMcpRuntime;
 
-impl McpRuntimeBinding for TestMcpRuntime {
-    fn foreign_question_port<'a>(
-        &self,
-        _runtime: SessionHookRuntime<'a>,
-        _floor: ResumeFloor,
-        _effects: ToolEffectPorts<'a>,
-    ) -> Arc<dyn ForeignQuestionPort + 'a> {
-        Arc::new(RejectingPort)
+struct UnusedHookPort;
+
+impl HookInvocationPort for UnusedHookPort {
+    fn invoke<'a>(&'a self, _request: HookInvocationRequest) -> HookFuture<'a> {
+        Box::pin(async { Err(HookFailure::new(HookFailureKind::HandlerFailed, None)) })
     }
 }
 
-fn attach_borrow_scoped_port<'a>(
-    turn: ego_core::turn::TurnLoop<'a>,
-    port: Arc<dyn ForeignQuestionPort + 'a>,
-) -> ego_core::turn::TurnLoop<'a> {
-    turn.with_foreign_question_port(port)
+impl McpRuntimeBinding for TestMcpRuntime {
+    fn hook_invocation_port<'a>(
+        &self,
+        _policy: &'a ego_core::permit::PolicyEngine,
+        _effects: ToolEffectPorts<'a>,
+    ) -> Result<Arc<dyn HookInvocationPort + 'a>, String> {
+        Ok(Arc::new(UnusedHookPort))
+    }
+
+    fn foreign_question_port<'session, 'turn>(
+        &self,
+        _runtime: SessionHookRuntime<'session>,
+        _floor: ResumeFloor,
+        _effects: ToolEffectPorts<'turn>,
+    ) -> Arc<dyn ForeignQuestionPort + 'turn>
+    where
+        'session: 'turn,
+    {
+        Arc::new(RejectingPort)
+    }
 }
 
 #[test]
@@ -70,7 +86,6 @@ fn execution_bindings_retain_one_clone_stable_runtime_and_factory_contract() {
         &cloned.mcp_runtime().expect("runtime binding retained")
     ));
     assert_eq!(cloned.mcp_errors(), ["safe MCP diagnostic"]);
-    let _ = attach_borrow_scoped_port;
 }
 
 #[derive(Debug, Default)]

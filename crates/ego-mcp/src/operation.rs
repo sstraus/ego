@@ -6,11 +6,11 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use ego_core::config::{McpHttpConfig, McpServerConfig, McpServerName, McpStdioConfig};
-use ego_core::event::hook::{HookLifecycle, HookOccurrenceKey};
+use ego_core::event::hook::{HookLifecycle, HookOccurrenceKey, HookSubject};
 use ego_core::event::id::Producer;
 use ego_core::event::time::{Clock, Timestamp};
 use ego_core::generator::attempt::DeliveryCertainty;
-use ego_core::hook::{EffectScope, HookEvent, HookLifecycleDispatcher, HookOccurrence};
+use ego_core::hook::{EffectScope, HookCausality, HookEvent, HookOccurrence, SessionHookRuntime};
 use ego_core::mcp::{
     CacheScope as CoreCacheScope, CancellationClassification, ForeignContent, ForeignInputRequired,
     ForeignQuestionPort, ForeignResult, McpAdmissionFingerprint, McpOperationKind, McpSubject,
@@ -183,18 +183,25 @@ impl McpContinuationOwner {
             self.remove_pin(&id)?;
             return Err(continuation(error));
         }
-        Self::dispatch(context.dispatcher(), HookLifecycle::Elicitation, &id).await?;
+        Self::dispatch(
+            &context.runtime(),
+            context.causality().clone(),
+            HookLifecycle::Elicitation,
+            &id,
+        )
+        .await?;
         ForeignInputRequired::new(id, required.question_request().clone())
             .map_err(|_| continuation(ContinuationError::InvalidId))
     }
 
-    pub async fn accept_answer<'a>(
+    pub async fn accept_answer<'session, 'turn>(
         &self,
         id: &str,
         raw_answer: &[u8],
-        dispatcher: HookLifecycleDispatcher,
+        runtime: SessionHookRuntime<'session>,
+        causality: HookCausality,
         floor: ResumeFloor,
-        effects: ToolEffectPorts<'a>,
+        effects: ToolEffectPorts<'turn>,
     ) -> Result<ToolExecution, McpError> {
         let pending = self.journal.load(id).map_err(continuation)?;
         validate_recorded_answer(&pending, raw_answer)?;
@@ -234,7 +241,14 @@ impl McpContinuationOwner {
             };
         let expires_at = opened.expires_at();
         let admission = McpResumeAdmission::validate(opened)?;
-        Self::dispatch(&dispatcher, HookLifecycle::ElicitationResult, id).await?;
+        Self::dispatch(
+            &runtime,
+            causality.clone(),
+            HookLifecycle::ElicitationResult,
+            id,
+        )
+        .await?;
+        let original_causality = original_tool_causality(&runtime, &causality)?;
         let claim_time = self.clock.now();
         let (authorized, successor) = match admission.into_retry_authorized_with_successor(
             floor,
@@ -265,7 +279,7 @@ impl McpContinuationOwner {
                 return Err(continuation(error));
             }
         };
-        let successor_context = McpResumeContext::new(dispatcher, capture.clone());
+        let successor_context = McpResumeContext::new(runtime, capture.clone(), original_causality);
         let (call, guarded) =
             effects.bind_mcp_resume(authorized, successor, Some(successor_context));
         let generation: Arc<str> = Arc::from(capture.generation());
@@ -357,15 +371,42 @@ impl McpContinuationOwner {
     }
 
     async fn dispatch(
-        dispatcher: &HookLifecycleDispatcher,
+        runtime: &SessionHookRuntime<'_>,
+        causality: HookCausality,
         lifecycle: HookLifecycle,
         id: &str,
     ) -> Result<(), McpError> {
+        let item = causality
+            .item_id()
+            .ok_or_else(|| hook_failure("MCP continuation has no tool item causality"))?;
+        let causality = match causality.owner() {
+            ego_core::event::hook::HookOccurrenceOwner::Continuation { id: owner }
+                if owner == id =>
+            {
+                causality
+            }
+            ego_core::event::hook::HookOccurrenceOwner::Continuation { .. } => {
+                return Err(hook_failure(
+                    "MCP continuation causality has the wrong owner",
+                ));
+            }
+            _ => {
+                let parent = causality.parent().ok_or_else(|| {
+                    hook_failure("MCP continuation has no parent event causality")
+                })?;
+                HookCausality::continuation(id, causality.turn(), item, parent)
+                    .map_err(|error| hook_failure(error.to_string()))?
+            }
+        };
         let key = HookOccurrenceKey::continuation(lifecycle, id)
             .map_err(|error| hook_failure(error.to_string()))?;
-        let occurrence = HookOccurrence::new(key, HookEvent::session(lifecycle))
-            .map_err(|error| hook_failure(error.to_string()))?;
-        let result = dispatcher
+        let occurrence = HookOccurrence::new(
+            key,
+            HookEvent::turn(lifecycle, HookSubject::Item { item }),
+            causality,
+        )
+        .map_err(|error| hook_failure(error.to_string()))?;
+        let result = runtime
             .dispatch(Producer::Main, occurrence)
             .await
             .map_err(|error| hook_failure(error.to_string()))?;
@@ -381,37 +422,38 @@ impl McpContinuationOwner {
 
 /// Session-bound adapter from the core question consumer to the captured MCP
 /// continuation owner and its original raw effect authority.
-pub struct McpForeignQuestionPort<'a> {
+pub struct McpForeignQuestionPort<'session, 'turn> {
     owner: Arc<McpContinuationOwner>,
-    dispatcher: HookLifecycleDispatcher,
+    runtime: SessionHookRuntime<'session>,
     floor: ResumeFloor,
-    effects: ToolEffectPorts<'a>,
+    effects: ToolEffectPorts<'turn>,
 }
 
-impl<'a> McpForeignQuestionPort<'a> {
+impl<'session, 'turn> McpForeignQuestionPort<'session, 'turn> {
     pub fn new(
         owner: Arc<McpContinuationOwner>,
-        dispatcher: HookLifecycleDispatcher,
+        runtime: SessionHookRuntime<'session>,
         floor: ResumeFloor,
-        effects: ToolEffectPorts<'a>,
+        effects: ToolEffectPorts<'turn>,
     ) -> Self {
         Self {
             owner,
-            dispatcher,
+            runtime,
             floor,
             effects,
         }
     }
 }
 
-impl ForeignQuestionPort for McpForeignQuestionPort<'_> {
+impl ForeignQuestionPort for McpForeignQuestionPort<'_, '_> {
     fn resume<'a>(
         &'a self,
         continuation_id: &'a str,
         canonical_json: &'a str,
+        causality: HookCausality,
     ) -> futures::future::BoxFuture<'a, Result<ToolExecution, String>> {
         let owner = Arc::clone(&self.owner);
-        let dispatcher = self.dispatcher.clone();
+        let runtime = self.runtime.clone();
         let floor = self.floor.clone();
         let effects = self.effects.clone();
         Box::pin(async move {
@@ -419,7 +461,8 @@ impl ForeignQuestionPort for McpForeignQuestionPort<'_> {
                 .accept_answer(
                     continuation_id,
                     canonical_json.as_bytes(),
-                    dispatcher,
+                    runtime,
+                    causality,
                     floor,
                     effects,
                 )
@@ -427,6 +470,24 @@ impl ForeignQuestionPort for McpForeignQuestionPort<'_> {
                 .map_err(|error| error.to_string())
         })
     }
+}
+
+fn original_tool_causality(
+    runtime: &SessionHookRuntime<'_>,
+    result: &HookCausality,
+) -> Result<HookCausality, McpError> {
+    let item = result
+        .item_id()
+        .ok_or_else(|| hook_failure("MCP continuation has no tool item causality"))?;
+    runtime
+        .inspect(|state| {
+            state.items.get(&item).and_then(|tool| {
+                tool.tool_call_started
+                    .map(|parent| HookCausality::item(item, tool.turn, parent))
+            })
+        })
+        .map_err(|error| hook_failure(error.to_string()))?
+        .ok_or_else(|| hook_failure("MCP continuation lost its original tool causality"))
 }
 
 fn validate_recorded_answer(

@@ -347,14 +347,13 @@ async fn compose_and_serve(
         controller: Arc::clone(&controller),
         artifacts: Arc::clone(&store),
     });
-    let compaction: Arc<dyn ego_core::compact::CompactionCommand> = Arc::new(
-        run::CliCompactionCommand::for_protocol(
+    let compaction: Arc<dyn ego_core::compact::CompactionCommand> =
+        Arc::new(run::CliCompactionCommand::for_protocol(
             root.clone(),
             args.session_dir.clone(),
             Arc::clone(&store),
             evidence,
-        ),
-    );
+        ));
     let ports = McpRunServerPorts::new(
         Arc::new(CanonicalRoots { base: root }),
         Arc::new(TokioExecutionSpawner),

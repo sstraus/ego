@@ -6,9 +6,10 @@
 use ego_core::digest::sha256_hex;
 use ego_core::event::domain::EventKind;
 use ego_core::event::hook::{
-    HookCatalogueEvidence, HookContentDigest, HookDecision, HookDescriptorEvidence, HookFailure,
-    HookFailureKind, HookFeedback, HookId, HookInvocationId, HookLifecycle, HookOccurrenceKey,
-    HookOccurrenceOwner, HookPlan, HookResult, HookSourceAuthority, HookSourceLocation,
+    HookActivation, HookCatalogueEntryEvidence, HookCatalogueEvidence, HookContentDigest,
+    HookDecision, HookDescriptorEvidence, HookFailure, HookFailureKind, HookFeedback, HookId,
+    HookInvocationId, HookLifecycle, HookOccurrenceKey, HookOccurrenceOwner, HookPlan,
+    HookPlanEntry, HookResult, HookSourceAuthority, HookSourceLocation,
 };
 use ego_core::event::id::{EventId, ItemId, Producer};
 use ego_core::store::evidence::{EvidenceId, EvidenceRef};
@@ -28,6 +29,9 @@ fn authority() -> HookSourceAuthority {
 }
 fn hook(ordinal: u32) -> HookDescriptorEvidence {
     HookDescriptorEvidence::new(authority(), location(), digest(), ordinal)
+}
+fn catalogue_entry(ordinal: u32) -> HookCatalogueEntryEvidence {
+    HookCatalogueEntryEvidence::new(hook(ordinal), HookActivation::Persistent)
 }
 fn evidence_for(text: &str) -> EvidenceRef {
     EvidenceRef {
@@ -99,9 +103,15 @@ fn descriptor_recomputes_identity_and_catalogue_rejects_duplicates_atomically() 
         descriptor.id(),
         HookId::derive(authority(), &location(), &digest(), 3)
     );
-    assert!(HookCatalogueEvidence::new(vec![descriptor.clone(), descriptor]).is_err());
-    assert!(HookCatalogueEvidence::new(vec![hook(0), hook(0)]).is_err());
-    assert!(HookCatalogueEvidence::new(vec![hook(0), hook(1)]).is_ok());
+    assert!(
+        HookCatalogueEvidence::new(vec![
+            HookCatalogueEntryEvidence::new(descriptor.clone(), HookActivation::Persistent),
+            HookCatalogueEntryEvidence::new(descriptor, HookActivation::Persistent),
+        ])
+        .is_err()
+    );
+    assert!(HookCatalogueEvidence::new(vec![catalogue_entry(0), catalogue_entry(0)]).is_err());
+    assert!(HookCatalogueEvidence::new(vec![catalogue_entry(0), catalogue_entry(1)]).is_ok());
     assert!(
         HookCatalogueEvidence::new(Vec::new())
             .unwrap()
@@ -216,7 +226,11 @@ fn events_are_exactly_the_four_typed_hook_facts_and_no_legacy_decoder_exists() {
     let subject_item = ItemId::new();
     let subject = ego_core::event::hook::HookSubject::Item { item: subject_item };
     let _ = EventKind::HookCatalogueAdmitted {
-        descriptors: HookCatalogueEvidence::new(vec![descriptor.clone()]).unwrap(),
+        descriptors: HookCatalogueEvidence::new(vec![HookCatalogueEntryEvidence::new(
+            descriptor.clone(),
+            HookActivation::Persistent,
+        )])
+        .unwrap(),
     };
     let _ = EventKind::HookLifecycleReached {
         occurrence: HookOccurrenceKey::new(
@@ -224,7 +238,11 @@ fn events_are_exactly_the_four_typed_hook_facts_and_no_legacy_decoder_exists() {
             HookOccurrenceOwner::Item { item: subject_item },
         ),
         subject,
-        plan: HookPlan::new(vec![descriptor.id()]).unwrap(),
+        plan: HookPlan::new(vec![HookPlanEntry::new(
+            descriptor.id(),
+            HookActivation::Persistent,
+        )])
+        .unwrap(),
     };
     let _ = EventKind::HookInvocationStarted {
         occurrence: EventId::new(),

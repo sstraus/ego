@@ -2,15 +2,28 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use ego_core::event::domain::GenerationRole;
-use ego_core::event::hook::HookDecision;
+use ego_core::event::hook::{
+    HookDecision, HookFailure, HookFailureKind, HookFeedback, HookOutcome,
+};
+use ego_core::event::id::TurnId;
 use ego_core::generator::attempt::DeliveryCertainty;
 use ego_core::hook::{
-    EffectScope, HookHandlerConfig, HookHandlerRequestV1, HookHandlerResultV1,
-    HookInvocationRequest,
+    EffectScope, HookFuture, HookHandlerConfig, HookHandlerRequestV1, HookHandlerResultV1,
+    HookInvocationPort, HookInvocationRequest,
+};
+use ego_core::permit::{
+    Classification, HttpRoute, HttpScheme, NetworkTarget, PolicyEngine, PreparedCall,
 };
 use ego_core::store::evidence::EvidenceRef;
+use ego_core::turn::{ToolEffectPorts, ToollessGenerationOwner};
+use ego_tools::exec::RunEffectPorts;
+use ego_tools::hook::{CommandHookAdapter, HookAdapterResult, HttpHookAdapter};
+
+use crate::model::CliGenerationModelSource;
+use crate::provider_http::ProviderHttpAdapter;
 
 pub type GenerationFuture<'a> =
     Pin<Box<dyn Future<Output = Result<GeneratedHookResult, ToollessGenerationError>> + Send + 'a>>;
@@ -23,6 +36,7 @@ pub struct ToollessGenerationRequest {
     model_slug: Option<String>,
     tools: Vec<String>,
     effect_scope: EffectScope,
+    turn: TurnId,
 }
 
 impl ToollessGenerationRequest {
@@ -48,6 +62,10 @@ impl ToollessGenerationRequest {
 
     pub fn effect_scope(&self) -> &EffectScope {
         &self.effect_scope
+    }
+
+    pub fn turn(&self) -> TurnId {
+        self.turn
     }
 }
 
@@ -94,6 +112,12 @@ impl std::error::Error for ToollessGenerationError {}
 
 pub trait ToollessGenerationService: Send + Sync {
     fn generate(&self, request: ToollessGenerationRequest) -> GenerationFuture<'_>;
+}
+
+impl<S: ToollessGenerationService + ?Sized> ToollessGenerationService for Arc<S> {
+    fn generate(&self, request: ToollessGenerationRequest) -> GenerationFuture<'_> {
+        self.as_ref().generate(request)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -164,6 +188,7 @@ impl<S: ToollessGenerationService> HookPromptAdapter<S> {
                 model_slug: model.clone(),
                 tools: Vec::new(),
                 effect_scope: request.effect_scope().clone(),
+                turn: request.causality().turn(),
             })
             .await;
         let generated = match generated {
@@ -199,4 +224,310 @@ impl<S: ToollessGenerationService> HookPromptAdapter<S> {
             }),
         }
     }
+}
+
+/// Production prompt-hook generation over the session's shared tool-less
+/// attempt owner and the invocation's exact cancel/deadline scope.
+pub struct RunToollessGenerationService<'session, 'effects> {
+    owner: ToollessGenerationOwner<'session, 'effects>,
+    source: Arc<CliGenerationModelSource>,
+    ports: Arc<RunEffectPorts>,
+}
+
+impl<'session, 'effects> RunToollessGenerationService<'session, 'effects> {
+    pub fn new(
+        owner: ToollessGenerationOwner<'session, 'effects>,
+        source: Arc<CliGenerationModelSource>,
+        ports: Arc<RunEffectPorts>,
+    ) -> Self {
+        Self {
+            owner,
+            source,
+            ports,
+        }
+    }
+}
+
+impl ToollessGenerationService for RunToollessGenerationService<'_, '_> {
+    fn generate(&self, request: ToollessGenerationRequest) -> GenerationFuture<'_> {
+        Box::pin(async move {
+            let input = serde_json::to_string(request.input())
+                .map_err(|error| ToollessGenerationError::new(error.to_string()))?;
+            let http = Arc::new(ProviderHttpAdapter::new(Arc::clone(&self.ports)))
+                as Arc<dyn ego_ai::http::Http>;
+            let source = self.source.bind(
+                http,
+                request.effect_scope().cancel_token(),
+                Some(request.effect_scope().deadline()),
+            );
+            let generated = self
+                .owner
+                .generate(
+                    source,
+                    request.role(),
+                    request.turn(),
+                    request.prompt().to_owned(),
+                    input,
+                    request
+                        .model_slug()
+                        .map(|model| ego_core::config::ModelRef(model.to_owned())),
+                )
+                .await
+                .map_err(|error| {
+                    ToollessGenerationError::with_delivery(error.to_string(), error.delivery())
+                })?;
+            Ok(GeneratedHookResult {
+                raw: generated.raw().to_vec(),
+                evidence: generated.evidence().clone(),
+                delivery: generated.delivery(),
+            })
+        })
+    }
+}
+
+/// The sole production-facing hook invocation adapter for one session.
+///
+/// Handler-specific parsing and execution stays in the typed lower adapters;
+/// this owner binds each prepared effect to the run policy and converts the
+/// settlement into the core hook result vocabulary.
+pub struct HookPortAdapter<'a> {
+    policy: &'a PolicyEngine,
+    effects: ToolEffectPorts<'a>,
+    mcp: Option<Arc<dyn HookInvocationPort + 'a>>,
+    prompt: Arc<dyn ToollessGenerationService + 'a>,
+}
+
+impl<'a> HookPortAdapter<'a> {
+    pub fn new(
+        policy: &'a PolicyEngine,
+        effects: ToolEffectPorts<'a>,
+        mcp: Option<Arc<dyn HookInvocationPort + 'a>>,
+        prompt: Arc<dyn ToollessGenerationService + 'a>,
+    ) -> Self {
+        Self {
+            policy,
+            effects,
+            mcp,
+            prompt,
+        }
+    }
+
+    async fn invoke_owned(
+        &self,
+        request: HookInvocationRequest,
+    ) -> Result<HookOutcome, Box<HookFailure>> {
+        match request.handler() {
+            HookHandlerConfig::Command { .. } => self.invoke_command(request).await,
+            HookHandlerConfig::Http { .. } => self.invoke_http(request).await,
+            HookHandlerConfig::McpTool { .. } => self.invoke_mcp(request).await,
+            HookHandlerConfig::Prompt { .. } => self.invoke_prompt(request).await,
+        }
+    }
+
+    async fn invoke_command(
+        &self,
+        request: HookInvocationRequest,
+    ) -> Result<HookOutcome, Box<HookFailure>> {
+        let prepared = CommandHookAdapter::prepare(request.clone())
+            .map_err(|error| self.failure(HookFailureKind::HandlerFailed, error.to_string()))?;
+        let (prepared, effects) = self.authorize(prepared)?;
+        let result = CommandHookAdapter::new(effects, prepared)
+            .invoke(request.clone())
+            .await
+            .map_err(|error| self.failure(HookFailureKind::HandlerFailed, error.to_string()))?;
+        self.settle_adapter(&request, result)
+    }
+
+    async fn invoke_http(
+        &self,
+        request: HookInvocationRequest,
+    ) -> Result<HookOutcome, Box<HookFailure>> {
+        let http = HttpHookAdapter::prepare(request.clone())
+            .map_err(|error| self.failure(HookFailureKind::HandlerFailed, error.to_string()))?;
+        let prepared = self.prepare_http_authority(&request, &http)?;
+        let (prepared, effects) = self.authorize(prepared)?;
+        let result = HttpHookAdapter::new(effects, prepared, http)
+            .invoke(request.clone())
+            .await
+            .map_err(|error| self.failure(HookFailureKind::HandlerFailed, error.to_string()))?;
+        self.settle_adapter(&request, result)
+    }
+
+    async fn invoke_mcp(
+        &self,
+        request: HookInvocationRequest,
+    ) -> Result<HookOutcome, Box<HookFailure>> {
+        let mcp = self.mcp.as_ref().ok_or_else(|| {
+            self.failure(
+                HookFailureKind::BackendUnavailable,
+                "the session has no MCP hook runtime".to_owned(),
+            )
+        })?;
+        mcp.invoke(request).await.map_err(Box::new)
+    }
+
+    async fn invoke_prompt(
+        &self,
+        request: HookInvocationRequest,
+    ) -> Result<HookOutcome, Box<HookFailure>> {
+        let settlement = HookPromptAdapter::new(Arc::clone(&self.prompt))
+            .invoke(request.clone())
+            .await
+            .map_err(|error| self.failure(HookFailureKind::HandlerFailed, error.to_string()))?;
+        if let Some(failure) = settlement.failure() {
+            let kind = match failure {
+                PromptHookFailure::Malformed => HookFailureKind::MalformedResult,
+                PromptHookFailure::Generation
+                    if settlement.delivery() == DeliveryCertainty::PossiblySent =>
+                {
+                    HookFailureKind::DeliveryUncertain
+                }
+                PromptHookFailure::Generation => HookFailureKind::BackendUnavailable,
+            };
+            return Err(Box::new(HookFailure::new(kind, None)));
+        }
+        self.outcome(&request, settlement.decision(), settlement.feedback())
+    }
+
+    fn authorize(
+        &self,
+        prepared: PreparedCall,
+    ) -> Result<(PreparedCall, ego_core::permit::GuardedEffects<'a>), Box<HookFailure>> {
+        match self.policy.classify(prepared) {
+            Classification::Settled(Ok(authorized)) => Ok(self.effects.clone().bind(authorized)),
+            Classification::Settled(Err(denial)) => {
+                Err(self.failure(HookFailureKind::EffectDenied, denial.to_string()))
+            }
+            Classification::Ask(pending) => {
+                Err(self.failure(HookFailureKind::EffectDenied, pending.request().to_string()))
+            }
+        }
+    }
+
+    fn prepare_http_authority(
+        &self,
+        request: &HookInvocationRequest,
+        http: &ego_core::permit::HttpRequest,
+    ) -> Result<PreparedCall, Box<HookFailure>> {
+        let HookHandlerConfig::Http {
+            url,
+            headers,
+            allowed_env_vars,
+            ..
+        } = request.handler()
+        else {
+            unreachable!("the HTTP branch matches the handler kind")
+        };
+        let parsed = url::Url::parse(url)
+            .map_err(|error| self.failure(HookFailureKind::HandlerFailed, error.to_string()))?;
+        if !parsed.username().is_empty()
+            || parsed.password().is_some()
+            || parsed.fragment().is_some()
+        {
+            return Err(self.failure(
+                HookFailureKind::HandlerFailed,
+                "HTTP hook URL contains unsupported authority or fragment".to_owned(),
+            ));
+        }
+        let scheme = match parsed.scheme() {
+            "http" => HttpScheme::Http,
+            "https" => HttpScheme::Https,
+            _ => {
+                return Err(self.failure(
+                    HookFailureKind::HandlerFailed,
+                    "HTTP hook URL has an unsupported scheme".to_owned(),
+                ));
+            }
+        };
+        let host = parsed.host_str().ok_or_else(|| {
+            self.failure(
+                HookFailureKind::HandlerFailed,
+                "HTTP hook URL has no host".to_owned(),
+            )
+        })?;
+        let port = parsed.port_or_known_default().ok_or_else(|| {
+            self.failure(
+                HookFailureKind::HandlerFailed,
+                "HTTP hook URL has no port".to_owned(),
+            )
+        })?;
+        let target = NetworkTarget::new(host, port)
+            .map_err(|error| self.failure(HookFailureKind::HandlerFailed, error.to_string()))?;
+        let route = HttpRoute::new(scheme, target)
+            .map_err(|error| self.failure(HookFailureKind::HandlerFailed, error.to_string()))?;
+        let allowed = allowed_env_vars.as_deref().unwrap_or_default();
+        let secret_sources = headers
+            .iter()
+            .filter_map(|(_, value)| exact_secret_name(value))
+            .filter(|name| allowed.iter().any(|allowed| allowed == name))
+            .map(str::to_owned)
+            .collect();
+        Ok(PreparedCall::hook_http(
+            request.hook(),
+            route,
+            http,
+            secret_sources,
+        ))
+    }
+
+    fn settle_adapter(
+        &self,
+        request: &HookInvocationRequest,
+        result: HookAdapterResult,
+    ) -> Result<HookOutcome, Box<HookFailure>> {
+        let delivery = result.delivery_certainty();
+        let HookAdapterResult::Settled(settlement) = result;
+        if settlement.failure().is_some() {
+            let kind = if delivery == DeliveryCertainty::PossiblySent {
+                HookFailureKind::DeliveryUncertain
+            } else {
+                HookFailureKind::HandlerFailed
+            };
+            return Err(Box::new(HookFailure::new(kind, None)));
+        }
+        self.outcome(request, settlement.decision(), settlement.feedback())
+    }
+
+    fn outcome(
+        &self,
+        request: &HookInvocationRequest,
+        decision: HookDecision,
+        feedback: Option<&str>,
+    ) -> Result<HookOutcome, Box<HookFailure>> {
+        let feedback = feedback
+            .map(|feedback| self.feedback(request, feedback))
+            .transpose()?;
+        Ok(HookOutcome::new(decision, feedback))
+    }
+
+    fn failure(&self, kind: HookFailureKind, message: String) -> Box<HookFailure> {
+        tracing::warn!(%message, ?kind, "hook invocation adapter refused an effect");
+        Box::new(HookFailure::new(kind, None))
+    }
+
+    fn feedback(
+        &self,
+        request: &HookInvocationRequest,
+        text: &str,
+    ) -> Result<HookFeedback, Box<HookFailure>> {
+        let reference = self
+            .effects
+            .store_hook_feedback(text.as_bytes())
+            .map_err(|_| Box::new(HookFailure::new(HookFailureKind::EvidenceFailed, None)))?;
+        HookFeedback::bounded(request.hook(), reference, text)
+            .map_err(|_| Box::new(HookFailure::new(HookFailureKind::EvidenceFailed, None)))
+    }
+}
+
+impl HookInvocationPort for HookPortAdapter<'_> {
+    fn invoke<'a>(&'a self, request: HookInvocationRequest) -> HookFuture<'a> {
+        Box::pin(async move { self.invoke_owned(request).await.map_err(|failure| *failure) })
+    }
+}
+
+fn exact_secret_name(value: &str) -> Option<&str> {
+    value
+        .strip_prefix("${")
+        .and_then(|value| value.strip_suffix('}'))
+        .filter(|name| !name.is_empty() && !name.contains('{') && !name.contains('}'))
 }

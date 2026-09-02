@@ -81,7 +81,7 @@ mod turn {
             session: Session<'a>,
             runtime: GenerationRuntime,
             tools: Tools<'a>,
-        ) -> CoreTurnLoop<'a> {
+        ) -> CoreTurnLoop<'a, 'a> {
             CoreTurnLoop::new(session, runtime, tools).expect("synchronized budget gate")
         }
     }

@@ -123,7 +123,11 @@ pub trait McpServerPort: Send + Sync {
         &'a self,
         call: McpServerToolCall,
     ) -> McpFuture<'a, Result<McpServerCallOutcome, McpError>> {
-        Box::pin(async move { self.call_tool(call).await.map(McpServerCallOutcome::success) })
+        Box::pin(async move {
+            self.call_tool(call)
+                .await
+                .map(McpServerCallOutcome::success)
+        })
     }
 
     fn list_resources<'a>(&'a self) -> McpFuture<'a, Vec<McpServerResourceDescriptor>>;

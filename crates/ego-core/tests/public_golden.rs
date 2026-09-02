@@ -16,9 +16,9 @@ use ego_core::event::domain::{
     SubagentTerminal,
 };
 use ego_core::event::hook::{
-    HookCatalogueEvidence, HookDecision, HookDescriptorEvidence, HookInvocationId,
-    HookOccurrenceKey, HookOccurrenceOwner, HookOutcome, HookPlan, HookSourceAuthority,
-    HookSourceLocation,
+    HookActivation, HookCatalogueEntryEvidence, HookCatalogueEvidence, HookDecision,
+    HookDescriptorEvidence, HookInvocationId, HookOccurrenceKey, HookOccurrenceOwner, HookOutcome,
+    HookPlan, HookPlanEntry, HookSourceAuthority, HookSourceLocation,
 };
 use ego_core::event::id::{
     EventId, ItemId, Producer, Seq, SessionId, SubagentInvocationId, TurnId,
@@ -46,6 +46,25 @@ mod public_golden {
     use super::common::id;
 
     const SESSION: &str = "00000000-0000-0000-0000-000000000001";
+
+    fn hook_descriptor() -> HookDescriptorEvidence {
+        HookDescriptorEvidence::new(
+            HookSourceAuthority::Project,
+            HookSourceLocation::parse("hooks/project.json").unwrap(),
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                .parse()
+                .unwrap(),
+            0,
+        )
+    }
+
+    fn hook_catalogue_entry() -> HookCatalogueEntryEvidence {
+        HookCatalogueEntryEvidence::new(hook_descriptor(), HookActivation::Persistent)
+    }
+
+    fn hook_plan_entry() -> HookPlanEntry {
+        HookPlanEntry::new(hook_descriptor().id(), HookActivation::Persistent)
+    }
 
     /// Tokens across every priced category, so the golden pins each of them
     /// rather than only the two the old input/output pair had.
@@ -292,15 +311,7 @@ mod public_golden {
                 turn1,
                 None,
                 EventKind::HookCatalogueAdmitted {
-                    descriptors: HookCatalogueEvidence::new(vec![HookDescriptorEvidence::new(
-                        HookSourceAuthority::Project,
-                        HookSourceLocation::parse("hooks/project.json").unwrap(),
-                        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-                            .parse()
-                            .unwrap(),
-                        0,
-                    )])
-                    .unwrap(),
+                    descriptors: HookCatalogueEvidence::new(vec![hook_catalogue_entry()]).unwrap(),
                 },
             ),
             ev(
@@ -315,18 +326,7 @@ mod public_golden {
                         },
                     ),
                     subject: ego_core::event::hook::HookSubject::Session,
-                    plan: HookPlan::new(vec![
-                        HookDescriptorEvidence::new(
-                            HookSourceAuthority::Project,
-                            HookSourceLocation::parse("hooks/project.json").unwrap(),
-                            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-                                .parse()
-                                .unwrap(),
-                            0,
-                        )
-                        .id(),
-                    ])
-                    .unwrap(),
+                    plan: HookPlan::new(vec![hook_plan_entry()]).unwrap(),
                 },
             ),
             ev(

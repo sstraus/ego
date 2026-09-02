@@ -56,6 +56,11 @@ use ego_core::turn::{
 use futures::future::BoxFuture;
 use futures::stream::BoxStream;
 
+const CONTINUATION_ID: &str =
+    "mcp-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+const SUCCESSOR_CONTINUATION_ID: &str =
+    "mcp-fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
+
 #[derive(Default)]
 struct RecordingElicitor {
     calls: Mutex<Vec<(ItemId, QuestionRequest)>>,
@@ -134,10 +139,10 @@ fn elicitor_receives_the_persisted_question_item_and_returns_a_typed_outcome() {
 // Keep the attachment itself explicit as a narrow compile contract; the
 // integration test below exercises the same port through a real model turn.
 #[allow(dead_code)]
-fn turn_loop_accepts_the_core_elicitor(
-    turn: TurnLoop<'_>,
+fn turn_loop_accepts_the_core_elicitor<'session, 'turn>(
+    turn: TurnLoop<'session, 'turn>,
     elicitor: Arc<dyn Elicitor>,
-) -> TurnLoop<'_> {
+) -> TurnLoop<'session, 'turn> {
     turn.with_elicitor(elicitor)
 }
 
@@ -393,6 +398,7 @@ impl ForeignQuestionPort for RecordingForeignQuestionPort {
         &'a self,
         continuation_id: &'a str,
         canonical_json: &'a str,
+        _causality: ego_core::hook::HookCausality,
     ) -> BoxFuture<'a, Result<ToolExecution, String>> {
         if let Some(trace) = &self.trace {
             trace.lock().expect("question trace").push("foreign-port");
@@ -443,7 +449,7 @@ impl Tool for ForeignInputTool {
     {
         Box::pin(async {
             Ok(ToolExecution::InputRequired(
-                ForeignInputRequired::new("regression_case", self.request.clone())
+                ForeignInputRequired::new(CONTINUATION_ID, self.request.clone())
                     .expect("valid continuation id"),
             ))
         })
@@ -455,7 +461,7 @@ fn with_foreign_turn<R>(
     elicitor: Arc<dyn Elicitor>,
     foreign_port: Arc<RecordingForeignQuestionPort>,
     trace: Option<Arc<Mutex<Vec<&'static str>>>>,
-    test: impl FnOnce(TurnLoop<'_>, &MemoryStore) -> R,
+    test: impl FnOnce(TurnLoop<'_, '_>, &MemoryStore) -> R,
 ) -> R {
     let store = trace.map_or_else(MemoryStore::default, MemoryStore::with_trace);
     let clock = FixedClock;
@@ -695,9 +701,9 @@ fn form_question_accepts_object_answers_and_rejects_schema_or_type_before_mutati
 #[test]
 fn foreign_input_required_carries_question_request_and_non_secret_continuation_id() {
     let request = foreign_question_request();
-    let foreign = ForeignInputRequired::new("regression_case", request.clone())
-        .expect("valid continuation id");
-    assert_eq!(foreign.continuation_id(), "regression_case");
+    let foreign =
+        ForeignInputRequired::new(CONTINUATION_ID, request.clone()).expect("valid continuation id");
+    assert_eq!(foreign.continuation_id(), CONTINUATION_ID);
     assert_eq!(foreign.question_request(), &request);
 }
 
@@ -728,7 +734,7 @@ fn foreign_input_required_is_projected_to_a_durable_pending_question() {
                 panic!("foreign input must retain a closed ForeignContinuation target");
             };
             assert_eq!(*tool_call, pending.tool_call());
-            assert_eq!(continuation_id, "regression_case");
+            assert_eq!(continuation_id, CONTINUATION_ID);
             let question = pending.item_id();
             assert!(
                 store
@@ -745,7 +751,7 @@ fn foreign_input_required_is_projected_to_a_durable_pending_question() {
             assert_eq!(
                 foreign_port.calls(),
                 vec![(
-                    "regression_case".to_owned(),
+                    CONTINUATION_ID.to_owned(),
                     r#"{"target":"staging"}"#.to_owned()
                 )]
             );
@@ -867,7 +873,7 @@ fn available_elicitor_settles_foreign_input_before_one_port_resume_and_completio
             assert_eq!(
                 foreign_port.calls(),
                 vec![(
-                    "regression_case".to_owned(),
+                    CONTINUATION_ID.to_owned(),
                     r#"{"target":"staging"}"#.to_owned()
                 )]
             );
@@ -903,8 +909,9 @@ fn successor_foreign_input_is_exposed_after_settlement_and_keeps_predecessor_clo
         ],
         Some(trace.clone()),
     ));
-    let successor = ForeignInputRequired::new("regression_case", foreign_question_request())
-        .expect("valid successor continuation");
+    let successor =
+        ForeignInputRequired::new(SUCCESSOR_CONTINUATION_ID, foreign_question_request())
+            .expect("valid successor continuation");
     let foreign_port = Arc::new(RecordingForeignQuestionPort::scripted(
         vec![Ok(ToolExecution::InputRequired(successor))],
         Some(trace.clone()),
@@ -962,7 +969,7 @@ fn successor_foreign_input_is_exposed_after_settlement_and_keeps_predecessor_clo
                 QuestionTarget::ForeignContinuation {
                     continuation_id,
                     ..
-                } if continuation_id == "regression_case"
+                } if continuation_id == SUCCESSOR_CONTINUATION_ID
             ));
             assert_eq!(foreign_port.calls().len(), 1);
 

@@ -278,7 +278,8 @@ pub fn stop_reason_v1(termination: &RunTermination) -> Result<v1::StopReason, St
         }
         RunTermination::QuestionRequired { question } => Err(format!(
             "question {} still requires an answer; resume it with `ego resume --answer {}=JSON`",
-            question.id, question.id
+            question.as_ref().id,
+            question.as_ref().id
         )),
         // Split for the reason the line UI splits it (`ego-cli`'s
         // `termination_note`): "nobody could grant it" describes a question

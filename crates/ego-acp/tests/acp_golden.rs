@@ -26,7 +26,7 @@
 //! projection.
 //!
 //! The fixture is a representative session, **not** an exhaustive tour of
-//! the domain's 31 event kinds: its 23 events cover 21 distinct kinds
+//! the domain's 36 event kinds: its 23 events cover 21 distinct kinds
 //! (`UserPrompt`, `AssistantDelta`, `AssistantMessage` and `TurnCompleted`
 //! each appear more than once) and omit `ReasoningDelta`,
 //! `GenerationStarted`, `AttemptSettled`, `UsageCorrected`, both prompt-queue
@@ -45,13 +45,17 @@ use ego_core::event::domain::{
     SubagentTerminal,
 };
 use ego_core::event::hook::{
-    HookCatalogueEvidence, HookDecision, HookDescriptorEvidence, HookInvocationId,
-    HookOccurrenceKey, HookOccurrenceOwner, HookOutcome, HookPlan, HookSourceAuthority,
-    HookSourceLocation,
+    HookActivation, HookCatalogueEntryEvidence, HookCatalogueEvidence, HookDecision,
+    HookDescriptorEvidence, HookInvocationId, HookOccurrenceKey, HookOccurrenceOwner, HookOutcome,
+    HookPlan, HookPlanEntry, HookSourceAuthority, HookSourceLocation,
 };
 use ego_core::event::id::{
     EventId, GenerationId, ItemId, Producer, QueuedPromptId, Seq, SessionId, SubagentInvocationId,
     TurnId,
+};
+use ego_core::event::skill::{
+    SkillCatalogueEvidence, SkillCatalogueGeneration, SkillContentDigest, SkillDescriptorEvidence,
+    SkillId, SkillSourceAuthority, SkillSourceLocation,
 };
 use ego_core::event::time::Timestamp;
 use ego_core::generator::attempt::{AttemptRef, DeliveryCertainty, Outcome, UsageReport};
@@ -115,6 +119,25 @@ fn acp_state_v2(
 
 mod acp_golden {
     use super::*;
+
+    fn hook_descriptor() -> HookDescriptorEvidence {
+        HookDescriptorEvidence::new(
+            HookSourceAuthority::Project,
+            HookSourceLocation::parse("hooks/project.json").unwrap(),
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                .parse()
+                .unwrap(),
+            0,
+        )
+    }
+
+    fn hook_catalogue_entry() -> HookCatalogueEntryEvidence {
+        HookCatalogueEntryEvidence::new(hook_descriptor(), HookActivation::Persistent)
+    }
+
+    fn hook_plan_entry() -> HookPlanEntry {
+        HookPlanEntry::new(hook_descriptor().id(), HookActivation::Persistent)
+    }
 
     fn blob_ref(bytes: u64) -> BlobRef {
         BlobRef::new(
@@ -327,15 +350,7 @@ mod acp_golden {
                 turn1,
                 None,
                 EventKind::HookCatalogueAdmitted {
-                    descriptors: HookCatalogueEvidence::new(vec![HookDescriptorEvidence::new(
-                        HookSourceAuthority::Project,
-                        HookSourceLocation::parse("hooks/project.json").unwrap(),
-                        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-                            .parse()
-                            .unwrap(),
-                        0,
-                    )])
-                    .unwrap(),
+                    descriptors: HookCatalogueEvidence::new(vec![hook_catalogue_entry()]).unwrap(),
                 },
             ),
             ev(
@@ -350,18 +365,7 @@ mod acp_golden {
                         },
                     ),
                     subject: ego_core::event::hook::HookSubject::Session,
-                    plan: HookPlan::new(vec![
-                        HookDescriptorEvidence::new(
-                            HookSourceAuthority::Project,
-                            HookSourceLocation::parse("hooks/project.json").unwrap(),
-                            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-                                .parse()
-                                .unwrap(),
-                            0,
-                        )
-                        .id(),
-                    ])
-                    .unwrap(),
+                    plan: HookPlan::new(vec![hook_plan_entry()]).unwrap(),
                 },
             ),
             ev(
@@ -412,7 +416,7 @@ mod acp_golden {
         ]
     }
 
-    /// Every event kind in the domain's 31-variant projection fixture, once each.
+    /// Every event kind in the domain's 36-variant projection fixture, once each.
     ///
     /// This is the *source* the `None`-set test selects from by name, so
     /// that a kind renamed or removed upstream breaks a test instead of
@@ -424,6 +428,31 @@ mod acp_golden {
     /// below keeps this fixture tied to the current enum; a newly added
     /// variant still requires one deliberately constructed value here.
     fn one_of_each_kind() -> Vec<EventKind> {
+        let skill_digest = SkillContentDigest::parse(
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        .unwrap();
+        let skill_location = SkillSourceLocation::parse("skills/fixture/SKILL.md").unwrap();
+        let skill = SkillDescriptorEvidence {
+            id: SkillId::derive(
+                SkillSourceAuthority::Project,
+                &skill_location,
+                "fixture",
+                &skill_digest,
+            ),
+            name: "fixture".to_owned(),
+            description: "fixture skill".to_owned(),
+            trigger: None,
+            argument_hint: None,
+            source: SkillSourceAuthority::Project,
+            location: skill_location.clone(),
+            source_digest: skill_digest,
+            user_invocable: true,
+            model_invocable: true,
+        };
+        let skill_catalogue = SkillCatalogueEvidence::new(vec![skill.clone()]).unwrap();
+        let skill_generation = SkillCatalogueGeneration::derive(&skill_catalogue);
+        let skill_invocation = ego_core::event::skill::SkillInvocationId::new();
         vec![
             EventKind::PromptQueued {
                 id: QueuedPromptId::new(),
@@ -533,6 +562,12 @@ mod acp_golden {
                 ok: true,
                 exit_reason: ExitReason::Completed,
             },
+            EventKind::CompactionSeeded {
+                source: SessionId::new(),
+                source_seq: Seq::default(),
+                prompt_revision: 0,
+                checkpoint: String::new(),
+            },
             EventKind::Compacted {
                 summary: String::new(),
             },
@@ -541,15 +576,7 @@ mod acp_golden {
                 at_seq: Seq::default(),
             },
             EventKind::HookCatalogueAdmitted {
-                descriptors: HookCatalogueEvidence::new(vec![HookDescriptorEvidence::new(
-                    HookSourceAuthority::Project,
-                    HookSourceLocation::parse("hooks/project.json").unwrap(),
-                    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-                        .parse()
-                        .unwrap(),
-                    0,
-                )])
-                .unwrap(),
+                descriptors: HookCatalogueEvidence::new(vec![hook_catalogue_entry()]).unwrap(),
             },
             EventKind::HookLifecycleReached {
                 occurrence: HookOccurrenceKey::new(
@@ -559,18 +586,7 @@ mod acp_golden {
                     },
                 ),
                 subject: ego_core::event::hook::HookSubject::Session,
-                plan: HookPlan::new(vec![
-                    HookDescriptorEvidence::new(
-                        HookSourceAuthority::Project,
-                        HookSourceLocation::parse("hooks/project.json").unwrap(),
-                        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-                            .parse()
-                            .unwrap(),
-                        0,
-                    )
-                    .id(),
-                ])
-                .unwrap(),
+                plan: HookPlan::new(vec![hook_plan_entry()]).unwrap(),
             },
             EventKind::HookInvocationStarted {
                 occurrence: EventId::new(),
@@ -619,6 +635,28 @@ mod acp_golden {
                 terminal: SubagentTerminal::Returned {
                     final_message: blob_ref(0),
                 },
+            },
+            EventKind::SkillCatalogueAdmitted {
+                generation: skill_generation,
+                descriptors: skill_catalogue,
+            },
+            EventKind::SkillInstructionAdmitted {
+                invocation: skill_invocation,
+                skill: skill.id,
+                catalogue_generation: skill_generation,
+                source: skill.source,
+                location: skill.location.clone(),
+                source_digest: skill.source_digest,
+                admission: blob_ref(1),
+                rendered: blob_ref(2),
+                model: None,
+                effort: None,
+            },
+            EventKind::SkillResourceAdmitted {
+                invocation: skill_invocation,
+                skill: skill.id,
+                location: SkillSourceLocation::parse("skills/fixture/reference.md").unwrap(),
+                content: blob_ref(3),
             },
             EventKind::Error {
                 message: String::new(),
@@ -778,7 +816,7 @@ mod acp_golden {
     fn events_with_no_counterpart_in_either_version_project_to_none() {
         assert_eq!(
             one_of_each_kind().len(),
-            31,
+            36,
             "the current internal event set is exhaustive"
         );
         let none_in_both = [
@@ -796,6 +834,9 @@ mod acp_golden {
             "hook_lifecycle_reached",
             "hook_invocation_started",
             "hook_invocation_settled",
+            "skill_catalogue_admitted",
+            "skill_instruction_admitted",
+            "skill_resource_admitted",
             "subagent_spawned",
             "subagent_requested",
             "error",
