@@ -50,9 +50,11 @@ impl BlobStore for EmptyBlobStore {
 /// A small writable content-addressed blob backend for integration tests that
 /// exercise durable admission. It intentionally implements only the generic
 /// blob boundary; semantic evidence remains owned by each test's wrapper.
+type MemoryBlobMap = Arc<Mutex<BTreeMap<String, (BlobRef, Vec<u8>)>>>;
+
 #[derive(Clone, Default)]
 pub struct MemoryBlobStore {
-    blobs: Arc<Mutex<BTreeMap<String, (BlobRef, Vec<u8>)>>>,
+    blobs: MemoryBlobMap,
 }
 
 struct MemoryBlobWriter {
