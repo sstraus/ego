@@ -1364,6 +1364,73 @@ impl<'session, 'turn> TurnLoop<'session, 'turn> {
             .await
     }
 
+    /// Run one user-authorized skill operation as the instruction for a fresh
+    /// turn. It is neither a user prompt nor a synthetic model tool call.
+    #[expect(
+        clippy::result_large_err,
+        reason = "TurnAbandoned carries the exact durable session state by contract"
+    )]
+    pub async fn run_admitted_skill(
+        &mut self,
+        operation: crate::skill::AdmittedSkillOperation,
+    ) -> Result<TurnOutcome, TurnAbandoned> {
+        let turn = TurnId::new();
+        match self.run_admitted_skill_inner(turn, operation).await {
+            Ok(outcome) => Ok(outcome),
+            Err(cause) => Err(self.abandon(turn, cause)),
+        }
+    }
+
+    async fn run_admitted_skill_inner(
+        &mut self,
+        turn: TurnId,
+        operation: crate::skill::AdmittedSkillOperation,
+    ) -> Result<TurnOutcome, StoreError> {
+        self.begin_turn(turn)?;
+        let Some(catalogue) = self.tools.skill_catalogue() else {
+            let driven = self.refuse_drive(
+                turn,
+                "no admitted skill catalogue is available".to_owned(),
+                ExitReason::Usage,
+            )?;
+            return self.finish_turn(turn, driven).await;
+        };
+        let mut next_scope = crate::skill::ActiveSkillScope::new(self.tools.effect_names());
+        if let Err(error) = crate::skill::SkillInvocation::preflight_user_scope(
+            &catalogue,
+            &operation,
+            &mut next_scope,
+        ) {
+            let driven = self.refuse_drive(turn, error.to_string(), ExitReason::Usage)?;
+            return self.finish_turn(turn, driven).await;
+        }
+        let selector = operation.name().to_owned();
+        let (invocation, admitted) = crate::skill::SkillInvocation::admit_user_in_turn(
+            &catalogue,
+            operation,
+            self.tools.blob_store(),
+            &self.journal,
+            turn,
+        )
+        .map_err(skill_store_error)?;
+        let continue_generation = self
+            .activate_skill_invocation(
+                turn,
+                &invocation,
+                next_scope,
+                HookCausality::event(admitted, turn, None),
+                HookSubject::Turn { turn },
+                selector,
+            )
+            .await?;
+        let driven = if continue_generation {
+            self.drive(turn, &[]).await?
+        } else {
+            DriveOutcome::Ended(ExitReason::Completed, None)
+        };
+        self.finish_turn(turn, driven).await
+    }
+
     /// Settle one durable pending question and continue its original turn.
     /// No new turn or user prompt is minted.
     #[expect(
@@ -1643,6 +1710,37 @@ impl<'session, 'turn> TurnLoop<'session, 'turn> {
         Ok(())
     }
 
+    async fn activate_skill_invocation(
+        &mut self,
+        turn: TurnId,
+        invocation: &crate::skill::SkillInvocation,
+        scope: crate::skill::ActiveSkillScope,
+        causality: HookCausality,
+        subject: HookSubject,
+        selector: String,
+    ) -> Result<bool, StoreError> {
+        self.active_skill_scope = Some(scope);
+        self.active_skill_invocations
+            .insert(invocation.id(), invocation.clone());
+        self.refresh_skill_hook_catalogue(turn)?;
+        let _ = self
+            .dispatch_hook(
+                causality.clone(),
+                HookEvent::tool(
+                    HookLifecycle::InstructionsLoaded,
+                    subject,
+                    selector.clone(),
+                ),
+            )
+            .await;
+        Ok(self
+            .dispatch_hook(
+                causality,
+                HookEvent::tool(HookLifecycle::UserPromptExpansion, subject, selector),
+            )
+            .await)
+    }
+
     fn refresh_skill_hook_catalogue(&self, turn: TurnId) -> Result<(), StoreError> {
         let mut sources = Vec::new();
         for invocation in self
@@ -1680,14 +1778,13 @@ impl<'session, 'turn> TurnLoop<'session, 'turn> {
         let had_active = !self.active_skill_invocations.is_empty();
         self.active_skill_invocations.clear();
         self.active_skill_scope = None;
-        if had_active {
-            self.hook_runtime
-                .as_ref()
-                .ok_or_else(|| {
-                    StoreError::Io(std::io::Error::other(
-                        "skill hooks require the session hook runtime",
-                    ))
-                })?
+        // Activation already refuses non-empty skill hook sources when no
+        // session hook runtime exists. In that case only the in-memory skill
+        // instruction and scope need clearing here.
+        if had_active
+            && let Some(runtime) = self.hook_runtime.as_ref()
+        {
+            runtime
                 .replace_skill_sources(turn, &[])
                 .map_err(hook_store_error)?;
         }
@@ -1732,36 +1829,44 @@ impl<'session, 'turn> TurnLoop<'session, 'turn> {
             Option<crate::event::id::QueuedPromptId>,
         )>,
     ) -> Result<TurnOutcome, TurnAbandoned> {
-        self.active_skill_scope = None;
-        self.active_skill_invocations.clear();
         let turn = TurnId::new();
-        if let Some(observation) = self.execution_observation.take()
-            && let Err(cause) = self.journal.append(
+        if let Err(cause) = self.begin_turn(turn) {
+            return Err(self.abandon(turn, cause));
+        }
+        let driven = match self.drive(turn, &prompts).await {
+            Ok(ended) => ended,
+            Err(cause) => return Err(self.abandon(turn, cause)),
+        };
+        match self.finish_turn(turn, driven).await {
+            Ok(outcome) => Ok(outcome),
+            Err(cause) => Err(self.abandon(turn, cause)),
+        }
+    }
+
+    fn begin_turn(&mut self, turn: TurnId) -> Result<(), StoreError> {
+        self.deactivate_skill_hooks(turn)?;
+        if let Some(observation) = self.execution_observation.take() {
+            self.journal.append(
                 turn,
                 None,
                 None,
                 EventKind::ExecutionObserved { observation },
-            )
-        {
-            return Err(self.abandon(turn, cause));
+            )?;
         }
         // `turn.started` of `CLI.md` §4.2. Published rather than appended:
         // `EventKind` has no counterpart, because the start of a turn is not
         // something the reducer establishes — it is what the loop knows the
         // instant it mints the id. Before this, nothing in the workspace
         // could emit it at all.
-        if let Err(cause) = self.journal.publish(&PublicEvent::TurnStarted { turn }) {
-            return Err(self.abandon(turn, cause));
-        }
+        self.journal.publish(&PublicEvent::TurnStarted { turn })?;
+        self.admit_skill_catalogue(turn)
+    }
 
-        if let Err(cause) = self.admit_skill_catalogue(turn) {
-            return Err(self.abandon(turn, cause));
-        }
-
-        let driven = match self.drive(turn, &prompts).await {
-            Ok(ended) => ended,
-            Err(cause) => return Err(self.abandon(turn, cause)),
-        };
+    async fn finish_turn(
+        &mut self,
+        turn: TurnId,
+        driven: DriveOutcome,
+    ) -> Result<TurnOutcome, StoreError> {
         let (exit_reason, denied) = match driven {
             DriveOutcome::Ended(exit_reason, denied) => (exit_reason, denied),
             DriveOutcome::QuestionRequired => {
@@ -1776,22 +1881,15 @@ impl<'session, 'turn> TurnLoop<'session, 'turn> {
             }
         };
         let ok = matches!(exit_reason, ExitReason::Completed);
-
-        if let Err(cause) = self.journal.append(
+        self.journal.append(
             turn,
             None,
             None,
             EventKind::TurnCompleted { ok, exit_reason },
-        ) {
-            return Err(self.abandon(turn, cause));
-        }
-        self.active_skill_scope = None;
-        self.active_skill_invocations.clear();
-        if let Err(cause) = self.close_and_drain_controls(turn).await {
-            return Err(self.abandon(turn, cause));
-        }
+        )?;
+        self.deactivate_skill_hooks(turn)?;
+        self.close_and_drain_controls(turn).await?;
         self.refresh_control_status();
-
         Ok(TurnOutcome {
             turn,
             ok,
@@ -2552,6 +2650,18 @@ impl<'session, 'turn> TurnLoop<'session, 'turn> {
             },
         )?;
         Ok(Generated::Ended(exit))
+    }
+
+    fn refuse_drive(
+        &mut self,
+        turn: TurnId,
+        reason: String,
+        exit: ExitReason,
+    ) -> Result<DriveOutcome, StoreError> {
+        let Generated::Ended(exit) = self.refuse(turn, reason, exit)? else {
+            unreachable!("a local refusal always ends before generation")
+        };
+        Ok(DriveOutcome::Ended(exit, None))
     }
 
     fn main_model_request(&self) -> GenerationModelRequest {
@@ -3386,37 +3496,25 @@ impl<'session, 'turn> TurnLoop<'session, 'turn> {
                     turn,
                 );
                 let invocation = match invocation {
-                    Ok(invocation) => invocation,
+                    Ok((invocation, _)) => invocation,
                     Err(error) => return Ok(answered(false, error.to_string())),
                 };
-                self.active_skill_scope = Some(next_scope);
-                self.active_skill_invocations
-                    .insert(invocation.id(), invocation.clone());
-                if let Err(error) = self.refresh_skill_hook_catalogue(turn) {
-                    return Ok(answered(false, error.to_string()));
-                }
                 let causality = HookCausality::item(call.item, turn, call.started);
-                let _ = self
-                    .dispatch_hook(
-                        causality.clone(),
-                        HookEvent::tool(
-                            HookLifecycle::InstructionsLoaded,
-                            HookSubject::Item { item: call.item },
-                            skill_selector.clone(),
-                        ),
+                let continue_generation = self
+                    .activate_skill_invocation(
+                        turn,
+                        &invocation,
+                        next_scope,
+                        causality,
+                        HookSubject::Item { item: call.item },
+                        skill_selector,
                     )
                     .await;
-                if !self
-                    .dispatch_hook(
-                        causality,
-                        HookEvent::tool(
-                            HookLifecycle::UserPromptExpansion,
-                            HookSubject::Item { item: call.item },
-                            skill_selector,
-                        ),
-                    )
-                    .await
-                {
+                let continue_generation = match continue_generation {
+                    Ok(continue_generation) => continue_generation,
+                    Err(error) => return Ok(answered(false, error.to_string())),
+                };
+                if !continue_generation {
                     return Ok(answered(
                         false,
                         "blocked by UserPromptExpansion hook".to_owned(),

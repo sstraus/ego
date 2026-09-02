@@ -16,12 +16,13 @@ use std::task::Poll;
 use ego_core::budget::{
     BudgetGate, Ledger, Metering, PricingQuote, ResolvedRates, SettlementSource, SharedBudgetGate,
 };
-use ego_core::config::{Mode, PermCfg, Ruleset, Source, SystemPrompt};
+use ego_core::config::{Mode, ModelRef, PermCfg, Ruleset, Source, SystemPrompt, Trust};
 use ego_core::cost::{
     Amount, CostAttribution, CostDelta, CurrencyCode, MeteringRevision, Money, PricingRevision,
     ProviderCostRevision, RateSource, UnknownCost,
 };
 use ego_core::event::domain::{CancelCause, DomainEvent, Envelope, EventKind, ExitReason};
+use ego_core::event::hook::{HookDecision, HookLifecycle, HookOutcome};
 use ego_core::event::id::{EventId, Producer, QueuedPromptId, Seq, SessionId, TurnId};
 use ego_core::event::time::{Clock, Timestamp};
 use ego_core::evidence::{
@@ -40,6 +41,11 @@ use ego_core::generator::types::{
     ContentBlock, ErrorKind, GenRequest, ReasoningState, Role, StopReason, ThinkingLevel,
     ToolDescriptor,
 };
+use ego_core::hook::{
+    HookCatalogue, HookConfigEntry, HookFuture, HookHandlerConfig, HookInvocationPort,
+    HookInvocationRequest, HookLifecycleDispatcher, HookRunner,
+    SessionHookRuntime,
+};
 use ego_core::permit::rule::Rule;
 use ego_core::permit::{
     Authority, CanonPath, Confinement, EnvPolicy, ExecCaps, Fs, GuardedIo, HumanApprover, OneHop,
@@ -57,8 +63,8 @@ use ego_core::store::evidence::{
 };
 use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
 use ego_core::turn::{
-    CancelToken, ControlError, GenerationRuntime, JudgeContext, Session, ToolEffectPorts, Tools,
-    TurnConfig, TurnLoop as CoreTurnLoop,
+    CancelToken, ControlError, GenerationRuntime, JudgeContext, Journal, RegisteredTool, Session,
+    SharedJournal, ToolEffectPorts, Tools, TurnConfig, TurnLoop as CoreTurnLoop,
 };
 use futures::StreamExt;
 use futures::executor::block_on;
@@ -742,6 +748,61 @@ mod turn {
 
     static NO_ADMISSION_EVIDENCE: NoAdmissionEvidence = NoAdmissionEvidence;
 
+    #[derive(Clone, Default)]
+    struct RecordingHookInvoker {
+        lifecycles: Arc<Mutex<Vec<HookLifecycle>>>,
+    }
+
+    impl RecordingHookInvoker {
+        fn lifecycles(&self) -> Vec<HookLifecycle> {
+            self.lifecycles.lock().unwrap().clone()
+        }
+    }
+
+    impl HookInvocationPort for RecordingHookInvoker {
+        fn invoke<'a>(&'a self, request: HookInvocationRequest) -> HookFuture<'a> {
+            self.lifecycles.lock().unwrap().push(request.lifecycle());
+            Box::pin(futures::future::ready(Ok(HookOutcome::new(
+                HookDecision::Continue,
+                None,
+            ))))
+        }
+    }
+
+    /// Evidence facade for the direct-skill tests: skill admission writes its
+    /// two durable blobs through the generic blob port, while ordinary tool
+    /// evidence remains unavailable in this fixture.
+    struct SkillEvidence {
+        blobs: common::MemoryBlobStore,
+    }
+
+    impl SkillEvidence {
+        fn new() -> Self {
+            Self {
+                blobs: common::MemoryBlobStore::default(),
+            }
+        }
+    }
+
+    impl EvidenceStore for SkillEvidence {
+        fn blob_store(&self) -> &dyn ego_core::store::blob::BlobStore {
+            &self.blobs
+        }
+
+        fn begin(&self) -> Result<Box<dyn EvidenceWriter>, EvidenceError> {
+            Err(EvidenceError::Limit { limit: 0 })
+        }
+
+        fn read_page<'a>(
+            &'a self,
+            request: &'a EvidenceRead,
+        ) -> BoxFuture<'a, Result<EvidencePage, EvidenceError>> {
+            Box::pin(futures::future::ready(Err(EvidenceError::NotFound {
+                reference: request.reference.id.clone(),
+            })))
+        }
+    }
+
     /// Everything a `TurnLoop` borrows, kept alive in one place so a test can
     /// build a loop in one line without fighting the borrow checker.
     struct Fixture {
@@ -942,7 +1003,7 @@ mod turn {
     impl ego_core::generation_model_source::GenerationModelSource for FixedGenerationSource {
         fn resolve<'a>(
             &'a self,
-            _request: ego_core::generation_model_source::GenerationModelRequest,
+            request: ego_core::generation_model_source::GenerationModelRequest,
         ) -> BoxFuture<
             'a,
             Result<
@@ -954,10 +1015,13 @@ mod turn {
             capabilities.max_output_tokens = self.settings.max_output_tokens;
             capabilities.supports_parallel_tool_calls = self.settings.parallel_tool_calls;
             capabilities.reasoning_efforts = self.settings.reasoning_efforts.clone();
+            let request_model = request
+                .model()
+                .map_or_else(|| self.settings.model.clone(), |model| model.0.clone());
             Box::pin(futures::future::ready(Ok(
                 ego_core::generation_model_source::GenerationProfile {
-                    identity: ego_core::config::ModelRef(self.settings.model.clone()),
-                    request_model: self.settings.model.clone(),
+                    identity: ModelRef(request_model.clone()),
+                    request_model,
                     thinking: self.settings.thinking,
                     generator: self.generator.clone(),
                     capabilities,
@@ -6359,5 +6423,443 @@ mod turn {
             assert_eq!(outstanding(&gate), Some(usd("0")));
             assert_eq!(committed(&gate), Some(usd("0.06144")));
         }
+    }
+
+    #[test]
+    fn completed_model_skill_turn_removes_invocation_hooks_before_next_turn() {
+        let location = ego_core::event::skill::SkillSourceLocation::parse(
+            "skills/explain/SKILL.md",
+        )
+        .expect("skill location");
+        let source_digest = ego_core::event::skill::SkillContentDigest::parse(
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        .expect("skill digest");
+        let descriptor = ego_core::event::skill::SkillDescriptorEvidence {
+            id: ego_core::event::skill::SkillId::derive(
+                ego_core::event::skill::SkillSourceAuthority::User,
+                &location,
+                "explain",
+                &source_digest,
+            ),
+            name: "explain".to_owned(),
+            description: "Explain a request".to_owned(),
+            trigger: None,
+            argument_hint: None,
+            source: ego_core::event::skill::SkillSourceAuthority::User,
+            location: location.clone(),
+            source_digest,
+            user_invocable: true,
+            model_invocable: true,
+        };
+        let skill = ego_core::skill::SkillSpec::new(
+            descriptor,
+            b"Explain this request: $ARGUMENTS".to_vec(),
+        )
+        .expect("skill body")
+        .with_hook_entries(vec![HookConfigEntry::new(
+            HookLifecycle::UserPromptExpansion,
+            None,
+            HookHandlerConfig::Prompt {
+                prompt: "continue this skill".to_owned(),
+                model: None,
+                timeout_seconds: None,
+            },
+        )]);
+        let catalogue = Arc::new(
+            ego_core::skill::SkillCatalogue::new(vec![skill]).expect("skill catalogue"),
+        );
+        let fx = Fixture::new(vec![
+            vec![
+                AiEvent::ToolCall {
+                    call_id: "skill-call".to_owned(),
+                    name: "skill".to_owned(),
+                    args: r#"{"kind":"invoke","name":"explain","arguments":"from model"}"#
+                        .to_owned(),
+                },
+                AiEvent::Stop(StopReason::ToolUse),
+            ],
+            vec![
+                AiEvent::TextDelta {
+                    text: "skill complete".to_owned(),
+                },
+                AiEvent::Stop(StopReason::Stop),
+            ],
+            vec![
+                AiEvent::TextDelta {
+                    text: "ordinary complete".to_owned(),
+                },
+                AiEvent::Stop(StopReason::Stop),
+            ],
+        ]);
+        let skill_evidence = SkillEvidence::new();
+        let hook_invocations = RecordingHookInvoker::default();
+        let base_hooks =
+            HookCatalogue::admit_typed(&[], &[], Trust::Trusted).expect("empty hook catalogue");
+        let session_id = SessionId::new();
+        let journal = SharedJournal::new(Journal::new(
+            session_id,
+            &fx.store,
+            &fx.clock,
+            &fx.sink,
+            Producer::Main,
+            SessionState::default(),
+        ));
+        let hook_runtime = SessionHookRuntime::new(
+            HookLifecycleDispatcher::new(HookRunner::new(), base_hooks),
+            journal.clone(),
+            Arc::new(hook_invocations.clone()),
+            CancelToken::new(),
+            std::time::Instant::now() + std::time::Duration::from_secs(30),
+        );
+        let runtime_observer = hook_runtime.clone();
+        let mut gate = fx.gate.borrow_mut();
+        let tools = Tools::from_registry(
+            &[RegisteredTool::skill(Arc::clone(&catalogue))],
+            &fx.policy,
+            ToolEffectPorts::new(
+                &fx.fs,
+                fx.process.as_ref(),
+                &skill_evidence,
+                Arc::new(NoResolver),
+                Arc::new(NoHop),
+                Arc::new(NoDuplex),
+            ),
+            CanonPath::new("/ws"),
+        );
+        let mut turn = CoreTurnLoop::from_shared_journal(
+            session_id,
+            journal,
+            &NO_ADMISSION_EVIDENCE,
+            CancelToken::new(),
+            model(&fx.generator, &mut gate),
+            tools,
+        )
+        .expect("synchronized budget gate")
+        .with_hook_runtime(hook_runtime)
+        .expect("hook runtime shares the turn journal");
+
+        let skill_outcome = block_on(turn.run("model invokes explain"))
+            .expect("model-invoked skill turn completes");
+        assert_eq!(skill_outcome.exit_reason, ExitReason::Completed);
+        let invocation = fx
+            .store
+            .events()
+            .iter()
+            .find_map(|event| match event.kind {
+                EventKind::SkillInstructionAdmitted { invocation, .. } => Some(invocation),
+                _ => None,
+            })
+            .expect("skill instruction admission is durable");
+        assert_eq!(
+            hook_invocations
+                .lifecycles()
+                .iter()
+                .filter(|lifecycle| **lifecycle == HookLifecycle::UserPromptExpansion)
+                .count(),
+            1,
+            "the invocation-scoped hook fires for the model skill turn"
+        );
+        assert!(
+            !runtime_observer
+                .catalogue_snapshot()
+                .expect("hook catalogue snapshot")
+                .specs()
+                .iter()
+                .any(|spec| spec.skill_invocation() == Some(invocation)),
+            "completed skill turns remove invocation-scoped hooks"
+        );
+
+        let ordinary = block_on(turn.run("ordinary"))
+            .expect("the following ordinary turn completes");
+        assert_eq!(ordinary.exit_reason, ExitReason::Completed);
+        assert_eq!(
+            hook_invocations
+                .lifecycles()
+                .iter()
+                .filter(|lifecycle| **lifecycle == HookLifecycle::UserPromptExpansion)
+                .count(),
+            1,
+            "the removed skill hook cannot fire on the next ordinary turn"
+        );
+    }
+
+    #[test]
+    fn typed_user_skill_turn_uses_admitted_instruction_not_prompt_or_tool_call() {
+        let location = ego_core::event::skill::SkillSourceLocation::parse(
+            "skills/explain/SKILL.md",
+        )
+        .expect("skill source location");
+        let source_digest = ego_core::event::skill::SkillContentDigest::parse(
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        .expect("skill source digest");
+        let descriptor = ego_core::event::skill::SkillDescriptorEvidence {
+            id: ego_core::event::skill::SkillId::derive(
+                ego_core::event::skill::SkillSourceAuthority::User,
+                &location,
+                "explain",
+                &source_digest,
+            ),
+            name: "explain".to_owned(),
+            description: "Explain a request".to_owned(),
+            trigger: None,
+            argument_hint: None,
+            source: ego_core::event::skill::SkillSourceAuthority::User,
+            location,
+            source_digest,
+            user_invocable: true,
+            model_invocable: false,
+        };
+        let catalogue = Arc::new(
+            ego_core::skill::SkillCatalogue::new(vec![
+                ego_core::skill::SkillSpec::new(
+                    descriptor.clone(),
+                    b"Explain this request: $ARGUMENTS".to_vec(),
+                )
+                .expect("admitted skill")
+                .with_model(ModelRef("skill-model".to_owned()), "high"),
+            ])
+            .expect("admitted catalogue"),
+        );
+        let arguments = "preserve these raw arguments: {x: 1}";
+        let operation = ego_core::skill::AdmittedSkillOperation::invoke(&descriptor, arguments);
+        let fx = Fixture::new(vec![
+            vec![
+                AiEvent::TextDelta {
+                    text: "done".to_owned(),
+                },
+                AiEvent::Stop(StopReason::Stop),
+            ],
+            vec![
+                AiEvent::TextDelta {
+                    text: "ordinary done".to_owned(),
+                },
+                AiEvent::Stop(StopReason::Stop),
+            ],
+        ]);
+        let skill_evidence = SkillEvidence::new();
+        let mut gate = fx.gate.borrow_mut();
+        let tools = Tools::from_registry(
+            &[RegisteredTool::skill(Arc::clone(&catalogue))],
+            &fx.policy,
+            ToolEffectPorts::new(
+                &fx.fs,
+                fx.process.as_ref(),
+                &skill_evidence,
+                Arc::new(NoResolver),
+                Arc::new(NoHop),
+                Arc::new(NoDuplex),
+            ),
+            CanonPath::new("/ws"),
+        );
+        let mut turn = TurnLoop::open(
+            session(
+                SessionState::default(),
+                &fx.store,
+                &fx.clock,
+                &fx.sink,
+                CancelToken::new(),
+            ),
+            model(&fx.generator, &mut gate),
+            tools,
+        );
+
+        let outcome = block_on(turn.run_admitted_skill(operation))
+            .expect("the store accepted every append");
+        let typed_turn = outcome.turn;
+        assert_eq!(outcome.exit_reason, ExitReason::Completed);
+        assert!(outcome.ok);
+
+        let calls = fx.generator.calls();
+        assert_eq!(calls.len(), 1, "a typed skill invokes one generation");
+        let request = &calls[0];
+        assert_eq!(request.model, "skill-model");
+        assert_eq!(
+            request.tools.iter().filter(|tool| tool.name == "skill").count(),
+            1,
+            "the mixed registry exposes the skill tool to the generation"
+        );
+        let instruction = request
+            .messages
+            .messages()
+            .iter()
+            .filter(|message| message.role == Role::System)
+            .flat_map(|message| message.content.iter())
+            .find_map(|block| match block {
+                ContentBlock::Text { text }
+                    if text.starts_with("Admitted skill instruction (") =>
+                {
+                    Some(text)
+                }
+                _ => None,
+            })
+            .expect("the request carries the admitted skill as a system instruction");
+        assert!(
+            instruction.ends_with("\nExplain this request: preserve these raw arguments: {x: 1}"),
+            "the request contains the rendered skill body: {instruction}"
+        );
+        assert!(
+            instruction.contains(arguments),
+            "the exact raw arguments survive rendering"
+        );
+
+        let events = fx.store.events();
+        let catalogue_at = events
+            .iter()
+            .position(|event| {
+                event.env.turn == typed_turn
+                    && matches!(&event.kind, EventKind::SkillCatalogueAdmitted { .. })
+            })
+            .expect("catalogue admission is durable");
+        let instruction_at = events
+            .iter()
+            .position(|event| {
+                event.env.turn == typed_turn
+                    && matches!(&event.kind, EventKind::SkillInstructionAdmitted { .. })
+            })
+            .expect("instruction admission is durable");
+        let generation_at = events
+            .iter()
+            .position(|event| {
+                event.env.turn == typed_turn
+                    && matches!(&event.kind, EventKind::GenerationStarted { .. })
+            })
+            .expect("generation start is durable");
+        assert!(catalogue_at < instruction_at && instruction_at < generation_at);
+        assert!(!events
+            .iter()
+            .any(|event| {
+                event.env.turn == typed_turn
+                    && matches!(&event.kind, EventKind::UserPrompt { .. })
+            }));
+        assert!(!events.iter().any(|event| matches!(
+            &event.kind,
+            EventKind::ToolCallStarted { .. } | EventKind::ToolCallCompleted { .. }
+        ) && event.env.turn == typed_turn));
+
+        let ordinary = block_on(turn.run("ordinary"))
+            .expect("the store accepted every ordinary append");
+        assert_eq!(ordinary.exit_reason, ExitReason::Completed);
+        let calls = fx.generator.calls();
+        assert_eq!(calls.len(), 2, "the ordinary turn invokes one more generation");
+        assert_eq!(calls[1].model, "test-model", "the skill model pin is cleared");
+        assert!(!calls[1].messages.messages().iter().any(|message| {
+            message.content.iter().any(|block| {
+                matches!(
+                    block,
+                    ContentBlock::Text { text }
+                        if text.starts_with("Admitted skill instruction (")
+                )
+            })
+        }));
+
+        let state = turn.into_state().expect("unique turn journal state");
+        assert!(
+            state.live_hooks().is_empty(),
+            "completed typed skill turns leave no active skill hooks"
+        );
+        assert_eq!(state.skill_events().len(), 1);
+    }
+
+    #[test]
+    fn stale_typed_user_skill_operation_is_refused_before_generation() {
+        let location = ego_core::event::skill::SkillSourceLocation::parse(
+            "skills/explain/SKILL.md",
+        )
+        .expect("skill source location");
+        let old_digest = ego_core::event::skill::SkillContentDigest::parse(
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        .expect("old skill source digest");
+        let current_digest = ego_core::event::skill::SkillContentDigest::parse(
+            "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+        )
+        .expect("current skill source digest");
+        let old_descriptor = ego_core::event::skill::SkillDescriptorEvidence {
+            id: ego_core::event::skill::SkillId::derive(
+                ego_core::event::skill::SkillSourceAuthority::User,
+                &location,
+                "explain",
+                &old_digest,
+            ),
+            name: "explain".to_owned(),
+            description: "Explain a request".to_owned(),
+            trigger: None,
+            argument_hint: None,
+            source: ego_core::event::skill::SkillSourceAuthority::User,
+            location: location.clone(),
+            source_digest: old_digest,
+            user_invocable: true,
+            model_invocable: false,
+        };
+        let current_descriptor = ego_core::event::skill::SkillDescriptorEvidence {
+            id: ego_core::event::skill::SkillId::derive(
+                ego_core::event::skill::SkillSourceAuthority::User,
+                &location,
+                "explain",
+                &current_digest,
+            ),
+            name: "explain".to_owned(),
+            description: "Explain a request".to_owned(),
+            trigger: None,
+            argument_hint: None,
+            source: ego_core::event::skill::SkillSourceAuthority::User,
+            location,
+            source_digest: current_digest,
+            user_invocable: true,
+            model_invocable: false,
+        };
+        assert_ne!(old_descriptor.id, current_descriptor.id);
+        let catalogue = Arc::new(
+            ego_core::skill::SkillCatalogue::new(vec![
+                ego_core::skill::SkillSpec::new(
+                    current_descriptor,
+                    b"Explain this request: $ARGUMENTS".to_vec(),
+                )
+                .expect("admitted current skill"),
+            ])
+            .expect("admitted current catalogue"),
+        );
+        let operation =
+            ego_core::skill::AdmittedSkillOperation::invoke(&old_descriptor, "stale arguments");
+        let fx = Fixture::new(vec![]);
+        let skill_evidence = SkillEvidence::new();
+        let mut gate = fx.gate.borrow_mut();
+        let tools = Tools::from_registry(
+            &[RegisteredTool::skill(Arc::clone(&catalogue))],
+            &fx.policy,
+            ToolEffectPorts::new(
+                &fx.fs,
+                fx.process.as_ref(),
+                &skill_evidence,
+                Arc::new(NoResolver),
+                Arc::new(NoHop),
+                Arc::new(NoDuplex),
+            ),
+            CanonPath::new("/ws"),
+        );
+        let mut turn = TurnLoop::open(
+            session(
+                SessionState::default(),
+                &fx.store,
+                &fx.clock,
+                &fx.sink,
+                CancelToken::new(),
+            ),
+            model(&fx.generator, &mut gate),
+            tools,
+        );
+
+        let _ = block_on(turn.run_admitted_skill(operation));
+
+        assert!(
+            fx.generator.calls().is_empty(),
+            "a stale operation never contacts the generator"
+        );
+        assert!(!fx.store.events().iter().any(|event| matches!(
+            &event.kind,
+            EventKind::SkillInstructionAdmitted { .. }
+        )));
     }
 }

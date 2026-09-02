@@ -711,6 +711,9 @@ impl HookSpec {
     pub fn event_name(&self) -> &'static str {
         self.entry.event.as_str()
     }
+    pub fn matcher(&self) -> Option<&HookMatcher> {
+        self.entry.matcher.as_ref()
+    }
     pub fn handler(&self) -> &HookHandlerConfig {
         &self.entry.handler
     }
@@ -2268,6 +2271,14 @@ impl HookLifecycleDispatcher {
             .evidence()
     }
 
+    pub fn catalogue_snapshot(&self) -> Result<Arc<HookCatalogue>, HookRunError> {
+        let catalogue = self
+            .catalogue
+            .lock()
+            .map_err(|_| HookRunError::new("hook catalogue synchronization failed"))?;
+        Ok(catalogue.clone())
+    }
+
     pub fn replace_catalogue(&self, catalogue: HookCatalogue) -> Result<(), HookRunError> {
         let mut active = self
             .catalogue
@@ -2341,6 +2352,10 @@ impl<'s> SessionHookRuntime<'s> {
 
     pub fn catalogue_evidence(&self) -> HookCatalogueEvidence {
         self.dispatcher.catalogue_evidence()
+    }
+
+    pub fn catalogue_snapshot(&self) -> Result<Arc<HookCatalogue>, HookRunError> {
+        self.dispatcher.catalogue_snapshot()
     }
 
     pub fn replace_catalogue(

@@ -12,7 +12,7 @@ use crate::event::domain::EventKind;
 use crate::event::hook::{
     HookActivation, HookCatalogueEntryEvidence, HookDescriptorEvidence, HookLifecycle,
 };
-use crate::event::id::{ItemId, SubagentInvocationId, TurnId};
+use crate::event::id::{EventId, ItemId, SubagentInvocationId, TurnId};
 use crate::event::skill::{
     SkillCatalogueEvidence, SkillCatalogueGeneration, SkillDescriptorEvidence, SkillId,
     SkillInvocationId, SkillSourceAuthority, SkillSourceLocation,
@@ -419,6 +419,20 @@ impl SkillCatalogue {
         self.authorize(name, |descriptor| descriptor.user_invocable)
     }
 
+    pub fn authorize_user_operation(
+        &self,
+        operation: &AdmittedSkillOperation,
+    ) -> Result<&SkillSpec, SkillError> {
+        let spec = self.authorize_user(operation.name())?;
+        if spec.descriptor.id != operation.descriptor_id() {
+            return Err(SkillError::new(format!(
+                "admitted skill operation for {} is stale: descriptor id does not match the current catalogue",
+                operation.name()
+            )));
+        }
+        Ok(spec)
+    }
+
     pub fn authorize_model(&self, name: &str) -> Result<&SkillSpec, SkillError> {
         self.authorize(name, |descriptor| descriptor.model_invocable)
     }
@@ -676,6 +690,22 @@ impl SkillInvocation {
         scope: &mut ActiveSkillScope,
     ) -> Result<(), SkillError> {
         let spec = catalogue.authorize_model(operation.name())?;
+        Self::preflight_spec_scope(spec, scope)
+    }
+
+    pub(crate) fn preflight_user_scope(
+        catalogue: &SkillCatalogue,
+        operation: &AdmittedSkillOperation,
+        scope: &mut ActiveSkillScope,
+    ) -> Result<(), SkillError> {
+        let spec = catalogue.authorize_user_operation(operation)?;
+        Self::preflight_spec_scope(spec, scope)
+    }
+
+    fn preflight_spec_scope(
+        spec: &SkillSpec,
+        scope: &mut ActiveSkillScope,
+    ) -> Result<(), SkillError> {
         scope.pin_selection(spec.model(), spec.effort())?;
         if let Some(allowed) = spec.allowed_tools() {
             let narrowed = scope
@@ -700,6 +730,7 @@ impl SkillInvocation {
         journal: &SharedJournal<'_>,
     ) -> Result<Self, SkillError> {
         Self::admit_in_turn(catalogue, operation, blobs, journal, TurnId::new())
+            .map(|(invocation, _)| invocation)
     }
 
     pub(crate) fn admit_in_turn(
@@ -708,15 +739,51 @@ impl SkillInvocation {
         blobs: &dyn BlobStore,
         journal: &SharedJournal<'_>,
         turn: TurnId,
-    ) -> Result<Self, SkillError> {
+    ) -> Result<(Self, EventId), SkillError> {
         let spec = catalogue.authorize_model(operation.name())?.clone();
+        Self::admit_authorized_in_turn(
+            catalogue.generation,
+            spec,
+            operation,
+            blobs,
+            journal,
+            turn,
+        )
+    }
+
+    pub(crate) fn admit_user_in_turn(
+        catalogue: &SkillCatalogue,
+        operation: AdmittedSkillOperation,
+        blobs: &dyn BlobStore,
+        journal: &SharedJournal<'_>,
+        turn: TurnId,
+    ) -> Result<(Self, EventId), SkillError> {
+        let spec = catalogue.authorize_user_operation(&operation)?.clone();
+        Self::admit_authorized_in_turn(
+            catalogue.generation,
+            spec,
+            operation.into_operation(),
+            blobs,
+            journal,
+            turn,
+        )
+    }
+
+    fn admit_authorized_in_turn(
+        catalogue_generation: SkillCatalogueGeneration,
+        spec: SkillSpec,
+        operation: SkillOperation,
+        blobs: &dyn BlobStore,
+        journal: &SharedJournal<'_>,
+        turn: TurnId,
+    ) -> Result<(Self, EventId), SkillError> {
         let rendered = spec.render(&operation)?;
         let id = SkillInvocationId::new();
-        let admission = invocation_admission(id, catalogue.generation, &spec)?;
+        let admission = invocation_admission(id, catalogue_generation, &spec)?;
         let admission_bytes = encode_admission(&admission)?;
         let admission_ref = commit_blob(blobs, &admission_bytes)?;
         let rendered_ref = commit_blob(blobs, rendered.as_bytes())?;
-        journal
+        let admitted = journal
             .append(
                 turn,
                 None,
@@ -724,7 +791,7 @@ impl SkillInvocation {
                 EventKind::SkillInstructionAdmitted {
                     invocation: id,
                     skill: spec.descriptor.id,
-                    catalogue_generation: catalogue.generation,
+                    catalogue_generation,
                     source: spec.descriptor.source,
                     location: spec.descriptor.location.clone(),
                     source_digest: spec.descriptor.source_digest,
@@ -735,14 +802,17 @@ impl SkillInvocation {
                 },
             )
             .map_err(|error| SkillError::new(error.to_string()))?;
-        Ok(Self {
-            id,
-            admission,
-            admission_ref: Some(admission_ref),
-            rendered_ref: Some(rendered_ref),
-            rendered: rendered.into(),
-            spec: Some(spec),
-        })
+        Ok((
+            Self {
+                id,
+                admission,
+                admission_ref: Some(admission_ref),
+                rendered_ref: Some(rendered_ref),
+                rendered: rendered.into(),
+                spec: Some(spec),
+            },
+            admitted,
+        ))
     }
 
     pub fn admit_for_service(

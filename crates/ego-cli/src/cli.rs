@@ -44,6 +44,8 @@ pub enum Invocation {
     Auth(Box<AuthArgs>),
     /// `ego mcp add|rm|ls` — typed MCP configuration management.
     Mcp(Box<McpArgs>),
+    /// `ego hooks ls [--json]` — the admitted system/user hook catalogue.
+    Hooks(HooksArgs),
     /// `ego run [PROMPT]` — the headless one-shot of `CLI.md` §2.
     Run(Box<Args>),
     /// `ego resume [ID] [PROMPT]` — the same run against a session that
@@ -159,6 +161,7 @@ pub const BUILT: &[&str] = &[
     "ls",
     "usage",
     "models",
+    "hooks",
     "acp",
     "auth",
     "mcp",
@@ -183,13 +186,6 @@ pub const BUILT: &[&str] = &[
 /// places the work, and from the code where it does not — a subsystem that
 /// table does not place still gets a reason, never a milestone invented for it.
 pub const UNBUILT: &[(&str, &str)] = &[
-    (
-        "hooks",
-        "the strict hook catalogue and runner (**M4**). This build has no \
-         admitted hook snapshot to inspect; `docs/21-claude-hook-parity.md` \
-         defines the final stable Claude-compatible lifecycle and read-only \
-         projection",
-    ),
     (
         "config",
         "a config writer. The loader is strict and read-only, and nothing in \
@@ -391,6 +387,12 @@ impl std::fmt::Display for ExportFormat {
 pub struct ModelsArgs {
     pub provider: Option<String>,
     pub refresh: bool,
+    pub json: bool,
+}
+
+/// The exact `ego hooks ls [--json]` request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HooksArgs {
     pub json: bool,
 }
 
@@ -668,6 +670,27 @@ struct ModelsCommand {
     /// Emit the exact versioned snapshot object.
     #[arg(long)]
     json: bool,
+}
+
+#[derive(Debug, Parser)]
+#[command(
+    name = "ego hooks",
+    about = "Inspect the admitted system and user hook catalogue.",
+    disable_help_subcommand = true
+)]
+struct HooksCommand {
+    #[command(subcommand)]
+    action: HooksSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum HooksSubcommand {
+    /// List the admitted hook catalogue without changing configuration.
+    Ls {
+        /// Emit the exact versioned hook-listing object.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// `ego acp` — the protocol, on stdio.
@@ -1228,6 +1251,7 @@ fn overview(program: &str) -> String {
             "compact" => "Compact a session into its deterministic successor",
             "export" => "Export a session or sanitized bundle",
             "models" => "List the shared model catalogue",
+            "hooks" => "Inspect the admitted hook catalogue",
             "acp" => "Serve the Agent Client Protocol on stdio",
             "mcp-server" => "Serve scoped ego runs over MCP on stdio",
             "auth" => "Manage subscription credentials",
@@ -1458,6 +1482,12 @@ pub fn parse(argv: Vec<String>) -> Result<Invocation, UsageError> {
                 refresh: parsed.refresh,
                 json: parsed.json,
             }))),
+        },
+        Some("hooks") => match clap_or_answer::<HooksCommand>(&tokens)? {
+            Parsed::Answered(text) => Ok(Invocation::Answered(text)),
+            Parsed::Command(parsed) => match parsed.action {
+                HooksSubcommand::Ls { json } => Ok(Invocation::Hooks(HooksArgs { json })),
+            },
         },
         Some("auth") => match clap_or_answer::<AuthCommand>(&tokens)? {
             Parsed::Answered(text) => Ok(Invocation::Answered(text)),

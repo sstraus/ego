@@ -25,6 +25,7 @@ pub mod cli;
 pub mod config;
 pub mod facts;
 pub mod hook;
+pub mod hooks;
 pub mod mcp;
 pub mod mcp_server;
 pub mod model;

@@ -59,6 +59,21 @@ pub fn auth() -> Result<std::collections::HashMap<String, AuthProviderLayer>, Us
         .map_err(|err| UsageError(err.to_string()))
 }
 
+/// The complete non-interactive hook-inspection input. Project and local
+/// configuration are ineligible and therefore are never opened.
+pub(crate) fn hook_listing_layers() -> Result<Vec<Sourced<ConfigLayer>>, UsageError> {
+    let mut found = Vec::new();
+    if let Some(system) = layer(Source::System, Path::new(SYSTEM_CONFIG))? {
+        found.push(system);
+    }
+    if let Some(home) = ego_home()
+        && let Some(user) = layer(Source::User, &home.join("config.toml"))?
+    {
+        found.push(user);
+    }
+    Ok(found)
+}
+
 /// The system/user authority used by process-wide MCP management commands.
 ///
 /// `ego mcp` has no workspace or trust flags. It therefore manages only the

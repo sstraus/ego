@@ -49,6 +49,7 @@ fn parsed<const N: usize>(args: [&str; N]) -> ego_cli::cli::Args {
         Invocation::Compact(_) => panic!("`compact` takes no Args: use the compact tests for it"),
         Invocation::Export(_) => panic!("`export` takes no Args: use the export tests for it"),
         Invocation::Usage(_) => panic!("`usage` takes no Args: use the usage tests for it"),
+        Invocation::Hooks(_) => panic!("`hooks` takes no Args: use the hooks tests for it"),
     }
 }
 
@@ -71,6 +72,7 @@ fn parsed_slice(args: &[&str]) -> ego_cli::cli::Args {
         Invocation::Compact(_) => panic!("`compact` takes no Args: use the compact tests for it"),
         Invocation::Export(_) => panic!("`export` takes no Args: use the export tests for it"),
         Invocation::Usage(_) => panic!("`usage` takes no Args: use the usage tests for it"),
+        Invocation::Hooks(_) => panic!("`hooks` takes no Args: use the hooks tests for it"),
     }
 }
 

@@ -181,6 +181,13 @@ async fn ordinary_main() -> std::process::ExitCode {
                     mcp_errors: Vec::new(),
                 }
             }
+            Ok(Invocation::Hooks(args)) => Ended {
+                termination: ego_cli::hooks::execute(&args, &out),
+                session: ego_core::event::id::SessionId::new(),
+                state: ego_core::state::SessionState::default(),
+                result: serde_json::Value::String(String::new()),
+                mcp_errors: Vec::new(),
+            },
             // `acp` serves many sessions over one connection, so there is no single
             // one to report — the same shape of absence `ls` has, for the opposite
             // reason. Its termination says whether the connection ended cleanly.
