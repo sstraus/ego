@@ -30,10 +30,9 @@ HookInvocationSettled | SubagentSpawned | SubagentReturned | Error
 ```
 
 Thirty-one in the final M1 schema, and this list is exhaustive by contract.
-The current `EventKind` (`crates/ego-core/src/event/domain.rs`) implements
-twenty-eight. regression case adds the two question-lifecycle variants; story
-regression_case adds the clean-session compaction seed. The enum and this list are
-compared by hand at each milestone close.
+The current `EventKind` (`crates/ego-core/src/event/domain.rs`) implements all
+thirty-one, including the question lifecycle and clean-session compaction seed.
+The enum and this list are compared by hand at each milestone close.
 
 - `SessionState::apply(&mut self, &Event)` is a **pure, sync** function.
 - Legacy in-place compaction, clean-session compaction lineage, and forking are
@@ -66,10 +65,9 @@ independently.
 
 ## 2. Crate layout (resolves §4.1)
 
-The final layout has six crates in one workspace. The current workspace has
-the five implemented crates; M2 adds `ego-mcp` when its real client/server
-surface exists. Dependency arrows point down only. The diagram is the target
-layout, not authority to scaffold an empty sixth crate.
+The final layout has six crates in one workspace, and all six are present. M2
+added `ego-mcp` with its real client/server surface. Dependency arrows point
+down only.
 
 ```
 ego          (bin)  CLI: interactive line UI, headless, subcommands, config
@@ -491,8 +489,8 @@ switching/resume/fork/delete, model selection (`providers/*`), config
 (`session/set_config_option`), usage *and cost* (`UsageUpdate`), approvals,
 streaming — natively or behind `unstable_*` crate features. The single gap is
 mid-turn pause/resume → ego extension method. `ego-acp` implements the agent
-side of protocol v1 and v2 through the runtime crate's version negotiation.
-No filesystem archaeology remains on tuicommander's side.
+side of protocol v1. Protocol v2 and the full negotiated capability surface
+remain M5 work. No filesystem archaeology remains on tuicommander's side.
 
 Coverage is **negotiated per connection, not assumed** (R11): pinning crates
 controls ego's build, not each host's capability set. Every ACP operation is
@@ -501,7 +499,7 @@ unstable DTOs stay inside the `ego-acp` adapter; projection fixtures and a
 compatibility matrix run against at least Zed and tuicommander. ego extensions
 are namespaced and optional.
 
-M3 adds one deliberately narrow exception before ACP completeness:
+M3 added one deliberately narrow exception before ACP completeness:
 `_ego/compact`, advertised in `AgentCapabilities._meta`, invokes the same core
 compaction transition as the CLI and MCP server. It registers the deterministic
 checkpoint target for a later standard `session/prompt`, while `loadSession`

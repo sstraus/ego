@@ -554,13 +554,16 @@ the supported current Claude extensions documented in `docs/20-agent-skills.md`.
 εgo does not scan `.claude/skills`: compatible metadata and bodies are portable,
 while storage aliases would create a second trust and precedence namespace.
 
-`/skills` lists, invokes, and explicitly rescans the one admitted catalogue;
-`/name [arguments]` invokes a user-visible skill. A model-visible skill is
+`/skills`, `/skills list`, and `/skills diagnose` inspect the one admitted
+catalogue; `/skills rescan` prepares and atomically publishes a complete
+candidate; `/skills invoke <name> [arguments]` and `/name [arguments]` invoke a
+user-visible skill through the same typed operation. A model-visible skill is
 announced by bounded name/description/trigger metadata like an admitted MCP
-capability and is invoked through one typed `Skill` operation. Its full body
-and rooted read-only resources enter context only after invocation. A user-only
-skill is never announced to the model, and a model-only skill is hidden from
-slash completion and refuses direct user invocation.
+capability. Its full body and rooted read-only resources enter context only
+after invocation. A user-only skill is never announced to the model, and a
+model-only skill is hidden from slash completion and refuses direct user
+invocation. `/hooks` accepts no arguments and inspects the active immutable hook
+catalogue without reloading or editing it.
 
 Skill frontmatter may narrow tools, model, effort, paths, and invocation
 visibility. It cannot relax system rules, trust, permission, sandbox, offline,
