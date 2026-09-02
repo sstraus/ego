@@ -13,7 +13,9 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::Poll;
 
-use ego_core::budget::{BudgetGate, Metering, PricingQuote, ResolvedRates, SettlementSource};
+use ego_core::budget::{
+    BudgetGate, Ledger, Metering, PricingQuote, ResolvedRates, SettlementSource, SharedBudgetGate,
+};
 use ego_core::config::{Mode, PermCfg, Ruleset, Source, SystemPrompt};
 use ego_core::cost::{
     Amount, CostAttribution, CostDelta, CurrencyCode, MeteringRevision, Money, PricingRevision,
@@ -56,7 +58,7 @@ use ego_core::store::evidence::{
 use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
 use ego_core::turn::{
     CancelToken, ControlError, GenerationRuntime, JudgeContext, Session, ToolEffectPorts, Tools,
-    TurnConfig, TurnLoop,
+    TurnConfig, TurnLoop as CoreTurnLoop,
 };
 use futures::StreamExt;
 use futures::executor::block_on;
@@ -71,6 +73,18 @@ mod common;
 mod turn {
     use super::*;
     use ego_core::permit::fake::{FakeFs, FakeWriteTool};
+
+    struct TurnLoop;
+
+    impl TurnLoop {
+        fn open<'a>(
+            session: Session<'a>,
+            runtime: GenerationRuntime,
+            tools: Tools<'a>,
+        ) -> CoreTurnLoop<'a> {
+            CoreTurnLoop::new(session, runtime, tools).expect("synchronized budget gate")
+        }
+    }
 
     struct NoResolver;
 
@@ -366,11 +380,14 @@ mod turn {
             ))
         }
 
-        fn execute<'a>(
+        fn execute<'a, 'io>(
             &'a self,
             call: PreparedCall,
-            io: &'a dyn GuardedIo,
-        ) -> BoxFuture<'a, Result<ToolResult, ToolError>> {
+            io: &'a dyn GuardedIo<'io>,
+        ) -> BoxFuture<'a, Result<ToolResult, ToolError>>
+        where
+            'io: 'a,
+        {
             Box::pin(async move {
                 let Some(Op::Read { path }) = call.ops.into_iter().next() else {
                     return Err(ToolError::InvalidParams("expected one Read op".into()));
@@ -419,11 +436,14 @@ mod turn {
             ))
         }
 
-        fn execute<'a>(
+        fn execute<'a, 'io>(
             &'a self,
             call: PreparedCall,
-            io: &'a dyn GuardedIo,
-        ) -> BoxFuture<'a, Result<ToolResult, ToolError>> {
+            io: &'a dyn GuardedIo<'io>,
+        ) -> BoxFuture<'a, Result<ToolResult, ToolError>>
+        where
+            'io: 'a,
+        {
             Box::pin(async move {
                 let Some(Op::Spawn { spec }) = call.ops.into_iter().next() else {
                     return Err(ToolError::InvalidParams("expected one Spawn op".into()));
@@ -492,11 +512,14 @@ mod turn {
             ))
         }
 
-        fn execute<'a>(
+        fn execute<'a, 'io>(
             &'a self,
             call: PreparedCall,
-            io: &'a dyn GuardedIo,
-        ) -> BoxFuture<'a, Result<ToolResult, ToolError>> {
+            io: &'a dyn GuardedIo<'io>,
+        ) -> BoxFuture<'a, Result<ToolResult, ToolError>>
+        where
+            'io: 'a,
+        {
             let released = Arc::clone(&self.released);
             let release_seen = Arc::clone(&self.release_seen);
             Box::pin(async move {
@@ -552,11 +575,14 @@ mod turn {
             ))
         }
 
-        fn execute<'a>(
+        fn execute<'a, 'io>(
             &'a self,
             call: PreparedCall,
-            io: &'a dyn GuardedIo,
-        ) -> BoxFuture<'a, Result<ToolResult, ToolError>> {
+            io: &'a dyn GuardedIo<'io>,
+        ) -> BoxFuture<'a, Result<ToolResult, ToolError>>
+        where
+            'io: 'a,
+        {
             self.started.fetch_add(1, Ordering::SeqCst);
             let calls = Arc::clone(&self.calls);
             let released = Arc::clone(&self.released);
@@ -654,6 +680,20 @@ mod turn {
         BudgetGate::new(usd("1000"))
     }
 
+    fn committed(gate: &SharedBudgetGate) -> Option<Money> {
+        match gate.snapshot().expect("budget snapshot").ledger() {
+            Ledger::Unlimited => None,
+            Ledger::Limited { committed, .. } => Some(*committed),
+        }
+    }
+
+    fn outstanding(gate: &SharedBudgetGate) -> Option<Money> {
+        match gate.snapshot().expect("budget snapshot").ledger() {
+            Ledger::Unlimited => None,
+            Ledger::Limited { outstanding, .. } => Some(*outstanding),
+        }
+    }
+
     struct NoProcess;
 
     impl ProcessExecutor for NoProcess {
@@ -713,7 +753,7 @@ mod turn {
         process: Arc<dyn ProcessExecutor>,
         evidence: NoEvidence,
         registry: Vec<std::sync::Arc<dyn ego_core::permit::Tool>>,
-        gate: RefCell<BudgetGate>,
+        gate: RefCell<SharedBudgetGate>,
         /// Where the public projection goes. Collecting rather than null, so
         /// a test can assert on what a host would have seen — which is now
         /// the only way to see it.
@@ -731,7 +771,7 @@ mod turn {
                 process: Arc::new(NoProcess),
                 evidence: NoEvidence,
                 registry: Vec::new(),
-                gate: RefCell::new(gate()),
+                gate: RefCell::new(SharedBudgetGate::new(gate())),
                 sink: CollectingSink::new(),
             }
         }
@@ -928,31 +968,31 @@ mod turn {
         }
     }
 
-    fn model<'a, G: Generator + 'static>(
+    fn model<G: Generator + 'static>(
         generator: &Arc<G>,
-        gate: &'a mut BudgetGate,
-    ) -> GenerationRuntime<'a> {
+        gate: &mut SharedBudgetGate,
+    ) -> GenerationRuntime {
         model_with(generator, gate, metering(), Some(rates()), None, config())
     }
 
-    fn model_with_reasoning<'a, G: Generator + 'static>(
+    fn model_with_reasoning<G: Generator + 'static>(
         generator: &Arc<G>,
-        gate: &'a mut BudgetGate,
+        gate: &mut SharedBudgetGate,
         reasoning_efforts: ReasoningEffortSupport,
-    ) -> GenerationRuntime<'a> {
+    ) -> GenerationRuntime {
         let mut settings = config();
         settings.reasoning_efforts = reasoning_efforts;
         model_with(generator, gate, metering(), Some(rates()), None, settings)
     }
 
-    fn model_with<'a, G: Generator + 'static>(
+    fn model_with<G: Generator + 'static>(
         generator: &Arc<G>,
-        gate: &'a mut BudgetGate,
+        gate: &mut SharedBudgetGate,
         metering: Metering,
         rates: Option<ResolvedRates>,
         token_ceiling: Option<u64>,
         settings: TestGenerationSettings,
-    ) -> GenerationRuntime<'a> {
+    ) -> GenerationRuntime {
         let system = settings.system.clone();
         let source = FixedGenerationSource {
             generator: generator.clone(),
@@ -962,7 +1002,7 @@ mod turn {
         };
         GenerationRuntime {
             source: Arc::new(source),
-            gate,
+            gate: gate.clone(),
             config: TurnConfig {
                 system,
                 token_ceiling,
@@ -1020,7 +1060,7 @@ mod turn {
             ),
             CanonPath::new("/ws"),
         );
-        let mut turn = TurnLoop::new(
+        let mut turn = TurnLoop::open(
             session(state, &fx.store, &fx.clock, &fx.sink, CancelToken::new()),
             model_with(
                 &fx.generator,
@@ -1033,7 +1073,11 @@ mod turn {
             tools,
         );
         let outcome = block_on(turn.run(prompt)).expect("the store accepted every append");
-        (outcome.exit_reason, outcome.ok, turn.into_state())
+        (
+            outcome.exit_reason,
+            outcome.ok,
+            turn.into_state().expect("unique turn journal state"),
+        )
     }
 
     /// Every `seq` in the log, in the order it was written.
@@ -1234,7 +1278,7 @@ mod turn {
             ),
             CanonPath::new("/ws"),
         );
-        let mut turn = TurnLoop::new(
+        let mut turn = TurnLoop::open(
             session(
                 SessionState::default(),
                 &fx.store,
@@ -1362,7 +1406,7 @@ mod turn {
             ),
             CanonPath::new("/ws"),
         );
-        let mut turn = TurnLoop::new(
+        let mut turn = TurnLoop::open(
             session(
                 SessionState::default(),
                 &fx.store,
@@ -1504,7 +1548,7 @@ mod turn {
             ),
             CanonPath::new("/ws"),
         );
-        let mut turn = TurnLoop::new(
+        let mut turn = TurnLoop::open(
             session(state, &fx.store, &fx.clock, &fx.sink, CancelToken::new()),
             model(&fx.generator, &mut budget),
             tools,
@@ -1560,7 +1604,7 @@ mod turn {
             ),
             CanonPath::new("/ws"),
         );
-        let mut turn = TurnLoop::new(
+        let mut turn = TurnLoop::open(
             session(
                 SessionState::default(),
                 &fx.store,
@@ -1577,7 +1621,7 @@ mod turn {
                 .expect("empty queue run is not a store failure")
                 .is_none()
         );
-        let _state = turn.into_state();
+        let _state = turn.into_state().expect("unique turn journal state");
         drop(budget);
 
         let mut closed_submit = Box::pin(ingress.submit("after empty queue run".to_owned()));
@@ -1641,7 +1685,7 @@ mod turn {
                 ),
                 CanonPath::new("/ws"),
             );
-            let mut turn = TurnLoop::new(
+            let mut turn = TurnLoop::open(
                 session(
                     SessionState::default(),
                     &fx.store,
@@ -1667,7 +1711,7 @@ mod turn {
                     .pending_steers,
                 1
             );
-            let state = turn.into_state();
+            let state = turn.into_state().expect("unique turn journal state");
             assert_eq!(state.queue_status().queued, 0);
             state
         };
@@ -1692,7 +1736,7 @@ mod turn {
                 ),
                 CanonPath::new("/ws"),
             );
-            let mut turn = TurnLoop::new(
+            let mut turn = TurnLoop::open(
                 session(state, &fx.store, &fx.clock, &fx.sink, CancelToken::new()),
                 model(&fx.generator, &mut budget),
                 tools,
@@ -1786,7 +1830,7 @@ mod turn {
             ),
             CanonPath::new("/ws"),
         );
-        let mut turn = TurnLoop::new(
+        let mut turn = TurnLoop::open(
             session(
                 SessionState::default(),
                 &fx.store,
@@ -1856,7 +1900,7 @@ mod turn {
                 }
             )
         }));
-        let state = turn.into_state();
+        let state = turn.into_state().expect("unique turn journal state");
         drop(budget);
         let mut recovery_budget = fx.gate.borrow_mut();
         let recovery_tools = Tools::new(
@@ -1872,7 +1916,7 @@ mod turn {
             ),
             CanonPath::new("/ws"),
         );
-        let mut recovery = TurnLoop::new(
+        let mut recovery = TurnLoop::open(
             session(state, &fx.store, &fx.clock, &fx.sink, CancelToken::new()),
             model(&fx.generator, &mut recovery_budget),
             recovery_tools,
@@ -1923,14 +1967,14 @@ mod turn {
                 text: "streaming".to_owned(),
             }]),
         });
-        let mut budget = gate();
+        let mut budget = SharedBudgetGate::new(gate());
         let sink = CollectingSink::new();
         let policy = PolicyEngine::new(CanonPath::new("/ws"), Mode::Default, Ruleset::default());
         let fs = FakeFs::default();
         let process = NoProcess;
         let evidence = NoEvidence;
         let cancel = CancelToken::new();
-        let mut turn = TurnLoop::new(
+        let mut turn = TurnLoop::open(
             session(SessionState::default(), &fx.store, &fx.clock, &sink, cancel),
             model(&generator, &mut budget),
             Tools::new(
@@ -1979,7 +2023,7 @@ mod turn {
         let (ingress, mut control) = ego_core::turn::interactive_control();
         let fx = Fixture::new(vec![]);
         let generator = Arc::new(ContinuouslyReadyGenerator);
-        let mut budget = gate();
+        let mut budget = SharedBudgetGate::new(gate());
         let tools = Tools::new(
             &fx.registry,
             &fx.policy,
@@ -1993,7 +2037,7 @@ mod turn {
             ),
             CanonPath::new("/ws"),
         );
-        let mut turn = TurnLoop::new(
+        let mut turn = TurnLoop::open(
             session(
                 SessionState::default(),
                 &fx.store,
@@ -2054,7 +2098,7 @@ mod turn {
                 text: "coordinator consumes one intent at a time".to_owned(),
             }]),
         });
-        let mut budget = gate();
+        let mut budget = SharedBudgetGate::new(gate());
         let tools = Tools::new(
             &fx.registry,
             &fx.policy,
@@ -2068,7 +2112,7 @@ mod turn {
             ),
             CanonPath::new("/ws"),
         );
-        let mut turn = TurnLoop::new(
+        let mut turn = TurnLoop::open(
             session(
                 SessionState::default(),
                 &fx.store,
@@ -2152,7 +2196,7 @@ mod turn {
                 text: "busy after adversarial ack".to_owned(),
             }]),
         });
-        let mut budget = gate();
+        let mut budget = SharedBudgetGate::new(gate());
         let tools = Tools::new(
             &fx.registry,
             &fx.policy,
@@ -2166,7 +2210,7 @@ mod turn {
             ),
             CanonPath::new("/ws"),
         );
-        let mut turn = TurnLoop::new(
+        let mut turn = TurnLoop::open(
             session(state, &fx.store, &fx.clock, &fx.sink, CancelToken::new()),
             model(&generator, &mut budget),
             tools,
@@ -2213,14 +2257,14 @@ mod turn {
         let generator = Arc::new(StallingGenerator {
             events: Mutex::new(Vec::new()),
         });
-        let mut budget = gate();
+        let mut budget = SharedBudgetGate::new(gate());
         let sink = CollectingSink::new();
         let policy = PolicyEngine::new(CanonPath::new("/ws"), Mode::Default, Ruleset::default());
         let fs = FakeFs::default();
         let process = NoProcess;
         let evidence = NoEvidence;
         let cancel = CancelToken::new();
-        let mut turn = TurnLoop::new(
+        let mut turn = TurnLoop::open(
             session(SessionState::default(), &fx.store, &fx.clock, &sink, cancel),
             model(&generator, &mut budget),
             Tools::new(
@@ -2297,7 +2341,7 @@ mod turn {
             ),
             CanonPath::new("/ws"),
         );
-        let mut turn = TurnLoop::new(
+        let mut turn = TurnLoop::open(
             session(
                 SessionState::default(),
                 &fx.store,
@@ -2344,8 +2388,8 @@ mod turn {
                 }
             )
         }));
-        let call = turn
-            .state()
+        let current_state = turn.state();
+        let call = current_state
             .items
             .values()
             .find(|item| item.kind == ItemKind::ToolCall)
@@ -2360,7 +2404,7 @@ mod turn {
                 } | EventKind::ToolCallCompleted { ok: false, .. }
             )
         });
-        let state = turn.into_state();
+        let state = turn.into_state().expect("unique turn journal state");
         drop(budget);
         let mut recovery_budget = fx.gate.borrow_mut();
         let recovery_tools = Tools::new(
@@ -2376,7 +2420,7 @@ mod turn {
             ),
             CanonPath::new("/ws"),
         );
-        let mut recovery = TurnLoop::new(
+        let mut recovery = TurnLoop::open(
             session(state, &fx.store, &fx.clock, &fx.sink, CancelToken::new()),
             model(&fx.generator, &mut recovery_budget),
             recovery_tools,
@@ -2430,7 +2474,7 @@ mod turn {
             ),
             CanonPath::new("/ws"),
         );
-        let mut turn = TurnLoop::new(
+        let mut turn = TurnLoop::open(
             session(
                 SessionState::default(),
                 &fx.store,
@@ -2470,8 +2514,8 @@ mod turn {
             ExitReason::Cancelled(CancelCause::User)
         );
         assert_eq!(calls.load(Ordering::SeqCst), 1);
-        let call = turn
-            .state()
+        let current_state = turn.state();
+        let call = current_state
             .items
             .values()
             .find(|item| item.kind == ItemKind::ToolCall)
@@ -2481,7 +2525,7 @@ mod turn {
         assert_live_interrupt_order(&fx, |kind| {
             matches!(kind, EventKind::ToolCallCompleted { ok: false, .. })
         });
-        let state = turn.into_state();
+        let state = turn.into_state().expect("unique turn journal state");
         drop(budget);
         let mut recovery_budget = fx.gate.borrow_mut();
         let recovery_tools = Tools::new(
@@ -2497,7 +2541,7 @@ mod turn {
             ),
             CanonPath::new("/ws"),
         );
-        let mut recovery = TurnLoop::new(
+        let mut recovery = TurnLoop::open(
             session(state, &fx.store, &fx.clock, &fx.sink, CancelToken::new()),
             model(&fx.generator, &mut recovery_budget),
             recovery_tools,
@@ -2545,7 +2589,7 @@ mod turn {
             ),
             CanonPath::new("/ws"),
         );
-        let mut turn = TurnLoop::new(
+        let mut turn = TurnLoop::open(
             session(
                 SessionState::default(),
                 &fx.store,
@@ -2590,8 +2634,8 @@ mod turn {
             outcome.exit_reason,
             ExitReason::Cancelled(CancelCause::User)
         );
-        let call = turn
-            .state()
+        let current_state = turn.state();
+        let call = current_state
             .items
             .values()
             .find(|item| item.kind == ItemKind::ToolCall)
@@ -2601,7 +2645,7 @@ mod turn {
         assert_live_interrupt_order(&fx, |kind| {
             matches!(kind, EventKind::ToolCallCompleted { ok: true, .. })
         });
-        let state = turn.into_state();
+        let state = turn.into_state().expect("unique turn journal state");
         drop(budget);
         let mut recovery_budget = fx.gate.borrow_mut();
         let recovery_tools = Tools::new(
@@ -2617,7 +2661,7 @@ mod turn {
             ),
             CanonPath::new("/ws"),
         );
-        let mut recovery = TurnLoop::new(
+        let mut recovery = TurnLoop::open(
             session(state, &fx.store, &fx.clock, &fx.sink, CancelToken::new()),
             model(&fx.generator, &mut recovery_budget),
             recovery_tools,
@@ -2681,7 +2725,7 @@ mod turn {
             ),
             CanonPath::new("/ws"),
         );
-        let mut turn = TurnLoop::new(
+        let mut turn = TurnLoop::open(
             session(
                 SessionState::default(),
                 &fx.store,
@@ -2723,8 +2767,8 @@ mod turn {
             ExitReason::Cancelled(CancelCause::User)
         );
         assert_eq!(calls.load(Ordering::SeqCst), 1);
-        let mut calls: Vec<_> = turn
-            .state()
+        let current_state = turn.state();
+        let mut calls: Vec<_> = current_state
             .items
             .values()
             .filter(|item| item.kind == ItemKind::ToolCall)
@@ -2739,7 +2783,7 @@ mod turn {
         assert_live_interrupt_order(&fx, |kind| {
             matches!(kind, EventKind::ToolCallCompleted { .. })
         });
-        let state = turn.into_state();
+        let state = turn.into_state().expect("unique turn journal state");
         drop(budget);
         let mut recovery_budget = fx.gate.borrow_mut();
         let recovery_tools = Tools::new(
@@ -2755,7 +2799,7 @@ mod turn {
             ),
             CanonPath::new("/ws"),
         );
-        let mut recovery = TurnLoop::new(
+        let mut recovery = TurnLoop::open(
             session(state, &fx.store, &fx.clock, &fx.sink, CancelToken::new()),
             model(&fx.generator, &mut recovery_budget),
             recovery_tools,
@@ -3449,7 +3493,7 @@ mod turn {
             ),
             CanonPath::new("/ws"),
         );
-        let mut turn = TurnLoop::new(
+        let mut turn = TurnLoop::open(
             session(
                 SessionState::default(),
                 &fx.store,
@@ -3490,8 +3534,8 @@ mod turn {
         );
         drop(turn);
         assert_eq!(
-            gate.outstanding(),
-            Some(&usd("0")),
+            outstanding(&gate),
+            Some(usd("0")),
             "the reservation was released, not leaked"
         );
     }
@@ -3564,7 +3608,7 @@ mod turn {
             ),
             CanonPath::new("/ws"),
         );
-        let mut turn = TurnLoop::new(
+        let mut turn = TurnLoop::open(
             session(
                 SessionState::default(),
                 &fx.store,
@@ -3591,7 +3635,7 @@ mod turn {
             kinds.contains(&"attempt_settled".to_string()),
             "and it must still settle its attempt: {kinds:?}"
         );
-        let state = turn.into_state();
+        let state = turn.into_state().expect("unique turn journal state");
         let call = state
             .items
             .values()
@@ -3621,7 +3665,7 @@ mod turn {
     fn a_refused_budget_stops_the_turn_without_starting_a_generation() {
         let fx = Fixture::new(vec![vec![AiEvent::Stop(StopReason::Stop)]]);
         // A gate too small to admit the upper bound of any request.
-        let mut gate = BudgetGate::new(usd("0.0000001"));
+        let mut gate = SharedBudgetGate::new(BudgetGate::new(usd("0.0000001")));
         let tools = Tools::new(
             &fx.registry,
             &fx.policy,
@@ -3635,7 +3679,7 @@ mod turn {
             ),
             CanonPath::new("/ws"),
         );
-        let mut turn = TurnLoop::new(
+        let mut turn = TurnLoop::open(
             session(
                 SessionState::default(),
                 &fx.store,
@@ -4045,7 +4089,7 @@ mod turn {
             ),
             CanonPath::new("/ws"),
         );
-        let mut turn = TurnLoop::new(
+        let mut turn = TurnLoop::open(
             session(
                 SessionState::default(),
                 &fx.store,
@@ -4066,8 +4110,8 @@ mod turn {
         );
         drop(turn);
         assert_eq!(
-            gate.outstanding(),
-            Some(&usd("0")),
+            outstanding(&gate),
+            Some(usd("0")),
             "an abandoned turn still settles the attempt it had in flight"
         );
     }
@@ -4109,7 +4153,7 @@ mod turn {
                 ThinkingLevel::High,
             ])),
         );
-        let mut turn = TurnLoop::new(
+        let mut turn = TurnLoop::open(
             session(
                 SessionState::default(),
                 &fx.store,
@@ -4127,11 +4171,11 @@ mod turn {
         assert!(!outcome.ok);
         drop(turn);
         assert_eq!(
-            gate.outstanding(),
-            Some(&usd("0")),
+            outstanding(&gate),
+            Some(usd("0")),
             "the gate reserved anyway"
         );
-        assert_eq!(gate.committed(), Some(&usd("0")), "the gate settled anyway");
+        assert_eq!(committed(&gate), Some(usd("0")), "the gate settled anyway");
         assert!(
             fx.generator.calls().is_empty(),
             "the request was sent to the provider anyway"
@@ -4163,7 +4207,7 @@ mod turn {
             &mut gate,
             ReasoningEffortSupport::Only(BTreeSet::from([ThinkingLevel::High])),
         );
-        let mut turn = TurnLoop::new(
+        let mut turn = TurnLoop::open(
             session(
                 SessionState::default(),
                 &fx.store,
@@ -4219,7 +4263,7 @@ mod turn {
         );
         let silent =
             model_with_reasoning(&fx.generator, &mut gate, ReasoningEffortSupport::Unknown);
-        let mut turn = TurnLoop::new(
+        let mut turn = TurnLoop::open(
             session(
                 SessionState::default(),
                 &fx.store,
@@ -4261,7 +4305,7 @@ mod turn {
             ),
             CanonPath::new("/ws"),
         );
-        let mut turn = TurnLoop::new(
+        let mut turn = TurnLoop::open(
             session(
                 SessionState::default(),
                 &fx.store,
@@ -4338,7 +4382,7 @@ mod turn {
             ),
             CanonPath::new("/ws"),
         );
-        let mut turn = TurnLoop::new(
+        let mut turn = TurnLoop::open(
             session(
                 SessionState::default(),
                 &fx.store,
@@ -4421,7 +4465,7 @@ mod turn {
             ),
             CanonPath::new("/ws"),
         );
-        let mut turn = TurnLoop::new(
+        let mut turn = TurnLoop::open(
             session(
                 SessionState::default(),
                 &fx.store,
@@ -4505,7 +4549,7 @@ mod turn {
         // first generation still has to be told which metering was about to
         // be charged, or the denial is unreadable.
         let denied = Fixture::new(vec![vec![AiEvent::Stop(StopReason::Stop)]]);
-        *denied.gate.borrow_mut() = BudgetGate::new(usd("0.01"));
+        *denied.gate.borrow_mut() = SharedBudgetGate::new(BudgetGate::new(usd("0.01")));
         let (exit, ok, _) = run(&denied, SessionState::default(), "hi");
         assert_eq!(exit, ExitReason::Budget);
         assert!(!ok, "a cent cannot admit this generation");
@@ -4588,8 +4632,9 @@ mod turn {
             AiEvent::Usage(tokens(900, 0, 0, 200)),
             AiEvent::Stop(StopReason::Stop),
         ]]);
-        *fx.gate.borrow_mut() =
-            BudgetGate::unlimited(CurrencyCode::new("USD").expect("USD is valid"));
+        *fx.gate.borrow_mut() = SharedBudgetGate::new(BudgetGate::unlimited(
+            CurrencyCode::new("USD").expect("USD is valid"),
+        ));
 
         // The first turn spends 1_100 tokens against a 1_000 ceiling, and
         // completes: the ceiling is checked before a generation, not after.
@@ -4643,8 +4688,9 @@ mod turn {
             AiEvent::Usage(tokens(1_000, 0, 0, 200)),
             AiEvent::Stop(StopReason::Stop),
         ]]);
-        *fx.gate.borrow_mut() =
-            BudgetGate::unlimited(CurrencyCode::new("USD").expect("USD is valid"));
+        *fx.gate.borrow_mut() = SharedBudgetGate::new(BudgetGate::unlimited(
+            CurrencyCode::new("USD").expect("USD is valid"),
+        ));
 
         let (exit, ok, _) = run_with(
             &fx,
@@ -4757,20 +4803,18 @@ mod turn {
 
         // A cent could not cover the $0.76536 worst case of the currency row.
         let currency = Fixture::new(script());
-        *currency.gate.borrow_mut() = BudgetGate::new(usd("0.01"));
+        *currency.gate.borrow_mut() = SharedBudgetGate::new(BudgetGate::new(usd("0.01")));
         let (exit, ok, _) = run(&currency, SessionState::default(), "hi");
         assert_eq!(exit, ExitReason::Budget);
         assert!(!ok, "a cent cannot admit a currency-metered generation");
 
         let flat = Fixture::new(script());
-        *flat.gate.borrow_mut() = BudgetGate::new(usd("0.01"));
+        *flat.gate.borrow_mut() = SharedBudgetGate::new(BudgetGate::new(usd("0.01")));
         let (exit, ok, _) = run_metered(&flat, SessionState::default(), "hi", subscription());
         assert_eq!(exit, ExitReason::Completed);
         assert!(ok, "a flat fee is not spent per request");
         assert!(
-            flat.gate
-                .borrow()
-                .committed()
+            committed(&flat.gate.borrow())
                 .expect("a limited gate keeps totals")
                 .amount
                 .is_zero()
@@ -4862,7 +4906,7 @@ mod turn {
             quote().price(&tokens(1_000, 0, 0, 200)),
             "a stated cost is not the table's answer"
         );
-        assert_eq!(fx.gate.borrow().committed(), Some(&usd("0.0012345678")));
+        assert_eq!(committed(&fx.gate.borrow()), Some(usd("0.0012345678")));
     }
 
     /// The cost may arrive before the usage or after it — SSE gives no
@@ -4924,8 +4968,8 @@ mod turn {
             "the tokens arrived, so `ProviderReportedNoUsage` would name the wrong silence"
         );
         assert_eq!(
-            fx.gate.borrow().committed(),
-            Some(&usd("0.76536")),
+            committed(&fx.gate.borrow()),
+            Some(usd("0.76536")),
             "an unknown cost charges the bound, never zero"
         );
     }
@@ -5242,7 +5286,7 @@ mod turn {
                 ])
                 .with_trace(trace.clone()),
             );
-            let mut gate = fx.gate.borrow_mut();
+            let gate = fx.gate.borrow_mut();
             let tools = Tools::new(
                 &fx.registry,
                 &fx.policy,
@@ -5256,7 +5300,7 @@ mod turn {
                 ),
                 CanonPath::new("/ws"),
             );
-            let mut turn = TurnLoop::new(
+            let mut turn = TurnLoop::open(
                 session(
                     SessionState::default(),
                     &fx.store,
@@ -5266,7 +5310,7 @@ mod turn {
                 ),
                 GenerationRuntime {
                     source: source.clone(),
-                    gate: &mut gate,
+                    gate: gate.clone(),
                     config: TurnConfig {
                         system: None,
                         token_ceiling: None,
@@ -5386,7 +5430,7 @@ mod turn {
                 confinement,
                 exec_caps: ExecCaps::READ_SCOPED.union(ExecCaps::WRITE_SCOPED),
             };
-            let mut gate = fx.gate.borrow_mut();
+            let gate = fx.gate.borrow_mut();
             let tools = Tools::new(
                 &fx.registry,
                 &fx.policy,
@@ -5400,7 +5444,7 @@ mod turn {
                 ),
                 CanonPath::new("/ws"),
             );
-            let mut turn = TurnLoop::new(
+            let mut turn = TurnLoop::open(
                 session(
                     SessionState::default(),
                     &fx.store,
@@ -5410,7 +5454,7 @@ mod turn {
                 ),
                 GenerationRuntime {
                     source: source.clone(),
-                    gate: &mut gate,
+                    gate: gate.clone(),
                     config: TurnConfig {
                         system: None,
                         token_ceiling: None,
@@ -5523,8 +5567,8 @@ mod turn {
                 ),
                 CanonPath::new("/ws"),
             );
-            let mut gate = fx.gate.borrow_mut();
-            let mut turn = TurnLoop::new(
+            let gate = fx.gate.borrow_mut();
+            let mut turn = TurnLoop::open(
                 session(
                     SessionState::default(),
                     &fx.store,
@@ -5534,7 +5578,7 @@ mod turn {
                 ),
                 GenerationRuntime {
                     source: source.clone(),
-                    gate: &mut gate,
+                    gate: gate.clone(),
                     config: TurnConfig {
                         system: None,
                         token_ceiling: None,
@@ -5582,8 +5626,8 @@ mod turn {
                     ),
                     CanonPath::new("/ws"),
                 );
-                let mut gate = fx.gate.borrow_mut();
-                let mut turn = TurnLoop::new(
+                let gate = fx.gate.borrow_mut();
+                let mut turn = TurnLoop::open(
                     session(
                         SessionState::default(),
                         &fx.store,
@@ -5593,7 +5637,7 @@ mod turn {
                     ),
                     GenerationRuntime {
                         source: source.clone(),
-                        gate: &mut gate,
+                        gate: gate.clone(),
                         config: TurnConfig {
                             system: None,
                             token_ceiling: None,
@@ -5613,8 +5657,8 @@ mod turn {
                         .any(|kind| kind == "generation_started")
                 );
                 assert!(fx.store.kinds().iter().any(|kind| kind == "error"));
-                assert_eq!(gate.outstanding(), Some(&usd("0")));
-                assert_eq!(gate.committed(), Some(&usd("0")));
+                assert_eq!(outstanding(&gate), Some(usd("0")));
+                assert_eq!(committed(&gate), Some(usd("0")));
             }
         }
 
@@ -5645,8 +5689,8 @@ mod turn {
                 ),
                 CanonPath::new("/ws"),
             );
-            let mut gate = fx.gate.borrow_mut();
-            let mut turn = TurnLoop::new(
+            let gate = fx.gate.borrow_mut();
+            let mut turn = TurnLoop::open(
                 session(
                     SessionState::default(),
                     &fx.store,
@@ -5656,7 +5700,7 @@ mod turn {
                 ),
                 GenerationRuntime {
                     source: source.clone(),
-                    gate: &mut gate,
+                    gate: gate.clone(),
                     config: TurnConfig {
                         system: None,
                         token_ceiling: None,
@@ -5684,8 +5728,8 @@ mod turn {
                     .any(|event| matches!(event, PublicEvent::MeteringSelected { .. }))
             );
             assert!(fx.store.kinds().iter().any(|kind| kind == "error"));
-            assert_eq!(gate.outstanding(), Some(&usd("0")));
-            assert_eq!(gate.committed(), Some(&usd("0")));
+            assert_eq!(outstanding(&gate), Some(usd("0")));
+            assert_eq!(committed(&gate), Some(usd("0")));
         }
 
         #[test]
@@ -5719,7 +5763,7 @@ mod turn {
                 ])
                 .with_trace(trace.clone()),
             );
-            let mut gate = fx.gate.borrow_mut();
+            let gate = fx.gate.borrow_mut();
             let tools = Tools::new(
                 &fx.registry,
                 &fx.policy,
@@ -5733,7 +5777,7 @@ mod turn {
                 ),
                 CanonPath::new("/ws"),
             );
-            let mut turn = TurnLoop::new(
+            let mut turn = TurnLoop::open(
                 session(
                     SessionState::default(),
                     &fx.store,
@@ -5743,7 +5787,7 @@ mod turn {
                 ),
                 GenerationRuntime {
                     source: source.clone(),
-                    gate: &mut gate,
+                    gate: gate.clone(),
                     config: TurnConfig {
                         system: None,
                         token_ceiling: None,
@@ -5795,8 +5839,8 @@ mod turn {
                     ..
                 }
             )));
-            assert_eq!(gate.outstanding(), Some(&usd("0")));
-            assert_eq!(gate.committed(), Some(&usd("0.06144")));
+            assert_eq!(outstanding(&gate), Some(usd("0")));
+            assert_eq!(committed(&gate), Some(usd("0.06144")));
         }
 
         #[test]
@@ -5827,8 +5871,8 @@ mod turn {
                 ),
                 CanonPath::new("/ws"),
             );
-            let mut gate = fx.gate.borrow_mut();
-            let mut turn = TurnLoop::new(
+            let gate = fx.gate.borrow_mut();
+            let mut turn = TurnLoop::open(
                 session(
                     SessionState::default(),
                     &fx.store,
@@ -5838,7 +5882,7 @@ mod turn {
                 ),
                 GenerationRuntime {
                     source: source.clone(),
-                    gate: &mut gate,
+                    gate: gate.clone(),
                     config: TurnConfig {
                         system: None,
                         token_ceiling: None,
@@ -5862,8 +5906,8 @@ mod turn {
                     .iter()
                     .any(|kind| kind == "generation_started")
             );
-            assert_eq!(gate.outstanding(), Some(&usd("0")));
-            assert_eq!(gate.committed(), Some(&usd("0")));
+            assert_eq!(outstanding(&gate), Some(usd("0")));
+            assert_eq!(committed(&gate), Some(usd("0")));
         }
 
         #[test]
@@ -5887,7 +5931,7 @@ mod turn {
                 ))])
                 .with_trace(trace),
             );
-            let mut gate = fx.gate.borrow_mut();
+            let gate = fx.gate.borrow_mut();
             let tools = Tools::new(
                 &fx.registry,
                 &fx.policy,
@@ -5901,7 +5945,7 @@ mod turn {
                 ),
                 CanonPath::new("/ws"),
             );
-            let mut turn = TurnLoop::new(
+            let mut turn = TurnLoop::open(
                 session(
                     SessionState::default(),
                     &fx.store,
@@ -5911,7 +5955,7 @@ mod turn {
                 ),
                 GenerationRuntime {
                     source: source.clone(),
-                    gate: &mut gate,
+                    gate: gate.clone(),
                     config: TurnConfig {
                         system: None,
                         token_ceiling: None,
@@ -5954,7 +5998,7 @@ mod turn {
                 &trace,
                 Some(2_048),
             ))]));
-            let mut gate = fx.gate.borrow_mut();
+            let gate = fx.gate.borrow_mut();
             let tools = Tools::new(
                 &fx.registry,
                 &fx.policy,
@@ -5968,7 +6012,7 @@ mod turn {
                 ),
                 CanonPath::new("/ws"),
             );
-            let mut turn = TurnLoop::new(
+            let mut turn = TurnLoop::open(
                 session(
                     SessionState::default(),
                     &fx.store,
@@ -5978,7 +6022,7 @@ mod turn {
                 ),
                 GenerationRuntime {
                     source: source.clone(),
-                    gate: &mut gate,
+                    gate: gate.clone(),
                     config: TurnConfig {
                         system: None,
                         token_ceiling: None,
@@ -6031,7 +6075,7 @@ mod turn {
                     ])
                     .with_trace(trace.clone()),
                 );
-                let mut gate = fx.gate.borrow_mut();
+                let gate = fx.gate.borrow_mut();
                 let tools = Tools::new(
                     &fx.registry,
                     &fx.policy,
@@ -6045,7 +6089,7 @@ mod turn {
                     ),
                     CanonPath::new("/ws"),
                 );
-                let mut turn = TurnLoop::new(
+                let mut turn = TurnLoop::open(
                     session(
                         SessionState::default(),
                         &fx.store,
@@ -6055,7 +6099,7 @@ mod turn {
                     ),
                     GenerationRuntime {
                         source: source.clone(),
-                        gate: &mut gate,
+                        gate: gate.clone(),
                         config: TurnConfig {
                             system: None,
                             token_ceiling: None,
@@ -6101,8 +6145,8 @@ mod turn {
                     }
                 )));
                 drop(turn);
-                assert_eq!(gate.outstanding(), Some(&usd("0")));
-                assert_eq!(gate.committed(), Some(&usd("0.06144")));
+                assert_eq!(outstanding(&gate), Some(usd("0")));
+                assert_eq!(committed(&gate), Some(usd("0.06144")));
             }
         }
 
@@ -6131,7 +6175,7 @@ mod turn {
             let source = Arc::new(source);
             let (ingress, mut control) = ego_core::turn::interactive_control();
             let cancel = CancelToken::new();
-            let mut gate = fx.gate.borrow_mut();
+            let gate = fx.gate.borrow_mut();
             let tools = Tools::new(
                 &fx.registry,
                 &fx.policy,
@@ -6145,7 +6189,7 @@ mod turn {
                 ),
                 CanonPath::new("/ws"),
             );
-            let mut turn = TurnLoop::new(
+            let mut turn = TurnLoop::open(
                 session(
                     SessionState::default(),
                     &fx.store,
@@ -6155,7 +6199,7 @@ mod turn {
                 ),
                 GenerationRuntime {
                     source: source.clone(),
-                    gate: &mut gate,
+                    gate: gate.clone(),
                     config: TurnConfig {
                         system: None,
                         token_ceiling: None,
@@ -6202,8 +6246,8 @@ mod turn {
                     ..
                 }
             )));
-            assert_eq!(gate.outstanding(), Some(&usd("0")));
-            assert_eq!(gate.committed(), Some(&usd("0.06144")));
+            assert_eq!(outstanding(&gate), Some(usd("0")));
+            assert_eq!(committed(&gate), Some(usd("0.06144")));
         }
 
         #[test]
@@ -6242,7 +6286,7 @@ mod turn {
                 ])
                 .with_trace(trace.clone()),
             );
-            let mut gate = fx.gate.borrow_mut();
+            let gate = fx.gate.borrow_mut();
             let tools = Tools::new(
                 &fx.registry,
                 &fx.policy,
@@ -6256,7 +6300,7 @@ mod turn {
                 ),
                 CanonPath::new("/ws"),
             );
-            let mut turn = TurnLoop::new(
+            let mut turn = TurnLoop::open(
                 session(
                     SessionState::default(),
                     &fx.store,
@@ -6266,7 +6310,7 @@ mod turn {
                 ),
                 GenerationRuntime {
                     source: source.clone(),
-                    gate: &mut gate,
+                    gate: gate.clone(),
                     config: TurnConfig {
                         system: None,
                         token_ceiling: None,
@@ -6312,8 +6356,8 @@ mod turn {
                 }
             )));
             drop(turn);
-            assert_eq!(gate.outstanding(), Some(&usd("0")));
-            assert_eq!(gate.committed(), Some(&usd("0.06144")));
+            assert_eq!(outstanding(&gate), Some(usd("0")));
+            assert_eq!(committed(&gate), Some(usd("0.06144")));
         }
     }
 }

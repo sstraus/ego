@@ -141,7 +141,7 @@ fn admitted_catalogue() -> HookCatalogueEvidence {
         HookDescriptorEvidence::new(
             HookSourceAuthority::User,
             HookSourceLocation::parse("hooks/user.toml").expect("catalogue location"),
-            digest.clone(),
+            digest,
             0,
         ),
         HookDescriptorEvidence::new(

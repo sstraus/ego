@@ -48,11 +48,14 @@ impl Tool for CountingTool {
             "fixture call is supplied by capture".into(),
         ))
     }
-    fn execute<'a>(
+    fn execute<'a, 'io>(
         &'a self,
         _call: PreparedCall,
-        _io: &'a dyn GuardedIo,
-    ) -> BoxFuture<'a, Result<ToolExecution, ToolError>> {
+        _io: &'a dyn GuardedIo<'io>,
+    ) -> BoxFuture<'a, Result<ToolExecution, ToolError>>
+    where
+        'io: 'a,
+    {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Box::pin(async { Ok(ToolExecution::Complete(ToolResult::builtin("counted"))) })
     }

@@ -4,14 +4,16 @@ mod common;
 
 use std::ffi::OsString;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
-use ego_core::budget::{BudgetGate, Metering};
+use ego_core::budget::{BudgetGate, Metering, SharedBudgetGate};
 use ego_core::config::{ConfigLayer, Mode, ModelRef, PermCfg, Ruleset, Source, Trust};
 use ego_core::cost::MeteringRevision;
 use ego_core::event::domain::{DomainEvent, Envelope, EventKind};
 use ego_core::event::hook::{
-    HookActivation, HookDecision, HookFailure, HookFailureKind, HookInvocationId, HookLifecycle,
-    HookOccurrenceKey, HookOccurrenceOwner, HookOutcome, HookPlan, HookResult,
+    HookActivation, HookCatalogueEvidence, HookDecision, HookDescriptorEvidence, HookFailure,
+    HookFailureKind, HookInvocationId, HookLifecycle, HookOccurrenceKey, HookOccurrenceOwner,
+    HookOutcome, HookPlan, HookResult, HookSourceAuthority,
 };
 use ego_core::event::id::{EventId, ItemId, Producer, Seq, SessionId, TurnId};
 use ego_core::event::skill::{
@@ -30,9 +32,10 @@ use ego_core::generator::fake::FakeGenerator;
 use ego_core::generator::port::AiEvent;
 use ego_core::generator::types::{StopReason, ThinkingLevel};
 use ego_core::hook::{
-    HookCatalogue, HookEvent, HookFuture, HookInvocationRequest, HookLifecycleDispatcher,
-    HookOccurrence, HookPort, HookReachFuture, HookReachedEvidence, HookRecordFuture, HookRunner,
-    HookSpec, HookStartFuture, HookStartedEvidence,
+    HookCatalogue, HookCausality, HookEvent, HookFuture, HookInvocationPort, HookInvocationRequest,
+    HookJournalPort, HookLifecycleDispatcher, HookOccurrence, HookReachError, HookReachOutcome,
+    HookReachedEvidence, HookRunError, HookRunner as CoreHookRunner, HookSource, HookSpec,
+    HookStartError, HookStartedEvidence, SessionHookRuntime,
 };
 use ego_core::mcp::ToolExecution;
 use ego_core::permit::rule::Rule;
@@ -95,12 +98,83 @@ fn catalogue() -> HookCatalogue {
     .expect("complete lifecycle catalogue")
 }
 
-fn occurrence(lifecycle: HookLifecycle, owner: HookOccurrenceOwner) -> HookOccurrence {
+fn catalogue_evidence(catalogue: &HookCatalogue) -> HookCatalogueEvidence {
+    let descriptors = catalogue.specs().iter().map(|spec| {
+        let authority = match spec.source() {
+            HookSource::System => HookSourceAuthority::System,
+            HookSource::User => HookSourceAuthority::User,
+            HookSource::Project => HookSourceAuthority::Project,
+            HookSource::Skill { authority, .. } => match authority {
+                SkillSourceAuthority::System => HookSourceAuthority::System,
+                SkillSourceAuthority::User => HookSourceAuthority::User,
+                SkillSourceAuthority::Project => HookSourceAuthority::Project,
+            },
+        };
+        HookDescriptorEvidence::new(
+            authority,
+            spec.location().clone(),
+            spec.content_digest(),
+            spec.ordinal().expect("hook ordinal"),
+        )
+    });
+    HookCatalogueEvidence::new(descriptors.collect()).expect("catalogue evidence")
+}
+
+fn occurrence(lifecycle: HookLifecycle, session: SessionId) -> HookOccurrence {
+    let turn = TurnId::new();
     HookOccurrence::new(
-        HookOccurrenceKey::new(lifecycle, owner),
+        HookOccurrenceKey::new(lifecycle, HookOccurrenceOwner::Session { session }),
         HookEvent::session(lifecycle),
+        HookCausality::session(session, turn),
     )
     .expect("matching lifecycle occurrence")
+}
+
+#[derive(Clone)]
+struct HookRunner<P> {
+    inner: CoreHookRunner,
+    port: Arc<P>,
+}
+
+impl<P> HookRunner<P>
+where
+    P: HookJournalPort + HookInvocationPort,
+{
+    fn new(port: P) -> Self {
+        Self {
+            inner: CoreHookRunner::new(),
+            port: Arc::new(port),
+        }
+    }
+
+    fn new_with_durable_started<I>(port: P, started: I) -> Self
+    where
+        I: IntoIterator<Item = HookStartedEvidence>,
+    {
+        Self {
+            inner: CoreHookRunner::new_with_durable_started(started),
+            port: Arc::new(port),
+        }
+    }
+
+    async fn run_occurrence(
+        &self,
+        catalogue: &HookCatalogue,
+        producer: Producer,
+        occurrence: HookOccurrence,
+    ) -> Result<ego_core::hook::HookRunResult, HookRunError> {
+        self.inner
+            .run_occurrence(
+                self.port.as_ref(),
+                self.port.as_ref(),
+                CancelToken::new(),
+                Instant::now() + Duration::from_secs(30),
+                catalogue,
+                producer,
+                occurrence,
+            )
+            .await
+    }
 }
 
 #[derive(Clone, Default)]
@@ -132,71 +206,65 @@ impl FailingPort {
     }
 }
 
-macro_rules! delegate_hook_port {
-    ($name:ty, $outcome:expr) => {
-        impl HookPort for $name {
-            fn reached<'a>(
-                &'a self,
-                producer: &'a Producer,
-                occurrence: &'a HookOccurrence,
-                plan: &'a HookPlan,
-            ) -> HookReachFuture<'a> {
+macro_rules! delegate_hook_journal_port {
+    ($name:ty) => {
+        impl HookJournalPort for $name {
+            fn reached(
+                &self,
+                producer: &Producer,
+                occurrence: &HookOccurrence,
+                plan: &HookPlan,
+            ) -> Result<HookReachOutcome, HookReachError> {
                 self.0.reached(producer, occurrence, plan)
             }
-            fn started<'a>(
-                &'a self,
-                spec: &'a HookSpec,
-                occurrence: &'a HookOccurrence,
-                reached: &'a HookReachedEvidence,
+            fn started(
+                &self,
+                spec: &HookSpec,
+                occurrence: &HookOccurrence,
+                reached: &HookReachedEvidence,
                 activation: HookActivation,
                 invocation: HookInvocationId,
-            ) -> HookStartFuture<'a> {
+            ) -> Result<HookStartedEvidence, HookStartError> {
                 self.0
                     .started(spec, occurrence, reached, activation, invocation)
             }
-            fn invoke<'a>(&'a self, _request: HookInvocationRequest) -> HookFuture<'a> {
-                Box::pin(std::future::ready($outcome))
-            }
-            fn settled<'a>(
-                &'a self,
-                spec: &'a HookSpec,
+            fn settled(
+                &self,
+                occurrence: &HookOccurrence,
                 started: HookStartedEvidence,
-                result: &'a HookResult,
-            ) -> HookRecordFuture<'a> {
-                self.0.settled(spec, started, result)
+                result: &HookResult,
+            ) -> Result<EventId, HookRunError> {
+                self.0.settled(occurrence, started, result)
             }
         }
     };
 }
 
-delegate_hook_port!(
-    BlockingPort,
-    Ok(HookOutcome::new(HookDecision::Block, None))
-);
+delegate_hook_journal_port!(BlockingPort);
 
-impl HookPort for FailingPort {
-    fn reached<'a>(
-        &'a self,
-        producer: &'a Producer,
-        occurrence: &'a HookOccurrence,
-        plan: &'a HookPlan,
-    ) -> HookReachFuture<'a> {
-        self.0.reached(producer, occurrence, plan)
-    }
-
-    fn started<'a>(
-        &'a self,
-        spec: &'a HookSpec,
-        occurrence: &'a HookOccurrence,
-        reached: &'a HookReachedEvidence,
-        activation: HookActivation,
-        invocation: HookInvocationId,
-    ) -> HookStartFuture<'a> {
-        self.0
-            .started(spec, occurrence, reached, activation, invocation)
-    }
-
+impl HookInvocationPort for BlockingPort {
     fn invoke<'a>(&'a self, request: HookInvocationRequest) -> HookFuture<'a> {
+        self.0
+            .calls
+            .lock()
+            .expect("hook calls")
+            .push(request.lifecycle());
+        Box::pin(std::future::ready(Ok(HookOutcome::new(
+            HookDecision::Block,
+            None,
+        ))))
+    }
+}
+
+delegate_hook_journal_port!(FailingPort);
+
+impl HookInvocationPort for FailingPort {
+    fn invoke<'a>(&'a self, request: HookInvocationRequest) -> HookFuture<'a> {
+        self.0
+            .calls
+            .lock()
+            .expect("hook calls")
+            .push(request.lifecycle());
         if request.lifecycle() == HookLifecycle::PostToolUseFailure {
             Box::pin(std::future::ready(Err(HookFailure::new(
                 HookFailureKind::HandlerFailed,
@@ -209,24 +277,15 @@ impl HookPort for FailingPort {
             ))))
         }
     }
-
-    fn settled<'a>(
-        &'a self,
-        spec: &'a HookSpec,
-        started: HookStartedEvidence,
-        result: &'a HookResult,
-    ) -> HookRecordFuture<'a> {
-        self.0.settled(spec, started, result)
-    }
 }
 
-impl HookPort for RecordingPort {
-    fn reached<'a>(
-        &'a self,
-        producer: &'a Producer,
-        occurrence: &'a HookOccurrence,
-        plan: &'a HookPlan,
-    ) -> HookReachFuture<'a> {
+impl HookJournalPort for RecordingPort {
+    fn reached(
+        &self,
+        producer: &Producer,
+        occurrence: &HookOccurrence,
+        plan: &HookPlan,
+    ) -> Result<HookReachOutcome, HookReachError> {
         let evidence = HookReachedEvidence::new(
             EventId::new(),
             occurrence.key().clone(),
@@ -234,18 +293,16 @@ impl HookPort for RecordingPort {
             producer.clone(),
             plan.clone(),
         );
-        Box::pin(std::future::ready(Ok(
-            ego_core::hook::HookReachOutcome::Fresh(evidence),
-        )))
+        Ok(HookReachOutcome::Fresh(evidence))
     }
-    fn started<'a>(
-        &'a self,
-        spec: &'a HookSpec,
-        occurrence: &'a HookOccurrence,
-        reached: &'a HookReachedEvidence,
+    fn started(
+        &self,
+        spec: &HookSpec,
+        _occurrence: &HookOccurrence,
+        reached: &HookReachedEvidence,
         activation: HookActivation,
         invocation: HookInvocationId,
-    ) -> HookStartFuture<'a> {
+    ) -> Result<HookStartedEvidence, HookStartError> {
         let evidence = HookStartedEvidence::new(
             reached.event(),
             reached.event(),
@@ -254,28 +311,30 @@ impl HookPort for RecordingPort {
             activation,
         );
         self.starts.lock().expect("hook starts").push(evidence);
+        Ok(evidence)
+    }
+
+    fn settled(
+        &self,
+        _occurrence: &HookOccurrence,
+        _started: HookStartedEvidence,
+        _result: &HookResult,
+    ) -> Result<EventId, HookRunError> {
+        Ok(EventId::new())
+    }
+}
+
+impl HookInvocationPort for RecordingPort {
+    fn invoke<'a>(&'a self, request: HookInvocationRequest) -> HookFuture<'a> {
         self.calls
             .lock()
             .expect("hook calls")
-            .push(occurrence.event().lifecycle());
-        Box::pin(std::future::ready(Ok(evidence)))
-    }
-
-    fn invoke<'a>(&'a self, request: HookInvocationRequest) -> HookFuture<'a> {
+            .push(request.lifecycle());
         self.requests.lock().expect("hook requests").push(request);
         Box::pin(std::future::ready(Ok(HookOutcome::new(
             HookDecision::Continue,
             None,
         ))))
-    }
-
-    fn settled<'a>(
-        &'a self,
-        _spec: &'a HookSpec,
-        _started: HookStartedEvidence,
-        _result: &'a HookResult,
-    ) -> HookRecordFuture<'a> {
-        Box::pin(std::future::ready(Ok(())))
     }
 }
 
@@ -484,14 +543,14 @@ impl ego_core::generation_model_source::GenerationModelSource for GeneratorSourc
     }
 }
 
-fn run_turn<P: HookPort + Clone + 'static>(
+fn run_turn<P: HookInvocationPort + Clone + 'static>(
     script: Vec<AiEvent>,
     port: &P,
 ) -> (Vec<DomainEvent>, SessionState) {
     run_turn_scripts(vec![script], port)
 }
 
-fn run_turn_scripts<P: HookPort + Clone + 'static>(
+fn run_turn_scripts<P: HookInvocationPort + Clone + 'static>(
     scripts: Vec<Vec<AiEvent>>,
     port: &P,
 ) -> (Vec<DomainEvent>, SessionState) {
@@ -499,10 +558,10 @@ fn run_turn_scripts<P: HookPort + Clone + 'static>(
     let clock = FixedClock;
     let sink = CollectingSink::new();
     let generator = Arc::new(FakeGenerator::new(scripts));
-    let mut gate = BudgetGate::new(ego_core::cost::Money::new(
+    let gate = SharedBudgetGate::new(BudgetGate::new(ego_core::cost::Money::new(
         ego_core::cost::Amount::new(1000, 0).expect("amount"),
         ego_core::cost::CurrencyCode::new("USD").expect("currency"),
-    ));
+    )));
     let policy = PolicyEngine::new(
         CanonPath::new("/ws"),
         Mode::Default,
@@ -532,19 +591,21 @@ fn run_turn_scripts<P: HookPort + Clone + 'static>(
         ),
         CanonPath::new("/ws"),
     );
+    let session = SessionId::new();
+    let cancel = CancelToken::new();
     let mut turn = TurnLoop::new(
         Session {
-            id: SessionId::new(),
+            id: session,
             state: SessionState::default(),
             store: &store,
             evidence: &NO_ADMISSION,
             clock: &clock,
             sink: &sink,
-            cancel: CancelToken::new(),
+            cancel: cancel.clone(),
         },
         GenerationRuntime {
             source: Arc::new(GeneratorSource { generator }),
-            gate: &mut gate,
+            gate,
             config: TurnConfig {
                 system: None,
                 token_ceiling: None,
@@ -554,12 +615,33 @@ fn run_turn_scripts<P: HookPort + Clone + 'static>(
         },
         tools,
     )
-    .with_hook_dispatcher(HookLifecycleDispatcher::new(
-        HookRunner::new_with_durable_started(port.clone(), Vec::<HookStartedEvidence>::new()),
-        catalogue(),
-    ));
+    .expect("synchronized turn loop");
+    let catalogue = catalogue();
+    turn.journal()
+        .append(
+            TurnId::new(),
+            None,
+            None,
+            EventKind::HookCatalogueAdmitted {
+                descriptors: catalogue_evidence(&catalogue),
+            },
+        )
+        .expect("hook catalogue admission");
+    let runtime = SessionHookRuntime::new(
+        HookLifecycleDispatcher::new(CoreHookRunner::new(), catalogue),
+        turn.journal(),
+        Arc::new(port.clone()),
+        cancel,
+        Instant::now() + Duration::from_secs(30),
+    );
+    turn = turn
+        .with_hook_runtime(runtime)
+        .expect("shared turn hook runtime");
     let _outcome = block_on(turn.run("prompt")).expect("TurnLoop owner");
-    (store.events(), turn.into_state())
+    (
+        store.events(),
+        turn.into_state().expect("unique turn journal state"),
+    )
 }
 
 #[test]
@@ -578,21 +660,25 @@ fn turn_loop_real_owner_records_prompt_and_stop_once_in_order() {
         port.calls(),
         vec![HookLifecycle::UserPromptSubmit, HookLifecycle::Stop]
     );
-    assert_eq!(port.starts.lock().expect("hook starts").len(), 2);
+    assert_eq!(port.requests().len(), 2);
 }
 
 #[test]
 fn dispatcher_accepts_every_admitted_lifecycle_once_in_deterministic_order() {
     let port = RecordingPort::default();
     let dispatcher = HookLifecycleDispatcher::new(
-        HookRunner::new_with_durable_started(port.clone(), Vec::<HookStartedEvidence>::new()),
+        CoreHookRunner::new_with_durable_started(Vec::<HookStartedEvidence>::new()),
         catalogue(),
     );
     let session = SessionId::new();
     for lifecycle in LIFECYCLES {
         block_on(dispatcher.dispatch(
+            &port,
+            &port,
+            CancelToken::new(),
+            Instant::now() + Duration::from_secs(30),
             Producer::Main,
-            occurrence(lifecycle, HookOccurrenceOwner::Session { session }),
+            occurrence(lifecycle, session),
         ))
         .expect("admitted lifecycle dispatch");
     }
@@ -693,22 +779,28 @@ fn runner_passes_one_complete_request_bound_to_the_durable_start() {
         .expect("one admitted hook")
         .clone();
     let event = HookEvent::session(HookLifecycle::SessionStart);
+    let session = SessionId::new();
+    let turn = TurnId::new();
     let occurrence = HookOccurrence::new(
-        HookOccurrenceKey::new(
-            event.lifecycle(),
-            HookOccurrenceOwner::Session {
-                session: SessionId::new(),
-            },
-        ),
+        HookOccurrenceKey::new(event.lifecycle(), HookOccurrenceOwner::Session { session }),
         event.clone(),
+        HookCausality::session(session, turn),
     )
     .expect("matching occurrence");
     let port = RecordingPort::default();
     let dispatcher = HookLifecycleDispatcher::new(
-        HookRunner::new_with_durable_started(port.clone(), Vec::<HookStartedEvidence>::new()),
+        CoreHookRunner::new_with_durable_started(Vec::<HookStartedEvidence>::new()),
         catalogue,
     );
-    block_on(dispatcher.dispatch(Producer::Main, occurrence.clone())).expect("hook dispatch");
+    block_on(dispatcher.dispatch(
+        &port,
+        &port,
+        CancelToken::new(),
+        Instant::now() + Duration::from_secs(30),
+        Producer::Main,
+        occurrence.clone(),
+    ))
+    .expect("hook dispatch");
 
     let started = port.starts.lock().expect("hook starts")[0];
     let request = port.requests().pop().expect("one invocation request");
@@ -739,32 +831,30 @@ impl PendingInvocationPort {
     }
 }
 
-impl HookPort for PendingInvocationPort {
-    fn reached<'a>(
-        &'a self,
-        producer: &'a Producer,
-        occurrence: &'a HookOccurrence,
-        plan: &'a HookPlan,
-    ) -> HookReachFuture<'a> {
-        Box::pin(std::future::ready(Ok(
-            ego_core::hook::HookReachOutcome::Fresh(HookReachedEvidence::new(
-                EventId::new(),
-                occurrence.key().clone(),
-                occurrence.event().subject(),
-                producer.clone(),
-                plan.clone(),
-            )),
+impl HookJournalPort for PendingInvocationPort {
+    fn reached(
+        &self,
+        producer: &Producer,
+        occurrence: &HookOccurrence,
+        plan: &HookPlan,
+    ) -> Result<HookReachOutcome, HookReachError> {
+        Ok(HookReachOutcome::Fresh(HookReachedEvidence::new(
+            EventId::new(),
+            occurrence.key().clone(),
+            occurrence.event().subject(),
+            producer.clone(),
+            plan.clone(),
         )))
     }
 
-    fn started<'a>(
-        &'a self,
-        spec: &'a HookSpec,
-        _occurrence: &'a HookOccurrence,
-        reached: &'a HookReachedEvidence,
+    fn started(
+        &self,
+        spec: &HookSpec,
+        _occurrence: &HookOccurrence,
+        reached: &HookReachedEvidence,
         activation: HookActivation,
         invocation: HookInvocationId,
-    ) -> HookStartFuture<'a> {
+    ) -> Result<HookStartedEvidence, HookStartError> {
         let evidence = HookStartedEvidence::new(
             reached.event(),
             reached.event(),
@@ -773,9 +863,20 @@ impl HookPort for PendingInvocationPort {
             activation,
         );
         self.started.lock().expect("hook starts").push(evidence);
-        Box::pin(std::future::ready(Ok(evidence)))
+        Ok(evidence)
     }
 
+    fn settled(
+        &self,
+        _occurrence: &HookOccurrence,
+        _started: HookStartedEvidence,
+        _result: &HookResult,
+    ) -> Result<EventId, HookRunError> {
+        Ok(EventId::new())
+    }
+}
+
+impl HookInvocationPort for PendingInvocationPort {
     fn invoke<'a>(&'a self, _request: HookInvocationRequest) -> HookFuture<'a> {
         let (sender, receiver) = oneshot::channel();
         self.releases.lock().expect("hook releases").push(sender);
@@ -786,15 +887,6 @@ impl HookPort for PendingInvocationPort {
             Ok(HookOutcome::new(HookDecision::Continue, None))
         })
     }
-
-    fn settled<'a>(
-        &'a self,
-        _spec: &'a HookSpec,
-        _started: HookStartedEvidence,
-        _result: &'a HookResult,
-    ) -> HookRecordFuture<'a> {
-        Box::pin(std::future::ready(Ok(())))
-    }
 }
 
 #[test]
@@ -804,18 +896,8 @@ fn concurrent_occurrences_release_admission_before_external_handler_await() {
     let port = PendingInvocationPort::default();
     let runner = HookRunner::new(port.clone());
     let shared_catalogue = Arc::new(catalogue());
-    let first = occurrence(
-        HookLifecycle::SessionStart,
-        HookOccurrenceOwner::Session {
-            session: SessionId::new(),
-        },
-    );
-    let second = occurrence(
-        HookLifecycle::SessionStart,
-        HookOccurrenceOwner::Session {
-            session: SessionId::new(),
-        },
-    );
+    let first = occurrence(HookLifecycle::SessionStart, SessionId::new());
+    let second = occurrence(HookLifecycle::SessionStart, SessionId::new());
     let mut pool = futures::executor::LocalPool::new();
     let first_runner = runner.clone();
     let first_catalogue = Arc::clone(&shared_catalogue);
@@ -1109,17 +1191,20 @@ fn hook_dispatcher_rejects_hook_produced_reentry_before_owner_effect() {
         &digest,
         0,
     );
-    let event = occurrence(
-        HookLifecycle::UserPromptSubmit,
-        HookOccurrenceOwner::Session {
-            session: SessionId::new(),
-        },
-    );
+    let event = occurrence(HookLifecycle::UserPromptSubmit, SessionId::new());
     let port = RecordingPort::default();
-    let runner =
-        HookRunner::new_with_durable_started(port.clone(), Vec::<HookStartedEvidence>::new());
-    let dispatcher = HookLifecycleDispatcher::new(runner, catalogue());
-    let _ = block_on(dispatcher.dispatch(Producer::Hook(hook), event));
+    let dispatcher = HookLifecycleDispatcher::new(
+        CoreHookRunner::new_with_durable_started(Vec::<HookStartedEvidence>::new()),
+        catalogue(),
+    );
+    let _ = block_on(dispatcher.dispatch(
+        &port,
+        &port,
+        CancelToken::new(),
+        Instant::now() + Duration::from_secs(30),
+        Producer::Hook(hook),
+        event,
+    ));
     assert!(
         port.calls().is_empty(),
         "hook-produced effects do not recursively invoke lifecycle handlers"
@@ -1185,14 +1270,14 @@ fn admitted_skill_instruction_crosses_real_hook_boundary_once_before_child_start
     let port = RecordingPort::default();
     let runner =
         HookRunner::new_with_durable_started(port.clone(), Vec::<HookStartedEvidence>::new());
+    let session = SessionId::new();
     let occurrence = HookOccurrence::new(
         ego_core::event::hook::HookOccurrenceKey::new(
             HookLifecycle::InstructionsLoaded,
-            ego_core::event::hook::HookOccurrenceOwner::Session {
-                session: SessionId::new(),
-            },
+            ego_core::event::hook::HookOccurrenceOwner::Session { session },
         ),
         HookEvent::session(HookLifecycle::InstructionsLoaded),
+        HookCausality::session(session, TurnId::new()),
     )
     .expect("instruction occurrence");
     block_on(runner.run_occurrence(&catalogue, Producer::Main, occurrence))

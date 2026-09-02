@@ -449,9 +449,10 @@ impl HookInvocationPort for PendingStartHookPort {
         let (sender, receiver) = futures::channel::oneshot::channel();
         *self.pending.lock().expect("pending invocation") = Some(sender);
         Box::pin(async move {
-            receiver
-                .await
-                .unwrap_or_else(|_| Err(HookFailure::new(HookFailureKind::Cancelled, None)))
+            match receiver.await {
+                Ok(outcome) => outcome,
+                Err(_) => Err(HookFailure::new(HookFailureKind::Cancelled, None)),
+            }
         })
     }
 }
