@@ -5,6 +5,7 @@
 //! projection test; this suite never feeds raw skill YAML to core.
 
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use ego_core::config::{ConfigLayer, Source, Sourced, Trust};
 use ego_core::event::domain::EventKind;
@@ -12,15 +13,63 @@ use ego_core::event::hook::{
     HookActivation, HookDecision, HookFailure, HookFailureKind, HookInvocationId, HookLifecycle,
     HookOccurrenceKey, HookOccurrenceOwner, HookOutcome, HookPlan, HookResult, HookSubject,
 };
-use ego_core::event::id::{EventId, ItemId, Producer};
+use ego_core::event::id::{EventId, ItemId, Producer, TurnId};
 use ego_core::event::skill::{SkillInvocationId, SkillSourceAuthority};
 use ego_core::hook::{
-    HookCatalogue, HookCatalogueError, HookConfigEntry, HookEvent, HookFuture, HookHandlerConfig,
-    HookInvocationRequest, HookMatcher, HookOccurrence, HookPort, HookReachFuture,
-    HookReachedEvidence, HookRecordFuture, HookRunError, HookRunner, HookSource, HookSpec,
-    HookStartError, HookStartFuture, HookStartedEvidence,
+    HookCatalogue, HookCatalogueError, HookCausality, HookConfigEntry, HookEvent, HookFuture,
+    HookHandlerConfig, HookInvocationPort, HookInvocationRequest, HookJournalPort, HookMatcher,
+    HookOccurrence, HookReachError, HookReachOutcome, HookReachedEvidence, HookRunError,
+    HookRunner as CoreHookRunner, HookSource, HookSpec, HookStartError, HookStartedEvidence,
 };
 use ego_core::permit::rule::Rule;
+use ego_core::turn::CancelToken;
+
+#[derive(Clone)]
+struct HookRunner<P> {
+    inner: CoreHookRunner,
+    port: Arc<P>,
+}
+
+impl<P> HookRunner<P>
+where
+    P: HookJournalPort + HookInvocationPort,
+{
+    fn new(port: P) -> Self {
+        Self {
+            inner: CoreHookRunner::new(),
+            port: Arc::new(port),
+        }
+    }
+
+    fn new_with_durable_started<I>(port: P, started: I) -> Self
+    where
+        I: IntoIterator<Item = HookStartedEvidence>,
+    {
+        Self {
+            inner: CoreHookRunner::new_with_durable_started(started),
+            port: Arc::new(port),
+        }
+    }
+
+    async fn run_occurrence(
+        &self,
+        catalogue: &HookCatalogue,
+        producer: Producer,
+        occurrence: HookOccurrence,
+    ) -> Result<ego_core::hook::HookRunResult, HookRunError> {
+        self.inner
+            .run_occurrence(
+                self.port.as_ref(),
+                self.port.as_ref(),
+                CancelToken::new(),
+                Instant::now() + Duration::from_secs(30),
+                catalogue,
+                producer,
+                occurrence,
+            )
+            .await
+    }
+}
 
 fn layer(source: Source, toml: &str) -> Sourced<ConfigLayer> {
     ConfigLayer::parse(source, toml).expect("valid hook layer")
@@ -28,14 +77,16 @@ fn layer(source: Source, toml: &str) -> Sourced<ConfigLayer> {
 
 fn occurrence(event: HookEvent) -> HookOccurrence {
     let lifecycle = event.lifecycle();
+    let owner = EventId::new();
+    let (turn, item) = match event.subject() {
+        HookSubject::Item { item } => (TurnId::new(), Some(item)),
+        HookSubject::Turn { turn } => (turn, None),
+        HookSubject::Session => (TurnId::new(), None),
+    };
     HookOccurrence::new(
-        HookOccurrenceKey::new(
-            lifecycle,
-            HookOccurrenceOwner::Event {
-                event: EventId::new(),
-            },
-        ),
+        HookOccurrenceKey::new(lifecycle, HookOccurrenceOwner::Event { event: owner }),
         event,
+        HookCausality::event(owner, turn, item),
     )
     .expect("matching lifecycle occurrence")
 }
@@ -232,32 +283,30 @@ impl DurableHookPort {
     }
 }
 
-impl HookPort for DurableHookPort {
-    fn reached<'a>(
-        &'a self,
-        producer: &'a Producer,
-        occurrence: &'a HookOccurrence,
-        plan: &'a HookPlan,
-    ) -> HookReachFuture<'a> {
-        Box::pin(futures::future::ready(Ok(
-            ego_core::hook::HookReachOutcome::Fresh(HookReachedEvidence::new(
-                EventId::new(),
-                occurrence.key().clone(),
-                occurrence.event().subject(),
-                producer.clone(),
-                plan.clone(),
-            )),
+impl HookJournalPort for DurableHookPort {
+    fn reached(
+        &self,
+        producer: &Producer,
+        occurrence: &HookOccurrence,
+        plan: &HookPlan,
+    ) -> Result<HookReachOutcome, HookReachError> {
+        Ok(HookReachOutcome::Fresh(HookReachedEvidence::new(
+            EventId::new(),
+            occurrence.key().clone(),
+            occurrence.event().subject(),
+            producer.clone(),
+            plan.clone(),
         )))
     }
 
-    fn started<'a>(
-        &'a self,
-        spec: &'a HookSpec,
-        _occurrence: &'a HookOccurrence,
-        reached: &'a HookReachedEvidence,
+    fn started(
+        &self,
+        spec: &HookSpec,
+        _occurrence: &HookOccurrence,
+        reached: &HookReachedEvidence,
         activation: HookActivation,
         invocation: HookInvocationId,
-    ) -> HookStartFuture<'a> {
+    ) -> Result<HookStartedEvidence, HookStartError> {
         let evidence = HookStartedEvidence::new(
             reached.event(),
             reached.event(),
@@ -279,19 +328,31 @@ impl HookPort for DurableHookPort {
                     .durable_start_failure
                     .lock()
                     .expect("durable start failure evidence") = Some(evidence);
-                Box::pin(futures::future::ready(Err(HookStartError::Durable {
-                    evidence,
-                    failure,
-                })))
+                Err(HookStartError::Durable { evidence, failure })
             } else {
-                Box::pin(futures::future::ready(Err(HookStartError::Absent(failure))))
+                Err(HookStartError::Absent(failure))
             }
         } else {
             self.started.lock().expect("started journal").push(evidence);
-            Box::pin(futures::future::ready(Ok(evidence)))
+            Ok(evidence)
         }
     }
 
+    fn settled(
+        &self,
+        _occurrence: &HookOccurrence,
+        started: HookStartedEvidence,
+        _result: &HookResult,
+    ) -> Result<EventId, HookRunError> {
+        self.settled
+            .lock()
+            .expect("settled journal")
+            .push(started.invocation());
+        Ok(EventId::new())
+    }
+}
+
+impl HookInvocationPort for DurableHookPort {
     fn invoke<'a>(&'a self, request: HookInvocationRequest) -> HookFuture<'a> {
         self.emitted.lock().expect("hook emissions").push(
             if let Some(selector) = request.selector() {
@@ -310,75 +371,56 @@ impl HookPort for DurableHookPort {
         };
         Box::pin(async move { Ok(HookOutcome::new(decision, None)) })
     }
-
-    fn settled<'a>(
-        &'a self,
-        _spec: &'a HookSpec,
-        started: HookStartedEvidence,
-        _result: &'a HookResult,
-    ) -> HookRecordFuture<'a> {
-        self.settled
-            .lock()
-            .expect("settled journal")
-            .push(started.invocation());
-        Box::pin(async { Ok(()) })
-    }
 }
 
-type PendingStart = (
-    HookStartedEvidence,
-    futures::channel::oneshot::Sender<Result<HookStartedEvidence, HookStartError>>,
-);
+type PendingInvocation = futures::channel::oneshot::Sender<Result<HookOutcome, HookFailure>>;
 
-type PendingStartSlot = Arc<Mutex<Option<PendingStart>>>;
+type PendingInvocationSlot = Arc<Mutex<Option<PendingInvocation>>>;
 
 #[derive(Clone, Default)]
 struct PendingStartHookPort {
     started: Arc<Mutex<Vec<HookStartedEvidence>>>,
-    pending: PendingStartSlot,
+    pending: PendingInvocationSlot,
     start_calls: Arc<Mutex<usize>>,
     invoke_calls: Arc<Mutex<usize>>,
 }
 
 impl PendingStartHookPort {
     fn release(&self) {
-        let (evidence, sender) = self
+        let sender = self
             .pending
             .lock()
-            .expect("pending starts")
+            .expect("pending invocation")
             .take()
-            .expect("one pending start");
-        self.started.lock().expect("started journal").push(evidence);
-        let _ = sender.send(Ok(evidence));
+            .expect("one pending invocation");
+        let _ = sender.send(Ok(HookOutcome::new(HookDecision::Continue, None)));
     }
 }
 
-impl HookPort for PendingStartHookPort {
-    fn reached<'a>(
-        &'a self,
-        producer: &'a Producer,
-        occurrence: &'a HookOccurrence,
-        plan: &'a HookPlan,
-    ) -> HookReachFuture<'a> {
-        Box::pin(futures::future::ready(Ok(
-            ego_core::hook::HookReachOutcome::Fresh(HookReachedEvidence::new(
-                EventId::new(),
-                occurrence.key().clone(),
-                occurrence.event().subject(),
-                producer.clone(),
-                plan.clone(),
-            )),
+impl HookJournalPort for PendingStartHookPort {
+    fn reached(
+        &self,
+        producer: &Producer,
+        occurrence: &HookOccurrence,
+        plan: &HookPlan,
+    ) -> Result<HookReachOutcome, HookReachError> {
+        Ok(HookReachOutcome::Fresh(HookReachedEvidence::new(
+            EventId::new(),
+            occurrence.key().clone(),
+            occurrence.event().subject(),
+            producer.clone(),
+            plan.clone(),
         )))
     }
 
-    fn started<'a>(
-        &'a self,
-        spec: &'a HookSpec,
-        _occurrence: &'a HookOccurrence,
-        reached: &'a HookReachedEvidence,
+    fn started(
+        &self,
+        spec: &HookSpec,
+        _occurrence: &HookOccurrence,
+        reached: &HookReachedEvidence,
         activation: HookActivation,
         invocation: HookInvocationId,
-    ) -> HookStartFuture<'a> {
+    ) -> Result<HookStartedEvidence, HookStartError> {
         let evidence = HookStartedEvidence::new(
             reached.event(),
             reached.event(),
@@ -386,31 +428,31 @@ impl HookPort for PendingStartHookPort {
             invocation,
             activation,
         );
-        let (sender, receiver) = futures::channel::oneshot::channel();
         *self.start_calls.lock().expect("pending start calls") += 1;
-        *self.pending.lock().expect("pending starts") = Some((evidence, sender));
-        Box::pin(async move {
-            match receiver.await {
-                Ok(result) => result,
-                Err(_) => Err(HookStartError::Absent(HookRunError::new(
-                    "pending hook start was cancelled",
-                ))),
-            }
-        })
+        self.started.lock().expect("started journal").push(evidence);
+        Ok(evidence)
     }
 
+    fn settled(
+        &self,
+        _occurrence: &HookOccurrence,
+        _started: HookStartedEvidence,
+        _result: &HookResult,
+    ) -> Result<EventId, HookRunError> {
+        Ok(EventId::new())
+    }
+}
+
+impl HookInvocationPort for PendingStartHookPort {
     fn invoke<'a>(&'a self, _request: HookInvocationRequest) -> HookFuture<'a> {
         *self.invoke_calls.lock().expect("hook invokes") += 1;
-        Box::pin(async { Ok(HookOutcome::new(HookDecision::Continue, None)) })
-    }
-
-    fn settled<'a>(
-        &'a self,
-        _spec: &'a HookSpec,
-        _started: HookStartedEvidence,
-        _result: &'a HookResult,
-    ) -> HookRecordFuture<'a> {
-        Box::pin(async { Ok(()) })
+        let (sender, receiver) = futures::channel::oneshot::channel();
+        *self.pending.lock().expect("pending invocation") = Some(sender);
+        Box::pin(async move {
+            receiver
+                .await
+                .unwrap_or_else(|_| Err(HookFailure::new(HookFailureKind::Cancelled, None)))
+        })
     }
 }
 
@@ -757,7 +799,7 @@ fn once_start_uncertainty_is_durable_and_rebuilt_runner_cannot_repeat() {
 }
 
 #[test]
-fn concurrent_once_holds_admission_until_one_pending_start_completes() {
+fn concurrent_once_consumes_admission_before_one_pending_invocation_completes() {
     use futures::task::LocalSpawnExt;
 
     let catalogue = once_catalogue();
@@ -798,7 +840,7 @@ fn concurrent_once_holds_admission_until_one_pending_start_completes() {
             .expect("pending start calls")
             .to_owned(),
         1,
-        "first run reached the externally controlled pending start"
+        "first run persisted one durable start before invocation"
     );
     assert_eq!(
         port.start_calls
@@ -806,7 +848,7 @@ fn concurrent_once_holds_admission_until_one_pending_start_completes() {
             .expect("pending start calls")
             .to_owned(),
         1,
-        "second run waits on the per-key admission"
+        "second run cannot persist another start for the consumed once key"
     );
     port.release();
     let first = pool.run_until(first_future);
