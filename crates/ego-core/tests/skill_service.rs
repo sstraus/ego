@@ -6,12 +6,13 @@
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use futures::future::BoxFuture;
 use futures::stream::{self, BoxStream};
 use serde_json::json;
 
-use ego_core::budget::BudgetGate;
+use ego_core::budget::{BudgetGate, SharedBudgetGate};
 use ego_core::config::{ModelRef, Trust};
 use ego_core::event::domain::{DomainEvent, EventKind};
 use ego_core::event::hook::{
@@ -27,9 +28,8 @@ use ego_core::event::time::{Clock, Timestamp};
 use ego_core::evidence::{EvidenceError, EvidenceWrite};
 use ego_core::generator::capabilities::ModelCapabilities;
 use ego_core::hook::{
-    HookCatalogue, HookConfigEntry, HookFuture, HookHandlerConfig, HookInvocationRequest,
-    HookLifecycleDispatcher, HookOccurrence, HookPort, HookReachFuture, HookReachedEvidence,
-    HookRecordFuture, HookRunner, HookSpec, HookStartFuture, HookStartedEvidence,
+    HookCatalogue, HookConfigEntry, HookFuture, HookHandlerConfig, HookInvocationPort,
+    HookInvocationRequest, HookLifecycleDispatcher, HookRunner, SessionHookRuntime,
 };
 use ego_core::permit::{GuardedEffects, GuardedIo, Op, PreparedCall};
 use ego_core::run::{
@@ -41,6 +41,7 @@ use ego_core::sink::NullSink;
 use ego_core::skill::{
     ActiveSkillScope, SkillCatalogue, SkillInvocation, SkillOperation, SkillSpec,
 };
+use ego_core::state::SessionState;
 use ego_core::store::blob::{
     BlobError, BlobId, BlobPage, BlobRead, BlobRef, BlobStore, BlobWriter,
 };
@@ -53,7 +54,7 @@ use ego_core::subagent::{
     ChildResultReader, ChildResultReaderError, ChildResultStore, ChildRunService,
     ChildSelectionAdmission, ChildServicePorts, ChildTaskReader, ChildWait,
 };
-use ego_core::turn::{Journal, RegisteredTool};
+use ego_core::turn::{CancelToken, Journal, RegisteredTool, SharedJournal};
 
 const DIGEST_A: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 const DIGEST_B: &str = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
@@ -520,14 +521,14 @@ fn durable_admission_and_rendered_blobs_are_forced_in_order_and_resume_uses_capt
     let clock = FixedClock;
     let sink = NullSink;
     let session = SessionId::new();
-    let mut journal = Journal::new(
+    let journal = SharedJournal::new(Journal::new(
         session,
         &store,
         &clock,
         &sink,
         Producer::Main,
         Default::default(),
-    );
+    ));
     let first = catalogue("explain", DIGEST_A);
     let invocation = SkillInvocation::admit(
         &first,
@@ -536,7 +537,7 @@ fn durable_admission_and_rendered_blobs_are_forced_in_order_and_resume_uses_capt
             arguments: "captured".to_owned(),
         },
         &blobs,
-        &mut journal,
+        &journal,
     )
     .unwrap();
     let records = store.entries();
@@ -588,7 +589,7 @@ fn durable_admission_and_rendered_blobs_are_forced_in_order_and_resume_uses_capt
         b"Changed source bytes must not be reread.",
     )])
     .unwrap();
-    let resumed = SkillInvocation::resume(invocation.id(), &changed, &blobs, &mut journal).unwrap();
+    let resumed = SkillInvocation::resume(invocation.id(), &changed, &blobs, &journal).unwrap();
     assert_eq!(resumed.admission_blob(&blobs).unwrap(), admission);
     assert_eq!(
         resumed.rendered(&blobs).unwrap(),
@@ -684,7 +685,7 @@ fn turn_batch_selection_rejects_skill_and_effect_before_either_executes() {
 
 #[test]
 fn skill_service_bridges_real_child_service_for_both_fork_modes() {
-    let (child, child_events, child_waits) = real_child_service();
+    let (child, parent, child_events, child_waits) = real_child_service();
     let service = ego_core::skill::SkillService::new(child);
     let foreground_invocation = SkillInvocation::admit_for_service(
         spec("explain", DIGEST_A, true, true),
@@ -706,10 +707,10 @@ fn skill_service_bridges_real_child_service_for_both_fork_modes() {
     let background_id = background_invocation.id();
 
     let foreground = service
-        .fork(foreground_invocation, ChildWait::Foreground)
+        .fork(foreground_invocation, ChildWait::Foreground, &parent)
         .expect("foreground skill fork");
     let background = service
-        .fork(background_invocation, ChildWait::Background)
+        .fork(background_invocation, ChildWait::Background, &parent)
         .expect("background skill fork");
     assert_eq!(foreground.wait_mode(), ChildWait::Foreground);
     assert_eq!(background.wait_mode(), ChildWait::Background);
@@ -814,15 +815,50 @@ struct ChildJournalFixture {
 }
 
 impl ChildJournal for ChildJournalFixture {
-    fn append(&self, event: DomainEvent) -> Result<(), ChildJournalError> {
-        self.events.lock().expect("child events").push(event);
+    fn read(
+        &self,
+        _invocation: SubagentInvocationId,
+    ) -> Result<Vec<DomainEvent>, ChildJournalError> {
+        Ok(Vec::new())
+    }
+}
+
+impl SessionStore for ChildJournalFixture {
+    fn append(&self, _session: &SessionId, event: &DomainEvent) -> Result<(), StoreError> {
+        self.events
+            .lock()
+            .expect("child events")
+            .push(event.clone());
         Ok(())
     }
 
     fn read(
         &self,
-        _invocation: SubagentInvocationId,
-    ) -> Result<Vec<DomainEvent>, ChildJournalError> {
+        _session: &SessionId,
+    ) -> Result<BoxStream<'static, Result<SessionEntry, StoreError>>, StoreError> {
+        Ok(Box::pin(stream::iter(
+            self.events
+                .lock()
+                .expect("child events")
+                .clone()
+                .into_iter()
+                .map(SessionEntry::Event)
+                .map(Ok),
+        )))
+    }
+
+    fn compare_and_append_run(
+        &self,
+        _session: &SessionId,
+        _expected_revision: Option<ego_core::run::RunRevision>,
+        _transaction: ego_core::run::RunTransaction,
+    ) -> Result<ego_core::run::RunAppend, StoreError> {
+        Err(StoreError::Io(std::io::Error::other(
+            "parent hook journal does not store run transactions",
+        )))
+    }
+
+    fn list(&self) -> Result<Vec<SessionMeta>, StoreError> {
         Ok(Vec::new())
     }
 }
@@ -892,49 +928,9 @@ impl ChildSelectionAdmission for ChildSelection {
 #[derive(Clone, Default)]
 struct RecordingHookPort {
     invocations: Arc<Mutex<usize>>,
-    started: Arc<Mutex<Vec<(HookActivation, HookSource)>>>,
 }
 
-impl HookPort for RecordingHookPort {
-    fn reached<'a>(
-        &'a self,
-        producer: &'a Producer,
-        occurrence: &'a HookOccurrence,
-        plan: &'a HookPlan,
-    ) -> HookReachFuture<'a> {
-        let evidence = HookReachedEvidence::new(
-            ego_core::event::id::EventId::new(),
-            occurrence.key().clone(),
-            occurrence.event().subject(),
-            producer.clone(),
-            plan.clone(),
-        );
-        Box::pin(futures::future::ready(Ok(
-            ego_core::hook::HookReachOutcome::Fresh(evidence),
-        )))
-    }
-
-    fn started<'a>(
-        &'a self,
-        spec: &'a HookSpec,
-        _occurrence: &'a HookOccurrence,
-        reached: &'a HookReachedEvidence,
-        activation: HookActivation,
-        invocation: HookInvocationId,
-    ) -> HookStartFuture<'a> {
-        self.started
-            .lock()
-            .expect("hook starts")
-            .push((activation, spec.source()));
-        Box::pin(futures::future::ready(Ok(HookStartedEvidence::new(
-            reached.event(),
-            reached.event(),
-            spec.id(),
-            invocation,
-            activation,
-        ))))
-    }
-
+impl HookInvocationPort for RecordingHookPort {
     fn invoke<'a>(&'a self, _request: HookInvocationRequest) -> HookFuture<'a> {
         *self.invocations.lock().expect("hook invocations") += 1;
         Box::pin(futures::future::ready(Ok(HookOutcome::new(
@@ -942,19 +938,11 @@ impl HookPort for RecordingHookPort {
             None,
         ))))
     }
-
-    fn settled<'a>(
-        &'a self,
-        _spec: &'a HookSpec,
-        _started: HookStartedEvidence,
-        _result: &'a HookResult,
-    ) -> HookRecordFuture<'a> {
-        Box::pin(futures::future::ready(Ok(())))
-    }
 }
 
 type RealChildService = (
     ChildRunService,
+    SessionHookRuntime<'static>,
     Arc<Mutex<Vec<DomainEvent>>>,
     Arc<Mutex<Vec<ChildWait>>>,
 );
@@ -967,28 +955,44 @@ fn real_child_service() -> RealChildService {
         Arc::new(FixedIds),
         RunRetention::new(std::num::NonZeroUsize::new(4).expect("retention")).expect("retention"),
     ));
-    let gate = Arc::new(Mutex::new(BudgetGate::unlimited(
+    let gate = SharedBudgetGate::new(BudgetGate::unlimited(
         ego_core::cost::CurrencyCode::new("USD").expect("currency"),
-    )));
+    ));
     let bindings =
-        RunExecutionBindings::new(Arc::new(NullFactory), None).with_budget_gate(Arc::clone(&gate));
+        RunExecutionBindings::new(Arc::new(NullFactory), None).with_budget_gate(gate.clone());
     let child_journal = ChildJournalFixture::default();
     let child_events = Arc::clone(&child_journal.events);
     let child_selection = ChildSelection::default();
     let child_waits = Arc::clone(&child_selection.waits);
+    let parent_run = RunId::new(SessionId::new(), uuid::Uuid::now_v7());
     let ports = ChildServicePorts::new(
-        RunId::new(SessionId::new(), uuid::Uuid::now_v7()),
-        Arc::new(child_journal),
+        parent_run,
+        Arc::new(child_journal.clone()),
         Arc::new(ChildTasks),
         Arc::new(ChildResults),
         Arc::new(ParentResults),
         Arc::new(ChildProfile),
         Arc::new(child_selection),
-        Arc::new(HookLifecycleDispatcher::new(
-            HookRunner::new(RecordingHookPort::default()),
+    );
+    let journal_store: &'static ChildJournalFixture = Box::leak(Box::new(child_journal));
+    let clock: &'static FixedClock = Box::leak(Box::new(FixedClock));
+    let sink: &'static NullSink = Box::leak(Box::new(NullSink));
+    let parent = SessionHookRuntime::new(
+        HookLifecycleDispatcher::new(
+            HookRunner::new(),
             HookCatalogue::admit_typed(&[], &[], Trust::Trusted).expect("empty hook catalogue"),
+        ),
+        SharedJournal::new(Journal::new(
+            parent_run.session_id(),
+            journal_store,
+            clock,
+            sink,
+            Producer::Main,
+            SessionState::default(),
         )),
-        Producer::Main,
+        Arc::new(RecordingHookPort::default()),
+        CancelToken::new(),
+        Instant::now() + Duration::from_secs(60),
     );
     (
         ChildRunService::new(
@@ -998,6 +1002,7 @@ fn real_child_service() -> RealChildService {
             bindings,
             ports,
         ),
+        parent,
         child_events,
         child_waits,
     )
