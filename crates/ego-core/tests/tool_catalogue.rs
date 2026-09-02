@@ -6,7 +6,7 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
-use ego_core::budget::{BudgetGate, Metering};
+use ego_core::budget::{BudgetGate, Metering, SharedBudgetGate};
 use ego_core::config::{Mode, Ruleset, SystemPrompt};
 use ego_core::cost::MeteringRevision;
 use ego_core::event::domain::{DomainEvent, EventKind, ExitReason};
@@ -347,9 +347,9 @@ fn loop_with(
         ToolEffectPorts::new(fs, process, evidence, resolver, hop, duplex),
         CanonPath::new("/workspace"),
     )?;
-    let gate = Box::leak(Box::new(BudgetGate::unlimited(
+    let gate = SharedBudgetGate::new(BudgetGate::unlimited(
         ego_core::cost::CurrencyCode::new("USD").expect("currency"),
-    )));
+    ));
     let runtime = GenerationRuntime {
         source: Arc::new(TestGenerationSource { generator }),
         gate,
@@ -369,7 +369,10 @@ fn loop_with(
         sink,
         cancel: ego_core::turn::CancelToken::new(),
     };
-    Ok((TurnLoop::new(session, runtime, tools), store))
+    Ok((
+        TurnLoop::new(session, runtime, tools).expect("budget gate is available"),
+        store,
+    ))
 }
 
 fn call(call_id: &str, name: &str) -> AiEvent {

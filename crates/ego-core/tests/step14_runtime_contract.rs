@@ -413,7 +413,7 @@ fn execution_observed_is_additive_internal_noop_and_has_no_public_projection() {
 
 mod turn_execution_observation {
     use super::*;
-    use ego_core::budget::{BudgetGate, Metering};
+    use ego_core::budget::{BudgetGate, Metering, SharedBudgetGate};
     use ego_core::cost::{Amount, CurrencyCode, MeteringRevision, Money};
     use ego_core::evidence::{
         EvidenceAdmissionService, EvidenceError as AdmissionError, EvidenceKey, EvidenceRecord,
@@ -592,7 +592,7 @@ mod turn_execution_observation {
         clock: FixedClock,
         generator: Arc<FakeGenerator>,
         sink: CollectingSink,
-        gate: BudgetGate,
+        gate: SharedBudgetGate,
         policy: PolicyEngine,
         fs: FakeFs,
         process: NoProcess,
@@ -607,10 +607,10 @@ mod turn_execution_observation {
                 clock: FixedClock,
                 generator: Arc::new(FakeGenerator::new(scripts)),
                 sink: CollectingSink::new(),
-                gate: BudgetGate::new(Money::new(
+                gate: SharedBudgetGate::new(BudgetGate::new(Money::new(
                     "1000".parse::<Amount>().unwrap(),
                     CurrencyCode::new("USD").unwrap(),
-                )),
+                ))),
                 policy: PolicyEngine::new(CanonPath::new("/ws"), Mode::Default, Ruleset::default()),
                 fs: FakeFs::default(),
                 process: NoProcess,
@@ -647,7 +647,7 @@ mod turn_execution_observation {
                     source: Arc::new(FixedSource {
                         generator: self.generator.clone(),
                     }),
-                    gate: &mut self.gate,
+                    gate: self.gate.clone(),
                     config: TurnConfig {
                         system: None,
                         token_ceiling: None,
@@ -657,6 +657,7 @@ mod turn_execution_observation {
                 },
                 tools,
             )
+            .expect("budget gate is available")
         }
     }
 

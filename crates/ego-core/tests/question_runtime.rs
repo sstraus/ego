@@ -9,7 +9,7 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use ego_core::budget::{BudgetGate, Metering};
+use ego_core::budget::{BudgetGate, Metering, SharedBudgetGate};
 use ego_core::config::{Mode, ModelRef, Ruleset};
 use ego_core::cost::{Amount, CurrencyCode, MeteringRevision, Money};
 use ego_core::event::domain::{DomainEvent, EventKind, ExitReason};
@@ -460,10 +460,10 @@ fn with_foreign_turn<R>(
     let store = trace.map_or_else(MemoryStore::default, MemoryStore::with_trace);
     let clock = FixedClock;
     let sink = CollectingSink::new();
-    let mut gate = BudgetGate::new(Money::new(
+    let gate = SharedBudgetGate::new(BudgetGate::new(Money::new(
         "1000".parse::<Amount>().expect("amount"),
         CurrencyCode::new("USD").expect("currency"),
-    ));
+    )));
     let policy = ego_core::permit::PolicyEngine::new(
         CanonPath::new("/ws"),
         Mode::Default,
@@ -497,7 +497,7 @@ fn with_foreign_turn<R>(
         },
         GenerationRuntime {
             source,
-            gate: &mut gate,
+            gate,
             config: TurnConfig {
                 system: None,
                 token_ceiling: None,
@@ -507,6 +507,7 @@ fn with_foreign_turn<R>(
         },
         tools,
     )
+    .expect("budget gate is available")
     .with_elicitor(elicitor)
     .with_foreign_question_port(foreign_port);
     test(turn, &store)
@@ -550,10 +551,10 @@ fn unavailable_elicitor_persists_question_closes_unstarted_siblings_and_leaves_t
     let store = MemoryStore::default();
     let clock = FixedClock;
     let sink = CollectingSink::new();
-    let mut gate = BudgetGate::new(Money::new(
+    let gate = SharedBudgetGate::new(BudgetGate::new(Money::new(
         "1000".parse::<Amount>().expect("amount"),
         CurrencyCode::new("USD").expect("currency"),
-    ));
+    )));
     let policy = ego_core::permit::PolicyEngine::new(
         CanonPath::new("/ws"),
         Mode::Default,
@@ -596,7 +597,7 @@ fn unavailable_elicitor_persists_question_closes_unstarted_siblings_and_leaves_t
         },
         GenerationRuntime {
             source,
-            gate: &mut gate,
+            gate,
             config: TurnConfig {
                 system: None,
                 token_ceiling: None,
@@ -606,6 +607,7 @@ fn unavailable_elicitor_persists_question_closes_unstarted_siblings_and_leaves_t
         },
         tools,
     )
+    .expect("budget gate is available")
     .with_elicitor(Arc::new(UnavailableElicitor));
 
     let outcome = futures::executor::block_on(turn.run("pick a channel"))
@@ -713,8 +715,8 @@ fn foreign_input_required_is_projected_to_a_durable_pending_question() {
                 .expect("foreign input suspension is a handled turn outcome");
             assert_eq!(outcome.exit_reason, ExitReason::PermissionRequired);
             assert!(!outcome.ok);
-            let pending = turn
-                .state()
+            let state = turn.state();
+            let pending = state
                 .pending_question()
                 .expect("ForeignInputRequired must become a durable pending question");
             assert!(pending.request().validate().is_ok());
@@ -949,8 +951,8 @@ fn successor_foreign_input_is_exposed_after_settlement_and_keeps_predecessor_clo
                 .expect("the successor request is durable");
             assert!(first_settled < successor_requested);
 
-            let pending = turn
-                .state()
+            let state = turn.state();
+            let pending = state
                 .pending_question()
                 .expect("unavailable successor elicitation leaves it pending");
             assert_eq!(pending.item_id(), questions[1].0);

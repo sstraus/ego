@@ -4,7 +4,7 @@
 //! pin the core-owned grammar, durable event, reducer/history boundary and
 //! public projection that every host must share.
 
-use ego_core::budget::{BudgetGate, Metering};
+use ego_core::budget::{BudgetGate, Metering, SharedBudgetGate};
 use ego_core::compact::{
     COMPACTION_PROMPT, COMPACTION_PROMPT_REVISION, Checkpoint, CompactionBusy, CompactionError,
     PreparedCompaction,
@@ -306,7 +306,7 @@ fn reducer_creates_one_context_checkpoint_and_history_carries_no_source_turn() {
 
 #[test]
 fn public_projection_distinguishes_checkpoint_from_human_prompt_and_keeps_authority_low() {
-    assert_eq!(PUBLIC_EVENT_VERSION, 8);
+    assert_eq!(PUBLIC_EVENT_VERSION, 9);
     let source: SessionId =
         serde_json::from_str(&format!("\"{SOURCE}\"")).expect("fixture source id");
     let seeded = seeded_event(EventKind::CompactionSeeded {
@@ -762,10 +762,10 @@ fn compaction_turn_with_state(
     let store = Box::leak(Box::new(CompactionMemoryStore::default()));
     let clock = Box::leak(Box::new(CompactionClock));
     let sink = Box::leak(Box::new(CollectingSink::new()));
-    let gate = Box::leak(Box::new(BudgetGate::new(Money::new(
+    let gate = SharedBudgetGate::new(BudgetGate::new(Money::new(
         Amount::new(1_000, 0).expect("budget amount"),
         CurrencyCode::new("USD").expect("budget currency"),
-    ))));
+    )));
     let policy = Box::leak(Box::new(PolicyEngine::new(
         CanonPath::new("/ws"),
         Mode::Default,
@@ -810,7 +810,8 @@ fn compaction_turn_with_state(
             invocation: RunInvocationId::new(),
         },
         tools,
-    );
+    )
+    .expect("budget gate is available");
     (turn, store, cancel)
 }
 
