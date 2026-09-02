@@ -27,6 +27,8 @@ use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
+use portable_pty::{NativePtySystem, PtySize, PtySystem};
+
 /// What the stub answers a `/v1/chat/completions` request with.
 #[derive(Debug, Clone)]
 pub enum Reply {
@@ -585,6 +587,106 @@ impl Ego {
         self
     }
 
+    /// Run one interactive script through a real pseudo-terminal.
+    ///
+    /// Interactive typed commands are classified by the terminal owner after
+    /// the editor reads them; a pipe is intentionally treated as one seed
+    /// prompt. This keeps process tests on the same public binary seam while
+    /// answering the terminal's cursor-position query as the child runs.
+    pub fn run_pty(self, input: &str) -> Finished {
+        let pair = NativePtySystem::default()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("pty");
+        let mut child = pair.slave.spawn_command(self.pty_command()).expect("spawn");
+        let writer = Arc::new(Mutex::new(pair.master.take_writer().expect("writer")));
+        let reader = pair.master.try_clone_reader().expect("reader");
+        let (chunks, received) = std::sync::mpsc::channel();
+        let responder = Arc::clone(&writer);
+        let reader = std::thread::spawn(move || {
+            const DSR_QUERY: &[u8] = b"\x1b[6n";
+            const DSR_RESPONSE: &[u8] = b"\x1b[4;1R";
+            let mut reader = reader;
+            let mut output = Vec::new();
+            let mut chunk = [0; 1024];
+            let mut responses = 0;
+            loop {
+                match reader.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(length) => {
+                        output.extend_from_slice(&chunk[..length]);
+                        let queries = output
+                            .windows(DSR_QUERY.len())
+                            .filter(|window| *window == DSR_QUERY)
+                            .count();
+                        while responses < queries {
+                            let mut writer = responder.lock().expect("pty writer lock");
+                            writer.write_all(DSR_RESPONSE).expect("DSR response");
+                            writer.flush().expect("DSR response flush");
+                            responses += 1;
+                        }
+                        if chunks.send(chunk[..length].to_vec()).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+            output
+        });
+        let mut output = Vec::new();
+        let mut trust_answered = false;
+        let mut submitted = false;
+        let mut eof_sent = false;
+        let mut prompt_count_before_submit = 0;
+        while !eof_sent {
+            let chunk = received
+                .recv_timeout(Duration::from_secs(8))
+                .expect("interactive prompt");
+            output.extend_from_slice(&chunk);
+            if !trust_answered
+                && output
+                    .windows(b"Trust project files".len())
+                    .any(|window| window == b"Trust project files")
+            {
+                let mut writer = writer.lock().expect("pty writer lock");
+                writer.write_all(b"yes\r").expect("trust answer");
+                writer.flush().expect("trust answer flush");
+                trust_answered = true;
+            }
+            let prompt_count = output.windows(2).filter(|window| *window == b"> ").count();
+            if !submitted && prompt_count > 0 {
+                // If a trust prompt was shown, the first `> ` belongs to the
+                // post-trust idle editor and is safe to submit against.
+                let mut writer = writer.lock().expect("pty writer lock");
+                writer
+                    .write_all(input.as_bytes())
+                    .expect("interactive script");
+                writer.write_all(b"\r").expect("interactive submit");
+                writer.flush().expect("interactive script flush");
+                prompt_count_before_submit = prompt_count;
+                submitted = true;
+            } else if submitted && prompt_count > prompt_count_before_submit {
+                let mut writer = writer.lock().expect("pty writer lock");
+                writer.write_all(b"\x04").expect("interactive EOF");
+                writer.flush().expect("interactive EOF flush");
+                eof_sent = true;
+            }
+        }
+        drop(writer);
+        let status = child.wait().expect("child ran");
+        let output = reader.join().expect("pty reader thread");
+        Finished {
+            code: Some(status.exit_code() as i32),
+            stdout: String::from_utf8_lossy(&output).into_owned(),
+            stderr: String::new(),
+            _keep: self.keep,
+        }
+    }
+
     /// Write a file into the workspace and return its path.
     pub fn file(&self, name: &str, contents: &str) -> PathBuf {
         let path = self.workspace.join(name);
@@ -598,6 +700,9 @@ impl Ego {
     /// Write a file into `$EGO_HOME` and return its path.
     pub fn home_file(&self, name: &str, contents: &str) -> PathBuf {
         let path = self.home.join(name);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("a temp dir is writable");
+        }
         std::fs::write(&path, contents).expect("a temp dir is writable");
         path
     }
