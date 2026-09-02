@@ -6,9 +6,13 @@
 //! projection, or an externally supplied child result.
 
 use std::collections::BTreeMap;
+use std::ops::Deref;
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
-use ego_core::budget::{BudgetGate, Metering, PricingQuote, Reservation, SettlementSource};
+use ego_core::budget::{
+    BudgetGate, Metering, PricingQuote, Reservation, SettlementSource, SharedBudgetGate,
+};
 use ego_core::ceiling::Budget;
 use ego_core::config::{
     ConfigLayer, Effective, ModelRef, Source, Trust, resolve, resolve_selected,
@@ -16,8 +20,8 @@ use ego_core::config::{
 use ego_core::cost::{Amount, CurrencyCode, PricingRevision};
 use ego_core::event::domain::{DomainEvent, Envelope, EventKind, SubagentTerminal};
 use ego_core::event::hook::{
-    HookActivation, HookDecision, HookInvocationId, HookLifecycle, HookOutcome, HookPlan,
-    HookResult,
+    HookCatalogueEvidence, HookDecision, HookDescriptorEvidence, HookInvocationId, HookLifecycle,
+    HookOutcome, HookSourceAuthority,
 };
 use ego_core::event::id::{
     EventId, ItemId, Producer, Seq, SessionId, SubagentInvocationId, TurnId,
@@ -31,9 +35,8 @@ use ego_core::generator::capabilities::{
 };
 use ego_core::generator::types::{Conversation, GenRequest, Message, Role, ThinkingLevel};
 use ego_core::hook::{
-    HookCatalogue, HookConfigEntry, HookFuture, HookHandlerConfig, HookInvocationRequest,
-    HookLifecycleDispatcher, HookOccurrence, HookPort, HookReachFuture, HookReachedEvidence,
-    HookRecordFuture, HookRunner, HookSource, HookStartFuture, HookStartedEvidence,
+    HookCatalogue, HookConfigEntry, HookFuture, HookHandlerConfig, HookInvocationPort,
+    HookInvocationRequest, HookLifecycleDispatcher, HookRunner, HookSource, SessionHookRuntime,
 };
 use ego_core::permit::{CanonPath, Confinement, RunConfinement};
 use ego_core::run::{
@@ -42,25 +45,28 @@ use ego_core::run::{
     RunRetention, RunRoot, RunSelections, RunSettlement, RunStart, RunTransaction,
 };
 use ego_core::sink::{EventSink, NullSink};
+use ego_core::state::SessionState;
 use ego_core::store::blob::{BlobId, BlobRef};
 use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
 use ego_core::subagent::{
-    ChildJournal, ChildJournalError, ChildProfileResolver, ChildRequest, ChildResultEvidence,
-    ChildResultReader, ChildResultReaderError, ChildResultStore, ChildRunService,
-    ChildSelectionAdmission, ChildServicePorts, ChildTaskReader, ChildWait, ChildWaitResult,
+    ChildAdmission, ChildJournal, ChildJournalError, ChildProfileResolver, ChildRequest,
+    ChildResultEvidence, ChildResultReader, ChildResultReaderError, ChildResultStore,
+    ChildRunService, ChildSelectionAdmission, ChildServicePorts, ChildTaskReader, ChildWait,
+    ChildWaitResult,
 };
+use ego_core::turn::{CancelToken, Journal, SharedJournal};
 use futures::future::{self, BoxFuture};
 use futures::stream::{self, BoxStream};
 
 const DEFAULT_TASK_BYTES: &[u8] = b"rendered default task";
 const RESULT: &str = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
 
-fn child_event_kind(event: &DomainEvent) -> &'static str {
+fn child_event_kind(event: &DomainEvent) -> Option<&'static str> {
     match &event.kind {
-        EventKind::SubagentRequested { .. } => "subagent_requested",
-        EventKind::SubagentSpawned { .. } => "subagent_spawned",
-        EventKind::SubagentSettled { .. } => "subagent_settled",
-        _ => "not a child lifecycle event",
+        EventKind::SubagentRequested { .. } => Some("subagent_requested"),
+        EventKind::SubagentSpawned { .. } => Some("subagent_spawned"),
+        EventKind::SubagentSettled { .. } => Some("subagent_settled"),
+        _ => None,
     }
 }
 
@@ -85,6 +91,16 @@ fn selections() -> RunSelections {
 fn parent_run() -> RunId {
     static PARENT: OnceLock<RunId> = OnceLock::new();
     *PARENT.get_or_init(|| RunId::new(SessionId::new(), uuid::Uuid::now_v7()))
+}
+
+fn parent_turn() -> TurnId {
+    static TURN: OnceLock<TurnId> = OnceLock::new();
+    *TURN.get_or_init(TurnId::new)
+}
+
+fn parent_item() -> ItemId {
+    static ITEM: OnceLock<ItemId> = OnceLock::new();
+    *ITEM.get_or_init(ItemId::new)
 }
 
 fn profile_name_from_owner() -> String {
@@ -226,8 +242,8 @@ fn request_with_task(
     ChildRequest::new(
         invocation,
         parent_run(),
-        TurnId::new(),
-        ItemId::new(),
+        parent_turn(),
+        parent_item(),
         task,
         selections(),
         wait,
@@ -382,10 +398,8 @@ impl DurableJournal {
     fn fail_next_settled(&self) {
         *self.fail_next_settled.lock().expect("settled failure flag") = true;
     }
-}
 
-impl ChildJournal for DurableJournal {
-    fn append(&self, event: DomainEvent) -> Result<(), ChildJournalError> {
+    fn append_event(&self, event: DomainEvent) -> Result<(), ChildJournalError> {
         let fail = matches!(&event.kind, EventKind::SubagentSettled { .. }) && {
             let mut flag = self.fail_next_settled.lock().expect("settled failure flag");
             let fail = *flag;
@@ -400,7 +414,9 @@ impl ChildJournal for DurableJournal {
         self.events.lock().expect("journal events").push(event);
         Ok(())
     }
+}
 
+impl ChildJournal for DurableJournal {
     fn read(
         &self,
         invocation: SubagentInvocationId,
@@ -419,6 +435,37 @@ impl ChildJournal for DurableJournal {
                 _ => None,
             })
             .collect())
+    }
+}
+
+impl SessionStore for DurableJournal {
+    fn append(&self, _session: &SessionId, event: &DomainEvent) -> Result<(), StoreError> {
+        self.append_event(event.clone())
+            .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))
+    }
+
+    fn read(
+        &self,
+        _session: &SessionId,
+    ) -> Result<BoxStream<'static, Result<SessionEntry, StoreError>>, StoreError> {
+        Ok(Box::pin(stream::iter(
+            self.records().into_iter().map(SessionEntry::Event).map(Ok),
+        )))
+    }
+
+    fn compare_and_append_run(
+        &self,
+        _session: &SessionId,
+        _expected_revision: Option<ego_core::run::RunRevision>,
+        _transaction: RunTransaction,
+    ) -> Result<RunAppend, StoreError> {
+        Err(StoreError::Io(std::io::Error::other(
+            "parent hook journal does not store run transactions",
+        )))
+    }
+
+    fn list(&self) -> Result<Vec<SessionMeta>, StoreError> {
+        Ok(Vec::new())
     }
 }
 
@@ -531,77 +578,18 @@ impl EventSinkFactory for Sinks {
 #[derive(Clone)]
 struct ReturnHookPort {
     decision: HookDecision,
-    started: Arc<Mutex<Vec<HookStartedEvidence>>>,
-    settled: Arc<Mutex<Vec<HookInvocationId>>>,
 }
 
 impl ReturnHookPort {
     fn new(decision: HookDecision) -> Self {
-        Self {
-            decision,
-            started: Arc::new(Mutex::new(Vec::new())),
-            settled: Arc::new(Mutex::new(Vec::new())),
-        }
+        Self { decision }
     }
 }
 
-impl HookPort for ReturnHookPort {
-    fn reached<'a>(
-        &'a self,
-        producer: &'a Producer,
-        occurrence: &'a HookOccurrence,
-        plan: &'a HookPlan,
-    ) -> HookReachFuture<'a> {
-        let evidence = HookReachedEvidence::new(
-            EventId::new(),
-            occurrence.key().clone(),
-            occurrence.event().subject(),
-            producer.clone(),
-            plan.clone(),
-        );
-        Box::pin(future::ready(Ok(ego_core::hook::HookReachOutcome::Fresh(
-            evidence,
-        ))))
-    }
-
-    fn started<'a>(
-        &'a self,
-        spec: &'a ego_core::hook::HookSpec,
-        _occurrence: &'a HookOccurrence,
-        reached: &'a HookReachedEvidence,
-        activation: HookActivation,
-        invocation: HookInvocationId,
-    ) -> HookStartFuture<'a> {
-        let evidence = HookStartedEvidence::new(
-            reached.event(),
-            reached.event(),
-            spec.id(),
-            invocation,
-            activation,
-        );
-        self.started
-            .lock()
-            .expect("return hook starts")
-            .push(evidence);
-        Box::pin(future::ready(Ok(evidence)))
-    }
-
+impl HookInvocationPort for ReturnHookPort {
     fn invoke<'a>(&'a self, _request: HookInvocationRequest) -> HookFuture<'a> {
         let outcome = HookOutcome::new(self.decision, None);
         Box::pin(future::ready(Ok(outcome)))
-    }
-
-    fn settled<'a>(
-        &'a self,
-        _spec: &'a ego_core::hook::HookSpec,
-        started: HookStartedEvidence,
-        _result: &'a HookResult,
-    ) -> HookRecordFuture<'a> {
-        self.settled
-            .lock()
-            .expect("return hook settlements")
-            .push(started.invocation());
-        Box::pin(future::ready(Ok(())))
     }
 }
 
@@ -626,6 +614,72 @@ fn return_hook_catalogue() -> HookCatalogue {
         Trust::Trusted,
     )
     .expect("return hook catalogue")
+}
+
+fn catalogue_evidence(catalogue: &HookCatalogue) -> HookCatalogueEvidence {
+    let descriptors = catalogue.specs().iter().map(|spec| {
+        let authority = match spec.source() {
+            HookSource::System => HookSourceAuthority::System,
+            HookSource::User => HookSourceAuthority::User,
+            HookSource::Project => HookSourceAuthority::Project,
+            HookSource::Skill { authority, .. } => match authority {
+                SkillSourceAuthority::System => HookSourceAuthority::System,
+                SkillSourceAuthority::User => HookSourceAuthority::User,
+                SkillSourceAuthority::Project => HookSourceAuthority::Project,
+            },
+        };
+        HookDescriptorEvidence::new(
+            authority,
+            spec.location().clone(),
+            spec.content_digest(),
+            spec.ordinal().expect("hook ordinal"),
+        )
+    });
+    HookCatalogueEvidence::new(descriptors.collect()).expect("catalogue evidence")
+}
+
+fn parent_runtime(journal: DurableJournal, port: ReturnHookPort) -> SessionHookRuntime<'static> {
+    let store: &'static DurableJournal = Box::leak(Box::new(journal));
+    let clock: &'static FixedClock = Box::leak(Box::new(FixedClock));
+    let sink: &'static NullSink = Box::leak(Box::new(NullSink));
+    let shared = SharedJournal::new(Journal::new(
+        parent_run().session_id(),
+        store,
+        clock,
+        sink,
+        Producer::Main,
+        SessionState::default(),
+    ));
+    shared
+        .append(
+            parent_turn(),
+            Some(parent_item()),
+            None,
+            EventKind::ToolCallStarted {
+                name: "subagent".to_owned(),
+                args: "{}".to_owned(),
+                call_id: Some("subagent-parent".to_owned()),
+            },
+        )
+        .expect("parent tool origin");
+    let catalogue = return_hook_catalogue();
+    shared
+        .append(
+            parent_turn(),
+            None,
+            None,
+            EventKind::HookCatalogueAdmitted {
+                descriptors: catalogue_evidence(&catalogue),
+            },
+        )
+        .expect("catalogue admission");
+    SessionHookRuntime::new(
+        HookLifecycleDispatcher::new(HookRunner::new(), catalogue),
+        shared,
+        Arc::new(port),
+        CancelToken::new(),
+        Instant::now() + Duration::from_secs(60),
+    )
 }
 
 struct Executor {
@@ -765,8 +819,6 @@ impl RunExecutor for Executor {
         let reservation = bindings
             .budget_gate()
             .expect("the execution binding owns the shared live budget gate")
-            .lock()
-            .expect("shared live budget gate")
             .reserve(
                 &generation_metering(),
                 Some(&generation_quote()),
@@ -801,6 +853,73 @@ impl RunExecutor for Executor {
 }
 
 type Controller = RunController<Store, Executor, FixedClock, FixedIds>;
+
+struct TestChildService {
+    inner: ChildRunService,
+    parent: SessionHookRuntime<'static>,
+}
+
+impl TestChildService {
+    async fn start(
+        &self,
+        request: ChildRequest,
+    ) -> Result<TestChildAdmission, ego_core::subagent::ChildServiceError> {
+        self.inner
+            .start(request, &self.parent)
+            .await
+            .map(|inner| TestChildAdmission {
+                inner,
+                parent: self.parent.clone(),
+            })
+    }
+
+    async fn collect_background(
+        &self,
+        invocation: SubagentInvocationId,
+    ) -> Result<ChildWaitResult, ego_core::subagent::ChildServiceError> {
+        self.inner
+            .collect_background(invocation, &self.parent)
+            .await
+    }
+
+    async fn recover_from_durable(
+        &self,
+        invocation: SubagentInvocationId,
+        cut: ego_core::subagent::RecoveryCut,
+    ) -> Result<Option<ego_core::subagent::RecoveredChild>, ego_core::subagent::ChildServiceError>
+    {
+        self.inner
+            .recover_from_durable(invocation, cut, &self.parent)
+            .await
+    }
+}
+
+impl Deref for TestChildService {
+    type Target = ChildRunService;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+struct TestChildAdmission {
+    inner: ChildAdmission,
+    parent: SessionHookRuntime<'static>,
+}
+
+impl TestChildAdmission {
+    async fn wait(&self) -> Result<ChildWaitResult, ego_core::subagent::ChildServiceError> {
+        self.inner.wait(&self.parent).await
+    }
+}
+
+impl Deref for TestChildAdmission {
+    type Target = ChildAdmission;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
 
 struct Harness {
     parent_run: RunId,
@@ -837,15 +956,17 @@ impl Harness {
         }
     }
 
-    fn service(&self, gate: BudgetGate) -> ChildRunService {
-        let gate = Arc::new(Mutex::new(gate));
-        self.service_with_ports(gate, self.default_ports())
+    fn service(&self, gate: BudgetGate) -> TestChildService {
+        self.service_with_ports(
+            SharedBudgetGate::new(gate),
+            self.default_ports(),
+            ReturnHookPort::new(HookDecision::Continue),
+        )
     }
 
-    fn service_with_return_hook(&self, gate: BudgetGate, port: ReturnHookPort) -> ChildRunService {
-        let gate = Arc::new(Mutex::new(gate));
+    fn service_with_return_hook(&self, gate: BudgetGate, port: ReturnHookPort) -> TestChildService {
         self.service_with_ports(
-            Arc::clone(&gate),
+            SharedBudgetGate::new(gate),
             ChildServicePorts::new(
                 self.parent_run,
                 Arc::new(self.journal.clone()),
@@ -854,20 +975,16 @@ impl Harness {
                 Arc::new(self.parent_blobs.clone()),
                 default_profile_owner(),
                 Arc::new(ExistingAuthorityAdmission::new()),
-                Arc::new(HookLifecycleDispatcher::new(
-                    HookRunner::new(port),
-                    return_hook_catalogue(),
-                )),
-                Producer::Main,
             ),
+            port,
         )
     }
 
     fn service_with_gate_and_authority(
         &self,
-        gate: Arc<Mutex<BudgetGate>>,
+        gate: SharedBudgetGate,
         authority: Arc<dyn ChildSelectionAdmission>,
-    ) -> ChildRunService {
+    ) -> TestChildService {
         self.service_with_ports(
             gate,
             ChildServicePorts::new(
@@ -878,12 +995,8 @@ impl Harness {
                 Arc::new(self.parent_blobs.clone()),
                 default_profile_owner(),
                 authority,
-                Arc::new(HookLifecycleDispatcher::new(
-                    HookRunner::new(ReturnHookPort::new(HookDecision::Continue)),
-                    return_hook_catalogue(),
-                )),
-                Producer::Main,
             ),
+            ReturnHookPort::new(HookDecision::Continue),
         )
     }
 
@@ -896,26 +1009,25 @@ impl Harness {
             Arc::new(self.parent_blobs.clone()),
             default_profile_owner(),
             Arc::new(ExistingAuthorityAdmission::new()),
-            Arc::new(HookLifecycleDispatcher::new(
-                HookRunner::new(ReturnHookPort::new(HookDecision::Continue)),
-                return_hook_catalogue(),
-            )),
-            Producer::Main,
         )
     }
 
     fn service_with_ports(
         &self,
-        gate: Arc<Mutex<BudgetGate>>,
+        gate: SharedBudgetGate,
         ports: ChildServicePorts,
-    ) -> ChildRunService {
-        ChildRunService::new(
-            Arc::clone(&self.controller),
-            Arc::clone(&gate),
-            RunRoot::new("/workspace").expect("absolute root"),
-            RunExecutionBindings::new(Arc::new(Sinks), None).with_budget_gate(gate),
-            ports,
-        )
+        port: ReturnHookPort,
+    ) -> TestChildService {
+        TestChildService {
+            inner: ChildRunService::new(
+                Arc::clone(&self.controller),
+                gate.clone(),
+                RunRoot::new("/workspace").expect("absolute root"),
+                RunExecutionBindings::new(Arc::new(Sinks), None).with_budget_gate(gate),
+                ports,
+            ),
+            parent: parent_runtime(self.journal.clone(), port),
+        }
     }
 
     fn content_service(
@@ -923,10 +1035,10 @@ impl Harness {
         task_reader: Arc<dyn ChildTaskReader>,
         results: Arc<dyn ChildResultReader>,
         parent_blobs: Arc<dyn ChildResultStore>,
-    ) -> ChildRunService {
-        let gate = Arc::new(Mutex::new(BudgetGate::unlimited(
+    ) -> TestChildService {
+        let gate = SharedBudgetGate::new(BudgetGate::unlimited(
             ego_core::cost::CurrencyCode::new("USD").expect("currency"),
-        )));
+        ));
         self.service_with_ports(
             gate,
             ChildServicePorts::new(
@@ -937,19 +1049,15 @@ impl Harness {
                 parent_blobs,
                 default_profile_owner(),
                 Arc::new(ExistingAuthorityAdmission::new()),
-                Arc::new(HookLifecycleDispatcher::new(
-                    HookRunner::new(ReturnHookPort::new(HookDecision::Continue)),
-                    return_hook_catalogue(),
-                )),
-                Producer::Main,
             ),
+            ReturnHookPort::new(HookDecision::Continue),
         )
     }
 
-    fn profile_service(&self, owner: Arc<dyn ChildProfileResolver>) -> ChildRunService {
-        let gate = Arc::new(Mutex::new(BudgetGate::unlimited(
+    fn profile_service(&self, owner: Arc<dyn ChildProfileResolver>) -> TestChildService {
+        let gate = SharedBudgetGate::new(BudgetGate::unlimited(
             ego_core::cost::CurrencyCode::new("USD").expect("currency"),
-        )));
+        ));
         self.service_with_ports(
             gate,
             ChildServicePorts::new(
@@ -960,12 +1068,8 @@ impl Harness {
                 Arc::new(self.parent_blobs.clone()),
                 owner,
                 Arc::new(ExistingAuthorityAdmission::new()),
-                Arc::new(HookLifecycleDispatcher::new(
-                    HookRunner::new(ReturnHookPort::new(HookDecision::Continue)),
-                    return_hook_catalogue(),
-                )),
-                Producer::Main,
             ),
+            ReturnHookPort::new(HookDecision::Continue),
         )
     }
 }
@@ -1012,7 +1116,7 @@ fn child_uses_real_controller_and_durable_typed_parent_order() {
             .journal
             .records()
             .iter()
-            .map(child_event_kind)
+            .filter_map(child_event_kind)
             .collect::<Vec<_>>(),
         ["subagent_requested", "subagent_spawned", "subagent_settled"],
     );
@@ -1091,8 +1195,20 @@ fn child_result_is_verified_copied_to_parent_and_only_parent_ref_is_returned() {
     assert_eq!(parent_ref, child_item);
     assert_eq!(parent_blobs.copied().len(), 1);
     assert_eq!(parent_blobs.copied()[0].2, parent_ref);
+    let records = harness.journal.records();
+    let child_events: Vec<_> = records
+        .iter()
+        .filter(|event| {
+            matches!(
+                event.kind,
+                EventKind::SubagentRequested { .. }
+                    | EventKind::SubagentSpawned { .. }
+                    | EventKind::SubagentSettled { .. }
+            )
+        })
+        .collect();
     assert!(matches!(
-        harness.journal.records().as_slice(),
+        child_events.as_slice(),
         [
             DomainEvent {
                 kind: EventKind::SubagentRequested { .. },
@@ -1109,7 +1225,7 @@ fn child_result_is_verified_copied_to_parent_and_only_parent_ref_is_returned() {
                 },
                 ..
             }
-        ] if *final_message == parent_ref
+        ] if final_message == &parent_ref
     ));
 }
 
@@ -1265,9 +1381,9 @@ fn request_only_recovery_admits_once_without_executing_or_delivering() {
     let results = Arc::new(DurableResults::default());
     let parent_blobs = Arc::new(ParentBlobStore::default());
     let service = harness.service_with_ports(
-        Arc::new(Mutex::new(BudgetGate::unlimited(
+        SharedBudgetGate::new(BudgetGate::unlimited(
             ego_core::cost::CurrencyCode::new("USD").expect("currency"),
-        ))),
+        )),
         ChildServicePorts::new(
             harness.parent_run,
             Arc::new(harness.journal.clone()),
@@ -1276,22 +1392,18 @@ fn request_only_recovery_admits_once_without_executing_or_delivering() {
             parent_blobs.clone(),
             profile.clone(),
             authority.clone(),
-            Arc::new(HookLifecycleDispatcher::new(
-                HookRunner::new(ReturnHookPort::new(HookDecision::Continue)),
-                return_hook_catalogue(),
-            )),
-            Producer::Main,
         ),
+        ReturnHookPort::new(HookDecision::Continue),
     );
     let invocation = SubagentInvocationId::new();
-    let parent_turn = TurnId::new();
-    let parent_item = ItemId::new();
+    let parent_turn = parent_turn();
+    let parent_item = parent_item();
     let task = blob_for_bytes(&task_bytes);
     let child_selections = selections().with_profile_name("worker");
     let mut seq = Seq::default();
     harness
         .journal
-        .append(DomainEvent {
+        .append_event(DomainEvent {
             env: Envelope {
                 seq: seq.next(),
                 id: EventId::new(),
@@ -1376,9 +1488,7 @@ fn request_only_recovery_admits_once_without_executing_or_delivering() {
     assert_eq!(transactions.len(), 1);
     assert_eq!(transactions[0].run_id(), child_run);
     assert_eq!(transactions[0].origin(), recovered.origin());
-    let events = harness
-        .journal
-        .read(invocation)
+    let events = ChildJournal::read(&harness.journal, invocation)
         .expect("request evidence remains readable");
     assert_eq!(events.len(), 2);
     assert_eq!(events[0].env.turn, parent_turn);
@@ -1460,10 +1570,8 @@ fn after_spawn_recovery_delegates_uncertainty_without_reexecution_or_result_io()
         drop(admission);
         child_run
     };
-    let events_before_recovery = harness
-        .journal
-        .read(invocation)
-        .expect("durable child lifecycle");
+    let events_before_recovery =
+        ChildJournal::read(&harness.journal, invocation).expect("durable child lifecycle");
     assert!(matches!(
         events_before_recovery.as_slice(),
         [
@@ -1603,10 +1711,20 @@ fn subagent_stop_uses_real_hook_runner_decision_and_never_accepts_a_forged_id() 
         );
         let terminal = futures::executor::block_on(admission.wait())
             .expect("real SubagentStop return boundary");
-        let started = port.started.lock().expect("return hook starts").clone();
+        let records = harness.journal.records();
+        let started: Vec<_> = records
+            .iter()
+            .filter_map(|event| match event.kind {
+                EventKind::HookInvocationStarted { invocation, .. } => Some(invocation),
+                _ => None,
+            })
+            .collect();
         assert_eq!(started.len(), 1);
         assert_eq!(
-            port.settled.lock().expect("return hook settlements").len(),
+            records
+                .iter()
+                .filter(|event| matches!(event.kind, EventKind::HookInvocationSettled { .. }))
+                .count(),
             1
         );
         match decision {
@@ -1620,7 +1738,7 @@ fn subagent_stop_uses_real_hook_runner_decision_and_never_accepts_a_forged_id() 
                     ChildWaitResult::ReturnBlocked {
                         hook_invocation,
                         ..
-                    } if hook_invocation == started[0].invocation() && hook_invocation != forged
+                    } if hook_invocation == started[0] && hook_invocation != forged
                 ));
             }
             HookDecision::RequestEscalation => unreachable!("fixture only uses terminal decisions"),
@@ -1661,13 +1779,13 @@ fn foreground_cancel_and_background_drop_preserve_real_execution_ownership() {
 #[test]
 fn authority_profile_and_shared_budget_are_admitted_by_real_owners() {
     let harness = Harness::new(RunSettlement::Completed);
-    let gate = Arc::new(Mutex::new(BudgetGate::new(ego_core::cost::Money::new(
+    let gate = SharedBudgetGate::new(BudgetGate::new(ego_core::cost::Money::new(
         "0.04".parse().expect("amount"),
         ego_core::cost::CurrencyCode::new("USD").expect("currency"),
-    ))));
+    )));
     let authority = Arc::new(ExistingAuthorityAdmission::new());
-    let service = harness.service_with_gate_and_authority(Arc::clone(&gate), authority.clone());
-    let gate_id = gate.lock().expect("shared gate").id();
+    let service = harness.service_with_gate_and_authority(gate.clone(), authority.clone());
+    let gate_id = gate.id();
     let first = futures::executor::block_on(
         service.start(request(SubagentInvocationId::new(), ChildWait::Background)),
     )
@@ -1687,12 +1805,11 @@ fn authority_profile_and_shared_budget_are_admitted_by_real_owners() {
         futures::executor::block_on(first.wait()).expect("first child settles"),
         ChildWaitResult::Returned { .. }
     ));
-    assert!(
-        gate.lock()
-            .expect("shared gate")
-            .outstanding()
-            .is_some_and(|amount| !amount.amount.is_zero())
-    );
+    assert!(matches!(
+        gate.snapshot().expect("shared gate snapshot").ledger(),
+        ego_core::budget::Ledger::Limited { outstanding, .. }
+            if !outstanding.amount.is_zero()
+    ));
     let second_result = futures::executor::block_on(second.wait());
     assert!(matches!(
         second_result,
