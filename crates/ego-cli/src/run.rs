@@ -5166,6 +5166,12 @@ struct Turns<'a> {
     deadline: Option<std::time::Instant>,
 }
 
+enum TurnStart {
+    Prompt { text: String, images: Vec<ImageRef> },
+    Resumed(ego_core::event::id::TurnId),
+    Skill(AdmittedSkillOperation),
+}
+
 impl Turns<'_> {
     fn deadline_expired(&self) -> bool {
         self.deadline
@@ -5180,8 +5186,16 @@ impl Turns<'_> {
         cancel: &CancelToken,
         diagnostics: &dyn Diagnostics,
     ) -> (RunTermination, Value) {
-        self.drive_from(loop_, first, images, None, None, cancel, diagnostics)
-            .await
+        self.drive_from(
+            loop_,
+            TurnStart::Prompt {
+                text: first.to_owned(),
+                images,
+            },
+            cancel,
+            diagnostics,
+        )
+        .await
     }
 
     async fn drive_admitted_skill(
@@ -5191,16 +5205,8 @@ impl Turns<'_> {
         cancel: &CancelToken,
         diagnostics: &dyn Diagnostics,
     ) -> (RunTermination, Value) {
-        self.drive_from(
-            loop_,
-            "",
-            Vec::new(),
-            None,
-            Some(operation),
-            cancel,
-            diagnostics,
-        )
-        .await
+        self.drive_from(loop_, TurnStart::Skill(operation), cancel, diagnostics)
+            .await
     }
 
     async fn drive_resumed(
@@ -5210,21 +5216,17 @@ impl Turns<'_> {
         cancel: &CancelToken,
         diagnostics: &dyn Diagnostics,
     ) -> (RunTermination, Value) {
-        self.drive_from(loop_, "", Vec::new(), Some(turn), None, cancel, diagnostics)
+        self.drive_from(loop_, TurnStart::Resumed(turn), cancel, diagnostics)
             .await
     }
 
     async fn drive_from(
         &self,
         loop_: &mut TurnLoop<'_, '_>,
-        first: &str,
-        mut images: Vec<ImageRef>,
-        mut resumed: Option<ego_core::event::id::TurnId>,
-        mut skill: Option<AdmittedSkillOperation>,
+        mut next: TurnStart,
         cancel: &CancelToken,
         diagnostics: &dyn Diagnostics,
     ) -> (RunTermination, Value) {
-        let mut prompt = first.to_string();
         let mut taken: u32 = 0;
         let mut left = self.retries;
 
@@ -5232,15 +5234,10 @@ impl Turns<'_> {
             if self.max_turns.is_some_and(|max| taken >= max) {
                 return (RunTermination::MaxTurns, self.answer(&loop_.state()));
             }
-            let outcome = match resumed.take() {
-                Some(turn) => self.one_resumed(loop_, turn, cancel).await,
-                None => match skill.take() {
-                    Some(operation) => self.one_skill(loop_, operation, cancel).await,
-                    None => {
-                        self.one(loop_, &prompt, std::mem::take(&mut images), cancel)
-                            .await
-                    }
-                },
+            let outcome = match next {
+                TurnStart::Prompt { text, images } => self.one(loop_, &text, images, cancel).await,
+                TurnStart::Resumed(turn) => self.one_resumed(loop_, turn, cancel).await,
+                TurnStart::Skill(operation) => self.one_skill(loop_, operation, cancel).await,
             };
             let outcome = match outcome {
                 Ok(outcome) => outcome,
@@ -5287,7 +5284,10 @@ impl Turns<'_> {
                         return (RunTermination::TaskFailed, Value::String(answer));
                     }
                     left -= 1;
-                    prompt = schema::repair_prompt(&invalid);
+                    next = TurnStart::Prompt {
+                        text: schema::repair_prompt(&invalid),
+                        images: Vec::new(),
+                    };
                 }
             }
         }
