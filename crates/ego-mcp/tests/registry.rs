@@ -232,13 +232,16 @@ impl McpOperationFactory for CountingFactory {
         Ok(PreparedCall::new("counted", Vec::new()))
     }
 
-    fn execute<'a>(
+    fn execute<'a, 'io>(
         &'a self,
         _admission: Arc<McpServerAdmission>,
         _call: PreparedCall,
-        _io: &'a dyn ego_core::permit::GuardedIo,
+        _io: &'a dyn ego_core::permit::GuardedIo<'io>,
         _generation: Arc<str>,
-    ) -> BoxFuture<'a, Result<ToolExecution, ToolError>> {
+    ) -> BoxFuture<'a, Result<ToolExecution, ToolError>>
+    where
+        'io: 'a,
+    {
         let _retained = self.tools.len();
         Box::pin(async {
             Ok(ToolExecution::Complete(

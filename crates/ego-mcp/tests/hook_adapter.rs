@@ -20,7 +20,11 @@ use ego_core::event::hook::{
     HookActivation, HookContentDigest, HookId, HookInvocationId, HookLifecycle,
     HookSourceAuthority, HookSourceLocation, HookSubject,
 };
-use ego_core::hook::{EffectScope, HookHandlerConfig, HookInvocationRequest};
+use ego_core::event::id::{EventId, SessionId, TurnId};
+use ego_core::hook::{
+    EffectScope, HookCausality, HookEvent, HookHandlerConfig, HookInvocationRequest,
+    HookStartedEvidence,
+};
 use ego_core::mcp::{McpAdmissionFingerprint, McpOperationKind, McpSubject, ToolExecution};
 use ego_core::permit::{
     CanonPath, Classification, CleanupCertainty, DnsResolution, DuplexEnd, DuplexHandle,
@@ -43,27 +47,31 @@ use ego_mcp::{
 };
 
 fn request(server: &str, tool: &str, input: serde_json::Value) -> HookInvocationRequest {
+    let hook = HookId::derive(
+        HookSourceAuthority::Project,
+        &HookSourceLocation::parse("hooks/mcp.toml").expect("hook source"),
+        &HookContentDigest::parse(
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        .expect("hook digest"),
+        0,
+    );
     HookInvocationRequest::new(
-        HookId::derive(
-            HookSourceAuthority::Project,
-            &HookSourceLocation::parse("hooks/mcp.toml").expect("hook source"),
-            &HookContentDigest::parse(
-                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-            )
-            .expect("hook digest"),
-            0,
+        HookStartedEvidence::new(
+            EventId::new(),
+            EventId::new(),
+            hook,
+            HookInvocationId::new(),
+            HookActivation::Persistent,
         ),
+        HookCausality::session(SessionId::new(), TurnId::new()),
         HookHandlerConfig::McpTool {
             server: server.to_owned(),
             tool: tool.to_owned(),
             input,
             timeout_seconds: Some(30),
         },
-        HookLifecycle::PreToolUse,
-        None,
-        HookSubject::Session,
-        HookActivation::Persistent,
-        HookInvocationId::new(),
+        HookEvent::turn(HookLifecycle::PreToolUse, HookSubject::Session),
         EffectScope::new(Duration::from_secs(30)),
     )
 }
@@ -648,13 +656,16 @@ impl McpOperationFactory for HookFactory {
         .map_err(|error| ToolError::InvalidParams(error.to_string()))
     }
 
-    fn execute<'a>(
+    fn execute<'a, 'io>(
         &'a self,
         _admission: Arc<McpServerAdmission>,
         _call: PreparedCall,
-        _io: &'a dyn GuardedIo,
+        _io: &'a dyn GuardedIo<'io>,
         _generation: Arc<str>,
-    ) -> BoxFuture<'a, Result<ToolExecution, ToolError>> {
+    ) -> BoxFuture<'a, Result<ToolExecution, ToolError>>
+    where
+        'io: 'a,
+    {
         Box::pin(async {
             Err(ToolError::InvalidParams(
                 "ordinary MCP result is not a hook result".to_owned(),
@@ -662,13 +673,16 @@ impl McpOperationFactory for HookFactory {
         })
     }
 
-    fn execute_hook<'a>(
+    fn execute_hook<'a, 'io>(
         &'a self,
         _admission: Arc<McpServerAdmission>,
         call: PreparedCall,
-        io: &'a dyn GuardedIo,
+        io: &'a dyn GuardedIo<'io>,
         scope: EffectScope,
-    ) -> McpFuture<'a, Result<ego_mcp::McpHookExecution, ToolError>> {
+    ) -> McpFuture<'a, Result<ego_mcp::McpHookExecution, ToolError>>
+    where
+        'io: 'a,
+    {
         self.calls
             .lock()
             .expect("hook calls")

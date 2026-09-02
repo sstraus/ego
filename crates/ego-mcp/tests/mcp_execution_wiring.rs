@@ -85,20 +85,23 @@ impl McpOperationFactory for FakeFactory {
         ))
     }
 
-    fn execute<'a>(
+    fn execute<'a, 'io>(
         &'a self,
         _: Arc<McpServerAdmission>,
         _: PreparedCall,
-        _: &'a dyn GuardedIo,
+        _: &'a dyn GuardedIo<'io>,
         _: Arc<str>,
-    ) -> BoxFuture<'a, Result<ToolExecution, ToolError>> {
+    ) -> BoxFuture<'a, Result<ToolExecution, ToolError>>
+    where
+        'io: 'a,
+    {
         self.executions.fetch_add(1, Ordering::SeqCst);
         Box::pin(async { Ok(ToolExecution::Complete(ToolResult::builtin("fixture"))) })
     }
 }
 
 struct NoIo;
-impl GuardedIo for NoIo {
+impl<'io> GuardedIo<'io> for NoIo {
     fn write(
         &self,
         _: &ego_core::permit::CanonPath,

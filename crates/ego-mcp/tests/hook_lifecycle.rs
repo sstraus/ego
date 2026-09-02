@@ -12,17 +12,18 @@ use std::time::Duration;
 use ego_core::config::{
     ConfigLayer, Mode, PermCfg, ResolvedMcpEntry, Ruleset, Source, Trust, resolve,
 };
+use ego_core::event::domain::{DomainEvent, EventKind};
 use ego_core::event::hook::{
-    HookActivation, HookContentDigest, HookDecision, HookId, HookInvocationId, HookLifecycle,
-    HookOutcome, HookPlan, HookResult, HookSourceAuthority, HookSourceLocation,
+    HookActivation, HookCatalogueEvidence, HookContentDigest, HookDecision, HookDescriptorEvidence,
+    HookId, HookInvocationId, HookLifecycle, HookOutcome, HookSourceAuthority, HookSourceLocation,
 };
-use ego_core::event::id::Producer;
+use ego_core::event::id::{EventId, ItemId, Producer, SessionId, TurnId};
 use ego_core::event::time::{Clock, Timestamp};
 use ego_core::generator::attempt::DeliveryCertainty;
 use ego_core::hook::{
-    EffectScope, HookCatalogue, HookFuture, HookHandlerConfig, HookInvocationRequest,
-    HookLifecycleDispatcher, HookOccurrence, HookPort, HookReachFuture, HookReachedEvidence,
-    HookRecordFuture, HookRunner, HookSpec, HookStartFuture, HookStartedEvidence,
+    EffectScope, HookCatalogue, HookCausality, HookEvent, HookFuture, HookHandlerConfig,
+    HookInvocationPort, HookInvocationRequest, HookLifecycleDispatcher, HookRunner,
+    HookStartedEvidence, SessionHookRuntime,
 };
 use ego_core::mcp::{ForeignQuestionPort, ToolExecution};
 use ego_core::permit::{
@@ -31,17 +32,21 @@ use ego_core::permit::{
     PolicyEngine, PrepareCtx, PreparedCall, ProcessError, ProcessExecutor, Resolver, SpawnSpec,
     Tool, ToolResult, TransportError, TransportFailure,
 };
+use ego_core::sink::NullSink;
+use ego_core::state::SessionState;
 use ego_core::store::blob::{BlobError, BlobPage, BlobRead, BlobRef, BlobStore, BlobWriter};
 use ego_core::store::evidence::{
     EvidenceError, EvidenceId, EvidencePage, EvidenceRead, EvidenceRef, EvidenceStore,
     EvidenceWriter,
 };
+use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
 use ego_core::suspension::{
     ClaimedContinuation, ContinuationError, ContinuationJournal, ContinuationRecord,
     ContinuationState, McpResumeContext, ResumeKeySource, ResumeSealer,
 };
 use ego_core::turn::{
-    McpRegistryEvent, McpRegistryJournal, McpRegistryJournalError, ToolEffectPorts,
+    CancelToken, Journal as SessionJournal, McpRegistryEvent, McpRegistryJournal,
+    McpRegistryJournalError, SharedJournal, ToolEffectPorts,
 };
 use ego_mcp::{
     McpAdmittedCandidate, McpCacheMetadata, McpCandidateAdmission, McpCandidateError,
@@ -53,6 +58,7 @@ use ego_mcp::{
 use futures::executor::block_on;
 use futures::future::BoxFuture;
 use futures::io::{AsyncRead, AsyncWrite};
+use futures::stream::{self, BoxStream};
 use serde_json::json;
 
 const SCHEMA: &[u8] = br#"{"type":"object","properties":{"choice":{"type":"string"}},"required":["choice"],"additionalProperties":false}"#;
@@ -102,67 +108,78 @@ impl RecordingPort {
         }
     }
 }
-impl HookPort for RecordingPort {
-    fn reached<'a>(
-        &'a self,
-        producer: &'a Producer,
-        occurrence: &'a HookOccurrence,
-        plan: &'a HookPlan,
-    ) -> HookReachFuture<'a> {
-        Box::pin(std::future::ready(Ok(
-            ego_core::hook::HookReachOutcome::Fresh(HookReachedEvidence::new(
-                ego_core::event::id::EventId::new(),
-                occurrence.key().clone(),
-                occurrence.event().subject(),
-                producer.clone(),
-                plan.clone(),
-            )),
-        )))
-    }
-    fn started<'a>(
-        &'a self,
-        spec: &'a HookSpec,
-        occurrence: &'a HookOccurrence,
-        reached: &'a HookReachedEvidence,
-        activation: HookActivation,
-        invocation: HookInvocationId,
-    ) -> HookStartFuture<'a> {
-        let lifecycle = occurrence.event().lifecycle();
+impl HookInvocationPort for RecordingPort {
+    fn invoke<'a>(&'a self, request: HookInvocationRequest) -> HookFuture<'a> {
+        let lifecycle = request.lifecycle();
         self.calls.lock().expect("hook calls").push(lifecycle);
         self.trace.push(lifecycle.as_str());
-        Box::pin(std::future::ready(Ok(HookStartedEvidence::new(
-            reached.event(),
-            reached.event(),
-            spec.id(),
-            invocation,
-            activation,
-        ))))
-    }
-    fn invoke<'a>(&'a self, request: HookInvocationRequest) -> HookFuture<'a> {
-        let decision = match (self.mode, request.lifecycle()) {
+        let decision = match (self.mode, lifecycle) {
             (HookMode::BlockResult, HookLifecycle::ElicitationResult) => HookDecision::Block,
             _ => HookDecision::Continue,
         };
         Box::pin(std::future::ready(Ok(HookOutcome::new(decision, None))))
     }
-    fn settled<'a>(
-        &'a self,
-        spec: &'a HookSpec,
-        _started: HookStartedEvidence,
-        _result: &'a HookResult,
-    ) -> HookRecordFuture<'a> {
+}
+
+#[derive(Default)]
+struct HookSessionStore {
+    events: Mutex<Vec<DomainEvent>>,
+    mode: HookMode,
+    lifecycle: Mutex<Option<HookLifecycle>>,
+}
+
+impl SessionStore for HookSessionStore {
+    fn append(&self, _session: &SessionId, event: &DomainEvent) -> Result<(), StoreError> {
         if matches!(self.mode, HookMode::UncertainResult)
-            && spec.event_name() == HookLifecycle::ElicitationResult.as_str()
+            && matches!(event.kind, EventKind::HookInvocationSettled { .. })
+            && *self.lifecycle.lock().expect("hook lifecycle")
+                == Some(HookLifecycle::ElicitationResult)
         {
-            return Box::pin(std::future::ready(Err(ego_core::hook::HookRunError::new(
+            return Err(StoreError::Io(std::io::Error::other(
                 "simulated delivery uncertainty",
-            ))));
+            )));
         }
-        Box::pin(std::future::ready(Ok(())))
+        if let EventKind::HookLifecycleReached { occurrence, .. } = &event.kind {
+            *self.lifecycle.lock().expect("hook lifecycle") = Some(occurrence.lifecycle());
+        }
+        self.events
+            .lock()
+            .expect("session events")
+            .push(event.clone());
+        Ok(())
+    }
+
+    fn read(
+        &self,
+        _session: &SessionId,
+    ) -> Result<BoxStream<'static, Result<SessionEntry, StoreError>>, StoreError> {
+        let events = self
+            .events
+            .lock()
+            .expect("session events")
+            .iter()
+            .cloned()
+            .map(SessionEntry::Event)
+            .map(Ok)
+            .collect::<Vec<_>>();
+        Ok(Box::pin(stream::iter(events)))
+    }
+
+    fn compare_and_append_run(
+        &self,
+        _session: &SessionId,
+        _expected_revision: Option<ego_core::run::RunRevision>,
+        _transaction: ego_core::run::RunTransaction,
+    ) -> Result<ego_core::run::RunAppend, StoreError> {
+        panic!("run transactions are outside this fixture")
+    }
+
+    fn list(&self) -> Result<Vec<SessionMeta>, StoreError> {
+        Ok(Vec::new())
     }
 }
 
-fn hooks_with_mode(mode: HookMode, trace: Trace) -> HookLifecycleDispatcher {
+fn hooks_with_mode(mode: HookMode, trace: Trace) -> SessionHookRuntime<'static> {
     let source = "[[hooks]]\nevent = \"Elicitation\"\n[hooks.handler]\ntype = \"prompt\"\nprompt = \"continue\"\n[[hooks]]\nevent = \"ElicitationResult\"\n[hooks.handler]\ntype = \"prompt\"\nprompt = \"continue\"\n";
     let catalogue = HookCatalogue::admit_typed(
         &[ConfigLayer::parse(Source::User, source).expect("hooks")],
@@ -170,9 +187,66 @@ fn hooks_with_mode(mode: HookMode, trace: Trace) -> HookLifecycleDispatcher {
         Trust::Trusted,
     )
     .expect("catalogue");
-    HookLifecycleDispatcher::new(
-        HookRunner::new_with_durable_started(RecordingPort::new(trace, mode), Vec::new()),
-        catalogue,
+    let descriptors = HookCatalogueEvidence::new(
+        catalogue
+            .specs()
+            .iter()
+            .map(|spec| {
+                HookDescriptorEvidence::new(
+                    HookSourceAuthority::User,
+                    spec.location().clone(),
+                    spec.content_digest(),
+                    spec.ordinal().expect("hook ordinal"),
+                )
+            })
+            .collect(),
+    )
+    .expect("catalogue evidence");
+    let session = SessionId::new();
+    let turn = TurnId::new();
+    let item = ItemId::new();
+    let store: &'static HookSessionStore = Box::leak(Box::new(HookSessionStore {
+        events: Mutex::default(),
+        mode,
+        lifecycle: Mutex::default(),
+    }));
+    let clock: &'static FixedClock = Box::leak(Box::new(FixedClock));
+    let sink: &'static NullSink = Box::leak(Box::new(NullSink));
+    let journal = SessionJournal::new(
+        session,
+        store,
+        clock,
+        sink,
+        Producer::Main,
+        SessionState::default(),
+    );
+    let shared = SharedJournal::new(journal);
+    shared
+        .append(
+            turn,
+            None,
+            None,
+            EventKind::HookCatalogueAdmitted { descriptors },
+        )
+        .expect("catalogue admission");
+    shared
+        .append(
+            turn,
+            Some(item),
+            None,
+            EventKind::ToolCallStarted {
+                name: "server/lookup".to_owned(),
+                args: "{}".to_owned(),
+                call_id: Some("mcp-hook-fixture".to_owned()),
+            },
+        )
+        .expect("tool call start");
+    SessionHookRuntime::new(
+        HookLifecycleDispatcher::new(HookRunner::new(), catalogue),
+        shared,
+        Arc::new(RecordingPort::new(trace, mode)),
+        CancelToken::new(),
+        std::time::Instant::now() + Duration::from_secs(60),
     )
 }
 
@@ -823,13 +897,9 @@ async fn accepted_answer_validates_hooks_claims_and_retries_once() {
     let (sealer, floor) = prepared_resume(&auth);
     let resume = sealer.prepare(&auth, floor.clone()).expect("resume");
     let spawner = Arc::new(ScriptedSpawner::new());
-    let (call, guarded) = guarded_with_session_context(
-        auth,
-        resume,
-        hooks_with_mode(HookMode::Continue, trace.clone()),
-        &capture,
-        spawner.clone(),
-    );
+    let runtime = hooks_with_mode(HookMode::Continue, trace.clone());
+    let (call, guarded) =
+        guarded_with_session_context(auth, resume, runtime.clone(), &capture, spawner.clone());
     let ToolExecution::InputRequired(foreign) =
         tool.execute(call, &guarded).await.expect("required")
     else {
@@ -840,7 +910,7 @@ async fn accepted_answer_validates_hooks_claims_and_retries_once() {
         .accept_answer(
             &id,
             br#"{"choice":"yes"}"#,
-            hooks_with_mode(HookMode::Continue, trace.clone()),
+            runtime,
             floor,
             ports(spawner.clone()),
         )
@@ -883,13 +953,9 @@ async fn foreign_question_port_reuses_owner_capture_floor_and_effects_for_succes
     let (sealer, floor) = prepared_resume(&auth);
     let resume = sealer.prepare(&auth, floor.clone()).expect("resume");
     let spawner = Arc::new(ScriptedSpawner::with_input_required_rounds(2));
-    let (call, guarded) = guarded_with_session_context(
-        auth,
-        resume,
-        hooks_with_mode(HookMode::Continue, trace.clone()),
-        &capture,
-        spawner.clone(),
-    );
+    let runtime = hooks_with_mode(HookMode::Continue, trace.clone());
+    let (call, guarded) =
+        guarded_with_session_context(auth, resume, runtime.clone(), &capture, spawner.clone());
     let ToolExecution::InputRequired(initial) =
         tool.execute(call, &guarded).await.expect("required")
     else {
@@ -898,7 +964,7 @@ async fn foreign_question_port_reuses_owner_capture_floor_and_effects_for_succes
     let initial_id = initial.continuation_id().to_owned();
     let adapter = ego_mcp::McpForeignQuestionPort::new(
         Arc::clone(&owner),
-        hooks_with_mode(HookMode::Continue, trace.clone()),
+        runtime,
         floor,
         ports(spawner.clone()),
     );
@@ -1016,13 +1082,9 @@ async fn pre_block_or_uncertainty_leaves_accepted_answer_unclaimed_without_reent
         let (sealer, floor) = prepared_resume(&auth);
         let resume = sealer.prepare(&auth, floor.clone()).expect("resume");
         let spawner = Arc::new(ScriptedSpawner::new());
-        let (call, guarded) = guarded_with_session_context(
-            auth,
-            resume,
-            hooks_with_mode(HookMode::Continue, trace.clone()),
-            &capture,
-            spawner.clone(),
-        );
+        let runtime = hooks_with_mode(mode, trace.clone());
+        let (call, guarded) =
+            guarded_with_session_context(auth, resume, runtime.clone(), &capture, spawner.clone());
         let ToolExecution::InputRequired(foreign) =
             tool.execute(call, &guarded).await.expect("required")
         else {
@@ -1033,7 +1095,7 @@ async fn pre_block_or_uncertainty_leaves_accepted_answer_unclaimed_without_reent
                 .accept_answer(
                     foreign.continuation_id(),
                     br#"{"choice":"yes"}"#,
-                    hooks_with_mode(mode, trace.clone()),
+                    runtime,
                     floor,
                     ports(spawner.clone())
                 )
@@ -1276,11 +1338,21 @@ fn context_free_owner(
 fn guarded_with_session_context(
     authorized: Authorized,
     resume: ego_core::suspension::PreparedResume,
-    dispatcher: HookLifecycleDispatcher,
+    runtime: SessionHookRuntime<'static>,
     capture: &McpRegistryCapture,
     spawner: Arc<ScriptedSpawner>,
 ) -> (PreparedCall, GuardedEffects<'static>) {
-    let context = McpResumeContext::new(dispatcher, capture.clone());
+    let causality = runtime
+        .inspect(|state| {
+            state.items.iter().find_map(|(item, state)| {
+                state
+                    .tool_call_started
+                    .map(|parent| HookCausality::item(*item, state.turn, parent))
+            })
+        })
+        .expect("session state inspection")
+        .expect("tool causality");
+    let context = McpResumeContext::new(runtime, capture.clone(), causality);
     ToolEffectPorts::new(
         Box::leak(Box::new(ego_core::permit::fake::FakeFs::default())),
         Box::leak(Box::new(NoProcess)),
@@ -1411,10 +1483,11 @@ async fn one_owner_routes_interleaved_answers_to_the_originating_session_dispatc
     let (sealer, floor) = prepared_resume(&first_auth);
     let first_resume = sealer.prepare(&first_auth, floor.clone()).expect("resume");
     let first_spawner = Arc::new(ScriptedSpawner::new());
+    let first_runtime = hooks_with_mode(HookMode::Continue, trace_a.clone());
     let (first_call, first_guarded) = guarded_with_session_context(
         first_auth,
         first_resume,
-        hooks_with_mode(HookMode::Continue, trace_a.clone()),
+        first_runtime.clone(),
         &capture,
         first_spawner.clone(),
     );
@@ -1429,10 +1502,11 @@ async fn one_owner_routes_interleaved_answers_to_the_originating_session_dispatc
     let second_auth = authorized(prepare_lookup(&tool_b));
     let second_resume = sealer.prepare(&second_auth, floor.clone()).expect("resume");
     let second_spawner = Arc::new(ScriptedSpawner::new());
+    let second_runtime = hooks_with_mode(HookMode::Continue, trace_b.clone());
     let (second_call, second_guarded) = guarded_with_session_context(
         second_auth,
         second_resume,
-        hooks_with_mode(HookMode::Continue, trace_b.clone()),
+        second_runtime.clone(),
         &capture,
         second_spawner.clone(),
     );
@@ -1450,7 +1524,7 @@ async fn one_owner_routes_interleaved_answers_to_the_originating_session_dispatc
         .accept_answer(
             second.continuation_id(),
             br#"{"choice":"two"}"#,
-            hooks_with_mode(HookMode::Continue, trace_b.clone()),
+            second_runtime,
             floor.clone(),
             ports(second_spawner),
         )
@@ -1460,7 +1534,7 @@ async fn one_owner_routes_interleaved_answers_to_the_originating_session_dispatc
         .accept_answer(
             &first_id,
             br#"{"choice":"one"}"#,
-            hooks_with_mode(HookMode::Continue, trace_a.clone()),
+            first_runtime,
             floor,
             ports(first_spawner),
         )
@@ -1501,25 +1575,17 @@ async fn answer_resume_resolves_recorded_capture_and_adapter_never_uses_loop_cap
     let (sealer, floor) = prepared_resume(&auth);
     let resume = sealer.prepare(&auth, floor.clone()).expect("resume");
     let spawner = Arc::new(ScriptedSpawner::new());
-    let (call, guarded) = guarded_with_session_context(
-        auth,
-        resume,
-        hooks_with_mode(HookMode::Continue, trace.clone()),
-        &capture,
-        spawner.clone(),
-    );
+    let runtime = hooks_with_mode(HookMode::Continue, trace.clone());
+    let (call, guarded) =
+        guarded_with_session_context(auth, resume, runtime.clone(), &capture, spawner.clone());
     let ToolExecution::InputRequired(required) =
         tool.execute(call, &guarded).await.expect("required")
     else {
         panic!("expected required");
     };
     assert_eq!(journal.recorded_capture(), stable);
-    let adapter = ego_mcp::McpForeignQuestionPort::new(
-        Arc::clone(&owner),
-        hooks_with_mode(HookMode::Continue, trace.clone()),
-        floor,
-        ports(spawner),
-    );
+    let adapter =
+        ego_mcp::McpForeignQuestionPort::new(Arc::clone(&owner), runtime, floor, ports(spawner));
     let result =
         ForeignQuestionPort::resume(&adapter, required.continuation_id(), r#"{"choice":"yes"}"#)
             .await
@@ -1544,13 +1610,9 @@ async fn blocked_result_keeps_the_pinned_capture_with_accepted_unclaimed_continu
     let (sealer, floor) = prepared_resume(&auth);
     let resume = sealer.prepare(&auth, floor.clone()).expect("resume");
     let spawner = Arc::new(ScriptedSpawner::new());
-    let (call, guarded) = guarded_with_session_context(
-        auth,
-        resume,
-        hooks_with_mode(HookMode::Continue, trace.clone()),
-        &capture,
-        spawner.clone(),
-    );
+    let runtime = hooks_with_mode(HookMode::BlockResult, trace.clone());
+    let (call, guarded) =
+        guarded_with_session_context(auth, resume, runtime.clone(), &capture, spawner.clone());
     let ToolExecution::InputRequired(required) =
         tool.execute(call, &guarded).await.expect("required")
     else {
@@ -1564,7 +1626,7 @@ async fn blocked_result_keeps_the_pinned_capture_with_accepted_unclaimed_continu
         .accept_answer(
             required.continuation_id(),
             br#"{"choice":"yes"}"#,
-            hooks_with_mode(HookMode::BlockResult, trace.clone()),
+            runtime,
             floor,
             ports(spawner),
         )
@@ -1661,27 +1723,34 @@ async fn mismatched_capture_context_fails_closed_before_foreign_question_or_resu
 
 #[test]
 fn mcp_hook_adapter_wire_retains_the_admitted_hook_identity() {
+    let hook = HookId::derive(
+        HookSourceAuthority::Project,
+        &HookSourceLocation::parse("hooks/mcp.toml").expect("hook source"),
+        &HookContentDigest::parse(
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        .expect("hook digest"),
+        0,
+    );
     let request = HookInvocationRequest::new(
-        HookId::derive(
-            HookSourceAuthority::Project,
-            &HookSourceLocation::parse("hooks/mcp.toml").expect("hook source"),
-            &HookContentDigest::parse(
-                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-            )
-            .expect("hook digest"),
-            0,
+        HookStartedEvidence::new(
+            EventId::new(),
+            EventId::new(),
+            hook,
+            HookInvocationId::new(),
+            HookActivation::Persistent,
         ),
+        HookCausality::session(SessionId::new(), TurnId::new()),
         HookHandlerConfig::McpTool {
             server: "server".to_owned(),
             tool: "lookup".to_owned(),
             input: json!({}),
             timeout_seconds: Some(30),
         },
-        HookLifecycle::PreToolUse,
-        None,
-        ego_core::event::hook::HookSubject::Session,
-        HookActivation::Persistent,
-        HookInvocationId::new(),
+        HookEvent::turn(
+            HookLifecycle::PreToolUse,
+            ego_core::event::hook::HookSubject::Session,
+        ),
         EffectScope::new(Duration::from_secs(30)),
     );
     let wire = serde_json::to_value(

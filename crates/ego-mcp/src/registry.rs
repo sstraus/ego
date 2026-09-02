@@ -2585,7 +2585,7 @@ mod collapsed_mcp_red {
         bootstrap_named(SERVER).await
     }
 
-    fn fingerprint_for(server: &str, generation: &str) -> McpAdmissionFingerprint {
+    fn fingerprint_for(server: &str, capture: &McpRegistryCapture) -> McpAdmissionFingerprint {
         let lookup_schema = management()
             .into_iter()
             .find(|tool| tool.name == "get_tool_schema")
@@ -2593,15 +2593,15 @@ mod collapsed_mcp_red {
         let lookup_schema = crate::dynamic::schema_fingerprint(&lookup_schema.parameters)
             .expect("lookup schema fingerprint");
         McpAdmissionFingerprint::new(
-            generation,
+            capture.stable_fingerprint(),
             format!("{server}/get_tool_schema"),
             lookup_schema,
         )
         .expect("lookup fingerprint")
     }
 
-    fn fingerprint(generation: &str) -> McpAdmissionFingerprint {
-        fingerprint_for(SERVER, generation)
+    fn fingerprint(capture: &McpRegistryCapture) -> McpAdmissionFingerprint {
+        fingerprint_for(SERVER, capture)
     }
 
     fn schema_definition(name: &str, schema: Value) -> Value {
@@ -2621,7 +2621,7 @@ mod collapsed_mcp_red {
         McpToolSchemaCommand::new(
             capture.servers()[0].clone(),
             generation.to_owned(),
-            fingerprint(generation),
+            fingerprint(capture),
             requested.to_owned(),
             structured_content,
         )
@@ -2845,7 +2845,7 @@ mod collapsed_mcp_red {
         let stale = McpToolSchemaCommand::new(
             other.capture().servers()[0].clone(),
             "generation-1".to_owned(),
-            fingerprint_for("other", "generation-1"),
+            fingerprint_for("other", other.capture()),
             "weather".to_owned(),
             schema_definition("weather", weather_schema()),
         );
