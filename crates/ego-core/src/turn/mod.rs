@@ -1726,11 +1726,7 @@ impl<'session, 'turn> TurnLoop<'session, 'turn> {
         let _ = self
             .dispatch_hook(
                 causality.clone(),
-                HookEvent::tool(
-                    HookLifecycle::InstructionsLoaded,
-                    subject,
-                    selector.clone(),
-                ),
+                HookEvent::tool(HookLifecycle::InstructionsLoaded, subject, selector.clone()),
             )
             .await;
         Ok(self
@@ -1781,9 +1777,7 @@ impl<'session, 'turn> TurnLoop<'session, 'turn> {
         // Activation already refuses non-empty skill hook sources when no
         // session hook runtime exists. In that case only the in-memory skill
         // instruction and scope need clearing here.
-        if had_active
-            && let Some(runtime) = self.hook_runtime.as_ref()
-        {
+        if had_active && let Some(runtime) = self.hook_runtime.as_ref() {
             runtime
                 .replace_skill_sources(turn, &[])
                 .map_err(hook_store_error)?;

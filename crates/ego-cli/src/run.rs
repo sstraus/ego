@@ -7,6 +7,7 @@
 //! a store, then turns — and the two things only a process can do: notice a
 //! signal, and notice a deadline.
 
+use std::future::Future;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -65,13 +66,14 @@ use ego_core::run::{
 };
 use ego_core::session::{ReplaySource, ReplaySourceError};
 use ego_core::sink::{EventSink, NullSink};
+use ego_core::skill::AdmittedSkillOperation;
 use ego_core::state::{ItemKind, QuestionContinuation, SessionState};
 use ego_core::store::run_artifact::{ArtifactPublication, PublishedRunArtifact, RunArtifactStore};
 use ego_core::store::session_store::{SessionEntry, SessionMeta};
 use ego_core::turn::{
     AdmittedToolSource, CancelToken, GenerationRuntime, InteractiveControl, Journal, JudgeContext,
     QueueStatus, RegisteredTool, Session, SharedJournal, ToolEffectPorts, ToollessGenerationOwner,
-    Tools, TurnConfig, TurnLoop, TurnOutcome, interactive_control,
+    Tools, TurnAbandoned, TurnConfig, TurnLoop, TurnOutcome, interactive_control,
 };
 use ego_core::usage::{UsagePeriod, UsageReportService};
 use ego_mcp::{McpRegistryController, McpRegistryRuntime};
@@ -100,7 +102,7 @@ use crate::provider_http::{ProviderHttpAdapter, run_effect_ports};
 use crate::render::caps::{Capabilities, Environment, OscProfile, Terminal};
 use crate::render::osc::{Osc, Progress, State};
 use crate::session::{self, ActiveSession, Opened};
-use crate::{attachment, config, model, prompt, repl, schema};
+use crate::{attachment, config, hooks, model, prompt, repl, schema};
 
 /// The currency a session settles in.
 ///
@@ -1312,7 +1314,7 @@ fn finish_rooted_settings(
 struct Materials {
     system: Option<SystemPrompt>,
     registry: Vec<RegisteredTool>,
-    skills: Option<Arc<ego_core::skill::SkillCatalogue>>,
+    skills: Option<Arc<crate::skill::SkillCatalogue>>,
     compiled: Option<schema::Schema>,
     text: String,
     slug: String,
@@ -1375,7 +1377,17 @@ fn prepared_materials(
         diagnostics,
     )?;
     let skills = discover_skills(settings, diagnostics)?;
-    let registry = tools(args.tools.as_ref(), skills.clone())?;
+    let skill_capture = skills
+        .as_ref()
+        .map(|catalogue| catalogue.capture())
+        .transpose()
+        .map_err(|error| UsageError(error.to_string()))?;
+    let registry = tools(
+        args.tools.as_ref(),
+        skill_capture
+            .as_ref()
+            .map(crate::skill::SkillCatalogueCapture::core),
+    )?;
     let slug = args
         .model
         .clone()
@@ -1401,7 +1413,7 @@ fn prepared_materials(
 fn discover_skills(
     settings: &Settings,
     diagnostics: &dyn Diagnostics,
-) -> Result<Option<Arc<ego_core::skill::SkillCatalogue>>, UsageError> {
+) -> Result<Option<Arc<crate::skill::SkillCatalogue>>, UsageError> {
     discover_skills_at(
         &settings.root,
         settings.trust,
@@ -1415,7 +1427,7 @@ fn discover_skills_at(
     trust: Trust,
     profile_layers: Option<&[Sourced<ConfigLayer>]>,
     diagnostics: &dyn Diagnostics,
-) -> Result<Option<Arc<ego_core::skill::SkillCatalogue>>, UsageError> {
+) -> Result<Option<Arc<crate::skill::SkillCatalogue>>, UsageError> {
     let Some(profile_layers) = profile_layers else {
         return Ok(None);
     };
@@ -1436,10 +1448,13 @@ fn discover_skills_at(
         profile_layers,
     )
     .map_err(|error| UsageError(error.to_string()))?;
-    for diagnostic in catalogue.diagnostics() {
+    let capture = catalogue
+        .capture()
+        .map_err(|error| UsageError(error.to_string()))?;
+    for diagnostic in capture.diagnostics() {
         diagnostics.note(&diagnostic.to_string());
     }
-    Ok(Some(catalogue.core()))
+    Ok(Some(Arc::new(catalogue)))
 }
 
 /// The store this run logs through, and which session in it.
@@ -3169,6 +3184,11 @@ fn compaction_availability(pending_work: bool) -> repl::actions::Availability {
     }
 }
 
+enum InteractiveTurnInput {
+    Prompt(String),
+    Skill(AdmittedSkillOperation),
+}
+
 struct ExecutionPreflight {
     settings: Settings,
     ci: Option<CiInvocation>,
@@ -3179,7 +3199,7 @@ struct ExecutionPreflight {
 struct ExecutionReady {
     system: Option<SystemPrompt>,
     registry: Vec<RegisteredTool>,
-    skills: Option<Arc<ego_core::skill::SkillCatalogue>>,
+    skills: Option<Arc<crate::skill::SkillCatalogue>>,
     compiled: Option<schema::Schema>,
     text: String,
     generation: GenerationReady,
@@ -3414,7 +3434,7 @@ async fn execute<S: EventSink>(
     if let (Some(status), Some(skills)) = (status.as_ref(), skills.as_ref()) {
         let actions = status.seat.action_registry();
         actions
-            .reload_skills(skills.evidence().clone())
+            .bind_skill_view(skills.view())
             .map_err(|error| RunTermination::Failed {
                 message: format!("interactive skill actions could not be installed: {error:?}"),
             })?;
@@ -3885,7 +3905,7 @@ async fn execute<S: EventSink>(
             type CompactionRuntime = (
                 Option<SystemPrompt>,
                 Vec<RegisteredTool>,
-                Option<Arc<ego_core::skill::SkillCatalogue>>,
+                Option<crate::skill::PreparedSkillRescan>,
             );
 
             enum EpochStart {
@@ -4122,7 +4142,9 @@ async fn execute<S: EventSink>(
                                 };
 
                                 match line {
-                                    repl::Line::Submitted(text) => Some(text),
+                                    repl::Line::Submitted(text) => {
+                                        Some(InteractiveTurnInput::Prompt(text))
+                                    }
                                     repl::Line::Blank => continue,
                                     // Ctrl+C at an idle prompt drops the line and nothing
                                     // else. Someone who pressed it to stop a turn must not
@@ -4131,6 +4153,134 @@ async fn execute<S: EventSink>(
                                     repl::Line::Ended => break 'epoch EpochTransition::Exit,
                                     repl::Line::Refused(why) => {
                                         diagnostics.note(why);
+                                        continue;
+                                    }
+                                    repl::Line::HostCommand(repl::HostCommand::Skill(
+                                        operation,
+                                    )) => {
+                                        if pending_work {
+                                            diagnostics.note(
+                                                "a skill cannot be invoked while source work is pending",
+                                            );
+                                            continue;
+                                        }
+                                        Some(InteractiveTurnInput::Skill(operation))
+                                    }
+                                    repl::Line::HostCommand(repl::HostCommand::Skills(
+                                        repl::actions::SkillSurfaceAction::List,
+                                    )) => {
+                                        match skills.as_ref() {
+                                            Some(catalogue) => match catalogue.capture() {
+                                                Ok(capture) => {
+                                                    diagnostics.note(&capture.render_list())
+                                                }
+                                                Err(error) => diagnostics.note(&format!(
+                                                    "the skill catalogue could not be captured: {error}"
+                                                )),
+                                            },
+                                            None => diagnostics
+                                                .note("the skill catalogue is unavailable"),
+                                        }
+                                        continue;
+                                    }
+                                    repl::Line::HostCommand(repl::HostCommand::Skills(
+                                        repl::actions::SkillSurfaceAction::Diagnose,
+                                    )) => {
+                                        match skills.as_ref() {
+                                            Some(catalogue) => match catalogue.capture() {
+                                                Ok(capture) => {
+                                                    diagnostics.note(&capture.render_diagnostics())
+                                                }
+                                                Err(error) => diagnostics.note(&format!(
+                                                    "the skill catalogue could not be captured: {error}"
+                                                )),
+                                            },
+                                            None => diagnostics
+                                                .note("the skill catalogue is unavailable"),
+                                        }
+                                        continue;
+                                    }
+                                    repl::Line::HostCommand(repl::HostCommand::Skills(
+                                        repl::actions::SkillSurfaceAction::Rescan,
+                                    )) => {
+                                        if pending_work {
+                                            diagnostics.note(
+                                                "skills cannot be rescanned while source work is pending",
+                                            );
+                                            continue;
+                                        }
+                                        let Some(catalogue) = skills.as_ref() else {
+                                            diagnostics.note("the skill catalogue is unavailable");
+                                            continue;
+                                        };
+                                        seat.busy();
+                                        let prepared = match catalogue.prepare_rescan() {
+                                            Ok(prepared) => prepared,
+                                            Err(error) => {
+                                                diagnostics.note(&format!(
+                                                    "the skill catalogue could not be rescanned: {error}"
+                                                ));
+                                                continue;
+                                            }
+                                        };
+                                        let published = prepared.published();
+                                        let prospective = prepared.capture();
+                                        debug_assert_eq!(
+                                            prospective.retained_last_good(),
+                                            !published
+                                        );
+                                        let next_registry = match tools(
+                                            args.tools.as_ref(),
+                                            Some(prospective.core()),
+                                        ) {
+                                            Ok(registry) => registry,
+                                            Err(error) => {
+                                                last.termination = RunTermination::Failed {
+                                                    message: format!(
+                                                        "the rescanned skill catalogue could not rebuild model tools: {error}"
+                                                    ),
+                                                };
+                                                break 'epoch EpochTransition::Exit;
+                                            }
+                                        };
+                                        let capture = match catalogue.commit_rescan(prepared) {
+                                            Ok(capture) => capture,
+                                            Err(error) => {
+                                                last.termination = RunTermination::Failed {
+                                                    message: format!(
+                                                        "the prepared skill catalogue could not be published: {error}"
+                                                    ),
+                                                };
+                                                break 'epoch EpochTransition::Exit;
+                                            }
+                                        };
+                                        registry = next_registry;
+                                        if published {
+                                            diagnostics.note(&format!(
+                                                "skills: published generation {}",
+                                                capture.snapshot_digest()
+                                            ));
+                                        } else {
+                                            diagnostics.note(&format!(
+                                                "skills: retained last-good generation {}",
+                                                capture.snapshot_digest()
+                                            ));
+                                            diagnostics.note(&capture.render_diagnostics());
+                                        }
+                                        continue;
+                                    }
+                                    repl::Line::HostCommand(repl::HostCommand::Hooks) => {
+                                        match session_hooks.runtime.catalogue_snapshot() {
+                                            Ok(catalogue) => match hooks::render(&catalogue, false) {
+                                                Ok(rendered) => diagnostics.note(&rendered),
+                                                Err(error) => diagnostics.note(&format!(
+                                                    "the hook catalogue could not be rendered: {error}"
+                                                )),
+                                            },
+                                            Err(error) => diagnostics.note(&format!(
+                                                "the hook catalogue could not be captured: {error}"
+                                            )),
+                                        }
                                         continue;
                                     }
                                     repl::Line::HostCommand(repl::HostCommand::ModelSwitch(
@@ -4400,20 +4550,25 @@ async fn execute<S: EventSink>(
                                             .map_err(|error| {
                                                 CompactionError::Internal(error.to_string())
                                             })?;
-                                            let target_skills = discover_skills_at(
-                                                &root,
-                                                skill_trust,
-                                                skill_profile_layers.as_deref(),
-                                                diagnostics,
+                                            let prepared_skills = skills
+                                                .as_ref()
+                                                .map(|catalogue| catalogue.prepare_rescan())
+                                                .transpose()
+                                                .map_err(|error| {
+                                                    CompactionError::Internal(error.to_string())
+                                                })?;
+                                            let target_skills = prepared_skills
+                                                .as_ref()
+                                                .map(crate::skill::PreparedSkillRescan::capture);
+                                            let target_registry = tools(
+                                                args.tools.as_ref(),
+                                                target_skills
+                                                    .as_ref()
+                                                    .map(crate::skill::SkillCatalogueCapture::core),
                                             )
                                             .map_err(|error| {
                                                 CompactionError::Internal(error.to_string())
                                             })?;
-                                            let target_registry =
-                                                tools(args.tools.as_ref(), target_skills.clone())
-                                                    .map_err(|error| {
-                                                    CompactionError::Internal(error.to_string())
-                                                })?;
                                             let target_tools: Vec<ToolDescriptor> = target_registry
                                                 .iter()
                                                 .map(RegisteredTool::descriptor)
@@ -4537,7 +4692,7 @@ async fn execute<S: EventSink>(
                                                 .expect("interactive compaction runtime") = Some((
                                                 target_system,
                                                 target_registry,
-                                                target_skills,
+                                                prepared_skills,
                                             ));
                                             Ok(prepared)
                                         });
@@ -4631,22 +4786,25 @@ async fn execute<S: EventSink>(
                                 run_deadline,
                             )
                             .await?;
-                            let images = if asked.is_some() && !pending_attachments.is_empty() {
-                                let images = acquire_attachments(
-                                    &pending_attachments,
-                                    &source,
-                                    &ports,
-                                    &turn_cancel,
-                                    run_deadline,
-                                    &cwd,
-                                    active.evidence().blob_store(),
-                                )
-                                .await?;
-                                pending_attachments.clear();
-                                images
-                            } else {
-                                Vec::new()
-                            };
+                            let images =
+                                if matches!(asked.as_ref(), Some(InteractiveTurnInput::Prompt(_)))
+                                    && !pending_attachments.is_empty()
+                                {
+                                    let images = acquire_attachments(
+                                        &pending_attachments,
+                                        &source,
+                                        &ports,
+                                        &turn_cancel,
+                                        run_deadline,
+                                        &cwd,
+                                        active.evidence().blob_store(),
+                                    )
+                                    .await?;
+                                    pending_attachments.clear();
+                                    images
+                                } else {
+                                    Vec::new()
+                                };
                             let mut loop_ = build!(
                                 active,
                                 &turn_cancel,
@@ -4664,12 +4822,23 @@ async fn execute<S: EventSink>(
                                     Some((termination, result))
                                 }
                                 None => match asked {
-                                    Some(asked) => {
+                                    Some(InteractiveTurnInput::Prompt(asked)) => {
                                         let (termination, result) = turns
                                             .drive_with_images(
                                                 &mut loop_,
                                                 &asked,
                                                 images,
+                                                &turn_cancel,
+                                                diagnostics,
+                                            )
+                                            .await;
+                                        Some((termination, result))
+                                    }
+                                    Some(InteractiveTurnInput::Skill(operation)) => {
+                                        let (termination, result) = turns
+                                            .drive_admitted_skill(
+                                                &mut loop_,
+                                                operation,
                                                 &turn_cancel,
                                                 diagnostics,
                                             )
@@ -4840,20 +5009,37 @@ async fn execute<S: EventSink>(
                                 error.exit_reason()
                             ));
                         }
-                        if let Some((target_system, target_registry, target_skills)) = runtime {
-                            registry = target_registry;
-                            config.system = target_system;
-                            if let (Some(status), Some(skills)) =
-                                (status.as_ref(), target_skills.as_ref())
-                            {
-                                let actions = status.seat.action_registry();
-                                if let Err(error) = actions.reload_skills(skills.evidence().clone())
-                                {
+                        if let Some((target_system, target_registry, prepared_skills)) = runtime {
+                            if let Some(prepared) = prepared_skills {
+                                let published = prepared.published();
+                                let Some(catalogue) = skills.as_ref() else {
+                                    return Err(RunTermination::Failed {
+                                        message: "the prepared skill catalogue lost its publication owner"
+                                            .to_owned(),
+                                    });
+                                };
+                                let capture = catalogue.commit_rescan(prepared).map_err(|error| {
+                                    RunTermination::Failed {
+                                        message: format!(
+                                            "the prepared skill catalogue could not be published after compaction activation: {error}"
+                                        ),
+                                    }
+                                })?;
+                                if published {
                                     diagnostics.note(&format!(
-                                        "fresh skill actions could not be installed: {error:?}"
+                                        "skills: published generation {}",
+                                        capture.snapshot_digest()
                                     ));
+                                } else {
+                                    diagnostics.note(&format!(
+                                        "skills: retained last-good generation {}",
+                                        capture.snapshot_digest()
+                                    ));
+                                    diagnostics.note(&capture.render_diagnostics());
                                 }
                             }
+                            registry = target_registry;
+                            config.system = target_system;
                         }
                         epoch_start = EpochStart::Compact {
                             diagnostic,
@@ -4994,8 +5180,27 @@ impl Turns<'_> {
         cancel: &CancelToken,
         diagnostics: &dyn Diagnostics,
     ) -> (RunTermination, Value) {
-        self.drive_from(loop_, first, images, None, cancel, diagnostics)
+        self.drive_from(loop_, first, images, None, None, cancel, diagnostics)
             .await
+    }
+
+    async fn drive_admitted_skill(
+        &self,
+        loop_: &mut TurnLoop<'_, '_>,
+        operation: AdmittedSkillOperation,
+        cancel: &CancelToken,
+        diagnostics: &dyn Diagnostics,
+    ) -> (RunTermination, Value) {
+        self.drive_from(
+            loop_,
+            "",
+            Vec::new(),
+            None,
+            Some(operation),
+            cancel,
+            diagnostics,
+        )
+        .await
     }
 
     async fn drive_resumed(
@@ -5005,7 +5210,7 @@ impl Turns<'_> {
         cancel: &CancelToken,
         diagnostics: &dyn Diagnostics,
     ) -> (RunTermination, Value) {
-        self.drive_from(loop_, "", Vec::new(), Some(turn), cancel, diagnostics)
+        self.drive_from(loop_, "", Vec::new(), Some(turn), None, cancel, diagnostics)
             .await
     }
 
@@ -5015,6 +5220,7 @@ impl Turns<'_> {
         first: &str,
         mut images: Vec<ImageRef>,
         mut resumed: Option<ego_core::event::id::TurnId>,
+        mut skill: Option<AdmittedSkillOperation>,
         cancel: &CancelToken,
         diagnostics: &dyn Diagnostics,
     ) -> (RunTermination, Value) {
@@ -5028,10 +5234,13 @@ impl Turns<'_> {
             }
             let outcome = match resumed.take() {
                 Some(turn) => self.one_resumed(loop_, turn, cancel).await,
-                None => {
-                    self.one(loop_, &prompt, std::mem::take(&mut images), cancel)
-                        .await
-                }
+                None => match skill.take() {
+                    Some(operation) => self.one_skill(loop_, operation, cancel).await,
+                    None => {
+                        self.one(loop_, &prompt, std::mem::take(&mut images), cancel)
+                            .await
+                    }
+                },
             };
             let outcome = match outcome {
                 Ok(outcome) => outcome,
@@ -5100,50 +5309,8 @@ impl Turns<'_> {
         images: Vec<ImageRef>,
         cancel: &CancelToken,
     ) -> Result<TurnOutcome, RunTermination> {
-        let (outcome, stopped) = {
-            let mut running = Box::pin(loop_.run_with_images(prompt, images));
-            let mut stopped = false;
-            loop {
-                if stopped {
-                    tokio::select! {
-                        done = &mut running => break (Some(done), stopped),
-                        () = tokio::time::sleep(GRACE) => break (None, stopped),
-                    }
-                }
-                tokio::select! {
-                    biased;
-                    cause = stop_signal(self.deadline) => {
-                        cancel.cancel(cause);
-                        stopped = true;
-                    }
-                    done = &mut running => {
-                        if self.deadline_expired() {
-                            cancel.cancel(CancelCause::Timeout);
-                            stopped = true;
-                        }
-                        break (Some(done), stopped);
-                    }
-                }
-            }
-        };
-
-        if stopped {
-            return Err(cancelled_termination(cancel));
-        }
-        match outcome {
-            Some(Ok(outcome)) => Ok(outcome),
-            Some(Err(abandoned)) => Err(RunTermination::Failed {
-                message: format!("the session log could not be written: {}", abandoned.cause),
-            }),
-            // The turn did not unwind in time. The cause is still the honest
-            // account of why the run ended, and it is the same mapping a
-            // cancelled turn would have produced.
-            None => Err(match cancel.cause() {
-                Some(CancelCause::Timeout) => RunTermination::TimedOut,
-                Some(CancelCause::User) => RunTermination::Signalled(Signal::Int),
-                _ => RunTermination::Signalled(Signal::Term),
-            }),
-        }
+        self.one_running(loop_.run_with_images(prompt, images), cancel)
+            .await
     }
 
     async fn one_resumed(
@@ -5152,8 +5319,29 @@ impl Turns<'_> {
         turn: ego_core::event::id::TurnId,
         cancel: &CancelToken,
     ) -> Result<TurnOutcome, RunTermination> {
+        self.one_running(loop_.resume_turn(turn), cancel).await
+    }
+
+    async fn one_skill(
+        &self,
+        loop_: &mut TurnLoop<'_, '_>,
+        operation: AdmittedSkillOperation,
+        cancel: &CancelToken,
+    ) -> Result<TurnOutcome, RunTermination> {
+        self.one_running(loop_.run_admitted_skill(operation), cancel)
+            .await
+    }
+
+    async fn one_running<F>(
+        &self,
+        running: F,
+        cancel: &CancelToken,
+    ) -> Result<TurnOutcome, RunTermination>
+    where
+        F: Future<Output = Result<TurnOutcome, TurnAbandoned>>,
+    {
         let (outcome, stopped) = {
-            let mut running = Box::pin(loop_.resume_turn(turn));
+            let mut running = Box::pin(running);
             let mut stopped = false;
             loop {
                 if stopped {
@@ -5824,9 +6012,67 @@ pub fn diagnose(termination: &RunTermination, broken: Option<String>) {
 mod tests {
     use super::*;
     use crate::render::caps::{Depth, OscProfile};
+    use ego_core::event::domain::DomainEvent;
+    use ego_core::event::hook::{HookDecision, HookOutcome, HookSource};
+    use ego_core::event::skill::{SkillInvocationId, SkillSourceAuthority};
+    use ego_core::event::time::{Clock, Timestamp};
+    use ego_core::hook::{
+        HookConfigEntry, HookFuture, HookHandlerConfig, HookInvocationPort, HookInvocationRequest,
+    };
     use ego_core::run::RunOrigin;
+    use ego_core::store::session_store::{SessionStore, StoreError};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::tempdir;
+
+    #[derive(Default)]
+    struct HookCaptureStore;
+
+    impl SessionStore for HookCaptureStore {
+        fn append(&self, _id: &SessionId, _event: &DomainEvent) -> Result<(), StoreError> {
+            Ok(())
+        }
+
+        fn read(
+            &self,
+            _id: &SessionId,
+        ) -> Result<futures::stream::BoxStream<'static, Result<SessionEntry, StoreError>>, StoreError>
+        {
+            Ok(Box::pin(futures::stream::empty()))
+        }
+
+        fn compare_and_append_run(
+            &self,
+            _session: &SessionId,
+            _expected_revision: Option<ego_core::run::RunRevision>,
+            _transaction: ego_core::run::RunTransaction,
+        ) -> Result<ego_core::run::RunAppend, StoreError> {
+            Err(StoreError::NotFound)
+        }
+
+        fn list(&self) -> Result<Vec<SessionMeta>, StoreError> {
+            Ok(Vec::new())
+        }
+    }
+
+    struct HookCaptureClock;
+
+    impl Clock for HookCaptureClock {
+        fn now(&self) -> Timestamp {
+            Timestamp::from_millis(1_000)
+        }
+    }
+
+    #[derive(Default)]
+    struct HookCaptureInvoker;
+
+    impl HookInvocationPort for HookCaptureInvoker {
+        fn invoke<'a>(&'a self, _request: HookInvocationRequest) -> HookFuture<'a> {
+            Box::pin(std::future::ready(Ok(HookOutcome::new(
+                HookDecision::Continue,
+                None,
+            ))))
+        }
+    }
 
     #[test]
     fn workspace_accepts_a_directory_but_rejects_an_existing_regular_file() {
@@ -6222,5 +6468,117 @@ mod tests {
         assert_eq!(duration(Duration::from_secs(9)), "9s");
         assert_eq!(duration(Duration::from_secs(60)), "1m 0s");
         assert_eq!(duration(Duration::from_secs(252)), "4m 12s");
+    }
+
+    #[test]
+    fn failed_skill_tool_preflight_keeps_owner_view_and_model_registry_unchanged() {
+        let owner = tempdir().expect("skill preflight owner");
+        let system = owner.path().join("system/skills");
+        let user = owner.path().join("user/skills");
+        let project = owner.path().join("project/skills");
+        for root in [&system, &user, &project] {
+            std::fs::create_dir_all(root).expect("skill root");
+        }
+        let explain = user.join("explain");
+        std::fs::create_dir_all(&explain).expect("skill directory");
+        std::fs::write(
+            explain.join("SKILL.md"),
+            "---\nname: explain\ndescription: Explain evidence.\n---\nExplain.\n",
+        )
+        .expect("skill file");
+        let discovery = crate::skill::SkillDiscovery::new(system, user.clone(), project, false);
+        let catalogue =
+            crate::skill::SkillCatalogue::discover(discovery, &["help", "skills", "hooks", "quit"])
+                .expect("skill catalogue");
+        let before = catalogue.capture().expect("initial capture");
+        let before_registry = tools(None, Some(before.core())).expect("initial tool registry");
+        std::fs::create_dir_all(user.join("new-valid")).expect("new skill directory");
+        std::fs::write(
+            user.join("new-valid/SKILL.md"),
+            "---\nname: new-valid\ndescription: New evidence.\n---\nNew.\n",
+        )
+        .expect("new skill file");
+        let prepared = catalogue.prepare_rescan().expect("prospective rescan");
+        let prospective = prepared.capture();
+        assert!(
+            prospective
+                .descriptors()
+                .iter()
+                .any(|spec| spec.name() == "new-valid")
+        );
+        let prospective_registry = tools(None, Some(prospective.core()))
+            .expect("prospective capture supplies model tool preflight");
+        assert!(
+            prospective_registry
+                .iter()
+                .any(|tool| tool.descriptor().name == "skill")
+        );
+
+        let selected = vec!["not-a-tool".to_owned()];
+        assert!(tools(Some(&selected), Some(prospective.core())).is_err());
+        let after = catalogue.capture().expect("capture after failed preflight");
+        assert!(std::sync::Arc::ptr_eq(&before.core(), &after.core()));
+        assert_eq!(before.snapshot_digest(), after.snapshot_digest());
+        let after_registry = tools(None, Some(after.core())).expect("unchanged registry");
+        assert_eq!(
+            before_registry
+                .iter()
+                .map(|tool| tool.descriptor().name)
+                .collect::<Vec<_>>(),
+            after_registry
+                .iter()
+                .map(|tool| tool.descriptor().name)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn hooks_listing_renders_the_exact_runtime_arc_with_active_skill_scope() {
+        let invocation = SkillInvocationId::new();
+        let source = HookSource::skill_entries_with_authority(
+            "skills/explain/SKILL.md",
+            invocation,
+            SkillSourceAuthority::User,
+            [HookConfigEntry::new(
+                HookLifecycle::PreToolUse,
+                None,
+                HookHandlerConfig::Prompt {
+                    prompt: "private handler payload".to_owned(),
+                    model: None,
+                    timeout_seconds: None,
+                },
+            )],
+        );
+        let catalogue = HookCatalogue::admit_typed(&[], &[source], Trust::Trusted)
+            .expect("admitted hook catalogue");
+        let store: &'static HookCaptureStore = Box::leak(Box::new(HookCaptureStore));
+        let clock: &'static HookCaptureClock = Box::leak(Box::new(HookCaptureClock));
+        let sink: &'static NullSink = Box::leak(Box::new(NullSink));
+        let journal = SharedJournal::new(Journal::new(
+            SessionId::new(),
+            store,
+            clock,
+            sink,
+            Producer::Main,
+            SessionState::default(),
+        ));
+        let runtime = SessionHookRuntime::new(
+            ego_core::hook::HookLifecycleDispatcher::new(HookRunner::new(), catalogue),
+            journal,
+            Arc::new(HookCaptureInvoker),
+            CancelToken::new(),
+            Instant::now() + Duration::from_secs(30),
+        );
+        let exact = runtime
+            .catalogue_snapshot()
+            .expect("runtime hook catalogue snapshot");
+        let exact_again = runtime
+            .catalogue_snapshot()
+            .expect("runtime hook catalogue snapshot remains stable");
+        assert!(Arc::ptr_eq(&exact, &exact_again));
+        let rendered = crate::hooks::render(exact.as_ref(), false).expect("render hooks");
+        assert!(rendered.contains(&invocation.to_string()));
+        assert!(rendered.contains("skill:"));
+        assert!(!rendered.contains("private handler payload"));
     }
 }

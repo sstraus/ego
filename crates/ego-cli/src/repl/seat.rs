@@ -20,7 +20,7 @@ use reedline::{
 use super::actions::{
     ActionDispatch, ActionId, ActionRegistry, ActionSink, Availability, CompositeActionSink,
     CompositeActionSinkError, Dispatch, InputOrigin, LocalAction, LocalActionOutcome,
-    SharedActionSink,
+    SharedActionSink, SkillSurfaceAction,
 };
 use super::keys::{Intercept, intercept};
 use super::selector::{Selector, SelectorKey, SelectorKind, SelectorOption, SelectorValue};
@@ -84,6 +84,8 @@ enum SurfaceActionEffect {
     Statusline,
     Mcp,
     Tools,
+    Skills,
+    Hooks,
     Doctor,
     Quit,
     Version,
@@ -112,6 +114,8 @@ impl ActionSink for SurfaceActionSink {
             ActionId::Statusline => SurfaceActionEffect::Statusline,
             ActionId::Mcp => SurfaceActionEffect::Mcp,
             ActionId::Tools => SurfaceActionEffect::Tools,
+            ActionId::Skills => SurfaceActionEffect::Skills,
+            ActionId::Hooks => SurfaceActionEffect::Hooks,
             ActionId::Doctor => SurfaceActionEffect::Doctor,
             ActionId::Quit => SurfaceActionEffect::Quit,
             ActionId::Version => SurfaceActionEffect::Version,
@@ -145,7 +149,7 @@ impl Completer for ActionCompleter {
         if filter.contains(char::is_whitespace) {
             return CompletionResult::fresh(Vec::<Suggestion>::new());
         }
-        let suggestions = self
+        let mut suggestions = self
             .registry
             .menu(filter)
             .into_iter()
@@ -166,6 +170,16 @@ impl Completer for ActionCompleter {
                 ..Suggestion::default()
             })
             .collect::<Vec<_>>();
+        suggestions.extend(self.registry.skill_menu(filter).into_iter().map(
+            |(name, description)| Suggestion {
+                value: format!("/{name}"),
+                display_override: Some(format!("/{name}")),
+                description: Some(format!("{description} — skill")),
+                span: Span::new(0, position),
+                append_whitespace: true,
+                ..Suggestion::default()
+            },
+        ));
         CompletionResult::fresh(suggestions)
     }
 }
@@ -648,11 +662,29 @@ impl Seat {
                 }
                 line
             }
-            SeatKind::Sequential(seat) => read_with(
-                &seat.editor,
-                &seat.asked_for_image,
-                &Waiting::new(Arc::new(Mutex::new(SurfaceStatus::default()))),
-            ),
+            SeatKind::Sequential(seat) => {
+                let line = read_with(
+                    &seat.editor,
+                    &seat.asked_for_image,
+                    &Waiting::new(Arc::new(Mutex::new(SurfaceStatus::default()))),
+                );
+                let Line::Submitted(text) = line else {
+                    return line;
+                };
+                match self
+                    .registry
+                    .classify(self.registry.submit(text.clone(), InputOrigin::Typed))
+                {
+                    Dispatch::Skill(operation) => Line::HostCommand(HostCommand::Skill(operation)),
+                    Dispatch::Skills(action) => Line::HostCommand(HostCommand::Skills(action)),
+                    Dispatch::Hooks => Line::HostCommand(HostCommand::Hooks),
+                    Dispatch::Refused { reason } => Line::Refused(reason),
+                    Dispatch::Action(_)
+                    | Dispatch::Prompt
+                    | Dispatch::Immediate
+                    | Dispatch::InteractiveIngress => Line::Submitted(text),
+                }
+            }
         }
     }
 
@@ -747,6 +779,8 @@ impl Seat {
             ActionId::Statusline,
             ActionId::Mcp,
             ActionId::Tools,
+            ActionId::Skills,
+            ActionId::Hooks,
             ActionId::Doctor,
             ActionId::Quit,
             ActionId::Version,
@@ -1204,36 +1238,74 @@ fn surface_line(
         if let Line::Submitted(text) = &line
             && phase.get() != EditPhase::Modal
         {
-            let action = {
-                let mut status = status.lock().expect("surface status lock");
-                let action = status.actions.as_ref().and_then(|actions| {
-                    let submission = actions.registry.submit(text.clone(), status.origin);
-                    match actions.registry.classify(submission) {
-                        Dispatch::Action(action) => Some(action),
-                        _ => None,
-                    }
-                });
-                status.origin = InputOrigin::Typed;
-                action
+            let dispatch = {
+                let mut current = status.lock().expect("surface status lock");
+                let dispatch = current
+                    .actions
+                    .as_ref()
+                    .map_or(Dispatch::Prompt, |actions| {
+                        let submission = actions.registry.submit(text.clone(), current.origin);
+                        actions.registry.classify(submission)
+                    });
+                current.origin = InputOrigin::Typed;
+                dispatch
             };
-            if let Some(action) = action {
-                let (handled, interrupted) = execute_action_and_modal(
-                    editor,
-                    phase,
-                    status,
-                    ingress,
-                    action,
-                    phase.get() == EditPhase::Busy,
-                );
-                if let Some(interrupted) = interrupted {
-                    return (interrupted, false);
+            match dispatch {
+                Dispatch::Action(action) => {
+                    let (handled, interrupted) = execute_action_and_modal(
+                        editor,
+                        phase,
+                        status,
+                        ingress,
+                        action,
+                        phase.get() == EditPhase::Busy,
+                    );
+                    if let Some(interrupted) = interrupted {
+                        return (interrupted, false);
+                    }
+                    if !handled {
+                        return (line, failed);
+                    }
+                    continue;
                 }
-                if !handled {
+                Dispatch::Skill(operation) => {
+                    if phase.get() == EditPhase::Busy {
+                        status.lock().expect("surface status lock").notice =
+                            Some("a skill cannot be invoked while a turn is running".to_owned());
+                        repaint_status(status);
+                        continue;
+                    }
+                    return (Line::HostCommand(HostCommand::Skill(operation)), failed);
+                }
+                Dispatch::Skills(action) => {
+                    if phase.get() == EditPhase::Busy {
+                        status.lock().expect("surface status lock").notice = Some(
+                            "skill actions are unavailable while a turn is running".to_owned(),
+                        );
+                        repaint_status(status);
+                        continue;
+                    }
+                    return (Line::HostCommand(HostCommand::Skills(action)), failed);
+                }
+                Dispatch::Hooks => {
+                    if phase.get() == EditPhase::Busy {
+                        status.lock().expect("surface status lock").notice = Some(
+                            "hook inspection is unavailable while a turn is running".to_owned(),
+                        );
+                        repaint_status(status);
+                        continue;
+                    }
+                    return (Line::HostCommand(HostCommand::Hooks), failed);
+                }
+                Dispatch::Refused { reason } => {
+                    status.lock().expect("surface status lock").notice = Some(reason.to_owned());
+                    repaint_status(status);
+                    continue;
+                }
+                Dispatch::Prompt | Dispatch::Immediate | Dispatch::InteractiveIngress => {
                     return (line, failed);
                 }
-                continue;
             }
-            return (line, failed);
         }
         let Line::HostCommand(command) = line else {
             if matches!(line, Line::Blank | Line::Interrupted) {
@@ -1296,29 +1368,54 @@ fn surface_line(
                 if buffer.trim().is_empty() {
                     continue;
                 }
-                let action = {
+                let dispatch = {
                     let status = status.lock().expect("surface status lock");
-                    status.actions.as_ref().and_then(|actions| {
-                        match actions
+                    status.actions.as_ref().map_or(Dispatch::Prompt, |actions| {
+                        actions
                             .registry
                             .classify(actions.registry.submit(buffer.clone(), status.origin))
-                        {
-                            Dispatch::Action(action) => Some(action),
-                            _ => None,
-                        }
                     })
                 };
-                if let Some(action) = action {
-                    let (handled, interrupted) =
-                        execute_action_and_modal(editor, phase, status, ingress, action, true);
-                    if let Some(interrupted) = interrupted {
-                        return (interrupted, false);
+                match dispatch {
+                    Dispatch::Action(action) => {
+                        let (handled, interrupted) =
+                            execute_action_and_modal(editor, phase, status, ingress, action, true);
+                        if let Some(interrupted) = interrupted {
+                            return (interrupted, false);
+                        }
+                        if handled {
+                            editor.run_edit_commands(&[EditCommand::Clear]);
+                            status.lock().expect("surface status lock").origin = InputOrigin::Typed;
+                        }
+                        continue;
                     }
-                    if handled {
-                        editor.run_edit_commands(&[EditCommand::Clear]);
-                        status.lock().expect("surface status lock").origin = InputOrigin::Typed;
+                    Dispatch::Skill(_) => {
+                        status.lock().expect("surface status lock").notice =
+                            Some("a skill cannot be invoked while a turn is running".to_owned());
+                        repaint_status(status);
+                        continue;
                     }
-                    continue;
+                    Dispatch::Skills(_) => {
+                        status.lock().expect("surface status lock").notice = Some(
+                            "skill actions are unavailable while a turn is running".to_owned(),
+                        );
+                        repaint_status(status);
+                        continue;
+                    }
+                    Dispatch::Hooks => {
+                        status.lock().expect("surface status lock").notice = Some(
+                            "hook inspection is unavailable while a turn is running".to_owned(),
+                        );
+                        repaint_status(status);
+                        continue;
+                    }
+                    Dispatch::Refused { reason } => {
+                        status.lock().expect("surface status lock").notice =
+                            Some(reason.to_owned());
+                        repaint_status(status);
+                        continue;
+                    }
+                    Dispatch::Prompt | Dispatch::Immediate | Dispatch::InteractiveIngress => {}
                 }
                 match futures::executor::block_on(ingress.submit(buffer)) {
                     Ok(queue) => {
@@ -1604,6 +1701,24 @@ fn apply_surface_effect(
                 Err(_) => "tools: the admitted tool catalogue is unavailable".to_string(),
             };
             status.lock().expect("surface status lock").notice = Some(notice);
+        }
+        SurfaceActionEffect::Skills => {
+            if busy {
+                status.lock().expect("surface status lock").notice =
+                    Some("skill actions are unavailable while a turn is running".to_owned());
+            } else {
+                return Some(Line::HostCommand(HostCommand::Skills(
+                    SkillSurfaceAction::List,
+                )));
+            }
+        }
+        SurfaceActionEffect::Hooks => {
+            if busy {
+                status.lock().expect("surface status lock").notice =
+                    Some("hook inspection is unavailable while a turn is running".to_owned());
+            } else {
+                return Some(Line::HostCommand(HostCommand::Hooks));
+            }
         }
         SurfaceActionEffect::Doctor => {
             let actions = status

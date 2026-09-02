@@ -4,8 +4,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ego_core::event::skill::{SkillCatalogueEvidence, SkillId};
 use ego_core::skill::AdmittedSkillOperation;
+
+use crate::skill::{SkillCatalogueCapture, SkillCatalogueView};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ActionId {
@@ -73,10 +74,19 @@ impl Submission {
 pub enum Dispatch {
     Action(ActionId),
     Skill(AdmittedSkillOperation),
+    Skills(SkillSurfaceAction),
+    Hooks,
     Prompt,
     Immediate,
     InteractiveIngress,
     Refused { reason: &'static str },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkillSurfaceAction {
+    List,
+    Diagnose,
+    Rescan,
 }
 
 /// The action selected from one displayed registry snapshot.
@@ -310,35 +320,13 @@ impl SurfaceSnapshot {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SkillAnnouncement {
-    catalogue_digest: Option<String>,
-    authorization: HashMap<String, SkillId>,
-}
-
-impl SkillAnnouncement {
-    pub fn catalogue_digest(&self) -> Option<&str> {
-        self.catalogue_digest.as_deref()
-    }
-
-    pub fn authorization(&self, name: &str) -> Option<SkillId> {
-        self.authorization.get(name).copied()
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegistryError(&'static str);
 
 #[derive(Debug, Clone)]
 pub struct ActionRegistry {
     registrations: Vec<ActionRegistration>,
     live_availability: Arc<Mutex<HashMap<ActionId, Availability>>>,
-    skill_surface: Arc<Mutex<SkillSurface>>,
-}
-
-#[derive(Debug, Default)]
-struct SkillSurface {
-    catalogue: SkillCatalogueEvidence,
-    digest: Option<String>,
+    skill_view: Arc<Mutex<Option<SkillCatalogueView>>>,
 }
 
 impl<const N: usize> TryFrom<[ActionRegistration; N]> for ActionRegistry {
@@ -373,7 +361,7 @@ impl<const N: usize> TryFrom<[ActionRegistration; N]> for ActionRegistry {
         Ok(Self {
             registrations: value.into(),
             live_availability: Arc::new(Mutex::new(HashMap::new())),
-            skill_surface: Arc::new(Mutex::new(SkillSurface::default())),
+            skill_view: Arc::new(Mutex::new(None)),
         })
     }
 }
@@ -420,7 +408,7 @@ impl ActionRegistry {
             enabled(Tools, "tools", "Inspect available tools"),
             enabled(Skills, "skills", "List or invoke admitted skills")
                 .unavailable("the skill catalogue"),
-            enabled(Hooks, "hooks", "Inspect admitted hooks").unavailable("the hook catalogue"),
+            enabled(Hooks, "hooks", "Inspect admitted hooks"),
             enabled(Version, "version", "Show packaged version information"),
         ])
         .expect("the final action surface is statically unique")
@@ -500,11 +488,10 @@ impl ActionRegistry {
     }
     pub fn snapshot(&self) -> SurfaceSnapshot {
         let skill_catalogue_digest = self
-            .skill_surface
-            .lock()
-            .expect("skill surface lock")
-            .digest
-            .clone();
+            .skill_capture()
+            .ok()
+            .flatten()
+            .map(|capture| capture.snapshot_digest().to_owned());
         SurfaceSnapshot {
             availability: self
                 .iter()
@@ -514,71 +501,41 @@ impl ActionRegistry {
         }
     }
 
-    pub fn with_skill_catalogue(
-        mut self,
-        catalogue: SkillCatalogueEvidence,
-    ) -> Result<Self, RegistryError> {
-        self.validate_skill_catalogue(&catalogue)?;
-        let digest =
-            ego_core::event::skill::SkillCatalogueGeneration::derive(&catalogue).to_string();
-        self.skill_surface = Arc::new(Mutex::new(SkillSurface {
-            catalogue,
-            digest: Some(digest),
-        }));
-        Ok(self)
+    pub(crate) fn bind_skill_view(&self, view: SkillCatalogueView) -> Result<(), RegistryError> {
+        let mut current = self.skill_view.lock().expect("skill view lock");
+        if current.is_some() {
+            return Err(RegistryError("the skill catalogue view is already bound"));
+        }
+        *current = Some(view);
+        drop(current);
+        self.set_availability(ActionId::Skills, Availability::Enabled);
+        Ok(())
     }
 
-    pub fn reload_skills(&self, catalogue: SkillCatalogueEvidence) -> Result<(), RegistryError> {
-        self.validate_skill_catalogue(&catalogue)?;
-        let digest =
-            ego_core::event::skill::SkillCatalogueGeneration::derive(&catalogue).to_string();
-        *self.skill_surface.lock().expect("skill surface lock") = SkillSurface {
-            catalogue,
-            digest: Some(digest),
+    fn skill_capture(&self) -> Result<Option<SkillCatalogueCapture>, RegistryError> {
+        let view = self.skill_view.lock().expect("skill view lock").clone();
+        view.map(|view| {
+            view.capture()
+                .map_err(|_| RegistryError("the skill catalogue view is unavailable"))
+        })
+        .transpose()
+    }
+
+    pub(crate) fn skill_menu(&self, filter: &str) -> Vec<(String, String)> {
+        let Ok(Some(capture)) = self.skill_capture() else {
+            return Vec::new();
         };
-        Ok(())
-    }
-
-    fn validate_skill_catalogue(
-        &self,
-        catalogue: &SkillCatalogueEvidence,
-    ) -> Result<(), RegistryError> {
-        let fixed: HashSet<&str> = self.names().into_iter().chain(self.aliases()).collect();
-        if catalogue
+        capture
             .descriptors()
             .iter()
-            .any(|descriptor| fixed.contains(descriptor.name.as_str()))
-        {
-            return Err(RegistryError(
-                "skill name conflicts with a fixed action or alias",
-            ));
-        }
-        Ok(())
-    }
-
-    pub fn announce_skills(&self) -> SkillAnnouncement {
-        let surface = self.skill_surface.lock().expect("skill surface lock");
-        SkillAnnouncement {
-            catalogue_digest: surface.digest.clone(),
-            authorization: surface
-                .catalogue
-                .descriptors()
-                .iter()
-                .filter(|descriptor| descriptor.user_invocable)
-                .map(|descriptor| (descriptor.name.clone(), descriptor.id))
-                .collect(),
-        }
-    }
-
-    pub fn authorize_skill(&self, name: &str) -> Option<SkillId> {
-        self.skill_surface
-            .lock()
-            .expect("skill surface lock")
-            .catalogue
-            .descriptors()
-            .iter()
-            .find(|descriptor| descriptor.name == name && descriptor.user_invocable)
-            .map(|descriptor| descriptor.id)
+            .filter(|spec| spec.descriptor().user_invocable && spec.name().starts_with(filter))
+            .map(|spec| {
+                (
+                    spec.name().to_owned(),
+                    spec.descriptor().description.clone(),
+                )
+            })
+            .collect()
     }
     pub fn select(&self, id: ActionId, displayed: &SurfaceSnapshot) -> Option<ActionSelection> {
         displayed
@@ -677,6 +634,54 @@ impl ActionRegistry {
             let boundary = command.find(char::is_whitespace).unwrap_or(command.len());
             let name = &command[..boundary];
             let raw_arguments = command[boundary..].trim_start_matches(char::is_whitespace);
+            if name == "skills" {
+                if self.resolve_slash(name) != Some(ActionId::Skills)
+                    || self.availability(ActionId::Skills) != Availability::Enabled
+                {
+                    return Dispatch::Refused {
+                        reason: "the skill catalogue is unavailable",
+                    };
+                }
+                let capture = match self.skill_capture() {
+                    Ok(Some(capture)) => capture,
+                    Ok(None) | Err(_) => {
+                        return Dispatch::Refused {
+                            reason: "the skill catalogue is unavailable",
+                        };
+                    }
+                };
+                return match raw_arguments {
+                    "" | "list" => Dispatch::Skills(SkillSurfaceAction::List),
+                    "diagnose" => Dispatch::Skills(SkillSurfaceAction::Diagnose),
+                    "rescan" => Dispatch::Skills(SkillSurfaceAction::Rescan),
+                    arguments => match parse_skill_invoke(arguments) {
+                        Some((skill_name, raw_arguments)) => {
+                            match admitted_skill_operation(&capture, skill_name, raw_arguments) {
+                                Some(operation) => Dispatch::Skill(operation),
+                                None => Dispatch::Refused {
+                                    reason: "the requested skill is not admitted for direct invocation",
+                                },
+                            }
+                        }
+                        None => Dispatch::Refused {
+                            reason: "usage: /skills [list|diagnose|rescan|invoke <name> [arguments]]",
+                        },
+                    },
+                };
+            }
+            if name == "hooks" && self.resolve_slash(name) == Some(ActionId::Hooks) {
+                return if !raw_arguments.is_empty() {
+                    Dispatch::Refused {
+                        reason: "usage: /hooks",
+                    }
+                } else if self.availability(ActionId::Hooks) == Availability::Enabled {
+                    Dispatch::Hooks
+                } else {
+                    Dispatch::Refused {
+                        reason: "the hook catalogue is unavailable",
+                    }
+                };
+            }
             if boundary == command.len()
                 && let Some(id) = self
                     .resolve_slash(name)
@@ -684,16 +689,260 @@ impl ActionRegistry {
             {
                 return Dispatch::Action(id);
             }
-            let surface = self.skill_surface.lock().expect("skill surface lock");
-            if let Some(descriptor) = surface
-                .catalogue
-                .descriptors()
-                .iter()
-                .find(|descriptor| descriptor.name == name && descriptor.user_invocable)
-            {
-                return Dispatch::Skill(AdmittedSkillOperation::invoke(descriptor, raw_arguments));
+            let capture = match self.skill_capture() {
+                Ok(Some(capture)) => capture,
+                Ok(None) => return Dispatch::Prompt,
+                Err(_) => {
+                    return Dispatch::Refused {
+                        reason: "the skill catalogue view is unavailable",
+                    };
+                }
+            };
+            if let Some(operation) = admitted_skill_operation(&capture, name, raw_arguments) {
+                return Dispatch::Skill(operation);
             }
         }
         Dispatch::Prompt
+    }
+}
+
+fn parse_skill_invoke(arguments: &str) -> Option<(&str, &str)> {
+    let tail = arguments.strip_prefix("invoke")?;
+    if !tail.chars().next().is_some_and(char::is_whitespace) {
+        return None;
+    }
+    let invocation = tail.trim_start_matches(char::is_whitespace);
+    if invocation.is_empty() {
+        return None;
+    }
+    let boundary = invocation
+        .find(char::is_whitespace)
+        .unwrap_or(invocation.len());
+    Some((
+        &invocation[..boundary],
+        invocation[boundary..].trim_start_matches(char::is_whitespace),
+    ))
+}
+
+fn admitted_skill_operation(
+    capture: &SkillCatalogueCapture,
+    name: &str,
+    raw_arguments: &str,
+) -> Option<AdmittedSkillOperation> {
+    capture
+        .descriptor(name)
+        .filter(|spec| spec.descriptor().user_invocable)
+        .map(|spec| AdmittedSkillOperation::invoke(spec.descriptor(), raw_arguments))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::skill::{SkillCatalogue, SkillDiscovery};
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use tempfile::TempDir;
+
+    struct Roots {
+        _dir: TempDir,
+        system: PathBuf,
+        user: PathBuf,
+        project: PathBuf,
+    }
+
+    impl Roots {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().expect("skill roots");
+            let system = dir.path().join("etc/ego/skills");
+            let user = dir.path().join("home/.ego/skills");
+            let project = dir.path().join("workspace/.ego/skills");
+            for root in [&system, &user, &project] {
+                fs::create_dir_all(root).expect("create skill root");
+            }
+            Self {
+                _dir: dir,
+                system,
+                user,
+                project,
+            }
+        }
+
+        fn write(&self, root: &Path, name: &str, frontmatter: &str, body: &str) {
+            let directory = root.join(name);
+            fs::create_dir_all(&directory).expect("create skill directory");
+            fs::write(
+                directory.join("SKILL.md"),
+                format!(
+                    "---\nname: {name}\ndescription: Explain {name}.\n{frontmatter}\n---\n{body}\n"
+                ),
+            )
+            .expect("write skill");
+        }
+
+        fn catalogue(&self) -> SkillCatalogue {
+            SkillCatalogue::discover(
+                SkillDiscovery::new(
+                    self.system.clone(),
+                    self.user.clone(),
+                    self.project.clone(),
+                    false,
+                ),
+                &["help", "skills", "hooks", "quit", "q"],
+            )
+            .expect("valid skill catalogue")
+        }
+
+        fn registry(&self) -> (ActionRegistry, SkillCatalogue) {
+            let catalogue = self.catalogue();
+            let registry = ActionRegistry::final_surface();
+            registry
+                .bind_skill_view(catalogue.view())
+                .expect("bind the owning catalogue view");
+            (registry, catalogue)
+        }
+    }
+
+    #[test]
+    fn typed_skill_and_strict_surface_keep_exact_operation_and_refuse_non_user_skills() {
+        let roots = Roots::new();
+        roots.write(&roots.user, "explain", "argument-hint: QUERY", "Explain.");
+        roots.write(
+            &roots.user,
+            "model-only",
+            "user-invocable: false",
+            "Model only.",
+        );
+        let (registry, _catalogue) = roots.registry();
+
+        let Dispatch::Skill(direct) = registry
+            .classify(registry.submit("/explain sh -c 'touch /tmp/nope'", InputOrigin::Typed))
+        else {
+            panic!("typed slash action must produce one Skill operation")
+        };
+        let Dispatch::Skill(strict) = registry.classify(registry.submit(
+            "/skills invoke explain sh -c 'touch /tmp/nope'",
+            InputOrigin::Typed,
+        )) else {
+            panic!("strict skill invocation must produce one Skill operation")
+        };
+        assert_eq!(direct.name(), "explain");
+        assert_eq!(direct.raw_arguments(), "sh -c 'touch /tmp/nope'");
+        assert_eq!(direct.descriptor_id(), strict.descriptor_id());
+        assert_eq!(direct.raw_arguments(), strict.raw_arguments());
+        assert_eq!(
+            direct.descriptor_id(),
+            registry
+                .skill_capture()
+                .expect("capture")
+                .expect("bound catalogue")
+                .descriptor("explain")
+                .expect("descriptor")
+                .descriptor()
+                .id
+        );
+
+        assert_eq!(
+            registry.classify(registry.submit(
+                "The model says /explain sh -c 'touch /tmp/nope'",
+                InputOrigin::BracketedPaste,
+            )),
+            Dispatch::Prompt
+        );
+        for command in [
+            "/skills",
+            "/skills list",
+            "/skills diagnose",
+            "/skills rescan",
+        ] {
+            assert!(
+                matches!(
+                    registry.classify(registry.submit(command, InputOrigin::Typed)),
+                    Dispatch::Skills(_)
+                ),
+                "{command} must stay on the owned skills surface"
+            );
+        }
+        for command in [
+            "/skills invoke",
+            "/skills invoke missing tail",
+            "/skills invoke model-only tail",
+        ] {
+            assert!(
+                matches!(
+                    registry.classify(registry.submit(command, InputOrigin::Typed)),
+                    Dispatch::Refused { .. }
+                ),
+                "{command} must be a typed refusal"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_hooks_command_refuses_without_becoming_a_prompt() {
+        let roots = Roots::new();
+        let (registry, _catalogue) = roots.registry();
+
+        assert_eq!(
+            registry.classify(registry.submit("/hooks", InputOrigin::Typed)),
+            Dispatch::Hooks
+        );
+        assert!(matches!(
+            registry.classify(registry.submit("/hooks extra", InputOrigin::Typed)),
+            Dispatch::Refused { .. }
+        ));
+    }
+
+    #[test]
+    fn fixed_names_and_aliases_remain_actions_while_collisions_are_diagnostic() {
+        let roots = Roots::new();
+        for name in ["help", "skills", "hooks", "quit", "q"] {
+            roots.write(&roots.user, name, "", "must not shadow an action");
+        }
+        let catalogue = roots.catalogue();
+        let captured = catalogue.capture().expect("capture");
+        assert!(captured.descriptors().is_empty());
+        for name in ["help", "skills", "hooks", "quit", "q"] {
+            assert!(
+                captured
+                    .diagnostics()
+                    .iter()
+                    .any(|diagnostic| diagnostic.name() == name && diagnostic.is_collision()),
+                "collision for {name} must remain visible"
+            );
+        }
+        let registry = ActionRegistry::final_surface();
+        assert_eq!(registry.resolve_slash("help"), Some(ActionId::Help));
+        assert_eq!(registry.resolve_slash("skills"), Some(ActionId::Skills));
+        assert_eq!(registry.resolve_slash("hooks"), Some(ActionId::Hooks));
+        assert_eq!(registry.resolve_slash("quit"), Some(ActionId::Quit));
+        let custom = ActionRegistry::try_from([
+            ActionRegistration::new(ActionId::Help, "help", ActionKind::Local).alias("q"),
+            ActionRegistration::new(ActionId::Skills, "skills", ActionKind::Local),
+        ])
+        .expect("custom action registration");
+        assert_eq!(custom.resolve_alias("q"), Some(ActionId::Help));
+    }
+
+    #[test]
+    fn one_immutable_capture_drives_announcement_completion_and_authorization() {
+        let roots = Roots::new();
+        roots.write(&roots.user, "explain", "", "Explain.");
+        let (registry, _catalogue) = roots.registry();
+        let captured = registry
+            .skill_capture()
+            .expect("capture")
+            .expect("bound catalogue");
+        let snapshot = registry.snapshot();
+        assert_eq!(
+            snapshot.skill_catalogue_digest(),
+            Some(captured.snapshot_digest())
+        );
+        assert_eq!(registry.skill_menu("exp").len(), 1);
+        assert_eq!(captured.descriptor("explain").unwrap().name(), "explain");
+        let captured_again = registry
+            .skill_capture()
+            .expect("capture")
+            .expect("bound catalogue");
+        assert!(Arc::ptr_eq(&captured.core(), &captured_again.core()));
     }
 }

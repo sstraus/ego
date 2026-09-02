@@ -16,7 +16,8 @@ pub use seat::{
     DraftStash, EditPhase, Seat, StatusSetup, SurfaceEditMode, SurfaceOutput, SurfacePhase,
 };
 
-use actions::ActionId;
+use actions::{ActionId, SkillSurfaceAction};
+use ego_core::skill::AdmittedSkillOperation;
 
 use reedline::Signal;
 
@@ -48,6 +49,9 @@ pub(super) const INTERRUPT_COMMAND: &str = "ego:interrupt";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostCommand {
     Action(ActionId),
+    Skill(AdmittedSkillOperation),
+    Skills(SkillSurfaceAction),
+    Hooks,
     ModelSwitch(crate::model_picker::ModelSwitchRequest),
     Draft,
     BusySubmit,
@@ -154,6 +158,10 @@ fn answer(asked_for_image: bool, signal: std::io::Result<Signal>) -> Line {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ego_core::event::skill::{
+        SkillContentDigest, SkillDescriptorEvidence, SkillId, SkillSourceAuthority,
+        SkillSourceLocation,
+    };
 
     #[test]
     fn a_pasted_stack_trace_is_one_prompt_and_not_its_first_line() {
@@ -252,6 +260,37 @@ mod tests {
                 "{typed:?}"
             );
         }
+    }
+
+    #[test]
+    fn host_command_carries_the_admitted_skill_operation_without_prompt_coercion() {
+        let location = SkillSourceLocation::parse("skills/explain/SKILL.md").unwrap();
+        let digest = SkillContentDigest::parse(
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        .unwrap();
+        let descriptor = SkillDescriptorEvidence {
+            id: SkillId::derive(SkillSourceAuthority::User, &location, "explain", &digest),
+            name: "explain".to_owned(),
+            description: "Explain evidence".to_owned(),
+            trigger: None,
+            argument_hint: None,
+            source: SkillSourceAuthority::User,
+            location,
+            source_digest: digest,
+            user_invocable: true,
+            model_invocable: true,
+        };
+        let operation = AdmittedSkillOperation::invoke(&descriptor, "the exact raw tail");
+        let line = Line::HostCommand(HostCommand::Skill(operation.clone()));
+
+        assert_eq!(
+            line,
+            Line::HostCommand(HostCommand::Skill(operation.clone()))
+        );
+        assert_eq!(operation.name(), "explain");
+        assert_eq!(operation.raw_arguments(), "the exact raw tail");
+        assert_ne!(line, Line::Submitted("the exact raw tail".to_owned()));
     }
 }
 

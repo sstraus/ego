@@ -5,7 +5,7 @@ use std::fmt;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use ego_core::config::{ConfigLayer, ModelRef, Sourced, Trust, resolve};
 use ego_core::event::hook::HookLifecycle;
@@ -114,10 +114,168 @@ impl fmt::Display for SkillCatalogueError {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct SkillCatalogue {
+pub(crate) struct SkillCatalogueCapture {
     catalogue: Arc<CoreSkillCatalogue>,
-    diagnostics: Vec<SkillDiagnostic>,
-    snapshot_digest: String,
+    diagnostics: Arc<[SkillDiagnostic]>,
+    snapshot_digest: Arc<str>,
+    attempt: u64,
+    publication: u64,
+}
+
+impl SkillCatalogueCapture {
+    pub(crate) fn descriptors(&self) -> &[SkillSpec] {
+        self.catalogue.specs()
+    }
+
+    pub(crate) fn diagnostics(&self) -> &[SkillDiagnostic] {
+        &self.diagnostics
+    }
+
+    pub(crate) fn descriptor(&self, name: &str) -> Option<&SkillSpec> {
+        self.catalogue
+            .specs()
+            .iter()
+            .find(|spec| spec.name() == name)
+    }
+
+    pub(crate) fn snapshot_digest(&self) -> &str {
+        &self.snapshot_digest
+    }
+
+    pub(crate) fn core(&self) -> Arc<CoreSkillCatalogue> {
+        Arc::clone(&self.catalogue)
+    }
+
+    pub(crate) fn retained_last_good(&self) -> bool {
+        self.attempt != self.publication
+    }
+
+    pub(crate) fn render_list(&self) -> String {
+        let state = if self.retained_last_good() {
+            "retained_last_good"
+        } else {
+            "current"
+        };
+        let mut rows = vec![format!(
+            "skills: catalogue_digest={} state={state}",
+            self.snapshot_digest()
+        )];
+        if self.descriptors().is_empty() {
+            rows.push("skills: none admitted".to_owned());
+        }
+        for spec in self.descriptors() {
+            let descriptor = spec.descriptor();
+            let arguments = descriptor
+                .argument_hint
+                .as_deref()
+                .map(|hint| format!(" {hint}"))
+                .unwrap_or_default();
+            let source_authority = match descriptor.source {
+                SkillSourceAuthority::System => "system",
+                SkillSourceAuthority::User => "user",
+                SkillSourceAuthority::Project => "project",
+            };
+            rows.push(format!(
+                "/{}{arguments}\n  description={}\n  source_authority={}\n  location={}\n  source_digest={}\n  user_invocable={}\n  model_invocable={}\n  availability=admitted",
+                spec.name(),
+                descriptor.description,
+                source_authority,
+                descriptor.location,
+                descriptor.source_digest,
+                descriptor.user_invocable,
+                descriptor.model_invocable,
+            ));
+        }
+        rows.push(self.render_diagnostics());
+        rows.join("\n")
+    }
+
+    pub(crate) fn render_diagnostics(&self) -> String {
+        if self.diagnostics.is_empty() {
+            "skills: no admission diagnostics".to_owned()
+        } else {
+            self.diagnostics
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct SkillCatalogueView {
+    publication: Arc<RwLock<SkillPublication>>,
+}
+
+impl SkillCatalogueView {
+    pub(crate) fn capture(&self) -> Result<SkillCatalogueCapture, SkillCatalogueError> {
+        self.publication
+            .read()
+            .map_err(|_| {
+                SkillCatalogueError("the skill catalogue publication is unavailable".to_owned())
+            })
+            .map(|publication| publication.capture())
+    }
+}
+
+#[derive(Clone, Debug)]
+struct SkillPublication {
+    catalogue: Arc<CoreSkillCatalogue>,
+    diagnostics: Arc<[SkillDiagnostic]>,
+    snapshot_digest: Arc<str>,
+    attempt: u64,
+    publication: u64,
+}
+
+impl SkillPublication {
+    fn capture(&self) -> SkillCatalogueCapture {
+        SkillCatalogueCapture {
+            catalogue: Arc::clone(&self.catalogue),
+            diagnostics: Arc::clone(&self.diagnostics),
+            snapshot_digest: Arc::clone(&self.snapshot_digest),
+            attempt: self.attempt,
+            publication: self.publication,
+        }
+    }
+
+    fn identity(&self) -> SkillPublicationIdentity {
+        SkillPublicationIdentity {
+            attempt: self.attempt,
+            publication: self.publication,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SkillPublicationIdentity {
+    attempt: u64,
+    publication: u64,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct SkillCatalogue {
+    discovery: SkillDiscovery,
+    fixed_actions: Arc<[String]>,
+    profile_layers: Option<Arc<[Sourced<ConfigLayer>]>>,
+    publication: Arc<RwLock<SkillPublication>>,
+}
+
+#[derive(Debug)]
+pub(crate) struct PreparedSkillRescan {
+    base: SkillPublicationIdentity,
+    prospective: SkillPublication,
+    published: bool,
+}
+
+impl PreparedSkillRescan {
+    pub(crate) fn capture(&self) -> SkillCatalogueCapture {
+        self.prospective.capture()
+    }
+
+    pub(crate) fn published(&self) -> bool {
+        self.published
+    }
 }
 
 impl SkillCatalogue {
@@ -125,8 +283,7 @@ impl SkillCatalogue {
         discovery: SkillDiscovery,
         fixed_actions: &[&str],
     ) -> Result<Self, SkillCatalogueError> {
-        let candidate = Candidate::build(discovery, fixed_actions, None)?;
-        Ok(candidate.publish())
+        Self::admit(discovery, fixed_actions, None)
     }
 
     pub(crate) fn discover_with_profile_layers(
@@ -134,60 +291,95 @@ impl SkillCatalogue {
         fixed_actions: &[&str],
         profile_layers: &[Sourced<ConfigLayer>],
     ) -> Result<Self, SkillCatalogueError> {
-        let candidate = Candidate::build(discovery, fixed_actions, Some(profile_layers))?;
-        Ok(candidate.publish())
+        Self::admit(discovery, fixed_actions, Some(profile_layers))
     }
 
-    pub(crate) fn reload(
-        &mut self,
+    fn admit(
         discovery: SkillDiscovery,
         fixed_actions: &[&str],
-    ) -> Result<(), SkillCatalogueError> {
-        let candidate = Candidate::build(discovery, fixed_actions, None)?;
-        self.publish_reload(candidate);
-        Ok(())
+        profile_layers: Option<&[Sourced<ConfigLayer>]>,
+    ) -> Result<Self, SkillCatalogueError> {
+        let candidate = Candidate::build(discovery.clone(), fixed_actions, profile_layers)?;
+        let publication = candidate.publish(0, 0);
+        Ok(Self {
+            discovery,
+            fixed_actions: fixed_actions
+                .iter()
+                .map(|action| (*action).to_owned())
+                .collect(),
+            profile_layers: profile_layers.map(|layers| Arc::from(layers.to_vec())),
+            publication: Arc::new(RwLock::new(publication)),
+        })
     }
 
-    pub(crate) fn reload_with_profile_layers(
-        &mut self,
-        discovery: SkillDiscovery,
-        fixed_actions: &[&str],
-        profile_layers: &[Sourced<ConfigLayer>],
-    ) -> Result<(), SkillCatalogueError> {
-        let candidate = Candidate::build(discovery, fixed_actions, Some(profile_layers))?;
-        self.publish_reload(candidate);
-        Ok(())
-    }
-
-    fn publish_reload(&mut self, candidate: Candidate) {
-        if candidate.diagnostics.is_empty() {
-            let published = candidate.publish();
-            self.catalogue = published.catalogue;
-            self.snapshot_digest = published.snapshot_digest;
-            self.diagnostics = published.diagnostics;
-            return;
+    pub(crate) fn view(&self) -> SkillCatalogueView {
+        SkillCatalogueView {
+            publication: Arc::clone(&self.publication),
         }
-        self.diagnostics = candidate.diagnostics;
     }
 
-    pub(crate) fn descriptors(&self) -> &[SkillSpec] {
-        self.catalogue.specs()
+    pub(crate) fn capture(&self) -> Result<SkillCatalogueCapture, SkillCatalogueError> {
+        self.view().capture()
     }
-    pub(crate) fn diagnostics(&self) -> &[SkillDiagnostic] {
-        &self.diagnostics
-    }
-    pub(crate) fn descriptor(&self, name: &str) -> Option<&SkillSpec> {
-        self.catalogue
-            .specs()
+
+    pub(crate) fn prepare_rescan(&self) -> Result<PreparedSkillRescan, SkillCatalogueError> {
+        let base = self.publication.read().map_err(|_| {
+            SkillCatalogueError("the skill catalogue publication is unavailable".to_owned())
+        })?;
+        let base_identity = base.identity();
+        let attempt = base.attempt.checked_add(1).ok_or_else(|| {
+            SkillCatalogueError("the skill catalogue attempt counter overflowed".to_owned())
+        })?;
+        let retained_catalogue = Arc::clone(&base.catalogue);
+        let retained_digest = Arc::clone(&base.snapshot_digest);
+        let retained_publication = base.publication;
+        drop(base);
+
+        let fixed_actions = self
+            .fixed_actions
             .iter()
-            .find(|spec| spec.name() == name)
-    }
-    pub(crate) fn snapshot_digest(&self) -> &str {
-        &self.snapshot_digest
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        let candidate = Candidate::build(
+            self.discovery.clone(),
+            &fixed_actions,
+            self.profile_layers.as_deref(),
+        )?;
+        let failed_diagnostics = (!candidate.diagnostics.is_empty())
+            .then(|| Arc::<[SkillDiagnostic]>::from(candidate.diagnostics.clone()));
+        let published = failed_diagnostics.is_none();
+        let prospective = match failed_diagnostics {
+            Some(diagnostics) => SkillPublication {
+                catalogue: retained_catalogue,
+                diagnostics,
+                snapshot_digest: retained_digest,
+                attempt,
+                publication: retained_publication,
+            },
+            None => candidate.publish(attempt, attempt),
+        };
+        Ok(PreparedSkillRescan {
+            base: base_identity,
+            prospective,
+            published,
+        })
     }
 
-    pub(crate) fn core(&self) -> Arc<CoreSkillCatalogue> {
-        Arc::clone(&self.catalogue)
+    pub(crate) fn commit_rescan(
+        &self,
+        prepared: PreparedSkillRescan,
+    ) -> Result<SkillCatalogueCapture, SkillCatalogueError> {
+        let mut publication = self.publication.write().map_err(|_| {
+            SkillCatalogueError("the skill catalogue publication is unavailable".to_owned())
+        })?;
+        if publication.identity() != prepared.base {
+            return Err(SkillCatalogueError(
+                "the skill catalogue publication changed before the prepared rescan could commit"
+                    .to_owned(),
+            ));
+        }
+        *publication = prepared.prospective;
+        Ok(publication.capture())
     }
 }
 
@@ -298,15 +490,17 @@ impl Candidate {
         })
     }
 
-    fn publish(self) -> SkillCatalogue {
+    fn publish(self, attempt: u64, publication: u64) -> SkillPublication {
         let catalogue =
             CoreSkillCatalogue::new(self.admitted.into_iter().map(|(spec, _)| spec).collect())
                 .expect("the candidate already rejects duplicate and unreachable skills");
-        let snapshot_digest = catalogue.generation().to_string();
-        SkillCatalogue {
+        let snapshot_digest: Arc<str> = catalogue.generation().to_string().into();
+        SkillPublication {
             catalogue: Arc::new(catalogue),
-            diagnostics: self.diagnostics,
+            diagnostics: self.diagnostics.into(),
             snapshot_digest,
+            attempt,
+            publication,
         }
     }
 }

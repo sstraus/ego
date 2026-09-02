@@ -6,8 +6,8 @@ use ego_core::hook::{HookCatalogue, HookHandlerConfig, HookMatcher, HookSource, 
 use ego_core::run::RunTermination;
 use serde::Serialize;
 
-use crate::config;
 use crate::cli::{HooksArgs, UsageError};
+use crate::config;
 use crate::output::Stdout;
 
 const HOOK_LISTING_VERSION: u8 = 1;
@@ -38,10 +38,7 @@ fn usage(error: UsageError) -> RunTermination {
 }
 
 /// Project and render exactly one immutable catalogue capture.
-pub(crate) fn render(
-    catalogue: &HookCatalogue,
-    json: bool,
-) -> Result<String, serde_json::Error> {
+pub(crate) fn render(catalogue: &HookCatalogue, json: bool) -> Result<String, serde_json::Error> {
     let listing = HookListing::from_catalogue(catalogue);
     if json {
         serde_json::to_string(&listing)

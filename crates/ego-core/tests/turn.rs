@@ -43,8 +43,7 @@ use ego_core::generator::types::{
 };
 use ego_core::hook::{
     HookCatalogue, HookConfigEntry, HookFuture, HookHandlerConfig, HookInvocationPort,
-    HookInvocationRequest, HookLifecycleDispatcher, HookRunner,
-    SessionHookRuntime,
+    HookInvocationRequest, HookLifecycleDispatcher, HookRunner, SessionHookRuntime,
 };
 use ego_core::permit::rule::Rule;
 use ego_core::permit::{
@@ -63,7 +62,7 @@ use ego_core::store::evidence::{
 };
 use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
 use ego_core::turn::{
-    CancelToken, ControlError, GenerationRuntime, JudgeContext, Journal, RegisteredTool, Session,
+    CancelToken, ControlError, GenerationRuntime, Journal, JudgeContext, RegisteredTool, Session,
     SharedJournal, ToolEffectPorts, Tools, TurnConfig, TurnLoop as CoreTurnLoop,
 };
 use futures::StreamExt;
@@ -6427,10 +6426,9 @@ mod turn {
 
     #[test]
     fn completed_model_skill_turn_removes_invocation_hooks_before_next_turn() {
-        let location = ego_core::event::skill::SkillSourceLocation::parse(
-            "skills/explain/SKILL.md",
-        )
-        .expect("skill location");
+        let location =
+            ego_core::event::skill::SkillSourceLocation::parse("skills/explain/SKILL.md")
+                .expect("skill location");
         let source_digest = ego_core::event::skill::SkillContentDigest::parse(
             "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         )
@@ -6466,9 +6464,8 @@ mod turn {
                 timeout_seconds: None,
             },
         )]);
-        let catalogue = Arc::new(
-            ego_core::skill::SkillCatalogue::new(vec![skill]).expect("skill catalogue"),
-        );
+        let catalogue =
+            Arc::new(ego_core::skill::SkillCatalogue::new(vec![skill]).expect("skill catalogue"));
         let fx = Fixture::new(vec![
             vec![
                 AiEvent::ToolCall {
@@ -6570,8 +6567,8 @@ mod turn {
             "completed skill turns remove invocation-scoped hooks"
         );
 
-        let ordinary = block_on(turn.run("ordinary"))
-            .expect("the following ordinary turn completes");
+        let ordinary =
+            block_on(turn.run("ordinary")).expect("the following ordinary turn completes");
         assert_eq!(ordinary.exit_reason, ExitReason::Completed);
         assert_eq!(
             hook_invocations
@@ -6586,10 +6583,9 @@ mod turn {
 
     #[test]
     fn typed_user_skill_turn_uses_admitted_instruction_not_prompt_or_tool_call() {
-        let location = ego_core::event::skill::SkillSourceLocation::parse(
-            "skills/explain/SKILL.md",
-        )
-        .expect("skill source location");
+        let location =
+            ego_core::event::skill::SkillSourceLocation::parse("skills/explain/SKILL.md")
+                .expect("skill source location");
         let source_digest = ego_core::event::skill::SkillContentDigest::parse(
             "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         )
@@ -6665,8 +6661,8 @@ mod turn {
             tools,
         );
 
-        let outcome = block_on(turn.run_admitted_skill(operation))
-            .expect("the store accepted every append");
+        let outcome =
+            block_on(turn.run_admitted_skill(operation)).expect("the store accepted every append");
         let typed_turn = outcome.turn;
         assert_eq!(outcome.exit_reason, ExitReason::Completed);
         assert!(outcome.ok);
@@ -6676,7 +6672,11 @@ mod turn {
         let request = &calls[0];
         assert_eq!(request.model, "skill-model");
         assert_eq!(
-            request.tools.iter().filter(|tool| tool.name == "skill").count(),
+            request
+                .tools
+                .iter()
+                .filter(|tool| tool.name == "skill")
+                .count(),
             1,
             "the mixed registry exposes the skill tool to the generation"
         );
@@ -6687,9 +6687,7 @@ mod turn {
             .filter(|message| message.role == Role::System)
             .flat_map(|message| message.content.iter())
             .find_map(|block| match block {
-                ContentBlock::Text { text }
-                    if text.starts_with("Admitted skill instruction (") =>
-                {
+                ContentBlock::Text { text } if text.starts_with("Admitted skill instruction (") => {
                     Some(text)
                 }
                 _ => None,
@@ -6727,23 +6725,27 @@ mod turn {
             })
             .expect("generation start is durable");
         assert!(catalogue_at < instruction_at && instruction_at < generation_at);
-        assert!(!events
-            .iter()
-            .any(|event| {
-                event.env.turn == typed_turn
-                    && matches!(&event.kind, EventKind::UserPrompt { .. })
-            }));
+        assert!(!events.iter().any(|event| {
+            event.env.turn == typed_turn && matches!(&event.kind, EventKind::UserPrompt { .. })
+        }));
         assert!(!events.iter().any(|event| matches!(
             &event.kind,
             EventKind::ToolCallStarted { .. } | EventKind::ToolCallCompleted { .. }
         ) && event.env.turn == typed_turn));
 
-        let ordinary = block_on(turn.run("ordinary"))
-            .expect("the store accepted every ordinary append");
+        let ordinary =
+            block_on(turn.run("ordinary")).expect("the store accepted every ordinary append");
         assert_eq!(ordinary.exit_reason, ExitReason::Completed);
         let calls = fx.generator.calls();
-        assert_eq!(calls.len(), 2, "the ordinary turn invokes one more generation");
-        assert_eq!(calls[1].model, "test-model", "the skill model pin is cleared");
+        assert_eq!(
+            calls.len(),
+            2,
+            "the ordinary turn invokes one more generation"
+        );
+        assert_eq!(
+            calls[1].model, "test-model",
+            "the skill model pin is cleared"
+        );
         assert!(!calls[1].messages.messages().iter().any(|message| {
             message.content.iter().any(|block| {
                 matches!(
@@ -6764,10 +6766,9 @@ mod turn {
 
     #[test]
     fn stale_typed_user_skill_operation_is_refused_before_generation() {
-        let location = ego_core::event::skill::SkillSourceLocation::parse(
-            "skills/explain/SKILL.md",
-        )
-        .expect("skill source location");
+        let location =
+            ego_core::event::skill::SkillSourceLocation::parse("skills/explain/SKILL.md")
+                .expect("skill source location");
         let old_digest = ego_core::event::skill::SkillContentDigest::parse(
             "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         )
@@ -6857,9 +6858,11 @@ mod turn {
             fx.generator.calls().is_empty(),
             "a stale operation never contacts the generator"
         );
-        assert!(!fx.store.events().iter().any(|event| matches!(
-            &event.kind,
-            EventKind::SkillInstructionAdmitted { .. }
-        )));
+        assert!(
+            !fx.store
+                .events()
+                .iter()
+                .any(|event| matches!(&event.kind, EventKind::SkillInstructionAdmitted { .. }))
+        );
     }
 }

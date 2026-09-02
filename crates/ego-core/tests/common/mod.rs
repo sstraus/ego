@@ -68,9 +68,8 @@ impl BlobWriter for MemoryBlobWriter {
 
     fn commit(self: Box<Self>) -> Result<BlobRef, BlobError> {
         let id = BlobId::parse(ego_core::digest::sha256_hex(&self.bytes))?;
-        let bytes = u64::try_from(self.bytes.len()).map_err(|_| BlobError::Limit {
-            limit: u64::MAX,
-        })?;
+        let bytes =
+            u64::try_from(self.bytes.len()).map_err(|_| BlobError::Limit { limit: u64::MAX })?;
         let reference = BlobRef::new(id, bytes);
         self.owner
             .blobs

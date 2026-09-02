@@ -7,7 +7,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use super::{SkillCatalogue, SkillDiscovery, SkillSourceAuthority};
+use super::{SkillCatalogue, SkillCatalogueCapture, SkillDiscovery, SkillSourceAuthority};
 use ego_core::config::{ConfigLayer, Source, Trust};
 use tempfile::TempDir;
 
@@ -60,6 +60,10 @@ impl Roots {
     }
 }
 
+fn capture(catalogue: &SkillCatalogue) -> SkillCatalogueCapture {
+    catalogue.capture().expect("skill catalogue capture")
+}
+
 fn valid_for(name: &str, frontmatter: &str) -> String {
     format!("name: {name}\ndescription: Explain a failing check.\n{frontmatter}")
 }
@@ -104,7 +108,8 @@ mod regression_case {
             "Read direct evidence.",
         );
         let catalogue = roots.catalogue(false);
-        let descriptor = catalogue
+        let captured = capture(&catalogue);
+        let descriptor = captured
             .descriptors()
             .iter()
             .find(|descriptor| descriptor.name() == "explain-failure")
@@ -147,7 +152,8 @@ mod regression_case {
         .unwrap();
 
         let catalogue = roots.catalogue(true);
-        let mut sources = catalogue
+        let captured = capture(&catalogue);
+        let mut sources = captured
             .descriptors()
             .iter()
             .map(|descriptor| (descriptor.name(), descriptor.source()))
@@ -161,7 +167,7 @@ mod regression_case {
                 ("user-skill", SkillSourceAuthority::User),
             ]
         );
-        assert!(catalogue.diagnostics().iter().all(|diagnostic| {
+        assert!(captured.diagnostics().iter().all(|diagnostic| {
             !diagnostic
                 .source_path()
                 .to_string_lossy()
@@ -180,7 +186,7 @@ mod regression_case {
         );
         let catalogue = roots.catalogue(false);
         assert!(
-            catalogue
+            capture(&catalogue)
                 .descriptors()
                 .iter()
                 .any(|descriptor| descriptor.name() == "canonical")
@@ -200,6 +206,7 @@ mod regression_case {
         }
         let candidate = SkillCatalogue::discover(roots.discovery(false), &["read", "grep"])
             .expect("candidate diagnostics are non-fatal");
+        let captured = capture(&candidate);
         for name in [
             "list-form",
             "comma-form",
@@ -207,7 +214,7 @@ mod regression_case {
             "empty-form",
             "deprecated-form",
         ] {
-            let diagnostic = candidate
+            let diagnostic = captured
                 .diagnostics()
                 .iter()
                 .find(|diagnostic| diagnostic.name() == name)
@@ -239,13 +246,13 @@ mod regression_case {
         );
         let catalogue = SkillCatalogue::discover(roots.discovery(false), &["skills", "help"])
             .expect("collisions are projected diagnostics");
-        assert!(catalogue
+        assert!(capture(&catalogue)
             .descriptors()
             .iter()
             .all(|descriptor| descriptor.name() != "duplicate" && descriptor.name() != "skills"));
         for name in ["duplicate", "skills"] {
             assert!(
-                catalogue
+                capture(&catalogue)
                     .diagnostics()
                     .iter()
                     .any(|diagnostic| diagnostic.name() == name && diagnostic.is_collision())
@@ -264,13 +271,13 @@ mod regression_case {
         );
         let catalogue = roots.catalogue(false);
         assert!(
-            catalogue
+            capture(&catalogue)
                 .descriptors()
                 .iter()
                 .all(|descriptor| descriptor.name() != "project-only")
         );
         assert!(
-            catalogue
+            capture(&catalogue)
                 .diagnostics()
                 .iter()
                 .any(
@@ -289,8 +296,8 @@ mod regression_case {
             &valid_for("stable", ""),
             "first body",
         );
-        let mut catalogue = roots.catalogue(false);
-        let before = catalogue.snapshot_digest().to_owned();
+        let catalogue = roots.catalogue(false);
+        let before = capture(&catalogue);
         roots.write(
             &roots.user,
             "new-valid",
@@ -305,28 +312,150 @@ mod regression_case {
         );
         roots.write(&roots.user, "new-invalid", "name: new-invalid", "bad body");
 
-        catalogue
-            .reload(roots.discovery(false), &["help"])
-            .expect("reload returns last good");
-        assert_eq!(catalogue.snapshot_digest(), before);
+        let prepared = catalogue
+            .prepare_rescan()
+            .expect("prepare returns last good prospective capture");
+        let prospective = prepared.capture();
+        assert!(prospective.retained_last_good());
+        assert!(std::sync::Arc::ptr_eq(&prospective.core(), &before.core()));
+        assert_eq!(prospective.snapshot_digest(), before.snapshot_digest());
+        assert!(capture(&catalogue).diagnostics().is_empty());
+        let committed = catalogue
+            .commit_rescan(prepared)
+            .expect("commit publishes the retained last-good capture");
+        assert!(committed.retained_last_good());
+        assert!(std::sync::Arc::ptr_eq(&committed.core(), &before.core()));
+        assert_eq!(committed.snapshot_digest(), before.snapshot_digest());
         assert!(
-            catalogue
+            committed
                 .descriptors()
                 .iter()
                 .any(|descriptor| descriptor.name() == "stable")
         );
         assert!(
-            catalogue
+            committed
                 .descriptors()
                 .iter()
                 .all(|descriptor| descriptor.name() != "new-invalid")
         );
         assert!(
-            catalogue
+            committed
                 .diagnostics()
                 .iter()
                 .any(|diagnostic| diagnostic.name() == "stable"
                     && diagnostic.message().contains("unknown"))
+        );
+    }
+
+    #[test]
+    fn prepared_valid_rescan_is_viewless_until_atomic_commit_and_supplies_new_core() {
+        let roots = Roots::new();
+        roots.write(
+            &roots.user,
+            "stable",
+            &valid_for("stable", ""),
+            "first body",
+        );
+        let catalogue = roots.catalogue(false);
+        let before = capture(&catalogue);
+        roots.write(
+            &roots.user,
+            "new-valid",
+            &valid_for("new-valid", "allowed-tools: \"read\""),
+            "valid body",
+        );
+
+        let prepared = catalogue
+            .prepare_rescan()
+            .expect("valid candidate is prepared");
+        let prospective = prepared.capture();
+        assert!(!prospective.retained_last_good());
+        assert!(
+            prospective
+                .descriptors()
+                .iter()
+                .any(|descriptor| descriptor.name() == "new-valid")
+        );
+        assert!(std::sync::Arc::ptr_eq(
+            &capture(&catalogue).core(),
+            &before.core()
+        ));
+        assert_eq!(
+            capture(&catalogue).snapshot_digest(),
+            before.snapshot_digest()
+        );
+
+        // The preflight consumer receives the exact prospective core. It is
+        // intentionally retained here as the value that model-tool assembly
+        // must consume before publication.
+        let preflight_core = prospective.core();
+        assert!(
+            preflight_core
+                .specs()
+                .iter()
+                .any(|descriptor| descriptor.name() == "new-valid")
+        );
+        let committed = catalogue
+            .commit_rescan(prepared)
+            .expect("valid candidate commits atomically");
+        assert!(!committed.retained_last_good());
+        assert!(std::sync::Arc::ptr_eq(&committed.core(), &preflight_core));
+        assert_ne!(committed.snapshot_digest(), before.snapshot_digest());
+        assert!(
+            capture(&catalogue)
+                .descriptors()
+                .iter()
+                .any(|descriptor| descriptor.name() == "new-valid")
+        );
+    }
+
+    #[test]
+    fn stale_prepared_rescan_refuses_without_overwriting_newer_publication() {
+        let roots = Roots::new();
+        roots.write(
+            &roots.user,
+            "stable",
+            &valid_for("stable", ""),
+            "first body",
+        );
+        let catalogue = roots.catalogue(false);
+        roots.write(
+            &roots.user,
+            "first",
+            &valid_for("first", ""),
+            "first candidate",
+        );
+        let stale = catalogue
+            .prepare_rescan()
+            .expect("first candidate is prepared");
+        roots.write(
+            &roots.user,
+            "second",
+            &valid_for("second", ""),
+            "second candidate",
+        );
+        let latest = catalogue
+            .prepare_rescan()
+            .expect("second candidate is prepared from the same base");
+        let latest_capture = catalogue
+            .commit_rescan(latest)
+            .expect("latest candidate commits");
+        assert!(
+            latest_capture
+                .descriptors()
+                .iter()
+                .any(|descriptor| descriptor.name() == "second")
+        );
+        let before_stale_commit = capture(&catalogue);
+        assert!(catalogue.commit_rescan(stale).is_err());
+        let after_stale_commit = capture(&catalogue);
+        assert!(std::sync::Arc::ptr_eq(
+            &before_stale_commit.core(),
+            &after_stale_commit.core()
+        ));
+        assert_eq!(
+            before_stale_commit.snapshot_digest(),
+            after_stale_commit.snapshot_digest()
         );
     }
 
@@ -358,12 +487,13 @@ mod regression_case {
             "body",
         );
         let catalogue = roots.catalogue(false);
+        let captured = capture(&catalogue);
         assert_eq!(
-            catalogue.descriptor("forked").unwrap().agent(),
+            captured.descriptor("forked").unwrap().agent(),
             Some("trusted")
         );
         for (name, field) in [("agent-without-fork", "agent"), ("temporary", "shell")] {
-            let diagnostic = catalogue
+            let diagnostic = captured
                 .diagnostics()
                 .iter()
                 .find(|diagnostic| diagnostic.name() == name)
@@ -371,13 +501,13 @@ mod regression_case {
             assert!(diagnostic.message().contains(field));
         }
         assert!(
-            catalogue
+            captured
                 .diagnostics()
                 .iter()
                 .all(|diagnostic| { diagnostic.name() != "hooked" })
         );
         assert!(
-            catalogue
+            captured
                 .descriptor("hooked")
                 .expect("hooked skill is admitted")
                 .hooks()
@@ -417,11 +547,12 @@ mod regression_case {
             &[profile_layer],
         )
         .expect("profile diagnostics are non-fatal");
+        let captured = capture(&catalogue);
         assert_eq!(
-            catalogue.descriptor("known-profile").unwrap().agent(),
+            captured.descriptor("known-profile").unwrap().agent(),
             Some("trusted")
         );
-        let diagnostic = catalogue
+        let diagnostic = captured
             .diagnostics()
             .iter()
             .find(|diagnostic| diagnostic.name() == "missing-profile")
@@ -442,8 +573,9 @@ mod regression_case {
             "body",
         );
         let catalogue = roots.catalogue(false);
+        let captured = capture(&catalogue);
         for (name, path) in [("oversized", oversized), ("malformed", malformed)] {
-            let diagnostic = catalogue
+            let diagnostic = captured
                 .diagnostics()
                 .iter()
                 .find(|diagnostic| diagnostic.name() == name)

@@ -741,14 +741,7 @@ impl SkillInvocation {
         turn: TurnId,
     ) -> Result<(Self, EventId), SkillError> {
         let spec = catalogue.authorize_model(operation.name())?.clone();
-        Self::admit_authorized_in_turn(
-            catalogue.generation,
-            spec,
-            operation,
-            blobs,
-            journal,
-            turn,
-        )
+        Self::admit_authorized_in_turn(catalogue.generation, spec, operation, blobs, journal, turn)
     }
 
     pub(crate) fn admit_user_in_turn(
