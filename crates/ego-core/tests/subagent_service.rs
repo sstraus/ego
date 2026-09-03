@@ -292,6 +292,7 @@ fn request_with_task(
 struct DurableJournal {
     events: Arc<Mutex<Vec<DomainEvent>>>,
     fail_next_settled: Arc<Mutex<bool>>,
+    fail_after_persist_settled: Arc<Mutex<bool>>,
     fail_next_subagent_stop_start: Arc<Mutex<bool>>,
     fail_next_spawn: Arc<Mutex<bool>>,
 }
@@ -301,6 +302,7 @@ impl Default for DurableJournal {
         Self {
             events: Arc::new(Mutex::new(Vec::new())),
             fail_next_settled: Arc::new(Mutex::new(false)),
+            fail_after_persist_settled: Arc::new(Mutex::new(false)),
             fail_next_subagent_stop_start: Arc::new(Mutex::new(false)),
             fail_next_spawn: Arc::new(Mutex::new(false)),
         }
@@ -421,6 +423,13 @@ impl DurableJournal {
         *self.fail_next_settled.lock().expect("settled failure flag") = true;
     }
 
+    fn fail_after_persist_settled(&self) {
+        *self
+            .fail_after_persist_settled
+            .lock()
+            .expect("after-persist settlement failure flag") = true;
+    }
+
     fn fail_next_subagent_stop_start(&self) {
         *self
             .fail_next_subagent_stop_start
@@ -475,7 +484,21 @@ impl DurableJournal {
                 "injected parent settlement durability failure",
             ));
         }
+        let fail_after_persist = matches!(&event.kind, EventKind::SubagentSettled { .. }) && {
+            let mut flag = self
+                .fail_after_persist_settled
+                .lock()
+                .expect("after-persist settlement failure flag");
+            let fail = *flag;
+            *flag = false;
+            fail
+        };
         self.events.lock().expect("journal events").push(event);
+        if fail_after_persist {
+            return Err(ChildJournalError::new(
+                "injected settlement error after persistence",
+            ));
+        }
         Ok(())
     }
 }
@@ -643,6 +666,7 @@ impl EventSinkFactory for Sinks {
 struct ReturnHookPort {
     decision: HookDecision,
     same_invocation_barrier: Option<SameInvocationBarrier>,
+    invocations: Arc<AtomicUsize>,
 }
 
 impl ReturnHookPort {
@@ -650,6 +674,7 @@ impl ReturnHookPort {
         Self {
             decision,
             same_invocation_barrier: None,
+            invocations: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -657,6 +682,7 @@ impl ReturnHookPort {
         Self {
             decision,
             same_invocation_barrier: Some(SameInvocationBarrier::default()),
+            invocations: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -664,6 +690,10 @@ impl ReturnHookPort {
         self.same_invocation_barrier
             .as_ref()
             .map_or(0, SameInvocationBarrier::invocations)
+    }
+
+    fn total_invocations(&self) -> usize {
+        self.invocations.load(Ordering::SeqCst)
     }
 }
 
@@ -682,6 +712,7 @@ impl SameInvocationBarrier {
 
 impl HookInvocationPort for ReturnHookPort {
     fn invoke<'a>(&'a self, _request: HookInvocationRequest) -> HookFuture<'a> {
+        self.invocations.fetch_add(1, Ordering::SeqCst);
         let outcome = HookOutcome::new(self.decision, None);
         let Some(barrier) = self.same_invocation_barrier.clone() else {
             return Box::pin(future::ready(Ok(outcome)));
@@ -2776,4 +2807,120 @@ fn same_background_invocation_retries_append_failure_without_duplicate_settlemen
     );
     assert_eq!(harness.executor.call_count(), calls);
     assert_eq!(harness.results.read_count(), reads);
+}
+
+#[test]
+fn settlement_error_after_persist_reconciles_without_duplicate_effects_or_delivery() {
+    let harness = Harness::new(RunSettlement::Completed);
+    let port = ReturnHookPort::new(HookDecision::Continue);
+    let service = harness.service_with_return_hook(
+        BudgetGate::unlimited(ego_core::cost::CurrencyCode::new("USD").expect("currency")),
+        port.clone(),
+    );
+    let invocation = SubagentInvocationId::new();
+    let admission =
+        futures::executor::block_on(service.start(request(invocation, ChildWait::Background)))
+            .expect("background child admission");
+    let result_ref = blob_for_bytes(b"persisted before the store reported an error");
+    harness.results.record_evidence(
+        admission.child_run(),
+        result_ref.clone(),
+        b"persisted before the store reported an error".to_vec(),
+    );
+    futures::executor::block_on(admission.host_launch()).expect("host launches child");
+    harness.journal.fail_after_persist_settled();
+
+    let first = futures::executor::block_on(service.collect_background(invocation));
+    assert!(matches!(
+        first,
+        Err(ego_core::subagent::ChildServiceError::Journal { diagnostic })
+            if diagnostic.contains("after persistence")
+    ));
+    assert_eq!(
+        harness
+            .journal
+            .records()
+            .iter()
+            .filter(|event| matches!(event.kind, EventKind::SubagentSettled { .. }))
+            .count(),
+        1,
+        "the settlement is durable even though its append reported an error"
+    );
+    let result_reads = harness.results.read_count();
+    let parent_copies = harness.parent_blobs.copied().len();
+    let hook_invocations = port.total_invocations();
+    let controller_effects = harness
+        .executor
+        .calls
+        .lock()
+        .expect("executor calls")
+        .iter()
+        .filter(|call| **call == "start" || **call == "submit")
+        .count();
+
+    let retried = futures::executor::block_on(service.collect_background(invocation))
+        .expect("same-service retry reconciles the durable settlement");
+    assert_eq!(
+        retried,
+        ChildWaitResult::Returned {
+            final_message: result_ref.clone()
+        }
+    );
+    assert_eq!(harness.results.read_count(), result_reads);
+    assert_eq!(harness.parent_blobs.copied().len(), parent_copies);
+    assert_eq!(port.total_invocations(), hook_invocations);
+    assert_eq!(
+        harness
+            .executor
+            .calls
+            .lock()
+            .expect("executor calls")
+            .iter()
+            .filter(|call| **call == "start" || **call == "submit")
+            .count(),
+        controller_effects
+    );
+
+    let reopened = harness.service_with_return_hook(
+        BudgetGate::unlimited(ego_core::cost::CurrencyCode::new("USD").expect("currency")),
+        port.clone(),
+    );
+    futures::executor::block_on(reopened.recover_from_durable(
+        invocation,
+        ego_core::subagent::RecoveryCut::BeforeParentSettlement,
+    ))
+    .expect("reopen reconciles the durable child")
+    .expect("durable child remains identified");
+    assert_eq!(
+        futures::executor::block_on(reopened.collect_background(invocation))
+            .expect("reopened settlement is already delivered"),
+        ChildWaitResult::Returned {
+            final_message: result_ref
+        }
+    );
+    assert_eq!(harness.results.read_count(), result_reads);
+    assert_eq!(harness.parent_blobs.copied().len(), parent_copies);
+    assert_eq!(port.total_invocations(), hook_invocations);
+    assert_eq!(
+        harness
+            .journal
+            .records()
+            .iter()
+            .filter(|event| matches!(event.kind, EventKind::SubagentSettled { .. }))
+            .count(),
+        1,
+        "retry and restart preserve exactly one logical settlement"
+    );
+    assert_eq!(
+        harness
+            .executor
+            .calls
+            .lock()
+            .expect("executor calls")
+            .iter()
+            .filter(|call| **call == "start" || **call == "submit")
+            .count(),
+        controller_effects,
+        "retry and restart do not re-execute the child controller"
+    );
 }
