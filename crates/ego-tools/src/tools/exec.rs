@@ -76,7 +76,7 @@ impl TypedTool for ExecTool {
         )
         .map_err(|err| ToolError::InvalidParams(err.to_string()))?;
 
-        Ok(PreparedCall::new(self.name(), vec![Op::Spawn { spec }]))
+        Ok(PreparedCall::new(self.name(), Op::Spawn { spec }))
     }
 
     fn execute<'a, 'io>(
@@ -88,8 +88,8 @@ impl TypedTool for ExecTool {
         'io: 'a,
     {
         Box::pin(async move {
-            let tool = call.tool;
-            let mut ops = call.ops.into_iter();
+            let (tool, ops) = call.into_parts();
+            let mut ops = ops.into_iter();
             let spec = match (ops.next(), ops.next()) {
                 (Some(Op::Spawn { spec }), None) => spec,
                 _ => {

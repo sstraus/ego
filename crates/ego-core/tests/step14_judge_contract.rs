@@ -38,7 +38,7 @@ fn spawn_call() -> PreparedCall {
         EnvPolicy::allow_only(["PATH", "EGO_CONTRACT_SECRET"]).unwrap(),
     )
     .unwrap();
-    PreparedCall::new("exec", vec![Op::Spawn { spec }])
+    PreparedCall::new("exec", Op::Spawn { spec })
 }
 
 fn escalation() -> Escalation {
@@ -178,10 +178,10 @@ fn judge_request_is_toolless_and_contains_only_canonical_authority_facts() {
 fn judge_request_describes_write_shape_without_disclosing_content() {
     let call = PreparedCall::new(
         "write",
-        vec![Op::Write {
+        Op::Write {
             path: CanonPath::new("/workspace/notes.txt"),
             change: ego_core::permit::Change::Whole(b"private bytes never leave prepare".to_vec()),
-        }],
+        },
     );
     let input = JudgeInput::new(
         &call,

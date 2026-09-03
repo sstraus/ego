@@ -79,9 +79,9 @@ impl McpOperationFactory for FakeFactory {
         }
         Ok(PreparedCall::new(
             "mcp-operation",
-            vec![Op::Read {
+            Op::Read {
                 path: ego_core::permit::CanonPath::new("/fixture"),
-            }],
+            },
         ))
     }
 

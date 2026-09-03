@@ -34,9 +34,9 @@ impl TypedTool for ReadTool {
     ) -> Result<PreparedCall, ToolError> {
         Ok(PreparedCall::new(
             self.name(),
-            vec![Op::Read {
+            Op::Read {
                 path: resolve(ctx, &params.path)?,
-            }],
+            },
         ))
     }
 

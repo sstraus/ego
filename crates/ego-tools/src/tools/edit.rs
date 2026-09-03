@@ -85,17 +85,15 @@ impl TypedTool for EditTool {
             // needs a `read(...)` rule *and* a `write(...)` rule — and a
             // `write(...)` rule alone cannot authorise the read it does.
             // `docs/13-effect-tools.md` Step C, second invariant.
-            vec![
-                Op::Read { path: path.clone() },
-                Op::Write {
-                    path,
-                    change: Change::Replace {
-                        old_string: params.old_string,
-                        new_string: params.new_string,
-                    },
-                },
-            ],
-        ))
+            Op::Read { path: path.clone() },
+        )
+        .with_op(Op::Write {
+            path,
+            change: Change::Replace {
+                old_string: params.old_string,
+                new_string: params.new_string,
+            },
+        }))
     }
 
     fn execute<'a, 'io>(
@@ -158,7 +156,8 @@ impl EditTool {
         &self,
         call: PreparedCall,
     ) -> Result<(ego_core::permit::CanonPath, String, String), ToolError> {
-        let mut ops = call.ops.into_iter();
+        let (_, ops) = call.into_parts();
+        let mut ops = ops.into_iter();
         let (Some(Op::Read { path: read_path }), Some(Op::Write { path, change }), None) =
             (ops.next(), ops.next(), ops.next())
         else {

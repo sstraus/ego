@@ -487,7 +487,7 @@ mod registration {
             .flat_map(|(name, params)| {
                 ws.prepare(name, params)
                     .unwrap_or_else(|err| panic!("{name} should prepare: {err}"))
-                    .ops
+                    .ops()
                     .iter()
                     .map(Op::name)
                     .collect::<Vec<_>>()
@@ -696,7 +696,7 @@ mod write {
             .expect("the parent directory exists, so the target resolves");
 
         assert_eq!(
-            call.ops,
+            call.ops(),
             vec![Op::Write {
                 path: CanonPath::new(ws.root.join("src/new.rs")),
                 change: Change::Whole(b"hello\n".to_vec()),
@@ -980,7 +980,7 @@ mod edit {
         let path = CanonPath::new(ws.root.join("src/main.rs"));
 
         assert_eq!(
-            call.ops,
+            call.ops(),
             vec![
                 Op::Read { path: path.clone() },
                 Op::Write {
@@ -1257,7 +1257,7 @@ mod glob {
             .prepare("glob", json!({ "pattern": "**/*.rs", "path": "src" }))
             .unwrap();
 
-        assert!(matches!(call.ops.as_slice(), [Op::List { .. }]));
+        assert!(matches!(call.ops(), [Op::List { .. }]));
         let granted = ws.authorize(call).unwrap();
         let permit = granted.permit();
         let found = CanonPath::new(ws.root.join("src/main.rs"));
@@ -1415,7 +1415,7 @@ mod grep {
             .unwrap();
 
         assert!(matches!(
-            call.ops.as_slice(),
+            call.ops(),
             [Op::Search { query, .. }] if query == "TODO"
         ));
         let granted = ws.authorize(call).unwrap();
@@ -1583,7 +1583,7 @@ mod rogue {
                     query: "TODO".to_string(),
                 },
             };
-            Ok(PreparedCall::new(self.name().to_string(), vec![op]))
+            Ok(PreparedCall::new(self.name().to_string(), op))
         }
 
         fn execute<'a, 'io>(

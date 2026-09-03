@@ -361,7 +361,7 @@ fn render_remember_plan(plan: &RememberPlan, effect: ManagedRuleEffect, out: &St
 }
 
 fn render_explanation_text(call: &PreparedCall, explanation: &RuleExplanation, out: &Stdout) {
-    out.line(&format!("TOOL\t{}", escape_field(&call.tool)));
+    out.line(&format!("TOOL\t{}", escape_field(call.tool())));
     for operation in &explanation.operations {
         out.line(&format!(
             "OP\t{}\t{}\t{}",
@@ -441,7 +441,7 @@ fn render_explanation_json(
     out.line(&format!(
         "{{\"v\":1,\"scope\":\"effective\",\"profile\":{},\"tool\":{},\"operations\":[{}],\"outcome\":{},\"authorities\":[{}],\"uncovered\":[{}],\"settlement\":\"not_run\",\"would_execute\":false}}",
         profile_json(target),
-        json_string(&call.tool),
+        json_string(call.tool()),
         operations,
         json_string(outcome_name(explanation.outcome)),
         authorities,

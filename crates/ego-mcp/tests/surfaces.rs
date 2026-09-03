@@ -7,7 +7,7 @@ use ego_core::config::{McpConfigProvenance, McpHttpAuth, McpServerConfig, McpSer
 use ego_core::credentials::SecretMaterial;
 use ego_core::generator::types::ToolDescriptor;
 use ego_core::mcp::ToolExecution;
-use ego_core::permit::{GuardedIo, PreparedCall, ToolError};
+use ego_core::permit::{CanonPath, GuardedIo, Op, PreparedCall, ToolError};
 use ego_core::turn::{McpRegistryEvent, McpRegistryJournal, McpRegistryJournalError};
 use ego_mcp::{
     McpAdmittedCandidate, McpCacheMetadata, McpCandidateAdmission, McpCandidateError,
@@ -236,7 +236,12 @@ impl McpOperationFactory for DynamicFactory {
         _admission: Arc<McpServerAdmission>,
         _operation: McpOperation,
     ) -> Result<PreparedCall, ToolError> {
-        Ok(PreparedCall::new("dynamic", Vec::new()))
+        Ok(PreparedCall::new(
+            "dynamic",
+            Op::Read {
+                path: CanonPath::new("/fixture"),
+            },
+        ))
     }
 
     fn execute<'a, 'io>(

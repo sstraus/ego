@@ -32,7 +32,7 @@ use ego_core::generator::types::StopReason;
 use ego_core::mcp::{ForeignInputRequired, ForeignQuestionPort, ToolExecution};
 use ego_core::permit::fake::{FakeFs, FakeWriteTool};
 use ego_core::permit::{
-    CanonPath, DuplexHandle, DuplexSpawner, GuardedIo, HttpRequest, OneHop, OneHopResponse,
+    CanonPath, DuplexHandle, DuplexSpawner, GuardedIo, HttpRequest, OneHop, OneHopResponse, Op,
     PrepareCtx, PreparedCall, ProcessError, ProcessExecutor, ResolvedConnect, Resolver, SpawnSpec,
     Tool, ToolDescriptor, ToolError, ToolResult, TransportError, Typed,
 };
@@ -436,7 +436,12 @@ impl Tool for ForeignInputTool {
         _params: serde_json::Value,
         _ctx: &PrepareCtx<'_>,
     ) -> Result<PreparedCall, ToolError> {
-        Ok(PreparedCall::new(self.descriptor().name, Vec::new()))
+        Ok(PreparedCall::new(
+            self.descriptor().name,
+            Op::Read {
+                path: CanonPath::new("/ws/fixture"),
+            },
+        ))
     }
 
     fn execute<'a, 'io>(

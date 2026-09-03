@@ -46,10 +46,10 @@ impl TypedTool for GrepTool {
         compile(&params.query)?;
         Ok(PreparedCall::new(
             self.name(),
-            vec![Op::Search {
+            Op::Search {
                 root: root_of(ctx, params.path.as_ref())?,
                 query: params.query,
-            }],
+            },
         ))
     }
 

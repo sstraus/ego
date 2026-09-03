@@ -135,7 +135,7 @@ impl ModeApprover {
     /// The whole of step 5, and it is sync because a mode is a value the run
     /// already holds. The trait is async for the parties that are not.
     fn verdict(&self, pending: &Pending) -> Verdict {
-        for op in &pending.call().ops {
+        for op in pending.call().ops() {
             let approved = match self.mode {
                 // Bypass: "do not ask about it". Step 0 is not reached from
                 // here — the boundary was settled before the question was

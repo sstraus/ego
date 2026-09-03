@@ -246,7 +246,7 @@ fn command_call(args: Option<Vec<String>>, shell: Option<&str>) -> PreparedCall 
         (Some(_), Some(_)) => Vec::new(),
     };
     let spec = SpawnSpec::new(argv, None, None, EnvPolicy::Inherited).expect("command spec");
-    PreparedCall::new("hook_command", vec![Op::Spawn { spec }])
+    PreparedCall::new("hook_command", Op::Spawn { spec })
 }
 
 fn invoke_command(
@@ -382,13 +382,13 @@ fn http_uses_guarded_http_prepared_call_with_connect_and_secret_egress() {
     assert_eq!(admitted.body(), br#"{"version":1,"decision":"continue"}"#);
     assert!(
         prepared
-            .ops
+            .ops()
             .iter()
             .any(|op| matches!(op, Op::Connect { .. }))
     );
     assert!(
         prepared
-            .ops
+            .ops()
             .iter()
             .any(|op| op.name().to_string() == "secret_egress")
     );

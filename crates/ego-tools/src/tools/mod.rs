@@ -147,8 +147,8 @@ fn scan_of(root: CanonPath) -> ScanRequest {
 /// authorised. That is what makes the query bound into `Op::Search` the query
 /// that actually runs.
 fn only_op(call: PreparedCall) -> Result<Op, ToolError> {
-    let tool = call.tool;
-    let mut ops = call.ops.into_iter();
+    let (tool, ops) = call.into_parts();
+    let mut ops = ops.into_iter();
     match (ops.next(), ops.next()) {
         (Some(op), None) => Ok(op),
         _ => Err(wrong_op(&tool)),

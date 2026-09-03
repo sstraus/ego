@@ -734,8 +734,13 @@ fn admitted_skill_snapshot_rejects_lifecycle_only_unknown_missing_mismatched_and
 #[test]
 fn resource_reads_cross_prepared_call_and_guarded_effects_before_durable_bytes() {
     let path = ego_core::permit::CanonPath::new("/workspace/skills/explain/refs/data.txt");
-    let prepared = PreparedCall::new("skill_resource", vec![Op::Read { path: path.clone() }]);
-    assert!(prepared.ops.iter().any(|op| matches!(op, Op::Read { .. })));
+    let prepared = PreparedCall::new("skill_resource", Op::Read { path: path.clone() });
+    assert!(
+        prepared
+            .ops()
+            .iter()
+            .any(|op| matches!(op, Op::Read { .. }))
+    );
 
     let policy = ego_core::permit::PolicyEngine::new(
         ego_core::permit::CanonPath::new("/workspace"),

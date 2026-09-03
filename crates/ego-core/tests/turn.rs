@@ -825,9 +825,9 @@ mod turn {
         ) -> Result<PreparedCall, ToolError> {
             Ok(PreparedCall::new(
                 self.name().to_string(),
-                vec![Op::Read {
+                Op::Read {
                     path: ctx.resolver.canonicalize(Path::new(&params.path))?,
-                }],
+                },
             ))
         }
 
@@ -840,7 +840,7 @@ mod turn {
             'io: 'a,
         {
             Box::pin(async move {
-                let Some(Op::Read { path }) = call.ops.into_iter().next() else {
+                let Some(Op::Read { path }) = call.into_parts().1.into_iter().next() else {
                     return Err(ToolError::InvalidParams("expected one Read op".into()));
                 };
                 let bytes = io.read(&path)?;
@@ -883,7 +883,7 @@ mod turn {
             .map_err(|err| ToolError::InvalidParams(err.to_string()))?;
             Ok(PreparedCall::new(
                 self.name().to_string(),
-                vec![Op::Spawn { spec }],
+                Op::Spawn { spec },
             ))
         }
 
@@ -896,7 +896,7 @@ mod turn {
             'io: 'a,
         {
             Box::pin(async move {
-                let Some(Op::Spawn { spec }) = call.ops.into_iter().next() else {
+                let Some(Op::Spawn { spec }) = call.into_parts().1.into_iter().next() else {
                     return Err(ToolError::InvalidParams("expected one Spawn op".into()));
                 };
                 io.exec(&spec).await.map_err(ToolError::from)
@@ -957,9 +957,9 @@ mod turn {
         ) -> Result<PreparedCall, ToolError> {
             Ok(PreparedCall::new(
                 self.name().to_string(),
-                vec![Op::Read {
+                Op::Read {
                     path: ctx.resolver.canonicalize(Path::new(&params.path))?,
-                }],
+                },
             ))
         }
 
@@ -984,7 +984,7 @@ mod turn {
                     }
                 })
                 .await;
-                let Some(Op::Read { path }) = call.ops.into_iter().next() else {
+                let Some(Op::Read { path }) = call.into_parts().1.into_iter().next() else {
                     return Err(ToolError::InvalidParams("expected one Read op".into()));
                 };
                 let bytes = io.read(&path)?;
@@ -1020,9 +1020,9 @@ mod turn {
         ) -> Result<PreparedCall, ToolError> {
             Ok(PreparedCall::new(
                 self.name().to_string(),
-                vec![Op::Read {
+                Op::Read {
                     path: ctx.resolver.canonicalize(Path::new(&params.path))?,
-                }],
+                },
             ))
         }
 
@@ -1049,7 +1049,7 @@ mod turn {
                     }
                 })
                 .await;
-                let Some(Op::Read { path }) = call.ops.into_iter().next() else {
+                let Some(Op::Read { path }) = call.into_parts().1.into_iter().next() else {
                     return Err(ToolError::InvalidParams("expected one Read op".into()));
                 };
                 let bytes = io.read(&path)?;

@@ -202,8 +202,8 @@ struct CanonicalCall {
 impl From<&PreparedCall> for CanonicalCall {
     fn from(call: &PreparedCall) -> Self {
         Self {
-            tool: call.tool.clone(),
-            operations: call.ops.iter().map(CanonicalOp::from).collect(),
+            tool: call.tool().to_owned(),
+            operations: call.ops().iter().map(CanonicalOp::from).collect(),
         }
     }
 }

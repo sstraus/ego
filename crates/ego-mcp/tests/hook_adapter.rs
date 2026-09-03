@@ -146,11 +146,16 @@ macro_rules! invoke_admitted_hook {
         let prepared = admitted_call(&wire, capture.stable_fingerprint());
         assert!(
             prepared
-                .ops
+                .ops()
                 .iter()
                 .any(|op| matches!(op, Op::Opaque { .. }))
         );
-        assert!(prepared.ops.iter().any(|op| matches!(op, Op::Spawn { .. })));
+        assert!(
+            prepared
+                .ops()
+                .iter()
+                .any(|op| matches!(op, Op::Spawn { .. }))
+        );
         let authorized = authorize(prepared.clone());
         let fs = ego_core::permit::fake::FakeFs::default();
         let process = HookProcess;

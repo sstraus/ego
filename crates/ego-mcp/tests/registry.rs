@@ -10,7 +10,7 @@ use ego_core::config::{
 };
 use ego_core::config::{McpHttpAuth, McpServerConfig, McpServerName};
 use ego_core::mcp::ToolExecution;
-use ego_core::permit::{PreparedCall, ToolError};
+use ego_core::permit::{CanonPath, Op, PreparedCall, ToolError};
 use ego_core::turn::{McpRegistryEvent, McpRegistryJournal, McpRegistryJournalError};
 use ego_mcp::{
     McpAdmittedCandidate, McpCandidateAdmission, McpCandidateError, McpCandidateInventory,
@@ -229,7 +229,12 @@ impl McpOperationFactory for CountingFactory {
         _admission: Arc<McpServerAdmission>,
         _operation: McpOperation,
     ) -> Result<PreparedCall, ToolError> {
-        Ok(PreparedCall::new("counted", Vec::new()))
+        Ok(PreparedCall::new(
+            "counted",
+            Op::Read {
+                path: CanonPath::new("/fixture"),
+            },
+        ))
     }
 
     fn execute<'a, 'io>(

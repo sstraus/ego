@@ -245,10 +245,10 @@ impl TypedTool for FakeWriteTool {
         let resolved = ctx.resolver.canonicalize(Path::new(&params.path))?;
         Ok(PreparedCall::new(
             self.name(),
-            vec![Op::Write {
+            Op::Write {
                 path: resolved,
                 change: Change::Whole(params.contents.into_bytes()),
-            }],
+            },
         ))
     }
 
@@ -261,10 +261,11 @@ impl TypedTool for FakeWriteTool {
         'io: 'a,
     {
         Box::pin(async move {
+            let (_, ops) = call.into_parts();
             let Some(Op::Write {
                 path,
                 change: Change::Whole(contents),
-            }) = call.ops.into_iter().next()
+            }) = ops.into_iter().next()
             else {
                 return Err(ToolError::InvalidParams(
                     "expected one whole Write op".into(),

@@ -69,7 +69,7 @@ fn protocol_envelope_refuses_semantic_or_byte_authority_mismatch_before_send() {
     )
     .expect("semantic preparation");
     assert!(matches!(
-        call.ops.as_slice(),
+        call.ops(),
         [Op::Opaque { .. }, Op::ProtocolConnect { .. }]
     ));
     let allowed = PolicyEngine::new(
@@ -99,7 +99,7 @@ fn protocol_envelope_refuses_semantic_or_byte_authority_mismatch_before_send() {
     )
     .expect("semantic preparation");
     assert!(matches!(
-        mismatch.ops.as_slice(),
+        mismatch.ops(),
         [Op::Opaque { .. }, Op::ProtocolConnect { .. }]
     ));
     assert!(matches!(
@@ -125,7 +125,7 @@ fn collapsed_dispatch_ops_need_outer_inner_and_network_rules() {
             .expect("request"),
     );
     assert!(matches!(
-        call.ops.as_slice(),
+        call.ops(),
         [Op::Opaque { .. }, Op::Opaque { .. }, Op::Connect { .. }]
     ));
     assert!(matches!(
@@ -177,7 +177,7 @@ fn collapsed_protocol_subject_keeps_exact_call_tool_identity() {
     )
     .expect("semantic preparation");
     assert!(matches!(
-        call.ops.as_slice(),
+        call.ops(),
         [
             Op::Opaque { .. },
             Op::Opaque { .. },

@@ -284,10 +284,35 @@ impl SecretEgressAuthority {
 }
 
 /// A tool call reduced to its canonical operations by `Tool::prepare`.
+///
+/// An empty prepared call is not a meaningful policy subject and callers must
+/// not be able to mutate the operation list after preparation:
+///
+/// ```compile_fail
+/// use ego_core::permit::PreparedCall;
+///
+/// let _empty = PreparedCall::new("empty", Vec::new());
+/// ```
+///
+/// ```compile_fail
+/// use ego_core::event::hook::HookId;
+/// use ego_core::permit::{HttpRequest, HttpRoute, HttpScheme, NetworkTarget, PreparedCall};
+///
+/// let target = NetworkTarget::new("example.com", 443).unwrap();
+/// let route = HttpRoute::new(HttpScheme::Https, target).unwrap();
+/// let request = HttpRequest::get("/health").unwrap();
+/// let mut call = PreparedCall::hook_http(
+///     HookId::parse(&format!("h1:{}", "00".repeat(32))).unwrap(),
+///     route,
+///     &request,
+///     Vec::new(),
+/// );
+/// call.ops.clear();
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreparedCall {
-    pub tool: String,
-    pub ops: Vec<Op>,
+    tool: String,
+    ops: Vec<Op>,
     mcp: Option<Box<McpPreparedEnvelope>>,
     hook_http: Option<Box<HookHttpPreparedEnvelope>>,
 }
@@ -356,13 +381,30 @@ impl McpPreparedEnvelope {
 }
 
 impl PreparedCall {
-    pub fn new(tool: impl Into<String>, ops: Vec<Op>) -> Self {
+    pub fn new(tool: impl Into<String>, first: Op) -> Self {
         Self {
             tool: tool.into(),
-            ops,
+            ops: vec![first],
             mcp: None,
             hook_http: None,
         }
+    }
+
+    pub fn with_op(mut self, additional: Op) -> Self {
+        self.ops.push(additional);
+        self
+    }
+
+    pub fn tool(&self) -> &str {
+        &self.tool
+    }
+
+    pub fn ops(&self) -> &[Op] {
+        &self.ops
+    }
+
+    pub fn into_parts(self) -> (String, Vec<Op>) {
+        (self.tool, self.ops)
     }
 
     #[allow(clippy::too_many_arguments)]

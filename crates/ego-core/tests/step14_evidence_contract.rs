@@ -169,9 +169,9 @@ fn read_evidence_authority_covers_the_exact_reference_and_offset_only() {
     let policy = PolicyEngine::new(root, ego_core::config::Mode::Plan, Default::default());
     let call = ego_core::permit::PreparedCall::new(
         "read_tool_result",
-        vec![Op::ReadEvidence {
+        Op::ReadEvidence {
             request: admitted.clone(),
-        }],
+        },
     );
 
     let Classification::Settled(Ok(authorized)) = policy.classify(call) else {
@@ -179,7 +179,7 @@ fn read_evidence_authority_covers_the_exact_reference_and_offset_only() {
     };
     assert_eq!(authorized.by(), &Authority::SessionEvidence);
     assert_eq!(
-        authorized.call().ops[0],
+        authorized.call().ops()[0],
         Op::ReadEvidence {
             request: admitted.clone(),
         }

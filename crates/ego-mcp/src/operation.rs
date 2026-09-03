@@ -897,7 +897,7 @@ async fn execute_stdio(
         .ok_or_else(|| authority("selected MCP call has no protocol envelope"))?;
     let server = server_name(envelope.subject().server())?;
     let spec = call
-        .ops
+        .ops()
         .iter()
         .find_map(|op| match op {
             ego_core::permit::Op::Spawn { spec } => Some(spec),
@@ -1028,7 +1028,7 @@ async fn execute_stdio_hook(
         .ok_or_else(|| authority("selected MCP hook has no protocol envelope"))?;
     let server = server_name(envelope.subject().server())?;
     let spec = call
-        .ops
+        .ops()
         .iter()
         .find_map(|op| match op {
             ego_core::permit::Op::Spawn { spec } => Some(spec),

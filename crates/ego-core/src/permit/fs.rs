@@ -437,7 +437,7 @@ impl<'effects, 'resume> GuardedEffects<'effects, GuardedMcpResume<'resume>> {
             );
             let mut saw_connect = false;
             let mut saw_secret = envelope.secret().is_none();
-            for op in &call.ops {
+            for op in call.ops() {
                 match op {
                     Op::Connect {
                         target,
@@ -750,7 +750,7 @@ impl ForeignClaim {
         let mut connect = None;
         let mut protocol_target = None;
         let mut spawn = None;
-        for op in &call.ops {
+        for op in call.ops() {
             match op {
                 Op::Opaque {
                     tool,

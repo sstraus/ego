@@ -47,10 +47,10 @@ impl TypedTool for GlobTool {
         compile(&params.pattern)?;
         Ok(PreparedCall::new(
             self.name(),
-            vec![Op::List {
+            Op::List {
                 root: root_of(ctx, params.path.as_ref())?,
                 pattern: params.pattern,
-            }],
+            },
         ))
     }
 

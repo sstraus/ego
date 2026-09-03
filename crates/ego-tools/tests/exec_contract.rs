@@ -532,7 +532,7 @@ fn exec_tool_preparation_policy_authorization_and_guarded_execution_preserve_ide
     let expected_call = call.clone();
     let Op::Spawn {
         spec: prepared_spec,
-    } = &call.ops[0]
+    } = &call.ops()[0]
     else {
         panic!("ExecTool must prepare exactly one Spawn operation");
     };
@@ -544,8 +544,8 @@ fn exec_tool_preparation_policy_authorization_and_guarded_execution_preserve_ide
         panic!("the exact prepared exec must be authorized by its rule");
     };
     assert_eq!(authorized.call(), &expected_call);
-    assert_eq!(authorized.call().tool, "exec");
-    assert_eq!(authorized.call().ops.len(), 1);
+    assert_eq!(authorized.call().tool(), "exec");
+    assert_eq!(authorized.call().ops().len(), 1);
     assert!(format!("{:?}", authorized.call()).contains("composite literal * ; $(false)"));
     let result = block_on(tools.execute(tool.as_ref(), authorized, None)).unwrap();
     let debug = format!("{result:?}");

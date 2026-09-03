@@ -167,9 +167,9 @@ fn read_tool_result_is_an_intrinsic_exact_session_capability() {
     let request = evidence_request('a', 128, 64);
     let call = PreparedCall::new(
         "read_tool_result",
-        vec![Op::ReadEvidence {
+        Op::ReadEvidence {
             request: request.clone(),
-        }],
+        },
     );
     let policy = PolicyEngine::new(
         workspace(),
@@ -189,12 +189,12 @@ fn read_tool_result_is_an_intrinsic_exact_session_capability() {
     };
     assert_eq!(authorized.by(), &Authority::SessionEvidence);
     assert_eq!(
-        authorized.call().ops,
+        authorized.call().ops(),
         vec![Op::ReadEvidence {
             request: request.clone(),
         }]
     );
-    assert_eq!(authorized.call().ops.len(), 1);
+    assert_eq!(authorized.call().ops().len(), 1);
     assert!(authorized.permit().allows_evidence(&request).is_ok());
     assert!(
         authorized
@@ -203,10 +203,8 @@ fn read_tool_result_is_an_intrinsic_exact_session_capability() {
             .is_err()
     );
 
-    let combined = PreparedCall::new(
-        "read_tool_result",
-        vec![Op::ReadEvidence { request }, Op::Read { path: workspace() }],
-    );
+    let combined = PreparedCall::new("read_tool_result", Op::ReadEvidence { request })
+        .with_op(Op::Read { path: workspace() });
     assert!(matches!(
         policy.classify(combined),
         Classification::Settled(Err(PolicyDenied::EvidenceMustStandAlone { .. }))

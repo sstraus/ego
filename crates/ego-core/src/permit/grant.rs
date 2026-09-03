@@ -130,9 +130,9 @@ struct Sealed(());
 ///     Mode::Default,
 ///     Ruleset::from_layer(PermCfg { judge: None, allow, deny: Vec::new() }, Source::Project),
 /// );
-/// let call = PreparedCall::new("read", vec![Op::Read {
+/// let call = PreparedCall::new("read", Op::Read {
 ///     path: CanonPath::new("/ws/a.rs"),
-/// }]);
+/// });
 /// let Classification::Settled(Ok(granted)) = engine.classify(call)
 ///     else { panic!("an allow rule covers this read") };
 /// let _scope = &granted.permit().scope;
@@ -151,9 +151,9 @@ struct Sealed(());
 ///     Mode::Default,
 ///     Ruleset::from_layer(PermCfg { judge: None, allow, deny: Vec::new() }, Source::Project),
 /// );
-/// let call = PreparedCall::new("read", vec![Op::Read {
+/// let call = PreparedCall::new("read", Op::Read {
 ///     path: CanonPath::new("/ws/a.rs"),
-/// }]);
+/// });
 /// let Classification::Settled(Ok(granted)) = engine.classify(call)
 ///     else { panic!("an allow rule covers this read") };
 /// let _permit = granted.permit();
@@ -397,9 +397,9 @@ impl Permit {
 ///     Mode::Default,
 ///     Ruleset::from_layer(PermCfg { judge: None, allow, deny: Vec::new() }, Source::Project),
 /// );
-/// let call = PreparedCall::new("read", vec![Op::Read {
+/// let call = PreparedCall::new("read", Op::Read {
 ///     path: CanonPath::new("/ws/a.rs"),
-/// }]);
+/// });
 /// let Classification::Settled(Ok(granted)) = engine.classify(call)
 ///     else { panic!("an allow rule covers this read") };
 /// let _stolen = &granted.permit;
@@ -418,9 +418,9 @@ impl Permit {
 ///     Mode::Default,
 ///     Ruleset::from_layer(PermCfg { judge: None, allow, deny: Vec::new() }, Source::Project),
 /// );
-/// let call = PreparedCall::new("read", vec![Op::Read {
+/// let call = PreparedCall::new("read", Op::Read {
 ///     path: CanonPath::new("/ws/a.rs"),
-/// }]);
+/// });
 /// let Classification::Settled(Ok(granted)) = engine.classify(call)
 ///     else { panic!("an allow rule covers this read") };
 /// let _borrowed = granted.permit();
@@ -446,9 +446,9 @@ impl Permit {
 ///     Ruleset::from_layer(PermCfg { judge: None, allow, deny: Vec::new() }, Source::Project),
 /// );
 /// let split = |path: &str| {
-///     let call = PreparedCall::new("read", vec![Op::Read {
+///     let call = PreparedCall::new("read", Op::Read {
 ///         path: CanonPath::new(path),
-///     }]);
+///     });
 ///     let Classification::Settled(Ok(granted)) = engine.classify(call)
 ///         else { panic!("an allow rule covers this read") };
 ///     granted.into_parts()
@@ -473,9 +473,9 @@ impl Permit {
 ///     Ruleset::from_layer(PermCfg { judge: None, allow, deny: Vec::new() }, Source::Project),
 /// );
 /// let split = |path: &str| {
-///     let call = PreparedCall::new("read", vec![Op::Read {
+///     let call = PreparedCall::new("read", Op::Read {
 ///         path: CanonPath::new(path),
-///     }]);
+///     });
 ///     let Classification::Settled(Ok(granted)) = engine.classify(call)
 ///         else { panic!("an allow rule covers this read") };
 ///     granted.into_parts()
@@ -1351,7 +1351,7 @@ impl PolicyEngine {
     /// authorise the whole call, boundary included. A refusal anywhere refuses
     /// the call.
     pub fn classify(&self, call: PreparedCall) -> Classification {
-        if matches!(call.ops.as_slice(), [Op::ReadEvidence { .. }]) {
+        if matches!(call.ops(), [Op::ReadEvidence { .. }]) {
             let permit = self.mint(scope_of(&call));
             return Classification::Settled(Ok(Authorized {
                 call,
@@ -1360,15 +1360,15 @@ impl PolicyEngine {
             }));
         }
         if call
-            .ops
+            .ops()
             .iter()
             .any(|op| matches!(op, Op::ReadEvidence { .. }))
         {
             return Classification::Settled(Err(PolicyDenied::EvidenceMustStandAlone {
-                tool: call.tool,
+                tool: call.into_parts().0,
             }));
         }
-        for op in &call.ops {
+        for op in call.ops() {
             if let Err(denied) = self.judge(&call, op) {
                 return Classification::Settled(Err(*denied));
             }
@@ -1380,7 +1380,7 @@ impl PolicyEngine {
         // gets one authority, because `judge` stops at the first deny.
         let mut rules: Vec<RuleAuthority> = Vec::new();
         let mut yolo_authorized_secret_egress = false;
-        for op in &call.ops {
+        for op in call.ops() {
             let Some(entry) = self.matching(&self.allow, op) else {
                 if self.mode == Mode::Yolo && matches!(op, Op::SecretEgress { .. }) {
                     yolo_authorized_secret_egress = true;
@@ -1433,9 +1433,11 @@ impl PolicyEngine {
                 let permit = self.mint(scope_of(&call));
                 Resolution::Settled(Ok(Authorized { call, permit, by }))
             }
-            Verdict::Deny { by } => {
-                Resolution::Settled(Err(refused(pending.call.tool, &pending.ask.why, by)))
-            }
+            Verdict::Deny { by } => Resolution::Settled(Err(refused(
+                pending.call.into_parts().0,
+                &pending.ask.why,
+                by,
+            ))),
             Verdict::Escalate { why } => Resolution::Ask(self.pending(pending.call, why)),
         }
     }
@@ -1454,9 +1456,11 @@ impl PolicyEngine {
                 let permit = self.mint(scope_of(&call));
                 Resolution::Settled(Ok(Authorized { call, permit, by }))
             }
-            super::judge::JudgeOutcome::Deny { .. } => {
-                Resolution::Settled(Err(refused(pending.call.tool, &pending.ask.why, by)))
-            }
+            super::judge::JudgeOutcome::Deny { .. } => Resolution::Settled(Err(refused(
+                pending.call.into_parts().0,
+                &pending.ask.why,
+                by,
+            ))),
             super::judge::JudgeOutcome::Escalate { .. } => Resolution::Ask(pending),
         }
     }
@@ -1486,7 +1490,7 @@ impl PolicyEngine {
             PermissionDecision::Deny => Resolution::HumanSettled {
                 request,
                 result: Err(refused(
-                    pending.call.tool,
+                    pending.call.into_parts().0,
                     &pending.ask.why,
                     Authority::Party,
                 )),
@@ -1503,8 +1507,8 @@ impl PolicyEngine {
     fn pending(&self, call: PreparedCall, why: Escalation) -> Pending {
         Pending {
             ask: PermissionRequest {
-                tool: call.tool.clone(),
-                ops: call.ops.clone(),
+                tool: call.tool().to_owned(),
+                ops: call.ops().to_vec(),
                 why,
             },
             call,
@@ -1525,7 +1529,7 @@ impl PolicyEngine {
             && !path.is_or_under(&self.workspace)
         {
             return Err(Box::new(PolicyDenied::OutsideWorkspace {
-                tool: call.tool.clone(),
+                tool: call.tool().to_owned(),
                 op: op.name(),
                 path: path.clone(),
             }));
@@ -1536,7 +1540,7 @@ impl PolicyEngine {
             let (from, also) = entry.attribution();
             return Err(Box::new(match path {
                 Some(path) => PolicyDenied::Denied {
-                    tool: call.tool.clone(),
+                    tool: call.tool().to_owned(),
                     op: op.name(),
                     path: path.clone(),
                     by: entry.rule().id(),
@@ -1544,7 +1548,7 @@ impl PolicyEngine {
                     also,
                 },
                 None => PolicyDenied::DeniedSubject {
-                    tool: call.tool.clone(),
+                    tool: call.tool().to_owned(),
                     op: op.name(),
                     subject: op.subject(&self.workspace),
                     by: entry.rule().id(),
@@ -1560,13 +1564,13 @@ impl PolicyEngine {
         if self.mode == Mode::Plan && op.mutates() {
             return Err(Box::new(match path {
                 Some(path) => PolicyDenied::ModeForbids {
-                    tool: call.tool.clone(),
+                    tool: call.tool().to_owned(),
                     mode: self.mode,
                     op: op.name(),
                     path: path.clone(),
                 },
                 None => PolicyDenied::ModeForbidsSubject {
-                    tool: call.tool.clone(),
+                    tool: call.tool().to_owned(),
                     mode: self.mode,
                     op: op.name(),
                     subject: op.subject(&self.workspace),
@@ -1645,7 +1649,7 @@ fn refused(tool: String, why: &Escalation, by: Authority) -> PolicyDenied {
 /// judged against this same narrow list.
 fn scope_of(call: &PreparedCall) -> Scope {
     let mut scope = Scope::default();
-    for op in &call.ops {
+    for op in call.ops() {
         // Each op widens only its own authority. A call that lists a
         // directory gets `list_paths` and no `read_paths`, so the tool learns
         // names and cannot then read what it found — the whole reason these
@@ -1883,10 +1887,10 @@ mod tests {
     fn write_call(path: &str) -> PreparedCall {
         PreparedCall::new(
             "edit",
-            vec![Op::Write {
+            Op::Write {
                 path: CanonPath::new(path),
                 change: Change::Whole(b"whatever".to_vec()),
-            }],
+            },
         )
     }
 
@@ -2091,7 +2095,7 @@ mod tests {
             .prepare(json!({ "path": "/ws/link", "contents": "hi" }), &ctx)
             .expect("prepare chases the symlink");
         assert_eq!(
-            call.ops,
+            call.ops(),
             vec![Op::Write {
                 path: CanonPath::new("/ws/allowed/file.txt"),
                 change: Change::Whole(b"hi".to_vec()),

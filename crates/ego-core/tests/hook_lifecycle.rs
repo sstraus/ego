@@ -450,7 +450,7 @@ impl Tool for FailingExecTool {
         .expect("valid test process");
         Ok(PreparedCall::new(
             self.descriptor().name,
-            vec![Op::Spawn { spec }],
+            Op::Spawn { spec },
         ))
     }
 
@@ -463,7 +463,7 @@ impl Tool for FailingExecTool {
         'io: 'a,
     {
         Box::pin(async move {
-            let Some(Op::Spawn { spec }) = call.ops.into_iter().next() else {
+            let Some(Op::Spawn { spec }) = call.into_parts().1.into_iter().next() else {
                 return Err(ToolError::InvalidParams("expected one Spawn op".to_owned()));
             };
             io.exec(&spec)

@@ -37,10 +37,7 @@ impl TypedTool for ReadToolResult {
         _ctx: &PrepareCtx<'_>,
     ) -> Result<PreparedCall, ToolError> {
         let request = EvidenceRead::new(params.reference, params.offset)?;
-        Ok(PreparedCall::new(
-            self.name(),
-            vec![Op::ReadEvidence { request }],
-        ))
+        Ok(PreparedCall::new(self.name(), Op::ReadEvidence { request }))
     }
 
     fn execute<'a, 'io>(

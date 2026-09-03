@@ -188,7 +188,7 @@ impl RuleManagement {
 
     pub fn explain(call: &PreparedCall, rules: &Ruleset, workspace: &Path) -> RuleExplanation {
         let operations = call
-            .ops
+            .ops()
             .iter()
             .enumerate()
             .map(|(index, op)| ExplainedOperation {
@@ -198,7 +198,7 @@ impl RuleManagement {
             })
             .collect();
 
-        for (operation, op) in call.ops.iter().enumerate() {
+        for (operation, op) in call.ops().iter().enumerate() {
             if let Some(entry) = rules
                 .deny
                 .iter()
@@ -219,7 +219,7 @@ impl RuleManagement {
 
         let mut authorities = Vec::new();
         let mut uncovered = Vec::new();
-        for (operation, op) in call.ops.iter().enumerate() {
+        for (operation, op) in call.ops().iter().enumerate() {
             match rules
                 .allow
                 .iter()
@@ -254,7 +254,7 @@ impl RuleManagement {
         let mut candidate_operations = Vec::new();
         let mut omitted = Vec::new();
         let mut omitted_operations = Vec::new();
-        for (operation, op) in call.ops.iter().enumerate() {
+        for (operation, op) in call.ops().iter().enumerate() {
             let (candidate, dimensions) = Self::remember_op(op, effect, workspace)?;
             if !candidates.contains(&candidate) {
                 candidates.push(candidate);

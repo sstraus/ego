@@ -178,7 +178,7 @@ fn read_tool_result_prepares_exact_reference_and_session_authority() {
         .prepare("read_tool_result", &request(&reference, 0))
         .expect("read_tool_result prepares");
     assert_eq!(
-        call.ops,
+        call.ops(),
         vec![Op::ReadEvidence {
             request: EvidenceRead::new(reference.clone(), 0).unwrap(),
         }]
@@ -187,7 +187,7 @@ fn read_tool_result_prepares_exact_reference_and_session_authority() {
         panic!("same-session evidence must settle intrinsically");
     };
     assert_eq!(
-        authorized.call().ops,
+        authorized.call().ops(),
         vec![Op::ReadEvidence {
             request: EvidenceRead::new(reference.clone(), 0).unwrap(),
         }]
@@ -344,7 +344,7 @@ fn read_tool_result_has_no_filesystem_or_rule_authority() {
         .prepare("read_tool_result", &request(&reference, 0))
         .expect("read_tool_result prepares without a filesystem path");
     assert_eq!(
-        call.ops,
+        call.ops(),
         vec![Op::ReadEvidence {
             request: EvidenceRead::new(reference.clone(), 0).unwrap(),
         }]
@@ -354,7 +354,7 @@ fn read_tool_result_has_no_filesystem_or_rule_authority() {
     };
     assert_eq!(authorized.by(), &Authority::SessionEvidence);
     assert_eq!(
-        authorized.call().ops,
+        authorized.call().ops(),
         vec![Op::ReadEvidence {
             request: EvidenceRead::new(reference, 0).unwrap(),
         }]

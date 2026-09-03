@@ -1516,10 +1516,10 @@ fn fixed_judge_request(
     let path = confinement.workspace().clone();
     let call = PreparedCall::new(
         "write",
-        vec![Op::Write {
+        Op::Write {
             path: path.clone(),
             change: Change::Whole(Vec::new()),
-        }],
+        },
     );
     let escalation = Escalation::ModeAsks {
         mode: Mode::Auto,

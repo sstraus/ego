@@ -122,7 +122,7 @@ impl<'a> CommandHookAdapter<'a> {
         let argv = command_argv(command, args.as_deref(), shell.as_deref())?;
         let spec = SpawnSpec::new(argv, None, None, EnvPolicy::Inherited)
             .map_err(|error| HookAdapterError::new(error.to_string()))?;
-        Ok(PreparedCall::new("hook_command", vec![Op::Spawn { spec }]))
+        Ok(PreparedCall::new("hook_command", Op::Spawn { spec }))
     }
 
     pub async fn invoke(
@@ -139,7 +139,7 @@ impl<'a> CommandHookAdapter<'a> {
         }
         let spec = self
             .prepared
-            .ops
+            .ops()
             .iter()
             .find_map(|op| match op {
                 Op::Spawn { spec } => Some(spec),

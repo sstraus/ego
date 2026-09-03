@@ -2410,7 +2410,7 @@ mod collapsed_mcp_red {
     use ego_core::config::{McpConfigProvenance, McpServerConfig, Source};
     use ego_core::generator::types::ToolDescriptor;
     use ego_core::mcp::ToolExecution;
-    use ego_core::permit::{GuardedIo, PreparedCall, ToolError};
+    use ego_core::permit::{CanonPath, GuardedIo, Op, PreparedCall, ToolError};
     use ego_core::turn::{McpRegistryEvent, McpRegistryJournal, McpRegistryJournalError};
 
     use super::*;
@@ -2477,7 +2477,12 @@ mod collapsed_mcp_red {
             _admission: Arc<McpServerAdmission>,
             _operation: crate::McpOperation,
         ) -> Result<PreparedCall, ToolError> {
-            Ok(PreparedCall::new("collapsed-test", Vec::new()))
+            Ok(PreparedCall::new(
+                "collapsed-test",
+                Op::Read {
+                    path: CanonPath::new("/fixture"),
+                },
+            ))
         }
 
         fn execute<'a, 'io>(

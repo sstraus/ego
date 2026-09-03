@@ -209,9 +209,9 @@ mod permit {
     fn read_call(path: &str) -> PreparedCall {
         PreparedCall::new(
             "read",
-            vec![Op::Read {
+            Op::Read {
                 path: CanonPath::new(path),
-            }],
+            },
         )
     }
 
@@ -250,10 +250,10 @@ mod permit {
     fn write_call(path: &str) -> PreparedCall {
         PreparedCall::new(
             "edit",
-            vec![Op::Write {
+            Op::Write {
                 path: CanonPath::new(path),
                 change: Change::Whole(b"pwned".to_vec()),
-            }],
+            },
         )
     }
 
@@ -302,7 +302,7 @@ mod permit {
                 path: CanonPath::new("/ws/src/main.rs"),
             }
         );
-        assert_eq!(pending.call().ops, write_call("/ws/src/main.rs").ops);
+        assert_eq!(pending.call().ops(), write_call("/ws/src/main.rs").ops());
     }
 
     #[test]
@@ -629,16 +629,14 @@ mod permit {
         let engine = engine(Mode::Yolo, &[], &[]);
         let call = PreparedCall::new(
             "write",
-            vec![
-                Op::Write {
-                    path: CanonPath::new("/ws/src/main.rs"),
-                    change: Change::Whole(b"harmless".to_vec()),
-                },
-                Op::Read {
-                    path: CanonPath::new("/etc/shadow"),
-                },
-            ],
-        );
+            Op::Write {
+                path: CanonPath::new("/ws/src/main.rs"),
+                change: Change::Whole(b"harmless".to_vec()),
+            },
+        )
+        .with_op(Op::Read {
+            path: CanonPath::new("/etc/shadow"),
+        });
 
         let Classification::Settled(Err(denied)) = engine.classify(call) else {
             panic!("the second op is outside the workspace, and yolo does not lift that");
@@ -686,12 +684,12 @@ mod permit {
             vec!["TOKEN".to_owned()],
         );
         let secret_op = hook_call
-            .ops
+            .ops()
             .iter()
             .find(|op| matches!(op, Op::SecretEgress { .. }))
             .cloned()
             .expect("hook preparation carries one SecretEgress operation");
-        let secret_call = PreparedCall::new("secret-egress", vec![secret_op]);
+        let secret_call = PreparedCall::new("secret-egress", secret_op);
         let yolo = engine(Mode::Yolo, &[], &[]);
         let secret = yolo
             .classify_settled(secret_call)
@@ -733,19 +731,17 @@ mod permit {
         let engine = engine(Mode::Default, &["read(**)"], &["read(secrets/**)"]);
         let call = PreparedCall::new(
             "read",
-            vec![
-                Op::Read {
-                    path: CanonPath::new("/ws/src/main.rs"),
-                },
-                Op::Read {
-                    path: CanonPath::new("/ws/secrets/prod.env"),
-                },
-                Op::Write {
-                    path: CanonPath::new("/ws/src/main.rs"),
-                    change: Change::Whole(b"pwned".to_vec()),
-                },
-            ],
-        );
+            Op::Read {
+                path: CanonPath::new("/ws/src/main.rs"),
+            },
+        )
+        .with_op(Op::Read {
+            path: CanonPath::new("/ws/secrets/prod.env"),
+        })
+        .with_op(Op::Write {
+            path: CanonPath::new("/ws/src/main.rs"),
+            change: Change::Whole(b"pwned".to_vec()),
+        });
         let denied = engine
             .classify_settled(call)
             .expect_err("op two is denied, and that ends the call");
@@ -864,15 +860,13 @@ mod permit {
         let engine = in_default_mode("/ws");
         let call = PreparedCall::new(
             "read",
-            vec![
-                Op::Read {
-                    path: CanonPath::new("/ws/fine.txt"),
-                },
-                Op::Read {
-                    path: CanonPath::new("/etc/shadow"),
-                },
-            ],
-        );
+            Op::Read {
+                path: CanonPath::new("/ws/fine.txt"),
+            },
+        )
+        .with_op(Op::Read {
+            path: CanonPath::new("/etc/shadow"),
+        });
         assert!(engine.classify_settled(call).is_err());
     }
 
@@ -883,20 +877,20 @@ mod permit {
     fn list_call(root: &str, pattern: &str) -> PreparedCall {
         PreparedCall::new(
             "glob",
-            vec![Op::List {
+            Op::List {
                 root: CanonPath::new(root),
                 pattern: pattern.to_string(),
-            }],
+            },
         )
     }
 
     fn search_call(root: &str, query: &str) -> PreparedCall {
         PreparedCall::new(
             "grep",
-            vec![Op::Search {
+            Op::Search {
                 root: CanonPath::new(root),
                 query: query.to_string(),
-            }],
+            },
         )
     }
 
@@ -1496,7 +1490,13 @@ mod permit {
     }
 
     fn check(engine: &PolicyEngine, ops: &[(Kind, &str)]) {
-        let call = PreparedCall::new("probe", ops.iter().map(|(k, p)| op_of(*k, p)).collect());
+        let mut operations = ops.iter().map(|(k, p)| op_of(*k, p));
+        let first = operations
+            .next()
+            .expect("generated probe call is non-empty");
+        let call = operations.fold(PreparedCall::new("probe", first), |call, op| {
+            call.with_op(op)
+        });
         let granted = engine
             .classify_settled(call)
             .expect("every generated call operates inside /ws, in a mode that admits it");

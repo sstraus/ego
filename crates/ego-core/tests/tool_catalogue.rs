@@ -131,7 +131,9 @@ impl TypedTool for TaggedTool {
     ) -> Result<ego_core::permit::PreparedCall, ToolError> {
         Ok(ego_core::permit::PreparedCall::new(
             self.label.clone(),
-            Vec::new(),
+            ego_core::permit::Op::Read {
+                path: ego_core::permit::CanonPath::new("/workspace/fixture"),
+            },
         ))
     }
 

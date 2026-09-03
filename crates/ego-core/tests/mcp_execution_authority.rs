@@ -102,7 +102,7 @@ fn semantic_mcp_preparation_orders_subjects_and_requires_guarded_protocol_claim(
     )
     .expect("semantic preparation");
     assert!(matches!(
-        call.ops.as_slice(),
+        call.ops(),
         [
             Op::Opaque { .. },
             Op::Opaque { .. },

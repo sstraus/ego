@@ -110,9 +110,9 @@ fn explain_denied_call_stops_at_first_deny_and_reports_only_that_authority() {
     let rules = system_rules(&["read(src/**)"], &["read(private/**)"]);
     let call = PreparedCall::new(
         "read",
-        vec![Op::Read {
+        Op::Read {
             path: CanonPath::new("/workspace/private/file.txt"),
-        }],
+        },
     );
     let explanation: RuleExplanation =
         RuleManagement::explain(&call, &rules, Path::new("/workspace"));
@@ -130,15 +130,13 @@ fn explain_without_deny_reports_first_allow_per_operation_and_uncovered_indices(
     let rules = system_rules(&["read(src/**)"], &[]);
     let call = PreparedCall::new(
         "read",
-        vec![
-            Op::Read {
-                path: CanonPath::new("/workspace/src/main.rs"),
-            },
-            Op::Read {
-                path: CanonPath::new("/workspace/other.txt"),
-            },
-        ],
-    );
+        Op::Read {
+            path: CanonPath::new("/workspace/src/main.rs"),
+        },
+    )
+    .with_op(Op::Read {
+        path: CanonPath::new("/workspace/other.txt"),
+    });
     let explanation = RuleManagement::explain(&call, &rules, Path::new("/workspace"));
     assert_eq!(explanation.outcome, RuleOutcome::Uncovered);
     assert_eq!(explanation.authorities.len(), 1);
@@ -151,19 +149,17 @@ fn explain_without_deny_reports_first_allow_per_operation_and_uncovered_indices(
 fn remember_deduplicates_rules_uses_absolute_paths_and_refuses_omitted_or_outside_ops() {
     let call = PreparedCall::new(
         "edit",
-        vec![
-            Op::Read {
-                path: CanonPath::new("/workspace/src/main.rs"),
-            },
-            Op::Write {
-                path: CanonPath::new("/workspace/src/main.rs"),
-                change: Change::Whole(b"updated".to_vec()),
-            },
-            Op::Read {
-                path: CanonPath::new("/workspace/src/main.rs"),
-            },
-        ],
-    );
+        Op::Read {
+            path: CanonPath::new("/workspace/src/main.rs"),
+        },
+    )
+    .with_op(Op::Write {
+        path: CanonPath::new("/workspace/src/main.rs"),
+        change: Change::Whole(b"updated".to_vec()),
+    })
+    .with_op(Op::Read {
+        path: CanonPath::new("/workspace/src/main.rs"),
+    });
     let plan =
         RuleManagement::remember(&call, ManagedRuleEffect::Allow, Path::new("/workspace")).unwrap();
     assert_eq!(plan.candidates.len(), 2);
@@ -171,9 +167,9 @@ fn remember_deduplicates_rules_uses_absolute_paths_and_refuses_omitted_or_outsid
     assert!(plan.omitted.contains(&OmittedDimension::Change));
     let outside = PreparedCall::new(
         "read",
-        vec![Op::Read {
+        Op::Read {
             path: CanonPath::new("/outside/secret.txt"),
-        }],
+        },
     );
     assert!(matches!(
         RuleManagement::remember(&outside, ManagedRuleEffect::Allow, Path::new("/workspace")),
@@ -190,10 +186,7 @@ fn remember_deduplicates_rules_uses_absolute_paths_and_refuses_omitted_or_outsid
         0,
     )
     .unwrap();
-    let evidence_call = PreparedCall::new(
-        "read_evidence",
-        vec![Op::ReadEvidence { request: evidence }],
-    );
+    let evidence_call = PreparedCall::new("read_evidence", Op::ReadEvidence { request: evidence });
     let target = NetworkTarget::new("example.com", 443).unwrap();
     let route = HttpRoute::new(HttpScheme::Https, target).unwrap();
     let request = HttpRequest::get("/secret").unwrap();
@@ -204,9 +197,9 @@ fn remember_deduplicates_rules_uses_absolute_paths_and_refuses_omitted_or_outsid
         vec!["TOKEN".to_owned()],
     );
     for op in [
-        &evidence_call.ops[0],
+        &evidence_call.ops()[0],
         secret_call
-            .ops
+            .ops()
             .iter()
             .find(|op| matches!(op, Op::SecretEgress { .. }))
             .unwrap(),

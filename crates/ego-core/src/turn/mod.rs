@@ -3665,7 +3665,7 @@ impl<'session, 'turn> TurnLoop<'session, 'turn> {
                             Ok(prepared) => prepared,
                             Err(error) => return Ok(answered(false, error)),
                         };
-                    let permission_selector = prepared.tool.clone();
+                    let permission_selector = prepared.tool().to_owned();
                     let authorized = match self.tools.authorize(prepared) {
                         Classification::Settled(Ok(authorized)) => {
                             self.decided(
@@ -3879,14 +3879,14 @@ impl<'session, 'turn> TurnLoop<'session, 'turn> {
                 HookEvent::tool(
                     HookLifecycle::PreToolUse,
                     HookSubject::Item { item: call.item },
-                    prepared.tool.clone(),
+                    prepared.tool().to_owned(),
                 ),
             )
             .await
         {
             return Ok(answered(false, "blocked by PreToolUse hook".to_owned()));
         }
-        let hook_selector = prepared.tool.clone();
+        let hook_selector = prepared.tool().to_owned();
         let authorized = loop {
             match self.tools.authorize(prepared) {
                 Classification::Settled(Ok(authorized)) => {

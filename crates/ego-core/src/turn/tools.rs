@@ -362,9 +362,9 @@ impl<'a> Tools<'a> {
         invocation.validate_resource_path(&target, &root)?;
         let prepared = PreparedCall::new(
             "skill_resource",
-            vec![Op::Read {
+            Op::Read {
                 path: target.clone(),
-            }],
+            },
         );
         Ok((logical, target, prepared))
     }
@@ -375,7 +375,7 @@ impl<'a> Tools<'a> {
         expected: &CanonPath,
     ) -> Result<Vec<u8>, String> {
         let (call, permit) = authorized.into_parts();
-        if call.ops.as_slice()
+        if call.ops()
             != [Op::Read {
                 path: expected.clone(),
             }]
