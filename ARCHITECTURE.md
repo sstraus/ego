@@ -21,7 +21,8 @@ State is a **reduction over an append-only event log** (pi's reducer,
 `docs/02-pi.md` §3, generalised):
 
 ```
-PromptQueued | PromptDeliveryExpedited | UserPrompt | AssistantDelta |
+SessionTitleChanged | SessionDeleted | PromptQueued |
+PromptDeliveryExpedited | UserPrompt | AssistantDelta |
 AssistantMessage | ReasoningDelta | ReasoningState | ToolCallStarted |
 ToolCallDelta | ToolCallCompleted | PermissionRequested | PermissionAmended |
 PermissionDecided | QuestionRequested | QuestionSettled | GenerationStarted |
@@ -33,16 +34,17 @@ SubagentSpawned | SubagentSettled | SkillCatalogueAdmitted |
 SkillInstructionAdmitted | SkillResourceAdmitted | Error
 ```
 
-Thirty-six in the current schema, and this list is exhaustive by contract.
+Thirty-eight in the current schema, and this list is exhaustive by contract.
 The current `EventKind` (`crates/ego-core/src/event/domain.rs`) implements all
-thirty-six, including the question, hook, subagent, skill, and clean-session
-compaction lifecycles.
+thirty-eight, including the session-metadata, question, hook, subagent, skill,
+and clean-session compaction lifecycles.
 The enum and this list are compared by hand at each milestone close.
-M5 extends the same event log for durable display-name and goal transitions;
-their accepted lifecycle, replay, fork, compaction, and projection semantics
-are fixed in
+regression case added the durable display-name and soft-delete transitions listed
+above. M5 further extends the same event log for durable goal transitions; the
+accepted lifecycle, replay, fork, compaction, and projection semantics are
+fixed in
 `docs/decisions/2026-09-03-session-metadata-and-goals-are-durable-state.md`.
-Those event kinds are not present until regression case lands and therefore are not
+Goal event kinds are not present until regression case lands and therefore are not
 included in the current exhaustive list above.
 
 - `SessionState::apply(&mut self, &Event)` is a **pure, sync** function.
