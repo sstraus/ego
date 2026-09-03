@@ -562,7 +562,7 @@ mod tests {
             body.get("messages").is_none(),
             "Codex must not use Chat Completions messages"
         );
-        assert!(unavailable_mapping("openai-codex").is_none());
+        assert!(selectable().contains(&"openai-codex".to_owned()));
     }
 
     /// The API-key candidate is still not runnable.
@@ -585,17 +585,14 @@ mod tests {
                 "{candidate} has no selectable current row: {ids:?}"
             );
         }
-        let candidate = "xai";
-        let refusal = unavailable_mapping(candidate).expect("the legacy id is actionable");
-        assert!(matches!(
-            &refusal,
-            ResolveError::ProviderMappingUnavailable { provider, mapping }
-                if provider == candidate && mapping.contains("xai-responses")
-        ));
-        assert!(
-            refusal.to_string().contains("xai-oauth"),
-            "the refusal must name the selectable current alternative: {refusal}"
-        );
+        let catalogue = Catalogue::new(rows(&Default::default()).unwrap());
+        for candidate in ["xai", "gemini"] {
+            assert!(matches!(
+                catalogue.row(candidate),
+                Err(ResolveError::UnknownProvider { provider, .. }) if provider == candidate
+            ));
+        }
+        assert!(catalogue.row("xai-oauth").is_ok());
     }
 
     /// The exact selectable set. Any accidental promotion or omission fails

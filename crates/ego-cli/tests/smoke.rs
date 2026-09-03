@@ -61,7 +61,9 @@ use ego_core::generator::capabilities::{
 };
 use ego_core::generator::port::{AiEvent, Generator};
 use ego_core::generator::types::{GenRequest, StopReason};
-use ego_core::permit::{CanonPath, Confinement, OneHopResponse, RunConfinement, TransportError};
+use ego_core::permit::{
+    CanonPath, Confinement, HttpHeader, OneHopResponse, RunConfinement, TransportError,
+};
 use ego_core::turn::CancelToken;
 use ego_tools::exec::{ExecLimits, ExecRunConfig, HttpCallTimeout, RunEffectPorts};
 use ego_tools::http::SystemResolver;
@@ -173,8 +175,11 @@ fn built(
         .unwrap_or_else(|err| panic!("{} was asked for by name: {err}", row.id()));
     let mut headers = credential.headers();
     for (name, value) in &row.extra_headers {
-        headers.retain(|(present, _)| !present.eq_ignore_ascii_case(name));
-        headers.push((name.clone(), value.clone()));
+        headers.retain(|existing| !existing.name().eq_ignore_ascii_case(name));
+        headers.push(
+            HttpHeader::new(name, value.as_bytes().to_vec())
+                .expect("row extra headers are validated public profile headers"),
+        );
     }
     let target = RequestTarget::new(credential.base_override().unwrap_or(row.base()), &headers);
     wire.build_request(&target, req)

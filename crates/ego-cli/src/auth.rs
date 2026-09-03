@@ -1650,8 +1650,10 @@ mod tests {
             .resolve(credentials.as_ref())
             .unwrap();
 
-        assert!(credential.headers().iter().any(|(name, value)| {
-            name.eq_ignore_ascii_case("authorization") && value == "Bearer login-access"
+        assert!(credential.headers().iter().any(|header| {
+            header.name().eq_ignore_ascii_case("authorization")
+                && header.value() == b"Bearer login-access"
+                && header.is_secret()
         }));
     }
 
@@ -1693,17 +1695,23 @@ mod tests {
             .resolve(credentials.as_ref())
             .unwrap();
 
-        assert!(credential.headers().iter().any(|(name, value)| {
-            name.eq_ignore_ascii_case("authorization") && value == "Bearer refreshed-access"
+        assert!(credential.headers().iter().any(|header| {
+            header.name().eq_ignore_ascii_case("authorization")
+                && header.value() == b"Bearer refreshed-access"
+                && header.is_secret()
         }));
-        assert_eq!(
-            store.read().unwrap().get("nous").unwrap(),
-            &AuthEntry::OAuth {
-                access: StoredSecret::from("refreshed-access"),
-                refresh: Some(StoredSecret::from("refreshed-refresh")),
-                expires: Some(4_102_444_800_000),
+        match store.read().unwrap().get("nous").unwrap() {
+            AuthEntry::OAuth {
+                access,
+                refresh: Some(refresh),
+                expires,
+            } => {
+                assert_eq!(access.expose_secret_bytes(), b"refreshed-access");
+                assert_eq!(refresh.expose_secret_bytes(), b"refreshed-refresh");
+                assert_eq!(*expires, Some(4_102_444_800_000));
             }
-        );
+            other => panic!("unexpected auth entry kind: {}", other.kind()),
+        }
     }
 
     #[test]
@@ -1812,12 +1820,12 @@ mod tests {
     fn invalid_grant_removes_dead_state_but_429_preserves_retryable_state() {
         let root = tempfile::tempdir().unwrap();
         let store = AuthStore::new(root.path());
-        let entry = AuthEntry::OAuth {
+        let first_entry = AuthEntry::OAuth {
             access: StoredSecret::from("access"),
             refresh: Some(StoredSecret::from("refresh")),
             expires: Some(1),
         };
-        store.put("openai-codex", entry.clone()).unwrap();
+        store.put("openai-codex", first_entry).unwrap();
 
         let invalid = FlowError::ReloginRequired {
             provider: "openai-codex".to_string(),
@@ -1827,7 +1835,16 @@ mod tests {
         assert!(matches!(err, AuthError::ReloginRequired { .. }));
         assert!(!store.read().unwrap().contains_key("openai-codex"));
 
-        store.put("openai-codex", entry).unwrap();
+        store
+            .put(
+                "openai-codex",
+                AuthEntry::OAuth {
+                    access: StoredSecret::from("access"),
+                    refresh: Some(StoredSecret::from("refresh")),
+                    expires: Some(1),
+                },
+            )
+            .unwrap();
         let limited = FlowError::Temporary {
             provider: "openai-codex".to_string(),
             status: 429,
