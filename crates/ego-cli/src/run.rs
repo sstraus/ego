@@ -2708,6 +2708,7 @@ async fn drive_headless_turn(
         .map_err(|error| RunTermination::Failed {
             message: error.to_string(),
         })?;
+    drop(skill_owner);
     let session_end = dispatch_session_hook(
         &hooks.runtime,
         active.id(),
