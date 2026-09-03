@@ -10,19 +10,13 @@
 //! is a second arm, written by whoever adds it, in a crate that should not
 //! have needed touching.
 //!
-//! # Three producers, and the third is not a third kind of answer
+//! # Two sources of model facts
 //!
 //! [`Supplied`] reads what an operator wrote down; [`OllamaDaemon`] asks the
 //! daemon. `2026-08-21-what-a-model-resolves-to.md` is the argument for why
 //! those are genuinely different kinds of answer rather than two paths to one:
 //! a hosted model's ceilings and prices are facts nobody can discover, and a
 //! local model's are facts nobody can write down.
-//!
-//! [`XaiLanguageModels`] is the ADR's third, and it is a *composition* rather
-//! than a rival: capabilities from [`Supplied`], price from the provider. That
-//! it composes is the evidence the split above was drawn in the right place —
-//! xAI is a counter-example to "a hosted model's price cannot be discovered"
-//! and to nothing else, so it borrows the half that still holds.
 //!
 //! # A name, or the thing itself
 //!
@@ -181,7 +175,14 @@ impl ModelResolver for Supplied {
         // Ready rather than an `async` block: this opens nothing and waits for
         // nothing, and a future that is already done says so.
         Box::pin(std::future::ready(
-            at.catalogue.resolve_hosted(at.slug, self.wire),
+            at.catalogue
+                .resolve_hosted(at.slug, self.wire)
+                .map(|mut resolved| {
+                    if let Some(cost) = &at.row.cost {
+                        resolved.metering = crate::catalogue::provider_reported(cost.as_ref());
+                    }
+                    resolved
+                }),
         ))
     }
 
@@ -311,57 +312,5 @@ impl ModelResolver for KimiManaged {
             ))));
         };
         Box::pin(crate::kimi::enumerate(at.row, at.http, credential))
-    }
-}
-
-/// Capabilities from what was supplied, price from xAI's own table.
-///
-/// `crate::xai` is the argument: xAI publishes `GET /v1/language-models` **per
-/// authenticating key**, which makes a price here the invoicing party's own
-/// figure rather than a rate this repository copied and hopes is current.
-/// `2026-08-21-what-a-model-resolves-to.md` §1 refuses to trust a price this
-/// build cannot verify, and asking is a better answer to that than refusing.
-///
-/// The two halves run in that order, and it is not cosmetic: a slug with no
-/// supplied capabilities fails here, before a request is sent.
-#[derive(Debug)]
-pub struct XaiLanguageModels {
-    wire: &'static dyn WireFormat,
-}
-
-impl XaiLanguageModels {
-    pub const fn new(wire: &'static dyn WireFormat) -> Self {
-        Self { wire }
-    }
-}
-
-impl ModelResolver for XaiLanguageModels {
-    fn supplied_request_mapping(
-        &self,
-        at: &StaticResolution<'_>,
-    ) -> Result<Option<StaticRequestProfile>, ResolveError> {
-        at.catalogue
-            .static_request_profile_with_mapping(at.slug, self.wire)
-            .map(Some)
-    }
-
-    fn resolve<'a>(
-        &'a self,
-        at: &'a Resolution<'a>,
-    ) -> BoxFuture<'a, Result<ResolvedModel, ResolveError>> {
-        Box::pin(async move {
-            let supplied = at.catalogue.resolve_hosted(at.slug, self.wire)?;
-            crate::xai::price(supplied, at.http, at.credential).await
-        })
-    }
-
-    fn enumerate<'a>(
-        &'a self,
-        at: &'a Enumeration<'a>,
-    ) -> BoxFuture<'a, Result<ModelDiscoveryReport, String>> {
-        Box::pin(std::future::ready(
-            at.catalogue
-                .enumerate_hosted(at.row.id(), Some(MeteringKind::Currency)),
-        ))
     }
 }

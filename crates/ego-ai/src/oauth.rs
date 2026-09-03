@@ -14,7 +14,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use url::Url;
 
-use crate::http::{AdmittedHttpProfile, Http, HttpRequest, Method};
+use crate::http::{AdmittedHttpProfile, Http, HttpRequest, Method, bearer_header, public_header};
 
 const CODEX_CLIENT: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const ANTHROPIC_CLIENT: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
@@ -442,24 +442,12 @@ impl BuiltInFlow {
             url: parse("https://api.github.com/copilot_internal/v2/token")?,
             method: Method::Get,
             headers: vec![
-                ("accept".to_string(), "application/json".to_string()),
-                (
-                    "authorization".to_string(),
-                    format!("Bearer {github_token}"),
-                ),
-                (
-                    "user-agent".to_string(),
-                    "GitHubCopilotChat/0.35.0".to_string(),
-                ),
-                ("editor-version".to_string(), "vscode/1.107.0".to_string()),
-                (
-                    "editor-plugin-version".to_string(),
-                    "copilot-chat/0.35.0".to_string(),
-                ),
-                (
-                    "copilot-integration-id".to_string(),
-                    "vscode-chat".to_string(),
-                ),
+                public_header("accept", b"application/json".to_vec()),
+                bearer_header(github_token.as_bytes()),
+                public_header("user-agent", b"GitHubCopilotChat/0.35.0".to_vec()),
+                public_header("editor-version", b"vscode/1.107.0".to_vec()),
+                public_header("editor-plugin-version", b"copilot-chat/0.35.0".to_vec()),
+                public_header("copilot-integration-id", b"vscode-chat".to_vec()),
             ],
             body: None,
         })
@@ -908,7 +896,7 @@ impl fmt::Display for FlowError {
 impl std::error::Error for FlowError {}
 
 pub enum ProviderAuth {
-    Headers(Vec<(String, String)>),
+    Headers(Vec<ego_core::permit::HttpHeader>),
 }
 
 impl fmt::Debug for ProviderAuth {
@@ -916,14 +904,19 @@ impl fmt::Debug for ProviderAuth {
         match self {
             Self::Headers(headers) => f
                 .debug_tuple("Headers")
-                .field(&headers.iter().map(|(name, _)| name).collect::<Vec<_>>())
+                .field(
+                    &headers
+                        .iter()
+                        .map(|header| header.name())
+                        .collect::<Vec<_>>(),
+                )
                 .finish(),
         }
     }
 }
 
 impl ProviderAuth {
-    pub fn headers(self) -> Vec<(String, String)> {
+    pub fn headers(self) -> Vec<ego_core::permit::HttpHeader> {
         match self {
             Self::Headers(headers) => headers,
         }
@@ -933,37 +926,34 @@ impl ProviderAuth {
 pub fn provider_auth(provider: &str, credential: &str) -> Result<ProviderAuth, FlowError> {
     if provider == "openai-codex" {
         return Ok(ProviderAuth::Headers(vec![
-            ("authorization".to_string(), format!("Bearer {credential}")),
-            (
-                "chatgpt-account-id".to_string(),
-                codex_account_id(credential)?,
-            ),
-            (
-                "openai-beta".to_string(),
-                "responses=experimental".to_string(),
-            ),
+            bearer_header(credential.as_bytes()),
+            ego_core::permit::HttpHeader::secret(
+                "chatgpt-account-id",
+                codex_account_id(credential)?.into(),
+            )
+            .expect("the account header name is valid"),
+            public_header("openai-beta", b"responses=experimental".to_vec()),
         ]));
     }
     if provider == "anthropic" {
         if credential.starts_with("sk-ant-oat") {
             return Ok(ProviderAuth::Headers(vec![
-                ("authorization".to_string(), format!("Bearer {credential}")),
-                ("user-agent".to_string(), "claude-cli/2.1.212".to_string()),
-                ("x-app".to_string(), "cli".to_string()),
-                (
-                    "anthropic-beta".to_string(),
-                    "claude-code-20250219,oauth-2025-04-20".to_string(),
+                bearer_header(credential.as_bytes()),
+                public_header("user-agent", b"claude-cli/2.1.212".to_vec()),
+                public_header("x-app", b"cli".to_vec()),
+                public_header(
+                    "anthropic-beta",
+                    b"claude-code-20250219,oauth-2025-04-20".to_vec(),
                 ),
             ]));
         }
-        return Ok(ProviderAuth::Headers(vec![(
-            "x-api-key".to_string(),
-            credential.to_string(),
-        )]));
+        return Ok(ProviderAuth::Headers(vec![
+            ego_core::permit::HttpHeader::secret("x-api-key", credential.into())
+                .expect("the API key header name is valid"),
+        ]));
     }
-    Ok(ProviderAuth::Headers(vec![(
-        "authorization".to_string(),
-        format!("Bearer {credential}"),
+    Ok(ProviderAuth::Headers(vec![bearer_header(
+        credential.as_bytes(),
     )]))
 }
 
@@ -1020,14 +1010,16 @@ fn form_request(url: &str, fields: &[(&str, &str)]) -> Result<HttpRequest, FlowE
         url: parse(url)?,
         method: Method::Post,
         headers: vec![
-            ("accept".to_string(), "application/json".to_string()),
-            (
-                "content-type".to_string(),
-                "application/x-www-form-urlencoded".to_string(),
+            public_header("accept", b"application/json".to_vec()),
+            public_header(
+                "content-type",
+                b"application/x-www-form-urlencoded".to_vec(),
             ),
-            (
-                "user-agent".to_string(),
-                concat!("ego/", env!("CARGO_PKG_VERSION")).to_string(),
+            public_header(
+                "user-agent",
+                concat!("ego/", env!("CARGO_PKG_VERSION"))
+                    .as_bytes()
+                    .to_vec(),
             ),
         ],
         body: Some(serializer.finish().into_bytes()),
@@ -1039,11 +1031,13 @@ fn json_request(url: &str, body: Value) -> Result<HttpRequest, FlowError> {
         url: parse(url)?,
         method: Method::Post,
         headers: vec![
-            ("accept".to_string(), "application/json".to_string()),
-            ("content-type".to_string(), "application/json".to_string()),
-            (
-                "user-agent".to_string(),
-                concat!("ego/", env!("CARGO_PKG_VERSION")).to_string(),
+            public_header("accept", b"application/json".to_vec()),
+            public_header("content-type", b"application/json".to_vec()),
+            public_header(
+                "user-agent",
+                concat!("ego/", env!("CARGO_PKG_VERSION"))
+                    .as_bytes()
+                    .to_vec(),
             ),
         ],
         body: Some(serde_json::to_vec(&body).expect("a JSON value serialises")),

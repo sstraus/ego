@@ -86,7 +86,7 @@ fn request_is_current_xai_responses_not_chat_completions_or_codex() {
 #[test]
 fn request_joins_v1_responses_without_codex_beta() {
     let base = Url::parse("https://api.x.ai/v1/").unwrap();
-    let headers = vec![("authorization".to_string(), "Bearer test".to_string())];
+    let headers = vec![HttpHeader::new("authorization", b"Bearer test".to_vec()).unwrap()];
     let target = RequestTarget::new(&base, &headers);
     let built = XaiResponses.build_request(&target, &request()).unwrap();
     assert_eq!(built.url.as_str(), "https://api.x.ai/v1/responses");
@@ -96,7 +96,7 @@ fn request_joins_v1_responses_without_codex_beta() {
         !built
             .headers
             .iter()
-            .any(|(name, _)| name.eq_ignore_ascii_case("openai-beta"))
+            .any(|header| header.name().eq_ignore_ascii_case("openai-beta"))
     );
 }
 

@@ -522,9 +522,10 @@ pub fn build_request(
     req: &GenRequest,
 ) -> Result<HttpRequest, Inexpressible> {
     let mut request = target.post_json(PATH, request_body(req)?);
-    request
-        .headers
-        .push((VERSION_HEADER.to_string(), VERSION.to_string()));
+    request.headers.push(crate::http::public_header(
+        VERSION_HEADER,
+        VERSION.as_bytes().to_vec(),
+    ));
     Ok(request)
 }
 

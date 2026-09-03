@@ -31,7 +31,8 @@ fn built_body(
     wire: &'static dyn WireFormat,
     request: &GenRequest,
 ) -> serde_json::Value {
-    let headers = vec![("authorization".to_string(), "Bearer test".to_string())];
+    let headers =
+        vec![ego_core::permit::HttpHeader::new("authorization", b"Bearer test".to_vec()).unwrap()];
     let target = RequestTarget::new(row.base(), &headers);
     let built = wire.build_request(&target, request).unwrap();
     serde_json::from_slice(built.body.as_deref().expect("a JSON body")).unwrap()
@@ -42,7 +43,8 @@ fn kimi_coding_uses_the_current_coding_v1_anthropic_contract() {
     assert_eq!(KIMI_CODING_BASE, "https://api.kimi.com/coding/v1/");
     let row = ProviderRow::kimi_coding_default();
     assert_eq!(format!("{:?}", KimiAnthropic), "KimiAnthropic");
-    let headers = vec![("authorization".to_string(), "Bearer test".to_string())];
+    let headers =
+        vec![ego_core::permit::HttpHeader::new("authorization", b"Bearer test".to_vec()).unwrap()];
     let target = RequestTarget::new(row.base(), &headers);
     let built = KimiAnthropic
         .build_request(&target, &request(vec![Message::text(Role::User, "say ok")]))
@@ -55,7 +57,7 @@ fn kimi_coding_uses_the_current_coding_v1_anthropic_contract() {
         built
             .headers
             .iter()
-            .any(|(name, _)| name.eq_ignore_ascii_case("anthropic-version"))
+            .any(|header| header.name().eq_ignore_ascii_case("anthropic-version"))
     );
 }
 
@@ -66,7 +68,8 @@ fn copilot_sets_current_dynamic_headers_without_changing_shared_chat_bytes() {
         format!("{:?}", GithubCopilotCompletions),
         "GithubCopilotCompletions"
     );
-    let headers = vec![("authorization".to_string(), "Bearer test".to_string())];
+    let headers =
+        vec![ego_core::permit::HttpHeader::new("authorization", b"Bearer test".to_vec()).unwrap()];
 
     for (messages, initiator) in [
         (vec![Message::text(Role::User, "say ok")], "user"),
@@ -101,11 +104,13 @@ fn copilot_sets_current_dynamic_headers_without_changing_shared_chat_bytes() {
             built.url.as_str(),
             "https://api.individual.githubcopilot.com/chat/completions"
         );
-        assert!(built.headers.iter().any(|(name, value)| {
-            name.eq_ignore_ascii_case("x-initiator") && value == initiator
+        assert!(built.headers.iter().any(|header| {
+            header.name().eq_ignore_ascii_case("x-initiator")
+                && header.value() == initiator.as_bytes()
         }));
-        assert!(built.headers.iter().any(|(name, value)| {
-            name.eq_ignore_ascii_case("openai-intent") && value == "conversation-edits"
+        assert!(built.headers.iter().any(|header| {
+            header.name().eq_ignore_ascii_case("openai-intent")
+                && header.value() == b"conversation-edits"
         }));
     }
 }

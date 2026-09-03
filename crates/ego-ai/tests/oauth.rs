@@ -295,7 +295,9 @@ fn copilot_exchanges_the_github_token_and_keeps_it_for_refresh() {
     assert!(
         request
             .headers
-            .contains(&("authorization".into(), "Bearer gho_refresh".into()))
+            .iter()
+            .any(|header| header.name() == "authorization"
+                && header.value() == b"Bearer gho_refresh")
     );
 
     let token = flow
@@ -359,25 +361,30 @@ fn anthropic_oat_and_api_keys_have_distinct_presentations() {
     let oat = provider_auth("anthropic", "sk-ant-oat01-secret").unwrap();
     assert!(matches!(&oat, ProviderAuth::Headers(_)));
     let headers = oat.headers();
-    assert!(headers.contains(&("authorization".into(), "Bearer sk-ant-oat01-secret".into())));
+    assert!(headers.iter().any(|header| {
+        header.name() == "authorization" && header.value() == b"Bearer sk-ant-oat01-secret"
+    }));
     assert!(
         headers
             .iter()
-            .any(|(name, value)| name == "user-agent" && value.starts_with("claude-cli/"))
+            .any(|header| header.name() == "user-agent"
+                && header.value().starts_with(b"claude-cli/"))
     );
-    assert!(
-        headers
-            .iter()
-            .any(|(name, value)| name == "anthropic-beta" && value.contains("oauth-2025-04-20"))
-    );
-    assert!(!headers.iter().any(|(name, _)| name == "x-api-key"));
+    assert!(headers.iter().any(|header| {
+        header.name() == "anthropic-beta"
+            && header
+                .value()
+                .windows(b"oauth-2025-04-20".len())
+                .any(|part| part == b"oauth-2025-04-20")
+    }));
+    assert!(!headers.iter().any(|header| header.name() == "x-api-key"));
 
-    assert_eq!(
-        provider_auth("anthropic", "sk-ant-api03-secret")
-            .unwrap()
-            .headers(),
-        vec![("x-api-key".into(), "sk-ant-api03-secret".into())]
-    );
+    let api_headers = provider_auth("anthropic", "sk-ant-api03-secret")
+        .unwrap()
+        .headers();
+    assert_eq!(api_headers.len(), 1);
+    assert_eq!(api_headers[0].name(), "x-api-key");
+    assert_eq!(api_headers[0].value(), b"sk-ant-api03-secret");
 }
 
 #[test]
@@ -467,9 +474,16 @@ fn codex_request_auth_is_derived_from_the_jwt() {
     let payload = base64_url(br#"{"https://api.openai.com/auth":{"chatgpt_account_id":"acct_1"}}"#);
     let token = format!("head.{payload}.sig");
     let headers = provider_auth("openai-codex", &token).unwrap().headers();
-    assert!(headers.contains(&("authorization".into(), format!("Bearer {token}"))));
-    assert!(headers.contains(&("chatgpt-account-id".into(), "acct_1".into())));
-    assert!(headers.contains(&("openai-beta".into(), "responses=experimental".into())));
+    assert!(headers.iter().any(|header| header.name() == "authorization"
+        && header.value() == format!("Bearer {token}").as_bytes()));
+    assert!(
+        headers
+            .iter()
+            .any(|header| header.name() == "chatgpt-account-id" && header.value() == b"acct_1")
+    );
+    assert!(headers.iter().any(
+        |header| header.name() == "openai-beta" && header.value() == b"responses=experimental"
+    ));
 }
 
 #[test]

@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use fd_lock::RwLock;
 use futures::future::BoxFuture;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -38,61 +38,15 @@ const FORBIDDEN_HEADERS: &[&str] = &[
     "chatgpt-account-id",
 ];
 
-/// A stored token whose formatters cannot reveal its value.
-#[derive(Clone, PartialEq, Eq)]
-pub struct StoredSecret(String);
-
-impl StoredSecret {
-    pub(crate) fn expose(&self) -> &str {
-        &self.0
-    }
-}
-
-impl From<String> for StoredSecret {
-    fn from(value: String) -> Self {
-        Self(value)
-    }
-}
-
-impl From<&str> for StoredSecret {
-    fn from(value: &str) -> Self {
-        Self(value.to_string())
-    }
-}
-
-impl fmt::Debug for StoredSecret {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("StoredSecret(<redacted>)")
-    }
-}
-
-impl Serialize for StoredSecret {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(&self.0)
-    }
-}
-
-impl<'de> Deserialize<'de> for StoredSecret {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        String::deserialize(deserializer).map(Self)
-    }
-}
+/// Established auth-store name for the single core-owned secret allocation.
+pub type StoredSecret = SecretMaterial;
 
 /// One entry in `auth.json`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+#[derive(Debug)]
 pub enum AuthEntry {
     OAuth {
         access: StoredSecret,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         refresh: Option<StoredSecret>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         expires: Option<u64>,
     },
     ApiKey {
@@ -115,11 +69,80 @@ impl AuthEntry {
         }
     }
 
-    fn active_secret(&self) -> &StoredSecret {
+    fn into_active_secret(self) -> StoredSecret {
         match self {
             Self::OAuth { access, .. } => access,
             Self::ApiKey { key } => key,
         }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+enum AuthEntryWire {
+    OAuth {
+        access: String,
+        #[serde(default)]
+        refresh: Option<String>,
+        #[serde(default)]
+        expires: Option<u64>,
+    },
+    ApiKey {
+        key: String,
+    },
+}
+
+impl From<AuthEntryWire> for AuthEntry {
+    fn from(entry: AuthEntryWire) -> Self {
+        match entry {
+            AuthEntryWire::OAuth {
+                access,
+                refresh,
+                expires,
+            } => Self::OAuth {
+                access: access.into(),
+                refresh: refresh.map(Into::into),
+                expires,
+            },
+            AuthEntryWire::ApiKey { key } => Self::ApiKey { key: key.into() },
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum AuthEntryRef<'a> {
+    OAuth {
+        access: &'a str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        refresh: Option<&'a str>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        expires: Option<u64>,
+    },
+    ApiKey {
+        key: &'a str,
+    },
+}
+
+fn secret_text(secret: &SecretMaterial) -> Result<&str, &'static str> {
+    std::str::from_utf8(secret.expose_secret_bytes())
+        .map_err(|_| "credential material is not UTF-8")
+}
+
+fn encode_entry(entry: &AuthEntry) -> Result<AuthEntryRef<'_>, &'static str> {
+    match entry {
+        AuthEntry::OAuth {
+            access,
+            refresh,
+            expires,
+        } => Ok(AuthEntryRef::OAuth {
+            access: secret_text(access)?,
+            refresh: refresh.as_ref().map(secret_text).transpose()?,
+            expires: *expires,
+        }),
+        AuthEntry::ApiKey { key } => Ok(AuthEntryRef::ApiKey {
+            key: secret_text(key)?,
+        }),
     }
 }
 
@@ -143,13 +166,9 @@ impl Credentials for StoreCredentials {
         let Some(provider) = name.strip_prefix("oauth:") else {
             return EnvCredentials.secret(name);
         };
-        let entries = self.store.read().map_err(|_| MissingCredential {
-            var: format!("ego auth login {provider}"),
-        })?;
-        entries
-            .get(provider)
-            .map(|entry| Secret::from(entry.active_secret().expose()))
-            .ok_or_else(|| MissingCredential {
+        self.store
+            .read_secret_material(provider)
+            .map_err(|_| MissingCredential {
                 var: format!("ego auth login {provider}"),
             })
     }
@@ -379,10 +398,18 @@ impl AuthStore {
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeMap::new()),
             Err(source) => return Err(AuthError::Io { path, source }),
         };
-        serde_json::from_slice(&bytes).map_err(|err| AuthError::CorruptStore {
-            path,
-            message: err.to_string(),
-        })
+        let bytes = SecretMaterial::new(bytes);
+        serde_json::from_slice::<BTreeMap<String, AuthEntryWire>>(bytes.expose_secret_bytes())
+            .map(|entries| {
+                entries
+                    .into_iter()
+                    .map(|(id, entry)| (id, entry.into()))
+                    .collect()
+            })
+            .map_err(|err| AuthError::CorruptStore {
+                path,
+                message: err.to_string(),
+            })
     }
 
     pub fn read(&self) -> Result<BTreeMap<String, AuthEntry>, AuthError> {
@@ -392,6 +419,22 @@ impl AuthStore {
             source,
         })?;
         self.read_unlocked()
+    }
+
+    pub fn read_secret_material(&self, id: &str) -> Result<SecretMaterial, AuthError> {
+        let mut lock = self.open_lock()?;
+        let _guard = lock.write().map_err(|source| AuthError::Io {
+            path: self.lock_path(),
+            source,
+        })?;
+        let mut entries = self.read_unlocked()?;
+        entries
+            .remove(id)
+            .map(AuthEntry::into_active_secret)
+            .ok_or_else(|| AuthError::MissingCredential {
+                program: format!("ego auth login {id}"),
+                reason: "no stored credential".to_string(),
+            })
     }
 
     pub fn modify<T>(
@@ -423,7 +466,20 @@ impl AuthStore {
     fn write_unlocked(&self, entries: &BTreeMap<String, AuthEntry>) -> Result<(), AuthError> {
         let path = self.path();
         let tmp = self.home.join("auth.json.tmp");
-        let bytes = serde_json::to_vec_pretty(entries).expect("auth entries are serialisable");
+        let encoded: Result<BTreeMap<&str, AuthEntryRef<'_>>, _> = entries
+            .iter()
+            .map(|(id, entry)| encode_entry(entry).map(|entry| (id.as_str(), entry)))
+            .collect();
+        let encoded = encoded.map_err(|message| AuthError::CorruptStore {
+            path: path.clone(),
+            message: message.to_string(),
+        })?;
+        let bytes = SecretMaterial::new(serde_json::to_vec_pretty(&encoded).map_err(|err| {
+            AuthError::CorruptStore {
+                path: path.clone(),
+                message: err.to_string(),
+            }
+        })?);
         let mut options = OpenOptions::new();
         options.create(true).truncate(true).write(true);
         #[cfg(unix)]
@@ -435,7 +491,7 @@ impl AuthStore {
             path: tmp.clone(),
             source,
         })?;
-        file.write_all(&bytes)
+        file.write_all(bytes.expose_secret_bytes())
             .and_then(|()| file.sync_all())
             .map_err(|source| AuthError::Io {
                 path: tmp.clone(),
@@ -1151,7 +1207,7 @@ async fn refresh_for_run_at(
         source,
     })?;
     let mut entries = store.read_unlocked()?;
-    let Some(current) = entries.get(id).cloned() else {
+    let Some(current) = entries.remove(id) else {
         return Ok(());
     };
     let expires = current.expires();
@@ -1236,17 +1292,21 @@ async fn refresh_built_in(
             reason: "the stored credential has no refresh token".to_string(),
         });
     };
+    let refresh = secret_text(refresh).map_err(|reason| AuthError::MissingCredential {
+        program: format!("ego auth login {id}"),
+        reason: reason.to_string(),
+    })?;
     let request = if flow == BuiltInFlow::GitHubCopilot {
-        flow.copilot_exchange_request(refresh.expose())
+        flow.copilot_exchange_request(refresh)
     } else {
-        flow.refresh_request(refresh.expose())
+        flow.refresh_request(refresh)
     }
     .map_err(flow_error)?;
     let response = oauth::execute(http, flow, request)
         .await
         .map_err(flow_error)?;
     let token = flow
-        .read_token(response, now_ms(), Some(refresh.expose()))
+        .read_token(response, now_ms(), Some(refresh))
         .map_err(flow_error)?;
     token_entry(flow, token)
 }
@@ -1477,9 +1537,14 @@ async fn run_program_parts(
     argv.push(program.as_os_str().to_os_string());
     argv.extend(arguments.iter().map(OsString::from));
     argv.push(OsString::from(verb));
-    let stdin = current.map(|entry| {
-        SecretMaterial::new(serde_json::to_vec(entry).expect("an auth entry serialises"))
-    });
+    let stdin = current
+        .map(|entry| {
+            let encoded = encode_entry(entry).map_err(|reason| missing_label(label, reason))?;
+            serde_json::to_vec(&encoded)
+                .map(SecretMaterial::new)
+                .map_err(|error| missing_label(label, error.to_string()))
+        })
+        .transpose()?;
     let stdout = scope
         .commands
         .run(CredentialCommandRequest {
@@ -1515,16 +1580,16 @@ fn parse_program_output(program: &str, stdout: &[u8]) -> Result<AuthEntry, AuthE
     }
     #[derive(Deserialize)]
     struct Blob {
-        access: StoredSecret,
+        access: String,
         #[serde(default)]
-        refresh: Option<StoredSecret>,
+        refresh: Option<String>,
         #[serde(default)]
         expires: Option<u64>,
     }
     match serde_json::from_str::<Blob>(text) {
         Ok(blob) => Ok(AuthEntry::OAuth {
-            access: blob.access,
-            refresh: blob.refresh,
+            access: blob.access.into(),
+            refresh: blob.refresh.map(Into::into),
             expires: blob.expires,
         }),
         Err(_) if text.starts_with('{') => {

@@ -120,18 +120,7 @@ pub(crate) fn rows(
 }
 
 fn mapped_rows(ollama: ProviderRow, openai: ProviderRow) -> Vec<ProviderRow> {
-    vec![
-        ollama,
-        openai,
-        ProviderRow::openai_codex_default(),
-        ProviderRow::anthropic_default(),
-        ProviderRow::github_copilot_default(),
-        ProviderRow::xai_oauth_default(),
-        ProviderRow::kimi_coding_default(),
-        ProviderRow::minimax_oauth_default(),
-        ProviderRow::nous_default(),
-        ProviderRow::openrouter_default(),
-    ]
+    ego_ai::conformance::final_provider_rows(ollama, openai).into()
 }
 
 /// Assemble the one resolver-selected catalogue from current rows and facts.
@@ -158,12 +147,6 @@ fn catalogue_from_rows(hosted: Vec<(String, facts::Hosted)>, rows: Vec<ProviderR
 pub(crate) fn supplied_request_profile(
     identity: &ModelRef,
 ) -> Result<Option<StaticRequestProfile>, GenerationModelError> {
-    let provider_id = identity
-        .0
-        .split_once('/')
-        .map(|(provider, _)| provider)
-        .unwrap_or(identity.0.as_str());
-    ensure_provider_mapping(provider_id).map_err(generation_error)?;
     let hosted = facts::supplied(&Ceilings::default()).map_err(|error| {
         GenerationModelError::new(GenerationModelErrorClass::Usage, error.to_string())
     })?;
@@ -358,7 +341,6 @@ impl CliGenerationModelSource {
             .split_once('/')
             .map(|(provider, _)| provider)
             .unwrap_or(identity.0.as_str());
-        ensure_provider_mapping(provider_id).map_err(generation_error)?;
         let hosted = facts::supplied(&self.ceilings).map_err(|error| {
             GenerationModelError::new(GenerationModelErrorClass::Usage, error.to_string())
         })?;
@@ -437,21 +419,6 @@ fn auth_generation_error(error: crate::auth::AuthError) -> GenerationModelError 
         | crate::auth::AuthError::ReloginRequired { .. } => GenerationModelErrorClass::Usage,
     };
     GenerationModelError::new(class, error.to_string())
-}
-
-fn unavailable_mapping(provider: &str) -> Option<ResolveError> {
-    match provider {
-        "xai" => Some(ResolveError::ProviderMappingUnavailable {
-            provider: provider.to_string(),
-            mapping: "xai-responses for API-key credentials; use `xai-oauth/<model>` after `ego auth login xai-oauth`"
-                .to_string(),
-        }),
-        _ => None,
-    }
-}
-
-pub(crate) fn ensure_provider_mapping(provider: &str) -> Result<(), ResolveError> {
-    unavailable_mapping(provider).map_or(Ok(()), Err)
 }
 
 /// Whether a resolution failure is the network's fault or the caller's.

@@ -2,6 +2,7 @@
 
 use ego_ai::http::{HttpRequest, Method};
 use ego_ai::provider::{CredentialStrategy, Credentials, MissingCredential, Secret};
+use ego_core::permit::HttpHeader;
 use url::Url;
 
 /// The checklist item is "no credentials or request bodies reachable from
@@ -14,11 +15,8 @@ fn a_formatted_request_prints_neither_the_credential_nor_the_body() {
             url: Url::parse("https://api.example.com/v1/chat/completions").unwrap(),
             method: Method::Post,
             headers: vec![
-                (
-                    "authorization".to_string(),
-                    "Bearer sk-live-SECRET".to_string(),
-                ),
-                ("content-type".to_string(), "application/json".to_string()),
+                HttpHeader::new("authorization", b"Bearer sk-live-SECRET".to_vec()).unwrap(),
+                HttpHeader::new("content-type", b"application/json".to_vec()).unwrap(),
             ],
             body: Some(br#"{"messages":[{"role":"user","content":"PROMPT"}]}"#.to_vec()),
         }

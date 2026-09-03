@@ -15,7 +15,7 @@ use crate::catalogue::{
     ModelDiscoveryEntry, ModelDiscoveryFailure, ModelDiscoveryReport, ModelDiscoverySource,
     ModelFactProvenance, ModelSlug, ResolveError, ResolvedModel, subscription,
 };
-use crate::http::{AdmittedHttpProfile, Http, HttpRequest, Method, exchange};
+use crate::http::{AdmittedHttpProfile, Http, HttpRequest, Method, exchange, public_header};
 use crate::provider::{ProviderRow, ResolvedCredential};
 use crate::wire::WireFormat;
 use crate::wire::kimi_anthropic::DIALECT as KIMI_ANTHROPIC_DIALECT;
@@ -174,10 +174,10 @@ async fn current_models(
     };
     let mut headers = credential.headers();
     for (name, value) in &row.extra_headers {
-        headers.retain(|(existing, _)| !existing.eq_ignore_ascii_case(name));
-        headers.push((name.clone(), value.clone()));
+        headers.retain(|existing| !existing.name().eq_ignore_ascii_case(name));
+        headers.push(public_header(name, value.as_bytes().to_vec()));
     }
-    headers.push(("accept".to_string(), "application/json".to_string()));
+    headers.push(public_header("accept", b"application/json".to_vec()));
     let answer = exchange(
         http,
         &profile,

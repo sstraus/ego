@@ -18,6 +18,7 @@
 
 use ego_ai::provider::ProviderRow;
 use ego_ai::wire::{RequestTarget, ollama, openai_codex_responses, openai_completions};
+use ego_core::permit::HttpHeader;
 use url::Url;
 
 fn parse(url: &str) -> Url {
@@ -94,11 +95,8 @@ fn a_base_without_a_trailing_slash_is_normalised_rather_than_truncating_the_path
 #[test]
 fn the_profiles_headers_reach_the_request_unread() {
     let headers = vec![
-        ("authorization".to_string(), "Bearer sk-test".to_string()),
-        (
-            "http-referer".to_string(),
-            "https://ego.example".to_string(),
-        ),
+        HttpHeader::new("authorization", b"Bearer sk-test".to_vec()).unwrap(),
+        HttpHeader::new("http-referer", b"https://ego.example".to_vec()).unwrap(),
     ];
     let base = parse("https://api.openai.com/v1/");
     let request = RequestTarget::new(&base, &headers).post_json("chat/completions", b"{}".to_vec());
@@ -106,13 +104,10 @@ fn the_profiles_headers_reach_the_request_unread() {
     assert_eq!(
         request.headers,
         vec![
-            ("content-type".to_string(), "application/json".to_string()),
-            ("accept".to_string(), "text/event-stream".to_string()),
-            ("authorization".to_string(), "Bearer sk-test".to_string()),
-            (
-                "http-referer".to_string(),
-                "https://ego.example".to_string()
-            ),
+            HttpHeader::new("content-type", b"application/json".to_vec()).unwrap(),
+            HttpHeader::new("accept", b"text/event-stream".to_vec()).unwrap(),
+            HttpHeader::new("authorization", b"Bearer sk-test".to_vec()).unwrap(),
+            HttpHeader::new("http-referer", b"https://ego.example".to_vec()).unwrap(),
         ]
     );
 }

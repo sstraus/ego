@@ -206,7 +206,7 @@ fn every_selectable_subscription_row_resolves_from_the_one_store_or_names_login(
             resolved
                 .headers()
                 .iter()
-                .any(|(name, _)| name.eq_ignore_ascii_case("authorization")),
+                .any(|header| header.name().eq_ignore_ascii_case("authorization")),
             "{} did not derive bearer auth",
             row.id()
         );

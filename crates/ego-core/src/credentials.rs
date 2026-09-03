@@ -128,6 +128,40 @@ impl SecretMaterial {
     pub fn expose_secret_bytes(&self) -> &[u8] {
         self.bytes.as_slice()
     }
+
+    /// Append bytes while retaining zeroizing ownership of the allocation.
+    pub fn extend_from_slice(&mut self, bytes: &[u8]) {
+        self.bytes.extend_from_slice(bytes);
+    }
+
+    /// Consume provider credential bytes into the typed transport boundary.
+    pub fn into_secret_header(
+        self,
+        name: &str,
+    ) -> Result<crate::permit::HttpHeader, crate::permit::ForeignValueError> {
+        crate::permit::HttpHeader::secret(name, self)
+    }
+}
+
+/// Provider-facing name for the one core secret owner.
+pub type ProviderSecret = SecretMaterial;
+
+impl From<Vec<u8>> for SecretMaterial {
+    fn from(value: Vec<u8>) -> Self {
+        Self::new(value)
+    }
+}
+
+impl From<String> for SecretMaterial {
+    fn from(value: String) -> Self {
+        Self::new(value.into_bytes())
+    }
+}
+
+impl From<&str> for SecretMaterial {
+    fn from(value: &str) -> Self {
+        Self::new(value.as_bytes().to_vec())
+    }
 }
 
 impl std::fmt::Debug for SecretMaterial {

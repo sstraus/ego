@@ -265,7 +265,9 @@ impl HttpCall for StubCall {
 fn row(id: &str, cost: Arc<dyn ProviderCost>) -> ProviderRow {
     let base = Url::parse("https://api.example/v1/").expect("a valid url");
     let mut row = match id {
-        "xai" => ProviderRow::xai(base.clone()),
+        // The decoder remains independently tested, but the retired xAI
+        // API-key row is no longer a fixture authority.
+        "xai" => ProviderRow::openrouter(base.clone()),
         "openrouter" => ProviderRow::openrouter(base),
         other => panic!("unsupported provider fixture {other}"),
     };

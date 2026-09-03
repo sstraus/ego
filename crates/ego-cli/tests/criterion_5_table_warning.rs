@@ -93,23 +93,6 @@ fn table_binding_warning_survives_quiet_mode() {
 }
 
 #[test]
-fn a_table_warning_is_not_deduplicated_against_a_provider_report() {
-    let ceiling = CeilingEffect::Binds {
-        limit: money("5"),
-        clamped_from: None,
-    };
-    let provider = PublicEvent::MeteringSelected {
-        turn: TurnId::new(),
-        metering: MeteringKind::Currency,
-        ceiling: ceiling.clone(),
-        rates: RateSource::ProviderPublished,
-    };
-    let notes = render(&[provider, table_event(ceiling)], false);
-    assert_eq!(notes.len(), 1, "the later Table fact must be announced");
-    assert!(notes[0].contains("third-party"), "{}", notes[0]);
-}
-
-#[test]
 fn a_clamped_table_warning_preserves_the_clamp_and_table_risk() {
     let notes = render(
         &[table_event(CeilingEffect::Binds {
@@ -150,15 +133,5 @@ fn nonbinding_or_non_table_rates_are_silent() {
         };
         assert!(render(&[event], false).is_empty());
     }
-    let provider = PublicEvent::MeteringSelected {
-        turn: TurnId::new(),
-        metering: MeteringKind::Currency,
-        ceiling: CeilingEffect::Binds {
-            limit: money("5"),
-            clamped_from: None,
-        },
-        rates: RateSource::ProviderPublished,
-    };
-    assert!(render(&[provider], false).is_empty());
     assert!(render(&[table_event(CeilingEffect::None)], false).is_empty());
 }

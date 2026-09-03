@@ -141,8 +141,11 @@ impl WireGenerator {
     ) -> Result<crate::http::HttpRequest, wire::RequestRefused> {
         let mut headers = self.credential.headers();
         for (name, value) in &self.row.extra_headers {
-            headers.retain(|(existing, _)| !existing.eq_ignore_ascii_case(name));
-            headers.push((name.clone(), value.clone()));
+            headers.retain(|existing| !existing.name().eq_ignore_ascii_case(name));
+            headers.push(
+                ego_core::permit::HttpHeader::new(name, value.as_bytes().to_vec())
+                    .expect("a validated provider profile header is valid"),
+            );
         }
         let base = self.credential.base_override().unwrap_or(self.row.base());
         let target = wire::RequestTarget::new(base, &headers);

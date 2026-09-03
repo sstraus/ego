@@ -9,6 +9,7 @@ use std::collections::HashSet;
 use std::fmt;
 use std::sync::Arc;
 
+use ego_core::credentials::SecretMaterial;
 use ego_core::generator::attempt::DeliveryCertainty;
 use ego_core::generator::types::ErrorKind;
 use ego_core::permit::{
@@ -366,8 +367,18 @@ impl Method {
 pub struct HttpRequest {
     pub url: Url,
     pub method: Method,
-    pub headers: Vec<(String, String)>,
+    pub headers: Vec<HttpHeader>,
     pub body: Option<Vec<u8>>,
+}
+
+pub(crate) fn public_header(name: &str, value: impl Into<Vec<u8>>) -> HttpHeader {
+    HttpHeader::new(name, value.into()).expect("a source-controlled HTTP header is valid")
+}
+
+pub(crate) fn bearer_header(value: &[u8]) -> HttpHeader {
+    let mut bearer = SecretMaterial::new(b"Bearer ".to_vec());
+    bearer.extend_from_slice(value);
+    HttpHeader::secret("authorization", bearer).expect("the authorization header name is valid")
 }
 
 impl HttpRequest {
@@ -377,16 +388,10 @@ impl HttpRequest {
             path.push('?');
             path.push_str(query);
         }
-        let headers = self
-            .headers
-            .iter()
-            .map(|(name, value)| HttpHeader::new(name, value.as_bytes().to_vec()))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|_| HttpProfileError::InvalidRequest)?;
         CoreHttpRequest::new(
             self.method.as_str(),
             &path,
-            headers,
+            self.headers.clone(),
             self.body.clone().unwrap_or_default(),
         )
         .map_err(|_| HttpProfileError::InvalidRequest)
@@ -403,7 +408,7 @@ impl fmt::Debug for HttpRequest {
                 &self
                     .headers
                     .iter()
-                    .map(|(name, _)| name.as_str())
+                    .map(HttpHeader::name)
                     .collect::<Vec<_>>(),
             )
             .field("body", &self.body.as_ref().map(|body| Elided(body.len())))

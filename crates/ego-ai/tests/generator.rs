@@ -258,16 +258,7 @@ impl HttpCall for StubCall {
             HttpScheme::Http => "http",
             HttpScheme::Https => "https",
         };
-        let headers = request
-            .headers()
-            .iter()
-            .map(|header| {
-                (
-                    header.name().to_owned(),
-                    String::from_utf8(header.value().to_vec()).expect("fixture header is UTF-8"),
-                )
-            })
-            .collect();
+        let headers = request.headers().to_vec();
         let url = Url::parse(&format!("{scheme}://{}{}", route.target(), request.path()))
             .expect("prepared request URL");
         let method = match request.method() {
@@ -330,9 +321,13 @@ async fn the_transport_is_handed_exactly_what_the_wire_format_would_send() {
     assert!(
         sent.headers
             .iter()
-            .any(|(name, value)| name == "authorization" && value == &format!("Bearer {KEY}")),
+            .any(|header| header.name() == "authorization"
+                && header.value() == format!("Bearer {KEY}").as_bytes()),
         "the provider row's credential reaches the request: {:?}",
-        sent.headers.iter().map(|(n, _)| n).collect::<Vec<_>>()
+        sent.headers
+            .iter()
+            .map(|header| header.name())
+            .collect::<Vec<_>>()
     );
 }
 
@@ -344,8 +339,9 @@ async fn ensure_expressible_and_generate_share_headers_base_and_wire_body() {
     let req = request();
     let mut headers = resolved.headers();
     for (name, value) in &profile.extra_headers {
-        headers.retain(|(existing, _)| !existing.eq_ignore_ascii_case(name));
-        headers.push((name.clone(), value.clone()));
+        headers.retain(|existing| !existing.name().eq_ignore_ascii_case(name));
+        headers
+            .push(HttpHeader::new(name, value.as_bytes().to_vec()).expect("fixture extra header"));
     }
     let target = RequestTarget::new(resolved.base_override().unwrap_or(profile.base()), &headers);
     let expected = GithubCopilotCompletions
@@ -569,11 +565,9 @@ fn resolving_a_credential_leaves_nothing_behind_in_the_row() {
         .expect("the fake holds every variable")
         .headers();
 
-    assert_eq!(
-        headers,
-        vec![("authorization".to_string(), format!("Bearer {KEY}"))],
-        "only the credential: content type and accept belong to the wire format"
-    );
+    assert_eq!(headers.len(), 1, "only the credential header remains");
+    assert_eq!(headers[0].name(), "authorization");
+    assert_eq!(headers[0].value(), format!("Bearer {KEY}").as_bytes());
     let printed = format!("{row:?}");
     assert!(
         !printed.contains(KEY),
@@ -629,15 +623,14 @@ fn a_credential_can_travel_under_a_header_the_provider_names() {
         var: KEY_VAR.to_string(),
     };
 
-    assert_eq!(
-        strategy
-            .resolve(&FakeCredentials::holding(KEY))
-            .expect("the fake holds every variable")
-            .headers(),
-        vec![("x-api-key".to_string(), KEY.to_string())],
-        "the value verbatim: `Bearer ` is the other strategy's scheme, and a \
-         provider that did not ask for one is sent a key it cannot read"
-    );
+    let headers = strategy
+        .resolve(&FakeCredentials::holding(KEY))
+        .expect("the fake holds every variable")
+        .headers();
+    assert_eq!(headers.len(), 1);
+    assert_eq!(headers[0].name(), "x-api-key");
+    assert_eq!(headers[0].value(), KEY.as_bytes());
+    assert!(headers[0].is_secret());
     assert!(
         strategy
             .resolve(&FakeCredentials::empty())
@@ -692,17 +685,13 @@ async fn the_resolved_credential_is_what_the_request_carries() {
 
     let seen = http.seen.lock().expect("not poisoned");
     let sent = seen.first().expect("the transport was called once");
-    let auth: Vec<&(String, String)> = sent
+    let auth: Vec<_> = sent
         .headers
         .iter()
-        .filter(|(name, _)| name == "authorization")
+        .filter(|header| header.name() == "authorization")
         .collect();
-    assert_eq!(
-        auth,
-        vec![&("authorization".to_string(), format!("Bearer {KEY}"))],
-        "one authorization header, carrying the resolved credential: {:?}",
-        sent.headers
-    );
+    assert_eq!(auth.len(), 1, "one authorization header");
+    assert_eq!(auth[0].value(), format!("Bearer {KEY}").as_bytes());
 }
 
 /// Profile identity is data beside the credential, and survives unchanged to
@@ -730,11 +719,13 @@ async fn profile_extra_headers_reach_the_request_without_becoming_credentials() 
     let sent = seen.first().expect("the transport was called once");
     assert!(
         sent.headers
-            .contains(&("originator".to_string(), "ego".to_string()))
+            .iter()
+            .any(|header| { header.name() == "originator" && header.value() == b"ego" })
     );
     assert!(
         sent.headers
-            .contains(&("user-agent".to_string(), "ego-test".to_string()))
+            .iter()
+            .any(|header| { header.name() == "user-agent" && header.value() == b"ego-test" })
     );
 }
 

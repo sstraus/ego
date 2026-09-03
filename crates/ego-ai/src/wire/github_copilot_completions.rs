@@ -16,6 +16,7 @@ use ego_core::generator::port::AiEvent;
 use ego_core::generator::types::{ContentBlock, GenRequest, Role};
 use futures::stream::BoxStream;
 
+use crate::http::public_header;
 use crate::http::{HttpError, HttpRequest, HttpResponse};
 
 use super::openai_completions;
@@ -57,8 +58,10 @@ impl WireFormat for GithubCopilotCompletions {
         ] {
             built
                 .headers
-                .retain(|(present, _)| !present.eq_ignore_ascii_case(name));
-            built.headers.push((name.to_string(), value.to_string()));
+                .retain(|present| !present.name().eq_ignore_ascii_case(name));
+            built
+                .headers
+                .push(public_header(name, value.as_bytes().to_vec()));
         }
         Ok(built)
     }

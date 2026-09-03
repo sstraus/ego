@@ -232,11 +232,11 @@ pub fn build_request(
     if !request
         .headers
         .iter()
-        .any(|(name, _)| name.eq_ignore_ascii_case("openai-beta"))
+        .any(|header| header.name().eq_ignore_ascii_case("openai-beta"))
     {
-        request.headers.push((
-            "openai-beta".to_string(),
-            "responses=experimental".to_string(),
+        request.headers.push(crate::http::public_header(
+            "openai-beta",
+            b"responses=experimental".to_vec(),
         ));
     }
     Ok(request)

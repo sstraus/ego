@@ -24,9 +24,9 @@ impl WireFormat for KimiAnthropic {
         req: &GenRequest,
     ) -> Result<HttpRequest, RequestRefused> {
         let mut request = target.post_json("messages?beta=true", request_body(req)?);
-        request.headers.push((
-            anthropic_messages::VERSION_HEADER.to_string(),
-            anthropic_messages::VERSION.to_string(),
+        request.headers.push(crate::http::public_header(
+            anthropic_messages::VERSION_HEADER,
+            anthropic_messages::VERSION.as_bytes().to_vec(),
         ));
         Ok(request)
     }

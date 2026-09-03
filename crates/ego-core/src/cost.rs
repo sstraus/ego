@@ -459,20 +459,18 @@ pub struct PricingRevision(pub String);
 /// honestly on either. See `2026-08-21-a-run-with-no-ceiling.md` §5 and
 /// §Consequences.
 ///
-/// **Exactly the sources that exist.** §5 names three, in resolution order:
-/// an operator's quote, the provider's own pricing endpoint, and the cached
-/// third-party table. All three have producers now — the last arrived with
-/// the pricing table of story `regression_case` — and none was declared before its
-/// producer existed, because a variant nothing can produce is a claim the
-/// code cannot back and `AGENTS.md:22-37` forbids exactly that.
-///
-/// The order of the variants is §5's resolution order, first hit wins.
+/// **Exactly the sources that exist.** A bounded run first uses an operator's
+/// quote, then the cached third-party table from story `regression_case`; `None`
+/// records that no lookup was needed. Every variant has a producer. The
+/// provider-published source was removed with its sole xAI API-key resolver by
+/// Story `regression_case`, because a variant nothing can produce is a claim the code
+/// cannot back.
 ///
 /// **The wire form is the variant's name** (`#[serde(tag = "source")]`), so an
 /// arm added between two others changes no encoding any consumer has already
 /// seen. That is why [`PUBLIC_EVENT_VERSION`](crate::public::PUBLIC_EVENT_VERSION)
 /// does not move for it: the constant tracks the shape a consumer parses, and
-/// a consumer that never met a `provider_published` cost cannot have parsed it
+/// a consumer that never met a newly added source cannot have parsed it
 /// differently before.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "source", rename_all = "snake_case")]
@@ -483,14 +481,6 @@ pub enum RateSource {
     /// Explicit operator configuration, which may hold a negotiated rate no
     /// public table knows about. First in §5's order for that reason.
     Operator,
-    /// The provider's own pricing endpoint, asked with this run's credential.
-    ///
-    /// Stronger evidence than [`Operator`](Self::Operator) about what will be
-    /// invoiced — it is the invoicing party's own figure — and weaker about
-    /// what was *agreed*, which is why it does not outrank it. `ego_ai::xai`
-    /// is the only producer: xAI is the one provider of the six that publishes
-    /// per-key prices.
-    ProviderPublished,
     /// A cached third-party table — litellm's — naming what it believes the
     /// provider charges.
     ///
@@ -500,10 +490,9 @@ pub enum RateSource {
     /// no ceiling at all.
     ///
     /// The only arm that carries a payload, and it is not decoration either.
-    /// The other two name a *kind* of source that a reader can go and inspect
-    /// — the operator's own configuration, the provider's own endpoint — while
-    /// this one names a file that is replaced as prices change, so "a table
-    /// said so" is unattributable until it says which. Minted from the
+    /// `None` and `Operator` are self-describing; this arm names a file that is
+    /// replaced as prices change, so "a table said so" is unattributable until
+    /// it says which. Minted from the
     /// quote's own `revision` rather than restated beside it (see
     /// `ego_ai::catalogue::table_rates`), for the reason
     /// [`SettlementSource::ProviderReported`](crate::budget::SettlementSource)

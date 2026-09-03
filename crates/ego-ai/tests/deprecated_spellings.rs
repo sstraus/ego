@@ -61,6 +61,7 @@ use ego_ai::wire::{
 use ego_core::generator::types::{
     ContentBlock, Conversation, GenRequest, Message, Role, ThinkingLevel, ToolDescriptor,
 };
+use ego_core::permit::HttpHeader;
 use url::Url;
 
 /// The mappings this build serialises a request with, named by module.
@@ -549,7 +550,7 @@ fn xai_oauth_cannot_regress_to_a_legacy_or_codex_endpoint() {
     assert_eq!(XAI_BASE, "https://api.x.ai/v1/");
     assert_eq!(xai_responses::PATH, "responses");
     let base = Url::parse(XAI_BASE).expect("the built-in xAI base parses");
-    let headers = vec![("authorization".to_string(), "Bearer test".to_string())];
+    let headers = vec![HttpHeader::new("authorization", b"Bearer test".to_vec()).unwrap()];
     let target = RequestTarget::new(&base, &headers);
     let built = xai_responses::XaiResponses
         .build_request(&target, &widest_request())
@@ -561,6 +562,6 @@ fn xai_oauth_cannot_regress_to_a_legacy_or_codex_endpoint() {
         !built
             .headers
             .iter()
-            .any(|(name, _)| name.eq_ignore_ascii_case("openai-beta"))
+            .any(|header| header.name().eq_ignore_ascii_case("openai-beta"))
     );
 }

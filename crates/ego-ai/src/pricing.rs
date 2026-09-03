@@ -524,7 +524,9 @@ use std::sync::{Arc, OnceLock};
 
 use url::Url;
 
-use crate::http::{AdmittedHttpProfile, Exchange, Http, HttpRequest, Method, exchange};
+use crate::http::{
+    AdmittedHttpProfile, Exchange, Http, HttpRequest, Method, exchange, public_header,
+};
 
 /// The document itself, on the branch litellm publishes from.
 ///
@@ -667,7 +669,7 @@ pub async fn fetch(http: &Arc<dyn Http>, known: Option<&str>) -> Result<Fetched,
             url: upstream(),
             method: Method::Get,
             headers: known
-                .map(|known| vec![(IF_NONE_MATCH.to_string(), known.to_string())])
+                .map(|known| vec![public_header(IF_NONE_MATCH, known.as_bytes().to_vec())])
                 .unwrap_or_default(),
             body: None,
         },

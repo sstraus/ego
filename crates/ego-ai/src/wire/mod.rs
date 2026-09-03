@@ -120,7 +120,7 @@ pub trait WireFormat: fmt::Debug + Send + Sync {
 /// prevents, and nothing at this seam could.
 pub struct RequestTarget<'a> {
     base: &'a Url,
-    headers: &'a [(String, String)],
+    headers: &'a [ego_core::permit::HttpHeader],
 }
 
 impl<'a> RequestTarget<'a> {
@@ -129,7 +129,7 @@ impl<'a> RequestTarget<'a> {
     /// where that is guaranteed. `headers` is the profile's contribution, the
     /// credential above all, and it is opaque here because a wire format is
     /// not allowed to know a credential (`ARCHITECTURE.md` §3.1).
-    pub fn new(base: &'a Url, headers: &'a [(String, String)]) -> Self {
+    pub fn new(base: &'a Url, headers: &'a [ego_core::permit::HttpHeader]) -> Self {
         RequestTarget { base, headers }
     }
 
@@ -151,7 +151,7 @@ impl<'a> RequestTarget<'a> {
     /// cannot use [`post_json`](Self::post_json). Reading them is allowed;
     /// interpreting them is not — a mapping that looked for a credential in
     /// here would be a mapping that knows what a credential is.
-    pub fn headers(&self) -> &[(String, String)] {
+    pub fn headers(&self) -> &[ego_core::permit::HttpHeader] {
         self.headers
     }
 
@@ -165,8 +165,14 @@ impl<'a> RequestTarget<'a> {
     /// mapping that had to remember them is a mapping that can forget one.
     pub fn post_json(&self, path: &str, body: Vec<u8>) -> HttpRequest {
         let mut headers = Vec::with_capacity(self.headers.len() + 2);
-        headers.push(("content-type".to_string(), "application/json".to_string()));
-        headers.push(("accept".to_string(), "text/event-stream".to_string()));
+        headers.push(
+            ego_core::permit::HttpHeader::new("content-type", b"application/json".to_vec())
+                .expect("a static wire header is valid"),
+        );
+        headers.push(
+            ego_core::permit::HttpHeader::new("accept", b"text/event-stream".to_vec())
+                .expect("a static wire header is valid"),
+        );
         headers.extend(self.headers.iter().cloned());
         HttpRequest {
             url: self.url(path),

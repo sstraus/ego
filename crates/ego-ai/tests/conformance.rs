@@ -143,8 +143,11 @@ async fn check_1_the_request_each_profile_builds_is_the_one_it_committed() {
             .expect("Configured answers every variable");
         let mut headers = credential.headers();
         for (name, value) in &row.extra_headers {
-            headers.retain(|(present, _)| !present.eq_ignore_ascii_case(name));
-            headers.push((name.clone(), value.clone()));
+            headers.retain(|present| !present.name().eq_ignore_ascii_case(name));
+            headers.push(
+                HttpHeader::new(name, value.as_bytes().to_vec())
+                    .expect("fixture extra header has a valid name"),
+            );
         }
         let target = RequestTarget::new(credential.base_override().unwrap_or(row.base()), &headers);
         let built = profile

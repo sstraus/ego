@@ -5,6 +5,7 @@
 //! owns `Http`, credentials and the provider tables.
 
 pub mod catalogue;
+pub mod conformance;
 pub mod generator;
 pub mod http;
 pub mod kimi;
@@ -14,4 +15,3 @@ pub mod pricing;
 pub mod provider;
 pub mod resolver;
 pub mod wire;
-pub mod xai;

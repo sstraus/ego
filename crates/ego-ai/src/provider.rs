@@ -18,12 +18,12 @@
 use std::fmt;
 use std::sync::Arc;
 
+use ego_core::credentials::{ProviderSecret, SecretMaterial};
+use ego_core::permit::HttpHeader;
 use url::Url;
 
-use crate::http::AdmittedHttpProfile;
-use crate::resolver::{
-    KimiManaged, ModelResolver, OllamaDaemon, SubscriptionSupplied, Supplied, XaiLanguageModels,
-};
+use crate::http::{AdmittedHttpProfile, bearer_header};
+use crate::resolver::{KimiManaged, ModelResolver, OllamaDaemon, SubscriptionSupplied, Supplied};
 use crate::wire::anthropic_messages::AnthropicMessages;
 use crate::wire::gemini_interactions::GeminiInteractions;
 use crate::wire::github_copilot_completions::GithubCopilotCompletions;
@@ -34,42 +34,12 @@ use crate::wire::openai_completions::OpenAiCompletions;
 use crate::wire::provider_cost::{OpenRouterUsd, ProviderCost, XaiUsdTicks};
 use crate::wire::xai_responses::XaiResponses;
 
-/// A credential. Prints as `<redacted>`, in every formatter, forever.
+/// The single core-owned provider secret type.
 ///
-/// The redaction is on the secret and not on its container on purpose. A
-/// `#[derive(Debug)]` on some future type that happens to hold one is the
-/// shortest path to a key in a `tracing` field, and the milestone checklist
-/// already carries "no credentials reachable from `PublicEvent`". A container
-/// that forgets is harmless if the value refuses.
-#[derive(Clone, PartialEq, Eq)]
-pub struct Secret(String);
-
-impl Secret {
-    /// The credential itself. Private to this module: the only legitimate
-    /// reader is [`ResolvedCredential::headers`], and a public accessor would
-    /// make the redaction above a formality.
-    fn expose(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Debug for Secret {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("Secret(<redacted>)")
-    }
-}
-
-impl From<String> for Secret {
-    fn from(value: String) -> Self {
-        Secret(value)
-    }
-}
-
-impl From<&str> for Secret {
-    fn from(value: &str) -> Self {
-        Secret(value.to_string())
-    }
-}
+/// Kept under the established public name so credential sources do not need a
+/// second wrapper. The aliased owner is non-`Clone`, zeroizes on drop, and
+/// redacts its formatter.
+pub type Secret = ProviderSecret;
 
 /// How a provider presents a credential, and where the credential is read
 /// from — the *strategy*, never the value.
@@ -136,15 +106,16 @@ impl CredentialStrategy {
             // missing, and collapsing them would make a misconfigured hosted
             // row look like a local daemon.
             CredentialStrategy::None => (Vec::new(), None),
-            CredentialStrategy::BearerFromEnv { var } => (
-                vec![(
-                    "authorization".to_string(),
-                    Secret::from(format!("Bearer {}", creds.secret(var)?.expose())),
-                )],
-                None,
-            ),
+            CredentialStrategy::BearerFromEnv { var } => {
+                let secret = creds.secret(var)?;
+                (vec![bearer_header(secret.expose_secret_bytes())], None)
+            }
             CredentialStrategy::HeaderFromEnv { header, var } => {
-                (vec![(header.clone(), creds.secret(var)?)], None)
+                let header = creds
+                    .secret(var)?
+                    .into_secret_header(header)
+                    .map_err(|_| MissingCredential { var: var.clone() })?;
+                (vec![header], None)
             }
             CredentialStrategy::OAuth { provider } => {
                 let secret =
@@ -153,7 +124,7 @@ impl CredentialStrategy {
                         .map_err(|_| MissingCredential {
                             var: format!("ego auth login {provider}"),
                         })?;
-                let base_override = crate::oauth::provider_base(provider, secret.expose())
+                let base_override = crate::oauth::provider_base(provider, secret_text(&secret)?)
                     .map_err(|_| MissingCredential {
                         var: format!("ego auth login {provider}"),
                     })?;
@@ -190,20 +161,18 @@ impl CredentialStrategy {
     }
 }
 
-fn oauth_headers(
-    provider: &str,
-    secret: &Secret,
-) -> Result<Vec<(String, Secret)>, MissingCredential> {
-    crate::oauth::provider_auth(provider, secret.expose())
+fn oauth_headers(provider: &str, secret: &Secret) -> Result<Vec<HttpHeader>, MissingCredential> {
+    crate::oauth::provider_auth(provider, secret_text(secret)?)
         .map_err(|_| MissingCredential {
             var: format!("ego auth login {provider}"),
         })
-        .map(|auth| {
-            auth.headers()
-                .into_iter()
-                .map(|(name, value)| (name, Secret::from(value)))
-                .collect()
-        })
+        .map(|auth| auth.headers())
+}
+
+fn secret_text(secret: &SecretMaterial) -> Result<&str, MissingCredential> {
+    std::str::from_utf8(secret.expose_secret_bytes()).map_err(|_| MissingCredential {
+        var: "credential contains non-UTF-8 bytes".to_string(),
+    })
 }
 
 /// One provider's credential, resolved: the header it becomes, or nothing.
@@ -214,12 +183,10 @@ fn oauth_headers(
 /// and travels to the budget gate and the ledger, which is precisely why the
 /// credential does not travel with it.
 ///
-/// `Debug` is derived and safe because [`Secret`] refuses to print — the belt
-/// the profile ADR §3 argues for, still fastened now that the braces are
-/// structural.
-#[derive(Debug, Clone)]
+/// Its custom `Debug` prints header names and the optional base only; the
+/// secret owner independently redacts itself as defense in depth.
 pub struct ResolvedCredential {
-    headers: Vec<(String, Secret)>,
+    headers: Vec<HttpHeader>,
     base_override: Option<Url>,
 }
 
@@ -231,17 +198,31 @@ impl ResolvedCredential {
     /// ([`RequestTarget::post_json`](crate::wire::RequestTarget::post_json)),
     /// because they are facts about the body — not about the provider.
     ///
-    /// This is the one place the secret is exposed, and it is exposed into a
-    /// value the caller is about to put in a header.
-    pub fn headers(&self) -> Vec<(String, String)> {
-        self.headers
-            .iter()
-            .map(|(name, secret)| (name.clone(), secret.expose().to_string()))
-            .collect()
+    /// The raw value remains inaccessible here. Cloning the typed header only
+    /// shares its zeroizing owner with the request about to be sent.
+    pub fn headers(&self) -> Vec<HttpHeader> {
+        self.headers.clone()
     }
 
     pub fn base_override(&self) -> Option<&Url> {
         self.base_override.as_ref()
+    }
+}
+
+impl fmt::Debug for ResolvedCredential {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ResolvedCredential")
+            .field(
+                "headers",
+                &self
+                    .headers
+                    .iter()
+                    .map(HttpHeader::name)
+                    .collect::<Vec<_>>(),
+            )
+            .field("base_override", &self.base_override)
+            .finish()
     }
 }
 
@@ -302,6 +283,13 @@ impl fmt::Display for MissingCredential {
 
 impl std::error::Error for MissingCredential {}
 
+/// The final charge behavior one provider profile promises to conformance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CostExpectation {
+    Positive,
+    NoCharge,
+}
+
 /// One provider profile: who it is, where it lives, how it authenticates,
 /// which shape its bytes take, and whether it states a charge.
 ///
@@ -337,6 +325,7 @@ pub struct ProviderRow {
     /// Non-secret identity headers declared by this profile. Credential and
     /// wire-format headers are excluded and validated at configuration load.
     pub extra_headers: Vec<(String, String)>,
+    cost_expectation: CostExpectation,
     /// What turns one of this provider's model ids into the facts a turn
     /// needs.
     ///
@@ -382,8 +371,6 @@ pub const OPENAI_KEY_VAR: &str = "OPENAI_API_KEY";
 pub const OLLAMA_BASE: &str = "http://localhost:11434/v1/";
 /// The base xAI serves its API under.
 pub const XAI_BASE: &str = "https://api.x.ai/v1/";
-/// The environment variable xAI's credential is read from.
-pub const XAI_KEY_VAR: &str = "XAI_API_KEY";
 /// The base OpenRouter serves its API under.
 pub const OPENROUTER_BASE: &str = "https://openrouter.ai/api/v1/";
 /// The environment variable OpenRouter's credential is read from.
@@ -414,7 +401,6 @@ const XAI_RESPONSES_READ_ON: &str = "2026-08-24";
 static OPENAI_SUPPLIED: Supplied = Supplied::new(&OpenAiCompletions);
 static ANTHROPIC_SUPPLIED: Supplied = Supplied::new(&AnthropicMessages);
 static GEMINI_SUPPLIED: Supplied = Supplied::new(&GeminiInteractions);
-static XAI_LANGUAGE_MODELS: XaiLanguageModels = XaiLanguageModels::new(&OpenAiCompletions);
 static OPENAI_CODEX_SUBSCRIPTION: SubscriptionSupplied = SubscriptionSupplied::new(
     "ego/builtin/openai-codex-subscription/v1",
     &OpenAiCodexResponses,
@@ -465,6 +451,10 @@ impl ProviderRow {
         &self.base
     }
 
+    pub fn cost_expectation(&self) -> CostExpectation {
+        self.cost_expectation
+    }
+
     /// The hosted row.
     ///
     /// Infallible, and that is the change the profile ADR's §3 argues for: a
@@ -490,6 +480,7 @@ impl ProviderRow {
             base,
             http_profile,
             extra_headers: Vec::new(),
+            cost_expectation: CostExpectation::Positive,
             resolver: &OPENAI_SUPPLIED,
             credential: CredentialStrategy::BearerFromEnv {
                 var: OPENAI_KEY_VAR.to_string(),
@@ -541,6 +532,7 @@ impl ProviderRow {
             base,
             http_profile,
             extra_headers: Vec::new(),
+            cost_expectation: CostExpectation::NoCharge,
             resolver: &OllamaDaemon,
             credential: CredentialStrategy::None,
             // A daemon serving its own weights charges nothing and states
@@ -552,41 +544,6 @@ impl ProviderRow {
     /// The local row at the default install's address.
     pub fn ollama_default() -> Self {
         Self::ollama(Url::parse(OLLAMA_BASE).expect("a constant this file controls"))
-    }
-
-    /// The old API-key xAI candidate: legacy Chat Completions, never selectable.
-    ///
-    /// **A candidate, not a member.**
-    /// `docs/decisions/2026-08-21-a-shared-shape-is-not-a-shared-contract.md`
-    /// §7 records that xAI has since deprecated this endpoint. This constructor
-    /// remains solely for the historical candidate audit and price-decoder
-    /// evidence. It is deliberately absent from the table
-    /// `crates/ego-cli/src/model.rs` builds, so `--model xai/...` does not
-    /// resolve; a live recording cannot promote a deprecated contract. The
-    /// selectable `xai-oauth` row below owns the current Responses mapping and
-    /// this constructor is not its fallback.
-    ///
-    /// [`XaiLanguageModels`] is what makes this row different from every other
-    /// family member: alone among the six, xAI publishes what it will charge
-    /// the key that asks.
-    pub fn xai(base: Url) -> Self {
-        let (base, http_profile) = admitted_base("xai", base);
-        ProviderRow {
-            id: "xai".to_string(),
-            base,
-            http_profile,
-            extra_headers: Vec::new(),
-            resolver: &XAI_LANGUAGE_MODELS,
-            credential: CredentialStrategy::BearerFromEnv {
-                var: XAI_KEY_VAR.to_string(),
-            },
-            cost: Some(Arc::new(XaiUsdTicks::new(READ_ON))),
-        }
-    }
-
-    /// The xAI row at xAI's own address.
-    pub fn xai_default() -> Self {
-        Self::xai(Url::parse(XAI_BASE).expect("a constant this file controls"))
     }
 
     pub fn openai_codex_default() -> Self {
@@ -602,6 +559,7 @@ impl ProviderRow {
                 ("originator".to_string(), "ego".to_string()),
                 ("user-agent".to_string(), "ego".to_string()),
             ],
+            cost_expectation: CostExpectation::NoCharge,
             resolver: &OPENAI_CODEX_SUBSCRIPTION,
             credential: CredentialStrategy::OAuth {
                 provider: "openai-codex".to_string(),
@@ -634,6 +592,7 @@ impl ProviderRow {
                     "vscode-chat".to_string(),
                 ),
             ],
+            cost_expectation: CostExpectation::NoCharge,
             resolver: &GITHUB_COPILOT_SUBSCRIPTION,
             credential: CredentialStrategy::OAuth {
                 provider: "github-copilot".to_string(),
@@ -652,6 +611,7 @@ impl ProviderRow {
             base,
             http_profile,
             extra_headers: Vec::new(),
+            cost_expectation: CostExpectation::NoCharge,
             resolver: &XAI_OAUTH_SUBSCRIPTION,
             credential: CredentialStrategy::OAuth {
                 provider: "xai-oauth".to_string(),
@@ -673,6 +633,7 @@ impl ProviderRow {
             base,
             http_profile,
             extra_headers: Vec::new(),
+            cost_expectation: CostExpectation::NoCharge,
             resolver: &KimiManaged,
             credential: CredentialStrategy::OAuth {
                 provider: "kimi-coding".to_string(),
@@ -691,6 +652,7 @@ impl ProviderRow {
             base,
             http_profile,
             extra_headers: Vec::new(),
+            cost_expectation: CostExpectation::NoCharge,
             resolver: &MINIMAX_OAUTH_SUBSCRIPTION,
             credential: CredentialStrategy::OAuth {
                 provider: "minimax-oauth".to_string(),
@@ -709,6 +671,7 @@ impl ProviderRow {
             base,
             http_profile,
             extra_headers: Vec::new(),
+            cost_expectation: CostExpectation::NoCharge,
             resolver: &NOUS_SUBSCRIPTION,
             credential: CredentialStrategy::OAuth {
                 provider: "nous".to_string(),
@@ -745,6 +708,7 @@ impl ProviderRow {
             base,
             http_profile,
             extra_headers: Vec::new(),
+            cost_expectation: CostExpectation::Positive,
             resolver: &OPENAI_SUPPLIED,
             credential: CredentialStrategy::OAuthOrEnv {
                 provider: "openrouter".to_string(),
@@ -780,6 +744,7 @@ impl ProviderRow {
             base,
             http_profile,
             extra_headers: Vec::new(),
+            cost_expectation: CostExpectation::Positive,
             resolver: &ANTHROPIC_SUPPLIED,
             credential: CredentialStrategy::Anthropic {
                 provider: "anthropic".to_string(),
@@ -821,6 +786,7 @@ impl ProviderRow {
             base,
             http_profile,
             extra_headers: Vec::new(),
+            cost_expectation: CostExpectation::Positive,
             resolver: &GEMINI_SUPPLIED,
             credential: CredentialStrategy::HeaderFromEnv {
                 header: "x-goog-api-key".to_string(),

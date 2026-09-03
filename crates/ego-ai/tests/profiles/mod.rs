@@ -183,22 +183,6 @@ pub const OPENAI: Profile = Profile {
 /// flat `{"code", "error"}` shape its error-code documentation and its users
 /// describe, and not something derived from a specification. It is the first
 /// thing a live smoke should overwrite.
-pub const XAI: Profile = Profile {
-    id: "xai",
-    thinking: ThinkingLevel::Off,
-    base: XAI_BASE,
-    model: "grok-4",
-    row: ProviderRow::xai_default,
-    wire: &OpenAiCompletions,
-    provenance: Provenance::VendorSchemaDerived,
-    source: "the xAI Chat Completions streaming specification",
-    subscription: false,
-    // Flat, and demonstrably not the family's. The mapping relays a body it
-    // could not parse verbatim, so the sentence survives anyway — which is the
-    // difference between a decode *difference* and a decode *failure*.
-    error_message_at: &["error"],
-};
-
 /// OpenRouter: schema-derived, selectable, and still lacking live acceptance.
 ///
 /// The ADR's §7 left an open question about conformance check 1 here that xAI
@@ -363,7 +347,6 @@ pub const SUBSCRIPTION: &[&Profile] = &[
 pub const ALL: &[&Profile] = &[
     &OLLAMA,
     &OPENAI,
-    &XAI,
     &OPENROUTER,
     &ANTHROPIC,
     &GEMINI,
@@ -462,7 +445,7 @@ pub fn request_fixture(request: &HttpRequest) -> String {
         "header_names": request
             .headers
             .iter()
-            .map(|(name, _)| name.as_str())
+            .map(|header| header.name())
             .collect::<Vec<_>>(),
         "body": body,
     });

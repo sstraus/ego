@@ -194,13 +194,13 @@ fn anthropic_protocol_selects_distinct_kimi_beta_messages_mapping() {
         built
             .headers
             .iter()
-            .any(|(name, value)| { name == "authorization" && value == "Bearer test-key" })
+            .any(|header| header.name() == "authorization" && header.value() == b"Bearer test-key")
     );
     assert!(
         built
             .headers
             .iter()
-            .any(|(name, value)| { name == "anthropic-version" && !value.is_empty() })
+            .any(|header| header.name() == "anthropic-version" && !header.value().is_empty())
     );
     let body: Value = serde_json::from_slice(built.body.as_deref().unwrap()).unwrap();
     assert_eq!(
@@ -228,7 +228,7 @@ fn kimi_openai_fixture_pins_thinking_completion_tools_builtin_and_usage() {
         built
             .headers
             .iter()
-            .any(|(name, value)| { name == "authorization" && value == "Bearer test-key" })
+            .any(|header| header.name() == "authorization" && header.value() == b"Bearer test-key")
     );
     let body: Value = serde_json::from_slice(built.body.as_deref().unwrap()).unwrap();
     assert_eq!(
@@ -527,7 +527,7 @@ fn resolved_kimi_wires_pin_full_image_request_bytes_and_route_distinctions() {
         built
             .headers
             .iter()
-            .any(|(name, value)| name == "authorization" && value == "Bearer test-key")
+            .any(|header| header.name() == "authorization" && header.value() == b"Bearer test-key")
     );
     let body: Value = serde_json::from_slice(built.body.as_deref().unwrap()).unwrap();
     assert_eq!(
@@ -551,13 +551,13 @@ fn resolved_kimi_wires_pin_full_image_request_bytes_and_route_distinctions() {
         built
             .headers
             .iter()
-            .any(|(name, value)| name == "anthropic-version" && !value.is_empty())
+            .any(|header| header.name() == "anthropic-version" && !header.value().is_empty())
     );
     assert!(
         built
             .headers
             .iter()
-            .any(|(name, value)| name == "authorization" && value == "Bearer test-key")
+            .any(|header| header.name() == "authorization" && header.value() == b"Bearer test-key")
     );
     let body: Value = serde_json::from_slice(built.body.as_deref().unwrap()).unwrap();
     assert_eq!(

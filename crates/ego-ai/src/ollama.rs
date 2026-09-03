@@ -47,7 +47,7 @@ use crate::catalogue::{
     ModelFactProvenance, ModelSlug, ResolveError, ResolvedModel, control_plane, is_locally_served,
     unmetered,
 };
-use crate::http::{Http, HttpRequest, Method, fetch};
+use crate::http::{Http, HttpRequest, Method, fetch, public_header};
 use crate::provider::ProviderRow;
 use ego_core::public::MeteringKind;
 
@@ -130,7 +130,7 @@ pub async fn enumerate(
         HttpRequest {
             url: url.clone(),
             method: Method::Get,
-            headers: vec![("accept".to_string(), "application/json".to_string())],
+            headers: vec![public_header("accept", b"application/json".to_vec())],
             body: None,
         },
     )
@@ -249,7 +249,7 @@ async fn installed(
         HttpRequest {
             url: url.clone(),
             method: Method::Get,
-            headers: vec![("accept".to_string(), "application/json".to_string())],
+            headers: vec![public_header("accept", b"application/json".to_vec())],
             body: None,
         },
     )
@@ -314,7 +314,7 @@ async fn running_context(
         HttpRequest {
             url: url.clone(),
             method: Method::Get,
-            headers: vec![("accept".to_string(), "application/json".to_string())],
+            headers: vec![public_header("accept", b"application/json".to_vec())],
             body: None,
         },
     )
@@ -348,7 +348,7 @@ async fn load(row: &ProviderRow, model: &str, http: &Arc<dyn Http>) -> Result<()
         HttpRequest {
             url: url.clone(),
             method: Method::Post,
-            headers: vec![("content-type".to_string(), "application/json".to_string())],
+            headers: vec![public_header("content-type", b"application/json".to_vec())],
             body: Some(serde_json::to_vec(&body).expect("a two-key object of strings")),
         },
     )

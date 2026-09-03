@@ -1,7 +1,7 @@
 //! The `openai-completions` wire format: `POST /chat/completions`, streamed.
 //!
 //! The shape behind OpenAI, OpenRouter, Groq, Together, Fireworks, DeepSeek,
-//! the API-key xAI candidate, and local daemons that advertise an
+//! and local daemons that advertise an
 //! "OpenAI-compatible" endpoint
 //! (`ARCHITECTURE.md` §3.1). Every field name, enum spelling and nullability
 //! below was read from `openai/openai-openapi` rather than recalled — the
@@ -233,7 +233,7 @@ struct StreamOptions {
     /// full usage automatically. That is not a reason to drop it:
     /// `ChatCompletionStreamOptions.include_usage` is undeprecated on the
     /// contract *this mapping is derived from*, where it is the only way usage
-    /// arrives at all; xAI requires it on the REST path and Ollama honours it.
+    /// arrives at all, while Ollama honours it.
     /// OpenRouter retired a **precondition, not a spelling** — nothing
     /// succeeded it — so there is no second spelling to be carrying, which is
     /// the shape `AGENTS.md` forbids. Audited in
@@ -603,8 +603,9 @@ struct Delta {
     /// there is no branch here, and nothing to consult a provider id about.
     #[serde(default)]
     reasoning: Option<String>,
-    /// Reasoning text, spelling two. xAI sends this one
-    /// (`POTENTIALS.md` P24, from xAI's own schema).
+    /// Reasoning text, spelling two. The retired xAI Chat schema supplied the
+    /// original evidence for this opportunistic extension (`POTENTIALS.md`
+    /// P24); that evidence is archival and no current xAI row uses this wire.
     ///
     /// Two fields and not one aliased field: `#[serde(alias)]` would decode
     /// either name into one slot and silently keep the last one written if a
@@ -706,7 +707,8 @@ fn map_usage(usage: &WireUsage) -> Option<Usage> {
         // Read where it is published and left unknown where it is not — the
         // same opportunistic, uniform decode the sibling ADR §4 rules for
         // every extension field, with no provider id anywhere near it.
-        // OpenRouter and xAI fill this in; Ollama sends no
+        // OpenRouter fills this in. The retired xAI Chat fixtures did too;
+        // that evidence is archival. Ollama sends no
         // `completion_tokens_details` at all, and `None` says so rather than
         // claiming it reasoned for nothing.
         reasoning_tokens: usage
@@ -771,8 +773,8 @@ pub struct StreamDecoder {
     /// How this provider states the money it will charge, when it states it.
     ///
     /// Carried by the provider row, not chosen here: this format is spoken by
-    /// OpenAI, OpenRouter, the unselectable API-key xAI candidate, Groq and
-    /// local daemons, and only some report a cost. A `match` on the provider id
+    /// OpenAI, OpenRouter, Groq and local daemons, and only some report a cost.
+    /// A `match` on the provider id
     /// in this file would be exactly the special case the metering ADR §8
     /// forbids.
     cost: Option<Arc<dyn ProviderCost>>,
@@ -1141,8 +1143,9 @@ impl StreamDecoder {
             "function_call" => StopReason::ToolUse,
             // Anthropic's spelling of `stop`, reaching this wire because a
             // gateway passes its upstream's reason through untranslated
-            // rather than mapping it (survey row 45; xAI is the measured
-            // case). It is not this format's vocabulary and it arrives in
+            // rather than mapping it (survey row 45; the retired xAI Chat
+            // recording is the archival measured case). It is not this
+            // format's vocabulary and it arrives in
             // this format's stream anyway, which is the whole reason the
             // table is widened here rather than made conditional on a
             // provider id — a `match` on the row inside a wire format is what
