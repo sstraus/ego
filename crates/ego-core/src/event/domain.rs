@@ -188,7 +188,7 @@ pub enum OccupancyProvenance {
 /// The exhaustive set of internal reducer inputs, per ARCH §1:
 ///
 /// ```text
-/// PromptQueued | PromptDeliveryExpedited | UserPrompt | AssistantDelta |
+/// SessionTitleChanged | SessionDeleted | PromptQueued | PromptDeliveryExpedited | UserPrompt | AssistantDelta |
 /// AssistantMessage | ReasoningDelta | ReasoningState | ToolCallStarted |
 /// ToolCallDelta | ToolCallCompleted | PermissionRequested |
 /// PermissionAmended | PermissionDecided | GenerationStarted |
@@ -219,6 +219,10 @@ pub enum OccupancyProvenance {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum EventKind {
+    /// Operator-facing metadata. The session identity and lineage do not change.
+    SessionTitleChanged { title: Option<String> },
+    /// Durable soft deletion. Storage remains available to lineage replay.
+    SessionDeleted,
     /// Input accepted for later delivery. Its envelope turn determines on
     /// replay whether it was accepted as a busy-turn steer or at an ordinary
     /// queue boundary.
@@ -567,6 +571,8 @@ impl EventKind {
     /// large) payload.
     pub fn name(&self) -> &'static str {
         match self {
+            EventKind::SessionTitleChanged { .. } => "session_title_changed",
+            EventKind::SessionDeleted => "session_deleted",
             EventKind::PromptQueued { .. } => "prompt_queued",
             EventKind::PromptDeliveryExpedited { .. } => "prompt_delivery_expedited",
             EventKind::UserPrompt { .. } => "user_prompt",

@@ -47,6 +47,10 @@ use crate::evidence::{EvidenceError, EvidenceWrite, RunInvocationId};
 use crate::generator::capabilities::ModelCapabilities;
 use crate::mcp::McpRuntimeBinding;
 use crate::question::Elicitor;
+use crate::session_lifecycle::{
+    ActivityFuture, CloseFuture, ClosedSession, LifecycleError, SessionActivity,
+    SessionRunLifecycle,
+};
 use crate::sink::EventSink;
 use crate::store::session_store::{SessionEntry, SessionStore, StoreError};
 use crate::turn::AdmittedToolSource;
@@ -2367,6 +2371,105 @@ where
         for waker in wakers {
             waker.wake();
         }
+    }
+
+    fn release_live_attachment(&self, run_id: RunId, lease: TurnLease) {
+        let mut live = self.live.lock().expect("run live state");
+        live.executions.remove(&(run_id, lease));
+        live.subscriptions.remove(&(run_id, lease));
+        live.handles.remove(&run_id);
+    }
+}
+
+impl<S, E, C, I> SessionRunLifecycle for RunController<S, E, C, I>
+where
+    S: SessionStore,
+    E: RunExecutor,
+    C: Clock,
+    I: IdSource,
+{
+    fn activity(&self, session: SessionId) -> ActivityFuture<'_> {
+        Box::pin(async move {
+            let folded = match self.read_folded(session).await {
+                Ok(folded) => folded,
+                Err(RunError::Store(StoreError::NotFound)) => {
+                    return Ok(SessionActivity::Inactive);
+                }
+                Err(error) => return Err(lifecycle_run_error(error)),
+            };
+            Ok(match folded.snapshot.status {
+                RunStatus::Running | RunStatus::Cancelling => SessionActivity::Active,
+                RunStatus::Uncertain => SessionActivity::Uncertain,
+                RunStatus::Settled | RunStatus::Cancelled | RunStatus::Interrupted => {
+                    SessionActivity::Inactive
+                }
+            })
+        })
+    }
+
+    fn cancel_and_settle(&self, session: SessionId) -> CloseFuture<'_> {
+        Box::pin(async move {
+            let folded = match self.read_folded(session).await {
+                Ok(folded) => folded,
+                Err(RunError::Store(StoreError::NotFound)) => {
+                    return Ok(ClosedSession {
+                        id: session,
+                        cancelled: false,
+                    });
+                }
+                Err(error) => return Err(lifecycle_run_error(error)),
+            };
+            match folded.snapshot.status {
+                RunStatus::Uncertain => return Err(LifecycleError::EffectUncertain),
+                RunStatus::Settled | RunStatus::Cancelled | RunStatus::Interrupted => {
+                    if let Ok(lease) = folded.last_lease() {
+                        self.release_live_attachment(folded.snapshot.run_id, lease);
+                    }
+                    return Ok(ClosedSession {
+                        id: session,
+                        cancelled: false,
+                    });
+                }
+                RunStatus::Running | RunStatus::Cancelling => {}
+            }
+
+            let lease = folded.active_lease().map_err(lifecycle_run_error)?;
+            let subscription = self
+                .live
+                .lock()
+                .expect("run live state")
+                .subscriptions
+                .get(&(folded.snapshot.run_id, lease))
+                .cloned()
+                .map(|state| RunSubscription { state })
+                .ok_or(LifecycleError::EffectUncertain)?;
+            if folded.snapshot.status == RunStatus::Running {
+                let key = self.cancel_key(&folded.snapshot, lease);
+                self.cancel_admitted(&key)
+                    .await
+                    .map_err(lifecycle_run_error)?;
+            }
+            let settled = subscription.await;
+            if settled.status == RunStatus::Uncertain {
+                return Err(LifecycleError::EffectUncertain);
+            }
+            self.release_live_attachment(folded.snapshot.run_id, lease);
+            Ok(ClosedSession {
+                id: session,
+                cancelled: matches!(
+                    settled.status,
+                    RunStatus::Cancelled | RunStatus::Interrupted
+                ),
+            })
+        })
+    }
+}
+
+fn lifecycle_run_error(error: RunError) -> LifecycleError {
+    match error {
+        RunError::PublishedDurabilityUncertain { .. } => LifecycleError::EffectUncertain,
+        RunError::Store(error) => LifecycleError::Store(error),
+        other => LifecycleError::Run(other.to_string()),
     }
 }
 

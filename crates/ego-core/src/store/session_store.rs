@@ -82,8 +82,8 @@ impl<'de> Deserialize<'de> for SessionEntry {
 /// not this type's.
 ///
 /// `model` and `title` are `Option` because an event-first session provides
-/// neither. A run admission can project its selected model; no durable entry
-/// currently supplies a title.
+/// neither. A run admission projects its selected model, while a
+/// `SessionTitleChanged` event projects the optional display title.
 ///
 /// `workspace_root` is **not** among them, and used to be. The reason it was
 /// optional — that `append` cannot learn a workspace — stopped being true

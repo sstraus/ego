@@ -176,6 +176,8 @@ pub enum ExportRunSettlement {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ExportEvent {
+    SessionTitleChanged,
+    SessionDeleted,
     PromptQueued {
         id: QueuedPromptId,
         images: Vec<ImageRef>,
@@ -639,6 +641,11 @@ fn project_run_command(command: &RunCommand, redactions: &mut Redactions) -> Exp
 
 fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
     match kind {
+        EventKind::SessionTitleChanged { title } => {
+            redactions.opaque_prose += title.is_some() as u64;
+            ExportEvent::SessionTitleChanged
+        }
+        EventKind::SessionDeleted => ExportEvent::SessionDeleted,
         EventKind::PromptQueued {
             id,
             text: _,

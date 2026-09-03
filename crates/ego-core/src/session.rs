@@ -375,10 +375,11 @@ impl<'a> ReplayContext<'a> {
     }
 }
 
-/// One canonical sequence-1 event and its tagged lineage for a new target.
+/// A canonical sequence-1 lineage event and any atomic target metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TargetSeed {
     event: DomainEvent,
+    trailing_events: Vec<DomainEvent>,
     lineage: SessionLineage,
 }
 
@@ -399,6 +400,7 @@ impl TargetSeed {
                 },
                 kind: EventKind::Forked { source, at_seq },
             },
+            trailing_events: Vec::new(),
             lineage: SessionLineage::Fork { source, at_seq },
         }
     }
@@ -434,6 +436,7 @@ impl TargetSeed {
                     checkpoint,
                 },
             },
+            trailing_events: Vec::new(),
             lineage: SessionLineage::Compaction {
                 source,
                 source_seq,
@@ -444,6 +447,36 @@ impl TargetSeed {
 
     pub fn event(&self) -> &DomainEvent {
         &self.event
+    }
+
+    /// Carry a fork's inherited display title in the same atomic target-log
+    /// image as its lineage seed. A missing title is the target default and
+    /// therefore needs no second event.
+    pub(crate) fn with_title(mut self, title: Option<String>) -> Self {
+        let Some(title) = title else {
+            return self;
+        };
+        let mut seq = self.event.env.seq;
+        seq.next();
+        self.trailing_events.push(DomainEvent {
+            env: Envelope {
+                seq,
+                id: EventId::new(),
+                turn: self.event.env.turn,
+                item: None,
+                parent: Some(self.event.env.id),
+                ts: self.event.env.ts,
+                producer: Producer::Main,
+            },
+            kind: EventKind::SessionTitleChanged { title: Some(title) },
+        });
+        self
+    }
+
+    /// The complete semantic prefix published for the target, beginning
+    /// with the canonical lineage event.
+    pub fn events(&self) -> impl Iterator<Item = &DomainEvent> {
+        std::iter::once(&self.event).chain(self.trailing_events.iter())
     }
 
     pub fn lineage(&self) -> SessionLineage {

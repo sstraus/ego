@@ -163,6 +163,8 @@ pub struct Lease {
     path: PathBuf,
 }
 
+impl ego_core::session_lifecycle::InactiveSessionLease for Lease {}
+
 impl std::fmt::Debug for Lease {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Lease")
@@ -172,6 +174,30 @@ impl std::fmt::Debug for Lease {
 }
 
 impl Lease {
+    /// Hold the same exclusive kernel lock as a writer without changing the
+    /// lease contents. `None` means a live holder already owns it.
+    pub(crate) fn probe(path: &Path) -> io::Result<Option<Self>> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(path)?;
+        let mut lock = RwLock::new(file);
+        match lock.try_write() {
+            Ok(guard) => std::mem::forget(guard),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(None),
+            Err(error) => return Err(error),
+        }
+        Ok(Some(Self {
+            lock,
+            path: path.to_path_buf(),
+        }))
+    }
+
     /// Acquire the writer lease at `path`, recording `pid` and `now` as
     /// this holder's liveness record.
     ///

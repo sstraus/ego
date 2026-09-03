@@ -30,6 +30,9 @@ use ego_core::session::{
     ReplaySource, ReplaySourceError, SessionBlobSource, SessionLineage, TargetPublication,
     TargetSeed,
 };
+use ego_core::session_lifecycle::{
+    InactiveSessionLease, LifecycleAppendError, LifecyclePublication, SessionLifecycleStore,
+};
 use ego_core::state::SessionState;
 use ego_core::store::blob::{BlobError, BlobStore};
 use ego_core::store::codec::{
@@ -41,6 +44,7 @@ use futures::stream::{self, BoxStream};
 
 use super::blob::SessionBlobStore;
 use super::io::{AtomicReplacePublication, StoreIo, tmp_path_for};
+use super::lease::Lease;
 use super::snapshot::{SNAPSHOT_VERSION, Snapshot, SnapshotRejection, validate};
 
 /// Filesystem-private cache projection. The public store port exposes only
@@ -56,6 +60,8 @@ struct RunManifest {
     hooks: HookCatalogueEvidence,
     #[serde(default)]
     evidence: ManifestEvidence,
+    #[serde(default)]
+    deleted: bool,
 }
 
 struct LogManifestFacts {
@@ -67,6 +73,20 @@ struct LogManifestFacts {
     execution: Option<ExecObservation>,
     hooks: HookCatalogueEvidence,
     evidence: ManifestEvidence,
+    title: Option<String>,
+    deleted: bool,
+}
+
+fn meta_from_log_facts(id: SessionId, facts: &LogManifestFacts) -> SessionMeta {
+    SessionMeta {
+        id,
+        workspace_root: facts.workspace_root.clone(),
+        model: facts.model.clone(),
+        created: facts.created,
+        updated: facts.last_ts.unwrap_or(facts.created),
+        title: facts.title.clone(),
+        lineage: facts.lineage,
+    }
 }
 
 /// Lease-local evidence facts derived from the repaired valid prefix.
@@ -340,6 +360,8 @@ fn log_manifest_facts(log: &[u8]) -> Result<Option<LogManifestFacts>, StoreError
     let mut execution = None;
     let mut hooks = HookCatalogueEvidence::default();
     let mut evidence_records = Vec::new();
+    let mut title = None;
+    let mut deleted = false;
     for line in lines {
         let record = match decode_line(line)? {
             StoreLine::Record(record) => record,
@@ -358,6 +380,8 @@ fn log_manifest_facts(log: &[u8]) -> Result<Option<LogManifestFacts>, StoreError
             SessionEntry::Event(event) => {
                 last_ts = Some(event.env.ts);
                 match event.kind {
+                    EventKind::SessionTitleChanged { title: changed } => title = changed,
+                    EventKind::SessionDeleted => deleted = true,
                     EventKind::CompactionSeeded {
                         source,
                         source_seq,
@@ -403,6 +427,8 @@ fn log_manifest_facts(log: &[u8]) -> Result<Option<LogManifestFacts>, StoreError
         execution,
         hooks,
         evidence,
+        title,
+        deleted,
     }))
 }
 
@@ -557,6 +583,7 @@ impl JsonlStore {
         seed: &TargetSeed,
     ) -> TargetPublication {
         let event = seed.event();
+        let events: Vec<_> = seed.events().collect();
         let mut first = Seq::ZERO;
         first.next();
         let valid_kind = match (&event.kind, seed.lineage()) {
@@ -590,7 +617,25 @@ impl JsonlStore {
         let valid_seed = event.env.seq == first
             && event.env.parent.is_none()
             && event.env.producer == Producer::Main
-            && valid_kind;
+            && valid_kind
+            && events.get(1..).is_some_and(|trailing| match trailing {
+                [] => true,
+                [title] => {
+                    let mut second = first;
+                    second.next();
+                    title.env.seq == second
+                        && title.env.parent == Some(event.env.id)
+                        && title.env.turn == event.env.turn
+                        && title.env.item.is_none()
+                        && title.env.ts == event.env.ts
+                        && title.env.producer == Producer::Main
+                        && matches!(
+                            &title.kind,
+                            EventKind::SessionTitleChanged { title: Some(_) }
+                        )
+                }
+                _ => false,
+            });
         if !valid_seed {
             return TargetPublication::NotPublished {
                 diagnostic: "a target requires one canonical typed sequence-1 seed event"
@@ -616,16 +661,19 @@ impl JsonlStore {
         let header = Header::new(*id, event.env.ts, self.workspace.clone());
         let mut log = encode_header(&header);
         log.push(b'\n');
-        let record = match encode_record(first, &SessionEntry::Event(event.clone())) {
-            Ok(record) => record,
-            Err(error) => {
-                return TargetPublication::NotPublished {
-                    diagnostic: format!("the target seed could not be encoded: {error}"),
-                };
-            }
-        };
-        log.extend_from_slice(&record);
-        log.push(b'\n');
+        let mut position = Seq::ZERO;
+        for event in events {
+            let record = match encode_record(position.next(), &SessionEntry::Event(event.clone())) {
+                Ok(record) => record,
+                Err(error) => {
+                    return TargetPublication::NotPublished {
+                        diagnostic: format!("the target seed could not be encoded: {error}"),
+                    };
+                }
+            };
+            log.extend_from_slice(&record);
+            log.push(b'\n');
+        }
 
         let publication = match self.io.replace_atomic_publication(&log_path, &log) {
             Ok(publication) => publication,
@@ -637,7 +685,7 @@ impl JsonlStore {
         };
 
         let manifest_diagnostic = self
-            .write_manifest(id, event, true)
+            .rebuild_manifest_from_log(id, &log)
             .err()
             .map(|error| format!("manifest cache update failed: {error}"));
         match publication {
@@ -898,22 +946,15 @@ impl JsonlStore {
         // one — it is a derived cache, and the log can regenerate it — but
         // an I/O error is propagated, because "cannot read this path" is
         // not evidence about the manifest's contents.
-        let (previous, manifest_unreadable) = match self.read_manifest(id) {
-            Ok(previous) => (previous, false),
-            Err(StoreError::Manifest(_)) => (None, true),
+        let previous = match self.read_manifest(id) {
+            Ok(previous) => previous,
+            Err(StoreError::Manifest(_)) => None,
             Err(e) => return Err(e),
         };
 
-        let Some(last_ts) = facts.last_ts else {
-            if previous.is_some() || manifest_unreadable {
-                self.io.remove_file(&self.manifest_path(id))?;
-                return Ok(true);
-            }
-            return Ok(false);
-        };
-
+        let projected_meta = meta_from_log_facts(*id, &facts);
         let meta = SessionMeta {
-            id: *id,
+            id: projected_meta.id,
             // From the log header, for exactly the reason `created` is —
             // and this is the whole point of the field being there. Carrying
             // it forward from the previous manifest, as this line used to,
@@ -921,11 +962,11 @@ impl JsonlStore {
             // workspace and silently left the one it belonged to. The
             // recovery path that loses the manifest is the one directly
             // above.
-            workspace_root: facts.workspace_root,
+            workspace_root: projected_meta.workspace_root,
             // Only the latest authoritative main-generation admission owns
             // this projection. A prior cache value is not evidence and must
             // disappear when the log no longer supplies its source.
-            model: facts.model,
+            model: projected_meta.model,
             // `created` comes from the log header rather than the old
             // manifest: the header is written once, at session creation, and
             // never rewritten, whereas this manifest is a derived cache that
@@ -939,16 +980,17 @@ impl JsonlStore {
             // file. The conclusion survives on the write-once clause alone;
             // the deleted clause was never checked. ADR §2 of
             // `docs/decisions/2026-08-21-a-header-the-repair-must-not-delete.md`.
-            created: facts.created,
-            updated: last_ts,
-            title: previous.as_ref().and_then(|m| m.meta.title.clone()),
-            lineage: facts.lineage,
+            created: projected_meta.created,
+            updated: projected_meta.updated,
+            title: projected_meta.title,
+            lineage: projected_meta.lineage,
         };
         let manifest = RunManifest {
             meta,
             execution: facts.execution,
             hooks: facts.hooks,
             evidence: facts.evidence,
+            deleted: facts.deleted,
         };
         if previous.as_ref() == Some(&manifest) {
             return Ok(false);
@@ -1020,7 +1062,13 @@ impl JsonlStore {
                 .or_else(|| log_facts.as_ref().map(|facts| facts.created))
                 .unwrap_or(ev.env.ts),
             updated: ev.env.ts,
-            title: previous.as_ref().and_then(|m| m.meta.title.clone()),
+            title: match &ev.kind {
+                EventKind::SessionTitleChanged { title } => title.clone(),
+                _ => previous
+                    .as_ref()
+                    .and_then(|manifest| manifest.meta.title.clone())
+                    .or_else(|| log_facts.as_ref().and_then(|facts| facts.title.clone())),
+            },
             lineage: match &ev.kind {
                 EventKind::CompactionSeeded {
                     source,
@@ -1067,6 +1115,9 @@ impl JsonlStore {
             execution,
             hooks,
             evidence,
+            deleted: matches!(ev.kind, EventKind::SessionDeleted)
+                || previous.as_ref().is_some_and(|manifest| manifest.deleted)
+                || log_facts.as_ref().is_some_and(|facts| facts.deleted),
         };
         let bytes = serde_json::to_vec(&manifest).expect("RunManifest always serialises");
         self.io.replace_atomic(&self.manifest_path(id), &bytes)?;
@@ -1352,6 +1403,7 @@ impl JsonlStore {
                 execution: None,
                 hooks: HookCatalogueEvidence::default(),
                 evidence: ManifestEvidence::default(),
+                deleted: false,
             },
             None => {
                 return Err(StoreError::Io(std::io::Error::other(
@@ -1745,9 +1797,168 @@ impl SessionStore for JsonlStore {
                 );
                 continue;
             }
-            metas.push(manifest.meta);
+            if !manifest.deleted {
+                metas.push(manifest.meta);
+            }
         }
         Ok(metas)
+    }
+}
+
+impl SessionLifecycleStore for JsonlStore {
+    fn publish_empty_session(
+        &self,
+        id: SessionId,
+        root: &std::path::Path,
+        created: Timestamp,
+    ) -> Result<LifecyclePublication, StoreError> {
+        self.with_events_lock(&id, || {
+            let log_path = self.log_path(&id);
+            if self.io.exists(&log_path)? {
+                return Ok(LifecyclePublication::NotPublished {
+                    diagnostic: "the session already has an event log".to_owned(),
+                });
+            }
+            let mut image = encode_header(&Header::new(id, created, root.to_path_buf()));
+            image.push(b'\n');
+            let publication = self.io.replace_atomic_publication(&log_path, &image)?;
+            if let Err(error) = self.rebuild_manifest_from_log(&id, &image) {
+                tracing::warn!(
+                    session = %session_dir_name(&id),
+                    error = %error,
+                    "created session is visible but its manifest projection failed"
+                );
+            }
+            Ok(match publication {
+                AtomicReplacePublication::PublishedDurably => LifecyclePublication::Published,
+                AtomicReplacePublication::PublishedDurabilityUncertain { diagnostic } => {
+                    LifecyclePublication::PublishedDurabilityUncertain { diagnostic }
+                }
+            })
+        })
+    }
+
+    fn compare_and_append_lifecycle(
+        &self,
+        id: SessionId,
+        expected: Seq,
+        event: DomainEvent,
+    ) -> Result<LifecyclePublication, LifecycleAppendError> {
+        self.with_events_lock(&id, || {
+            let log_path = self.log_path(&id);
+            let bytes = self.io.read(&log_path)?.ok_or(StoreError::NotFound)?;
+            let (header, start) = decoded_header(&bytes)?.ok_or(StoreError::MissingHeader)?;
+            if header.v != CODEC_VERSION {
+                return Err(StoreError::UnsupportedLog { found: header.v });
+            }
+            if header.session != id {
+                return Err(StoreError::WrongSession {
+                    expected: header.session,
+                    asked: id,
+                });
+            }
+            let (valid_len, _) = valid_prefix(&bytes, start);
+            if valid_len != bytes.len() {
+                return Err(invalid_log("session log has a corrupt or torn tail"));
+            }
+
+            let mut physical = Seq::ZERO;
+            let mut semantic = Seq::ZERO;
+            for line in split_lines(&bytes[start..]) {
+                let record = match decode_line(line)? {
+                    StoreLine::Record(record) => record,
+                    StoreLine::Header(_) => {
+                        return Err(invalid_log(
+                            "unexpected header record past the log's first line",
+                        ));
+                    }
+                    StoreLine::Unknown(_) => {
+                        return Err(invalid_log("unknown record in the valid session prefix"));
+                    }
+                };
+                accept_physical_position(&mut physical, record.seq)?;
+                let entry = serde_json::from_str::<SessionEntry>(record.payload.get())
+                    .map_err(|_| invalid_log("unknown payload in the valid session prefix"))?;
+                if let SessionEntry::Event(previous) = entry {
+                    let wanted = semantic.next();
+                    if previous.env.seq != wanted {
+                        return Err(invalid_log("semantic event sequence is not contiguous"));
+                    }
+                }
+            }
+            if semantic != expected {
+                return Ok(Err(LifecycleAppendError::Conflict));
+            }
+            let mut next_semantic = expected;
+            let valid_event = event.env.seq == next_semantic.next()
+                && event.env.item.is_none()
+                && event.env.parent.is_none()
+                && event.env.producer == Producer::Main
+                && matches!(
+                    &event.kind,
+                    EventKind::SessionTitleChanged { .. } | EventKind::SessionDeleted
+                );
+            if !valid_event {
+                return Err(invalid_log("invalid lifecycle event append"));
+            }
+
+            let mut image = bytes;
+            image.extend_from_slice(&encode_record(
+                physical.next(),
+                &SessionEntry::Event(event),
+            )?);
+            image.push(b'\n');
+            let publication = self.io.replace_atomic_publication(&log_path, &image)?;
+            if let Err(error) = self.rebuild_manifest_from_log(&id, &image) {
+                tracing::warn!(
+                    session = %session_dir_name(&id),
+                    error = %error,
+                    "lifecycle event is visible but its manifest projection failed"
+                );
+            }
+            Ok(Ok(match publication {
+                AtomicReplacePublication::PublishedDurably => LifecyclePublication::Published,
+                AtomicReplacePublication::PublishedDurabilityUncertain { diagnostic } => {
+                    LifecyclePublication::PublishedDurabilityUncertain { diagnostic }
+                }
+            }))
+        })
+        .map_err(LifecycleAppendError::Store)?
+    }
+
+    fn lifecycle_meta(&self, id: SessionId) -> Result<Option<SessionMeta>, StoreError> {
+        let Some(bytes) = self.io.read(&self.log_path(&id))? else {
+            return Ok(None);
+        };
+        let (header, start) = decoded_header(&bytes)?.ok_or(StoreError::MissingHeader)?;
+        if header.v != CODEC_VERSION {
+            return Err(StoreError::UnsupportedLog { found: header.v });
+        }
+        if header.session != id {
+            return Err(StoreError::WrongSession {
+                expected: header.session,
+                asked: id,
+            });
+        }
+        let (valid_len, _) = valid_prefix(&bytes, start);
+        if valid_len != bytes.len() {
+            return Err(invalid_log("session log has a corrupt or torn tail"));
+        }
+        Ok(log_manifest_facts(&bytes)?.map(|facts| meta_from_log_facts(id, &facts)))
+    }
+
+    fn acquire_inactive_lease(
+        &self,
+        id: SessionId,
+    ) -> Result<Box<dyn InactiveSessionLease>, LifecycleAppendError> {
+        Lease::probe(&self.lease_path(&id))
+            .map_err(StoreError::from)?
+            .map(|lease| Box::new(lease) as Box<dyn InactiveSessionLease>)
+            .ok_or(LifecycleAppendError::LeaseHeld)
+    }
+
+    fn publish_fork(&self, id: SessionId, seed: &TargetSeed) -> TargetPublication {
+        self.publish_target(&id, seed)
     }
 }
 
@@ -1822,6 +2033,13 @@ impl ReplaySource for JsonlStore {
             return Err(ReplaySourceError::CorruptSession {
                 session: *session,
                 reason: "session log header has the wrong codec or identity".to_string(),
+            });
+        }
+        let (valid_len, _) = valid_prefix(&bytes, start);
+        if valid_len != bytes.len() {
+            return Err(ReplaySourceError::CorruptSession {
+                session: *session,
+                reason: "session log has a corrupt or torn tail".to_owned(),
             });
         }
 

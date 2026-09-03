@@ -947,6 +947,12 @@ pub struct SessionState {
     /// The tagged source boundary that created this fork or compaction target.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lineage: Option<SessionLineage>,
+    /// Mutable display metadata, reduced from the authoritative event stream.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// A soft-deleted session remains readable only for internal lineage replay.
+    #[serde(default)]
+    pub deleted: bool,
     /// Per-turn state, keyed by turn id.
     pub turns: HashMap<TurnId, TurnState>,
     /// Per-item state, keyed by item id.
@@ -1070,6 +1076,8 @@ impl Default for SessionState {
             usage: Usage::IDENTITY,
             last_seq: Seq::default(),
             lineage: None,
+            title: None,
+            deleted: false,
             turns: HashMap::default(),
             items: HashMap::default(),
             known_events: HashSet::default(),
@@ -1566,6 +1574,8 @@ impl SessionState {
         self.known_events.insert(ev.env.id);
 
         match &ev.kind {
+            EventKind::SessionTitleChanged { title } => self.title = title.clone(),
+            EventKind::SessionDeleted => self.deleted = true,
             EventKind::PromptQueued { id, text, images } => {
                 self.accept_prompt(ev, *id, text, images)
             }
