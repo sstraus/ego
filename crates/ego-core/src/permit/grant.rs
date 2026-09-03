@@ -1379,9 +1379,11 @@ impl PolicyEngine {
         // not, on its own, authorise anything. A denial is the other shape and
         // gets one authority, because `judge` stops at the first deny.
         let mut rules: Vec<RuleAuthority> = Vec::new();
+        let mut yolo_authorized_secret_egress = false;
         for op in &call.ops {
             let Some(entry) = self.matching(&self.allow, op) else {
                 if self.mode == Mode::Yolo && matches!(op, Op::SecretEgress { .. }) {
+                    yolo_authorized_secret_egress = true;
                     continue;
                 }
                 let why = match op.subject_path(&self.workspace) {
@@ -1405,7 +1407,11 @@ impl PolicyEngine {
         Classification::Settled(Ok(Authorized {
             call,
             permit,
-            by: Authority::Rules { rules },
+            by: if yolo_authorized_secret_egress {
+                Authority::Mode { mode: Mode::Yolo }
+            } else {
+                Authority::Rules { rules }
+            },
         }))
     }
 

@@ -7,14 +7,15 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use ego_core::config::{Mode, OriginSet, PermCfg, Ruleset, Source};
+use ego_core::event::hook::HookId;
 use ego_core::permit::rule::Rule;
 use ego_core::permit::{
     Authority, Authorized, CanonPath, Change, Classification, DuplexHandle, DuplexSpawner, Entry,
-    EntryKind, Escalation, Fs, FsError, GuardedEffects, GuardedIo, HttpRequest, IoDenied, OneHop,
-    Op, OpName, PathResolver, Pending, PermitDenied, PolicyDenied, PolicyEngine, PrepareCtx,
-    PreparedCall, ProcessError, ProcessExecutor, Resolution, ResolvedConnect, Resolver, Scan,
-    ScanLimits, ScanRequest, SpawnSpec, Tool, ToolError, ToolResult, TransportError,
-    TransportFailure, Typed,
+    EntryKind, Escalation, Fs, FsError, GuardedEffects, GuardedIo, HttpRequest, HttpRoute,
+    HttpScheme, IoDenied, NetworkTarget, OneHop, Op, OpName, PathResolver, Pending, PermitDenied,
+    PolicyDenied, PolicyEngine, PrepareCtx, PreparedCall, ProcessError, ProcessExecutor,
+    Resolution, ResolvedConnect, Resolver, Scan, ScanLimits, ScanRequest, SpawnSpec, Tool,
+    ToolError, ToolResult, TransportError, TransportFailure, Typed,
 };
 use ego_core::store::evidence::{
     EvidenceError, EvidencePage, EvidenceRead, EvidenceStore, EvidenceWriter,
@@ -671,6 +672,55 @@ mod permit {
                 .classify_settled(read_call("/ws/src/main.rs"))
                 .unwrap_or_else(|err| panic!("{mode} mode refused a workspace read: {err}"));
         }
+    }
+
+    #[test]
+    fn permit_yolo_secret_egress_names_mode_while_rule_covered_read_names_rules() {
+        let target = NetworkTarget::new("example.com", 443).unwrap();
+        let route = HttpRoute::new(HttpScheme::Https, target).unwrap();
+        let request = HttpRequest::get("/secret").unwrap();
+        let hook_call = PreparedCall::hook_http(
+            HookId::parse(&format!("h1:{}", "00".repeat(32))).unwrap(),
+            route,
+            &request,
+            vec!["TOKEN".to_owned()],
+        );
+        let secret_op = hook_call
+            .ops
+            .iter()
+            .find(|op| matches!(op, Op::SecretEgress { .. }))
+            .cloned()
+            .expect("hook preparation carries one SecretEgress operation");
+        let secret_call = PreparedCall::new("secret-egress", vec![secret_op]);
+        let yolo = engine(Mode::Yolo, &[], &[]);
+        let secret = yolo
+            .classify_settled(secret_call)
+            .expect("yolo settles SecretEgress without a matching rule");
+        assert_eq!(secret.by(), &Authority::Mode { mode: Mode::Yolo });
+
+        let ruled = engine(Mode::Yolo, &["read(**)"], &[])
+            .classify_settled(read_call("/ws/src/main.rs"))
+            .expect("a matching rule settles an ordinary read");
+        assert!(matches!(ruled.by(), Authority::Rules { rules } if !rules.is_empty()));
+    }
+
+    #[test]
+    fn permit_yolo_mixed_hook_http_names_mode_even_when_network_rule_covers_connect() {
+        let target = NetworkTarget::new("example.com", 443).unwrap();
+        let route = HttpRoute::new(HttpScheme::Https, target).unwrap();
+        let request = HttpRequest::get("/secret").unwrap();
+        let call = PreparedCall::hook_http(
+            HookId::parse(&format!("h1:{}", "00".repeat(32))).unwrap(),
+            route,
+            &request,
+            vec!["TOKEN".to_owned()],
+        );
+        let yolo = engine(Mode::Yolo, &["net(example.com:443)"], &[]);
+        let granted = yolo
+            .classify_settled(call)
+            .expect("yolo settles the mixed hook call");
+
+        assert_eq!(granted.by(), &Authority::Mode { mode: Mode::Yolo });
     }
 
     #[test]
