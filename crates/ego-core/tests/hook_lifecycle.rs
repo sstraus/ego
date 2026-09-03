@@ -3,7 +3,10 @@
 mod common;
 
 use std::ffi::OsString;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicUsize, Ordering},
+};
 use std::time::{Duration, Instant};
 
 use ego_core::budget::{BudgetGate, Metering, SharedBudgetGate};
@@ -214,6 +217,12 @@ impl FailingPort {
     }
 }
 
+impl BlockingPort {
+    fn calls(&self) -> Vec<HookLifecycle> {
+        self.0.calls()
+    }
+}
+
 macro_rules! delegate_hook_journal_port {
     ($name:ty) => {
         impl HookJournalPort for $name {
@@ -257,10 +266,12 @@ impl HookInvocationPort for BlockingPort {
             .lock()
             .expect("hook calls")
             .push(request.lifecycle());
-        Box::pin(std::future::ready(Ok(HookOutcome::new(
-            HookDecision::Block,
-            None,
-        ))))
+        let decision = if request.lifecycle() == HookLifecycle::PreToolUse {
+            HookDecision::Block
+        } else {
+            HookDecision::Continue
+        };
+        Box::pin(std::future::ready(Ok(HookOutcome::new(decision, None))))
     }
 }
 
@@ -386,12 +397,23 @@ impl Clock for FixedClock {
     }
 }
 
-struct NoProcess;
+#[derive(Clone, Default)]
+struct NoProcess {
+    calls: Arc<AtomicUsize>,
+}
+
+impl NoProcess {
+    fn call_count(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
 impl ProcessExecutor for NoProcess {
     fn execute<'a>(
         &'a self,
         _spec: &'a ego_core::permit::SpawnSpec,
     ) -> BoxFuture<'a, Result<ToolResult, ProcessError>> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
         Box::pin(std::future::ready(Err(ProcessError::Invariant(
             "unused process".to_owned(),
         ))))
@@ -563,14 +585,14 @@ impl ego_core::generation_model_source::GenerationModelSource for GeneratorSourc
 fn run_turn<P: HookInvocationPort + Clone + 'static>(
     script: Vec<AiEvent>,
     port: &P,
-) -> (Vec<DomainEvent>, SessionState) {
+) -> (Vec<DomainEvent>, SessionState, usize) {
     run_turn_scripts(vec![script], port)
 }
 
 fn run_turn_scripts<P: HookInvocationPort + Clone + 'static>(
     scripts: Vec<Vec<AiEvent>>,
     port: &P,
-) -> (Vec<DomainEvent>, SessionState) {
+) -> (Vec<DomainEvent>, SessionState, usize) {
     run_turn_scripts_with_policy(scripts, port, false)
 }
 
@@ -578,7 +600,7 @@ fn run_turn_scripts_with_policy<P: HookInvocationPort + Clone + 'static>(
     scripts: Vec<Vec<AiEvent>>,
     port: &P,
     deny_exec: bool,
-) -> (Vec<DomainEvent>, SessionState) {
+) -> (Vec<DomainEvent>, SessionState, usize) {
     let store = Store::default();
     let clock = FixedClock;
     let sink = CollectingSink::new();
@@ -609,7 +631,7 @@ fn run_turn_scripts_with_policy<P: HookInvocationPort + Clone + 'static>(
     } else {
         PolicyEngine::new(CanonPath::new("/ws"), Mode::Default, permissions)
     };
-    let process = NoProcess;
+    let process = NoProcess::default();
     let evidence = NoEvidence;
     let fs = ego_core::permit::fake::FakeFs::default();
     let registry: [Arc<dyn Tool>; 1] = [Arc::new(FailingExecTool)];
@@ -676,13 +698,14 @@ fn run_turn_scripts_with_policy<P: HookInvocationPort + Clone + 'static>(
     (
         store.events(),
         turn.into_state().expect("unique turn journal state"),
+        process.call_count(),
     )
 }
 
 #[test]
 fn turn_loop_real_owner_records_prompt_and_stop_once_in_order() {
     let port = RecordingPort::default();
-    let (_events, _state) = run_turn(
+    let (_events, _state, _process_calls) = run_turn(
         vec![
             AiEvent::TextDelta {
                 text: "answer".to_owned(),
@@ -723,14 +746,14 @@ fn dispatcher_accepts_every_admitted_lifecycle_once_in_deterministic_order() {
 #[test]
 fn turn_loop_pre_block_stops_before_tool_effect_and_post_failure_observer_does_not_revert() {
     let blocking = BlockingPort::default();
-    let (_events, blocked_state) = run_turn(
+    let (blocked_events, blocked_state, process_calls) = run_turn(
         vec![
             AiEvent::ToolCall {
                 call_id: "call-1".to_owned(),
                 name: "failing_exec".to_owned(),
                 args: "{}".to_owned(),
             },
-            AiEvent::Stop(StopReason::Stop),
+            AiEvent::Stop(StopReason::ToolUse),
         ],
         &blocking,
     );
@@ -738,8 +761,38 @@ fn turn_loop_pre_block_stops_before_tool_effect_and_post_failure_observer_does_n
         blocked_state.unacknowledged_prompts().is_empty(),
         "a blocked pre-effect prompt cannot alter session state"
     );
+    assert_eq!(
+        blocking.calls(),
+        vec![
+            HookLifecycle::UserPromptSubmit,
+            HookLifecycle::PreToolUse,
+            HookLifecycle::PostToolBatch,
+            HookLifecycle::StopFailure,
+        ],
+        "the earlier lifecycle must continue so the tool is blocked at PreToolUse"
+    );
+    assert!(
+        !blocking.calls().iter().any(|lifecycle| matches!(
+            lifecycle,
+            HookLifecycle::PermissionRequest
+                | HookLifecycle::PermissionDenied
+                | HookLifecycle::PostToolUse
+                | HookLifecycle::PostToolUseFailure
+        )),
+        "a blocked tool must not reach permission or post-tool effect lifecycles"
+    );
+    assert_eq!(
+        process_calls, 0,
+        "a PreToolUse block must not cross the prepared tool's process port"
+    );
+    assert!(
+        blocked_events
+            .iter()
+            .any(|event| matches!(event.kind, EventKind::ToolCallCompleted { ok: false, .. })),
+        "the PreToolUse block must produce the durable blocked result"
+    );
     let failing = FailingPort::default();
-    let (events, _state) = run_turn_scripts(
+    let (events, _state, _process_calls) = run_turn_scripts(
         vec![
             vec![
                 AiEvent::ToolCall {
@@ -778,7 +831,7 @@ fn turn_loop_pre_block_stops_before_tool_effect_and_post_failure_observer_does_n
 #[test]
 fn turn_loop_real_owner_reaches_tool_batch_and_failure_boundaries_then_stops() {
     let port = RecordingPort::default();
-    let (_events, _state) = run_turn_scripts(
+    let (_events, _state, _process_calls) = run_turn_scripts(
         vec![
             vec![
                 AiEvent::ToolCall {
@@ -808,7 +861,7 @@ fn turn_loop_real_owner_reaches_tool_batch_and_failure_boundaries_then_stops() {
 #[test]
 fn turn_loop_permission_denial_reaches_request_and_denied_hooks_once_before_exit() {
     let port = RecordingPort::default();
-    let (_events, _state) = run_turn_scripts_with_policy(
+    let (_events, _state, _process_calls) = run_turn_scripts_with_policy(
         vec![
             vec![
                 AiEvent::ToolCall {
