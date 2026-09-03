@@ -172,8 +172,9 @@ pub const BUILT: &[&str] = &[
 /// subsystem it is waiting on.
 ///
 /// The subcommand twin of [`UNAVAILABLE`], and it exists for the same reason.
-/// §2 offers fourteen commands and `run` is the only one here, so the other
-/// thirteen used to fall through to the *interactive* refusal below — which
+/// In the first availability table, `run` was the only implemented named
+/// command, so every other documented command fell through to the *interactive*
+/// refusal below — which
 /// told someone who typed `ego resume` that the permission dialog was missing.
 /// True, and about a surface they had not asked for. `CLI.md` §3.1 states the
 /// standard for flags ("refused **by name**, with the subsystem it waits on")

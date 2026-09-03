@@ -80,7 +80,7 @@ Notes:
 ### 2.1 Availability — what ships today
 
 The same discipline as §3.1, and it was missing here until 2026-08-21. §2 lists
-seventeen commands; this build implements **thirteen**. The remaining four are
+seventeen commands; this build implements **fourteen**. The remaining three are
 refused **by name**, each naming the subsystem it waits on, from the `UNBUILT`
 table in `crates/ego-cli/src/cli.rs`. A test binds that table to this section,
 so a command can be refused as documented only while this list still offers it.
@@ -112,7 +112,7 @@ omitted when empty: two states, identical bytes.
 | `ego mcp-server` | **yes** | serves scoped `run`/`continue`/`cancel`/`status`/`compact` tools and sanitized summary/output resources on stdio. `--max-concurrent-runs`, `--retained-requests`, and `--max-resource-bytes` are required non-zero deployment bounds; `-C`/the current directory is the sole canonical root and stdout remains protocol-only |
 | `ego auth` | **yes** | `login\|logout\|status [PROVIDER]`; credentials live in one locked `$EGO_HOME/auth.json`, while TOML commands and discovered auth plugins can supply login tokens |
 | `ego models` | **yes** | prints the shared current-model catalogue as deterministic text or versioned JSON; `--provider` filters both model and source rows, and `--refresh` updates authoritative discovered slices without promoting cached display facts into generation authority |
-| `ego hooks` | no | the strict hook catalogue and runner (**M4**). This build has no admitted hook snapshot to inspect; `docs/21-claude-hook-parity.md` defines the final stable Claude-compatible lifecycle and read-only projection |
+| `ego hooks` | **yes** | `ls [--json]` reads the same immutable admitted hook catalogue used by execution; it neither reloads nor edits hook policy |
 | `ego config` | no | a config writer. The loader is strict and read-only, and nothing in this build writes a config file — `-c/--set` overrides one run |
 | `ego rules` | no | somewhere to keep a rule. The grammar and its stable IDs are built and `--allow`/`--deny` already reach the engine through them, so `ls` and `explain` have their material; what `allow`, `deny`, `revoke` and `remember` have nowhere to write to is a rule store — the same read-only loader `config` waits on |
 | `ego usage` | **yes** | reports the versioned main/judge/compaction/total accounting DTO for this workspace; `--period` accepts `all` or a positive `s`/`m`/`h` duration and `--json` emits the same DTO the text view renders |
@@ -567,11 +567,11 @@ catalogue without reloading or editing it.
 
 Skill frontmatter may narrow tools, model, effort, paths, and invocation
 visibility. It cannot relax system rules, trust, permission, sandbox, offline,
-budget, judge, or egress. Unsupported fork/agent/background/hook fields refuse
-by name until their final owner exists; `shell`, dynamic `!command` context,
-and Claude runtime variables are refused permanently. Invocation stores the
-rendered instruction and source digest durably so resume and compaction never
-silently reread a changed file.
+budget, judge, or egress. `context: fork`, `agent`, `background`, and `hooks`
+use the final child-run and source-bound hook owners; `shell`, dynamic
+`!command` context, and Claude runtime variables are refused permanently.
+Invocation stores the rendered instruction and source digest durably so resume
+and compaction never silently reread a changed file.
 
 ## 6. Interactive surface (complete, linear, keyboard-first)
 
