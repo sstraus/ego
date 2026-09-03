@@ -4,8 +4,8 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use ego_core::config::{
-    ConfigLayer, McpConfigProvenance, McpLayerEntry, McpServerConfig, McpServerName,
-    ResolvedMcpEntry, Source, Sourced, Trust, UserConfigMutation, UserMcpSlot, resolve,
+    ConfigLayer, McpConfigProvenance, McpLayerEntry, McpServerConfig, McpServerName, ProfileName,
+    ResolvedMcpEntry, Source, Sourced, Trust, UserConfigMutation, UserConfigTarget, resolve,
 };
 use ego_core::credentials::{
     CredentialKey, CredentialRemoval, CredentialStore, CredentialStoreError,
@@ -196,21 +196,21 @@ fn user_mutations_encode_exact_slot_expected_entry_and_reveal_semantics() {
         inherit_env: vec![],
     });
     let set = UserConfigMutation::McpSet {
-        slot: UserMcpSlot::Profile("dev".into()),
+        target: UserConfigTarget::Profile(ProfileName::parse("dev").unwrap()),
         name: name.clone(),
         expected_user_entry: Some(McpLayerEntry::Tombstone),
         server: server.clone(),
     };
     assert!(
-        matches!(set, UserConfigMutation::McpSet { slot: UserMcpSlot::Profile(profile), name: n, expected_user_entry: Some(McpLayerEntry::Tombstone), server: McpServerConfig::Stdio(_) } if profile == "dev" && n == name)
+        matches!(set, UserConfigMutation::McpSet { target: UserConfigTarget::Profile(profile), name: n, expected_user_entry: Some(McpLayerEntry::Tombstone), server: McpServerConfig::Stdio(_), .. } if profile.as_str() == "dev" && n == name)
     );
     let delete = UserConfigMutation::McpDeleteUserEntry {
-        slot: UserMcpSlot::Base,
+        target: UserConfigTarget::Base,
         name: name.clone(),
         expected_entry: McpLayerEntry::Server(server),
     };
     assert!(
-        matches!(delete, UserConfigMutation::McpDeleteUserEntry { slot: UserMcpSlot::Base, expected_entry: McpLayerEntry::Server(McpServerConfig::Stdio(s)), .. } if s.command == "mcp")
+        matches!(delete, UserConfigMutation::McpDeleteUserEntry { target: UserConfigTarget::Base, expected_entry: McpLayerEntry::Server(McpServerConfig::Stdio(s)), .. } if s.command == "mcp")
     );
     let insert = UserConfigMutation::McpInsertUserTombstone {
         name: name.clone(),

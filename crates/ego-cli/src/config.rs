@@ -14,8 +14,8 @@ use std::path::{Path, PathBuf};
 use ego_core::config::{
     AuthProviderLayer, ConfigError, ConfigLayer, Effective, McpConfigProvenance,
     McpEnvironmentName, McpHttpAuth, McpHttpConfig, McpHttpUrl, McpLayerEntry, McpServerConfig,
-    McpServerName, ResolvedMcpEntry, Source, Sourced, Trust, UserMcpSlot, resolve,
-    resolve_selected,
+    McpServerName, ProfileName, ResolvedMcpEntry, Source, Sourced, Trust, UserConfigTarget,
+    resolve, resolve_selected,
 };
 use serde::Deserialize;
 
@@ -79,11 +79,11 @@ pub(crate) fn hook_listing_layers() -> Result<Vec<Sourced<ConfigLayer>>, UsageEr
 /// `ego mcp` has no workspace or trust flags. It therefore manages only the
 /// two non-ambient layers that are meaningful outside a run. The selected
 /// `EGO_PROFILE`, when present, still goes through core's ordinary profile
-/// resolution and names the exact user slot a mutation must compare.
+/// resolution and names the exact user target a mutation must compare.
 pub(crate) struct McpManagementConfig {
     pub(crate) effective: Effective,
     pub(crate) user: ConfigLayer,
-    pub(crate) profile: Option<String>,
+    pub(crate) profile: Option<ProfileName>,
     pub(crate) user_path: PathBuf,
 }
 
@@ -91,25 +91,25 @@ impl McpManagementConfig {
     /// The exact user-owned entry observed before a compare-and-set mutation.
     pub(crate) fn user_entry(
         &self,
-        slot: &UserMcpSlot,
+        target: &UserConfigTarget,
         name: &McpServerName,
     ) -> Option<&McpLayerEntry> {
-        match slot {
-            UserMcpSlot::Base => self.user.mcp.servers.get(name),
-            UserMcpSlot::Profile(profile) => self
+        match target {
+            UserConfigTarget::Base => self.user.mcp.servers.get(name),
+            UserConfigTarget::Profile(profile) => self
                 .user
                 .profile
-                .get(profile)
+                .get(profile.as_str())
                 .and_then(|layer| layer.mcp.servers.get(name)),
         }
     }
 
-    /// The slot selected for an add operation.
-    pub(crate) fn selected_user_slot(&self) -> UserMcpSlot {
+    /// The target selected for an add operation.
+    pub(crate) fn selected_user_target(&self) -> UserConfigTarget {
         self.profile
             .clone()
-            .map(UserMcpSlot::Profile)
-            .unwrap_or(UserMcpSlot::Base)
+            .map(UserConfigTarget::Profile)
+            .unwrap_or(UserConfigTarget::Base)
     }
 }
 
@@ -131,9 +131,19 @@ pub(crate) fn mcp_management() -> Result<McpManagementConfig, UsageError> {
         }
         None => ConfigLayer::default(),
     };
-    let profile = std::env::var(ENV_PROFILE).ok();
-    let effective = resolve(&found, Trust::Untrusted, profile.as_deref())
-        .map_err(|error| UsageError(error.to_string()))?;
+    let profile = std::env::var(ENV_PROFILE)
+        .ok()
+        .map(|name| {
+            ProfileName::parse(&name)
+                .map_err(|error| UsageError(format!("invalid {ENV_PROFILE}: {error}")))
+        })
+        .transpose()?;
+    let effective = resolve(
+        &found,
+        Trust::Untrusted,
+        profile.as_ref().map(ProfileName::as_str),
+    )
+    .map_err(|error| UsageError(error.to_string()))?;
     Ok(McpManagementConfig {
         effective,
         user,

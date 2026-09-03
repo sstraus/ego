@@ -23,7 +23,8 @@ pub use layer::{
     ModelRef, PermCfg, ProfileLayer, StatusSegmentName, StatuslineLayer, UiLayer,
 };
 pub use mutation::{
-    UserConfigError, UserConfigMutation, UserConfigPublication, UserConfigStore, UserMcpSlot,
+    UserConfigError, UserConfigMutation, UserConfigMutationFacts, UserConfigMutationResult,
+    UserConfigPublication, UserConfigStore,
 };
 pub use resolve::{
     ActiveProfileProvenance, Effective, McpConfigProvenance, Posture, ResolvedMcpConfig,

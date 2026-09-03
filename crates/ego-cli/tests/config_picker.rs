@@ -13,8 +13,8 @@ use ego_cli::model_picker::{
 };
 use ego_cli::repl::actions::{ActionId, ActionSink, LocalAction, LocalActionOutcome};
 use ego_core::config::{
-    ConfigLayer, ModelRef, Source, UserConfigError, UserConfigMutation, UserConfigPublication,
-    UserConfigStore,
+    ConfigLayer, ModelRef, Source, UserConfigError, UserConfigMutation, UserConfigMutationFacts,
+    UserConfigMutationResult, UserConfigPublication, UserConfigStore, UserConfigTarget,
 };
 use ego_core::generator::capabilities::{
     CacheRetention, CancelSemantics, ImageInputSupport, ModelCapabilities, ReasoningCarryover,
@@ -117,9 +117,23 @@ impl UserConfigStore for RecordingUserConfigStore {
     fn mutate(
         &self,
         mutation: UserConfigMutation,
-    ) -> Result<UserConfigPublication, UserConfigError> {
+    ) -> Result<UserConfigMutationResult, UserConfigError> {
         self.mutations.lock().unwrap().push(mutation);
-        self.publication.clone()
+        self.publication
+            .clone()
+            .map(|publication| UserConfigMutationResult {
+                target: UserConfigTarget::Base,
+                facts: UserConfigMutationFacts::Set {
+                    key: ego_core::config::ManagedConfigKey::Bare,
+                    value: ego_core::config::ManagedConfigValue::parse(
+                        ego_core::config::ManagedConfigKey::Bare,
+                        "true",
+                    )
+                    .unwrap(),
+                },
+                changed: true,
+                publication,
+            })
     }
 }
 

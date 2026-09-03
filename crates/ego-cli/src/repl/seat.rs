@@ -1961,11 +1961,17 @@ fn configure_statusline(status: &SharedStatus, segments: Vec<ego_core::config::S
         .map(|segment| segment.as_str().to_string())
         .collect::<Vec<_>>();
     match store.mutate(UserConfigMutation::Statusline { segments: names }) {
-        Ok(publication) => {
+        Ok(result) => {
             let mut current = status.lock().expect("surface status lock");
             current.configured = segments.into_iter().map(StatusSegmentName::from).collect();
             current.native_status = !current.configured.is_empty();
-            current.notice = Some(match publication {
+            current.notice = Some(match result.publication {
+                UserConfigPublication::NotPublished if current.native_status => {
+                    "status line already enabled; configuration unchanged".to_string()
+                }
+                UserConfigPublication::NotPublished => {
+                    "status line already disabled; configuration unchanged".to_string()
+                }
                 UserConfigPublication::PublishedDurably if current.native_status => {
                     "status line enabled and saved".to_string()
                 }

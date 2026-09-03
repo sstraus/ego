@@ -7,17 +7,22 @@
 use crate::generator::types::ThinkingLevel;
 
 use super::layer::{McpLayerEntry, McpServerConfig, McpServerName, validate_status_segment_names};
-
-/// The exact user-owned table changed by an MCP mutation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum UserMcpSlot {
-    Base,
-    Profile(String),
-}
+use super::vocabulary::{ManagedConfigKey, ManagedConfigValue, UserConfigTarget};
 
 /// One complete, atomic change to the user configuration authority.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UserConfigMutation {
+    /// Set one field from the closed managed configuration vocabulary.
+    ManagedSet {
+        target: UserConfigTarget,
+        key: ManagedConfigKey,
+        value: ManagedConfigValue,
+    },
+    /// Remove one field from the closed managed configuration vocabulary.
+    ManagedUnset {
+        target: UserConfigTarget,
+        key: ManagedConfigKey,
+    },
     /// Change the model default and its reasoning effort together.
     ModelAndThinking {
         model: String,
@@ -27,14 +32,14 @@ pub enum UserConfigMutation {
     Statusline { segments: Vec<String> },
     /// Set one complete server in the exact base or profile slot.
     McpSet {
-        slot: UserMcpSlot,
+        target: UserConfigTarget,
         name: McpServerName,
         expected_user_entry: Option<McpLayerEntry>,
         server: McpServerConfig,
     },
     /// Delete exactly the entry the caller resolved from a user-owned slot.
     McpDeleteUserEntry {
-        slot: UserMcpSlot,
+        target: UserConfigTarget,
         name: McpServerName,
         expected_entry: McpLayerEntry,
     },
@@ -53,6 +58,27 @@ impl UserConfigMutation {
     /// ambiguous configuration and therefore fails as a whole.
     pub fn validate(&self) -> Result<(), UserConfigError> {
         match self {
+            Self::ManagedSet { target, key, value } => {
+                validate_managed_target_key(target, *key)?;
+                if !managed_value_matches_key(*key, value) {
+                    return Err(UserConfigError::new(format!(
+                        "managed configuration key `{key}` received a value of the wrong type"
+                    )));
+                }
+                let canonical = value.to_toml();
+                let reparsed = ManagedConfigValue::parse(*key, &canonical).map_err(|error| {
+                    UserConfigError::new(format!(
+                        "managed configuration key `{key}` cannot store its typed value: {error}"
+                    ))
+                })?;
+                if &reparsed != value {
+                    return Err(UserConfigError::new(format!(
+                        "managed configuration key `{key}` cannot store its typed value without loss"
+                    )));
+                }
+                Ok(())
+            }
+            Self::ManagedUnset { target, key } => validate_managed_target_key(target, *key),
             Self::Statusline { segments } => {
                 validate_status_segment_names(segments).map_err(UserConfigError::new)
             }
@@ -93,6 +119,124 @@ impl UserConfigMutation {
             } => Ok(()),
         }
     }
+
+    /// The exact user-owned authority this mutation addresses.
+    pub fn target(&self) -> UserConfigTarget {
+        match self {
+            Self::ManagedSet { target, .. }
+            | Self::ManagedUnset { target, .. }
+            | Self::McpSet { target, .. }
+            | Self::McpDeleteUserEntry { target, .. } => target.clone(),
+            Self::ModelAndThinking { .. }
+            | Self::Statusline { .. }
+            | Self::McpInsertUserTombstone { .. } => UserConfigTarget::Base,
+        }
+    }
+
+    /// Canonical facts returned after this mutation succeeds.
+    pub fn facts(&self) -> UserConfigMutationFacts {
+        match self {
+            Self::ManagedSet { key, value, .. } => UserConfigMutationFacts::Set {
+                key: *key,
+                value: value.clone(),
+            },
+            Self::ManagedUnset { key, .. } => UserConfigMutationFacts::Unset { key: *key },
+            Self::ModelAndThinking { model, thinking } => {
+                UserConfigMutationFacts::ModelAndThinking {
+                    model: model.clone(),
+                    thinking: *thinking,
+                }
+            }
+            Self::Statusline { segments } => UserConfigMutationFacts::Statusline {
+                segments: segments.clone(),
+            },
+            Self::McpSet { name, server, .. } => UserConfigMutationFacts::McpSet {
+                name: name.clone(),
+                server: server.clone(),
+            },
+            Self::McpDeleteUserEntry {
+                name,
+                expected_entry,
+                ..
+            } => UserConfigMutationFacts::McpDeleteUserEntry {
+                name: name.clone(),
+                removed: expected_entry.clone(),
+            },
+            Self::McpInsertUserTombstone { name, .. } => {
+                UserConfigMutationFacts::McpInsertUserTombstone { name: name.clone() }
+            }
+        }
+    }
+}
+
+fn validate_managed_target_key(
+    target: &UserConfigTarget,
+    key: ManagedConfigKey,
+) -> Result<(), UserConfigError> {
+    if ManagedConfigKey::for_target(target.clone()).contains(&key) {
+        return Ok(());
+    }
+    let target = match target {
+        UserConfigTarget::Base => "base user configuration".to_owned(),
+        UserConfigTarget::Profile(profile) => format!("user profile `{profile}`"),
+    };
+    Err(UserConfigError::new(format!(
+        "managed configuration key `{key}` is not available for {target}"
+    )))
+}
+
+fn managed_value_matches_key(key: ManagedConfigKey, value: &ManagedConfigValue) -> bool {
+    matches!(
+        (key, value),
+        (ManagedConfigKey::Model, ManagedConfigValue::Model(_))
+            | (ManagedConfigKey::Thinking, ManagedConfigValue::Thinking(_))
+            | (ManagedConfigKey::Mode, ManagedConfigValue::Mode(_))
+            | (ManagedConfigKey::Sandbox, ManagedConfigValue::Sandbox(_))
+            | (ManagedConfigKey::Budget, ManagedConfigValue::Budget(_))
+            | (ManagedConfigKey::Bare, ManagedConfigValue::Bare(_))
+            | (
+                ManagedConfigKey::PermissionsJudge,
+                ManagedConfigValue::PermissionsJudge(_)
+            )
+            | (
+                ManagedConfigKey::StatuslineSegments,
+                ManagedConfigValue::StatuslineSegments(_)
+            )
+            | (
+                ManagedConfigKey::SessionDir | ManagedConfigKey::ArtifactDir,
+                ManagedConfigValue::Path(_)
+            )
+    )
+}
+
+/// Canonical description of the successfully requested user-config change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UserConfigMutationFacts {
+    Set {
+        key: ManagedConfigKey,
+        value: ManagedConfigValue,
+    },
+    Unset {
+        key: ManagedConfigKey,
+    },
+    ModelAndThinking {
+        model: String,
+        thinking: ThinkingLevel,
+    },
+    Statusline {
+        segments: Vec<String>,
+    },
+    McpSet {
+        name: McpServerName,
+        server: McpServerConfig,
+    },
+    McpDeleteUserEntry {
+        name: McpServerName,
+        removed: McpLayerEntry,
+    },
+    McpInsertUserTombstone {
+        name: McpServerName,
+    },
 }
 
 /// A failed user-config mutation. Callers must keep their previous in-memory
@@ -123,6 +267,8 @@ impl std::error::Error for UserConfigError {}
 /// What became authoritative after a successful user-config publication.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UserConfigPublication {
+    /// The requested state was already authoritative; no replace was attempted.
+    NotPublished,
     /// The new config was published and its directory entry was synced.
     PublishedDurably,
     /// The new config is authoritative, but its final durability barrier
@@ -130,12 +276,22 @@ pub enum UserConfigPublication {
     PublishedDurabilityUncertain { diagnostic: String },
 }
 
+/// The final state of one successful user-config transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserConfigMutationResult {
+    pub target: UserConfigTarget,
+    pub facts: UserConfigMutationFacts,
+    pub changed: bool,
+    pub publication: UserConfigPublication,
+}
+
 /// The narrow consumer port for the user configuration transaction.
 pub trait UserConfigStore: Send + Sync {
-    /// Publish one complete mutation. `Err` guarantees that publication did
-    /// not occur and the previous config remains authoritative.
+    /// Apply one complete mutation. `Err` guarantees that publication did not
+    /// occur and the previous config remains authoritative; an unchanged
+    /// success reports [`UserConfigPublication::NotPublished`].
     fn mutate(
         &self,
         mutation: UserConfigMutation,
-    ) -> Result<UserConfigPublication, UserConfigError>;
+    ) -> Result<UserConfigMutationResult, UserConfigError>;
 }

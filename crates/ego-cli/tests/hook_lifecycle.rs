@@ -21,7 +21,8 @@ use ego_cli::repl::actions::{ActionId, ActionSink, LocalAction, LocalActionOutco
 use ego_cli::run::RunModelSwitchOwner;
 use ego_core::config::{
     ConfigLayer, ModelRef, Source, Trust, UserConfigError, UserConfigMutation,
-    UserConfigPublication, UserConfigStore,
+    UserConfigMutationFacts, UserConfigMutationResult, UserConfigPublication, UserConfigStore,
+    UserConfigTarget,
 };
 use ego_core::event::domain::GenerationRole;
 use ego_core::event::hook::{
@@ -393,14 +394,26 @@ impl UserConfigStore for ConfigStore {
     fn mutate(
         &self,
         _mutation: UserConfigMutation,
-    ) -> Result<UserConfigPublication, UserConfigError> {
+    ) -> Result<UserConfigMutationResult, UserConfigError> {
         assert_eq!(
             self.selection.snapshot().expect("selection").identity,
             ModelRef("openai/old".to_owned()),
             "config publication must precede active model installation"
         );
         *self.publications.lock().expect("config publications") += 1;
-        Ok(UserConfigPublication::PublishedDurably)
+        Ok(UserConfigMutationResult {
+            target: UserConfigTarget::Base,
+            facts: UserConfigMutationFacts::Set {
+                key: ego_core::config::ManagedConfigKey::Model,
+                value: ego_core::config::ManagedConfigValue::parse(
+                    ego_core::config::ManagedConfigKey::Model,
+                    "'openai/new'",
+                )
+                .unwrap(),
+            },
+            changed: true,
+            publication: UserConfigPublication::PublishedDurably,
+        })
     }
 }
 

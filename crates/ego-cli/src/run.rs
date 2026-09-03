@@ -186,14 +186,14 @@ impl<'s> RunModelSwitchOwner<'s> {
         }
 
         let publication = if request.is_persistent() {
-            Some(
-                self.config_store
-                    .mutate(UserConfigMutation::ModelAndThinking {
-                        model: target.0.clone(),
-                        thinking,
-                    })
-                    .map_err(RunModelSwitchError::Persistence)?,
-            )
+            let result = self
+                .config_store
+                .mutate(UserConfigMutation::ModelAndThinking {
+                    model: target.0.clone(),
+                    thinking,
+                })
+                .map_err(RunModelSwitchError::Persistence)?;
+            Some(result.publication)
         } else {
             None
         };

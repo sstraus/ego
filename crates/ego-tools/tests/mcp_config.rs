@@ -6,8 +6,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use ego_core::config::{
-    ConfigLayer, McpLayerEntry, McpServerConfig, McpServerName, Source, UserConfigMutation,
-    UserConfigPublication, UserConfigStore, UserMcpSlot,
+    ConfigLayer, McpLayerEntry, McpServerConfig, McpServerName, ProfileName, Source,
+    UserConfigMutation, UserConfigMutationResult, UserConfigPublication, UserConfigStore,
+    UserConfigTarget,
 };
 use ego_core::credentials::{
     CredentialKey, CredentialRemoval, CredentialStore, CredentialTarget, SecretMaterial,
@@ -100,13 +101,13 @@ fn mcp_set_delete_and_tombstone_preserve_comments_order_and_unrelated_entries() 
     let store = OsUserConfigStore::new(&io, &path);
     let name: McpServerName = "managed".parse().expect("name");
     let set = UserConfigMutation::McpSet {
-        slot: UserMcpSlot::Base,
+        target: UserConfigTarget::Base,
         name: name.clone(),
         expected_user_entry: None,
         server: stdio("first"),
     };
     assert_eq!(
-        store.mutate(set).expect("set"),
+        store.mutate(set).expect("set").publication,
         UserConfigPublication::PublishedDurably
     );
     let text = std::fs::read_to_string(&path).expect("read");
@@ -114,12 +115,12 @@ fn mcp_set_delete_and_tombstone_preserve_comments_order_and_unrelated_entries() 
     assert!(text.contains("[mcp.servers.unrelated]"));
     assert!(text.contains("command='keep'"));
     let delete = UserConfigMutation::McpDeleteUserEntry {
-        slot: UserMcpSlot::Base,
+        target: UserConfigTarget::Base,
         name: name.clone(),
         expected_entry: McpLayerEntry::Server(stdio("first")),
     };
     assert_eq!(
-        store.mutate(delete).expect("delete"),
+        store.mutate(delete).expect("delete").publication,
         UserConfigPublication::PublishedDurably
     );
     let insert = UserConfigMutation::McpInsertUserTombstone {
@@ -127,7 +128,7 @@ fn mcp_set_delete_and_tombstone_preserve_comments_order_and_unrelated_entries() 
         expected_user_entry: None,
     };
     assert_eq!(
-        store.mutate(insert).expect("tombstone"),
+        store.mutate(insert).expect("tombstone").publication,
         UserConfigPublication::PublishedDurably
     );
     let published = std::fs::read_to_string(&path).expect("read");
@@ -140,13 +141,13 @@ fn mcp_set_delete_and_tombstone_preserve_comments_order_and_unrelated_entries() 
         Some(McpLayerEntry::Tombstone)
     ));
     let reveal = UserConfigMutation::McpSet {
-        slot: UserMcpSlot::Base,
+        target: UserConfigTarget::Base,
         name: "managed".parse().expect("name"),
         expected_user_entry: Some(McpLayerEntry::Tombstone),
         server: stdio("revealed"),
     };
     assert_eq!(
-        store.mutate(reveal).expect("replace tombstone"),
+        store.mutate(reveal).expect("replace tombstone").publication,
         UserConfigPublication::PublishedDurably
     );
     let revealed = ConfigLayer::parse(Source::User, &std::fs::read_to_string(&path).expect("read"))
@@ -166,7 +167,7 @@ fn stale_compare_and_set_is_unpublished_and_publication_uncertainty_is_durable()
     let store = OsUserConfigStore::new(&io, &path);
     let name: McpServerName = "managed".parse().expect("name");
     let stale = UserConfigMutation::McpDeleteUserEntry {
-        slot: UserMcpSlot::Base,
+        target: UserConfigTarget::Base,
         name: name.clone(),
         expected_entry: McpLayerEntry::Server(stdio("never-present")),
     };
@@ -177,7 +178,7 @@ fn stale_compare_and_set_is_unpublished_and_publication_uncertainty_is_durable()
     );
     let before_stale_set = std::fs::read(&path).expect("read bytes");
     let stale_set = UserConfigMutation::McpSet {
-        slot: UserMcpSlot::Base,
+        target: UserConfigTarget::Base,
         name: name.clone(),
         expected_user_entry: Some(McpLayerEntry::Tombstone),
         server: stdio("must-not-publish"),
@@ -190,13 +191,13 @@ fn stale_compare_and_set_is_unpublished_and_publication_uncertainty_is_durable()
     };
     let uncertain_store = OsUserConfigStore::new(&uncertain_io, &path);
     let set = UserConfigMutation::McpSet {
-        slot: UserMcpSlot::Profile("dev".into()),
+        target: UserConfigTarget::Profile(ProfileName::parse("dev").unwrap()),
         name,
         expected_user_entry: None,
         server: stdio("published"),
     };
     assert!(
-        matches!(uncertain_store.mutate(set), Ok(UserConfigPublication::PublishedDurabilityUncertain { diagnostic }) if diagnostic == "uncertain")
+        matches!(uncertain_store.mutate(set), Ok(UserConfigMutationResult { publication: UserConfigPublication::PublishedDurabilityUncertain { diagnostic }, .. }) if diagnostic == "uncertain")
     );
     let published = std::fs::read_to_string(&path).expect("read");
     assert!(published.contains("[profile.dev.mcp.servers.managed]"));

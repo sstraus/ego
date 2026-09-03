@@ -8,8 +8,9 @@
 use std::sync::Arc;
 
 use ego_core::config::{
-    McpConfigProvenance, McpHttpAuth, McpServerConfig, McpServerName, ResolvedMcpEntry, Source,
-    UserConfigMutation, UserConfigPublication, UserConfigStore, UserMcpSlot,
+    McpConfigProvenance, McpHttpAuth, McpServerConfig, McpServerName, ProfileName,
+    ResolvedMcpEntry, Source, UserConfigMutation, UserConfigMutationResult, UserConfigPublication,
+    UserConfigStore, UserConfigTarget,
 };
 use ego_core::run::RunTermination;
 use ego_mcp::{
@@ -91,7 +92,7 @@ fn usage(error: UsageError) -> RunTermination {
 fn publish(
     config: &McpManagementConfig,
     mutation: UserConfigMutation,
-) -> Result<UserConfigPublication, RunTermination> {
+) -> Result<UserConfigMutationResult, RunTermination> {
     let store = OsUserConfigStore::new(Arc::new(OsIo), config.user_path.as_path());
     store
         .mutate(mutation)
@@ -107,16 +108,17 @@ async fn add(
     controller: &Arc<McpRegistryController>,
 ) -> Result<(), RunTermination> {
     let before = management_config()?;
-    let slot = before.selected_user_slot();
-    let publication = publish(
+    let target = before.selected_user_target();
+    let result = publish(
         &before,
         UserConfigMutation::McpSet {
-            slot: slot.clone(),
+            target: target.clone(),
             name: name.clone(),
-            expected_user_entry: before.user_entry(&slot, name).cloned(),
+            expected_user_entry: before.user_entry(&target, name).cloned(),
             server: server.clone(),
         },
     )?;
+    let publication = result.publication;
     let after = resolve_after_publication(&publication)?;
     let status = reconcile(
         &after,
@@ -148,7 +150,8 @@ async fn remove(
 ) -> Result<(), RunTermination> {
     let before = management_config()?;
     let (mutation, removal) = removal_mutation(&before, name)?;
-    let publication = publish(&before, mutation)?;
+    let result = publish(&before, mutation)?;
+    let publication = result.publication;
     let after = resolve_after_publication(&publication)?;
     let status = reconcile(
         &after,
@@ -186,11 +189,20 @@ fn removal_mutation(
     match provenance {
         McpConfigProvenance::Layer {
             source: Source::User,
-        } => delete_user_entry(config, UserMcpSlot::Base, name, removal),
+        } => delete_user_entry(config, UserConfigTarget::Base, name, removal),
         McpConfigProvenance::Profile {
             source: Source::User,
             name: profile,
-        } => delete_user_entry(config, UserMcpSlot::Profile(profile.clone()), name, removal),
+        } => delete_user_entry(
+            config,
+            UserConfigTarget::Profile(ProfileName::parse(profile).map_err(|error| {
+                usage(UsageError(format!(
+                    "resolved user profile has an invalid name: {error}"
+                )))
+            })?),
+            name,
+            removal,
+        ),
         McpConfigProvenance::Layer {
             source: Source::System,
         }
@@ -203,7 +215,7 @@ fn removal_mutation(
                     "MCP server `{name}` is not configured; the system layer contains a tombstone"
                 ))));
             }
-            let expected_user_entry = config.user_entry(&UserMcpSlot::Base, name).cloned();
+            let expected_user_entry = config.user_entry(&UserConfigTarget::Base, name).cloned();
             if expected_user_entry.is_some() {
                 return Err(RunTermination::Failed {
                     message: format!(
@@ -229,22 +241,22 @@ fn removal_mutation(
 
 fn delete_user_entry(
     config: &McpManagementConfig,
-    slot: UserMcpSlot,
+    target: UserConfigTarget,
     name: &McpServerName,
     removal: Removal,
 ) -> Result<(UserConfigMutation, Removal), RunTermination> {
     let expected_entry =
         config
-            .user_entry(&slot, name)
+            .user_entry(&target, name)
             .cloned()
             .ok_or_else(|| RunTermination::Failed {
                 message: format!(
-                    "resolved user MCP server `{name}` is absent from its provenance slot"
+                    "resolved user MCP server `{name}` is absent from its provenance target"
                 ),
             })?;
     Ok((
         UserConfigMutation::McpDeleteUserEntry {
-            slot,
+            target,
             name: name.clone(),
             expected_entry,
         },
@@ -266,6 +278,7 @@ fn resolve_after_publication(
 
 fn publication_text(publication: &UserConfigPublication) -> String {
     match publication {
+        UserConfigPublication::NotPublished => "unchanged; not published".to_string(),
         UserConfigPublication::PublishedDurably => "published durably".to_string(),
         UserConfigPublication::PublishedDurabilityUncertain { diagnostic } => {
             format!("published with durability uncertain: {diagnostic}")

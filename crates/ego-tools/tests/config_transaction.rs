@@ -109,7 +109,8 @@ fn transaction_locks_read_edit_strict_reparse_replace_and_unlocks_after_replace(
                 model: "openai/new".into(),
                 thinking: ThinkingLevel::High,
             })
-            .unwrap(),
+            .unwrap()
+            .publication,
         UserConfigPublication::PublishedDurably
     );
     let text = std::fs::read_to_string(&path).unwrap();
@@ -199,7 +200,8 @@ fn post_publish_barrier_failure_reports_uncertainty_and_keeps_new_disk_authority
                 model: "openai/new".into(),
                 thinking: ThinkingLevel::High,
             })
-            .unwrap(),
+            .unwrap()
+            .publication,
         UserConfigPublication::PublishedDurabilityUncertain {
             diagnostic: "injected post-publish durability uncertainty".into(),
         }
