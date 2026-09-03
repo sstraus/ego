@@ -26,8 +26,8 @@ use std::str::FromStr;
 use clap::error::ErrorKind;
 use clap::{ArgAction, Args as ClapArgs, Parser, Subcommand};
 use ego_core::config::{
-    McpEnvironmentName, McpHttpAuth, McpHttpConfig, McpHttpUrl, McpServerConfig, McpServerName,
-    Mode,
+    ManagedConfigKey, ManagedConfigValue, McpEnvironmentName, McpHttpAuth, McpHttpConfig,
+    McpHttpUrl, McpServerConfig, McpServerName, Mode, ProfileName, UserConfigTarget,
 };
 use ego_core::event::id::{ItemId, SessionId};
 use ego_core::generator::types::ThinkingLevel;
@@ -40,6 +40,8 @@ use crate::agent_file::{self, AgentFile};
 /// What the process was asked to do.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Invocation {
+    /// `ego config get|set|unset|ls|edit` — typed user configuration management.
+    Config(Box<ConfigArgs>),
     /// `ego auth login|logout|status [PROVIDER]`.
     Auth(Box<AuthArgs>),
     /// `ego mcp add|rm|ls` — typed MCP configuration management.
@@ -165,6 +167,7 @@ pub const BUILT: &[&str] = &[
     "acp",
     "auth",
     "mcp",
+    "config",
     "mcp-server",
 ];
 
@@ -188,17 +191,10 @@ pub const BUILT: &[&str] = &[
 /// table does not place still gets a reason, never a milestone invented for it.
 pub const UNBUILT: &[(&str, &str)] = &[
     (
-        "config",
-        "a config writer. The loader is strict and read-only, and nothing in \
-         this build writes a config file — `-c/--set` overrides one run",
-    ),
-    (
         "rules",
-        "somewhere to keep a rule. The grammar and its stable IDs are built and \
-         `--allow`/`--deny` already reach the engine through them, so `ls` and \
-         `explain` have their material; what `allow`, `deny`, `revoke` and \
-         `remember` have nowhere to write to is a rule store — the same \
-         read-only loader `config` waits on",
+        "root-command composition for the canonical rule grammar and persistent \
+         user rule store. `ls`, `allow`, `deny`, `revoke`, `remember`, and \
+         `explain` do not yet share one dispatched policy service",
     ),
     (
         "doctor",
@@ -450,6 +446,36 @@ pub enum McpAction {
     Reload {
         name: Option<McpServerName>,
     },
+}
+
+/// The exact semantic payload of `ego config`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigArgs {
+    pub action: ConfigAction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigAction {
+    Get {
+        target: UserConfigTarget,
+        key: ManagedConfigKey,
+        json: bool,
+    },
+    Set {
+        target: UserConfigTarget,
+        key: ManagedConfigKey,
+        value: ManagedConfigValue,
+    },
+    Unset {
+        target: UserConfigTarget,
+        key: ManagedConfigKey,
+    },
+    List {
+        target: UserConfigTarget,
+        json: bool,
+    },
+    /// Edit the complete user document, including profiles.
+    Edit,
 }
 
 /// The parsed command line of `ego run`.
@@ -773,6 +799,52 @@ enum AuthSubcommand {
 struct McpCommand {
     #[command(subcommand)]
     action: McpSubcommand,
+}
+
+#[derive(Debug, Parser)]
+#[command(
+    name = "ego config",
+    about = "Manage stored user configuration.",
+    disable_help_subcommand = true
+)]
+struct ConfigCommand {
+    #[command(subcommand)]
+    action: ConfigSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum ConfigSubcommand {
+    /// Read one exact stored value.
+    Get {
+        #[arg(long, value_name = "NAME")]
+        profile: Option<String>,
+        #[arg(long)]
+        json: bool,
+        key: String,
+    },
+    /// Store one strictly typed TOML value.
+    Set {
+        #[arg(long, value_name = "NAME")]
+        profile: Option<String>,
+        #[arg(value_name = "KEY=TOML_VALUE")]
+        assignment: String,
+    },
+    /// Remove one exact stored value.
+    Unset {
+        #[arg(long, value_name = "NAME")]
+        profile: Option<String>,
+        key: String,
+    },
+    /// List the exact stored managed projection.
+    #[command(name = "ls")]
+    List {
+        #[arg(long, value_name = "NAME")]
+        profile: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Edit the complete user document in the selected external editor.
+    Edit,
 }
 
 #[derive(Debug, Subcommand)]
@@ -1231,6 +1303,29 @@ fn clap_or_answer<T: Parser>(tokens: &[String]) -> Result<Parsed<T>, UsageError>
     }
 }
 
+/// Parse config without letting clap quote a rejected positional value.
+///
+/// The set positional may contain a secret even though managed configuration
+/// will reject it. Structural failures therefore retain the frozen usage but
+/// not clap's echo of the supplied argv.
+fn config_clap_or_answer(tokens: &[String]) -> Result<Parsed<ConfigCommand>, UsageError> {
+    match ConfigCommand::try_parse_from(tokens) {
+        Ok(parsed) => Ok(Parsed::Command(parsed)),
+        Err(err)
+            if matches!(
+                err.kind(),
+                ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
+            ) =>
+        {
+            Ok(Parsed::Answered(err.to_string()))
+        }
+        Err(_) => Err(UsageError(
+            "invalid ego config invocation\n\nUsage:\n  ego config get [--profile NAME] [--json] KEY\n  ego config set [--profile NAME] KEY=TOML_VALUE\n  ego config unset [--profile NAME] KEY\n  ego config ls [--profile NAME] [--json]\n  ego config edit"
+                .to_owned(),
+        )),
+    }
+}
+
 /// `ego --help`: the command set, from the tables the refusals read.
 ///
 /// Deliberately short. It names what this build has and points at `CLI.md` §2
@@ -1257,6 +1352,7 @@ fn overview(program: &str) -> String {
             "mcp-server" => "Serve scoped ego runs over MCP on stdio",
             "auth" => "Manage subscription credentials",
             "mcp" => "Manage configured MCP servers",
+            "config" => "Manage stored user configuration",
             other => other,
         };
         text.push_str(&format!("  {name:<8}{about}\n"));
@@ -1507,6 +1603,10 @@ pub fn parse(argv: Vec<String>) -> Result<Invocation, UsageError> {
                 })))
             }
         },
+        Some("config") => match config_clap_or_answer(&tokens)? {
+            Parsed::Answered(text) => Ok(Invocation::Answered(text)),
+            Parsed::Command(parsed) => Ok(Invocation::Config(Box::new(into_config_args(parsed)?))),
+        },
         Some("mcp") => match clap_or_answer::<McpCommand>(&tokens)? {
             Parsed::Answered(text) => Ok(Invocation::Answered(text)),
             Parsed::Command(parsed) => Ok(Invocation::Mcp(Box::new(into_mcp_args(parsed, tail)?))),
@@ -1516,6 +1616,66 @@ pub fn parse(argv: Vec<String>) -> Result<Invocation, UsageError> {
             Parsed::Command(parsed) => Ok(Invocation::Run(Box::new(into_args(parsed)?))),
         },
     }
+}
+
+fn into_config_args(command: ConfigCommand) -> Result<ConfigArgs, UsageError> {
+    let action = match command.action {
+        ConfigSubcommand::Get { profile, json, key } => {
+            let target = config_target(profile)?;
+            let key = managed_config_key(&target, &key)?;
+            ConfigAction::Get { target, key, json }
+        }
+        ConfigSubcommand::Set {
+            profile,
+            assignment,
+        } => {
+            let target = config_target(profile)?;
+            let Some((key, raw_value)) = assignment.split_once('=') else {
+                return Err(UsageError(
+                    "ego config set requires exactly one KEY=TOML_VALUE assignment".to_owned(),
+                ));
+            };
+            let key = managed_config_key(&target, key)?;
+            let value = ManagedConfigValue::parse(key, raw_value).map_err(|_| {
+                UsageError(format!("invalid TOML value or type for config key `{key}`"))
+            })?;
+            ConfigAction::Set { target, key, value }
+        }
+        ConfigSubcommand::Unset { profile, key } => {
+            let target = config_target(profile)?;
+            let key = managed_config_key(&target, &key)?;
+            ConfigAction::Unset { target, key }
+        }
+        ConfigSubcommand::List { profile, json } => ConfigAction::List {
+            target: config_target(profile)?,
+            json,
+        },
+        ConfigSubcommand::Edit => ConfigAction::Edit,
+    };
+    Ok(ConfigArgs { action })
+}
+
+fn config_target(profile: Option<String>) -> Result<UserConfigTarget, UsageError> {
+    match profile {
+        Some(name) => ProfileName::parse(&name)
+            .map(UserConfigTarget::Profile)
+            .map_err(|error| UsageError(format!("invalid config profile: {error}"))),
+        None => Ok(UserConfigTarget::Base),
+    }
+}
+
+fn managed_config_key(
+    target: &UserConfigTarget,
+    raw: &str,
+) -> Result<ManagedConfigKey, UsageError> {
+    let key =
+        ManagedConfigKey::parse(raw).map_err(|_| UsageError("unknown config key".to_owned()))?;
+    if !ManagedConfigKey::for_target(target.clone()).contains(&key) {
+        return Err(UsageError(format!(
+            "config key `{key}` is not available for this target"
+        )));
+    }
+    Ok(key)
 }
 
 /// `ego resume [ID] [PROMPT]` becomes the same [`Args`] a run produces, with

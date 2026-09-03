@@ -87,6 +87,25 @@ async fn ordinary_main() -> std::process::ExitCode {
         }
     } else {
         match invocation {
+            Ok(Invocation::Config(args)) => {
+                let mut running = Box::pin(ego_cli::config::execute(&args, &out, &cancel));
+                let termination = tokio::select! {
+                    biased;
+                    cause = run::stop_signal(None) => {
+                        cancel.cancel(cause);
+                        let _ = running.as_mut().await;
+                        run::cancelled_termination(&cancel)
+                    }
+                    result = &mut running => result,
+                };
+                Ended {
+                    termination,
+                    session: ego_core::event::id::SessionId::new(),
+                    state: ego_core::state::SessionState::default(),
+                    result: serde_json::Value::String(String::new()),
+                    mcp_errors: Vec::new(),
+                }
+            }
             Ok(Invocation::Auth(args)) => {
                 let mut running = Box::pin(ego_cli::auth::execute(&args, &cancel));
                 let termination = tokio::select! {

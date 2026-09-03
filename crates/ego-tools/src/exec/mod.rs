@@ -1,6 +1,7 @@
 //! Exact argv-native execution behind one run-owned process boundary.
 
 mod backend;
+mod editor_process;
 #[cfg(target_os = "linux")]
 mod landlock;
 mod null;
@@ -29,6 +30,7 @@ use backend::{Backend, MeasuredBackend};
 use null::NullBackend;
 
 pub use crate::store::SessionEvidenceStore;
+pub use editor_process::{EditorProcessError, run_editor_process};
 pub use ego_core::permit::{ProcessError, ProcessExecutor};
 #[cfg(target_os = "linux")]
 pub use landlock::dispatch_helper as dispatch_landlock_helper;

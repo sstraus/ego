@@ -9,17 +9,26 @@
 //! Invalid config is never skipped (§4.5): an unknown key is a hard error
 //! from the layer it was written in, with the key and the source named.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use ego_core::config::{
-    AuthProviderLayer, ConfigError, ConfigLayer, Effective, McpConfigProvenance,
-    McpEnvironmentName, McpHttpAuth, McpHttpConfig, McpHttpUrl, McpLayerEntry, McpServerConfig,
-    McpServerName, ProfileName, ResolvedMcpEntry, Source, Sourced, Trust, UserConfigTarget,
-    resolve, resolve_selected,
+    AuthProviderLayer, ConfigError, ConfigLayer, Effective, ManagedConfigValue,
+    McpConfigProvenance, McpEnvironmentName, McpHttpAuth, McpHttpConfig, McpHttpUrl, McpLayerEntry,
+    McpServerConfig, McpServerName, ProfileName, ResolvedMcpEntry, Source, Sourced, Trust,
+    UserConfigMutation, UserConfigMutationFacts, UserConfigMutationResult, UserConfigPublication,
+    UserConfigSnapshot, UserConfigStore, UserConfigTarget, resolve, resolve_selected,
 };
+use ego_core::run::RunTermination;
+use ego_core::turn::CancelToken;
+use ego_tools::config::OsUserConfigStore;
+use ego_tools::exec::run_editor_process;
+use ego_tools::store::{OsIo, StoreIo};
 use serde::Deserialize;
 
-use crate::cli::{Args, McpSelector, UsageError};
+use crate::cli::{Args, ConfigAction, ConfigArgs, McpSelector, UsageError};
+use crate::output::{self, Stdout};
 
 /// The system layer: an administrator's fleet defaults and the only source of
 /// non-relaxable ceilings.
@@ -29,6 +38,398 @@ const EGO_HOME: &str = "EGO_HOME";
 /// Environment overrides, between the flags and the project layers.
 const ENV_MODEL: &str = "EGO_MODEL";
 const ENV_PROFILE: &str = "EGO_PROFILE";
+
+/// Execute the user-scoped configuration management surface.
+pub async fn execute(args: &ConfigArgs, out: &Stdout, cancel: &CancelToken) -> RunTermination {
+    match execute_inner(args, out, cancel).await {
+        Ok(()) => RunTermination::Done,
+        Err(termination) => termination,
+    }
+}
+
+async fn execute_inner(
+    args: &ConfigArgs,
+    out: &Stdout,
+    cancel: &CancelToken,
+) -> Result<(), RunTermination> {
+    let editor = matches!(&args.action, ConfigAction::Edit)
+        .then(editor_argv)
+        .transpose()?;
+    let path = ego_home()
+        .ok_or_else(|| RunTermination::Failed {
+            message: "config management needs EGO_HOME or HOME for user configuration".to_owned(),
+        })?
+        .join("config.toml");
+    let store = OsUserConfigStore::new(Arc::new(OsIo), path);
+    match &args.action {
+        ConfigAction::Get { target, key, json } => {
+            let snapshot = snapshot(&store, target.clone())?;
+            let value = snapshot
+                .values
+                .into_iter()
+                .find_map(|(candidate, value)| (candidate == *key).then_some(value).flatten())
+                .ok_or_else(|| RunTermination::Failed {
+                    message: format!("config key `{key}` is absent from the selected user target"),
+                })?;
+            if *json {
+                render_json(target, std::iter::once((*key, value)), out)?;
+            } else {
+                out.line(&value.to_toml());
+            }
+        }
+        ConfigAction::List { target, json } => {
+            let snapshot = snapshot(&store, target.clone())?;
+            let values = snapshot
+                .values
+                .into_iter()
+                .filter_map(|(key, value)| value.map(|value| (key, value)))
+                .collect::<Vec<_>>();
+            if *json {
+                render_json(target, values, out)?;
+            } else {
+                for (key, value) in values {
+                    out.line(&format!(
+                        "{}\t{}",
+                        key.as_str(),
+                        escape_field(&value.to_toml())
+                    ));
+                }
+            }
+        }
+        ConfigAction::Set { target, key, value } => {
+            let result = store
+                .mutate(UserConfigMutation::ManagedSet {
+                    target: target.clone(),
+                    key: *key,
+                    value: value.clone(),
+                })
+                .map_err(store_failure)?;
+            render_receipt(result, out)?;
+        }
+        ConfigAction::Unset { target, key } => {
+            let result = store
+                .mutate(UserConfigMutation::ManagedUnset {
+                    target: target.clone(),
+                    key: *key,
+                })
+                .map_err(store_failure)?;
+            render_receipt(result, out)?;
+        }
+        ConfigAction::Edit => {
+            execute_edit(
+                &store,
+                out,
+                cancel,
+                editor.expect("the edit action resolved its editor argv"),
+            )
+            .await?
+        }
+    }
+    Ok(())
+}
+
+async fn execute_edit<I>(
+    store: &OsUserConfigStore<I>,
+    out: &Stdout,
+    cancel: &CancelToken,
+    mut argv: Vec<OsString>,
+) -> Result<(), RunTermination>
+where
+    I: std::ops::Deref + Send + Sync,
+    I::Target: StoreIo,
+{
+    let edit = store.prepare_edit().map_err(store_failure)?;
+    let candidate_path = edit.candidate_path().to_owned();
+    output::note(&format!(
+        "config editor candidate: {}",
+        candidate_path.display()
+    ));
+    argv.push(candidate_path.as_os_str().to_owned());
+
+    if let Err(error) = run_editor_process(argv, cancel.clone()).await {
+        let cleanup = store.discard_edit(edit).err();
+        if cancel.is_cancelled() {
+            let message = match cleanup {
+                Some(cleanup) => format!(
+                    "config edit was cancelled, but candidate cleanup failed at {}: {cleanup}",
+                    candidate_path.display()
+                ),
+                None => "config edit was cancelled; its candidate was removed".to_owned(),
+            };
+            output::note(&message);
+            return Err(crate::run::cancelled_termination(cancel));
+        }
+        let message = match cleanup {
+            Some(cleanup) => format!(
+                "{error}; candidate cleanup failed at {}: {cleanup}",
+                candidate_path.display()
+            ),
+            None => format!("{error}; config editor candidate was removed"),
+        };
+        return Err(RunTermination::Failed { message });
+    }
+
+    if cancel.is_cancelled() {
+        let cleanup = store.discard_edit(edit).err();
+        output::note(&match cleanup {
+            Some(error) => format!(
+                "config edit was cancelled, but candidate cleanup failed at {}: {error}",
+                candidate_path.display()
+            ),
+            None => "config edit was cancelled; its candidate was removed".to_owned(),
+        });
+        return Err(crate::run::cancelled_termination(cancel));
+    }
+
+    let result = store
+        .publish_edit(edit)
+        .map_err(|error| RunTermination::Failed {
+            message: format!(
+                "user config edit was not published: {error}; recovery candidate remains at {}",
+                candidate_path.display()
+            ),
+        })?;
+    let publication = match &result.publication {
+        UserConfigPublication::NotPublished => "not_published",
+        UserConfigPublication::PublishedDurably => "published_durably",
+        UserConfigPublication::PublishedDurabilityUncertain { diagnostic } => {
+            output::note(&format!(
+                "config was published but durability is uncertain: {diagnostic}; recovery candidate remains at {}",
+                candidate_path.display()
+            ));
+            "published_durability_uncertain"
+        }
+    };
+    if let Some(warning) = result.candidate_cleanup_warning {
+        output::note(&format!(
+            "{warning}; recovery candidate remains at {}",
+            candidate_path.display()
+        ));
+    }
+    out.line(&format!(
+        "{}\tuser\t{publication}",
+        if result.changed {
+            "changed"
+        } else {
+            "unchanged"
+        }
+    ));
+    Ok(())
+}
+
+fn editor_argv() -> Result<Vec<OsString>, RunTermination> {
+    let (name, command) = match editor_environment("VISUAL")? {
+        Some(command) => ("VISUAL", command),
+        None => match editor_environment("EDITOR")? {
+            Some(command) => ("EDITOR", command),
+            None => {
+                return Err(RunTermination::UsageError {
+                    message: "ego config edit needs a nonempty VISUAL or EDITOR command".to_owned(),
+                });
+            }
+        },
+    };
+    let argv = lex_editor_command(&command).map_err(|error| RunTermination::UsageError {
+        message: format!("invalid {name} editor command: {error}"),
+    })?;
+    if argv.first().is_none_or(|program| program.is_empty()) {
+        return Err(RunTermination::UsageError {
+            message: format!("{name} editor command does not name an executable"),
+        });
+    }
+    Ok(argv)
+}
+
+fn editor_environment(name: &str) -> Result<Option<String>, RunTermination> {
+    match std::env::var(name) {
+        Ok(value) if value.is_empty() => Ok(None),
+        Ok(value) => Ok(Some(value)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(RunTermination::UsageError {
+            message: format!("{name} editor command is not valid UTF-8"),
+        }),
+    }
+}
+
+#[derive(Clone, Copy)]
+enum EditorQuote {
+    Single,
+    Double,
+}
+
+fn lex_editor_command(command: &str) -> Result<Vec<OsString>, &'static str> {
+    let bytes = command.as_bytes();
+    let mut argv = Vec::new();
+    let mut word = Vec::new();
+    let mut word_started = false;
+    let mut quote = None;
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        match quote {
+            Some(EditorQuote::Single) => {
+                if byte == b'\'' {
+                    quote = None;
+                } else {
+                    word.push(byte);
+                }
+            }
+            Some(EditorQuote::Double) => match byte {
+                b'"' => quote = None,
+                b'\\' => {
+                    index += 1;
+                    let Some(escaped) = bytes.get(index) else {
+                        return Err("editor command ends with a dangling escape");
+                    };
+                    word.push(*escaped);
+                }
+                _ => word.push(byte),
+            },
+            None => match byte {
+                byte if byte.is_ascii_whitespace() => {
+                    if word_started {
+                        push_editor_word(&mut argv, &mut word);
+                        word_started = false;
+                    }
+                }
+                b'\'' => {
+                    word_started = true;
+                    quote = Some(EditorQuote::Single);
+                }
+                b'"' => {
+                    word_started = true;
+                    quote = Some(EditorQuote::Double);
+                }
+                b'\\' => {
+                    word_started = true;
+                    index += 1;
+                    let Some(escaped) = bytes.get(index) else {
+                        return Err("editor command ends with a dangling escape");
+                    };
+                    word.push(*escaped);
+                }
+                _ => {
+                    word_started = true;
+                    word.push(byte);
+                }
+            },
+        }
+        index += 1;
+    }
+    if quote.is_some() {
+        return Err("editor command contains an unmatched quote");
+    }
+    if word_started {
+        push_editor_word(&mut argv, &mut word);
+    }
+    Ok(argv)
+}
+
+fn push_editor_word(argv: &mut Vec<OsString>, word: &mut Vec<u8>) {
+    let word = String::from_utf8(std::mem::take(word))
+        .expect("removing ASCII editor syntax preserves UTF-8");
+    argv.push(OsString::from(word));
+}
+
+fn snapshot(
+    store: &impl UserConfigStore,
+    target: UserConfigTarget,
+) -> Result<UserConfigSnapshot, RunTermination> {
+    store.snapshot(target).map_err(store_failure)
+}
+
+fn store_failure(error: impl std::fmt::Display) -> RunTermination {
+    RunTermination::Failed {
+        message: format!("user config operation failed before publication: {error}"),
+    }
+}
+
+fn render_json(
+    target: &UserConfigTarget,
+    values: impl IntoIterator<Item = (ego_core::config::ManagedConfigKey, ManagedConfigValue)>,
+    out: &Stdout,
+) -> Result<(), RunTermination> {
+    let mut rendered = Vec::new();
+    for (key, value) in values {
+        let toml = value
+            .to_toml()
+            .parse::<toml::Value>()
+            .map_err(|_| RunTermination::Failed {
+                message: format!("config key `{key}` could not be rendered"),
+            })?;
+        let json = serde_json::to_value(toml).map_err(|error| RunTermination::Failed {
+            message: format!("config key `{key}` could not be rendered: {error}"),
+        })?;
+        let key = serde_json::to_string(key.as_str()).expect("a string is always valid JSON");
+        let value = serde_json::to_string(&json).map_err(|error| RunTermination::Failed {
+            message: format!("config value could not be rendered: {error}"),
+        })?;
+        rendered.push(format!("{key}:{value}"));
+    }
+    let profile = match target.profile() {
+        Some(profile) => serde_json::to_string(profile.as_str())
+            .expect("a validated profile string is always valid JSON"),
+        None => "null".to_owned(),
+    };
+    let line = format!(
+        "{{\"v\":1,\"scope\":\"user\",\"profile\":{profile},\"values\":{{{}}}}}",
+        rendered.join(",")
+    );
+    out.line(&line);
+    Ok(())
+}
+
+fn render_receipt(result: UserConfigMutationResult, out: &Stdout) -> Result<(), RunTermination> {
+    let (key, value) = match result.facts {
+        UserConfigMutationFacts::Set { key, value } => (key, value.to_toml()),
+        UserConfigMutationFacts::Unset { key } => (key, "<absent>".to_owned()),
+        _ => {
+            return Err(RunTermination::Failed {
+                message: "config mutation returned unrelated transaction facts".to_owned(),
+            });
+        }
+    };
+    let target = match &result.target {
+        UserConfigTarget::Base => "user".to_owned(),
+        UserConfigTarget::Profile(profile) => format!(
+            "user:profile={}",
+            serde_json::to_string(profile.as_str()).expect("a string is always valid JSON")
+        ),
+    };
+    let (publication, warning) = match result.publication {
+        UserConfigPublication::NotPublished => ("not_published", None),
+        UserConfigPublication::PublishedDurably => ("published_durably", None),
+        UserConfigPublication::PublishedDurabilityUncertain { diagnostic } => {
+            ("published_durability_uncertain", Some(diagnostic))
+        }
+    };
+    out.line(&format!(
+        "{}\t{}\t{}\t{}\t{}",
+        if result.changed {
+            "changed"
+        } else {
+            "unchanged"
+        },
+        escape_field(&target),
+        key.as_str(),
+        escape_field(&value),
+        publication
+    ));
+    if let Some(warning) = warning {
+        output::note(&format!(
+            "config was published but durability is uncertain: {warning}"
+        ));
+    }
+    Ok(())
+}
+
+fn escape_field(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('\t', "\\t")
+        .replace('\r', "\\r")
+        .replace('\n', "\\n")
+}
 
 /// The user layer's directory: `$EGO_HOME`, else `~/.ego`.
 pub fn ego_home() -> Option<PathBuf> {

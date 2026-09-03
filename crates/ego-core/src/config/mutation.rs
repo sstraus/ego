@@ -5,6 +5,9 @@
 //! comment-preserving editing, strict validation, and durable publication as one
 //! mutation operation.
 
+use std::any::Any;
+use std::path::Path;
+
 use crate::generator::types::ThinkingLevel;
 use crate::permit::rule::{Rule, RuleId};
 
@@ -338,6 +341,27 @@ pub struct UserConfigSnapshot {
     pub values: Vec<(ManagedConfigKey, Option<ManagedConfigValue>)>,
 }
 
+/// One adapter-owned whole-document edit prepared from the current authority.
+///
+/// The CLI may discover only the candidate path. The adapter retains the
+/// compare-and-publish state and consumes the handle exactly once.
+pub trait UserConfigEditHandle: Any + Send {
+    fn candidate_path(&self) -> &Path;
+
+    #[doc(hidden)]
+    fn into_any(self: Box<Self>) -> Box<dyn Any + Send>;
+}
+
+/// The final state of one successful whole-document edit transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserConfigEditResult {
+    pub changed: bool,
+    pub publication: UserConfigPublication,
+    /// A post-publication candidate cleanup failure cannot make the old
+    /// authority current again. Report it without falsifying publication.
+    pub candidate_cleanup_warning: Option<String>,
+}
+
 /// The exact stored rule lists in one user-owned target.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuleSnapshot {
@@ -362,4 +386,28 @@ pub trait UserConfigStore: Send + Sync {
         &self,
         mutation: UserConfigMutation,
     ) -> Result<UserConfigMutationResult, UserConfigError>;
+
+    /// Copy the exact current user document into a private sibling candidate.
+    fn prepare_edit(&self) -> Result<Box<dyn UserConfigEditHandle>, UserConfigError> {
+        Err(UserConfigError::new(
+            "whole-document editing is not supported by this user config store",
+        ))
+    }
+
+    /// Strictly validate and compare-and-publish one prepared candidate.
+    fn publish_edit(
+        &self,
+        _edit: Box<dyn UserConfigEditHandle>,
+    ) -> Result<UserConfigEditResult, UserConfigError> {
+        Err(UserConfigError::new(
+            "whole-document editing is not supported by this user config store",
+        ))
+    }
+
+    /// Remove only the candidate named by one prepared edit handle.
+    fn discard_edit(&self, _edit: Box<dyn UserConfigEditHandle>) -> Result<(), UserConfigError> {
+        Err(UserConfigError::new(
+            "whole-document editing is not supported by this user config store",
+        ))
+    }
 }

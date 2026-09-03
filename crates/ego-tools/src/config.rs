@@ -2,16 +2,18 @@
 
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use ego_core::config::{
     ConfigLayer, ManagedConfigKey, ManagedConfigValue, ManagedRuleEffect, McpHttpAuth,
-    McpLayerEntry, McpServerConfig, RuleMutation, RuleSnapshot, Source, UserConfigError,
-    UserConfigMutation, UserConfigMutationResult, UserConfigPublication, UserConfigSnapshot,
-    UserConfigStore, UserConfigTarget,
+    McpLayerEntry, McpServerConfig, RuleMutation, RuleSnapshot, Source, UserConfigEditHandle,
+    UserConfigEditResult, UserConfigError, UserConfigMutation, UserConfigMutationResult,
+    UserConfigPublication, UserConfigSnapshot, UserConfigStore, UserConfigTarget,
 };
 use ego_core::permit::rule::{Rule, RuleId};
 use fd_lock::RwLock;
+use sha2::{Digest as _, Sha256};
 use toml_edit::{Array, DocumentMut, Item, Table, TableLike, Value, value};
 
 use crate::store::{AtomicReplacePublication, StoreIo};
@@ -28,6 +30,42 @@ impl<I> OsUserConfigStore<I> {
             io,
             path: path.as_ref().to_path_buf(),
         }
+    }
+}
+
+impl<I> OsUserConfigStore<I>
+where
+    I: std::ops::Deref + Send + Sync,
+    I::Target: StoreIo,
+{
+    pub fn prepare_edit(&self) -> Result<Box<dyn UserConfigEditHandle>, UserConfigError> {
+        <Self as UserConfigStore>::prepare_edit(self)
+    }
+
+    pub fn publish_edit(
+        &self,
+        edit: Box<dyn UserConfigEditHandle>,
+    ) -> Result<UserConfigEditResult, UserConfigError> {
+        <Self as UserConfigStore>::publish_edit(self, edit)
+    }
+
+    pub fn discard_edit(&self, edit: Box<dyn UserConfigEditHandle>) -> Result<(), UserConfigError> {
+        <Self as UserConfigStore>::discard_edit(self, edit)
+    }
+}
+
+struct OsUserConfigEdit {
+    candidate_path: PathBuf,
+    authority_digest: [u8; 32],
+}
+
+impl UserConfigEditHandle for OsUserConfigEdit {
+    fn candidate_path(&self) -> &Path {
+        &self.candidate_path
+    }
+
+    fn into_any(self: Box<Self>) -> Box<dyn std::any::Any + Send> {
+        self
     }
 }
 
@@ -59,18 +97,7 @@ where
         let target = mutation.target();
         let facts = mutation.facts();
 
-        let lock_path = lock_path_for(&self.path);
-        if let Some(parent) = lock_path.parent() {
-            fs::create_dir_all(parent).map_err(transaction_error)?;
-        }
-        let lock_file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(false)
-            .open(&lock_path)
-            .map_err(transaction_error)?;
-        let mut lock = RwLock::new(lock_file);
+        let mut lock = user_config_lock(&self.path)?;
         let _guard = lock.write().map_err(transaction_error)?;
 
         let (text, parsed) = read_user_config(&*self.io, &self.path)?;
@@ -110,21 +137,128 @@ where
             publication,
         })
     }
+
+    fn prepare_edit(&self) -> Result<Box<dyn UserConfigEditHandle>, UserConfigError> {
+        let bytes = read_user_config_bytes(&*self.io, &self.path)?;
+        parse_user_config_bytes(&bytes, "user config")?;
+        let authority_digest = sha256(&bytes);
+        let candidate_path = create_edit_candidate(&self.path, &bytes)?;
+        Ok(Box::new(OsUserConfigEdit {
+            candidate_path,
+            authority_digest,
+        }))
+    }
+
+    fn publish_edit(
+        &self,
+        edit: Box<dyn UserConfigEditHandle>,
+    ) -> Result<UserConfigEditResult, UserConfigError> {
+        let edit = edit
+            .into_any()
+            .downcast::<OsUserConfigEdit>()
+            .map_err(|_| {
+                UserConfigError::new("edit handle does not belong to the OS config store")
+            })?;
+        validate_candidate_path(&self.path, &edit.candidate_path)?;
+        validate_candidate_file(&edit.candidate_path)?;
+        let candidate = self
+            .io
+            .read(&edit.candidate_path)
+            .map_err(transaction_error)?
+            .ok_or_else(|| UserConfigError::new("user config edit candidate is missing"))?;
+        parse_user_config_bytes(&candidate, "edited user config")?;
+
+        let mut lock = user_config_lock(&self.path)?;
+        let _guard = lock.write().map_err(transaction_error)?;
+        let current = read_user_config_bytes(&*self.io, &self.path)?;
+        parse_user_config_bytes(&current, "user config")?;
+        if sha256(&current) != edit.authority_digest {
+            return Err(UserConfigError::new(
+                "user config changed after the edit candidate was prepared",
+            ));
+        }
+        if candidate == current {
+            self.io
+                .remove_file(&edit.candidate_path)
+                .map_err(transaction_error)?;
+            return Ok(UserConfigEditResult {
+                changed: false,
+                publication: UserConfigPublication::NotPublished,
+                candidate_cleanup_warning: None,
+            });
+        }
+
+        let publication = self
+            .io
+            .replace_atomic_publication(&self.path, &candidate)
+            .map_err(transaction_error)?;
+        match publication {
+            AtomicReplacePublication::PublishedDurably => {
+                let candidate_cleanup_warning = self
+                    .io
+                    .remove_file(&edit.candidate_path)
+                    .err()
+                    .map(|error| {
+                        format!("published config candidate could not be removed: {error}")
+                    });
+                Ok(UserConfigEditResult {
+                    changed: true,
+                    publication: UserConfigPublication::PublishedDurably,
+                    candidate_cleanup_warning,
+                })
+            }
+            AtomicReplacePublication::PublishedDurabilityUncertain { diagnostic } => {
+                Ok(UserConfigEditResult {
+                    changed: true,
+                    publication: UserConfigPublication::PublishedDurabilityUncertain { diagnostic },
+                    candidate_cleanup_warning: None,
+                })
+            }
+        }
+    }
+
+    fn discard_edit(&self, edit: Box<dyn UserConfigEditHandle>) -> Result<(), UserConfigError> {
+        let edit = edit
+            .into_any()
+            .downcast::<OsUserConfigEdit>()
+            .map_err(|_| {
+                UserConfigError::new("edit handle does not belong to the OS config store")
+            })?;
+        validate_candidate_path(&self.path, &edit.candidate_path)?;
+        self.io
+            .remove_file(&edit.candidate_path)
+            .map_err(transaction_error)
+    }
+}
+
+fn read_user_config_bytes<I>(io: &I, path: &Path) -> Result<Vec<u8>, UserConfigError>
+where
+    I: StoreIo + ?Sized,
+{
+    Ok(io
+        .read(path)
+        .map_err(transaction_error)?
+        .unwrap_or_default())
+}
+
+fn parse_user_config_bytes(
+    bytes: &[u8],
+    description: &str,
+) -> Result<ConfigLayer, UserConfigError> {
+    let text = std::str::from_utf8(bytes)
+        .map_err(|error| UserConfigError::new(format!("{description} is not UTF-8: {error}")))?;
+    ConfigLayer::parse(Source::User, text)
+        .map(|parsed| parsed.value)
+        .map_err(|error| UserConfigError::new(format!("invalid {description}: {error}")))
 }
 
 fn read_user_config<I>(io: &I, path: &Path) -> Result<(String, ConfigLayer), UserConfigError>
 where
     I: StoreIo + ?Sized,
 {
-    let bytes = io.read(path).map_err(transaction_error)?;
-    let text = match bytes {
-        Some(bytes) => String::from_utf8(bytes)
-            .map_err(|error| UserConfigError::new(format!("user config is not UTF-8: {error}")))?,
-        None => String::new(),
-    };
-    let parsed = ConfigLayer::parse(Source::User, &text)
-        .map_err(|error| UserConfigError::new(format!("invalid user config: {error}")))?
-        .value;
+    let bytes = read_user_config_bytes(io, path)?;
+    let parsed = parse_user_config_bytes(&bytes, "user config")?;
+    let text = String::from_utf8(bytes).expect("strict user config parsing accepted UTF-8");
     Ok((text, parsed))
 }
 
@@ -826,6 +960,135 @@ fn replace_item_preserving_decor(target: &mut Item, mut replacement: Item) {
         *value.decor_mut() = decor;
     }
     *target = replacement;
+}
+
+fn user_config_lock(path: &Path) -> Result<RwLock<fs::File>, UserConfigError> {
+    let lock_path = lock_path_for(path);
+    if let Some(parent) = lock_path.parent() {
+        fs::create_dir_all(parent).map_err(transaction_error)?;
+    }
+    let lock_file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(lock_path)
+        .map_err(transaction_error)?;
+    Ok(RwLock::new(lock_file))
+}
+
+fn create_edit_candidate(path: &Path, bytes: &[u8]) -> Result<PathBuf, UserConfigError> {
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| UserConfigError::new("user config path has no file name"))?;
+    for _ in 0..32 {
+        let mut random = [0_u8; 16];
+        getrandom::fill(&mut random).map_err(|error| {
+            UserConfigError::new(format!("user config candidate name failed: {error}"))
+        })?;
+        let mut candidate_name = file_name.to_os_string();
+        candidate_name.push(".ego-edit-");
+        candidate_name.push(hex(&random));
+        let candidate_path = path.with_file_name(candidate_name);
+        match create_private_file(&candidate_path) {
+            Ok(mut file) => {
+                if let Err(error) = file.write_all(bytes) {
+                    let _ = fs::remove_file(&candidate_path);
+                    return Err(transaction_error(error));
+                }
+                return Ok(candidate_path);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(transaction_error(error)),
+        }
+    }
+    Err(UserConfigError::new(
+        "could not allocate a unique user config edit candidate",
+    ))
+}
+
+fn create_private_file(path: &Path) -> std::io::Result<fs::File> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let file = options.open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        if let Err(error) = file.set_permissions(fs::Permissions::from_mode(0o600)) {
+            drop(file);
+            let _ = fs::remove_file(path);
+            return Err(error);
+        }
+    }
+    Ok(file)
+}
+
+fn validate_candidate_path(authority: &Path, candidate: &Path) -> Result<(), UserConfigError> {
+    if candidate.parent() != authority.parent() {
+        return Err(UserConfigError::new(
+            "user config edit candidate is not a sibling of its authority",
+        ));
+    }
+    let authority_name = authority
+        .file_name()
+        .ok_or_else(|| UserConfigError::new("user config path has no file name"))?;
+    let candidate_name = candidate
+        .file_name()
+        .ok_or_else(|| UserConfigError::new("user config edit candidate has no file name"))?;
+    let mut prefix = authority_name.to_os_string();
+    prefix.push(".ego-edit-");
+    let prefix = prefix.as_encoded_bytes();
+    let candidate_name = candidate_name.as_encoded_bytes();
+    let suffix = candidate_name.strip_prefix(prefix).ok_or_else(|| {
+        UserConfigError::new("user config edit candidate name does not belong to its authority")
+    })?;
+    if suffix.len() != 32 || !suffix.iter().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(UserConfigError::new(
+            "user config edit candidate name is malformed",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_candidate_file(path: &Path) -> Result<(), UserConfigError> {
+    let metadata = fs::symlink_metadata(path).map_err(transaction_error)?;
+    if !metadata.file_type().is_file() {
+        return Err(UserConfigError::new(
+            "user config edit candidate is not a regular file",
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        if metadata.permissions().mode() & 0o777 != 0o600 {
+            return Err(UserConfigError::new(
+                "user config edit candidate permissions are not mode 0600",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn sha256(bytes: &[u8]) -> [u8; 32] {
+    Sha256::digest(bytes).into()
+}
+
+fn hex(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for &byte in bytes {
+        encoded.push(DIGITS[usize::from(byte >> 4)] as char);
+        encoded.push(DIGITS[usize::from(byte & 0x0f)] as char);
+    }
+    encoded
 }
 
 fn lock_path_for(path: &Path) -> PathBuf {

@@ -23,9 +23,9 @@ pub use layer::{
     ModelRef, PermCfg, ProfileLayer, StatusSegmentName, StatuslineLayer, UiLayer,
 };
 pub use mutation::{
-    ManagedRuleEffect, RuleMutation, RuleMutationFacts, RuleSnapshot, UserConfigError,
-    UserConfigMutation, UserConfigMutationFacts, UserConfigMutationResult, UserConfigPublication,
-    UserConfigSnapshot, UserConfigStore,
+    ManagedRuleEffect, RuleMutation, RuleMutationFacts, RuleSnapshot, UserConfigEditHandle,
+    UserConfigEditResult, UserConfigError, UserConfigMutation, UserConfigMutationFacts,
+    UserConfigMutationResult, UserConfigPublication, UserConfigSnapshot, UserConfigStore,
 };
 pub use resolve::{
     ActiveProfileProvenance, Effective, McpConfigProvenance, Posture, ResolvedMcpConfig,
