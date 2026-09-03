@@ -626,7 +626,9 @@ pub(super) fn validate_status_segment_names(names: &[String]) -> Result<(), Stri
     validate_unique_status_segments(&segments)
 }
 
-fn validate_unique_status_segments(segments: &[StatusSegmentName]) -> Result<(), String> {
+pub(super) fn validate_unique_status_segments(
+    segments: &[StatusSegmentName],
+) -> Result<(), String> {
     let mut unique = Vec::with_capacity(segments.len());
     for segment in segments {
         if unique.contains(segment) {

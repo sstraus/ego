@@ -10,6 +10,7 @@ mod mutation;
 mod resolve;
 mod ruleset;
 mod source;
+mod vocabulary;
 
 pub use discovery::{
     CwdOutsideRoot, Found, INSTRUCTIONS_FILE, Instruction, InstructionIo, InstructionSet, Limits,
@@ -30,3 +31,4 @@ pub use resolve::{
 };
 pub use ruleset::{OriginSet, Ruleset, SourcedRule};
 pub use source::{Source, Sourced, Trust};
+pub use vocabulary::{ManagedConfigKey, ManagedConfigValue, ProfileName, UserConfigTarget};

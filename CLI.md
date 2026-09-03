@@ -134,6 +134,104 @@ interactive session, `ego run … | jq`, `kill → ego resume`, and the same
 session over ACP. This is availability, not a release boundary; later
 milestones remain dependencies of the final product.
 
+### 2.2 Configuration and rule management grammar
+
+The final root grammar is exact:
+
+```text
+ego config get   [--profile NAME] [--json] KEY
+ego config set   [--profile NAME] KEY=TOML_VALUE
+ego config unset [--profile NAME] KEY
+ego config ls    [--profile NAME] [--json]
+ego config edit
+
+ego rules ls       [--profile NAME] [--json]
+ego rules allow    [--profile NAME] RULE
+ego rules deny     [--profile NAME] RULE
+ego rules revoke   [--profile NAME] RULE_ID
+ego rules remember [--profile NAME] [-C DIR] [--yes] allow|deny TOOL ARGS_JSON
+ego rules explain  [--profile NAME] [-C DIR] [--json] TOOL ARGS_JSON
+```
+
+These management commands never infer a target from `EGO_PROFILE`. No profile
+means the base user document; explicit `--profile NAME` means exactly that
+user profile. Mutations never write system, project, project-local,
+environment, agent-file, or flags authority. `rules ls` and `rules explain`
+read system plus the selected user authority in bare posture; they do not
+ambiently trust the current directory.
+
+`NAME` is one to 64 UTF-8 bytes, contains no ASCII control character, and has
+no leading or trailing Unicode whitespace. For `config`, a missing profile
+lists empty, `get` reports absence, `set` creates it, and `unset` is unchanged
+success. For `rules`, the selected user contribution is empty but effective
+list/explain still includes applicable system rules.
+
+`config set` accepts one assignment and parses its value as TOML. Its closed
+key set is `model`, `thinking`, `mode`, `sandbox`, `budget`, `bare`,
+`permissions.judge`, and `ui.statusline.segments` at base user scope; profiles
+accept `model`, `thinking`, `mode`, `sandbox`, `budget`, and
+`permissions.judge`, with `session_dir` and `artifact_dir` accepted only for
+explicit profile `ci`. Permission arrays, credentials, MCP, and hooks remain
+owned by their dedicated commands. `unset` is the only null operation and
+prunes empty managed tables. There are no table fragments, list indices,
+aliases, or arbitrary dotted keys.
+
+`config get|ls --json` emits
+`{"v":1,"scope":"user","profile":string|null,"values":{...}}`; JSON
+values preserve their types and keys use canonical dotted spelling. Text uses
+canonical TOML values: `get` prints only value plus newline and `ls` prints
+escaped `KEY\tVALUE` rows in closed-schema order. A missing `get` writes no
+stdout, reports the key on stderr, and exits 1; an empty `ls` succeeds.
+Mutations print one five-field tab-separated receipt containing changed state,
+target, canonical key, canonical value or `<absent>`, and publication state.
+Successful no-ops use `not_published`;
+pre-publication failures emit no receipt. Text fields escape backslash, tab,
+carriage return, and newline.
+
+`rules allow|deny` stores the canonical AST in the existing user
+`permissions` arrays. A same-effect duplicate is an unchanged success; the
+opposite effect is a conflict. `revoke` removes the ID from both effects in the
+selected user target; an absent ID is unchanged success, a future grammar ID
+is exit 2, and a collision is exit 1. Copies in other authorities survive and
+are reported. A permissions table is a whole-block override: creating one may
+shadow that layer's base judge/lists or lower-layer allow/judge values; system
+denies remain binding. Receipts report stored and effective change separately.
+For `allow`, `deny`, and `revoke`, the rule ADR fixes the one-line receipt to
+eight escaped tab-separated fields:
+stored change, effective change, effect, ID, canonical rule, target, surviving
+or shadowing authorities, and publication state.
+
+`rules ls --json` emits
+`{"v":1,"scope":"effective","profile":string|null,"rules":[...]}`.
+Each row has `id`, `effect`, canonical `rule`, `from`, and `also`; text is
+`ID EFFECT RULE FROM ALSO`, tab-separated. `rules explain` prepares and
+matches the call but returns the exact version-1 schema and deterministic line
+order in the rule ADR: redacted ordered operations, outcome
+`allowed|denied|uncovered`, matching rule authorities, uncovered operation
+indices, `settlement: not_run`, and `would_execute: false`. Every match names
+its operation index and complete `from`/`also` origin set; deny returns the
+first matching deny, otherwise each covered operation returns its first allow.
+It never invokes
+discovery, a mode, approver, judge, human, settlement, or executor.
+
+Standalone rule preparation accepts exactly one JSON object and the static
+effect built-ins `read`, `glob`, `grep`, `write`, `edit`, `exec`, and
+`read_tool_result`; the last is explainable but not rememberable. It never
+discovers skills or foreign tools.
+
+`rules remember` derives the narrowest rule the existing grammar can express,
+not an exact invocation. Its preview names every loss: list/search omit
+pattern/query; write omits its change payload; spawn omits
+cwd/timeout/environment; ordinary connect omits request digest; opaque omits
+parameter digest/transport. Protocol-connect retains its exact authority.
+Without `--yes`, it previews and publishes nothing. `--yes` accepts that
+widening and performs the atomic mutation; `/permissions` uses the same preview
+with modal confirmation.
+Session-evidence reads require no rule and secret egress is not persistible.
+The rule ADR fixes its output as ordered `DERIVED`/`OMITTED` rows followed by
+one `RESULT` row containing stored change, effective change, target, and
+publication state; this replaces the singular-rule receipt for this command.
+
 ## 3. Flags (the argument grammar)
 
 Grouped; all long flags, short forms only for the hot four
@@ -388,6 +486,20 @@ is right): on SIGTERM abort the turn, kill the tool process tree, run
 session-end hooks, flush the session file, exit 143. Flags are never removed
 silently: a retired flag errors **by name** with its replacement.
 
+For `config` and `rules`, exit 0 includes an idempotent unchanged result; exit
+1 covers missing `config get`, opposite-effect or ID-collision conflicts,
+strict candidate validation, changed edit bases, and pre-publication store
+failure; exit 2 covers grammar, type, unknown key/tool, non-persistible
+operation, and future rule-ID generation errors. A durability-uncertain
+publication has already changed authority, prints its successful receipt,
+warns on stderr, and exits 0. No management command uses exits 3–5.
+
+For `rules remember|explain`, a non-object or tool-schema-invalid `ARGS_JSON`,
+unknown/non-persistible tool, or invalid/nonexistent `-C` is exit 2. A
+schema-valid tool argument whose named path is absent or cannot be
+canonicalized is exit 1. These pre-mutation failures write no stdout and one
+actionable diagnostic to stderr.
+
 ### 4.4 Non-interactive posture: untrusted by default
 
 Headless runs never hang on a prompt. An unresolvable permission is exit 3 with
@@ -632,6 +744,33 @@ while bracketed paste and non-command text remain ordinary prompts. Completion,
 menu, help, dispatch, and live availability read that one registry. Actions
 whose final owner has not landed remain visible with their explicit disabled
 reason rather than becoming model input or silently disappearing.
+
+`/mode`, `/plan`, `/yolo`, and `/permissions` are argument-free local modal
+actions. A direct-argument form such as `/mode edits` or `/permissions allow
+...` is rejected as action usage and never submitted as a prompt. `/mode`
+selects one of `plan`, `default`, `auto`, `edits`, or `yolo` for this session;
+`/plan` stages plan idempotently. Every transition into yolo, whether selected
+through `/mode` or `/yolo`, requires the operator to type the exact lowercase
+confirmation `yolo`; cancel, Ctrl-C, EOF, or other input changes neither active
+nor staged state. Selecting auto first validates the configured judge and its
+current model/request without a provider effect; failure changes nothing.
+`/permissions`
+exposes the same list, allow, deny, revoke, remember, and explain services and
+DTOs as the root `rules` command. List/explain use the session's
+already-admitted ruleset; mutations always target base user config, never the
+active profile or `EGO_PROFILE`.
+
+A mode or rule change takes effect only at the next generation boundary,
+after the preceding provider attempt, complete sibling tool batch, permission
+settlement, events, usage, and cost are durable. Each generation captures one
+immutable `(Mode, Ruleset)` and constructs a fresh policy engine. None of these
+actions can widen sandbox, offline posture, budget, workspace, system denies,
+or child-agent ceilings; permit scope remains derived solely from the prepared
+call. The registry remains metadata/availability/dispatch only, the
+seat/controller owns modal state, and the generation coordinator owns staged
+policy and the swap. After config publication it re-resolves the same frozen
+admitted sources; a higher source may leave effective policy unchanged, which
+the receipt reports.
 
 The canonical metadata actions are `/name show`, `/name set TEXT`, and
 `/name clear`, with bare `/name` equal to `show`; and `/goal show`, `/goal set
@@ -952,14 +1091,28 @@ transport owns only the shortest zeroizing header presentation. Events,
 manifests, diagnostics, traces, and request digests carry status/source facts,
 never secret bytes.
 
-All config mutations use the one atomic transaction from the accepted config
-ADR. `ego config edit` writes a mode-0600 candidate, selects `$VISUAL` then
-`$EDITOR`, parses the editor value as argv without a shell, and edits outside
-the config lock. Publication reacquires the lock, compares the original digest,
-strictly parses the complete candidate, applies system ceilings, and atomically
-replaces the file. Conflict or publication uncertainty preserves an explicit
-candidate recovery path; cancel, unchanged content, or editor failure removes
-the candidate and leaves authoritative config untouched.
+All config and rule mutations use the one atomic transaction from the accepted
+config ADR. They write only `$EGO_HOME/config.toml`, falling back to
+`~/.ego/config.toml`, and preserve unrelated keys, comments, and ordering.
+Typed no-ops publish nothing; every changed result strictly reparses the full
+document before publication. A now-empty managed table is pruned rather than
+left to shadow lower authority.
+
+`ego config edit` edits the whole user config document, including profiles. It writes a mode-0600
+sibling candidate, prints that path to stderr, selects `$VISUAL` then
+`$EDITOR`, and parses the value with the documented lexical quoting and
+escaping rules. The path is appended as the final argv element. There is no
+shell, expansion, globbing, or guessed editor. Editing occurs outside the
+config lock. Publication reacquires the lock, compares the original digest,
+strictly parses the complete candidate, and atomically replaces the file. CI
+filesystem invariants and system ceilings remain run/resume admission and
+resolution behavior; edit does not execute or rewrite them. Invalid content or a changed base preserves and reports the
+candidate. Launch failure, non-zero exit, cancellation, or unchanged content
+removes it. A post-rename durability failure has already published the new
+authority: it reports a warning and recovery copy without retry or rollback.
+Orphan candidates from a crashed parent are never silently removed.
+The config transaction ADR's outcome matrix fixes exit, stdout, stderr, and
+candidate retention for every editor result.
 
 `ego doctor [--json]` and `/doctor` are two renderings of one ordered,
 versioned `HealthSnapshot`: config, credential status, session store,
