@@ -23,7 +23,9 @@ use ego_core::cost::{
 };
 use ego_core::event::domain::{CancelCause, DomainEvent, Envelope, EventKind, ExitReason};
 use ego_core::event::hook::{HookDecision, HookLifecycle, HookOutcome};
-use ego_core::event::id::{EventId, Producer, QueuedPromptId, Seq, SessionId, TurnId};
+use ego_core::event::id::{
+    EventId, ItemId, Producer, QueuedPromptId, Seq, SessionId, SubagentInvocationId, TurnId,
+};
 use ego_core::event::time::{Clock, Timestamp};
 use ego_core::evidence::{
     EvidenceAdmissionService, EvidenceError as AdmissionError, EvidenceKey, EvidenceRecord,
@@ -57,10 +59,12 @@ use ego_core::run::RunTermination;
 use ego_core::run::{RunAppend, RunRevision, RunTransaction};
 use ego_core::sink::{CollectingSink, EventSink};
 use ego_core::state::{ItemKind, SessionState, Usage};
+use ego_core::store::blob::{BlobId, BlobRef};
 use ego_core::store::evidence::{
     EvidenceError, EvidencePage, EvidenceRead, EvidenceStore, EvidenceWriter,
 };
 use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
+use ego_core::subagent::{ChildWait, ChildWaitResult};
 use ego_core::turn::{
     CancelToken, ControlError, GenerationRuntime, Journal, JudgeContext, RegisteredTool, Session,
     SharedJournal, ToolEffectPorts, Tools, TurnConfig, TurnLoop as CoreTurnLoop,
@@ -272,6 +276,448 @@ mod turn {
                 answers: Mutex::new(answers.into_iter().collect()),
             }
         }
+    }
+
+    fn forked_descriptor(model_invocable: bool) -> ego_core::event::skill::SkillDescriptorEvidence {
+        let location = ego_core::event::skill::SkillSourceLocation::parse("skills/forked/SKILL.md")
+            .expect("skill source location");
+        let source_digest = ego_core::event::skill::SkillContentDigest::parse(
+            "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+        )
+        .expect("skill source digest");
+        ego_core::event::skill::SkillDescriptorEvidence {
+            id: ego_core::event::skill::SkillId::derive(
+                ego_core::event::skill::SkillSourceAuthority::User,
+                &location,
+                "forked",
+                &source_digest,
+            ),
+            name: "forked".to_owned(),
+            description: "Run in an isolated child".to_owned(),
+            trigger: None,
+            argument_hint: None,
+            source: ego_core::event::skill::SkillSourceAuthority::User,
+            location,
+            source_digest,
+            user_invocable: true,
+            model_invocable,
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct SkillPortCall {
+        invocation: ego_core::event::skill::SkillInvocationId,
+        parent_turn: TurnId,
+        parent_item: ItemId,
+        parent_event: EventId,
+        effect_tools: BTreeSet<String>,
+        wait: Option<ChildWait>,
+    }
+
+    #[derive(Default)]
+    struct RecordingSkillInvocationPort {
+        calls: Mutex<Vec<SkillPortCall>>,
+    }
+
+    impl RecordingSkillInvocationPort {
+        fn calls(&self) -> Vec<SkillPortCall> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    impl ego_core::skill::SkillInvocationPort for RecordingSkillInvocationPort {
+        fn invoke<'a>(
+            &'a self,
+            invocation: ego_core::skill::SkillInvocation,
+            parent_turn: TurnId,
+            parent_item: ItemId,
+            parent_event: EventId,
+            effect_tools: BTreeSet<String>,
+        ) -> BoxFuture<
+            'a,
+            Result<ego_core::skill::SkillInvocationOutcome, ego_core::skill::SkillError>,
+        > {
+            let wait = invocation.fork_wait();
+            self.calls.lock().unwrap().push(SkillPortCall {
+                invocation: invocation.id(),
+                parent_turn,
+                parent_item,
+                parent_event,
+                effect_tools,
+                wait,
+            });
+            Box::pin(futures::future::ready(Ok(match wait {
+                None => ego_core::skill::SkillInvocationOutcome::Parent(Box::new(invocation)),
+                Some(ChildWait::Foreground) => {
+                    let id = BlobId::parse(
+                        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                    )
+                    .expect("verified child result blob id");
+                    ego_core::skill::SkillInvocationOutcome::Foreground(ChildWaitResult::Returned {
+                        final_message: BlobRef::new(id, 19),
+                    })
+                }
+                Some(ChildWait::Background) => ego_core::skill::SkillInvocationOutcome::Background(
+                    invocation.subagent_invocation(),
+                ),
+            })))
+        }
+    }
+
+    #[test]
+    fn typed_user_fork_invocation_creates_child_and_returns_only_verified_child_result() {
+        let descriptor = forked_descriptor(false);
+        let catalogue = Arc::new(
+            ego_core::skill::SkillCatalogue::new(vec![
+                ego_core::skill::SkillSpec::new(
+                    descriptor.clone(),
+                    b"child task: $ARGUMENTS".to_vec(),
+                )
+                .expect("forked skill")
+                .with_fork(ChildWait::Foreground)
+                .with_profile("trusted")
+                .with_model(ModelRef("admitted-model".to_owned()), "high")
+                .with_tool_ceiling(["read"]),
+            ])
+            .expect("admitted catalogue"),
+        );
+        let fx = Fixture::new(vec![vec![
+            AiEvent::TextDelta {
+                text: "parent must not render the fork body".to_owned(),
+            },
+            AiEvent::Stop(StopReason::Stop),
+        ]]);
+        let skill_evidence = SkillEvidence::new();
+        let mut gate = fx.gate.borrow_mut();
+        let skill_port = Arc::new(RecordingSkillInvocationPort::default());
+        let registry = [
+            RegisteredTool::skill(Arc::clone(&catalogue)),
+            RegisteredTool::Effect(Arc::new(Typed(FakeReadTool))),
+        ];
+        let tools = Tools::from_registry(
+            &registry,
+            &fx.policy,
+            ToolEffectPorts::new(
+                &fx.fs,
+                fx.process.as_ref(),
+                &skill_evidence,
+                Arc::new(NoResolver),
+                Arc::new(NoHop),
+                Arc::new(NoDuplex),
+            ),
+            CanonPath::new("/ws"),
+        );
+        let mut turn = TurnLoop::open(
+            session(
+                SessionState::default(),
+                &fx.store,
+                &fx.clock,
+                &fx.sink,
+                CancelToken::new(),
+            ),
+            model(&fx.generator, &mut gate),
+            tools,
+        )
+        .with_skill_invocation_port(skill_port.clone());
+        let operation =
+            ego_core::skill::AdmittedSkillOperation::invoke(&descriptor, "typed arguments");
+        let outcome = block_on(turn.run_admitted_skill(operation));
+        let outcome = outcome.expect("typed fork invocation must complete");
+        assert_eq!(
+            outcome.skill,
+            Some(ego_core::skill::SkillInvocationOutcome::Foreground(
+                ChildWaitResult::Returned {
+                    final_message: BlobRef::new(
+                        BlobId::parse(
+                            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                        )
+                        .expect("verified child result blob id"),
+                        19,
+                    ),
+                },
+            ))
+        );
+        let events = fx.store.events();
+        let admitted = events.iter().find_map(|event| match &event.kind {
+            EventKind::SkillInstructionAdmitted { invocation, .. } => {
+                Some((*invocation, event.env.id, event.env.turn, event.env.item))
+            }
+            _ => None,
+        });
+        let (invocation, admitted_event, admitted_turn, admitted_item) =
+            admitted.expect("user fork admission is durable");
+        let calls = skill_port.calls();
+        assert_eq!(calls.len(), 1, "the product owner receives one user fork");
+        assert_eq!(calls[0].invocation, invocation);
+        assert_eq!(calls[0].parent_event, admitted_event);
+        assert_eq!(calls[0].parent_turn, admitted_turn);
+        assert_eq!(calls[0].parent_item, admitted_item.expect("user fork item"));
+        assert_eq!(calls[0].effect_tools, BTreeSet::from(["read".to_owned()]));
+        assert_eq!(calls[0].wait, Some(ChildWait::Foreground));
+        assert_eq!(
+            fx.generator.calls().len(),
+            0,
+            "foreground user fork returns the verified child result, not parent generation"
+        );
+    }
+
+    #[test]
+    fn model_fork_tool_invocation_creates_independent_child_with_durable_identity() {
+        let descriptor = forked_descriptor(true);
+        let catalogue = Arc::new(
+            ego_core::skill::SkillCatalogue::new(vec![
+                ego_core::skill::SkillSpec::new(
+                    descriptor,
+                    b"model child task: $ARGUMENTS".to_vec(),
+                )
+                .expect("forked skill")
+                .with_fork(ChildWait::Background)
+                .with_profile("trusted")
+                .with_model(ModelRef("admitted-model".to_owned()), "high")
+                .with_tool_ceiling(["read"]),
+            ])
+            .expect("admitted catalogue"),
+        );
+        let fx = Fixture::new(vec![
+            vec![
+                AiEvent::ToolCall {
+                    call_id: "skill-call".to_owned(),
+                    name: "skill".to_owned(),
+                    args: r#"{"kind":"invoke","name":"forked","arguments":"model arguments"}"#
+                        .to_owned(),
+                },
+                AiEvent::Stop(StopReason::ToolUse),
+            ],
+            vec![
+                AiEvent::TextDelta {
+                    text: "parent continuation".to_owned(),
+                },
+                AiEvent::Stop(StopReason::Stop),
+            ],
+        ]);
+        let skill_evidence = SkillEvidence::new();
+        let mut gate = fx.gate.borrow_mut();
+        let skill_port = Arc::new(RecordingSkillInvocationPort::default());
+        let registry = [
+            RegisteredTool::skill(Arc::clone(&catalogue)),
+            RegisteredTool::Effect(Arc::new(Typed(FakeReadTool))),
+        ];
+        let tools = Tools::from_registry(
+            &registry,
+            &fx.policy,
+            ToolEffectPorts::new(
+                &fx.fs,
+                fx.process.as_ref(),
+                &skill_evidence,
+                Arc::new(NoResolver),
+                Arc::new(NoHop),
+                Arc::new(NoDuplex),
+            ),
+            CanonPath::new("/ws"),
+        );
+        let mut turn = TurnLoop::open(
+            session(
+                SessionState::default(),
+                &fx.store,
+                &fx.clock,
+                &fx.sink,
+                CancelToken::new(),
+            ),
+            model(&fx.generator, &mut gate),
+            tools,
+        )
+        .with_skill_invocation_port(skill_port.clone());
+        let outcome = block_on(turn.run("model invokes forked skill"));
+        let _outcome = outcome.expect("model fork invocation must complete");
+        let events = fx.store.events();
+        let admitted = events.iter().find_map(|event| match &event.kind {
+            EventKind::SkillInstructionAdmitted { invocation, .. } => {
+                Some((*invocation, event.env.id, event.env.turn, event.env.item))
+            }
+            _ => None,
+        });
+        let (invocation, admitted_event, admitted_turn, admitted_item) =
+            admitted.expect("model fork admission is durable");
+        assert!(!invocation.to_string().is_empty());
+        let calls = skill_port.calls();
+        assert_eq!(calls.len(), 1, "the product owner receives one model fork");
+        assert_eq!(calls[0].invocation, invocation);
+        assert_eq!(calls[0].parent_event, admitted_event);
+        assert_eq!(calls[0].parent_turn, admitted_turn);
+        assert_eq!(
+            calls[0].parent_item,
+            admitted_item.expect("model fork item")
+        );
+        assert_eq!(calls[0].effect_tools, BTreeSet::from(["read".to_owned()]));
+        assert_eq!(calls[0].wait, Some(ChildWait::Background));
+        assert_eq!(
+            SubagentInvocationId::from_uuid(calls[0].invocation.uuid())
+                .expect("durable child identity")
+                .to_string(),
+            invocation.to_string(),
+            "the background outcome retains the durable child identity"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(&event.kind, EventKind::SkillInstructionAdmitted { .. })),
+            "forked model skills durably record the admitted invocation"
+        );
+    }
+
+    #[test]
+    fn typed_fork_without_product_owner_fails_closed_before_parent_generation() {
+        let descriptor = forked_descriptor(false);
+        let catalogue = Arc::new(
+            ego_core::skill::SkillCatalogue::new(vec![
+                ego_core::skill::SkillSpec::new(
+                    descriptor.clone(),
+                    b"child task: $ARGUMENTS".to_vec(),
+                )
+                .expect("forked skill")
+                .with_fork(ChildWait::Foreground)
+                .with_profile("trusted")
+                .with_model(ModelRef("admitted-model".to_owned()), "high")
+                .with_tool_ceiling(["read"]),
+            ])
+            .expect("admitted catalogue"),
+        );
+        let fx = Fixture::new(vec![]);
+        let skill_evidence = SkillEvidence::new();
+        let mut gate = fx.gate.borrow_mut();
+        let registry = [
+            RegisteredTool::skill(Arc::clone(&catalogue)),
+            RegisteredTool::Effect(Arc::new(Typed(FakeReadTool))),
+        ];
+        let tools = Tools::from_registry(
+            &registry,
+            &fx.policy,
+            ToolEffectPorts::new(
+                &fx.fs,
+                fx.process.as_ref(),
+                &skill_evidence,
+                Arc::new(NoResolver),
+                Arc::new(NoHop),
+                Arc::new(NoDuplex),
+            ),
+            CanonPath::new("/ws"),
+        );
+        let mut turn = TurnLoop::open(
+            session(
+                SessionState::default(),
+                &fx.store,
+                &fx.clock,
+                &fx.sink,
+                CancelToken::new(),
+            ),
+            model(&fx.generator, &mut gate),
+            tools,
+        );
+        let operation = ego_core::skill::AdmittedSkillOperation::invoke(&descriptor, "arguments");
+        let abandoned = block_on(turn.run_admitted_skill(operation))
+            .expect_err("a fork without a product owner must be refused");
+        assert!(
+            abandoned
+                .cause
+                .to_string()
+                .contains("skill invocation has no product runtime owner")
+        );
+        assert!(
+            fx.generator.calls().is_empty(),
+            "a fail-closed fork must not activate parent generation"
+        );
+        assert!(
+            fx.store
+                .events()
+                .iter()
+                .any(|event| matches!(&event.kind, EventKind::SkillInstructionAdmitted { .. }))
+        );
+    }
+
+    #[test]
+    fn model_fork_without_product_owner_completes_with_a_failed_tool_result() {
+        let descriptor = forked_descriptor(true);
+        let catalogue = Arc::new(
+            ego_core::skill::SkillCatalogue::new(vec![
+                ego_core::skill::SkillSpec::new(
+                    descriptor,
+                    b"model child task: $ARGUMENTS".to_vec(),
+                )
+                .expect("forked skill")
+                .with_fork(ChildWait::Background)
+                .with_profile("trusted")
+                .with_model(ModelRef("admitted-model".to_owned()), "high")
+                .with_tool_ceiling(["read"]),
+            ])
+            .expect("admitted catalogue"),
+        );
+        let fx = Fixture::new(vec![
+            vec![
+                AiEvent::ToolCall {
+                    call_id: "skill-call".to_owned(),
+                    name: "skill".to_owned(),
+                    args: r#"{"kind":"invoke","name":"forked","arguments":"model arguments"}"#
+                        .to_owned(),
+                },
+                AiEvent::Stop(StopReason::ToolUse),
+            ],
+            vec![
+                AiEvent::TextDelta {
+                    text: "parent continuation".to_owned(),
+                },
+                AiEvent::Stop(StopReason::Stop),
+            ],
+        ]);
+        let skill_evidence = SkillEvidence::new();
+        let mut gate = fx.gate.borrow_mut();
+        let registry = [
+            RegisteredTool::skill(Arc::clone(&catalogue)),
+            RegisteredTool::Effect(Arc::new(Typed(FakeReadTool))),
+        ];
+        let tools = Tools::from_registry(
+            &registry,
+            &fx.policy,
+            ToolEffectPorts::new(
+                &fx.fs,
+                fx.process.as_ref(),
+                &skill_evidence,
+                Arc::new(NoResolver),
+                Arc::new(NoHop),
+                Arc::new(NoDuplex),
+            ),
+            CanonPath::new("/ws"),
+        );
+        let mut turn = TurnLoop::open(
+            session(
+                SessionState::default(),
+                &fx.store,
+                &fx.clock,
+                &fx.sink,
+                CancelToken::new(),
+            ),
+            model(&fx.generator, &mut gate),
+            tools,
+        );
+        let outcome = block_on(turn.run("model invokes forked skill"))
+            .expect("missing product owner is reported as a failed tool result");
+        assert_eq!(outcome.exit_reason, ExitReason::Completed);
+        let events = fx.store.events();
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(&event.kind, EventKind::SkillInstructionAdmitted { .. }))
+        );
+        let failed_tool = events
+            .iter()
+            .find(|event| matches!(&event.kind, EventKind::ToolCallCompleted { ok: false, .. }));
+        assert!(
+            failed_tool.is_some(),
+            "a missing product owner must complete the model tool call as failed"
+        );
+        assert!(events.iter().all(|event| !matches!(
+            &event.kind,
+            EventKind::SubagentRequested { .. } | EventKind::SubagentSpawned { .. }
+        )));
     }
 
     impl HumanApprover for ScriptedHuman {
@@ -6533,6 +6979,7 @@ mod turn {
             tools,
         )
         .expect("synchronized budget gate")
+        .with_skill_invocation_port(Arc::new(RecordingSkillInvocationPort::default()))
         .with_hook_runtime(hook_runtime)
         .expect("hook runtime shares the turn journal");
 
@@ -6659,7 +7106,8 @@ mod turn {
             ),
             model(&fx.generator, &mut gate),
             tools,
-        );
+        )
+        .with_skill_invocation_port(Arc::new(RecordingSkillInvocationPort::default()));
 
         let outcome =
             block_on(turn.run_admitted_skill(operation)).expect("the store accepted every append");

@@ -29,13 +29,13 @@ use crate::store::session_store::{SessionStore, StoreError};
 /// in-memory state, and publishes the projection — in that order, and nowhere
 /// else.
 ///
-/// The ordering is the point, and it now has two halves. A store failure must
-/// leave [`SessionState`] describing exactly what is on disk, so the fold
-/// happens only after the append returns; the reverse order would produce an
-/// in-memory session that remembers an event no reader will ever find. The
-/// sink comes last for the same reason one layer out: a host told about an
-/// event that was never written would be reporting a turn nobody can resume
-/// into.
+/// The ordering is the point, and it now has two halves. The fold happens only
+/// after the append returns; if the store may have written before reporting an
+/// error, the exact event freezes this journal until its durable disposition
+/// is resolved. The reverse order would produce an in-memory session that
+/// remembers an event no reader will ever find. The sink comes last for the
+/// same reason one layer out: a host told about an event that was never written
+/// would be reporting a turn nobody can resume into.
 ///
 /// That ordering is also why the sink is handed [`SessionState`]: at the
 /// moment of publication this journal holds the reduction *including* the
@@ -56,6 +56,9 @@ pub struct Journal<'a> {
     /// and carrying on does not restart its ordering.
     seq: Seq,
     state: SessionState,
+    /// The exact event whose append returned an error. Until its durable
+    /// disposition is resolved, no different event may consume this sequence.
+    uncertain_append: Option<DomainEvent>,
 }
 
 /// A cloneable append authority for one borrow-scoped session journal.
@@ -96,6 +99,13 @@ impl std::error::Error for SharedJournalError {
             Self::InUse | Self::Synchronization => None,
         }
     }
+}
+
+fn uncertain_append_error(message: &'static str) -> StoreError {
+    StoreError::Io(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        message,
+    ))
 }
 
 impl From<StoreError> for SharedJournalError {
@@ -148,6 +158,27 @@ impl<'s> SharedJournal<'s> {
     ) -> Result<EventId, SharedJournalError> {
         self.lock()?
             .append(turn, item, parent, kind)
+            .map_err(Into::into)
+    }
+
+    /// Fold and project one exact event that the store reveals after an
+    /// append returned an uncertain error. This never writes; it only brings
+    /// the sole in-memory journal owner back to the durable sequence.
+    pub(crate) fn reconcile_durable(&self, event: &DomainEvent) -> Result<(), SharedJournalError> {
+        self.lock()?.reconcile_durable(event).map_err(Into::into)
+    }
+
+    /// Append a subagent settlement, or retry the exact same event after its
+    /// caller has confirmed that a prior uncertain append is absent.
+    pub(crate) fn append_or_retry_settlement(
+        &self,
+        turn: TurnId,
+        item: Option<ItemId>,
+        parent: Option<EventId>,
+        kind: EventKind,
+    ) -> Result<EventId, SharedJournalError> {
+        self.lock()?
+            .append_or_retry_settlement(turn, item, parent, kind)
             .map_err(Into::into)
     }
 
@@ -207,10 +238,15 @@ impl<'s> SharedJournal<'s> {
     /// Recover the exact final state once every other append handle is gone.
     pub fn try_into_state(self) -> Result<SessionState, SharedJournalError> {
         let journal = Arc::try_unwrap(self.inner).map_err(|_| SharedJournalError::InUse)?;
-        journal
+        let journal = journal
             .into_inner()
-            .map(Journal::into_state)
-            .map_err(|_| SharedJournalError::Synchronization)
+            .map_err(|_| SharedJournalError::Synchronization)?;
+        if journal.uncertain_append.is_some() {
+            return Err(SharedJournalError::Store(uncertain_append_error(
+                "the journal cannot finalize with an unresolved uncertain append",
+            )));
+        }
+        Ok(journal.into_state())
     }
 }
 
@@ -376,6 +412,7 @@ impl<'a> Journal<'a> {
             producer,
             seq: state.last_seq,
             state,
+            uncertain_append: None,
         }
     }
 
@@ -401,10 +438,16 @@ impl<'a> Journal<'a> {
         producer: Producer,
         kind: EventKind,
     ) -> Result<EventId, StoreError> {
+        if self.uncertain_append.is_some() {
+            return Err(uncertain_append_error(
+                "the journal has an unresolved uncertain append",
+            ));
+        }
         let id = EventId::new();
+        let mut next = self.seq;
         let event = DomainEvent {
             env: Envelope {
-                seq: self.seq.next(),
+                seq: next.next(),
                 id,
                 turn,
                 item,
@@ -414,12 +457,75 @@ impl<'a> Journal<'a> {
             },
             kind,
         };
+        if let Err(error) = self.store.append(&self.session, &event) {
+            self.uncertain_append = Some(event);
+            return Err(error);
+        }
+        self.commit(event);
+        Ok(id)
+    }
+
+    fn append_or_retry_settlement(
+        &mut self,
+        turn: TurnId,
+        item: Option<ItemId>,
+        parent: Option<EventId>,
+        kind: EventKind,
+    ) -> Result<EventId, StoreError> {
+        if !matches!(&kind, EventKind::SubagentSettled { .. }) {
+            return Err(uncertain_append_error(
+                "only a subagent settlement can retry an uncertain append",
+            ));
+        }
+        let Some(event) = self.uncertain_append.clone() else {
+            return self.append(turn, item, parent, kind);
+        };
+        if event.env.turn != turn
+            || event.env.item != item
+            || event.env.parent != parent
+            || event.env.producer != self.producer
+            || event.kind != kind
+        {
+            return Err(uncertain_append_error(
+                "a different event cannot replace the journal's uncertain append",
+            ));
+        }
         self.store.append(&self.session, &event)?;
+        let id = event.env.id;
+        self.uncertain_append = None;
+        self.commit(event);
+        Ok(id)
+    }
+
+    fn commit(&mut self, event: DomainEvent) {
+        self.seq = event.env.seq;
         self.state.apply(&event);
         if let Some(public) = project_public(&event) {
             self.sink.publish(&public, &self.state);
         }
-        Ok(id)
+    }
+
+    fn reconcile_durable(&mut self, event: &DomainEvent) -> Result<(), StoreError> {
+        if !matches!(&event.kind, EventKind::SubagentSettled { .. }) {
+            return Err(StoreError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "only a durable subagent settlement can reconcile an uncertain append",
+            )));
+        }
+        if self.uncertain_append.as_ref() != Some(event) {
+            return Err(uncertain_append_error(
+                "durable settlement is not the journal's exact uncertain event",
+            ));
+        }
+        let mut expected = self.state.last_seq;
+        if self.seq != self.state.last_seq || event.env.seq != expected.next() {
+            return Err(uncertain_append_error(
+                "durable settlement is not the journal's exact uncertain append",
+            ));
+        }
+        self.uncertain_append = None;
+        self.commit(event.clone());
+        Ok(())
     }
 
     /// Durably freeze the exact ordered plan at a real owner's lifecycle point.

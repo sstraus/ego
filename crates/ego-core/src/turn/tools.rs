@@ -306,11 +306,24 @@ impl<'a> Tools<'a> {
     }
 
     pub(crate) fn effect_names(&self) -> Vec<String> {
-        self.registry
+        let mut names = self
+            .registry
             .iter()
             .filter_map(RegisteredTool::as_effect)
             .map(|tool| tool.descriptor().name)
-            .collect()
+            .collect::<Vec<_>>();
+        if let Ok(dynamic) = self.source.capture() {
+            names.extend(
+                dynamic
+                    .tools()
+                    .iter()
+                    .filter_map(RegisteredTool::as_effect)
+                    .map(|tool| tool.descriptor().name),
+            );
+        }
+        names.sort();
+        names.dedup();
+        names
     }
 
     pub(crate) fn prepare_skill_resource(

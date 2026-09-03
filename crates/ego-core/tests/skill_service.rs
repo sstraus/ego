@@ -4,7 +4,7 @@
 //! permit, child, and hook seams. They do not define a second skill parser,
 //! authority object, or effect runner.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -16,7 +16,7 @@ use ego_core::budget::{BudgetGate, SharedBudgetGate};
 use ego_core::config::{ModelRef, Trust};
 use ego_core::event::domain::{DomainEvent, EventKind};
 use ego_core::event::hook::{HookDecision, HookLifecycle, HookOutcome};
-use ego_core::event::id::{ItemId, Producer, SessionId, SubagentInvocationId, TurnId};
+use ego_core::event::id::{EventId, ItemId, Producer, SessionId, SubagentInvocationId, TurnId};
 use ego_core::event::skill::{
     SkillContentDigest, SkillDescriptorEvidence, SkillId, SkillInvocationId, SkillSourceAuthority,
     SkillSourceLocation,
@@ -36,7 +36,8 @@ use ego_core::run::{
 };
 use ego_core::sink::NullSink;
 use ego_core::skill::{
-    ActiveSkillScope, SkillCatalogue, SkillInvocation, SkillOperation, SkillSpec,
+    ActiveSkillScope, SkillCatalogue, SkillInvocation, SkillInvocationOutcome, SkillInvocationPort,
+    SkillOperation, SkillSpec,
 };
 use ego_core::state::SessionState;
 use ego_core::store::blob::{
@@ -47,9 +48,9 @@ use ego_core::store::evidence::{
 };
 use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
 use ego_core::subagent::{
-    ChildJournal, ChildJournalError, ChildProfileResolver, ChildRequest, ChildResultEvidence,
-    ChildResultReader, ChildResultReaderError, ChildResultStore, ChildRunService,
-    ChildSelectionAdmission, ChildServicePorts, ChildTaskReader, ChildWait,
+    ChildJournal, ChildJournalError, ChildProfileResolver, ChildRequest, ChildRequestOrigin,
+    ChildResultEvidence, ChildResultReader, ChildResultReaderError, ChildResultStore,
+    ChildRunService, ChildSelectionAdmission, ChildServicePorts, ChildTaskReader, ChildWait,
 };
 use ego_core::turn::{CancelToken, Journal, RegisteredTool, SharedJournal};
 
@@ -817,7 +818,7 @@ fn turn_batch_selection_rejects_skill_and_effect_before_either_executes() {
 }
 
 #[test]
-fn skill_service_bridges_real_child_service_for_both_fork_modes() {
+fn skill_invocation_port_bridges_real_child_service_for_both_fork_modes() {
     let RealChildFixture {
         child,
         parent,
@@ -825,7 +826,10 @@ fn skill_service_bridges_real_child_service_for_both_fork_modes() {
         child_waits,
         origins: [foreground_origin, background_origin],
     } = real_child_service();
-    let service = ego_core::skill::SkillService::new(child);
+    let port = ChildServiceInvocationPort {
+        child: child.clone(),
+        parent: parent.clone(),
+    };
     let foreground_invocation = SkillInvocation::admit_for_service(
         spec("explain", DIGEST_A, true, true),
         SkillOperation::Invoke {
@@ -836,7 +840,7 @@ fn skill_service_bridges_real_child_service_for_both_fork_modes() {
     .expect("typed service invocation");
     let foreground_id = foreground_invocation.id();
     let background_invocation = SkillInvocation::admit_for_service(
-        spec("explain", DIGEST_A, true, true),
+        spec("explain", DIGEST_A, true, true).with_fork(ChildWait::Background),
         SkillOperation::Invoke {
             name: "explain".to_owned(),
             arguments: "background".to_owned(),
@@ -845,26 +849,24 @@ fn skill_service_bridges_real_child_service_for_both_fork_modes() {
     .expect("typed background service invocation");
     let background_id = background_invocation.id();
 
-    let foreground = service
-        .fork(
-            foreground_invocation,
-            ChildWait::Foreground,
-            foreground_origin.turn,
-            foreground_origin.item,
-            &parent,
-        )
-        .expect("foreground skill fork");
-    let background = service
-        .fork(
-            background_invocation,
-            ChildWait::Background,
-            background_origin.turn,
-            background_origin.item,
-            &parent,
-        )
-        .expect("background skill fork");
-    assert_eq!(foreground.wait_mode(), ChildWait::Foreground);
-    assert_eq!(background.wait_mode(), ChildWait::Background);
+    let foreground = futures::executor::block_on(port.invoke(
+        foreground_invocation,
+        foreground_origin.turn,
+        foreground_origin.item,
+        foreground_origin.event,
+        BTreeSet::new(),
+    ))
+    .expect("foreground skill invocation");
+    let background = futures::executor::block_on(port.invoke(
+        background_invocation,
+        background_origin.turn,
+        background_origin.item,
+        background_origin.event,
+        BTreeSet::new(),
+    ))
+    .expect("background skill invocation");
+    assert!(matches!(foreground, SkillInvocationOutcome::Foreground(_)));
+    assert!(matches!(background, SkillInvocationOutcome::Background(_)));
     assert_ne!(foreground_id, background_id);
     let child_events = child_events.lock().expect("child journal");
     assert_eq!(
@@ -1102,6 +1104,79 @@ impl HookInvocationPort for RecordingHookPort {
 struct ParentToolOrigin {
     turn: TurnId,
     item: ItemId,
+    event: EventId,
+}
+
+struct ChildServiceInvocationPort {
+    child: ChildRunService,
+    parent: SessionHookRuntime<'static>,
+}
+
+impl SkillInvocationPort for ChildServiceInvocationPort {
+    fn invoke<'a>(
+        &'a self,
+        invocation: SkillInvocation,
+        parent_turn: TurnId,
+        parent_item: ItemId,
+        parent_event: EventId,
+        effect_tools: BTreeSet<String>,
+    ) -> BoxFuture<'a, Result<SkillInvocationOutcome, ego_core::skill::SkillError>> {
+        Box::pin(async move {
+            let Some(wait) = invocation.fork_wait() else {
+                return Ok(SkillInvocationOutcome::Parent(Box::new(invocation)));
+            };
+            let id = invocation.subagent_invocation();
+            let selections = RunSelections::new(
+                invocation.model().map(|model| ModelRef(model.to_owned())),
+                invocation
+                    .effort()
+                    .and_then(ego_core::skill::parse_skill_effort),
+                None,
+                None,
+                invocation.profile().map(str::to_owned),
+            );
+            let request = ChildRequest::new(
+                id,
+                ChildRequestOrigin::new(
+                    self.child.parent_run(),
+                    parent_turn,
+                    parent_item,
+                    parent_event,
+                ),
+                invocation
+                    .rendered_ref()
+                    .cloned()
+                    .expect("rendered child task"),
+                selections,
+                wait,
+            )
+            .with_requested_tools(effect_tools);
+            let admission = self
+                .child
+                .start(request, &self.parent)
+                .await
+                .map_err(|error| ego_core::skill::SkillError::new(error.to_string()))?;
+            if wait == ChildWait::Foreground {
+                if let Some(execution) = self
+                    .child
+                    .take_execution(id)
+                    .map_err(|error| ego_core::skill::SkillError::new(error.to_string()))?
+                {
+                    self.child
+                        .execute(execution)
+                        .await
+                        .map_err(|error| ego_core::skill::SkillError::new(error.to_string()))?;
+                }
+                return Ok(SkillInvocationOutcome::Foreground(
+                    admission
+                        .wait(&self.parent)
+                        .await
+                        .map_err(|error| ego_core::skill::SkillError::new(error.to_string()))?,
+                ));
+            }
+            Ok(SkillInvocationOutcome::Background(id))
+        })
+    }
 }
 
 struct RealChildFixture {
@@ -1151,18 +1226,20 @@ fn real_child_service() -> RealChildFixture {
         SessionState::default(),
     ));
     let turn = TurnId::new();
-    let origins = [
+    let mut origins = [
         ParentToolOrigin {
             turn,
             item: ItemId::new(),
+            event: EventId::new(),
         },
         ParentToolOrigin {
             turn,
             item: ItemId::new(),
+            event: EventId::new(),
         },
     ];
-    for (ordinal, origin) in origins.iter().enumerate() {
-        shared
+    for (ordinal, origin) in origins.iter_mut().enumerate() {
+        let event = shared
             .append(
                 origin.turn,
                 Some(origin.item),
@@ -1174,6 +1251,7 @@ fn real_child_service() -> RealChildFixture {
                 },
             )
             .expect("parent tool origin");
+        origin.event = event;
     }
     let parent = SessionHookRuntime::new(
         HookLifecycleDispatcher::new(

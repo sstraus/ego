@@ -5,6 +5,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 
 use crate::config::{ModelRef, Trust};
@@ -17,14 +18,11 @@ use crate::event::skill::{
     SkillCatalogueEvidence, SkillCatalogueGeneration, SkillDescriptorEvidence, SkillId,
     SkillInvocationId, SkillSourceAuthority, SkillSourceLocation,
 };
-use crate::hook::{
-    HookCatalogue, HookConfigEntry, HookHandlerConfig, HookMatcher, HookSource, SessionHookRuntime,
-};
+use crate::hook::{HookCatalogue, HookConfigEntry, HookHandlerConfig, HookMatcher, HookSource};
 use crate::permit::rule::PathPattern;
 use crate::permit::{CanonPath, GuardedIo, PathResolver};
-use crate::run::RunSelections;
 use crate::store::blob::{BlobRef, BlobStore};
-use crate::subagent::{ChildRequest, ChildRunService, ChildWait};
+use crate::subagent::{ChildWait, ChildWaitResult};
 use crate::turn::SharedJournal;
 
 const MAX_ADMISSION_BYTES: usize = 64 * 1024;
@@ -101,7 +99,7 @@ impl AdmittedSkillOperation {
 pub struct SkillError(String);
 
 impl SkillError {
-    fn new(message: impl Into<String>) -> Self {
+    pub fn new(message: impl Into<String>) -> Self {
         Self(message.into())
     }
 }
@@ -668,19 +666,59 @@ fn decode_admission(bytes: &[u8]) -> Result<SkillInvocationAdmission, SkillError
             "skill invocation admission exceeds 65536 bytes",
         ));
     }
-    serde_json::from_slice(bytes).map_err(|error| SkillError::new(error.to_string()))
+    let admission: SkillInvocationAdmission =
+        serde_json::from_slice(bytes).map_err(|error| SkillError::new(error.to_string()))?;
+    if !matches!(
+        admission.fork.as_deref(),
+        None | Some("foreground") | Some("background")
+    ) {
+        return Err(SkillError::new("admitted skill has an invalid fork mode"));
+    }
+    Ok(admission)
 }
 
 /// One admitted invocation. The exact rendered body and body-free authority
 /// snapshot are independent durable blobs referenced by one forced fact.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SkillInvocation {
     id: SkillInvocationId,
     admission: SkillInvocationAdmission,
     admission_ref: Option<BlobRef>,
     rendered_ref: Option<BlobRef>,
     rendered: Arc<str>,
-    spec: Option<SkillSpec>,
+}
+
+#[derive(Clone, Copy)]
+struct SkillAdmissionOrigin {
+    turn: TurnId,
+    item: Option<ItemId>,
+    parent: Option<EventId>,
+}
+
+impl SkillAdmissionOrigin {
+    const fn turn(turn: TurnId) -> Self {
+        Self {
+            turn,
+            item: None,
+            parent: None,
+        }
+    }
+
+    const fn user(turn: TurnId, item: ItemId) -> Self {
+        Self {
+            turn,
+            item: Some(item),
+            parent: None,
+        }
+    }
+
+    const fn model(turn: TurnId, item: ItemId, parent: EventId) -> Self {
+        Self {
+            turn,
+            item: Some(item),
+            parent: Some(parent),
+        }
+    }
 }
 
 impl SkillInvocation {
@@ -741,15 +779,43 @@ impl SkillInvocation {
         turn: TurnId,
     ) -> Result<(Self, EventId), SkillError> {
         let spec = catalogue.authorize_model(operation.name())?.clone();
-        Self::admit_authorized_in_turn(catalogue.generation, spec, operation, blobs, journal, turn)
+        Self::admit_authorized_in_turn(
+            catalogue.generation,
+            spec,
+            operation,
+            blobs,
+            journal,
+            SkillAdmissionOrigin::turn(turn),
+        )
     }
 
-    pub(crate) fn admit_user_in_turn(
+    pub(crate) fn admit_in_turn_with_origin(
+        catalogue: &SkillCatalogue,
+        operation: SkillOperation,
+        blobs: &dyn BlobStore,
+        journal: &SharedJournal<'_>,
+        turn: TurnId,
+        item: ItemId,
+        parent: EventId,
+    ) -> Result<(Self, EventId), SkillError> {
+        let spec = catalogue.authorize_model(operation.name())?.clone();
+        Self::admit_authorized_in_turn(
+            catalogue.generation,
+            spec,
+            operation,
+            blobs,
+            journal,
+            SkillAdmissionOrigin::model(turn, item, parent),
+        )
+    }
+
+    pub(crate) fn admit_user_in_turn_with_origin(
         catalogue: &SkillCatalogue,
         operation: AdmittedSkillOperation,
         blobs: &dyn BlobStore,
         journal: &SharedJournal<'_>,
         turn: TurnId,
+        item: ItemId,
     ) -> Result<(Self, EventId), SkillError> {
         let spec = catalogue.authorize_user_operation(&operation)?.clone();
         Self::admit_authorized_in_turn(
@@ -758,7 +824,7 @@ impl SkillInvocation {
             operation.into_operation(),
             blobs,
             journal,
-            turn,
+            SkillAdmissionOrigin::user(turn, item),
         )
     }
 
@@ -768,7 +834,7 @@ impl SkillInvocation {
         operation: SkillOperation,
         blobs: &dyn BlobStore,
         journal: &SharedJournal<'_>,
-        turn: TurnId,
+        origin: SkillAdmissionOrigin,
     ) -> Result<(Self, EventId), SkillError> {
         let rendered = spec.render(&operation)?;
         let id = SkillInvocationId::new();
@@ -778,9 +844,9 @@ impl SkillInvocation {
         let rendered_ref = commit_blob(blobs, rendered.as_bytes())?;
         let admitted = journal
             .append(
-                turn,
-                None,
-                None,
+                origin.turn,
+                origin.item,
+                origin.parent,
                 EventKind::SkillInstructionAdmitted {
                     invocation: id,
                     skill: spec.descriptor.id,
@@ -802,7 +868,6 @@ impl SkillInvocation {
                 admission_ref: Some(admission_ref),
                 rendered_ref: Some(rendered_ref),
                 rendered: rendered.into(),
-                spec: Some(spec),
             },
             admitted,
         ))
@@ -829,7 +894,6 @@ impl SkillInvocation {
             admission_ref: Some(admission_ref),
             rendered_ref: Some(rendered_ref),
             rendered: rendered.into(),
-            spec: Some(spec),
         })
     }
 
@@ -850,29 +914,21 @@ impl SkillInvocation {
         let event = journal
             .inspect(|state| {
                 state.skill_events().iter().find_map(|event| match event {
-                    crate::state::SkillEvent::Instruction {
-                        invocation: found,
-                        skill,
-                        catalogue_generation,
-                        source,
-                        location,
-                        source_digest,
-                        admission,
-                        rendered,
-                        model,
-                        effort,
-                        ..
-                    } if *found == invocation => Some((
-                        admission.clone(),
-                        rendered.clone(),
-                        *skill,
-                        *catalogue_generation,
-                        *source,
-                        location.clone(),
-                        *source_digest,
-                        model.clone(),
-                        effort.clone(),
-                    )),
+                    crate::state::SkillEvent::Instruction(admitted)
+                        if admitted.invocation == invocation =>
+                    {
+                        Some((
+                            admitted.admission.clone(),
+                            admitted.rendered.clone(),
+                            admitted.skill,
+                            admitted.catalogue_generation,
+                            admitted.source,
+                            admitted.location.clone(),
+                            admitted.source_digest,
+                            admitted.model.clone(),
+                            admitted.effort.clone(),
+                        ))
+                    }
                     _ => None,
                 })
             })
@@ -908,7 +964,6 @@ impl SkillInvocation {
             admission_ref: Some(event.0),
             rendered_ref: Some(event.1),
             rendered: rendered.into(),
-            spec: None,
         })
     }
 
@@ -940,8 +995,25 @@ impl SkillInvocation {
     pub fn model(&self) -> Option<&str> {
         self.admission.model.as_deref()
     }
+    pub fn name(&self) -> &str {
+        &self.admission.descriptor.name
+    }
     pub fn effort(&self) -> Option<&str> {
         self.admission.effort.as_deref()
+    }
+    pub fn fork_wait(&self) -> Option<ChildWait> {
+        match self.admission.fork.as_deref() {
+            Some("foreground") => Some(ChildWait::Foreground),
+            Some("background") => Some(ChildWait::Background),
+            _ => None,
+        }
+    }
+    pub fn profile(&self) -> Option<&str> {
+        self.admission.profile.as_deref()
+    }
+    pub fn subagent_invocation(&self) -> SubagentInvocationId {
+        SubagentInvocationId::from_uuid(self.id.uuid())
+            .expect("a skill invocation UUIDv7 is a subagent invocation UUIDv7")
     }
     pub fn admission_ref(&self) -> Option<&BlobRef> {
         self.admission_ref.as_ref()
@@ -1175,78 +1247,26 @@ fn synthetic_blob(bytes: &[u8]) -> Result<BlobRef, SkillError> {
     Ok(BlobRef::new(id, bytes.len() as u64))
 }
 
-/// Result of starting a real child under one skill invocation.
-#[derive(Debug)]
-pub struct SkillFork {
-    wait: ChildWait,
+/// Product result of one skill invocation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SkillInvocationOutcome {
+    Parent(Box<SkillInvocation>),
+    Foreground(ChildWaitResult),
+    Background(SubagentInvocationId),
 }
 
-impl SkillFork {
-    pub fn wait_mode(&self) -> ChildWait {
-        self.wait
-    }
-}
-
-/// Thin orchestration over the completed child owner.
-pub struct SkillService {
-    child: ChildRunService,
-}
-
-impl SkillService {
-    pub fn new(child: ChildRunService) -> Self {
-        Self { child }
-    }
-
-    pub fn fork(
-        &self,
+/// Consumer-owned async seam shared by direct user and model skill entries.
+/// The product adapter is the sole owner of child admission, immediate host
+/// launch, foreground collection, and background retention/drain.
+pub trait SkillInvocationPort: Send + Sync {
+    fn invoke<'a>(
+        &'a self,
         invocation: SkillInvocation,
-        wait: ChildWait,
         parent_turn: TurnId,
         parent_item: ItemId,
-        parent: &SessionHookRuntime<'_>,
-    ) -> Result<SkillFork, SkillError> {
-        let spec = invocation
-            .spec
-            .as_ref()
-            .ok_or_else(|| SkillError::new("resumed invocation has no executable child spec"))?;
-        let rendered = invocation
-            .rendered_ref
-            .clone()
-            .ok_or_else(|| SkillError::new("skill child has no rendered task blob"))?;
-        let mut selections = RunSelections::new(
-            spec.model.clone(),
-            spec.effort().and_then(parse_skill_effort),
-            None,
-            None,
-            spec.profile.clone(),
-        );
-        if let Some(profile) = spec.profile() {
-            selections = selections.with_profile_name(profile.to_owned());
-        }
-        let mut request = ChildRequest::new(
-            SubagentInvocationId::new(),
-            self.child.parent_run(),
-            parent_turn,
-            parent_item,
-            rendered,
-            selections,
-            wait,
-        );
-        if let Some(tools) = spec.allowed_tools() {
-            request = request.with_requested_tools(tools.iter().cloned());
-        }
-        if let Some(profile) = spec.profile() {
-            request = request.with_requested_profile(profile.to_owned());
-        }
-
-        let admission = futures::executor::block_on(self.child.start(request, parent))
-            .map_err(|error| SkillError::new(error.to_string()))?;
-        if wait == ChildWait::Foreground {
-            futures::executor::block_on(admission.wait(parent))
-                .map_err(|error| SkillError::new(error.to_string()))?;
-        }
-        Ok(SkillFork { wait })
-    }
+        parent_event: EventId,
+        effect_tools: BTreeSet<String>,
+    ) -> BoxFuture<'a, Result<SkillInvocationOutcome, SkillError>>;
 }
 
 pub fn parse_skill_effort(value: &str) -> Option<crate::generator::types::ThinkingLevel> {

@@ -286,6 +286,8 @@ pub struct TurnOutcome {
     /// told nothing it can act on. §4.4's four remedies need the authority
     /// too, which is why this is one [`Denial`] and not a string.
     pub denied: Option<Denial>,
+    /// Direct product result when the turn was a forked skill invocation.
+    pub skill: Option<crate::skill::SkillInvocationOutcome>,
 }
 
 /// A turn that could not be written down.
@@ -816,6 +818,8 @@ pub struct TurnLoop<'session, 'turn> {
     control: Option<&'turn mut InteractiveControl>,
     elicitor: Option<Arc<dyn Elicitor>>,
     foreign_question_port: Option<Arc<dyn crate::mcp::ForeignQuestionPort + 'turn>>,
+    skill_invocation_port: Option<Arc<dyn crate::skill::SkillInvocationPort + 'turn>>,
+    inherited_effect_tools: Option<Arc<BTreeSet<String>>>,
     hook_runtime: Option<SessionHookRuntime<'session>>,
     active_skill_scope: Option<crate::skill::ActiveSkillScope>,
     active_skill_invocations:
@@ -928,6 +932,8 @@ impl<'session, 'turn> TurnLoop<'session, 'turn> {
             control: None,
             elicitor: None,
             foreign_question_port: None,
+            skill_invocation_port: None,
+            inherited_effect_tools: None,
             hook_runtime: None,
             active_skill_scope: None,
             active_skill_invocations: BTreeMap::new(),
@@ -966,6 +972,21 @@ impl<'session, 'turn> TurnLoop<'session, 'turn> {
         port: Arc<dyn crate::mcp::ForeignQuestionPort + 'turn>,
     ) -> Self {
         self.foreign_question_port = Some(port);
+        self
+    }
+
+    /// Attach the product's sole async fork owner.
+    pub fn with_skill_invocation_port(
+        mut self,
+        port: Arc<dyn crate::skill::SkillInvocationPort + 'turn>,
+    ) -> Self {
+        self.skill_invocation_port = Some(port);
+        self
+    }
+
+    /// Apply an already-admitted parent effect ceiling to every generation.
+    pub fn with_effect_tool_ceiling(mut self, tools: Arc<BTreeSet<String>>) -> Self {
+        self.inherited_effect_tools = Some(tools);
         self
     }
 
@@ -1027,6 +1048,46 @@ impl<'session, 'turn> TurnLoop<'session, 'turn> {
         self.journal
             .inspect(Clone::clone)
             .expect("turn loop journal inspection")
+    }
+
+    /// Materialize the parent-visible value of one fork result without
+    /// consulting child state or re-running settlement.
+    pub fn materialize_skill_outcome(
+        &self,
+        outcome: &crate::skill::SkillInvocationOutcome,
+    ) -> Result<(bool, String), crate::skill::SkillError> {
+        use crate::skill::SkillInvocationOutcome;
+        use crate::subagent::ChildWaitResult;
+
+        match outcome {
+            SkillInvocationOutcome::Parent(_) => Err(crate::skill::SkillError::new(
+                "a non-fork skill instruction has no child result to materialize",
+            )),
+            SkillInvocationOutcome::Background(invocation) => Ok((true, invocation.to_string())),
+            SkillInvocationOutcome::Foreground(ChildWaitResult::Returned { final_message }) => {
+                let bytes = self
+                    .tools
+                    .blob_store()
+                    .read(final_message)
+                    .map_err(|error| crate::skill::SkillError::new(error.to_string()))?;
+                String::from_utf8(bytes)
+                    .map(|text| (true, text))
+                    .map_err(|_| crate::skill::SkillError::new("child result is not valid UTF-8"))
+            }
+            SkillInvocationOutcome::Foreground(ChildWaitResult::Refused { failure }) => {
+                Ok((false, format!("child invocation was refused: {failure:?}")))
+            }
+            SkillInvocationOutcome::Foreground(ChildWaitResult::Failed { settlement }) => {
+                Ok((false, format!("child invocation failed: {settlement:?}")))
+            }
+            SkillInvocationOutcome::Foreground(ChildWaitResult::ReturnBlocked {
+                hook_invocation,
+                ..
+            }) => Ok((
+                false,
+                format!("child return was blocked by hook invocation {hook_invocation}"),
+            )),
+        }
     }
 
     /// Take the session state back, to resume with a different loop.
@@ -1395,7 +1456,7 @@ impl<'session, 'turn> TurnLoop<'session, 'turn> {
             )?;
             return self.finish_turn(turn, driven).await;
         };
-        let mut next_scope = crate::skill::ActiveSkillScope::new(self.tools.effect_names());
+        let mut next_scope = crate::skill::ActiveSkillScope::new(self.effect_tool_baseline());
         if let Err(error) = crate::skill::SkillInvocation::preflight_user_scope(
             &catalogue,
             &operation,
@@ -1405,21 +1466,66 @@ impl<'session, 'turn> TurnLoop<'session, 'turn> {
             return self.finish_turn(turn, driven).await;
         }
         let selector = operation.name().to_owned();
-        let (invocation, admitted) = crate::skill::SkillInvocation::admit_user_in_turn(
+        let item = ItemId::new();
+        let (invocation, admitted) = crate::skill::SkillInvocation::admit_user_in_turn_with_origin(
             &catalogue,
             operation,
             self.tools.blob_store(),
             &self.journal,
             turn,
+            item,
         )
         .map_err(skill_store_error)?;
+        if invocation.fork_wait().is_some() {
+            let effect_tools = next_scope
+                .effect_tools()
+                .into_iter()
+                .map(str::to_owned)
+                .collect();
+            let skill = self
+                .invoke_forked_skill(
+                    turn,
+                    invocation,
+                    item,
+                    admitted,
+                    effect_tools,
+                    HookCausality::event(admitted, turn, Some(item)),
+                )
+                .await?;
+            let mut outcome = self
+                .finish_turn(turn, DriveOutcome::Ended(ExitReason::Completed, None))
+                .await?;
+            outcome.skill = Some(skill);
+            return Ok(outcome);
+        }
+        let invocation = match self
+            .invoke_skill_product(
+                invocation,
+                turn,
+                item,
+                admitted,
+                next_scope
+                    .effect_tools()
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect(),
+            )
+            .await?
+        {
+            crate::skill::SkillInvocationOutcome::Parent(invocation) => *invocation,
+            _ => {
+                return Err(skill_store_error(crate::skill::SkillError::new(
+                    "the product owner returned a child outcome for a non-fork skill",
+                )));
+            }
+        };
         let continue_generation = self
             .activate_skill_invocation(
                 turn,
                 &invocation,
                 next_scope,
-                HookCausality::event(admitted, turn, None),
-                HookSubject::Turn { turn },
+                HookCausality::event(admitted, turn, Some(item)),
+                HookSubject::Item { item },
                 selector,
             )
             .await?;
@@ -1474,6 +1580,7 @@ impl<'session, 'turn> TurnLoop<'session, 'turn> {
                     ok: false,
                     exit_reason: ExitReason::PermissionRequired,
                     denied: None,
+                    skill: None,
                 });
             };
             let progress = match self
@@ -1513,6 +1620,7 @@ impl<'session, 'turn> TurnLoop<'session, 'turn> {
                                 ok: false,
                                 exit_reason: ExitReason::PermissionRequired,
                                 denied: None,
+                                skill: None,
                             })
                         }
                         ToolOutcome::Ended(exit_reason) => Ok(TurnOutcome {
@@ -1520,6 +1628,7 @@ impl<'session, 'turn> TurnLoop<'session, 'turn> {
                             ok: false,
                             exit_reason,
                             denied: None,
+                            skill: None,
                         }),
                         ToolOutcome::Answered { .. }
                         | ToolOutcome::Executed { .. }
@@ -1624,6 +1733,21 @@ impl<'session, 'turn> TurnLoop<'session, 'turn> {
         if let Err(cause) = self.restore_skill_scope(turn) {
             return Err(self.abandon(turn, cause));
         }
+        match self.recover_direct_fork(turn).await {
+            Ok(Some(skill)) => {
+                let mut outcome = match self
+                    .finish_turn(turn, DriveOutcome::Ended(ExitReason::Completed, None))
+                    .await
+                {
+                    Ok(outcome) => outcome,
+                    Err(cause) => return Err(self.abandon(turn, cause)),
+                };
+                outcome.skill = Some(skill);
+                return Ok(outcome);
+            }
+            Ok(None) => {}
+            Err(cause) => return Err(self.abandon(turn, cause)),
+        }
         if let Some(observation) = self.execution_observation.take()
             && let Err(cause) = self.journal.append(
                 turn,
@@ -1647,6 +1771,7 @@ impl<'session, 'turn> TurnLoop<'session, 'turn> {
                     ok: false,
                     exit_reason: ExitReason::PermissionRequired,
                     denied: None,
+                    skill: None,
                 });
             }
         };
@@ -1671,6 +1796,7 @@ impl<'session, 'turn> TurnLoop<'session, 'turn> {
             ok,
             exit_reason,
             denied,
+            skill: None,
         })
     }
 
@@ -1680,11 +1806,9 @@ impl<'session, 'turn> TurnLoop<'session, 'turn> {
             .skill_events()
             .iter()
             .filter_map(|event| match event {
-                crate::state::SkillEvent::Instruction {
-                    turn: admitted_turn,
-                    invocation,
-                    ..
-                } if *admitted_turn == turn => Some(*invocation),
+                crate::state::SkillEvent::Instruction(admitted) if admitted.turn == turn => {
+                    Some(admitted.invocation)
+                }
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -1696,7 +1820,10 @@ impl<'session, 'turn> TurnLoop<'session, 'turn> {
                 &self.journal,
             )
             .map_err(skill_store_error)?;
-            let baseline = self.tools.effect_names();
+            if invocation.fork_wait().is_some() {
+                continue;
+            }
+            let baseline = self.effect_tool_baseline();
             let scope = self
                 .active_skill_scope
                 .get_or_insert_with(|| crate::skill::ActiveSkillScope::new(baseline));
@@ -1710,6 +1837,66 @@ impl<'session, 'turn> TurnLoop<'session, 'turn> {
         Ok(())
     }
 
+    async fn recover_direct_fork(
+        &mut self,
+        turn: TurnId,
+    ) -> Result<Option<crate::skill::SkillInvocationOutcome>, StoreError> {
+        let origins = self
+            .state()
+            .skill_events()
+            .iter()
+            .filter_map(|event| match event {
+                crate::state::SkillEvent::Instruction(admitted)
+                    if admitted.turn == turn && admitted.parent.is_none() =>
+                {
+                    admitted
+                        .item
+                        .map(|item| (admitted.event, item, admitted.invocation))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let mut origin = None;
+        for (event, item, invocation_id) in origins {
+            let invocation = crate::skill::SkillInvocation::resume_durable(
+                invocation_id,
+                self.tools.blob_store(),
+                &self.journal,
+            )
+            .map_err(skill_store_error)?;
+            if invocation.fork_wait().is_none() {
+                continue;
+            }
+            if origin.replace((event, item, invocation)).is_some() {
+                return Err(skill_store_error(crate::skill::SkillError::new(
+                    "turn has more than one direct forked skill invocation",
+                )));
+            }
+        }
+        let Some((event, item, invocation)) = origin else {
+            return Ok(None);
+        };
+        let mut scope = crate::skill::ActiveSkillScope::new(self.effect_tool_baseline());
+        invocation
+            .apply_captured_scope(&mut scope)
+            .map_err(skill_store_error)?;
+        let effect_tools = scope
+            .effect_tools()
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        self.invoke_forked_skill(
+            turn,
+            invocation,
+            item,
+            event,
+            effect_tools,
+            HookCausality::event(event, turn, Some(item)),
+        )
+        .await
+        .map(Some)
+    }
+
     async fn activate_skill_invocation(
         &mut self,
         turn: TurnId,
@@ -1720,6 +1907,18 @@ impl<'session, 'turn> TurnLoop<'session, 'turn> {
         selector: String,
     ) -> Result<bool, StoreError> {
         self.active_skill_scope = Some(scope);
+        self.activate_skill_hooks(turn, invocation, causality, subject, selector)
+            .await
+    }
+
+    async fn activate_skill_hooks(
+        &mut self,
+        turn: TurnId,
+        invocation: &crate::skill::SkillInvocation,
+        causality: HookCausality,
+        subject: HookSubject,
+        selector: String,
+    ) -> Result<bool, StoreError> {
         self.active_skill_invocations
             .insert(invocation.id(), invocation.clone());
         self.refresh_skill_hook_catalogue(turn)?;
@@ -1737,6 +1936,59 @@ impl<'session, 'turn> TurnLoop<'session, 'turn> {
             .await)
     }
 
+    async fn invoke_forked_skill(
+        &mut self,
+        turn: TurnId,
+        invocation: crate::skill::SkillInvocation,
+        item: ItemId,
+        admitted: EventId,
+        effect_tools: BTreeSet<String>,
+        causality: HookCausality,
+    ) -> Result<crate::skill::SkillInvocationOutcome, StoreError> {
+        let continue_invocation = self
+            .activate_skill_hooks(
+                turn,
+                &invocation,
+                causality,
+                HookSubject::Item { item },
+                invocation.name().to_owned(),
+            )
+            .await?;
+        if !continue_invocation {
+            self.active_skill_invocations.remove(&invocation.id());
+            self.refresh_skill_hook_catalogue(turn)?;
+            return Err(skill_store_error(crate::skill::SkillError::new(
+                "blocked by UserPromptExpansion hook",
+            )));
+        }
+        let result = self
+            .invoke_skill_product(invocation.clone(), turn, item, admitted, effect_tools)
+            .await;
+        self.active_skill_invocations.remove(&invocation.id());
+        self.refresh_skill_hook_catalogue(turn)?;
+        result
+    }
+
+    async fn invoke_skill_product(
+        &self,
+        invocation: crate::skill::SkillInvocation,
+        turn: TurnId,
+        item: ItemId,
+        admitted: EventId,
+        effect_tools: BTreeSet<String>,
+    ) -> Result<crate::skill::SkillInvocationOutcome, StoreError> {
+        self.skill_invocation_port
+            .as_ref()
+            .ok_or_else(|| {
+                skill_store_error(crate::skill::SkillError::new(
+                    "skill invocation has no product runtime owner",
+                ))
+            })?
+            .invoke(invocation, turn, item, admitted, effect_tools)
+            .await
+            .map_err(skill_store_error)
+    }
+
     fn refresh_skill_hook_catalogue(&self, turn: TurnId) -> Result<(), StoreError> {
         let mut sources = Vec::new();
         for invocation in self
@@ -1744,11 +1996,9 @@ impl<'session, 'turn> TurnLoop<'session, 'turn> {
             .skill_events()
             .iter()
             .filter_map(|event| match event {
-                crate::state::SkillEvent::Instruction {
-                    turn: admitted_turn,
-                    invocation,
-                    ..
-                } if *admitted_turn == turn => Some(invocation),
+                crate::state::SkillEvent::Instruction(admitted) if admitted.turn == turn => {
+                    Some(&admitted.invocation)
+                }
                 _ => None,
             })
         {
@@ -1768,6 +2018,14 @@ impl<'session, 'turn> TurnLoop<'session, 'turn> {
             ))),
             None => Ok(()),
         }
+    }
+
+    fn effect_tool_baseline(&self) -> Vec<String> {
+        let mut tools = self.tools.effect_names();
+        if let Some(inherited) = self.inherited_effect_tools.as_ref() {
+            tools.retain(|tool| inherited.contains(tool));
+        }
+        tools
     }
 
     fn deactivate_skill_hooks(&mut self, turn: TurnId) -> Result<(), StoreError> {
@@ -1871,6 +2129,7 @@ impl<'session, 'turn> TurnLoop<'session, 'turn> {
                     ok: false,
                     exit_reason: ExitReason::PermissionRequired,
                     denied: None,
+                    skill: None,
                 });
             }
         };
@@ -1889,6 +2148,7 @@ impl<'session, 'turn> TurnLoop<'session, 'turn> {
             ok,
             exit_reason,
             denied,
+            skill: None,
         })
     }
 
@@ -2412,7 +2672,12 @@ impl<'session, 'turn> TurnLoop<'session, 'turn> {
         let ceiling = self
             .active_skill_scope
             .as_ref()
-            .map(crate::skill::ActiveSkillScope::effect_tools);
+            .map(crate::skill::ActiveSkillScope::effect_tools)
+            .or_else(|| {
+                self.inherited_effect_tools
+                    .as_ref()
+                    .map(|tools| tools.iter().map(String::as_str).collect())
+            });
         let catalogue = match self.tools.capture_with_effect_ceiling(ceiling.as_deref()) {
             Ok(catalogue) => catalogue,
             Err(error) => {
@@ -2702,43 +2967,48 @@ impl<'session, 'turn> TurnLoop<'session, 'turn> {
     }
 
     fn durable_skill_messages(&self) -> Result<Vec<Message>, StoreError> {
-        self.state()
-            .skill_events()
-            .iter()
-            .filter_map(|event| match event {
-                crate::state::SkillEvent::Instruction {
-                    invocation,
-                    source,
-                    location,
-                    source_digest,
-                    rendered,
-                    ..
-                } if !self.active_skill_invocations.contains_key(invocation) => {
-                    Some((invocation, source, location, source_digest, rendered))
-                }
-                crate::state::SkillEvent::Instruction { .. } => None,
-                crate::state::SkillEvent::Resource { .. } => None,
-            })
-            .map(|(invocation, source, location, source_digest, rendered)| {
-                let bytes =
-                    self.tools.blob_store().read(rendered).map_err(|error| {
-                        StoreError::Io(std::io::Error::other(error.to_string()))
-                    })?;
-                let text = String::from_utf8(bytes).map_err(|_| {
-                    StoreError::Io(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "rendered skill blob is not valid UTF-8",
-                    ))
-                })?;
-                Ok(Message::text(
-                    Role::System,
-                    format!(
-                        "Admitted skill instruction (invocation {invocation}; source={source:?} \
-                         location={location} digest={source_digest}):\n{text}"
-                    ),
+        let state = self.state();
+        let mut messages = Vec::new();
+        for event in state.skill_events() {
+            let crate::state::SkillEvent::Instruction(evidence) = event else {
+                continue;
+            };
+            if self
+                .active_skill_invocations
+                .contains_key(&evidence.invocation)
+            {
+                continue;
+            }
+            let admitted = crate::skill::SkillInvocation::resume_durable(
+                evidence.invocation,
+                self.tools.blob_store(),
+                &self.journal,
+            )
+            .map_err(skill_store_error)?;
+            if admitted.fork_wait().is_some() {
+                continue;
+            }
+            let bytes = self
+                .tools
+                .blob_store()
+                .read(&evidence.rendered)
+                .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
+            let text = String::from_utf8(bytes).map_err(|_| {
+                StoreError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "rendered skill blob is not valid UTF-8",
                 ))
-            })
-            .collect()
+            })?;
+            messages.push(Message::text(
+                Role::System,
+                format!(
+                    "Admitted skill instruction (invocation {}; source={:?} \
+                     location={} digest={}):\n{text}",
+                    evidence.invocation, evidence.source, evidence.location, evidence.source_digest,
+                ),
+            ));
+        }
+        Ok(messages)
     }
 
     /// Prefix target-local history with its already-validated ancestor history.
@@ -3472,28 +3742,111 @@ impl<'session, 'turn> TurnLoop<'session, 'turn> {
                     return Ok(answered(true, String::from_utf8_lossy(&bytes).into_owned()));
                 }
                 let mut next_scope = self.active_skill_scope.clone().unwrap_or_else(|| {
-                    crate::skill::ActiveSkillScope::new(self.tools.effect_names())
+                    crate::skill::ActiveSkillScope::new(self.effect_tool_baseline())
                 });
-                if let Err(error) = crate::skill::SkillInvocation::preflight_scope(
-                    &catalogue,
-                    &operation,
-                    &mut next_scope,
-                ) {
-                    return Ok(answered(false, error.to_string()));
-                }
-                let skill_selector = operation.name().to_owned();
-                let invocation = crate::skill::SkillInvocation::admit_in_turn(
-                    &catalogue,
-                    operation,
-                    self.tools.blob_store(),
-                    &self.journal,
-                    turn,
-                );
-                let invocation = match invocation {
-                    Ok((invocation, _)) => invocation,
+                let requested_selector = operation.name().to_owned();
+                let durable = self
+                    .state()
+                    .skill_events()
+                    .iter()
+                    .find_map(|event| match event {
+                        crate::state::SkillEvent::Instruction(admitted)
+                            if admitted.turn == turn
+                                && admitted.item == Some(call.item)
+                                && admitted.parent == Some(call.started) =>
+                        {
+                            Some((admitted.event, admitted.invocation))
+                        }
+                        _ => None,
+                    });
+                let invocation = match durable {
+                    Some((event, invocation)) => crate::skill::SkillInvocation::resume_durable(
+                        invocation,
+                        self.tools.blob_store(),
+                        &self.journal,
+                    )
+                    .and_then(|invocation| {
+                        if invocation.name() != requested_selector {
+                            return Err(crate::skill::SkillError::new(
+                                "durable skill invocation does not match its tool call",
+                            ));
+                        }
+                        invocation.apply_captured_scope(&mut next_scope)?;
+                        Ok((invocation, event))
+                    }),
+                    None => {
+                        if let Err(error) = crate::skill::SkillInvocation::preflight_scope(
+                            &catalogue,
+                            &operation,
+                            &mut next_scope,
+                        ) {
+                            return Ok(answered(false, error.to_string()));
+                        }
+                        crate::skill::SkillInvocation::admit_in_turn_with_origin(
+                            &catalogue,
+                            operation,
+                            self.tools.blob_store(),
+                            &self.journal,
+                            turn,
+                            call.item,
+                            call.started,
+                        )
+                    }
+                };
+                let (invocation, admitted) = match invocation {
+                    Ok(invocation) => invocation,
                     Err(error) => return Ok(answered(false, error.to_string())),
                 };
                 let causality = HookCausality::item(call.item, turn, call.started);
+                if invocation.fork_wait().is_some() {
+                    let effect_tools = next_scope
+                        .effect_tools()
+                        .into_iter()
+                        .map(str::to_owned)
+                        .collect();
+                    let outcome = self
+                        .invoke_forked_skill(
+                            turn,
+                            invocation,
+                            call.item,
+                            admitted,
+                            effect_tools,
+                            causality,
+                        )
+                        .await;
+                    return Ok(match outcome {
+                        Ok(outcome) => match self.materialize_skill_outcome(&outcome) {
+                            Ok((ok, text)) => answered(ok, text),
+                            Err(error) => answered(false, error.to_string()),
+                        },
+                        Err(error) => answered(false, error.to_string()),
+                    });
+                }
+                let invocation = match self
+                    .invoke_skill_product(
+                        invocation,
+                        turn,
+                        call.item,
+                        admitted,
+                        next_scope
+                            .effect_tools()
+                            .into_iter()
+                            .map(str::to_owned)
+                            .collect(),
+                    )
+                    .await
+                {
+                    Ok(crate::skill::SkillInvocationOutcome::Parent(invocation)) => *invocation,
+                    Ok(_) => {
+                        return Ok(answered(
+                            false,
+                            "the product owner returned a child outcome for a non-fork skill"
+                                .to_owned(),
+                        ));
+                    }
+                    Err(error) => return Ok(answered(false, error.to_string())),
+                };
+                let skill_selector = invocation.name().to_owned();
                 let continue_generation = self
                     .activate_skill_invocation(
                         turn,

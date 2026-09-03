@@ -302,13 +302,13 @@ fn assert_tool_origin_and_continuation_result(state: &SessionState, item: ItemId
 }
 
 #[test]
-fn snapshot_version_is_thirteen_and_validation_exposes_exact_rejection_set() {
-    assert_eq!(SNAPSHOT_VERSION, 13);
+fn snapshot_version_is_fourteen_and_validation_exposes_exact_rejection_set() {
+    assert_eq!(SNAPSHOT_VERSION, 14);
     let fixture = Fixture::new();
     let state = fixture.full_replay();
     assert_eq!(state.hook_settlements().len(), 1);
     let snapshot = Snapshot::new(fixture.id, fixture.events[3].env.seq, state.clone());
-    assert_eq!(snapshot.v, 13);
+    assert_eq!(snapshot.v, 14);
     assert_eq!(
         validate(
             &snapshot,
@@ -338,7 +338,7 @@ fn full_log_replay_reconstructs_exact_tool_call_origin_and_parent_result() {
 }
 
 #[test]
-fn snapshot_v13_roundtrip_and_tail_replay_preserve_tool_origin_and_result() {
+fn snapshot_v14_roundtrip_and_tail_replay_preserve_tool_origin_and_result() {
     let fixture = ToolOriginFixture::new();
     let expected = fixture.full_replay();
     fixture

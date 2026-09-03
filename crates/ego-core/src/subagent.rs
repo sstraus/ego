@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
 use futures::future::BoxFuture;
+use futures::lock::Mutex as AsyncMutex;
 
 use crate::budget::SharedBudgetGate;
 use crate::digest::sha256_hex;
@@ -38,12 +39,44 @@ pub enum RecoveryCut {
     BeforeParentSettlement,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ChildRequest {
-    invocation: SubagentInvocationId,
+/// Exact admitted parent identity for one child request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChildRequestOrigin {
     parent_run: RunId,
     parent_turn: TurnId,
     parent_item: ItemId,
+    parent_event: EventId,
+}
+
+impl ChildRequestOrigin {
+    pub const fn new(
+        parent_run: RunId,
+        parent_turn: TurnId,
+        parent_item: ItemId,
+        parent_event: EventId,
+    ) -> Self {
+        Self {
+            parent_run,
+            parent_turn,
+            parent_item,
+            parent_event,
+        }
+    }
+
+    fn run_origin(self, invocation: SubagentInvocationId) -> RunOrigin {
+        RunOrigin::Subagent {
+            invocation,
+            parent_run: self.parent_run,
+            parent_turn: self.parent_turn,
+            parent_item: self.parent_item,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChildRequest {
+    invocation: SubagentInvocationId,
+    origin: ChildRequestOrigin,
     task: BlobRef,
     selections: RunSelections,
     wait: ChildWait,
@@ -59,18 +92,14 @@ pub struct ChildRequest {
 impl ChildRequest {
     pub fn new(
         invocation: SubagentInvocationId,
-        parent_run: RunId,
-        parent_turn: TurnId,
-        parent_item: ItemId,
+        origin: ChildRequestOrigin,
         task: BlobRef,
         selections: RunSelections,
         wait: ChildWait,
     ) -> Self {
         Self {
             invocation,
-            parent_run,
-            parent_turn,
-            parent_item,
+            origin,
             task,
             selections,
             wait,
@@ -422,6 +451,13 @@ impl RecoveredChild {
 pub struct ChildRunService {
     inner: Arc<Inner>,
 }
+impl Clone for ChildRunService {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+}
 impl ChildRunService {
     pub fn new<S, E, C, I>(
         controller: Arc<RunController<S, E, C, I>>,
@@ -465,11 +501,60 @@ impl ChildRunService {
     ) -> Result<ChildWaitResult, ChildServiceError> {
         finish(&self.inner, invocation, parent).await
     }
+    /// Transfer the admitted execution to the product runtime exactly once.
+    ///
+    /// Admission deliberately does not execute a child: the host that owns
+    /// the async product invocation must launch this value immediately.
+    pub fn take_execution(
+        &self,
+        invocation: SubagentInvocationId,
+    ) -> Result<Option<RunExecution>, ChildServiceError> {
+        self.inner
+            .active
+            .lock()
+            .expect("active children")
+            .get_mut(&invocation)
+            .map(|child| child.execution.take())
+            .ok_or(ChildServiceError::UnknownInvocation { invocation })
+    }
+    /// Execute a value transferred by [`Self::take_execution`].
+    pub async fn execute(&self, execution: RunExecution) -> Result<RunSnapshot, ChildServiceError> {
+        self.inner
+            .controller
+            .execute(execution)
+            .await
+            .map_err(controller_error)
+    }
+    /// Cancel a child on behalf of the retained product owner.
+    pub async fn cancel_owned(
+        &self,
+        invocation: SubagentInvocationId,
+    ) -> Result<(), ChildServiceError> {
+        let key = self
+            .inner
+            .active
+            .lock()
+            .expect("active children")
+            .get(&invocation)
+            .ok_or(ChildServiceError::UnknownInvocation { invocation })?
+            .cancel_key
+            .clone();
+        if let Some(key) = key {
+            self.inner
+                .controller
+                .cancel_admitted(&key)
+                .await
+                .map_err(controller_error)?;
+        }
+        Ok(())
+    }
     pub async fn recover_from_durable(
         &self,
         invocation: SubagentInvocationId,
         _cut: RecoveryCut,
         parent: &SessionHookRuntime<'_>,
+        wait: ChildWait,
+        requested_tools: BTreeSet<String>,
     ) -> Result<Option<RecoveredChild>, ChildServiceError> {
         let events = self
             .inner
@@ -477,11 +562,17 @@ impl ChildRunService {
             .journal
             .read(invocation)
             .map_err(journal_error)?;
-        let Some(requested) = events.iter().find(|event| {
+        let mut requested_events = events.iter().filter(|event| {
             matches!(&event.kind, EventKind::SubagentRequested { invocation: id, .. } if *id == invocation)
-        }) else {
+        });
+        let Some(requested) = requested_events.next() else {
             return Ok(None);
         };
+        if requested_events.next().is_some() {
+            return Err(ChildServiceError::InvalidDurableState {
+                diagnostic: format!("child {invocation} has more than one durable request"),
+            });
+        }
         let (task, selections) = match &requested.kind {
             EventKind::SubagentRequested {
                 task, selections, ..
@@ -495,40 +586,127 @@ impl ChildRunService {
                 .ok_or_else(|| ChildServiceError::InvalidDurableState {
                     diagnostic: "durable child request has no parent item".into(),
                 })?;
-        let origin = RunOrigin::Subagent {
+        let parent_event =
+            requested
+                .env
+                .parent
+                .ok_or_else(|| ChildServiceError::InvalidDurableState {
+                    diagnostic: "durable child request has no admitted parent event".into(),
+                })?;
+        let mut recovery_request = ChildRequest::new(
             invocation,
-            parent_run: self.inner.ports.parent_run,
-            parent_turn: requested.env.turn,
-            parent_item,
-        };
-        validate_gate(&self.inner, &self.inner.bindings)?;
-        if let Some(child) = events.iter().find_map(|event| match &event.kind {
-            EventKind::SubagentSettled { child, .. } => Some(*child),
-            _ => None,
-        }) {
-            return Ok(Some(RecoveredChild {
-                invocation,
-                child,
-                origin,
-            }));
-        }
-        if let Some((child, parent_event)) = events.iter().find_map(|event| match &event.kind {
-            EventKind::SubagentSpawned { child, .. } => Some((*child, event.env.id)),
-            _ => None,
-        }) {
-            recover_active(
-                &self.inner,
-                invocation,
-                child,
+            ChildRequestOrigin::new(
+                self.inner.ports.parent_run,
                 requested.env.turn,
                 parent_item,
                 parent_event,
-                &origin,
+            ),
+            task.clone(),
+            selections,
+            wait,
+        )
+        .with_requested_tools(requested_tools);
+        if let Some(profile) = recovery_request.selections.profile().map(str::to_owned) {
+            recovery_request = recovery_request.with_requested_profile(profile);
+        }
+        let (selections, bindings) = admit_child_authority(&self.inner, &mut recovery_request)?;
+        let origin = recovery_request.origin.run_origin(invocation);
+        validate_gate(&self.inner, &bindings)?;
+        let spawned = events
+            .iter()
+            .filter_map(|event| match &event.kind {
+                EventKind::SubagentSpawned {
+                    invocation: found,
+                    child,
+                } if *found == invocation => Some((event, *child)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if spawned.len() > 1 {
+            return Err(ChildServiceError::InvalidDurableState {
+                diagnostic: format!("child {invocation} has more than one durable spawn"),
+            });
+        }
+        if let Some((spawned_event, _)) = spawned.first()
+            && (spawned_event.env.turn != requested.env.turn
+                || spawned_event.env.item != requested.env.item
+                || spawned_event.env.parent != Some(requested.env.id))
+        {
+            return Err(ChildServiceError::InvalidDurableState {
+                diagnostic: format!("child {invocation} has an invalid durable spawn origin"),
+            });
+        }
+        let settled = events
+            .iter()
+            .filter_map(|event| match &event.kind {
+                EventKind::SubagentSettled {
+                    invocation: found,
+                    child,
+                    terminal,
+                } if *found == invocation => Some((event, *child, terminal.clone())),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if settled.len() > 1 {
+            return Err(ChildServiceError::InvalidDurableState {
+                diagnostic: format!("child {invocation} has more than one durable settlement"),
+            });
+        }
+        if let Some((settled_event, child, terminal)) = settled.first() {
+            let child = (*child).ok_or_else(|| ChildServiceError::InvalidDurableState {
+                diagnostic: "settled admitted child has no run identity".into(),
+            })?;
+            if spawned.first().map(|(_, run)| *run) != Some(child)
+                || settled_event.env.turn != requested.env.turn
+                || settled_event.env.item != requested.env.item
+            {
+                return Err(ChildServiceError::InvalidDurableState {
+                    diagnostic: format!(
+                        "child {invocation} has an invalid durable settlement origin"
+                    ),
+                });
+            }
+            self.inner.active.lock().expect("active children").insert(
+                invocation,
+                ActiveChild {
+                    run: child,
+                    parent_turn: requested.env.turn,
+                    parent_item,
+                    parent_event: settled_event.env.id,
+                    execution: None,
+                    cancel_key: None,
+                    subscription: None,
+                    observed: None,
+                    settlement: Arc::new(AsyncMutex::new(SettlementState {
+                        materialized: None,
+                        pending: None,
+                        settled: Some(result_of_terminal(terminal)),
+                    })),
+                },
+            );
+            return Ok(Some(RecoveredChild {
+                invocation,
+                child: Some(child),
+                origin,
+            }));
+        }
+        if let Some((spawned_event, child)) = spawned.first() {
+            recover_active(
+                &self.inner,
+                invocation,
+                *child,
+                ChildRequestOrigin::new(
+                    self.inner.ports.parent_run,
+                    requested.env.turn,
+                    parent_item,
+                    spawned_event.env.id,
+                ),
+                bindings.clone(),
             )
             .await?;
             return Ok(Some(RecoveredChild {
                 invocation,
-                child: Some(child),
+                child: Some(*child),
                 origin,
             }));
         }
@@ -540,22 +718,19 @@ impl ChildRunService {
         {
             Ok(snapshot) => {
                 validate_expected_origin(&snapshot, &origin)?;
-                let parent_event = parent_origin(parent, parent_item)?;
                 recover_active(
                     &self.inner,
                     invocation,
                     snapshot.run_id(),
-                    requested.env.turn,
-                    parent_item,
-                    parent_event,
-                    &origin,
+                    recovery_request.origin,
+                    bindings.clone(),
                 )
                 .await?;
                 let parent_event = append_lifecycle(
                     parent,
                     requested.env.turn,
                     Some(parent_item),
-                    Some(parent_origin(parent, parent_item)?),
+                    Some(requested.env.id),
                     EventKind::SubagentSpawned {
                         invocation,
                         child: snapshot.run_id(),
@@ -584,14 +759,14 @@ impl ChildRunService {
                     origin.clone(),
                     selections,
                     prompt,
-                    self.inner.bindings.clone(),
+                    bindings,
                 )
                 .await?;
                 let parent_event = append_lifecycle(
                     parent,
                     requested.env.turn,
                     Some(parent_item),
-                    Some(parent_origin(parent, parent_item)?),
+                    Some(requested.env.id),
                     EventKind::SubagentSpawned { invocation, child },
                 )?;
                 self.inner.active.lock().expect("active children").insert(
@@ -603,10 +778,9 @@ impl ChildRunService {
                         parent_event,
                         execution: Some(execution),
                         cancel_key: Some(cancel_key),
-                        subscription,
+                        subscription: Some(subscription),
                         observed: None,
-                        pending: None,
-                        result: None,
+                        settlement: Arc::new(AsyncMutex::new(SettlementState::default())),
                     },
                 );
                 Ok(Some(RecoveredChild {
@@ -635,58 +809,61 @@ struct ActiveChild {
     parent_event: EventId,
     execution: Option<RunExecution>,
     cancel_key: Option<CancelKey>,
-    subscription: RunSubscription,
+    subscription: Option<RunSubscription>,
     observed: Option<RunSettlement>,
+    settlement: Arc<AsyncMutex<SettlementState>>,
+}
+
+#[derive(Default)]
+struct SettlementState {
+    materialized: Option<ChildWaitResult>,
     pending: Option<ChildWaitResult>,
-    result: Option<ChildWaitResult>,
+    settled: Option<ChildWaitResult>,
 }
 
 async fn recover_active(
     inner: &Arc<Inner>,
     invocation: SubagentInvocationId,
     child: RunId,
-    parent_turn: TurnId,
-    parent_item: ItemId,
-    parent_event: EventId,
-    expected_origin: &RunOrigin,
+    parent: ChildRequestOrigin,
+    bindings: RunExecutionBindings,
 ) -> Result<(), ChildServiceError> {
+    let expected_origin = parent.run_origin(invocation);
     let outcome = inner
         .controller
-        .recover(child, inner.bindings.clone())
+        .recover(child, bindings)
         .await
         .map_err(controller_error)?;
     let active = match outcome {
         RunRecoveryOutcome::Reattached(reattachment) => {
-            validate_expected_origin(reattachment.snapshot(), expected_origin)?;
+            validate_expected_origin(reattachment.snapshot(), &expected_origin)?;
             let subscription = reattachment.subscription();
             let cancel_key = reattachment.cancel_key().clone();
             let execution = reattachment.into_execution();
             ActiveChild {
                 run: child,
-                parent_turn,
-                parent_item,
-                parent_event,
+                parent_turn: parent.parent_turn,
+                parent_item: parent.parent_item,
+                parent_event: parent.parent_event,
                 execution: Some(execution),
                 cancel_key: Some(cancel_key),
-                subscription,
+                subscription: Some(subscription),
                 observed: None,
-                pending: None,
-                result: None,
+                settlement: Arc::new(AsyncMutex::new(SettlementState::default())),
             }
         }
         RunRecoveryOutcome::Observed(observation) => {
-            validate_expected_origin(observation.snapshot(), expected_origin)?;
+            validate_expected_origin(observation.snapshot(), &expected_origin)?;
             ActiveChild {
                 run: child,
-                parent_turn,
-                parent_item,
-                parent_event,
+                parent_turn: parent.parent_turn,
+                parent_item: parent.parent_item,
+                parent_event: parent.parent_event,
                 execution: None,
                 cancel_key: None,
-                subscription: observation.subscription(),
+                subscription: Some(observation.subscription()),
                 observed: observation.snapshot().settlement().cloned(),
-                pending: None,
-                result: None,
+                settlement: Arc::new(AsyncMutex::new(SettlementState::default())),
             }
         }
     };
@@ -703,7 +880,7 @@ async fn start(
     mut request: ChildRequest,
     parent: &SessionHookRuntime<'_>,
 ) -> Result<ChildAdmission, ChildServiceError> {
-    if request.parent_run != inner.ports.parent_run {
+    if request.origin.parent_run != inner.ports.parent_run {
         return Err(ChildServiceError::InvalidDurableState {
             diagnostic: "child request belongs to a different parent run".into(),
         });
@@ -713,22 +890,8 @@ async fn start(
             dimension: "parent transcript".into(),
         });
     }
-    if let Some(profile) = request.requested_profile.as_deref() {
-        if profile.is_empty() || inner.ports.profiles.resolve_profile(profile).is_err() {
-            return Err(ChildServiceError::ProfileUnavailable {
-                profile: profile.to_owned(),
-            });
-        }
-        request.selections = request.selections.with_profile_name(profile.to_owned());
-    }
-    let (selections, bindings) = inner
-        .ports
-        .selections
-        .admit(&request, &inner.bindings)
-        .map_err(|diagnostic| ChildServiceError::AuthorityWouldWiden {
-            dimension: authority_dimension(&diagnostic),
-        })?;
-    validate_gate(inner, &bindings)?;
+    validate_parent_origin(parent, &request)?;
+    let (selections, bindings) = admit_child_authority(inner, &mut request)?;
     let prompt = read_task(inner, &request.task)?;
     let existing = inner
         .ports
@@ -742,9 +905,9 @@ async fn start(
     } else {
         append_lifecycle(
             parent,
-            request.parent_turn,
-            Some(request.parent_item),
-            Some(parent_origin(parent, request.parent_item)?),
+            request.origin.parent_turn,
+            Some(request.origin.parent_item),
+            Some(request.origin.parent_event),
             EventKind::SubagentRequested {
                 invocation: request.invocation,
                 task: request.task.clone(),
@@ -752,12 +915,7 @@ async fn start(
             },
         )?
     };
-    let origin = RunOrigin::Subagent {
-        invocation: request.invocation,
-        parent_run: request.parent_run,
-        parent_turn: request.parent_turn,
-        parent_item: request.parent_item,
-    };
+    let origin = request.origin.run_origin(request.invocation);
     let (child_run, execution, cancel_key, subscription, turn_lease) = admit(
         inner,
         request.invocation,
@@ -769,8 +927,8 @@ async fn start(
     .await?;
     let spawned = append_lifecycle(
         parent,
-        request.parent_turn,
-        Some(request.parent_item),
+        request.origin.parent_turn,
+        Some(request.origin.parent_item),
         Some(requested_event),
         EventKind::SubagentSpawned {
             invocation: request.invocation,
@@ -782,15 +940,14 @@ async fn start(
         request.invocation,
         ActiveChild {
             run: child_run,
-            parent_turn: request.parent_turn,
-            parent_item: request.parent_item,
+            parent_turn: request.origin.parent_turn,
+            parent_item: request.origin.parent_item,
             parent_event: spawned,
             execution: Some(execution),
             cancel_key: Some(cancel_key),
-            subscription: subscription.clone(),
+            subscription: Some(subscription.clone()),
             observed: None,
-            pending: None,
-            result: None,
+            settlement: Arc::new(AsyncMutex::new(SettlementState::default())),
         },
     );
     let started = dispatch_subagent(
@@ -813,7 +970,7 @@ async fn start(
     Ok(ChildAdmission {
         inner: Arc::clone(inner),
         invocation: request.invocation,
-        parent_run: request.parent_run,
+        parent_run: request.origin.parent_run,
         child_run,
         child_session,
         origin,
@@ -822,6 +979,29 @@ async fn start(
         wait: request.wait,
         subscription,
     })
+}
+
+fn admit_child_authority(
+    inner: &Inner,
+    request: &mut ChildRequest,
+) -> Result<(RunSelections, RunExecutionBindings), ChildServiceError> {
+    if let Some(profile) = request.requested_profile.as_deref() {
+        if profile.is_empty() || inner.ports.profiles.resolve_profile(profile).is_err() {
+            return Err(ChildServiceError::ProfileUnavailable {
+                profile: profile.to_owned(),
+            });
+        }
+        request.selections = request.selections.with_profile_name(profile.to_owned());
+    }
+    let admitted = inner
+        .ports
+        .selections
+        .admit(request, &inner.bindings)
+        .map_err(|diagnostic| ChildServiceError::AuthorityWouldWiden {
+            dimension: authority_dimension(&diagnostic),
+        })?;
+    validate_gate(inner, &admitted.1)?;
+    Ok(admitted)
 }
 
 async fn admit(
@@ -875,21 +1055,33 @@ async fn finish(
     invocation: SubagentInvocationId,
     parent: &SessionHookRuntime<'_>,
 ) -> Result<ChildWaitResult, ChildServiceError> {
-    {
-        let active = inner.active.lock().expect("active children");
-        let child = active
-            .get(&invocation)
-            .ok_or(ChildServiceError::UnknownInvocation { invocation })?;
-        if let Some(result) = &child.result {
-            return Ok(result.clone());
-        }
-        if child.pending.is_some() {
-            drop(active);
-            return persist_pending(inner, invocation, parent);
-        }
+    let settlement = inner
+        .active
+        .lock()
+        .expect("active children")
+        .get(&invocation)
+        .map(|child| Arc::clone(&child.settlement))
+        .ok_or(ChildServiceError::UnknownInvocation { invocation })?;
+    // This invocation-local lock is intentionally held across materializing
+    // the result, dispatching SubagentStop, appending the durable settlement,
+    // and caching it. Other invocations have independent locks.
+    let mut flight = settlement.lock().await;
+    if let Some(result) = &flight.settled {
+        return Ok(result.clone());
     }
-    let prepared = prepare_result(inner, invocation).await?;
-    let prepared = match prepared {
+    if let Some(pending) = flight.pending.clone() {
+        return persist_pending(inner, invocation, pending, parent, &mut flight);
+    }
+
+    let materialized = match flight.materialized.clone() {
+        Some(materialized) => materialized,
+        None => {
+            let materialized = prepare_result(inner, invocation).await?;
+            flight.materialized = Some(materialized.clone());
+            materialized
+        }
+    };
+    let prepared = match materialized {
         ChildWaitResult::Returned { final_message } => {
             let parent_event = active_parent_event(inner, invocation)?;
             let outcome = dispatch_subagent(
@@ -926,8 +1118,9 @@ async fn finish(
         }
         other => other,
     };
-    set_pending(inner, invocation, prepared)?;
-    persist_pending(inner, invocation, parent)
+    flight.materialized = None;
+    flight.pending = Some(prepared.clone());
+    persist_pending(inner, invocation, prepared, parent, &mut flight)
 }
 
 async fn dispatch_subagent(
@@ -969,20 +1162,7 @@ async fn prepare_result(
     inner: &Arc<Inner>,
     invocation: SubagentInvocationId,
 ) -> Result<ChildWaitResult, ChildServiceError> {
-    {
-        let active = inner.active.lock().expect("active children");
-        let child = active
-            .get(&invocation)
-            .ok_or(ChildServiceError::UnknownInvocation { invocation })?;
-        if let Some(result) = &child.result {
-            return Ok(result.clone());
-        }
-        if let Some(pending) = &child.pending {
-            return Ok(pending.clone());
-        }
-    }
     enum ResultSource {
-        Execute(Box<RunExecution>),
         Observed(RunSettlement),
         Wait(RunSubscription),
     }
@@ -991,24 +1171,23 @@ async fn prepare_result(
         let child = active
             .get_mut(&invocation)
             .ok_or(ChildServiceError::UnknownInvocation { invocation })?;
-        let source = if let Some(execution) = child.execution.take() {
-            ResultSource::Execute(Box::new(execution))
-        } else if let Some(settlement) = child.observed.clone() {
+        if child.execution.is_some() {
+            return Err(ChildServiceError::InvalidDurableState {
+                diagnostic: "admitted child execution was not launched by the product owner".into(),
+            });
+        }
+        let source = if let Some(settlement) = child.observed.clone() {
             ResultSource::Observed(settlement)
         } else {
-            ResultSource::Wait(child.subscription.clone())
+            ResultSource::Wait(child.subscription.clone().ok_or_else(|| {
+                ChildServiceError::InvalidDurableState {
+                    diagnostic: "active child has neither an observation nor a subscription".into(),
+                }
+            })?)
         };
         (child.run, source)
     };
     let settlement = match source {
-        ResultSource::Execute(execution) => inner
-            .controller
-            .execute(*execution)
-            .await
-            .map_err(controller_error)?
-            .settlement()
-            .cloned()
-            .unwrap_or(RunSettlement::Uncertain),
         ResultSource::Observed(settlement) => settlement,
         ResultSource::Wait(subscription) => subscription
             .await
@@ -1040,62 +1219,90 @@ async fn prepare_result(
     }
 }
 
-fn set_pending(
-    inner: &Arc<Inner>,
-    invocation: SubagentInvocationId,
-    result: ChildWaitResult,
-) -> Result<(), ChildServiceError> {
-    let mut active = inner.active.lock().expect("active children");
-    let child = active
-        .get_mut(&invocation)
-        .ok_or(ChildServiceError::UnknownInvocation { invocation })?;
-    if child.result.is_none() {
-        child.pending = Some(result);
-    }
-    Ok(())
-}
-
 fn persist_pending(
     inner: &Arc<Inner>,
     invocation: SubagentInvocationId,
+    result: ChildWaitResult,
     parent: &SessionHookRuntime<'_>,
+    flight: &mut SettlementState,
 ) -> Result<ChildWaitResult, ChildServiceError> {
-    let (run, turn, item, result) = {
+    let (run, turn, item) = {
         let active = inner.active.lock().expect("active children");
         let child = active
             .get(&invocation)
             .ok_or(ChildServiceError::UnknownInvocation { invocation })?;
-        if let Some(result) = &child.result {
-            return Ok(result.clone());
-        }
-        (
-            child.run,
-            child.parent_turn,
-            child.parent_item,
-            child
-                .pending
-                .clone()
-                .ok_or(ChildServiceError::UnknownInvocation { invocation })?,
-        )
+        (child.run, child.parent_turn, child.parent_item)
     };
-    append_lifecycle(
-        parent,
-        turn,
-        Some(item),
-        Some(active_parent_event(inner, invocation)?),
-        EventKind::SubagentSettled {
-            invocation,
-            child: Some(run),
-            terminal: terminal_of(&result),
-        },
-    )?;
-    let mut active = inner.active.lock().expect("active children");
-    let child = active
-        .get_mut(&invocation)
-        .expect("persisted child remains active");
-    child.pending = None;
-    child.result = Some(result.clone());
+    if let Some((event, durable)) = durable_settlement(inner, invocation, run)? {
+        if durable != result {
+            return Err(ChildServiceError::InvalidDurableState {
+                diagnostic: format!(
+                    "durable settlement for child {invocation} conflicts with the prepared outcome"
+                ),
+            });
+        }
+        parent
+            .journal()
+            .reconcile_durable(&event)
+            .map_err(|error| ChildServiceError::Journal {
+                diagnostic: error.to_string(),
+            })?;
+        flight.pending = None;
+        flight.settled = Some(durable.clone());
+        return Ok(durable);
+    }
+    parent
+        .journal()
+        .append_or_retry_settlement(
+            turn,
+            Some(item),
+            Some(active_parent_event(inner, invocation)?),
+            EventKind::SubagentSettled {
+                invocation,
+                child: Some(run),
+                terminal: terminal_of(&result),
+            },
+        )
+        .map_err(|error| ChildServiceError::Journal {
+            diagnostic: error.to_string(),
+        })?;
+    flight.pending = None;
+    flight.settled = Some(result.clone());
     Ok(result)
+}
+
+fn durable_settlement(
+    inner: &Inner,
+    invocation: SubagentInvocationId,
+    run: RunId,
+) -> Result<Option<(DomainEvent, ChildWaitResult)>, ChildServiceError> {
+    let events = inner
+        .ports
+        .journal
+        .read(invocation)
+        .map_err(journal_error)?;
+    let mut settlements = events.into_iter().filter_map(|event| match &event.kind {
+        EventKind::SubagentSettled {
+            invocation: found,
+            child,
+            terminal,
+        } if *found == invocation => Some((event.clone(), *child, terminal.clone())),
+        _ => None,
+    });
+    let Some((event, child, terminal)) = settlements.next() else {
+        return Ok(None);
+    };
+    if settlements.next().is_some() {
+        return Err(ChildServiceError::InvalidDurableState {
+            diagnostic: format!("child {invocation} has more than one durable settlement"),
+        });
+    }
+    if child != Some(run) {
+        return Err(ChildServiceError::InvalidDurableState {
+            diagnostic: format!("child {invocation} settled a different run identity"),
+        });
+    }
+    Ok(Some((event, result_of_terminal(&terminal))))
 }
 
 fn terminal_of(result: &ChildWaitResult) -> SubagentTerminal {
@@ -1113,6 +1320,27 @@ fn terminal_of(result: &ChildWaitResult) -> SubagentTerminal {
             final_message,
             hook_invocation,
         } => SubagentTerminal::ReturnBlocked {
+            final_message: final_message.clone(),
+            hook_invocation: *hook_invocation,
+        },
+    }
+}
+
+fn result_of_terminal(terminal: &SubagentTerminal) -> ChildWaitResult {
+    match terminal {
+        SubagentTerminal::Returned { final_message } => ChildWaitResult::Returned {
+            final_message: final_message.clone(),
+        },
+        SubagentTerminal::Refused { failure } => ChildWaitResult::Refused {
+            failure: failure.clone(),
+        },
+        SubagentTerminal::Failed { settlement } => ChildWaitResult::Failed {
+            settlement: settlement.clone(),
+        },
+        SubagentTerminal::ReturnBlocked {
+            final_message,
+            hook_invocation,
+        } => ChildWaitResult::ReturnBlocked {
             final_message: final_message.clone(),
             hook_invocation: *hook_invocation,
         },
@@ -1169,23 +1397,38 @@ fn append_lifecycle(
         })
 }
 
-fn parent_origin(
+fn validate_parent_origin(
     parent: &SessionHookRuntime<'_>,
-    item: ItemId,
-) -> Result<EventId, ChildServiceError> {
-    parent
+    request: &ChildRequest,
+) -> Result<(), ChildServiceError> {
+    let valid = parent
         .inspect(|state| {
             state
                 .items
-                .get(&item)
+                .get(&request.origin.parent_item)
+                .filter(|item| item.turn == request.origin.parent_turn)
                 .and_then(|item| item.tool_call_started)
+                == Some(request.origin.parent_event)
+                || state.skill_events().iter().any(|event| {
+                    matches!(
+                        event,
+                        crate::state::SkillEvent::Instruction(admitted)
+                            if admitted.event == request.origin.parent_event
+                                && admitted.turn == request.origin.parent_turn
+                                && admitted.item == Some(request.origin.parent_item)
+                    )
+                })
         })
         .map_err(|error| ChildServiceError::Journal {
             diagnostic: error.to_string(),
-        })?
-        .ok_or_else(|| ChildServiceError::InvalidDurableState {
-            diagnostic: "parent child item has no admitted tool-call origin".into(),
+        })?;
+    if valid {
+        Ok(())
+    } else {
+        Err(ChildServiceError::InvalidDurableState {
+            diagnostic: "child request does not name an admitted parent event".into(),
         })
+    }
 }
 
 fn active_parent_event(

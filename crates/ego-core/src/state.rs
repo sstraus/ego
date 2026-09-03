@@ -585,20 +585,29 @@ pub enum SubagentEvent {
 
 /// Durable rendered skill evidence retained by the reducer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkillInstructionEvent {
+    pub event: EventId,
+    pub turn: TurnId,
+    pub item: Option<ItemId>,
+    pub parent: Option<EventId>,
+    pub invocation: SkillInvocationId,
+    pub skill: SkillId,
+    pub catalogue_generation: SkillCatalogueGeneration,
+    pub source: SkillSourceAuthority,
+    pub location: SkillSourceLocation,
+    pub source_digest: SkillContentDigest,
+    pub admission: BlobRef,
+    pub rendered: BlobRef,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+}
+
+/// A skill state record. Boxing the instruction payload bounds the enum while
+/// Serde preserves the same externally tagged object as the former struct
+/// variant.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SkillEvent {
-    Instruction {
-        turn: TurnId,
-        invocation: SkillInvocationId,
-        skill: SkillId,
-        catalogue_generation: SkillCatalogueGeneration,
-        source: SkillSourceAuthority,
-        location: SkillSourceLocation,
-        source_digest: SkillContentDigest,
-        admission: BlobRef,
-        rendered: BlobRef,
-        model: Option<String>,
-        effort: Option<String>,
-    },
+    Instruction(Box<SkillInstructionEvent>),
     Resource {
         invocation: SkillInvocationId,
         skill: SkillId,
@@ -1519,13 +1528,9 @@ impl SessionState {
         }
         for event in &self.skill_events {
             match event {
-                SkillEvent::Instruction {
-                    admission,
-                    rendered,
-                    ..
-                } => {
-                    references.push(admission.clone());
-                    references.push(rendered.clone());
+                SkillEvent::Instruction(instruction) => {
+                    references.push(instruction.admission.clone());
+                    references.push(instruction.rendered.clone());
                 }
                 SkillEvent::Resource { content, .. } => references.push(content.clone()),
             }
@@ -1813,19 +1818,24 @@ impl SessionState {
                 rendered,
                 model,
                 effort,
-            } => self.skill_events.push(SkillEvent::Instruction {
-                turn: ev.env.turn,
-                invocation: *invocation,
-                skill: *skill,
-                catalogue_generation: *catalogue_generation,
-                source: *source,
-                location: location.clone(),
-                source_digest: *source_digest,
-                admission: admission.clone(),
-                rendered: rendered.clone(),
-                model: model.clone(),
-                effort: effort.clone(),
-            }),
+            } => self
+                .skill_events
+                .push(SkillEvent::Instruction(Box::new(SkillInstructionEvent {
+                    event: ev.env.id,
+                    turn: ev.env.turn,
+                    item: ev.env.item,
+                    parent: ev.env.parent,
+                    invocation: *invocation,
+                    skill: *skill,
+                    catalogue_generation: *catalogue_generation,
+                    source: *source,
+                    location: location.clone(),
+                    source_digest: *source_digest,
+                    admission: admission.clone(),
+                    rendered: rendered.clone(),
+                    model: model.clone(),
+                    effort: effort.clone(),
+                }))),
             EventKind::SkillResourceAdmitted {
                 invocation,
                 skill,

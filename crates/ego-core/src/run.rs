@@ -943,6 +943,7 @@ pub struct RunExecutionBindings {
     mcp_errors: Arc<[String]>,
     mcp_runtime: Option<Arc<dyn McpRuntimeBinding>>,
     budget_gate: Option<SharedBudgetGate>,
+    effect_tools: Option<Arc<BTreeSet<String>>>,
 }
 
 impl RunExecutionBindings {
@@ -957,6 +958,7 @@ impl RunExecutionBindings {
             mcp_errors: Arc::from([]),
             mcp_runtime: None,
             budget_gate: None,
+            effect_tools: None,
         }
     }
 
@@ -985,9 +987,19 @@ impl RunExecutionBindings {
         self
     }
 
+    /// Attach the exact inherited effect-tool ceiling for a child execution.
+    pub fn with_effect_tools(mut self, tools: BTreeSet<String>) -> Self {
+        self.effect_tools = Some(Arc::new(tools));
+        self
+    }
+
     /// The exact shared gate used by generation-boundary executors.
     pub fn budget_gate(&self) -> Option<SharedBudgetGate> {
         self.budget_gate.clone()
+    }
+
+    pub fn effect_tools(&self) -> Option<Arc<BTreeSet<String>>> {
+        self.effect_tools.as_ref().map(Arc::clone)
     }
 
     pub fn admitted_tools(&self) -> Option<Arc<dyn AdmittedToolSource>> {

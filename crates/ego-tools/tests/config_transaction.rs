@@ -252,5 +252,5 @@ fn two_writers_serialize_and_each_reads_after_acquiring_the_lock_without_lost_up
 fn current_versions_keep_event_codec_additive_but_advance_public_and_snapshot_shapes() {
     assert_eq!(ego_core::store::codec::CODEC_VERSION, 12);
     assert_eq!(ego_core::public::PUBLIC_EVENT_VERSION, 9);
-    assert_eq!(SNAPSHOT_VERSION, 13);
+    assert_eq!(SNAPSHOT_VERSION, 14);
 }

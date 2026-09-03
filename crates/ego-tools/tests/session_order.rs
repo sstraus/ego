@@ -244,7 +244,7 @@ fn real_v6_snapshot_is_rejected_and_full_replay_uses_current_log() {
     let (state, rejection) = store.resume(&id).unwrap();
     assert_eq!(rejection, Some(SnapshotRejection::Version { found: 6 }));
     assert_eq!(state, expected);
-    assert_eq!(SNAPSHOT_VERSION, 13);
+    assert_eq!(SNAPSHOT_VERSION, 14);
 }
 
 #[test]

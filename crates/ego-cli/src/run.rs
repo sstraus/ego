@@ -7,6 +7,7 @@
 //! a store, then turns — and the two things only a process can do: notice a
 //! signal, and notice a deadline.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
@@ -22,15 +23,15 @@ use ego_core::compact::{
     PreparedCompaction,
 };
 use ego_core::config::{
-    ConfigLayer, Effective, Limits, McpServerConfig, Mode, ModelRef, Posture, Selection, Sourced,
-    SystemPrompt, Trust, UserConfigError, UserConfigMutation, UserConfigPublication,
+    ConfigLayer, Effective, Limits, McpServerConfig, Mode, ModelRef, Posture, Ruleset, Selection,
+    Sourced, SystemPrompt, Trust, UserConfigError, UserConfigMutation, UserConfigPublication,
     UserConfigStore, resolve_selected, system_prompt,
 };
 use ego_core::cost::CurrencyCode;
 use ego_core::event::domain::CancelCause;
 use ego_core::event::domain::EventKind;
 use ego_core::event::hook::{HookLifecycle, HookOccurrenceKey, HookOccurrenceOwner, HookSubject};
-use ego_core::event::id::{EventId, Producer, SessionId, TurnId};
+use ego_core::event::id::{EventId, ItemId, Producer, SessionId, SubagentInvocationId, TurnId};
 use ego_core::evidence::{
     ConfigProvenance, EgoVersion, EvidenceAdmissionService, EvidenceDigest, EvidenceError,
     EvidenceRecord, EvidenceWrite, ExecutionAdmissionDescriptor, McpContextDescriptor,
@@ -51,8 +52,8 @@ use ego_core::hook::{
 use ego_core::mcp::McpRuntimeBinding;
 use ego_core::permit::judge::{JudgeConfig, JudgeInput};
 use ego_core::permit::{
-    CanonPath, Change, Escalation, ExecCaps, ExecObservation, HumanApprover, Op, OpName,
-    PermissionDecision, PermissionRequest, PolicyDigest, PolicyEngine, PreparedCall,
+    CanonPath, Change, Confinement, Escalation, ExecCaps, ExecObservation, HumanApprover, Op,
+    OpName, PermissionDecision, PermissionRequest, PolicyDigest, PolicyEngine, PreparedCall,
     RunConfinement,
 };
 use ego_core::public::{
@@ -60,16 +61,29 @@ use ego_core::public::{
 };
 use ego_core::question::{AskQuestionTool, Elicitor, QuestionOutcome};
 use ego_core::run::{
-    CancelReason, DeniedBy, RecoveryEvidence, RequestId, RunExecutionBindings, RunExecutor,
-    RunExecutorError, RunHandle, RunId, RunPreparation, RunPrepared, RunSettlement, RunStart,
+    CancelReason, DeniedBy, IdSource, RecoveryEvidence, RequestId, RunController,
+    RunExecutionBindings, RunExecutor, RunExecutorError, RunHandle, RunId, RunPreparation,
+    RunPrepared, RunRetention, RunRoot, RunSelections, RunSettlement, RunSnapshot, RunStart,
     RunTermination, Signal,
 };
 use ego_core::session::{ReplaySource, ReplaySourceError};
 use ego_core::sink::{EventSink, NullSink};
-use ego_core::skill::AdmittedSkillOperation;
+use ego_core::skill::{
+    AdmittedSkillOperation, SkillError, SkillInvocation, SkillInvocationOutcome,
+    SkillInvocationPort,
+};
 use ego_core::state::{ItemKind, QuestionContinuation, SessionState};
-use ego_core::store::run_artifact::{ArtifactPublication, PublishedRunArtifact, RunArtifactStore};
-use ego_core::store::session_store::{SessionEntry, SessionMeta};
+use ego_core::store::blob::{BlobId, BlobRef, BlobStore};
+use ego_core::store::run_artifact::{
+    ArtifactPublication, PublishedRunArtifact, RunArtifactId, RunArtifactStore,
+};
+use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore};
+use ego_core::subagent::{
+    ChildJournal, ChildJournalError, ChildProfileResolver, ChildRequest, ChildRequestOrigin,
+    ChildResultEvidence, ChildResultReader, ChildResultReaderError, ChildResultStore,
+    ChildRunService, ChildSelectionAdmission, ChildServiceError, ChildServicePorts,
+    ChildTaskReader, ChildWait, RecoveryCut,
+};
 use ego_core::turn::{
     AdmittedToolSource, CancelToken, GenerationRuntime, InteractiveControl, Journal, JudgeContext,
     QueueStatus, RegisteredTool, Session, SharedJournal, ToolEffectPorts, ToollessGenerationOwner,
@@ -84,6 +98,7 @@ use ego_tools::fs::OsFs;
 use ego_tools::instructions::OsInstructionIo;
 use ego_tools::store::{AtomicReplacePublication, JsonlStore, OsIo, SessionEvidenceStore, StoreIo};
 use ego_tools::tools::builtins;
+use futures::{FutureExt, StreamExt};
 use serde_json::Value;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
@@ -2053,6 +2068,450 @@ fn unbounded_hook_deadline() -> Instant {
         .expect("the monotonic clock represents the process lifetime")
 }
 
+#[derive(Debug)]
+struct CliChildIds;
+
+impl IdSource for CliChildIds {
+    fn next_uuid(&self) -> uuid::Uuid {
+        uuid::Uuid::now_v7()
+    }
+}
+
+struct CliChildJournal {
+    store: Arc<JsonlStore>,
+    session: SessionId,
+}
+
+impl ChildJournal for CliChildJournal {
+    fn read(
+        &self,
+        invocation: SubagentInvocationId,
+    ) -> Result<Vec<ego_core::event::domain::DomainEvent>, ChildJournalError> {
+        let mut stream = SessionStore::read(self.store.as_ref(), &self.session)
+            .map_err(|error| ChildJournalError::new(error.to_string()))?;
+        let mut events = Vec::new();
+        loop {
+            let entry = stream.next().now_or_never().ok_or_else(|| {
+                ChildJournalError::new("the eager JSONL journal unexpectedly became asynchronous")
+            })?;
+            let Some(entry) = entry else {
+                break;
+            };
+            let entry = entry.map_err(|error| ChildJournalError::new(error.to_string()))?;
+            let SessionEntry::Event(event) = entry else {
+                continue;
+            };
+            if matches!(
+                &event.kind,
+                EventKind::SubagentRequested { invocation: found, .. }
+                    | EventKind::SubagentSpawned { invocation: found, .. }
+                    | EventKind::SubagentSettled { invocation: found, .. }
+                    if *found == invocation
+            ) {
+                events.push(event);
+            }
+        }
+        Ok(events)
+    }
+}
+
+#[derive(Clone)]
+struct CliParentBlobs(SessionEvidenceStore);
+
+impl ChildTaskReader for CliParentBlobs {
+    fn read_rendered_task(&self, reference: &BlobRef) -> Result<Vec<u8>, ChildResultReaderError> {
+        self.0
+            .read(reference)
+            .map_err(|error| ChildResultReaderError::Read {
+                diagnostic: error.to_string(),
+            })
+    }
+}
+
+impl ChildResultStore for CliParentBlobs {
+    fn copy_to_parent(
+        &self,
+        _child: RunId,
+        evidence: &ChildResultEvidence,
+    ) -> Result<BlobRef, ChildResultReaderError> {
+        let mut writer = self
+            .0
+            .begin()
+            .map_err(|error| ChildResultReaderError::Read {
+                diagnostic: error.to_string(),
+            })?;
+        writer
+            .append(evidence.bytes())
+            .map_err(|error| ChildResultReaderError::Read {
+                diagnostic: error.to_string(),
+            })?;
+        writer
+            .commit()
+            .map_err(|error| ChildResultReaderError::Read {
+                diagnostic: error.to_string(),
+            })
+    }
+}
+
+struct CliChildResults(Arc<dyn RunArtifactStore>);
+
+impl ChildResultReader for CliChildResults {
+    fn read_final_assistant(
+        &self,
+        run: RunId,
+    ) -> Result<ChildResultEvidence, ChildResultReaderError> {
+        let artifact = self.0.read(run, RunArtifactId::output()).map_err(|error| {
+            ChildResultReaderError::Read {
+                diagnostic: error.to_string(),
+            }
+        })?;
+        let id =
+            BlobId::parse(ego_core::digest::sha256_hex(artifact.bytes())).map_err(|error| {
+                ChildResultReaderError::Read {
+                    diagnostic: error.to_string(),
+                }
+            })?;
+        Ok(ChildResultEvidence::new(
+            BlobRef::new(id, artifact.bytes().len() as u64),
+            artifact.bytes().to_vec(),
+        ))
+    }
+}
+
+struct CliChildProfiles {
+    executor: Arc<CliRunExecutor>,
+    root: RunRoot,
+}
+
+impl ChildProfileResolver for CliChildProfiles {
+    fn resolve_profile(&self, name: &str) -> Result<(), String> {
+        if name.is_empty() {
+            return Err("child profile name is empty".to_owned());
+        }
+        let mut args = self.executor.args.clone();
+        args.profile = Some(name.to_owned());
+        args.profile_source = Some(ego_core::config::Source::Flags);
+        match self.executor.frozen.as_deref() {
+            Some(frozen) => frozen
+                .resolve(&args)
+                .map_err(|error| error.to_string())
+                .and_then(|effective| {
+                    self.executor
+                        .admit_child_authority(&effective, args.offline)
+                }),
+            None => rooted_settings(
+                &args,
+                self.root.as_path().to_path_buf(),
+                |_| Trust::Untrusted,
+                &Stderr,
+            )
+            .map_err(|error| error.to_string())
+            .and_then(|settings| {
+                self.executor
+                    .admit_child_authority(&settings.effective, settings.confinement.offline())
+            }),
+        }
+    }
+}
+
+struct CliChildSelections;
+
+impl ChildSelectionAdmission for CliChildSelections {
+    fn admit(
+        &self,
+        request: &ChildRequest,
+        bindings: &RunExecutionBindings,
+    ) -> Result<(RunSelections, RunExecutionBindings), String> {
+        let tools = request.requested_tools().ok_or_else(|| {
+            "forked skill did not supply its admitted tool intersection".to_owned()
+        })?;
+        Ok((
+            request.selections().clone(),
+            bindings.clone().with_effect_tools(tools.clone()),
+        ))
+    }
+}
+
+struct CliChildSinkFactory;
+
+impl ego_core::run::EventSinkFactory for CliChildSinkFactory {
+    fn create(&self, _capabilities: &ModelCapabilities) -> Arc<dyn EventSink> {
+        Arc::new(NullSink)
+    }
+}
+
+struct ChildComposition {
+    parent_run: RunId,
+    parent_session: SessionId,
+    root: RunRoot,
+    store: Arc<JsonlStore>,
+    executor: Arc<CliRunExecutor>,
+    gate: SharedBudgetGate,
+    bindings: RunExecutionBindings,
+    blobs: SessionEvidenceStore,
+}
+
+fn compose_child_service(composition: ChildComposition) -> ChildRunService {
+    let ChildComposition {
+        parent_run,
+        parent_session,
+        root,
+        store,
+        executor,
+        gate,
+        bindings,
+        blobs,
+    } = composition;
+    let controller = Arc::new(RunController::new(
+        Arc::clone(&store),
+        Arc::clone(&executor),
+        Arc::new(SystemClock),
+        Arc::new(CliChildIds),
+        RunRetention::new(NonZeroUsize::new(64).expect("non-zero child retention"))
+            .expect("valid child retention"),
+    ));
+    let artifacts: Arc<dyn RunArtifactStore> = store.clone();
+    let parent_blobs = Arc::new(CliParentBlobs(blobs));
+    ChildRunService::new(
+        controller,
+        gate,
+        root.clone(),
+        bindings,
+        ChildServicePorts::new(
+            parent_run,
+            Arc::new(CliChildJournal {
+                store,
+                session: parent_session,
+            }),
+            parent_blobs.clone(),
+            Arc::new(CliChildResults(artifacts)),
+            parent_blobs,
+            Arc::new(CliChildProfiles { executor, root }),
+            Arc::new(CliChildSelections),
+        ),
+    )
+}
+
+type ChildExecutionTask = tokio::task::JoinHandle<Result<RunSnapshot, ChildServiceError>>;
+
+struct BackgroundSkill {
+    service: ChildRunService,
+    invocation: SkillInvocation,
+    turn: TurnId,
+    execution: Option<ChildExecutionTask>,
+}
+
+struct CliSkillInvocationOwner<'a> {
+    service: ChildRunService,
+    hooks: SessionHookRuntime<'a>,
+    parent_cancel: CancelToken,
+    background: Arc<Mutex<BTreeMap<SubagentInvocationId, BackgroundSkill>>>,
+}
+
+impl<'a> CliSkillInvocationOwner<'a> {
+    fn new(
+        service: ChildRunService,
+        hooks: SessionHookRuntime<'a>,
+        parent_cancel: CancelToken,
+    ) -> Self {
+        Self {
+            service,
+            hooks,
+            parent_cancel,
+            background: Arc::new(Mutex::new(BTreeMap::new())),
+        }
+    }
+
+    fn launch(
+        &self,
+        invocation: SubagentInvocationId,
+    ) -> Result<Option<ChildExecutionTask>, SkillError> {
+        let Some(execution) = self
+            .service
+            .take_execution(invocation)
+            .map_err(|error| SkillError::new(error.to_string()))?
+        else {
+            return Ok(None);
+        };
+        let service = self.service.clone();
+        Ok(Some(tokio::spawn(async move {
+            service.execute(execution).await
+        })))
+    }
+
+    async fn await_execution(task: ChildExecutionTask) -> Result<(), SkillError> {
+        task.await
+            .map_err(|error| SkillError::new(format!("child execution task failed: {error}")))?
+            .map(|_| ())
+            .map_err(|error| SkillError::new(error.to_string()))
+    }
+
+    async fn drain(&self) -> Result<(), SkillError> {
+        Self::drain_background(
+            Arc::clone(&self.background),
+            &self.hooks,
+            self.parent_cancel.is_cancelled(),
+        )
+        .await
+    }
+
+    async fn drain_background(
+        background: Arc<Mutex<BTreeMap<SubagentInvocationId, BackgroundSkill>>>,
+        hooks: &SessionHookRuntime<'_>,
+        cancel_children: bool,
+    ) -> Result<(), SkillError> {
+        let pending =
+            std::mem::take(&mut *background.lock().expect("background skill invocations"));
+        let mut first_error = None;
+        for (id, background) in pending {
+            let BackgroundSkill {
+                service,
+                invocation,
+                turn,
+                execution,
+            } = background;
+            if cancel_children && let Err(error) = service.cancel_owned(id).await {
+                first_error.get_or_insert_with(|| SkillError::new(error.to_string()));
+            }
+            if let Some(task) = execution
+                && let Err(error) = Self::await_execution(task).await
+            {
+                first_error.get_or_insert(error);
+            }
+            let source = match invocation.hook_source() {
+                Ok(source) => source,
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                    continue;
+                }
+            };
+            if let Err(error) = hooks.replace_skill_sources(turn, &[source]) {
+                first_error.get_or_insert_with(|| SkillError::new(error.to_string()));
+                continue;
+            }
+            let collected = service
+                .collect_background(id, hooks)
+                .await
+                .map_err(|error| SkillError::new(error.to_string()));
+            let cleared = hooks
+                .replace_skill_sources(turn, &[])
+                .map_err(|error| SkillError::new(error.to_string()));
+            if let Err(error) = collected {
+                first_error.get_or_insert(error);
+            }
+            if let Err(error) = cleared {
+                first_error.get_or_insert(error);
+            }
+        }
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+}
+
+impl SkillInvocationPort for CliSkillInvocationOwner<'_> {
+    fn invoke<'a>(
+        &'a self,
+        invocation: SkillInvocation,
+        parent_turn: TurnId,
+        parent_item: ItemId,
+        parent_event: EventId,
+        effect_tools: BTreeSet<String>,
+    ) -> futures::future::BoxFuture<'a, Result<SkillInvocationOutcome, SkillError>> {
+        Box::pin(async move {
+            let Some(wait) = invocation.fork_wait() else {
+                return Ok(SkillInvocationOutcome::Parent(Box::new(invocation)));
+            };
+            let rendered = invocation
+                .rendered_ref()
+                .cloned()
+                .ok_or_else(|| SkillError::new("forked skill has no rendered task blob"))?;
+            let thinking = invocation
+                .effort()
+                .map(|effort| {
+                    ego_core::skill::parse_skill_effort(effort).ok_or_else(|| {
+                        SkillError::new(format!(
+                            "admitted child reasoning effort `{effort}` is unsupported"
+                        ))
+                    })
+                })
+                .transpose()?;
+            let selections = RunSelections::new(
+                invocation.model().map(|model| ModelRef(model.to_owned())),
+                thinking,
+                None,
+                None,
+                invocation.profile().map(str::to_owned),
+            );
+            let id = invocation.subagent_invocation();
+            if self
+                .service
+                .recover_from_durable(
+                    id,
+                    RecoveryCut::BeforeParentSettlement,
+                    &self.hooks,
+                    wait,
+                    effect_tools.clone(),
+                )
+                .await
+                .map_err(|error| SkillError::new(error.to_string()))?
+                .is_none()
+            {
+                let mut request = ChildRequest::new(
+                    id,
+                    ChildRequestOrigin::new(
+                        self.service.parent_run(),
+                        parent_turn,
+                        parent_item,
+                        parent_event,
+                    ),
+                    rendered,
+                    selections,
+                    wait,
+                )
+                .with_requested_tools(effect_tools);
+                if let Some(profile) = invocation.profile() {
+                    request = request.with_requested_profile(profile.to_owned());
+                }
+                self.service
+                    .start(request, &self.hooks)
+                    .await
+                    .map_err(|error| SkillError::new(error.to_string()))?;
+            }
+            let execution = self.launch(id)?;
+            self.background
+                .lock()
+                .expect("background skill invocations")
+                .entry(id)
+                .or_insert_with(|| BackgroundSkill {
+                    service: self.service.clone(),
+                    invocation: invocation.clone(),
+                    turn: parent_turn,
+                    execution,
+                });
+            match wait {
+                ChildWait::Foreground => {
+                    let collected = self
+                        .service
+                        .collect_background(id, &self.hooks)
+                        .await
+                        .map(SkillInvocationOutcome::Foreground)
+                        .map_err(|error| SkillError::new(error.to_string()));
+                    if collected.is_ok() {
+                        self.background
+                            .lock()
+                            .expect("background skill invocations")
+                            .remove(&id);
+                    }
+                    collected
+                }
+                ChildWait::Background => Ok(SkillInvocationOutcome::Background(id)),
+            }
+        })
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn drive_headless_turn(
     active: &mut ActiveSession<'_>,
@@ -2063,6 +2522,11 @@ async fn drive_headless_turn(
     source: Arc<model::CliGenerationModelSource>,
     admission: Arc<EvidenceAdmissionService>,
     invocation: RunInvocationId,
+    parent_run: RunId,
+    child_root: RunRoot,
+    child_store: Arc<JsonlStore>,
+    child_executor: Arc<CliRunExecutor>,
+    inherited_effect_tools: Option<Arc<BTreeSet<String>>>,
     config: TurnConfig,
     gate: SharedBudgetGate,
     hook_layers: Option<&[Sourced<ConfigLayer>]>,
@@ -2128,7 +2592,7 @@ async fn drive_headless_turn(
         active.evidence(),
         admission,
         invocation,
-        gate,
+        gate.clone(),
         hook_layers,
         hook_trust,
         Arc::clone(&source),
@@ -2141,6 +2605,29 @@ async fn drive_headless_turn(
         instructions_loaded,
     )
     .await?;
+    let mut child_bindings = RunExecutionBindings::new(
+        Arc::new(CliChildSinkFactory),
+        elicitor.as_ref().map(Arc::clone),
+    )
+    .with_budget_gate(gate.clone());
+    if let (Some(admitted), Some(mcp)) = (admitted_tools.as_ref(), mcp_runtime.as_ref()) {
+        child_bindings = child_bindings.with_mcp(Arc::clone(admitted), Vec::new(), Arc::clone(mcp));
+    }
+    let child_service = compose_child_service(ChildComposition {
+        parent_run,
+        parent_session: active.id(),
+        root: child_root,
+        store: child_store,
+        executor: child_executor,
+        gate: gate.clone(),
+        bindings: child_bindings,
+        blobs: active.evidence().clone(),
+    });
+    let skill_owner = Arc::new(CliSkillInvocationOwner::new(
+        child_service,
+        hooks.runtime.clone(),
+        cancel.clone(),
+    ));
     let foreign_question_port = mcp_runtime.map(|runtime| {
         runtime.foreign_question_port(
             hooks.runtime.clone(),
@@ -2175,7 +2662,12 @@ async fn drive_headless_turn(
     .with_hook_runtime(hooks.runtime.clone())
     .map_err(|error| RunTermination::Failed {
         message: error.to_string(),
-    })?;
+    })?
+    .with_skill_invocation_port(skill_owner.clone());
+    let loop_ = match inherited_effect_tools {
+        Some(tools) => loop_.with_effect_tool_ceiling(tools),
+        None => loop_,
+    };
     let loop_ = match active.replayed() {
         Some(replayed) => loop_.with_ancestor_conversation(replayed.conversation().clone()),
         None => loop_,
@@ -2210,6 +2702,12 @@ async fn drive_headless_turn(
         }
     };
     drop(loop_);
+    skill_owner
+        .drain()
+        .await
+        .map_err(|error| RunTermination::Failed {
+            message: error.to_string(),
+        })?;
     let session_end = dispatch_session_hook(
         &hooks.runtime,
         active.id(),
@@ -2258,6 +2756,13 @@ pub struct CliPrepared {
     slug: String,
     run_context: RunContextEvidence,
     admission: Arc<EvidenceAdmissionService>,
+    child_executor: Arc<CliRunExecutor>,
+}
+
+struct PreparedExecutionRuntime {
+    admission: Arc<EvidenceAdmissionService>,
+    child_executor: Arc<CliRunExecutor>,
+    child: bool,
 }
 
 impl CliPrepared {
@@ -2268,8 +2773,13 @@ impl CliPrepared {
         request: &RunPreparation,
         permit: Option<OwnedSemaphorePermit>,
         frozen: Option<&config::FrozenRunConfig>,
-        admission: Arc<EvidenceAdmissionService>,
+        runtime: PreparedExecutionRuntime,
     ) -> Result<RunPrepared<Self>, RunTermination> {
+        let PreparedExecutionRuntime {
+            admission,
+            child_executor,
+            child,
+        } = runtime;
         let usage = |error: UsageError| RunTermination::UsageError {
             message: error.to_string(),
         };
@@ -2308,6 +2818,8 @@ impl CliPrepared {
             text: _,
             slug,
         } = prepared_materials(&settings, &args, String::new(), &Stderr).map_err(usage)?;
+        let system = if child { None } else { system };
+        let compiled = if child { None } else { compiled };
         let Settings {
             run_deadline,
             root,
@@ -2354,6 +2866,7 @@ impl CliPrepared {
                 slug,
                 run_context,
                 admission,
+                child_executor,
             },
         ))
     }
@@ -2366,6 +2879,12 @@ impl CliPrepared {
     ) -> Result<RunSettlement, RunExecutorError> {
         let run_id = self.run_id;
         let artifacts = self.artifacts.clone();
+        let child_root = RunRoot::new(self.root.clone())
+            .map_err(|error| RunExecutorError::new(error.to_string()))?;
+        let child_executor = Arc::new(
+            self.child_executor
+                .with_child_authority(&self.effective, &self.confinement),
+        );
         let clock = SystemClock;
         let opened = Opened::Durable(Box::new(
             session::open(self.store.as_ref(), &self.session_id, &clock)
@@ -2405,6 +2924,7 @@ impl CliPrepared {
         let mcp_errors = bindings.mcp_errors().to_vec();
         let admitted_tools = bindings.admitted_tools();
         let mcp_runtime = bindings.mcp_runtime();
+        let inherited_effect_tools = bindings.effect_tools();
         let sink = bindings.sink_factory.create(&model_capabilities);
         sink.publish(
             &PublicEvent::SessionStarted {
@@ -2461,6 +2981,11 @@ impl CliPrepared {
             source,
             admission,
             invocation,
+            run_id,
+            child_root,
+            Arc::clone(&self.store),
+            child_executor,
+            inherited_effect_tools,
             config,
             gate,
             None,
@@ -2619,6 +3144,7 @@ impl CliRunAuthority {
 }
 
 /// Production executor adapter for controller-owned headless turns.
+#[derive(Clone)]
 pub struct CliRunExecutor {
     args: Args,
     store: Arc<JsonlStore>,
@@ -2626,6 +3152,88 @@ pub struct CliRunExecutor {
     frozen: Option<Arc<config::FrozenRunConfig>>,
     artifacts: Option<Arc<dyn RunArtifactStore>>,
     admission: Arc<EvidenceAdmissionService>,
+    child_authority: Option<Arc<ChildAuthorityCeiling>>,
+    child: bool,
+}
+
+#[derive(Clone)]
+struct ChildAuthorityCeiling {
+    mode: Mode,
+    sandbox: Confinement,
+    offline: bool,
+    permissions: Ruleset,
+    ceilings: Ceilings,
+}
+
+impl ChildAuthorityCeiling {
+    fn from_parent(effective: &Effective, confinement: &RunConfinement) -> Self {
+        Self {
+            mode: effective.mode.unwrap_or(Mode::Default),
+            sandbox: effective.sandbox.unwrap_or_default(),
+            offline: confinement.offline(),
+            permissions: effective.permissions.clone(),
+            ceilings: effective.ceilings.clone(),
+        }
+    }
+
+    fn admit(&self, effective: &Effective, offline: bool) -> Result<(), String> {
+        let mode = effective.mode.unwrap_or(Mode::Default);
+        if !mode_is_no_wider(mode, self.mode) {
+            return Err(format!(
+                "child profile mode {mode} widens parent mode {}",
+                self.mode
+            ));
+        }
+        let sandbox = effective.sandbox.unwrap_or_default();
+        if confinement_rank(sandbox) > confinement_rank(self.sandbox) {
+            return Err(format!(
+                "child profile sandbox {sandbox} widens parent sandbox {}",
+                self.sandbox
+            ));
+        }
+        if self.offline && !offline {
+            return Err("child profile cannot clear the parent offline ceiling".to_owned());
+        }
+        let child = &effective.permissions;
+        let allows_no_more = child.allow.iter().all(|candidate| {
+            self.permissions
+                .allow
+                .iter()
+                .any(|parent| parent.rule() == candidate.rule())
+        });
+        let denies_no_less = self.permissions.deny.iter().all(|parent| {
+            child
+                .deny
+                .iter()
+                .any(|candidate| candidate.rule() == parent.rule())
+        });
+        if !allows_no_more || !denies_no_less {
+            return Err(
+                "child profile permissions are not a syntactic narrowing of the parent authority"
+                    .to_owned(),
+            );
+        }
+        let mut bounded = effective.ceilings.clone();
+        bounded.clamp(&self.ceilings);
+        if bounded != effective.ceilings {
+            return Err("child profile budget widens the parent ceiling".to_owned());
+        }
+        Ok(())
+    }
+}
+
+fn confinement_rank(confinement: Confinement) -> u8 {
+    match confinement {
+        Confinement::Ro => 0,
+        Confinement::Workspace => 1,
+        Confinement::Off => 2,
+    }
+}
+
+fn mode_is_no_wider(child: Mode, parent: Mode) -> bool {
+    child == Mode::Plan
+        || child == parent
+        || matches!(parent, Mode::Edits | Mode::Yolo) && !matches!(child, Mode::Yolo)
 }
 
 #[derive(Clone)]
@@ -3002,6 +3610,30 @@ fn compaction_termination(termination: RunTermination) -> CompactionError {
 }
 
 impl CliRunExecutor {
+    fn for_children(&self) -> Self {
+        let mut executor = self.clone();
+        let artifacts: Arc<dyn RunArtifactStore> = self.store.clone();
+        executor.artifacts = Some(artifacts);
+        executor.child = true;
+        executor
+    }
+
+    fn with_child_authority(&self, effective: &Effective, confinement: &RunConfinement) -> Self {
+        let mut executor = self.for_children();
+        executor.child_authority = Some(Arc::new(ChildAuthorityCeiling::from_parent(
+            effective,
+            confinement,
+        )));
+        executor
+    }
+
+    fn admit_child_authority(&self, effective: &Effective, offline: bool) -> Result<(), String> {
+        match self.child_authority.as_deref() {
+            Some(authority) => authority.admit(effective, offline),
+            None => Ok(()),
+        }
+    }
+
     /// Build the fixed headless inputs for the ACP host once, before admission.
     pub fn for_acp(
         session_dir: Option<PathBuf>,
@@ -3015,6 +3647,8 @@ impl CliRunExecutor {
             frozen: None,
             artifacts: None,
             admission,
+            child_authority: None,
+            child: false,
         }
     }
 
@@ -3057,6 +3691,8 @@ impl CliRunExecutor {
                 frozen: Some(frozen),
                 artifacts: Some(artifacts),
                 admission,
+                child_authority: None,
+                child: false,
             },
             policy,
         ))
@@ -3093,7 +3729,11 @@ impl RunExecutor for CliRunExecutor {
                 request,
                 permit,
                 self.frozen.as_deref(),
-                Arc::clone(&self.admission),
+                PreparedExecutionRuntime {
+                    admission: Arc::clone(&self.admission),
+                    child_executor: Arc::new(self.for_children()),
+                    child: self.child,
+                },
             )
             .await
             .map_err(run_executor_error)
@@ -3381,11 +4021,12 @@ async fn execute<S: EventSink>(
         store: jsonl_store,
         id: session_id,
     } = chosen(&args, &settings.root).map_err(usage)?;
+    let jsonl_store = Arc::new(jsonl_store);
     let clock = SystemClock;
     let direct_ci_ready = ready.is_some();
     let early_opened = if direct_ci_ready || !args.answers.is_empty() {
         Some(Opened::Durable(Box::new(
-            session::open(&jsonl_store, &session_id, &clock).map_err(|err| {
+            session::open(jsonl_store.as_ref(), &session_id, &clock).map_err(|err| {
                 RunTermination::Failed {
                     message: err.to_string(),
                 }
@@ -3458,7 +4099,7 @@ async fn execute<S: EventSink>(
     let mut opened = match early_opened {
         Some(opened) => opened,
         None => Opened::Durable(Box::new(
-            session::open(&jsonl_store, &session_id, &clock).map_err(|err| {
+            session::open(jsonl_store.as_ref(), &session_id, &clock).map_err(|err| {
                 RunTermination::Failed {
                     message: err.to_string(),
                 }
@@ -3471,6 +4112,25 @@ async fn execute<S: EventSink>(
 
     let invocation = RunInvocationId::new();
     let run_id = RunId::new(session_id, invocation.uuid());
+    let child_root = RunRoot::new(root.clone()).map_err(|error| RunTermination::Failed {
+        message: error.to_string(),
+    })?;
+    let child_artifacts: Arc<dyn RunArtifactStore> = jsonl_store.clone();
+    let child_executor = Arc::new(CliRunExecutor {
+        args: args.clone(),
+        store: Arc::clone(&jsonl_store),
+        concurrency: None,
+        frozen: Some(Arc::new(
+            config::FrozenRunConfig::capture(&root, &args, skill_trust).map_err(usage)?,
+        )),
+        artifacts: Some(child_artifacts),
+        admission: Arc::clone(&evidence),
+        child_authority: Some(Arc::new(ChildAuthorityCeiling::from_parent(
+            &effective,
+            &confinement,
+        ))),
+        child: true,
+    });
     let instruction_descriptors = system
         .as_ref()
         .map(|prompt| prompt.sources.clone())
@@ -3505,7 +4165,7 @@ async fn execute<S: EventSink>(
         Some(
             apply_resume_answers_once(&mut opened, &args.answers).map_err(|termination| {
                 finalize_ci_error(
-                    &jsonl_store,
+                    jsonl_store.as_ref(),
                     artifact_store.as_ref(),
                     run_id,
                     termination,
@@ -3522,7 +4182,7 @@ async fn execute<S: EventSink>(
 
     mcp_registry.reconcile(refresh).await.map_err(|error| {
         finalize_ci_error(
-            &jsonl_store,
+            jsonl_store.as_ref(),
             artifact_store.as_ref(),
             run_id,
             RunTermination::Failed {
@@ -3566,7 +4226,7 @@ async fn execute<S: EventSink>(
             .await
             .map_err(|termination| {
                 finalize_ci_error(
-                    &jsonl_store,
+                    jsonl_store.as_ref(),
                     artifact_store.as_ref(),
                     run_id,
                     termination,
@@ -3588,7 +4248,7 @@ async fn execute<S: EventSink>(
     let mut active =
         ActiveSession::durable(opened, opening.clone(), EVIDENCE_CAP).map_err(|err| {
             finalize_ci_error(
-                &jsonl_store,
+                jsonl_store.as_ref(),
                 artifact_store.as_ref(),
                 run_id,
                 RunTermination::Failed {
@@ -3698,7 +4358,7 @@ async fn execute<S: EventSink>(
     // A macro and not a closure: the loop borrows from this function's locals,
     // and a closure cannot name the lifetimes of a `TurnLoop<'_, '_>` it returns.
     macro_rules! build {
-        ($active:expr, $cancel:expr, $ports:expr, $observation:expr, $hooks:expr, $journal:expr) => {{
+        ($active:expr, $cancel:expr, $ports:expr, $observation:expr, $hooks:expr, $journal:expr, $skill_owner:expr) => {{
             let http = Arc::new(ProviderHttpAdapter::new(Arc::clone(&$ports)))
                 as Arc<dyn ego_ai::http::Http>;
             let runtime = GenerationRuntime {
@@ -3756,6 +4416,8 @@ async fn execute<S: EventSink>(
                 message: error.to_string(),
             })?
             .with_foreign_question_port(foreign_question_port);
+            let skill_owner: Arc<dyn SkillInvocationPort + '_> = ($skill_owner).clone();
+            let loop_ = loop_.with_skill_invocation_port(skill_owner);
             let loop_ = match $active.replayed() {
                 Some(replayed) => loop_.with_ancestor_conversation(replayed.conversation().clone()),
                 None => loop_,
@@ -3855,6 +4517,11 @@ async fn execute<S: EventSink>(
                 Arc::clone(&source),
                 Arc::clone(&evidence),
                 invocation,
+                run_id,
+                child_root.clone(),
+                Arc::clone(&jsonl_store),
+                Arc::clone(&child_executor),
+                None,
                 config.clone(),
                 gate.clone(),
                 skill_profile_layers.as_deref(),
@@ -3892,7 +4559,7 @@ async fn execute<S: EventSink>(
             };
             if let Some(artifact_store) = artifact_store.as_ref() {
                 finalize_ci_bundle(
-                    &jsonl_store,
+                    jsonl_store.as_ref(),
                     artifact_store,
                     run_id,
                     &mut ended.termination,
@@ -3971,6 +4638,33 @@ async fn execute<S: EventSink>(
                             .await?;
                     let (session_journal, session_hooks) =
                         open_session_hooks!(active, active.state().clone(), session_hook_ports);
+                    let mut child_bindings = RunExecutionBindings::new(
+                        Arc::new(CliChildSinkFactory),
+                        elicitor.as_ref().map(Arc::clone),
+                    )
+                    .with_budget_gate(gate.clone());
+                    if let Some(admitted) = admitted_tools.as_ref() {
+                        child_bindings = child_bindings.with_mcp(
+                            Arc::clone(admitted),
+                            mcp_errors.clone(),
+                            Arc::clone(&mcp_runtime) as Arc<dyn McpRuntimeBinding>,
+                        );
+                    }
+                    let child_service = compose_child_service(ChildComposition {
+                        parent_run: RunId::new(active.id(), invocation.uuid()),
+                        parent_session: active.id(),
+                        root: child_root.clone(),
+                        store: Arc::clone(&jsonl_store),
+                        executor: Arc::clone(&child_executor),
+                        gate: gate.clone(),
+                        bindings: child_bindings,
+                        blobs: active.evidence().clone(),
+                    });
+                    let skill_owner = Arc::new(CliSkillInvocationOwner::new(
+                        child_service,
+                        session_hooks.runtime.clone(),
+                        cancel.clone(),
+                    ));
                     let model_switch_owner;
                     install_model_switch_owner!(session_hooks, model_switch_owner, status);
                     if let EpochStart::Compact {
@@ -4326,8 +5020,11 @@ async fn execute<S: EventSink>(
                                     repl::Line::HostCommand(repl::HostCommand::Action(
                                         repl::actions::ActionId::Sessions,
                                     )) => {
-                                        match crate::catalogue::listing(&jsonl_store, &root, false)
-                                        {
+                                        match crate::catalogue::listing(
+                                            jsonl_store.as_ref(),
+                                            &root,
+                                            false,
+                                        ) {
                                             Ok(metas) => diagnostics.note(
                                                 &crate::catalogue::table(&metas, false).join("\n"),
                                             ),
@@ -4341,7 +5038,7 @@ async fn execute<S: EventSink>(
                                         repl::actions::ActionId::Usage,
                                     )) => {
                                         let metadata = match crate::catalogue::listing(
-                                            &jsonl_store,
+                                            jsonl_store.as_ref(),
                                             &root,
                                             false,
                                         ) {
@@ -4362,7 +5059,7 @@ async fn execute<S: EventSink>(
                                 );
                                             continue;
                                         };
-                                        match UsageReportService::new(&jsonl_store, &clock)
+                                        match UsageReportService::new(jsonl_store.as_ref(), &clock)
                                             .report(std::slice::from_ref(&meta), UsagePeriod::All)
                                             .await
                                         {
@@ -4386,16 +5083,19 @@ async fn execute<S: EventSink>(
                                             continue;
                                         }
                                         let target = SessionId::new();
-                                        let target_opened =
-                                            match session::open(&jsonl_store, &target, &clock) {
-                                                Ok(opened) => opened,
-                                                Err(error) => {
-                                                    diagnostics.note(&format!(
-                                        "the new session could not be opened: {error}"
-                                    ));
-                                                    continue;
-                                                }
-                                            };
+                                        let target_opened = match session::open(
+                                            jsonl_store.as_ref(),
+                                            &target,
+                                            &clock,
+                                        ) {
+                                            Ok(opened) => opened,
+                                            Err(error) => {
+                                                diagnostics.note(&format!(
+                                                    "the new session could not be opened: {error}"
+                                                ));
+                                                continue;
+                                            }
+                                        };
                                         let target_owner = match ActiveSession::durable(
                                             target_opened,
                                             SessionState::default(),
@@ -4451,16 +5151,19 @@ async fn execute<S: EventSink>(
                                             }
                                         };
                                         let target = SessionId::new();
-                                        let target_opened =
-                                            match session::open(&jsonl_store, &target, &clock) {
-                                                Ok(opened) => opened,
-                                                Err(error) => {
-                                                    diagnostics.note(&format!(
-                                        "the fork target could not be opened: {error}"
-                                    ));
-                                                    continue;
-                                                }
-                                            };
+                                        let target_opened = match session::open(
+                                            jsonl_store.as_ref(),
+                                            &target,
+                                            &clock,
+                                        ) {
+                                            Ok(opened) => opened,
+                                            Err(error) => {
+                                                diagnostics.note(&format!(
+                                                    "the fork target could not be opened: {error}"
+                                                ));
+                                                continue;
+                                            }
+                                        };
                                         let target_state =
                                             SessionState::replay([prepared.seed().event().clone()]);
                                         let mut target_owner = match ActiveSession::durable(
@@ -4705,7 +5408,11 @@ async fn execute<S: EventSink>(
                                             source: source_id,
                                         };
                                         let receipt = CompactionTransitionService::new(clock)
-                                            .compact(request, &mut preparation, &jsonl_store)
+                                            .compact(
+                                                request,
+                                                &mut preparation,
+                                                jsonl_store.as_ref(),
+                                            )
                                             .await;
                                         drop(preparation);
                                         let receipt = match receipt {
@@ -4723,16 +5430,19 @@ async fn execute<S: EventSink>(
                                             }
                                         };
                                         let target = receipt.target;
-                                        let target_opened =
-                                            match session::open(&jsonl_store, &target, &clock) {
-                                                Ok(opened) => Opened::Durable(Box::new(opened)),
-                                                Err(error) => {
-                                                    diagnostics.note(&format!(
-                                        "compaction target could not be opened: {error}"
-                                    ));
-                                                    continue;
-                                                }
-                                            };
+                                        let target_opened = match session::open(
+                                            jsonl_store.as_ref(),
+                                            &target,
+                                            &clock,
+                                        ) {
+                                            Ok(opened) => Opened::Durable(Box::new(opened)),
+                                            Err(error) => {
+                                                diagnostics.note(&format!(
+                                                    "compaction target could not be opened: {error}"
+                                                ));
+                                                continue;
+                                            }
+                                        };
                                         let target_state = target_opened.state();
                                         let target_owner = match ActiveSession::durable(
                                             target_opened,
@@ -4811,7 +5521,8 @@ async fn execute<S: EventSink>(
                                 ports,
                                 observation,
                                 session_hooks,
-                                session_journal
+                                session_journal,
+                                skill_owner
                             )
                             .with_interactive_control(&mut control);
                             let driven = match resumed_turn {
@@ -4927,13 +5638,21 @@ async fn execute<S: EventSink>(
                     };
 
                     drop(model_switch_owner);
-                    let session_end = dispatch_session_hook(
-                        &session_hooks.runtime,
-                        active.id(),
-                        session_hooks.turn,
-                        HookLifecycle::SessionEnd,
-                    )
-                    .await;
+                    let session_end = match skill_owner.drain().await {
+                        Ok(()) => {
+                            dispatch_session_hook(
+                                &session_hooks.runtime,
+                                active.id(),
+                                session_hooks.turn,
+                                HookLifecycle::SessionEnd,
+                            )
+                            .await
+                        }
+                        Err(error) => Err(RunTermination::Failed {
+                            message: error.to_string(),
+                        }),
+                    };
+                    drop(skill_owner);
                     drop(session_hooks);
                     let source_state = session_journal
                         .try_into_state()
@@ -5256,6 +5975,22 @@ impl Turns<'_> {
                     },
                     self.answer(&loop_.state()),
                 );
+            }
+
+            if let Some(skill) = outcome.skill.as_ref() {
+                return match loop_.materialize_skill_outcome(skill) {
+                    Ok((true, text)) => (RunTermination::Done, Value::String(text)),
+                    Ok((false, diagnostic)) => {
+                        diagnostics.note(&diagnostic);
+                        (RunTermination::TaskFailed, Value::String(diagnostic))
+                    }
+                    Err(error) => (
+                        RunTermination::Failed {
+                            message: error.to_string(),
+                        },
+                        Value::String(error.to_string()),
+                    ),
+                };
             }
 
             if let Some(termination) =
@@ -6012,8 +6747,9 @@ pub fn diagnose(termination: &RunTermination, broken: Option<String>) {
 mod tests {
     use super::*;
     use crate::render::caps::{Depth, OscProfile};
-    use ego_core::event::domain::DomainEvent;
+    use ego_core::event::domain::{DomainEvent, Envelope};
     use ego_core::event::hook::{HookDecision, HookOutcome, HookSource};
+    use ego_core::event::id::Seq;
     use ego_core::event::skill::{SkillInvocationId, SkillSourceAuthority};
     use ego_core::event::time::{Clock, Timestamp};
     use ego_core::hook::{
@@ -6074,6 +6810,350 @@ mod tests {
         }
     }
 
+    #[derive(Default, Clone)]
+    struct LaunchBarrierStore {
+        events: Arc<Mutex<Vec<DomainEvent>>>,
+        transactions: Arc<Mutex<Vec<ego_core::run::RunTransaction>>>,
+    }
+
+    impl SessionStore for LaunchBarrierStore {
+        fn append(&self, _id: &SessionId, event: &DomainEvent) -> Result<(), StoreError> {
+            self.events.lock().unwrap().push(event.clone());
+            Ok(())
+        }
+
+        fn read(
+            &self,
+            _id: &SessionId,
+        ) -> Result<futures::stream::BoxStream<'static, Result<SessionEntry, StoreError>>, StoreError>
+        {
+            let events = self.events.lock().unwrap().clone();
+            let transactions = self.transactions.lock().unwrap().clone();
+            Ok(Box::pin(futures::stream::iter(
+                events
+                    .into_iter()
+                    .map(|event| Ok(SessionEntry::Event(event)))
+                    .chain(
+                        transactions
+                            .into_iter()
+                            .map(|transaction| Ok(SessionEntry::RunTransaction(transaction))),
+                    ),
+            )))
+        }
+
+        fn compare_and_append_run(
+            &self,
+            _session: &SessionId,
+            _expected_revision: Option<ego_core::run::RunRevision>,
+            transaction: ego_core::run::RunTransaction,
+        ) -> Result<ego_core::run::RunAppend, StoreError> {
+            let revision = transaction.revision();
+            self.transactions.lock().unwrap().push(transaction);
+            Ok(ego_core::run::RunAppend::Committed { revision })
+        }
+
+        fn list(&self) -> Result<Vec<SessionMeta>, StoreError> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[derive(Default)]
+    struct LaunchBarrierClock;
+
+    impl Clock for LaunchBarrierClock {
+        fn now(&self) -> Timestamp {
+            Timestamp::from_millis(1_000)
+        }
+    }
+
+    #[derive(Default)]
+    struct LaunchBarrierIds;
+
+    impl ego_core::run::IdSource for LaunchBarrierIds {
+        fn next_uuid(&self) -> uuid::Uuid {
+            uuid::Uuid::now_v7()
+        }
+    }
+
+    struct LaunchBarrierSink;
+
+    impl ego_core::run::EventSinkFactory for LaunchBarrierSink {
+        fn create(&self, _capabilities: &ModelCapabilities) -> Arc<dyn EventSink> {
+            Arc::new(NullSink)
+        }
+    }
+
+    struct LaunchBarrierExecutor {
+        crossed: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    }
+
+    impl LaunchBarrierExecutor {
+        fn arm(&self) -> tokio::sync::oneshot::Receiver<()> {
+            let (sender, receiver) = tokio::sync::oneshot::channel();
+            *self.crossed.lock().unwrap() = Some(sender);
+            receiver
+        }
+    }
+
+    impl RunExecutor for LaunchBarrierExecutor {
+        type Prepared = ();
+
+        fn prepare<'a>(
+            &'a self,
+            _request: &'a RunPreparation,
+        ) -> futures::future::BoxFuture<'a, Result<RunPrepared<Self::Prepared>, RunExecutorError>>
+        {
+            Box::pin(std::future::ready(Ok(RunPrepared::new(
+                ModelRef("launch-test-model".to_owned()),
+                (),
+            ))))
+        }
+
+        fn admit_run_context<'a>(
+            &'a self,
+            _prepared: &'a Self::Prepared,
+        ) -> ego_core::run::RunFuture<'a, Result<EvidenceWrite, EvidenceError>> {
+            Box::pin(std::future::ready(Ok(EvidenceWrite::Published)))
+        }
+
+        fn start<'a>(
+            &'a self,
+            request: &'a RunStart,
+        ) -> futures::future::BoxFuture<'a, Result<RunHandle, RunExecutorError>> {
+            Box::pin(std::future::ready(Ok(RunHandle::new(request.run_id, ()))))
+        }
+
+        fn recover<'a>(
+            &'a self,
+            _run: &'a RunId,
+        ) -> futures::future::BoxFuture<'a, Result<RecoveryEvidence, RunExecutorError>> {
+            Box::pin(std::future::ready(Ok(RecoveryEvidence::NotRecoverable)))
+        }
+
+        fn observe<'a>(
+            &'a self,
+            _handle: &'a RunHandle,
+            _bindings: RunExecutionBindings,
+        ) -> futures::future::BoxFuture<'a, Result<RunSettlement, RunExecutorError>> {
+            Box::pin(std::future::ready(Ok(RunSettlement::Completed)))
+        }
+
+        fn submit<'a>(
+            &'a self,
+            _handle: &'a RunHandle,
+            _prompt: &'a str,
+            _prepared: Self::Prepared,
+            _bindings: RunExecutionBindings,
+        ) -> futures::future::BoxFuture<'a, Result<RunSettlement, RunExecutorError>> {
+            if let Some(sender) = self.crossed.lock().unwrap().take() {
+                sender
+                    .send(())
+                    .expect("launch barrier receiver remains alive");
+            }
+            Box::pin(std::future::ready(Ok(RunSettlement::Completed)))
+        }
+
+        fn interrupt<'a>(
+            &'a self,
+            _handle: &'a RunHandle,
+        ) -> futures::future::BoxFuture<'a, Result<(), RunExecutorError>> {
+            Box::pin(std::future::ready(Ok(())))
+        }
+    }
+
+    struct LaunchBarrierTaskReader;
+
+    impl ChildTaskReader for LaunchBarrierTaskReader {
+        fn read_rendered_task(
+            &self,
+            _reference: &BlobRef,
+        ) -> Result<Vec<u8>, ChildResultReaderError> {
+            Ok(b"background launch task".to_vec())
+        }
+    }
+
+    struct LaunchBarrierResults;
+
+    impl ChildResultReader for LaunchBarrierResults {
+        fn read_final_assistant(
+            &self,
+            run: RunId,
+        ) -> Result<ChildResultEvidence, ChildResultReaderError> {
+            Err(ChildResultReaderError::Missing { run })
+        }
+    }
+
+    struct LaunchBarrierParentResults;
+
+    impl ChildResultStore for LaunchBarrierParentResults {
+        fn copy_to_parent(
+            &self,
+            _child: RunId,
+            _evidence: &ChildResultEvidence,
+        ) -> Result<BlobRef, ChildResultReaderError> {
+            Err(ChildResultReaderError::Read {
+                diagnostic: "collection is outside this launch-only fixture".to_owned(),
+            })
+        }
+    }
+
+    struct LaunchBarrierProfiles;
+
+    impl ChildProfileResolver for LaunchBarrierProfiles {
+        fn resolve_profile(&self, _name: &str) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    struct LaunchBarrierSelections;
+
+    impl ChildSelectionAdmission for LaunchBarrierSelections {
+        fn admit(
+            &self,
+            request: &ChildRequest,
+            bindings: &RunExecutionBindings,
+        ) -> Result<(RunSelections, RunExecutionBindings), String> {
+            Ok((request.selections().clone(), bindings.clone()))
+        }
+    }
+
+    struct LaunchBarrierJournal(&'static LaunchBarrierStore);
+
+    impl ChildJournal for LaunchBarrierJournal {
+        fn read(
+            &self,
+            _invocation: SubagentInvocationId,
+        ) -> Result<Vec<DomainEvent>, ChildJournalError> {
+            Ok(self.0.events.lock().unwrap().clone())
+        }
+    }
+
+    fn launch_barrier_parent_hooks(
+        store: &'static LaunchBarrierStore,
+        session: SessionId,
+    ) -> SessionHookRuntime<'static> {
+        let journal = SharedJournal::new(Journal::new(
+            session,
+            store,
+            &LaunchBarrierClock,
+            &NullSink,
+            Producer::Main,
+            {
+                let mut state = SessionState::default();
+                for event in store.events.lock().unwrap().iter() {
+                    state.apply(event);
+                }
+                state
+            },
+        ));
+        let catalogue = HookCatalogue::admit_typed(&[], &[], Trust::Trusted)
+            .expect("empty launch barrier hook catalogue");
+        SessionHookRuntime::new(
+            HookLifecycleDispatcher::new(HookRunner::new(), catalogue),
+            journal,
+            Arc::new(HookCaptureInvoker),
+            CancelToken::new(),
+            Instant::now() + Duration::from_secs(30),
+        )
+    }
+
+    #[tokio::test]
+    async fn cli_background_launch_crosses_execution_barrier_without_collection_future() {
+        let store: &'static LaunchBarrierStore = Box::leak(Box::new(LaunchBarrierStore::default()));
+        let executor = Arc::new(LaunchBarrierExecutor {
+            crossed: Mutex::new(None),
+        });
+        let crossed = executor.arm();
+        let parent_run = RunId::new(SessionId::new(), uuid::Uuid::now_v7());
+        let parent_session = parent_run.session_id();
+        let gate = SharedBudgetGate::new(ego_core::budget::BudgetGate::unlimited(
+            CurrencyCode::new("USD").expect("launch barrier currency"),
+        ));
+        let bindings = RunExecutionBindings::new(Arc::new(LaunchBarrierSink), None)
+            .with_budget_gate(gate.clone());
+        let ports = ChildServicePorts::new(
+            parent_run,
+            Arc::new(LaunchBarrierJournal(store)),
+            Arc::new(LaunchBarrierTaskReader),
+            Arc::new(LaunchBarrierResults),
+            Arc::new(LaunchBarrierParentResults),
+            Arc::new(LaunchBarrierProfiles),
+            Arc::new(LaunchBarrierSelections),
+        );
+        let controller = Arc::new(RunController::new(
+            Arc::new(store.clone()),
+            Arc::clone(&executor),
+            Arc::new(LaunchBarrierClock),
+            Arc::new(LaunchBarrierIds),
+            RunRetention::new(NonZeroUsize::new(8).expect("retention")).expect("retention"),
+        ));
+        let service = ChildRunService::new(
+            controller,
+            gate,
+            RunRoot::new("/workspace").expect("launch barrier root"),
+            bindings,
+            ports,
+        );
+        let invocation = SubagentInvocationId::new();
+        let parent_turn = TurnId::new();
+        let parent_item = ItemId::new();
+        let parent_event = EventId::new();
+        store
+            .append(
+                &parent_session,
+                &DomainEvent {
+                    env: Envelope {
+                        seq: Seq::default(),
+                        id: parent_event,
+                        turn: parent_turn,
+                        item: Some(parent_item),
+                        parent: None,
+                        ts: Timestamp::from_millis(1_000),
+                        producer: Producer::Main,
+                    },
+                    kind: EventKind::ToolCallStarted {
+                        name: "skill".to_owned(),
+                        args: "{}".to_owned(),
+                        call_id: Some("launch-barrier".to_owned()),
+                    },
+                },
+            )
+            .expect("parent event is durable before child admission");
+        let hooks = launch_barrier_parent_hooks(store, parent_session);
+        let task = b"background launch task";
+        service
+            .start(
+                ChildRequest::new(
+                    invocation,
+                    ChildRequestOrigin::new(parent_run, parent_turn, parent_item, parent_event),
+                    BlobRef::new(
+                        BlobId::parse(ego_core::digest::sha256_hex(task)).expect("task blob id"),
+                        task.len() as u64,
+                    ),
+                    RunSelections::empty(),
+                    ChildWait::Background,
+                )
+                .with_requested_tools(["read"]),
+                &hooks,
+            )
+            .await
+            .expect("background child admission");
+        let owner = CliSkillInvocationOwner::new(service, hooks, CancelToken::new());
+        let execution = owner
+            .launch(invocation)
+            .expect("launch does not fail")
+            .expect("admitted background execution is transferred");
+        let completed = tokio::time::timeout(Duration::from_secs(1), execution)
+            .await
+            .expect("background execution does not stall")
+            .expect("background execution task does not panic");
+        completed.expect("background execution settles");
+        tokio::time::timeout(Duration::from_secs(1), crossed)
+            .await
+            .expect("child execution crosses its barrier before collection exists")
+            .expect("launch barrier sender remains alive");
+    }
+
     #[test]
     fn workspace_accepts_a_directory_but_rejects_an_existing_regular_file() {
         let owner = tempdir().expect("workspace owner");
@@ -6123,6 +7203,11 @@ mod tests {
             origin: RunOrigin::TopLevel,
         };
 
+        let admission = Arc::new(EvidenceAdmissionService::new());
+        let child_executor = Arc::new(
+            CliRunExecutor::for_acp(None, Arc::clone(&store), Arc::clone(&admission))
+                .for_children(),
+        );
         let result = CliPrepared::prepare(
             protocol_args(None),
             store,
@@ -6130,7 +7215,11 @@ mod tests {
             &request,
             None,
             None,
-            Arc::new(EvidenceAdmissionService::new()),
+            PreparedExecutionRuntime {
+                admission,
+                child_executor,
+                child: false,
+            },
         )
         .await;
         let message = match result {
