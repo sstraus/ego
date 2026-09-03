@@ -1,4 +1,4 @@
-//! OS adapter for the atomic user-configuration mutation port.
+//! OS adapter for stored user-configuration reads and atomic mutations.
 
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use ego_core::config::{
     ConfigLayer, ManagedConfigKey, ManagedConfigValue, McpHttpAuth, McpLayerEntry, McpServerConfig,
     Source, UserConfigError, UserConfigMutation, UserConfigMutationResult, UserConfigPublication,
-    UserConfigStore, UserConfigTarget,
+    UserConfigSnapshot, UserConfigStore, UserConfigTarget,
 };
 use fd_lock::RwLock;
 use toml_edit::{Array, DocumentMut, Item, Table, TableLike, Value, value};
@@ -34,6 +34,16 @@ where
     I: std::ops::Deref + Send + Sync,
     I::Target: StoreIo,
 {
+    fn snapshot(&self, target: UserConfigTarget) -> Result<UserConfigSnapshot, UserConfigError> {
+        let (_, parsed) = read_user_config(&*self.io, &self.path)?;
+        let values = ManagedConfigKey::for_target(target.clone())
+            .iter()
+            .copied()
+            .map(|key| (key, managed_value(&parsed, &target, key)))
+            .collect();
+        Ok(UserConfigSnapshot { target, values })
+    }
+
     fn mutate(
         &self,
         mutation: UserConfigMutation,
@@ -56,20 +66,12 @@ where
         let mut lock = RwLock::new(lock_file);
         let _guard = lock.write().map_err(transaction_error)?;
 
-        let bytes = self.io.read(&self.path).map_err(transaction_error)?;
-        let text = match bytes {
-            Some(bytes) => String::from_utf8(bytes).map_err(|error| {
-                UserConfigError::new(format!("user config is not UTF-8: {error}"))
-            })?,
-            None => String::new(),
-        };
-        let parsed = ConfigLayer::parse(Source::User, &text)
-            .map_err(|error| UserConfigError::new(format!("invalid user config: {error}")))?;
+        let (text, parsed) = read_user_config(&*self.io, &self.path)?;
         let mut document = text
             .parse::<DocumentMut>()
             .map_err(|error| UserConfigError::new(format!("invalid user config TOML: {error}")))?;
 
-        let changed = apply(&mut document, &parsed.value, mutation)?;
+        let changed = apply(&mut document, &parsed, mutation)?;
         if !changed {
             return Ok(UserConfigMutationResult {
                 target,
@@ -101,6 +103,22 @@ where
             publication,
         })
     }
+}
+
+fn read_user_config<I>(io: &I, path: &Path) -> Result<(String, ConfigLayer), UserConfigError>
+where
+    I: StoreIo + ?Sized,
+{
+    let bytes = io.read(path).map_err(transaction_error)?;
+    let text = match bytes {
+        Some(bytes) => String::from_utf8(bytes)
+            .map_err(|error| UserConfigError::new(format!("user config is not UTF-8: {error}")))?,
+        None => String::new(),
+    };
+    let parsed = ConfigLayer::parse(Source::User, &text)
+        .map_err(|error| UserConfigError::new(format!("invalid user config: {error}")))?
+        .value;
+    Ok((text, parsed))
 }
 
 fn apply(

@@ -21,8 +21,8 @@ use ego_cli::repl::actions::{ActionId, ActionSink, LocalAction, LocalActionOutco
 use ego_cli::run::RunModelSwitchOwner;
 use ego_core::config::{
     ConfigLayer, ModelRef, Source, Trust, UserConfigError, UserConfigMutation,
-    UserConfigMutationFacts, UserConfigMutationResult, UserConfigPublication, UserConfigStore,
-    UserConfigTarget,
+    UserConfigMutationFacts, UserConfigMutationResult, UserConfigPublication, UserConfigSnapshot,
+    UserConfigStore, UserConfigTarget,
 };
 use ego_core::event::domain::GenerationRole;
 use ego_core::event::hook::{
@@ -391,6 +391,17 @@ struct ConfigStore {
     publications: Arc<Mutex<usize>>,
 }
 impl UserConfigStore for ConfigStore {
+    fn snapshot(&self, target: UserConfigTarget) -> Result<UserConfigSnapshot, UserConfigError> {
+        Ok(UserConfigSnapshot {
+            values: ego_core::config::ManagedConfigKey::for_target(target.clone())
+                .iter()
+                .copied()
+                .map(|key| (key, None))
+                .collect(),
+            target,
+        })
+    }
+
     fn mutate(
         &self,
         _mutation: UserConfigMutation,

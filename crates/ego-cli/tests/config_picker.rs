@@ -14,7 +14,8 @@ use ego_cli::model_picker::{
 use ego_cli::repl::actions::{ActionId, ActionSink, LocalAction, LocalActionOutcome};
 use ego_core::config::{
     ConfigLayer, ModelRef, Source, UserConfigError, UserConfigMutation, UserConfigMutationFacts,
-    UserConfigMutationResult, UserConfigPublication, UserConfigStore, UserConfigTarget,
+    UserConfigMutationResult, UserConfigPublication, UserConfigSnapshot, UserConfigStore,
+    UserConfigTarget,
 };
 use ego_core::generator::capabilities::{
     CacheRetention, CancelSemantics, ImageInputSupport, ModelCapabilities, ReasoningCarryover,
@@ -114,6 +115,17 @@ impl RecordingUserConfigStore {
 }
 
 impl UserConfigStore for RecordingUserConfigStore {
+    fn snapshot(&self, target: UserConfigTarget) -> Result<UserConfigSnapshot, UserConfigError> {
+        Ok(UserConfigSnapshot {
+            values: ego_core::config::ManagedConfigKey::for_target(target.clone())
+                .iter()
+                .copied()
+                .map(|key| (key, None))
+                .collect(),
+            target,
+        })
+    }
+
     fn mutate(
         &self,
         mutation: UserConfigMutation,

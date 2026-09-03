@@ -1,8 +1,9 @@
-//! The consumer-owned transaction port for changes to user configuration.
+//! The consumer-owned port for stored user configuration.
 //!
-//! Core names the complete policy change. The filesystem adapter is responsible
-//! for locking, comment-preserving editing, strict validation, and durable
-//! publication as one operation.
+//! Core names the closed stored projection and each complete policy change. The
+//! filesystem adapter is responsible for side-effect-free reads and for locking,
+//! comment-preserving editing, strict validation, and durable publication as one
+//! mutation operation.
 
 use crate::generator::types::ThinkingLevel;
 
@@ -285,8 +286,18 @@ pub struct UserConfigMutationResult {
     pub publication: UserConfigPublication,
 }
 
-/// The narrow consumer port for the user configuration transaction.
+/// The closed managed projection of one stored user-config authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserConfigSnapshot {
+    pub target: UserConfigTarget,
+    pub values: Vec<(ManagedConfigKey, Option<ManagedConfigValue>)>,
+}
+
+/// The narrow consumer port for stored user configuration.
 pub trait UserConfigStore: Send + Sync {
+    /// Read one stored user authority without resolving inherited values.
+    fn snapshot(&self, target: UserConfigTarget) -> Result<UserConfigSnapshot, UserConfigError>;
+
     /// Apply one complete mutation. `Err` guarantees that publication did not
     /// occur and the previous config remains authoritative; an unchanged
     /// success reports [`UserConfigPublication::NotPublished`].

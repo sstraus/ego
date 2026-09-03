@@ -24,7 +24,7 @@ pub use layer::{
 };
 pub use mutation::{
     UserConfigError, UserConfigMutation, UserConfigMutationFacts, UserConfigMutationResult,
-    UserConfigPublication, UserConfigStore,
+    UserConfigPublication, UserConfigSnapshot, UserConfigStore,
 };
 pub use resolve::{
     ActiveProfileProvenance, Effective, McpConfigProvenance, Posture, ResolvedMcpConfig,
