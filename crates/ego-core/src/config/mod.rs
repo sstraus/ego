@@ -8,6 +8,7 @@ mod error;
 mod layer;
 mod mutation;
 mod resolve;
+pub mod rule_management;
 mod ruleset;
 mod source;
 mod vocabulary;

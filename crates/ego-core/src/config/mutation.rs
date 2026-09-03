@@ -269,6 +269,13 @@ pub enum UserConfigMutationFacts {
     Revoke {
         id: RuleId,
     },
+    /// Rule-specific before/after facts captured by the store while its
+    /// existing user-document write lock is held.
+    RuleTransaction {
+        request: Box<UserConfigMutationFacts>,
+        before: RuleSnapshot,
+        after: RuleSnapshot,
+    },
 }
 
 /// Canonical facts for a persistent permission-rule mutation.
@@ -332,6 +339,22 @@ pub struct UserConfigMutationResult {
     pub facts: UserConfigMutationFacts,
     pub changed: bool,
     pub publication: UserConfigPublication,
+}
+
+impl UserConfigMutationResult {
+    /// The requested rule mutation and its atomic stored snapshots.
+    pub fn rule_transaction(
+        &self,
+    ) -> Option<(&UserConfigMutationFacts, &RuleSnapshot, &RuleSnapshot)> {
+        match &self.facts {
+            UserConfigMutationFacts::RuleTransaction {
+                request,
+                before,
+                after,
+            } => Some((request, before, after)),
+            _ => None,
+        }
+    }
 }
 
 /// The closed managed projection of one stored user-config authority.

@@ -51,6 +51,7 @@ fn parsed<const N: usize>(args: [&str; N]) -> ego_cli::cli::Args {
         Invocation::Usage(_) => panic!("`usage` takes no Args: use the usage tests for it"),
         Invocation::Hooks(_) => panic!("`hooks` takes no Args: use the hooks tests for it"),
         Invocation::Config(_) => panic!("`config` takes no Args: use the config tests for it"),
+        Invocation::Rules(_) => panic!("`rules` takes no Args: use the rules tests for it"),
     }
 }
 
@@ -75,6 +76,7 @@ fn parsed_slice(args: &[&str]) -> ego_cli::cli::Args {
         Invocation::Usage(_) => panic!("`usage` takes no Args: use the usage tests for it"),
         Invocation::Hooks(_) => panic!("`hooks` takes no Args: use the hooks tests for it"),
         Invocation::Config(_) => panic!("`config` takes no Args: use the config tests for it"),
+        Invocation::Rules(_) => panic!("`rules` takes no Args: use the rules tests for it"),
     }
 }
 

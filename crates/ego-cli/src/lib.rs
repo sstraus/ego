@@ -36,6 +36,7 @@ pub mod prompt;
 pub mod provider_http;
 pub mod render;
 pub mod repl;
+pub mod rules;
 pub mod run;
 pub mod schema;
 pub mod session;

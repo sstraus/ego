@@ -26,12 +26,13 @@ use std::str::FromStr;
 use clap::error::ErrorKind;
 use clap::{ArgAction, Args as ClapArgs, Parser, Subcommand};
 use ego_core::config::{
-    ManagedConfigKey, ManagedConfigValue, McpEnvironmentName, McpHttpAuth, McpHttpConfig,
-    McpHttpUrl, McpServerConfig, McpServerName, Mode, ProfileName, UserConfigTarget,
+    ManagedConfigKey, ManagedConfigValue, ManagedRuleEffect, McpEnvironmentName, McpHttpAuth,
+    McpHttpConfig, McpHttpUrl, McpServerConfig, McpServerName, Mode, ProfileName, UserConfigTarget,
 };
 use ego_core::event::id::{ItemId, SessionId};
 use ego_core::generator::types::ThinkingLevel;
 use ego_core::permit::Confinement;
+use ego_core::permit::rule::{Rule, RuleId};
 use ego_core::run::RequestId;
 use ego_core::usage::UsagePeriod;
 
@@ -42,6 +43,8 @@ use crate::agent_file::{self, AgentFile};
 pub enum Invocation {
     /// `ego config get|set|unset|ls|edit` — typed user configuration management.
     Config(Box<ConfigArgs>),
+    /// `ego rules ls|allow|deny|revoke|remember|explain`.
+    Rules(Box<RulesArgs>),
     /// `ego auth login|logout|status [PROVIDER]`.
     Auth(Box<AuthArgs>),
     /// `ego mcp add|rm|ls` — typed MCP configuration management.
@@ -168,6 +171,7 @@ pub const BUILT: &[&str] = &[
     "auth",
     "mcp",
     "config",
+    "rules",
     "mcp-server",
 ];
 
@@ -189,20 +193,12 @@ pub const BUILT: &[&str] = &[
 /// `waiting_on` is sourced from `ARCHITECTURE.md` §8's milestone table where it
 /// places the work, and from the code where it does not — a subsystem that
 /// table does not place still gets a reason, never a milestone invented for it.
-pub const UNBUILT: &[(&str, &str)] = &[
-    (
-        "rules",
-        "root-command composition for the canonical rule grammar and persistent \
-         user rule store. `ls`, `allow`, `deny`, `revoke`, `remember`, and \
-         `explain` do not yet share one dispatched policy service",
-    ),
-    (
-        "doctor",
-        "a unified diagnostic contract and actionable probes. Authentication, \
+pub const UNBUILT: &[(&str, &str)] = &[(
+    "doctor",
+    "a unified diagnostic contract and actionable probes. Authentication, \
          model resolution, sandbox execution, and MCP now exist, but no health \
          projection composes their sanitized status and actionable remediation",
-    ),
-];
+)];
 
 /// A flag that was removed, and what replaced it.
 ///
@@ -476,6 +472,44 @@ pub enum ConfigAction {
     },
     /// Edit the complete user document, including profiles.
     Edit,
+}
+
+/// One root rule-management request with all syntax already typed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RulesArgs {
+    pub action: RulesAction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RulesAction {
+    List {
+        target: UserConfigTarget,
+        json: bool,
+    },
+    Add {
+        target: UserConfigTarget,
+        effect: ManagedRuleEffect,
+        rule: Rule,
+    },
+    Revoke {
+        target: UserConfigTarget,
+        id: RuleId,
+    },
+    Remember {
+        target: UserConfigTarget,
+        directory: Option<PathBuf>,
+        yes: bool,
+        effect: ManagedRuleEffect,
+        tool: String,
+        arguments: serde_json::Map<String, serde_json::Value>,
+    },
+    Explain {
+        target: UserConfigTarget,
+        directory: Option<PathBuf>,
+        json: bool,
+        tool: String,
+        arguments: serde_json::Map<String, serde_json::Value>,
+    },
 }
 
 /// The parsed command line of `ego run`.
@@ -810,6 +844,72 @@ struct McpCommand {
 struct ConfigCommand {
     #[command(subcommand)]
     action: ConfigSubcommand,
+}
+
+#[derive(Debug, Parser)]
+#[command(
+    name = "ego rules",
+    about = "Inspect and manage persistent permission rules.",
+    disable_help_subcommand = true
+)]
+struct RulesCommand {
+    #[command(subcommand)]
+    action: RulesSubcommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum RulesSubcommand {
+    /// List the effective system and selected user rules.
+    #[command(name = "ls")]
+    List {
+        #[arg(long, value_name = "NAME")]
+        profile: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Persist one allow predicate.
+    Allow {
+        #[arg(long, value_name = "NAME")]
+        profile: Option<String>,
+        rule: String,
+    },
+    /// Persist one deny predicate.
+    Deny {
+        #[arg(long, value_name = "NAME")]
+        profile: Option<String>,
+        rule: String,
+    },
+    /// Remove one predicate ID from both selected user lists.
+    Revoke {
+        #[arg(long, value_name = "NAME")]
+        profile: Option<String>,
+        id: String,
+    },
+    /// Derive persistent rules from one prepared builtin call.
+    Remember {
+        #[arg(long, value_name = "NAME")]
+        profile: Option<String>,
+        #[arg(short = 'C', value_name = "DIR")]
+        directory: Option<PathBuf>,
+        #[arg(long)]
+        yes: bool,
+        effect: String,
+        tool: String,
+        #[arg(value_name = "ARGS_JSON")]
+        arguments: String,
+    },
+    /// Explain one prepared builtin call without running it.
+    Explain {
+        #[arg(long, value_name = "NAME")]
+        profile: Option<String>,
+        #[arg(short = 'C', value_name = "DIR")]
+        directory: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+        tool: String,
+        #[arg(value_name = "ARGS_JSON")]
+        arguments: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -1326,6 +1426,24 @@ fn config_clap_or_answer(tokens: &[String]) -> Result<Parsed<ConfigCommand>, Usa
     }
 }
 
+fn rules_clap_or_answer(tokens: &[String]) -> Result<Parsed<RulesCommand>, UsageError> {
+    match RulesCommand::try_parse_from(tokens) {
+        Ok(parsed) => Ok(Parsed::Command(parsed)),
+        Err(err)
+            if matches!(
+                err.kind(),
+                ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
+            ) =>
+        {
+            Ok(Parsed::Answered(err.to_string()))
+        }
+        Err(_) => Err(UsageError(
+            "invalid ego rules invocation\n\nUsage:\n  ego rules ls [--profile NAME] [--json]\n  ego rules allow [--profile NAME] RULE\n  ego rules deny [--profile NAME] RULE\n  ego rules revoke [--profile NAME] RULE_ID\n  ego rules remember [--profile NAME] [-C DIR] [--yes] allow|deny TOOL ARGS_JSON\n  ego rules explain [--profile NAME] [-C DIR] [--json] TOOL ARGS_JSON"
+                .to_owned(),
+        )),
+    }
+}
+
 /// `ego --help`: the command set, from the tables the refusals read.
 ///
 /// Deliberately short. It names what this build has and points at `CLI.md` §2
@@ -1353,6 +1471,7 @@ fn overview(program: &str) -> String {
             "auth" => "Manage subscription credentials",
             "mcp" => "Manage configured MCP servers",
             "config" => "Manage stored user configuration",
+            "rules" => "Inspect and manage permission rules",
             other => other,
         };
         text.push_str(&format!("  {name:<8}{about}\n"));
@@ -1607,6 +1726,10 @@ pub fn parse(argv: Vec<String>) -> Result<Invocation, UsageError> {
             Parsed::Answered(text) => Ok(Invocation::Answered(text)),
             Parsed::Command(parsed) => Ok(Invocation::Config(Box::new(into_config_args(parsed)?))),
         },
+        Some("rules") => match rules_clap_or_answer(&tokens)? {
+            Parsed::Answered(text) => Ok(Invocation::Answered(text)),
+            Parsed::Command(parsed) => Ok(Invocation::Rules(Box::new(into_rules_args(parsed)?))),
+        },
         Some("mcp") => match clap_or_answer::<McpCommand>(&tokens)? {
             Parsed::Answered(text) => Ok(Invocation::Answered(text)),
             Parsed::Command(parsed) => Ok(Invocation::Mcp(Box::new(into_mcp_args(parsed, tail)?))),
@@ -1653,6 +1776,90 @@ fn into_config_args(command: ConfigCommand) -> Result<ConfigArgs, UsageError> {
         ConfigSubcommand::Edit => ConfigAction::Edit,
     };
     Ok(ConfigArgs { action })
+}
+
+fn into_rules_args(command: RulesCommand) -> Result<RulesArgs, UsageError> {
+    let action = match command.action {
+        RulesSubcommand::List { profile, json } => RulesAction::List {
+            target: config_target(profile)?,
+            json,
+        },
+        RulesSubcommand::Allow { profile, rule } => RulesAction::Add {
+            target: config_target(profile)?,
+            effect: ManagedRuleEffect::Allow,
+            rule: managed_rule(&rule)?,
+        },
+        RulesSubcommand::Deny { profile, rule } => RulesAction::Add {
+            target: config_target(profile)?,
+            effect: ManagedRuleEffect::Deny,
+            rule: managed_rule(&rule)?,
+        },
+        RulesSubcommand::Revoke { profile, id } => {
+            let id = RuleId::from_str(&id)
+                .map_err(|_| UsageError("invalid permission rule ID".to_owned()))?;
+            if !id.is_known() {
+                return Err(UsageError(
+                    "permission rule ID uses an unsupported grammar generation".to_owned(),
+                ));
+            }
+            RulesAction::Revoke {
+                target: config_target(profile)?,
+                id,
+            }
+        }
+        RulesSubcommand::Remember {
+            profile,
+            directory,
+            yes,
+            effect,
+            tool,
+            arguments,
+        } => RulesAction::Remember {
+            target: config_target(profile)?,
+            directory,
+            yes,
+            effect: managed_rule_effect(&effect)?,
+            tool,
+            arguments: rule_arguments(&arguments)?,
+        },
+        RulesSubcommand::Explain {
+            profile,
+            directory,
+            json,
+            tool,
+            arguments,
+        } => RulesAction::Explain {
+            target: config_target(profile)?,
+            directory,
+            json,
+            tool,
+            arguments: rule_arguments(&arguments)?,
+        },
+    };
+    Ok(RulesArgs { action })
+}
+
+fn managed_rule(raw: &str) -> Result<Rule, UsageError> {
+    Rule::load(raw).map_err(|_| UsageError("invalid or unenforceable permission rule".to_owned()))
+}
+
+fn managed_rule_effect(raw: &str) -> Result<ManagedRuleEffect, UsageError> {
+    match raw {
+        "allow" => Ok(ManagedRuleEffect::Allow),
+        "deny" => Ok(ManagedRuleEffect::Deny),
+        _ => Err(UsageError(
+            "rule effect must be exactly `allow` or `deny`".to_owned(),
+        )),
+    }
+}
+
+fn rule_arguments(raw: &str) -> Result<serde_json::Map<String, serde_json::Value>, UsageError> {
+    match serde_json::from_str(raw) {
+        Ok(serde_json::Value::Object(arguments)) => Ok(arguments),
+        _ => Err(UsageError(
+            "tool arguments must be exactly one JSON object".to_owned(),
+        )),
+    }
 }
 
 fn config_target(profile: Option<String>) -> Result<UserConfigTarget, UsageError> {

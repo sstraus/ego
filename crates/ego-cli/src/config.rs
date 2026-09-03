@@ -16,9 +16,10 @@ use std::sync::Arc;
 use ego_core::config::{
     AuthProviderLayer, ConfigError, ConfigLayer, Effective, ManagedConfigValue,
     McpConfigProvenance, McpEnvironmentName, McpHttpAuth, McpHttpConfig, McpHttpUrl, McpLayerEntry,
-    McpServerConfig, McpServerName, ProfileName, ResolvedMcpEntry, Source, Sourced, Trust,
-    UserConfigMutation, UserConfigMutationFacts, UserConfigMutationResult, UserConfigPublication,
-    UserConfigSnapshot, UserConfigStore, UserConfigTarget, resolve, resolve_selected,
+    McpServerConfig, McpServerName, ProfileLayer, ProfileName, ResolvedMcpEntry, Ruleset, Source,
+    Sourced, Trust, UserConfigMutation, UserConfigMutationFacts, UserConfigMutationResult,
+    UserConfigPublication, UserConfigSnapshot, UserConfigStore, UserConfigTarget, resolve,
+    resolve_selected,
 };
 use ego_core::run::RunTermination;
 use ego_core::turn::CancelToken;
@@ -389,13 +390,7 @@ fn render_receipt(result: UserConfigMutationResult, out: &Stdout) -> Result<(), 
             });
         }
     };
-    let target = match &result.target {
-        UserConfigTarget::Base => "user".to_owned(),
-        UserConfigTarget::Profile(profile) => format!(
-            "user:profile={}",
-            serde_json::to_string(profile.as_str()).expect("a string is always valid JSON")
-        ),
-    };
+    let target = user_target(&result.target);
     let (publication, warning) = match result.publication {
         UserConfigPublication::NotPublished => ("not_published", None),
         UserConfigPublication::PublishedDurably => ("published_durably", None),
@@ -423,12 +418,22 @@ fn render_receipt(result: UserConfigMutationResult, out: &Stdout) -> Result<(), 
     Ok(())
 }
 
-fn escape_field(value: &str) -> String {
+pub(crate) fn escape_field(value: &str) -> String {
     value
         .replace('\\', "\\\\")
         .replace('\t', "\\t")
         .replace('\r', "\\r")
         .replace('\n', "\\n")
+}
+
+pub(crate) fn user_target(target: &UserConfigTarget) -> String {
+    match target {
+        UserConfigTarget::Base => "user".to_owned(),
+        UserConfigTarget::Profile(profile) => format!(
+            "user:profile={}",
+            serde_json::to_string(profile.as_str()).expect("a string is always valid JSON")
+        ),
+    }
 }
 
 /// The user layer's directory: `$EGO_HOME`, else `~/.ego`.
@@ -473,6 +478,46 @@ pub(crate) fn hook_listing_layers() -> Result<Vec<Sourced<ConfigLayer>>, UsageEr
         found.push(user);
     }
     Ok(found)
+}
+
+/// One captured administrator authority and the user document it governs.
+pub(crate) struct RuleManagementConfig {
+    pub(crate) system: Ruleset,
+    pub(crate) user_path: PathBuf,
+}
+
+/// Resolve only administrator rules for one explicit management target.
+///
+/// A marker profile makes a user-only profile selectable without contributing
+/// any permissions. The stored user lists are read separately by the existing
+/// store port, or atomically returned by its mutation transaction.
+pub(crate) fn rule_management(
+    target: &UserConfigTarget,
+) -> Result<RuleManagementConfig, UsageError> {
+    let user_path = ego_home()
+        .ok_or_else(|| {
+            UsageError("ego rules needs EGO_HOME or HOME for user configuration".into())
+        })?
+        .join("config.toml");
+    let mut found = Vec::new();
+    if let Some(system) = layer(Source::System, Path::new(SYSTEM_CONFIG))? {
+        found.push(system);
+    }
+    let profile = target.profile();
+    if let Some(profile) = profile {
+        let mut marker = ConfigLayer::default();
+        marker
+            .profile
+            .insert(profile.as_str().to_owned(), ProfileLayer::default());
+        found.push(Sourced {
+            source: Source::User,
+            value: marker,
+        });
+    }
+    let system = resolve(&found, Trust::Untrusted, profile.map(ProfileName::as_str))
+        .map_err(|error| UsageError(error.to_string()))?
+        .permissions;
+    Ok(RuleManagementConfig { system, user_path })
 }
 
 /// The system/user authority used by process-wide MCP management commands.

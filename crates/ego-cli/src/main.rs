@@ -106,6 +106,13 @@ async fn ordinary_main() -> std::process::ExitCode {
                     mcp_errors: Vec::new(),
                 }
             }
+            Ok(Invocation::Rules(args)) => Ended {
+                termination: ego_cli::rules::execute(&args, &out),
+                session: ego_core::event::id::SessionId::new(),
+                state: ego_core::state::SessionState::default(),
+                result: serde_json::Value::String(String::new()),
+                mcp_errors: Vec::new(),
+            },
             Ok(Invocation::Auth(args)) => {
                 let mut running = Box::pin(ego_cli::auth::execute(&args, &cancel));
                 let termination = tokio::select! {

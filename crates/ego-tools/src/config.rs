@@ -101,12 +101,18 @@ where
         let _guard = lock.write().map_err(transaction_error)?;
 
         let (text, parsed) = read_user_config(&*self.io, &self.path)?;
+        let before_rules = matches!(
+            &mutation,
+            UserConfigMutation::Rules { .. } | UserConfigMutation::RevokeRule { .. }
+        )
+        .then(|| rule_snapshot(&parsed, target.clone()));
         let mut document = text
             .parse::<DocumentMut>()
             .map_err(|error| UserConfigError::new(format!("invalid user config TOML: {error}")))?;
 
         let changed = apply(&mut document, &parsed, mutation)?;
         if !changed {
+            let facts = rule_transaction_facts(facts, before_rules.as_ref(), before_rules.clone());
             return Ok(UserConfigMutationResult {
                 target,
                 facts,
@@ -115,11 +121,16 @@ where
             });
         }
         let published = document.to_string();
-        ConfigLayer::parse(Source::User, &published).map_err(|error| {
-            UserConfigError::new(format!(
-                "mutated user config failed strict validation: {error}"
-            ))
-        })?;
+        let published_layer = ConfigLayer::parse(Source::User, &published)
+            .map_err(|error| {
+                UserConfigError::new(format!(
+                    "mutated user config failed strict validation: {error}"
+                ))
+            })?
+            .value;
+        let after_rules = before_rules
+            .as_ref()
+            .map(|_| rule_snapshot(&published_layer, target.clone()));
         let publication = self
             .io
             .replace_atomic_publication(&self.path, published.as_bytes())
@@ -130,6 +141,7 @@ where
                 UserConfigPublication::PublishedDurabilityUncertain { diagnostic }
             }
         };
+        let facts = rule_transaction_facts(facts, before_rules.as_ref(), after_rules);
         Ok(UserConfigMutationResult {
             target,
             facts,
@@ -228,6 +240,22 @@ where
         self.io
             .remove_file(&edit.candidate_path)
             .map_err(transaction_error)
+    }
+}
+
+fn rule_transaction_facts(
+    request: ego_core::config::UserConfigMutationFacts,
+    before: Option<&RuleSnapshot>,
+    after: Option<RuleSnapshot>,
+) -> ego_core::config::UserConfigMutationFacts {
+    match (before, after) {
+        (Some(before), Some(after)) => ego_core::config::UserConfigMutationFacts::RuleTransaction {
+            request: Box::new(request),
+            before: before.clone(),
+            after,
+        },
+        (None, None) => request,
+        _ => unreachable!("rule transaction snapshots are captured as a pair"),
     }
 }
 
