@@ -1,9 +1,11 @@
 # ego — Architecture
 
-Date: 2026-08-19. Status: **ratified by maintainer** after adversarial review
+Date: 2026-08-19; M5 contract freeze: 2026-09-03. Status: **ratified by
+maintainer** after adversarial review
 (`docs/08-codex-critique.md`) and triage (`docs/10-triage.md`).
 Resolves the eight open questions of `SPEC.md` §4. Evidence citations refer to
-the dossier in `docs/`.
+the dossier in `docs/`. Statements labelled M5 target are required final
+behavior, not claims about the current binary.
 
 ## 0. Product stance
 
@@ -36,6 +38,12 @@ The current `EventKind` (`crates/ego-core/src/event/domain.rs`) implements all
 thirty-six, including the question, hook, subagent, skill, and clean-session
 compaction lifecycles.
 The enum and this list are compared by hand at each milestone close.
+M5 extends the same event log for durable display-name and goal transitions;
+their accepted lifecycle, replay, fork, compaction, and projection semantics
+are fixed in
+`docs/decisions/2026-09-03-session-metadata-and-goals-are-durable-state.md`.
+Those event kinds are not present until regression case lands and therefore are not
+included in the current exhaustive list above.
 
 - `SessionState::apply(&mut self, &Event)` is a **pure, sync** function.
 - Legacy in-place compaction, clean-session compaction lineage, and forking are
@@ -59,7 +67,7 @@ The enum and this list are compared by hand at each milestone close.
 | `DomainEvent` | exhaustive internal reducer input; evolves freely with core |
 | `StoreRecord` | durable envelope: session ID, sequence, causal IDs, codec version, integrity checksum, versioned payload |
 | `PublicEvent` | privacy-filtered, stable JSONL DTO with its own compatibility policy (`CLI.md` §4.2) |
-| ACP adapters | capability-aware lossy projections onto protocol v1 and v2 |
+| ACP adapters | capability-aware lossy projections onto production ACP v1; retained v2 projections are migration evidence while v2 remains Draft |
 
 Each has golden fixtures and projection/migration tests; a new internal event
 never becomes public automatically. The semantics stay single-sourced — that is
@@ -167,19 +175,23 @@ struct ProviderRow {
     id: String,
     /// Scheme, host and any prefix; the *mapping* owns the path.
     base: Url,
-    /// A variable name and a header name. Never a secret: the resolved
-    /// credential exists once, beside the model and not inside it (§6).
+    /// A variable name and a header name. Never a secret: M5 resolves one
+    /// non-cloneable zeroizing credential owner for the run.
     credential: CredentialStrategy,
-    /// Which API shape. The thing itself, not a name — a name needs a
-    /// registry, and a registry needs a configuration file this build does
-    /// not have yet.
-    wire: &'static dyn WireFormat,
     /// What turns one of this provider's model ids into a `ResolvedModel`:
-    /// read from what an operator supplied, or asked of a daemon.
+    /// read from what an operator supplied, or asked of a daemon. The
+    /// resolved model owns the selected wire because authenticated facts may
+    /// select different current contracts within one provider.
     resolver: &'static dyn ModelResolver,
     /// Whether this provider states a monetary figure on the wire, and how to
     /// read it. `None` is a claim, not a gap.
     cost: Option<Arc<dyn ProviderCost>>,
+}
+
+struct ResolvedModel {
+    model: ModelId,
+    capabilities: ModelCapabilities,
+    wire: &'static dyn WireFormat,
 }
 
 /// Transport seam: one method, reqwest impl. Also where `--offline` lives,
@@ -208,11 +220,30 @@ manifest; fallback chains check conversation compatibility and explicitly
 transform or drop provider-private reasoning state before switching. Unknown
 cost fails the budget closed.
 
+M5 adds two public mappings without merging contracts: the OpenAI API-key row uses
+the public Responses endpoint, while `openai-codex` retains its distinct
+private ChatGPT Codex contract; Gemini uses stable v1 Interactions, never the
+`v1beta` route. Neither row becomes selectable from schema evidence alone:
+all five conformance checks, including a live entitled-model recording, must
+pass. Cost conformance enumerates every selectable profile and requires a
+third independent decoder path. See
+`docs/decisions/2026-09-03-public-provider-wires-require-live-promotion.md`.
+Provider resolution also converges every source on the one non-cloneable,
+zeroizing lifetime in
+`docs/decisions/2026-09-03-provider-credentials-share-one-zeroizing-lifetime.md`;
+catalogue, model, event, manifest, and diagnostic records remain secret-free.
+
 Carried over from fx because it is cheap and correct (`docs/01-fx.md` §2.4):
 **delivery certainty** — `DeliveryCertainty { DefinitelyUnsent, PossiblySent }`
-tracked per attempt, deciding whether a retry is safe or might double-bill, with
-explicit retry ownership (transport vs agent). In from day one, since scripting
-mode retries unattended.
+tracked per attempt, deciding whether a retry is safe or might double-bill.
+In M5 one core turn coordinator owns every attempt: `--retry N` permits at
+most N additional attempts on the same model and only after
+`DefinitelyUnsent`; ordered fallback re-resolves current catalogue facts and
+must prove capability and request expressibility before a fresh attempt.
+Possibly-sent work never retries or falls back automatically. Each attempt
+keeps its own identity, reservation, digest, settlement, usage, and cost; the
+turn folds them without rewriting history. The complete failure contract is
+`docs/decisions/2026-09-03-one-turn-owns-every-retry-and-fallback-attempt.md`.
 
 Per-generation usage and cost are first-class outputs of `parse_stream`, not an
 afterthought — the CLI's `--budget` and ACP's `UsageUpdate` both feed off them.
@@ -221,8 +252,10 @@ afterthought — the CLI's `--budget` and ACP's `UsageUpdate` both feed off them
 LM Studio, vLLM and llama.cpp-server are all rows in the provider table on the
 openai-completions shape, working from M0 with `auth: None`. Beyond the table:
 `ego models` queries the local daemon's catalogue live (`/v1/models`,
-`/api/tags`) instead of a generated file; `ego doctor` detects running local
-daemons; `--offline` (pi's flag) asserts no non-loopback egress — enforced at
+`/api/tags`) instead of a generated file. The final M5 `ego doctor` observes a
+redacted health snapshot that may include bounded loopback liveness; the
+current root command is unavailable and the current slash handler reports MCP
+health only. `--offline` (pi's flag) asserts no non-loopback egress — enforced at
 the `Http` seam, not by convention — which is also the air-gapped posture for
 the server deployment (`docs/09-server-companion.md`). Cost accounting reports
 zero-cost usage rather than pretending local tokens are billable.
@@ -384,9 +417,10 @@ any Rust embedder supplies custom implementations without ego knowing — pi's
 extension richness, minus the runtime.
 
 **"Registry" was the wrong word and this corrects it.** A port is selected by
-*value*: a row holds a `&'static dyn WireFormat` and a `&'static dyn
-ModelResolver`, and an embedder that adds a protocol writes a row that names
-its adapter. A registry — a name, a table, and a lookup that can fail — buys
+*value*: a row holds a `&'static dyn ModelResolver`, and its resolved model
+holds the selected `&'static dyn WireFormat`. An embedder that adds a protocol
+supplies those values through its row and resolver. A registry — a name, a
+table, and a lookup that can fail — buys
 exactly one thing that this does not: it lets a profile be written in a
 *file*, because a file can hold a name and cannot hold a trait object. That
 file does not exist yet, so the table would have one caller, be populated by
@@ -405,7 +439,7 @@ same registries" — no redesign, so deferring costs nothing.
 **Tokio, multi-thread, Send futures — but all decision logic is pure and sync.**
 
 - The ACP SDK 2.0 is Send-based on multi-thread tokio (verified,
-  `docs/06-acp.md` §4); rmcp and reqwest are tokio-native. A sync core would
+  `docs/06-acp.md` §6); rmcp and reqwest are tokio-native. A sync core would
   bridge against the entire dependency ecosystem.
 - The testability argument for a sync core is answered differently: the
   reducer, the permission classifier, truncation, compaction selection — the
@@ -467,6 +501,13 @@ catalogue is a directory scan over manifests with an mtime cache; if that is
 ever slow, the fix is an index file. fx's manifest-acceptance rules (recent +
 `id` and `workspace_root` match, `docs/03-tuicommander.md` §2.5) are adopted.
 
+Display names and goals are authoritative ordered log events, never mutable
+manifest fields. The manifest and ACP session-info notification are rebuildable
+projections. Metadata-only `ego resume` operations take the normal writer lease
+and expected revision but do not start a model turn; fork and compaction carry
+the ratified lineage state explicitly. See
+`docs/decisions/2026-09-03-session-metadata-and-goals-are-durable-state.md`.
+
 ## 6. Terminal approach (resolves §4.6)
 
 **Primary-buffer line renderer + `reedline`. No alternate screen, mouse
@@ -497,21 +538,23 @@ supersedes the earlier sequential-seat implementation decision.
 
 ## 7. ACP integration (resolves §4.7)
 
-Verified against the schema crates, full record in `docs/06-acp.md`. Summary:
-ACP covers everything tuicommander needs — session catalogue (`session/list`),
-switching/resume/fork/delete, model selection (`providers/*`), config
-(`session/set_config_option`), usage *and cost* (`UsageUpdate`), approvals,
-streaming — natively or behind `unstable_*` crate features. The single gap is
-mid-turn pause/resume → ego extension method. `ego-acp` implements the agent
-side of protocol v1. Protocol v2 and the full negotiated capability surface
-remain M5 work. No filesystem archaeology remains on tuicommander's side.
+Verified against current primary sources on 2026-09-03; full record in
+`docs/06-acp.md`. M5 serves stable ACP v1 only while v2 remains Draft. It
+completes the selected v1 lifecycle, model/config, metadata, usage/cost,
+streaming, question, image, and permission surface through shared durable core
+services. Protocol v2 projections and goldens remain expiry evidence, not a
+production router arm. Unrelated filesystem, terminal, next-edit, document,
+and authentication methods are outside the contract.
 
 Coverage is **negotiated per connection, not assumed** (R11): pinning crates
 controls ego's build, not each host's capability set. Every ACP operation is
 modelled as a negotiated capability with a defined fallback when absent;
-unstable DTOs stay inside the `ego-acp` adapter; projection fixtures and a
-compatibility matrix run against at least Zed and tuicommander. ego extensions
-are namespaced and optional.
+ACP DTOs stay inside the `ego-acp` adapter; projection fixtures and a
+compatibility matrix run against current real Zed and the separate-repository
+TUICommander client. `_ego/pause` and `_ego/resume` are namespaced,
+session-bound, durable safe-boundary controls; absence is reported as
+unavailable and never mapped to cancel. An ACP-owned turn uses the connected
+host as its only permission seat and never reads terminal input.
 
 M3 added one deliberately narrow exception before ACP completeness:
 `_ego/compact`, advertised in `AgentCapabilities._meta`, invokes the same core
@@ -536,7 +579,7 @@ section) are M0a's exit criteria.
 | **M2 — MCP, both directions** | Outbound MCP 2026-07-28 through a release-gated rmcp 3.x: stdio + stateless Streamable HTTP over core-owned guarded transports, explicit discovery/per-request metadata/standard headers, current CIMD OAuth, tools plus `ContextSource` resources/prompts, cache hints, tool-list subscriptions, and MRTR; one immutable admitted tool capture per generation; snapshots refresh atomically from add/rm/login/reload/config/TTL/list changes; failed refresh retains last-good and truthful health; foreign direct and collapsed meta-tools require exact tool plus egress authority. Bring the final rooted `RunController` and leases forward from M4. **`ego mcp-server`** (I1): Claude-compatible MCP 2025-11-25 stdio with run/continue/cancel/status tools and sanitized resources, no second served revision, MCP Tasks, or server prompts. | A current static or collapsed MCP server reloads without changing an active generation, every selected inner operation crosses permission/egress, a failed refresh retains last-good, and Claude Code delegates a scoped run to εgo over 2025-11-25; exact-Luna proves cancellation before and after the first outbound HTTP event on a released SDK. |
 | **M3 — sessions in full** | Full compaction (intent, latest results, blockers, verification state survive), fork, replay/export (`--sanitize`), catalogue polish, budgets incl. judge budget line, final tagged codec-8 physical evidence and rebuildable manifest, `[profile.ci]` contract (U1). `--ephemeral` is refused before effects. Exact context overflow settles without blind retry. One deterministic target-log-backed transition serves `/compact`, headless `ego compact`, the narrow ACP `_ego/compact` extension, and a fifth served MCP tool, `compact`; it adds no transition journal, `RunCommand` mode, or proactive threshold. | `--budget`, `ego fork`, compaction across a context-overflow task from every supported host, including response-loss confirmation and later Main adoption; a CI job consumes the sanitized run bundle. |
 | **M4 — subagents, skills, hooks** *(complete)* | Sub-loops with context isolation over M2's existing `RunController` IDs/leases (U2); strict Agent Skills/Claude-compatible `SKILL.md` frontmatter, system/user/project admission, progressive disclosure, typed user/model invocation, `/skills` rescan, durable digest/rendered content, and fail-closed fork/hook fields; one strict source-bound hook catalogue and deterministic runner over the `Hook` port; stable `command`, `http`, `mcp_tool`, and `prompt` adapters through their real safety owners; `/hooks` and read-only `ego hooks ls`; executable agent files remain top-level run inputs. | A model sees only admitted skill descriptors, invokes one through the typed Skill operation, and cannot widen tools/sandbox/offline/budget; user-only/model-only visibility, reload failure, resume/compaction, and fork ownership are proven; `/hooks` and `ego hooks ls --json` project the same immutable catalogue, unsupported/deprecated/experimental hook inputs fail by exact name, a pre-effect hook blocks a forbidden commit without granting authority, adapter settlement is durable, an executable `.ego` file runs as a shebang script, and parallel subagents hold distinct leases. |
-| **M5 — ACP full + remaining shapes** | `ego-acp` complete (v1+v2, negotiated capabilities), tuicommander + Zed as hosts; openai-responses + google-generative-ai shapes. New shapes register their final resolution sources in M1's existing model catalogue rather than introducing another catalogue. | ego driven from Zed and tuicommander with session list, model switch, live cost. |
+| **M5 — final product** | Complete the 17 baseline commands and 24 selected actions; persist config/rules, session metadata, and goals; ship delivery-safe retry/fallback; give provider credentials one zeroizing lifetime; remove the deprecated xAI API-key candidate; add public OpenAI Responses and stable Gemini v1 Interactions through the existing catalogue and five-check promotion gate; complete the selected durable ACP v1 lifecycle and negotiated host controls; generate CLI reference/completions from the ratified grammar. Protocol v2 projections/goldens remain inactive expiry evidence. | The complete product passes deterministic gates and real-host matrices in current Zed and the separate-repository TUICommander ACP client, including lifecycle, model/config changes, permission, pause/resume, streaming, and cumulative usage/cost. Public OpenAI and Gemini promote only after operator keys, current entitled models, and recorded live check 5 exist; absence is a closure blocker, never authority for a fallback. |
 
 Order rationale: contracts before code that would freeze them; safety before
 the first write lands in anger; permissions before MCP because the permit
@@ -551,11 +594,13 @@ before its contract.
 1. **Seatbelt deprecation** — `sandbox-exec` may break in a future macOS.
    Mitigation: it is one `Sandbox` impl; the null backend + classifier is the
    documented fallback. Codex shares this exposure.
-2. **ACP `unstable_*` churn** — the features ego needs are unstable upstream.
-   Mitigation: pin versions; `ego-acp` is the only crate exposed.
-3. **Scope of v1** — four blocks is a lot. The mitigation *is* §8: every
-   milestone is a usable tool, so scope pressure cuts tail milestones, not
-   quality.
+2. **ACP contract churn** — selected v1 methods and the v2 Draft can change
+   upstream. Mitigation: keep dated primary-source audits, isolate ACP DTOs in
+   `ego-acp`, and require deterministic plus real-host matrices before a served
+   version or capability changes.
+3. **Final-product scope** — M5 is large. Its phases order dependencies and
+   evidence only; scope pressure does not cut required final behavior or create
+   a reduced release.
 4. **fx attribution** — any verbatim reuse of fx's system prompt sections
    requires Apache-2.0 attribution in `NOTICE`. Decide at M0 when the prompt
    is written.

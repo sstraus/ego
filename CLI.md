@@ -1,8 +1,10 @@
 # ego — Command language
 
-Date: 2026-08-19. Status: **§4 (output contracts) ratified by maintainer
-2026-08-21 — §4.1 through §4.5 in full, not a subset.** The rest of this
-document remains proposed.
+Date: 2026-08-19; M5 contract freeze: 2026-09-03. Status: **§4 (output
+contracts) ratified by maintainer 2026-08-21 — §4.1 through §4.5 in full, not a
+subset.** regression case freezes the
+M5 amendments in this document; unaffected previously proposed prose remains
+proposed.
 
 
 
@@ -27,7 +29,8 @@ document remains proposed.
 ego [PROMPT]                  interactive session (prompt submitted if given)
 ego run [PROMPT]              headless one-shot; PROMPT from argv, -f FILE, or stdin
 ego resume [ID] [PROMPT]      continue a session; no ID = latest in this workspace;
-                              --answer QUESTION_ID=JSON answers pending input
+                              --answer QUESTION_ID=JSON answers pending input;
+                              --name and --goal are metadata-only operations
 ego ls                        list sessions (this workspace; --all for every one)
 ego fork <ID>                 branch a session
 ego compact <ID> --request-id UUID
@@ -55,7 +58,7 @@ ego rules  ls|allow|deny|revoke|remember|explain   (permission rules,
                               canonical intent + matching rule, dry)
 ego usage  [--period P] [--json]             cost and token report
 ego acp                       serve ACP on stdio (the embedding surface)
-ego doctor                    environment / config / credential diagnosis
+ego doctor [--json]           read-only redacted health snapshot
 ```
 
 Notes:
@@ -76,6 +79,11 @@ Notes:
   file is a usage error. Relative files resolve from canonical `-C`. Existing
   identical bytes succeed without rewrite, different bytes conflict, and a
   published-but-durability-uncertain file remains visible and is not retried.
+- Metadata-only session operations reuse `resume` and never start a model turn:
+  `ego resume ID --name show|set=TEXT|clear [--output text|json|jsonl]` and
+  `ego resume ID --goal show|set=TEXT|achieve|block=REASON` with optional
+  `--output text|json|jsonl`. They do not accept a prompt or `--answer` in the
+  same invocation.
 
 ### 2.1 Availability — what ships today
 
@@ -84,6 +92,8 @@ seventeen commands; this build implements **fourteen**. The remaining three are
 refused **by name**, each naming the subsystem it waits on, from the `UNBUILT`
 table in `crates/ego-cli/src/cli.rs`. A test binds that table to this section,
 so a command can be refused as documented only while this list still offers it.
+M5 must enable all seventeen from their final owners; this count is current
+availability, not permission to ship a fourteen-command product.
 
 A word that is **not** on this list stays a prompt: §2's first line is
 `ego [PROMPT]`, so `ego "explain this failing test"` is the interactive form
@@ -126,8 +136,9 @@ milestones remain dependencies of the final product.
 
 ## 3. Flags (the argument grammar)
 
-Grouped; all long flags, short forms only for the hot five
-(`-m -q -v -C -f`).
+Grouped; all long flags, short forms only for the hot four
+(`-m -q -C -f`). `-v`/`--verbose` has no ratified semantics and is not part of
+the final grammar.
 
 **Model and generation**
 
@@ -188,6 +199,9 @@ ceilings come only from an administrator's `/etc/ego`.
     --artifact-dir DIR  override the sanitized artifact root; valid only for
                         the explicit `ci` profile
     --answer ID=JSON    repeatable; answer a pending AskQuestion while resuming
+    --name OP           resume only; show|set=TEXT|clear, metadata-only
+    --goal OP           resume only; show|set=TEXT|achieve|block=REASON,
+                        metadata-only
 ```
 
 **Scripting contract**
@@ -210,25 +224,36 @@ ceilings come only from an administrator's `/etc/ego`.
                         (Codex's mechanism: -c 'sandbox.mode="workspace"')
     --profile NAME      layer [profile.NAME] from config (§7)
     --bare              no ambient discovery even in a trusted workspace
--q / -v / --no-color
+-q / --no-color
 ```
 
 **Attachments and tools**
 
 ```
     --attach IMAGE_PATH|HTTPS_IMAGE_URL
-                        repeatable; exact image bytes as context
+                        repeatable; exact image bytes admitted as a durable
+                        content block before provider projection
     --tools LIST        restrict builtin tools;  --no-tools for pure generation
     --mcp NAME|@cfg.json  attach a named effective or strict explicitly named
                           JSON MCP server for this invocation (repeatable)
 ```
+
+Final retry semantics are owned above provider mappings. `--retry N` permits
+at most N additional attempts on the same resolved model and only after a
+`DefinitelyUnsent` settlement. Each repeatable `--fallback P/M` is an ordered
+candidate that is re-resolved from current facts and attempted only after
+capability and request-expressibility checks preserve tools, images, schemas,
+limits, and reasoning state. A possibly-sent attempt stops automatic retry and
+fallback. Every attempt has a fresh ID, reservation, request digest, settlement,
+usage, and cost; output totals fold them without hiding failed or charged work.
+See the accepted attempt-ownership ADR.
 
 ### 3.1 Availability — what ships today
 
 §4.5 requires this table: *no flag documented before its contract is
 implemented*. The grammar above is the **whole** design; this says which of it
 you can actually run. Checked against the clap definitions in
-`crates/ego-cli/src/cli.rs`, not against intent, on 2026-08-30.
+`crates/ego-cli/src/cli.rs`, not against intent, on 2026-09-03.
 
 A flag marked **no** is **refused by name**, with the subsystem it waits on —
 not swallowed, and not reported as an unknown argument. That mechanism is
@@ -246,6 +271,10 @@ written down. They are refused where the layers are read
 the flag, the file, the profile table and `-c`, and which arrives with the file
 and line that said it.
 
+Rows marked **M5 target** freeze a final spelling whose owning story has not
+yet changed the parser. They are not claimed as current and must become
+ordinary parsed flags rather than long-lived compatibility placeholders.
+
 | Flag | Current | Note |
 |---|---|---|
 | `-m, --model` | **yes** | |
@@ -259,6 +288,7 @@ and line that said it.
 | `--session-dir` | **yes** | |
 | `--artifact-dir` | **yes** | `ego run`/`ego resume` only, and only with the exact selected profile name `ci`; flags override `[profile.ci].artifact_dir` |
 | `--answer` | **yes** | `ego resume --answer QUESTION_ID=JSON` validates and durably settles pending questions before continuing the session |
+| `--name`, `--goal` | **M5 target** | regression case adds the exact metadata-only `ego resume` operations from §2; the current parser does not serve them |
 | `--output` | **yes** | `text\|json\|jsonl`. On `ego ls` the two machine forms are §4.6's, not §4.1/§4.2's — a listing is not a run |
 | `--all` | **yes** | `ego ls` only, and documented in §2 rather than here: §3 is the argument grammar of a *run*, and this widens a catalogue query |
 | `--schema`, `--schema-retries` | **yes** | `--schema-retries` ships as its own flag; §3 mentions it only inside `--schema`'s description |
@@ -270,15 +300,14 @@ and line that said it.
 | `--mode`, `--plan`, `--yolo`, `--allow`, `--deny` | **yes** | `--plan`/`--yolo` are spellings of `--mode`; two at once is a usage error. All five modes enforce. `auto` resolves a separate configured judge and routes its closed verdict before any human escalation. Five of the seven rule heads enforce: `read`, `write`, `list`, `search`, and `exec`; `net` and `tool` remain refused by name because no builtin produces those operations. The seven builtins are read, glob, grep, write, edit, exec, and read_tool_result. `edit` prepares both `Read` and `Write`; `read_tool_result` uses its session-evidence capability rather than a user-authored rule head. |
 | `--sandbox` | **yes** | `ro\|workspace\|off`, default `workspace`, enforced by the measured platform backend before a prepared process can launch; an unavailable required capability fails closed |
 | `-f`, `--file`, `--var` | **yes** | strict version-1 agent files load through the existing bounded YAML implementation, apply their configuration layer below flags, and substitute declared body variables. M4 extracts the shared envelope for skills and still owns the direct executable shebang end-to-end proof, not these flags' availability |
-| `--attach` | no | waiting on a non-text content block — the conversation model carries text, tool calls and tool results, so an image has nothing to be sent in |
+| `--attach` | **yes** | repeatable local-path or HTTPS image input; bytes enter the durable session-blob/content path before model-specific projection and unsupported model/profile combinations refuse before acquisition |
 | `--mcp` | **yes** | repeatable ordered selection of effective `NAME` entries and strict invocation-scoped `@FILE` entries; the selected live admission is shared by dispatch, `/tools`, `/doctor`, and deterministic `mcp_errors` |
-| `--retry`, `--fallback` | no | waiting on a retry seam. Delivery certainty is implemented and enforced; a generation owns its reservation for its whole life, so re-issuing one changes the attempt contract rather than adding a loop |
-| `-v`, `--verbose` | no | waiting on a **decision**, not a subsystem — the only such entry. §4.7 says exactly what `-q` suppresses and nothing anywhere says what `-v` adds. It was marked **yes** beside `--no-color` until 2026-08-23 while being parsed and read by nothing, which is `--no-color`'s own defect sitting in `--no-color`'s own row. The obvious answer, turning up `tracing`, is not obvious: this build installs no subscriber at all, so every `tracing::warn!` in the workspace already goes nowhere, and adding one puts a second writer on the stream §4.7's marks and notification own (R12) |
+| `--retry`, `--fallback` | **M5 target** | regression case installs the one-turn attempt coordinator; current delivery certainty alone does not authorize re-issue |
+| `-v`, `--verbose` | excluded | the current binary refuses this legacy placeholder by name. No final behavior was ratified; regression case retires the spelling while preserving the named retired-flag error contract |
 
-**Six documented flag spellings do not ship.** That is the gap this table
-exists to stop being invisible, and it is not a defect list — every one of them
-refuses by name and says what it is waiting on. The defect would be §3 reading,
-to someone who has not run the binary, as though all of it worked.
+The table distinguishes implemented flags, intentional refusals, frozen M5
+target spellings, and the excluded verbose placeholder. The defect would be §3
+reading, to someone who has not run the binary, as though all of it worked.
 
 Milestones in bold above are from `ARCHITECTURE.md` §8's table, which owns
 them; the flags with none are waiting on a subsystem that table does not place.
@@ -399,7 +428,10 @@ mutually-exclusive groups (`--session`/`--session-id`/`--ephemeral`, mode ×
 sandbox); a defined winner when limits collide (budget beats schema-retry:
 exit 5); **stdout is protocol-clean** in json/jsonl/acp modes, all diagnostics
 on stderr; agent files are a versioned format. CLI reference and completions
-are generated from the same clap definitions and snapshot-tested.
+are generated from the same final clap definitions and snapshot-tested. M5
+regression case regenerates both artifacts only after all 17 commands and their
+applicability rules are installed; hand-maintained parallel command lists are
+not release evidence.
 
 **`--help` and `--version` are answers, not errors**: stdout, exit 0, and a
 usage line naming the command that was asked about — `ego ls --help` says
@@ -457,7 +489,8 @@ event.
   tie. It is the order `ego resume` selects "latest" by, so the first row is
   always the session `ego resume` with no ID would continue.
 - **`model` and `title` are `null` today** and are present anyway. An omitted
-  key and a key nobody has set are two states with identical bytes.
+  key and a key nobody has set are two states with identical bytes. In M5,
+  `title` projects the durable display name and remains `null` when unset.
 - `created` and `updated` are UTC milliseconds since the epoch, the same
   `Timestamp` the session log carries.
 - The empty store writes `{"v":1,"sessions":[]}` and exits 0. A script that
@@ -556,8 +589,9 @@ while storage aliases would create a second trust and precedence namespace.
 
 `/skills`, `/skills list`, and `/skills diagnose` inspect the one admitted
 catalogue; `/skills rescan` prepares and atomically publishes a complete
-candidate; `/skills invoke <name> [arguments]` and `/name [arguments]` invoke a
-user-visible skill through the same typed operation. A model-visible skill is
+candidate; `/skills invoke <name> [arguments]` and `/<skill-name> [arguments]`
+invoke a user-visible skill through the same typed operation. A model-visible
+skill is
 announced by bounded name/description/trigger metadata like an admitted MCP
 capability. Its full body and rooted read-only resources enter context only
 after invocation. A user-only skill is never announced to the model, and a
@@ -599,6 +633,22 @@ menu, help, dispatch, and live availability read that one registry. Actions
 whose final owner has not landed remain visible with their explicit disabled
 reason rather than becoming model input or silently disappearing.
 
+The canonical metadata actions are `/name show`, `/name set TEXT`, and
+`/name clear`, with bare `/name` equal to `show`; and `/goal show`, `/goal set
+TEXT`, `/goal achieve`, and `/goal block REASON`, with bare `/goal` equal to
+`show`. They invoke the same metadata-only services as §2's `ego resume`
+spellings. A name never changes session identity. One goal may be active;
+`achieved` and `blocked` are terminal and a later objective starts a new goal.
+`achieve` is the operator's explicit completion attestation. `block REASON`
+records one blocker observation; only the third consecutive observation of the
+same condition makes the goal terminal, and progress or a changed condition
+resets that audit.
+
+Current availability remains narrower: `/doctor` dispatches only the admitted
+MCP health projection, `/name` and `/goal` are disabled, and root `ego doctor`
+is refused. M5 replaces that partial doctor handler and enables the root
+command together over one redacted, versioned, non-mutating health snapshot.
+
 The permission prompt has a plain representation that works in every terminal
 and scripted transcript: `allow`, `deny`, or `amend`. Amend reads a complete
 JSON object of replacement tool parameters, then re-runs prepare and policy
@@ -613,22 +663,10 @@ makes pasting a stack trace impossible. A paste arrives as one edit, never as
 keystrokes, so it is never interpreted as a slash command or a control
 sequence.
 
-**Ctrl+V asks for an image first and text second.** The image cannot come
-through the terminal: bracketed paste carries what the emulator decided to
-send, which is text, and OSC 52's read form is disabled by default on every
-host in the matrix — it lets anything on the far end of a PTY exfiltrate the
-clipboard, so a host that answered it would be the bug. It comes from the
-platform pasteboard, read directly. An image found there becomes a temporary
-file and then the same content block `--attach` produces; anything else is
-pasted as text.
-
-That works where ego runs on the machine that owns the pasteboard. Over SSH
-there is usually no pasteboard to read, and Ctrl+V falls through to text — the
-image is attached by naming it instead
-(`--attach IMAGE_PATH|HTTPS_IMAGE_URL`, §3). Stated here
-because it is a limit of where the clipboard lives, not a limit ego can lift:
-no CLI on the far end of a PTY can reach the pasteboard in front of the person
-typing.
+εgo does not read a platform pasteboard and assigns no image semantics to
+`Ctrl+V`. Terminal text paste remains ordinary editor input. Image input uses
+the explicit, scriptable `--attach IMAGE_PATH|HTTPS_IMAGE_URL` grammar; no
+clipboard fallback or OSC 52 read path is part of the product.
 
 ### 6.2 Availability — what ships today
 
@@ -643,14 +681,14 @@ bounded channels.
 |---|---|---|
 | Input line, history, multiline | **yes** | reedline. `Ctrl+C` abandons the line and keeps the session; `Ctrl+D` ends it |
 | Bracketed paste | **yes** | on for every read, off on exit. A pasted stack trace is one prompt, not its first line |
-| Ctrl+V | **refused by name** | it asks for a pasteboard *image* first (§6.1), and there is nowhere to put one — the same gap that refuses `--attach`. It refuses rather than silently pasting text, because only one of those two can be discovered |
+| Ctrl+V | legacy image action unavailable | M5 removes the special image placeholder; the final surface leaves text paste to the terminal/editor and uses `--attach` for images |
 | Permission dialog | **yes** | plain `allow`, `deny`, or `amend`; amend then reads replacement JSON parameters. Invalid answers re-prompt; Ctrl-C and EOF deny. The engine keeps the configured mode first and re-prepares/re-classifies every amendment |
 | Slash commands | **partly** | one shared 24-command registry drives typed-slash classification, completion, menu, help, and dispatch. Enabled actions have installed local handlers; unavailable actions remain registered and name their owning subsystem |
 | Live composer during a turn | **yes** | one Reedline owner accepts bounded external-printer output and preserves the exact draft through streaming, tools, permission waits, paste, and resize |
 | Ctrl-S drafts, prompt queue, steering | **yes** | exact LIFO drafts, durable FIFO busy input, safe-boundary steering, expedited Esc delivery, replay, and exit accounting |
 | Model/question menus and status line | **yes** | the shared model picker, typed question path, and width-aware status projection are live |
-| `--attach` | no | §3.1's row: waiting on a non-text content block |
-| OSC 133 A (prompt mark), OSC 7 (cwd) | no | deliberately: both are owned by the surface rather than by a run, and their exact terminal contract is not implemented. `ego run` emits 133 C/D, OSC 9;4 and — under TUICommander — 7770 |
+| `--attach` | **yes** | §3.1's durable image path; no pasteboard spelling is required |
+| OSC 133 A (prompt mark), OSC 7 (cwd) | excluded | not part of the final M5 terminal contract. `ego run` retains 133 C/D, OSC 9;4 and — under TUICommander — 7770 |
 
 ### 6.3 Live composer, drafts, queue, and steering
 
@@ -908,5 +946,28 @@ Precedence: flags > env (`EGO_MODEL`, `EGO_PROFILE`, …) > local >
 project > user > system, with system ceilings binding everyone. Credentials
 resolve through a source chain (OS keyring, systemd credentials, env,
 `credential_command` for Vault/SOPS, device-flow OAuth) via `ego auth` —
-never plaintext in config.
+never plaintext in config. M5 resolves provider material into one non-cloneable
+zeroizing owner: discovery borrows it, generation transfers it, and the guarded
+transport owns only the shortest zeroizing header presentation. Events,
+manifests, diagnostics, traces, and request digests carry status/source facts,
+never secret bytes.
+
+All config mutations use the one atomic transaction from the accepted config
+ADR. `ego config edit` writes a mode-0600 candidate, selects `$VISUAL` then
+`$EDITOR`, parses the editor value as argv without a shell, and edits outside
+the config lock. Publication reacquires the lock, compares the original digest,
+strictly parses the complete candidate, applies system ceilings, and atomically
+replaces the file. Conflict or publication uncertainty preserves an explicit
+candidate recovery path; cancel, unchanged content, or editor failure removes
+the candidate and leaves authoritative config untouched.
+
+`ego doctor [--json]` and `/doctor` are two renderings of one ordered,
+versioned `HealthSnapshot`: config, credential status, session store,
+sandbox/backend, provider/model catalogue, MCP, skills, and hooks. Doctor is
+non-mutating and redacted. It may read existing facts and perform bounded local
+or loopback checks; it never logs in, refreshes credentials or catalogues,
+reloads extensions, edits config, probes a hosted provider, uploads logs, or
+widens egress. `ok`, `warning`, `error`, and `not_checked` stay distinct; root
+exit is 1 only when an operational error exists. Until the shared service
+lands, root doctor is unavailable and slash doctor remains MCP-only.
 
