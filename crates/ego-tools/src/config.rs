@@ -5,10 +5,12 @@ use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 
 use ego_core::config::{
-    ConfigLayer, ManagedConfigKey, ManagedConfigValue, McpHttpAuth, McpLayerEntry, McpServerConfig,
-    Source, UserConfigError, UserConfigMutation, UserConfigMutationResult, UserConfigPublication,
-    UserConfigSnapshot, UserConfigStore, UserConfigTarget,
+    ConfigLayer, ManagedConfigKey, ManagedConfigValue, ManagedRuleEffect, McpHttpAuth,
+    McpLayerEntry, McpServerConfig, RuleMutation, RuleSnapshot, Source, UserConfigError,
+    UserConfigMutation, UserConfigMutationResult, UserConfigPublication, UserConfigSnapshot,
+    UserConfigStore, UserConfigTarget,
 };
+use ego_core::permit::rule::{Rule, RuleId};
 use fd_lock::RwLock;
 use toml_edit::{Array, DocumentMut, Item, Table, TableLike, Value, value};
 
@@ -42,6 +44,11 @@ where
             .map(|key| (key, managed_value(&parsed, &target, key)))
             .collect();
         Ok(UserConfigSnapshot { target, values })
+    }
+
+    fn rule_snapshot(&self, target: UserConfigTarget) -> Result<RuleSnapshot, UserConfigError> {
+        let (_, parsed) = read_user_config(&*self.io, &self.path)?;
+        Ok(rule_snapshot(&parsed, target))
     }
 
     fn mutate(
@@ -229,6 +236,230 @@ fn apply(
             target.insert(&name.to_string(), Item::Table(tombstone));
             Ok(true)
         }
+        UserConfigMutation::Rules { target, changes } => {
+            apply_rule_changes(document, parsed, &target, &changes)
+        }
+        UserConfigMutation::RevokeRule { target, id } => {
+            apply_rule_revoke(document, parsed, &target, &id)
+        }
+    }
+}
+
+fn rule_snapshot(parsed: &ConfigLayer, target: UserConfigTarget) -> RuleSnapshot {
+    let permissions = match &target {
+        UserConfigTarget::Base => parsed.permissions.as_ref(),
+        UserConfigTarget::Profile(name) => parsed
+            .profile
+            .get(name.as_str())
+            .and_then(|profile| profile.permissions.as_ref()),
+    };
+    RuleSnapshot {
+        target,
+        permissions_present: permissions.is_some(),
+        allow: permissions
+            .map(|permissions| permissions.allow.clone())
+            .unwrap_or_default(),
+        deny: permissions
+            .map(|permissions| permissions.deny.clone())
+            .unwrap_or_default(),
+    }
+}
+
+fn apply_rule_changes(
+    document: &mut DocumentMut,
+    parsed: &ConfigLayer,
+    target: &UserConfigTarget,
+    changes: &[RuleMutation],
+) -> Result<bool, UserConfigError> {
+    let snapshot = rule_snapshot(parsed, target.clone());
+    let mut allow = snapshot.allow;
+    let mut deny = snapshot.deny;
+    let mut additions = Vec::new();
+
+    for change in changes {
+        let (same, opposite) = match change.effect {
+            ManagedRuleEffect::Allow => (&allow, &deny),
+            ManagedRuleEffect::Deny => (&deny, &allow),
+        };
+        if opposite.iter().any(|rule| rule == &change.rule) {
+            return Err(UserConfigError::new(format!(
+                "rule `{}` already exists with the opposite effect",
+                change.rule
+            )));
+        }
+        if same.iter().any(|rule| rule == &change.rule) {
+            continue;
+        }
+        match change.effect {
+            ManagedRuleEffect::Allow => allow.push(change.rule.clone()),
+            ManagedRuleEffect::Deny => deny.push(change.rule.clone()),
+        }
+        additions.push(change);
+    }
+
+    if additions.is_empty() {
+        return Ok(false);
+    }
+    for change in additions {
+        rule_array_mut(document, target, change.effect)?.push(change.rule.to_string());
+    }
+    Ok(true)
+}
+
+fn apply_rule_revoke(
+    document: &mut DocumentMut,
+    parsed: &ConfigLayer,
+    target: &UserConfigTarget,
+    id: &RuleId,
+) -> Result<bool, UserConfigError> {
+    let snapshot = rule_snapshot(parsed, target.clone());
+    let allow = matching_rule_indices(&snapshot.allow, id)?;
+    let deny = matching_rule_indices(&snapshot.deny, id)?;
+    if let (Some(allow_index), Some(deny_index)) = (allow.first(), deny.first())
+        && snapshot.allow[*allow_index] != snapshot.deny[*deny_index]
+    {
+        return Err(UserConfigError::new(format!(
+            "rule ID `{id}` is ambiguous in the selected user config target"
+        )));
+    }
+    if allow.is_empty() && deny.is_empty() {
+        return Ok(false);
+    }
+    remove_rule_indices(document, target, ManagedRuleEffect::Allow, &allow)?;
+    remove_rule_indices(document, target, ManagedRuleEffect::Deny, &deny)?;
+    prune_rule_target(document, target)?;
+    Ok(true)
+}
+
+fn matching_rule_indices(rules: &[Rule], id: &RuleId) -> Result<Vec<usize>, UserConfigError> {
+    let matches = rules
+        .iter()
+        .enumerate()
+        .filter(|(_, rule)| rule.id() == *id)
+        .collect::<Vec<_>>();
+    if matches
+        .iter()
+        .skip(1)
+        .any(|(_, rule)| *rule != matches[0].1)
+    {
+        return Err(UserConfigError::new(format!(
+            "rule ID `{id}` is ambiguous in the selected user config target"
+        )));
+    }
+    Ok(matches.into_iter().map(|(index, _)| index).collect())
+}
+
+fn rule_array_mut<'a>(
+    document: &'a mut DocumentMut,
+    target: &UserConfigTarget,
+    effect: ManagedRuleEffect,
+) -> Result<&'a mut Array, UserConfigError> {
+    let target = managed_target_table_mut(document, target)?;
+    let permissions = table_like_field_mut(target, "permissions")?;
+    let field = rule_effect_field(effect);
+    if !permissions.contains_key(field) {
+        permissions.insert(field, value(Array::new()));
+    }
+    permissions
+        .get_mut(field)
+        .and_then(Item::as_array_mut)
+        .ok_or_else(|| {
+            UserConfigError::new(format!("user config `permissions.{field}` is not an array"))
+        })
+}
+
+fn remove_rule_indices(
+    document: &mut DocumentMut,
+    target: &UserConfigTarget,
+    effect: ManagedRuleEffect,
+    indices: &[usize],
+) -> Result<(), UserConfigError> {
+    if indices.is_empty() {
+        return Ok(());
+    }
+    let array = existing_rule_array_mut(document, target, effect)?;
+    for index in indices.iter().rev() {
+        array.remove(*index);
+    }
+    if array.is_empty() {
+        let permissions = existing_permissions_table_mut(document, target)?;
+        permissions.remove(rule_effect_field(effect));
+    }
+    Ok(())
+}
+
+fn existing_rule_array_mut<'a>(
+    document: &'a mut DocumentMut,
+    target: &UserConfigTarget,
+    effect: ManagedRuleEffect,
+) -> Result<&'a mut Array, UserConfigError> {
+    existing_permissions_table_mut(document, target)?
+        .get_mut(rule_effect_field(effect))
+        .and_then(Item::as_array_mut)
+        .ok_or_else(|| UserConfigError::new("stored permission rule list is missing"))
+}
+
+fn existing_permissions_table_mut<'a>(
+    document: &'a mut DocumentMut,
+    target: &UserConfigTarget,
+) -> Result<&'a mut dyn TableLike, UserConfigError> {
+    let target = match target {
+        UserConfigTarget::Base => document.as_table_mut() as &mut dyn TableLike,
+        UserConfigTarget::Profile(name) => {
+            let profiles = existing_table_like_field_mut(document.as_table_mut(), "profile")?;
+            existing_table_like_field_mut(profiles, name.as_str())?
+        }
+    };
+    existing_table_like_field_mut(target, "permissions")
+}
+
+fn prune_rule_target(
+    document: &mut DocumentMut,
+    target: &UserConfigTarget,
+) -> Result<(), UserConfigError> {
+    match target {
+        UserConfigTarget::Base => {
+            if document
+                .as_table()
+                .get("permissions")
+                .and_then(Item::as_table_like)
+                .is_some_and(|table| table.is_empty())
+            {
+                document.as_table_mut().remove("permissions");
+            }
+        }
+        UserConfigTarget::Profile(name) => {
+            let root = document.as_table_mut();
+            let remove_profiles = {
+                let profiles = existing_table_like_field_mut(root, "profile")?;
+                let remove_profile = {
+                    let profile = existing_table_like_field_mut(profiles, name.as_str())?;
+                    if profile
+                        .get("permissions")
+                        .and_then(Item::as_table_like)
+                        .is_some_and(|table| table.is_empty())
+                    {
+                        profile.remove("permissions");
+                    }
+                    profile.is_empty()
+                };
+                if remove_profile {
+                    profiles.remove(name.as_str());
+                }
+                profiles.is_empty()
+            };
+            if remove_profiles {
+                root.remove("profile");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn rule_effect_field(effect: ManagedRuleEffect) -> &'static str {
+    match effect {
+        ManagedRuleEffect::Allow => "allow",
+        ManagedRuleEffect::Deny => "deny",
     }
 }
 

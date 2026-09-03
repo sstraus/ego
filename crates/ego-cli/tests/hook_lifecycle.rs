@@ -20,7 +20,7 @@ use ego_cli::provider_http::McpProcessScope;
 use ego_cli::repl::actions::{ActionId, ActionSink, LocalAction, LocalActionOutcome};
 use ego_cli::run::RunModelSwitchOwner;
 use ego_core::config::{
-    ConfigLayer, ModelRef, Source, Trust, UserConfigError, UserConfigMutation,
+    ConfigLayer, ModelRef, RuleSnapshot, Source, Trust, UserConfigError, UserConfigMutation,
     UserConfigMutationFacts, UserConfigMutationResult, UserConfigPublication, UserConfigSnapshot,
     UserConfigStore, UserConfigTarget,
 };
@@ -399,6 +399,15 @@ impl UserConfigStore for ConfigStore {
                 .map(|key| (key, None))
                 .collect(),
             target,
+        })
+    }
+
+    fn rule_snapshot(&self, target: UserConfigTarget) -> Result<RuleSnapshot, UserConfigError> {
+        Ok(RuleSnapshot {
+            target,
+            permissions_present: false,
+            allow: Vec::new(),
+            deny: Vec::new(),
         })
     }
 

@@ -13,9 +13,9 @@ use ego_cli::model_picker::{
 };
 use ego_cli::repl::actions::{ActionId, ActionSink, LocalAction, LocalActionOutcome};
 use ego_core::config::{
-    ConfigLayer, ModelRef, Source, UserConfigError, UserConfigMutation, UserConfigMutationFacts,
-    UserConfigMutationResult, UserConfigPublication, UserConfigSnapshot, UserConfigStore,
-    UserConfigTarget,
+    ConfigLayer, ModelRef, RuleSnapshot, Source, UserConfigError, UserConfigMutation,
+    UserConfigMutationFacts, UserConfigMutationResult, UserConfigPublication, UserConfigSnapshot,
+    UserConfigStore, UserConfigTarget,
 };
 use ego_core::generator::capabilities::{
     CacheRetention, CancelSemantics, ImageInputSupport, ModelCapabilities, ReasoningCarryover,
@@ -123,6 +123,15 @@ impl UserConfigStore for RecordingUserConfigStore {
                 .map(|key| (key, None))
                 .collect(),
             target,
+        })
+    }
+
+    fn rule_snapshot(&self, target: UserConfigTarget) -> Result<RuleSnapshot, UserConfigError> {
+        Ok(RuleSnapshot {
+            target,
+            permissions_present: false,
+            allow: Vec::new(),
+            deny: Vec::new(),
         })
     }
 

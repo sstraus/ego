@@ -6,6 +6,7 @@
 //! mutation operation.
 
 use crate::generator::types::ThinkingLevel;
+use crate::permit::rule::{Rule, RuleId};
 
 use super::layer::{McpLayerEntry, McpServerConfig, McpServerName, validate_status_segment_names};
 use super::vocabulary::{ManagedConfigKey, ManagedConfigValue, UserConfigTarget};
@@ -48,6 +49,16 @@ pub enum UserConfigMutation {
     McpInsertUserTombstone {
         name: McpServerName,
         expected_user_entry: Option<McpLayerEntry>,
+    },
+    /// Add ordered permission rules to one exact user-owned target.
+    Rules {
+        target: UserConfigTarget,
+        changes: Vec<RuleMutation>,
+    },
+    /// Remove a predicate, regardless of its stored effect, from one target.
+    RevokeRule {
+        target: UserConfigTarget,
+        id: RuleId,
     },
 }
 
@@ -117,7 +128,12 @@ impl UserConfigMutation {
             | Self::McpInsertUserTombstone {
                 expected_user_entry: None,
                 ..
-            } => Ok(()),
+            }
+            | Self::Rules { .. } => Ok(()),
+            Self::RevokeRule { id, .. } if !id.is_known() => Err(UserConfigError::new(format!(
+                "rule ID `{id}` uses an unsupported grammar generation"
+            ))),
+            Self::RevokeRule { .. } => Ok(()),
         }
     }
 
@@ -127,7 +143,9 @@ impl UserConfigMutation {
             Self::ManagedSet { target, .. }
             | Self::ManagedUnset { target, .. }
             | Self::McpSet { target, .. }
-            | Self::McpDeleteUserEntry { target, .. } => target.clone(),
+            | Self::McpDeleteUserEntry { target, .. }
+            | Self::Rules { target, .. }
+            | Self::RevokeRule { target, .. } => target.clone(),
             Self::ModelAndThinking { .. }
             | Self::Statusline { .. }
             | Self::McpInsertUserTombstone { .. } => UserConfigTarget::Base,
@@ -166,6 +184,10 @@ impl UserConfigMutation {
             Self::McpInsertUserTombstone { name, .. } => {
                 UserConfigMutationFacts::McpInsertUserTombstone { name: name.clone() }
             }
+            Self::Rules { changes, .. } => UserConfigMutationFacts::Batch {
+                changes: changes.clone(),
+            },
+            Self::RevokeRule { id, .. } => UserConfigMutationFacts::Revoke { id: id.clone() },
         }
     }
 }
@@ -238,6 +260,29 @@ pub enum UserConfigMutationFacts {
     McpInsertUserTombstone {
         name: McpServerName,
     },
+    Batch {
+        changes: Vec<RuleMutation>,
+    },
+    Revoke {
+        id: RuleId,
+    },
+}
+
+/// Canonical facts for a persistent permission-rule mutation.
+pub type RuleMutationFacts = UserConfigMutationFacts;
+
+/// Which permission list owns a managed rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManagedRuleEffect {
+    Allow,
+    Deny,
+}
+
+/// One typed rule addition within an atomic user-config transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuleMutation {
+    pub effect: ManagedRuleEffect,
+    pub rule: Rule,
 }
 
 /// A failed user-config mutation. Callers must keep their previous in-memory
@@ -293,10 +338,22 @@ pub struct UserConfigSnapshot {
     pub values: Vec<(ManagedConfigKey, Option<ManagedConfigValue>)>,
 }
 
+/// The exact stored rule lists in one user-owned target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuleSnapshot {
+    pub target: UserConfigTarget,
+    pub permissions_present: bool,
+    pub allow: Vec<Rule>,
+    pub deny: Vec<Rule>,
+}
+
 /// The narrow consumer port for stored user configuration.
 pub trait UserConfigStore: Send + Sync {
     /// Read one stored user authority without resolving inherited values.
     fn snapshot(&self, target: UserConfigTarget) -> Result<UserConfigSnapshot, UserConfigError>;
+
+    /// Read the ordered stored rules without resolving inherited authority.
+    fn rule_snapshot(&self, target: UserConfigTarget) -> Result<RuleSnapshot, UserConfigError>;
 
     /// Apply one complete mutation. `Err` guarantees that publication did not
     /// occur and the previous config remains authoritative; an unchanged
