@@ -64,7 +64,7 @@ fn managed_mutation_facts_and_result_preserve_changed_and_publication_state() {
             value: ManagedConfigValue::parse(ManagedConfigKey::Bare, "true").unwrap(),
         }
     );
-    assert_eq!(result.changed, true);
+    assert!(result.changed);
     assert_eq!(
         result.publication,
         ego_core::config::UserConfigPublication::PublishedDurably
@@ -77,7 +77,7 @@ fn managed_mutation_facts_and_result_preserve_changed_and_publication_state() {
         changed: false,
         publication: ego_core::config::UserConfigPublication::NotPublished,
     };
-    assert_eq!(no_op.changed, false);
+    assert!(!no_op.changed);
     assert_eq!(
         no_op.publication,
         ego_core::config::UserConfigPublication::NotPublished

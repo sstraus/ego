@@ -4,7 +4,7 @@
 //! handles. The lifecycle service has no test-only control surface and opens
 //! no filesystem paths.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use ego_core::event::domain::{DomainEvent, Envelope, EventKind};
@@ -137,18 +137,17 @@ impl SessionLifecycleStore for FakeStore {
         _expected: Seq,
         event: DomainEvent,
     ) -> Result<LifecyclePublication, LifecycleAppendError> {
-        if let EventKind::SessionTitleChanged { title } = &event.kind {
-            if let Some(meta) = self
+        if let EventKind::SessionTitleChanged { title } = &event.kind
+            && let Some(meta) = self
                 .0
                 .lock()
                 .unwrap()
                 .metadata
                 .iter_mut()
                 .find(|meta| meta.id == id)
-            {
-                meta.title = title.clone();
-                meta.updated = event.env.ts;
-            }
+        {
+            meta.title = title.clone();
+            meta.updated = event.env.ts;
         }
         self.append(&id, &event)
             .map_err(LifecycleAppendError::Store)?;
@@ -304,10 +303,10 @@ fn event(text: &str, seq: u64) -> DomainEvent {
     }
 }
 
-fn metadata(id: SessionId, root: &PathBuf, created: u64) -> SessionMeta {
+fn metadata(id: SessionId, root: &Path, created: u64) -> SessionMeta {
     SessionMeta {
         id,
-        workspace_root: root.clone(),
+        workspace_root: root.to_path_buf(),
         model: None,
         created: Timestamp::from_millis(created),
         updated: Timestamp::from_millis(created),

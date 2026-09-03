@@ -121,7 +121,7 @@ fn visual_wins_and_lexed_argv_has_candidate_last_without_shell_expansion() {
     assert!(!stderr.contains("EDITOR-RAN"));
     assert!(stderr.find("config").unwrap() < stderr.find("visual-start").unwrap());
     let argv = fs::read_to_string(fixture.workspace.path().join("argv.txt")).unwrap();
-    assert_eq!(argv.lines().nth(0), Some("quoted arg"));
+    assert_eq!(argv.lines().next(), Some("quoted arg"));
     assert_eq!(argv.lines().nth(1), Some("literal $HOME"));
     assert_eq!(argv.lines().nth(2), Some("backslash"));
     assert!(

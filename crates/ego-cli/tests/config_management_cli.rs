@@ -78,7 +78,7 @@ fn root_grammar_accepts_only_the_frozen_config_forms() {
         &["config", "unset", "--profile", "ci", "model"],
         &["config", "ls", "--profile", "ci", "--json"],
     ] {
-        let output = fixture.run(&args);
+        let output = fixture.run(args);
         assert_ne!(
             output.status.code(),
             Some(2),
@@ -94,7 +94,7 @@ fn root_grammar_accepts_only_the_frozen_config_forms() {
         &["config", "set", "model=\"one\"", "mode=\"plan\""],
         &["config", "unset"],
     ] {
-        assert_usage_failure(&fixture.run(&args), "Usage");
+        assert_usage_failure(&fixture.run(args), "Usage");
     }
 }
 
@@ -320,7 +320,7 @@ fn rejected_values_and_usage_emit_no_receipt_and_keep_secrets_out_of_stderr() {
         &["config", "set", "permissions.allow=[\"read(src/**)\"]"],
         &["config", "set", "model=SECRET-DO-NOT-LEAK", "extra"],
     ] {
-        let output = fixture.run(&args);
+        let output = fixture.run(args);
         assert!(output.status.code().is_some_and(|code| code != 0));
         assert!(output.stdout.is_empty());
         assert!(error(&output).contains("config") || error(&output).contains("model"));

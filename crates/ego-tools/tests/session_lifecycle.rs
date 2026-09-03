@@ -50,17 +50,12 @@ struct RecordingIo {
     calls: Arc<Mutex<Vec<IoCall>>>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 enum PublicationCut {
+    #[default]
     None,
     BeforeRename,
     AfterRename,
-}
-
-impl Default for PublicationCut {
-    fn default() -> Self {
-        Self::None
-    }
 }
 
 #[derive(Default)]
@@ -256,8 +251,7 @@ fn create_header_only_publishes_manifest_and_empty_log() {
         calls
             .lock()
             .unwrap()
-            .iter()
-            .any(|call| *call == IoCall::ReplaceAtomicPublication)
+            .contains(&IoCall::ReplaceAtomicPublication)
     );
 }
 
@@ -585,7 +579,7 @@ fn reopened_lifecycle_preserves_title_lineage_and_keyset_catalogue_order() {
         Some(ego_core::session::SessionLineage::Fork { source: parent, .. }) if parent == source
     ));
 
-    let mut expected = vec![source, peer, third, child];
+    let mut expected = [source, peer, third, child];
     expected.sort();
     let page = reopened.list(None, 2, Some(&workspace)).unwrap();
     assert_eq!(
