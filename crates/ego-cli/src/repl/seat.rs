@@ -92,6 +92,8 @@ enum SurfaceActionEffect {
     Sessions,
     Usage,
     New,
+    Name,
+    Goal,
     Help,
     Clear,
     Statusline,
@@ -126,6 +128,8 @@ impl ActionSink for SurfaceActionSink {
             ActionId::Sessions => SurfaceActionEffect::Sessions,
             ActionId::Usage => SurfaceActionEffect::Usage,
             ActionId::New => SurfaceActionEffect::New,
+            ActionId::Name => SurfaceActionEffect::Name,
+            ActionId::Goal => SurfaceActionEffect::Goal,
             ActionId::Help => SurfaceActionEffect::Help,
             ActionId::Clear => SurfaceActionEffect::Clear,
             ActionId::Statusline => SurfaceActionEffect::Statusline,
@@ -695,6 +699,9 @@ impl Seat {
                     .registry
                     .classify(self.registry.submit(text.clone(), InputOrigin::Typed))
                 {
+                    Dispatch::SessionMetadata(operation) => {
+                        Line::HostCommand(HostCommand::SessionMetadata(operation))
+                    }
                     Dispatch::Skill(operation) => Line::HostCommand(HostCommand::Skill(operation)),
                     Dispatch::Skills(action) => Line::HostCommand(HostCommand::Skills(action)),
                     Dispatch::Hooks => Line::HostCommand(HostCommand::Hooks),
@@ -798,6 +805,8 @@ impl Seat {
             ActionId::Sessions,
             ActionId::Usage,
             ActionId::New,
+            ActionId::Name,
+            ActionId::Goal,
             ActionId::Help,
             ActionId::Clear,
             ActionId::Statusline,
@@ -1345,6 +1354,14 @@ fn surface_line(
                     }
                     continue;
                 }
+                Dispatch::SessionMetadata(operation) => {
+                    if let Some(line) =
+                        route_session_metadata(status, operation, phase.get() == EditPhase::Busy)
+                    {
+                        return (line, failed);
+                    }
+                    continue;
+                }
                 Dispatch::Skill(operation) => {
                     if phase.get() == EditPhase::Busy {
                         status.lock().expect("surface status lock").notice =
@@ -1464,6 +1481,10 @@ fn surface_line(
                             editor.run_edit_commands(&[EditCommand::Clear]);
                             status.lock().expect("surface status lock").origin = InputOrigin::Typed;
                         }
+                        continue;
+                    }
+                    Dispatch::SessionMetadata(operation) => {
+                        route_session_metadata(status, operation, true);
                         continue;
                     }
                     Dispatch::Skill(_) => {
@@ -1682,6 +1703,20 @@ fn apply_surface_effect(
         SurfaceActionEffect::New => {
             return Some(Line::HostCommand(HostCommand::Action(ActionId::New)));
         }
+        SurfaceActionEffect::Name => {
+            return route_session_metadata(
+                status,
+                crate::cli::SessionMetadataOperation::Name(crate::cli::NameOperation::Show),
+                busy,
+            );
+        }
+        SurfaceActionEffect::Goal => {
+            return route_session_metadata(
+                status,
+                crate::cli::SessionMetadataOperation::Goal(crate::cli::GoalOperation::Show),
+                busy,
+            );
+        }
         SurfaceActionEffect::Help => {
             let help = {
                 let current = status.lock().expect("surface status lock");
@@ -1864,6 +1899,21 @@ fn apply_surface_effect(
     }
     repaint_status(status);
     None
+}
+
+fn route_session_metadata(
+    status: &SharedStatus,
+    operation: crate::cli::SessionMetadataOperation,
+    busy: bool,
+) -> Option<Line> {
+    if busy {
+        status.lock().expect("surface status lock").notice =
+            Some("session metadata is unavailable while a turn is running".to_owned());
+        repaint_status(status);
+        None
+    } else {
+        Some(Line::HostCommand(HostCommand::SessionMetadata(operation)))
+    }
 }
 
 enum PolicyModeChoice {
@@ -3647,6 +3697,72 @@ mod tests {
             );
             drop(observed);
             pending.lock().unwrap().take();
+        }
+    }
+
+    #[test]
+    fn regression_case_surface_sink_routes_name_and_goal() {
+        let pending = Arc::new(Mutex::new(None));
+        let mut sink = SurfaceActionSink {
+            pending: Arc::clone(&pending),
+        };
+        for (id, effect) in [
+            (ActionId::Name, SurfaceActionEffect::Name),
+            (ActionId::Goal, SurfaceActionEffect::Goal),
+        ] {
+            assert_eq!(
+                sink.invoke(LocalAction { id, busy: false }),
+                LocalActionOutcome::Completed
+            );
+            assert_eq!(
+                pending.lock().unwrap().as_ref().map(std::mem::discriminant),
+                Some(std::mem::discriminant(&effect))
+            );
+            pending.lock().unwrap().take();
+        }
+    }
+
+    #[test]
+    fn regression_case_surface_effect_maps_idle_and_refuses_busy() {
+        let mut editor = Reedline::create();
+        let phase = SurfacePhase::new(EditPhase::Idle);
+        let status = Arc::new(Mutex::new(SurfaceStatus::default()));
+        assert!(matches!(
+            apply_surface_effect(
+                &mut editor,
+                &phase,
+                &status,
+                SurfaceActionEffect::Name,
+                false
+            ),
+            Some(Line::HostCommand(HostCommand::SessionMetadata(
+                crate::cli::SessionMetadataOperation::Name(crate::cli::NameOperation::Show)
+            )))
+        ));
+        assert!(matches!(
+            apply_surface_effect(
+                &mut editor,
+                &phase,
+                &status,
+                SurfaceActionEffect::Goal,
+                false
+            ),
+            Some(Line::HostCommand(HostCommand::SessionMetadata(
+                crate::cli::SessionMetadataOperation::Goal(crate::cli::GoalOperation::Show)
+            )))
+        ));
+        for effect in [SurfaceActionEffect::Name, SurfaceActionEffect::Goal] {
+            status.lock().unwrap().notice = None;
+            assert!(apply_surface_effect(&mut editor, &phase, &status, effect, true).is_none());
+            assert!(
+                status
+                    .lock()
+                    .unwrap()
+                    .notice
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("unavailable while a turn is running")
+            );
         }
     }
 

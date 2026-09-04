@@ -52,6 +52,7 @@ pub(super) const INTERRUPT_COMMAND: &str = "ego:interrupt";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostCommand {
     Action(ActionId),
+    SessionMetadata(crate::cli::SessionMetadataOperation),
     Policy(PolicyControlRequest),
     Skill(AdmittedSkillOperation),
     Skills(SkillSurfaceAction),

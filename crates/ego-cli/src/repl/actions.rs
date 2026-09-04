@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ego_core::skill::AdmittedSkillOperation;
 
+use crate::cli::{GoalOperation, NameOperation, SessionMetadataOperation};
 use crate::skill::{SkillCatalogueCapture, SkillCatalogueView};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -73,6 +74,7 @@ impl Submission {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Dispatch {
     Action(ActionId),
+    SessionMetadata(SessionMetadataOperation),
     Skill(AdmittedSkillOperation),
     Skills(SkillSurfaceAction),
     Hooks,
@@ -401,10 +403,8 @@ impl ActionRegistry {
             enabled(Doctor, "doctor", "Diagnose local subsystem health"),
             enabled(Quit, "quit", "Exit the interactive session"),
             enabled(New, "new", "Create a durable session"),
-            enabled(Name, "name", "Set durable session display metadata")
-                .unavailable("session metadata"),
-            enabled(Goal, "goal", "Manage the persistent goal lifecycle")
-                .unavailable("the goal service"),
+            enabled(Name, "name", "Set durable session display metadata"),
+            enabled(Goal, "goal", "Manage the persistent goal lifecycle"),
             enabled(Tools, "tools", "Inspect available tools"),
             enabled(Skills, "skills", "List or invoke admitted skills")
                 .unavailable("the skill catalogue"),
@@ -634,6 +634,12 @@ impl ActionRegistry {
             let boundary = command.find(char::is_whitespace).unwrap_or(command.len());
             let name = &command[..boundary];
             let raw_arguments = command[boundary..].trim_start_matches(char::is_whitespace);
+            if name == "name" && self.resolve_slash(name) == Some(ActionId::Name) {
+                return parse_name_action(raw_arguments);
+            }
+            if name == "goal" && self.resolve_slash(name) == Some(ActionId::Goal) {
+                return parse_goal_action(raw_arguments);
+            }
             if name == "skills" {
                 if self.resolve_slash(name) != Some(ActionId::Skills)
                     || self.availability(ActionId::Skills) != Availability::Enabled
@@ -722,6 +728,58 @@ impl ActionRegistry {
         }
         Dispatch::Prompt
     }
+}
+
+fn parse_name_action(arguments: &str) -> Dispatch {
+    let operation = match arguments {
+        "" | "show" => NameOperation::Show,
+        "clear" => NameOperation::Clear,
+        _ => match arguments
+            .strip_prefix("set")
+            .and_then(|tail| tail.strip_prefix(char::is_whitespace))
+            .map(|tail| tail.trim_start_matches(char::is_whitespace))
+            .filter(|text| !text.is_empty())
+        {
+            Some(text) => NameOperation::Set(text.to_owned()),
+            None => {
+                return Dispatch::Refused {
+                    reason: "usage: /name [show|set TEXT|clear]",
+                };
+            }
+        },
+    };
+    Dispatch::SessionMetadata(SessionMetadataOperation::Name(operation))
+}
+
+fn parse_goal_action(arguments: &str) -> Dispatch {
+    let operation = match arguments {
+        "" | "show" => GoalOperation::Show,
+        "achieve" => GoalOperation::Achieve,
+        _ => {
+            let (keyword, operation) = if let Some(tail) = arguments.strip_prefix("set") {
+                (tail, GoalOperation::Set as fn(String) -> GoalOperation)
+            } else if let Some(tail) = arguments.strip_prefix("block") {
+                (tail, GoalOperation::Block as fn(String) -> GoalOperation)
+            } else {
+                return Dispatch::Refused {
+                    reason: "usage: /goal [show|set TEXT|achieve|block REASON]",
+                };
+            };
+            match keyword
+                .strip_prefix(char::is_whitespace)
+                .map(|tail| tail.trim_start_matches(char::is_whitespace))
+                .filter(|text| !text.is_empty())
+            {
+                Some(text) => operation(text.to_owned()),
+                None => {
+                    return Dispatch::Refused {
+                        reason: "usage: /goal [show|set TEXT|achieve|block REASON]",
+                    };
+                }
+            }
+        }
+    };
+    Dispatch::SessionMetadata(SessionMetadataOperation::Goal(operation))
 }
 
 fn parse_skill_invoke(arguments: &str) -> Option<(&str, &str)> {
