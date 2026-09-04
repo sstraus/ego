@@ -160,6 +160,17 @@ pub trait ForeignQuestionPort: Send + Sync {
 /// Session-owned factory for a foreign-question adapter bound to the exact
 /// hook dispatcher, resume floor and effect authority of one turn.
 pub trait McpRuntimeBinding: Send + Sync {
+    fn load_pending_foreign_policy(
+        &self,
+        continuation_id: &str,
+    ) -> Result<Arc<crate::turn::GenerationPolicySnapshot>, String>;
+
+    fn bind_pending_foreign_continuation(
+        &self,
+        continuation_id: &str,
+        snapshot: Arc<crate::turn::GenerationPolicySnapshot>,
+    ) -> Result<(), String>;
+
     fn hook_invocation_port<'a>(
         &self,
         policy: Arc<crate::permit::PolicyEngine>,

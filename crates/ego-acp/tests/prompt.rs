@@ -306,6 +306,21 @@ impl HookInvocationPort for UnusedHookPort {
 }
 
 impl McpRuntimeBinding for RecordingMcpRuntime {
+    fn load_pending_foreign_policy(
+        &self,
+        _continuation_id: &str,
+    ) -> Result<Arc<ego_core::turn::GenerationPolicySnapshot>, String> {
+        Err("prompt fixture has no pending foreign policy".to_owned())
+    }
+
+    fn bind_pending_foreign_continuation(
+        &self,
+        _continuation_id: &str,
+        _snapshot: Arc<ego_core::turn::GenerationPolicySnapshot>,
+    ) -> Result<(), String> {
+        Err("prompt fixture cannot bind a pending continuation".to_owned())
+    }
+
     fn hook_invocation_port<'a>(
         &self,
         _policy: Arc<ego_core::permit::PolicyEngine>,

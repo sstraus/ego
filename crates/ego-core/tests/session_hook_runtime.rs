@@ -519,6 +519,21 @@ impl ForeignQuestionPort for RejectingForeignPort {
 struct RuntimeBinding;
 
 impl McpRuntimeBinding for RuntimeBinding {
+    fn load_pending_foreign_policy(
+        &self,
+        _continuation_id: &str,
+    ) -> Result<Arc<ego_core::turn::GenerationPolicySnapshot>, String> {
+        Err("hook fixture has no pending foreign policy".to_owned())
+    }
+
+    fn bind_pending_foreign_continuation(
+        &self,
+        _continuation_id: &str,
+        _snapshot: Arc<ego_core::turn::GenerationPolicySnapshot>,
+    ) -> Result<(), String> {
+        Err("hook fixture cannot bind a pending continuation".to_owned())
+    }
+
     fn hook_invocation_port<'a>(
         &self,
         _policy: Arc<ego_core::permit::PolicyEngine>,

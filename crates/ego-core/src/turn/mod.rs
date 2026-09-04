@@ -1057,6 +1057,12 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         Ok(self)
     }
 
+    /// Bind hooks and foreign questions to one already-restored policy.
+    pub fn with_hook_policy(mut self, policy: Arc<PolicyEngine>) -> Result<Self, String> {
+        self.bind_hook_policy(policy)?;
+        Ok(self)
+    }
+
     fn bind_hook_policy(&mut self, policy: Arc<PolicyEngine>) -> Result<(), String> {
         let Some(binding) = self.hook_binding.as_ref() else {
             return Ok(());

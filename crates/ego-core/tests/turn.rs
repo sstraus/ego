@@ -1255,9 +1255,32 @@ mod turn {
     #[derive(Default)]
     struct RecordingMcpRuntime {
         floors: Mutex<Vec<ResumeFloor>>,
+        pending_policy: Mutex<Option<Arc<GenerationPolicySnapshot>>>,
+        bound_policies: Mutex<Vec<Arc<GenerationPolicySnapshot>>>,
     }
 
     impl McpRuntimeBinding for RecordingMcpRuntime {
+        fn load_pending_foreign_policy(
+            &self,
+            _continuation_id: &str,
+        ) -> Result<Arc<GenerationPolicySnapshot>, String> {
+            self.pending_policy
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(Arc::clone)
+                .ok_or_else(|| "pending generation policy is unavailable".into())
+        }
+
+        fn bind_pending_foreign_continuation(
+            &self,
+            _continuation_id: &str,
+            snapshot: Arc<GenerationPolicySnapshot>,
+        ) -> Result<(), String> {
+            self.bound_policies.lock().unwrap().push(snapshot);
+            Ok(())
+        }
+
         fn hook_invocation_port<'a>(
             &self,
             _policy: Arc<PolicyEngine>,
@@ -7888,6 +7911,103 @@ mod turn {
                 "provider"
             ]
         );
+    }
+
+    #[test]
+    fn mcp_runtime_binding_exposes_explicit_pending_policy_recovery_phases() {
+        let snapshot = captured_policy(Mode::Default, Ruleset::default()).snapshot();
+        let runtime = RecordingMcpRuntime {
+            pending_policy: Mutex::new(Some(Arc::clone(&snapshot))),
+            ..RecordingMcpRuntime::default()
+        };
+        let binding: &dyn McpRuntimeBinding = &runtime;
+
+        let loaded = binding
+            .load_pending_foreign_policy("continuation")
+            .expect("pending policy loads");
+        assert!(Arc::ptr_eq(&loaded, &snapshot));
+
+        binding
+            .bind_pending_foreign_continuation("continuation", Arc::clone(&loaded))
+            .expect("pending continuation binds");
+        let bound = runtime.bound_policies.lock().unwrap();
+        assert_eq!(bound.len(), 1);
+        assert!(Arc::ptr_eq(&bound[0], &snapshot));
+    }
+
+    #[test]
+    fn construction_policy_binding_uses_supplied_policy_without_reading_current() {
+        let fx = Fixture::new(vec![]);
+        let trace = generation_boundary::GenerationTrace::default();
+        let active = Arc::new(PolicyEngine::new(
+            CanonPath::new("/ws"),
+            Mode::Auto,
+            Ruleset::default(),
+        ));
+        let supplied = captured_policy(Mode::Default, Ruleset::default()).policy();
+        let policy_source = Arc::new(ScriptedPolicySource {
+            captures: Mutex::new(VecDeque::new()),
+            timeline: Arc::clone(&trace.timeline),
+            active,
+        });
+        let binding = Arc::new(RecordingHookBinding {
+            invoker: RecordingHookInvoker::default(),
+            policies: Mutex::new(Vec::new()),
+            mcp_bindings: Mutex::new(0),
+            fail_at: None,
+            timeline: Arc::clone(&trace.timeline),
+        });
+        let mut gate = fx.gate.borrow_mut();
+        let mut runtime = model_for(&fx, &fx.generator, &mut gate);
+        runtime.policy_source = policy_source;
+        let tools = Tools::new(
+            &fx.registry,
+            ToolEffectPorts::new(
+                &fx.fs,
+                fx.process.as_ref(),
+                &fx.evidence,
+                Arc::new(NoResolver),
+                Arc::new(NoHop),
+                Arc::new(NoDuplex),
+            ),
+            CanonPath::new("/ws"),
+        );
+        let turn = TurnLoop::open(
+            session(
+                SessionState::default(),
+                &fx.store,
+                &fx.clock,
+                &fx.sink,
+                CancelToken::new(),
+            ),
+            runtime,
+            tools,
+        );
+        let hook_catalogue =
+            HookCatalogue::admit_typed(&[], &[], Trust::Trusted).expect("empty hook catalogue");
+        let state = SessionHookState::new(
+            HookLifecycleDispatcher::new(HookRunner::new(), hook_catalogue),
+            turn.journal(),
+            CancelToken::new(),
+            std::time::Instant::now() + std::time::Duration::from_secs(30),
+        );
+        let mcp = Arc::new(RecordingMcpRuntime::default());
+
+        let _turn = turn
+            .with_hook_binding(state, binding.clone(), Some(mcp.clone()))
+            .expect("hook binding attaches to turn")
+            .with_hook_policy(Arc::clone(&supplied))
+            .expect("supplied policy binds");
+
+        let policies = binding.policies.lock().unwrap();
+        assert_eq!(policies.len(), 1);
+        assert!(Arc::ptr_eq(&policies[0], &supplied));
+        assert_eq!(*binding.mcp_bindings.lock().unwrap(), 1);
+        assert_eq!(
+            mcp.floors.lock().unwrap().as_slice(),
+            [supplied.resume_floor()]
+        );
+        assert_eq!(trace.timeline.lock().unwrap().as_slice(), ["bind"]);
     }
 
     #[test]

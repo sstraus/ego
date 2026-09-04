@@ -19,9 +19,9 @@ use ego_core::suspension::{
     ResumeFloor, ResumeKeySource,
 };
 use ego_core::turn::{
-    AdmittedToolSource, CapturedToolCatalogue, GenerationPolicyCaptureStore, McpRegistryEvent,
-    McpRegistryJournal, McpRegistryJournalError, RegisteredTool, ToolCatalogueError,
-    ToolEffectPorts,
+    AdmittedToolSource, CapturedToolCatalogue, GenerationPolicyCaptureStore,
+    GenerationPolicySnapshot, McpRegistryEvent, McpRegistryJournal, McpRegistryJournalError,
+    RegisteredTool, ToolCatalogueError, ToolEffectPorts,
 };
 use rmcp::model::{Prompt, Resource};
 use sha2::{Digest, Sha256};
@@ -1499,6 +1499,25 @@ impl McpRegistryRuntime {
 }
 
 impl McpRuntimeBinding for McpRegistryRuntime {
+    fn load_pending_foreign_policy(
+        &self,
+        continuation_id: &str,
+    ) -> Result<Arc<GenerationPolicySnapshot>, String> {
+        self.continuations
+            .load_pending_foreign_policy(continuation_id)
+            .map_err(|error| error.to_string())
+    }
+
+    fn bind_pending_foreign_continuation(
+        &self,
+        continuation_id: &str,
+        snapshot: Arc<GenerationPolicySnapshot>,
+    ) -> Result<(), String> {
+        self.continuations
+            .bind_pending_foreign_continuation(continuation_id, snapshot)
+            .map_err(|error| error.to_string())
+    }
+
     fn hook_invocation_port<'a>(
         &self,
         policy: Arc<ego_core::permit::PolicyEngine>,

@@ -518,6 +518,21 @@ impl ego_core::turn::GenerationPolicySource for TracingPolicySource {
 }
 
 impl McpRuntimeBinding for QuestionMcpRuntime {
+    fn load_pending_foreign_policy(
+        &self,
+        _continuation_id: &str,
+    ) -> Result<Arc<GenerationPolicySnapshot>, String> {
+        Err("question fixture has no pending foreign policy".to_owned())
+    }
+
+    fn bind_pending_foreign_continuation(
+        &self,
+        _continuation_id: &str,
+        _snapshot: Arc<GenerationPolicySnapshot>,
+    ) -> Result<(), String> {
+        Err("question fixture cannot bind a pending continuation".to_owned())
+    }
+
     fn hook_invocation_port<'a>(
         &self,
         _policy: Arc<PolicyEngine>,
