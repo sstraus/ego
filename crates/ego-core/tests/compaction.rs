@@ -9,7 +9,7 @@ use ego_core::compact::{
     COMPACTION_PROMPT, COMPACTION_PROMPT_REVISION, Checkpoint, CompactionBusy, CompactionError,
     PreparedCompaction,
 };
-use ego_core::config::{Mode, ModelRef, Ruleset, SystemPrompt};
+use ego_core::config::{ModelRef, SystemPrompt};
 use ego_core::cost::{Amount, CurrencyCode, MeteringRevision, Money};
 use ego_core::cost::{CostDelta, UnknownCost};
 use ego_core::event::domain::{CancelCause, DomainEvent, Envelope, EventKind, GenerationRole};
@@ -38,8 +38,8 @@ use ego_core::generator::types::{
 };
 use ego_core::permit::fake::FakeFs;
 use ego_core::permit::{
-    CanonPath, DuplexHandle, DuplexSpawner, OneHop, OneHopResponse, PolicyEngine, ProcessError,
-    ProcessExecutor, ResolvedConnect, Resolver, SpawnSpec, ToolResult, TransportError,
+    CanonPath, DuplexHandle, DuplexSpawner, OneHop, OneHopResponse, ProcessError, ProcessExecutor,
+    ResolvedConnect, Resolver, SpawnSpec, ToolResult, TransportError,
 };
 use ego_core::public::{
     ItemKind as PublicItemKind, PUBLIC_EVENT_VERSION, PublicEvent, project_public,
@@ -766,18 +766,12 @@ fn compaction_turn_with_state(
         Amount::new(1_000, 0).expect("budget amount"),
         CurrencyCode::new("USD").expect("budget currency"),
     )));
-    let policy = Box::leak(Box::new(PolicyEngine::new(
-        CanonPath::new("/ws"),
-        Mode::Default,
-        Ruleset::default(),
-    )));
     let fs = Box::leak(Box::new(FakeFs::default()));
     let process = Box::leak(Box::new(CompactionNoProcess));
     let evidence = Box::leak(Box::new(CompactionNoEvidence));
     let registry: Vec<Arc<dyn ego_core::permit::Tool>> = Vec::new();
     let tools = Tools::new(
         &registry,
-        policy,
         ToolEffectPorts::new(
             fs,
             process,
@@ -800,6 +794,7 @@ fn compaction_turn_with_state(
             cancel: cancel.clone(),
         },
         GenerationRuntime {
+            policy_source: common::default_policy_source(),
             source,
             gate,
             config: TurnConfig {

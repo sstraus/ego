@@ -38,7 +38,7 @@ use ego_core::generator::types::{Conversation, GenRequest, Message, Role, Thinki
 use ego_core::hook::{
     HookCatalogue, HookConfigEntry, HookFuture, HookHandlerConfig, HookInvocationPort,
     HookInvocationRequest, HookLifecycleDispatcher, HookRunner, HookSource, HookStartedEvidence,
-    SessionHookRuntime,
+    SessionHookRuntime, SessionHookState,
 };
 use ego_core::permit::{CanonPath, Confinement, RunConfinement};
 use ego_core::run::{
@@ -824,7 +824,7 @@ fn parent_runtime(journal: DurableJournal, port: ReturnHookPort) -> SessionHookR
             )
             .expect("catalogue admission");
     }
-    SessionHookRuntime::new(
+    let state = SessionHookState::new(
         HookLifecycleDispatcher::new(
             HookRunner::new_with_durable_started(
                 records.iter().filter_map(HookStartedEvidence::from_event),
@@ -832,10 +832,10 @@ fn parent_runtime(journal: DurableJournal, port: ReturnHookPort) -> SessionHookR
             catalogue,
         ),
         shared,
-        Arc::new(port),
         CancelToken::new(),
         Instant::now() + Duration::from_secs(60),
-    )
+    );
+    state.bind(Arc::new(port))
 }
 
 struct Executor {

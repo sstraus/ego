@@ -591,7 +591,6 @@ mod turn_execution_observation {
         generator: Arc<FakeGenerator>,
         sink: CollectingSink,
         gate: SharedBudgetGate,
-        policy: PolicyEngine,
         fs: FakeFs,
         process: NoProcess,
         evidence: NoEvidence,
@@ -609,7 +608,6 @@ mod turn_execution_observation {
                     "1000".parse::<Amount>().unwrap(),
                     CurrencyCode::new("USD").unwrap(),
                 ))),
-                policy: PolicyEngine::new(CanonPath::new("/ws"), Mode::Default, Ruleset::default()),
                 fs: FakeFs::default(),
                 process: NoProcess,
                 evidence: NoEvidence,
@@ -620,7 +618,6 @@ mod turn_execution_observation {
         fn loop_(&mut self) -> TurnLoop<'_, '_> {
             let tools = Tools::new(
                 &self.registry,
-                &self.policy,
                 ToolEffectPorts::new(
                     &self.fs,
                     &self.process,
@@ -642,6 +639,7 @@ mod turn_execution_observation {
                     cancel: CancelToken::new(),
                 },
                 GenerationRuntime {
+                    policy_source: common::default_policy_source(),
                     source: Arc::new(FixedSource {
                         generator: self.generator.clone(),
                     }),

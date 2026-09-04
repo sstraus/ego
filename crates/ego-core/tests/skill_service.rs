@@ -27,6 +27,7 @@ use ego_core::generator::capabilities::ModelCapabilities;
 use ego_core::hook::{
     HookCatalogue, HookConfigEntry, HookFuture, HookHandlerConfig, HookInvocationPort,
     HookInvocationRequest, HookLifecycleDispatcher, HookRunner, SessionHookRuntime,
+    SessionHookState,
 };
 use ego_core::permit::{GuardedEffects, GuardedIo, Op, PreparedCall};
 use ego_core::run::{
@@ -783,7 +784,7 @@ fn turn_batch_selection_rejects_skill_and_effect_before_either_executes() {
             ego_core::permit::fake::FakeWriteTool,
         ))),
     ];
-    let policy = ego_core::permit::PolicyEngine::new(
+    let _policy = ego_core::permit::PolicyEngine::new(
         ego_core::permit::CanonPath::new("/workspace"),
         ego_core::config::Mode::Default,
         ego_core::config::Ruleset::default(),
@@ -793,7 +794,6 @@ fn turn_batch_selection_rejects_skill_and_effect_before_either_executes() {
     let evidence = NoEvidence::default();
     let tools = ego_core::turn::Tools::from_registry(
         &registered,
-        &policy,
         ego_core::turn::ToolEffectPorts::new(
             &fs,
             &process,
@@ -1258,16 +1258,16 @@ fn real_child_service() -> RealChildFixture {
             .expect("parent tool origin");
         origin.event = event;
     }
-    let parent = SessionHookRuntime::new(
+    let parent_state = SessionHookState::new(
         HookLifecycleDispatcher::new(
             HookRunner::new(),
             HookCatalogue::admit_typed(&[], &[], Trust::Trusted).expect("empty hook catalogue"),
         ),
         shared,
-        Arc::new(RecordingHookPort::default()),
         CancelToken::new(),
         Instant::now() + Duration::from_secs(60),
     );
+    let parent = parent_state.bind(Arc::new(RecordingHookPort::default()));
     RealChildFixture {
         child: ChildRunService::new(
             controller,

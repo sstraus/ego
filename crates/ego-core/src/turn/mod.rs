@@ -33,7 +33,7 @@ use crate::compact::{
     COMPACTION_PROMPT, Checkpoint, CompactionBusy, CompactionError, PreparedCompaction,
     checkpoint_frame,
 };
-use crate::config::{ModelRef, SystemPrompt};
+use crate::config::{Mode, ModelRef, SystemPrompt};
 use crate::cost::{Money, RateSource};
 use crate::event::domain::{
     CancelCause, EventKind, ExitReason, GenerationRole, OccupancyProvenance,
@@ -57,10 +57,15 @@ use crate::generator::port::AiEvent;
 use crate::generator::types::{
     Conversation, ErrorKind, GenRequest, Message, Role, StopReason, ToolDescriptor,
 };
-use crate::hook::{HookCausality, HookEvent, HookOccurrence, HookRunError, SessionHookRuntime};
+use crate::hook::{
+    HookCausality, HookEvent, HookInvocationBinding, HookOccurrence, HookRunError,
+    SessionHookRuntime, SessionHookState,
+};
 use crate::permit::ExecObservation;
 use crate::permit::judge::{JudgeConfig, JudgeDecoder, JudgeInput, JudgeOutcome};
-use crate::permit::{Authority, Classification, Pending, PolicyDenied, Resolution, ToolResult};
+use crate::permit::{
+    Authority, Classification, Pending, PolicyDenied, PolicyEngine, Resolution, ToolResult,
+};
 use crate::public::PublicEvent;
 use crate::question::{Elicitor, QuestionAnswer, QuestionOutcome, QuestionTarget};
 use crate::run::{Denial, DeniedBy};
@@ -484,9 +489,16 @@ pub struct Session<'a> {
     pub cancel: CancelToken,
 }
 
+/// Supplies active pre-generation authority and one immutable generation capture.
+pub trait GenerationPolicySource: Send + Sync {
+    fn current(&self) -> Result<Arc<PolicyEngine>, String>;
+    fn capture(&self) -> Result<Arc<PolicyEngine>, String>;
+}
+
 /// The run-owned inputs needed at every fresh generation boundary.
 pub struct GenerationRuntime {
     pub source: Arc<dyn GenerationModelSource>,
+    pub policy_source: Arc<dyn GenerationPolicySource>,
     pub gate: SharedBudgetGate,
     pub config: TurnConfig,
     pub admission: Arc<EvidenceAdmissionService>,
@@ -804,6 +816,7 @@ pub struct TurnLoop<'session, 'turn> {
     session_id: SessionId,
     journal: SharedJournal<'session>,
     source: Arc<dyn GenerationModelSource>,
+    policy_source: Arc<dyn GenerationPolicySource>,
     evidence: &'session dyn EvidenceStore,
     admission: Arc<EvidenceAdmissionService>,
     invocation: RunInvocationId,
@@ -820,10 +833,16 @@ pub struct TurnLoop<'session, 'turn> {
     foreign_question_port: Option<Arc<dyn crate::mcp::ForeignQuestionPort + 'turn>>,
     skill_invocation_port: Option<Arc<dyn crate::skill::SkillInvocationPort + 'turn>>,
     inherited_effect_tools: Option<Arc<BTreeSet<String>>>,
+    hook_binding: Option<HookBindingState<'session>>,
     hook_runtime: Option<SessionHookRuntime<'session>>,
     active_skill_scope: Option<crate::skill::ActiveSkillScope>,
     active_skill_invocations:
         BTreeMap<crate::event::skill::SkillInvocationId, crate::skill::SkillInvocation>,
+}
+
+struct HookBindingState<'session> {
+    state: SessionHookState<'session>,
+    binding: Arc<dyn HookInvocationBinding + 'session>,
 }
 
 fn admit_generation_evidence(
@@ -918,6 +937,7 @@ impl<'session, 'turn> TurnLoop<'session, 'turn> {
             session_id,
             journal,
             source: runtime.source,
+            policy_source: runtime.policy_source,
             evidence,
             admission: runtime.admission,
             invocation: runtime.invocation,
@@ -934,6 +954,7 @@ impl<'session, 'turn> TurnLoop<'session, 'turn> {
             foreign_question_port: None,
             skill_invocation_port: None,
             inherited_effect_tools: None,
+            hook_binding: None,
             hook_runtime: None,
             active_skill_scope: None,
             active_skill_invocations: BTreeMap::new(),
@@ -943,6 +964,12 @@ impl<'session, 'turn> TurnLoop<'session, 'turn> {
     /// Attach the stable host facts for the optional judge seat.
     pub fn with_judge(mut self, judge: JudgeContext) -> Self {
         self.judge = Some(judge);
+        self
+    }
+
+    /// Replace the run's generation policy source during construction.
+    pub fn with_policy_source(mut self, source: Arc<dyn GenerationPolicySource>) -> Self {
+        self.policy_source = source;
         self
     }
 
@@ -1006,18 +1033,29 @@ impl<'session, 'turn> TurnLoop<'session, 'turn> {
         }
     }
 
-    /// Attach the session's borrow-scoped hook runtime.
-    pub fn with_hook_runtime(
+    /// Attach the session's shared hook state and immutable policy binding.
+    pub fn with_hook_binding(
         mut self,
-        runtime: SessionHookRuntime<'session>,
+        state: SessionHookState<'session>,
+        binding: Arc<dyn HookInvocationBinding + 'session>,
     ) -> Result<Self, HookRunError> {
-        if !self.journal.same_owner(&runtime.journal()) {
+        if !self.journal.same_owner(&state.journal()) {
             return Err(HookRunError::new(
-                "the hook runtime does not own this turn loop's journal",
+                "the hook state does not own this turn loop's journal",
             ));
         }
-        self.hook_runtime = Some(runtime);
+        self.hook_binding = Some(HookBindingState { state, binding });
         Ok(self)
+    }
+
+    fn bind_hook_policy(&mut self, policy: Arc<PolicyEngine>) -> Result<(), String> {
+        self.hook_runtime = None;
+        let Some(binding) = self.hook_binding.as_ref() else {
+            return Ok(());
+        };
+        let runtime = binding.state.bind(binding.binding.bind(policy, None)?);
+        self.hook_runtime = Some(runtime);
+        Ok(())
     }
 
     /// Attach ancestor-only provider history resolved by [`crate::session::ReplayContext`].
@@ -1094,12 +1132,14 @@ impl<'session, 'turn> TurnLoop<'session, 'turn> {
     pub fn into_state(self) -> Result<SessionState, SharedJournalError> {
         let Self {
             journal,
+            hook_binding,
             hook_runtime,
             foreign_question_port,
             ..
         } = self;
         drop(foreign_question_port);
         drop(hook_runtime);
+        drop(hook_binding);
         journal.try_into_state()
     }
 
@@ -2007,14 +2047,15 @@ impl<'session, 'turn> TurnLoop<'session, 'turn> {
             };
             sources.push(active.hook_source().map_err(skill_store_error)?);
         }
-        match self.hook_runtime.as_ref() {
-            Some(runtime) => runtime
+        match self.hook_binding.as_ref() {
+            Some(binding) => binding
+                .state
                 .replace_skill_sources(turn, &sources)
                 .map_err(hook_store_error),
             None if sources.iter().any(|source| {
                 matches!(source, crate::hook::HookSource::Skill { entries, .. } if !entries.is_empty())
             }) => Err(StoreError::Io(std::io::Error::other(
-                "skill hooks require the session hook runtime",
+                "skill hooks require the session hook state",
             ))),
             None => Ok(()),
         }
@@ -2033,10 +2074,11 @@ impl<'session, 'turn> TurnLoop<'session, 'turn> {
         self.active_skill_invocations.clear();
         self.active_skill_scope = None;
         // Activation already refuses non-empty skill hook sources when no
-        // session hook runtime exists. In that case only the in-memory skill
+        // session hook state exists. In that case only the in-memory skill
         // instruction and scope need clearing here.
-        if had_active && let Some(runtime) = self.hook_runtime.as_ref() {
-            runtime
+        if had_active && let Some(binding) = self.hook_binding.as_ref() {
+            binding
+                .state
                 .replace_skill_sources(turn, &[])
                 .map_err(hook_store_error)?;
         }
@@ -2201,7 +2243,7 @@ impl<'session, 'turn> TurnLoop<'session, 'turn> {
             Option<crate::event::id::QueuedPromptId>,
         )],
     ) -> Result<DriveOutcome, StoreError> {
-        for (text, images, queued_prompt) in prompts {
+        for (index, (text, images, queued_prompt)) in prompts.iter().enumerate() {
             let item = ItemId::new();
             let admitted = self.journal.append(
                 turn,
@@ -2213,6 +2255,28 @@ impl<'session, 'turn> TurnLoop<'session, 'turn> {
                     queued_prompt: *queued_prompt,
                 },
             )?;
+            if index == 0 && self.hook_binding.is_some() {
+                let active = match self.policy_source.current() {
+                    Ok(policy) => policy,
+                    Err(error) => {
+                        tracing::warn!(%error, "the active hook policy could not be read");
+                        let Generated::Ended(exit) =
+                            self.refuse(turn, error, ExitReason::Internal)?
+                        else {
+                            unreachable!("a refusal always ends the generation")
+                        };
+                        return Ok(DriveOutcome::Ended(exit, None));
+                    }
+                };
+                if let Err(error) = self.bind_hook_policy(active) {
+                    tracing::warn!(%error, "the active hook policy could not be bound");
+                    let Generated::Ended(exit) = self.refuse(turn, error, ExitReason::Internal)?
+                    else {
+                        unreachable!("a refusal always ends the generation")
+                    };
+                    return Ok(DriveOutcome::Ended(exit, None));
+                }
+            }
             if !self
                 .dispatch_hook(
                     HookCausality::item(item, turn, admitted),
@@ -2246,7 +2310,7 @@ impl<'session, 'turn> TurnLoop<'session, 'turn> {
                 return Ok(DriveOutcome::Ended(ExitReason::Budget, None));
             }
 
-            let (generation, terminal, reason, pending, error_kind) =
+            let (policy, generation, terminal, reason, pending, error_kind) =
                 match self.generate(turn).await? {
                     Generated::Ended(reason) => return Ok(DriveOutcome::Ended(reason, None)),
                     Generated::Cancelled { cause, pending } => {
@@ -2254,12 +2318,13 @@ impl<'session, 'turn> TurnLoop<'session, 'turn> {
                         return Ok(DriveOutcome::Ended(ExitReason::Cancelled(cause), None));
                     }
                     Generated::Stopped {
+                        policy,
                         generation,
                         terminal,
                         reason,
                         pending,
                         error_kind,
-                    } => (generation, terminal, reason, pending, error_kind),
+                    } => (policy, generation, terminal, reason, pending, error_kind),
                 };
 
             // A generation that says it stopped for tools and then names none
@@ -2376,7 +2441,10 @@ impl<'session, 'turn> TurnLoop<'session, 'turn> {
                 // needed an answer — reading like a refusal somebody
                 // configured on purpose. `DeniedBy` is what carries that
                 // difference past the prose and into §4.1's object.
-                let denial = match self.run_tool(turn, &mut pending[index]).await? {
+                let denial = match self
+                    .run_tool(policy.as_ref(), turn, &mut pending[index])
+                    .await?
+                {
                     ToolOutcome::Answered { ok, result } => {
                         let call = &pending[index];
                         self.journal.append(
@@ -2641,6 +2709,17 @@ impl<'session, 'turn> TurnLoop<'session, 'turn> {
 
         let source = Arc::clone(&self.source);
         let model_request = self.main_model_request();
+        let policy = match self.policy_source.capture() {
+            Ok(policy) => policy,
+            Err(error) => {
+                tracing::warn!(%error, "the generation policy could not be captured");
+                return self.refuse(turn, error, ExitReason::Internal);
+            }
+        };
+        if let Err(error) = self.bind_hook_policy(Arc::clone(&policy)) {
+            tracing::warn!(%error, "the generation hook policy could not be bound");
+            return self.refuse(turn, error, ExitReason::Internal);
+        }
         let profile = match await_controlled(
             &self.journal,
             &self.cancel,
@@ -2871,6 +2950,7 @@ impl<'session, 'turn> TurnLoop<'session, 'turn> {
             return Ok(Generated::Ended(ExitReason::Provider));
         }
         Ok(Generated::Stopped {
+            policy,
             generation: reference.generation(),
             terminal,
             reason: settlement.outcome.stop(),
@@ -3368,9 +3448,13 @@ impl<'session, 'turn> TurnLoop<'session, 'turn> {
     /// Run the one paid, tool-less opinion allowed for this pending call.
     async fn judge_pending(
         &mut self,
+        policy: &PolicyEngine,
         turn: TurnId,
         pending: &Pending,
     ) -> Result<JudgeRun, StoreError> {
+        if policy.mode() != Mode::Auto {
+            return Ok(JudgeRun::Unavailable);
+        }
         let Some(judge) = self.judge.as_ref() else {
             return Ok(JudgeRun::Unavailable);
         };
@@ -3617,6 +3701,7 @@ impl<'session, 'turn> TurnLoop<'session, 'turn> {
     /// nobody to ask. It comes back typed, and the caller decides.
     async fn run_tool(
         &mut self,
+        policy: &PolicyEngine,
         turn: TurnId,
         call: &mut PendingCall,
     ) -> Result<ToolOutcome, StoreError> {
@@ -3666,7 +3751,7 @@ impl<'session, 'turn> TurnLoop<'session, 'turn> {
                             Err(error) => return Ok(answered(false, error)),
                         };
                     let permission_selector = prepared.tool().to_owned();
-                    let authorized = match self.tools.authorize(prepared) {
+                    let authorized = match self.tools.authorize(policy, prepared) {
                         Classification::Settled(Ok(authorized)) => {
                             self.decided(
                                 turn,
@@ -3689,42 +3774,46 @@ impl<'session, 'turn> TurnLoop<'session, 'turn> {
                             .await?;
                             return Ok(ToolOutcome::Refused { denial });
                         }
-                        Classification::Ask(pending) => match self.tools.settle(pending).await {
-                            Resolution::Settled(Ok(authorized)) => {
-                                self.decided(
-                                    turn,
-                                    call,
-                                    &permission_selector,
-                                    true,
-                                    authorized.by().clone(),
-                                )
-                                .await?;
-                                authorized
-                            }
-                            Resolution::Settled(Err(denial)) => {
-                                self.decided(
-                                    turn,
-                                    call,
-                                    &permission_selector,
-                                    false,
-                                    denial.authority(),
-                                )
-                                .await?;
-                                return Ok(ToolOutcome::Refused { denial });
-                            }
-                            Resolution::Ask(pending) => {
-                                if !self.requested(turn, call, pending.request()).await? {
-                                    return Ok(answered(
-                                        false,
-                                        "blocked by PermissionRequest hook".to_owned(),
-                                    ));
+                        Classification::Ask(pending) => {
+                            match self.tools.settle(policy, pending).await {
+                                Resolution::Settled(Ok(authorized)) => {
+                                    self.decided(
+                                        turn,
+                                        call,
+                                        &permission_selector,
+                                        true,
+                                        authorized.by().clone(),
+                                    )
+                                    .await?;
+                                    authorized
                                 }
-                                return Ok(ToolOutcome::Unanswerable { pending });
+                                Resolution::Settled(Err(denial)) => {
+                                    self.decided(
+                                        turn,
+                                        call,
+                                        &permission_selector,
+                                        false,
+                                        denial.authority(),
+                                    )
+                                    .await?;
+                                    return Ok(ToolOutcome::Refused { denial });
+                                }
+                                Resolution::Ask(pending) => {
+                                    if !self.requested(turn, call, pending.request()).await? {
+                                        return Ok(answered(
+                                            false,
+                                            "blocked by PermissionRequest hook".to_owned(),
+                                        ));
+                                    }
+                                    return Ok(ToolOutcome::Unanswerable { pending });
+                                }
+                                Resolution::HumanSettled { .. } | Resolution::Reclassify { .. } => {
+                                    unreachable!(
+                                        "mode settlement cannot produce a human resolution"
+                                    )
+                                }
                             }
-                            Resolution::HumanSettled { .. } | Resolution::Reclassify { .. } => {
-                                unreachable!("mode settlement cannot produce a human resolution")
-                            }
-                        },
+                        }
                     };
                     let bytes = match self.tools.read_skill_resource(authorized, &target) {
                         Ok(bytes) => bytes,
@@ -3888,7 +3977,7 @@ impl<'session, 'turn> TurnLoop<'session, 'turn> {
         }
         let hook_selector = prepared.tool().to_owned();
         let authorized = loop {
-            match self.tools.authorize(prepared) {
+            match self.tools.authorize(policy, prepared) {
                 Classification::Settled(Ok(authorized)) => {
                     self.decided(turn, call, &hook_selector, true, authorized.by().clone())
                         .await?;
@@ -3905,7 +3994,7 @@ impl<'session, 'turn> TurnLoop<'session, 'turn> {
                         &self.cancel,
                         &mut self.control,
                         turn,
-                        self.tools.settle(pending),
+                        self.tools.settle(policy, pending),
                         InterruptDisposition::Return,
                     )
                     .await;
@@ -3936,7 +4025,7 @@ impl<'session, 'turn> TurnLoop<'session, 'turn> {
                                     "blocked by PermissionRequest hook".to_owned(),
                                 ));
                             }
-                            let pending = match self.judge_pending(turn, &pending).await? {
+                            let pending = match self.judge_pending(policy, turn, &pending).await? {
                                 JudgeRun::Unavailable => pending,
                                 JudgeRun::Ended(ExitReason::Cancelled(_)) => {
                                     self.decided(
@@ -3962,7 +4051,7 @@ impl<'session, 'turn> TurnLoop<'session, 'turn> {
                                         by.clone(),
                                     )
                                     .await?;
-                                    match self.tools.settle_judge(pending, &outcome, by) {
+                                    match self.tools.settle_judge(policy, pending, &outcome, by) {
                                         Resolution::Settled(Ok(authorized)) => break authorized,
                                         Resolution::Settled(Err(denial)) => {
                                             return Ok(ToolOutcome::Refused { denial });
@@ -3982,7 +4071,7 @@ impl<'session, 'turn> TurnLoop<'session, 'turn> {
                                 &self.cancel,
                                 &mut self.control,
                                 turn,
-                                self.tools.decide(pending),
+                                self.tools.decide(policy, pending),
                                 InterruptDisposition::Return,
                             )
                             .await;
@@ -4117,7 +4206,7 @@ impl<'session, 'turn> TurnLoop<'session, 'turn> {
             &mut self.control,
             turn,
             self.tools
-                .execute(tool.as_ref(), authorized, resume_context),
+                .execute(policy, tool.as_ref(), authorized, resume_context),
             InterruptDisposition::AwaitEffect,
         )
         .await;
@@ -4629,6 +4718,8 @@ enum Generated {
     },
     /// The generation finished. `pending` is what it asked to call.
     Stopped {
+        /// The exact immutable authority captured before this generation.
+        policy: Arc<PolicyEngine>,
         generation: GenerationId,
         terminal: EventId,
         reason: StopReason,

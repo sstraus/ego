@@ -7,7 +7,7 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use ego_core::budget::{BudgetGate, Metering, SharedBudgetGate};
-use ego_core::config::{Mode, Ruleset, SystemPrompt};
+use ego_core::config::SystemPrompt;
 use ego_core::cost::MeteringRevision;
 use ego_core::event::domain::{DomainEvent, EventKind, ExitReason};
 use ego_core::event::id::SessionId;
@@ -22,8 +22,8 @@ use ego_core::generator::port::{AiEvent, Generator, RequestExpressibilityError};
 use ego_core::generator::types::GenRequest;
 use ego_core::generator::types::StopReason;
 use ego_core::permit::{
-    CanonPath, DuplexSpawner, OneHop, OneHopResponse, PolicyEngine, ProcessError, ProcessExecutor,
-    Resolver, Tool, ToolError, ToolResult, Typed, TypedTool,
+    CanonPath, DuplexSpawner, OneHop, OneHopResponse, ProcessError, ProcessExecutor, Resolver,
+    Tool, ToolError, ToolResult, Typed, TypedTool,
 };
 use ego_core::sink::CollectingSink;
 use ego_core::state::SessionState;
@@ -331,11 +331,6 @@ fn loop_with(
     let store: &'static MemoryStore = Box::leak(Box::new(MemoryStore::default()));
     let clock = Box::leak(Box::new(FixedClock));
     let sink = Box::leak(Box::new(CollectingSink::new()));
-    let policy = Box::leak(Box::new(PolicyEngine::new(
-        CanonPath::new("/workspace"),
-        Mode::Default,
-        Ruleset::default(),
-    )));
     let fs = Box::leak(Box::new(ego_core::permit::fake::FakeFs::default()));
     let process = Box::leak(Box::new(NoProcess));
     let evidence = Box::leak(Box::new(NoEvidence));
@@ -345,7 +340,6 @@ fn loop_with(
     let tools = Tools::from_registry_with_source(
         static_tools,
         source,
-        policy,
         ToolEffectPorts::new(fs, process, evidence, resolver, hop, duplex),
         CanonPath::new("/workspace"),
     )?;
@@ -353,6 +347,7 @@ fn loop_with(
         ego_core::cost::CurrencyCode::new("USD").expect("currency"),
     ));
     let runtime = GenerationRuntime {
+        policy_source: common::default_policy_source(),
         source: Arc::new(TestGenerationSource { generator }),
         gate,
         config: TurnConfig {

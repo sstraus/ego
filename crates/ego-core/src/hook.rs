@@ -25,6 +25,8 @@ use crate::event::id::{
     EventId, GenerationId, ItemId, Producer, SessionId, SubagentInvocationId, TurnId,
 };
 use crate::event::skill::{SkillInvocationId, SkillSourceAuthority};
+use crate::mcp::McpRuntimeBinding;
+use crate::permit::PolicyEngine;
 use crate::permit::rule::{ArgvToken, Rule, Segment};
 use crate::state::SessionState;
 use crate::turn::{CancelToken, SharedJournal, SharedJournalError};
@@ -1797,6 +1799,17 @@ pub trait HookInvocationPort: Send + Sync {
     fn invoke<'a>(&'a self, request: HookInvocationRequest) -> HookFuture<'a>;
 }
 
+/// Builds one immutable hook invocation authority from one captured policy.
+pub trait HookInvocationBinding: Send + Sync {
+    fn bind<'a>(
+        &self,
+        policy: Arc<PolicyEngine>,
+        mcp: Option<&'a dyn McpRuntimeBinding>,
+    ) -> Result<Arc<dyn HookInvocationPort + 'a>, String>
+    where
+        Self: 'a;
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HookRunError(String);
 
@@ -2302,48 +2315,35 @@ impl HookLifecycleDispatcher {
     }
 }
 
-/// Borrow-scoped authority that binds one session's hook policy and effects.
+/// Long-lived hook state shared by every immutable invocation binding in a session.
 #[derive(Clone)]
-pub struct SessionHookRuntime<'s> {
+pub struct SessionHookState<'s> {
     dispatcher: HookLifecycleDispatcher,
     journal: SharedJournal<'s>,
-    invoker: Arc<dyn HookInvocationPort + 's>,
     parent_cancel: CancelToken,
     parent_deadline: Instant,
 }
 
-impl<'s> SessionHookRuntime<'s> {
+impl<'s> SessionHookState<'s> {
     pub fn new(
         dispatcher: HookLifecycleDispatcher,
         journal: SharedJournal<'s>,
-        invoker: Arc<dyn HookInvocationPort + 's>,
         parent_cancel: CancelToken,
         parent_deadline: Instant,
     ) -> Self {
         Self {
             dispatcher,
             journal,
-            invoker,
             parent_cancel,
             parent_deadline,
         }
     }
 
-    pub async fn dispatch(
-        &self,
-        producer: Producer,
-        occurrence: HookOccurrence,
-    ) -> Result<HookRunResult, HookRunError> {
-        self.dispatcher
-            .dispatch(
-                &self.journal,
-                self.invoker.as_ref(),
-                self.parent_cancel.clone(),
-                self.parent_deadline,
-                producer,
-                occurrence,
-            )
-            .await
+    pub fn bind(&self, invoker: Arc<dyn HookInvocationPort + 's>) -> SessionHookRuntime<'s> {
+        SessionHookRuntime {
+            state: self.clone(),
+            invoker,
+        }
     }
 
     pub fn journal(&self) -> SharedJournal<'s> {
@@ -2398,11 +2398,46 @@ impl<'s> SessionHookRuntime<'s> {
 
     pub fn state(&self) -> SessionState {
         self.inspect(Clone::clone)
-            .expect("session hook runtime journal inspection")
+            .expect("session hook state journal inspection")
     }
 
     pub fn try_into_state(self) -> Result<SessionState, SharedJournalError> {
         self.journal.try_into_state()
+    }
+}
+
+/// One immutable hook invocation authority bound over shared session state.
+#[derive(Clone)]
+pub struct SessionHookRuntime<'s> {
+    state: SessionHookState<'s>,
+    invoker: Arc<dyn HookInvocationPort + 's>,
+}
+
+impl<'s> SessionHookRuntime<'s> {
+    pub async fn dispatch(
+        &self,
+        producer: Producer,
+        occurrence: HookOccurrence,
+    ) -> Result<HookRunResult, HookRunError> {
+        self.state
+            .dispatcher
+            .dispatch(
+                &self.state.journal,
+                self.invoker.as_ref(),
+                self.state.parent_cancel.clone(),
+                self.state.parent_deadline,
+                producer,
+                occurrence,
+            )
+            .await
+    }
+
+    pub fn hook_state(&self) -> SessionHookState<'s> {
+        self.state.clone()
+    }
+
+    pub fn catalogue_evidence(&self) -> HookCatalogueEvidence {
+        self.state.catalogue_evidence()
     }
 }
 

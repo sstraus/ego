@@ -1,5 +1,5 @@
-//! The tool half of the loop's dependencies: a registry, the policy that
-//! authorises a call, and the raw filesystem a grant is exercised against.
+//! The tool half of the loop's dependencies: a registry and the raw
+//! filesystem a policy grant is exercised against.
 //!
 //! Kept as three stages rather than one `run(name, args)` future, for the
 //! reason `docs/decisions/2026-08-21-the-turn-loop.md` gives for rejecting a
@@ -171,7 +171,6 @@ impl<'a> ToolEffectPorts<'a> {
 pub struct Tools<'a> {
     registry: Vec<RegisteredTool>,
     source: std::sync::Arc<dyn AdmittedToolSource>,
-    policy: &'a PolicyEngine,
     /// The *raw* filesystem. [`GuardedEffects`] binds one permit to the raw
     /// effect ports at construction, so a fresh facade is built per
     /// authorised call; there is no permit to swap into a shared one.
@@ -184,7 +183,6 @@ pub struct Tools<'a> {
 impl<'a> Tools<'a> {
     pub fn new(
         registry: &[std::sync::Arc<dyn Tool>],
-        policy: &'a PolicyEngine,
         effects: ToolEffectPorts<'a>,
         cwd: CanonPath,
     ) -> Self {
@@ -195,7 +193,6 @@ impl<'a> Tools<'a> {
                 .map(RegisteredTool::Effect)
                 .collect(),
             source: std::sync::Arc::new(EmptyAdmittedToolSource),
-            policy,
             effects,
             cwd,
             skill_resource_roots: None,
@@ -207,14 +204,12 @@ impl<'a> Tools<'a> {
     /// present alongside effect tools.
     pub fn from_registry(
         registry: &[RegisteredTool],
-        policy: &'a PolicyEngine,
         effects: ToolEffectPorts<'a>,
         cwd: CanonPath,
     ) -> Self {
         Self {
             registry: registry.to_vec(),
             source: std::sync::Arc::new(EmptyAdmittedToolSource),
-            policy,
             effects,
             cwd,
             skill_resource_roots: None,
@@ -226,7 +221,6 @@ impl<'a> Tools<'a> {
     pub fn from_registry_with_source(
         registry: &[RegisteredTool],
         source: std::sync::Arc<dyn AdmittedToolSource>,
-        policy: &'a PolicyEngine,
         effects: ToolEffectPorts<'a>,
         cwd: CanonPath,
     ) -> Result<Self, ToolCatalogueError> {
@@ -234,7 +228,6 @@ impl<'a> Tools<'a> {
         Ok(Self {
             registry: registry.to_vec(),
             source,
-            policy,
             effects,
             cwd,
             skill_resource_roots: None,
@@ -529,8 +522,8 @@ impl<'a> Tools<'a> {
     /// Three outcomes rather than two, and the third is the one the loop must
     /// not collapse: a call nobody in this run can answer is not a call that
     /// was refused.
-    pub fn authorize(&self, call: PreparedCall) -> Classification {
-        self.policy.classify(call)
+    pub fn authorize(&self, policy: &PolicyEngine, call: PreparedCall) -> Classification {
+        policy.classify(call)
     }
 
     /// Stage two and a half: put a question the rules did not settle to the
@@ -545,24 +538,25 @@ impl<'a> Tools<'a> {
     /// The loop consults; it does not choose who answers. The approver is
     /// built inside [`PolicyEngine::new`] from the resolved mode, so there is
     /// nothing here to pass and nothing to substitute.
-    pub async fn settle(&self, pending: Pending) -> Resolution {
-        self.policy.settle(pending).await
+    pub async fn settle(&self, policy: &PolicyEngine, pending: Pending) -> Resolution {
+        policy.settle(pending).await
     }
 
     pub(crate) fn settle_judge(
         &self,
+        policy: &PolicyEngine,
         pending: Pending,
         outcome: &crate::permit::judge::JudgeOutcome,
         by: crate::permit::Authority,
     ) -> Resolution {
-        self.policy.settle_judge(pending, outcome, by)
+        policy.settle_judge(pending, outcome, by)
     }
 
     /// Consult the final human party after the loop has made the request
     /// durable. Keeping this separate from mode settlement is the journal's
     /// crash boundary while a person is deciding.
-    pub async fn decide(&self, pending: Pending) -> Resolution {
-        self.policy.decide(pending).await
+    pub async fn decide(&self, policy: &PolicyEngine, pending: Pending) -> Resolution {
+        policy.decide(pending).await
     }
 
     /// Stage three: run it, under the grant policy issued and through the
@@ -574,6 +568,7 @@ impl<'a> Tools<'a> {
     /// between where a different call could be substituted.
     pub async fn execute<'session>(
         &self,
+        policy: &PolicyEngine,
         tool: &dyn Tool,
         authorized: Authorized,
         context: Option<McpResumeContext<'session>>,
@@ -583,7 +578,7 @@ impl<'a> Tools<'a> {
                 self.resume
                     .as_ref()
                     .ok_or(crate::suspension::ContinuationError::InvalidKey)?
-                    .prepare(&authorized, self.policy.resume_floor())?,
+                    .prepare(&authorized, policy.resume_floor())?,
                 context,
             ))
         } else {

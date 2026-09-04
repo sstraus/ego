@@ -17,7 +17,7 @@ use ego_core::event::time::{Clock, Timestamp};
 use ego_core::hook::{
     HookCatalogue, HookCausality, HookConfigEntry, HookEvent, HookFuture, HookHandlerConfig,
     HookInvocationPort, HookInvocationRequest, HookLifecycleDispatcher, HookRunner, HookSource,
-    SessionHookRuntime,
+    SessionHookRuntime, SessionHookState,
 };
 use ego_core::mcp::{ForeignQuestionPort, McpRuntimeBinding, ToolExecution};
 use ego_core::run::{EventSinkFactory, RunExecutionBindings};
@@ -144,6 +144,7 @@ fn admitted_catalogue() -> HookCatalogueEvidence {
 
 fn admit_catalogue(runtime: &SessionHookRuntime<'_>, turn: TurnId) {
     runtime
+        .hook_state()
         .journal()
         .append(
             turn,
@@ -188,13 +189,13 @@ fn runtime_fixture(
     };
     let invocation = Arc::new(port);
     let dispatcher = HookLifecycleDispatcher::new(HookRunner::new(), active_catalogue());
-    let runtime = SessionHookRuntime::new(
+    let state = SessionHookState::new(
         dispatcher,
         shared,
-        invocation.clone(),
         CancelToken::new(),
         Instant::now() + Duration::from_secs(60),
     );
+    let runtime = state.bind(invocation.clone());
     (runtime, invocation, store, session, turn, release)
 }
 
@@ -216,6 +217,7 @@ fn occurrence(
 fn normal_append_and_two_hook_occurrences_share_one_sequence_and_state() {
     let (runtime, _invocation, store, session, turn, release) = runtime_fixture(false);
     let normal = runtime
+        .hook_state()
         .journal()
         .append(
             turn,
@@ -249,10 +251,10 @@ fn normal_append_and_two_hook_occurrences_share_one_sequence_and_state() {
         assert_eq!(event.env.seq, expected.next());
     }
     assert_eq!(
-        runtime.state().last_seq,
+        runtime.hook_state().state().last_seq,
         events.last().expect("events").env.seq
     );
-    let state = runtime.state();
+    let state = runtime.hook_state().state();
     assert_eq!(state.hook_occurrences().len(), 2);
     assert_eq!(
         state
@@ -332,10 +334,12 @@ fn skill_catalogue_is_activation_qualified_and_turn_completion_restores_persiste
         )],
     );
     runtime
+        .hook_state()
         .replace_skill_sources(turn, &[skill])
         .expect("publish complete active skill catalogue");
     assert!(
         runtime
+            .hook_state()
             .catalogue_evidence()
             .as_slice()
             .iter()
@@ -370,6 +374,7 @@ fn skill_catalogue_is_activation_qualified_and_turn_completion_restores_persiste
     );
 
     runtime
+        .hook_state()
         .journal()
         .append(
             turn,
@@ -382,10 +387,12 @@ fn skill_catalogue_is_activation_qualified_and_turn_completion_restores_persiste
         )
         .expect("turn completion");
     runtime
+        .hook_state()
         .replace_skill_sources(turn, &[])
         .expect("restore persistent-only catalogue after turn completion");
     assert!(
         runtime
+            .hook_state()
             .catalogue_evidence()
             .as_slice()
             .iter()
@@ -440,7 +447,7 @@ fn blocked_invocation_does_not_hold_journal_lock_across_await() {
     let waker = futures::task::noop_waker_ref();
     let mut context = Context::from_waker(waker);
     assert!(matches!(blocked.as_mut().poll(&mut context), Poll::Pending));
-    let append = runtime.journal().append(
+    let append = runtime.hook_state().journal().append(
         turn,
         None,
         None,
@@ -459,14 +466,14 @@ fn blocked_invocation_does_not_hold_journal_lock_across_await() {
 #[test]
 fn finalization_rejects_live_append_handles_then_succeeds_after_ordered_teardown() {
     let (runtime, _invocation, _store, _session, _turn, _release) = runtime_fixture(false);
-    let journal = runtime.journal().clone();
+    let journal = runtime.hook_state().journal().clone();
     assert!(
         journal.try_into_state().is_err(),
         "live runtime retains append authority"
     );
 
     let (runtime, _invocation, _store, _session, _turn, _release) = runtime_fixture(false);
-    let journal = runtime.journal().clone();
+    let journal = runtime.hook_state().journal().clone();
     drop(runtime);
     assert!(
         journal.try_into_state().is_ok(),

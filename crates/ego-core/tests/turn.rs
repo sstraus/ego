@@ -16,7 +16,9 @@ use std::task::Poll;
 use ego_core::budget::{
     BudgetGate, Ledger, Metering, PricingQuote, ResolvedRates, SettlementSource, SharedBudgetGate,
 };
-use ego_core::config::{Mode, ModelRef, PermCfg, Ruleset, Source, SystemPrompt, Trust};
+use ego_core::config::{
+    ConfigLayer, Mode, ModelRef, PermCfg, Ruleset, Source, SystemPrompt, Trust,
+};
 use ego_core::cost::{
     Amount, CostAttribution, CostDelta, CurrencyCode, MeteringRevision, Money, PricingRevision,
     ProviderCostRevision, RateSource, UnknownCost,
@@ -44,9 +46,11 @@ use ego_core::generator::types::{
     ToolDescriptor,
 };
 use ego_core::hook::{
-    HookCatalogue, HookConfigEntry, HookFuture, HookHandlerConfig, HookInvocationPort,
-    HookInvocationRequest, HookLifecycleDispatcher, HookRunner, SessionHookRuntime,
+    HookCatalogue, HookConfigEntry, HookFuture, HookHandlerConfig, HookInvocationBinding,
+    HookInvocationPort, HookInvocationRequest, HookLifecycleDispatcher, HookRunner,
+    SessionHookState,
 };
+use ego_core::mcp::McpRuntimeBinding;
 use ego_core::permit::rule::Rule;
 use ego_core::permit::{
     Authority, CanonPath, Confinement, EnvPolicy, ExecCaps, Fs, GuardedIo, HumanApprover, OneHop,
@@ -66,8 +70,9 @@ use ego_core::store::evidence::{
 use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
 use ego_core::subagent::{ChildWait, ChildWaitResult};
 use ego_core::turn::{
-    CancelToken, ControlError, GenerationRuntime, Journal, JudgeContext, RegisteredTool, Session,
-    SharedJournal, ToolEffectPorts, Tools, TurnConfig, TurnLoop as CoreTurnLoop,
+    CancelToken, ControlError, GenerationPolicySource, GenerationRuntime, Journal, JudgeContext,
+    RegisteredTool, Session, SharedJournal, ToolEffectPorts, Tools, TurnConfig,
+    TurnLoop as CoreTurnLoop,
 };
 use futures::StreamExt;
 use futures::executor::block_on;
@@ -396,7 +401,6 @@ mod turn {
         ];
         let tools = Tools::from_registry(
             &registry,
-            &fx.policy,
             ToolEffectPorts::new(
                 &fx.fs,
                 fx.process.as_ref(),
@@ -415,7 +419,7 @@ mod turn {
                 &fx.sink,
                 CancelToken::new(),
             ),
-            model(&fx.generator, &mut gate),
+            model_for(&fx, &fx.generator, &mut gate),
             tools,
         )
         .with_skill_invocation_port(skill_port.clone());
@@ -504,7 +508,6 @@ mod turn {
         ];
         let tools = Tools::from_registry(
             &registry,
-            &fx.policy,
             ToolEffectPorts::new(
                 &fx.fs,
                 fx.process.as_ref(),
@@ -523,7 +526,7 @@ mod turn {
                 &fx.sink,
                 CancelToken::new(),
             ),
-            model(&fx.generator, &mut gate),
+            model_for(&fx, &fx.generator, &mut gate),
             tools,
         )
         .with_skill_invocation_port(skill_port.clone());
@@ -591,7 +594,6 @@ mod turn {
         ];
         let tools = Tools::from_registry(
             &registry,
-            &fx.policy,
             ToolEffectPorts::new(
                 &fx.fs,
                 fx.process.as_ref(),
@@ -610,7 +612,7 @@ mod turn {
                 &fx.sink,
                 CancelToken::new(),
             ),
-            model(&fx.generator, &mut gate),
+            model_for(&fx, &fx.generator, &mut gate),
             tools,
         );
         let operation = ego_core::skill::AdmittedSkillOperation::invoke(&descriptor, "arguments");
@@ -676,7 +678,6 @@ mod turn {
         ];
         let tools = Tools::from_registry(
             &registry,
-            &fx.policy,
             ToolEffectPorts::new(
                 &fx.fs,
                 fx.process.as_ref(),
@@ -695,7 +696,7 @@ mod turn {
                 &fx.sink,
                 CancelToken::new(),
             ),
-            model(&fx.generator, &mut gate),
+            model_for(&fx, &fx.generator, &mut gate),
             tools,
         );
         let outcome = block_on(turn.run("model invokes forked skill"))
@@ -1116,6 +1117,42 @@ mod turn {
         reasoning_efforts: ReasoningEffortSupport,
     }
 
+    /// Default policy source used by legacy turn fixtures after policy became
+    /// an explicit per-generation runtime dependency.
+    struct FixedPolicySource {
+        mode: Mode,
+        permissions: Ruleset,
+        human: Option<Arc<dyn HumanApprover>>,
+    }
+
+    fn default_policy_source() -> Arc<FixedPolicySource> {
+        Arc::new(FixedPolicySource {
+            mode: Mode::Default,
+            permissions: Ruleset::default(),
+            human: None,
+        })
+    }
+
+    impl GenerationPolicySource for FixedPolicySource {
+        fn current(&self) -> Result<Arc<PolicyEngine>, String> {
+            self.capture()
+        }
+
+        fn capture(&self) -> Result<Arc<PolicyEngine>, String> {
+            Ok(Arc::new(match &self.human {
+                Some(human) => PolicyEngine::with_human(
+                    CanonPath::new("/ws"),
+                    self.mode,
+                    self.permissions.clone(),
+                    Arc::clone(human),
+                ),
+                None => {
+                    PolicyEngine::new(CanonPath::new("/ws"), self.mode, self.permissions.clone())
+                }
+            }))
+        }
+    }
+
     fn config() -> TestGenerationSettings {
         TestGenerationSettings {
             model: "test-model".to_string(),
@@ -1196,6 +1233,8 @@ mod turn {
     #[derive(Clone, Default)]
     struct RecordingHookInvoker {
         lifecycles: Arc<Mutex<Vec<HookLifecycle>>>,
+        timeline: Option<Arc<Mutex<Vec<String>>>>,
+        block_prompt: bool,
     }
 
     impl RecordingHookInvoker {
@@ -1207,10 +1246,15 @@ mod turn {
     impl HookInvocationPort for RecordingHookInvoker {
         fn invoke<'a>(&'a self, request: HookInvocationRequest) -> HookFuture<'a> {
             self.lifecycles.lock().unwrap().push(request.lifecycle());
-            Box::pin(futures::future::ready(Ok(HookOutcome::new(
-                HookDecision::Continue,
-                None,
-            ))))
+            if let Some(timeline) = &self.timeline {
+                timeline.lock().unwrap().push("prompt_hook".into());
+            }
+            let decision = if self.block_prompt {
+                HookDecision::Block
+            } else {
+                HookDecision::Continue
+            };
+            Box::pin(futures::future::ready(Ok(HookOutcome::new(decision, None))))
         }
     }
 
@@ -1255,6 +1299,7 @@ mod turn {
         clock: FixedClock,
         generator: Arc<FakeGenerator>,
         policy: PolicyEngine,
+        policy_source: Arc<FixedPolicySource>,
         fs: FakeFs,
         process: Arc<dyn ProcessExecutor>,
         evidence: NoEvidence,
@@ -1268,11 +1313,17 @@ mod turn {
 
     impl Fixture {
         fn new(script: Vec<Vec<AiEvent>>) -> Self {
+            let policy_source = Arc::new(FixedPolicySource {
+                mode: Mode::Default,
+                permissions: Ruleset::default(),
+                human: None,
+            });
             Self {
                 store: MemStore::default(),
                 clock: FixedClock(1_787_000_000_000),
                 generator: Arc::new(FakeGenerator::new(script)),
                 policy: PolicyEngine::new(CanonPath::new("/ws"), Mode::Default, Ruleset::default()),
+                policy_source,
                 fs: FakeFs::default(),
                 process: Arc::new(NoProcess),
                 evidence: NoEvidence,
@@ -1328,6 +1379,15 @@ mod turn {
             self
         }
 
+        fn set_mode(&mut self, mode: Mode) {
+            self.policy = PolicyEngine::new(CanonPath::new("/ws"), mode, Ruleset::default());
+            self.policy_source = Arc::new(FixedPolicySource {
+                mode,
+                permissions: Ruleset::default(),
+                human: None,
+            });
+        }
+
         /// Rules an operator wrote, so a call can be settled at §6 step 3 —
         /// by a rule with an ID and a layer — rather than at step 5 by the
         /// mode. `Project` because that is the layer an operator edits.
@@ -1337,50 +1397,71 @@ mod turn {
                     .map(|raw| Rule::load(raw).expect("a rule this build enforces"))
                     .collect()
             };
-            self.policy = PolicyEngine::new(
-                CanonPath::new("/ws"),
-                Mode::Default,
-                Ruleset::from_layer(
-                    PermCfg {
-                        judge: None,
-                        allow: load(allow),
-                        deny: load(deny),
-                    },
-                    Source::Project,
-                ),
+            let permissions = Ruleset::from_layer(
+                PermCfg {
+                    judge: None,
+                    allow: load(allow),
+                    deny: load(deny),
+                },
+                Source::Project,
             );
+            self.policy =
+                PolicyEngine::new(CanonPath::new("/ws"), Mode::Default, permissions.clone());
+            self.policy_source = Arc::new(FixedPolicySource {
+                mode: Mode::Default,
+                permissions,
+                human: None,
+            });
             self
         }
 
         fn with_human(mut self, answers: impl IntoIterator<Item = PermissionDecision>) -> Self {
+            let human: Arc<dyn HumanApprover> = Arc::new(ScriptedHuman::new(answers));
             self.policy = PolicyEngine::with_human(
                 CanonPath::new("/ws"),
                 Mode::Default,
                 Ruleset::default(),
-                Arc::new(ScriptedHuman::new(answers)),
+                Arc::clone(&human),
             );
+            self.policy_source = Arc::new(FixedPolicySource {
+                mode: Mode::Default,
+                permissions: Ruleset::default(),
+                human: Some(human),
+            });
             self
         }
 
         fn with_request_observing_human(mut self) -> Self {
+            let human: Arc<dyn HumanApprover> = Arc::new(RequestObservingHuman {
+                permission_requested: Arc::clone(&self.store.permission_requested),
+            });
             self.policy = PolicyEngine::with_human(
                 CanonPath::new("/ws"),
                 Mode::Default,
                 Ruleset::default(),
-                Arc::new(RequestObservingHuman {
-                    permission_requested: Arc::clone(&self.store.permission_requested),
-                }),
+                Arc::clone(&human),
             );
+            self.policy_source = Arc::new(FixedPolicySource {
+                mode: Mode::Default,
+                permissions: Ruleset::default(),
+                human: Some(human),
+            });
             self
         }
 
         fn with_pending_human(mut self) -> Self {
+            let human: Arc<dyn HumanApprover> = Arc::new(PendingHuman);
             self.policy = PolicyEngine::with_human(
                 CanonPath::new("/ws"),
                 Mode::Default,
                 Ruleset::default(),
-                Arc::new(PendingHuman),
+                Arc::clone(&human),
             );
+            self.policy_source = Arc::new(FixedPolicySource {
+                mode: Mode::Default,
+                permissions: Ruleset::default(),
+                human: Some(human),
+            });
             self
         }
 
@@ -1393,26 +1474,33 @@ mod turn {
                 .iter()
                 .map(|raw| Rule::load(raw).expect("a rule this build enforces"))
                 .collect();
+            let permissions = Ruleset::from_layer(
+                PermCfg {
+                    judge: None,
+                    allow: Vec::new(),
+                    deny: denied,
+                },
+                Source::Project,
+            );
+            let human: Arc<dyn HumanApprover> = Arc::new(ScriptedHuman::new(answers));
             self.policy = PolicyEngine::with_human(
                 CanonPath::new("/ws"),
                 Mode::Default,
-                Ruleset::from_layer(
-                    PermCfg {
-                        judge: None,
-                        allow: Vec::new(),
-                        deny: denied,
-                    },
-                    Source::Project,
-                ),
-                Arc::new(ScriptedHuman::new(answers)),
+                permissions.clone(),
+                Arc::clone(&human),
             );
+            self.policy_source = Arc::new(FixedPolicySource {
+                mode: Mode::Default,
+                permissions,
+                human: Some(human),
+            });
             self
         }
     }
 
     fn session<'a>(
         state: SessionState,
-        store: &'a MemStore,
+        store: &'a dyn SessionStore,
         clock: &'a FixedClock,
         sink: &'a dyn EventSink,
         cancel: CancelToken,
@@ -1484,6 +1572,16 @@ mod turn {
         model_with(generator, gate, metering(), Some(rates()), None, config())
     }
 
+    fn model_for<G: Generator + 'static>(
+        fx: &Fixture,
+        generator: &Arc<G>,
+        gate: &mut SharedBudgetGate,
+    ) -> GenerationRuntime {
+        let mut runtime = model(generator, gate);
+        runtime.policy_source = fx.policy_source.clone();
+        runtime
+    }
+
     fn model_with_reasoning<G: Generator + 'static>(
         generator: &Arc<G>,
         gate: &mut SharedBudgetGate,
@@ -1510,6 +1608,7 @@ mod turn {
             rates,
         };
         GenerationRuntime {
+            policy_source: default_policy_source(),
             source: Arc::new(source),
             gate: gate.clone(),
             config: TurnConfig {
@@ -1558,7 +1657,6 @@ mod turn {
         let mut gate = fx.gate.borrow_mut();
         let tools = Tools::new(
             &fx.registry,
-            &fx.policy,
             ToolEffectPorts::new(
                 &fx.fs,
                 fx.process.as_ref(),
@@ -1569,16 +1667,18 @@ mod turn {
             ),
             CanonPath::new("/ws"),
         );
+        let mut runtime = model_with(
+            &fx.generator,
+            &mut gate,
+            metering,
+            rates,
+            token_ceiling,
+            config,
+        );
+        runtime.policy_source = fx.policy_source.clone();
         let mut turn = TurnLoop::open(
             session(state, &fx.store, &fx.clock, &fx.sink, CancelToken::new()),
-            model_with(
-                &fx.generator,
-                &mut gate,
-                metering,
-                rates,
-                token_ceiling,
-                config,
-            ),
+            runtime,
             tools,
         );
         let outcome = block_on(turn.run(prompt)).expect("the store accepted every append");
@@ -1776,7 +1876,6 @@ mod turn {
         let mut budget = fx.gate.borrow_mut();
         let tools = Tools::new(
             &fx.registry,
-            &fx.policy,
             ToolEffectPorts::new(
                 &fx.fs,
                 fx.process.as_ref(),
@@ -1795,7 +1894,7 @@ mod turn {
                 &fx.sink,
                 CancelToken::new(),
             ),
-            model(&fx.generator, &mut budget),
+            model_for(&fx, &fx.generator, &mut budget),
             tools,
         )
         .with_interactive_control(&mut control);
@@ -1904,7 +2003,6 @@ mod turn {
         let mut budget = fx.gate.borrow_mut();
         let tools = Tools::new(
             &fx.registry,
-            &fx.policy,
             ToolEffectPorts::new(
                 &fx.fs,
                 fx.process.as_ref(),
@@ -2046,7 +2144,6 @@ mod turn {
         let mut budget = fx.gate.borrow_mut();
         let tools = Tools::new(
             &fx.registry,
-            &fx.policy,
             ToolEffectPorts::new(
                 &fx.fs,
                 fx.process.as_ref(),
@@ -2059,7 +2156,7 @@ mod turn {
         );
         let mut turn = TurnLoop::open(
             session(state, &fx.store, &fx.clock, &fx.sink, CancelToken::new()),
-            model(&fx.generator, &mut budget),
+            model_for(&fx, &fx.generator, &mut budget),
             tools,
         )
         .with_interactive_control(&mut control);
@@ -2102,7 +2199,6 @@ mod turn {
         let mut budget = fx.gate.borrow_mut();
         let tools = Tools::new(
             &fx.registry,
-            &fx.policy,
             ToolEffectPorts::new(
                 &fx.fs,
                 fx.process.as_ref(),
@@ -2121,7 +2217,7 @@ mod turn {
                 &fx.sink,
                 CancelToken::new(),
             ),
-            model(&fx.generator, &mut budget),
+            model_for(&fx, &fx.generator, &mut budget),
             tools,
         )
         .with_interactive_control(&mut control);
@@ -2183,7 +2279,6 @@ mod turn {
             let mut budget = fx.gate.borrow_mut();
             let tools = Tools::new(
                 &fx.registry,
-                &fx.policy,
                 ToolEffectPorts::new(
                     &fx.fs,
                     fx.process.as_ref(),
@@ -2202,7 +2297,7 @@ mod turn {
                     &fx.sink,
                     CancelToken::new(),
                 ),
-                model(&fx.generator, &mut budget),
+                model_for(&fx, &fx.generator, &mut budget),
                 tools,
             )
             .with_interactive_control(&mut control);
@@ -2234,7 +2329,6 @@ mod turn {
             let mut budget = fx.gate.borrow_mut();
             let tools = Tools::new(
                 &fx.registry,
-                &fx.policy,
                 ToolEffectPorts::new(
                     &fx.fs,
                     fx.process.as_ref(),
@@ -2247,7 +2341,7 @@ mod turn {
             );
             let mut turn = TurnLoop::open(
                 session(state, &fx.store, &fx.clock, &fx.sink, CancelToken::new()),
-                model(&fx.generator, &mut budget),
+                model_for(&fx, &fx.generator, &mut budget),
                 tools,
             )
             .with_interactive_control(&mut control);
@@ -2328,7 +2422,6 @@ mod turn {
         let mut budget = fx.gate.borrow_mut();
         let tools = Tools::new(
             &fx.registry,
-            &fx.policy,
             ToolEffectPorts::new(
                 &fx.fs,
                 fx.process.as_ref(),
@@ -2414,7 +2507,6 @@ mod turn {
         let mut recovery_budget = fx.gate.borrow_mut();
         let recovery_tools = Tools::new(
             &fx.registry,
-            &fx.policy,
             ToolEffectPorts::new(
                 &fx.fs,
                 fx.process.as_ref(),
@@ -2427,7 +2519,7 @@ mod turn {
         );
         let mut recovery = TurnLoop::open(
             session(state, &fx.store, &fx.clock, &fx.sink, CancelToken::new()),
-            model(&fx.generator, &mut recovery_budget),
+            model_for(&fx, &fx.generator, &mut recovery_budget),
             recovery_tools,
         );
         let recovered = block_on(recovery.run_queued_turn())
@@ -2478,7 +2570,6 @@ mod turn {
         });
         let mut budget = SharedBudgetGate::new(gate());
         let sink = CollectingSink::new();
-        let policy = PolicyEngine::new(CanonPath::new("/ws"), Mode::Default, Ruleset::default());
         let fs = FakeFs::default();
         let process = NoProcess;
         let evidence = NoEvidence;
@@ -2488,7 +2579,6 @@ mod turn {
             model(&generator, &mut budget),
             Tools::new(
                 &[],
-                &policy,
                 ToolEffectPorts::new(
                     &fs,
                     &process,
@@ -2535,7 +2625,6 @@ mod turn {
         let mut budget = SharedBudgetGate::new(gate());
         let tools = Tools::new(
             &fx.registry,
-            &fx.policy,
             ToolEffectPorts::new(
                 &fx.fs,
                 fx.process.as_ref(),
@@ -2610,7 +2699,6 @@ mod turn {
         let mut budget = SharedBudgetGate::new(gate());
         let tools = Tools::new(
             &fx.registry,
-            &fx.policy,
             ToolEffectPorts::new(
                 &fx.fs,
                 fx.process.as_ref(),
@@ -2708,7 +2796,6 @@ mod turn {
         let mut budget = SharedBudgetGate::new(gate());
         let tools = Tools::new(
             &fx.registry,
-            &fx.policy,
             ToolEffectPorts::new(
                 &fx.fs,
                 fx.process.as_ref(),
@@ -2768,7 +2855,6 @@ mod turn {
         });
         let mut budget = SharedBudgetGate::new(gate());
         let sink = CollectingSink::new();
-        let policy = PolicyEngine::new(CanonPath::new("/ws"), Mode::Default, Ruleset::default());
         let fs = FakeFs::default();
         let process = NoProcess;
         let evidence = NoEvidence;
@@ -2778,7 +2864,6 @@ mod turn {
             model(&generator, &mut budget),
             Tools::new(
                 &[],
-                &policy,
                 ToolEffectPorts::new(
                     &fs,
                     &process,
@@ -2839,7 +2924,6 @@ mod turn {
         let mut budget = fx.gate.borrow_mut();
         let tools = Tools::new(
             &fx.registry,
-            &fx.policy,
             ToolEffectPorts::new(
                 &fx.fs,
                 fx.process.as_ref(),
@@ -2858,7 +2942,7 @@ mod turn {
                 &fx.sink,
                 CancelToken::new(),
             ),
-            model(&fx.generator, &mut budget),
+            model_for(&fx, &fx.generator, &mut budget),
             tools,
         )
         .with_interactive_control(&mut control);
@@ -2918,7 +3002,6 @@ mod turn {
         let mut recovery_budget = fx.gate.borrow_mut();
         let recovery_tools = Tools::new(
             &fx.registry,
-            &fx.policy,
             ToolEffectPorts::new(
                 &fx.fs,
                 fx.process.as_ref(),
@@ -2931,7 +3014,7 @@ mod turn {
         );
         let mut recovery = TurnLoop::open(
             session(state, &fx.store, &fx.clock, &fx.sink, CancelToken::new()),
-            model(&fx.generator, &mut recovery_budget),
+            model_for(&fx, &fx.generator, &mut recovery_budget),
             recovery_tools,
         );
         let queued = block_on(recovery.run_queued_turn())
@@ -2972,7 +3055,6 @@ mod turn {
         let mut budget = fx.gate.borrow_mut();
         let tools = Tools::new(
             &fx.registry,
-            &fx.policy,
             ToolEffectPorts::new(
                 &fx.fs,
                 fx.process.as_ref(),
@@ -2991,7 +3073,7 @@ mod turn {
                 &fx.sink,
                 CancelToken::new(),
             ),
-            model(&fx.generator, &mut budget),
+            model_for(&fx, &fx.generator, &mut budget),
             tools,
         )
         .with_interactive_control(&mut control);
@@ -3039,7 +3121,6 @@ mod turn {
         let mut recovery_budget = fx.gate.borrow_mut();
         let recovery_tools = Tools::new(
             &fx.registry,
-            &fx.policy,
             ToolEffectPorts::new(
                 &fx.fs,
                 fx.process.as_ref(),
@@ -3052,7 +3133,7 @@ mod turn {
         );
         let mut recovery = TurnLoop::open(
             session(state, &fx.store, &fx.clock, &fx.sink, CancelToken::new()),
-            model(&fx.generator, &mut recovery_budget),
+            model_for(&fx, &fx.generator, &mut recovery_budget),
             recovery_tools,
         );
         let recovered = block_on(recovery.run_queued_turn())
@@ -3087,7 +3168,6 @@ mod turn {
         let mut budget = fx.gate.borrow_mut();
         let tools = Tools::new(
             &fx.registry,
-            &fx.policy,
             ToolEffectPorts::new(
                 &fx.fs,
                 fx.process.as_ref(),
@@ -3106,7 +3186,7 @@ mod turn {
                 &fx.sink,
                 CancelToken::new(),
             ),
-            model(&fx.generator, &mut budget),
+            model_for(&fx, &fx.generator, &mut budget),
             tools,
         )
         .with_interactive_control(&mut control);
@@ -3159,7 +3239,6 @@ mod turn {
         let mut recovery_budget = fx.gate.borrow_mut();
         let recovery_tools = Tools::new(
             &fx.registry,
-            &fx.policy,
             ToolEffectPorts::new(
                 &fx.fs,
                 fx.process.as_ref(),
@@ -3172,7 +3251,7 @@ mod turn {
         );
         let mut recovery = TurnLoop::open(
             session(state, &fx.store, &fx.clock, &fx.sink, CancelToken::new()),
-            model(&fx.generator, &mut recovery_budget),
+            model_for(&fx, &fx.generator, &mut recovery_budget),
             recovery_tools,
         );
         let recovered = block_on(recovery.run_queued_turn())
@@ -3223,7 +3302,6 @@ mod turn {
         let mut budget = fx.gate.borrow_mut();
         let tools = Tools::new(
             &fx.registry,
-            &fx.policy,
             ToolEffectPorts::new(
                 &fx.fs,
                 fx.process.as_ref(),
@@ -3297,7 +3375,6 @@ mod turn {
         let mut recovery_budget = fx.gate.borrow_mut();
         let recovery_tools = Tools::new(
             &fx.registry,
-            &fx.policy,
             ToolEffectPorts::new(
                 &fx.fs,
                 fx.process.as_ref(),
@@ -3310,7 +3387,7 @@ mod turn {
         );
         let mut recovery = TurnLoop::open(
             session(state, &fx.store, &fx.clock, &fx.sink, CancelToken::new()),
-            model(&fx.generator, &mut recovery_budget),
+            model_for(&fx, &fx.generator, &mut recovery_budget),
             recovery_tools,
         );
         let recovered = block_on(recovery.run_queued_turn())
@@ -3991,7 +4068,6 @@ mod turn {
         let mut gate = fx.gate.borrow_mut();
         let tools = Tools::new(
             &fx.registry,
-            &fx.policy,
             ToolEffectPorts::new(
                 &fx.fs,
                 fx.process.as_ref(),
@@ -4106,7 +4182,6 @@ mod turn {
         let mut gate = fx.gate.borrow_mut();
         let tools = Tools::new(
             &fx.registry,
-            &fx.policy,
             ToolEffectPorts::new(
                 &fx.fs,
                 fx.process.as_ref(),
@@ -4177,7 +4252,6 @@ mod turn {
         let mut gate = SharedBudgetGate::new(BudgetGate::new(usd("0.0000001")));
         let tools = Tools::new(
             &fx.registry,
-            &fx.policy,
             ToolEffectPorts::new(
                 &fx.fs,
                 fx.process.as_ref(),
@@ -4196,7 +4270,7 @@ mod turn {
                 &fx.sink,
                 CancelToken::new(),
             ),
-            model(&fx.generator, &mut gate),
+            model_for(&fx, &fx.generator, &mut gate),
             tools,
         );
 
@@ -4587,7 +4661,6 @@ mod turn {
         let mut gate = fx.gate.borrow_mut();
         let tools = Tools::new(
             &fx.registry,
-            &fx.policy,
             ToolEffectPorts::new(
                 &fx.fs,
                 fx.process.as_ref(),
@@ -4606,7 +4679,7 @@ mod turn {
                 &fx.sink,
                 CancelToken::new(),
             ),
-            model(&fx.generator, &mut gate),
+            model_for(&fx, &fx.generator, &mut gate),
             tools,
         );
 
@@ -4642,7 +4715,6 @@ mod turn {
         let mut gate = fx.gate.borrow_mut();
         let tools = Tools::new(
             &fx.registry,
-            &fx.policy,
             ToolEffectPorts::new(
                 &fx.fs,
                 fx.process.as_ref(),
@@ -4700,7 +4772,6 @@ mod turn {
         let mut gate = fx.gate.borrow_mut();
         let tools = Tools::new(
             &fx.registry,
-            &fx.policy,
             ToolEffectPorts::new(
                 &fx.fs,
                 fx.process.as_ref(),
@@ -4759,7 +4830,6 @@ mod turn {
         let mut gate = fx.gate.borrow_mut();
         let tools = Tools::new(
             &fx.registry,
-            &fx.policy,
             ToolEffectPorts::new(
                 &fx.fs,
                 fx.process.as_ref(),
@@ -4803,7 +4873,6 @@ mod turn {
         let mut gate = fx.gate.borrow_mut();
         let tools = Tools::new(
             &fx.registry,
-            &fx.policy,
             ToolEffectPorts::new(
                 &fx.fs,
                 fx.process.as_ref(),
@@ -4822,7 +4891,7 @@ mod turn {
                 &fx.sink,
                 CancelToken::new(),
             ),
-            model(&fx.generator, &mut gate),
+            model_for(&fx, &fx.generator, &mut gate),
             tools,
         );
 
@@ -4880,7 +4949,6 @@ mod turn {
         let mut gate = fx.gate.borrow_mut();
         let tools = Tools::new(
             &fx.registry,
-            &fx.policy,
             ToolEffectPorts::new(
                 &fx.fs,
                 fx.process.as_ref(),
@@ -4963,7 +5031,6 @@ mod turn {
         let mut gate = fx.gate.borrow_mut();
         let tools = Tools::new(
             &fx.registry,
-            &fx.policy,
             ToolEffectPorts::new(
                 &fx.fs,
                 fx.process.as_ref(),
@@ -4982,7 +5049,7 @@ mod turn {
                 &fx.sink,
                 CancelToken::new(),
             ),
-            model(&fx.generator, &mut gate),
+            model_for(&fx, &fx.generator, &mut gate),
             tools,
         );
         block_on(turn.run("hello")).expect_err("the store refused the first append");
@@ -5495,7 +5562,7 @@ mod turn {
             Pending,
         }
 
-        struct ScriptedGenerationSource {
+        pub(super) struct ScriptedGenerationSource {
             steps: Mutex<VecDeque<ResolutionStep>>,
             resolved: Mutex<Vec<GenerationRole>>,
             ready: Option<Mutex<Option<futures::channel::oneshot::Sender<()>>>>,
@@ -5503,9 +5570,10 @@ mod turn {
         }
 
         #[derive(Clone, Default)]
-        struct GenerationTrace {
-            requests: Arc<Mutex<Vec<GenRequest>>>,
+        pub(super) struct GenerationTrace {
+            pub(super) requests: Arc<Mutex<Vec<GenRequest>>>,
             steps: Arc<Mutex<Vec<String>>>,
+            pub(super) timeline: Arc<Mutex<Vec<String>>>,
         }
 
         struct RecordingGenerator {
@@ -5532,12 +5600,13 @@ mod turn {
                     .lock()
                     .unwrap()
                     .push(format!("generate:{}", request.model));
+                self.trace.timeline.lock().unwrap().push("provider".into());
                 self.inner.generate(request, attempt)
             }
         }
 
         impl ScriptedGenerationSource {
-            fn new(
+            pub(super) fn new(
                 profiles: impl IntoIterator<Item = Result<GenerationProfile, GenerationModelError>>,
             ) -> Self {
                 Self {
@@ -5570,7 +5639,7 @@ mod turn {
                 self.pending_with_signal_at(0)
             }
 
-            fn with_trace(mut self, trace: GenerationTrace) -> Self {
+            pub(super) fn with_trace(mut self, trace: GenerationTrace) -> Self {
                 self.trace = Some(trace);
                 self
             }
@@ -5666,7 +5735,7 @@ mod turn {
             )
         }
 
-        fn profile(
+        pub(super) fn profile(
             slug: &str,
             judge: bool,
             script: Vec<AiEvent>,
@@ -5713,6 +5782,7 @@ mod turn {
                         .lock()
                         .unwrap()
                         .push(format!("resolve:{role:?}"));
+                    trace.timeline.lock().unwrap().push("model_resolve".into());
                 }
                 let step = self
                     .steps
@@ -5798,7 +5868,6 @@ mod turn {
             let gate = fx.gate.borrow_mut();
             let tools = Tools::new(
                 &fx.registry,
-                &fx.policy,
                 ToolEffectPorts::new(
                     &fx.fs,
                     fx.process.as_ref(),
@@ -5818,6 +5887,7 @@ mod turn {
                     CancelToken::new(),
                 ),
                 GenerationRuntime {
+                    policy_source: fx.policy_source.clone(),
                     source: source.clone(),
                     gate: gate.clone(),
                     config: TurnConfig {
@@ -5893,7 +5963,7 @@ mod turn {
         #[test]
         fn auto_write_judge_allow_resolves_fresh_judge_and_executes_the_prepared_write() {
             let mut fx = Fixture::new(vec![]).with_write_tool();
-            fx.policy = PolicyEngine::new(CanonPath::new("/ws"), Mode::Auto, Ruleset::default());
+            fx.set_mode(Mode::Auto);
             let trace = GenerationTrace::default();
             let source = Arc::new(
                 ScriptedGenerationSource::new([
@@ -5942,7 +6012,6 @@ mod turn {
             let gate = fx.gate.borrow_mut();
             let tools = Tools::new(
                 &fx.registry,
-                &fx.policy,
                 ToolEffectPorts::new(
                     &fx.fs,
                     fx.process.as_ref(),
@@ -5962,6 +6031,7 @@ mod turn {
                     CancelToken::new(),
                 ),
                 GenerationRuntime {
+                    policy_source: fx.policy_source.clone(),
                     source: source.clone(),
                     gate: gate.clone(),
                     config: TurnConfig {
@@ -6065,7 +6135,6 @@ mod turn {
             );
             let tools = Tools::new(
                 &fx.registry,
-                &fx.policy,
                 ToolEffectPorts::new(
                     &fx.fs,
                     fx.process.as_ref(),
@@ -6086,6 +6155,7 @@ mod turn {
                     CancelToken::new(),
                 ),
                 GenerationRuntime {
+                    policy_source: fx.policy_source.clone(),
                     source: source.clone(),
                     gate: gate.clone(),
                     config: TurnConfig {
@@ -6124,7 +6194,6 @@ mod turn {
                 )]));
                 let tools = Tools::new(
                     &fx.registry,
-                    &fx.policy,
                     ToolEffectPorts::new(
                         &fx.fs,
                         fx.process.as_ref(),
@@ -6145,6 +6214,7 @@ mod turn {
                         CancelToken::new(),
                     ),
                     GenerationRuntime {
+                        policy_source: fx.policy_source.clone(),
                         source: source.clone(),
                         gate: gate.clone(),
                         config: TurnConfig {
@@ -6187,7 +6257,6 @@ mod turn {
             );
             let tools = Tools::new(
                 &fx.registry,
-                &fx.policy,
                 ToolEffectPorts::new(
                     &fx.fs,
                     fx.process.as_ref(),
@@ -6208,6 +6277,7 @@ mod turn {
                     CancelToken::new(),
                 ),
                 GenerationRuntime {
+                    policy_source: fx.policy_source.clone(),
                     source: source.clone(),
                     gate: gate.clone(),
                     config: TurnConfig {
@@ -6244,7 +6314,7 @@ mod turn {
         #[test]
         fn judge_expressibility_refusal_escalates_after_only_main_attempt() {
             let mut fx = Fixture::new(vec![]).with_write_tool();
-            fx.policy = PolicyEngine::new(CanonPath::new("/ws"), Mode::Auto, Ruleset::default());
+            fx.set_mode(Mode::Auto);
             let trace = GenerationTrace::default();
             let source = Arc::new(
                 ScriptedGenerationSource::new([
@@ -6275,7 +6345,6 @@ mod turn {
             let gate = fx.gate.borrow_mut();
             let tools = Tools::new(
                 &fx.registry,
-                &fx.policy,
                 ToolEffectPorts::new(
                     &fx.fs,
                     fx.process.as_ref(),
@@ -6295,6 +6364,7 @@ mod turn {
                     CancelToken::new(),
                 ),
                 GenerationRuntime {
+                    policy_source: fx.policy_source.clone(),
                     source: source.clone(),
                     gate: gate.clone(),
                     config: TurnConfig {
@@ -6369,7 +6439,6 @@ mod turn {
             let cancel = CancelToken::new();
             let tools = Tools::new(
                 &fx.registry,
-                &fx.policy,
                 ToolEffectPorts::new(
                     &fx.fs,
                     fx.process.as_ref(),
@@ -6390,6 +6459,7 @@ mod turn {
                     cancel,
                 ),
                 GenerationRuntime {
+                    policy_source: fx.policy_source.clone(),
                     source: source.clone(),
                     gate: gate.clone(),
                     config: TurnConfig {
@@ -6421,7 +6491,8 @@ mod turn {
 
         #[test]
         fn unresolved_write_without_judge_context_is_headless_and_does_not_resolve_judge() {
-            let fx = Fixture::new(vec![]).with_write_tool();
+            let mut fx = Fixture::new(vec![]).with_write_tool();
+            fx.set_mode(Mode::Auto);
             let trace = GenerationTrace::default();
             let source = Arc::new(
                 ScriptedGenerationSource::new([Ok(profile(
@@ -6443,7 +6514,6 @@ mod turn {
             let gate = fx.gate.borrow_mut();
             let tools = Tools::new(
                 &fx.registry,
-                &fx.policy,
                 ToolEffectPorts::new(
                     &fx.fs,
                     fx.process.as_ref(),
@@ -6463,6 +6533,7 @@ mod turn {
                     CancelToken::new(),
                 ),
                 GenerationRuntime {
+                    policy_source: fx.policy_source.clone(),
                     source: source.clone(),
                     gate: gate.clone(),
                     config: TurnConfig {
@@ -6510,7 +6581,6 @@ mod turn {
             let gate = fx.gate.borrow_mut();
             let tools = Tools::new(
                 &fx.registry,
-                &fx.policy,
                 ToolEffectPorts::new(
                     &fx.fs,
                     fx.process.as_ref(),
@@ -6530,6 +6600,7 @@ mod turn {
                     CancelToken::new(),
                 ),
                 GenerationRuntime {
+                    policy_source: fx.policy_source.clone(),
                     source: source.clone(),
                     gate: gate.clone(),
                     config: TurnConfig {
@@ -6562,7 +6633,8 @@ mod turn {
                 GenerationModelErrorClass::Provider,
                 GenerationModelErrorClass::Internal,
             ] {
-                let fx = Fixture::new(vec![]).with_write_tool();
+                let mut fx = Fixture::new(vec![]).with_write_tool();
+                fx.set_mode(Mode::Auto);
                 let trace = GenerationTrace::default();
                 let source = Arc::new(
                     ScriptedGenerationSource::new([
@@ -6587,7 +6659,6 @@ mod turn {
                 let gate = fx.gate.borrow_mut();
                 let tools = Tools::new(
                     &fx.registry,
-                    &fx.policy,
                     ToolEffectPorts::new(
                         &fx.fs,
                         fx.process.as_ref(),
@@ -6607,6 +6678,7 @@ mod turn {
                         CancelToken::new(),
                     ),
                     GenerationRuntime {
+                        policy_source: fx.policy_source.clone(),
                         source: source.clone(),
                         gate: gate.clone(),
                         config: TurnConfig {
@@ -6661,7 +6733,8 @@ mod turn {
 
         #[test]
         fn judge_pending_cancellation_has_no_judge_attempt_or_reservation() {
-            let fx = Fixture::new(vec![]).with_write_tool();
+            let mut fx = Fixture::new(vec![]).with_write_tool();
+            fx.set_mode(Mode::Auto);
             let trace = GenerationTrace::default();
             let (source, ready) = ScriptedGenerationSource::new([
                 Ok(profile(
@@ -6687,7 +6760,6 @@ mod turn {
             let gate = fx.gate.borrow_mut();
             let tools = Tools::new(
                 &fx.registry,
-                &fx.policy,
                 ToolEffectPorts::new(
                     &fx.fs,
                     fx.process.as_ref(),
@@ -6707,6 +6779,7 @@ mod turn {
                     cancel,
                 ),
                 GenerationRuntime {
+                    policy_source: fx.policy_source.clone(),
                     source: source.clone(),
                     gate: gate.clone(),
                     config: TurnConfig {
@@ -6762,7 +6835,7 @@ mod turn {
         #[test]
         fn judge_capability_gap_is_headless_without_judge_attempt() {
             let mut fx = Fixture::new(vec![]).with_write_tool();
-            fx.policy = PolicyEngine::new(CanonPath::new("/ws"), Mode::Auto, Ruleset::default());
+            fx.set_mode(Mode::Auto);
             let trace = GenerationTrace::default();
             let mut judge = profile_with_settings(
                 "openai/judge",
@@ -6798,7 +6871,6 @@ mod turn {
             let gate = fx.gate.borrow_mut();
             let tools = Tools::new(
                 &fx.registry,
-                &fx.policy,
                 ToolEffectPorts::new(
                     &fx.fs,
                     fx.process.as_ref(),
@@ -6818,6 +6890,7 @@ mod turn {
                     CancelToken::new(),
                 ),
                 GenerationRuntime {
+                    policy_source: fx.policy_source.clone(),
                     source: source.clone(),
                     gate: gate.clone(),
                     config: TurnConfig {
@@ -6948,18 +7021,22 @@ mod turn {
             Producer::Main,
             SessionState::default(),
         ));
-        let hook_runtime = SessionHookRuntime::new(
+        let hook_state = SessionHookState::new(
             HookLifecycleDispatcher::new(HookRunner::new(), base_hooks),
             journal.clone(),
-            Arc::new(hook_invocations.clone()),
             CancelToken::new(),
             std::time::Instant::now() + std::time::Duration::from_secs(30),
         );
-        let runtime_observer = hook_runtime.clone();
+        let runtime_observer = hook_state.clone();
+        let hook_binding = Arc::new(RecordingHookBinding {
+            invoker: hook_invocations.clone(),
+            policies: Mutex::new(Vec::new()),
+            fail_at: None,
+            timeline: Arc::new(Mutex::new(Vec::new())),
+        });
         let mut gate = fx.gate.borrow_mut();
         let tools = Tools::from_registry(
             &[RegisteredTool::skill(Arc::clone(&catalogue))],
-            &fx.policy,
             ToolEffectPorts::new(
                 &fx.fs,
                 fx.process.as_ref(),
@@ -6975,12 +7052,12 @@ mod turn {
             journal,
             &NO_ADMISSION_EVIDENCE,
             CancelToken::new(),
-            model(&fx.generator, &mut gate),
+            model_for(&fx, &fx.generator, &mut gate),
             tools,
         )
         .expect("synchronized budget gate")
         .with_skill_invocation_port(Arc::new(RecordingSkillInvocationPort::default()))
-        .with_hook_runtime(hook_runtime)
+        .with_hook_binding(hook_state, hook_binding)
         .expect("hook runtime shares the turn journal");
 
         let skill_outcome = block_on(turn.run("model invokes explain"))
@@ -7085,7 +7162,6 @@ mod turn {
         let mut gate = fx.gate.borrow_mut();
         let tools = Tools::from_registry(
             &[RegisteredTool::skill(Arc::clone(&catalogue))],
-            &fx.policy,
             ToolEffectPorts::new(
                 &fx.fs,
                 fx.process.as_ref(),
@@ -7104,7 +7180,7 @@ mod turn {
                 &fx.sink,
                 CancelToken::new(),
             ),
-            model(&fx.generator, &mut gate),
+            model_for(&fx, &fx.generator, &mut gate),
             tools,
         )
         .with_skill_invocation_port(Arc::new(RecordingSkillInvocationPort::default()));
@@ -7277,7 +7353,6 @@ mod turn {
         let mut gate = fx.gate.borrow_mut();
         let tools = Tools::from_registry(
             &[RegisteredTool::skill(Arc::clone(&catalogue))],
-            &fx.policy,
             ToolEffectPorts::new(
                 &fx.fs,
                 fx.process.as_ref(),
@@ -7296,7 +7371,7 @@ mod turn {
                 &fx.sink,
                 CancelToken::new(),
             ),
-            model(&fx.generator, &mut gate),
+            model_for(&fx, &fx.generator, &mut gate),
             tools,
         );
 
@@ -7311,6 +7386,630 @@ mod turn {
                 .events()
                 .iter()
                 .any(|event| matches!(&event.kind, EventKind::SkillInstructionAdmitted { .. }))
+        );
+    }
+
+    struct ScriptedPolicySource {
+        captures: Mutex<VecDeque<Result<Arc<PolicyEngine>, String>>>,
+        timeline: Arc<Mutex<Vec<String>>>,
+        active: Arc<PolicyEngine>,
+    }
+
+    impl GenerationPolicySource for ScriptedPolicySource {
+        fn current(&self) -> Result<Arc<PolicyEngine>, String> {
+            self.timeline.lock().unwrap().push("current".into());
+            Ok(Arc::clone(&self.active))
+        }
+
+        fn capture(&self) -> Result<Arc<PolicyEngine>, String> {
+            let next = self
+                .captures
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("one policy capture per generation");
+            self.timeline.lock().unwrap().push("capture".into());
+            next
+        }
+    }
+
+    struct RecordingHookBinding {
+        invoker: RecordingHookInvoker,
+        policies: Mutex<Vec<Arc<PolicyEngine>>>,
+        fail_at: Option<usize>,
+        timeline: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl HookInvocationBinding for RecordingHookBinding {
+        fn bind<'a>(
+            &self,
+            policy: Arc<PolicyEngine>,
+            _mcp: Option<&'a dyn McpRuntimeBinding>,
+        ) -> Result<Arc<dyn HookInvocationPort + 'a>, String>
+        where
+            Self: 'a,
+        {
+            let mut policies = self.policies.lock().unwrap();
+            policies.push(Arc::clone(&policy));
+            self.timeline.lock().unwrap().push("bind".into());
+            if self.fail_at == Some(policies.len()) {
+                return Err("hook policy binding failed".into());
+            }
+            Ok(Arc::new(self.invoker.clone()))
+        }
+    }
+
+    struct TimelineStore<'a> {
+        inner: &'a MemStore,
+        timeline: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl SessionStore for TimelineStore<'_> {
+        fn append(&self, id: &SessionId, event: &DomainEvent) -> Result<(), StoreError> {
+            self.inner.append(id, event)?;
+            match &event.kind {
+                EventKind::PermissionDecided { .. } => self
+                    .timeline
+                    .lock()
+                    .unwrap()
+                    .push("permission_settled".into()),
+                EventKind::ToolCallCompleted { .. } => {
+                    self.timeline.lock().unwrap().push("tool_completed".into())
+                }
+                _ => {}
+            }
+            Ok(())
+        }
+
+        fn compare_and_append_run(
+            &self,
+            session: &SessionId,
+            expected_revision: Option<RunRevision>,
+            transaction: RunTransaction,
+        ) -> Result<RunAppend, StoreError> {
+            self.inner
+                .compare_and_append_run(session, expected_revision, transaction)
+        }
+
+        fn read(
+            &self,
+            id: &SessionId,
+        ) -> Result<BoxStream<'static, Result<SessionEntry, StoreError>>, StoreError> {
+            self.inner.read(id)
+        }
+
+        fn list(&self) -> Result<Vec<SessionMeta>, StoreError> {
+            self.inner.list()
+        }
+    }
+
+    #[test]
+    fn policy_capture_is_once_per_generation_and_binds_each_tool_batch() {
+        let fx = Fixture::new(vec![
+            vec![
+                AiEvent::ToolCall {
+                    call_id: "first".into(),
+                    name: "read".into(),
+                    args: r#"{"path":"/ws/notes.md"}"#.into(),
+                },
+                AiEvent::Stop(StopReason::ToolUse),
+            ],
+            vec![
+                AiEvent::ToolCall {
+                    call_id: "second".into(),
+                    name: "read".into(),
+                    args: r#"{"path":"/ws/notes.md"}"#.into(),
+                },
+                AiEvent::Stop(StopReason::ToolUse),
+            ],
+            vec![
+                AiEvent::TextDelta {
+                    text: "done".into(),
+                },
+                AiEvent::Stop(StopReason::Stop),
+            ],
+        ])
+        .with_read_tool();
+        fx.fs.file("/ws/notes.md", "notes");
+        let trace = generation_boundary::GenerationTrace::default();
+        let timeline = Arc::clone(&trace.timeline);
+        let policy_source = Arc::new(ScriptedPolicySource {
+            captures: Mutex::new(VecDeque::from([
+                Ok(Arc::new(PolicyEngine::new(
+                    CanonPath::new("/ws"),
+                    Mode::Default,
+                    Ruleset::from_layer(
+                        PermCfg {
+                            judge: None,
+                            allow: vec![Rule::load("read(/ws/notes.md)").unwrap()],
+                            deny: vec![],
+                        },
+                        Source::Project,
+                    ),
+                ))),
+                Ok(Arc::new(PolicyEngine::new(
+                    CanonPath::new("/ws"),
+                    Mode::Default,
+                    Ruleset::default(),
+                ))),
+                Ok(Arc::new(PolicyEngine::new(
+                    CanonPath::new("/ws"),
+                    Mode::Default,
+                    Ruleset::default(),
+                ))),
+            ])),
+            timeline: Arc::clone(&timeline),
+            active: Arc::new(PolicyEngine::new(
+                CanonPath::new("/ws"),
+                Mode::Default,
+                Ruleset::default(),
+            )),
+        });
+        let source = Arc::new(
+            generation_boundary::ScriptedGenerationSource::new([
+                Ok(generation_boundary::profile(
+                    "openai/one",
+                    false,
+                    vec![
+                        AiEvent::ToolCall {
+                            call_id: "first".into(),
+                            name: "read".into(),
+                            args: r#"{"path":"/ws/notes.md"}"#.into(),
+                        },
+                        AiEvent::Stop(StopReason::ToolUse),
+                    ],
+                    &trace,
+                    Some(2048),
+                )),
+                Ok(generation_boundary::profile(
+                    "openai/two",
+                    false,
+                    vec![
+                        AiEvent::ToolCall {
+                            call_id: "second".into(),
+                            name: "read".into(),
+                            args: r#"{"path":"/ws/missing.md"}"#.into(),
+                        },
+                        AiEvent::Stop(StopReason::ToolUse),
+                    ],
+                    &trace,
+                    Some(2048),
+                )),
+                Ok(generation_boundary::profile(
+                    "openai/three",
+                    false,
+                    vec![
+                        AiEvent::TextDelta {
+                            text: "done".into(),
+                        },
+                        AiEvent::Stop(StopReason::Stop),
+                    ],
+                    &trace,
+                    Some(2048),
+                )),
+            ])
+            .with_trace(trace.clone()),
+        );
+        let mut gate = fx.gate.borrow_mut();
+        let mut runtime = model_for(&fx, &fx.generator, &mut gate);
+        runtime.source = source;
+        let timeline_store = TimelineStore {
+            inner: &fx.store,
+            timeline: Arc::clone(&timeline),
+        };
+        let tools = Tools::new(
+            &fx.registry,
+            ToolEffectPorts::new(
+                &fx.fs,
+                fx.process.as_ref(),
+                &fx.evidence,
+                Arc::new(NoResolver),
+                Arc::new(NoHop),
+                Arc::new(NoDuplex),
+            ),
+            CanonPath::new("/ws"),
+        );
+        let mut turn = TurnLoop::open(
+            session(
+                SessionState::default(),
+                &timeline_store,
+                &fx.clock,
+                &fx.sink,
+                CancelToken::new(),
+            ),
+            runtime,
+            tools,
+        )
+        .with_policy_source(policy_source);
+        block_on(turn.run("two generations")).expect("turn completes");
+        assert_eq!(
+            timeline.lock().unwrap().as_slice(),
+            [
+                "capture",
+                "model_resolve",
+                "provider",
+                "permission_settled",
+                "tool_completed",
+                "capture",
+                "model_resolve",
+                "provider",
+                "permission_settled",
+                "tool_completed",
+                "capture",
+                "model_resolve",
+                "provider",
+            ]
+        );
+        let completed: Vec<bool> = fx
+            .store
+            .events()
+            .iter()
+            .filter_map(|event| match event.kind {
+                EventKind::ToolCallCompleted { ok, .. } => Some(ok),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(completed, [true, false]);
+    }
+
+    #[test]
+    fn policy_capture_failure_has_no_generation_provider_or_effect() {
+        let fx = Fixture::new(vec![vec![AiEvent::Stop(StopReason::Stop)]]);
+        let trace = generation_boundary::GenerationTrace::default();
+        let source = Arc::new(generation_boundary::ScriptedGenerationSource::new([Ok(
+            generation_boundary::profile("openai/never", false, vec![], &trace, Some(2048)),
+        )]));
+        let timeline = Arc::clone(&trace.timeline);
+        let policy_source = Arc::new(ScriptedPolicySource {
+            captures: Mutex::new(VecDeque::from([Err("poisoned policy".into())])),
+            timeline: Arc::clone(&timeline),
+            active: Arc::new(PolicyEngine::new(
+                CanonPath::new("/ws"),
+                Mode::Default,
+                Ruleset::default(),
+            )),
+        });
+        let mut gate = fx.gate.borrow_mut();
+        let mut runtime = model_for(&fx, &fx.generator, &mut gate);
+        runtime.source = source;
+        let tools = Tools::new(
+            &fx.registry,
+            ToolEffectPorts::new(
+                &fx.fs,
+                fx.process.as_ref(),
+                &fx.evidence,
+                Arc::new(NoResolver),
+                Arc::new(NoHop),
+                Arc::new(NoDuplex),
+            ),
+            CanonPath::new("/ws"),
+        );
+        let mut turn = TurnLoop::open(
+            session(
+                SessionState::default(),
+                &fx.store,
+                &fx.clock,
+                &fx.sink,
+                CancelToken::new(),
+            ),
+            runtime,
+            tools,
+        )
+        .with_policy_source(policy_source);
+        let outcome = block_on(turn.run("capture fails")).expect("capture refusal is durable");
+        assert_eq!(outcome.exit_reason, ExitReason::Internal);
+        assert_eq!(timeline.lock().unwrap().as_slice(), ["capture"]);
+        assert!(
+            fx.store
+                .kinds()
+                .iter()
+                .all(|kind| kind != "generation_started")
+        );
+        assert!(trace.requests.lock().unwrap().is_empty());
+        assert!(
+            fx.store
+                .kinds()
+                .iter()
+                .all(|kind| kind != "tool_call_started")
+        );
+    }
+
+    #[test]
+    fn policy_capture_binds_current_prompt_hook_before_generation_capture() {
+        let fx = Fixture::new(vec![vec![AiEvent::Stop(StopReason::Stop)]]);
+        let trace = generation_boundary::GenerationTrace::default();
+        let active = Arc::new(PolicyEngine::new(
+            CanonPath::new("/ws"),
+            Mode::Auto,
+            Ruleset::default(),
+        ));
+        let captured = Arc::new(PolicyEngine::new(
+            CanonPath::new("/ws"),
+            Mode::Default,
+            Ruleset::default(),
+        ));
+        let policy_source = Arc::new(ScriptedPolicySource {
+            captures: Mutex::new(VecDeque::from([Ok(Arc::clone(&captured))])),
+            timeline: Arc::clone(&trace.timeline),
+            active: Arc::clone(&active),
+        });
+        let invoker = Arc::new(RecordingHookInvoker {
+            lifecycles: Arc::new(Mutex::new(Vec::new())),
+            timeline: Some(Arc::clone(&trace.timeline)),
+            block_prompt: false,
+        });
+        let binding = Arc::new(RecordingHookBinding {
+            invoker: (*invoker).clone(),
+            policies: Mutex::new(Vec::new()),
+            fail_at: None,
+            timeline: Arc::clone(&trace.timeline),
+        });
+        let mut gate = fx.gate.borrow_mut();
+        let mut runtime = model_for(&fx, &fx.generator, &mut gate);
+        runtime.policy_source = policy_source.clone();
+        runtime.source = Arc::new(
+            generation_boundary::ScriptedGenerationSource::new([Ok(generation_boundary::profile(
+                "openai/hook-binding",
+                false,
+                vec![AiEvent::Stop(StopReason::Stop)],
+                &trace,
+                Some(2048),
+            ))])
+            .with_trace(trace.clone()),
+        );
+        let tools = Tools::new(
+            &fx.registry,
+            ToolEffectPorts::new(
+                &fx.fs,
+                fx.process.as_ref(),
+                &fx.evidence,
+                Arc::new(NoResolver),
+                Arc::new(NoHop),
+                Arc::new(NoDuplex),
+            ),
+            CanonPath::new("/ws"),
+        );
+        let mut turn = TurnLoop::open(
+            session(
+                SessionState::default(),
+                &fx.store,
+                &fx.clock,
+                &fx.sink,
+                CancelToken::new(),
+            ),
+            runtime,
+            tools,
+        );
+        let hook_catalogue = HookCatalogue::admit_typed(
+            &[ConfigLayer::parse(
+                Source::User,
+                "[[hooks]]\nevent = \"UserPromptSubmit\"\n[hooks.handler]\ntype = \"prompt\"\nprompt = \"continue\"\n",
+            )
+            .expect("one prompt hook")],
+            &[],
+            Trust::Trusted,
+        )
+        .expect("hook catalogue");
+        let state = SessionHookState::new(
+            HookLifecycleDispatcher::new(HookRunner::new(), hook_catalogue),
+            turn.journal(),
+            CancelToken::new(),
+            std::time::Instant::now() + std::time::Duration::from_secs(30),
+        );
+        turn = turn
+            .with_hook_binding(state, binding.clone())
+            .expect("hook binding attaches to turn");
+        let outcome = block_on(turn.run("hook binding")).expect("turn completes");
+        assert_eq!(outcome.exit_reason, ExitReason::Completed);
+        let policies = binding.policies.lock().unwrap();
+        assert_eq!(policies.len(), 2);
+        assert!(Arc::ptr_eq(&policies[0], &active));
+        assert!(Arc::ptr_eq(&policies[1], &captured));
+        assert_eq!(invoker.lifecycles(), vec![HookLifecycle::UserPromptSubmit]);
+        assert_eq!(
+            trace.timeline.lock().unwrap().as_slice(),
+            [
+                "current",
+                "bind",
+                "prompt_hook",
+                "capture",
+                "bind",
+                "model_resolve",
+                "provider"
+            ]
+        );
+    }
+
+    #[test]
+    fn blocking_prompt_hook_does_not_capture_generation_policy() {
+        let fx = Fixture::new(vec![vec![AiEvent::Stop(StopReason::Stop)]]);
+        let trace = generation_boundary::GenerationTrace::default();
+        let active = Arc::new(PolicyEngine::new(
+            CanonPath::new("/ws"),
+            Mode::Auto,
+            Ruleset::default(),
+        ));
+        let policy_source = Arc::new(ScriptedPolicySource {
+            captures: Mutex::new(VecDeque::new()),
+            timeline: Arc::clone(&trace.timeline),
+            active,
+        });
+        let binding = Arc::new(RecordingHookBinding {
+            invoker: RecordingHookInvoker {
+                lifecycles: Arc::new(Mutex::new(Vec::new())),
+                timeline: Some(Arc::clone(&trace.timeline)),
+                block_prompt: true,
+            },
+            policies: Mutex::new(Vec::new()),
+            fail_at: None,
+            timeline: Arc::clone(&trace.timeline),
+        });
+        let mut gate = fx.gate.borrow_mut();
+        let mut runtime = model_for(&fx, &fx.generator, &mut gate);
+        runtime.policy_source = policy_source;
+        let tools = Tools::new(
+            &fx.registry,
+            ToolEffectPorts::new(
+                &fx.fs,
+                fx.process.as_ref(),
+                &fx.evidence,
+                Arc::new(NoResolver),
+                Arc::new(NoHop),
+                Arc::new(NoDuplex),
+            ),
+            CanonPath::new("/ws"),
+        );
+        let mut turn = TurnLoop::open(
+            session(
+                SessionState::default(),
+                &fx.store,
+                &fx.clock,
+                &fx.sink,
+                CancelToken::new(),
+            ),
+            runtime,
+            tools,
+        );
+        let hook_catalogue = HookCatalogue::admit_typed(
+            &[ConfigLayer::parse(
+                Source::User,
+                "[[hooks]]\nevent = \"UserPromptSubmit\"\n[hooks.handler]\ntype = \"prompt\"\nprompt = \"continue\"\n",
+            )
+            .expect("one prompt hook")],
+            &[],
+            Trust::Trusted,
+        )
+        .expect("hook catalogue");
+        let state = SessionHookState::new(
+            HookLifecycleDispatcher::new(HookRunner::new(), hook_catalogue),
+            turn.journal(),
+            CancelToken::new(),
+            std::time::Instant::now() + std::time::Duration::from_secs(30),
+        );
+        turn = turn
+            .with_hook_binding(state, binding)
+            .expect("hook binding attaches to turn");
+        let _outcome = block_on(turn.run("blocked prompt")).expect("prompt block is durable");
+        assert_eq!(
+            trace.timeline.lock().unwrap().as_slice(),
+            ["current", "bind", "prompt_hook"]
+        );
+        assert!(
+            fx.store
+                .kinds()
+                .iter()
+                .all(|kind| kind != "generation_started")
+        );
+        assert!(
+            fx.store
+                .kinds()
+                .iter()
+                .all(|kind| kind != "tool_call_started")
+        );
+    }
+
+    #[test]
+    fn policy_hook_binding_failure_refuses_before_model_resolution_generation_or_effect() {
+        let fx = Fixture::new(vec![vec![AiEvent::Stop(StopReason::Stop)]]);
+        let trace = generation_boundary::GenerationTrace::default();
+        let active = Arc::new(PolicyEngine::new(
+            CanonPath::new("/ws"),
+            Mode::Auto,
+            Ruleset::default(),
+        ));
+        let captured = Arc::new(PolicyEngine::new(
+            CanonPath::new("/ws"),
+            Mode::Default,
+            Ruleset::default(),
+        ));
+        let policy_source = Arc::new(ScriptedPolicySource {
+            captures: Mutex::new(VecDeque::from([Ok(captured)])),
+            timeline: Arc::clone(&trace.timeline),
+            active,
+        });
+        let binding = Arc::new(RecordingHookBinding {
+            invoker: RecordingHookInvoker {
+                lifecycles: Arc::new(Mutex::new(Vec::new())),
+                timeline: Some(Arc::clone(&trace.timeline)),
+                block_prompt: false,
+            },
+            policies: Mutex::new(Vec::new()),
+            fail_at: Some(2),
+            timeline: Arc::clone(&trace.timeline),
+        });
+        let mut gate = fx.gate.borrow_mut();
+        let mut runtime = model_for(&fx, &fx.generator, &mut gate);
+        runtime.policy_source = policy_source;
+        runtime.source = Arc::new(
+            generation_boundary::ScriptedGenerationSource::new([Ok(generation_boundary::profile(
+                "openai/hook-binding-failure",
+                false,
+                vec![AiEvent::Stop(StopReason::Stop)],
+                &trace,
+                Some(2048),
+            ))])
+            .with_trace(trace.clone()),
+        );
+        let tools = Tools::new(
+            &fx.registry,
+            ToolEffectPorts::new(
+                &fx.fs,
+                fx.process.as_ref(),
+                &fx.evidence,
+                Arc::new(NoResolver),
+                Arc::new(NoHop),
+                Arc::new(NoDuplex),
+            ),
+            CanonPath::new("/ws"),
+        );
+        let mut turn = TurnLoop::open(
+            session(
+                SessionState::default(),
+                &fx.store,
+                &fx.clock,
+                &fx.sink,
+                CancelToken::new(),
+            ),
+            runtime,
+            tools,
+        );
+        let hook_catalogue = HookCatalogue::admit_typed(
+            &[ConfigLayer::parse(
+                Source::User,
+                "[[hooks]]\nevent = \"UserPromptSubmit\"\n[hooks.handler]\ntype = \"prompt\"\nprompt = \"continue\"\n",
+            )
+            .expect("one prompt hook")],
+            &[],
+            Trust::Trusted,
+        )
+        .expect("hook catalogue");
+        let state = SessionHookState::new(
+            HookLifecycleDispatcher::new(HookRunner::new(), hook_catalogue),
+            turn.journal(),
+            CancelToken::new(),
+            std::time::Instant::now() + std::time::Duration::from_secs(30),
+        );
+        turn = turn
+            .with_hook_binding(state, binding.clone())
+            .expect("hook binding attaches to turn");
+        let outcome = block_on(turn.run("hook binding")).expect("binding refusal is durable");
+        assert_eq!(outcome.exit_reason, ExitReason::Internal);
+        assert_eq!(
+            trace.timeline.lock().unwrap().as_slice(),
+            ["current", "bind", "prompt_hook", "capture", "bind"]
+        );
+        assert!(trace.requests.lock().unwrap().is_empty());
+        assert!(
+            fx.store
+                .kinds()
+                .iter()
+                .all(|kind| kind != "generation_started")
+        );
+        assert!(
+            fx.store
+                .kinds()
+                .iter()
+                .all(|kind| kind != "tool_call_started")
         );
     }
 }

@@ -17,6 +17,30 @@ use ego_core::store::blob::{
 };
 use futures::future::BoxFuture;
 
+use ego_core::config::{Mode, Ruleset};
+use ego_core::permit::{CanonPath, PolicyEngine};
+use ego_core::turn::GenerationPolicySource;
+
+struct FixedPolicySource;
+
+impl GenerationPolicySource for FixedPolicySource {
+    fn current(&self) -> Result<Arc<PolicyEngine>, String> {
+        self.capture()
+    }
+
+    fn capture(&self) -> Result<Arc<PolicyEngine>, String> {
+        Ok(Arc::new(PolicyEngine::new(
+            CanonPath::new("/ws"),
+            Mode::Default,
+            Ruleset::default(),
+        )))
+    }
+}
+
+pub fn default_policy_source() -> Arc<dyn GenerationPolicySource> {
+    Arc::new(FixedPolicySource)
+}
+
 /// A no-op blob backend for tests whose contract does not use attachments.
 pub static EMPTY_BLOB_STORE: EmptyBlobStore = EmptyBlobStore;
 

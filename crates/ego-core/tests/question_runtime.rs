@@ -475,7 +475,7 @@ fn with_foreign_turn<R>(
         "1000".parse::<Amount>().expect("amount"),
         CurrencyCode::new("USD").expect("currency"),
     )));
-    let policy = ego_core::permit::PolicyEngine::new(
+    let _policy = ego_core::permit::PolicyEngine::new(
         CanonPath::new("/ws"),
         Mode::Default,
         Ruleset::default(),
@@ -491,7 +491,6 @@ fn with_foreign_turn<R>(
     }) as Arc<dyn Tool>)];
     let tools = Tools::from_registry(
         &registry,
-        &policy,
         ToolEffectPorts::new(&fs, &process, &evidence, resolver, one_hop, duplex),
         CanonPath::new("/ws"),
     );
@@ -507,6 +506,7 @@ fn with_foreign_turn<R>(
             cancel: CancelToken::new(),
         },
         GenerationRuntime {
+            policy_source: common::default_policy_source(),
             source,
             gate,
             config: TurnConfig {
@@ -566,7 +566,7 @@ fn unavailable_elicitor_persists_question_closes_unstarted_siblings_and_leaves_t
         "1000".parse::<Amount>().expect("amount"),
         CurrencyCode::new("USD").expect("currency"),
     )));
-    let policy = ego_core::permit::PolicyEngine::new(
+    let _policy = ego_core::permit::PolicyEngine::new(
         CanonPath::new("/ws"),
         Mode::Default,
         Ruleset::default(),
@@ -584,7 +584,6 @@ fn unavailable_elicitor_persists_question_closes_unstarted_siblings_and_leaves_t
     ];
     let tools = Tools::from_registry(
         &registry,
-        &policy,
         ToolEffectPorts::new(
             &fs,
             &process,
@@ -607,6 +606,7 @@ fn unavailable_elicitor_persists_question_closes_unstarted_siblings_and_leaves_t
             cancel: CancelToken::new(),
         },
         GenerationRuntime {
+            policy_source: common::default_policy_source(),
             source,
             gate,
             config: TurnConfig {

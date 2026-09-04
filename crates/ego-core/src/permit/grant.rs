@@ -1248,6 +1248,11 @@ impl PolicyEngine {
         }
     }
 
+    /// The immutable mode this engine was constructed to enforce.
+    pub(crate) fn mode(&self) -> Mode {
+        self.mode
+    }
+
     pub fn resume_floor(&self) -> crate::suspension::ResumeFloor {
         crate::suspension::ResumeFloor::from_policy(
             self.workspace.to_string(),

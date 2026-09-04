@@ -1242,6 +1242,7 @@ fn persist_pending(
             });
         }
         parent
+            .hook_state()
             .journal()
             .reconcile_durable(&event)
             .map_err(|error| ChildServiceError::Journal {
@@ -1252,6 +1253,7 @@ fn persist_pending(
         return Ok(durable);
     }
     parent
+        .hook_state()
         .journal()
         .append_or_retry_settlement(
             turn,
@@ -1390,6 +1392,7 @@ fn append_lifecycle(
     kind: EventKind,
 ) -> Result<EventId, ChildServiceError> {
     parent
+        .hook_state()
         .journal()
         .append(turn, item, parent_event, kind)
         .map_err(|error| ChildServiceError::Journal {
@@ -1402,6 +1405,7 @@ fn validate_parent_origin(
     request: &ChildRequest,
 ) -> Result<(), ChildServiceError> {
     let valid = parent
+        .hook_state()
         .inspect(|state| {
             state
                 .items

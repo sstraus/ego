@@ -35,11 +35,13 @@ use ego_core::generator::fake::FakeGenerator;
 use ego_core::generator::port::AiEvent;
 use ego_core::generator::types::{StopReason, ThinkingLevel};
 use ego_core::hook::{
-    HookCatalogue, HookCausality, HookEvent, HookFuture, HookInvocationPort, HookInvocationRequest,
-    HookJournalPort, HookLifecycleDispatcher, HookOccurrence, HookReachError, HookReachOutcome,
-    HookReachedEvidence, HookRunError, HookRunner as CoreHookRunner, HookSource, HookSpec,
-    HookStartError, HookStartedEvidence, SessionHookRuntime,
+    HookCatalogue, HookCausality, HookEvent, HookFuture, HookInvocationBinding, HookInvocationPort,
+    HookInvocationRequest, HookJournalPort, HookLifecycleDispatcher, HookOccurrence,
+    HookReachError, HookReachOutcome, HookReachedEvidence, HookRunError,
+    HookRunner as CoreHookRunner, HookSource, HookSpec, HookStartError, HookStartedEvidence,
+    SessionHookState,
 };
+use ego_core::mcp::McpRuntimeBinding;
 use ego_core::mcp::ToolExecution;
 use ego_core::permit::rule::Rule;
 use ego_core::permit::{
@@ -57,7 +59,8 @@ use ego_core::store::evidence::{
 };
 use ego_core::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
 use ego_core::turn::{
-    CancelToken, GenerationRuntime, Session, ToolEffectPorts, Tools, TurnConfig, TurnLoop,
+    CancelToken, GenerationPolicySource, GenerationRuntime, Session, SharedJournal,
+    ToolEffectPorts, Tools, TurnConfig, TurnLoop,
 };
 use futures::channel::oneshot;
 use futures::executor::block_on;
@@ -589,6 +592,33 @@ fn run_turn<P: HookInvocationPort + Clone + 'static>(
     run_turn_scripts(vec![script], port)
 }
 
+struct TestHookBinding<P>(P);
+
+struct FixedPolicySource(Arc<PolicyEngine>);
+
+impl GenerationPolicySource for FixedPolicySource {
+    fn current(&self) -> Result<Arc<PolicyEngine>, String> {
+        Ok(Arc::clone(&self.0))
+    }
+
+    fn capture(&self) -> Result<Arc<PolicyEngine>, String> {
+        Ok(Arc::clone(&self.0))
+    }
+}
+
+impl<P: HookInvocationPort + Clone + 'static> HookInvocationBinding for TestHookBinding<P> {
+    fn bind<'a>(
+        &self,
+        _policy: Arc<PolicyEngine>,
+        _mcp: Option<&'a dyn McpRuntimeBinding>,
+    ) -> Result<Arc<dyn HookInvocationPort + 'a>, String>
+    where
+        Self: 'a,
+    {
+        Ok(Arc::new(self.0.clone()))
+    }
+}
+
 fn run_turn_scripts<P: HookInvocationPort + Clone + 'static>(
     scripts: Vec<Vec<AiEvent>>,
     port: &P,
@@ -637,7 +667,6 @@ fn run_turn_scripts_with_policy<P: HookInvocationPort + Clone + 'static>(
     let registry: [Arc<dyn Tool>; 1] = [Arc::new(FailingExecTool)];
     let tools = Tools::new(
         &registry,
-        &policy,
         ToolEffectPorts::new(
             &fs,
             &process,
@@ -661,6 +690,7 @@ fn run_turn_scripts_with_policy<P: HookInvocationPort + Clone + 'static>(
             cancel: cancel.clone(),
         },
         GenerationRuntime {
+            policy_source: Arc::new(FixedPolicySource(Arc::new(policy))),
             source: Arc::new(GeneratorSource { generator }),
             gate,
             config: TurnConfig {
@@ -684,15 +714,14 @@ fn run_turn_scripts_with_policy<P: HookInvocationPort + Clone + 'static>(
             },
         )
         .expect("hook catalogue admission");
-    let runtime = SessionHookRuntime::new(
+    let hook_state = SessionHookState::new(
         HookLifecycleDispatcher::new(CoreHookRunner::new(), catalogue),
         turn.journal(),
-        Arc::new(port.clone()),
-        cancel,
+        cancel.clone(),
         Instant::now() + Duration::from_secs(30),
     );
     turn = turn
-        .with_hook_runtime(runtime)
+        .with_hook_binding(hook_state, Arc::new(TestHookBinding(port.clone())))
         .expect("shared turn hook runtime");
     let _outcome = block_on(turn.run("prompt")).expect("TurnLoop owner");
     (
@@ -719,6 +748,69 @@ fn turn_loop_real_owner_records_prompt_and_stop_once_in_order() {
         vec![HookLifecycle::UserPromptSubmit, HookLifecycle::Stop]
     );
     assert_eq!(port.requests().len(), 2);
+}
+
+#[test]
+fn session_hook_state_binds_distinct_invokers_over_one_shared_catalogue_and_journal() {
+    let store = Store::default();
+    let clock = FixedClock;
+    let sink = CollectingSink::new();
+    let session = SessionId::new();
+    let journal = SharedJournal::new(ego_core::turn::Journal::new(
+        session,
+        &store,
+        &clock,
+        &sink,
+        Producer::Main,
+        SessionState::default(),
+    ));
+    let state = SessionHookState::new(
+        HookLifecycleDispatcher::new(CoreHookRunner::new(), catalogue()),
+        journal,
+        CancelToken::new(),
+        Instant::now() + Duration::from_secs(30),
+    );
+    let a = RecordingPort::default();
+    let b = RecordingPort::default();
+    let binding_a = state.bind(Arc::new(a.clone()));
+    let binding_b = state.bind(Arc::new(b.clone()));
+    let retained_a = binding_a.clone();
+
+    block_on(binding_a.dispatch(
+        Producer::Main,
+        occurrence(HookLifecycle::UserPromptSubmit, session),
+    ))
+    .expect("binding A dispatch");
+    block_on(binding_b.dispatch(
+        Producer::Main,
+        occurrence(HookLifecycle::UserPromptSubmit, session),
+    ))
+    .expect("binding B dispatch");
+    block_on(retained_a.dispatch(
+        Producer::Main,
+        occurrence(HookLifecycle::UserPromptSubmit, session),
+    ))
+    .expect("retained A dispatch");
+
+    assert_eq!(a.calls(), [HookLifecycle::UserPromptSubmit; 2]);
+    assert_eq!(b.calls(), [HookLifecycle::UserPromptSubmit]);
+    assert_eq!(
+        binding_a.hook_state().catalogue_evidence(),
+        binding_b.hook_state().catalogue_evidence()
+    );
+    assert_eq!(
+        retained_a.hook_state().catalogue_evidence(),
+        binding_a.hook_state().catalogue_evidence()
+    );
+    assert_eq!(
+        store
+            .events()
+            .iter()
+            .filter(|event| matches!(event.kind, EventKind::HookCatalogueAdmitted { .. }))
+            .count(),
+        0,
+        "binding does not re-admit or recreate SessionStart state"
+    );
 }
 
 #[test]
