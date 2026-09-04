@@ -13,7 +13,7 @@ use crate::config::Mode;
 use crate::event::time::{Clock, Timestamp};
 use crate::hook::{HookCausality, SessionHookRuntime};
 use crate::permit::{Authority, Authorized, PreparedCall};
-use crate::turn::GenerationPolicySnapshot;
+use crate::turn::{GenerationPolicyDigest, GenerationPolicySnapshot};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -367,6 +367,7 @@ impl PreparedResume {
     pub fn into_record(
         self,
         id: impl Into<String>,
+        generation_policy_digest: GenerationPolicyDigest,
         request_state: Vec<u8>,
         correlation_key: impl Into<String>,
         correlation_schema: Vec<u8>,
@@ -378,6 +379,7 @@ impl PreparedResume {
         }
         ContinuationRecord::new(
             id,
+            generation_policy_digest,
             self.subject,
             self.grant,
             self.fingerprints,
@@ -565,6 +567,7 @@ pub enum ContinuationState {
 #[serde(deny_unknown_fields)]
 pub struct ContinuationRecord {
     id: String,
+    generation_policy_digest: GenerationPolicyDigest,
     subject: ContinuationSubject,
     grant: ResumeGrant,
     fingerprints: ResumeFingerprints,
@@ -581,6 +584,7 @@ pub struct ContinuationRecord {
 impl ContinuationRecord {
     pub fn new(
         id: impl Into<String>,
+        generation_policy_digest: GenerationPolicyDigest,
         subject: ContinuationSubject,
         grant: ResumeGrant,
         fingerprints: ResumeFingerprints,
@@ -592,6 +596,7 @@ impl ContinuationRecord {
         }
         Ok(Self {
             id,
+            generation_policy_digest,
             subject,
             grant,
             fingerprints,
@@ -634,6 +639,9 @@ impl ContinuationRecord {
 
     pub fn id(&self) -> &str {
         &self.id
+    }
+    pub fn generation_policy_digest(&self) -> &GenerationPolicyDigest {
+        &self.generation_policy_digest
     }
     pub fn subject(&self) -> &ContinuationSubject {
         &self.subject

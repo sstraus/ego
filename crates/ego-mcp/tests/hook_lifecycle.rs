@@ -47,8 +47,9 @@ use ego_core::suspension::{
     ContinuationState, McpResumeContext, ResumeKeySource, ResumeSealer,
 };
 use ego_core::turn::{
-    CancelToken, GenerationPolicyCapture, GenerationPolicySnapshot, Journal as SessionJournal,
-    McpRegistryEvent, McpRegistryJournal, McpRegistryJournalError, SharedJournal, ToolEffectPorts,
+    CancelToken, GenerationPolicyCapture, GenerationPolicyDigest, GenerationPolicySnapshot,
+    Journal as SessionJournal, McpRegistryEvent, McpRegistryJournal, McpRegistryJournalError,
+    SharedJournal, ToolEffectPorts,
 };
 use ego_mcp::{
     McpAdmittedCandidate, McpCacheMetadata, McpCandidateAdmission, McpCandidateError,
@@ -351,6 +352,15 @@ impl Journal {
             .fingerprints()
             .capture()
             .to_owned()
+    }
+    fn recorded_policy_digest(&self) -> GenerationPolicyDigest {
+        self.record
+            .lock()
+            .expect("record")
+            .as_ref()
+            .expect("recorded continuation")
+            .generation_policy_digest()
+            .clone()
     }
     fn push(&self, event: &'static str) {
         self.events.lock().expect("journal events").push(event);
@@ -1015,12 +1025,13 @@ async fn foreign_question_port_reuses_owner_capture_floor_and_effects_for_succes
         Arc::clone(&policy_snapshot),
         spawner.clone(),
     );
-    drop(policy_snapshot);
     let ToolExecution::InputRequired(initial) =
         tool.execute(call, &guarded).await.expect("required")
     else {
         panic!("expected required");
     };
+    assert_eq!(journal.recorded_policy_digest(), policy_snapshot.digest());
+    drop(policy_snapshot);
     drop(guarded);
     let retained_by_initial = policy_snapshot_weak
         .upgrade()
@@ -1126,6 +1137,15 @@ fn schema_or_authority_failure_precedes_durable_acceptance() {
     let runtime = hooks_with_mode(HookMode::Continue, Trace::default());
     let causality = tool_causality(&runtime);
     let envelope = call.mcp_envelope().expect("envelope").clone();
+    let policy_digest = GenerationPolicyCapture::new(
+        CanonPath::new("/workspace"),
+        Mode::Default,
+        Ruleset::default(),
+        None,
+    )
+    .expect("valid generation policy capture")
+    .snapshot()
+    .digest();
     journal
         .record(
             sealer
@@ -1133,6 +1153,7 @@ fn schema_or_authority_failure_precedes_durable_acceptance() {
                 .expect("resume")
                 .into_record(
                     "continuation-schema-authority",
+                    policy_digest,
                     mapped.request_state().to_vec(),
                     mapped.correlation_key(),
                     serde_json::to_vec(mapped.schema()).expect("schema"),

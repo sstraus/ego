@@ -152,12 +152,14 @@ impl McpContinuationOwner {
                 "MCP resume context capture does not match its operation",
             ));
         }
+        let policy_snapshot = context.policy_snapshot();
         let schema = serde_json::to_vec(required.schema())
             .map_err(|_| continuation(ContinuationError::InvalidRecord))?;
         let id = continuation_id(&envelope, &required, &schema);
         let record = resume
             .into_record(
                 id.clone(),
+                policy_snapshot.digest(),
                 required.request_state().to_vec(),
                 required.correlation_key(),
                 schema,
@@ -184,7 +186,7 @@ impl McpContinuationOwner {
                 "MCP capture resolver returned the wrong identity",
             ));
         }
-        self.insert_pin(id.clone(), capture, context.policy_snapshot())?;
+        self.insert_pin(id.clone(), capture, policy_snapshot)?;
         if let Err(error) = self.journal.record(record) {
             self.remove_pin(&id)?;
             return Err(continuation(error));

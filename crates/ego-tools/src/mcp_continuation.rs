@@ -18,7 +18,7 @@ use crate::store::{AtomicReplacePublication, OsIo, StoreIo};
 
 const JOURNAL_FILE: &str = "continuations.jsonl";
 const LOCK_FILE: &str = "continuations.lock";
-const RECORD_VERSION: u32 = 1;
+const RECORD_VERSION: u32 = 2;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

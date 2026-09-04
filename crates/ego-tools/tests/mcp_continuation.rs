@@ -6,13 +6,21 @@ use ego_core::mcp::{McpAdmissionFingerprint, McpOperationKind, McpSubject};
 use ego_core::permit::{
     CanonPath, ForeignToolId, ForeignTransportTarget, InvocationDigest, PolicyEngine, PreparedCall,
 };
-use ego_core::suspension::{ContinuationState, ResumeKeySource, ResumeSealer};
+use ego_core::suspension::{ContinuationJournal, ContinuationState, ResumeKeySource, ResumeSealer};
+use ego_core::turn::GenerationPolicyDigest;
 use ego_tools::mcp_continuation::JsonlContinuationJournal;
 use serde_json::json;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const CAPTURE: &str = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+const GENERATION_POLICY_DIGEST: &str =
+    "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
+
+fn generation_policy_digest() -> GenerationPolicyDigest {
+    GenerationPolicyDigest::try_from(GENERATION_POLICY_DIGEST.to_owned())
+        .expect("valid deterministic generation policy digest")
+}
 
 #[derive(Clone)]
 struct FakeResumeKey {
@@ -61,6 +69,7 @@ fn record(
         .expect("prepared resume")
         .into_record(
             "continuation-1",
+            generation_policy_digest(),
             br#"{"requestState":"opaque"}"#.to_vec(),
             "request-1",
             br#"{"type":"object"}"#.to_vec(),
@@ -79,14 +88,20 @@ fn now() -> Timestamp {
     Timestamp::from_millis(millis)
 }
 
-fn persisted_wire(root: &std::path::Path) -> serde_json::Value {
+fn persisted_wires(root: &std::path::Path) -> Vec<serde_json::Value> {
     let bytes = std::fs::read(root.join("continuations.jsonl")).expect("journal bytes");
-    let line = std::str::from_utf8(&bytes)
+    std::str::from_utf8(&bytes)
         .expect("journal UTF-8")
         .lines()
+        .map(|line| serde_json::from_str(line).expect("journal wire JSON"))
+        .collect()
+}
+
+fn persisted_wire(root: &std::path::Path) -> serde_json::Value {
+    persisted_wires(root)
+        .into_iter()
         .next()
-        .expect("journal line");
-    serde_json::from_str(line).expect("journal wire JSON")
+        .expect("journal line")
 }
 
 fn authorized() -> ego_core::permit::Authorized {
@@ -142,7 +157,11 @@ fn accepted_answer_is_durable_before_atomic_single_use_claim() {
         )
         .expect("accepted");
     let wire = persisted_wire(root.path());
-    assert_eq!(wire["version"], json!(1));
+    assert_eq!(wire["version"], json!(2));
+    assert_eq!(
+        wire["record"]["generation_policy_digest"],
+        json!(GENERATION_POLICY_DIGEST)
+    );
     assert_eq!(wire["record"]["subject"]["capture"], json!(CAPTURE));
     assert_eq!(wire["record"]["fingerprints"]["capture"], json!(CAPTURE));
     let serialized = serde_json::to_string(&wire).expect("wire JSON");
@@ -153,6 +172,22 @@ fn accepted_answer_is_durable_before_atomic_single_use_claim() {
     journal
         .settle(claimed, ContinuationState::Completed)
         .expect("settled");
+    let committed = persisted_wires(root.path());
+    assert_eq!(committed.len(), 3);
+    assert_eq!(
+        committed
+            .iter()
+            .map(|snapshot| snapshot["record"]["state"].as_str())
+            .collect::<Vec<_>>(),
+        vec![Some("accepted"), Some("claimed"), Some("completed")]
+    );
+    for snapshot in committed {
+        assert_eq!(snapshot["version"], json!(2));
+        assert_eq!(
+            snapshot["record"]["generation_policy_digest"],
+            json!(GENERATION_POLICY_DIGEST)
+        );
+    }
 }
 
 #[test]
@@ -182,35 +217,102 @@ fn stable_capture_identity_survives_reopen_and_resume_validation() {
     let resumed = reopened
         .resume_with_fingerprint(&id, CAPTURE, "tool-fingerprint", &prepared_fingerprint)
         .expect("stable capture resumes after reopen");
+    let loaded_policy_digest: &GenerationPolicyDigest = resumed.generation_policy_digest();
+    assert_eq!(loaded_policy_digest, &generation_policy_digest());
     assert_eq!(resumed.capture(), CAPTURE);
     assert_eq!(resumed.fingerprints().capture(), CAPTURE);
 }
 
 #[test]
-fn ordinal_generation_snapshot_fails_closed_without_a_compatibility_reader() {
-    let root = tempfile::tempdir().expect("directory");
+fn journal_refuses_v1_and_v2_without_policy_digest_before_record_use() {
     let key = FakeResumeKey {
         key: Arc::from(b"deterministic-key-0123456789abcdef".as_slice()),
     };
     let authorized = authorized();
     let record = record(&authorized, key.key, now(), 300_000);
     let id = record.id().to_owned();
-    let mut wire = json!({
-        "version": 1,
-        "record": serde_json::to_value(record).expect("record JSON"),
-    });
-    wire["record"]["subject"]["capture"] = json!("generation-7");
-    wire["record"]["fingerprints"]["capture"] = json!("generation-7");
-    std::fs::write(
-        root.path().join("continuations.jsonl"),
-        format!("{}\n", serde_json::to_string(&wire).expect("wire JSON")),
-    )
-    .expect("legacy snapshot");
+    let record_wire = serde_json::to_value(record).expect("record JSON");
 
-    let reopened = JsonlContinuationJournal::open(root.path()).expect("reopen");
+    let v1_root = tempfile::tempdir().expect("v1 directory");
+    let v1_wire = json!({
+        "version": 1,
+        "record": record_wire.clone(),
+    });
+    std::fs::write(
+        v1_root.path().join("continuations.jsonl"),
+        format!(
+            "{}\n",
+            serde_json::to_string(&v1_wire).expect("v1 wire JSON")
+        ),
+    )
+    .expect("v1 snapshot");
+    let v1 = JsonlContinuationJournal::open(v1_root.path()).expect("v1 journal");
     assert!(
-        reopened.state(&id).is_err(),
-        "ordinal generation capture records must fail closed"
+        matches!(
+            ContinuationJournal::load(&v1, &id),
+            Err(ego_core::suspension::ContinuationError::Corrupt(_))
+        ),
+        "an otherwise valid v1 record must fail during journal read"
+    );
+
+    let v2_root = tempfile::tempdir().expect("v2 directory");
+    let mut missing_digest = record_wire.clone();
+    let removed_digest = missing_digest
+        .as_object_mut()
+        .expect("record wire is an object")
+        .remove("generation_policy_digest")
+        .expect("fixture carries a required generation policy digest");
+    assert_eq!(removed_digest, json!(GENERATION_POLICY_DIGEST));
+    let v2_wire = json!({
+        "version": 2,
+        "record": missing_digest,
+    });
+    std::fs::write(
+        v2_root.path().join("continuations.jsonl"),
+        format!(
+            "{}\n",
+            serde_json::to_string(&v2_wire).expect("v2 wire JSON")
+        ),
+    )
+    .expect("v2 snapshot without digest");
+    let v2 = JsonlContinuationJournal::open(v2_root.path()).expect("v2 journal");
+    assert!(
+        matches!(
+            ContinuationJournal::load(&v2, &id),
+            Err(ego_core::suspension::ContinuationError::Corrupt(_))
+        ),
+        "a v2 record without generation policy digest must fail during journal read"
+    );
+
+    let assert_corrupt_digest = |digest: serde_json::Value, label: &str| {
+        let root = tempfile::tempdir().expect("invalid digest directory");
+        let mut invalid_digest = record_wire.clone();
+        invalid_digest["generation_policy_digest"] = digest;
+        let wire = json!({
+            "version": 2,
+            "record": invalid_digest,
+        });
+        std::fs::write(
+            root.path().join("continuations.jsonl"),
+            format!(
+                "{}\n",
+                serde_json::to_string(&wire).expect("invalid digest wire JSON")
+            ),
+        )
+        .expect("invalid digest snapshot");
+        let journal = JsonlContinuationJournal::open(root.path()).expect("invalid digest journal");
+        assert!(
+            matches!(
+                ContinuationJournal::load(&journal, &id),
+                Err(ego_core::suspension::ContinuationError::Corrupt(_))
+            ),
+            "{label} must fail during journal read"
+        );
+    };
+    assert_corrupt_digest(json!(7), "a non-string generation policy digest");
+    assert_corrupt_digest(
+        json!("not-a-generation-policy-digest"),
+        "an invalid generation policy digest",
     );
 }
 
