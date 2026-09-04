@@ -184,7 +184,7 @@ impl fmt::Debug for GenerationPolicyCapture {
     }
 }
 
-/// Confidential storage for one generation policy keyed by continuation id.
+/// Confidential storage for one generation policy keyed by continuation id and digest.
 pub trait GenerationPolicyCaptureStore: Send + Sync {
     fn store(
         &self,
@@ -198,7 +198,11 @@ pub trait GenerationPolicyCaptureStore: Send + Sync {
         expected: &GenerationPolicyDigest,
     ) -> Result<Arc<GenerationPolicySnapshot>, GenerationPolicyCaptureStoreError>;
 
-    fn delete(&self, id: &str) -> Result<(), GenerationPolicyCaptureStoreError>;
+    fn delete(
+        &self,
+        id: &str,
+        expected: &GenerationPolicyDigest,
+    ) -> Result<(), GenerationPolicyCaptureStoreError>;
 }
 
 /// Capture-store operation that failed.

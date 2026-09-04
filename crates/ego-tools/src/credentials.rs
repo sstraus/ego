@@ -22,10 +22,10 @@ const SERVICE: &str = "ego";
 const OAUTH_USER_PREFIX: &str = "mcp/oauth/v1/";
 const OAUTH_ENVELOPE_MAGIC: &[u8; 8] = b"EGO-MCP\0";
 const OAUTH_ENVELOPE_VERSION: u8 = 1;
-const CAPTURE_USER_PREFIX: &str = "mcp/generation-policy-capture/v1/";
-const CAPTURE_KEY_DOMAIN: &[u8] = b"ego:generation-policy-capture-key:v1";
+const CAPTURE_USER_PREFIX: &str = "mcp/generation-policy-capture/v2/";
+const CAPTURE_KEY_DOMAIN: &[u8] = b"ego:generation-policy-capture-key:v2";
 const CAPTURE_ENVELOPE_MAGIC: &[u8; 8] = b"EGO-GPC\0";
-const CAPTURE_ENVELOPE_VERSION: u8 = 1;
+const CAPTURE_ENVELOPE_VERSION: u8 = 2;
 const RESUME_USER: &str = "mcp/resume/v1";
 const RESUME_LOCK: &str = "mcp-resume-key.lock";
 
@@ -259,14 +259,30 @@ where
         id: &str,
         snapshot: Arc<GenerationPolicySnapshot>,
     ) -> Result<(), GenerationPolicyCaptureStoreError> {
-        let canonical_key = Zeroizing::new(capture_key(id));
+        let digest = snapshot.digest();
+        let canonical_key = Zeroizing::new(capture_key(id, &digest));
         let user = user_for(CAPTURE_USER_PREFIX, &canonical_key);
+        let confidential = snapshot.encode_confidential();
         match self.backend.get(SERVICE, &user) {
             Ok(Some(existing)) => {
                 let existing = Zeroizing::new(existing);
-                decode_capture_snapshot(&canonical_key, &existing).map_err(|kind| {
-                    capture_error(GenerationPolicyCaptureStoreOperation::Store, kind)
-                })?;
+                let (stored, canonical) =
+                    decode_capture_entry(&canonical_key, &existing).map_err(|kind| {
+                        capture_error(GenerationPolicyCaptureStoreOperation::Store, kind)
+                    })?;
+                if stored.digest() != digest {
+                    return Err(capture_error(
+                        GenerationPolicyCaptureStoreOperation::Store,
+                        GenerationPolicyCaptureStoreErrorKind::DigestMismatch,
+                    ));
+                }
+                if canonical != confidential.expose_secret_bytes() {
+                    return Err(capture_error(
+                        GenerationPolicyCaptureStoreOperation::Store,
+                        GenerationPolicyCaptureStoreErrorKind::Corrupt,
+                    ));
+                }
+                return Ok(());
             }
             Ok(None) | Err(CredentialBackendError::NoEntry) => {}
             Err(error) => {
@@ -278,7 +294,6 @@ where
             }
         }
 
-        let confidential = snapshot.encode_confidential();
         let envelope = encode_envelope(
             CAPTURE_ENVELOPE_MAGIC,
             CAPTURE_ENVELOPE_VERSION,
@@ -301,7 +316,7 @@ where
         id: &str,
         expected: &GenerationPolicyDigest,
     ) -> Result<Arc<GenerationPolicySnapshot>, GenerationPolicyCaptureStoreError> {
-        let canonical_key = Zeroizing::new(capture_key(id));
+        let canonical_key = Zeroizing::new(capture_key(id, expected));
         let user = user_for(CAPTURE_USER_PREFIX, &canonical_key);
         let envelope = match self.backend.get(SERVICE, &user) {
             Ok(Some(envelope)) => envelope,
@@ -320,10 +335,9 @@ where
             }
         };
         let envelope = Zeroizing::new(envelope);
-        let snapshot = Arc::new(
-            decode_capture_snapshot(&canonical_key, &envelope)
-                .map_err(|kind| capture_error(GenerationPolicyCaptureStoreOperation::Load, kind))?,
-        );
+        let (snapshot, _) = decode_capture_entry(&canonical_key, &envelope)
+            .map_err(|kind| capture_error(GenerationPolicyCaptureStoreOperation::Load, kind))?;
+        let snapshot = Arc::new(snapshot);
         if snapshot.digest() != expected.clone() {
             return Err(capture_error(
                 GenerationPolicyCaptureStoreOperation::Load,
@@ -333,8 +347,12 @@ where
         Ok(snapshot)
     }
 
-    fn delete(&self, id: &str) -> Result<(), GenerationPolicyCaptureStoreError> {
-        let canonical_key = Zeroizing::new(capture_key(id));
+    fn delete(
+        &self,
+        id: &str,
+        expected: &GenerationPolicyDigest,
+    ) -> Result<(), GenerationPolicyCaptureStoreError> {
+        let canonical_key = Zeroizing::new(capture_key(id, expected));
         let user = user_for(CAPTURE_USER_PREFIX, &canonical_key);
         let envelope = match self.backend.get(SERVICE, &user) {
             Ok(Some(envelope)) => envelope,
@@ -348,8 +366,14 @@ where
             }
         };
         let envelope = Zeroizing::new(envelope);
-        decode_capture_snapshot(&canonical_key, &envelope)
+        let (snapshot, _) = decode_capture_entry(&canonical_key, &envelope)
             .map_err(|kind| capture_error(GenerationPolicyCaptureStoreOperation::Delete, kind))?;
+        if snapshot.digest() != expected.clone() {
+            return Err(capture_error(
+                GenerationPolicyCaptureStoreOperation::Delete,
+                GenerationPolicyCaptureStoreErrorKind::DigestMismatch,
+            ));
+        }
         match self.backend.delete(SERVICE, &user) {
             Ok(_) | Err(CredentialBackendError::NoEntry) => Ok(()),
             Err(error) => Err(capture_backend_error(
@@ -525,10 +549,12 @@ fn capture_error(
     GenerationPolicyCaptureStoreError::new(operation, kind)
 }
 
-fn capture_key(id: &str) -> Vec<u8> {
+fn capture_key(id: &str, digest: &GenerationPolicyDigest) -> Vec<u8> {
     let mut key = Vec::new();
     push_capture_key_field(&mut key, 0, CAPTURE_KEY_DOMAIN);
     push_capture_key_field(&mut key, 1, id.as_bytes());
+    let digest = String::from(digest.clone());
+    push_capture_key_field(&mut key, 2, digest.as_bytes());
     key
 }
 
@@ -538,10 +564,10 @@ fn push_capture_key_field(key: &mut Vec<u8>, tag: u8, value: &[u8]) {
     key.extend_from_slice(value);
 }
 
-fn decode_capture_snapshot(
+fn decode_capture_entry<'a>(
     canonical_key: &[u8],
-    envelope: &[u8],
-) -> Result<GenerationPolicySnapshot, GenerationPolicyCaptureStoreErrorKind> {
+    envelope: &'a [u8],
+) -> Result<(GenerationPolicySnapshot, &'a [u8]), GenerationPolicyCaptureStoreErrorKind> {
     let encoded = decode_envelope(
         CAPTURE_ENVELOPE_MAGIC,
         CAPTURE_ENVELOPE_VERSION,
@@ -549,9 +575,10 @@ fn decode_capture_snapshot(
         envelope,
     )
     .map_err(|_| GenerationPolicyCaptureStoreErrorKind::Corrupt)?;
-    let encoded = SecretMaterial::new(encoded.to_vec());
-    GenerationPolicySnapshot::decode_confidential(&encoded)
-        .map_err(|_| GenerationPolicyCaptureStoreErrorKind::Corrupt)
+    let confidential = SecretMaterial::new(encoded.to_vec());
+    let snapshot = GenerationPolicySnapshot::decode_confidential(&confidential)
+        .map_err(|_| GenerationPolicyCaptureStoreErrorKind::Corrupt)?;
+    Ok((snapshot, encoded))
 }
 
 fn user_for(prefix: &str, canonical_key: &[u8]) -> String {

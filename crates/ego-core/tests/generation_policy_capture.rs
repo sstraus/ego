@@ -104,7 +104,13 @@ const CODEC_LIMIT: usize = 1024 * 1024;
 
 #[derive(Default)]
 struct TypedCaptureStore {
-    stored: Mutex<Option<(String, Arc<GenerationPolicySnapshot>)>>,
+    stored: Mutex<
+        Vec<(
+            String,
+            GenerationPolicyDigest,
+            Arc<GenerationPolicySnapshot>,
+        )>,
+    >,
 }
 
 impl GenerationPolicyCaptureStore for TypedCaptureStore {
@@ -113,12 +119,21 @@ impl GenerationPolicyCaptureStore for TypedCaptureStore {
         id: &str,
         snapshot: Arc<GenerationPolicySnapshot>,
     ) -> Result<(), GenerationPolicyCaptureStoreError> {
-        *self.stored.lock().map_err(|_| {
+        let digest = snapshot.digest();
+        let mut stored = self.stored.lock().map_err(|_| {
             GenerationPolicyCaptureStoreError::new(
                 GenerationPolicyCaptureStoreOperation::Store,
                 GenerationPolicyCaptureStoreErrorKind::Unavailable,
             )
-        })? = Some((id.to_owned(), snapshot));
+        })?;
+        if let Some((_, _, existing)) = stored
+            .iter_mut()
+            .find(|(stored_id, stored_digest, _)| stored_id == id && stored_digest == &digest)
+        {
+            *existing = snapshot;
+        } else {
+            stored.push((id.to_owned(), digest, snapshot));
+        }
         Ok(())
     }
 
@@ -133,34 +148,30 @@ impl GenerationPolicyCaptureStore for TypedCaptureStore {
                 GenerationPolicyCaptureStoreErrorKind::Unavailable,
             )
         })?;
-        let Some((_, snapshot)) = stored.as_ref().filter(|(stored_id, _)| stored_id == id) else {
+        let Some((_, _, snapshot)) = stored
+            .iter()
+            .find(|(stored_id, stored_digest, _)| stored_id == id && stored_digest == expected)
+        else {
             return Err(GenerationPolicyCaptureStoreError::new(
                 GenerationPolicyCaptureStoreOperation::Load,
                 GenerationPolicyCaptureStoreErrorKind::Missing,
             ));
         };
-        if snapshot.digest() != expected.clone() {
-            return Err(GenerationPolicyCaptureStoreError::new(
-                GenerationPolicyCaptureStoreOperation::Load,
-                GenerationPolicyCaptureStoreErrorKind::DigestMismatch,
-            ));
-        }
         Ok(Arc::clone(snapshot))
     }
 
-    fn delete(&self, id: &str) -> Result<(), GenerationPolicyCaptureStoreError> {
+    fn delete(
+        &self,
+        id: &str,
+        expected: &GenerationPolicyDigest,
+    ) -> Result<(), GenerationPolicyCaptureStoreError> {
         let mut stored = self.stored.lock().map_err(|_| {
             GenerationPolicyCaptureStoreError::new(
                 GenerationPolicyCaptureStoreOperation::Delete,
                 GenerationPolicyCaptureStoreErrorKind::Unavailable,
             )
         })?;
-        if stored
-            .as_ref()
-            .is_some_and(|(stored_id, _)| stored_id == id)
-        {
-            *stored = None;
-        }
+        stored.retain(|(stored_id, stored_digest, _)| stored_id != id || stored_digest != expected);
         Ok(())
     }
 }
@@ -604,18 +615,41 @@ fn typed_capture_store_contract_carries_only_verified_snapshot_values() {
     assert_send_sync::<dyn GenerationPolicyCaptureStore>();
 
     let store: Arc<dyn GenerationPolicyCaptureStore> = Arc::new(TypedCaptureStore::default());
-    let snapshot = capture(Mode::Auto, rules()).snapshot();
-    let expected = snapshot.digest();
+    let first = capture(Mode::Auto, rules()).snapshot();
+    let second = capture(Mode::Plan, rules()).snapshot();
+    let first_digest = first.digest();
+    let second_digest = second.digest();
+    assert_ne!(first_digest, second_digest);
     store
-        .store(CONTINUATION_ID, Arc::clone(&snapshot))
-        .expect("typed snapshot stores");
-    let loaded = store
-        .load(CONTINUATION_ID, &expected)
-        .expect("expected digest loads the typed snapshot");
-    assert!(Arc::ptr_eq(&loaded, &snapshot));
+        .store(CONTINUATION_ID, Arc::clone(&first))
+        .expect("first typed snapshot stores");
     store
-        .delete(CONTINUATION_ID)
-        .expect("typed snapshot deletes");
+        .store(CONTINUATION_ID, Arc::clone(&second))
+        .expect("same id with a different digest stores separately");
+    let loaded_first = store
+        .load(CONTINUATION_ID, &first_digest)
+        .expect("first pair loads its typed snapshot");
+    let loaded_second = store
+        .load(CONTINUATION_ID, &second_digest)
+        .expect("second pair loads its typed snapshot");
+    assert!(Arc::ptr_eq(&loaded_first, &first));
+    assert!(Arc::ptr_eq(&loaded_second, &second));
+    store
+        .delete(CONTINUATION_ID, &first_digest)
+        .expect("first pair deletes");
+    let missing = store
+        .load(CONTINUATION_ID, &first_digest)
+        .expect_err("deleted pair is missing");
+    assert_eq!(
+        missing.kind(),
+        GenerationPolicyCaptureStoreErrorKind::Missing
+    );
+    assert!(Arc::ptr_eq(
+        &store
+            .load(CONTINUATION_ID, &second_digest)
+            .expect("deleting the first pair preserves the second"),
+        &second,
+    ));
 }
 
 fn digest_text(digest: &GenerationPolicyDigest) -> String {
