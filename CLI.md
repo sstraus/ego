@@ -351,7 +351,7 @@ See the accepted attempt-ownership ADR.
 §4.5 requires this table: *no flag documented before its contract is
 implemented*. The grammar above is the **whole** design; this says which of it
 you can actually run. Checked against the clap definitions in
-`crates/ego-cli/src/cli.rs`, not against intent, on 2026-09-03.
+`crates/ego-cli/src/cli.rs`, not against intent, on 2026-09-04.
 
 A flag marked **no** is **refused by name**, with the subsystem it waits on —
 not swallowed, and not reported as an unknown argument. That mechanism is
@@ -386,7 +386,7 @@ ordinary parsed flags rather than long-lived compatibility placeholders.
 | `--session-dir` | **yes** | |
 | `--artifact-dir` | **yes** | `ego run`/`ego resume` only, and only with the exact selected profile name `ci`; flags override `[profile.ci].artifact_dir` |
 | `--answer` | **yes** | `ego resume --answer QUESTION_ID=JSON` validates and durably settles pending questions before continuing the session |
-| `--name`, `--goal` | **M5 target** | regression case adds the exact metadata-only `ego resume` operations from §2; the current parser does not serve them |
+| `--name`, `--goal` | **yes** | metadata-only `ego resume ID` operations from §2; they cannot be combined with a prompt, answer, or run-only override |
 | `--output` | **yes** | `text\|json\|jsonl`. On `ego ls` the two machine forms are §4.6's, not §4.1/§4.2's — a listing is not a run |
 | `--all` | **yes** | `ego ls` only, and documented in §2 rather than here: §3 is the argument grammar of a *run*, and this widens a catalogue query |
 | `--schema`, `--schema-retries` | **yes** | `--schema-retries` ships as its own flag; §3 mentions it only inside `--schema`'s description |
