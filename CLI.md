@@ -783,10 +783,10 @@ records one blocker observation; only the third consecutive observation of the
 same condition makes the goal terminal, and progress or a changed condition
 resets that audit.
 
-Current availability remains narrower: `/doctor` dispatches only the admitted
-MCP health projection, `/name` and `/goal` are disabled, and root `ego doctor`
-is refused. M5 replaces that partial doctor handler and enables the root
-command together over one redacted, versioned, non-mutating health snapshot.
+Current availability remains narrower for doctor: `/doctor` dispatches only
+the admitted MCP health projection, and root `ego doctor` is refused. M5
+replaces that partial handler and enables the root command together over one
+redacted, versioned, non-mutating health snapshot.
 
 The permission prompt has a plain representation that works in every terminal
 and scripted transcript: `allow`, `deny`, or `amend`. Amend reads a complete
